@@ -1,7 +1,6 @@
 import json
 from rag_arc.core.file_management.extractor.Base_GraphExtractor import GraphExtractorBase
 from rag_arc.utils.prompt import HYPERRAG_EXTRACTION_PROMPT
-from rag_arc.utils.schema import KnowledgeStructure, MentionList
 from rag_arc.utils import Document
 from rag_arc.encapsulation.llm.base import LLMBase
 from typing import Any, Dict, List
@@ -14,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 class HyperRAGGraphExtractor(GraphExtractorBase):
     """
-    HyperRAGGraphExtractor用于提取完整的图结构，包括事件、mention、实体和关系。
+    HyperRAGGraphExtractor用于提取完整的图结构，包括事件、实体和关系。
     """
     
     def __init__(
@@ -25,6 +24,7 @@ class HyperRAGGraphExtractor(GraphExtractorBase):
         max_rounds: int = 3,
         max_concurrent: int = 100,
         response_format: Any = None,
+        clean_response_format: Any = None,
         enable_cleaning: bool = False
     ) -> None:
         """
@@ -38,7 +38,8 @@ class HyperRAGGraphExtractor(GraphExtractorBase):
             max_concurrent: 最大并发数。
         """
         self.extract_prompt = extract_prompt if extract_prompt is not None else HYPERRAG_EXTRACTION_PROMPT
-        self.response_format = response_format if response_format is not None else KnowledgeStructure
+        self.response_format = response_format 
+        self.clean_response_format = clean_response_format 
         self.clean_prompt = clean_prompt 
 
         super().__init__(   
@@ -81,11 +82,11 @@ class HyperRAGGraphExtractor(GraphExtractorBase):
                 logger.error(f"An error occurred during graph extraction: {e}")
                 result = {}
 
-            document.metadata = {k: v for k, v in document.metadata.items() if k not in ['events', 'mentions', 'event_relations', 'entity_relations']}
+            document.metadata = {k: v for k, v in document.metadata.items() if k not in ['events', 'entities', 'event_relations', 'entity_relations']}
 
             events = result.get("events", [])
             document.metadata["events"] = events
-            document.metadata["mentions"] = result.get("mentions", [])
+            document.metadata["entities"] = result.get("entities", [])
             document.metadata["entity_relations"] = result.get("entity_relations", [])
 
             processed_event_relations = self._process_event_relations(
@@ -107,7 +108,7 @@ class HyperRAGGraphExtractor(GraphExtractorBase):
             extracted_doc = await self._aextract(current_doc, semaphore, history)
             history, added = self._merge_extraction_history(extracted_doc, history)
             current_doc.metadata['events'] = history['events']
-            current_doc.metadata['mentions'] = history['mentions']
+            current_doc.metadata['entities'] = history['entities']
             current_doc.metadata['entity_relations'] = history['entity_relations']
             current_doc.metadata['event_relations'] = history['event_relations']
 
@@ -126,10 +127,10 @@ class HyperRAGGraphExtractor(GraphExtractorBase):
         """初始化抽取历史，从文档metadata中获取已抽取的实体和关系"""
         metadata = getattr(document, 'metadata', {})
         events = metadata.get('events', [])
-        mentions = metadata.get('mentions', [])
+        entities = metadata.get('entities', [])
         event_relations = metadata.get('event_relations', [])
         entity_relations = metadata.get('entity_relations', [])
-        return {'events': list(events), 'mentions': list(mentions), 'event_relations': list(event_relations), 'entity_relations': list(entity_relations)}
+        return {'events': list(events), 'entities': list(entities), 'event_relations': list(event_relations), 'entity_relations': list(entity_relations)}
 
 
     def _merge_extraction_history(self, document: Document, history: Dict[str, List]):
@@ -139,18 +140,18 @@ class HyperRAGGraphExtractor(GraphExtractorBase):
         """
         # 确保 history 有默认结构
         history.setdefault('events', [])
-        history.setdefault('mentions', [])
+        history.setdefault('entities', [])
         history.setdefault('entity_relations', [])
         history.setdefault('event_relations', [])
 
         new_events = document.metadata.get('events', []) or []
-        new_mentions = document.metadata.get('mentions', []) or []
+        new_entities = document.metadata.get('entities', []) or []
         new_e_rel = document.metadata.get('entity_relations', []) or []
         new_ev_rel = document.metadata.get('event_relations', []) or []
 
         # 已有 id/name 集合用于去重
         existing_event_ids = {e['id'] for e in history['events'] if 'id' in e}
-        existing_mention_keys = {m.get('entity_name') for m in history['mentions'] if 'entity_name' in m}
+        existing_entity_keys = {m.get('entity_name') for m in history['entities'] if 'entity_name' in m}
 
         added_events = []
         for e in new_events:
@@ -159,18 +160,18 @@ class HyperRAGGraphExtractor(GraphExtractorBase):
                 existing_event_ids.add(e.get('id'))
                 added_events.append(e)
 
-        added_mentions = []
-        for m in new_mentions:
+        added_entities = []
+        for m in new_entities:
             key = m.get('entity_name')
-            if key not in existing_mention_keys:
-                history['mentions'].append(m)
-                existing_mention_keys.add(key)
-                added_mentions.append(m)
+            if key not in existing_entity_keys:
+                history['entities'].append(m)
+                existing_entity_keys.add(key)
+                added_entities.append(m)
 
         history['entity_relations'].extend([r for r in new_e_rel if r not in history['entity_relations']])
         history['event_relations'].extend([r for r in new_ev_rel if r not in history['event_relations']])
 
-        added = bool(added_events or added_mentions)
+        added = bool(added_events or added_entities)
         return history, added
 
 
@@ -216,39 +217,39 @@ class HyperRAGGraphExtractor(GraphExtractorBase):
         """
         async with semaphore:
             events = document.metadata.get("events", [])
-            mentions = document.metadata.get("mentions", [])
+            entities = document.metadata.get("entities", [])
             entity_relations = document.metadata.get("entity_relations", [])
             
-            logger.debug(f"开始清洗文档，原始数据: {len(events)} events, {len(mentions)} mentions, {len(entity_relations)} entity_relations")
+            logger.debug(f"开始清洗文档，原始数据: {len(events)} events, {len(entities)} entities, {len(entity_relations)} entity_relations")
 
             # 使用线程池执行同步的清洗操作，避免阻塞事件循环
-            cleaned_mentions = await asyncio.to_thread(
-                self._review_and_clean_mentions, mentions, document.content
+            cleaned_entities = await asyncio.to_thread(
+                self._review_and_clean_entities, entities, document.content
             )
             
-            # 更新文档的mentions
-            document.metadata["mentions"] = cleaned_mentions
+            # 更新文档的entities
+            document.metadata["entities"] = cleaned_entities
             
             # 清洗实体关系
-            cleaned_entity_relations = self._clean_entity_relations(entity_relations, cleaned_mentions)
+            cleaned_entity_relations = self._clean_entity_relations(entity_relations, cleaned_entities)
             document.metadata["entity_relations"] = cleaned_entity_relations
             
-            logger.debug(f"清洗完成，结果: {len(events)} events, {len(cleaned_mentions)} mentions, {len(cleaned_entity_relations)} entity_relations")
+            logger.debug(f"清洗完成，结果: {len(events)} events, {len(cleaned_entities)} entities, {len(cleaned_entity_relations)} entity_relations")
 
             return document
 
 
-    def _pre_filter_mentions(self, mentions: List[Dict]) -> List[Dict]:
+    def _pre_filter_entities(self, entities: List[Dict]) -> List[Dict]:
         """
-        预处理过滤mentions，去除明显无用的实体
+        预处理过滤entities，去除明显无用的实体
         
         Args:
-            mentions: 原始mentions列表
+            entities: 原始entities列表
             
         Returns:
-            预处理后的mentions列表
+            预处理后的entities列表
         """
-        if not mentions:
+        if not entities:
             return []
         
         # 定义需要过滤的模式
@@ -280,14 +281,13 @@ class HyperRAGGraphExtractor(GraphExtractorBase):
             r'^.$',
         ]
         
-        filtered_mentions = []
+        filtered_entities = []
         
-        for mention in mentions:
-            entity_name = mention.get('entity_name', '')
-            text = mention.get('text', '')
+        for entity in entities:
+            entity_name = entity.get('entity_name', '')
             
             # 跳过空字符串
-            if not entity_name.strip() or not text.strip():
+            if not entity_name.strip():
                 continue
                 
             # 检查是否匹配过滤模式
@@ -306,19 +306,19 @@ class HyperRAGGraphExtractor(GraphExtractorBase):
                 should_filter = True
                 
             if not should_filter:
-                filtered_mentions.append(mention)
+                filtered_entities.append(entity)
         
-        logger.info(f"预处理过滤mentions: {len(mentions)} -> {len(filtered_mentions)}")
-        return filtered_mentions
+        logger.info(f"预处理过滤entities: {len(entities)} -> {len(filtered_entities)}")
+        return filtered_entities
 
 
-    def _clean_entity_relations(self, entity_relations: List[Dict], cleaned_mentions: List[Dict]) -> List[Dict]:
+    def _clean_entity_relations(self, entity_relations: List[Dict], cleaned_entities: List[Dict]) -> List[Dict]:
         """
         清洗实体关系，删除无效关系（包括头尾实体不存在、自环关系）
         
         Args:
             entity_relations: 原始实体关系列表
-            cleaned_mentions: 清洗后的mentions列表
+            cleaned_entities: 清洗后的entities列表
             
         Returns:
             清洗后的实体关系列表
@@ -326,66 +326,68 @@ class HyperRAGGraphExtractor(GraphExtractorBase):
         if not entity_relations:
             return []
         
-        # 创建text到entity_name的映射
-        text_to_entity_name = {}
-        valid_texts = set()
+        # 创建entity_id到entity_name的映射
+        id_to_entity_name = {}
+        valid_entity_ids = set()
         
-        for mention in cleaned_mentions:
-            entity_name = mention.get('entity_name', '').strip()
-            original_text = mention.get('text', '').strip()
+        for entity in cleaned_entities:
+            entity_id = entity.get('id', '').strip()
+            entity_name = entity.get('entity_name', '').strip()
             
-            if entity_name and original_text:
-                text_to_entity_name[original_text.lower()] = entity_name
-                valid_texts.add(original_text.lower())
+            if entity_id and entity_name:
+                id_to_entity_name[entity_id] = entity_name
+                valid_entity_ids.add(entity_id)
         
         # 过滤有效的关系
         cleaned_relations = []
         removed_relations = []
         
         for relation in entity_relations:
-            head_entity = relation.get('head_entity', '').strip()
-            tail_entity = relation.get('tail_entity', '').strip()
+            head_id = relation.get('head_id', '').strip()
+            tail_id = relation.get('tail_id', '').strip()
             
-            # 检查头尾实体是否存在于有效text集合
-            head_valid = head_entity.lower() in valid_texts
-            tail_valid = tail_entity.lower() in valid_texts
+            # 检查头尾实体ID是否存在于有效entity集合
+            head_valid = head_id in valid_entity_ids
+            tail_valid = tail_id in valid_entity_ids
             
             # 1. 过滤掉不存在的实体关系
             if not (head_valid and tail_valid):
                 removed_relations.append({
-                    'head_entity': head_entity,
-                    'tail_entity': tail_entity,
+                    'head_id': head_id,
+                    'tail_id': tail_id,
                     'relation_type': relation.get('relation_type', ''),
                     'reason': f"head_valid: {head_valid}, tail_valid: {tail_valid}"
                 })
                 continue
             
-            # 2. 过滤掉自环关系（基于原始text比较）
-            if head_entity.lower() == tail_entity.lower():
+            # 2. 过滤掉自环关系（基于entity_id比较）
+            if head_id == tail_id:
                 removed_relations.append({
-                    'head_entity': head_entity,
-                    'tail_entity': tail_entity,
+                    'head_id': head_id,
+                    'tail_id': tail_id,
                     'relation_type': relation.get('relation_type', ''),
                     'reason': "self_loop"
                 })
                 continue
             
-            # 将关系中的text替换为相应的entity_name
-            updated_relation = relation.copy()
-            updated_relation['head_entity'] = text_to_entity_name[head_entity.lower()]
-            updated_relation['tail_entity'] = text_to_entity_name[tail_entity.lower()]
+            # 3. 检查是否为同一实体的不同ID（基于entity_name比较）
+            head_name = id_to_entity_name.get(head_id, '')
+            tail_name = id_to_entity_name.get(tail_id, '')
             
-            # 3. 过滤掉自环关系（基于替换后的entity_name比较）
-            if updated_relation['head_entity'].lower() == updated_relation['tail_entity'].lower():
+            if head_name.lower() == tail_name.lower():
                 removed_relations.append({
-                    'head_entity': head_entity,
-                    'tail_entity': tail_entity,
+                    'head_id': head_id,
+                    'tail_id': tail_id,
                     'relation_type': relation.get('relation_type', ''),
-                    'reason': "self_loop_after_mapping"
+                    'reason': "same_entity_different_ids"
                 })
                 continue
             
-            cleaned_relations.append(updated_relation)
+            # 保留有效关系，并将ID转换为entity_name
+            cleaned_relation = relation.copy()
+            cleaned_relation['head_id'] = head_name
+            cleaned_relation['tail_id'] = tail_name
+            cleaned_relations.append(cleaned_relation)
         
         logger.info(f"清洗实体关系: {len(entity_relations)} -> {len(cleaned_relations)}")
         
@@ -393,66 +395,65 @@ class HyperRAGGraphExtractor(GraphExtractorBase):
         if removed_relations:
             logger.debug(f"删除了 {len(removed_relations)} 个无效关系:")
             for i, removed in enumerate(removed_relations[:5]):  # 只显示前5个
-                logger.debug(f"  {i+1}. {removed['head_entity']} -> {removed['tail_entity']} ({removed['relation_type']}) - {removed['reason']}")
+                logger.debug(f"  {i+1}. {removed['head_id']} -> {removed['tail_id']} ({removed['relation_type']}) - {removed['reason']}")
             if len(removed_relations) > 5:
                 logger.debug(f"  ... 还有 {len(removed_relations) - 5} 个关系被删除")
         
         return cleaned_relations
 
-    def _review_and_clean_mentions(self, mentions: List[Dict], document_content: str) -> List[Dict]:
+    def _review_and_clean_entities(self, entities: List[Dict], document_content: str) -> List[Dict]:
         """
-        使用LLM清洗和规范化mentions
+        使用LLM清洗和规范化entities
         
         Args:
-            mentions: 原始mentions列表
+            entities: 原始entities列表
             document_content: 文档内容，用于上下文
             
         Returns:
-            清洗后的mentions列表
+            清洗后的entities列表
         """
-        if not mentions:
+        if not entities:
             return []
         
         # 第一步：预处理过滤，去除明显无用的实体
-        pre_filtered_mentions = self._pre_filter_mentions(mentions)
+        pre_filtered_entities = self._pre_filter_entities(entities)
         
-        if not pre_filtered_mentions:
-            logger.info("预处理后没有剩余mentions")
+        if not pre_filtered_entities:
+            logger.info("预处理后没有剩余entities")
             return []
         
         # 使用配置的清洗提示词
         review_prompt = self.clean_prompt.format(
             document_content=document_content,
-            mentions_json=json.dumps(pre_filtered_mentions, ensure_ascii=False, indent=2)
+            entities_json=json.dumps(pre_filtered_entities, ensure_ascii=False, indent=2)
         )
         
         try:
             # 调用LLM进行清洗
             messages = [{"role": "user", "content": review_prompt}]
-            logger.debug(f"开始调用LLM清洗mentions，原始数量: {len(pre_filtered_mentions)}")
+            logger.debug(f"开始调用LLM清洗entities，原始数量: {len(pre_filtered_entities)}")
             
-            response = self.llm.parse_chat(messages, response_format=MentionList)
+            response = self.llm.parse_chat(messages, response_format=self.clean_response_format)
             
             # 解析LLM响应
             if response:
-                logger.debug(f"LLM返回响应，mentions数量: {len(response.mentions)}")
+                logger.debug(f"LLM返回响应，entities数量: {len(response.entities)}")
                 response_dicts = []
-                for mention in response.mentions:
+                for entity in response.entities:
                     response_dicts.append({
-                        'id': mention.id,
-                        'text': mention.text,
-                        'entity_name': mention.entity_name,
-                        'entity_type': mention.entity_type,
-                        'entity_description': mention.entity_description,
-                        'event_indices': mention.event_indices
+                        'id': entity.id,
+                        'entity_name': entity.entity_name,
+                        'entity_type': entity.entity_type,
+                        'entity_description': entity.entity_description,
+                        'event_indices': entity.event_indices
                     })
                 
-                logger.info(f"成功清洗mentions: {len(mentions)} -> {len(response_dicts)}")
+                logger.info(f"成功清洗entities: {len(entities)} -> {len(response_dicts)}")
                 return response_dicts
             else:
-                logger.warning("LLM响应格式异常，返回预处理后的mentions")
-                return pre_filtered_mentions
+                logger.warning("LLM响应格式异常，返回预处理后的entities")
+                return pre_filtered_entities
                 
         except Exception as e:
-            logger.error(f"清洗mentions时出错: {e}")
-            return mentions
+            logger.error(f"清洗entities时出错: {e}")
+            return entities
