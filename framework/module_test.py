@@ -98,11 +98,32 @@ class B(AbstractModule):
         print(f"Module A result: {result}")
         return f"B processed: {params}, A result: {result}"
 
+class DConfig(AbstractConfig):
+    """Config class for module D"""
+    type: Literal["D"] = "D"
+    param1: int
+    param2: str
+    param3: NewType
+    sub_config: list[Annotated[AConfig | CConfig, Field(discriminator="type")]]
+    def build(self) -> "D":
+        return D(self)
+
+class D(AbstractModule):
+    """Module D implementation"""
+
+    config: DConfig
+    
+    def __call__(self, params):
+        print(f"Module D called with params: {params}")
+        print(f"Config param1: {self.config.param1}")
+        print(f"Config param2: {self.config.param2}")
+        print(f"Config param3: {self.config.param3}")
+        return f"D processed: {params}"
 
 class TestConfigFromJson(unittest.TestCase):
     """Test creating configs from JSON"""
 
-    def test_create_b_and_a_config_from_json_(self):
+    def test_create_b_and_a_config_from_json(self):
         json_str = """
         {
             "type": "B",
@@ -136,7 +157,7 @@ class TestConfigFromJson(unittest.TestCase):
         self.assertEqual(sub_config.config.param3, "seq")
         self.assertEqual(sub_config.config.param4, "write")
 
-    def test_create_b_and_c_config_from_json_(self):
+    def test_create_b_and_c_config_from_json(self):
         json_str = """
         {
             "type": "B",
@@ -214,6 +235,73 @@ class TestConfigFromJson(unittest.TestCase):
         with self.assertRaises(ValidationError):
             BConfig(**config_data)
 
+    def test_create_d_config_from_json(self):
+        json_str = """
+        {
+            "type": "D",
+            "param1": 42,
+            "param2": "dparam",
+            "param3": "dval",
+            "sub_config": [
+                {
+                    "type": "A",
+                    "param1": 100,
+                    "param2": "a1",
+                    "param3": "a2",
+                    "param4": "append"
+                },
+                {
+                    "type": "C",
+                    "param1": 200,
+                    "param2": "c1",
+                    "param3": "c2",
+                    "sub_config": {
+                        "type": "A",
+                        "param1": 300,
+                        "param2": "a3",
+                        "param3": "a4",
+                        "param4": "read"
+                    }
+                }
+            ]
+        }
+        """
+        config_data = json.loads(json_str)
+        config = DConfig(**config_data)
+        d = config.build()
+        self.assertIsInstance(d, D)
+        self.assertEqual(d.config.type, "D")
+        self.assertEqual(d.config.param1, 42)
+        self.assertEqual(d.config.param2, "dparam")
+        self.assertEqual(d.config.param3, "dval")
+        self.assertEqual(len(d.config.sub_config), 2)
+        # First sub_config is AConfig
+        sub0 = d.config.sub_config[0]
+        self.assertIsInstance(sub0, AConfig)
+        self.assertEqual(sub0.type, "A")
+        self.assertEqual(sub0.param1, 100)
+        self.assertEqual(sub0.param2, "a1")
+        self.assertEqual(sub0.param3, "a2")
+        self.assertEqual(sub0.param4, "append")
+        # Second sub_config is CConfig
+        sub1 = d.config.sub_config[1]
+        self.assertIsInstance(sub1, CConfig)
+        self.assertEqual(sub1.type, "C")
+        self.assertEqual(sub1.param1, 200)
+        self.assertEqual(sub1.param2, "c1")
+        self.assertEqual(sub1.param3, "c2")
+        # sub_config of CConfig is AConfig
+        sub1_sub = sub1.sub_config
+        self.assertIsInstance(sub1_sub, AConfig)
+        self.assertEqual(sub1_sub.type, "A")
+        self.assertEqual(sub1_sub.param1, 300)
+        self.assertEqual(sub1_sub.param2, "a3")
+        self.assertEqual(sub1_sub.param3, "a4")
+        self.assertEqual(sub1_sub.param4, "read")
+        # Test build chain
+        d_module = config.build()
+        self.assertIsInstance(d_module, D)
+        self.assertEqual(d_module.config.type, "D")
 
 if __name__ == "__main__":
     unittest.main()
