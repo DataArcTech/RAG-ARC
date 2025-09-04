@@ -89,7 +89,7 @@ class BaseRetriever(ABC):
         Returns:
             相关文档列表
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         with ThreadPoolExecutor() as executor:
             return await loop.run_in_executor(
                 executor, self._get_relevant_documents, query, **kwargs
