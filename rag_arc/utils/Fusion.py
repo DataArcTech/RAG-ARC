@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from collections import defaultdict
 
-from schema import Document
+from rag_arc.utils.schema import Document
 
 
 @dataclass

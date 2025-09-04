@@ -55,8 +55,8 @@ async def main():
 
     # 初始化 LLM 和抽取器
     llm = OpenAILLM(
-        model_name="gpt-4.1-mini",
-        api_key="sk-2T06b7c7f9c3870049fbf8fada596b0f8ef908d1e233KLY2",
+        model_name="gpt-5-mini",
+        api_key="sk-",
         base_url="https://api.gptsapi.net/v1"
     )
 

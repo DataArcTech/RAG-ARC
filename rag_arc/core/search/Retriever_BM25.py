@@ -3,7 +3,10 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Iterable, List, Optional
 import uuid
-from pydantic import ConfigDict, Field, model_validator
+import dill
+import warnings
+import os
+from pydantic import ConfigDict, Field, model_validator, field_validator
 
 logger = logging.getLogger(__name__)
 import numpy as np
@@ -23,7 +26,7 @@ def default_preprocessing_func(text: str) -> List[str]:
 
 
 
-
+# TODO 中英文提示，分词不一致，分词用正则
 class BM25Retriever(BaseRetriever):
     """
     BM25Retriever 是一个基于 BM25 算法的文档检索器，适用于信息检索、问答系统、知识库等场景下的高效文本相关性排序。
@@ -56,6 +59,7 @@ class BM25Retriever(BaseRetriever):
         - update_k: 动态调整返回文档数量。
 
     性能注意事项：
+        - 默认采用空格分词，可以自定义分词函数
         - 每次添加/删除文档都会重建 BM25 索引，适合文档量较小或更新不频繁的场景。
         - 文档量较大或频繁更新时，建议使用向量检索方案。
         - 支持异步操作，便于大规模数据处理。
@@ -75,23 +79,19 @@ class BM25Retriever(BaseRetriever):
         bm25_params: BM25 算法参数
     """
     
-    vectorizer: Any = None
-    """BM25 向量化器实例"""
-    
-    docs: List[Document] = Field(default_factory=list, repr=False)
-    """文档列表"""
-    
-    k: int = 5
-    """返回的文档数量，默认为 5"""
-    
-    preprocess_func: Callable[[str], List[str]] = Field(default=default_preprocessing_func)
-    """文本预处理函数，默认使用空格分词"""
-    
-    bm25_params: Dict[str, Any] = Field(default_factory=dict)
-    """BM25 算法参数"""
+    vectorizer: Any = Field(default=None, description="BM25 向量化器实例")
+    docs: List[Document] = Field(default_factory=list, repr=False, description="文档列表")
+    k: int = Field(default=5, gt=0, description="返回的文档数量，必须大于0")
+    preprocess_func: Callable[[str], List[str]] = Field(
+        default=default_preprocessing_func, 
+        description="文本预处理函数，默认使用空格分词"
+    )
+    bm25_params: Dict[str, Any] = Field(default_factory=dict, description="BM25 算法参数")
+    _warn_default_preprocess: bool = Field(default=True, exclude=True, description="是否对默认预处理函数发出警告")
     
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
+        validate_assignment=True,  # 启用赋值时验证
     )
     
     def __init__(self, **kwargs):
@@ -99,52 +99,54 @@ class BM25Retriever(BaseRetriever):
         
         Args:
             vectorizer: BM25 向量化器
-            docs: 文档列表
-            k: 返回文档数量
+            docs: 文档列表  
+            k: 返回文档数量，必须大于0
             preprocess_func: 预处理函数
             bm25_params: BM25 参数
+            warn_default_preprocess: 是否对默认预处理函数发出警告，默认True
             **kwargs: 其他参数
         """
+        # 处理警告标志
+        warn_flag = kwargs.pop('warn_default_preprocess', True)
+        
+        # 让 Pydantic 处理字段初始化和验证
         super().__init__(**kwargs)
         
-        # 设置属性
-        self.vectorizer = kwargs.get('vectorizer')
-        self.docs = kwargs.get('docs', [])
-        self.k = kwargs.get('k', 5)
-        self.preprocess_func = kwargs.get('preprocess_func', default_preprocessing_func)
-        self.bm25_params = kwargs.get('bm25_params', {})
-        
-        # 验证配置
-        self._validate_configuration()
+        # 发出预处理函数警告（仅当使用默认函数且需要警告时）
+        if (warn_flag and 
+            self.preprocess_func == default_preprocessing_func and 
+            'preprocess_func' not in kwargs):
+            warnings.warn(
+                "使用默认的英文空格分词预处理函数。对于中文或其他语言，建议提供自定义的预处理函数以获得更好的检索效果。",
+                UserWarning,
+                stacklevel=2
+            )
     
-    def _validate_configuration(self) -> None:
-        """验证配置参数
-        
-        Raises:
-            ValueError: 如果配置无效
-        """
-        if self.k <= 0:
-            raise ValueError(f"k 必须大于 0，当前值: {self.k}")
-        
-        if not callable(self.preprocess_func):
-            raise ValueError("preprocess_func 必须是可调用的函数")
-    
-    @model_validator(mode="before")
+    @field_validator('k')
     @classmethod
-    def validate_params(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        """验证参数（Pydantic 验证器）
-        
-        Args:
-            values: 要验证的值
-            
-        Returns:
-            验证后的值
-        """
-        k = values.get("k", 5)
-        if k <= 0:
-            raise ValueError(f"k 必须大于 0，当前值: {k}")
-        
-        return values
+    def validate_k(cls, v: int) -> int:
+        """验证 k 值"""
+        if v <= 0:
+            raise ValueError(f"k 必须大于 0，当前值: {v}")
+        return v
+    
+    @field_validator('preprocess_func')
+    @classmethod 
+    def validate_preprocess_func(cls, v: Callable) -> Callable:
+        """验证预处理函数"""
+        if not callable(v):
+            raise ValueError("preprocess_func 必须是可调用的函数")
+        return v
+    
+    @model_validator(mode='after')
+    def validate_model_state(self) -> 'BM25Retriever':
+        """验证模型整体状态的一致性"""
+        # 检查 vectorizer 和 docs 的一致性
+        if self.vectorizer is not None and self.docs:
+            # 这里可以添加更复杂的一致性检查
+            # 比如检查 vectorizer 的文档数量是否与 docs 长度匹配
+            pass
+        return self
     
     @classmethod
     def from_texts(
@@ -216,18 +218,22 @@ class BM25Retriever(BaseRetriever):
         vectorizer = BM25Okapi(texts_processed, **bm25_params)
         
         # 创建文档对象
-        docs = []
-        for text, metadata, doc_id in zip(texts_list, metadatas_list, ids_list):
-            doc = Document(content=text, metadata=metadata, id=doc_id)
-            docs.append(doc)
+        docs = [
+            Document(content=text, metadata=metadata, id=doc_id)
+            for text, metadata, doc_id in zip(texts_list, metadatas_list, ids_list)
+        ]
         
         logger.info(f"成功创建包含 {len(docs)} 个文档的 BM25Retriever")
+
+        # 检查是否使用默认预处理函数
+        warn_default = preprocess_func == default_preprocessing_func
         
         return cls(
             vectorizer=vectorizer,
             docs=docs,
             preprocess_func=preprocess_func,
             bm25_params=bm25_params,
+            warn_default_preprocess=warn_default,
             **kwargs
         )
     
@@ -418,6 +424,7 @@ class BM25Retriever(BaseRetriever):
         
         警告：此操作会重新构建整个 BM25 索引，在大型文档集合上可能很慢。
         """
+        # 改成当前事件的循环（loop = asyncio.get_running_loop())
         loop = asyncio.get_event_loop()
         with ThreadPoolExecutor() as executor:
             return await loop.run_in_executor(
@@ -539,3 +546,64 @@ class BM25Retriever(BaseRetriever):
             f"k={self.k}, "
             f"preprocess_func={self.preprocess_func.__name__})"
         )
+
+    def save_to_disk(self, path: str) -> None:
+        """将 BM25 检索器状态保存到磁盘
+        
+        使用 pickle 序列化 vectorizer、docs 和其他配置。
+        
+        Args:
+            path: 保存路径（.pkl 文件）
+        
+        Raises:
+            IOError: 如果保存失败
+        """
+        if not path.endswith('.pkl'):
+            path = os.path.join(path, "bm25.pkl")
+        try:
+            state = {
+                'vectorizer': self.vectorizer,
+                'docs': self.docs,
+                'k': self.k,
+                'preprocess_func': self.preprocess_func,
+                'bm25_params': self.bm25_params,
+            }
+            with open(path, 'wb') as f:
+                dill.dump(state, f)
+            logger.info(f"BM25 检索器已保存到 {path}")
+        except Exception as e:
+            logger.error(f"保存 BM25 检索器失败: {e}")
+            raise IOError(f"保存失败: {e}")
+
+    @classmethod
+    def load_from_disk(cls, path: str) -> "BM25Retriever":
+        """从磁盘加载 BM25 检索器
+        
+        Args:
+            path: 加载路径（.pkl 文件）
+        
+        Returns:
+            BM25Retriever 实例
+        
+        Raises:
+            IOError: 如果加载失败
+            ValueError: 如果状态无效
+        """
+        if not os.path.exists(path):
+            raise IOError(f"文件不存在: {path}")
+        
+        try:
+            with open(path, 'rb') as f:
+                state = dill.load(f)
+            retriever = cls(
+                vectorizer=state['vectorizer'],
+                docs=state['docs'],
+                k=state['k'],
+                preprocess_func=state['preprocess_func'],
+                bm25_params=state['bm25_params'],
+            )
+            logger.info(f"从 {path} 加载 BM25 检索器成功")
+            return retriever
+        except Exception as e:
+            logger.error(f"加载 BM25 检索器失败: {e}")
+            raise IOError(f"加载失败: {e}")
