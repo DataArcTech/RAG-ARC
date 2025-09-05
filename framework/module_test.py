@@ -9,8 +9,8 @@ import os
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from framework.config import AbstractConfig
-from framework.module import AbstractModule
+from config.config import AbstractConfig
+from config.module import AbstractModule
 
 # Type definitions
 NewType = TypeVar("NewType")
