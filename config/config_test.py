@@ -1,9 +1,16 @@
 import json
+import os
+import sys
 import unittest
 from pydantic import ValidationError
-from framework.config import AbstractConfig
 from typing import Literal, Annotated
 from pydantic import Field
+
+# Add the project root to Python path for direct execution
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from config.config import AbstractConfig
 
 
 class AConfig(AbstractConfig):
