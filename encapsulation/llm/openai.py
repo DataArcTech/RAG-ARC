@@ -1,6 +1,9 @@
 from .base import LLMBase
-from typing import Dict, Any, List, Optional, Union, Tuple
+from typing import Dict, Any, List, Optional, Union, Tuple, TYPE_CHECKING
 import openai
+
+if TYPE_CHECKING:
+    from .document import Document
 
 
 class OpenAILLM(LLMBase):
@@ -289,6 +292,6 @@ class OpenAILLM(LLMBase):
     
     # ==================== NOT SUPPORTED ====================
     
-    def _rerank(self, query: str, documents: List[str], top_k: Optional[int] = None) -> List[Tuple[int, float]]:
+    def _rerank(self, query: str, documents: List['Document'], top_k: Optional[int] = None) -> List[Tuple[int, float]]:
         """OpenAI doesn't provide native reranking"""
         raise NotImplementedError("OpenAI provider does not support reranking. Use a dedicated reranker.")

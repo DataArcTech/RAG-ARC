@@ -4,6 +4,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Import Document here to avoid circular imports
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .document import Document
+
 
 class LLMBase(ABC):
     """
@@ -104,7 +109,7 @@ class LLMBase(ABC):
     def rerank(
         self, 
         query: str, 
-        documents: List[str], 
+        documents: List['Document'], 
         top_k: Optional[int] = None
     ) -> List[Tuple[int, float]]:
         """
@@ -112,7 +117,7 @@ class LLMBase(ABC):
         
         Args:
             query: Query text
-            documents: List of candidate documents
+            documents: List of Document objects
             top_k: Return top k results
             
         Returns:
@@ -125,7 +130,7 @@ class LLMBase(ABC):
     def _rerank(
         self, 
         query: str, 
-        documents: List[str], 
+        documents: List['Document'], 
         top_k: Optional[int] = None
     ) -> List[Tuple[int, float]]:
         """Internal reranking implementation"""

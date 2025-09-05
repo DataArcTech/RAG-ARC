@@ -1,5 +1,8 @@
 from .base import LLMBase
-from typing import Union, List, Dict, Any, Optional
+from typing import Union, List, Dict, Any, Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .document import Document
 
 
 class HuggingFaceLLM(LLMBase):
@@ -110,6 +113,6 @@ class HuggingFaceLLM(LLMBase):
         """HuggingFace embedding models don't support streaming chat"""
         raise NotImplementedError("HuggingFace embedding models do not support streaming chat")
     
-    def _rerank(self, query: str, documents: List[str], top_k: Optional[int] = None):
+    def _rerank(self, query: str, documents: List['Document'], top_k: Optional[int] = None) -> List[Tuple[int, float]]:
         """HuggingFace embedding models don't support reranking"""
         raise NotImplementedError("HuggingFace embedding models do not support reranking")
