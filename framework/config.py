@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Annotated
 
 if TYPE_CHECKING:
-    from config.module import AbstractModule
+    from framework.module import AbstractModule
 
 
 class AbstractConfig(BaseModel):
