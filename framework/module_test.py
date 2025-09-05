@@ -5,7 +5,9 @@ from pydantic import Field, ValidationError
 import sys
 import os
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add the project root to Python path for direct execution
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from framework.config import AbstractConfig
 from framework.module import AbstractModule
