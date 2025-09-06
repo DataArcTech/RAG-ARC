@@ -1,1 +1,2 @@
 dill
+faiss-gpu

@@ -1,4 +1,3 @@
-
 from typing import Any, Optional, List, Dict, ClassVar, Collection
 import logging
 
@@ -11,64 +10,64 @@ logger = logging.getLogger(__name__)
 
 
 class VectorStoreRetriever(BaseRetriever):
-    """向量数据库检索器
+    """Vector database retriever
     
-    基于向量数据库的检索器实现，支持多种搜索类型：
-    - similarity: 相似性搜索
-    - similarity_score_threshold: 带分数阈值的相似性搜索
-    - mmr: 最大边际相关性搜索
+    Vector-based document retriever implementation supporting multiple search types:
+    - similarity: Similarity search
+    - similarity_score_threshold: Similarity search with score threshold
+    - mmr: Maximal Marginal Relevance search
     """
     
     vectorstore: 'VectorStore'
-    """用于检索的向量数据库实例"""
+    """Vector database instance used for retrieval"""
     
     search_type: str = "similarity"
-    """执行的搜索类型，默认为 'similarity'"""
+    """Type of search to perform, defaults to 'similarity'"""
     
     search_kwargs: Dict[str, Any] = Field(default_factory=dict)
-    """传递给搜索函数的关键字参数"""
+    """Keyword arguments passed to the search functions"""
     
     allowed_search_types: ClassVar[Collection[str]] = (
         "similarity",
         "similarity_score_threshold", 
         "mmr",
     )
-    """允许的搜索类型"""
+    """Allowed search types"""
     
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
     )
     
     def __init__(self, vectorstore: 'VectorStore', **kwargs):
-        """初始化向量数据库检索器
+        """Initialize vector database retriever
         
         Args:
-            vectorstore: 向量数据库实例
-            search_type: 搜索类型，默认为 "similarity"
-            search_kwargs: 搜索参数字典
-            **kwargs: 其他参数
+            vectorstore: Vector database instance
+            search_type: Search type, defaults to "similarity"
+            search_kwargs: Search parameters dictionary
+            **kwargs: Other parameters
         """
         self.vectorstore = vectorstore
         self.search_type = kwargs.get("search_type", "similarity")
         self.search_kwargs = kwargs.get("search_kwargs", {})
         
-        # 验证搜索类型
+        # Validate search configuration
         self._validate_search_config()
         
-        # 调用父类初始化
+        # Call parent initialization
         super().__init__(**kwargs)
     
     def _validate_search_config(self) -> None:
-        """验证搜索配置
+        """Validate search configuration
         
         Raises:
-            ValueError: 如果搜索类型不在允许的类型中
-            ValueError: 如果使用 similarity_score_threshold 但未指定有效的 score_threshold
+            ValueError: If search type is not in allowed types
+            ValueError: If using similarity_score_threshold but no valid score_threshold specified
         """
         if self.search_type not in self.allowed_search_types:
             msg = (
-                f"search_type '{self.search_type}' 不被允许。"
-                f"有效值为: {self.allowed_search_types}"
+                f"search_type '{self.search_type}' is not allowed. "
+                f"Valid values are: {self.allowed_search_types}"
             )
             raise ValueError(msg)
         
@@ -78,30 +77,30 @@ class VectorStoreRetriever(BaseRetriever):
                 not isinstance(score_threshold, (int, float)) or
                 not (0 <= score_threshold <= 1)):
                 msg = (
-                    "使用 'similarity_score_threshold' 搜索类型时，"
-                    "必须在 search_kwargs 中指定有效的 score_threshold (0~1 之间的浮点数)"
+                    "When using 'similarity_score_threshold' search type, "
+                    "a valid score_threshold (float between 0 and 1) must be specified in search_kwargs"
                 )
                 raise ValueError(msg)
     
     @model_validator(mode="before")
     @classmethod
     def validate_search_type(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        """验证搜索类型（Pydantic 验证器）
+        """Validate search type (Pydantic validator)
         
         Args:
-            values: 要验证的值
+            values: Values to validate
             
         Returns:
-            验证后的值
+            Validated values
             
         Raises:
-            ValueError: 如果搜索类型无效
+            ValueError: If search type is invalid
         """
         search_type = values.get("search_type", "similarity")
         if search_type not in cls.allowed_search_types:
             msg = (
-                f"search_type '{search_type}' 不被允许。"
-                f"有效值为: {cls.allowed_search_types}"
+                f"search_type '{search_type}' is not allowed. "
+                f"Valid values are: {cls.allowed_search_types}"
             )
             raise ValueError(msg)
             
@@ -112,37 +111,37 @@ class VectorStoreRetriever(BaseRetriever):
                 not isinstance(score_threshold, (int, float)) or
                 not (0 <= score_threshold <= 1)):
                 msg = (
-                    "使用 'similarity_score_threshold' 搜索类型时，"
-                    "必须在 search_kwargs 中指定有效的 score_threshold (0~1 之间的数值)"
+                    "When using 'similarity_score_threshold' search type, "
+                    "a valid score_threshold (numeric value between 0 and 1) must be specified in search_kwargs"
                 )
                 raise ValueError(msg)
         
         return values
     
     def _get_relevant_documents(self, query: str, **kwargs: Any) -> List[Document]:
-        """获取与查询相关的文档
+        """Get documents relevant to the query
         
         Args:
-            query: 查询字符串
-            **kwargs: 额外的搜索参数
+            query: Query string
+            **kwargs: Additional search parameters
             
         Returns:
-            相关文档列表
+            List of relevant documents
             
         Raises:
-            ValueError: 如果搜索类型无效
+            ValueError: If search type is invalid
         """
-        # 合并搜索参数
+        # Merge search parameters
         search_params = {**self.search_kwargs, **kwargs}
         
-        # 获取返回文档数量，参考BM25Retriever的做法
-        k = search_params.get('k', getattr(self, 'k', 5))
+        # Get number of documents to return, referencing BM25Retriever approach
+        k = search_params.get('k', getattr(self, 'k', 4))
         search_params['k'] = k
         
         try:
             if self.search_type == "similarity":
                 docs = self.vectorstore.similarity_search(query, **search_params)
-                # 确保返回前k个文档
+                # Ensure only top k documents are returned
                 docs = docs[:k]
                 
             elif self.search_type == "similarity_score_threshold":
@@ -152,41 +151,41 @@ class VectorStoreRetriever(BaseRetriever):
                     )
                 )
                 docs = [doc for doc, _ in docs_and_similarities]
-                # 确保返回前k个文档
+                # Ensure only top k documents are returned
                 docs = docs[:k]
                 
             elif self.search_type == "mmr":
                 docs = self.vectorstore.max_marginal_relevance_search(
                     query, **search_params
                 )
-                # 确保返回前k个文档
+                # Ensure only top k documents are returned
                 docs = docs[:k]
                 
             else:
-                msg = f"不支持的搜索类型: {self.search_type}"
+                msg = f"Unsupported search type: {self.search_type}"
                 raise ValueError(msg)
             
-            logger.debug(f"检索到 {len(docs)} 个文档，搜索类型: {self.search_type}")
+            logger.debug(f"Retrieved {len(docs)} documents, search type: {self.search_type}")
             return docs
             
         except Exception as e:
-            logger.error(f"检索文档时发生错误: {e}")
+            logger.error(f"Error retrieving documents: {e}")
             raise
     
     async def _aget_relevant_documents(self, query: str, **kwargs: Any) -> List[Document]:
-        """异步获取与查询相关的文档
+        """Asynchronously get documents relevant to the query
         
         Args:
-            query: 查询字符串
-            **kwargs: 额外的搜索参数
+            query: Query string
+            **kwargs: Additional search parameters
             
         Returns:
-            相关文档列表
+            List of relevant documents
             
         Raises:
-            ValueError: 如果搜索类型无效
+            ValueError: If search type is invalid
         """
-        # 合并搜索参数
+        # Merge search parameters
         search_params = {**self.search_kwargs, **kwargs}
         
         try:
@@ -207,133 +206,133 @@ class VectorStoreRetriever(BaseRetriever):
                 )
                 
             else:
-                msg = f"不支持的搜索类型: {self.search_type}"
+                msg = f"Unsupported search type: {self.search_type}"
                 raise ValueError(msg)
             
-            logger.debug(f"异步检索到 {len(docs)} 个文档，搜索类型: {self.search_type}")
+            logger.debug(f"Asynchronously retrieved {len(docs)} documents, search type: {self.search_type}")
             return docs
             
         except Exception as e:
-            logger.error(f"异步检索文档时发生错误: {e}")
+            logger.error(f"Error asynchronously retrieving documents: {e}")
             raise
     
     def add_documents(self, documents: List[Document], **kwargs: Any) -> List[str]:
-        """向向量数据库添加文档
+        """Add documents to the vector database
         
         Args:
-            documents: 要添加的文档列表
-            **kwargs: 其他关键字参数
+            documents: List of documents to add
+            **kwargs: Other keyword arguments
             
         Returns:
-            添加文档的ID列表
+            List of added document IDs
         """
         try:
             ids = self.vectorstore.add_documents(documents, **kwargs)
-            logger.info(f"成功添加 {len(documents)} 个文档到向量数据库")
+            logger.info(f"Successfully added {len(documents)} documents to vector database")
             return ids
         except Exception as e:
-            logger.error(f"添加文档时发生错误: {e}")
+            logger.error(f"Error adding documents: {e}")
             raise
     
     async def aadd_documents(self, documents: List[Document], **kwargs: Any) -> List[str]:
-        """异步向向量数据库添加文档
+        """Asynchronously add documents to the vector database
         
         Args:
-            documents: 要添加的文档列表
-            **kwargs: 其他关键字参数
+            documents: List of documents to add
+            **kwargs: Other keyword arguments
             
         Returns:
-            添加文档的ID列表
+            List of added document IDs
         """
         try:
             ids = await self.vectorstore.aadd_documents(documents, **kwargs)
-            logger.info(f"成功异步添加 {len(documents)} 个文档到向量数据库")
+            logger.info(f"Successfully asynchronously added {len(documents)} documents to vector database")
             return ids
         except Exception as e:
-            logger.error(f"异步添加文档时发生错误: {e}")
+            logger.error(f"Error asynchronously adding documents: {e}")
             raise
     
     def delete_documents(self, ids: Optional[List[str]] = None, **kwargs: Any) -> Optional[bool]:
-        """从向量数据库删除文档
+        """Delete documents from the vector database
         
         Args:
-            ids: 要删除的文档ID列表，如果为None则删除所有文档
-            **kwargs: 其他关键字参数
+            ids: List of document IDs to delete, if None deletes all documents
+            **kwargs: Other keyword arguments
             
         Returns:
-            删除是否成功
+            Whether deletion was successful
         """
         try:
             result = self.vectorstore.delete(ids, **kwargs)
             if ids:
-                logger.info(f"删除了 {len(ids)} 个文档")
+                logger.info(f"Deleted {len(ids)} documents")
             else:
-                logger.info("删除了所有文档")
+                logger.info("Deleted all documents")
             return result
         except Exception as e:
-            logger.error(f"删除文档时发生错误: {e}")
+            logger.error(f"Error deleting documents: {e}")
             raise
     
     async def adelete_documents(self, ids: Optional[List[str]] = None, **kwargs: Any) -> Optional[bool]:
-        """异步从向量数据库删除文档
+        """Asynchronously delete documents from the vector database
         
         Args:
-            ids: 要删除的文档ID列表，如果为None则删除所有文档
-            **kwargs: 其他关键字参数
+            ids: List of document IDs to delete, if None deletes all documents
+            **kwargs: Other keyword arguments
             
         Returns:
-            删除是否成功
+            Whether deletion was successful
         """
         try:
             result = await self.vectorstore.adelete(ids, **kwargs)
             if ids:
-                logger.info(f"异步删除了 {len(ids)} 个文档")
+                logger.info(f"Asynchronously deleted {len(ids)} documents")
             else:
-                logger.info("异步删除了所有文档")
+                logger.info("Asynchronously deleted all documents")
             return result
         except Exception as e:
-            logger.error(f"异步删除文档时发生错误: {e}")
+            logger.error(f"Error asynchronously deleting documents: {e}")
             raise
     
     def get_by_ids(self, ids: List[str]) -> List[Document]:
-        """根据ID获取文档
+        """Get documents by IDs
         
         Args:
-            ids: 要获取的文档ID列表
+            ids: List of document IDs to retrieve
             
         Returns:
-            文档列表
+            List of documents
         """
         try:
             docs = self.vectorstore.get_by_ids(ids)
-            logger.debug(f"根据ID获取了 {len(docs)} 个文档")
+            logger.debug(f"Retrieved {len(docs)} documents by IDs")
             return docs
         except Exception as e:
-            logger.error(f"根据ID获取文档时发生错误: {e}")
+            logger.error(f"Error retrieving documents by IDs: {e}")
             raise
     
     async def aget_by_ids(self, ids: List[str]) -> List[Document]:
-        """异步根据ID获取文档
+        """Asynchronously get documents by IDs
         
         Args:
-            ids: 要获取的文档ID列表
+            ids: List of document IDs to retrieve
             
         Returns:
-            文档列表
+            List of documents
         """
         try:
             docs = await self.vectorstore.aget_by_ids(ids)
-            logger.debug(f"异步根据ID获取了 {len(docs)} 个文档")
+            logger.debug(f"Asynchronously retrieved {len(docs)} documents by IDs")
             return docs
         except Exception as e:
-            logger.error(f"异步根据ID获取文档时发生错误: {e}")
+            logger.error(f"Error asynchronously retrieving documents by IDs: {e}")
             raise
     
     def get_vectorstore_info(self) -> Dict[str, Any]:
-        """获取向量数据库信息
+        """Get vector database information
         
         Returns:
-            包含向量数据库信息的字典
+            Dictionary containing vector database information
         """
         info = {
             "vectorstore_class": self.vectorstore.__class__.__name__,
@@ -342,7 +341,7 @@ class VectorStoreRetriever(BaseRetriever):
             "allowed_search_types": list(self.allowed_search_types),
         }
         
-        # 如果向量数据库有嵌入信息，添加到信息中
+        # If vector database has embedding information, add it to info
         if hasattr(self.vectorstore, 'embeddings') and self.vectorstore.embeddings:
             info["embedding_class"] = self.vectorstore.embeddings.__class__.__name__
         elif hasattr(self.vectorstore, 'embedding'):
@@ -351,30 +350,29 @@ class VectorStoreRetriever(BaseRetriever):
         return info
     
     def get_name(self) -> str:
-        """获取检索器名称"""
+        """Get retriever name"""
         return f"{self.vectorstore.__class__.__name__}Retriever"
     
     def update_search_params(self, **kwargs: Any) -> None:
-        """更新搜索参数
+        """Update search parameters
         
         Args:
-            **kwargs: 要更新的搜索参数
+            **kwargs: Search parameters to update
         """
         self.search_kwargs.update(kwargs)
         
-        # 如果更新了搜索类型，重新验证
+        # If search type is updated, re-validate
         if "search_type" in kwargs:
             self.search_type = kwargs["search_type"]
             self._validate_search_config()
         
-        logger.debug(f"更新搜索参数: {kwargs}")
+        logger.debug(f"Updated search parameters: {kwargs}")
     
     def __repr__(self) -> str:
-        """返回检索器的字符串表示"""
+        """Return string representation of the retriever"""
         return (
             f"{self.__class__.__name__}("
             f"vectorstore={self.vectorstore.__class__.__name__}, "
             f"search_type='{self.search_type}', "
             f"search_kwargs={self.search_kwargs})"
         )
-

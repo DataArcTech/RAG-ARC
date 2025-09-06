@@ -8,11 +8,11 @@ import threading
 import psutil
 import multiprocessing
 import gc
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 from concurrent.futures import ProcessPoolExecutor
-
+import jieba
 from core.utils.data_model import Document
-from core.retrieval.tantivy_bm25_new import TantivyBM25Retriever
+from core.retrieval.tantivy_bm25 import TantivyBM25Retriever
 from encapsulation.database.utils.TokenizerManager import TokenizerManager
 
 try:
@@ -30,32 +30,91 @@ logger = logging.getLogger(__name__)
 
 
 def init_jieba_worker():
-    """在工作进程中初始化jieba，减少重复初始化开销"""
-    try:
-        import jieba
-        return jieba
-    except ImportError:
-        raise ImportError("The 'jieba' library was not found. Please install it using: pip install jieba")
-
+    """Initialize jieba in the worker process to reduce initialization overhead"""
+    return jieba
 
 
 class BM25IndexBuilder:
     """
-    基于 Tantivy 搜索引擎的高性能索引构建器
-
-    优化特性：
-    - 流式处理减少内存占用
-    - 智能批处理
-    - 内存管理和垃圾回收
-    - 异常恢复机制
-    - 优化的多进程处理
-    - 增量更新和文档去重
-    - 上下文管理器支持
-    - 自动语言检测和分词器选择 (仅在未提供自定义 preprocess_func 时)
+    BM25IndexBuilder is a high-performance index builder based on the Tantivy search engine.
+    
+    This class implements efficient indexing for document collections by leveraging Tantivy's
+    capabilities, supporting stream processing to reduce memory usage, intelligent batching,
+    memory management, exception recovery mechanisms, optimized multiprocessing, incremental
+    updates, and document deduplication.
+    
+    Key features:
+    - Stream processing to reduce memory footprint
+    - Intelligent batch processing
+    - Memory management and garbage collection
+    - Exception recovery mechanisms
+    - Optimized multiprocessing
+    - Incremental updates and document deduplication
+    - Context manager support
+    - Automatic language detection and tokenizer selection (only when no custom preprocess_func is provided)
+    
+    Main parameters:
+        index_path (str): Path to store the index
+        preprocess_func (Callable): Custom text preprocessing function
+        bm25_k1 (float): BM25 k1 parameter
+        bm25_b (float): BM25 b parameter
+        stopwords (List[str]): List of stopwords to filter out
+        writer_heap_size (int): Heap size for the index writer
+        batch_size (int): Number of documents to process in each batch
+        tokenize_batch_size (int): Number of texts to tokenize in each batch
+        max_workers (int): Maximum number of worker processes
+        progress_interval (int): Interval for progress reporting
+        enable_gc (bool): Whether to enable garbage collection
+        progress_callback (Callable): Callback function for progress reporting
+    
+    Core methods:
+        - build_index: Build index using producer-consumer pattern
+        - add_documents: Add documents to existing index
+        - update_documents: Update documents in index
+        - delete_documents: Delete documents from index
+        - get_document_by_id: Retrieve document by ID
+        - as_retriever: Create retriever from current index
+        - get_index_stats: Get index statistics
+        - close: Close process pool executor
+    
+    Performance considerations:
+        - Stream processing reduces memory usage
+        - Intelligent batching optimizes performance
+        - Memory management and garbage collection reduce memory footprint
+        - Multiprocessing improves tokenization performance
+        - Context manager ensures proper resource cleanup
+    
+    Typical usage:
+        >>> with BM25IndexBuilder(index_path="./my_index") as builder:
+        >>>     builder.build_index(documents)
+        >>>     retriever = builder.as_retriever()
+        
+        >>> builder = BM25IndexBuilder.from_documents(documents)
+        >>> retriever = builder.as_retriever()
+        
+        >>> builder = BM25IndexBuilder.load_local("./my_index")
+        >>> retriever = builder.as_retriever()
+    
+    Attributes:
+        index_path: Path to store the index
+        bm25_k1: BM25 k1 parameter
+        bm25_b: BM25 b parameter
+        stopwords: List of stopwords to filter out
+        tokenizer_manager: TokenizerManager instance
+        _index: Tantivy index instance
+        _schema: Tantivy schema
+        _batch_size: Number of documents to process in each batch
+        _tokenize_batch_size: Number of texts to tokenize in each batch
+        _max_workers: Maximum number of worker processes
+        _progress_interval: Interval for progress reporting
+        _enable_gc: Whether to enable garbage collection
+        _writer_heap_size: Heap size for the index writer
+        _tokenizers_registered: Whether tokenizers are registered
+        progress_callback: Callback function for progress reporting
     """
 
     def __init__(self,
-                 index_path: str = None,
+                 index_path: Optional[str] = None,
                  preprocess_func: Optional[Callable[[str], List[str]]] = None,
                  bm25_k1: float = 1.2,
                  bm25_b: float = 0.75,
@@ -68,15 +127,36 @@ class BM25IndexBuilder:
                  enable_gc: bool = True,
                  progress_callback: Optional[Callable] = None,
                  **kwargs):
+        """Initialize BM25 Index Builder
+        
+        Args:
+            index_path: Path to store the index, defaults to a generated path
+            preprocess_func: Custom text preprocessing function
+            bm25_k1: BM25 k1 parameter, must be greater than 0
+            bm25_b: BM25 b parameter, must be between 0 and 1
+            stopwords: List of stopwords to filter out
+            writer_heap_size: Heap size for the index writer
+            batch_size: Number of documents to process in each batch
+            tokenize_batch_size: Number of texts to tokenize in each batch
+            max_workers: Maximum number of worker processes
+            progress_interval: Interval for progress reporting
+            enable_gc: Whether to enable garbage collection
+            progress_callback: Callback function for progress reporting
+            **kwargs: Additional parameters
+        """
+        # Validate parameters
         if bm25_k1 <= 0:
             raise ValueError(f"bm25_k1 must be greater than 0, but got {bm25_k1}")
         if not (0 <= bm25_b <= 1):
             raise ValueError(f"bm25_b must be between 0 and 1, but got {bm25_b}")
 
         self.index_path = index_path or f"./tantivy_index_{uuid.uuid4().hex[:8]}"
+        
         self.bm25_k1, self.bm25_b = bm25_k1, bm25_b
+        
         self.stopwords = stopwords or ["的", "是", "在", "和", "与", "或", "了", "等", "就", "也",
                                        "一", "个", "有", "这", "那", "不", "但", "对", "为", "很"]
+        
         self._index: Optional[Index] = None
         self._schema = None
         self._batch_size = batch_size
@@ -86,23 +166,20 @@ class BM25IndexBuilder:
         self._enable_gc = enable_gc
         self._tokenizers_registered = False
         
-        # 使用 TokenizerManager 管理分词器
+        # Use TokenizerManager to manage tokenizers
         self.tokenizer_manager = TokenizerManager(preprocess_func)
-        # 同步停用词
+        # Sync stopwords
         self.tokenizer_manager.update_stopwords(self.stopwords)
 
-        # 动态 heap_size (默认取系统内存 20%，最大 1GB)
+        # Dynamic heap_size (default to 20% of system memory, max 1GB)
         if writer_heap_size is None:
             total_mem = psutil.virtual_memory().total
-            # TODO 比例和最大值需要调整
             self._writer_heap_size = min(int(total_mem * 0.2), 1024 * 1024 * 1024)
         else:
             self._writer_heap_size = writer_heap_size
 
-        # 并发 & 队列
         self._executor: Optional[ProcessPoolExecutor] = None
         self._executor_closed = False
-        #TODO  maxsize 暂时还不确定
         self._queue = queue.Queue(maxsize=1000)
         self._writer_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -110,35 +187,48 @@ class BM25IndexBuilder:
         self.progress_callback = progress_callback
 
         self._initialize_index()
-
-
-
     
     def _set_tokenizer(self, documents: List[Document]):
-        """设置分词器（代理到 TokenizerManager）"""
+        """Set tokenizer (proxied to TokenizerManager)"""
         self.tokenizer_manager.set_tokenizer_by_detection(documents)
 
     def _tokenize_batch_sequential(self, texts: List[str]) -> List[List[str]]:
-        """顺序批量分词（单进程）"""
+        """Tokenize texts sequentially (single process)
+        
+        Args:
+            texts: List of texts to tokenize
+            
+        Returns:
+            List of tokenized texts
+        """
         return self.tokenizer_manager.batch_tokenize(texts)
 
     def _tokenize_batch_parallel(self, texts: List[str]) -> List[List[str]]:
-        """并行批量分词（多进程）"""
+        """Tokenize texts in parallel (multiprocessing)
+        
+        Args:
+            texts: List of texts to tokenize
+            
+        Returns:
+            List of tokenized texts
+        """
         executor = self._get_executor()
         if not executor or len(texts) <= self._tokenize_batch_size:
             return self._tokenize_batch_sequential(texts)
 
+        # Split texts into batches
         batches = [texts[i:i + self._tokenize_batch_size] for i in range(0, len(texts), self._tokenize_batch_size)]
         results = []
         
-        # 创建一个可序列化的分词任务
+        # Create serializable tokenization tasks
         futures = []
         for batch in batches:
-            # 由于 TokenizerManager 可能包含不可序列化的自定义函数，
-            # 我们直接使用当前实例的分词方法
+            # Since TokenizerManager may contain non-serializable custom functions,
+            # we directly use the current instance's tokenization method
             future = executor.submit(self._tokenize_batch_sequential, batch)
             futures.append(future)
             
+        # Collect results
         for future in futures:
             try:
                 results.extend(future.result(timeout=60))
@@ -147,10 +237,13 @@ class BM25IndexBuilder:
                 return self._tokenize_batch_sequential(texts)
         return results
 
-    # TODO 支持任意字段过滤
-    def _initialize_index(self):
+    # TODO Support arbitrary field filtering
+    def _initialize_index(self) -> None:
+        """Initialize the Tantivy index"""
         if self._index is not None:
             return
+            
+        # Build schema
         schema_builder = SchemaBuilder()
         schema_builder.add_text_field("id", stored=True, tokenizer_name="raw", fast=True)
         schema_builder.add_text_field("content", stored=True, tokenizer_name="raw")
@@ -160,6 +253,7 @@ class BM25IndexBuilder:
         schema_builder.add_text_field("tag", tokenizer_name="raw", stored=False, fast=True)
         self._schema = schema_builder.build()
 
+        # Load existing index or create new one
         is_new_index = True
         if os.path.exists(self.index_path) and any(os.scandir(self.index_path)):
             logger.info(f"Loading existing index from: {self.index_path}")
@@ -170,15 +264,15 @@ class BM25IndexBuilder:
             os.makedirs(self.index_path, exist_ok=True)
             self._index = Index(self._schema, path=self.index_path)
         
-        # 只在新索引或明确需要时注册tokenizer
+        # Register tokenizers only for new index or when not yet registered
         if is_new_index or not self._tokenizers_registered:
             self._register_tokenizers()
 
         logger.info("Tantivy index initialized successfully")
 
-    def _register_tokenizers(self):
-        """注册tokenizer，避免重复注册"""
-        if self._tokenizers_registered:
+    def _register_tokenizers(self) -> None:
+        """Register tokenizers to avoid duplicate registration"""
+        if self._tokenizers_registered or self._index is None:
             return
             
         try:
@@ -194,15 +288,18 @@ class BM25IndexBuilder:
             self._index.register_tokenizer("raw", raw_analyzer)
             
             self._tokenizers_registered = True
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug("Tokenizers registered successfully")
+            logger.debug("Tokenizers registered successfully")
                 
         except Exception as e:
             logger.error(f"Failed to register tokenizers: {e}")
             raise
 
-    def _writer_worker(self, writer):
-        """消费者线程：索引写入"""
+    def _writer_worker(self, writer) -> None:
+        """Consumer thread: index writing worker
+        
+        Args:
+            writer: Tantivy index writer
+        """
         batch_docs = []
         while not self._stop_event.is_set() or not self._queue.empty():
             try:
@@ -213,21 +310,38 @@ class BM25IndexBuilder:
                 if len(batch_docs) >= self._batch_size:
                     self._batch_write_documents(batch_docs, writer)
                     batch_docs.clear()
+                    # Trigger garbage collection if enabled
+                    if self._enable_gc:
+                        gc.collect()
             except queue.Empty:
                 continue
+        
         if batch_docs:
             self._batch_write_documents(batch_docs, writer)
 
-    def _batch_write_documents(self, docs: List[TantivyDocument], writer):
+    def _batch_write_documents(self, docs: List[TantivyDocument], writer) -> None:
+        """Write a batch of documents to the index
+        
+        Args:
+            docs: List of Tantivy documents to write
+            writer: Tantivy index writer
+        """
         try:
             writer.add_documents(docs)
         except AttributeError:
             for d in docs:
                 writer.add_document(d)
+        except Exception as e:
+            logger.error(f"Error writing batch of documents: {e}")
+            raise
 
-    def _delete_documents_by_ids(self, doc_ids: List[str]):
-        """根据ID删除文档"""
-        if not doc_ids:
+    def _delete_documents_by_ids(self, doc_ids: List[str]) -> None:
+        """Delete documents by their IDs
+        
+        Args:
+            doc_ids: List of document IDs to delete
+        """
+        if not doc_ids or self._index is None:
             return
             
         try:
@@ -237,7 +351,6 @@ class BM25IndexBuilder:
                 writer.delete_documents("id", doc_id)
             
             writer.commit()
-            # 重新加载索引以反映删除操作
             self._index.reload()
             logger.info(f"Deleted {len(doc_ids)} documents from index")
             
@@ -247,22 +360,32 @@ class BM25IndexBuilder:
 
 
     def build_index(self, documents: List[Document]) -> List[str]:
-        """使用生产者-消费者模式的索引构建方法"""
+        """Build index using producer-consumer pattern
+        
+        Args:
+            documents: List of Document objects to index
+            
+        Returns:
+            List of document IDs that were added to the index
+            
+        Raises:
+            RuntimeError: If there's an error during index building
+        """
         if not documents:
             logger.warning("No documents provided for indexing")
             return []
         
-        # 只有在没有使用自定义 preprocess_func 时才检测语言和设置分词器
         if self.tokenizer_manager.custom_preprocess_func is None:
             self._set_tokenizer(documents)
         
+        if self._index is None:
+            raise RuntimeError("Index has not been initialized")
+            
         total_docs = len(documents)
         added_ids, processed_count = [], 0
         
-        # 创建写入器
         writer = self._index.writer(heap_size=self._writer_heap_size)
         
-        # 启动写入线程
         self._writer_thread = threading.Thread(target=self._writer_worker, args=(writer,))
         self._writer_thread.start()
 
@@ -272,28 +395,25 @@ class BM25IndexBuilder:
             for doc in documents:
                 content_tokens = self.tokenizer_manager.get_current_tokenizer()(doc.content or "")
                 doc_id = str(doc.id) if doc.id else str(uuid.uuid4())
+                
                 tantivy_doc = TantivyDocument()
                 tantivy_doc.add_text("id", doc_id)
                 tantivy_doc.add_text("content", doc.content or "")
                 tantivy_doc.add_text("content_tokens", " ".join(content_tokens))
                 
-                # 添加元数据
                 metadata = doc.metadata or {}
                 tantivy_doc.add_json("metadata", metadata)
                 
-                # 添加元数据索引字段
                 if "source" in metadata:
                     tantivy_doc.add_text("source", str(metadata["source"]))
                 if "tag" in metadata:
                     tantivy_doc.add_text("tag", str(metadata["tag"]))
                 
-                # 放入队列
                 self._queue.put(tantivy_doc)
 
                 added_ids.append(doc_id)
                 processed_count += 1
                 
-                # 进度报告
                 if processed_count % self._progress_interval == 0:
                     elapsed = time.time() - start_time
                     stats = {
@@ -306,13 +426,11 @@ class BM25IndexBuilder:
                     if self.progress_callback:
                         self.progress_callback(processed_count, total_docs, stats)
 
-            # 结束信号
             self._queue.put(None)
             self._writer_thread.join()
             writer.commit()
             self._index.reload()
             
-            # 报告使用的分词器
             tokenizer_info = self.tokenizer_manager.get_tokenizer_info()
             logger.info(f"Successfully built index with {len(added_ids)} documents using {tokenizer_info} tokenizer")
             
@@ -331,13 +449,20 @@ class BM25IndexBuilder:
         return added_ids
 
     def add_documents(self, documents: List[Document], overwrite: bool = False) -> List[str]:
-        """向现有索引添加文档，支持去重"""
+        """Add documents to the existing index, supporting deduplication
+        
+        Args:
+            documents: List of Document objects to add
+            overwrite: Whether to overwrite existing documents with the same IDs
+            
+        Returns:
+            List of document IDs that were added to the index
+        """
         if not documents:
             logger.warning("No documents provided for adding")
             return []
         
         if overwrite:
-            # 提取要添加的文档ID
             doc_ids = [str(doc.id) for doc in documents if doc.id is not None]
             if doc_ids:
                 logger.info(f"Overwrite mode: deleting {len(doc_ids)} existing documents")
@@ -346,29 +471,51 @@ class BM25IndexBuilder:
         return self.build_index(documents)
 
     def update_documents(self, documents: List[Document]) -> List[str]:
-        """更新文档，先删除后添加"""
+        """Update documents in the index by first deleting then adding
+        
+        Args:
+            documents: List of Document objects to update
+            
+        Returns:
+            List of document IDs that were updated in the index
+        """
         return self.add_documents(documents, overwrite=True)
 
     def delete_documents(self, doc_ids: List[str]) -> int:
-        """删除指定ID的文档"""
+        """Delete documents with specified IDs
+        
+        Args:
+            doc_ids: List of document IDs to delete
+            
+        Returns:
+            Number of documents deleted
+        """
         if not doc_ids:
             return 0
         
-        # 去重处理
         unique_doc_ids = list(set(doc_ids))
         
         self._delete_documents_by_ids(unique_doc_ids)
         return len(unique_doc_ids)
 
-    # TODO 修改为batch获取
+    # TODO Modify to batch retrieval
     def get_document_by_id(self, doc_id: str) -> Optional[Document]:
-        """根据ID获取单个文档"""
+        """Retrieve a single document by its ID
+        
+        Args:
+            doc_id: Document ID to retrieve
+            
+        Returns:
+            Document object if found, None otherwise
+            
+        Raises:
+            RuntimeError: If index is not initialized
+        """
         if self._index is None:
             raise RuntimeError("Index has not been initialized. Call build_index() or load_local() first.")
 
         try:
             searcher = self._index.searcher()
-            # 构建精确匹配 id 字段的查询
             query = self._index.parse_query(f'id:"{doc_id}"', ["id"])
             results = searcher.search(query, 1)
 
@@ -376,12 +523,10 @@ class BM25IndexBuilder:
                 _, doc_address = results.hits[0]
                 tantivy_doc = searcher.doc(doc_address)
                 
-                # 提取字段
                 doc_id_field = tantivy_doc.get_first("id") or ""
                 content_field = tantivy_doc.get_first("content") or ""
                 metadata_field = tantivy_doc.get_first("metadata") or {}
 
-                # 尝试解析 metadata（如果是字符串）
                 if isinstance(metadata_field, str):
                     try:
                         metadata_field = json.loads(metadata_field)
@@ -402,6 +547,19 @@ class BM25IndexBuilder:
 
     @classmethod
     def from_documents(cls, documents: List[Document], **kwargs: Any) -> "BM25IndexBuilder":
+        """Create BM25IndexBuilder from document list
+        
+        Args:
+            documents: List of Document objects to index
+            **kwargs: Additional parameters for BM25IndexBuilder
+            
+        Returns:
+            BM25IndexBuilder instance
+            
+        Raises:
+            ValueError: If documents list is empty
+            Exception: If there's an error during index building
+        """
         if not documents:
             raise ValueError("Documents list cannot be empty")
         
@@ -415,12 +573,26 @@ class BM25IndexBuilder:
 
     @classmethod
     def load_local(cls, index_path: str, **kwargs: Any) -> "BM25IndexBuilder":
+        """Load existing index from local path
+        
+        Args:
+            index_path: Path to the existing index
+            **kwargs: Additional parameters for BM25IndexBuilder
+            
+        Returns:
+            BM25IndexBuilder instance
+            
+        Raises:
+            FileNotFoundError: If index path does not exist
+            Exception: If there's an error during index loading
+        """
         if not os.path.exists(index_path):
             raise FileNotFoundError(f"Index path does not exist: {index_path}")
         
         builder = cls(index_path=index_path, **kwargs)
         try:
-            builder._index.reload()
+            if builder._index is not None:
+                builder._index.reload()
             logger.info("Successfully loaded existing index")
         except Exception as e:
             logger.error(f"Failed to load index: {e}")
@@ -430,32 +602,51 @@ class BM25IndexBuilder:
 
 
     def as_retriever(self, **kwargs: Any) -> "TantivyBM25Retriever":
+        """Create a retriever from the current index
+        
+        Args:
+            **kwargs: Additional parameters for the retriever
+            
+        Returns:
+            TantivyBM25Retriever instance
+            
+        Raises:
+            RuntimeError: If index is not initialized
+        """
         if self._index is None:
             raise RuntimeError(
                 "Index has not been initialized. "
                 "Call build_index() or load_local() first."
             )
 
-        # 确保索引是最新的
+        # Ensure index is up to date
         self._index.reload()
         
+        # Create retriever with current tokenizer
         retriever = TantivyBM25Retriever(
             index=self._index,
-            preprocess_func=self.tokenizer_manager.get_current_tokenizer(), # 传递当前使用的分词器
+            preprocess_func=self.tokenizer_manager.get_current_tokenizer(),
             stopwords=self.stopwords,
             **kwargs
         )
         
-        # 重新加载搜索器以获取最新数据
+        # Reload searcher to get latest data
         retriever.reload_searcher()
         
         return retriever
 
     def get_index_stats(self) -> Dict[str, Any]:
-        """获取索引统计信息"""
+        """Get index statistics
+        
+        Returns:
+            Dictionary containing index statistics
+        """
         try:
-            searcher = self._index.searcher()
-            num_docs = searcher.num_docs
+            if self._index is not None:
+                searcher = self._index.searcher()
+                num_docs = searcher.num_docs
+            else:
+                num_docs = 0
         except Exception:
             num_docs = 0
             
@@ -474,16 +665,23 @@ class BM25IndexBuilder:
         }
 
     def get_tokenizer_stats(self) -> dict:
-        """获取分词器统计信息"""
+        """Get tokenizer statistics
+        
+        Returns:
+            Dictionary containing tokenizer statistics
+        """
         return self.tokenizer_manager.get_stats()
 
     def __repr__(self) -> str:
-        num_docs = 0
+        """String representation of the BM25IndexBuilder instance"""
         try:
-            searcher = self._index.searcher()
-            num_docs = searcher.num_docs
+            if self._index is not None:
+                searcher = self._index.searcher()
+                num_docs = searcher.num_docs
+            else:
+                num_docs = 0
         except:
-            pass
+            num_docs = 0
         
         tokenizer = self.tokenizer_manager.get_tokenizer_info()
         
@@ -497,54 +695,62 @@ class BM25IndexBuilder:
 
 
     def __enter__(self) -> "BM25IndexBuilder":
-        """上下文管理器入口"""
+        """Context manager entry point
+        
+        Returns:
+            BM25IndexBuilder instance
+        """
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """上下文管理器出口，确保资源清理"""
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Context manager exit point, ensures resource cleanup
+        
+        Args:
+            exc_type: Exception type
+            exc_val: Exception value
+            exc_tb: Exception traceback
+        """
         self.close()
         if exc_type is not None:
             logger.error(f"Exception in BM25IndexBuilder context: {exc_type.__name__}: {exc_val}")
 
     def _get_executor(self) -> Optional[ProcessPoolExecutor]:
-        """懒加载进程池，带初始化器"""
+        """Lazy load process pool executor with initializer
+        
+        Returns:
+            ProcessPoolExecutor instance or None if not available
+        """
         if self._max_workers > 1 and self._executor is None and not self._executor_closed:
             try:
                 self._executor = ProcessPoolExecutor(
                     max_workers=self._max_workers,
                     mp_context=multiprocessing.get_context('spawn'),
-                    initializer=init_jieba_worker  # 在每个工作进程中初始化jieba
+                    initializer=init_jieba_worker  # Initialize jieba in each worker process
                 )
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug(f"Process pool executor created with {self._max_workers} workers")
+                logger.debug(f"Process pool executor created with {self._max_workers} workers")
             except Exception as e:
                 logger.error(f"Failed to create process pool executor: {e}")
                 self._executor_closed = True
         return self._executor
 
-
-    def close(self):
-        """手动关闭进程池"""
+    def close(self) -> None:
+        """Close the process pool executor manually"""
         if self._executor and not self._executor_closed:
             try:
                 self._executor.shutdown(wait=True)
-                if logger.isEnabledFor(logging.INFO):
-                    logger.info("Process pool executor closed successfully")
+                logger.info("Process pool executor closed successfully")
             except Exception as e:
                 logger.error(f"Error closing process pool executor: {e}")
             finally:
                 self._executor = None
                 self._executor_closed = True
 
-    def __del__(self):
-        """析构时关闭进程池"""
+    def __del__(self) -> None:
+        """Destructor to close process pool"""
         try:
             self.close()
         except Exception as e:
-            # 记录析构时的异常，避免掩盖问题
             try:
                 logger.error(f"Error in __del__: {e}")
             except:
-                # 如果连日志都无法记录，则静默处理
                 pass
-

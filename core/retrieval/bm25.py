@@ -8,6 +8,7 @@ import numpy as np
 import jieba
 from rank_bm25 import BM25Okapi
 from core.utils.data_model import Document
+from core.retrieval.base import BaseRetriever
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ def jieba_preprocessing_func(text: str) -> List[str]:
     return list(jieba.cut(text)) 
 
 
-class BM25Retriever(BaseModel):
+class BM25Retriever(BaseRetriever):
     """
     BM25Retriever is a document retriever based on the BM25 algorithm, suitable for efficient text relevance ranking in scenarios such as information retrieval, question answering systems, and knowledge bases.
 
@@ -87,23 +88,8 @@ class BM25Retriever(BaseModel):
         bm25_params: BM25 algorithm parameters
     """
     
-    vectorizer: Any = Field(default=None, description="BM25 vectorizer instance")
-    docs: List[Document] = Field(default_factory=list, description="Document list")
-    k: int = Field(default=5, gt=0, description="Number of documents to return, must be greater than 0")
-    preprocess_func: Callable[[str], List[str]] = Field(
-        default=default_preprocessing_func, 
-        description="Text preprocessing function, defaults to space tokenization"
-    )
-    bm25_params: Dict[str, Any] = Field(default_factory=dict, description="BM25 algorithm parameters")
-    search_kwargs: Dict[str, Any] = Field(default_factory=dict, description="Search parameters")
-    processed_texts: List[List[str]] = Field(default_factory=list, description="Cached processed texts", exclude=True)
-    
-    model_config = ConfigDict(
-        arbitrary_types_allowed=True,
-        validate_assignment=True,  # Enable validation on assignment
-    )
-    
-    def __init__(self, **kwargs):
+    def __init__(self, vectorizer=None, docs=None, k=5, preprocess_func=default_preprocessing_func, 
+                 bm25_params=None, search_kwargs=None, **kwargs):
         """Initialize BM25 Retriever
         
         Args:
@@ -112,16 +98,27 @@ class BM25Retriever(BaseModel):
             k: Number of documents to return, must be greater than 0
             preprocess_func: Preprocessing function
             bm25_params: BM25 parameters
+            search_kwargs: Search parameters
             **kwargs: Other parameters
         """
-        # Process search parameters
-        search_kwargs = kwargs.pop("search_kwargs", {})
+        # Initialize BaseRetriever
+        super().__init__(search_kwargs=search_kwargs or {}, **kwargs)
         
-        # Let Pydantic handle field initialization and validation
-        super().__init__(**kwargs)
+        # Initialize BM25 specific attributes
+        self.vectorizer = vectorizer
+        self.docs = docs or []
+        self.k = k
+        self.preprocess_func = preprocess_func
+        self.bm25_params = bm25_params or {}
+        self.processed_texts = []
         
-        # Set search parameters
-        self.search_kwargs = search_kwargs
+        # Validate k value
+        if self.k <= 0:
+            raise ValueError(f"k must be greater than 0, current value: {self.k}")
+            
+        # Validate preprocess_func
+        if not callable(self.preprocess_func):
+            raise ValueError("preprocess_func must be a callable function")
         
         # Issue preprocessing function warning (only when using default function)
         if self._contains_chinese() and self.preprocess_func == default_preprocessing_func:
@@ -131,7 +128,7 @@ class BM25Retriever(BaseModel):
                 UserWarning,
                 stacklevel=2
             )
-   
+    
     def _contains_chinese(self) -> bool:
         """Check if the documents contain Chinese text"""
         for doc in self.docs:
@@ -143,70 +140,6 @@ class BM25Retriever(BaseModel):
                 )
                 return True
         return False
-    
-    @field_validator('k')
-    @classmethod
-    def validate_k(cls, v: int) -> int:
-        """Validate k value"""
-        if v <= 0:
-            raise ValueError(f"k must be greater than 0, current value: {v}")
-        return v
-    
-    @field_validator('preprocess_func')
-    @classmethod 
-    def validate_preprocess_func(cls, v: Callable) -> Callable:
-        """Validate preprocessing function"""
-        if not callable(v):
-            raise ValueError("preprocess_func must be a callable function")
-        return v
-    
-    @model_validator(mode='after')
-    def validate_model_state(self) -> 'BM25Retriever':
-        """Validate overall model state consistency"""
-        # Check consistency between vectorizer and docs
-        if self.vectorizer is not None and self.docs:
-            # More complex consistency checks can be added here
-            # Such as checking if the number of documents in vectorizer matches the length of docs
-            pass
-        return self
-    
-    def invoke(self, input: str, **kwargs: Any) -> List[Document]:
-        """Invoke retriever to get relevant documents
-        
-        Main entry point for synchronous retriever invocation.
-        
-        Args:
-            input: Query string
-            **kwargs: Other parameters passed to the retriever
-            
-        Returns:
-            List of relevant documents
-            
-        Examples:
-            >>> retriever.invoke("query")
-        """
-        return self._get_relevant_documents(input, **kwargs)
-    
-    async def ainvoke(self, input: str, **kwargs: Any) -> List[Document]:
-        """Asynchronously invoke retriever to get relevant documents
-        
-        Main entry point for asynchronous retriever invocation.
-        
-        Args:
-            input: Query string
-            **kwargs: Other parameters passed to the retriever
-            
-        Returns:
-            List of relevant documents
-            
-        Examples:
-            >>> await retriever.ainvoke("query")
-        """
-        try:
-            return await asyncio.to_thread(self._get_relevant_documents, input, **kwargs)
-        except AttributeError:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(None, self._get_relevant_documents, input, **kwargs)
     
     @classmethod
     def from_texts(

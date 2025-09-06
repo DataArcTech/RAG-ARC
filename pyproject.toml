@@ -1,1 +1,16 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
 
+[project]
+name = "RAG-ARC"
+version = "0.1.0"
+description = "Retrieval-Augmented Generation Architecture"
+dependencies = [
+    "dill",
+    "faiss-gpu"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "encapsulation*", "framework*", "api*", "application*"]
