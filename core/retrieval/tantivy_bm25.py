@@ -1,15 +1,49 @@
 import logging
 import warnings
-from typing import Any, List, Callable, Optional, Dict, Union, Tuple, Sequence, cast
+from pydantic import Field, field_validator, ConfigDict
+from typing import Any, List, Callable, Optional, Dict, Union, Tuple, cast, Literal, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from encapsulation.database.bm25_indexer import BM25IndexBuilder
 from tantivy import Index, Query, Occur, Order
 
-from core.retrieval.base import BaseRetriever
+from core.retrieval.base import BaseRetriever, BaseRetrieverConfig
 from core.utils.data_model import Document
 
 logger = logging.getLogger(__name__)
 
+class TantivyBM25RetrieverConfig(BaseRetrieverConfig):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
+    type: Literal["tantivy_bm25"] = "tantivy_bm25"
+    
+    # Runtime dependencies (injected by index builder)
+    index: Optional["Index"] = Field(default=None, exclude=True, description="Tantivy index instance")
+    preprocess_func: Optional[Callable[[str], List[str]]] = Field(default=None, exclude=True, description="Text preprocessing function")
+    stopwords: Optional[List[str]] = Field(default=None, exclude=True, description="List of stopwords")
+    
+    # Default retrieval parameters (from index configuration)
+    default_k: int = Field(default=10, exclude=True, description="Default number of documents to return")
+    default_use_phrase_query: bool = Field(default=False, exclude=True, description="Default phrase query setting")
+    default_with_score: bool = Field(default=True, exclude=True, description="Default score inclusion setting")
+    default_search_kwargs: dict = Field(default_factory=dict, exclude=True, description="Default additional search parameters")
 
-class TantivyBM25Retriever(BaseRetriever):
+    def build(self) -> "TantivyBM25Retriever":
+        """Build the TantivyBM25Retriever instance"""
+        if self.index is None:
+            raise ValueError("TantivyBM25RetrieverConfig.index must not be None. Please provide a valid tantivy.Index instance.")
+        if not isinstance(self.index, Index):
+            raise TypeError(f"Expected tantivy.Index, got {type(self.index).__name__}")
+
+        if self.preprocess_func is None:
+            raise ValueError("TantivyBM25RetrieverConfig.preprocess_func must not be None. Please provide a valid preprocessing function.")
+        if not callable(self.preprocess_func):
+            raise TypeError("preprocess_func must be callable")
+
+        return TantivyBM25Retriever(config=self)
+
+
+class TantivyBM25Retriever(BaseRetriever[TantivyBM25RetrieverConfig]):
     """
     TantivyBM25Retriever is a high-performance document retriever based on the Tantivy search engine.
     
@@ -26,14 +60,13 @@ class TantivyBM25Retriever(BaseRetriever):
     Main parameters:
         index (Index): Tantivy index instance
         preprocess_func (Callable): Text preprocessing function
-        top_k (int): Default number of documents to return
+        k (int): Default number of documents to return
         stopwords (List[str]): List of stopwords to filter out
         use_phrase_query (bool): Whether to enable phrase queries
         
     Core methods:
         - invoke: Main entry point for synchronous retrieval
         - _get_relevant_documents: Execute search and return structured results
-        - get_relevant_documents_with_score: Get documents with their scores
         - reload_searcher: Reload searcher to reflect latest index state
         
     Performance considerations:
@@ -42,53 +75,35 @@ class TantivyBM25Retriever(BaseRetriever):
         - Reloading searcher ensures index consistency
         
     Typical usage:
-        >>> retriever = TantivyBM25Retriever(index, preprocess_func)
+        >>> config = TantivyBM25RetrieverConfig(index=index, preprocess_func=preprocess_func)
+        >>> retriever = config.build()
         >>> results = retriever.invoke("query statement")
-        >>> results = retriever.invoke("query", filters={"source": "news"})
+        >>> results = retriever.invoke("query", filters={"category": "news", "author": "john"})
         
     Attributes:
         index: Tantivy index instance
         preprocess_func: Text preprocessing function
-        top_k: Number of documents to return
+        k: Number of documents to return
         stopwords: Set of stopwords to filter out
         use_phrase_query: Whether phrase queries are enabled
         searcher: Tantivy searcher instance
     """
 
-    def __init__(
-        self,
-        index: Index,
-        preprocess_func: Callable[[str], List[str]],
-        top_k: int = 10,
-        stopwords: Optional[List[str]] = None,
-        use_phrase_query: bool = False,
-        **kwargs: Any
-    ):
+    def __init__(self, config: TantivyBM25RetrieverConfig):
         """Initialize Tantivy BM25 Retriever
         
         Args:
-            index: Tantivy index instance
-            preprocess_func: Text preprocessing function
-            top_k: Default number of documents to return, must be greater than 0
-            stopwords: List of stopwords to filter out
-            use_phrase_query: Whether to enable phrase queries
-            **kwargs: Additional parameters
+            config: Configuration object containing all necessary parameters
         """
-        if not isinstance(index, Index):
-            raise TypeError(f"Expected tantivy.Index type, but got {type(index)}")
+        super().__init__(config=config)
         
-        if top_k <= 0:
-            raise ValueError(f"top_k must be greater than 0, but got {top_k}")
-            
-        if not callable(preprocess_func):
-            raise ValueError("preprocess_func must be a callable function")
+        # Set instance attributes from config
+        self.index = config.index
+        self.preprocess_func = config.preprocess_func
+        self.stopwords = set(config.stopwords or [])
+        self.searcher = None
 
-        self.index = index
-        self.preprocess_func = preprocess_func
-        self.top_k = top_k
-        self.stopwords = set(stopwords or [])
-        self.use_phrase_query = use_phrase_query
-        self.searcher = self.index.searcher()
+        self.reload_searcher()
 
     def reload_searcher(self) -> None:
         """Reload searcher to reflect latest index state
@@ -125,7 +140,7 @@ class TantivyBM25Retriever(BaseRetriever):
                 logger.warning(f"Skipping invalid filter field '{field_name}': {e}")
         return filter_queries
 
-    def _build_main_query(self, query_tokens: List[str]) -> Query:
+    def _build_main_query(self, query_tokens: List[str], use_phrase_query: bool = False) -> Query:
         """Build main query supporting normal BM25 or phrase queries
         
         Args:
@@ -137,12 +152,12 @@ class TantivyBM25Retriever(BaseRetriever):
         if not query_tokens:
             return Query.all_query()
 
-        # Remove stopwords (optional)
-        filtered_tokens = [t for t in query_tokens if t not in self.stopwords]
+        # Remove stopwords and empty/whitespace-only tokens
+        filtered_tokens = [t for t in query_tokens if t not in self.stopwords and t.strip()]
         if not filtered_tokens:
             return Query.all_query()
 
-        if self.use_phrase_query and len(filtered_tokens) > 1:
+        if use_phrase_query and len(filtered_tokens) > 1:
             # Use phrase query (order-sensitive, more precise)
             try:
                 # Convert to the exact type required by phrase_query
@@ -160,27 +175,41 @@ class TantivyBM25Retriever(BaseRetriever):
     def _get_relevant_documents(
         self,
         query: str,
-        top_k: Optional[int] = None,
+        k: Optional[int] = None,
         filters: Optional[Dict[str, Union[str, List[str]]]] = None,
         order_by_field: Optional[str] = None,
         order_desc: bool = True,
+        with_score: Optional[bool] = None,
+        use_phrase_query: Optional[bool] = None,
         **kwargs: Any
-    ) -> List[Dict[str, Any]]:
+    ) -> List[Document]:
         """Execute search and return structured results
         
         Args:
             query: Query string
-            top_k: Number of documents to return
+            k: Number of documents to return (default from config)
             filters: Dictionary of field names and their values to filter by
             order_by_field: Field to sort by
             order_desc: Whether to sort in descending order
+            with_score: Whether to include score in metadata (default from config)
+            use_phrase_query: Whether to use phrase queries (default from config)
             **kwargs: Additional parameters
             
         Returns:
-            List of dictionaries containing document data and scores
+            List of Document objects
         """
-        top_k = top_k or self.top_k
+        # Use config defaults if parameters not provided
+        k = k if k is not None else self.config.default_k
         filters = filters or {}
+        with_score = with_score if with_score is not None else self.config.default_with_score
+        use_phrase_query = use_phrase_query if use_phrase_query is not None else self.config.default_use_phrase_query
+        
+        # Validate k parameter
+        if k <= 0:
+            raise ValueError(f"Parameter 'k' must be greater than 0, got {k}")
+        
+        # Merge additional search_kwargs from config
+        merged_search_kwargs = {**self.config.default_search_kwargs, **kwargs}
 
         if not query.strip():
             logger.info("Empty query received, returning empty results.")
@@ -195,7 +224,7 @@ class TantivyBM25Retriever(BaseRetriever):
             return []
 
         # 2. Build main query + filters
-        main_query = self._build_main_query(query_tokens)
+        main_query = self._build_main_query(query_tokens, use_phrase_query)
         filter_subqueries = self._build_filter_query(filters)
 
         final_query = (
@@ -203,15 +232,15 @@ class TantivyBM25Retriever(BaseRetriever):
             if filter_subqueries else main_query
         )
 
-        # 3. Calculate actual search top_k (expand search range in filter mode)
-        search_top_k = top_k * 3 if filter_subqueries else top_k
+        # 3. Calculate actual search k (expand search range in filter mode)
+        search_k = k * 3 if filter_subqueries else k
 
         # 4. Execute search
         try:
             order = Order.Desc if order_desc else Order.Asc
             search_result = self.searcher.search(
                 final_query,
-                limit=search_top_k,
+                limit=search_k,
                 order_by_field=order_by_field,
                 order=order
             )
@@ -221,99 +250,28 @@ class TantivyBM25Retriever(BaseRetriever):
 
         # 5. Assemble results
         results = []
-        for score, doc_address in search_result.hits[:top_k]:  # Truncate to top_k
+        for score, doc_address in search_result.hits[:k]:  # Truncate to k
             try:
                 tantivy_doc = self.searcher.doc(doc_address)
-                doc_data = {
-                    "id": tantivy_doc.get_first("id") or "",
-                    "content": tantivy_doc.get_first("content") or "",
-                    "metadata": tantivy_doc.get_first("metadata") or {},
-                    "score": float(score),
-                }
+                metadata = tantivy_doc.get_first("metadata") or {}
+                
+                # Add score to metadata if with_score is True
+                if with_score:
+                    metadata = {**metadata, "score": float(score)}
+                else:
+                    # Ensure score is not included when with_score is False
+                    metadata = {k: v for k, v in metadata.items() if k != "score"}
+                
+                document = Document(
+                    id=tantivy_doc.get_first("id") or "",
+                    content=tantivy_doc.get_first("content") or "",
+                    metadata=metadata
+                )
 
-                results.append(doc_data)
+                results.append(document)
             except Exception as e:
                 logger.warning(f"Failed to parse document from index: {e}")
                 continue
 
         logger.info(f"Retrieved {len(results)} documents for query: '{query}'")
         return results
-
-    def invoke(self, query: str, **kwargs: Any) -> List[Document]:
-        """Invoke retriever to get relevant documents
-        
-        Main entry point for synchronous retriever invocation.
-        
-        Args:
-            query: Query string
-            **kwargs: Other parameters passed to the retriever
-                top_k: Number of documents to return
-                filters: Dictionary of field names and their values to filter by
-                order_by_field: Field to sort by
-                order_desc: Whether to sort in descending order
-            
-        Returns:
-            List of relevant documents
-            
-        Examples:
-            >>> retriever.invoke("query")
-            >>> retriever.invoke("query", filters={"source": "news"})
-        """
-        raw_results = self._get_relevant_documents(query, **kwargs)
-        return [
-            Document(
-                id=res["id"],
-                content=res["content"],
-                metadata={**res.get("metadata", {}), "score": res["score"]}
-            )
-            for res in raw_results
-        ]
-
-    def get_relevant_documents_with_score(self, query: str, **kwargs: Any) -> List[Tuple[Document, float]]:
-        """Get documents and their raw scores as tuples
-        
-        Args:
-            query: Query string
-            **kwargs: Other parameters passed to the retriever
-            
-        Returns:
-            List of (Document, score) tuples
-        """
-        raw_results = self._get_relevant_documents(query, **kwargs)
-        return [
-            (
-                Document(id=res["id"], content=res["content"], metadata=res.get("metadata", {})),
-                res["score"]
-            )
-            for res in raw_results
-        ]
-
-    def get_retriever_info(self) -> Dict[str, Any]:
-        """Get retriever configuration information
-        
-        Returns:
-            Dictionary containing retriever configuration information
-        """
-        return {
-            "top_k": self.top_k,
-            "use_phrase_query": self.use_phrase_query,
-            "stopwords_count": len(self.stopwords),
-            "preprocess_func": self.preprocess_func.__name__ if hasattr(self.preprocess_func, '__name__') else str(self.preprocess_func)
-        }
-
-    def update_top_k(self, top_k: int) -> None:
-        """Update number of documents to return
-        
-        Args:
-            top_k: New number of documents to return, must be greater than 0
-        """
-        if top_k <= 0:
-            raise ValueError(f"top_k must be greater than 0, but got {top_k}")
-        self.top_k = top_k
-
-    def __repr__(self) -> str:
-        """String representation of the TantivyBM25Retriever instance"""
-        return (
-            f"{self.__class__.__name__}(top_k={self.top_k}, "
-            f"use_phrase={self.use_phrase_query})"
-        )

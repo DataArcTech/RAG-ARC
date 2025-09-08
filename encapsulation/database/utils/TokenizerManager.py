@@ -2,39 +2,120 @@ import re
 from typing import List, Callable, Optional, Tuple
 import logging
 import jieba
+from pathlib import Path
 from core.utils.data_model import Document
 
 logger = logging.getLogger(__name__)
 
 class TokenizerManager:
     """
-    统一管理分词器的类，支持 jieba、空格分词和自定义分词器。
-    支持多进程环境下的初始化和序列化。
+    Unified tokenizer management class supporting jieba, whitespace tokenization and custom tokenizers.
+    Supports initialization and serialization in multi-process environments.
     """
 
-    def __init__(self, custom_preprocess_func: Optional[Callable[[str], List[str]]] = None):
+    def __init__(self, custom_preprocess_func: Optional[Callable[[str], List[str]]] = None,
+                 custom_stopwords_file: Optional[str] = None):
         self.custom_preprocess_func = custom_preprocess_func
-        self._use_jieba = None  # None 表示未检测，True/False 表示已确定
+        self.custom_stopwords_file = custom_stopwords_file
+        self._use_jieba = None  # None means not detected, True/False means determined
         self._tokenizer_stats = None
-        self._stopwords = ["的", "是", "在", "和", "与", "或", "了", "等", "就", "也",
-                          "一", "个", "有", "这", "那", "不", "但", "对", "为", "很"]
+        self._stopwords = []  # Will be loaded in _load_stopwords
 
     @staticmethod
     def _jieba_tokenize(text: str) -> List[str]:
-        """jieba分词（静态方法，便于序列化）"""
+        """Jieba tokenization (static method for easy serialization)"""
         if not text or not text.strip():
             return []
         return list(jieba.cut(text.strip()))
 
     @staticmethod
     def _whitespace_tokenize(text: str) -> List[str]:
-        """空格分词（静态方法，便于序列化）"""
+        """Whitespace tokenization (static method for easy serialization)"""
         if not text or not text.strip():
             return []
         return text.strip().split()
 
+    def _load_stopwords_from_file(self, file_path: str) -> List[str]:
+        """Load stopwords from file
+        
+        Args:
+            file_path: Path to stopwords file
+            
+        Returns:
+            List of stopwords
+        """
+        file_path = Path(file_path)
+        
+        if not file_path.exists():
+            logger.warning(f"Stopwords file not found: {file_path}, using empty stopwords list")
+            return []
+        
+        stopwords = []
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    word = line.strip()
+                    if word and not word.startswith('#'):
+                        stopwords.append(word)
+        except UnicodeDecodeError:
+            try:
+                with open(file_path, 'r', encoding='gbk') as f:
+                    for line in f:
+                        word = line.strip()
+                        if word and not word.startswith('#'):
+                            stopwords.append(word)
+            except UnicodeDecodeError:
+                logger.error(f"Unable to decode stopwords file: {file_path}")
+                return []
+        
+        logger.info(f"Loaded {len(stopwords)} stopwords from: {file_path}")
+        return stopwords
+
+    def _get_default_stopwords_file(self) -> str:
+        """Get default stopwords file path based on tokenizer type
+        
+        Returns:
+            Path to default stopwords file
+        """
+        # Get project root directory
+        current_dir = Path(__file__).parent
+        stopwords_dir = current_dir / "stopwords"  # utils/stopwords
+        
+        if self._use_jieba:
+            # Use jieba tokenizer, select Chinese stopwords
+            default_file = stopwords_dir / "chinese_default.txt"
+        else:
+            # Use whitespace tokenizer, select English stopwords
+            default_file = stopwords_dir / "english_default.txt"
+        
+        return str(default_file)
+
+    def _load_stopwords(self) -> None:
+        """Load stopwords list"""
+        if self.custom_stopwords_file:
+            # Use custom stopwords file
+            self._stopwords = self._load_stopwords_from_file(self.custom_stopwords_file)
+        else:
+            # Use default stopwords file based on tokenizer type
+            if self._use_jieba is not None:  # Tokenizer already determined
+                default_file = self._get_default_stopwords_file()
+                self._stopwords = self._load_stopwords_from_file(default_file)
+            else:
+                # Tokenizer not determined yet, use empty list temporarily
+                self._stopwords = []
+
+    def get_stopwords(self) -> List[str]:
+        """Get current stopwords list
+        
+        Returns:
+            List of stopwords
+        """
+        if not self._stopwords and self._use_jieba is not None:
+            self._load_stopwords()
+        return self._stopwords
+
     def get_current_tokenizer(self) -> Callable[[str], List[str]]:
-        """获取当前使用的分词函数"""
+        """Get currently used tokenizer function"""
         if self.custom_preprocess_func is not None:
             return self.custom_preprocess_func
         elif self._use_jieba is True:
@@ -42,12 +123,12 @@ class TokenizerManager:
         elif self._use_jieba is False:
             return self._whitespace_tokenize
         else:
-            # 默认使用空格分词，直到语言检测完成
+            # Default to whitespace tokenization until language detection is complete
             return self._whitespace_tokenize
 
     def detect_language(self, documents: List[Document], sample_size: int = 20,
                        chinese_ratio_threshold: float = 0.1) -> Tuple[bool, dict]:
-        """检测文档语言，决定是否使用 jieba"""
+        """Detect document language to decide whether to use jieba"""
         if not documents:
             return False, {"reason": "no_documents"}
 
@@ -89,7 +170,7 @@ class TokenizerManager:
         return use_jieba, stats
 
     def set_tokenizer_by_detection(self, documents: List[Document]) -> None:
-        """根据文档内容自动检测并设置分词器"""
+        """Automatically detect and set tokenizer based on document content"""
         if self.custom_preprocess_func is not None:
             logger.info("Custom preprocess_func provided, skipping language detection and tokenizer switch.")
             return
@@ -104,9 +185,12 @@ class TokenizerManager:
             
         self._use_jieba = use_jieba
         logger.info(f"Switched to {'jieba' if use_jieba else 'whitespace'} tokenizer. {stats['reason']}")
+        
+        # Load corresponding stopwords after tokenizer is determined
+        self._load_stopwords()
 
     def batch_tokenize(self, texts: List[str]) -> List[List[str]]:
-        """批量分词"""
+        """Batch tokenization"""
         tokenize_func = self.get_current_tokenizer()
         result = []
         for text in texts:
@@ -114,7 +198,7 @@ class TokenizerManager:
         return result
 
     def get_tokenizer_info(self) -> str:
-        """获取当前分词器信息"""
+        """Get current tokenizer information"""
         if self.custom_preprocess_func is not None:
             return "custom"
         elif self._use_jieba is True:
@@ -125,19 +209,15 @@ class TokenizerManager:
             return "unset"
 
     def get_stats(self) -> dict:
-        """获取分词器统计信息"""
+        """Get tokenizer statistics"""
         base_stats = {
             "current_tokenizer": self.get_tokenizer_info(),
             "use_jieba": self._use_jieba,
             "use_custom_preprocess": self.custom_preprocess_func is not None,
-            "tokenizers_registered": True  # 假设已注册
+            "tokenizers_registered": True  # Assume registered
         }
         
         if self._tokenizer_stats:
             base_stats.update(self._tokenizer_stats)
             
         return base_stats
-
-    def update_stopwords(self, stopwords: List[str]) -> None:
-        """更新停用词列表"""
-        self._stopwords = stopwords
