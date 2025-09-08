@@ -60,4 +60,56 @@ echo
 echo "Full hello_world response body:"
 echo "$HELLO_RESPONSE" | sed -n '/^\r$/,$p' | tail -n +2
 
-echo "$HELLO_RESPONSE" | grep -q 'Hello, world!' && echo "✅ PASS" || echo "❌ Did not find 'Hello, world!'"
+echo "$HELLO_RESPONSE" | grep -q 'Hello, world!' && echo "✅ [hello_world] PASS" || echo "❌ [hello_world] Did not find 'Hello, world!'"
+echo -e "\n4. Test create_chat tool using the session ID:"
+CREATE_CHAT_RESPONSE=$(curl -i -s "$ENDPOINT" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H "mcp-session-id: $SESSION_ID" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "tools/call",
+    "params": {
+      "name": "create_chat",
+      "arguments": {}
+    }
+  }')
+
+echo "$CREATE_CHAT_RESPONSE" | grep -E "(data: |event: )"
+echo
+echo "Full create_chat response body:"
+echo "$CREATE_CHAT_RESPONSE" | sed -n '/^\r$/,$p' | tail -n +2
+
+CHAT_SESSION_ID=$(echo "$CREATE_CHAT_RESPONSE" | grep -o '"session_id":"[^"]*"' | sed 's/"session_id":"//' | sed 's/"//')
+
+if [ -n "$CHAT_SESSION_ID" ]; then
+  echo "✅ [create_chat] PASS - session_id: $CHAT_SESSION_ID"
+else
+  echo "❌ [create_chat] Did not find session_id in response"
+fi
+
+echo -e "\n5. Test chat tool using the chat session ID:"
+CHAT_RESPONSE=$(curl -i -s "$ENDPOINT" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H "mcp-session-id: $SESSION_ID" \
+  -d "{
+    \"jsonrpc\": \"2.0\",
+    \"id\": 4,
+    \"method\": \"tools/call\",
+    \"params\": {
+      \"name\": \"chat\",
+      \"arguments\": {
+        \"session_id\": \"$CHAT_SESSION_ID\",
+        \"message\": \"Hello, assistant!\"
+      }
+    }
+  }")
+
+echo "$CHAT_RESPONSE" | grep -E "(data: |event: )"
+echo
+echo "Full chat response body:"
+echo "$CHAT_RESPONSE" | sed -n '/^\r$/,$p' | tail -n +2
+
+echo "$CHAT_RESPONSE" | grep -q 'reply' && echo "✅ [chat] PASS" || echo "❌ [chat] Did not find 'reply' in response"
