@@ -1,0 +1,12 @@
+{
+  "bm25_indexer_config": {
+    "type": "bm25_indexer",
+    "index_path": "test_index",
+    "bm25_k1": 1.2,
+    "bm25_b": 0.75,
+    "batch_size": 10,
+    "retrieval_k": 5,
+    "retrieval_use_phrase_query": false,
+    "retrieval_with_score": true
+  }
+}
