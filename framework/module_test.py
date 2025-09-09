@@ -21,10 +21,10 @@ class AConfig(AbstractConfig):
     """Config class for module A"""
 
     type: Literal["A"] = "A"
-    param1: int | None = None
+    param1: int
     param2: NewType
-    param3: str
-    param4: OperationType
+    param3: str = "test_string"
+    param4: OperationType = "read"
 
     def build(self) -> "A":
         return A(self)
@@ -33,7 +33,7 @@ class AConfig(AbstractConfig):
 class A(AbstractModule):
     """Module A implementation"""
 
-    config: AConfig
+    config: AConfig | None = None
 
     def __call__(self, param):
         print(f"Module A called with param: {param}")
@@ -49,9 +49,9 @@ class CConfig(AbstractConfig):
 
     type: Literal["C"] = "C"
     param1: int
-    param2: str
-    param3: NewType
-    sub_config: AConfig
+    param2: str = "default_string"  # Default value
+    param3: NewType = "default_newtype"  # Default value
+    sub_config: AConfig | None = None  # Optional with default None
 
     def build(self) -> "C":
         return C(self)
@@ -67,17 +67,20 @@ class C(AbstractModule):
         print(f"Config param1: {self.config.param1}")
         print(f"Config param2: {self.config.param2}")
         print(f"Config param3: {self.config.param3}")
-        a_module = self.config.sub_config.build()
-        result = a_module("test_param")
-        print(f"Module A result: {result}")
-        return f"C processed: {params}, A result: {result}"
+        if self.config.sub_config is not None:
+            a_module = self.config.sub_config.build()
+            result = a_module("test_param")
+            print(f"Module A result: {result}")
+            return f"C processed: {params}, A result: {result}"
+        else:
+            return f"C processed: {params} (no sub_config)"
 
 class BConfig(AbstractConfig):
     """Config class for module B"""
 
     type: Literal["B"] = "B"
     param1: int
-    param2: str
+    param2: str = "default_string"
     param3: NewType
     sub_config: Annotated[AConfig | CConfig, Field(discriminator="type")]
 
@@ -104,7 +107,7 @@ class DConfig(AbstractConfig):
     """Config class for module D"""
     type: Literal["D"] = "D"
     param1: int
-    param2: str
+    param2: str = "default_string_d"
     param3: NewType
     sub_config: list[Annotated[AConfig | CConfig, Field(discriminator="type")]]
     def build(self) -> "D":
@@ -304,6 +307,47 @@ class TestConfigFromJson(unittest.TestCase):
         d_module = config.build()
         self.assertIsInstance(d_module, D)
         self.assertEqual(d_module.config.type, "D")
+
+    def test_create_c_config_with_defaults(self):
+        """Test creating CConfig with minimal data, using defaults"""
+        json_str = """
+        {
+            "type": "C",
+            "param1": 42
+        }
+        """
+        config_data = json.loads(json_str)
+        config = CConfig(**config_data)
+        c = config.build()
+        self.assertIsInstance(c, C)
+        self.assertEqual(c.config.type, "C")
+        self.assertEqual(c.config.param1, 42)  # Default value
+        self.assertEqual(c.config.param2, "default_string")  # Default value
+        self.assertEqual(c.config.param3, "default_newtype")  # Default value
+        self.assertIsNone(c.config.sub_config)  # Default value
+        
+        # Test calling the module with defaults
+        result = c("test_input")
+        self.assertIn("C processed: test_input (no sub_config)", result)
+
+    def test_create_c_config_with_partial_overrides(self):
+        """Test creating CConfig with some overrides and some defaults"""
+        json_str = """
+        {
+            "type": "C",
+            "param1": 100,
+            "param2": "custom_string"
+        }
+        """
+        config_data = json.loads(json_str)
+        config = CConfig(**config_data)
+        c = config.build()
+        self.assertIsInstance(c, C)
+        self.assertEqual(c.config.type, "C")
+        self.assertEqual(c.config.param1, 100)  # Overridden
+        self.assertEqual(c.config.param2, "custom_string")  # Overridden
+        self.assertEqual(c.config.param3, "default_newtype")  # Default value
+        self.assertIsNone(c.config.sub_config)  # Default value
 
 if __name__ == "__main__":
     unittest.main()
