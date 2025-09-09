@@ -64,12 +64,15 @@ class BM25IndexBuilderConfig(AbstractConfig):
     max_workers: Optional[int] = Field(default=None, description="Maximum number of worker processes")
     progress_interval: int = Field(default=500, description="Interval for progress reporting")
     enable_gc: bool = Field(default=True, description="Whether to enable garbage collection")
+    queue_maxsize: int = Field(default=1000, description="Maximum size of the processing queue")
     
     # Retrieval configuration
-    retrieval_k: int = Field(default=10, description="Default number of documents to return in search", gt=0)
-    retrieval_use_phrase_query: bool = Field(default=False, description="Whether to use phrase queries for better relevance")
-    retrieval_with_score: bool = Field(default=True, description="Whether to include relevance scores in results")
-    retrieval_search_kwargs: Dict[str, Any] = Field(default_factory=dict, description="Additional search parameters")
+    k: int = Field(default=10, description="Default number of documents to return in search", gt=0)
+    with_score: bool = Field(default=True, description="Whether to include relevance scores in results")
+    search_kwargs: Dict[str, Any] = Field(
+        default_factory=lambda: {"use_phrase_query": False}, 
+        description="Additional search parameters including use_phrase_query"
+    )
     
     # Runtime dependencies (not serializable to JSON)
     preprocess_func: Optional[Callable[[str], List[str]]] = Field(default=None, exclude=True)
@@ -119,12 +122,12 @@ class BM25IndexBuilder(AbstractModule):
     - Context manager support
     - Automatic language detection and tokenizer selection (only when no custom preprocess_func is provided)
     
-    Main parameters:
+    Configuration parameters (from config):
         index_path (str): Path to store the index
         preprocess_func (Callable): Custom text preprocessing function
         bm25_k1 (float): BM25 k1 parameter
         bm25_b (float): BM25 b parameter
-        stopwords (List[str]): List of stopwords to filter out
+        stopwords_file (str): Path to custom stopwords file
         writer_heap_size (int): Heap size for the index writer
         batch_size (int): Number of documents to process in each batch
         tokenize_batch_size (int): Number of texts to tokenize in each batch
@@ -132,6 +135,18 @@ class BM25IndexBuilder(AbstractModule):
         progress_interval (int): Interval for progress reporting
         enable_gc (bool): Whether to enable garbage collection
         progress_callback (Callable): Callback function for progress reporting
+    
+    Runtime instance variables:
+        tokenizer_manager: TokenizerManager instance
+        _index: Tantivy index instance
+        _schema: Tantivy schema
+        _writer_heap_size: Calculated heap size for the index writer
+        _tokenizers_registered: Whether tokenizers are registered
+        _executor: ProcessPoolExecutor instance
+        _executor_closed: Whether executor is closed
+        _queue: Queue for producer-consumer pattern
+        _writer_thread: Writer thread instance
+        _stop_event: Threading event for stopping operations
     
     Core methods:
         - load_local: Load existing index from local path
@@ -167,69 +182,54 @@ class BM25IndexBuilder(AbstractModule):
         >>> builder2.load_local()
         >>> builder2.add_documents(new_documents)  # Add documents to loaded index
         >>> retriever = builder2.as_retriever()
-    
-    Attributes:
-        index_path: Path to store the index
-        bm25_k1: BM25 k1 parameter
-        bm25_b: BM25 b parameter
-        stopwords: List of stopwords to filter out
-        tokenizer_manager: TokenizerManager instance
-        _index: Tantivy index instance
-        _schema: Tantivy schema
-        _batch_size: Number of documents to process in each batch
-        _tokenize_batch_size: Number of texts to tokenize in each batch
-        _max_workers: Maximum number of worker processes
-        _progress_interval: Interval for progress reporting
-        _enable_gc: Whether to enable garbage collection
-        _writer_heap_size: Heap size for the index writer
-        _tokenizers_registered: Whether tokenizers are registered
-        progress_callback: Callback function for progress reporting
     """
 
-    def __init__(self, config: BM25IndexBuilderConfig):
-        """Initialize BM25 Index Builder
-        
-        Args:
-            config: Configuration object containing all necessary parameters
-        """
-        super().__init__(config=config)
-        
-        # Set instance attributes from config
-        self.index_path = config.index_path
-        self.bm25_k1, self.bm25_b = config.bm25_k1, config.bm25_b
-        
-        self._index: Optional[Index] = None
-        self._schema = None
-        self._batch_size = config.batch_size
-        self._tokenize_batch_size = config.tokenize_batch_size
-        self._max_workers = config.max_workers or min(4, multiprocessing.cpu_count() - 1)
-        self._progress_interval = config.progress_interval
-        self._enable_gc = config.enable_gc
-        self._tokenizers_registered = False
-        
-        # Use TokenizerManager to manage tokenizers and stopwords
-        self.tokenizer_manager = TokenizerManager(
-            custom_preprocess_func=config.preprocess_func,
-            custom_stopwords_file=config.stopwords_file
-        )
+    # Runtime instance variables (initialized when needed)
+    _index: Optional[Index] = None
+    _schema = None
+    _writer_heap_size: int = 0
+    _tokenizers_registered: bool = False
+    _executor: Optional[ProcessPoolExecutor] = None
+    _executor_closed: bool = False
+    _queue: queue.Queue = None
+    _writer_thread: Optional[threading.Thread] = None
+    _stop_event: threading.Event = None
+    _tokenizer_manager: TokenizerManager = None
 
-        # Dynamic heap_size (default to 20% of system memory, max 1GB)
-        if config.writer_heap_size is None:
-            total_mem = psutil.virtual_memory().total
-            self._writer_heap_size = min(int(total_mem * 0.2), 1024 * 1024 * 1024)
-        else:
-            self._writer_heap_size = config.writer_heap_size
-
-        self._executor: Optional[ProcessPoolExecutor] = None
-        self._executor_closed = False
-        self._queue = queue.Queue(maxsize=1000)
-        self._writer_thread: Optional[threading.Thread] = None
-        self._stop_event = threading.Event()
-
-        self.progress_callback = config.progress_callback
-
-        # Index will be initialized when load_local() or from_documents() is called
-        # This allows for lazy loading of existing indices
+    @property
+    def tokenizer_manager(self) -> TokenizerManager:
+        """Lazy-initialized tokenizer manager"""
+        if self._tokenizer_manager is None:
+            self._tokenizer_manager = TokenizerManager(
+                custom_preprocess_func=self.config.preprocess_func,
+                custom_stopwords_file=self.config.stopwords_file
+            )
+        return self._tokenizer_manager
+    
+    @property
+    def writer_heap_size(self) -> int:
+        """Lazy-calculated writer heap size"""
+        if self._writer_heap_size == 0:
+            if self.config.writer_heap_size is None:
+                total_mem = psutil.virtual_memory().total
+                self._writer_heap_size = min(int(total_mem * 0.2), 1024 * 1024 * 1024)
+            else:
+                self._writer_heap_size = self.config.writer_heap_size
+        return self._writer_heap_size
+    
+    @property
+    def processing_queue(self) -> queue.Queue:
+        """Lazy-initialized processing queue"""
+        if self._queue is None:
+            self._queue = queue.Queue(maxsize=self.config.queue_maxsize)
+        return self._queue
+    
+    @property
+    def stop_event(self) -> threading.Event:
+        """Lazy-initialized stop event"""
+        if self._stop_event is None:
+            self._stop_event = threading.Event()
+        return self._stop_event
     
     
     def _set_tokenizer(self, documents: List[Document]):
@@ -269,11 +269,11 @@ class BM25IndexBuilder(AbstractModule):
             List of tokenized texts
         """
         executor = self._get_executor()
-        if not executor or len(texts) <= self._tokenize_batch_size:
+        if not executor or len(texts) <= self.config.tokenize_batch_size:
             return self._tokenize_batch_sequential(texts)
 
         # Split texts into batches
-        batches = [texts[i:i + self._tokenize_batch_size] for i in range(0, len(texts), self._tokenize_batch_size)]
+        batches = [texts[i:i + self.config.tokenize_batch_size] for i in range(0, len(texts), self.config.tokenize_batch_size)]
         results = []
         
         # Create serializable tokenization tasks
@@ -343,14 +343,14 @@ class BM25IndexBuilder(AbstractModule):
 
         # Load existing index or create new one
         is_new_index = True
-        if os.path.exists(self.index_path) and any(os.scandir(self.index_path)):
-            logger.info(f"Loading existing index from: {self.index_path}")
-            self._index = Index.open(self.index_path)
+        if os.path.exists(self.config.index_path) and any(os.scandir(self.config.index_path)):
+            logger.info(f"Loading existing index from: {self.config.index_path}")
+            self._index = Index.open(self.config.index_path)
             is_new_index = False
         else:
-            logger.info(f"Creating new index at: {self.index_path}")
-            os.makedirs(self.index_path, exist_ok=True)
-            self._index = Index(self._schema, path=self.index_path)
+            logger.info(f"Creating new index at: {self.config.index_path}")
+            os.makedirs(self.config.index_path, exist_ok=True)
+            self._index = Index(self._schema, path=self.config.index_path)
         
         # Register tokenizers only for new index or when not yet registered
         if is_new_index or not self._tokenizers_registered:
@@ -389,17 +389,17 @@ class BM25IndexBuilder(AbstractModule):
             writer: Tantivy index writer
         """
         batch_docs = []
-        while not self._stop_event.is_set() or not self._queue.empty():
+        while not self.stop_event.is_set() or not self.processing_queue.empty():
             try:
-                doc = self._queue.get(timeout=1)
+                doc = self.processing_queue.get(timeout=1)
                 if doc is None:
                     break
                 batch_docs.append(doc)
-                if len(batch_docs) >= self._batch_size:
+                if len(batch_docs) >= self.config.batch_size:
                     self._batch_write_documents(batch_docs, writer)
                     batch_docs.clear()
                     # Trigger garbage collection if enabled
-                    if self._enable_gc:
+                    if self.config.enable_gc:
                         gc.collect()
             except queue.Empty:
                 continue
@@ -494,7 +494,7 @@ class BM25IndexBuilder(AbstractModule):
             self._set_tokenizer(documents)
         
         # For new indices, reinitialize with dynamic fields based on documents
-        index_exists = os.path.exists(self.index_path) and any(os.scandir(self.index_path)) if os.path.exists(self.index_path) else False
+        index_exists = os.path.exists(self.config.index_path) and any(os.scandir(self.config.index_path)) if os.path.exists(self.config.index_path) else False
         if not index_exists:
             self._index = None  # Reset to force reinitialization with dynamic fields
             self._initialize_index(documents)
@@ -507,23 +507,23 @@ class BM25IndexBuilder(AbstractModule):
         
         # Ensure any previous writer thread is stopped
         if self._writer_thread and self._writer_thread.is_alive():
-            self._stop_event.set()
+            self.stop_event.set()
             try:
                 self._writer_thread.join(timeout=5.0)
             except:
                 pass
         
         # Clear the queue
-        while not self._queue.empty():
+        while not self.processing_queue.empty():
             try:
-                self._queue.get_nowait()
+                self.processing_queue.get_nowait()
             except queue.Empty:
                 break
         
-        writer = self._index.writer(heap_size=self._writer_heap_size)
+        writer = self._index.writer(heap_size=self.writer_heap_size)
         
         # Reset stop event for this build operation
-        self._stop_event.clear()
+        self.stop_event.clear()
         
         self._writer_thread = threading.Thread(target=self._writer_worker, args=(writer,))
         self._writer_thread.start()
@@ -551,12 +551,12 @@ class BM25IndexBuilder(AbstractModule):
                         except Exception as e:
                             logger.warning(f"Failed to add field '{key}' to document: {e}")
                 
-                self._queue.put(tantivy_doc)
+                self.processing_queue.put(tantivy_doc)
 
                 added_ids.append(doc_id)
                 processed_count += 1
                 
-                if processed_count % self._progress_interval == 0:
+                if processed_count % self.config.progress_interval == 0:
                     elapsed = time.time() - start_time
                     stats = {
                         "processed": processed_count,
@@ -565,11 +565,11 @@ class BM25IndexBuilder(AbstractModule):
                         "throughput_docs_sec": round(processed_count / elapsed, 2)
                     }
                     logger.info(f"[IndexProgress] {json.dumps(stats, ensure_ascii=False)}")
-                    if self.progress_callback:
-                        self.progress_callback(processed_count, total_docs, stats)
+                    if self.config.progress_callback:
+                        self.config.progress_callback(processed_count, total_docs, stats)
 
             # Final progress callback if not already called at the end
-            if processed_count % self._progress_interval != 0 and self.progress_callback:
+            if processed_count % self.config.progress_interval != 0 and self.config.progress_callback:
                 elapsed = time.time() - start_time
                 stats = {
                     "processed": processed_count,
@@ -578,9 +578,9 @@ class BM25IndexBuilder(AbstractModule):
                     "throughput_docs_sec": round(processed_count / elapsed, 2)
                 }
                 logger.info(f"[IndexProgress] Final: {json.dumps(stats, ensure_ascii=False)}")
-                self.progress_callback(processed_count, total_docs, stats)
+                self.config.progress_callback(processed_count, total_docs, stats)
 
-            self._queue.put(None)
+            self.processing_queue.put(None)
             self._writer_thread.join()
             writer.commit()
             self._index.reload()
@@ -596,8 +596,8 @@ class BM25IndexBuilder(AbstractModule):
                 pass
             raise
         finally:
-            self._stop_event.set()
-            if self._enable_gc:
+            self.stop_event.set()
+            if self.config.enable_gc:
                 gc.collect()
         
         return added_ids
@@ -717,19 +717,19 @@ class BM25IndexBuilder(AbstractModule):
             logger.warning("Index is already loaded")
             return self
             
-        if not os.path.exists(self.index_path):
-            raise FileNotFoundError(f"Index path does not exist: {self.index_path}")
+        if not os.path.exists(self.config.index_path):
+            raise FileNotFoundError(f"Index path does not exist: {self.config.index_path}")
         
-        if not any(os.scandir(self.index_path)):
-            raise FileNotFoundError(f"Index directory is empty: {self.index_path}")
+        if not any(os.scandir(self.config.index_path)):
+            raise FileNotFoundError(f"Index directory is empty: {self.config.index_path}")
         
         try:
             # Load existing index without dynamic fields (they're already in the schema)
             self._initialize_index()
-            logger.info(f"Successfully loaded existing index from: {self.index_path}")
+            logger.info(f"Successfully loaded existing index from: {self.config.index_path}")
             return self
         except Exception as e:
-            logger.error(f"Failed to load index from {self.index_path}: {e}")
+            logger.error(f"Failed to load index from {self.config.index_path}: {e}")
             self.close()
             raise
 
@@ -802,11 +802,10 @@ class BM25IndexBuilder(AbstractModule):
             preprocess_func=self.tokenizer_manager.get_current_tokenizer(),
             stopwords=self.tokenizer_manager.get_stopwords(),
             
-            # 从索引配置中获取默认检索参数
-            default_k=self.config.retrieval_k,
-            default_use_phrase_query=self.config.retrieval_use_phrase_query,
-            default_with_score=self.config.retrieval_with_score,
-            default_search_kwargs=self.config.retrieval_search_kwargs.copy()
+            # 从索引配置中获取检索参数
+            k=self.config.k,
+            with_score=self.config.with_score,
+            search_kwargs=self.config.search_kwargs.copy()
         )
         
         # 创建并返回检索器
@@ -832,12 +831,12 @@ class BM25IndexBuilder(AbstractModule):
             
         return {
             "num_docs": num_docs,
-            "index_path": self.index_path,
-            "batch_size": self._batch_size,
-            "tokenize_batch_size": self._tokenize_batch_size,
-            "max_workers": self._max_workers,
-            "writer_heap_size_mb": self._writer_heap_size / (1024 * 1024),
-            "enable_gc": self._enable_gc,
+            "index_path": self.config.index_path,
+            "batch_size": self.config.batch_size,
+            "tokenize_batch_size": self.config.tokenize_batch_size,
+            "max_workers": self.config.max_workers,
+            "writer_heap_size_mb": self.writer_heap_size / (1024 * 1024),
+            "enable_gc": self.config.enable_gc,
             "tokenizers_registered": self._tokenizers_registered,
             "use_jieba": self.tokenizer_manager._use_jieba,
             "use_custom_preprocess": self.tokenizer_manager.custom_preprocess_func is not None,
@@ -868,8 +867,8 @@ class BM25IndexBuilder(AbstractModule):
         return (
             f"{self.__class__.__name__}("
             f"docs={num_docs}, "
-            f"index_path='{self.index_path}', "
-            f"workers={self._max_workers}, "
+            f"index_path='{self.config.index_path}', "
+            f"workers={self.config.max_workers}, "
             f"tokenizer={tokenizer})"
         )
 
@@ -900,14 +899,15 @@ class BM25IndexBuilder(AbstractModule):
         Returns:
             ProcessPoolExecutor instance or None if not available
         """
-        if self._max_workers > 1 and self._executor is None and not self._executor_closed:
+        max_workers = self.config.max_workers or min(4, multiprocessing.cpu_count() - 1)
+        if max_workers > 1 and self._executor is None and not self._executor_closed:
             try:
                 self._executor = ProcessPoolExecutor(
-                    max_workers=self._max_workers,
+                    max_workers=max_workers,
                     mp_context=multiprocessing.get_context('spawn'),
                     initializer=init_jieba_worker  # Initialize jieba in each worker process
                 )
-                logger.debug(f"Process pool executor created with {self._max_workers} workers")
+                logger.debug(f"Process pool executor created with {max_workers} workers")
             except Exception as e:
                 logger.error(f"Failed to create process pool executor: {e}")
                 self._executor_closed = True
