@@ -352,12 +352,36 @@ class TestConfigFromJson(unittest.TestCase):
 
 # -------------------------------- Shared module decorator test --------------------------------
 
+class KConfig(AbstractConfig):
+    """Config class for module K"""
+    type: Literal["K"] = "K"
+    param1: int
+    param2: str
+    param3: NewType
+
+    def build(self) -> "K":
+        return K(self)
+
+@shared_module
+class K(AbstractModule):
+    """Module K implementation"""
+
+    config: KConfig
+
+    def __call__(self, params):
+        print(f"Module K called with params: {params}")
+        print(f"Config param1: {self.config.param1}")
+        print(f"Config param2: {self.config.param2}")
+        print(f"Config param3: {self.config.param3}")
+        return f"K processed: {params}"
+
 class FConfig(AbstractConfig):
     """Config class for shared module F"""
     type: Literal["F"] = "F"
     param1: int
     param2: str
     param3: NewType
+    sub_config: KConfig
 
     def build(self) -> "F":
         return F(self)
@@ -374,7 +398,13 @@ class F(AbstractModule):
         print(f"Config param1: {self.config.param1}")
         print(f"Config param2: {self.config.param2}")
         print(f"Config param3: {self.config.param3}")
-        return f"F processed: {param}"
+        if self.config.sub_config is not None:
+            k_module = self.config.sub_config.build()
+            result = k_module("test_param_from_F")
+            print(f"Module K result from F: {result}")
+            return f"F processed: {param}, K result: {result}"
+        else:
+            return f"F processed: {param}"
 
 class GConfig(AbstractConfig):
     """Config class for module G"""
@@ -464,7 +494,6 @@ class TestSharedModule(unittest.TestCase):
     """Test shared module functionality"""
 
     def test_shared_module_same_config(self):
-        # JSON for IConfig, with GConfig and HConfig, both referencing the same FConfig values
         json_str = """
         {
             "type": "I",
@@ -481,7 +510,13 @@ class TestSharedModule(unittest.TestCase):
                         "type": "F",
                         "param1": 10,
                         "param2": "fparam",
-                        "param3": "fval"
+                        "param3": "fval",
+                        "sub_config": {
+                            "type": "K",
+                            "param2": "kparam",
+                            "param1": 10,
+                            "param3": "kval"
+                        }
                     }
                 },
                 {
@@ -493,7 +528,13 @@ class TestSharedModule(unittest.TestCase):
                         "type": "F",
                         "param1": 10,
                         "param2": "fparam",
-                        "param3": "fval"
+                        "param3": "fval",
+                        "sub_config": {
+                            "type": "K",
+                            "param1": 10,
+                            "param2": "kparam",
+                            "param3": "kval"
+                        }
                     }
                 }
             ]
@@ -509,14 +550,16 @@ class TestSharedModule(unittest.TestCase):
         h_config = i_module.config.sub_config[1]
         g_module = g_config.build()
         h_module = h_config.build()
-        # Build F from both G and H
         f_from_g = g_module.config.sub_config.build()
         f_from_h = h_module.config.sub_config.build()
-        # They should be the same instance due to shared_module decorator
         self.assertIs(f_from_g, f_from_h)
+        # Both F modules should have the same K sub_config
+        if f_from_g.config.sub_config is not None and f_from_h.config.sub_config is not None:
+            k_from_g = f_from_g.config.sub_config.build()
+            k_from_h = f_from_h.config.sub_config.build()
+            self.assertIs(k_from_g, k_from_h)
 
-    def test_shared_module_different_config(self):
-        # JSON for IConfig, with GConfig and HConfig, both referencing the same FConfig values
+    def test_shared_module_different_k_config(self):
         json_str = """
         {
             "type": "I",
@@ -533,7 +576,79 @@ class TestSharedModule(unittest.TestCase):
                         "type": "F",
                         "param1": 10,
                         "param2": "fparam",
-                        "param3": "fval"
+                        "param3": "fval",
+                        "sub_config": {
+                            "type": "K",
+                            "param1": 10,
+                            "param2": "kparam",
+                            "param3": "kval"
+                        }
+                    }
+                },
+                {
+                    "type": "H",
+                    "param1": 3,
+                    "param2": "hparam",
+                    "param3": "hval",
+                    "sub_config": {
+                        "type": "F",
+                        "param1": 10,
+                        "param2": "fparam",
+                        "param3": "fval",
+                        "sub_config": {
+                            "type": "K",
+                            "param1": 20,
+                            "param2": "kparam",
+                            "param3": "kval"
+                        }
+                    }
+                }
+            ]
+        }
+        """
+        config_data = json.loads(json_str)
+        config = IConfig(**config_data)
+        i_module = config.build()
+        self.assertIsInstance(i_module, I)
+        self.assertEqual(i_module.config.type, "I")
+        self.assertEqual(len(i_module.config.sub_config), 2)
+        g_config = i_module.config.sub_config[0]
+        h_config = i_module.config.sub_config[1]
+        g_module = g_config.build()
+        h_module = h_config.build()
+        f_from_g = g_module.config.sub_config.build()
+        f_from_h = h_module.config.sub_config.build()
+        self.assertIsNot(f_from_g, f_from_h)
+        # F modules have different K sub_configs, so K modules should be different
+        if f_from_g.config.sub_config is not None and f_from_h.config.sub_config is not None:
+            k_from_g = f_from_g.config.sub_config.build()
+            k_from_h = f_from_h.config.sub_config.build()
+            self.assertIsNot(k_from_g, k_from_h)
+
+    def test_shared_module_different_config(self):
+        json_str = """
+        {
+            "type": "I",
+            "param1": 1,
+            "param2": "iparam",
+            "param3": "ival",
+            "sub_config": [
+                {
+                    "type": "G",
+                    "param1": 2,
+                    "param2": "gparam",
+                    "param3": "gval",
+                    "sub_config": {
+                        "type": "F",
+                        "param1": 10,
+                        "param2": "fparam",
+                        "param3": "fval",
+                        "sub_config": {
+                            "type": "K",
+                            "param1": 10,
+                            "param2": "kparam",
+                            "param3": "kval"
+                        }
                     }
                 },
                 {
@@ -545,7 +660,13 @@ class TestSharedModule(unittest.TestCase):
                         "type": "F",
                         "param1": 20,
                         "param2": "fparam",
-                        "param3": "fval"
+                        "param3": "fval",
+                        "sub_config": {
+                            "type": "K",
+                            "param1": 20,
+                            "param2": "kparam",
+                            "param3": "kval"
+                        }
                     }
                 }
             ]
@@ -561,10 +682,8 @@ class TestSharedModule(unittest.TestCase):
         h_config = i_module.config.sub_config[1]
         g_module = g_config.build()
         h_module = h_config.build()
-        # Build F from both G and H
         f_from_g = g_module.config.sub_config.build()
         f_from_h = h_module.config.sub_config.build()
-        # They should NOT be the same instance due to shared_module decorator
         self.assertIsNot(f_from_g, f_from_h)
 
 if __name__ == "__main__":
