@@ -1,14 +1,14 @@
 import asyncio
 import logging
-from typing import Any, List, Optional, Literal, Annotated
+from typing import Any, List, Optional, Literal, Union, Annotated, Dict
 from pydantic import ConfigDict, Field, field_validator, model_validator
 import warnings
 
 from core.retrieval.base import BaseRetriever, BaseRetrieverConfig
-from core.retrieval.dense import DenseRetrieverConfig
-from core.retrieval.tantivy_bm25 import TantivyBM25RetrieverConfig
 from core.utils.data_model import Document
 from core.utils.Fusion import FusionMethod, RRFusion
+from encapsulation.database.vector_db.faiss import FaissVectorDBConfig
+from encapsulation.database.bm25_indexer import BM25IndexBuilderConfig
 
 logger = logging.getLogger(__name__)
 
@@ -19,10 +19,9 @@ class MultiPathRetrieverConfig(BaseRetrieverConfig):
     
     type: Literal["multipath"] = "multipath"
     
-    # Retriever configurations (sub-modules)
-    retrievers: List[Annotated[DenseRetrieverConfig | TantivyBM25RetrieverConfig, Field(discriminator="type")]] = Field(
+    indexers: List[Annotated[Union[FaissVectorDBConfig, BM25IndexBuilderConfig], Field(discriminator="type")]] = Field(
         default_factory=list,
-        description="List of retriever configurations, each will be built into a retriever instance"
+        description="List of indexer config objects. Each must provide build() to create indexer and support loading + as_retriever()"
     )
     
     # Runtime built retrievers (populated after build)
@@ -42,20 +41,23 @@ class MultiPathRetrieverConfig(BaseRetrieverConfig):
     top_k_per_retriever: int = Field(
         default=50,
         gt=0,
-        description="Number of results returned by each retriever"
+        description="Number of results returned by each retriever",
+        exclude=True
     )
     
-    @field_validator("retrievers")
-    @classmethod
-    def validate_retrievers(cls, v: List[Any]) -> List[Any]:
-        """Validate that all retriever configs are valid"""
-        if len(v) == 0:
-            raise ValueError("At least one retriever configuration is required")
-        return v
+    # Explicitly redefine search_kwargs to ensure proper default behavior
+    search_kwargs: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional search parameters",
+        exclude=True
+    )
     
     @model_validator(mode='after')
-    def validate_k_and_top_k_per_retriever(self) -> 'MultiPathRetrieverConfig':
-        """Validate that k is less than or equal to top_k_per_retriever"""
+    def validate_indexers_and_k(self) -> 'MultiPathRetrieverConfig':
+        """Validate indexers presence and k/top_k_per_retriever relation"""
+        if not isinstance(self.indexers, list) or len(self.indexers) == 0:
+            raise ValueError("At least one indexer config is required")
+
         if self.k > self.top_k_per_retriever:
             raise ValueError(
                 f"k ({self.k}) must be less than or equal to top_k_per_retriever ({self.top_k_per_retriever}). "
@@ -64,165 +66,206 @@ class MultiPathRetrieverConfig(BaseRetrieverConfig):
             )
         return self
     
+    def _get_retrievers(self) -> List[BaseRetriever]:
+        """
+        Get retriever instances based on the configured indexer configurations.
+
+        This method iterates over each indexer configuration in self.indexers, builds an indexer instance,
+        loads local data if possible, and then converts the indexer instance into a retriever.
+
+        Returns:
+            List[BaseRetriever]: A list of built retriever instances.
+        """
+        retrieved_retrievers = []
+        for idx, indexer_config in enumerate(self.indexers):
+            try:
+                # Check if the indexer configuration provides a build() method
+                if not hasattr(indexer_config, 'build') or not callable(getattr(indexer_config, 'build')):
+                    raise TypeError(f"Indexer config at position {idx} does not provide a build() method")
+
+                # Build the indexer instance
+                indexer_instance = indexer_config.build()
+
+                # Try to load local data if the indexer instance supports it and the index path is configured
+                if hasattr(indexer_instance, 'load_local'):
+                    try:
+                        if hasattr(indexer_config, 'index_path'):
+                            indexer_instance.load_local()
+                    except Exception:
+                        pass
+
+                # Check if the indexer instance provides an as_retriever() method
+                if not hasattr(indexer_instance, 'as_retriever'):
+                    raise TypeError(f"Indexer instance built from position {idx} does not provide as_retriever()")
+
+                # Convert the indexer instance into a retriever
+                retriever = indexer_instance.as_retriever(
+                    k=self.k,
+                    with_score=self.with_score,
+                    search_kwargs=self.search_kwargs.copy()
+                )
+                retrieved_retrievers.append(retriever)
+
+            except Exception as e:
+                logger.error(f"Failed to build retriever from indexer config at position {idx}: {e}")
+                raise
+
+        return retrieved_retrievers
+    
     def build(self) -> "MultiPathRetriever":
         """Build the MultiPathRetriever instance"""
-        if not self.retrievers:
-            raise ValueError("MultiPathRetrieverConfig.retrievers cannot be empty. Please provide at least one retriever.")
+
+        built_retrievers = self._get_retrievers()
         
-        # Build retriever instances from configurations
-        built_retrievers = []
-        for retriever_config in self.retrievers:
-            retriever_instance = retriever_config.build()
-            built_retrievers.append(retriever_instance)
+        # Ensure there is at least one retriever
+        if not built_retrievers:
+            raise ValueError("No retrievers available. Please provide at least one retriever reference.")
         
         # Store built retrievers in the internal field
         self.built_retrievers = built_retrievers
         
         return MultiPathRetriever(config=self)
-    
-    def get_built_retrievers(self) -> List[BaseRetriever]:
-        """Get the built retriever instances"""
-        return self.built_retrievers or []
 
 
 class MultiPathRetriever(BaseRetriever[MultiPathRetrieverConfig]):
     """
-    MultiPathRetriever 是一个多路径文档检索器，可以同时使用多个检索器进行文档检索，并通过指定的融合方法合并和排序多个检索器的结果。
+    MultiPathRetriever is a multi-path document retriever that can use multiple retrievers simultaneously for document retrieval. 
+    It merges and sorts the results from multiple retrievers using a specified fusion method.
 
-    此类实现多路径检索功能，支持组合不同检索算法（如BM25、向量检索等）的结果，以提高检索准确性和鲁棒性。
+    This class implements multi-path retrieval functionality, supporting the combination of results from different retrieval algorithms 
+    (e.g., BM25, vector retrieval, etc.) to improve retrieval accuracy and robustness.
     
-    主要特性:
-    - 支持多个检索器并行运行
-    - 支持可配置的融合方法（默认为互惠排名融合）
-    - 兼容同步和异步调用
-    - 提供动态添加和移除检索器
-    - 通过Pydantic验证参数确保配置安全性
+    Key Features:
+    - Supports parallel execution of multiple retrievers
+    - Supports configurable fusion methods (Reciprocal Rank Fusion by default)
+    - Compatible with both synchronous and asynchronous calls
+    - Provides dynamic addition and removal of retrievers
+    - Ensures configuration security through Pydantic parameter validation
 
-    配置参数 (来自 config):
-        retrievers (List[Any]): 检索器列表，每个检索器需要实现invoke方法
-        fusion_method (FusionMethod): 用于合并多个检索器结果的融合方法
-        top_k_per_retriever (int): 每个检索器返回的结果数量
-        k (int): 默认返回文档数量
-        with_score (bool): 是否默认包含相关性分数
-        search_kwargs (dict): 额外搜索参数
+    Configuration Parameters (from config):
+        retrievers (List[Any]): List of retrievers, each of which needs to implement the invoke method
+        fusion_method (FusionMethod): Fusion method for merging results from multiple retrievers
+        top_k_per_retriever (int): Number of results returned by each retriever
+        k (int): Default number of documents to return
+        with_score (bool): Whether to include relevance scores by default
+        search_kwargs (dict): Additional search parameters
 
-    核心方法:
-        - invoke: 同步检索的主要入口点
-        - _get_relevant_documents: 核心检索实现
-        - add_retriever/remove_retriever: 动态管理检索器
-        - set_fusion_method: 设置融合方法
+    Core Methods:
+        - invoke: Main entry point for synchronous retrieval
+        - _get_relevant_documents: Core retrieval implementation
+        - add_retriever/remove_retriever: Dynamically manage retrievers
+        - set_fusion_method: Set the fusion method
 
-    性能考虑:
-        - 每个检索器独立运行，整体性能取决于最慢的检索器
-        - 融合过程增加额外的计算开销
-        - 对于高实时性要求的场景，建议优化单个检索器的性能
+    Performance Considerations:
+        - Each retriever runs independently, and the overall performance depends on the slowest retriever
+        - The fusion process adds extra computational overhead
+        - For scenarios with high real-time requirements, it is recommended to optimize the performance of individual retrievers
 
-    典型用法:
+    Typical Usage:
         >>> config = MultiPathRetrieverConfig(
         ...     retrievers=[bm25_config, vector_config],
         ...     fusion_method=RRFusion(),
         ...     top_k_per_retriever=50
         ... )
         >>> multi_retriever = config.build()
-        >>> results = multi_retriever.invoke("查询语句")
+        >>> results = multi_retriever.invoke("Query statement")
     """
-    
     def _get_relevant_documents(self, query: str, **kwargs: Any) -> List[Document]:
         """
-        获取与查询相关的文档
+        Retrieve documents relevant to the query.
         
-        此方法将调用所有配置的检索器，获取每个检索器的检索结果，
-        然后使用指定的融合方法合并和排序所有结果。
+        This method invokes all configured retrievers, collects the retrieval results from each retriever,
+        and then merges and sorts all results using the specified fusion method.
         
         Args:
-            query: 查询字符串
-            **kwargs: 其他参数，包括k等
+            query: Query string.
+            **kwargs: Other parameters, including k, etc.
             
         Returns:
-            融合后的相关文档列表，按相关性排序
+            A list of fused relevant documents sorted by relevance.
             
         Note:
-            - 每个检索器返回Document对象列表
-            - 融合后的结果返回排序后的Document对象，分数存储在metadata['score']中
+            - Each retriever returns a list of Document objects.
+            - The fused results return sorted Document objects with scores stored in metadata['score'].
         """
-        # 使用配置默认值
+        # Use default configuration values
         top_k = kwargs.get('k', self.config.k)
         top_k_per_retriever = kwargs.get('top_k_per_retriever', self.config.top_k_per_retriever)
         
-        # 验证参数
+        # Validate parameters
         if top_k <= 0:
-            raise ValueError(f"参数 'k' 必须大于 0，得到 {top_k}")
+            raise ValueError(f"Parameter 'k' must be greater than 0, got {top_k}")
         
         if top_k > top_k_per_retriever:
             raise ValueError(
-                f"k ({top_k}) 必须小于等于 top_k_per_retriever ({top_k_per_retriever})。"
-                f"每个检索器最多只能返回 {top_k_per_retriever} 个结果，"
-                f"因此最终结果不能超过此限制。"
+                f"k ({top_k}) must be less than or equal to top_k_per_retriever ({top_k_per_retriever}). "
+                f"Each retriever can return at most {top_k_per_retriever} results, "
+                f"so the final result cannot exceed this limit."
             )
         
         if not query.strip():
-            logger.info("空查询，返回空结果")
+            logger.info("Empty query, returning empty results")
             return []
         
         all_results = []
         for retriever in self.config.built_retrievers:
             try:
-                # 为每个检索器调用时传递正确的参数
+                # Pass the correct parameters when invoking each retriever
                 retriever_kwargs = {**kwargs, 'k': top_k_per_retriever}
                 documents = retriever.invoke(query, **retriever_kwargs)
                 
-                # 确保每个文档都有分数在metadata中
+                # Ensure each document has a score in its metadata
                 for doc in documents:
                     if doc.metadata is None:
                         doc.metadata = {}
-                    # 如果没有分数，使用默认分数1.0
+                    # Use a default score of 1.0 if no score is provided
                     if 'score' not in doc.metadata:
                         doc.metadata['score'] = 1.0
                 
                 all_results.append(documents)
-                logger.debug(f"检索器 {type(retriever).__name__} 返回 {len(documents)} 个结果")
+                logger.debug(f"Retriever {type(retriever).__name__} returned {len(documents)} results")
                 
             except Exception as e:
-                logger.error(f"检索器 {type(retriever).__name__} 执行失败: {e}")
-                warnings.warn(f"检索器 {type(retriever).__name__} 执行失败: {e}", RuntimeWarning)
+                logger.error(f"Retriever {type(retriever).__name__} failed to execute: {e}")
+                warnings.warn(f"Retriever {type(retriever).__name__} failed to execute: {e}", RuntimeWarning)
                 all_results.append([])
         
         if not all_results or all(len(results) == 0 for results in all_results):
-            logger.warning("所有检索器都没有返回结果")
+            logger.warning("All retrievers returned no results")
             return []
         
         fused_documents = self.config.fusion_method.fuse(all_results, top_k)
-        logger.info(f"使用 {type(self.config.fusion_method).__name__} 融合了 {len(fused_documents)} 个结果")
+        logger.info(f"Fused {len(fused_documents)} results using {type(self.config.fusion_method).__name__}")
         
         return fused_documents
 
     def add_retriever(self, retriever: Any) -> None:
         """
-        向多路径检索器添加新的检索器
+        Add a new retriever to the multi-path retriever.
         
         Args:
-            retriever: 要添加的检索器实例
+            retriever: The retriever instance to add.
         """
         if not hasattr(retriever, 'invoke'):
-            raise ValueError(f"检索器 {type(retriever).__name__} 必须实现 invoke 方法")
+            raise ValueError(f"Retriever {type(retriever).__name__} must implement the invoke method")
         
         if self.config.built_retrievers is None:
             self.config.built_retrievers = []
         self.config.built_retrievers.append(retriever)
-        logger.info(f"已添加检索器 {type(retriever).__name__}")
+        logger.info(f"Added retriever {type(retriever).__name__}")
     
     def remove_retriever(self, name: str) -> bool:
         """
-        移除指定的检索器
+        Remove the specified retriever.
         
         Args:
-            name: 要移除的检索器的类名
+            name: The class name of the retriever to remove.
             
         Returns:
-            是否移除成功
+            Whether the removal was successful.
             
         Note:
-            此方法通过比较检索器的类名来识别要移除的检索器
+            This method identifies the retriever to remove by comparing the class names of retrievers.
         """
         if self.config.built_retrievers is None:
             return False
@@ -230,23 +273,23 @@ class MultiPathRetriever(BaseRetriever[MultiPathRetrieverConfig]):
         for i, retriever in enumerate(self.config.built_retrievers):
             if hasattr(retriever, '__class__') and retriever.__class__.__name__ == name:
                 removed_retriever = self.config.built_retrievers.pop(i)
-                logger.info(f"已移除检索器 {type(removed_retriever).__name__}")
+                logger.info(f"Removed retriever {type(removed_retriever).__name__}")
                 return True
-        logger.warning(f"未找到检索器 {name}")
+        logger.warning(f"Retriever {name} not found")
         return False
     
     def set_fusion_method(self, fusion_method: FusionMethod) -> None:
         """
-        设置融合方法
+        Set the fusion method.
         
         Args:
-            fusion_method: 新的融合方法实例
+            fusion_method: The new fusion method instance.
         """
         self.config.fusion_method = fusion_method
-        logger.info(f"已设置融合方法为 {type(fusion_method).__name__}")
+        logger.info(f"Set fusion method to {type(fusion_method).__name__}")
 
     def get_multipath_info(self) -> dict:
-        """获取多路径检索器信息"""
+        """Get information about the multi-path retriever."""
         retrievers = self.config.built_retrievers or []
         return {
             "retriever_count": len(retrievers),
@@ -259,7 +302,7 @@ class MultiPathRetriever(BaseRetriever[MultiPathRetrieverConfig]):
         }
     
     def get_name(self) -> str:
-        """获取检索器名称"""
+        """Get the name of the retriever."""
         retrievers = self.config.built_retrievers or []
         retriever_names = [type(r).__name__ for r in retrievers]
         return f"MultiPath[{','.join(retriever_names)}]"

@@ -1,6 +1,6 @@
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Any, List, TypeVar, Generic, Tuple, Literal
+from typing import Any, List, TypeVar, Generic, Tuple, Literal, Dict
 from pydantic import Field
 from framework.module import AbstractModule
 from framework.config import AbstractConfig
@@ -9,16 +9,23 @@ from core.utils.data_model import Document
 
 ConfigType = TypeVar("ConfigType", bound="BaseRetrieverConfig")
 
-class BaseRetrieverConfig(AbstractConfig):
+class  BaseRetrieverConfig(AbstractConfig):
     """
     Abstract base class for all retriever configurations.
     - Subclasses must define `type: Literal["xxx"]`
     - Subclasses must implement build() to return the corresponding Retriever
     """
     type: Literal["base_retriever"] = "base_retriever"
-    search_kwargs: dict = Field(default_factory=dict, description="Runtime parameters for retrieval, e.g., {'k': 5, 'with_score': True}")
 
-
+    k: int = Field(default=10, description="Default number of documents to return in search", gt=0, exclude=True)
+    with_score: bool = Field(default=True, description="Whether to include relevance scores in results", exclude=True)
+    search_kwargs: Dict[str, Any] = Field(
+        default_factory={}, 
+        description="Additional search parameters including use_phrase_query",
+        exclude=True
+    )
+    
+    
     @abstractmethod
     def build(self) -> "BaseRetriever":
         """Build the retriever"""
@@ -49,6 +56,14 @@ class BaseRetriever(AbstractModule, Generic[ConfigType], ABC):
         """
         super().__init__(config=config)
     
+    def get_default_search_config(self) -> dict:
+        """获取默认搜索配置
+        
+        Returns:
+            dict: 默认搜索配置，包含k、with_score、search_kwargs等参数
+        """
+        return self.config.search_kwargs.copy()
+    
     def invoke(self, input: str, **kwargs: Any) -> List[Document]:
         """Invoke the retriever to get relevant documents
         
@@ -56,15 +71,17 @@ class BaseRetriever(AbstractModule, Generic[ConfigType], ABC):
         
         Args:
             input: Query string
-            **kwargs: Other parameters passed to the retriever
+            **kwargs: Runtime parameters (k, with_score, search_kwargs, etc.)
             
         Returns:
             List of relevant documents
             
         Examples:
             >>> retriever.invoke("query")
+            >>> retriever.invoke("query", k=5, with_score=True)
         """
-        merged_kwargs = {**self.config.search_kwargs, **kwargs}
+        default_config = self.get_default_search_config()
+        merged_kwargs = {**default_config, **kwargs}
         return self._get_relevant_documents(input, **merged_kwargs)
     
     async def ainvoke(self, input: str, **kwargs: Any) -> List[Document]:
@@ -74,15 +91,17 @@ class BaseRetriever(AbstractModule, Generic[ConfigType], ABC):
         
         Args:
             input: Query string
-            **kwargs: Other parameters passed to the retriever
+            **kwargs: Runtime parameters (k, with_score, search_kwargs, etc.)
             
         Returns:
             List of relevant documents
             
         Examples:
             >>> await retriever.ainvoke("query")
+            >>> await retriever.ainvoke("query", k=5, with_score=True)
         """
-        merged_kwargs = {**self.config.search_kwargs, **kwargs}
+        default_config = self.get_default_search_config()
+        merged_kwargs = {**default_config, **kwargs}
         return await self._aget_relevant_documents(input, **merged_kwargs)
     
     @abstractmethod

@@ -5,9 +5,7 @@ from pydantic import ConfigDict, Field, model_validator
 from core.retrieval.base import BaseRetriever, BaseRetrieverConfig
 from core.utils.data_model import Document
 from core.utils.retrieval_helper import RetrievalHelper
-
-if TYPE_CHECKING:
-    from encapsulation.database.vector_db.base import BaseVectorDB
+from encapsulation.database.vector_db.base import BaseVectorDB
 
 logger = logging.getLogger(__name__)
 
@@ -18,21 +16,10 @@ class DenseRetrieverConfig(BaseRetrieverConfig):
     type: Literal["dense"] = "dense"
     
     # Runtime dependencies (injected by vector database)
-    vectorstore: Optional[Any] = Field(default=None, exclude=True, description="Vector database instance")
-    metric: Optional[str] = Field(default=None, exclude=True, description="Distance metric from vector database")
-    
-    # Retrieval parameters (from vector database configuration)
-    search_kwargs: Dict[str, Any] = Field(
-        default_factory=dict, 
-        exclude=True,
-        description="""Additional search parameters. Supported parameters:
-        - k (int): Number of documents to return (overrides config default)
-        - score_threshold (float): Minimum relevance score threshold for similarity_score_threshold search
-        - fetch_k (int): Number of documents to fetch for MMR (default: 20)
-        - lambda_mult (float): Diversity parameter for MMR search (0-1, default: 0.5)
-        - with_score (bool): Whether to include score in metadata (overrides config default)
-        """
-    )
+    vectorstore: Optional[BaseVectorDB] = Field(default=None, exclude=True, description="Vector database instance")
+    metric: Literal["cosine", "l2", "ip"] = Field(default="cosine", description="Distance metric from vector database")
+    # search_type: Literal["similarity", "similarity_score_threshold", "mmr"] = Field(default="similarity", description="Search type")
+
     
     def build(self) -> "DenseRetriever":
         """Build the DenseRetriever instance"""
@@ -44,44 +31,44 @@ class DenseRetrieverConfig(BaseRetrieverConfig):
 
 class DenseRetriever(BaseRetriever[DenseRetrieverConfig]):
     """
-    DenseRetriever 是基于密集向量数据库的高性能文档检索器。
+    DenseRetriever is a high-performance document retriever based on dense vector databases.
     
-    此类实现基于向量相似度的文档检索，支持多种搜索类型和高级功能，
-    如最大边际相关性(MMR)搜索以获得多样化的结果集。
+    This class implements document retrieval based on vector similarity, supporting multiple search types
+    and advanced features such as Maximum Marginal Relevance (MMR) search for diversified result sets.
     
-    主要特性:
-    - 多种搜索类型: similarity, similarity_score_threshold, mmr
-    - 支持相关性分数阈值过滤
-    - 最大边际相关性(MMR)搜索实现结果多样性
-    - 异步操作支持
-    - 灵活的搜索参数配置
-    - 与多种向量数据库兼容
+    Key Features:
+    - Multiple search types: similarity, similarity_score_threshold, mmr
+    - Support for relevance score threshold filtering
+    - Maximum Marginal Relevance (MMR) search for result diversity
+    - Async operation support
+    - Flexible search parameter configuration
+    - Compatible with multiple vector databases
     
-    配置参数 (来自 config):
-        vectorstore (BaseVectorDB): 向量数据库实例
-        metric (str): 距离度量类型 ('cosine', 'l2', 'ip')
-        k (int): 默认返回文档数量
-        with_score (bool): 是否默认包含相关性分数
-        search_kwargs (dict): 额外搜索参数
+    Configuration Parameters (from config):
+        vectorstore (BaseVectorDB): Vector database instance
+        metric (str): Distance metric type ('cosine', 'l2', 'ip')
+        k (int): Default number of documents to return
+        with_score (bool): Whether to include relevance scores by default
+        search_kwargs (dict): Additional search parameters
         
-    运行时实例变量:
-        _relevance_score_fn: 相关性评分函数
+    Runtime Instance Variables:
+        _relevance_score_fn: Relevance scoring function
         
-    核心方法:
-        - invoke: 同步检索的主要入口点
-        - _get_relevant_documents: 执行搜索并返回结构化结果
-        - _get_docs_with_embeddings_for_mmr: 获取MMR搜索所需的文档和嵌入
+    Core Methods:
+        - invoke: Main entry point for synchronous retrieval
+        - _get_relevant_documents: Execute search and return structured results
+        - _get_docs_with_embeddings_for_mmr: Get documents and embeddings for MMR search
         
-    性能考虑:
-        - 相似性搜索适用于大多数场景
-        - MMR搜索提供多样性但计算成本更高
-        - 分数阈值过滤可能影响返回文档数量
+    Performance Considerations:
+        - Similarity search is suitable for most scenarios
+        - MMR search provides diversity but has higher computational cost
+        - Score threshold filtering may affect the number of returned documents
         
-    典型用法:
-        >>> # 通过向量数据库创建检索器
+    Typical Usage:
+        >>> # Create retriever through vector database
         >>> retriever = vector_db.as_retriever()
-        >>> results = retriever.invoke("查询文本")
-        >>> results = retriever.invoke("查询文本", k=5, search_type="mmr")
+        >>> results = retriever.invoke("query text")
+        >>> results = retriever.invoke("query text", k=5, search_type="mmr")
     """
     
     allowed_search_types: ClassVar[Collection[str]] = (
@@ -89,36 +76,36 @@ class DenseRetriever(BaseRetriever[DenseRetrieverConfig]):
         "similarity_score_threshold", 
         "mmr",
     )
-    """允许的搜索类型"""
+    """Allowed search types"""
     
     # Runtime instance variables
     _relevance_score_fn = None
     
     def _get_relevance_score_fn(self):
-        """获取相关性评分函数（懒加载）"""
+        """Get relevance scoring function (lazy loading)"""
         if self._relevance_score_fn is None and self.config.metric:
             try:
                 self._relevance_score_fn = RetrievalHelper.select_relevance_score_fn_by_metric(self.config.metric)
             except ValueError:
-                logger.warning(f"不支持的度量类型 {self.config.metric}，使用余弦相似度评分函数")
+                logger.warning(f"Unsupported metric type {self.config.metric}, using cosine similarity scoring function")
                 self._relevance_score_fn = RetrievalHelper.cosine_relevance_score_fn
         return self._relevance_score_fn
     
     def _validate_search_config(self, search_type: str, search_kwargs: Dict[str, Any]) -> None:
-        """验证搜索配置
+        """Validate search configuration
         
         Args:
-            search_type: 搜索类型
-            search_kwargs: 搜索参数
+            search_type: Search type
+            search_kwargs: Search parameters
             
         Raises:
-            ValueError: 如果搜索类型不在允许的类型中
-            ValueError: 如果使用 similarity_score_threshold 但未指定有效的 score_threshold
+            ValueError: If search type is not in allowed types
+            ValueError: If using similarity_score_threshold but no valid score_threshold is specified
         """
         if search_type not in self.allowed_search_types:
             msg = (
-                f"search_type '{search_type}' 不被允许。"
-                f"有效值为: {self.allowed_search_types}"
+                f"search_type '{search_type}' is not allowed. "
+                f"Valid values are: {self.allowed_search_types}"
             )
             raise ValueError(msg)
         
@@ -128,8 +115,8 @@ class DenseRetriever(BaseRetriever[DenseRetrieverConfig]):
                 not isinstance(score_threshold, (int, float)) or
                 not (0 <= score_threshold <= 1)):
                 msg = (
-                    "使用 'similarity_score_threshold' 搜索类型时，"
-                    "必须在 search_kwargs 中指定有效的 score_threshold (0~1 之间的浮点数)"
+                    "When using 'similarity_score_threshold' search type, "
+                    "a valid score_threshold (float between 0 and 1) must be specified in search_kwargs"
                 )
                 raise ValueError(msg)
     
@@ -145,30 +132,30 @@ class DenseRetriever(BaseRetriever[DenseRetrieverConfig]):
         with_score: Optional[bool] = None,
         **kwargs: Any
     ) -> List[Document]:
-        """执行搜索并返回结构化结果
+        """Execute search and return structured results
         
         Args:
-            query: 查询字符串
-            k: 返回文档数量（默认使用配置值）
-            search_type: 搜索类型
-            score_threshold: 相关性分数阈值
-            fetch_k: MMR搜索的候选文档数量
-            lambda_mult: MMR多样性参数
-            with_score: 是否在元数据中包含分数
-            **kwargs: 额外搜索参数
+            query: Query string
+            k: Number of documents to return (defaults to config value)
+            search_type: Search type
+            score_threshold: Relevance score threshold
+            fetch_k: Number of candidate documents for MMR search
+            lambda_mult: MMR diversity parameter
+            with_score: Whether to include score in metadata
+            **kwargs: Additional search parameters
             
         Returns:
-            相关文档列表
+            List of relevant documents
         """
-        # 使用配置默认值
+        # Use configuration defaults
         k = k if k is not None else self.config.k
         with_score = with_score if with_score is not None else self.config.with_score
         
-        # 验证参数
+        # Validate parameters
         if k <= 0:
-            raise ValueError(f"参数 'k' 必须大于 0，得到 {k}")
+            raise ValueError(f"Parameter 'k' must be greater than 0, got {k}")
         
-        # 合并搜索参数
+        # Merge search parameters
         search_params = {**self.config.search_kwargs, **kwargs}
         search_params.update({
             'k': k,
@@ -178,11 +165,11 @@ class DenseRetriever(BaseRetriever[DenseRetrieverConfig]):
             'with_score': with_score
         })
         
-        # 验证搜索配置
+        # Validate search configuration
         self._validate_search_config(search_type, search_params)
         
         if not query.strip():
-            logger.info("空查询，返回空结果")
+            logger.info("Empty query, returning empty results")
             return []
         
         try:
@@ -190,32 +177,32 @@ class DenseRetriever(BaseRetriever[DenseRetrieverConfig]):
                 docs = self.config.vectorstore.similarity_search(query, k=k, **kwargs)
                 
             elif search_type == "similarity_score_threshold":
-                # 使用带相关性分数的搜索
+                # Use search with relevance scores
                 docs_and_similarities = self.config.vectorstore.similarity_search_with_relevance_scores(
                     query, k=k, score_threshold=score_threshold, **kwargs
                 )
                 docs = [doc for doc, _ in docs_and_similarities]
                 
             elif search_type == "mmr":
-                # 检查向量数据库是否支持MMR
+                # Check if vector database supports MMR
                 if hasattr(self.config.vectorstore, 'max_marginal_relevance_search'):
                     docs = self.config.vectorstore.max_marginal_relevance_search(
                         query, k=k, fetch_k=fetch_k, lambda_mult=lambda_mult, **kwargs
                     )
                 else:
-                    # 向量数据库不支持MMR，退回到普通相似性搜索
+                    # Vector database doesn't support MMR, fallback to regular similarity search
                     logger.warning(
-                        f"向量数据库 {self.config.vectorstore.__class__.__name__} 不支持MMR搜索，"
-                        f"退回到普通相似性搜索 (k={k})"
+                        f"Vector database {self.config.vectorstore.__class__.__name__} does not support MMR search, "
+                        f"falling back to regular similarity search (k={k})"
                     )
                     docs = self.config.vectorstore.similarity_search(query, k=k, **kwargs)
                         
             else:
-                raise ValueError(f"不支持的搜索类型: {search_type}")
+                raise ValueError(f"Unsupported search type: {search_type}")
             
-            # 添加分数到元数据（如果需要且支持）
+            # Add scores to metadata (if needed and supported)
             if with_score and search_type != "similarity_score_threshold":
-                # 对于非阈值搜索，尝试获取分数
+                # For non-threshold searches, try to get scores
                 if hasattr(self.config.vectorstore, 'similarity_search_with_score'):
                     try:
                         docs_with_scores = self.config.vectorstore.similarity_search_with_score(
@@ -229,26 +216,27 @@ class DenseRetriever(BaseRetriever[DenseRetrieverConfig]):
                                 relevance_score = relevance_score_fn(score_dict[doc.id])
                                 doc.metadata = {**(doc.metadata or {}), "score": relevance_score}
                     except Exception as e:
-                        logger.debug(f"无法获取分数: {e}")
+                        logger.debug(f"Unable to get scores: {e}")
             
-            logger.debug(f"检索到 {len(docs)} 个文档，搜索类型: {search_type}")
+            logger.debug(f"Retrieved {len(docs)} documents, search type: {search_type}")
             return docs
             
         except Exception as e:
-            logger.error(f"检索文档时发生错误: {e}")
+            logger.error(f"Error occurred while retrieving documents: {e}")
             raise
     
     async def _aget_relevant_documents(self, query: str, **kwargs: Any) -> List[Document]:
-        """异步获取与查询相关的文档
+        """Asynchronously get documents relevant to the query
         
-        默认实现使用线程池执行同步版本。子类可以重写以提供真正的异步实现。
+        Default implementation uses thread pool to execute synchronous version.
+        Subclasses can override to provide true async implementation.
         
         Args:
-            query: 查询字符串
-            **kwargs: 额外的搜索参数
+            query: Query string
+            **kwargs: Additional search parameters
             
         Returns:
-            相关文档列表
+            List of relevant documents
         """
         try:
             import asyncio
@@ -261,7 +249,7 @@ class DenseRetriever(BaseRetriever[DenseRetrieverConfig]):
 
     
     def get_vectorstore_info(self) -> Dict[str, Any]:
-        """获取向量数据库信息"""
+        """Get vector database information"""
         info = {
             "vectorstore_class": self.config.vectorstore.__class__.__name__,
             "metric": self.config.metric,
@@ -271,12 +259,12 @@ class DenseRetriever(BaseRetriever[DenseRetrieverConfig]):
             "allowed_search_types": list(self.allowed_search_types),
         }
         
-        # 如果向量数据库有嵌入信息，添加到信息中
+        # If vector database has embedding information, add it to info
         if hasattr(self.config.vectorstore, 'embedding') and self.config.vectorstore.embedding:
             info["embedding_class"] = self.config.vectorstore.embedding.__class__.__name__
         
         return info
     
     def get_name(self) -> str:
-        """获取检索器名称"""
+        """Get retriever name"""
         return f"{self.config.vectorstore.__class__.__name__}Retriever"
