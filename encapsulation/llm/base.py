@@ -23,7 +23,7 @@ class LLMBaseConfig(AbstractConfig):
     type: Literal["base_llm"] = "base_llm"
 
     model_name: str = Field(description="Model name")
-    task_types: List[str] = Field(description="Supported task types")
+    task_types: Literal["chat", "embedding", "rerank"] = Field(description="Supported task types")
     kwargs: dict = Field(default_factory=dict, description="Additional configuration parameters")
 
     @abstractmethod

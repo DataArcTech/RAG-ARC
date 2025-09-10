@@ -13,14 +13,15 @@ class OpenAIConfig(LLMBaseConfig):
     OpenAI LLM configuration
     """
     type: Literal["openai"] = "openai"
+    task_types: Literal["chat", "embedding"] = Field(default="chat", description="Supported task types")
+
     api_key: Optional[str] = Field(default=None, description="OpenAI API key")
     base_url: Optional[str] = Field(default=None, description="API base URL")
     organization: Optional[str] = Field(default=None, description="Organization ID")
     max_retries: int = Field(default=3, description="Max retry attempts")
     timeout: float = Field(default=60.0, description="Request timeout")
-    default_max_tokens: int = Field(default=None, description="Default max tokens for chat")
+    default_max_tokens: Optional[int] = Field(default=None, description="Default max tokens for chat")
     default_temperature: float = Field(default=0.7, description="Default temperature for chat")
-    embedding_dimensions: Optional[int] = Field(default=None, description="Embedding dimensions")
     
     def build(self) -> "OpenAILLM":
         """Build the OpenAI LLM"""
@@ -182,6 +183,16 @@ class OpenAILLM(LLMBase[OpenAIConfig]):
                     
                     self.logger.debug(f"Streaming chat completed, length: {len(full_response)}, tokens: {token_stats}")
                     yield token_stats
+                    return
+
+                if return_token_count:
+                    self.logger.info("The streaming chat has not finished yet, token usage information is temporarily unavailable")
+                    default_stats = {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 0
+                    }
+                    yield default_stats
                     
         except Exception as e:
             self.logger.error(f"Streaming chat failed: {str(e)}")
@@ -206,15 +217,10 @@ class OpenAILLM(LLMBase[OpenAIConfig]):
             # Clean texts - remove newlines
             cleaned_texts = [text.replace("\n", " ") for text in text_list]
             
-            # Create embedding request
-            embedding_kwargs = {}
-            if self.config.embedding_dimensions:
-                embedding_kwargs['dimensions'] = self.config.embedding_dimensions
             
             response = self.client.embeddings.create(
                 model=self.config.model_name,
                 input=cleaned_texts,
-                **embedding_kwargs
             )
             
             # Extract embeddings - handle different response formats
@@ -273,7 +279,6 @@ class OpenAILLM(LLMBase[OpenAIConfig]):
             "timeout": getattr(self.client, 'timeout', None),
             "default_max_tokens": self.config.default_max_tokens,
             "default_temperature": self.config.default_temperature,
-            "embedding_dimensions": self.config.embedding_dimensions,
             "provider": "openai"
         })
         return info
