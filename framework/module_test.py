@@ -11,6 +11,7 @@ if __name__ == "__main__":
 
 from framework.config import AbstractConfig
 from framework.module import AbstractModule
+from framework.shared_module_decorator import shared_module
 
 # Type definitions
 NewType = TypeVar("NewType")
@@ -21,10 +22,10 @@ class AConfig(AbstractConfig):
     """Config class for module A"""
 
     type: Literal["A"] = "A"
-    param1: int | None = None
+    param1: int
     param2: NewType
-    param3: str
-    param4: OperationType
+    param3: str = "test_string"
+    param4: OperationType = "read"
 
     def build(self) -> "A":
         return A(self)
@@ -33,7 +34,7 @@ class AConfig(AbstractConfig):
 class A(AbstractModule):
     """Module A implementation"""
 
-    config: AConfig
+    config: AConfig | None = None
 
     def __call__(self, param):
         print(f"Module A called with param: {param}")
@@ -49,9 +50,9 @@ class CConfig(AbstractConfig):
 
     type: Literal["C"] = "C"
     param1: int
-    param2: str
-    param3: NewType
-    sub_config: AConfig
+    param2: str = "default_string"  # Default value
+    param3: NewType = "default_newtype"  # Default value
+    sub_config: AConfig | None = None  # Optional with default None
 
     def build(self) -> "C":
         return C(self)
@@ -67,17 +68,20 @@ class C(AbstractModule):
         print(f"Config param1: {self.config.param1}")
         print(f"Config param2: {self.config.param2}")
         print(f"Config param3: {self.config.param3}")
-        a_module = self.config.sub_config.build()
-        result = a_module("test_param")
-        print(f"Module A result: {result}")
-        return f"C processed: {params}, A result: {result}"
+        if self.config.sub_config is not None:
+            a_module = self.config.sub_config.build()
+            result = a_module("test_param")
+            print(f"Module A result: {result}")
+            return f"C processed: {params}, A result: {result}"
+        else:
+            return f"C processed: {params} (no sub_config)"
 
 class BConfig(AbstractConfig):
     """Config class for module B"""
 
     type: Literal["B"] = "B"
     param1: int
-    param2: str
+    param2: str = "default_string"
     param3: NewType
     sub_config: Annotated[AConfig | CConfig, Field(discriminator="type")]
 
@@ -104,7 +108,7 @@ class DConfig(AbstractConfig):
     """Config class for module D"""
     type: Literal["D"] = "D"
     param1: int
-    param2: str
+    param2: str = "default_string_d"
     param3: NewType
     sub_config: list[Annotated[AConfig | CConfig, Field(discriminator="type")]]
     def build(self) -> "D":
@@ -304,6 +308,264 @@ class TestConfigFromJson(unittest.TestCase):
         d_module = config.build()
         self.assertIsInstance(d_module, D)
         self.assertEqual(d_module.config.type, "D")
+
+    def test_create_c_config_with_defaults(self):
+        """Test creating CConfig with minimal data, using defaults"""
+        json_str = """
+        {
+            "type": "C",
+            "param1": 42
+        }
+        """
+        config_data = json.loads(json_str)
+        config = CConfig(**config_data)
+        c = config.build()
+        self.assertIsInstance(c, C)
+        self.assertEqual(c.config.type, "C")
+        self.assertEqual(c.config.param1, 42)  # Default value
+        self.assertEqual(c.config.param2, "default_string")  # Default value
+        self.assertEqual(c.config.param3, "default_newtype")  # Default value
+        self.assertIsNone(c.config.sub_config)  # Default value
+        
+        # Test calling the module with defaults
+        result = c("test_input")
+        self.assertIn("C processed: test_input (no sub_config)", result)
+
+    def test_create_c_config_with_partial_overrides(self):
+        """Test creating CConfig with some overrides and some defaults"""
+        json_str = """
+        {
+            "type": "C",
+            "param1": 100,
+            "param2": "custom_string"
+        }
+        """
+        config_data = json.loads(json_str)
+        config = CConfig(**config_data)
+        c = config.build()
+        self.assertIsInstance(c, C)
+        self.assertEqual(c.config.type, "C")
+        self.assertEqual(c.config.param1, 100)  # Overridden
+        self.assertEqual(c.config.param2, "custom_string")  # Overridden
+        self.assertEqual(c.config.param3, "default_newtype")  # Default value
+        self.assertIsNone(c.config.sub_config)  # Default value
+
+# -------------------------------- Shared module decorator test --------------------------------
+
+class FConfig(AbstractConfig):
+    """Config class for shared module F"""
+    type: Literal["F"] = "F"
+    param1: int
+    param2: str
+    param3: NewType
+
+    def build(self) -> "F":
+        return F(self)
+
+
+@shared_module
+class F(AbstractModule):
+    """Shared module F implementation"""
+    
+    config: FConfig
+
+    def __call__(self, param):
+        print(f"Module F called with param: {param}")
+        print(f"Config param1: {self.config.param1}")
+        print(f"Config param2: {self.config.param2}")
+        print(f"Config param3: {self.config.param3}")
+        return f"F processed: {param}"
+
+class GConfig(AbstractConfig):
+    """Config class for module G"""
+    type: Literal["G"] = "G"
+    param1: int
+    param2: str
+    param3: NewType
+    sub_config: FConfig
+
+    def build(self) -> "G":
+        return G(self)
+
+
+class G(AbstractModule):
+    """Module G implementation that uses shared module F"""
+    
+    config: GConfig
+
+    def __call__(self, params):
+        print(f"Module G called with params: {params}")
+        print(f"Config param1: {self.config.param1}")
+        print(f"Config param2: {self.config.param2}")
+        print(f"Config param3: {self.config.param3}")
+        f_module = self.config.sub_config.build()
+        result = f_module("test_param_from_G")
+        print(f"Module F result from G: {result}")
+        return f"G processed: {params}, F result: {result}"
+
+
+class HConfig(AbstractConfig):
+    """Config class for module H"""
+    type: Literal["H"] = "H"
+    param1: int
+    param2: str
+    param3: NewType
+    sub_config: FConfig
+
+    def build(self) -> "H":
+        return H(self)
+
+
+class H(AbstractModule):
+    """Module H implementation that also uses shared module F"""
+    
+    config: HConfig
+
+    def __call__(self, params):
+        print(f"Module H called with params: {params}")
+        print(f"Config param1: {self.config.param1}")
+        print(f"Config param2: {self.config.param2}")
+        print(f"Config param3: {self.config.param3}")
+        f_module = self.config.sub_config.build()
+        result = f_module("test_param_from_H")
+        print(f"Module F result from H: {result}")
+        return f"H processed: {params}, F result: {result}"
+
+class IConfig(AbstractConfig):
+    """Config class for module I"""
+    type: Literal["I"] = "I"
+    param1: int
+    param2: str
+    param3: NewType
+    sub_config: list[Annotated[GConfig | HConfig, Field(discriminator="type")]]
+
+    def build(self) -> "I":
+        return I(self)
+
+class I(AbstractModule):
+    """Module I implementation"""
+
+    config: IConfig
+    
+    def __call__(self, params):
+        print(f"Module I called with params: {params}")
+        print(f"Config param1: {self.config.param1}")
+        print(f"Config param2: {self.config.param2}")
+        print(f"Config param3: {self.config.param3}")
+        # Call all submodules and collect their results
+        results = []
+        for sub in self.config.sub_config:
+            mod = sub.build()
+            if hasattr(mod, '__call__'):
+                results.append(mod(f"from_I_{params}"))
+        return f"I processed: {params}, submodules: {results}"
+
+class TestSharedModule(unittest.TestCase):
+    """Test shared module functionality"""
+
+    def test_shared_module_same_config(self):
+        # JSON for IConfig, with GConfig and HConfig, both referencing the same FConfig values
+        json_str = """
+        {
+            "type": "I",
+            "param1": 1,
+            "param2": "iparam",
+            "param3": "ival",
+            "sub_config": [
+                {
+                    "type": "G",
+                    "param1": 2,
+                    "param2": "gparam",
+                    "param3": "gval",
+                    "sub_config": {
+                        "type": "F",
+                        "param1": 10,
+                        "param2": "fparam",
+                        "param3": "fval"
+                    }
+                },
+                {
+                    "type": "H",
+                    "param1": 3,
+                    "param2": "hparam",
+                    "param3": "hval",
+                    "sub_config": {
+                        "type": "F",
+                        "param1": 10,
+                        "param2": "fparam",
+                        "param3": "fval"
+                    }
+                }
+            ]
+        }
+        """
+        config_data = json.loads(json_str)
+        config = IConfig(**config_data)
+        i_module = config.build()
+        self.assertIsInstance(i_module, I)
+        self.assertEqual(i_module.config.type, "I")
+        self.assertEqual(len(i_module.config.sub_config), 2)
+        g_config = i_module.config.sub_config[0]
+        h_config = i_module.config.sub_config[1]
+        g_module = g_config.build()
+        h_module = h_config.build()
+        # Build F from both G and H
+        f_from_g = g_module.config.sub_config.build()
+        f_from_h = h_module.config.sub_config.build()
+        # They should be the same instance due to shared_module decorator
+        self.assertIs(f_from_g, f_from_h)
+
+    def test_shared_module_different_config(self):
+        # JSON for IConfig, with GConfig and HConfig, both referencing the same FConfig values
+        json_str = """
+        {
+            "type": "I",
+            "param1": 1,
+            "param2": "iparam",
+            "param3": "ival",
+            "sub_config": [
+                {
+                    "type": "G",
+                    "param1": 2,
+                    "param2": "gparam",
+                    "param3": "gval",
+                    "sub_config": {
+                        "type": "F",
+                        "param1": 10,
+                        "param2": "fparam",
+                        "param3": "fval"
+                    }
+                },
+                {
+                    "type": "H",
+                    "param1": 3,
+                    "param2": "hparam",
+                    "param3": "hval",
+                    "sub_config": {
+                        "type": "F",
+                        "param1": 20,
+                        "param2": "fparam",
+                        "param3": "fval"
+                    }
+                }
+            ]
+        }
+        """
+        config_data = json.loads(json_str)
+        config = IConfig(**config_data)
+        i_module = config.build()
+        self.assertIsInstance(i_module, I)
+        self.assertEqual(i_module.config.type, "I")
+        self.assertEqual(len(i_module.config.sub_config), 2)
+        g_config = i_module.config.sub_config[0]
+        h_config = i_module.config.sub_config[1]
+        g_module = g_config.build()
+        h_module = h_config.build()
+        # Build F from both G and H
+        f_from_g = g_module.config.sub_config.build()
+        f_from_h = h_module.config.sub_config.build()
+        # They should NOT be the same instance due to shared_module decorator
+        self.assertIsNot(f_from_g, f_from_h)
 
 if __name__ == "__main__":
     unittest.main()
