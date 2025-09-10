@@ -1,6 +1,7 @@
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from typing import Dict, Any, List, Optional, Union, Tuple
 import logging
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -9,26 +10,15 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .document import Document
 
+from framework.module import AbstractModule
 
-class LLMBase(ABC):
+
+@dataclass
+class LLMBase(AbstractModule):
     """
     Unified model base class supporting multiple task types
     Supports: chat, embedding, reranking
     """
-    
-    def __init__(self, model_name: str, task_types: List[str] = None, **kwargs):
-        """
-        Initialize model base class
-        
-        Args:
-            model_name: Model name
-            task_types: Supported task types ['chat', 'embedding', 'rerank']
-            **kwargs: Additional configuration parameters
-        """
-        self.model_name = model_name
-        self.task_types = task_types or ['chat']  # Default to chat support
-        self.config = kwargs
-        self._setup_logging()
     
     def _setup_logging(self):
         """Setup logging configuration"""
@@ -36,12 +26,15 @@ class LLMBase(ABC):
     
     def supports_task(self, task_type: str) -> bool:
         """Check if specified task type is supported"""
-        return task_type in self.task_types
+        task_types = getattr(self.config, 'task_types', ['chat'])
+        return task_type in task_types
     
     def validate_task_support(self, task_type: str):
         """Validate task support, raise exception if not supported"""
         if not self.supports_task(task_type):
-            raise ValueError(f"Model {self.model_name} does not support task: {task_type}. Supported: {self.task_types}")
+            model_name = getattr(self.config, 'model_name', 'default')
+            task_types = getattr(self.config, 'task_types', ['chat'])
+            raise ValueError(f"Model {model_name} does not support task: {task_type}. Supported: {task_types}")
     
     # ==================== CHAT METHODS ====================
     def chat(
@@ -142,8 +135,8 @@ class LLMBase(ABC):
         Get model information
         """
         return {
-            "model_name": self.model_name,
-            "task_types": self.task_types,
+            "model_name": self.config.model_name,
+            "task_types": self.config.task_types,
             "config": self.config,
             "class_name": self.__class__.__name__
         }
@@ -181,8 +174,8 @@ class LLMBase(ABC):
     
     def __str__(self) -> str:
         """String representation"""
-        return f"{self.__class__.__name__}(model_name='{self.model_name}', tasks={self.task_types})"
+        return f"{self.__class__.__name__}(model_name='{self.config.model_name}', tasks={self.config.task_types})"
     
     def __repr__(self) -> str:
         """Detailed string representation"""
-        return f"{self.__class__.__name__}(model_name='{self.model_name}', tasks={self.task_types}, config={self.config})"
+        return f"{self.__class__.__name__}(model_name='{self.config.model_name}', tasks={self.config.task_types}, config={self.config})"

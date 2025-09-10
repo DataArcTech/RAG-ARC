@@ -2,32 +2,46 @@
 Simple test to understand how OpenAI LLM works for chat and embedding
 """
 
+from framework.config import AbstractConfig
 from encapsulation.llm.openai import OpenAILLM
+from typing import Literal
 import os
+
+class OpenAIChatConfig(AbstractConfig):
+    """Configuration for OpenAI Chat LLM"""
+    type: Literal["openai"] = "openai"
+    model_name: str = "gpt-4o-mini"
+    task_types: list = ["chat"]
+    base_url: str = "https://api.gptsapi.net/v1"
+    api_key: str = "sk-xxx"
+    
+    def build(self) -> OpenAILLM:
+        return OpenAILLM(self)
+
+class OpenAIEmbeddingConfig(AbstractConfig):
+    """Configuration for OpenAI Embedding LLM"""
+    type: Literal["openai"] = "openai"
+    model_name: str = "text-embedding-3-small"
+    task_types: list = ["embedding"]
+    base_url: str = "https://api.gptsapi.net/v1"
+    api_key: str = "sk-xxx"
+    
+    def build(self) -> OpenAILLM:
+        return OpenAILLM(self)
 
 def main():
     print("Testing OpenAI LLM (Chat)...")
     
-    # Create OpenAI LLM instance for chat
-    # Note: Make sure to set OPENAI_API_KEY environment variable
-    chat_llm = OpenAILLM(
-        model_name="gpt-4o-mini",
-        task_types=['chat'],
-        base_url="https://api.gptsapi.net/v1",
-        api_key="xxx",
-    )
+    # Create OpenAI LLM instances using configuration injection
+    chat_config = OpenAIChatConfig()
+    chat_llm = chat_config.build()
+    
+    embedding_config = OpenAIEmbeddingConfig()
+    embedding_llm = embedding_config.build()
     
     print(f"Model info: {chat_llm.get_model_info()}")
     print(f"Supports chat: {chat_llm.supports_task('chat')}")
     print(f"Supports embedding: {chat_llm.supports_task('embedding')}")
-    
-    # Create separate embedding instance
-    embedding_llm = OpenAILLM(
-        model_name="text-embedding-3-small",
-        task_types=['embedding'],
-        base_url="https://api.gptsapi.net/v1",
-        api_key="xxx",
-    )
     
     # Test chat functionality
     print("\n--- Chat Test ---")
@@ -103,7 +117,7 @@ def main():
     # Test with token counting
     print(f"\n--- Token Counting Test ---")
     try:
-        response_with_tokens = chat_llm._chat(messages, return_token_count=True)
+        response_with_tokens = chat_llm.chat(messages, return_token_count=True)
         if isinstance(response_with_tokens, tuple):
             response, token_stats = response_with_tokens
             print(f"Response: {response[:100]}...")

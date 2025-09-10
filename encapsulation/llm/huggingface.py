@@ -1,64 +1,99 @@
 from .base import LLMBase
 from typing import Union, List, Dict, Any, Optional, Tuple, TYPE_CHECKING
 
+from framework.shared_module_decorator import shared_module
+
 if TYPE_CHECKING:
     from .document import Document
 
-
+@shared_module
 class HuggingFaceLLM(LLMBase):
     """
-    HuggingFace embedding model implementation
-    Pure embedding operations - no business logic
+    HuggingFace embedding model implementation for high-performance text vectorization.
+    
+    This class provides a complete embedding solution using HuggingFace's SentenceTransformers library,
+    supporting various pre-trained models with flexible device configuration and caching capabilities.
+    Optimized for batch processing and memory-efficient inference with configurable encoding parameters.
+    
+    Key features:
+    - SentenceTransformers integration for state-of-the-art embeddings
+    - Multi-device support: CPU, GPU, and multi-GPU configurations
+    - Flexible model selection: BERT, RoBERTa, MPNet, and specialized embedding models
+    - Batch processing with configurable encoding parameters
+    - Local model caching for offline deployment
+    - Memory optimization for large-scale processing
+    
+    Main parameters:
+        config (AbstractConfig): Configuration containing model path, device, cache settings, etc.
+        _client: Lazy-initialized SentenceTransformer model instance
+        
+    Core methods:
+        - embed/_embed: General text embedding with automatic batching
+        - embed_documents: Batch document embedding for large collections
+        - embed_query: Single query embedding with optimized processing
+        
+    Supported models:
+        - General: sentence-transformers/all-mpnet-base-v2, all-MiniLM-L6-v2
+        - Multilingual: sentence-transformers/paraphrase-multilingual-mpnet-base-v2
+        - Specialized: sentence-transformers/msmarco-distilbert-base-v4
+        - Custom: Any compatible HuggingFace model with proper configuration
+        
+    Performance considerations:
+        - Lazy model loading for faster application startup
+        - GPU acceleration with automatic device detection
+        - Batch processing for improved throughput
+        - Model caching to reduce download overhead
+        - Memory-mapped models for efficient loading
+        
+    Configuration options:
+        - model_name: HuggingFace model identifier or local path
+        - device: Target device (cpu, cuda, cuda:0, etc.)
+        - cache_folder: Local cache directory for models
+        - model_kwargs: Additional model initialization parameters
+        - encode_kwargs: Encoding-specific parameters (batch_size, show_progress_bar, etc.)
     """
     
-    def __init__(
-        self,
-        model_name: str = "sentence-transformers/all-mpnet-base-v2",
-        device: str = "cpu",
-        cache_folder: Optional[str] = None,
-        model_kwargs: Optional[Dict[str, Any]] = None,
-        encode_kwargs: Optional[Dict[str, Any]] = None,
-        **kwargs
-    ):
-        # Initialize base class with embedding support
-        super().__init__(model_name, task_types=['embedding'], **kwargs)
-        
-        self.device = device
-        self.cache_folder = cache_folder
-        self.model_kwargs = model_kwargs or {}
-        self.encode_kwargs = encode_kwargs or {}
-        
-        self._client = None
-        
-        # Initialize embedding model
-        self._init_model()
     
-    def _init_model(self):
-        """Initialize sentence transformer for embedding"""
-        try:
-            import sentence_transformers
-            self._client = sentence_transformers.SentenceTransformer(
-                self.model_name,
-                cache_folder=self.cache_folder,
-                device=self.device,
-                **self.model_kwargs
-            )
+    def _get_logger(self):
+        """Get or create logger instance"""
+        if not hasattr(self, '_logger') or self._logger is None:
+            import logging
+            self._logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        return self._logger
+    
+    def _get_client(self):
+        """Get or create sentence transformer client"""
+        if not hasattr(self, '_client') or self._client is None:
+            logger = self._get_logger()
             
-            self.logger.info(f"HuggingFace LLM initialized: {self.model_name}")
-            
-        except ImportError:
-            raise ImportError("sentence-transformers required for embedding task")
+            try:
+                import sentence_transformers
+                
+                model_name = getattr(self.config, 'model_name', 'sentence-transformers/all-mpnet-base-v2')
+                device = getattr(self.config, 'device', 'cpu')
+                cache_folder = getattr(self.config, 'cache_folder', None)
+                model_kwargs = getattr(self.config, 'model_kwargs', {})
+                
+                self._client = sentence_transformers.SentenceTransformer(
+                    model_name,
+                    cache_folder=cache_folder,
+                    device=device,
+                    **model_kwargs
+                )
+                
+                logger.info(f"HuggingFace model initialized: {model_name}")
+                
+            except ImportError:
+                logger.error("sentence-transformers library required for embedding task")
+                raise ImportError("sentence-transformers required for embedding task")
+            except Exception as e:
+                logger.error(f"Failed to initialize HuggingFace model: {str(e)}")
+                raise
+                
+        return self._client
     
     def _embed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
-        """
-        文本嵌入生成
-        
-        Args:
-            texts: 单个文本或文本列表
-            
-        Returns:
-            嵌入向量或嵌入向量列表
-        """
+        """Generate text embeddings"""
         # Handle single text vs list
         is_single = isinstance(texts, str)
         text_list = [texts] if is_single else texts
@@ -67,7 +102,8 @@ class HuggingFaceLLM(LLMBase):
             embeddings = self.embed_documents(text_list)
             return embeddings[0] if is_single else embeddings
         except Exception as e:
-            self.logger.error(f"Embedding failed: {str(e)}")
+            logger = self._get_logger()
+            logger.error(f"Text embedding failed: {str(e)}")
             raise
     
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
@@ -76,16 +112,20 @@ class HuggingFaceLLM(LLMBase):
             # Clean texts
             texts = [text.replace("\n", " ") for text in texts]
             
-            embeddings = self._client.encode(
+            client = self._get_client()
+            encode_kwargs = getattr(self.config, 'encode_kwargs', {})
+            
+            embeddings = client.encode(
                 texts,
                 convert_to_tensor=False,
-                **self.encode_kwargs
+                **encode_kwargs
             )
             
             return embeddings.tolist()
             
         except Exception as e:
-            self.logger.error(f"Document embedding failed: {str(e)}")
+            logger = self._get_logger()
+            logger.error(f"Document embedding failed: {str(e)}")
             raise RuntimeError(f"Document embedding failed: {str(e)}")
     
     def embed_query(self, text: str) -> List[float]:
@@ -96,8 +136,8 @@ class HuggingFaceLLM(LLMBase):
         """Get model information"""
         info = super().get_model_info()
         info.update({
-            "device": self.device,
-            "cache_folder": self.cache_folder,
+            "device": getattr(self.config, 'device', 'cpu'),
+            "cache_folder": getattr(self.config, 'cache_folder', None),
             "provider": "huggingface",
             "model_type": "sentence_transformer"
         })

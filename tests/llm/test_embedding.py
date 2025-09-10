@@ -2,16 +2,26 @@
 Simple test to understand how HuggingFace embedding works
 """
 
+from framework.config import AbstractConfig
 from encapsulation.llm.huggingface import HuggingFaceLLM
+from typing import Literal
+
+class HuggingFaceConfig(AbstractConfig):
+    """Configuration for HuggingFace LLM"""
+    type: Literal["huggingface"] = "huggingface"
+    model_name: str = "/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B"
+    device: str = "cuda:0"
+    task_types: list = ["embedding"]
+    
+    def build(self) -> HuggingFaceLLM:
+        return HuggingFaceLLM(self)
 
 def main():
     print("Testing HuggingFace LLM (Embedding)...")
     
-    # Create embedding instance
-    embedding = HuggingFaceLLM(
-        model_name="/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
-        device="cuda:0"
-    )
+    # Create embedding instance using configuration injection
+    config = HuggingFaceConfig()
+    embedding = config.build()
     
     print(f"Model info: {embedding.get_model_info()}")
     print(f"Supports embedding: {embedding.supports_task('embedding')}")
