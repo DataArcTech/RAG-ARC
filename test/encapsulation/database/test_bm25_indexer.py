@@ -1,8 +1,3 @@
-"""
-BM25IndexBuilder 完整测试代码（合并版本）
-
-测试 encapsulation/database/bm25_indexer.py 的所有功能
-"""
 import json
 import os
 import sys
@@ -476,7 +471,7 @@ def test_bm25_index_builder():
             
             # 测试创建检索器
             retriever = builder.as_retriever()
-            print(f"✅ 创建检索器成功: {retriever}")
+            print(f"✅ 创建检索器成功")
             passed_steps.append("retrieval_create_retriever")
             
             # 测试基本检索
@@ -733,11 +728,6 @@ def test_bm25_index_builder():
         print(f"❌ 步骤10失败: {e}")
         failed_steps.append("error_handling_overall")
     
-    # 总结
-    print("\n" + "=" * 60)
-    print("测试结果总结:")
-    print(f"通过的测试步骤: {len(passed_steps)}")
-    print(f"失败的测试步骤: {len(failed_steps)}")
     
     if failed_steps:
         print("\n失败的测试步骤:")
