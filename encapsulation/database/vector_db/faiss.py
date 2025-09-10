@@ -3,10 +3,12 @@ import pickle
 import os
 import uuid
 import numpy as np
-from typing import Any, Optional, List, Tuple, Literal
-from pydantic import Field, field_validator
+from typing import Any, Optional, List, Tuple, Literal, Dict, Union
+from pydantic import Field
+
 
 from encapsulation.database.vector_db.base import BaseVectorDB, BaseVectorDBConfig
+from encapsulation.llm.base import LLMBase
 from core.utils.data_model import Document
 
 
@@ -16,43 +18,28 @@ class FaissVectorDBConfig(BaseVectorDBConfig):
     type: Literal["faiss"] = "faiss"
     
     # index path
-    index_path: Optional[str] = Field(default=None, description="Path to FAISS index file")
-    
-    # FAISS specific configuration
-    index_type: str = Field(default="flat", description="FAISS index type: 'flat', 'ivf', 'hnsw'")
+    index_path: str = Field(default="FaissVectorDB", description="Path to FAISS index file")
+    index_type: Literal["flat", "ivf", "hnsw"] = Field(default="flat", description="FAISS index type: 'flat', 'ivf', 'hnsw'")
+    metric: Literal["cosine", "l2", "ip"] = Field(default="cosine", description="Distance metric: 'cosine', 'l2', 'ip'")
 
-    # Index construction parameters
     nlist: int = Field(default=100, description="Number of clusters for IVF index")
     m: int = Field(default=8, description="Number of connections for HNSW index")
     efConstruction: int = Field(default=40, description="Construction parameter for HNSW index")
     efSearch: int = Field(default=16, description="Search parameter for HNSW index")
-    
     # Training parameters
     train_size: int = Field(default=10000, description="Maximum number of vectors to use for index training")
-      
-    @field_validator("index_type")
-    @classmethod
-    def validate_index_type(cls, v: str) -> str:
-        allowed_types = {"flat", "ivf", "hnsw"}
-        if v not in allowed_types:
-            raise ValueError(f"index_type must be one of {allowed_types}, but got {v}")
-        return v
     
-    @field_validator("metric")
-    @classmethod
-    def validate_metric(cls, v: str) -> str:
-        allowed_metrics = {"cosine", "l2", "ip"}
-        if v not in allowed_metrics:
-            raise ValueError(f"metric must be one of {allowed_metrics}, but got {v}")
-        return v
     
     def build(self):
-        """Build the FAISS Vector Database"""
-        if self.embedding is None:
-            raise ValueError("Embedding model is required but not provided")
-            
-        # embedding 现在应该是已经加载好的模型实例，直接使用
-        return FaissVectorDB(config=self)
+        """
+        Build the FAISS Vector Database
+        """
+        # 获取嵌入模型
+        embedding = self._get_embedding()
+        
+        # 创建向量数据库实例，传入嵌入模型
+        return FaissVectorDB(config=self, embedding=embedding)
+
     
 
 
@@ -74,7 +61,6 @@ class FaissVectorDB(BaseVectorDB[FaissVectorDBConfig]):
     - Dynamic document addition and deletion
     
     Configuration parameters (from config):
-        embedding: Embedding model interface for text vectorization
         index_type (str): FAISS index type ('flat', 'ivf', 'hnsw')
         metric (str): Distance metric ('cosine', 'l2', 'ip')
         normalize_L2 (bool): Whether to normalize vectors for cosine similarity
@@ -85,6 +71,7 @@ class FaissVectorDB(BaseVectorDB[FaissVectorDBConfig]):
         search_kwargs: Additional search parameters
         
     Runtime instance variables:
+        embedding: Embedding model instance for text vectorization
         docstore: Document storage mapping
         index_to_docstore_id: Index to document ID mapping
         index: FAISS index instance
@@ -95,7 +82,7 @@ class FaissVectorDB(BaseVectorDB[FaissVectorDBConfig]):
         - max_marginal_relevance_search: MMR-based diverse search
         - delete: Remove documents by IDs
         - save_local/load_local: Persist and restore index
-        - initialize_from_documents: Create instance from document collection
+        - from_documents: Create instance from document collection
         
     Performance considerations:
         - Flat index: Best for small collections (<10K documents)
@@ -105,17 +92,26 @@ class FaissVectorDB(BaseVectorDB[FaissVectorDBConfig]):
         - Index training required for IVF with sufficient data (>=100 vectors)
         
     Typical usage:
-        >>> config = FaissVectorDBConfig(embedding=embedding_model)
+        >>> config = FaissVectorDBConfig(embedding_ref="my_embedding")
         >>> vs = config.build()
-        >>> vs.initialize_from_documents(documents)
+        >>> vs.from_documents(documents)
         >>> docs = vs.similarity_search("query")
         >>> vs.save_local("./index")
     """
     
-    # Runtime instance variables (initialized when needed)
-    _docstore: Optional[dict[str, 'Document']] = None
-    _index_to_docstore_id: Optional[dict[int, str]] = None
-    _index: Optional[faiss.Index] = None
+    def __init__(self, config: FaissVectorDBConfig, embedding: LLMBase):
+        """Initialize FAISS vector database
+        
+        Args:
+            config: FAISS配置对象
+            embedding: 嵌入模型实例
+        """
+        super().__init__(config=config, embedding=embedding)
+        
+        # 初始化FAISS特有的属性
+        self._docstore: Optional[dict[str, 'Document']] = None
+        self._index_to_docstore_id: Optional[dict[int, str]] = None
+        self._index: Optional[faiss.Index] = None
     
     @property
     def docstore(self) -> dict[str, 'Document']:
@@ -151,22 +147,22 @@ class FaissVectorDB(BaseVectorDB[FaissVectorDBConfig]):
         """Set FAISS index instance"""
         self._index = value
     
-    def load_from_folder(self, folder_path: str):
-        """Initialize this instance by loading from folder
+    def load_local(self):
+        """Initialize this instance by loading from local
         
         Args:
-            folder_path: Directory path containing .faiss and .pkl files
+            index_path: Directory path containing .faiss and .pkl files
         """
         # Find .faiss file
-        faiss_files = [f for f in os.listdir(folder_path) if f.endswith('.faiss')]
+        faiss_files = [f for f in os.listdir(self.config.index_path) if f.endswith('.faiss')]
         if faiss_files:
-            faiss_path = os.path.join(folder_path, faiss_files[0])
+            faiss_path = os.path.join(self.config.index_path, faiss_files[0])
             self.index = faiss.read_index(faiss_path)
         
         # Find .pkl file  
-        pkl_files = [f for f in os.listdir(folder_path) if f.endswith('.pkl')]
+        pkl_files = [f for f in os.listdir(self.config.index_path) if f.endswith('.pkl')]
         if pkl_files:
-            pkl_path = os.path.join(folder_path, pkl_files[0])
+            pkl_path = os.path.join(self.config.index_path, pkl_files[0])
             with open(pkl_path, 'rb') as f:
                 data = pickle.load(f)
                 
@@ -179,7 +175,7 @@ class FaissVectorDB(BaseVectorDB[FaissVectorDBConfig]):
             self.config.metric = data.get("metric", self.config.metric) 
             self.config.normalize_L2 = data.get("normalize_L2", self.config.normalize_L2)
     
-    def initialize_from_documents(self, documents: List[Document]):
+    def from_documents(self, documents: List[Document]):
         """Initialize this instance from documents
         
         Args:
@@ -278,7 +274,7 @@ class FaissVectorDB(BaseVectorDB[FaissVectorDBConfig]):
         ids = [doc.id for doc in doc_list if doc.id is not None]
         
         # Embed documents
-        embeddings = self.config.embedding.embed_documents(texts)
+        embeddings = self.embedding.embed_documents(texts)
         embeddings_np = np.array(embeddings).astype(np.float32)
         
         # Create index if it doesn't exist
@@ -318,6 +314,8 @@ class FaissVectorDB(BaseVectorDB[FaissVectorDBConfig]):
         for i, doc in enumerate(doc_list):
             self.docstore[doc.id] = doc
             self.index_to_docstore_id[start_index + i] = doc.id
+
+        self.save_local(self.config.index_path)
         
         return ids
     
@@ -416,17 +414,17 @@ class FaissVectorDB(BaseVectorDB[FaissVectorDBConfig]):
         with open(os.path.join(index_path, f"{index_name}.pkl"), "wb") as f:
             pickle.dump(data, f)
     
-    def as_retriever(self, **kwargs: Any):
+    def as_retriever(self, k: Optional[int] = None, with_score: Optional[bool] = None, search_kwargs: Optional[Dict[str, Any]] = None, **kwargs: Any):
         """Create a retriever from the current vector database
         
         检索器使用向量数据库中配置的检索参数。
         所有检索相关的配置都在向量数据库配置中定义。
         
         Args:
-            **kwargs: 可选的检索器配置覆盖参数
-                     - k (int): 覆盖默认返回文档数量
-                     - with_score (bool): 覆盖默认分数包含设置
-                     - search_kwargs (dict): 额外搜索参数
+            k: Number of documents to return
+            with_score: Whether to include relevance scores in results
+            search_kwargs: Additional search parameters
+            **kwargs: Additional parameters for retriever configuration
         
         Returns:
             DenseRetriever instance
@@ -437,37 +435,24 @@ class FaissVectorDB(BaseVectorDB[FaissVectorDBConfig]):
         Examples:
             # 创建检索器 - 使用向量数据库中的配置
             retriever = vector_db.as_retriever()
-            
-            # 运行时可以覆盖向量数据库中的默认配置
-            results = retriever.invoke(
-                "查询文本",
-                k=5,                    # 覆盖向量数据库中的默认k值
-                search_type="mmr",      # 指定搜索类型
-                lambda_mult=0.7,        # MMR多样性参数
-                score_threshold=0.8     # 相关性分数阈值
-            )
+            retriever = vector_db.as_retriever(k=5, with_score=True, search_kwargs={"search_type": "mmr"})
         """
         from core.retrieval.dense import DenseRetrieverConfig
         
         if self.index is None:
-            raise RuntimeError("向量数据库未初始化。请先调用 initialize_from_folder() 或 initialize_from_documents() 初始化数据库。")
+            raise RuntimeError("向量数据库未初始化。请先调用 load_local() 或 from_documents() 初始化数据库。")
         
         
-        # 从配置中获取检索参数，允许kwargs覆盖
-        retriever_k = kwargs.get('k', getattr(self.config, 'k', 10))
-        retriever_with_score = kwargs.get('with_score', getattr(self.config, 'with_score', True))
-        retriever_search_kwargs = kwargs.get('search_kwargs', getattr(self.config, 'search_kwargs', {}))
-        
-        # 创建检索器配置，注入运行时依赖
+        runtime_k = k or self.config.k
+        runtime_with_score = with_score or self.config.with_score
+        runtime_search_kwargs = search_kwargs or self.config.search_kwargs.copy()
+
         retriever_config = DenseRetrieverConfig(
-            # 注入运行时依赖
             vectorstore=self,
             metric=self.config.metric,
-            
-            # 从向量数据库配置中获取检索参数
-            k=retriever_k,
-            with_score=retriever_with_score,
-            search_kwargs=retriever_search_kwargs.copy()
+            k=runtime_k,
+            with_score=runtime_with_score,
+            search_kwargs=runtime_search_kwargs.copy()
         )
         
         # 创建并返回检索器
@@ -489,7 +474,7 @@ class FaissVectorDB(BaseVectorDB[FaissVectorDBConfig]):
             List of documents most similar to query
         """
         # Embed query
-        query_embedding = self.config.embedding.embed_query(query)
+        query_embedding = self.embedding.embed_query(query)
         return self.similarity_search_by_vector(query_embedding, k, **kwargs)
     
     def similarity_search_by_vector(self, embedding: List[float], k: int = 4, **kwargs: Any) -> List['Document']:
@@ -590,7 +575,7 @@ class FaissVectorDB(BaseVectorDB[FaissVectorDBConfig]):
             List of (document, distance_score) tuples
         """
         # Embed query
-        query_embedding = self.config.embedding.embed_query(query)
+        query_embedding = self.embedding.embed_query(query)
         return self.similarity_search_by_vector_with_score(query_embedding, k, **kwargs)
     
     def _select_relevance_score_fn(self):
@@ -627,7 +612,7 @@ class FaissVectorDB(BaseVectorDB[FaissVectorDBConfig]):
             return []
         
         # Embed query
-        query_embedding = self.config.embedding.embed_query(query)
+        query_embedding = self.embedding.embed_query(query)
         
         # Get candidate documents
         docs_and_scores = self.similarity_search_by_vector_with_score(
@@ -641,7 +626,7 @@ class FaissVectorDB(BaseVectorDB[FaissVectorDBConfig]):
         candidate_embeddings = []
         for doc, _ in docs_and_scores:
             # Re-embed document content (in practice, you might want to cache these)
-            doc_embedding = self.config.embedding.embed_query(doc.content)
+            doc_embedding = self.embedding.embed_query(doc.content)
             candidate_embeddings.append(doc_embedding)
         
         # Normalize embeddings for cosine similarity
@@ -666,3 +651,9 @@ class FaissVectorDB(BaseVectorDB[FaissVectorDBConfig]):
         
         return selected_docs
 
+
+# 解决前向引用（字符串）
+try:
+    FaissVectorDBConfig.model_rebuild()
+except Exception:
+    pass

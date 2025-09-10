@@ -10,14 +10,24 @@ from typing import (
     List,
     Generic,
     Literal,
+    TYPE_CHECKING,
+    Annotated,
+    Union,
+    Dict,
 )
 import asyncio
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from encapsulation.llm.base import LLMBase
 from core.utils.data_model import Document
 from framework.config import AbstractConfig
 from framework.module import AbstractModule
+from framework.shared_module_decorator import shared_module
+
+
+from encapsulation.llm.huggingface import HuggingFaceEmbedConfig
+from encapsulation.llm.openai import OpenAIConfig
+from encapsulation.llm.qwen3 import QwenConfig
 
 logger = logging.getLogger(__name__)
 
@@ -29,34 +39,60 @@ class BaseVectorDBConfig(AbstractConfig):
     Abstract base class for all vector database configurations.
     - Subclasses must define `type: Literal["xxx"]`
     - Subclasses must implement build() to return the corresponding VectorDB
+    
+    嵌入模型配置：
+    - embedding_config: 内联配置嵌入模型（支持共享实例）
+    
+    注意: 使用 @shared_module 装饰器，相同配置的向量数据库实例会被自动共享
     """
     type: Literal["base_vector_db"] = "base_vector_db"
 
+    index_path: Optional[str] = Field(default=None, description="Path to vector database index file")
 
-    k: int = Field(default=10, description="Default number of documents to return in search", gt=0)
-    with_score: bool = Field(default=True, description="Whether to include relevance scores in results")
-    search_kwargs: dict = Field(default_factory=dict, description="Additional search parameters for retrieval")
-    
     # Vector database specific configuration parameters
     metric: str = Field(default="cosine", description="Distance metric for similarity calculation")
     normalize_L2: bool = Field(default=False, description="Whether to normalize vectors for cosine similarity")
-    search_params: dict = Field(default_factory=dict, description="Parameters for search operations")
     
-    # embedding model instance
-    embedding: Optional[LLMBase] = Field(default=None, description="已加载的嵌入模型实例用于文本向量化", exclude=True)
+    # Runtime search configuration
+    k: int = Field(default=10, description="Default number of documents to return in search", gt=0, exclude=True)
+    with_score: bool = Field(default=True, description="Whether to include relevance scores in results", exclude=True)
+    search_kwargs: Dict[str, Any] = Field(
+        default_factory=lambda: {"use_phrase_query": False}, 
+        description="Additional search parameters including use_phrase_query",
+        exclude=True
+    )
+    
+    embedding_config: HuggingFaceEmbedConfig = Field(
+        description="内联配置嵌入模型（支持共享实例）"
+    )
 
+    
+    @model_validator(mode='after')
+    def validate_embedding_config(self) -> 'BaseVectorDBConfig':
+        """确保嵌入模型配置已提供"""
+        if self.embedding_config is None:
+            raise ValueError("embedding_config is required")
+        return self
 
-    @field_validator("k")
-    @classmethod
-    def validate_k(cls, v: int) -> int:
-        if v <= 0:
-            raise ValueError(f"k must be greater than 0, but got {v}")
-        return v
+    def _get_embedding(self) -> LLMBase:
+        """获取嵌入模型实例
+
+        Returns:
+            LLMBase: 嵌入模型实例
+            
+        Raises:
+            ValueError: 当配置无效时
+        """
+        return self.embedding_config.build()
+
 
     @abstractmethod
     def build(self) -> "BaseVectorDB":
-        """Build the vector database"""
+        """Build the vector database
+        """
         raise NotImplementedError("Subclasses must implement build() method")
+
+
 
 
 class BaseVectorDB(AbstractModule, Generic[ConfigType], ABC):
@@ -76,13 +112,23 @@ class BaseVectorDB(AbstractModule, Generic[ConfigType], ABC):
     
     config: ConfigType
     
-    def __init__(self, config: ConfigType):
+    def __init__(self, config: ConfigType, embedding: LLMBase):
         """Initialize the vector database
         
         Args:
             config: Configuration object containing all parameters
+            embedding: 嵌入模型实例（由配置类的build方法传入）
         """
         super().__init__(config=config)
+        self.embedding = embedding
+    
+    def get_default_search_config(self) -> dict:
+        """获取默认搜索配置
+        
+        Returns:
+            dict: 默认搜索配置，包含k、with_score、search_kwargs等参数
+        """
+        return self.config.default_search_config.copy()
     
     @abstractmethod
     def add_documents(self, documents: List[Document]) -> List[str]:
@@ -178,26 +224,26 @@ class BaseVectorDB(AbstractModule, Generic[ConfigType], ABC):
         pass
 
     @abstractmethod
-    def save_local(self, folder_path: str, index_name: str = "index") -> None:
+    def save_local(self, index_path: str, index_name: str = "index") -> None:
         """Save vector database to local filesystem
         
         Args:
-            folder_path: Directory path to save the vector database
+            index_path: Directory path to save the vector database
             index_name: Base name for saved files (without extension)
         """
         pass
 
     @abstractmethod
-    def load_from_folder(self, folder_path: str) -> None:
-        """Initialize this instance by loading from folder(from saved files)
+    def load_local(self, index_path: str) -> None:
+        """Initialize this instance by loading from local(from saved files)
         
         Args:
-            folder_path: Directory path containing saved vector database files
+            index_path: Directory path containing saved vector database files
         """
         pass
 
     @abstractmethod
-    def initialize_from_documents(self, documents: List[Document]) -> None:
+    def from_documents(self, documents: List[Document]) -> None:
         """Initialize this instance from documents(from scratch)
         
         Args:
@@ -205,12 +251,15 @@ class BaseVectorDB(AbstractModule, Generic[ConfigType], ABC):
         """
         pass
 
-    def as_retriever(self, **kwargs: Any):
+    def as_retriever(self, k: Optional[int] = None, with_score: Optional[bool] = None, search_kwargs: Optional[Dict[str, Any]] = None, **kwargs: Any):
         """Return a BaseRetriever from this vector database
         
         Args:
+            k: Number of documents to return
+            with_score: Whether to include relevance scores in results
+            search_kwargs: Additional search parameters
             **kwargs: Additional parameters for retriever configuration
-            
+
         Returns:
             BaseRetriever instance configured with this vector database
         """
@@ -220,10 +269,17 @@ class BaseVectorDB(AbstractModule, Generic[ConfigType], ABC):
         except ImportError:
             raise ImportError("BaseRetriever not available. Make sure core.retrieval.base is properly installed.")
         
+        runtime_k = k or self.config.k
+        runtime_with_score = with_score or self.config.with_score
+        runtime_search_kwargs = search_kwargs or self.config.search_kwargs.copy()
+
         # Create retriever configuration
         retriever_config = BaseRetrieverConfig(
             vectorstore=self,
-            **kwargs
+            k=runtime_k,
+            with_score=runtime_with_score,
+            search_kwargs=runtime_search_kwargs,
+            **kwargs,
         )
         
         return retriever_config.build()
@@ -232,3 +288,9 @@ class BaseVectorDB(AbstractModule, Generic[ConfigType], ABC):
         """Get the vector database's unique name from its config 'type' field."""
         return self.config.type
 
+
+# 解决前向引用（字符串）
+try:
+    BaseVectorDBConfig.model_rebuild()
+except Exception:
+    pass
