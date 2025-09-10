@@ -2,23 +2,26 @@ from encapsulation.llm.base import LLMBase, LLMBaseConfig
 from typing import Union, List, Dict, Any, Optional, Tuple, Literal, TYPE_CHECKING
 from pydantic import Field
 from dataclasses import dataclass
+from framework.shared_module_decorator import shared_module
 
 if TYPE_CHECKING:
     from core.utils.data_model import Document
 
-
-
+@shared_module
 class HuggingFaceEmbedConfig(LLMBaseConfig):
     """
     HuggingFace embedding model configuration
     """
     type: Literal["huggingface_embedding"] = "huggingface_embedding"
+    task_types: Literal["embedding"] = Field(default="embedding", description="Supported task types")
+
+
     device: str = Field(default="cpu", description="Device to use for embedding")
     cache_folder: Optional[str] = Field(default=None, description="Cache folder for embedding model")
     model_kwargs: Optional[Dict[str, Any]] = Field(default=None, description="Model kwargs for embedding model")
     encode_kwargs: Optional[Dict[str, Any]] = Field(default=None, description="Encode kwargs for embedding model")
     
-    def build(self) -> "HuggingFaceEmbed":
+    def build(self, **kwargs) -> "HuggingFaceEmbed":
         """Build the HuggingFace embedding model"""
         return HuggingFaceEmbed(config=self)
 
