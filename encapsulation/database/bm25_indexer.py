@@ -66,17 +66,18 @@ class BM25IndexBuilderConfig(AbstractConfig):
     enable_gc: bool = Field(default=True, description="Whether to enable garbage collection")
     queue_maxsize: int = Field(default=1000, description="Maximum size of the processing queue")
     
-    # Retrieval configuration
-    k: int = Field(default=10, description="Default number of documents to return in search", gt=0)
-    with_score: bool = Field(default=True, description="Whether to include relevance scores in results")
-    search_kwargs: Dict[str, Any] = Field(
-        default_factory=lambda: {"use_phrase_query": False}, 
-        description="Additional search parameters including use_phrase_query"
-    )
-    
-    # Runtime dependencies (not serializable to JSON)
+
+    # Runtime-only
     preprocess_func: Optional[Callable[[str], List[str]]] = Field(default=None, exclude=True)
     progress_callback: Optional[Callable] = Field(default=None, exclude=True)
+
+    k: int = Field(default=10, description="Default number of documents to return in search", gt=0, exclude=True)
+    with_score: bool = Field(default=True, description="Whether to include relevance scores in results", exclude=True)
+    search_kwargs: Dict[str, Any] = Field(
+        default_factory=lambda: {"use_phrase_query": False}, 
+        description="Additional search parameters including use_phrase_query",
+        exclude=True
+    )
     
     @field_validator("bm25_k1")
     @classmethod
@@ -768,11 +769,11 @@ class BM25IndexBuilder(AbstractModule):
 
 
 
-    def as_retriever(self) -> "TantivyBM25Retriever":
+    def as_retriever(self, k: Optional[int] = None, with_score: Optional[bool] = None, search_kwargs: Optional[Dict[str, Any]] = None) -> "TantivyBM25Retriever":
         """Create a retriever from the current index
         
-        检索器使用索引中配置的检索参数。
-        所有检索相关的配置都在BM25IndexBuilderConfig中定义。
+        The retriever uses the retrieval parameters configured in the index.
+        All retrieval-related configurations are defined in BM25IndexBuilderConfig.
         
         Returns:
             TantivyBM25Retriever instance
@@ -781,34 +782,37 @@ class BM25IndexBuilder(AbstractModule):
             RuntimeError: If index is not initialized
             
         Examples:
-            # 创建检索器 - 使用索引中的配置
+            # Create retriever - uses configuration from the index
             retriever = builder.as_retriever()
             
-            # 运行时可以覆盖索引中的默认配置
+            # Runtime can override default configuration from the index
             results = retriever.invoke(
-                "查询文本",
-                k=5,                    # 覆盖索引中的默认k值
-                use_phrase_query=True,  # 覆盖索引中的默认设置
+                "query text",
+                k=5,                    # Override default k value from index
+                use_phrase_query=True,  # Override default setting from index
                 filters={"category": "tech"}
             )
         """
         self._ensure_index_loaded()
         self._index.reload()
         
-        # 创建简化的检索器配置，使用索引中的配置参数
+        runtime_k = k or self.config.k
+        runtime_with_score = with_score or self.config.with_score
+        runtime_search_kwargs = search_kwargs or self.config.search_kwargs.copy()
+        # Create simplified retriever configuration using parameters from index configuration
         retriever_config = TantivyBM25RetrieverConfig(
-            # 注入运行时依赖
+            # Inject runtime dependencies
             index=self._index,
             preprocess_func=self.tokenizer_manager.get_current_tokenizer(),
             stopwords=self.tokenizer_manager.get_stopwords(),
             
-            # 从索引配置中获取检索参数
-            k=self.config.k,
-            with_score=self.config.with_score,
-            search_kwargs=self.config.search_kwargs.copy()
+            # Get retrieval parameters from index configuration
+            k=runtime_k,
+            with_score=runtime_with_score,
+            search_kwargs=runtime_search_kwargs
         )
         
-        # 创建并返回检索器
+        # Create and return retriever
         retriever = retriever_config.build()
         retriever.reload_searcher()
         
