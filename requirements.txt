@@ -1,3 +1,6 @@
 dill
 faiss-gpu; python_version<="3.12"
 tantivy
+sentence-transformers
+jieba
+openai
