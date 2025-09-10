@@ -1,33 +1,24 @@
 from typing import List
-from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from collections import defaultdict
 
 from core.utils.data_model import Document
 
 
-@dataclass
-class RetrievalResult:
-    """检索结果的数据类"""
-    document: Document
-    score: float
-    rank: int = 0
-
-
 class FusionMethod(ABC):
     """融合方法的抽象基类"""
     
     @abstractmethod
-    def fuse(self, results: List[List[RetrievalResult]], top_k: int) -> List[RetrievalResult]:
+    def fuse(self, results: List[List[Document]], top_k: int) -> List[Document]:
         """
         融合多个检索器的结果
         
         Args:
-            results: 每个检索器的结果列表
+            results: 每个检索器的结果列表，每个列表包含Document对象
             top_k: 返回的最终结果数量
             
         Returns:
-            融合后的结果列表
+            融合后的Document列表，分数存储在metadata['score']中
         """
         pass
 
@@ -42,35 +33,31 @@ class RRFusion(FusionMethod):
         """
         self.k = k
     
-    def fuse(self, results: List[List[RetrievalResult]], top_k: int) -> List[RetrievalResult]:
-        # 为每个结果分配rank
-        for retriever_results in results:
-            for i, result in enumerate(retriever_results):
-                result.rank = i + 1
-        
+    def fuse(self, results: List[List[Document]], top_k: int) -> List[Document]:
         # 计算RRF分数
         rrf_scores = defaultdict(float)
         document_map = {}
         
         for retriever_results in results:
-            for result in retriever_results:
-                rrf_score = 1.0 / (self.k + result.rank)
+            for rank, document in enumerate(retriever_results, 1):  # rank从1开始
+                rrf_score = 1.0 / (self.k + rank)
                 # 使用文档内容作为key来去重
-                content_key = result.document.content
+                content_key = document.content
                 rrf_scores[content_key] += rrf_score
-                document_map[content_key] = result.document
+                document_map[content_key] = document
         
         # 按RRF分数排序
         sorted_items = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
         
-        # 构建最终结果
-        fused_results = []
-        for i, (content, rrf_score) in enumerate(sorted_items[:top_k]):
-            result = RetrievalResult(
-                document=document_map[content],
-                score=rrf_score,
-                rank=i + 1
-            )
-            fused_results.append(result)
+        # 构建最终结果，将分数放到文档的metadata中
+        fused_documents = []
+        for content, rrf_score in sorted_items[:top_k]:
+            document = document_map[content]
+            # 将RRF分数添加到文档的metadata中
+            if document.metadata is None:
+                document.metadata = {}
+            document.metadata["score"] = rrf_score
+            
+            fused_documents.append(document)
         
-        return fused_results
+        return fused_documents
