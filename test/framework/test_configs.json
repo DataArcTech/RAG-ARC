@@ -5,8 +5,10 @@
     "bm25_k1": 1.2,
     "bm25_b": 0.75,
     "batch_size": 10,
-    "retrieval_k": 5,
-    "retrieval_use_phrase_query": false,
-    "retrieval_with_score": true
+    "k": 5,
+    "with_score": true,
+    "search_kwargs": {
+      "use_phrase_query": false
+    }
   }
 }
