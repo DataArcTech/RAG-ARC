@@ -19,11 +19,7 @@ class LLMBase(AbstractModule):
     Unified model base class supporting multiple task types
     Supports: chat, embedding, reranking
     """
-    
-    def _setup_logging(self):
-        """Setup logging configuration"""
-        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
-    
+
     def supports_task(self, task_type: str) -> bool:
         """Check if specified task type is supported"""
         task_types = getattr(self.config, 'task_types', ['chat'])

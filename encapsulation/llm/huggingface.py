@@ -1,10 +1,13 @@
 from .base import LLMBase
 from typing import Union, List, Dict, Any, Optional, Tuple, TYPE_CHECKING
+import logging
 
 from framework.shared_module_decorator import shared_module
 
 if TYPE_CHECKING:
     from .document import Document
+
+logger = logging.getLogger(__name__)
 
 @shared_module
 class HuggingFaceLLM(LLMBase):
@@ -54,17 +57,9 @@ class HuggingFaceLLM(LLMBase):
     """
     
     
-    def _get_logger(self):
-        """Get or create logger instance"""
-        if not hasattr(self, '_logger') or self._logger is None:
-            import logging
-            self._logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
-        return self._logger
-    
     def _get_client(self):
         """Get or create sentence transformer client"""
         if not hasattr(self, '_client') or self._client is None:
-            logger = self._get_logger()
             
             try:
                 import sentence_transformers
@@ -102,7 +97,6 @@ class HuggingFaceLLM(LLMBase):
             embeddings = self.embed_documents(text_list)
             return embeddings[0] if is_single else embeddings
         except Exception as e:
-            logger = self._get_logger()
             logger.error(f"Text embedding failed: {str(e)}")
             raise
     
@@ -124,7 +118,6 @@ class HuggingFaceLLM(LLMBase):
             return embeddings.tolist()
             
         except Exception as e:
-            logger = self._get_logger()
             logger.error(f"Document embedding failed: {str(e)}")
             raise RuntimeError(f"Document embedding failed: {str(e)}")
     

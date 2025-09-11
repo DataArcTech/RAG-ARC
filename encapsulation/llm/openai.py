@@ -1,9 +1,12 @@
 from .base import LLMBase
 from typing import Dict, Any, List, Optional, Union, Tuple, TYPE_CHECKING
 import openai
+import logging
 
 if TYPE_CHECKING:
     from .document import Document
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAILLM(LLMBase):
@@ -57,17 +60,9 @@ class OpenAILLM(LLMBase):
     """
     
     
-    def _get_logger(self):
-        """Get or create logger instance"""
-        if not hasattr(self, '_logger') or self._logger is None:
-            import logging
-            self._logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
-        return self._logger
-    
     def _get_client(self):
         """Get or create OpenAI client"""
         if not hasattr(self, '_client') or self._client is None:
-            logger = self._get_logger()
             
             # Extract OpenAI-specific config parameters
             api_key = getattr(self.config, 'api_key', None)
@@ -140,7 +135,6 @@ class OpenAILLM(LLMBase):
                 return result
                 
         except Exception as e:
-            logger = self._get_logger()
             logger.error(f"Chat completion failed: {str(e)}")
             raise
     
@@ -216,7 +210,6 @@ class OpenAILLM(LLMBase):
                     yield token_stats
                     
         except Exception as e:
-            logger = self._get_logger()
             logger.error(f"Streaming chat failed: {str(e)}")
             raise
     
@@ -266,7 +259,6 @@ class OpenAILLM(LLMBase):
             return embeddings[0] if is_single else embeddings
             
         except Exception as e:
-            logger = self._get_logger()
             logger.error(f"Embedding failed: {str(e)}")
             raise RuntimeError(f"Embedding failed: {str(e)}")
     
@@ -293,19 +285,15 @@ class OpenAILLM(LLMBase):
             model_names = [model.id for model in models.data]
             return model_names
         except openai.AuthenticationError as e:
-            logger = self._get_logger()
             logger.error(f"Authentication failed when getting available models: {e}")
             return []
         except openai.APIConnectionError as e:
-            logger = self._get_logger()
             logger.error(f"API connection error when getting available models: {e}")
             return []
         except openai.RateLimitError as e:
-            logger = self._get_logger()
             logger.warning(f"Rate limit exceeded when getting available models: {e}")
             return []
         except Exception as e:
-            logger = self._get_logger()
             logger.error(f"Unexpected error when getting available models: {e}")
             return []
     

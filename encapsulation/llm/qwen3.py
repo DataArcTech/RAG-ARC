@@ -1,6 +1,9 @@
 from .base import LLMBase
 from .document import Document
 from typing import List, Dict, Any, Optional, Tuple, Union
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class QwenLLM(LLMBase):
@@ -53,17 +56,9 @@ class QwenLLM(LLMBase):
     """
     
     
-    def _get_logger(self):
-        """Get or create logger instance"""
-        if not hasattr(self, '_logger') or self._logger is None:
-            import logging
-            self._logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
-        return self._logger
-    
     def _get_client(self):
         """Get or create Qwen client and tokenizer"""
         if not hasattr(self, '_client') or self._client is None:
-            logger = self._get_logger()
             
             try:
                 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -85,7 +80,7 @@ class QwenLLM(LLMBase):
                     model_name,
                     cache_dir=cache_folder,
                     trust_remote_code=True,
-                    dtype=torch.float16,
+                    torch_dtype=torch.float16,
                     **model_kwargs
                 )
                 self._client.to(device)
@@ -219,7 +214,6 @@ class QwenLLM(LLMBase):
             return ranked_docs
             
         except Exception as e:
-            logger = self._get_logger()
             logger.error(f"Reranking failed: {str(e)}")
             raise RuntimeError(f"Reranking failed: {str(e)}")
     
