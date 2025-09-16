@@ -276,8 +276,8 @@ class DenseRetriever(BaseRetriever[DenseRetrieverConfig]):
     ) -> List[Document]:
         """执行搜索并返回相关文档"""
         # Use configuration defaults
-        k = k if k is not None else self.config.k
-        with_score = with_score if with_score is not None else self.config.with_score
+        k = k if k is not None else self.config.search_kwargs.get("k", 5)
+        with_score = with_score if with_score is not None else self.config.search_kwargs.get("with_score", False)
         
         # Validate parameters
         if k <= 0:
@@ -348,8 +348,8 @@ class DenseRetriever(BaseRetriever[DenseRetrieverConfig]):
         info = {
             "vectorstore_class": vectorstore.__class__.__name__,
             "metric": self.config.metric,
-            "k": self.config.k,
-            "with_score": self.config.with_score,
+            "k": self.config.search_kwargs.get("k", 5),
+            "with_score": self.config.search_kwargs.get("with_score", False),
             "search_kwargs": self.config.search_kwargs,
             "allowed_search_types": list(self.allowed_search_types),
         }
