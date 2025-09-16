@@ -3,10 +3,10 @@ from typing import Dict, Any, List, Optional, Union, Tuple, TYPE_CHECKING, Liter
 from pydantic import Field
 import openai
 from dataclasses import dataclass
+from framework.shared_module_decorator import shared_module
 
 if TYPE_CHECKING:
     from core.utils.data_model import Document
-
 
 class OpenAIConfig(LLMBaseConfig):
     """
@@ -28,7 +28,7 @@ class OpenAIConfig(LLMBaseConfig):
         return OpenAILLM(config=self)
 
 
-@dataclass
+@shared_module
 class OpenAILLM(LLMBase[OpenAIConfig]):
     """
     Unified OpenAI LLM supporting both chat and embeddings
@@ -43,6 +43,14 @@ class OpenAILLM(LLMBase[OpenAIConfig]):
         
         # Single OpenAI client for all operations
         self.client = openai.OpenAI(
+            api_key=self.config.api_key,
+            base_url=self.config.base_url,
+            organization=self.config.organization,
+            max_retries=self.config.max_retries,
+            timeout=self.config.timeout
+        )
+
+        self.async_client = openai.AsyncOpenAI(
             api_key=self.config.api_key,
             base_url=self.config.base_url,
             organization=self.config.organization,
@@ -197,7 +205,95 @@ class OpenAILLM(LLMBase[OpenAIConfig]):
         except Exception as e:
             self.logger.error(f"Streaming chat failed: {str(e)}")
             raise
-    
+
+
+    async def achat(
+        self, 
+        messages: List[Dict[str, str]], 
+        max_tokens: Optional[int] = None, 
+        temperature: Optional[float] = None, 
+        return_token_count: bool = False, 
+        **kwargs
+        ) -> Union[str, Tuple[str, Dict[str, int]]]:
+        """
+        Async chat completion
+        """
+        self.validate_task_support('chat')
+        return await self._achat(messages, max_tokens, temperature, return_token_count, **kwargs)
+
+    async def astream_chat(
+        self, 
+        messages: List[Dict[str, str]], 
+        max_tokens: Optional[int] = None, 
+        temperature: Optional[float] = None, 
+        return_token_count: bool = False, 
+        **kwargs
+        ):
+        self.validate_task_support('chat')
+        return await self._astream_chat(messages, max_tokens, temperature, return_token_count, **kwargs)
+
+    async def _achat(
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        return_token_count: bool = False,
+        **kwargs
+    ) -> Union[str, Tuple[str, Dict[str, int]]]:
+
+        try:
+            response = await self.async_client.chat.completions.create(
+                model=self.config.model_name,
+                messages=messages,
+                max_tokens=max_tokens or self.config.default_max_tokens,
+                temperature=temperature or self.config.default_temperature,
+                **kwargs
+            )
+            result = response.choices[0].message.content
+            if return_token_count:
+                return result, self._get_token_stats(response.usage)
+            return result
+
+        except Exception as e:
+            self.logger.error(f"异步对话生成失败: {str(e)}")
+            raise
+
+    async def _astream_chat(
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        return_token_count: bool = False,
+        **kwargs
+    ):
+
+        try:
+            params = {}
+            if return_token_count:
+                params["stream_options"] = {"include_usage": True}
+
+            stream = await self.async_client.chat.completions.create(
+                model=self.config.model_name,
+                messages=messages,
+                max_tokens=max_tokens or self.config.default_max_tokens,
+                temperature=temperature or self.config.default_temperature,
+                stream=True,
+                **params,
+                **kwargs
+            )
+
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content is not None:
+                    yield chunk.choices[0].delta.content
+
+                if return_token_count and getattr(chunk, "usage", None):
+                    yield self._get_token_stats(chunk.usage)
+
+        except Exception as e:
+            self.logger.error(f"异步流式对话生成失败: {str(e)}")
+            raise
+
+
     # ==================== EMBEDDING IMPLEMENTATION ====================
     
     def _embed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:

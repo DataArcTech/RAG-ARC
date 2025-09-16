@@ -2,7 +2,9 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from core.rerank.base import RerankerBase
 from core.utils.data_model import Document
+from framework.shared_module_decorator import shared_module
 
+@shared_module
 class Qwen3Reranker(RerankerBase):
     def __init__(self, model_name_or_path: str, max_length: int = 4096, instruction=None, attn_type='causal', device_id="cuda:0", **kwargs):
         super().__init__()

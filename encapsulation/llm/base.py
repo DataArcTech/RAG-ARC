@@ -79,7 +79,32 @@ class LLMBase(AbstractModule, Generic[ConfigType], ABC):
         """Internal chat implementation"""
         pass
 
-    def stream_chat(
+    async def achat(
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        return_token_count: bool = False,
+        **kwargs
+    ) -> str:
+        """
+        Async chat completion
+        """
+        self.validate_task_support('chat')
+        return self._achat(messages, max_tokens, temperature, **kwargs)
+    
+    @abstractmethod
+    def _achat(
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        **kwargs
+    ) -> str:
+        """Internal async chat implementation"""
+        pass
+
+    async def astream_chat(
         self,
         messages: List[Dict[str, str]], 
         max_tokens: Optional[int] = None,
@@ -90,10 +115,10 @@ class LLMBase(AbstractModule, Generic[ConfigType], ABC):
         Streaming chat completion
         """
         self.validate_task_support('chat')
-        return self._stream_chat(messages, max_tokens, temperature, **kwargs)
+        return self._astream_chat(messages, max_tokens, temperature, **kwargs)
     
     @abstractmethod
-    def _stream_chat(
+    def _astream_chat(
         self,
         messages: List[Dict[str, str]], 
         max_tokens: Optional[int] = None,

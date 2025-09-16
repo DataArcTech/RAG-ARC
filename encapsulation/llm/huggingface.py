@@ -3,11 +3,13 @@ from typing import Union, List, Dict, Any, Optional, Tuple, Literal, TYPE_CHECKI
 from pydantic import Field
 from dataclasses import dataclass
 from framework.shared_module_decorator import shared_module
+from framework.module import AbstractModule
+import sentence_transformers
 
 if TYPE_CHECKING:
     from core.utils.data_model import Document
 
-@shared_module
+
 class HuggingFaceEmbedConfig(LLMBaseConfig):
     """
     HuggingFace embedding model configuration
@@ -21,14 +23,13 @@ class HuggingFaceEmbedConfig(LLMBaseConfig):
     model_kwargs: Optional[Dict[str, Any]] = Field(default=None, description="Model kwargs for embedding model")
     encode_kwargs: Optional[Dict[str, Any]] = Field(default=None, description="Encode kwargs for embedding model")
     
-    def build(self, **kwargs) -> "HuggingFaceEmbed":
+    def build(self) -> "HuggingFaceEmbed":
         """Build the HuggingFace embedding model"""
-        return HuggingFaceEmbed(config=self)
+        return HuggingFaceEmbed(self)
 
 
 
-
-@dataclass
+@shared_module
 class HuggingFaceEmbed(LLMBase[HuggingFaceEmbedConfig]):
     """
     HuggingFace embedding model implementation
@@ -37,8 +38,10 @@ class HuggingFaceEmbed(LLMBase[HuggingFaceEmbedConfig]):
     
     config: HuggingFaceEmbedConfig
     
-    def __post_init__(self):
+    def __init__(self, config: HuggingFaceEmbedConfig):
         """Initialize after config is set"""
+        super().__init__(config=config)
+        self.config = config
         self._setup_logging()
         self._client = None
         # Initialize embedding model
@@ -47,7 +50,6 @@ class HuggingFaceEmbed(LLMBase[HuggingFaceEmbedConfig]):
     def _init_model(self):
         """Initialize sentence transformer for embedding"""
         try:
-            import sentence_transformers
             model_kwargs = self.config.model_kwargs or {}
             self._client = sentence_transformers.SentenceTransformer(
                 self.config.model_name,
@@ -121,6 +123,13 @@ class HuggingFaceEmbed(LLMBase[HuggingFaceEmbedConfig]):
     def _chat(self, messages, max_tokens=None, temperature=None, **kwargs):
         """HuggingFace embedding models don't support chat"""
         raise NotImplementedError("HuggingFace embedding models do not support chat")
+
+    def _achat(self, messages: List[Dict[str, str]], max_tokens: Optional[int] = None, temperature: Optional[float] = None, **kwargs) -> str:
+        raise NotImplementedError("HuggingFace embedding models do not support async chat")
+    
+    async def _astream_chat(self, messages: List[Dict[str, str]], max_tokens: Optional[int] = None, temperature: Optional[float] = None, **kwargs) -> str:
+        """HuggingFace embedding models don't support streaming chat"""
+        raise NotImplementedError("HuggingFace embedding models do not support streaming chat")
     
     def _stream_chat(self, messages, max_tokens=None, temperature=None, **kwargs):
         """HuggingFace embedding models don't support streaming chat"""
