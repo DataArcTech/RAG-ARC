@@ -1,0 +1,21 @@
+{
+    "type": "dense",
+    "index_config": {
+        "type": "faiss",
+        "index_path": "./data/unified_faiss_index",
+        "dimension": 768,
+        "metric": "cosine",
+        "index_type": "flat",
+        "normalize_L2": true
+    },
+    "embedding_config": {
+        "type": "huggingface_embedding",
+        "model_name": "sentence-transformers/all-MiniLM-L6-v2",
+        "device": "cpu"
+    },
+    "search_kwargs": {
+        "k": 5,
+        "with_score": true,
+        "score_threshold": null
+    }
+}

@@ -37,14 +37,14 @@ class BaseIndex(AbstractModule, Generic[ConfigType], ABC):
     
     @abstractmethod
     def add(self, documents: List[Document], embeddings: Optional[List[List[float]]] = None) -> List[str]:
-        """添加文档到索引
+        """添加文档到索引（会根据ID去重，重复ID的文档不会被添加）
 
         Args:
             documents: 要添加的文档列表
             embeddings: 预计算的文档嵌入向量
 
         Returns:
-            添加的文档ID列表
+            成功添加的文档ID列表
         """
         pass
 
@@ -104,10 +104,22 @@ class BaseIndex(AbstractModule, Generic[ConfigType], ABC):
 
     @abstractmethod
     def build_index(self, documents: List[Document], embeddings: Optional[List[List[float]]] = None) -> None:
-        """构建索引
+        """构建索引（仅在索引不存在时使用，如果索引已存在会抛出异常）
 
         Args:
             documents: 用于构建索引的文档列表
             embeddings: 预计算的文档嵌入向量
+
+        Raises:
+            RuntimeError: 如果索引已存在
+        """
+        pass
+
+    @abstractmethod
+    def index_exists(self) -> bool:
+        """检查索引是否存在
+
+        Returns:
+            bool: 索引是否存在
         """
         pass

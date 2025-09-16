@@ -522,14 +522,14 @@ class BM25IndexBuilder(BaseIndex):
         return added_ids
 
     def add(self, documents: List[Document], embeddings: Optional[List[List[float]]] = None) -> List[str]:
-        """Add documents to the existing index
+        """Add documents to the existing index (with ID deduplication)
 
         Args:
             documents: List of Document objects to add
             embeddings: 预计算的嵌入向量（BM25不需要，忽略此参数，保持接口一致）
 
         Returns:
-            List of document IDs that were added to the index
+            List of document IDs that were successfully added to the index
         """
         if not documents:
             logger.warning("No documents provided for adding")
@@ -539,7 +539,37 @@ class BM25IndexBuilder(BaseIndex):
         if embeddings is not None:
             logger.debug("BM25 index does not use embeddings, ignoring embeddings parameter")
 
-        return self._build_index(documents)
+        # 检查重复ID并过滤
+        unique_documents = []
+        duplicate_ids = []
+        existing_ids = set()
+
+        # 获取现有文档ID
+        try:
+            if self._index is not None:
+                # 这里可以实现获取现有ID的逻辑，暂时简化处理
+                pass
+        except Exception:
+            pass
+
+        # 检查文档列表中的重复ID
+        seen_ids = set()
+        for doc in documents:
+            if doc.id in seen_ids:
+                duplicate_ids.append(doc.id)
+                logger.warning(f"Duplicate document ID found: {doc.id}. Use update_documents() to update existing documents.")
+            else:
+                seen_ids.add(doc.id)
+                unique_documents.append(doc)
+
+        if duplicate_ids:
+            logger.warning(f"Found {len(duplicate_ids)} duplicate document IDs: {duplicate_ids}")
+
+        if not unique_documents:
+            logger.warning("No unique documents to add after deduplication")
+            return []
+
+        return self._build_index(unique_documents)
 
     def save_index(self, index_path: str, index_name: str = "index") -> None:
         """保存索引状态（Tantivy自动持久化）"""

@@ -1,0 +1,14 @@
+{
+    "type": "tantivy_bm25",
+    "index_config": {
+        "type": "bm25_indexer",
+        "index_path": "./data/unified_bm25_index",
+        "language": "chinese",
+        "tokenizer_type": "jieba"
+    },
+    "search_kwargs": {
+        "k": 5,
+        "with_score": true,
+        "use_phrase_query": false
+    }
+}

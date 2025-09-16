@@ -1,0 +1,34 @@
+{
+    "type": "multipath",
+    "retrievers": [
+        {
+            "type": "dense",
+            "index_config": {
+                "type": "faiss",
+                "index_path": "./data/unified_faiss_index",
+                "dimension": 768,
+                "metric": "cosine",
+                "index_type": "flat"
+            },
+            "embedding_config": {
+                "type": "huggingface_embedding",
+                "model_name": "sentence-transformers/all-MiniLM-L6-v2"
+            }
+        },
+        {
+            "type": "tantivy_bm25",
+            "index_config": {
+                "type": "bm25_indexer",
+                "index_path": "./data/unified_bm25_index",
+                "language": "chinese"
+            }
+        }
+    ],
+    "fusion_method": "rrf",
+    "rrf_k": 60,
+    "weights": null,
+    "search_kwargs": {
+        "k": 5,
+        "with_score": true
+    }
+}

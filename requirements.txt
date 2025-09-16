@@ -4,3 +4,6 @@ tantivy
 sentence-transformers
 jieba
 openai
+tqdm
+
+faiss-cpu

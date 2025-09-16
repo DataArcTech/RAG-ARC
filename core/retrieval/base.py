@@ -119,6 +119,21 @@ class BaseRetriever(AbstractModule, Generic[ConfigType], ABC):
             return self._index.update(documents)
 
     def build_index(self, documents: List[Document]) -> None:
+        """构建索引（仅在索引不存在时使用）
+
+        Args:
+            documents: 用于构建索引的文档列表
+
+        Raises:
+            RuntimeError: 如果索引已存在
+        """
+        # 检查索引是否已存在
+        if self._index.index_exists():
+            raise RuntimeError(
+                "Index already exists. Use add_documents() to add documents to existing index, "
+                "or delete the existing index first if you want to rebuild it."
+            )
+
         # 计算嵌入向量
         if hasattr(self.config, "embedding_config") and self.config.embedding_config is not None:
             embedding_model = self.get_embedding()
