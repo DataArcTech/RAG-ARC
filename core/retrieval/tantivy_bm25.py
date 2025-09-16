@@ -1,14 +1,13 @@
 import logging
-import warnings
-from pydantic import Field, field_validator, ConfigDict
-from typing import Any, List, Callable, Optional, Dict, Union, Tuple, cast, Literal, TYPE_CHECKING
+from pydantic import Field, ConfigDict
+from typing import Any, List, Optional, Union, Tuple, cast, Literal, Annotated, Dict
 
-if TYPE_CHECKING:
-    from encapsulation.database.bm25_indexer import BM25IndexBuilder
-from tantivy import Index, Query, Occur, Order
+from tantivy import Query, Occur, Order
 
 from core.retrieval.base import BaseRetriever, BaseRetrieverConfig
 from core.utils.data_model import Document
+from encapsulation.database.bm25_indexer import BM25IndexBuilderConfig
+from framework.shared_module_decorator import shared_module
 
 logger = logging.getLogger(__name__)
 
@@ -17,40 +16,38 @@ class TantivyBM25RetrieverConfig(BaseRetrieverConfig):
     
     type: Literal["tantivy_bm25"] = "tantivy_bm25"
     
-    # Runtime dependencies (injected by index builder)
-    index: Optional["Index"] = Field(default=None, exclude=True, description="Tantivy index instance")
-    preprocess_func: Optional[Callable[[str], List[str]]] = Field(default=None, exclude=True, description="Text preprocessing function")
-    stopwords: Optional[List[str]] = Field(default=None, exclude=True, description="List of stopwords")
+    # Index configuration
+    index_config: Annotated[
+        BM25IndexBuilderConfig,
+        Field(description="BM25 index configuration")
+    ]
+
+    # BM25检索器不需要embedding配置
+    embedding_config: Optional[Any] = None
     
-    # Retrieval parameters (from index configuration)
-    search_kwargs: dict = Field(
-        default_factory=lambda: {"use_phrase_query": False}, 
-        exclude=True, 
+    # Search parameters
+    search_kwargs: Dict[str, Any] = Field(
+        default_factory=lambda: {
+            "use_phrase_query": False,
+            "k": 5,
+            "with_score": True
+        },
         description="""Additional search parameters. Supported parameters:
         - use_phrase_query (bool): Whether to use phrase queries for better relevance (default: False)
-        - k (int): Number of documents to return (overrides config default)
+        - k (int): Number of documents to return (default: 5)
         - filters (dict): Dictionary of field names and their values to filter by
         - order_by_field (str): Field to sort by
         - order_desc (bool): Whether to sort in descending order (default: True)
-        - with_score (bool): Whether to include score in metadata (overrides config default)
+        - with_score (bool): Whether to include score in metadata (default: False)
         """
     )
 
     def build(self) -> "TantivyBM25Retriever":
         """Build the TantivyBM25Retriever instance"""
-        if self.index is None:
-            raise ValueError("TantivyBM25RetrieverConfig.index must not be None. Please provide a valid tantivy.Index instance.")
-        if not isinstance(self.index, Index):
-            raise TypeError(f"Expected tantivy.Index, got {type(self.index).__name__}")
-
-        if self.preprocess_func is None:
-            raise ValueError("TantivyBM25RetrieverConfig.preprocess_func must not be None. Please provide a valid preprocessing function.")
-        if not callable(self.preprocess_func):
-            raise TypeError("preprocess_func must be callable")
-
         return TantivyBM25Retriever(config=self)
 
 
+@shared_module
 class TantivyBM25Retriever(BaseRetriever[TantivyBM25RetrieverConfig]):
     """
     TantivyBM25Retriever is a high-performance document retriever based on the Tantivy search engine.
@@ -66,14 +63,11 @@ class TantivyBM25Retriever(BaseRetriever[TantivyBM25RetrieverConfig]):
     - Compatible with both synchronous and asynchronous operations
     
     Configuration parameters (from config):
-        index (Index): Tantivy index instance
-        preprocess_func (Callable): Text preprocessing function
-        stopwords (List[str]): List of stopwords to filter out
-        k (int): Default number of documents to return
-        with_score (bool): Whether to include scores by default
+        index_config (BM25IndexBuilderConfig): BM25 index configuration
         search_kwargs (dict): Additional search parameters including use_phrase_query and other options
         
     Runtime instance variables:
+        index_builder: BM25IndexBuilder instance
         searcher: Tantivy searcher instance
         
     Core methods:
@@ -87,28 +81,40 @@ class TantivyBM25Retriever(BaseRetriever[TantivyBM25RetrieverConfig]):
         - Reloading searcher ensures index consistency
         
     Typical usage:
-        >>> config = TantivyBM25RetrieverConfig(index=index, preprocess_func=preprocess_func)
+        >>> config = TantivyBM25RetrieverConfig(index_config=index_config)
         >>> retriever = config.build()
         >>> results = retriever.invoke("query statement")
         >>> results = retriever.invoke("query", filters={"category": "news", "author": "john"})
     """
 
-    # Runtime instance variables
-    searcher = None
+    def __init__(self, config: TantivyBM25RetrieverConfig):
+        """Initialize TantivyBM25Retriever with configuration
+
+        Args:
+            config: TantivyBM25RetrieverConfig instance
+        """
+        super().__init__(config)
+
+        # Runtime instance variables
+        self.searcher = None
 
     def _ensure_searcher(self):
         """Ensure searcher is initialized"""
         if self.searcher is None:
-            self.searcher = self.config.index.searcher()
+            index_instance = self.index
+            if index_instance.index is None:
+                raise RuntimeError("Index is not loaded. Please load the index first.")
+            self.searcher = index_instance.index.searcher()
 
     def reload_searcher(self) -> None:
         """Reload searcher to reflect latest index state
-        
+
         This method should be called after index modifications to ensure
         the searcher reflects the latest index state.
         """
         try:
-            self.searcher = self.config.index.searcher()
+            index_instance = self.index
+            self.searcher = index_instance.index.searcher()
             logger.debug("Searcher reloaded successfully")
         except Exception as e:
             logger.error(f"Error reloading searcher: {e}")
@@ -130,7 +136,8 @@ class TantivyBM25Retriever(BaseRetriever[TantivyBM25RetrieverConfig]):
             if not values:
                 continue
             try:
-                q = Query.term_set_query(self.config.index.schema, field_name, values)
+                index_instance = self.index
+                q = Query.term_set_query(index_instance.index.schema, field_name, values)
                 filter_queries.append((Occur.Must, q))
             except Exception as e:
                 logger.warning(f"Skipping invalid filter field '{field_name}': {e}")
@@ -149,7 +156,8 @@ class TantivyBM25Retriever(BaseRetriever[TantivyBM25RetrieverConfig]):
             return Query.all_query()
 
         # Remove stopwords and empty/whitespace-only tokens
-        stopwords = set(self.config.stopwords or [])
+        index_instance = self.index
+        stopwords = set(index_instance.tokenizer_manager.get_stopwords())
         filtered_tokens = [t for t in query_tokens if t not in stopwords and t.strip()]
         if not filtered_tokens:
             return Query.all_query()
@@ -159,15 +167,35 @@ class TantivyBM25Retriever(BaseRetriever[TantivyBM25RetrieverConfig]):
             try:
                 # Convert to the exact type required by phrase_query
                 phrase_tokens: List[Union[str, Tuple[int, str]]] = cast(List[Union[str, Tuple[int, str]]], filtered_tokens)
-                phrase_q = Query.phrase_query(self.config.index.schema, "content_tokens", phrase_tokens)
+                phrase_q = Query.phrase_query(index_instance.index.schema, "content_tokens", phrase_tokens)
                 return phrase_q
             except Exception as e:
                 logger.warning(f"Falling back to term query due to phrase query error: {e}")
 
-        # Default: BM25 multi-term query
-        query_str = " ".join(filtered_tokens)
-        fields = ["content_tokens"]
-        return self.config.index.parse_query(query_str, fields)
+        # Default: BM25 multi-term query with OR logic
+        logger.info(f"Building query for tokens: {filtered_tokens}")
+        
+        # Use consistent term query approach for both single and multi-token queries
+        # This ensures consistent behavior regardless of token count
+        term_queries = []
+        for token in filtered_tokens:
+            try:
+                term_q = Query.term_query(index_instance.index.schema, "content_tokens", token)
+                term_queries.append((Occur.Should, term_q))
+            except Exception as e:
+                logger.warning(f"Failed to create term query for token '{token}': {e}")
+        
+        if not term_queries:
+            return Query.all_query()
+        
+        if len(term_queries) == 1:
+            # Single token query - extract the term query directly
+            logger.info(f"Using single token query: '{filtered_tokens[0]}' on content_tokens field")
+            return term_queries[0][1]  # Return the Query object without boolean wrapper
+        else:
+            # Multi-token OR query
+            logger.info(f"Using OR query for tokens: {filtered_tokens} on content_tokens field")
+            return Query.boolean_query(term_queries)
 
     def _get_relevant_documents(
         self,
@@ -196,9 +224,9 @@ class TantivyBM25Retriever(BaseRetriever[TantivyBM25RetrieverConfig]):
             List of Document objects
         """
         # Use config defaults if parameters not provided
-        k = k if k is not None else self.config.k
+        k = k if k is not None else self.config.search_kwargs.get("k", 5)
         filters = filters or {}
-        with_score = with_score if with_score is not None else self.config.with_score
+        with_score = with_score if with_score is not None else self.config.search_kwargs.get("with_score", False)
         use_phrase_query = use_phrase_query if use_phrase_query is not None else self.config.search_kwargs.get("use_phrase_query", False)
         
         # Validate k parameter
@@ -214,7 +242,8 @@ class TantivyBM25Retriever(BaseRetriever[TantivyBM25RetrieverConfig]):
 
         # 1. Preprocess query
         try:
-            query_tokens = self.config.preprocess_func(query)
+            index_instance = self.index
+            query_tokens = index_instance.tokenizer_manager.get_current_tokenizer()(query)
             logger.debug(f"Query tokens: {query_tokens}")
         except Exception as e:
             logger.error(f"Error during query preprocessing: {e}")

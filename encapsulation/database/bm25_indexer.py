@@ -13,10 +13,8 @@ from concurrent.futures import ProcessPoolExecutor
 from pydantic import Field, field_validator
 import jieba
 
-from framework.config import AbstractConfig
-from framework.module import AbstractModule
 from core.utils.data_model import Document
-from core.retrieval.tantivy_bm25 import TantivyBM25Retriever, TantivyBM25RetrieverConfig
+from encapsulation.database.vector_db.base import BaseIndex, BaseIndexConfig
 from encapsulation.database.utils.TokenizerManager import TokenizerManager
 
 try:
@@ -25,9 +23,7 @@ try:
         Tokenizer, TextAnalyzerBuilder, Filter
     )
 except ImportError:
-    raise ImportError(
-        "The 'tantivy-py' library was not found. Please install it using: pip install tantivy"
-    )
+    raise ImportError("Please install tantivy: pip install tantivy")
 
 logger = logging.getLogger(__name__)
 
@@ -44,40 +40,29 @@ EXCLUDED_METADATA_FIELDS = {
 }
 
 
-class BM25IndexBuilderConfig(AbstractConfig):
-    """
-    Configuration for BM25IndexBuilder.
-    Contains all configuration parameters for index building and retrieval.
-    Must be used to instantiate BM25IndexBuilder via build().
-    """
+class BM25IndexBuilderConfig(BaseIndexConfig):
+    """BM25索引构建器配置"""
     type: Literal["bm25_indexer"] = "bm25_indexer"
-    
-    # Index building configuration
-    index_path: str = Field(description="Path to store the index (required)")
-    preprocess_func_name: Optional[str] = Field(default=None, description="Name of the preprocessing function to use")
-    bm25_k1: float = Field(default=1.2, description="BM25 k1 parameter, must be greater than 0")
-    bm25_b: float = Field(default=0.75, description="BM25 b parameter, must be between 0 and 1")
-    stopwords_file: Optional[str] = Field(default=None, description="Path to custom stopwords file (txt format, one word per line). If not provided, stopwords will be selected automatically based on tokenizer.")
-    writer_heap_size: Optional[int] = Field(default=None, description="Heap size for the index writer")
-    batch_size: int = Field(default=50, description="Number of documents to process in each batch")
-    tokenize_batch_size: int = Field(default=200, description="Number of texts to tokenize in each batch")
-    max_workers: Optional[int] = Field(default=None, description="Maximum number of worker processes")
-    progress_interval: int = Field(default=500, description="Interval for progress reporting")
-    enable_gc: bool = Field(default=True, description="Whether to enable garbage collection")
-    queue_maxsize: int = Field(default=1000, description="Maximum size of the processing queue")
-    
 
-    # Runtime-only
+    # 核心配置
+    index_path: str = Field(description="索引存储路径")
+    bm25_k1: float = Field(default=1.2, description="BM25 k1参数")
+    bm25_b: float = Field(default=0.75, description="BM25 b参数")
+
+    # 可选配置
+    preprocess_func_name: Optional[str] = Field(default=None, description="预处理函数名")
+    stopwords_file: Optional[str] = Field(default=None, description="停用词文件路径")
+    writer_heap_size: Optional[int] = Field(default=None, description="写入器堆大小")
+    batch_size: int = Field(default=50, description="批处理大小")
+    tokenize_batch_size: int = Field(default=200, description="分词批处理大小")
+    max_workers: Optional[int] = Field(default=None, description="最大工作进程数")
+    progress_interval: int = Field(default=500, description="进度报告间隔")
+    enable_gc: bool = Field(default=True, description="是否启用垃圾回收")
+    queue_maxsize: int = Field(default=1000, description="队列最大大小")
+
+    # 运行时字段
     preprocess_func: Optional[Callable[[str], List[str]]] = Field(default=None, exclude=True)
     progress_callback: Optional[Callable] = Field(default=None, exclude=True)
-
-    k: int = Field(default=10, description="Default number of documents to return in search", gt=0, exclude=True)
-    with_score: bool = Field(default=True, description="Whether to include relevance scores in results", exclude=True)
-    search_kwargs: Dict[str, Any] = Field(
-        default_factory=lambda: {"use_phrase_query": False}, 
-        description="Additional search parameters including use_phrase_query",
-        exclude=True
-    )
     
     @field_validator("bm25_k1")
     @classmethod
@@ -104,85 +89,15 @@ def init_jieba_worker():
     return jieba
 
 
-class BM25IndexBuilder(AbstractModule):
+class BM25IndexBuilder(BaseIndex):
     """
-    BM25IndexBuilder is a high-performance index builder based on the Tantivy search engine.
-    
-    This class implements efficient indexing for document collections by leveraging Tantivy's
-    capabilities, supporting stream processing to reduce memory usage, intelligent batching,
-    memory management, exception recovery mechanisms, optimized multiprocessing, incremental
-    updates, and document deduplication.
-    
-    Key features:
-    - Stream processing to reduce memory footprint
-    - Intelligent batch processing
-    - Memory management and garbage collection
-    - Exception recovery mechanisms
-    - Optimized multiprocessing
-    - Incremental updates and document deduplication
-    - Context manager support
-    - Automatic language detection and tokenizer selection (only when no custom preprocess_func is provided)
-    
-    Configuration parameters (from config):
-        index_path (str): Path to store the index
-        preprocess_func (Callable): Custom text preprocessing function
-        bm25_k1 (float): BM25 k1 parameter
-        bm25_b (float): BM25 b parameter
-        stopwords_file (str): Path to custom stopwords file
-        writer_heap_size (int): Heap size for the index writer
-        batch_size (int): Number of documents to process in each batch
-        tokenize_batch_size (int): Number of texts to tokenize in each batch
-        max_workers (int): Maximum number of worker processes
-        progress_interval (int): Interval for progress reporting
-        enable_gc (bool): Whether to enable garbage collection
-        progress_callback (Callable): Callback function for progress reporting
-    
-    Runtime instance variables:
-        tokenizer_manager: TokenizerManager instance
-        _index: Tantivy index instance
-        _schema: Tantivy schema
-        _writer_heap_size: Calculated heap size for the index writer
-        _tokenizers_registered: Whether tokenizers are registered
-        _executor: ProcessPoolExecutor instance
-        _executor_closed: Whether executor is closed
-        _queue: Queue for producer-consumer pattern
-        _writer_thread: Writer thread instance
-        _stop_event: Threading event for stopping operations
-    
-    Core methods:
-        - load_local: Load existing index from local path
-        - from_documents: Build new index from document list (initial creation only)
-        - add_documents: Add documents to existing index
-        - update_documents: Update documents in index
-        - delete_documents: Delete documents from index
-        - get_document_by_id: Retrieve document by ID
-        - as_retriever: Create retriever from current index
-        - get_index_stats: Get index statistics
-        - close: Close process pool executor
-    
-    Performance considerations:
-        - Stream processing reduces memory usage
-        - Intelligent batching optimizes performance
-        - Memory management and garbage collection reduce memory footprint
-        - Multiprocessing improves tokenization performance
-        - Context manager ensures proper resource cleanup
-    
-    Typical usage:
-        >>> # Create new index (initial creation)
-        >>> config = BM25IndexBuilderConfig(index_path="./my_index")
-        >>> builder = config.build()
-        >>> builder.from_documents(initial_documents)  # Only for initial creation
-        >>> retriever = builder.as_retriever()
-        
-        >>> # Add more documents to existing index
-        >>> builder.add_documents(additional_documents)  # Use add_documents for more data
-        
-        >>> # Load existing index
-        >>> config2 = BM25IndexBuilderConfig(index_path="./existing_index")
-        >>> builder2 = config2.build()
-        >>> builder2.load_local()
-        >>> builder2.add_documents(new_documents)  # Add documents to loaded index
-        >>> retriever = builder2.as_retriever()
+    基于Tantivy的BM25索引构建器
+
+    主要功能：
+    - 文档索引构建和管理
+    - 支持中文分词和多语言
+    - 流式处理和批量操作
+    - 多进程优化
     """
 
     # Runtime instance variables (initialized when needed)
@@ -231,6 +146,11 @@ class BM25IndexBuilder(AbstractModule):
         if self._stop_event is None:
             self._stop_event = threading.Event()
         return self._stop_event
+    
+    @property
+    def index(self) -> Optional[Index]:
+        """Get the Tantivy index instance"""
+        return self._index
     
     
     def _set_tokenizer(self, documents: List[Document]):
@@ -330,7 +250,7 @@ class BM25IndexBuilder(AbstractModule):
         schema_builder = SchemaBuilder()
         schema_builder.add_text_field("id", stored=True, tokenizer_name="raw", fast=True)
         schema_builder.add_text_field("content", stored=True, tokenizer_name="raw")
-        schema_builder.add_text_field("content_tokens", tokenizer_name="custom", stored=False)
+        schema_builder.add_text_field("content_tokens", tokenizer_name="custom", stored=True)
         schema_builder.add_json_field("metadata", stored=True)
         
         # Add dynamic fields based on document metadata
@@ -343,18 +263,16 @@ class BM25IndexBuilder(AbstractModule):
         self._schema = schema_builder.build()
 
         # Load existing index or create new one
-        is_new_index = True
         if os.path.exists(self.config.index_path) and any(os.scandir(self.config.index_path)):
             logger.info(f"Loading existing index from: {self.config.index_path}")
             self._index = Index.open(self.config.index_path)
-            is_new_index = False
         else:
             logger.info(f"Creating new index at: {self.config.index_path}")
             os.makedirs(self.config.index_path, exist_ok=True)
             self._index = Index(self._schema, path=self.config.index_path)
         
-        # Register tokenizers only for new index or when not yet registered
-        if is_new_index or not self._tokenizers_registered:
+        # Always register tokenizers when index is loaded/created
+        if not self._tokenizers_registered:
             self._register_tokenizers()
 
         logger.info("Tantivy index initialized successfully")
@@ -603,105 +521,169 @@ class BM25IndexBuilder(AbstractModule):
         
         return added_ids
 
-    def add_documents(self, documents: List[Document], overwrite: bool = False) -> List[str]:
-        """Add documents to the existing index, supporting deduplication
-        
+    def add(self, documents: List[Document], embeddings: Optional[List[List[float]]] = None) -> List[str]:
+        """Add documents to the existing index
+
         Args:
             documents: List of Document objects to add
-            overwrite: Whether to overwrite existing documents with the same IDs
-            
+            embeddings: 预计算的嵌入向量（BM25不需要，忽略此参数，保持接口一致）
+
         Returns:
             List of document IDs that were added to the index
         """
         if not documents:
             logger.warning("No documents provided for adding")
             return []
-        
-        if overwrite:
-            doc_ids = [str(doc.id) for doc in documents if doc.id is not None]
-            if doc_ids:
-                logger.info(f"Overwrite mode: attempting to delete {len(doc_ids)} existing documents")
-                deleted_count = self._delete_documents_by_ids(doc_ids)
-                logger.info(f"Overwrite mode: successfully deleted {deleted_count} documents")
-                
-                # Ensure index is reloaded after deletion for consistency
-                if self._index is not None:
-                    self._index.reload()
-        
+
+        # BM25 索引不需要 embeddings，忽略此参数
+        if embeddings is not None:
+            logger.debug("BM25 index does not use embeddings, ignoring embeddings parameter")
+
         return self._build_index(documents)
 
-    def update_documents(self, documents: List[Document]) -> List[str]:
+    def save_index(self, index_path: str, index_name: str = "index") -> None:
+        """保存索引状态（Tantivy自动持久化）"""
+        self._ensure_index_loaded()
+        logger.info(f"Index saved at: {self.config.index_path}")
+        if index_path != self.config.index_path:
+            logger.debug(f"Using configured path {self.config.index_path}, ignoring {index_path}")
+
+    def build_index(self, documents: List[Document], embeddings: Optional[List[List[float]]] = None) -> None:
+        """Build index from documents (alias for from_documents)
+
+        Args:
+            documents: List of Document objects to index
+            embeddings: 预计算的嵌入向量（BM25不需要，忽略此参数）
+        """
+        # BM25 索引不需要 embeddings，忽略此参数
+        if embeddings is not None:
+            logger.debug("BM25 index does not use embeddings, ignoring embeddings parameter")
+
+        self.from_documents(documents)
+
+    def load_index(self, index_path: Optional[str] = None) -> None:
+        """Load index from storage (alias for load_local)
+
+        Args:
+            index_path: 索引路径（BM25使用配置中的路径，忽略此参数）
+
+        Raises:
+            FileNotFoundError: If index path does not exist
+            RuntimeError: If index is already loaded
+        """
+        if index_path is not None and index_path != self.config.index_path:
+            logger.debug(f"BM25 index uses configured path {self.config.index_path}, ignoring provided path {index_path}")
+        self.load_local()
+
+    def update(self, documents: List[Document], embeddings: Optional[List[List[float]]] = None) -> None:
         """Update documents in the index by first deleting then adding
-        
+
         Args:
             documents: List of Document objects to update
-            
-        Returns:
-            List of document IDs that were updated in the index
+            embeddings: 预计算的嵌入向量（BM25不需要，忽略此参数）
         """
-        return self.add_documents(documents, overwrite=True)
+        if not documents:
+            return
 
-    def delete_documents(self, doc_ids: List[str]) -> int:
-        """Delete documents with specified IDs
-        
-        Args:
-            doc_ids: List of document IDs to delete
-            
-        Returns:
-            Number of documents deleted
-        """
-        if not doc_ids:
-            return 0
-        
-        unique_doc_ids = list(set(doc_ids))
-        
-        deleted_count = self._delete_documents_by_ids(unique_doc_ids)
-        return deleted_count
+        # BM25 索引不需要 embeddings，忽略此参数
+        if embeddings is not None:
+            logger.debug("BM25 index does not use embeddings, ignoring embeddings parameter")
+
+        # 先删除现有文档，再添加更新的文档
+        doc_ids = [str(doc.id) for doc in documents if doc.id is not None]
+        if doc_ids:
+            logger.info(f"Update mode: attempting to delete {len(doc_ids)} existing documents")
+            deleted_count = self._delete_documents_by_ids(doc_ids)
+            logger.info(f"Update mode: successfully deleted {deleted_count} documents")
+
+            # Ensure index is reloaded after deletion for consistency
+            if self._index is not None:
+                self._index.reload()
+
+        # 添加更新的文档
+        self._build_index(documents)
+
+    def delete(self, ids: Optional[List[str]] = None, **kwargs: Any) -> Optional[bool]:
+        """删除指定ID的文档"""
+        if ids is None:
+            # 删除所有文档 - 重新创建空索引
+            try:
+                if self._index is not None:
+                    # 关闭当前索引
+                    self._index = None
+                    self._tokenizers_registered = False
+
+                # 重新创建空索引
+                self._initialize_index()
+                logger.info("Successfully deleted all documents by recreating index")
+                return True
+            except Exception as e:
+                logger.error(f"Error deleting all documents: {e}")
+                return False
+
+        if not ids:
+            return True
+
+        unique_doc_ids = list(set(ids))
+
+        try:
+            deleted_count = self._delete_documents_by_ids(unique_doc_ids)
+            return deleted_count > 0
+        except Exception as e:
+            logger.error(f"Error deleting documents: {e}")
+            return False
 
     # TODO Modify to batch retrieval
-    def get_document_by_id(self, doc_id: str) -> Optional[Document]:
-        """Retrieve a single document by its ID
+    def get_by_ids(self, doc_ids: List[str]) -> List[Document]:
+        """Retrieve documents by their IDs
         
         Args:
-            doc_id: Document ID to retrieve
+            doc_ids: List of document IDs to retrieve
             
         Returns:
-            Document object if found, None otherwise
+            List of Document objects found
             
         Raises:
             RuntimeError: If index is not initialized
         """
+        if not doc_ids:
+            return []
+            
         self._ensure_index_loaded()
+        documents = []
 
         try:
             searcher = self._index.searcher()
-            query = self._index.parse_query(f'id:"{doc_id}"', ["id"])
-            results = searcher.search(query, 1)
+            
+            for doc_id in doc_ids:
+                query = self._index.parse_query(f'id:"{doc_id}"', ["id"])
+                results = searcher.search(query, 1)
 
-            if results.hits:
-                _, doc_address = results.hits[0]
-                tantivy_doc = searcher.doc(doc_address)
-                
-                doc_id_field = tantivy_doc.get_first("id") or ""
-                content_field = tantivy_doc.get_first("content") or ""
-                metadata_field = tantivy_doc.get_first("metadata") or {}
+                if results.hits:
+                    _, doc_address = results.hits[0]
+                    tantivy_doc = searcher.doc(doc_address)
+                    
+                    doc_id_field = tantivy_doc.get_first("id") or ""
+                    content_field = tantivy_doc.get_first("content") or ""
+                    metadata_field = tantivy_doc.get_first("metadata") or {}
 
-                if isinstance(metadata_field, str):
-                    try:
-                        metadata_field = json.loads(metadata_field)
-                    except json.JSONDecodeError:
-                        metadata_field = {}
+                    if isinstance(metadata_field, str):
+                        try:
+                            metadata_field = json.loads(metadata_field)
+                        except json.JSONDecodeError:
+                            metadata_field = {}
 
-                return Document(
-                    id=doc_id_field,
-                    content=content_field,
-                    metadata=metadata_field
-                )
-            return None
+                    documents.append(Document(
+                        id=doc_id_field,
+                        content=content_field,
+                        metadata=metadata_field
+                    ))
+            
+            return documents
 
         except Exception as e:
-            logger.error(f"Error retrieving document by ID '{doc_id}': {e}")
-            return None
+            logger.error(f"Error retrieving documents by IDs {doc_ids}: {e}")
+            return []
 
     def load_local(self) -> "BM25IndexBuilder":
         """Load existing index from local path specified in config
@@ -769,54 +751,125 @@ class BM25IndexBuilder(AbstractModule):
 
 
 
-    def as_retriever(self, k: Optional[int] = None, with_score: Optional[bool] = None, search_kwargs: Optional[Dict[str, Any]] = None) -> "TantivyBM25Retriever":
-        """Create a retriever from the current index
+    def search(
+        self,
+        query: str,
+        k: Optional[int] = None,
+        filters: Optional[Dict[str, Union[str, List[str]]]] = None,
+        order_by_field: Optional[str] = None,
+        order_desc: bool = True,
+        with_score: Optional[bool] = None,
+        use_phrase_query: Optional[bool] = None,
+        **kwargs: Any
+    ) -> List[Document]:
+        """执行搜索并返回文档列表"""
+        from tantivy import Query, Occur, Order
         
-        The retriever uses the retrieval parameters configured in the index.
-        All retrieval-related configurations are defined in BM25IndexBuilderConfig.
+        # Use config defaults if parameters not provided
+        k = k if k is not None else self.config.k
+        filters = filters or {}
+        with_score = with_score if with_score is not None else self.config.with_score
+        use_phrase_query = use_phrase_query if use_phrase_query is not None else self.config.search_kwargs.get("use_phrase_query", False)
         
-        Returns:
-            TantivyBM25Retriever instance
-            
-        Raises:
-            RuntimeError: If index is not initialized
-            
-        Examples:
-            # Create retriever - uses configuration from the index
-            retriever = builder.as_retriever()
-            
-            # Runtime can override default configuration from the index
-            results = retriever.invoke(
-                "query text",
-                k=5,                    # Override default k value from index
-                use_phrase_query=True,  # Override default setting from index
-                filters={"category": "tech"}
-            )
-        """
+        # Validate k parameter
+        if k <= 0:
+            raise ValueError(f"Parameter 'k' must be greater than 0, got {k}")
+        
+        if not query.strip():
+            logger.info("Empty query received, returning empty results.")
+            return []
+
         self._ensure_index_loaded()
-        self._index.reload()
         
-        runtime_k = k or self.config.k
-        runtime_with_score = with_score or self.config.with_score
-        runtime_search_kwargs = search_kwargs or self.config.search_kwargs.copy()
-        # Create simplified retriever configuration using parameters from index configuration
-        retriever_config = TantivyBM25RetrieverConfig(
-            # Inject runtime dependencies
-            index=self._index,
-            preprocess_func=self.tokenizer_manager.get_current_tokenizer(),
-            stopwords=self.tokenizer_manager.get_stopwords(),
-            
-            # Get retrieval parameters from index configuration
-            k=runtime_k,
-            with_score=runtime_with_score,
-            search_kwargs=runtime_search_kwargs
+        # 1. Preprocess query
+        try:
+            query_tokens = self.tokenizer_manager.get_current_tokenizer()(query)
+            logger.debug(f"Query tokens: {query_tokens}")
+        except Exception as e:
+            logger.error(f"Error during query preprocessing: {e}")
+            return []
+
+        # 2. Build main query
+        if use_phrase_query and len(query_tokens) > 1:
+            # Use phrase query for better relevance
+            phrase_query = ' '.join(query_tokens)
+            main_query = self._index.parse_query(f'content_tokens:"{phrase_query}"', ["content_tokens"])
+        else:
+            # Use standard BM25 query on content_tokens field for proper tokenization
+            query_str = ' '.join(query_tokens)
+            main_query = self._index.parse_query(query_str, ["content_tokens"])
+        
+        # 3. Build filter queries
+        filter_subqueries = []
+        for field_name, values in filters.items():
+            if not isinstance(values, list):
+                values = [values]
+            if not values:
+                continue
+            try:
+                q = Query.term_set_query(self._index.schema, field_name, values)
+                filter_subqueries.append((Occur.Must, q))
+            except Exception as e:
+                logger.warning(f"Skipping invalid filter field '{field_name}': {e}")
+        
+        # 4. Combine queries
+        final_query = (
+            Query.boolean_query([(Occur.Must, main_query)] + filter_subqueries)
+            if filter_subqueries else main_query
         )
-        
-        # Create and return retriever
-        retriever = retriever_config.build()
-        retriever.reload_searcher()
-        
-        return retriever
+
+        # 5. Calculate actual search k (expand search range in filter mode)
+        search_k = k * 3 if filter_subqueries else k
+
+        # 6. Execute search
+        try:
+            searcher = self._index.searcher()
+            order = Order.Desc if order_desc else Order.Asc
+            search_result = searcher.search(
+                final_query,
+                limit=search_k,
+                order_by_field=order_by_field,
+                order=order
+            )
+        except Exception as e:
+            logger.error(f"Search execution failed: {e}")
+            return []
+
+        # 7. Assemble results
+        results = []
+        for score, doc_address in search_result.hits[:k]:  # Truncate to k
+            try:
+                tantivy_doc = searcher.doc(doc_address)
+                metadata_field = tantivy_doc.get_first("metadata") or {}
+                
+                if isinstance(metadata_field, str):
+                    try:
+                        metadata_field = json.loads(metadata_field)
+                    except json.JSONDecodeError:
+                        metadata_field = {}
+                
+                # Add score to metadata if with_score is True
+                if with_score:
+                    metadata_field = {**metadata_field, "score": float(score)}
+                else:
+                    # Ensure score is not included when with_score is False
+                    metadata_field = {k: v for k, v in metadata_field.items() if k != "score"}
+                
+                document = Document(
+                    id=tantivy_doc.get_first("id") or "",
+                    content=tantivy_doc.get_first("content") or "",
+                    metadata=metadata_field
+                )
+
+                results.append(document)
+            except Exception as e:
+                logger.warning(f"Failed to parse document from index: {e}")
+                continue
+
+        logger.info(f"Retrieved {len(results)} documents for query: '{query}'")
+        return results
+
+
 
     def get_index_stats(self) -> Dict[str, Any]:
         """Get index statistics
@@ -886,13 +939,7 @@ class BM25IndexBuilder(AbstractModule):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        """Context manager exit point, ensures resource cleanup
-        
-        Args:
-            exc_type: Exception type
-            exc_val: Exception value
-            exc_tb: Exception traceback
-        """
+        """上下文管理器退出，清理资源"""
         self.close()
         if exc_type is not None:
             logger.error(f"Exception in BM25IndexBuilder context: {exc_type.__name__}: {exc_val}")

@@ -71,7 +71,7 @@ class BaseNeo4jConfig(AbstractConfig):
             GraphStoreBaseNeo4j: Configured Neo4j graph store instance
         """
         from .base import GraphStoreBaseNeo4j
-        return GraphStoreBaseNeo4j(config=self)
+        return GraphStoreBaseNeo4j(self)
 
 
 
