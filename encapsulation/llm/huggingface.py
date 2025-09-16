@@ -1,6 +1,7 @@
 from .base import LLMBase
 from typing import Union, List, Dict, Any, Optional, Tuple, TYPE_CHECKING
 import logging
+from functools import cached_property
 
 from framework.shared_module_decorator import shared_module
 
@@ -56,36 +57,34 @@ class HuggingFaceLLM(LLMBase):
         - encode_kwargs: Encoding-specific parameters (batch_size, show_progress_bar, etc.)
     """
     
-    
-    def _get_client(self):
-        """Get or create sentence transformer client"""
-        if not hasattr(self, '_client') or self._client is None:
-            
-            try:
-                import sentence_transformers
-                
-                model_name = getattr(self.config, 'model_name', 'sentence-transformers/all-mpnet-base-v2')
-                device = getattr(self.config, 'device', 'cpu')
-                cache_folder = getattr(self.config, 'cache_folder', None)
-                model_kwargs = getattr(self.config, 'model_kwargs', {})
-                
-                self._client = sentence_transformers.SentenceTransformer(
-                    model_name,
-                    cache_folder=cache_folder,
-                    device=device,
-                    **model_kwargs
-                )
-                
-                logger.info(f"HuggingFace model initialized: {model_name}")
-                
-            except ImportError:
-                logger.error("sentence-transformers library required for embedding task")
-                raise ImportError("sentence-transformers required for embedding task")
-            except Exception as e:
-                logger.error(f"Failed to initialize HuggingFace model: {str(e)}")
-                raise
-                
-        return self._client
+
+    @cached_property
+    def client(self):
+        """Get sentence transformer client (cached)"""
+        try:
+            import sentence_transformers
+
+            model_name = getattr(self.config, 'model_name', 'sentence-transformers/all-mpnet-base-v2')
+            device = getattr(self.config, 'device', 'cpu')
+            cache_folder = getattr(self.config, 'cache_folder', None)
+            model_kwargs = getattr(self.config, 'model_kwargs', {})
+
+            client = sentence_transformers.SentenceTransformer(
+                model_name,
+                cache_folder=cache_folder,
+                device=device,
+                **model_kwargs
+            )
+
+            logger.info(f"HuggingFace model initialized: {model_name}")
+            return client
+
+        except ImportError:
+            logger.error("sentence-transformers library required for embedding task")
+            raise ImportError("sentence-transformers required for embedding task")
+        except Exception as e:
+            logger.error(f"Failed to initialize HuggingFace model: {str(e)}")
+            raise
     
     def _embed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
         """Generate text embeddings"""
@@ -106,10 +105,9 @@ class HuggingFaceLLM(LLMBase):
             # Clean texts
             texts = [text.replace("\n", " ") for text in texts]
             
-            client = self._get_client()
             encode_kwargs = getattr(self.config, 'encode_kwargs', {})
             
-            embeddings = client.encode(
+            embeddings = self.client.encode(
                 texts,
                 convert_to_tensor=False,
                 **encode_kwargs

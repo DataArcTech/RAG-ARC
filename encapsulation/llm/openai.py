@@ -2,6 +2,7 @@ from .base import LLMBase
 from typing import Dict, Any, List, Optional, Union, Tuple, TYPE_CHECKING
 import openai
 import logging
+from functools import cached_property
 
 if TYPE_CHECKING:
     from .document import Document
@@ -59,33 +60,30 @@ class OpenAILLM(LLMBase):
         - max_retries: Automatic retry attempts
     """
     
-    
-    def _get_client(self):
-        """Get or create OpenAI client"""
-        if not hasattr(self, '_client') or self._client is None:
-            
-            # Extract OpenAI-specific config parameters
-            api_key = getattr(self.config, 'api_key', None)
-            base_url = getattr(self.config, 'base_url', None)
-            organization = getattr(self.config, 'organization', None)
-            max_retries = getattr(self.config, 'max_retries', 3)
-            timeout = getattr(self.config, 'timeout', 60.0)
-            
-            try:
-                self._client = openai.OpenAI(
-                    api_key=api_key,
-                    base_url=base_url,
-                    organization=organization,
-                    max_retries=max_retries,
-                    timeout=timeout
-                )
-                model_name = getattr(self.config, 'model_name', 'gpt-4o-mini')
-                logger.info(f"OpenAI client initialized: {model_name}")
-            except Exception as e:
-                logger.error(f"Failed to initialize OpenAI client: {str(e)}")
-                raise
-                
-        return self._client
+    @cached_property
+    def client(self):
+        """Get OpenAI client (cached)"""
+        # Extract OpenAI-specific config parameters
+        api_key = getattr(self.config, 'api_key', None)
+        base_url = getattr(self.config, 'base_url', None)
+        organization = getattr(self.config, 'organization', None)
+        max_retries = getattr(self.config, 'max_retries', 3)
+        timeout = getattr(self.config, 'timeout', 60.0)
+
+        try:
+            client = openai.OpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                organization=organization,
+                max_retries=max_retries,
+                timeout=timeout
+            )
+            model_name = getattr(self.config, 'model_name', 'gpt-4o-mini')
+            logger.info(f"OpenAI client initialized: {model_name}")
+            return client
+        except Exception as e:
+            logger.error(f"Failed to initialize OpenAI client: {str(e)}")
+            raise
     
     # ==================== CHAT IMPLEMENTATION ====================
     
@@ -111,10 +109,8 @@ class OpenAILLM(LLMBase):
         default_max_tokens = getattr(self.config, 'max_tokens', 2000)
         default_temperature = getattr(self.config, 'temperature', 0.7)
         
-        client = self._get_client()
-        
         try:
-            response = client.chat.completions.create(
+            response = self.client.chat.completions.create(
                 model=model_name,
                 messages=messages,
                 max_tokens=max_tokens or default_max_tokens,
@@ -178,8 +174,7 @@ class OpenAILLM(LLMBase):
             default_max_tokens = getattr(self.config, 'max_tokens', 2000)
             default_temperature = getattr(self.config, 'temperature', 0.7)
             
-            client = self._get_client()
-            stream = client.chat.completions.create(
+            stream = self.client.chat.completions.create(
                 model=model_name,
                 messages=messages,
                 max_tokens=max_tokens or default_max_tokens,
@@ -240,8 +235,7 @@ class OpenAILLM(LLMBase):
             if embedding_dimensions:
                 embedding_kwargs['dimensions'] = embedding_dimensions
             
-            client = self._get_client()
-            response = client.embeddings.create(
+            response = self.client.embeddings.create(
                 model=model_name,
                 input=cleaned_texts,
                 **embedding_kwargs
@@ -280,8 +274,7 @@ class OpenAILLM(LLMBase):
         Get list of available models
         """
         try:
-            client = self._get_client()
-            models = client.models.list()
+            models = self.client.models.list()
             model_names = [model.id for model in models.data]
             return model_names
         except openai.AuthenticationError as e:
@@ -304,7 +297,7 @@ class OpenAILLM(LLMBase):
         info = super().get_model_info()
         
         # Safely get client info without forcing initialization
-        client = getattr(self, '_client', None)
+        client = getattr(self, 'client', None)
         
         info.update({
             "model": getattr(self.config, 'model_name', 'gpt-4o-mini'),

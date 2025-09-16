@@ -2,6 +2,7 @@ from .base import LLMBase
 from .document import Document
 from typing import List, Dict, Any, Optional, Tuple, Union
 import logging
+from functools import cached_property
 
 logger = logging.getLogger(__name__)
 
@@ -55,61 +56,58 @@ class QwenLLM(LLMBase):
         - instruction: Default instruction template for ranking tasks
     """
     
-    
-    def _get_client(self):
-        """Get or create Qwen client and tokenizer"""
-        if not hasattr(self, '_client') or self._client is None:
-            
-            try:
-                from transformers import AutoTokenizer, AutoModelForCausalLM
-                import torch
-                
-                model_name = getattr(self.config, 'model_name', 'Qwen/qwen_reranker_0.6B')
-                device = getattr(self.config, 'device', 'cpu')
-                cache_folder = getattr(self.config, 'cache_folder', None)
-                model_kwargs = getattr(self.config, 'model_kwargs', {})
-                
-                self._tokenizer = AutoTokenizer.from_pretrained(
-                    model_name,
-                    cache_dir=cache_folder,
-                    trust_remote_code=True,
-                    padding_side='left'
-                )
-                
-                self._client = AutoModelForCausalLM.from_pretrained(
-                    model_name,
-                    cache_dir=cache_folder,
-                    trust_remote_code=True,
-                    torch_dtype=torch.float16,
-                    **model_kwargs
-                )
-                self._client.to(device)
-                
-                # Initialize Qwen-specific tokens
-                self.token_false_id = self._tokenizer.convert_tokens_to_ids("no")
-                self.token_true_id = self._tokenizer.convert_tokens_to_ids("yes")
-                
-                # Qwen conversation template - get from config or use defaults
-                self.prefix = getattr(self.config, 'prefix', "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n")
-                self.suffix = getattr(self.config, 'suffix', "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n")
-                
-                # Tokenize prefix and suffix
-                self.prefix_tokens = self._tokenizer.encode(self.prefix, add_special_tokens=False)
-                self.suffix_tokens = self._tokenizer.encode(self.suffix, add_special_tokens=False)
-                
-                # Default instruction from config or fallback
-                self.instruction = getattr(self.config, 'instruction', "Given the user query, retrieve the relevant passages")
-                
-                logger.info(f"Qwen reranker initialized: {model_name}")
-                
-            except ImportError:
-                logger.error("transformers library required for reranking task")
-                raise ImportError("transformers required for reranking task")
-            except Exception as e:
-                logger.error(f"Failed to initialize Qwen model: {str(e)}")
-                raise
-                
-        return self._client
+    @cached_property
+    def client(self):
+        """Get Qwen client and tokenizer (cached)"""
+        try:
+            from transformers import AutoTokenizer, AutoModelForCausalLM
+            import torch
+
+            model_name = getattr(self.config, 'model_name', 'Qwen/qwen_reranker_0.6B')
+            device = getattr(self.config, 'device', 'cpu')
+            cache_folder = getattr(self.config, 'cache_folder', None)
+            model_kwargs = getattr(self.config, 'model_kwargs', {})
+
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                model_name,
+                cache_dir=cache_folder,
+                trust_remote_code=True,
+                padding_side='left'
+            )
+
+            client = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                cache_dir=cache_folder,
+                trust_remote_code=True,
+                torch_dtype=torch.float16,
+                **model_kwargs
+            )
+            client.to(device)
+
+            # Initialize Qwen-specific tokens
+            self.token_false_id = self._tokenizer.convert_tokens_to_ids("no")
+            self.token_true_id = self._tokenizer.convert_tokens_to_ids("yes")
+
+            # Qwen conversation template - get from config or use defaults
+            self.prefix = getattr(self.config, 'prefix', "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n")
+            self.suffix = getattr(self.config, 'suffix', "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n")
+
+            # Tokenize prefix and suffix
+            self.prefix_tokens = self._tokenizer.encode(self.prefix, add_special_tokens=False)
+            self.suffix_tokens = self._tokenizer.encode(self.suffix, add_special_tokens=False)
+
+            # Default instruction from config or fallback
+            self.instruction = getattr(self.config, 'instruction', "Given the user query, retrieve the relevant passages")
+
+            logger.info(f"Qwen reranker initialized: {model_name}")
+            return client
+
+        except ImportError:
+            logger.error("transformers library required for reranking task")
+            raise ImportError("transformers required for reranking task")
+        except Exception as e:
+            logger.error(f"Failed to initialize Qwen model: {str(e)}")
+            raise
     
     def _format_instruction(self, instruction, query, doc):
         """Format instruction with query and document"""
@@ -120,7 +118,6 @@ class QwenLLM(LLMBase):
     
     def _process_inputs(self, pairs):
         """Process input pairs with proper tokenization and padding"""
-        self._get_client()  # Ensure tokenizer is initialized
         device = getattr(self.config, 'device', 'cpu')
         
         # Tokenize pairs without padding first
@@ -153,10 +150,9 @@ class QwenLLM(LLMBase):
     def _compute_logits(self, inputs, **kwargs):
         """Compute logits for yes/no tokens"""
         import torch
-        client = self._get_client()  # Ensure client is initialized
         
         with torch.no_grad():
-            batch_scores = client(**inputs).logits[:, -1, :]
+            batch_scores = self.client(**inputs).logits[:, -1, :]
             true_vector = batch_scores[:, self.token_true_id]
             false_vector = batch_scores[:, self.token_false_id]
             batch_scores = torch.stack([false_vector, true_vector], dim=1)
