@@ -8,6 +8,7 @@ import threading
 import psutil
 import multiprocessing
 import gc
+import pickle
 from typing import Any, Callable, Dict, List, Optional, Literal, Union
 from concurrent.futures import ProcessPoolExecutor
 from pydantic import Field, field_validator
@@ -111,6 +112,7 @@ class BM25IndexBuilder(BaseIndex):
     _writer_thread: Optional[threading.Thread] = None
     _stop_event: threading.Event = None
     _tokenizer_manager: TokenizerManager = None
+    _document_ids: Optional[set] = None  # 缓存的文档ID集合
 
     @property
     def tokenizer_manager(self) -> TokenizerManager:
@@ -151,6 +153,91 @@ class BM25IndexBuilder(BaseIndex):
     def index(self) -> Optional[Index]:
         """Get the Tantivy index instance"""
         return self._index
+
+    @property
+    def _ids_file_path(self) -> str:
+        """Get the path for storing document IDs"""
+        return os.path.join(self.config.index_path, "document_ids.pkl")
+
+    def _load_document_ids(self) -> set:
+        """Load document IDs from pickle file
+
+        Returns:
+            Set of document IDs
+        """
+        if self._document_ids is not None:
+            return self._document_ids
+
+        ids_file = self._ids_file_path
+        if os.path.exists(ids_file):
+            try:
+                with open(ids_file, 'rb') as f:
+                    self._document_ids = pickle.load(f)
+                logger.debug(f"Loaded {len(self._document_ids)} document IDs from {ids_file}")
+            except Exception as e:
+                logger.warning(f"Failed to load document IDs from {ids_file}: {e}")
+                self._document_ids = set()
+        else:
+            self._document_ids = set()
+
+        return self._document_ids
+
+    def _save_document_ids(self) -> None:
+        """Save document IDs to pickle file"""
+        if self._document_ids is None:
+            return
+
+        ids_file = self._ids_file_path
+        try:
+            os.makedirs(os.path.dirname(ids_file), exist_ok=True)
+            with open(ids_file, 'wb') as f:
+                pickle.dump(self._document_ids, f)
+            logger.debug(f"Saved {len(self._document_ids)} document IDs to {ids_file}")
+        except Exception as e:
+            logger.warning(f"Failed to save document IDs to {ids_file}: {e}")
+
+    def _add_document_ids(self, doc_ids: List[str]) -> None:
+        """Add document IDs to the cache and save to file
+
+        Args:
+            doc_ids: List of document IDs to add
+        """
+        if self._document_ids is None:
+            self._load_document_ids()
+
+        self._document_ids.update(doc_ids)
+        self._save_document_ids()
+
+    def _remove_document_ids(self, doc_ids: List[str]) -> None:
+        """Remove document IDs from the cache and save to file
+
+        Args:
+            doc_ids: List of document IDs to remove
+        """
+        if self._document_ids is None:
+            self._load_document_ids()
+
+        self._document_ids.difference_update(doc_ids)
+        self._save_document_ids()
+
+    def _clear_document_ids(self) -> None:
+        """Clear all document IDs from cache and file"""
+        self._document_ids = set()
+        ids_file = self._ids_file_path
+        if os.path.exists(ids_file):
+            try:
+                os.remove(ids_file)
+                logger.debug(f"Removed document IDs file: {ids_file}")
+            except Exception as e:
+                logger.warning(f"Failed to remove document IDs file {ids_file}: {e}")
+
+    def get_all_document_ids(self) -> set:
+        """Get all document IDs in the index
+
+        Returns:
+            Set of all document IDs
+        """
+        return self._load_document_ids().copy()
     
     
     def _set_tokenizer(self, documents: List[Document]):
@@ -518,7 +605,11 @@ class BM25IndexBuilder(BaseIndex):
             self.stop_event.set()
             if self.config.enable_gc:
                 gc.collect()
-        
+
+        # 更新文档ID缓存
+        if added_ids:
+            self._add_document_ids(added_ids)
+
         return added_ids
 
     def add(self, documents: List[Document], embeddings: Optional[List[List[float]]] = None) -> List[str]:
@@ -547,17 +638,25 @@ class BM25IndexBuilder(BaseIndex):
         # 获取现有文档ID
         try:
             if self._index is not None:
-                # 这里可以实现获取现有ID的逻辑，暂时简化处理
-                pass
-        except Exception:
-            pass
+                existing_ids = self._load_document_ids()
+                logger.debug(f"Found {len(existing_ids)} existing document IDs in index")
+            else:
+                existing_ids = set()
+        except Exception as e:
+            logger.debug(f"Error getting existing document IDs: {e}")
+            existing_ids = set()
 
-        # 检查文档列表中的重复ID
+        # 检查文档列表中的重复ID（包括与现有文档的重复）
         seen_ids = set()
         for doc in documents:
             if doc.id in seen_ids:
+                # 文档列表内部重复
                 duplicate_ids.append(doc.id)
                 logger.warning(f"Duplicate document ID found: {doc.id}. Use update_documents() to update existing documents.")
+            elif doc.id in existing_ids:
+                # 与现有文档重复
+                duplicate_ids.append(doc.id)
+                logger.warning(f"Document with ID {doc.id} already exists. Use update() to update existing documents.")
             else:
                 seen_ids.add(doc.id)
                 unique_documents.append(doc)
@@ -579,17 +678,52 @@ class BM25IndexBuilder(BaseIndex):
             logger.debug(f"Using configured path {self.config.index_path}, ignoring {index_path}")
 
     def build_index(self, documents: List[Document], embeddings: Optional[List[List[float]]] = None) -> None:
-        """Build index from documents (alias for from_documents)
+        """Build index from documents (only when index doesn't exist)
 
         Args:
             documents: List of Document objects to index
             embeddings: 预计算的嵌入向量（BM25不需要，忽略此参数）
+
+        Raises:
+            RuntimeError: If index already exists
         """
+        # 检查索引是否已存在
+        if self.index_exists():
+            raise RuntimeError(
+                "Index already exists. Use add() to add documents to existing index, "
+                "or delete the existing index first if you want to rebuild it."
+            )
+
         # BM25 索引不需要 embeddings，忽略此参数
         if embeddings is not None:
             logger.debug("BM25 index does not use embeddings, ignoring embeddings parameter")
 
         self.from_documents(documents)
+
+    def index_exists(self) -> bool:
+        """Check if index exists
+
+        Returns:
+            bool: True if index exists and has documents, False otherwise
+        """
+        try:
+            # 检查索引是否已初始化
+            if self._index is None:
+                return False
+
+            # 检查索引是否有文档
+            if hasattr(self._index, 'searcher'):
+                searcher = self._index.searcher()
+                # 简单检查：尝试搜索所有文档
+                from tantivy import Query
+                all_query = Query.all_query()
+                result = searcher.search(all_query, limit=1)
+                return len(result.hits) > 0
+
+            return False
+        except Exception as e:
+            logger.debug(f"Error checking index existence: {e}")
+            return False
 
     def load_index(self, index_path: Optional[str] = None) -> None:
         """Load index from storage (alias for load_local)
@@ -645,6 +779,8 @@ class BM25IndexBuilder(BaseIndex):
 
                 # 重新创建空索引
                 self._initialize_index()
+                # 清空文档ID缓存
+                self._clear_document_ids()
                 logger.info("Successfully deleted all documents by recreating index")
                 return True
             except Exception as e:
@@ -658,6 +794,9 @@ class BM25IndexBuilder(BaseIndex):
 
         try:
             deleted_count = self._delete_documents_by_ids(unique_doc_ids)
+            if deleted_count > 0:
+                # 从ID缓存中移除已删除的文档ID
+                self._remove_document_ids(unique_doc_ids)
             return deleted_count > 0
         except Exception as e:
             logger.error(f"Error deleting documents: {e}")
@@ -739,6 +878,8 @@ class BM25IndexBuilder(BaseIndex):
         try:
             # Load existing index without dynamic fields (they're already in the schema)
             self._initialize_index()
+            # 加载文档ID缓存
+            self._load_document_ids()
             logger.info(f"Successfully loaded existing index from: {self.config.index_path}")
             return self
         except Exception as e:
@@ -773,6 +914,8 @@ class BM25IndexBuilder(BaseIndex):
             )
         
         try:
+            # 清空文档ID缓存（因为这是初始创建）
+            self._clear_document_ids()
             self._build_index(documents)
             return self
         except Exception:

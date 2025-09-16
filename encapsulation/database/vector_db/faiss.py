@@ -3,12 +3,15 @@ import pickle
 import os
 import uuid
 import numpy as np
+import logging
 from typing import Any, Optional, List, Literal
 
 
 from encapsulation.database.vector_db.base import BaseIndex, BaseIndexConfig
 from core.utils.data_model import Document
 from framework.shared_module_decorator import shared_module
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -152,14 +155,14 @@ class FaissIndex(BaseIndex[FaissIndexConfig]):
         return vectors
     
     def add(self, documents: List[Document], embeddings: Optional[List[List[float]]] = None) -> List[str]:
-        """添加文档到索引
+        """添加文档到索引（会根据ID去重，重复ID的文档不会被添加）
 
         Args:
             documents: 要添加的文档列表
             embeddings: 预计算的文档嵌入向量，如果为None则抛出异常
 
         Returns:
-            添加的文档ID列表
+            成功添加的文档ID列表
         """
         doc_list = list(documents)
         if not doc_list:
@@ -171,12 +174,32 @@ class FaissIndex(BaseIndex[FaissIndexConfig]):
         if len(embeddings) != len(doc_list):
             raise ValueError(f"Number of embeddings ({len(embeddings)}) must match number of documents ({len(doc_list)})")
 
-        texts = [doc.content for doc in doc_list]
-        metadatas = [doc.metadata for doc in doc_list]
-        ids = [doc.id for doc in doc_list if doc.id is not None]
+        # 检查重复ID并过滤
+        unique_documents = []
+        unique_embeddings = []
+        duplicate_ids = []
+
+        for i, doc in enumerate(doc_list):
+            if doc.id in self.docstore:
+                duplicate_ids.append(doc.id)
+                logger.warning(f"Document with ID {doc.id} already exists. Use update() to update existing documents.")
+            else:
+                unique_documents.append(doc)
+                unique_embeddings.append(embeddings[i])
+
+        if duplicate_ids:
+            logger.warning(f"Found {len(duplicate_ids)} duplicate document IDs: {duplicate_ids}")
+
+        if not unique_documents:
+            logger.warning("No unique documents to add after deduplication")
+            return []
+
+        texts = [doc.content for doc in unique_documents]
+        metadatas = [doc.metadata for doc in unique_documents]
+        ids = [doc.id for doc in unique_documents if doc.id is not None]
 
         # Convert embeddings to numpy array
-        embeddings_np = np.array(embeddings).astype(np.float32)
+        embeddings_np = np.array(unique_embeddings).astype(np.float32)
         
         # Create index if it doesn't exist
         if self.index is None:
@@ -187,9 +210,9 @@ class FaissIndex(BaseIndex[FaissIndexConfig]):
         embeddings_np = self._normalize_vectors(embeddings_np)
         
         # Train IVF index if not trained and we have enough data
-        if (hasattr(self.index, 'is_trained') and 
-            not self.index.is_trained and 
-            len(embeddings) >= 100):
+        if (hasattr(self.index, 'is_trained') and
+            not self.index.is_trained and
+            len(unique_embeddings) >= 100):
             self.index.train(embeddings_np)
         
         # Generate IDs
@@ -211,7 +234,7 @@ class FaissIndex(BaseIndex[FaissIndexConfig]):
         self.index.add(embeddings_np)
         
         # Store documents and mappings
-        for i, doc in enumerate(doc_list):
+        for i, doc in enumerate(unique_documents):
             self.docstore[doc.id] = doc
             self.index_to_docstore_id[start_index + i] = doc.id
 
@@ -332,3 +355,54 @@ class FaissIndex(BaseIndex[FaissIndexConfig]):
         
         with open(os.path.join(index_path, f"{index_name}.pkl"), "wb") as f:
             pickle.dump(data, f)
+
+    def build_index(self, documents: List[Document], embeddings: Optional[List[List[float]]] = None) -> None:
+        """构建索引（仅在索引不存在时使用）
+
+        Args:
+            documents: 用于构建索引的文档列表
+            embeddings: 预计算的文档嵌入向量
+
+        Raises:
+            RuntimeError: 如果索引已存在
+        """
+        if self.index_exists():
+            raise RuntimeError(
+                "Index already exists. Use add() to add documents to existing index, "
+                "or delete the existing index first if you want to rebuild it."
+            )
+
+        # 清空现有数据
+        self.docstore.clear()
+        self.index_to_docstore_id.clear()
+        self.index = None
+
+        # 对于build_index，需要在文档列表内部去重
+        unique_documents = []
+        unique_embeddings = []
+        seen_ids = set()
+        duplicate_ids = []
+
+        for i, doc in enumerate(documents):
+            if doc.id in seen_ids:
+                duplicate_ids.append(doc.id)
+                logger.warning(f"Duplicate document ID found in build_index: {doc.id}. Skipping duplicate.")
+            else:
+                seen_ids.add(doc.id)
+                unique_documents.append(doc)
+                if embeddings:
+                    unique_embeddings.append(embeddings[i])
+
+        if duplicate_ids:
+            logger.warning(f"Found {len(duplicate_ids)} duplicate document IDs in build_index: {duplicate_ids}")
+
+        # 添加去重后的文档来构建索引
+        self.add(unique_documents, unique_embeddings if embeddings else None)
+
+    def index_exists(self) -> bool:
+        """检查索引是否存在
+
+        Returns:
+            bool: 索引是否存在且包含文档
+        """
+        return self.index is not None and self.index.ntotal > 0
