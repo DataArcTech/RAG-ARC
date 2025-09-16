@@ -61,3 +61,91 @@ class RRFusion(FusionMethod):
             fused_documents.append(document)
         
         return fused_documents
+
+
+class WeightedSumFusion(FusionMethod):
+    """加权求和融合方法"""
+
+    def __init__(self, weights: List[float]):
+        """
+        Args:
+            weights: 每个检索器的权重列表
+        """
+        if not weights or len(weights) == 0:
+            raise ValueError("Weights list cannot be empty")
+        if any(w < 0 for w in weights):
+            raise ValueError("All weights must be non-negative")
+
+        # 归一化权重
+        total_weight = sum(weights)
+        if total_weight == 0:
+            raise ValueError("Sum of weights cannot be zero")
+        self.weights = [w / total_weight for w in weights]
+
+    def fuse(self, results: List[List[Document]], top_k: int) -> List[Document]:
+        if len(results) != len(self.weights):
+            raise ValueError(f"Number of result lists ({len(results)}) must match number of weights ({len(self.weights)})")
+
+        # 计算加权分数
+        weighted_scores = defaultdict(float)
+        document_map = {}
+
+        for retriever_idx, retriever_results in enumerate(results):
+            weight = self.weights[retriever_idx]
+
+            for document in retriever_results:
+                content_key = document.content
+                # 获取原始分数，如果没有则使用1.0
+                original_score = document.metadata.get('score', 1.0) if document.metadata else 1.0
+                weighted_scores[content_key] += weight * original_score
+                document_map[content_key] = document
+
+        # 按加权分数排序
+        sorted_items = sorted(weighted_scores.items(), key=lambda x: x[1], reverse=True)
+
+        # 构建最终结果
+        fused_documents = []
+        for content, weighted_score in sorted_items[:top_k]:
+            document = document_map[content]
+            if document.metadata is None:
+                document.metadata = {}
+            document.metadata["score"] = weighted_score
+            fused_documents.append(document)
+
+        return fused_documents
+
+
+class RankFusion(FusionMethod):
+    """基于排名的融合方法"""
+
+    def __init__(self):
+        """排名融合不需要额外参数"""
+        pass
+
+    def fuse(self, results: List[List[Document]], top_k: int) -> List[Document]:
+        # 计算排名分数（排名越靠前分数越高）
+        rank_scores = defaultdict(float)
+        document_map = {}
+
+        for retriever_results in results:
+            max_rank = len(retriever_results)
+            for rank, document in enumerate(retriever_results):
+                content_key = document.content
+                # 排名分数：最高排名得到最高分数
+                rank_score = max_rank - rank
+                rank_scores[content_key] += rank_score
+                document_map[content_key] = document
+
+        # 按排名分数排序
+        sorted_items = sorted(rank_scores.items(), key=lambda x: x[1], reverse=True)
+
+        # 构建最终结果
+        fused_documents = []
+        for content, rank_score in sorted_items[:top_k]:
+            document = document_map[content]
+            if document.metadata is None:
+                document.metadata = {}
+            document.metadata["score"] = rank_score
+            fused_documents.append(document)
+
+        return fused_documents
