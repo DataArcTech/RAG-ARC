@@ -7,3 +7,4 @@ openai
 tqdm
 
 faiss-cpu
+psycopg[binary]
