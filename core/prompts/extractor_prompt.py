@@ -1,68 +1,221 @@
 EXTRACTION_PROMPT = """
-你是一个高效的AI信息抽取引擎。你的任务是从给定的文本中提取结构化的信息，包括实体、它们的属性以及它们之间的关系。
+你是一个专业的知识图谱抽取引擎。请从给定文本中抽取实体、属性和关系，并以TSV格式输出。
 
-请严格遵循以下规则，并以两个独立的TSV (Tab-Separated Values) 片段输出结果。
+## 输入信息
 
----
-## 1. 输入
+**文本内容**:
+{text}
 
-*   **text: `{text}`**: 待抽取的当前文本。
-*   **history: `{history}`**: (可选) 一个包含先前已抽取的 `ENTITIES` 和 `RELATIONS` 的TSV格式字符串。
-*   **schema: `{schema}`**: (可选) 用户定义的实体和关系类型。如果提供，所有抽取的 `entity_type` 和 `relation` 必须严格遵循此 schema。
+**Schema约束**:
+{schema}
 
----
-## 2. 核心指令：增量抽取
+**历史数据**:
+{history}
 
-你的目标是根据 `history`，仅抽取出 `text` 中**新增的**信息。
+**参考示例**:
+{examples}
 
-1.  **分析历史 (`history`)**: 首先，仔细分析 `history` 中已有的实体和关系。
-2.  **识别增量**: 对比 `text` 和 `history`，找出所有新的、未被记录的信息。
-3.  **只输出增量**: 你的输出应该**只包含**新增的实体、新增的属性、和新增的关系。
-    *   **新增实体**: 如果发现 `text` 中有 `history` 里没有的新实体，则输出新实体。
-    *   **新增属性**: 如果 `text` 为 `history` 中已存在的实体补充了新的属性，则在 `ENTITIES` 部分输出该实体，但 `attributes` 字段只包含**新增的**键值对。
-    *   **新增关系**: 如果发现实体间有 `history` 里没有的新关系，则输出新关系。
-4.  **空输出**: 如果经过分析，`text` 中没有比 `history` 更新的信息，则输出空的 `ENTITIES` 和 `RELATIONS` 片段。
+## 抽取规则
 
----
-## 3. 实体与关系规则
+### 1. 增量抽取原则
+- 仔细分析历史数据中已有的实体和关系
+- 只抽取文本中**新增的**信息，避免重复
+- 如果没有新信息，输出空的ENTITIES和RELATIONS部分
 
-1.  **实体 (Entities)**:
-    *   识别文本中所有重要的实体。
-    *   为每个**新**实体分配一个唯一的 `id` (例如 `e1`, `e2`, ...)，并确保这个ID在 `history` 中尚不存在。
-    *   确定每个实体的 `type` (实体类型)。
-    *   提取与实体直接相关的属性 (attributes) 作为键值对。
+### 2. 实体抽取规则
+- 识别文本中的重要实体（人物、地点、组织、概念等）
+- 为新实体分配唯一ID（如e1, e2...），确保不与历史数据冲突
+- 提取实体的关键属性作为键值对
+- 严格遵循Schema中定义的实体类型（如果提供）
 
-2.  **关系 (Relations)**:
-    *   识别实体之间有意义的**新**关系。
-    *   **关键约束**: 关系中的 `head_id` 和 `tail_id` 必须引用实体 `id` (可以是 `history` 中已有的或本轮新增的)，绝不能是实体名称的字符串字面量。
+### 3. 关系抽取规则
+- 识别实体间的语义关系
+- 关系的head_id和tail_id必须引用实体ID，不能使用实体名称
+- 严格遵循Schema中定义的关系类型（如果提供）
+- 避免抽取过于泛化或无意义的关系
 
----
-## 4. 输出格式 (TSV)
+### 4. 质量要求
+- 实体名称应该是有意义的名词或名词短语
+- 避免抽取纯数字、标点符号或过短的字符串
+- 关系类型应该清晰表达实体间的语义联系
+- 属性值应该准确反映实体的特征
 
-你的输出必须包含 `ENTITIES` 和 `RELATIONS` 两个部分，严格使用制表符 `\t` 分隔。
+## 输出格式
+
+请严格按照以下TSV格式输出，使用制表符分隔：
 
 ### ENTITIES
 id\tname\ttype\tattributes
 
-*   **id**: 实体唯一标识符。
-*   **name**: 实体名称。
-*   **type**: 实体类型。
-*   **attributes**: 键值对，格式为 `key1|->|value1|#|key2|->|value2`。如果没有属性，则留空。
+### RELATIONS
+head_id\ttype\ttail_id
+
+**属性格式**: key1|->|value1|#|key2|->|value2
+
+## 输出示例
+
+### ENTITIES
+e1\t张三\tPerson\t年龄|->|30|#|职业|->|工程师
+e2\t北京大学\tOrganization\t类型|->|高等院校|#|成立时间|->|1898年
+
+### RELATIONS
+e1\tgraduated_from\te2
+"""
+
+CLEANING_PROMPT = """
+你是一个知识图谱质量控制专家。请对以下抽取的图数据进行清洗和优化。
+
+## 输入数据
+
+**原始文本**:
+{text}
+
+**抽取的图数据**:
+{graph_data}
+
+## 清洗任务
+
+### 1. 实体清洗
+- 移除无意义的实体（如纯数字、标点符号、过短字符串）
+- 合并重复或相似的实体
+- 标准化实体名称和类型
+- 验证实体属性的准确性
+
+### 2. 关系清洗
+- 移除无效关系（如自环、不存在的实体引用）
+- 去除重复关系
+- 标准化关系类型
+- 验证关系的语义合理性
+
+### 3. 一致性检查
+- 确保所有关系中的实体ID都有对应的实体定义
+- 检查实体类型和关系类型的一致性
+- 验证属性值的格式正确性
+
+## 输出要求
+
+请输出清洗后的图数据，保持TSV格式：
+
+### ENTITIES
+id\tname\ttype\tattributes
+
+### RELATIONS
+head_id\ttype\ttail_id
+"""
+
+MULTI_ROUND_PROMPT = """
+这是第{round_num}轮抽取。请基于前面轮次的结果，继续从文本中发现新的实体和关系。
+
+**重点关注**:
+- 前面轮次可能遗漏的细节信息
+- 实体间的隐含关系
+- 实体的补充属性
+- 文本中的深层语义信息
+
+{base_prompt}
+"""
+
+EXTRACTION_PROMPT_EN = """
+You are a professional knowledge graph extraction engine. Please extract entities, attributes, and relationships from the given text and output in TSV format.
+
+## Input Information
+
+**Text Content**:
+{text}
+
+**Schema Constraints**:
+{schema}
+
+**Historical Data**:
+{history}
+
+**Reference Examples**:
+{examples}
+
+## Extraction Rules
+
+### 1. Incremental Extraction Principle
+- Carefully analyze existing entities and relationships in historical data
+- Only extract **new** information from the text, avoid duplication
+- If no new information, output empty ENTITIES and RELATIONS sections
+
+### 2. Entity Extraction Rules
+- Identify important entities in the text (people, places, organizations, concepts, etc.)
+- Assign unique IDs to new entities (e.g., e1, e2...), ensure no conflict with historical data
+- Extract key attributes of entities as key-value pairs
+- Strictly follow entity types defined in Schema (if provided)
+
+### 3. Relationship Extraction Rules
+- Identify semantic relationships between entities
+- head_id and tail_id in relationships must reference entity IDs, not entity names
+- Strictly follow relationship types defined in Schema (if provided)
+- Avoid extracting overly generalized or meaningless relationships
+
+### 4. Quality Requirements
+- Entity names should be meaningful nouns or noun phrases
+- Avoid extracting pure numbers, punctuation, or overly short strings
+- Relationship types should clearly express semantic connections between entities
+- Attribute values should accurately reflect entity characteristics
+
+## Output Format
+
+Please output strictly in the following TSV format, using tab separators:
+
+### ENTITIES
+id\tname\ttype\tattributes
 
 ### RELATIONS
 head_id\ttype\ttail_id
 
-*   **head_id**: 关系头实体的ID。
-*   **type**: 关系类型。
-*   **tail_id**: 关系尾实体的ID。
+**Attribute Format**: key1|->|value1|#|key2|->|value2
 
----
-## 5. 输出样例
+## Output Example
 
 ### ENTITIES
-e1	小明	Person	性别|->|男|#|职业|->|算法工程师
-e2	小红	Person	性别|->|女
+e1\tJohn Smith\tPerson\tage|->|30|#|occupation|->|engineer
+e2\tBeijing University\tOrganization\ttype|->|university|#|founded|->|1898
 
 ### RELATIONS
-e1	friend_of	e2
+e1\tgraduated_from\te2
+"""
+
+CLEANING_PROMPT_EN = """
+You are a knowledge graph quality control expert. Please clean and optimize the following extracted graph data.
+
+## Input Data
+
+**Original Text**:
+{text}
+
+**Extracted Graph Data**:
+{graph_data}
+
+## Cleaning Tasks
+
+### 1. Entity Cleaning
+- Remove meaningless entities (pure numbers, punctuation, overly short strings)
+- Merge duplicate or similar entities
+- Standardize entity names and types
+- Verify accuracy of entity attributes
+
+### 2. Relationship Cleaning
+- Remove invalid relationships (self-loops, non-existent entity references)
+- Remove duplicate relationships
+- Standardize relationship types
+- Verify semantic reasonableness of relationships
+
+### 3. Consistency Check
+- Ensure all entity IDs in relationships have corresponding entity definitions
+- Check consistency of entity types and relationship types
+- Verify correct format of attribute values
+
+## Output Requirements
+
+Please output the cleaned graph data in TSV format:
+
+### ENTITIES
+id\tname\ttype\tattributes
+
+### RELATIONS
+head_id\ttype\ttail_id
 """
