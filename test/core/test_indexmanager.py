@@ -7,13 +7,14 @@ import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from datetime import timezone
-from core.file_management.IndexManager import IndexManager, IndexManagerConfig
+from core.file_management.IndexManager import IndexManager, IndexManagerConfig, PostgreSQLDBConfig, LocalDBConfig
 from core.utils.data_model import Document
 from encapsulation.database.relational_db.data_schema import ChunksMetadata, ChunksStatus
 from core.retrieval.dense import DenseRetrieverConfig
 from core.retrieval.tantivy_bm25 import TantivyBM25RetrieverConfig
 from encapsulation.database.vector_db.faiss import FaissIndexConfig
 from encapsulation.database.bm25_indexer import BM25IndexBuilderConfig
+from encapsulation.llm.huggingface import HuggingFaceEmbedConfig
 from encapsulation.llm.huggingface import HuggingFaceEmbedConfig
 
 
@@ -140,37 +141,43 @@ def test_multi_index_retrieval():
             os.makedirs(bm25_index_path, exist_ok=True)
             os.makedirs(faiss_index_path, exist_ok=True)
             
+            # 创建配置对象
+            relational_db_config = PostgreSQLDBConfig(
+                host="localhost",
+                port=5432,
+                database="rag_arc_test",
+                user="postgres",
+                password="123"
+            )
+
+            file_db_config = LocalDBConfig(
+                base_path=temp_dir
+            )
+
+            bm25_config = BM25IndexBuilderConfig(
+                index_path=bm25_index_path
+            )
+
+            faiss_config = FaissIndexConfig(
+                index_path=faiss_index_path,
+                metric="cosine",
+                index_type="flat",
+                normalize_L2=True
+            )
+
+            embedding_config = HuggingFaceEmbedConfig(
+                model_name="/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
+                device="cuda:1"
+            )
+
             config = IndexManagerConfig(
-                relational_db_config={
-                    "type": "postgresql",
-                    "host": "localhost",
-                    "port": 5432,
-                    "database": "rag_arc_test",
-                    "user": "postgres",
-                    "password": "123"
-                },
-                file_db_config={
-                    "type": "local",
-                    "base_path": temp_dir
-                },
+                relational_db_config=relational_db_config,
+                file_db_config=file_db_config,
                 indexer_configs={
-                    "bm25_indexer": {
-                        "type": "bm25_indexer",
-                        "index_path": bm25_index_path
-                    },
-                    "faiss": {
-                        "type": "faiss",
-                        "index_path": faiss_index_path,
-                        "metric": "cosine",
-                        "index_type": "flat",
-                        "normalize_L2": True
-                    }
+                    "bm25_indexer": bm25_config,
+                    "faiss": faiss_config
                 },
-                embedding_config={
-                    "type": "huggingface_embedding",
-                    "model_name": "/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
-                    "device": "cuda:1"
-                },
+                embedding_config=embedding_config,
                 batch_size=3,
                 max_concurrent_builds=2
             )
