@@ -34,13 +34,16 @@ class OpenAILLM(LLMBase[OpenAIConfig]):
     Unified OpenAI LLM supporting both chat and embeddings
     Single client, multiple capabilities
     """
-    
+
     config: OpenAIConfig
-    
-    def __post_init__(self):
-        """Initialize after config is set"""
+
+    def __init__(self, config: OpenAIConfig):
+        """Initialize OpenAI LLM with config"""
+        self.config = config
+
+        # Setup logging first
         self._setup_logging()
-        
+
         # Single OpenAI client for all operations
         self.client = openai.OpenAI(
             api_key=self.config.api_key,
@@ -57,7 +60,7 @@ class OpenAILLM(LLMBase[OpenAIConfig]):
             max_retries=self.config.max_retries,
             timeout=self.config.timeout
         )
-        
+
         self.logger.info(f"OpenAI LLM initialized: {self.config.model_name}")
     
     # ==================== CHAT IMPLEMENTATION ====================
