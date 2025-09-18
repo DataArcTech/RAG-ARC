@@ -3,7 +3,7 @@ Simple test to understand how Qwen LLM works for reranking
 """
 
 from framework.config import AbstractConfig
-from encapsulation.llm.qwen3 import QwenLLM
+from encapsulation.llm.qwen import QwenLLM
 from encapsulation.llm.document import Document
 from typing import Literal
 

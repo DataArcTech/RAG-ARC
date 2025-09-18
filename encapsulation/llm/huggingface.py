@@ -43,7 +43,6 @@ class HuggingFaceLLM(LLMBase):
         - Custom: Any compatible HuggingFace model with proper configuration
         
     Performance considerations:
-        - Lazy model loading for faster application startup
         - GPU acceleration with automatic device detection
         - Batch processing for improved throughput
         - Model caching to reduce download overhead
@@ -58,9 +57,14 @@ class HuggingFaceLLM(LLMBase):
     """
     
 
-    @cached_property
-    def client(self):
-        """Get sentence transformer client (cached)"""
+    def __init__(self, config):
+        """Initialize HuggingFace with eager model creation"""
+        super().__init__(config)
+        # Initialize client immediately since we always need it for embeddings
+        self.client = self._create_client()
+
+    def _create_client(self):
+        """Create HuggingFace SentenceTransformer client"""
         try:
             import sentence_transformers
 

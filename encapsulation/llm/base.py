@@ -1,7 +1,6 @@
 from abc import abstractmethod
 from typing import Dict, Any, List, Optional, Union, Tuple
 import logging
-from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +12,6 @@ if TYPE_CHECKING:
 from framework.module import AbstractModule
 
 
-@dataclass
 class LLMBase(AbstractModule):
     """
     Unified model base class supporting multiple task types

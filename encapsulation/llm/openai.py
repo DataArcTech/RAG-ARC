@@ -42,7 +42,6 @@ class OpenAILLM(LLMBase):
         - Custom endpoints: Compatible with VLLM, LocalAI, and other OpenAI-compatible APIs
         
     Performance considerations:
-        - Lazy client initialization for faster startup
         - Connection pooling and automatic retries
         - Streaming support for real-time applications
         - Token usage tracking for cost monitoring
@@ -60,9 +59,14 @@ class OpenAILLM(LLMBase):
         - max_retries: Automatic retry attempts
     """
     
-    @cached_property
-    def client(self):
-        """Get OpenAI client (cached)"""
+    def __init__(self, config):
+        """Initialize OpenAI with eager client creation"""
+        super().__init__(config)
+        # Initialize client immediately since we always need it for API calls
+        self.client = self._create_client()
+
+    def _create_client(self):
+        """Create OpenAI client"""
         # Extract OpenAI-specific config parameters
         api_key = getattr(self.config, 'api_key', None)
         base_url = getattr(self.config, 'base_url', None)

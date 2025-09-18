@@ -2,7 +2,6 @@ from .base import LLMBase
 from .document import Document
 from typing import List, Dict, Any, Optional, Tuple, Union
 import logging
-from functools import cached_property
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +40,6 @@ class QwenLLM(LLMBase):
         - Supports custom instructions for domain-specific ranking
         
     Performance considerations:
-        - Lazy model loading for faster application startup
         - GPU acceleration with automatic memory management
         - Batch processing for improved throughput
         - Template pre-tokenization for reduced overhead
@@ -56,9 +54,14 @@ class QwenLLM(LLMBase):
         - instruction: Default instruction template for ranking tasks
     """
     
-    @cached_property
-    def client(self):
-        """Get Qwen client and tokenizer (cached)"""
+    def __init__(self, config):
+        """Initialize Qwen with eager model and tokenizer creation"""
+        super().__init__(config)
+        # Initialize client immediately since we always need it for reranking
+        self.client = self._create_client()
+
+    def _create_client(self):
+        """Create Qwen client and tokenizer"""
         try:
             from transformers import AutoTokenizer, AutoModelForCausalLM
             import torch
