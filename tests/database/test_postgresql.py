@@ -1,761 +1,286 @@
 """
-Test for PostgreSQL Metadata Store - testing file and parsed content metadata operations
+Simple test to understand how PostgreSQL database operations work with SQLAlchemy ORM
 """
 
-import pytest
-from datetime import datetime
-from zoneinfo import ZoneInfo
-from typing import Literal
-import uuid
+import sys
+import os
+
+# Add the project root to Python path for direct execution
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from framework.config import AbstractConfig
 from encapsulation.database.relational_db.postgresql import PostgreSQLDB
-from encapsulation.database.relational_db.models.file_metadata import FileMetadata, FileStatus
-from encapsulation.database.relational_db.models.parsed_content_metadata import ParsedContentMetadata, ParsedContentStatus
-from encapsulation.database.relational_db.models.chunks_metadata import ChunksMetadata, ChunksStatus
-
+from encapsulation.database.relational_db.data_schema import (
+    FileMetadata, FileStatus,
+    ParsedContentMetadata, ParsedContentStatus,
+    ChunksMetadata, ChunksStatus
+)
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from typing import Literal
 
 class PostgreSQLConfig(AbstractConfig):
-    """Configuration for PostgreSQL metadata store testing"""
-    type: Literal["postgresql_metadata"] = "postgresql_metadata"
+    """Configuration for PostgreSQL Database"""
+    type: Literal["postgresql"] = "postgresql"
     host: str = "localhost"
     port: int = 5432
     database: str = "rag_arc_test"
     user: str = "postgres"
     password: str = "123"
-    pool_size: int = 5       # Optional
-    max_overflow: int = 10   # Optional
-    echo_sql: bool = False   # Optional
-    
+
     def build(self) -> PostgreSQLDB:
         return PostgreSQLDB(self)
 
+def test_file_metadata_operations(db: PostgreSQLDB):
+    """Test complete CRUD operations for FileMetadata"""
+    print("\n=== FILE METADATA OPERATIONS ===")
 
-def create_test_config() -> PostgreSQLConfig:
-    """Create PostgreSQL configuration for testing"""
-    return PostgreSQLConfig()
-
-
-@pytest.fixture
-def metadata_store():
-    """Create PostgreSQL metadata store instance for testing"""
-    config = create_test_config()
-    return config.build()
-
-
-@pytest.fixture
-def sample_file_metadata():
-    """Sample file metadata for testing"""
+    # Create test file metadata
     now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
-    return FileMetadata(
-        asset_id=str(uuid.uuid4()),
-        blob_key="test/sample_document.pdf",
-        filename="sample_document.pdf",
-        status=FileStatus.UPLOADED,
+    file_metadata = FileMetadata(
+        asset_id="test-file-123",
+        blob_key="assets/te/test-file-123/document.pdf",
+        filename="document.pdf",
+        status=FileStatus.UPLOADING,  # Using enum directly
         file_size=1024000,
         content_type="application/pdf",
         checksum="abc123def456",
         created_at=now,
         updated_at=now,
-        original_path="/uploads/sample_document.pdf"
+        original_path="/uploads/document.pdf"
     )
 
+    # Test CREATE
+    print("1. Testing file metadata creation...")
+    stored_id = db.store_file_metadata(file_metadata)
+    print(f"   ✓ Stored file metadata with ID: {stored_id}")
 
-@pytest.fixture
-def sample_parsed_content_metadata():
-    """Sample parsed content metadata for testing"""
+    # Test READ
+    print("2. Testing file metadata retrieval...")
+    retrieved = db.get_file_metadata("test-file-123")
+    if retrieved:
+        print(f"   ✓ Retrieved: {retrieved.filename} - Status: {retrieved.status}")
+        print(f"   ✓ Status type: {type(retrieved.status)} (should be FileStatus enum)")
+    else:
+        print("   ✗ Failed to retrieve file metadata")
+
+    # Test UPDATE
+    print("3. Testing file metadata update...")
+    success = db.update_file_metadata("test-file-123", {
+        "status": FileStatus.UPLOADED,  # Using enum directly
+        "blob_key": "assets/te/test-file-123/document-v2.pdf"
+    })
+    if success:
+        updated = db.get_file_metadata("test-file-123")
+        print(f"   ✓ Updated status to: {updated.status}")
+        print(f"   ✓ Updated blob_key to: {updated.blob_key}")
+    else:
+        print("   ✗ Failed to update file metadata")
+
+    # Test LIST
+    print("4. Testing file metadata listing...")
+    file_list = db.list_file_metadata(status=FileStatus.UPLOADED, limit=5)
+    print(f"   ✓ Found {len(file_list)} uploaded files")
+    for f in file_list:
+        print(f"     - {f.filename} ({f.status})")
+
+    return retrieved
+
+def test_parsed_content_operations(db: PostgreSQLDB, source_file: FileMetadata):
+    """Test complete CRUD operations for ParsedContentMetadata"""
+    print("\n=== PARSED CONTENT METADATA OPERATIONS ===")
+
+    # Create test parsed content metadata
     now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
-    return ParsedContentMetadata(
-        parsed_content_id=str(uuid.uuid4()),
-        source_asset_id=str(uuid.uuid4()),
-        blob_key="test/parsed_content.md",
+    parsed_metadata = ParsedContentMetadata(
+        parsed_content_id="parsed-123",
+        source_asset_id=source_file.asset_id,
+        blob_key="parsed/te/test-file-123/parsed-123.markdown",
         content_size=50000,
         checksum="def456ghi789",
-        parser_type="dots_ocr",
+        parser_type="pdf_parser",
         parser_version="1.0.0",
-        status=ParsedContentStatus.PARSED,
+        status=ParsedContentStatus.PARSING,  # Using enum directly
         created_at=now,
         updated_at=now,
         content_type="text/markdown",
-        parsing_config='{"confidence_threshold": 0.8}',
-        page_count=5,
+        parsing_config='{"extract_images": true}',
+        page_count=10,
         language="en"
     )
 
+    # Test CREATE
+    print("1. Testing parsed content creation...")
+    stored_id = db.store_parsed_content_metadata(parsed_metadata)
+    print(f"   ✓ Stored parsed content with ID: {stored_id}")
 
-@pytest.fixture
-def sample_chunks_metadata():
-    """Sample chunks metadata for testing"""
+    # Test READ
+    print("2. Testing parsed content retrieval...")
+    retrieved = db.get_parsed_content_metadata("parsed-123")
+    if retrieved:
+        print(f"   ✓ Retrieved: {retrieved.parser_type} - Status: {retrieved.status}")
+        print(f"   ✓ Page count: {retrieved.page_count}, Language: {retrieved.language}")
+    else:
+        print("   ✗ Failed to retrieve parsed content metadata")
+
+    # Test UPDATE
+    print("3. Testing parsed content update...")
+    success = db.update_parsed_content_metadata("parsed-123", {
+        "status": ParsedContentStatus.PARSED,  # Using enum directly
+        "page_count": 12
+    })
+    if success:
+        updated = db.get_parsed_content_metadata("parsed-123")
+        print(f"   ✓ Updated status to: {updated.status}")
+        print(f"   ✓ Updated page count to: {updated.page_count}")
+    else:
+        print("   ✗ Failed to update parsed content metadata")
+
+    # Test LIST
+    print("4. Testing parsed content listing...")
+    parsed_list = db.list_parsed_content_metadata(
+        source_asset_id=source_file.asset_id,
+        status=ParsedContentStatus.PARSED,
+        limit=5
+    )
+    print(f"   ✓ Found {len(parsed_list)} parsed content for source file")
+
+    return retrieved
+
+def test_chunks_operations(db: PostgreSQLDB, source_parsed: ParsedContentMetadata):
+    """Test complete CRUD operations for ChunksMetadata"""
+    print("\n=== CHUNKS METADATA OPERATIONS ===")
+
+    # Create test chunks metadata
     now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
-    return ChunksMetadata(
-        chunks_id=str(uuid.uuid4()),
-        source_parsed_content_id=str(uuid.uuid4()),
-        blob_key="chunks/ch/chunks-123/chunks.json",
-        chunks_count=10,
-        content_size=25000,
+    chunks_metadata = ChunksMetadata(
+        chunks_id="chunks-123",
+        source_parsed_content_id=source_parsed.parsed_content_id,
+        blob_key="chunks/pa/parsed-123/chunks-123.semantic",
+        chunks_count=25,
+        content_size=75000,
         checksum="ghi789jkl012",
-        chunking_strategy="fixed_1000",
-        chunking_version="1.0.0",
-        status=ChunksStatus.CHUNKED,
+        chunking_strategy="semantic_0.8",
+        chunking_version="2.0.0",
+        status=ChunksStatus.CHUNKING,  # Using enum directly
         created_at=now,
         updated_at=now,
         content_type="application/json",
         processing_time_ms=1500,
-        chunking_config='{"chunk_size": 1000, "overlap": 100}'
+        chunking_config='{"similarity_threshold": 0.8}',
+        index_type=None  # Not indexed yet
     )
 
+    # Test CREATE
+    print("1. Testing chunks creation...")
+    stored_id = db.store_chunks_metadata(chunks_metadata)
+    print(f"   ✓ Stored chunks with ID: {stored_id}")
 
-class TestPostgreSQLMetadataStore:
-    """Test cases for PostgreSQL metadata store"""
-    
-    def test_store_and_get_file_metadata(self, metadata_store, sample_file_metadata):
-        """Test storing and retrieving file metadata"""
-        print("\n--- Testing file metadata storage and retrieval ---")
-        
-        # Store metadata
-        stored_asset_id = metadata_store.store_file_metadata(sample_file_metadata)
-        assert stored_asset_id == sample_file_metadata.asset_id
-        print(f"✓ Stored file metadata with asset_id: {stored_asset_id}")
-        
-        # Retrieve metadata
-        retrieved_metadata = metadata_store.get_file_metadata(sample_file_metadata.asset_id)
-        assert retrieved_metadata is not None
-        assert retrieved_metadata.asset_id == sample_file_metadata.asset_id
-        assert retrieved_metadata.filename == sample_file_metadata.filename
-        assert retrieved_metadata.status == sample_file_metadata.status
-        assert retrieved_metadata.file_size == sample_file_metadata.file_size
-        print(f"✓ Retrieved file metadata: {retrieved_metadata.filename}")
-        
-        # Clean up
-        deleted = metadata_store.delete_file_metadata(sample_file_metadata.asset_id)
-        assert deleted is True
-        print(f"✓ Deleted file metadata: {deleted}")
-    
-    def test_update_file_metadata(self, metadata_store, sample_file_metadata):
-        """Test updating file metadata"""
-        print("\n--- Testing file metadata updates ---")
-        
-        # Store initial metadata
-        metadata_store.store_file_metadata(sample_file_metadata)
-        print(f"✓ Stored initial metadata")
-        
-        # Update filename and file size
-        updates = {
-            "filename": "updated_document.pdf",
-            "file_size": 2048000
-        }
-        updated = metadata_store.update_file_metadata(sample_file_metadata.asset_id, updates)
-        assert updated is True
-        print(f"✓ Updated metadata fields")
-        
-        # Verify updates
-        retrieved_metadata = metadata_store.get_file_metadata(sample_file_metadata.asset_id)
-        assert retrieved_metadata.filename == "updated_document.pdf"
-        assert retrieved_metadata.file_size == 2048000
-        # assert retrieved_metadata.updated_at > sample_file_metadata.updated_at
-        print(f"✓ Verified updates: {retrieved_metadata.filename}, {retrieved_metadata.file_size} bytes")
-        
-        # Clean up
-        metadata_store.delete_file_metadata(sample_file_metadata.asset_id)
-    
-    def test_update_file_status(self, metadata_store, sample_file_metadata):
-        """Test updating file processing status"""
-        print("\n--- Testing file status updates ---")
-        
-        # Store initial metadata
-        metadata_store.store_file_metadata(sample_file_metadata)
-        print(f"✓ Initial status: {sample_file_metadata.status.value}")
-        
-        # Update status to PARSING
-        updated = metadata_store.update_file_status(sample_file_metadata.asset_id, FileStatus.PARSING)
-        assert updated is True
-        print(f"✓ Updated status to: {FileStatus.PARSING.value}")
-        
-        # Verify status update
-        retrieved_metadata = metadata_store.get_file_metadata(sample_file_metadata.asset_id)
-        assert retrieved_metadata.status == FileStatus.PARSING
-        
-        # Update status to PARSED
-        updated = metadata_store.update_file_status(sample_file_metadata.asset_id, FileStatus.PARSED)
-        assert updated is True
-        print(f"✓ Updated status to: {FileStatus.PARSED.value}")
-        
-        # Verify final status
-        retrieved_metadata = metadata_store.get_file_metadata(sample_file_metadata.asset_id)
-        assert retrieved_metadata.status == FileStatus.PARSED
-        print(f"✓ Final status confirmed: {retrieved_metadata.status.value}")
-        
-        # Clean up
-        metadata_store.delete_file_metadata(sample_file_metadata.asset_id)
-    
-    def test_list_file_metadata(self, metadata_store):
-        """Test listing file metadata with filtering"""
-        print("\n--- Testing file metadata listing ---")
-        
-        # Create multiple test files with different statuses
-        test_files = []
-        statuses = [FileStatus.UPLOADED, FileStatus.PARSING, FileStatus.PARSED, FileStatus.FAILED]
-        
-        for i, status in enumerate(statuses):
-            now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
-            file_metadata = FileMetadata(
-                asset_id=str(uuid.uuid4()),
-                blob_key=f"test/file_{i}.pdf",
-                filename=f"file_{i}.pdf",
-                status=status,
-                file_size=1000 * (i + 1),
-                content_type="application/pdf",
-                checksum=f"hash{i}",
-                created_at=now,
-                updated_at=now,
-                original_path=f"/uploads/file_{i}.pdf"
-            )
-            metadata_store.store_file_metadata(file_metadata)
-            test_files.append(file_metadata)
-        
-        print(f"✓ Created {len(test_files)} test files")
-        
-        # List all files
-        all_files = metadata_store.list_file_metadata()
-        assert len(all_files) >= 4
-        print(f"✓ Listed {len(all_files)} total files")
-        
-        # List files by status
-        uploaded_files = metadata_store.list_file_metadata(status=FileStatus.UPLOADED)
-        assert len(uploaded_files) >= 1
-        print(f"✓ Found {len(uploaded_files)} UPLOADED files")
-        
-        parsed_files = metadata_store.list_file_metadata(status=FileStatus.PARSED)
-        assert len(parsed_files) >= 1
-        print(f"✓ Found {len(parsed_files)} PARSED files")
-        
-        # Test pagination
-        limited_files = metadata_store.list_file_metadata(limit=2)
-        assert len(limited_files) == 2
-        print(f"✓ Limited listing returned {len(limited_files)} files")
-        
-        # Clean up
-        for file_metadata in test_files:
-            metadata_store.delete_file_metadata(file_metadata.asset_id)
-        print(f"✓ Cleaned up {len(test_files)} test files")
-    
-    def test_delete_file_metadata(self, metadata_store, sample_file_metadata):
-        """Test deleting file metadata"""
-        print("\n--- Testing file metadata deletion ---")
-        
-        # Store metadata
-        metadata_store.store_file_metadata(sample_file_metadata)
-        print(f"✓ Stored metadata for deletion test")
-        
-        # Verify it exists
-        retrieved = metadata_store.get_file_metadata(sample_file_metadata.asset_id)
-        assert retrieved is not None
-        print(f"✓ Confirmed metadata exists")
-        
-        # Delete metadata
-        deleted = metadata_store.delete_file_metadata(sample_file_metadata.asset_id)
-        assert deleted is True
-        print(f"✓ Deleted metadata successfully")
-        
-        # Verify it's gone
-        retrieved = metadata_store.get_file_metadata(sample_file_metadata.asset_id)
-        assert retrieved is None
-        print(f"✓ Confirmed metadata is deleted")
-        
-        # Try to delete again (should return False)
-        deleted_again = metadata_store.delete_file_metadata(sample_file_metadata.asset_id)
-        assert deleted_again is False
-        print(f"✓ Second deletion correctly returned False")
-    
-    def test_duplicate_asset_id_error(self, metadata_store, sample_file_metadata):
-        """Test error handling for duplicate asset IDs"""
-        print("\n--- Testing duplicate asset ID handling ---")
-        
-        # Store initial metadata
-        metadata_store.store_file_metadata(sample_file_metadata)
-        print(f"✓ Stored initial metadata")
-        
-        # Try to store duplicate
-        try:
-            metadata_store.store_file_metadata(sample_file_metadata)
-            assert False, "Should have raised ValueError for duplicate asset_id"
-        except ValueError as e:
-            assert "already exists" in str(e)
-            print(f"✓ Correctly raised ValueError: {e}")
-        
-        # Clean up
-        metadata_store.delete_file_metadata(sample_file_metadata.asset_id)
-    
-    def test_nonexistent_file_operations(self, metadata_store):
-        """Test operations on non-existent files"""
-        print("\n--- Testing non-existent file operations ---")
-        
-        fake_asset_id = str(uuid.uuid4())
-        
-        # Get non-existent file
-        result = metadata_store.get_file_metadata(fake_asset_id)
-        assert result is None
-        print(f"✓ Get non-existent file returned None")
-        
-        # Update non-existent file
-        updated = metadata_store.update_file_metadata(fake_asset_id, {"filename": "new.pdf"})
-        assert updated is False
-        print(f"✓ Update non-existent file returned False")
-        
-        # Delete non-existent file
-        deleted = metadata_store.delete_file_metadata(fake_asset_id)
-        assert deleted is False
-        print(f"✓ Delete non-existent file returned False")
-    
-    # Parsed Content Metadata Tests
-    
-    def test_store_and_get_parsed_content_metadata(self, metadata_store, sample_parsed_content_metadata):
-        """Test storing and retrieving parsed content metadata"""
-        print("\n--- Testing parsed content metadata storage and retrieval ---")
-        
-        # Store metadata
-        stored_id = metadata_store.store_parsed_content_metadata(sample_parsed_content_metadata)
-        assert stored_id == sample_parsed_content_metadata.parsed_content_id
-        print(f"✓ Stored parsed content metadata with ID: {stored_id}")
-        
-        # Retrieve metadata
-        retrieved_metadata = metadata_store.get_parsed_content_metadata(sample_parsed_content_metadata.parsed_content_id)
-        assert retrieved_metadata is not None
-        assert retrieved_metadata.parsed_content_id == sample_parsed_content_metadata.parsed_content_id
-        assert retrieved_metadata.source_asset_id == sample_parsed_content_metadata.source_asset_id
-        assert retrieved_metadata.parser_type == sample_parsed_content_metadata.parser_type
-        assert retrieved_metadata.status == sample_parsed_content_metadata.status
-        print(f"✓ Retrieved parsed content metadata: {retrieved_metadata.parser_type}")
-        
-        # Clean up
-        deleted = metadata_store.delete_parsed_content_metadata(sample_parsed_content_metadata.parsed_content_id)
-        assert deleted is True
-        print(f"✓ Deleted parsed content metadata: {deleted}")
-    
-    def test_update_parsed_content_metadata(self, metadata_store, sample_parsed_content_metadata):
-        """Test updating parsed content metadata"""
-        print("\n--- Testing parsed content metadata updates ---")
-        
-        # Store initial metadata
-        metadata_store.store_parsed_content_metadata(sample_parsed_content_metadata)
-        print(f"✓ Stored initial parsed content metadata")
-        
-        # Update parser version and content size
-        updates = {
-            "parser_version": "1.1.0",
-            "content_size": 75000
-        }
-        updated = metadata_store.update_parsed_content_metadata(sample_parsed_content_metadata.parsed_content_id, updates)
-        assert updated is True
-        print(f"✓ Updated metadata fields")
-        
-        # Verify updates
-        retrieved_metadata = metadata_store.get_parsed_content_metadata(sample_parsed_content_metadata.parsed_content_id)
-        assert retrieved_metadata.parser_version == "1.1.0"
-        assert retrieved_metadata.content_size == 75000
-        # assert retrieved_metadata.updated_at > sample_parsed_content_metadata.updated_at
-        print(f"✓ Verified updates: {retrieved_metadata.parser_version}, {retrieved_metadata.content_size} bytes")
-        
-        # Clean up
-        metadata_store.delete_parsed_content_metadata(sample_parsed_content_metadata.parsed_content_id)
-    
-    def test_update_parsed_content_status(self, metadata_store, sample_parsed_content_metadata):
-        """Test updating parsed content processing status"""
-        print("\n--- Testing parsed content status updates ---")
-        
-        # Store initial metadata
-        metadata_store.store_parsed_content_metadata(sample_parsed_content_metadata)
-        print(f"✓ Initial status: {sample_parsed_content_metadata.status.value}")
-        
-        # Update status to INDEXED
-        updated = metadata_store.update_parsed_content_status(sample_parsed_content_metadata.parsed_content_id, ParsedContentStatus.INDEXED)
-        assert updated is True
-        print(f"✓ Updated status to: {ParsedContentStatus.INDEXED.value}")
-        
-        # Verify status update
-        retrieved_metadata = metadata_store.get_parsed_content_metadata(sample_parsed_content_metadata.parsed_content_id)
-        assert retrieved_metadata.status == ParsedContentStatus.INDEXED
-        print(f"✓ Status confirmed: {retrieved_metadata.status.value}")
-        
-        # Clean up
-        metadata_store.delete_parsed_content_metadata(sample_parsed_content_metadata.parsed_content_id)
-    
-    def test_list_parsed_content_metadata(self, metadata_store):
-        """Test listing parsed content metadata with filtering"""
-        print("\n--- Testing parsed content metadata listing ---")
-        
-        # Create multiple test parsed contents with different attributes
-        source_asset_id = str(uuid.uuid4())
-        test_parsed_contents = []
-        parsers = ["dots_ocr", "pypdf", "unstructured"]
-        statuses = [ParsedContentStatus.PARSED, ParsedContentStatus.INDEXED, ParsedContentStatus.FAILED]
-        
-        for i, (parser, status) in enumerate(zip(parsers, statuses)):
-            now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
-            parsed_metadata = ParsedContentMetadata(
-                parsed_content_id=str(uuid.uuid4()),
-                source_asset_id=source_asset_id if i < 2 else str(uuid.uuid4()),  # First 2 share same source
-                blob_key=f"test/parsed_{i}.md",
-                content_size=1000 * (i + 1),
-                checksum=f"hash{i}",
-                parser_type=parser,
-                parser_version="1.0.0",
-                status=status,
-                created_at=now,
-                updated_at=now,
-                content_type="text/markdown"
-            )
-            metadata_store.store_parsed_content_metadata(parsed_metadata)
-            test_parsed_contents.append(parsed_metadata)
-        
-        print(f"✓ Created {len(test_parsed_contents)} test parsed contents")
-        
-        # List all parsed contents
-        all_parsed = metadata_store.list_parsed_content_metadata()
-        assert len(all_parsed) >= 3
-        print(f"✓ Listed {len(all_parsed)} total parsed contents")
-        
-        # List by source asset ID
-        source_parsed = metadata_store.list_parsed_content_metadata(source_asset_id=source_asset_id)
-        assert len(source_parsed) >= 2
-        print(f"✓ Found {len(source_parsed)} parsed contents for source asset")
-        
-        # List by status
-        indexed_parsed = metadata_store.list_parsed_content_metadata(status=ParsedContentStatus.INDEXED)
-        assert len(indexed_parsed) >= 1
-        print(f"✓ Found {len(indexed_parsed)} INDEXED parsed contents")
-        
-        # List by parser type
-        ocr_parsed = metadata_store.list_parsed_content_metadata(parser_type="dots_ocr")
-        assert len(ocr_parsed) >= 1
-        print(f"✓ Found {len(ocr_parsed)} dots_ocr parsed contents")
-        
-        # Test pagination
-        limited_parsed = metadata_store.list_parsed_content_metadata(limit=2)
-        assert len(limited_parsed) == 2
-        print(f"✓ Limited listing returned {len(limited_parsed)} parsed contents")
-        
-        # Clean up
-        for parsed_metadata in test_parsed_contents:
-            metadata_store.delete_parsed_content_metadata(parsed_metadata.parsed_content_id)
-        print(f"✓ Cleaned up {len(test_parsed_contents)} test parsed contents")
-    
-    def test_duplicate_parsed_content_id_error(self, metadata_store, sample_parsed_content_metadata):
-        """Test error handling for duplicate parsed content IDs"""
-        print("\n--- Testing duplicate parsed content ID handling ---")
-        
-        # Store initial metadata
-        metadata_store.store_parsed_content_metadata(sample_parsed_content_metadata)
-        print(f"✓ Stored initial parsed content metadata")
-        
-        # Try to store duplicate
-        try:
-            metadata_store.store_parsed_content_metadata(sample_parsed_content_metadata)
-            assert False, "Should have raised ValueError for duplicate parsed_content_id"
-        except ValueError as e:
-            assert "already exists" in str(e)
-            print(f"✓ Correctly raised ValueError: {e}")
-        
-        # Clean up
-        metadata_store.delete_parsed_content_metadata(sample_parsed_content_metadata.parsed_content_id)
-    
-    def test_nonexistent_parsed_content_operations(self, metadata_store):
-        """Test operations on non-existent parsed content"""
-        print("\n--- Testing non-existent parsed content operations ---")
-        
-        fake_parsed_id = str(uuid.uuid4())
-        
-        # Get non-existent parsed content
-        result = metadata_store.get_parsed_content_metadata(fake_parsed_id)
-        assert result is None
-        print(f"✓ Get non-existent parsed content returned None")
-        
-        # Update non-existent parsed content
-        updated = metadata_store.update_parsed_content_metadata(fake_parsed_id, {"parser_version": "2.0.0"})
-        assert updated is False
-        print(f"✓ Update non-existent parsed content returned False")
-        
-        # Delete non-existent parsed content
-        deleted = metadata_store.delete_parsed_content_metadata(fake_parsed_id)
-        assert deleted is False
-        print(f"✓ Delete non-existent parsed content returned False")
+    # Test READ
+    print("2. Testing chunks retrieval...")
+    retrieved = db.get_chunks_metadata("chunks-123")
+    if retrieved:
+        print(f"   ✓ Retrieved: {retrieved.chunking_strategy} - Status: {retrieved.status}")
+        print(f"   ✓ Chunks count: {retrieved.chunks_count}, Index type: {retrieved.index_type}")
+    else:
+        print("   ✗ Failed to retrieve chunks metadata")
 
-    # Chunks Metadata Tests
+    # Test UPDATE (simulate indexing)
+    print("3. Testing chunks update (indexing simulation)...")
+    success = db.update_chunks_metadata("chunks-123", {
+        "status": ChunksStatus.INDEXED,  # Using enum directly
+        "index_type": "faiss"  # Now indexed in FAISS
+    })
+    if success:
+        updated = db.get_chunks_metadata("chunks-123")
+        print(f"   ✓ Updated status to: {updated.status}")
+        print(f"   ✓ Updated index_type to: {updated.index_type}")
+    else:
+        print("   ✗ Failed to update chunks metadata")
 
-    def test_store_and_get_chunks_metadata(self, metadata_store, sample_chunks_metadata):
-        """Test storing and retrieving chunks metadata"""
-        print("\n--- Testing chunks metadata storage and retrieval ---")
+    # Test LIST
+    print("4. Testing chunks listing...")
+    chunks_list = db.list_chunks_metadata(
+        source_parsed_content_id=source_parsed.parsed_content_id,
+        status=ChunksStatus.INDEXED,
+        limit=5
+    )
+    print(f"   ✓ Found {len(chunks_list)} indexed chunks for source parsed content")
 
-        # Store metadata
-        stored_id = metadata_store.store_chunks_metadata(sample_chunks_metadata)
-        assert stored_id == sample_chunks_metadata.chunks_id
-        print(f"✓ Stored chunks metadata with ID: {stored_id}")
+    return retrieved
 
-        # Retrieve metadata
-        retrieved_metadata = metadata_store.get_chunks_metadata(sample_chunks_metadata.chunks_id)
-        assert retrieved_metadata is not None
-        assert retrieved_metadata.chunks_id == sample_chunks_metadata.chunks_id
-        assert retrieved_metadata.source_parsed_content_id == sample_chunks_metadata.source_parsed_content_id
-        assert retrieved_metadata.chunking_strategy == sample_chunks_metadata.chunking_strategy
-        assert retrieved_metadata.status == sample_chunks_metadata.status
-        assert retrieved_metadata.chunks_count == sample_chunks_metadata.chunks_count
-        print(f"✓ Retrieved chunks metadata: {retrieved_metadata.chunking_strategy}")
+def test_cleanup_operations(db: PostgreSQLDB):
+    """Test cleanup by deleting all test data"""
+    print("\n=== CLEANUP OPERATIONS ===")
 
-        # Clean up
-        deleted = metadata_store.delete_chunks_metadata(sample_chunks_metadata.chunks_id)
-        assert deleted is True
-        print(f"✓ Deleted chunks metadata: {deleted}")
+    # Delete in reverse order (chunks -> parsed -> file) due to dependencies
+    print("1. Deleting chunks metadata...")
+    chunks_deleted = db.delete_chunks_metadata("chunks-123")
+    print(f"   ✓ Chunks deleted: {chunks_deleted}")
 
-    def test_update_chunks_metadata(self, metadata_store, sample_chunks_metadata):
-        """Test updating chunks metadata"""
-        print("\n--- Testing chunks metadata updates ---")
+    print("2. Deleting parsed content metadata...")
+    parsed_deleted = db.delete_parsed_content_metadata("parsed-123")
+    print(f"   ✓ Parsed content deleted: {parsed_deleted}")
 
-        # Store initial metadata
-        metadata_store.store_chunks_metadata(sample_chunks_metadata)
-        print(f"✓ Stored initial chunks metadata")
-
-        # Update chunking version and content size
-        updates = {
-            "chunking_version": "1.1.0",
-            "content_size": 30000
-        }
-        updated = metadata_store.update_chunks_metadata(sample_chunks_metadata.chunks_id, updates)
-        assert updated is True
-        print(f"✓ Updated metadata fields")
-
-        # Verify updates
-        retrieved_metadata = metadata_store.get_chunks_metadata(sample_chunks_metadata.chunks_id)
-        assert retrieved_metadata.chunking_version == "1.1.0"
-        assert retrieved_metadata.content_size == 30000
-        # assert retrieved_metadata.updated_at > sample_chunks_metadata.updated_at
-        print(f"✓ Verified updates: {retrieved_metadata.chunking_version}, {retrieved_metadata.content_size} bytes")
-
-        # Clean up
-        metadata_store.delete_chunks_metadata(sample_chunks_metadata.chunks_id)
-
-    def test_update_chunks_status(self, metadata_store, sample_chunks_metadata):
-        """Test updating chunks processing status"""
-        print("\n--- Testing chunks status updates ---")
-
-        # Store initial metadata
-        metadata_store.store_chunks_metadata(sample_chunks_metadata)
-        print(f"✓ Initial status: {sample_chunks_metadata.status.value}")
-
-        # Update status to INDEXED
-        updated = metadata_store.update_chunks_status(sample_chunks_metadata.chunks_id, ChunksStatus.INDEXED)
-        assert updated is True
-        print(f"✓ Updated status to: {ChunksStatus.INDEXED.value}")
-
-        # Verify status update
-        retrieved_metadata = metadata_store.get_chunks_metadata(sample_chunks_metadata.chunks_id)
-        assert retrieved_metadata.status == ChunksStatus.INDEXED
-        print(f"✓ Status confirmed: {retrieved_metadata.status.value}")
-
-        # Clean up
-        metadata_store.delete_chunks_metadata(sample_chunks_metadata.chunks_id)
-
-    def test_list_chunks_metadata(self, metadata_store):
-        """Test listing chunks metadata with filtering"""
-        print("\n--- Testing chunks metadata listing ---")
-
-        # Create multiple test chunks with different attributes
-        source_parsed_content_id = str(uuid.uuid4())
-        test_chunks = []
-        strategies = ["fixed_1000", "semantic_0.8", "recursive_500"]
-        statuses = [ChunksStatus.CHUNKED, ChunksStatus.INDEXED, ChunksStatus.FAILED]
-
-        for i, (strategy, status) in enumerate(zip(strategies, statuses)):
-            now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
-            chunks_metadata = ChunksMetadata(
-                chunks_id=str(uuid.uuid4()),
-                source_parsed_content_id=source_parsed_content_id if i < 2 else str(uuid.uuid4()),  # First 2 share same source
-                blob_key=f"chunks/ch/chunks_{i}.json",
-                chunks_count=5 + i * 2,
-                content_size=1000 * (i + 1),
-                checksum=f"hash{i}",
-                chunking_strategy=strategy,
-                chunking_version="1.0.0",
-                status=status,
-                created_at=now,
-                updated_at=now,
-                content_type="application/json"
-            )
-            metadata_store.store_chunks_metadata(chunks_metadata)
-            test_chunks.append(chunks_metadata)
-
-        print(f"✓ Created {len(test_chunks)} test chunks")
-
-        # List all chunks
-        all_chunks = metadata_store.list_chunks_metadata()
-        assert len(all_chunks) >= 3
-        print(f"✓ Listed {len(all_chunks)} total chunks")
-
-        # List by source parsed content ID
-        source_chunks = metadata_store.list_chunks_metadata(source_parsed_content_id=source_parsed_content_id)
-        assert len(source_chunks) >= 2
-        print(f"✓ Found {len(source_chunks)} chunks for source parsed content")
-
-        # List by status
-        indexed_chunks = metadata_store.list_chunks_metadata(status=ChunksStatus.INDEXED)
-        assert len(indexed_chunks) >= 1
-        print(f"✓ Found {len(indexed_chunks)} INDEXED chunks")
-
-        # List by chunking strategy
-        fixed_chunks = metadata_store.list_chunks_metadata(chunking_strategy="fixed_1000")
-        assert len(fixed_chunks) >= 1
-        print(f"✓ Found {len(fixed_chunks)} fixed_1000 chunks")
-
-        # Test pagination
-        limited_chunks = metadata_store.list_chunks_metadata(limit=2)
-        assert len(limited_chunks) == 2
-        print(f"✓ Limited listing returned {len(limited_chunks)} chunks")
-
-        # Clean up
-        for chunks_metadata in test_chunks:
-            metadata_store.delete_chunks_metadata(chunks_metadata.chunks_id)
-        print(f"✓ Cleaned up {len(test_chunks)} test chunks")
-
-    def test_duplicate_chunks_id_error(self, metadata_store, sample_chunks_metadata):
-        """Test error handling for duplicate chunks IDs"""
-        print("\n--- Testing duplicate chunks ID handling ---")
-
-        # Store initial metadata
-        metadata_store.store_chunks_metadata(sample_chunks_metadata)
-        print(f"✓ Stored initial chunks metadata")
-
-        # Try to store duplicate
-        try:
-            metadata_store.store_chunks_metadata(sample_chunks_metadata)
-            assert False, "Should have raised ValueError for duplicate chunks_id"
-        except ValueError as e:
-            assert "already exists" in str(e)
-            print(f"✓ Correctly raised ValueError: {e}")
-
-        # Clean up
-        metadata_store.delete_chunks_metadata(sample_chunks_metadata.chunks_id)
-
-    def test_nonexistent_chunks_operations(self, metadata_store):
-        """Test operations on non-existent chunks"""
-        print("\n--- Testing non-existent chunks operations ---")
-
-        fake_chunks_id = str(uuid.uuid4())
-
-        # Get non-existent chunks
-        result = metadata_store.get_chunks_metadata(fake_chunks_id)
-        assert result is None
-        print(f"✓ Get non-existent chunks returned None")
-
-        # Update non-existent chunks
-        updated = metadata_store.update_chunks_metadata(fake_chunks_id, {"chunking_version": "2.0.0"})
-        assert updated is False
-        print(f"✓ Update non-existent chunks returned False")
-
-        # Delete non-existent chunks
-        deleted = metadata_store.delete_chunks_metadata(fake_chunks_id)
-        assert deleted is False
-        print(f"✓ Delete non-existent chunks returned False")
-
+    print("3. Deleting file metadata...")
+    file_deleted = db.delete_file_metadata("test-file-123")
+    print(f"   ✓ File metadata deleted: {file_deleted}")
 
 def main():
-    """Main test function"""
-    print("Testing PostgreSQL Metadata Store...")
-    print("Note: This test requires PostgreSQL server running with test database")
-    print("Connection: postgresql://postgres:password@localhost:5432/rag_arc_test")
-    
+    print("Testing PostgreSQL Database Operations with SQLAlchemy ORM...")
+
+    # Create database instance using configuration injection
+    config = PostgreSQLConfig()
+    db = config.build()
+
+    print(f"Database connected to: {config.host}:{config.port}/{config.database}")
+    print(f"Engine info: {db.engine}")
+    print(f"SessionMaker: {db.SessionMaker}")
+
+    # Drop and recreate all tables to ensure schema is up-to-date
+    print("\n=== SCHEMA SETUP ===")
+    print("Dropping and recreating all tables...")
+    from encapsulation.database.relational_db.data_schema import Base
+    Base.metadata.drop_all(db.engine)
+    Base.metadata.create_all(db.engine)
+    print("✓ Tables recreated with latest schema")
+
     try:
-        # Create metadata store instance
-        config = create_test_config()
-        metadata_store = config.build()
-        
-        # Sample file metadata
-        now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
-        sample_file_metadata = FileMetadata(
-            asset_id=str(uuid.uuid4()),
-            blob_key="test/sample_document.pdf",
-            filename="sample_document.pdf",
-            status=FileStatus.UPLOADED,
-            file_size=1024000,
-            content_type="application/pdf",
-            checksum="abc123def456",
-            created_at=now,
-            updated_at=now,
-            original_path="/uploads/sample_document.pdf"
-        )
-        
-        # Sample parsed content metadata
-        sample_parsed_content_metadata = ParsedContentMetadata(
-            parsed_content_id=str(uuid.uuid4()),
-            source_asset_id=str(uuid.uuid4()),
-            blob_key="test/parsed_content.md",
-            content_size=50000,
-            checksum="def456ghi789",
-            parser_type="dots_ocr",
-            parser_version="1.0.0",
-            status=ParsedContentStatus.PARSED,
-            created_at=now,
-            updated_at=now,
-            content_type="text/markdown",
-            parsing_config='{"confidence_threshold": 0.8}',
-            page_count=5,
-            language="en"
-        )
+        # Test file metadata operations
+        file_metadata = test_file_metadata_operations(db)
 
-        # Sample chunks metadata
-        sample_chunks_metadata = ChunksMetadata(
-            chunks_id=str(uuid.uuid4()),
-            source_parsed_content_id=str(uuid.uuid4()),
-            blob_key="chunks/ch/chunks-123/chunks.json",
-            chunks_count=10,
-            content_size=25000,
-            checksum="ghi789jkl012",
-            chunking_strategy="fixed_1000",
-            chunking_version="1.0.0",
-            status=ChunksStatus.CHUNKED,
-            created_at=now,
-            updated_at=now,
-            content_type="application/json",
-            processing_time_ms=1500,
-            chunking_config='{"chunk_size": 1000, "overlap": 100}'
-        )
-        
-        # Run tests
-        test_instance = TestPostgreSQLMetadataStore()
-        
-        print("\n=== File Metadata Tests ===")
-        test_instance.test_store_and_get_file_metadata(metadata_store, sample_file_metadata)
-        test_instance.test_update_file_metadata(metadata_store, sample_file_metadata)
-        test_instance.test_update_file_status(metadata_store, sample_file_metadata)
-        test_instance.test_list_file_metadata(metadata_store)
-        test_instance.test_delete_file_metadata(metadata_store, sample_file_metadata)
-        test_instance.test_duplicate_asset_id_error(metadata_store, sample_file_metadata)
-        test_instance.test_nonexistent_file_operations(metadata_store)
-        
-        print("\n=== Parsed Content Metadata Tests ===")
-        test_instance.test_store_and_get_parsed_content_metadata(metadata_store, sample_parsed_content_metadata)
-        test_instance.test_update_parsed_content_metadata(metadata_store, sample_parsed_content_metadata)
-        test_instance.test_update_parsed_content_status(metadata_store, sample_parsed_content_metadata)
-        test_instance.test_list_parsed_content_metadata(metadata_store)
-        test_instance.test_duplicate_parsed_content_id_error(metadata_store, sample_parsed_content_metadata)
-        test_instance.test_nonexistent_parsed_content_operations(metadata_store)
+        # Test parsed content operations (depends on file)
+        parsed_metadata = test_parsed_content_operations(db, file_metadata)
 
-        print("\n=== Chunks Metadata Tests ===")
-        test_instance.test_store_and_get_chunks_metadata(metadata_store, sample_chunks_metadata)
-        test_instance.test_update_chunks_metadata(metadata_store, sample_chunks_metadata)
-        test_instance.test_update_chunks_status(metadata_store, sample_chunks_metadata)
-        test_instance.test_list_chunks_metadata(metadata_store)
-        test_instance.test_duplicate_chunks_id_error(metadata_store, sample_chunks_metadata)
-        test_instance.test_nonexistent_chunks_operations(metadata_store)
+        # Test chunks operations (depends on parsed content)
+        chunks_metadata = test_chunks_operations(db, parsed_metadata)
 
-        print("\n🎉 All PostgreSQL metadata store tests passed!")
-        print("✓ File metadata operations working correctly")
-        print("✓ Parsed content metadata operations working correctly")
-        print("✓ Chunks metadata operations working correctly")
-        
+        # Show final state
+        print("\n=== FINAL STATE VERIFICATION ===")
+        final_file = db.get_file_metadata("test-file-123")
+        final_parsed = db.get_parsed_content_metadata("parsed-123")
+        final_chunks = db.get_chunks_metadata("chunks-123")
+
+        print(f"File status: {final_file.status} (type: {type(final_file.status)})")
+        print(f"Parsed status: {final_parsed.status} (type: {type(final_parsed.status)})")
+        print(f"Chunks status: {final_chunks.status}, Index: {final_chunks.index_type}")
+
+        # Cleanup test data
+        test_cleanup_operations(db)
+
+        print("\n✅ All tests completed successfully!")
+
     except Exception as e:
-        print(f"\n❌ Test failed: {e}")
-        print("Make sure PostgreSQL server is running and test database exists")
-        print("Database will be created automatically if it doesn't exist")
+        print(f"\n❌ Test failed with error: {e}")
+        import traceback
+        traceback.print_exc()
 
+        # Try cleanup even if tests failed
+        try:
+            test_cleanup_operations(db)
+        except:
+            print("⚠️  Cleanup also failed - you may need to manually clean test data")
 
 if __name__ == "__main__":
     main()

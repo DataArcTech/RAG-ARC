@@ -11,19 +11,17 @@ from typing import (
 )
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 
 if TYPE_CHECKING:
-    from .models.file_metadata import FileMetadata, FileStatus
-    from .models.parsed_content_metadata import ParsedContentMetadata, ParsedContentStatus
-    from .models.chunks_metadata import ChunksMetadata, ChunksStatus
+    from .data_schema import FileMetadata, FileStatus
+    from .data_schema import ParsedContentMetadata, ParsedContentStatus
+    from .data_schema import ChunksMetadata, ChunksStatus
 
 from framework.module import AbstractModule
 
 MST = TypeVar("MST", bound="RelationalDB")
 
 
-@dataclass
 class RelationalDB(AbstractModule):
     """Metadata storage base class - encapsulation layer for file metadata operations"""
     
