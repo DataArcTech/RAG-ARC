@@ -165,7 +165,7 @@ def test_multi_index_retrieval():
             )
 
             embedding_config = HuggingFaceEmbedConfig(
-                model_name="/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
+                model_name="sentence-transformers/all-MiniLM-L6-v2",
                 device="cuda:1"
             )
 
@@ -268,7 +268,7 @@ def test_multi_index_retrieval():
                     ),
                     embedding_config=HuggingFaceEmbedConfig(
                         type="huggingface_embedding",
-                        model_name = "/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
+                        model_name = "sentence-transformers/all-MiniLM-L6-v2",
                         device="cuda:1"
                     ),
                     search_kwargs={
