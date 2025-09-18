@@ -15,7 +15,6 @@ from core.retrieval.tantivy_bm25 import TantivyBM25RetrieverConfig
 from encapsulation.database.vector_db.faiss import FaissIndexConfig
 from encapsulation.database.bm25_indexer import BM25IndexBuilderConfig
 from encapsulation.llm.huggingface import HuggingFaceEmbedConfig
-from encapsulation.llm.huggingface import HuggingFaceEmbedConfig
 
 
 def create_test_documents():
