@@ -4,66 +4,173 @@ from typing import Dict, List, Optional, Literal
 from pydantic import Field
 
 from core.file_management.extractor.base import ExtractorBase, ExtractorBaseConfig
-from core.prompts.extractor_prompt import EXTRACTION_PROMPT
-from core.utils.data_model import Document
-from encapsulation.llm.base import LLMBase
+from core.prompts.extractor_prompt import EXTRACTION_PROMPT, CLEANING_PROMPT, EXTRACTION_PROMPT_EN, CLEANING_PROMPT_EN
+from core.utils.data_model import Document, GraphData
 
 logger = logging.getLogger(__name__)
 
 
 class GraphExtractorConfig(ExtractorBaseConfig):
-    """Configuration for GraphExtractor"""
+    """GraphExtractor配置"""
     type: Literal['graph_extractor'] = 'graph_extractor'
-    
-    entity_types: Optional[List[str]] = Field(default=None, description="Optional predefined entity types")
-    relation_types: Optional[List[str]] = Field(default=None, description="Optional predefined relation types")
-    extract_prompt: str = Field(default=EXTRACTION_PROMPT)
-    enable_cleaning: bool = Field(default=True, description="Whether to enable cleaning functionality")
-    max_rounds: int = Field(default=3, description="Maximum number of extraction rounds", ge=1)
-    
+
+    entity_types: Optional[List[str]] = Field(default=None, description="预定义实体类型")
+    relation_types: Optional[List[str]] = Field(default=None, description="预定义关系类型")
+    extraction_prompt: Optional[str] = Field(default=None, description="用户自定义抽取prompt模板")
+    cleaning_prompt: Optional[str] = Field(default=None, description="用户自定义清洗prompt模板")
+    entity_examples: Optional[List[Dict]] = Field(default=None, description="实体示例")
+    relation_examples: Optional[List[List]] = Field(default=None, description="关系示例")
+
+    enable_cleaning: bool = Field(default=True, description="是否启用清洗")
+    enable_llm_cleaning: bool = Field(default=False, description="是否启用LLM辅助清洗")
+    max_rounds: int = Field(default=3, description="最大抽取轮数，设为1表示单轮抽取", ge=1)
+
     def build(self) -> 'GraphExtractor':
-        """Build GraphExtractor instance"""
-        llm = self.llm_config.build()
-        return GraphExtractor(config=self, llm=llm)
+        return GraphExtractor(self)
 
 
-class GraphExtractor(ExtractorBase[GraphExtractorConfig]):
-    """GraphExtractor extracts entities and relations from text using TSV format for LLM interaction."""
-    
-    def __init__(self, config: GraphExtractorConfig, llm: LLMBase):
+class GraphExtractor(ExtractorBase):
+    """优化的GraphExtractor，支持多轮抽取、清洗和中英双语"""
+
+    def __init__(self, config):
         super().__init__(config)
-        self.llm = llm
-        self._validate_config()
-    
-    def _validate_config(self):
-        """Validate configuration parameters"""
-        if self.config.max_rounds <= 0:
-            raise ValueError("max_rounds must be greater than 0")
-    
-    def _generate_schema_string(self) -> str:
-        """Generate schema string for LLM prompt"""
-        schema_parts = []
-        
+        self.logger = logging.getLogger(__name__)
+
+    async def extract(self, document: Document) -> GraphData:
+        """主抽取方法：根据max_rounds自动支持单轮或多轮抽取"""
+        if not document.content:
+            return GraphData()
+
+        accumulated_graph = GraphData()
+
+        # 根据max_rounds驱动的抽取循环（1轮=单轮抽取，>1轮=多轮抽取）
+        for round_num in range(self.config.max_rounds):
+            try:
+                # 构建prompt（支持中英双语）
+                prompt = self.build_extraction_prompt(document.content, accumulated_graph)
+
+                # 调用LLM
+                response = await self.llm.achat([{"role": "user", "content": prompt}])
+
+                # 解析响应
+                new_graph = self.parse_tsv_response(response)
+
+                # 如果没有新的抽取结果，提前结束
+                if not new_graph.entities and not new_graph.relations:
+                    break
+
+                # 合并结果
+                accumulated_graph = self.merge_graph_data(accumulated_graph, new_graph)
+
+            except Exception as e:
+                self.logger.error(f"Error in round {round_num + 1}: {e}")
+                break
+
+        # Clean data if enabled
+        if self.config.enable_cleaning:
+            accumulated_graph = await self.clean_graph_data(accumulated_graph, document)
+
+        # Convert IDs to entity names for final output
+        return self.convert_final_output_to_names(accumulated_graph)
+
+    def detect_language(self, text: str) -> str:
+        """检测文本语言（中文或英文）"""
+        chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
+        total_chars = len(re.sub(r'\s', '', text))
+
+        if total_chars == 0:
+            return 'zh'  # 默认中文
+
+        chinese_ratio = chinese_chars / total_chars
+        return 'zh' if chinese_ratio > 0.2 else 'en'
+
+    def build_extraction_prompt(self, text: str, history: GraphData) -> str:
+        """Build extraction prompt with user custom priority"""
+        if self.config.extraction_prompt:
+            template = self.config.extraction_prompt
+            language = self.detect_language(text)
+        else:
+            language = self.detect_language(text)
+            if language == 'en':
+                template = EXTRACTION_PROMPT_EN
+            else:
+                template = EXTRACTION_PROMPT
+
+        if language == 'en':
+            schema_str = self.generate_schema_string(language='en')
+            history_str = self.build_history_string(history, language='en')
+            examples_str = self.generate_examples_string(language='en')
+        else:
+            schema_str = self.generate_schema_string(language='zh')
+            history_str = self.build_history_string(history, language='zh')
+            examples_str = self.generate_examples_string(language='zh')
+
+        return template.format(
+            text=text,
+            schema=schema_str,
+            history=history_str,
+            examples=examples_str
+        )
+
+    def generate_schema_string(self, language: str = 'zh') -> str:
+        """生成schema字符串（支持中英双语）"""
+        parts = []
+
         if self.config.entity_types:
             entity_types = ", ".join(self.config.entity_types)
-            schema_parts.append(f"**Entity Types**: {entity_types}")
-        
+            if language == 'en':
+                parts.append(f"**Entity Types**: {entity_types}")
+            else:
+                parts.append(f"**实体类型**: {entity_types}")
+
         if self.config.relation_types:
             relation_types = ", ".join(self.config.relation_types)
-            schema_parts.append(f"**Relation Types**: {relation_types}")
-        
-        return "\n".join(schema_parts) if schema_parts else ""
+            if language == 'en':
+                parts.append(f"**Relation Types**: {relation_types}")
+            else:
+                parts.append(f"**关系类型**: {relation_types}")
 
-    def _parse_tsv_response(self, response_text: str) -> Dict[str, List]:
+        return "\n".join(parts)
+
+    def generate_examples_string(self, language: str = 'zh') -> str:
+        """生成示例字符串（支持中英双语）"""
+        parts = []
+
+        if self.config.entity_examples:
+            if language == 'en':
+                parts.append("**Entity Examples**:")
+            else:
+                parts.append("**实体示例**:")
+            parts.append("### ENTITIES")
+            parts.append("id\tname\ttype\tattributes")
+            for i, example in enumerate(self.config.entity_examples):
+                attr_str = self.format_attributes_string(example.get('attributes', {}))
+                parts.append(f"e{i+1}\t{example['name']}\t{example['type']}\t{attr_str}")
+
+        if self.config.relation_examples:
+            if parts:
+                parts.append("")
+            if language == 'en':
+                parts.append("**Relation Examples**:")
+            else:
+                parts.append("**关系示例**:")
+            parts.append("### RELATIONS")
+            parts.append("head_id\ttype\ttail_id")
+            for example in self.config.relation_examples:
+                parts.append(f"{example[0]}\t{example[1]}\t{example[2]}")
+
+        return "\n".join(parts)
+
+    def parse_tsv_response(self, response_text: str) -> GraphData:
         """Parse TSV format response from LLM"""
         entities, relations = [], []
         current_section = None
-        
+
         for line in response_text.strip().split('\n'):
             line = line.strip()
             if not line or line.startswith('...'):
                 continue
-                
+
             if line.startswith('### ENTITIES'):
                 current_section = 'entities'
                 continue
@@ -72,15 +179,15 @@ class GraphExtractor(ExtractorBase[GraphExtractorConfig]):
                 continue
             elif line.startswith(('id\t', 'head_id\t')):
                 continue  # Skip header
-                
+
             # Only process lines containing tabs
             if '\t' not in line:
                 continue
-                
+
             parts = [p.strip() for p in line.split('\t')]
             if len(parts) < 3:
                 continue
-                
+
             try:
                 if current_section == 'entities':
                     attr_str = parts[3] if len(parts) > 3 else ''
@@ -88,20 +195,60 @@ class GraphExtractor(ExtractorBase[GraphExtractorConfig]):
                         'id': parts[0],
                         'entity_name': parts[1],
                         'entity_type': parts[2],
-                        'attributes': self._parse_attributes_string(attr_str)
+                        'attributes': self.parse_attributes_string(attr_str)
                     })
                 elif current_section == 'relations':
                     relations.append(parts[:3])
             except Exception as e:
                 logger.warning(f"Failed to parse line '{line}': {e}")
-                    
-        return {'entities': entities, 'relations': relations}
-        
-    def _parse_attributes_string(self, attr_str: str) -> Dict:
+
+        return GraphData(entities=entities, relations=relations)
+
+    def build_history_string(self, history: GraphData, language: str = 'zh') -> str:
+        """构建历史数据字符串"""
+        if history.is_empty():
+            return ""
+
+        history_parts = []
+
+        # 构建实体部分
+        if history.entities:
+            if language == 'en':
+                history_parts.extend([
+                    "Previous extracted data:",
+                    "### ENTITIES",
+                    "id\tname\ttype\tattributes"
+                ])
+            else:
+                history_parts.extend([
+                    "Previous extracted data:",
+                    "### ENTITIES",
+                    "id\tname\ttype\tattributes"
+                ])
+            for entity in history.entities:
+                entity_id = entity.get('id', '')
+                entity_name = entity.get('entity_name', '')
+                entity_type = entity.get('entity_type', '')
+                attr_str = self.format_attributes_string(entity.get('attributes', {}))
+                history_parts.append(f"{entity_id}\t{entity_name}\t{entity_type}\t{attr_str}")
+
+        # 构建关系部分
+        if history.relations:
+            if not history.entities:
+                history_parts.append("Previous extracted data:")
+            history_parts.extend(["", "### RELATIONS", "head_id\ttype\ttail_id"])
+
+            for relation in history.relations:
+                if isinstance(relation, list) and len(relation) >= 3:
+                    history_parts.append(f"{relation[0]}\t{relation[1]}\t{relation[2]}")
+
+        return "\n".join(history_parts)
+
+    def parse_attributes_string(self, attr_str: str) -> Dict:
         """Parse attribute string: key1|->|value1|#|key2|->|value2"""
         if not attr_str.strip():
             return {}
-            
+
         attributes = {}
         for part in attr_str.split('|#|'):
             if '|->|' in part:
@@ -113,298 +260,207 @@ class GraphExtractor(ExtractorBase[GraphExtractorConfig]):
                 except ValueError:
                     continue
         return attributes
-        
-    def _format_attributes_string(self, attributes: Dict) -> str:
+
+    def format_attributes_string(self, attributes: Dict) -> str:
         """Format attributes dictionary to string"""
         if not isinstance(attributes, dict):
             return ''
         return '|#|'.join(f'{k}|->|{v}' for k, v in attributes.items() if k and v is not None)
-    
-    async def _aextract(self, document: Document) -> Document:
-        """Complete multi-round extraction + cleaning process to extract graph structure from a single document"""
-        if not document.metadata:
-            document.metadata = {}
-            
-        if not document.content:
-            document.metadata.update({'entities': [], 'relations': []})
-            return document
 
-        # Initialize history data
-        history = {
-            'entities': document.metadata.get('entities', []) if isinstance(document.metadata.get('entities'), list) else [],
-            'relations': document.metadata.get('relations', []) if isinstance(document.metadata.get('relations'), list) else []
-        }
-
-        # Multi-round extraction
-        for i in range(self.config.max_rounds):
-            try:
-                new_result = await self._single_round_extract(document, history)
-                if not new_result.get('entities') and not new_result.get('relations'):
-                    break
-                history = self._merge_graph_data(history, new_result)
-            except Exception as e:
-                logger.error(f"Error in round {i + 1}: {e}")
-                break
-
-        # Update document metadata
-        document.metadata.update(history)
-        
-        # Clean if enabled
-        if self.config.enable_cleaning:
-            document = await self._aclean(document)
-        else:
-            # Convert relation entity IDs to entity names
-            document.metadata['relations'] = self._convert_relations_to_entity_names(
-                document.metadata['relations'], document.metadata['entities']
-            )
-        
-        return document
-        
-    async def _single_round_extract(self, document: Document, history: Dict[str, List]) -> Dict[str, List]:
-        """Single round extraction using TSV format"""
+    async def clean_graph_data(self, graph_data: GraphData, document: Document) -> GraphData:
+        """Clean graph data"""
         try:
-            prompt = self.config.extract_prompt.format(
-                text=document.content, 
-                history=self._build_history_string(history),
-                schema=self._generate_schema_string()
-            )
-            
-            llm_response = await self.llm.achat([{"role": "user", "content": prompt}])
-            response_content = self._extract_response_content(llm_response)
-            
-            return self._parse_tsv_response(response_content) if response_content else {'entities': [], 'relations': []}
+            # Basic cleaning
+            cleaned_entities = self.clean_entities(graph_data.entities)
+            cleaned_relations = self.clean_relations(graph_data.relations, cleaned_entities)
+
+            # LLM-assisted cleaning (optional)
+            if self.config.enable_llm_cleaning:
+                return await self.llm_clean(GraphData(cleaned_entities, cleaned_relations), document)
+
+            return GraphData(cleaned_entities, cleaned_relations)
         except Exception as e:
-            logger.error(f"Error during extraction: {e}")
-            return {'entities': [], 'relations': []}
-    
-    def _build_history_string(self, history: Dict[str, List]) -> str:
-        """Build TSV format history data string"""
-        if not (history.get('entities') or history.get('relations')):
-            return ""
-        
-        history_parts = []
-        entities = history.get('entities', [])
-        
-        # Ensure entities have IDs
-        self._ensure_entity_ids(entities)
-        
-        # Build TSV format for entities
-        if entities:
-            history_parts.extend([
-                "Previous extracted data:",
+            self.logger.error(f"Error during cleaning: {e}")
+            return graph_data
+
+    def clean_entities(self, entities: List[Dict]) -> List[Dict]:
+        cleaned = []
+        seen = set()
+
+        for entity in entities:
+            name = entity.get('entity_name', '').strip()
+            entity_type = entity.get('entity_type', '').strip()
+
+            # 去重
+            key = (name.lower(), entity_type.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+
+            # 格式检查
+            if self.is_valid_entity(name):
+                cleaned.append(entity)
+
+        return cleaned
+
+    def clean_relations(self, relations: List[List], entities: List[Dict]) -> List[List]:
+        entity_names = {e.get('entity_name', '').strip().lower() for e in entities}
+        entity_ids = {str(e.get('id', '')).strip() for e in entities if e.get('id')}
+
+        cleaned = []
+        seen = set()
+
+        for relation in relations:
+            if len(relation) < 3:
+                continue
+
+            head, rel_type, tail = str(relation[0]).strip(), str(relation[1]).strip(), str(relation[2]).strip()
+
+            head_valid = head.lower() in entity_names or head in entity_ids
+            tail_valid = tail.lower() in entity_names or tail in entity_ids
+
+            if not (head_valid and tail_valid):
+                continue
+
+            if head.lower() == tail.lower():
+                continue
+
+            key = (head.lower(), rel_type.lower(), tail.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+
+            cleaned.append([head, rel_type, tail])
+
+        return cleaned
+
+    def is_valid_entity(self, name: str) -> bool:
+        """检查实体名称是否有效"""
+        if not name or len(name.strip()) < 2:
+            return False
+
+        # 过滤纯数字
+        if re.match(r'^\d+$', name) or re.match(r'^[\d\s\.,;:!?()\[\]{}""''\-_]+$', name):
+            return False
+
+        return True
+
+    def merge_graph_data(self, history: GraphData, new_extraction: GraphData) -> GraphData:
+        """合并历史数据和新抽取结果"""
+        merged_entities = list(history.entities)
+        merged_relations = list(history.relations)
+
+        # 合并实体
+        entity_keys = {(e.get('entity_name', ''), e.get('entity_type', '')) for e in merged_entities}
+        for entity in new_extraction.entities:
+            key = (entity.get('entity_name', ''), entity.get('entity_type', ''))
+            if key not in entity_keys:
+                merged_entities.append(entity)
+                entity_keys.add(key)
+
+        # 合并关系
+        relation_keys = {(str(r[0]), str(r[1]), str(r[2])) for r in merged_relations if len(r) >= 3}
+        for relation in new_extraction.relations:
+            if len(relation) >= 3:
+                key = (str(relation[0]), str(relation[1]), str(relation[2]))
+                if key not in relation_keys:
+                    merged_relations.append(relation)
+                    relation_keys.add(key)
+
+        return GraphData(entities=merged_entities, relations=merged_relations)
+
+    async def llm_clean(self, graph_data: GraphData, document: Document) -> GraphData:
+        """LLM-assisted graph data cleaning"""
+        try:
+            language = self.detect_language(document.content)
+            prompt = self.build_cleaning_prompt(document.content, graph_data, language)
+            response = await self.llm.achat([{"role": "user", "content": prompt}])
+            cleaned_graph = self.parse_tsv_response(response)
+
+            if cleaned_graph.is_empty():
+                self.logger.warning("LLM cleaning returned empty result, using basic cleaning result")
+                return graph_data
+
+            return cleaned_graph
+
+        except Exception as e:
+            self.logger.error(f"LLM cleaning failed: {e}")
+            return graph_data
+
+    def build_cleaning_prompt(self, text: str, graph_data: GraphData, language: str = 'zh') -> str:
+        """Build cleaning prompt with user custom priority"""
+        graph_data_str = self.format_graph_for_cleaning(graph_data)
+
+        if self.config.cleaning_prompt:
+            template = self.config.cleaning_prompt
+        else:
+            if language == 'en':
+                template = CLEANING_PROMPT_EN
+            else:
+                template = CLEANING_PROMPT
+
+        return template.format(
+            text=text,
+            graph_data=graph_data_str
+        )
+
+    def format_graph_for_cleaning(self, graph_data: GraphData) -> str:
+        """将图数据格式化为清洗prompt中使用的字符串"""
+        parts = []
+
+        # 格式化实体
+        if graph_data.entities:
+            parts.extend([
                 "### ENTITIES",
                 "id\tname\ttype\tattributes"
             ])
-            for ent in entities:
-                ent_id = str(ent.get('id', '')).strip()
-                entity_name = ent.get('entity_name') or ent.get('name') or ''
-                entity_type = ent.get('entity_type') or ent.get('type') or ''
-                attr_str = self._format_attributes_string(ent.get('attributes', {}))
-                history_parts.append(f"{ent_id}\t{entity_name}\t{entity_type}\t{attr_str}")
-        
-        # Build TSV format for relations
-        relations = history.get('relations', [])
-        if relations:
-            if not entities:
-                history_parts.append("Previous extracted data:")
-            history_parts.extend(["", "### RELATIONS", "head_id\ttype\ttail_id"])
-            
-            # Build name->ID mapping
-            name_to_id = {(ent.get('entity_name') or ent.get('name', '')).strip(): str(ent.get('id', '')).strip() 
-                         for ent in entities if ent.get('entity_name') or ent.get('name')}
-            id_set = {str(ent.get('id', '')).strip() for ent in entities if ent.get('id')}
-            
-            for rel in relations:
-                if isinstance(rel, list) and len(rel) >= 3:
-                    head, rtype, tail = str(rel[0]).strip(), str(rel[1]).strip(), str(rel[2]).strip()
-                    head = head if head in id_set else name_to_id.get(head, head)
-                    tail = tail if tail in id_set else name_to_id.get(tail, tail)
-                    history_parts.append(f"{head}\t{rtype}\t{tail}")
-        
-        return "\n".join(history_parts)
-    
-    def _ensure_entity_ids(self, entities: List[Dict]) -> None:
-        """Ensure entities have stable IDs"""
-        used_ids = {str(e.get('id', '')).strip() for e in entities if e.get('id')}
-        counter = 1
-        for ent in entities:
-            if not ent.get('id') or not str(ent.get('id', '')).strip():
-                while f"e{counter}" in used_ids:
-                    counter += 1
-                ent['id'] = f"e{counter}"
-                used_ids.add(ent['id'])
-                counter += 1
-    
-    def _extract_response_content(self, llm_response) -> str:
-        """Extract content from LLM response"""
-        if llm_response is None:
-            return ""
-        if isinstance(llm_response, str):
-            return llm_response
-        if hasattr(llm_response, 'content'):
-            return str(llm_response.content)
-        return str(llm_response)
+            for entity in graph_data.entities:
+                entity_id = entity.get('id', '')
+                entity_name = entity.get('entity_name', '')
+                entity_type = entity.get('entity_type', '')
+                attr_str = self.format_attributes_string(entity.get('attributes', {}))
+                parts.append(f"{entity_id}\t{entity_name}\t{entity_type}\t{attr_str}")
+
+        # 格式化关系
+        if graph_data.relations:
+            if parts:
+                parts.append("")
+            parts.extend([
+                "### RELATIONS",
+                "head_id\ttype\ttail_id"
+            ])
+            for relation in graph_data.relations:
+                if isinstance(relation, list) and len(relation) >= 3:
+                    parts.append(f"{relation[0]}\t{relation[1]}\t{relation[2]}")
+
+        return "\n".join(parts)
 
 
-    async def _aclean(self, document: Document) -> Document:
-        """Asynchronously clean graph structure from a single document"""
-        if not self._has_valid_triples(document):
-            return document
-            
-        entities = document.metadata.get('entities', [])
-        relations = document.metadata.get('relations', [])
+    def convert_final_output_to_names(self, graph_data: GraphData) -> GraphData:
+        """将最终输出的关系中的ID转换为实体名"""
+        # 创建ID到名称的映射
+        id_to_name = {}
+        for entity in graph_data.entities:
+            entity_id = entity.get('id', '')
+            entity_name = entity.get('entity_name', '')
+            if entity_id and entity_name:
+                id_to_name[entity_id] = entity_name
 
-        try:
-            cleaned_entities = self._pre_filter_entities(entities)
-            cleaned_relations = self._clean_relations(relations, cleaned_entities)
-            cleaned_relations = self._convert_relations_to_entity_names(cleaned_relations, cleaned_entities)
-            
-            document.metadata.update({
-                'entities': cleaned_entities,
-                'relations': cleaned_relations
-            })
-        except Exception as e:
-            logger.error(f"Error during cleaning process: {e}")
+        # 转换关系中的ID为名称
+        converted_relations = []
+        for relation in graph_data.relations:
+            if isinstance(relation, list) and len(relation) >= 3:
+                head_id, rel_type, tail_id = relation[0], relation[1], relation[2]
+                head_name = id_to_name.get(head_id, head_id)
+                tail_name = id_to_name.get(tail_id, tail_id)
+                converted_relations.append([head_name, rel_type, tail_name])
+            else:
+                converted_relations.append(relation)
 
-        return document
-    
-    def _has_valid_triples(self, document: Document) -> bool:
-        """Check if document has valid entities or relations data"""
-        return (
-            document.metadata and 
-            (document.metadata.get('entities') or document.metadata.get('relations'))
+        # 返回最终输出格式的图数据
+        return GraphData(
+            entities=graph_data.entities,     # 实体保持不变
+            relations=converted_relations,    # 关系使用实体名
+            metadata=graph_data.metadata
         )
 
-
-    def _pre_filter_entities(self, entities: List[Dict]) -> List[Dict]:
-        """Pre-process filter entities, remove obviously useless entities"""
-        if not entities:
-            return []
-        
-        filtered_entities = []
-        for entity in entities:
-            entity_name = entity.get('entity_name', '').strip()
-            if not entity_name:
-                continue
-                
-            # Filter pure numbers or pure punctuation
-            if (re.match(r'^\d+$', entity_name) or 
-                re.match(r'^[\d\s\.,;:!?()\[\]{}""''\-_]+$', entity_name)):
-                continue
-                
-            filtered_entities.append(entity)
-        
-        return filtered_entities
-
-
-    def _clean_relations(self, relations: List[List], cleaned_entities: List[Dict]) -> List[List]:
-        """Clean relations, remove invalid relations (including non-existent head/tail entities, self-loop relations)"""
-        if not relations:
-            return []
-        
-        # Build valid entity sets
-        valid_entity_ids = {str(entity.get('id', '')).strip() for entity in cleaned_entities if entity.get('id')}
-        valid_entity_names = {entity.get('entity_name', '').strip() for entity in cleaned_entities if entity.get('entity_name')}
-        
-        cleaned_relations = []
-        for relation in relations:
-            if not isinstance(relation, list) or len(relation) < 3:
-                continue
-                
-            head, relation_type, tail = str(relation[0]).strip(), str(relation[1]).strip(), str(relation[2]).strip()
-            
-            # Check entity validity and relation type
-            head_valid = head in valid_entity_ids or head in valid_entity_names
-            tail_valid = tail in valid_entity_ids or tail in valid_entity_names
-            
-            if head_valid and tail_valid and head != tail and relation_type:
-                cleaned_relations.append([head, relation_type, tail])
-        
-        return cleaned_relations
-    
-    def _convert_relations_to_entity_names(self, relations: List[List], entities: List[Dict]) -> List[List]:
-        """Convert entity IDs in relations to entity names"""
-        if not relations or not entities:
-            return relations
-            
-        # Build ID to name mapping
-        id_to_name = {str(entity.get('id', '')).strip(): entity.get('entity_name', '').strip()
-                     for entity in entities if entity.get('id') and entity.get('entity_name')}
-        
-        converted_relations = []
-        for relation in relations:
-            if isinstance(relation, list) and len(relation) >= 3:
-                head, relation_type, tail = str(relation[0]).strip(), str(relation[1]).strip(), str(relation[2]).strip()
-                converted_relations.append([
-                    id_to_name.get(head, head),
-                    relation_type,
-                    id_to_name.get(tail, tail)
-                ])
-        return converted_relations
-
-
-        
-    # ==================== Data Merging Methods ====================
-    
-    def _merge_graph_data(self, history: Dict[str, List], new_extraction: Dict[str, List]) -> Dict[str, List]:
-        """Merge history and new extraction results, deduplicate"""
-        entities = list(history.get('entities', []))
-        relations = self._normalize_relations(history.get('relations', []))
-        
-        entities, _ = self._merge_entities(entities, new_extraction.get('entities', []))
-        relations = self._merge_relations(relations, new_extraction.get('relations', []))
-        
-        return {'entities': entities, 'relations': relations}
-        
-    def _normalize_relations(self, relations: List) -> List[List]:
-        """Normalize relations to triple list"""
-        return [list(r) for r in relations if isinstance(r, (list, tuple)) and len(r) == 3]
-        
-    def _merge_entities(self, existing_entities: List[Dict], new_entities: List[Dict]) -> tuple:
-        """Merge entities by (entity_name, entity_type), deduplicate"""
-        entity_map = {(e.get('entity_name'), e.get('entity_type')): e for e in existing_entities}
-        
-        for ent in new_entities:
-            name = ent.get('entity_name') or ent.get('name')
-            etype = ent.get('entity_type') or ent.get('type')
-            if not name or not etype:
-                continue
-                
-            key = (name, etype)
-            if key not in entity_map:
-                new_entity = {
-                    'id': ent.get('id'),
-                    'entity_name': name,
-                    'entity_type': etype,
-                    'attributes': ent.get('attributes', {}) if isinstance(ent.get('attributes'), dict) else {}
-                }
-                existing_entities.append(new_entity)
-                entity_map[key] = new_entity
-            else:
-                self._merge_entity_attributes(entity_map[key], ent.get('attributes', {}))
-                if ent.get('id') and not entity_map[key].get('id'):
-                    entity_map[key]['id'] = ent.get('id')
-                
-        return existing_entities, entity_map
-        
-    def _merge_entity_attributes(self, target_entity: Dict, new_attrs: Dict):
-        """Merge attributes to target entity (only add missing keys)"""
-        if not isinstance(target_entity.get('attributes'), dict):
-            target_entity['attributes'] = {}
-        if isinstance(new_attrs, dict):
-            for key, value in new_attrs.items():
-                if key not in target_entity['attributes']:
-                    target_entity['attributes'][key] = value
-                    
-    def _merge_relations(self, existing_relations: List[List], new_relations: List) -> List[List]:
-        """Merge relations by (head, relation_type, tail), deduplicate"""
-        rel_keys = {(str(h), str(p), str(o)) for h, p, o in existing_relations}
-        
-        for r in new_relations:
-            if isinstance(r, (list, tuple)) and len(r) == 3:
-                key = (str(r[0]), str(r[1]), str(r[2]))
-                if all(key) and key not in rel_keys:
-                    existing_relations.append([r[0], r[1], r[2]])
-                    rel_keys.add(key)
-                    
-        return existing_relations
