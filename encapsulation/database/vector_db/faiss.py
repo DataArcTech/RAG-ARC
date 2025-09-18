@@ -4,7 +4,7 @@ import os
 import uuid
 import numpy as np
 import logging
-from typing import Any, Optional, List, Literal
+from typing import Any, Optional, List, Literal, Dict
 
 
 from encapsulation.database.vector_db.base import BaseIndex, BaseIndexConfig
@@ -406,3 +406,83 @@ class FaissIndex(BaseIndex[FaissIndexConfig]):
             bool: 索引是否存在且包含文档
         """
         return self.index is not None and self.index.ntotal > 0
+
+    def similarity_search_by_vector_with_score(
+        self, embedding: List[float], k: int = 4, **kwargs: Any
+    ) -> List[tuple[Document, float]]:
+        """向量相似度搜索并返回分数
+
+        Args:
+            embedding: 查询向量
+            k: 返回结果数量
+            **kwargs: 其他搜索参数
+
+        Returns:
+            List[tuple[Document, float]]: 文档和相似度分数的元组列表
+        """
+        if self.index is None or self.index.ntotal == 0:
+            return []
+
+        # Convert embedding to numpy array
+        query_vector = np.array([embedding]).astype(np.float32)
+
+        # Normalize if needed
+        if self.config.normalize_L2:
+            faiss.normalize_L2(query_vector)
+
+        # Search
+        scores, indices = self.index.search(query_vector, k)
+
+        # Convert results
+        results = []
+        for i, (score, idx) in enumerate(zip(scores[0], indices[0])):
+            if idx == -1:  # FAISS returns -1 for empty slots
+                break
+
+            if idx in self.index_to_docstore_id:
+                doc_id = self.index_to_docstore_id[idx]
+                if doc_id in self.docstore:
+                    doc = self.docstore[doc_id]
+
+                    # Convert distance to similarity score based on metric
+                    if self.config.metric == "cosine":
+                        # For cosine similarity with IndexFlatIP and normalized vectors,
+                        # FAISS returns the inner product which equals cosine similarity
+                        # Range is [-1, 1], where 1 is most similar
+                        similarity_score = float(score)
+                    elif self.config.metric == "ip":  # Inner product
+                        # For inner product, higher is better (already similarity)
+                        similarity_score = float(score)
+                    else:  # L2 distance
+                        # For L2, lower distance means higher similarity
+                        # Convert to similarity: similarity = 1 / (1 + distance)
+                        similarity_score = 1.0 / (1.0 + score)
+
+                    results.append((doc, similarity_score))
+
+        return results
+
+    def get_index_stats(self) -> Dict[str, Any]:
+        """获取索引统计信息
+
+        Returns:
+            Dict[str, Any]: 索引统计信息
+        """
+        if self.index is None:
+            return {
+                "num_documents": 0,
+                "index_type": self.config.index_type,
+                "metric": self.config.metric,
+                "dimension": 0,
+                "is_trained": False,
+                "docstore_size": len(self.docstore)
+            }
+
+        return {
+            "num_documents": self.index.ntotal,
+            "index_type": self.config.index_type,
+            "metric": self.config.metric,
+            "dimension": self.index.d,
+            "is_trained": getattr(self.index, 'is_trained', True),
+            "docstore_size": len(self.docstore)
+        }

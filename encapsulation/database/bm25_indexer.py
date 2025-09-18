@@ -61,6 +61,18 @@ class BM25IndexBuilderConfig(BaseIndexConfig):
     enable_gc: bool = Field(default=True, description="是否启用垃圾回收")
     queue_maxsize: int = Field(default=1000, description="队列最大大小")
 
+    # 搜索配置
+    search_kwargs: Dict[str, Any] = Field(
+        default_factory=lambda: {
+            "use_phrase_query": False,
+            "k": 5,
+            "with_score": True
+        },
+        description="搜索参数配置"
+    )
+    k: int = Field(default=5, description="默认返回结果数量")
+    with_score: bool = Field(default=True, description="是否返回分数")
+
     # 运行时字段
     preprocess_func: Optional[Callable[[str], List[str]]] = Field(default=None, exclude=True)
     progress_callback: Optional[Callable] = Field(default=None, exclude=True)
@@ -350,9 +362,17 @@ class BM25IndexBuilder(BaseIndex):
         self._schema = schema_builder.build()
 
         # Load existing index or create new one
-        if os.path.exists(self.config.index_path) and any(os.scandir(self.config.index_path)):
-            logger.info(f"Loading existing index from: {self.config.index_path}")
-            self._index = Index.open(self.config.index_path)
+        if os.path.exists(self.config.index_path):
+            # 使用with语句确保scandir正确关闭
+            with os.scandir(self.config.index_path) as entries:
+                has_files = any(entries)
+            if has_files:
+                logger.info(f"Loading existing index from: {self.config.index_path}")
+                self._index = Index.open(self.config.index_path)
+            else:
+                # 目录存在但为空，创建新索引
+                logger.info(f"Creating new index at existing empty directory: {self.config.index_path}")
+                self._index = Index(self._schema, path=self.config.index_path)
         else:
             logger.info(f"Creating new index at: {self.config.index_path}")
             os.makedirs(self.config.index_path, exist_ok=True)
@@ -872,7 +892,10 @@ class BM25IndexBuilder(BaseIndex):
         if not os.path.exists(self.config.index_path):
             raise FileNotFoundError(f"Index path does not exist: {self.config.index_path}")
         
-        if not any(os.scandir(self.config.index_path)):
+        # 使用with语句确保scandir正确关闭
+        with os.scandir(self.config.index_path) as entries:
+            has_files = any(entries)
+        if not has_files:
             raise FileNotFoundError(f"Index directory is empty: {self.config.index_path}")
         
         try:

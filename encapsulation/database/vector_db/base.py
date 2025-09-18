@@ -10,6 +10,7 @@ from typing import (
     List,
     Generic,
     Literal,
+    Dict,
 )
 from core.utils.data_model import Document
 from framework.config import AbstractConfig
@@ -123,3 +124,24 @@ class BaseIndex(AbstractModule, Generic[ConfigType], ABC):
             bool: 索引是否存在
         """
         pass
+
+    @abstractmethod
+    def get_index_stats(self) -> Dict[str, Any]:
+        """获取索引统计信息
+
+        Returns:
+            Dict[str, Any]: 索引统计信息，包含文档数量、索引大小等
+        """
+        pass
+
+    def health_check(self) -> Dict[str, Any]:
+        """索引健康检查
+
+        Returns:
+            Dict[str, Any]: 健康检查结果，包含索引状态、统计信息等
+        """
+        return {
+            "exists": self.index_exists(),
+            "stats": self.get_index_stats() if self.index_exists() else {},
+            "status": "healthy" if self.index_exists() else "missing"
+        }

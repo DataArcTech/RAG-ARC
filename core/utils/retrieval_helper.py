@@ -7,7 +7,7 @@
 import math
 import warnings
 import logging
-from typing import Callable, Any, Tuple, List, Optional
+from typing import Callable, Any, Tuple, List, Optional, Dict
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -356,18 +356,169 @@ class RetrievalHelper:
     @staticmethod
     def normalize_vectors_for_cosine(embeddings: List[List[float]]) -> List[List[float]]:
         """为余弦相似度归一化向量
-        
+
         Args:
             embeddings: 嵌入向量列表
-            
+
         Returns:
             归一化后的嵌入向量列表
         """
         import numpy as np
-        
+
         embeddings_array = np.array(embeddings)
         norms = np.linalg.norm(embeddings_array, axis=1, keepdims=True)
         # 避免除零
         norms = np.where(norms == 0, 1, norms)
         normalized = embeddings_array / norms
         return normalized.tolist()
+
+    @staticmethod
+    def vector_search_with_faiss(
+        index: Any,
+        embedding: List[float],
+        search_kwargs: Dict[str, Any]
+    ) -> List[Tuple[Any, float]]:
+        """使用FAISS执行向量搜索
+
+        Args:
+            index: FAISS索引对象
+            embedding: 查询嵌入向量
+            search_kwargs: 搜索参数，包含k, score_threshold等
+
+        Returns:
+            (文档, 分数)元组列表
+        """
+        import numpy as np
+        import faiss
+
+        if not hasattr(index, 'index') or index.index is None or index.index.ntotal == 0:
+            return []
+
+        # 获取搜索参数
+        k = search_kwargs.get("k", 5)
+        score_threshold = search_kwargs.get("score_threshold")
+        metric = search_kwargs.get("metric", "cosine")
+
+        # 准备查询向量
+        query_vector = np.array([embedding]).astype(np.float32)
+
+        # 检查是否需要归一化
+        if hasattr(index.config, 'normalize_L2') and index.config.normalize_L2:
+            faiss.normalize_L2(query_vector)
+        elif hasattr(index.config, 'metric') and index.config.metric == "cosine":
+            faiss.normalize_L2(query_vector)
+
+        # 执行搜索
+        k = min(k, index.index.ntotal)
+        distances, indices = index.index.search(query_vector, k)
+
+        results = []
+        for distance, idx in zip(distances[0], indices[0]):
+            if idx == -1:  # FAISS返回-1表示无效结果
+                continue
+
+            doc_id = index.index_to_docstore_id[idx]
+            doc = index.docstore[doc_id]
+
+            # 对于cosine度量，FAISS返回的是相似度分数而不是距离
+            if metric == "cosine":
+                similarity_score = float(distance)
+            else:
+                # 对于其他度量，需要转换距离为相似度
+                relevance_score_fn = RetrievalHelper.select_relevance_score_fn_by_metric(metric)
+                similarity_score = relevance_score_fn(float(distance))
+
+            results.append((doc, similarity_score))
+
+        # 按相似度分数降序排序
+        results.sort(key=lambda x: x[1], reverse=True)
+
+        # 应用分数阈值过滤（如果指定）
+        if score_threshold is not None:
+            results = [
+                (doc, score) for doc, score in results
+                if score >= score_threshold
+            ]
+
+            if len(results) == 0:
+                logger.warning(
+                    f"使用分数阈值 {score_threshold} 没有检索到相关文档"
+                )
+
+        return results
+
+    @staticmethod
+    def mmr_search(
+        query_embedding: List[float],
+        docs_and_scores: List[Tuple[Any, float]],
+        embedding_model: Any,
+        search_kwargs: Dict[str, Any]
+    ) -> List[Any]:
+        """最大边际相关性搜索
+
+        Args:
+            query_embedding: 查询嵌入向量
+            docs_and_scores: 候选(文档, 分数)元组列表
+            embedding_model: 嵌入模型
+            search_kwargs: 搜索参数，包含k, lambda_mult等
+
+        Returns:
+            选中的文档列表
+        """
+        import numpy as np
+
+        if not docs_and_scores:
+            return []
+
+        # 获取搜索参数
+        k = search_kwargs.get("k", 4)
+        lambda_mult = search_kwargs.get("lambda_mult", 0.5)
+        normalize_for_cosine = search_kwargs.get("normalize_for_cosine", True)
+
+        # 获取候选文档的嵌入向量
+        candidate_embeddings = []
+        for doc, _ in docs_and_scores:
+            doc_embedding = embedding_model.embed_query(doc.content)
+            candidate_embeddings.append(doc_embedding)
+
+        # 转换为numpy数组
+        query_emb_norm = np.array(query_embedding)
+        candidate_embs_norm = np.array(candidate_embeddings)
+
+        # 归一化处理（如果需要）
+        if normalize_for_cosine:
+            query_emb_norm = query_emb_norm / np.linalg.norm(query_emb_norm)
+            candidate_embs_norm = candidate_embs_norm / np.linalg.norm(
+                candidate_embs_norm, axis=1, keepdims=True
+            )
+
+        # 使用MMR选择文档
+        return RetrievalHelper.mmr_select_documents(
+            docs_and_scores,
+            candidate_embs_norm.tolist(),
+            query_emb_norm.tolist(),
+            k,
+            lambda_mult,
+        )
+
+    @staticmethod
+    def add_scores_to_documents(
+        docs: List[Any],
+        docs_with_scores: List[Tuple[Any, float]]
+    ) -> List[Any]:
+        """为文档添加分数到元数据中
+
+        Args:
+            docs: 文档列表
+            docs_with_scores: (文档, 分数)元组列表
+
+        Returns:
+            添加了分数元数据的文档列表
+        """
+        score_dict = {doc.id: score for doc, score in docs_with_scores}
+
+        for doc in docs:
+            if doc.id in score_dict:
+                doc.metadata = {**(doc.metadata or {}), "score": score_dict[doc.id]}
+
+        return docs

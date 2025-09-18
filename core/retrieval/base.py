@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from abc import ABC, abstractmethod
 from typing import Any, List, TypeVar, Generic, Tuple, Literal, Dict, Optional, Union
 from typing import Annotated
@@ -12,6 +13,8 @@ from encapsulation.database.vector_db.faiss import FaissIndexConfig
 from encapsulation.llm.base import LLMBaseConfig
 from encapsulation.llm.huggingface import HuggingFaceEmbedConfig
 from encapsulation.llm.openai import OpenAIConfig
+
+logger = logging.getLogger(__name__)
 
 class BaseRetrieverConfig(AbstractConfig):
     type: Literal["retriever"] = "retriever"
@@ -56,6 +59,18 @@ class BaseRetriever(AbstractModule, Generic[ConfigType], ABC):
         self.config = config
         self._index = self.config.index_config.build()
         self._embedding = None
+        self._load_existing_index()
+
+    def _load_existing_index(self) -> None:
+        """尝试加载已存在的索引"""
+        try:
+            if hasattr(self._index, 'load_index'):
+                self._index.load_index()
+                logger.info(f"Successfully loaded existing index for {self.get_name()}")
+        except Exception as e:
+            message = f"Index not found for retriever {self.get_name()}: {e}"
+            logger.warning(f"{message}. Please use IndexManager to build the index first.")
+            raise RuntimeError(message)
 
     def get_default_search_config(self) -> Dict[str, Any]:
         return self.config.search_kwargs.copy()
@@ -92,60 +107,5 @@ class BaseRetriever(AbstractModule, Generic[ConfigType], ABC):
     def get_name(self) -> str:
         return self.config.type
 
-    # CRUD 操作代理
-    def add_documents(self, documents: List[Document]) -> List[str]:
-        # 计算嵌入向量
-        if hasattr(self.config, "embedding_config") and self.config.embedding_config is not None:
-            embedding_model = self.get_embedding()
-            texts = [doc.content for doc in documents]
-            embeddings = embedding_model.embed_documents(texts)
-            return self._index.add(documents, embeddings)
-        else:
-            # 对于不需要embedding的索引（如BM25），直接调用add方法
-            return self._index.add(documents)
-
-    def delete_documents(self, ids: Optional[List[str]] = None, **kwargs: Any) -> Optional[bool]:
-        return self._index.delete(ids, **kwargs)
-
-    def update_documents(self, documents: List[Document]) -> None:
-        # 计算嵌入向量
-        if hasattr(self.config, "embedding_config") and self.config.embedding_config is not None:
-            embedding_model = self.get_embedding()
-            texts = [doc.content for doc in documents]
-            embeddings = embedding_model.embed_documents(texts)
-            return self._index.update(documents, embeddings)
-        else:
-            # 对于不需要embedding的索引（如BM25），直接调用update方法
-            return self._index.update(documents)
-
-    def build_index(self, documents: List[Document]) -> None:
-        """构建索引（仅在索引不存在时使用）
-
-        Args:
-            documents: 用于构建索引的文档列表
-
-        Raises:
-            RuntimeError: 如果索引已存在
-        """
-        # 检查索引是否已存在
-        if self._index.index_exists():
-            raise RuntimeError(
-                "Index already exists. Use add_documents() to add documents to existing index, "
-                "or delete the existing index first if you want to rebuild it."
-            )
-
-        # 计算嵌入向量
-        if hasattr(self.config, "embedding_config") and self.config.embedding_config is not None:
-            embedding_model = self.get_embedding()
-            texts = [doc.content for doc in documents]
-            embeddings = embedding_model.embed_documents(texts)
-            return self._index.build_index(documents, embeddings)
-        else:
-            # 对于不需要embedding的索引（如BM25），直接调用build_index方法
-            return self._index.build_index(documents)
-
-    def save_index(self, index_path: str, index_name: str = "index") -> None:
-        return self._index.save_index(index_path, index_name)
-
-    def load_index(self, index_path: Optional[str] = None) -> None:
-        return self._index.load_index(index_path)
+    # 索引CRUD操作已移至IndexManager
+    # Retriever专注于检索功能
