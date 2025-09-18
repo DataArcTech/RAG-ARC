@@ -6,6 +6,7 @@ from framework.config import AbstractConfig
 from encapsulation.llm.openai import OpenAILLM
 from typing import Literal
 import os
+import asyncio
 
 class OpenAIChatConfig(AbstractConfig):
     """Configuration for OpenAI Chat LLM"""
@@ -13,7 +14,7 @@ class OpenAIChatConfig(AbstractConfig):
     model_name: str = "gpt-4o-mini"
     task_types: list = ["chat"]
     base_url: str = "https://api.gptsapi.net/v1"
-    api_key: str = "sk-xxx"
+    api_key: str = "sk-2T06b7c7f9c3870049fbf8fada596b0f8ef908d1e233KLY2"
     
     def build(self) -> OpenAILLM:
         return OpenAILLM(self)
@@ -24,7 +25,7 @@ class OpenAIEmbeddingConfig(AbstractConfig):
     model_name: str = "text-embedding-3-small"
     task_types: list = ["embedding"]
     base_url: str = "https://api.gptsapi.net/v1"
-    api_key: str = "sk-xxx"
+    api_key: str = "sk-2T06b7c7f9c3870049fbf8fada596b0f8ef908d1e233KLY2"
     
     def build(self) -> OpenAILLM:
         return OpenAILLM(self)
@@ -126,6 +127,80 @@ def main():
             print(f"Token counting not supported in this version")
     except Exception as e:
         print(f"Token counting test failed: {e}")
+
+    # ==================== ASYNC TESTS ====================
+    print("\n" + "="*50)
+    print("ASYNC FUNCTIONALITY TESTS")
+    print("="*50)
+
+    async def run_async_tests():
+        # Test async chat
+        print("\n--- Async Chat Test ---")
+        try:
+            achat_response = await chat_llm.achat(messages)
+            print(f"Input: {messages[-1]['content']}")
+            print(f"Async Response: {achat_response}")
+            print(f"Response type: {type(achat_response)}")
+            print(f"Response length: {len(achat_response)} characters")
+        except Exception as e:
+            print(f"Async chat test failed: {e}")
+
+        # Test async streaming chat
+        print("\n--- Async Streaming Chat Test ---")
+        try:
+            print("Async streaming response: ", end="", flush=True)
+            async for chunk in chat_llm.astream_chat(messages):
+                if isinstance(chunk, str):
+                    print(chunk, end="", flush=True)
+                else:
+                    print(f"\nAsync token stats: {chunk}")
+            print()  # New line after streaming
+        except Exception as e:
+            print(f"Async streaming chat test failed: {e}")
+
+        # Test async single text embedding
+        print("\n--- Async Single Text Embedding Test ---")
+        async_single_text = "This is an async test sentence for embedding"
+        try:
+            result_single = await embedding_llm.aembed(async_single_text)
+            print(f"Input: {async_single_text}")
+            print(f"Output type: {type(result_single)}")
+            print(f"Output shape: {len(result_single)} dimensions")
+            print(f"First 5 values: {result_single[:5]}")
+        except Exception as e:
+            print(f"Async single embedding test failed: {e}")
+
+        # Test async multiple texts embedding
+        print("\n--- Async Multiple Texts Embedding Test ---")
+        async_multiple_texts = ["Async hello world", "This is another async test", "Third async sentence"]
+        try:
+            result_multiple = await embedding_llm.aembed(async_multiple_texts)
+            print(f"Input: {async_multiple_texts}")
+            print(f"Output type: {type(result_multiple)}")
+            print(f"Output shape: {len(result_multiple)} texts x {len(result_multiple[0])} dimensions")
+            print(f"First embedding first 5 values: {result_multiple[0][:5]}")
+        except Exception as e:
+            print(f"Async multiple embedding test failed: {e}")
+
+        # Test async chat with token counting
+        print("\n--- Async Token Counting Test ---")
+        try:
+            response_with_tokens = await chat_llm.achat(messages, return_token_count=True)
+            if isinstance(response_with_tokens, tuple):
+                response, token_stats = response_with_tokens
+                print(f"Async Response: {response[:100]}...")
+                print(f"Async Token stats: {token_stats}")
+            else:
+                print(f"Async token counting not supported in this version")
+        except Exception as e:
+            print(f"Async token counting test failed: {e}")
+
+    # Run async tests
+    print("\nRunning async tests...")
+    try:
+        asyncio.run(run_async_tests())
+    except Exception as e:
+        print(f"Async tests failed: {e}")
 
 if __name__ == "__main__":
     main()

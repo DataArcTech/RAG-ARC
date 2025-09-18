@@ -236,7 +236,19 @@ class QwenLLM(LLMBase):
     def _stream_chat(self, messages, max_tokens=None, temperature=None, **kwargs):
         """Qwen reranker models don't support streaming chat"""
         raise NotImplementedError("Qwen reranker models do not support streaming chat")
-    
+
+    async def _achat(self, messages, max_tokens=None, temperature=None, **kwargs):
+        """Qwen reranker models don't support async chat"""
+        raise NotImplementedError("Qwen reranker models do not support async chat")
+
+    async def _astream_chat(self, messages, max_tokens=None, temperature=None, **kwargs):
+        """Qwen reranker models don't support async streaming chat"""
+        raise NotImplementedError("Qwen reranker models do not support async streaming chat")
+
     def _embed(self, texts):
         """Qwen reranker models don't support embedding"""
         raise NotImplementedError("Qwen reranker models do not support embedding")
+
+    async def _aembed(self, texts):
+        """Qwen reranker models don't support async embedding"""
+        raise NotImplementedError("Qwen reranker models do not support async embedding")

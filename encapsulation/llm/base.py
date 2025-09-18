@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import Dict, Any, List, Optional, Union, Tuple
+from typing import Dict, Any, List, Optional, Union, Tuple, AsyncGenerator
 import logging
 
 logger = logging.getLogger(__name__)
@@ -71,12 +71,62 @@ class LLMBase(AbstractModule):
     @abstractmethod
     def _stream_chat(
         self,
-        messages: List[Dict[str, str]], 
+        messages: List[Dict[str, str]],
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         **kwargs
     ):
         """Internal streaming chat implementation"""
+        pass
+
+    # ==================== ASYNC CHAT METHODS ====================
+    async def achat(
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        **kwargs
+    ) -> str:
+        """
+        Async chat completion
+        """
+        self.validate_task_support('chat')
+        return await self._achat(messages, max_tokens, temperature, **kwargs)
+
+    @abstractmethod
+    async def _achat(
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        **kwargs
+    ) -> str:
+        """Internal async chat implementation"""
+        pass
+
+    async def astream_chat(
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        **kwargs
+    ) -> AsyncGenerator[str, None]:
+        """
+        Async streaming chat completion
+        """
+        self.validate_task_support('chat')
+        async for chunk in self._astream_chat(messages, max_tokens, temperature, **kwargs):
+            yield chunk
+
+    @abstractmethod
+    async def _astream_chat(
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        **kwargs
+    ) -> AsyncGenerator[str, None]:
+        """Internal async streaming chat implementation"""
         pass
     
     # ==================== EMBEDDING METHODS ====================
@@ -90,6 +140,19 @@ class LLMBase(AbstractModule):
     @abstractmethod
     def _embed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
         """Internal embedding implementation"""
+        pass
+
+    # ==================== ASYNC EMBEDDING METHODS ====================
+    async def aembed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
+        """
+        Generate text embeddings asynchronously
+        """
+        self.validate_task_support('embedding')
+        return await self._aembed(texts)
+
+    @abstractmethod
+    async def _aembed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
+        """Internal async embedding implementation"""
         pass
     
     # ==================== RERANKING METHODS ====================
