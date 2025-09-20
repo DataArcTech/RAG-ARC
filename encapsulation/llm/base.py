@@ -1,33 +1,36 @@
-from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Optional, Union
+from abc import abstractmethod
+from typing import Dict, Any, List, Optional, Union, Tuple, AsyncGenerator
 import logging
 
 logger = logging.getLogger(__name__)
 
+# Import Document here to avoid circular imports
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .document import Document
 
-class LLMBase(ABC):
+from framework.module import AbstractModule
+
+
+class LLMBase(AbstractModule):
     """
-    大语言模型基类，定义了所有LLM实现必须遵循的接口
+    Unified model base class supporting multiple task types
+    Supports: chat, embedding, reranking
     """
+
+    def supports_task(self, task_type: str) -> bool:
+        """Check if specified task type is supported"""
+        task_types = getattr(self.config, 'task_types', ['chat'])
+        return task_type in task_types
     
-    def __init__(self, model_name: str, **kwargs):
-        """
-        初始化LLM基类
-        
-        Args:
-            model_name: 模型名称
-            **kwargs: 其他配置参数
-        """
-        self.model_name = model_name
-        self.config = kwargs
-        self._setup_logging()
+    def validate_task_support(self, task_type: str):
+        """Validate task support, raise exception if not supported"""
+        if not self.supports_task(task_type):
+            model_name = getattr(self.config, 'model_name', 'default')
+            task_types = getattr(self.config, 'task_types', ['chat'])
+            raise ValueError(f"Model {model_name} does not support task: {task_type}. Supported: {task_types}")
     
-    def _setup_logging(self):
-        """设置日志配置"""
-        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
-    
- 
-    @abstractmethod
+    # ==================== CHAT METHODS ====================
     def chat(
         self, 
         messages: List[Dict[str, str]], 
@@ -36,20 +39,22 @@ class LLMBase(ABC):
         **kwargs
     ) -> str:
         """
-        对话式生成
-        
-        Args:
-            messages: 对话消息列表，格式如[{"role": "user", "content": "问题"}]
-            max_tokens: 最大生成token数
-            temperature: 生成温度参数
-            **kwargs: 其他生成参数
-            
-        Returns:
-            生成的回复文本
+        Chat completion
         """
+        self.validate_task_support('chat')
+        return self._chat(messages, max_tokens, temperature, **kwargs)
+    
+    @abstractmethod
+    def _chat(
+        self, 
+        messages: List[Dict[str, str]], 
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        **kwargs
+    ) -> str:
+        """Internal chat implementation"""
         pass
 
-    @abstractmethod
     def stream_chat(
         self,
         messages: List[Dict[str, str]], 
@@ -58,143 +63,162 @@ class LLMBase(ABC):
         **kwargs
     ):
         """
-        流式对话生成
+        Streaming chat completion
         """
-        pass
-
+        self.validate_task_support('chat')
+        return self._stream_chat(messages, max_tokens, temperature, **kwargs)
+    
     @abstractmethod
-    def parse_chat(self, messages: List[Dict[str, str]], response_format: Any, **kwargs):
-        """
-        解析对话生成，生成指定pydantic模型
-        """
-        pass
-
-    @abstractmethod
-    def embed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
-        """
-        文本嵌入生成
-        
-        Args:
-            texts: 单个文本或文本列表
-            
-        Returns:
-            嵌入向量或嵌入向量列表
-        """
-        pass
-
-
-    @abstractmethod
-    async def astream_chat(
+    def _stream_chat(
         self,
-        messages: List[Dict[str, str]], 
+        messages: List[Dict[str, str]],
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         **kwargs
     ):
-        """
-        异步流式对话生成
-        
-        Args:
-            messages: 对话消息列表，格式如[{"role": "user", "content": "问题"}]
-            max_tokens: 最大生成token数
-            temperature: 生成温度参数
-            **kwargs: 其他生成参数
-            
-        Yields:
-            生成的文本片段
-        """
+        """Internal streaming chat implementation"""
         pass
 
-
-    @abstractmethod
+    # ==================== ASYNC CHAT METHODS ====================
     async def achat(
-        self, 
-        messages: List[Dict[str, str]], 
-        max_tokens: Optional[int] = None, 
-        temperature: Optional[float] = None, 
-        **kwargs) -> str:
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        **kwargs
+    ) -> str:
         """
-        异步对话式生成
-        
-        Args:
-            messages: 对话消息列表，格式如[{"role": "user", "content": "问题"}]
-            max_tokens: 最大生成token数
-            temperature: 生成温度参数
-            **kwargs: 其他生成参数
-            
-        Returns:
-            生成的回复文本
+        Async chat completion
         """
-        pass
+        self.validate_task_support('chat')
+        return await self._achat(messages, max_tokens, temperature, **kwargs)
 
     @abstractmethod
-    async def aparse_chat(self, messages: List[Dict[str, str]], response_format: Any, **kwargs):
-        """
-        异步解析对话生成，生成指定pydantic模型
-        """
+    async def _achat(
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        **kwargs
+    ) -> str:
+        """Internal async chat implementation"""
         pass
 
+    async def astream_chat(
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        **kwargs
+    ) -> AsyncGenerator[str, None]:
+        """
+        Async streaming chat completion
+        """
+        self.validate_task_support('chat')
+        async for chunk in self._astream_chat(messages, max_tokens, temperature, **kwargs):
+            yield chunk
+
     @abstractmethod
-    async def aembed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
-        """
-        异步文本嵌入生成
-        
-        Args:
-            texts: 单个文本或文本列表
-            
-        Returns:
-            嵌入向量或嵌入向量列表
-        """
+    async def _astream_chat(
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        **kwargs
+    ) -> AsyncGenerator[str, None]:
+        """Internal async streaming chat implementation"""
         pass
     
+    # ==================== EMBEDDING METHODS ====================
+    def embed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
+        """
+        Generate text embeddings
+        """
+        self.validate_task_support('embedding')
+        return self._embed(texts)
+    
+    @abstractmethod
+    def _embed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
+        """Internal embedding implementation"""
+        pass
+
+    # ==================== ASYNC EMBEDDING METHODS ====================
+    async def aembed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
+        """
+        Generate text embeddings asynchronously
+        """
+        self.validate_task_support('embedding')
+        return await self._aembed(texts)
+
+    @abstractmethod
+    async def _aembed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
+        """Internal async embedding implementation"""
+        pass
+    
+    # ==================== RERANKING METHODS ====================
+    def rerank(
+        self, 
+        query: str, 
+        documents: List['Document'], 
+        top_k: Optional[int] = None
+    ) -> List[Tuple[int, float]]:
+        """
+        Document reranking
+        
+        Args:
+            query: Query text
+            documents: List of Document objects
+            top_k: Return top k results
+            
+        Returns:
+            List of (document_index, score) tuples sorted by score
+        """
+        self.validate_task_support('rerank')
+        return self._rerank(query, documents, top_k)
+    
+    @abstractmethod 
+    def _rerank(
+        self, 
+        query: str, 
+        documents: List['Document'], 
+        top_k: Optional[int] = None
+    ) -> List[Tuple[int, float]]:
+        """Internal reranking implementation"""
+        pass
+    
+    # ==================== UTILITY METHODS ====================
     def get_model_info(self) -> Dict[str, Any]:
         """
-        获取模型信息
-        
-        Returns:
-            包含模型名称和配置的字典
+        Get model information
         """
         return {
-            "model_name": self.model_name,
+            "model_name": self.config.model_name,
+            "task_types": self.config.task_types,
             "config": self.config,
             "class_name": self.__class__.__name__
         }
     
     def validate_input(self, input_text: str, max_length: Optional[int] = None) -> bool:
         """
-        验证输入文本
-        
-        Args:
-            input_text: 输入文本
-            max_length: 最大长度限制
-            
-        Returns:
-            是否验证通过
+        Validate input text
         """
         if not isinstance(input_text, str):
-            self.logger.error("输入必须是字符串类型")
+            self.logger.error("Input must be string type")
             return False
         
         if not input_text.strip():
-            self.logger.error("输入文本不能为空")
+            self.logger.error("Input text cannot be empty")
             return False
         
         if max_length and len(input_text) > max_length:
-            self.logger.error(f"输入文本长度超过限制: {len(input_text)} > {max_length}")
+            self.logger.error(f"Input text length exceeds limit: {len(input_text)} > {max_length}")
             return False
         
         return True
     
     def format_messages(self, user_message: str, system_message: Optional[str] = None) -> List[Dict[str, str]]:
         """
-        格式化对话消息
-        
-        Args:
-            user_message: 用户消息
-            system_message: 系统消息（可选）
-            
-        Returns:
-            格式化后的消息列表
+        Format chat messages
         """
         messages = []
         
@@ -206,9 +230,9 @@ class LLMBase(ABC):
         return messages
     
     def __str__(self) -> str:
-        """字符串表示"""
-        return f"{self.__class__.__name__}(model_name='{self.model_name}')"
+        """String representation"""
+        return f"{self.__class__.__name__}(model_name='{self.config.model_name}', tasks={self.config.task_types})"
     
     def __repr__(self) -> str:
-        """详细字符串表示"""
-        return f"{self.__class__.__name__}(model_name='{self.model_name}', config={self.config})"
+        """Detailed string representation"""
+        return f"{self.__class__.__name__}(model_name='{self.config.model_name}', tasks={self.config.task_types}, config={self.config})"
