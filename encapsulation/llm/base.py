@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional, Union, Tuple, Literal, Generic, TypeVar, TYPE_CHECKING
+import typing
 from pydantic import Field
 import logging
 from dataclasses import dataclass
@@ -47,12 +48,14 @@ class LLMBase(AbstractModule, Generic[ConfigType], ABC):
     
     def supports_task(self, task_type: str) -> bool:
         """Check if specified task type is supported"""
-        return task_type in self.config.task_types
+        config = typing.cast(LLMBaseConfig, self.config)
+        return task_type in config.task_types
     
     def validate_task_support(self, task_type: str):
         """Validate task support, raise exception if not supported"""
+        config = typing.cast(LLMBaseConfig, self.config)
         if not self.supports_task(task_type):
-            raise ValueError(f"Model {self.config.model_name} does not support task: {task_type}. Supported: {self.config.task_types}")
+            raise ValueError(f"Model {config.model_name} does not support task: {task_type}. Supported: {config.task_types}")
     
     # ==================== CHAT METHODS ====================
     def chat(
@@ -177,10 +180,11 @@ class LLMBase(AbstractModule, Generic[ConfigType], ABC):
         """
         Get model information
         """
+        config = typing.cast(LLMBaseConfig, self.config)
         return {
-            "model_name": self.config.model_name,
-            "task_types": self.config.task_types,
-            "config": self.config.kwargs,
+            "model_name": config.model_name,
+            "task_types": config.task_types,
+            "config": config.kwargs,
             "class_name": self.__class__.__name__
         }
     
@@ -217,8 +221,10 @@ class LLMBase(AbstractModule, Generic[ConfigType], ABC):
     
     def __str__(self) -> str:
         """String representation"""
-        return f"{self.__class__.__name__}(model_name='{self.config.model_name}', tasks={self.config.task_types})"
+        config = typing.cast(LLMBaseConfig, self.config)
+        return f"{self.__class__.__name__}(model_name='{config.model_name}', tasks={config.task_types})"
     
     def __repr__(self) -> str:
         """Detailed string representation"""
-        return f"{self.__class__.__name__}(model_name='{self.config.model_name}', tasks={self.config.task_types}, config={self.config.kwargs})"
+        config = typing.cast(LLMBaseConfig, self.config)
+        return f"{self.__class__.__name__}(model_name='{config.model_name}', tasks={config.task_types}, config={config.kwargs})"

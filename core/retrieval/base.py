@@ -21,7 +21,7 @@ class BaseRetrieverConfig(AbstractConfig):
 
     # Index configuration - 支持具体的索引类型
     index_config: Annotated[
-        Union[FaissIndexConfig],
+        Union[FaissIndexConfig, BaseIndexConfig],
         Field(discriminator="type")
     ]
 
@@ -56,8 +56,8 @@ class BaseRetriever(AbstractModule, Generic[ConfigType], ABC):
     config: ConfigType
 
     def __init__(self, config: ConfigType):
-        self.config = config
-        self._index = self.config.index_config.build()
+        super().__init__(config=config)
+        self._index = config.index_config.build()
         self._embedding = None
         self._load_existing_index()
 
@@ -107,5 +107,13 @@ class BaseRetriever(AbstractModule, Generic[ConfigType], ABC):
     def get_name(self) -> str:
         return self.config.type
 
-    # 索引CRUD操作已移至IndexManager
-    # Retriever专注于检索功能
+    def build_index(self, documents: List[Document]) -> None:
+        """        
+        Args:
+            documents: 用于构建索引的文档列表
+
+        Raises:
+            NotImplementedError: 如果子类没有实现此方法
+            RuntimeError: 如果索引已存在
+        """
+        raise NotImplementedError(f"Retriever {self.__class__.__name__} does not support build_index operation")

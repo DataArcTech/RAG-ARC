@@ -11,7 +11,8 @@
     "embedding_config": {
         "type": "huggingface_embedding",
         "model_name": "sentence-transformers/all-MiniLM-L6-v2",
-        "device": "cpu"
+        "device": "cpu",
+        "use_china_mirror": true
     },
     "search_kwargs": {
         "k": 5,
