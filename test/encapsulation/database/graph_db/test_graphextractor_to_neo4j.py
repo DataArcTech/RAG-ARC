@@ -8,7 +8,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.
 try:
     from core.file_management.extractor.graphextractor import GraphExtractorConfig
     from encapsulation.llm.openai import OpenAIConfig
-    from core.utils.data_model import Document
+    from encapsulation.data_model.data_model import Document
     from encapsulation.database.graph_db.neo4j import Neo4jConfig, Neo4jGraphStore
     IMPORTS_AVAILABLE = True
 except ImportError as e:
@@ -67,7 +67,7 @@ def setup_graphextractor():
         # Real LLM configuration
         llm_config = OpenAIConfig(
             model_name='gpt-4.1-mini',
-            api_key='sk-2T06b7c7f9c3870049fbf8fada596b0f8ef908d1e233KLY2',
+            api_key='sk-',
             base_url='https://api.gptsapi.net/v1',
             default_max_tokens=2000
         )

@@ -4,51 +4,16 @@ from typing import Any, List, Optional, Union, Tuple, cast, Literal, Annotated, 
 
 from tantivy import Query, Occur, Order
 
-from core.retrieval.base import BaseRetriever, BaseRetrieverConfig
-from core.utils.data_model import Document
-from encapsulation.database.bm25_indexer import BM25IndexBuilderConfig
+from core.retrieval.base import BaseRetriever
+from encapsulation.data_model.data_model import Document
 from framework.shared_module_decorator import shared_module
 
 logger = logging.getLogger(__name__)
 
-class TantivyBM25RetrieverConfig(BaseRetrieverConfig):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    
-    type: Literal["tantivy_bm25"] = "tantivy_bm25"
-    
-    # Index configuration
-    index_config: Annotated[
-        BM25IndexBuilderConfig,
-        Field(description="BM25 index configuration")
-    ]
-
-    # BM25检索器不需要embedding配置
-    embedding_config: Optional[Any] = None
-    
-    # Search parameters
-    search_kwargs: Dict[str, Any] = Field(
-        default_factory=lambda: {
-            "use_phrase_query": False,
-            "k": 5,
-            "with_score": True
-        },
-        description="""Additional search parameters. Supported parameters:
-        - use_phrase_query (bool): Whether to use phrase queries for better relevance (default: False)
-        - k (int): Number of documents to return (default: 5)
-        - filters (dict): Dictionary of field names and their values to filter by
-        - order_by_field (str): Field to sort by
-        - order_desc (bool): Whether to sort in descending order (default: True)
-        - with_score (bool): Whether to include score in metadata (default: False)
-        """
-    )
-
-    def build(self) -> "TantivyBM25Retriever":
-        """Build the TantivyBM25Retriever instance"""
-        return TantivyBM25Retriever(config=self)
 
 
 @shared_module
-class TantivyBM25Retriever(BaseRetriever[TantivyBM25RetrieverConfig]):
+class TantivyBM25Retriever(BaseRetriever):
     """
     TantivyBM25Retriever is a high-performance document retriever based on the Tantivy search engine.
     
@@ -87,16 +52,34 @@ class TantivyBM25Retriever(BaseRetriever[TantivyBM25RetrieverConfig]):
         >>> results = retriever.invoke("query", filters={"category": "news", "author": "john"})
     """
 
-    def __init__(self, config: TantivyBM25RetrieverConfig):
+    def __init__(self, config):
         """Initialize TantivyBM25Retriever with configuration
 
         Args:
             config: TantivyBM25RetrieverConfig instance
         """
-        super().__init__(config)
+        self.config = config
+        self._index = self.config.index_config.build()
+        self._embedding = None
+        self._load_existing_index()
 
         # Runtime instance variables
         self.searcher = None
+
+    def _load_existing_index(self) -> None:
+        """尝试加载已存在的索引"""
+        try:
+            if hasattr(self._index, 'load_index'):
+                # Check if the index has an index_path in its config
+                if hasattr(self._index.config, 'index_path') and self._index.config.index_path:
+                    self._index.load_index(self._index.config.index_path)
+                else:
+                    self._index.load_index()
+                logger.info(f"Successfully loaded existing index for {self.get_name()}")
+        except Exception as e:
+            message = f"Index not found for retriever {self.get_name()}: {e}"
+            logger.warning(f"{message}. Index will be empty until documents are added.")
+            # Don't raise an error, just continue with an empty index
 
     def _ensure_searcher(self):
         """Ensure searcher is initialized"""

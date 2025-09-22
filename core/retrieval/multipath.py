@@ -1,65 +1,13 @@
 import logging
-from typing import Any, List, Optional, Literal, Union, Annotated
-from pydantic import ConfigDict, Field, model_validator
+from typing import Any, List, Optional
 
-from core.retrieval.base import BaseRetriever, BaseRetrieverConfig
-from core.utils.data_model import Document
-from core.utils.Fusion import FusionMethod
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from core.retrieval.dense import DenseRetrieverConfig
-    from core.retrieval.tantivy_bm25 import TantivyBM25RetrieverConfig
+from core.retrieval.base import BaseRetriever
+from encapsulation.data_model.data_model import Document
 
 logger = logging.getLogger(__name__)
 
 
-class MultiPathRetrieverConfig(BaseRetrieverConfig):
-    """Configuration for MultiPath Retriever"""
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    type: Literal["multipath"] = "multipath"
-
-    # 重写index_config为可选，因为MultiPath使用retrievers字段
-    index_config: Optional[Any] = None
-    # MultiPath检索器不需要embedding配置
-    embedding_config: Optional[Any] = None
-
-    retrievers: List[Annotated[Union["DenseRetrieverConfig", "TantivyBM25RetrieverConfig"], Field(discriminator="type")]] = Field(
-        default_factory=list,
-        description="List of retriever config objects"
-    )
-
-    # 融合方法配置
-    fusion_method: str = Field(default="rrf", description="Fusion method: 'rrf', 'weighted_sum', 'rank_fusion'")
-    rrf_k: int = Field(default=60, description="RRF parameter k")
-    weights: Optional[List[float]] = Field(default=None, description="Weights for weighted fusion")
-
-    # 内部字段
-    built_retrievers: Optional[List[BaseRetriever]] = Field(default=None, exclude=True)
-    fusion_instance: Optional[FusionMethod] = Field(default=None, exclude=True)
-    
-
-    @model_validator(mode='after')
-    def validate_retrievers(self) -> 'MultiPathRetrieverConfig':
-        """Validate retrievers presence"""
-        if not self.retrievers:
-            raise ValueError("At least one retriever config is required")
-        return self
-
-    def build(self) -> "MultiPathRetriever":
-        """Build the MultiPathRetriever instance"""
-        built_retrievers = []
-        for idx, retriever_config in enumerate(self.retrievers):
-            if not hasattr(retriever_config, 'build'):
-                raise TypeError(f"Retriever config at position {idx} does not provide a build() method")
-            built_retrievers.append(retriever_config.build())
-
-        self.built_retrievers = built_retrievers
-        return MultiPathRetriever(config=self)
-
-
-class MultiPathRetriever(BaseRetriever[MultiPathRetrieverConfig]):
+class MultiPathRetriever(BaseRetriever):
     """
     MultiPath检索器，使用多个检索器并融合结果。
 
@@ -69,7 +17,7 @@ class MultiPathRetriever(BaseRetriever[MultiPathRetrieverConfig]):
     - rank_fusion: 基于排名的融合
     """
     
-    def __init__(self, config: MultiPathRetrieverConfig):
+    def __init__(self, config):
         """Initialize MultiPathRetriever"""
         self.config = config
         self._index = None
@@ -116,6 +64,8 @@ class MultiPathRetriever(BaseRetriever[MultiPathRetrieverConfig]):
                 logger.debug(f"Retriever {type(retriever).__name__} returned {len(documents)} results")
             except Exception as e:
                 logger.error(f"Retriever {type(retriever).__name__} failed: {e}")
+                import traceback
+                logger.error(f"Full traceback: {traceback.format_exc()}")
                 all_results.append([])
 
         if not all_results or all(len(results) == 0 for results in all_results):

@@ -1,17 +1,22 @@
 {
     "type": "dense",
+    "index_path": "./data/unified_faiss_index",
     "index_config": {
         "type": "faiss",
         "index_path": "./data/unified_faiss_index",
-        "dimension": 768,
         "metric": "cosine",
         "index_type": "flat",
-        "normalize_L2": true
+        "normalize_L2": true,
+        "embedding_config": {
+            "type": "huggingface_embedding",
+            "model_name": "/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
+            "device": "cuda:7"
+        }
     },
     "embedding_config": {
         "type": "huggingface_embedding",
-        "model_name": "sentence-transformers/all-MiniLM-L6-v2",
-        "device": "cpu"
+        "model_name": "/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
+        "device": "cuda:7"
     },
     "search_kwargs": {
         "k": 5,

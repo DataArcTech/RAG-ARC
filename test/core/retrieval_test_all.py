@@ -9,13 +9,13 @@ from typing import List, Dict, Any
 # Add project root directory to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
-from core.utils.data_model import Document
-from encapsulation.database.bm25_indexer import BM25IndexBuilderConfig
-from core.retrieval.tantivy_bm25 import TantivyBM25RetrieverConfig
-from core.retrieval.multipath import MultiPathRetrieverConfig
-from core.retrieval.dense import DenseRetrieverConfig
-from encapsulation.database.vector_db.faiss import FaissIndexConfig
-from encapsulation.llm.huggingface import HuggingFaceEmbedConfig
+from encapsulation.data_model.data_model import Document
+from config.encapsulaiton.bm25_config import BM25IndexBuilderConfig
+from config.retrieval.tantivy_bm25_config import TantivyBM25RetrieverConfig
+from config.retrieval.multipath_config import MultiPathRetrieverConfig
+from config.retrieval.dense_config import DenseRetrieverConfig
+from config.encapsulaiton.faiss_config import FaissIndexConfig
+from config.llm.huggingface_config import HuggingFaceEmbedConfig
 
 # 设置日志级别
 logging.basicConfig(level=logging.WARNING)
@@ -65,22 +65,23 @@ def create_index_manager_and_build_indexes(documents: List[Document], index_conf
 
         elif index_type == "faiss":
             try:
-                from encapsulation.llm.huggingface import HuggingFaceEmbedConfig
+                from config.llm.huggingface_config import HuggingFaceEmbedConfig
 
-                # 创建嵌入模型
+                # 创建嵌入模型配置并设置到索引配置中
                 embedding_config = HuggingFaceEmbedConfig(
                     model_name="/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
                     task_types="embedding",
                     device="cuda:0"
                 )
-                embedding_model = embedding_config.build()
 
-                # 计算文档嵌入向量
-                texts = [doc.content for doc in documents]
-                embeddings = [embedding_model.embed_query(text) for text in texts]
+                # 设置嵌入模型到索引配置中
+                index_config.embedding = embedding_config
 
-                # 添加文档到索引
-                index.add(documents, embeddings)
+                # 重新构建索引以包含嵌入配置
+                index = index_config.build()
+
+                # 使用build_index方法构建索引
+                index.build_index(documents)
 
                 # 保存索引
                 index.save_index(index_config.index_path)
@@ -303,7 +304,8 @@ class TestDenseRetriever(unittest.TestCase):
             index_path=os.path.join(self.temp_dir, "dense_test"),
             metric="cosine",
             index_type="flat",
-            normalize_L2=True
+            normalize_L2=True,
+            embedding=embedding_config
         )
 
         # 使用IndexManager构建索引
@@ -385,12 +387,15 @@ class TestDenseRetriever(unittest.TestCase):
         
         config_data = json.loads(json_str)
         config = DenseRetrieverConfig(**config_data)
-        
+
         # 验证配置
         self.assertEqual(config.type, "dense")
         self.assertEqual(config.search_kwargs["k"], 10)
         self.assertEqual(config.index_config.metric, "cosine")
         self.assertEqual(config.embedding_config.model_name, "/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B")
+
+        # 设置嵌入配置到索引配置中
+        config.index_config.embedding = config.embedding_config
 
         # 使用IndexManager构建索引
         index_configs = {"faiss": config.index_config}
@@ -481,6 +486,9 @@ class TestMultiPathRetriever(unittest.TestCase):
         self.assertEqual(config.retrievers[1].type, "dense")
         self.assertEqual(config.fusion_method, "rrf")
         self.assertEqual(config.rrf_k, 60)
+
+        # 设置嵌入配置到Dense检索器的索引配置中
+        config.retrievers[1].index_config.embedding = config.retrievers[1].embedding_config
 
         # 使用IndexManager构建索引
         index_configs = {

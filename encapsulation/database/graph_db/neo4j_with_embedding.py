@@ -48,8 +48,8 @@ class Neo4jVectorGraphStore(Neo4jGraphStore):
             entity_name = entity.get('entity_name', '')
             attributes = entity.get('attributes', {})
 
-            # Serialize attributes to string for embedding
-            attributes_str = json.dumps(attributes, sort_keys=True) if attributes else ""
+            # Serialize attributes to string for embedding (preserve Chinese characters)
+            attributes_str = json.dumps(attributes, sort_keys=True, ensure_ascii=False) if attributes else ""
 
             # Combine entity name and attributes
             text_for_embedding = f"{entity_name} {attributes_str}".strip()
@@ -81,7 +81,7 @@ class Neo4jVectorGraphStore(Neo4jGraphStore):
         self._execute_query(query, {
             'doc_id': document.id,
             'content': document.content,
-            'metadata': json.dumps(document.metadata) if document.metadata else "{}",
+            'metadata': json.dumps(document.metadata, ensure_ascii=False) if document.metadata else "{}",
             'embedding': embedding,
             'create_time': datetime.now().isoformat(),
             'update_time': datetime.now().isoformat()
@@ -104,7 +104,7 @@ class Neo4jVectorGraphStore(Neo4jGraphStore):
                 'document_id': doc_id,
                 'create_time': datetime.now().isoformat(),
                 'update_time': datetime.now().isoformat(),
-                'attributes': json.dumps(entity['attributes']) if entity.get('attributes') else "{}",
+                'attributes': json.dumps(entity['attributes'], ensure_ascii=False) if entity.get('attributes') else "{}",
                 'embedding': entity_embedding
             }
 
@@ -235,3 +235,7 @@ class Neo4jVectorGraphStore(Neo4jGraphStore):
             ])
 
         return GraphData(entities=entities, relations=relations, metadata={})
+
+    def delete_all_Index(self, confirm: bool = False) -> bool:
+        """Delete all documents and their graph data - implements abstract method"""
+        return self.delete_all_index(confirm)

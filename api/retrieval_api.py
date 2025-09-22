@@ -7,14 +7,14 @@
 
 import json
 import logging
-from typing import Dict, List, Any, Optional, Union, Literal
+from typing import Dict, List, Any, Optional, Literal
 from pathlib import Path
 
 from core.retrieval.base import BaseRetriever
-from core.retrieval.dense import DenseRetrieverConfig
-from core.retrieval.tantivy_bm25 import TantivyBM25RetrieverConfig
-from core.retrieval.multipath import MultiPathRetrieverConfig
-from core.utils.data_model import Document
+from config.core.dense_config import DenseRetrieverConfig
+from config.core.tantivy_bm25_config import TantivyBM25RetrieverConfig
+from config.core.multipath_config import MultiPathRetrieverConfig
+from encapsulation.data_model.data_model import Document
 
 logger = logging.getLogger(__name__)
 
@@ -339,8 +339,8 @@ class RetrievalAPI:
                 elif hasattr(retriever, 'searcher'):
                     retriever.searcher = None
             else:
-                # 对于其他类型的检索器，使用add方法（因为索引已被清空）
-                retriever.add_documents(documents)
+                # 对于其他类型的检索器，使用build_index方法（因为索引已被清空）
+                retriever._index.build_index(documents)
 
             logger.info(f"Successfully initialized index for {retriever_name} with {len(documents)} documents")
 

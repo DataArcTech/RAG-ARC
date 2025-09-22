@@ -9,7 +9,7 @@ import asyncio
 import logging
 
 from encapsulation.llm.base import LLMBaseConfig
-from core.utils.data_model import Document, GraphData
+from encapsulation.data_model.data_model import Document, GraphData
 from framework.module import AbstractModule
 from framework.config import AbstractConfig
 

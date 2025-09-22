@@ -5,7 +5,7 @@ from pydantic import Field
 
 from core.file_management.extractor.base import ExtractorBase, ExtractorBaseConfig
 from core.prompts.extractor_prompt import EXTRACTION_PROMPT, CLEANING_PROMPT, EXTRACTION_PROMPT_EN, CLEANING_PROMPT_EN
-from core.utils.data_model import Document, GraphData
+from encapsulation.data_model.data_model import Document, GraphData
 
 logger = logging.getLogger(__name__)
 

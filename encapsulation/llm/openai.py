@@ -1,83 +1,118 @@
-from encapsulation.llm.base import LLMBase, LLMBaseConfig
-from typing import Dict, Any, List, Optional, Union, Tuple, TYPE_CHECKING, Literal
-from pydantic import Field
+from .base import LLMBase
+from typing import Dict, Any, List, Optional, Union, Tuple
 import openai
-from dataclasses import dataclass
-from framework.shared_module_decorator import shared_module
+import logging
 
-if TYPE_CHECKING:
-    from core.utils.data_model import Document
+from encapsulation.data_model.data_model import Document
 
-class OpenAIConfig(LLMBaseConfig):
+logger = logging.getLogger(__name__)
+
+
+class OpenAILLM(LLMBase):
     """
-    OpenAI LLM configuration
-    """
-    type: Literal["openai"] = "openai"
-    task_types: Literal["chat", "embedding"] = Field(default="chat", description="Supported task types")
-
-    api_key: Optional[str] = Field(default=None, description="OpenAI API key")
-    base_url: Optional[str] = Field(default=None, description="API base URL")
-    organization: Optional[str] = Field(default=None, description="Organization ID")
-    max_retries: int = Field(default=3, description="Max retry attempts")
-    timeout: float = Field(default=60.0, description="Request timeout")
-    default_max_tokens: Optional[int] = Field(default=None, description="Default max tokens for chat")
-    default_temperature: float = Field(default=0.7, description="Default temperature for chat")
+    Unified OpenAI LLM implementation supporting both chat and embeddings capabilities.
     
-    def build(self) -> "OpenAILLM":
-        """Build the OpenAI LLM"""
-        return OpenAILLM(config=self)
-
-
-@shared_module
-class OpenAILLM(LLMBase[OpenAIConfig]):
-    """
-    Unified OpenAI LLM supporting both chat and embeddings
-    Single client, multiple capabilities
-    """
-
-    config: OpenAIConfig
-
-    def __init__(self, config: OpenAIConfig):
-        """Initialize OpenAI LLM with config"""
-        self.config = config
-
-        # Setup logging first
-        self._setup_logging()
-
-        # Single OpenAI client for all operations
-        self.client = openai.OpenAI(
-            api_key=self.config.api_key,
-            base_url=self.config.base_url,
-            organization=self.config.organization,
-            max_retries=self.config.max_retries,
-            timeout=self.config.timeout
-        )
-
-        self.async_client = openai.AsyncOpenAI(
-            api_key=self.config.api_key,
-            base_url=self.config.base_url,
-            organization=self.config.organization,
-            max_retries=self.config.max_retries,
-            timeout=self.config.timeout
-        )
-
-        self.logger.info(f"OpenAI LLM initialized: {self.config.model_name}")
+    This class provides a complete language model solution using OpenAI's API,
+    supporting multiple model types and task configurations with intelligent client management.
+    Optimized for both conversational AI and text embedding generation with streaming support.
     
+    Key features:
+    - Dual functionality: Chat completions and text embeddings
+    - Multiple model support: GPT-4, GPT-3.5, text-embedding models
+    - Streaming chat with token usage tracking
+    - Configurable parameters: temperature, max_tokens, dimensions
+    - Automatic retry logic and timeout handling
+    - Flexible API endpoint configuration (OpenAI or compatible)
+    
+    Main parameters:
+        config (AbstractConfig): Configuration containing API credentials, model settings, etc.
+        _client: Lazy-initialized OpenAI client instance
+        
+    Core methods:
+        - chat/_chat: Standard chat completion
+        - stream_chat/_stream_chat: Streaming chat with real-time responses  
+        - embed/_embed: Text embedding generation
+        - embed_documents/embed_query: Convenience methods for different use cases
+        
+    Supported models:
+        - Chat: gpt-4, gpt-4-turbo, gpt-3.5-turbo, gpt-4o-mini
+        - Embeddings: text-embedding-ada-002, text-embedding-3-small, text-embedding-3-large
+        - Custom endpoints: Compatible with VLLM, LocalAI, and other OpenAI-compatible APIs
+        
+    Performance considerations:
+        - Connection pooling and automatic retries
+        - Streaming support for real-time applications
+        - Token usage tracking for cost monitoring
+        - Configurable timeouts and rate limiting
+        
+    Configuration options:
+        - api_key: OpenAI API key or compatible service key
+        - base_url: API endpoint (defaults to OpenAI, supports custom servers)
+        - model_name: Target model identifier
+        - max_tokens: Maximum response length
+        - temperature: Response creativity (0.0-2.0)
+        - embedding_dimensions: Custom embedding size (if supported)
+        - organization: OpenAI organization ID
+        - timeout: Request timeout in seconds
+        - max_retries: Automatic retry attempts
+    """
+    
+    def __init__(self, config):
+        """Initialize OpenAI with eager client creation"""
+        super().__init__(config)
+        # Initialize client immediately since we always need it for API calls
+        self.client = self._create_client()
+        self.async_client = self._create_async_client()
+
+    def _create_client(self):
+        """Create OpenAI client"""
+        # Extract OpenAI-specific config parameters
+        api_key = getattr(self.config, 'api_key', None)
+        base_url = getattr(self.config, 'base_url', None)
+        organization = getattr(self.config, 'organization', None)
+        max_retries = getattr(self.config, 'max_retries', 3)
+        timeout = getattr(self.config, 'timeout', 60.0)
+
+        try:
+            client = openai.OpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                organization=organization,
+                max_retries=max_retries,
+                timeout=timeout
+            )
+            model_name = getattr(self.config, 'model_name', 'gpt-4o-mini')
+            logger.info(f"OpenAI client initialized: {model_name}")
+            return client
+        except Exception as e:
+            logger.error(f"Failed to initialize OpenAI client: {str(e)}")
+            raise
+
+    def _create_async_client(self):
+        """Create OpenAI async client"""
+        try:
+            # Extract OpenAI-specific config parameters (same as sync client)
+            api_key = getattr(self.config, 'api_key', None)
+            base_url = getattr(self.config, 'base_url', None)
+            organization = getattr(self.config, 'organization', None)
+            max_retries = getattr(self.config, 'max_retries', 3)
+            timeout = getattr(self.config, 'timeout', 30)
+
+            async_client = openai.AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                organization=organization,
+                max_retries=max_retries,
+                timeout=timeout
+            )
+            model_name = getattr(self.config, 'model_name', 'gpt-4o-mini')
+            logger.info(f"OpenAI async client initialized: {model_name}")
+            return async_client
+        except Exception as e:
+            logger.error(f"Failed to initialize OpenAI async client: {str(e)}")
+            raise
+
     # ==================== CHAT IMPLEMENTATION ====================
-    
-    def chat(
-        self, 
-        messages: List[Dict[str, str]], 
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
-        return_token_count: bool = False,
-        **kwargs
-    ) -> Union[str, Tuple[str, Dict[str, int]]]:
-        """
-        Chat completion using OpenAI
-        """
-        self.validate_task_support('chat')
-        return self._chat(messages, max_tokens, temperature, return_token_count, **kwargs)
     
     def _chat(
         self, 
@@ -87,25 +122,20 @@ class OpenAILLM(LLMBase[OpenAIConfig]):
         return_token_count: bool = False,
         **kwargs
     ) -> Union[str, Tuple[str, Dict[str, int]]]:
-        """
-        Internal chat implementation
-        """
-        if not messages or not isinstance(messages, list):
-            raise ValueError("Messages must be a non-empty list")
-        
-        # Validate message format
-        for msg in messages:
-            if not isinstance(msg, dict) or 'role' not in msg or 'content' not in msg:
-                raise ValueError("Message format error: must contain 'role' and 'content'")
-            if not self.validate_input(msg['content']):
-                raise ValueError(f"Message content validation failed: {msg['content']}")
+        """Internal chat implementation"""
+        self._validate_messages(messages)
+
+        # Get config values
+        model_name = getattr(self.config, 'model_name', 'gpt-4o-mini')
+        default_max_tokens = getattr(self.config, 'max_tokens', 2000)
+        default_temperature = getattr(self.config, 'temperature', 0.7)
         
         try:
             response = self.client.chat.completions.create(
-                model=self.config.model_name,
+                model=model_name,
                 messages=messages,
-                max_tokens=max_tokens or self.config.default_max_tokens,
-                temperature=temperature or self.config.default_temperature,
+                max_tokens=max_tokens or default_max_tokens,
+                temperature=temperature or default_temperature,
                 **kwargs
             )
             
@@ -117,30 +147,13 @@ class OpenAILLM(LLMBase[OpenAIConfig]):
                     "output_tokens": response.usage.completion_tokens if response.usage else 0,
                     "total_tokens": response.usage.total_tokens if response.usage else 0
                 }
-                
-                self.logger.debug(f"Chat completion successful, length: {len(result)}, tokens: {token_stats}")
                 return result, token_stats
             else:
-                self.logger.debug(f"Chat completion successful, length: {len(result)}")
                 return result
                 
         except Exception as e:
-            self.logger.error(f"Chat completion failed: {str(e)}")
+            logger.error(f"Chat completion failed: {str(e)}")
             raise
-    
-    def stream_chat(
-        self,
-        messages: List[Dict[str, str]], 
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
-        return_token_count: bool = False,
-        **kwargs
-    ):
-        """
-        Streaming chat completion using OpenAI
-        """
-        self.validate_task_support('chat')
-        return self._stream_chat(messages, max_tokens, temperature, return_token_count, **kwargs)
     
     def _stream_chat(
         self,
@@ -153,22 +166,18 @@ class OpenAILLM(LLMBase[OpenAIConfig]):
         """
         Internal streaming chat implementation
         """
-        if not messages or not isinstance(messages, list):
-            raise ValueError("Messages must be a non-empty list")
-        
-        # Validate message format
-        for msg in messages:
-            if not isinstance(msg, dict) or 'role' not in msg or 'content' not in msg:
-                raise ValueError("Message format error: must contain 'role' and 'content'")
-            if not self.validate_input(msg['content']):
-                raise ValueError(f"Message content validation failed: {msg['content']}")
-        
+        self._validate_messages(messages)
+
         try:
+            model_name = getattr(self.config, 'model_name', 'gpt-4o-mini')
+            default_max_tokens = getattr(self.config, 'max_tokens', 2000)
+            default_temperature = getattr(self.config, 'temperature', 0.7)
+            
             stream = self.client.chat.completions.create(
-                model=self.config.model_name,
+                model=model_name,
                 messages=messages,
-                max_tokens=max_tokens or self.config.default_max_tokens,
-                temperature=temperature or self.config.default_temperature,
+                max_tokens=max_tokens or default_max_tokens,
+                temperature=temperature or default_temperature,
                 stream=True,
                 **kwargs
             )
@@ -192,48 +201,11 @@ class OpenAILLM(LLMBase[OpenAIConfig]):
                         "total_tokens": chunk.usage.total_tokens if chunk.usage else 0
                     }
                     
-                    self.logger.debug(f"Streaming chat completed, length: {len(full_response)}, tokens: {token_stats}")
                     yield token_stats
-                    return
-
-                if return_token_count:
-                    self.logger.info("The streaming chat has not finished yet, token usage information is temporarily unavailable")
-                    default_stats = {
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                        "total_tokens": 0
-                    }
-                    yield default_stats
                     
         except Exception as e:
-            self.logger.error(f"Streaming chat failed: {str(e)}")
+            logger.error(f"Streaming chat failed: {str(e)}")
             raise
-
-
-    async def achat(
-        self, 
-        messages: List[Dict[str, str]], 
-        max_tokens: Optional[int] = None, 
-        temperature: Optional[float] = None, 
-        return_token_count: bool = False, 
-        **kwargs
-        ) -> Union[str, Tuple[str, Dict[str, int]]]:
-        """
-        Async chat completion
-        """
-        self.validate_task_support('chat')
-        return await self._achat(messages, max_tokens, temperature, return_token_count, **kwargs)
-
-    async def astream_chat(
-        self, 
-        messages: List[Dict[str, str]], 
-        max_tokens: Optional[int] = None, 
-        temperature: Optional[float] = None, 
-        return_token_count: bool = False, 
-        **kwargs
-        ):
-        self.validate_task_support('chat')
-        return await self._astream_chat(messages, max_tokens, temperature, return_token_count, **kwargs)
 
     async def _achat(
         self,
@@ -243,13 +215,22 @@ class OpenAILLM(LLMBase[OpenAIConfig]):
         return_token_count: bool = False,
         **kwargs
     ) -> Union[str, Tuple[str, Dict[str, int]]]:
+        """
+        Async function of chat
+        """
+        self._validate_messages(messages)
+
+        # Get config values
+        model_name = getattr(self.config, 'model_name', 'gpt-4o-mini')
+        default_max_tokens = getattr(self.config, 'max_tokens', 2000)
+        default_temperature = getattr(self.config, 'temperature', 0.7)
 
         try:
             response = await self.async_client.chat.completions.create(
-                model=self.config.model_name,
+                model=model_name,
                 messages=messages,
-                max_tokens=max_tokens or self.config.default_max_tokens,
-                temperature=temperature or self.config.default_temperature,
+                max_tokens=max_tokens or default_max_tokens,
+                temperature=temperature or default_temperature,
                 **kwargs
             )
             result = response.choices[0].message.content
@@ -258,7 +239,7 @@ class OpenAILLM(LLMBase[OpenAIConfig]):
             return result
 
         except Exception as e:
-            self.logger.error(f"异步对话生成失败: {str(e)}")
+            logger.error(f"Async chat failed: {str(e)}")
             raise
 
     async def _astream_chat(
@@ -269,6 +250,15 @@ class OpenAILLM(LLMBase[OpenAIConfig]):
         return_token_count: bool = False,
         **kwargs
     ):
+        """
+        Async function of stream chat
+        """
+        self._validate_messages(messages)
+
+        # Get config values
+        model_name = getattr(self.config, 'model_name', 'gpt-4o-mini')
+        default_max_tokens = getattr(self.config, 'max_tokens', 2000)
+        default_temperature = getattr(self.config, 'temperature', 0.7)
 
         try:
             params = {}
@@ -276,10 +266,10 @@ class OpenAILLM(LLMBase[OpenAIConfig]):
                 params["stream_options"] = {"include_usage": True}
 
             stream = await self.async_client.chat.completions.create(
-                model=self.config.model_name,
+                model=model_name,
                 messages=messages,
-                max_tokens=max_tokens or self.config.default_max_tokens,
-                temperature=temperature or self.config.default_temperature,
+                max_tokens=max_tokens or default_max_tokens,
+                temperature=temperature or default_temperature,
                 stream=True,
                 **params,
                 **kwargs
@@ -293,9 +283,8 @@ class OpenAILLM(LLMBase[OpenAIConfig]):
                     yield self._get_token_stats(chunk.usage)
 
         except Exception as e:
-            self.logger.error(f"异步流式对话生成失败: {str(e)}")
+            logger.error(f"Async streaming chat failed: {str(e)}")
             raise
-
 
     # ==================== EMBEDDING IMPLEMENTATION ====================
     
@@ -316,10 +305,18 @@ class OpenAILLM(LLMBase[OpenAIConfig]):
             # Clean texts - remove newlines
             cleaned_texts = [text.replace("\n", " ") for text in text_list]
             
+            model_name = getattr(self.config, 'model_name', 'text-embedding-ada-002')
+            embedding_dimensions = getattr(self.config, 'embedding_dimensions', None)
+            
+            # Create embedding request
+            embedding_kwargs = {}
+            if embedding_dimensions:
+                embedding_kwargs['dimensions'] = embedding_dimensions
             
             response = self.client.embeddings.create(
-                model=self.config.model_name,
+                model=model_name,
                 input=cleaned_texts,
+                **embedding_kwargs
             )
             
             # Extract embeddings - handle different response formats
@@ -330,15 +327,43 @@ class OpenAILLM(LLMBase[OpenAIConfig]):
             else:
                 raise RuntimeError(f"Unexpected response format: {type(response)}")
             
-            self.logger.debug(f"Embedding successful, {len(embeddings)} vectors generated")
-            
             # Return single embedding or list based on input
             return embeddings[0] if is_single else embeddings
             
         except Exception as e:
-            self.logger.error(f"Embedding failed: {str(e)}")
+            logger.error(f"Embedding failed: {str(e)}")
             raise RuntimeError(f"Embedding failed: {str(e)}")
     
+    async def _aembed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
+        """
+        Async function of generate embeddings
+        """
+        is_single = isinstance(texts, str)
+        text_list = [texts] if is_single else texts
+
+        for text in text_list:
+            if not self.validate_input(text):
+                raise ValueError(f"Invalid text: {text}")
+
+        try:
+            model_name = getattr(self.config, 'model_name', 'text-embedding-ada-002')
+            
+            embeddings = []
+            batch_size = 100
+            for i in range(0, len(text_list), batch_size):
+                batch = text_list[i:i+batch_size]
+                response = await self.async_client.embeddings.create(
+                    model=model_name,
+                    input=batch
+                )
+                embeddings.extend(data.embedding for data in response.data)
+
+            return embeddings[0] if is_single else embeddings
+
+        except Exception as e:
+            logger.error(f"Async embedding failed: {str(e)}")
+            raise
+
     # ==================== CONVENIENCE METHODS ====================
     
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
@@ -359,10 +384,18 @@ class OpenAILLM(LLMBase[OpenAIConfig]):
         try:
             models = self.client.models.list()
             model_names = [model.id for model in models.data]
-            self.logger.debug(f"Retrieved {len(model_names)} available models")
             return model_names
+        except openai.AuthenticationError as e:
+            logger.error(f"Authentication failed when getting available models: {e}")
+            return []
+        except openai.APIConnectionError as e:
+            logger.error(f"API connection error when getting available models: {e}")
+            return []
+        except openai.RateLimitError as e:
+            logger.warning(f"Rate limit exceeded when getting available models: {e}")
+            return []
         except Exception as e:
-            self.logger.error(f"Failed to get model list: {str(e)}")
+            logger.error(f"Unexpected error when getting available models: {e}")
             return []
     
     def get_model_info(self) -> Dict[str, Any]:
@@ -370,18 +403,40 @@ class OpenAILLM(LLMBase[OpenAIConfig]):
         Get comprehensive model information
         """
         info = super().get_model_info()
+        
+        # Safely get client info without forcing initialization
+        client = getattr(self, 'client', None)
+        
         info.update({
-            "model": self.config.model_name,
-            "api_base": getattr(self.client, 'base_url', None),
-            "organization": getattr(self.client, 'organization', None),
-            "max_retries": getattr(self.client, 'max_retries', None),
-            "timeout": getattr(self.client, 'timeout', None),
-            "default_max_tokens": self.config.default_max_tokens,
-            "default_temperature": self.config.default_temperature,
+            "model": getattr(self.config, 'model_name', 'gpt-4o-mini'),
+            "api_base": getattr(client, 'base_url', None) if client else None,
+            "organization": getattr(client, 'organization', None) if client else None,
+            "max_retries": getattr(client, 'max_retries', None) if client else None,
+            "timeout": getattr(client, 'timeout', None) if client else None,
+            "default_max_tokens": getattr(self.config, 'max_tokens', 2000),
+            "default_temperature": getattr(self.config, 'temperature', 0.7),
+            "embedding_dimensions": getattr(self.config, 'embedding_dimensions', None),
             "provider": "openai"
         })
         return info
     
+    def _validate_messages(self, messages):
+        """Validate message format"""
+        if not messages or not isinstance(messages, list):
+            raise ValueError("Messages must be a non-empty list")
+        for msg in messages:
+            if not isinstance(msg, dict) or 'role' not in msg or 'content' not in msg:
+                raise ValueError("Message format error: must contain 'role' and 'content'")
+            if not self.validate_input(msg['content']):
+                raise ValueError(f"Message content validation failed: {msg['content']}")
+            
+    def _get_token_stats(self, usage) -> Dict[str, int]:
+        """Get token status for llm chat"""
+        return {
+            "input_tokens": getattr(usage, "prompt_tokens", 0),
+            "output_tokens": getattr(usage, "completion_tokens", 0),
+            "total_tokens": getattr(usage, "total_tokens", 0)
+        }
     # ==================== NOT SUPPORTED ====================
     
     def _rerank(self, query: str, documents: List['Document'], top_k: Optional[int] = None) -> List[Tuple[int, float]]:

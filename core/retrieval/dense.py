@@ -1,36 +1,18 @@
-from typing import Any, List, Dict, ClassVar, Collection, Literal, Tuple, Annotated
+from typing import Any, List, Dict, ClassVar, Collection
 import logging
 
-from pydantic import ConfigDict, Field
-from core.retrieval.base import BaseRetriever, BaseRetrieverConfig
-from core.utils.data_model import Document
+from core.retrieval.base import BaseRetriever
+from encapsulation.data_model.data_model import Document
 from core.utils.retrieval_helper import RetrievalHelper
-from encapsulation.database.vector_db.faiss import FaissIndexConfig
-from encapsulation.llm.huggingface import HuggingFaceEmbedConfig
 from framework.shared_module_decorator import shared_module
 
 logger = logging.getLogger(__name__)
 
 
-class DenseRetrieverConfig(BaseRetrieverConfig):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    
-    type: Literal["dense"] = "dense"
-
-    index_config: Annotated[FaissIndexConfig, Field(description="Index configuration")]
-    embedding_config: Annotated[HuggingFaceEmbedConfig, Field(description="Embedding configuration")]
-    # Runtime dependencies (injected by vector database)
-    metric: Literal["cosine", "l2", "ip"] = Field(default="cosine", description="Distance metric from vector database")
-
-
-    # search_type: Literal["similarity", "similarity_score_threshold", "mmr"] = Field(default="similarity", description="Search type")
-    def build(self) -> "DenseRetriever":
-        """Build the DenseRetriever instance"""
-        return DenseRetriever(self)
 
 
 @shared_module
-class DenseRetriever(BaseRetriever[DenseRetrieverConfig]):
+class DenseRetriever(BaseRetriever):
     """
     基于向量数据库的密集检索器
 
@@ -44,10 +26,30 @@ class DenseRetriever(BaseRetriever[DenseRetrieverConfig]):
     )
     """Allowed search types"""
     
-    config: DenseRetrieverConfig
-    def __init__(self, config: DenseRetrieverConfig):
-        super().__init__(config=config)
+    def __init__(self, config):
+        self.config = config
+        # Pass embedding config to FAISS index config
+        if hasattr(config, 'embedding_config') and config.embedding_config is not None:
+            config.index_config.embedding_config = config.embedding_config
+        self._index = self.config.index_config.build()
+        self._embedding = None
+        self._load_existing_index()
         self._ensure_index_initialized()
+
+    def _load_existing_index(self) -> None:
+        """尝试加载已存在的索引"""
+        try:
+            if hasattr(self._index, 'load_index'):
+                # Check if the index has an index_path in its config
+                if hasattr(self._index.config, 'index_path') and self._index.config.index_path:
+                    self._index.load_index(self._index.config.index_path)
+                else:
+                    self._index.load_index()
+                logger.info(f"Successfully loaded existing index for {self.get_name()}")
+        except Exception as e:
+            message = f"Index not found for retriever {self.get_name()}: {e}"
+            logger.warning(f"{message}. Index will be empty until documents are added.")
+            # Don't raise an error, just continue with an empty index
     
     def get_index(self):
         """Get the vector index"""
@@ -96,8 +98,17 @@ class DenseRetriever(BaseRetriever[DenseRetrieverConfig]):
                 )
                 raise ValueError(msg)
 
-    def similarity_search(self, query: str, **kwargs: Any) -> List[Document]:
-        """相似度搜索"""
+    def similarity_search(self, query: str, include_score: bool = False, **kwargs: Any) -> List[Document]:
+        """相似度搜索
+
+        Args:
+            query: 查询字符串
+            include_score: 是否在Document.metadata["score"]中包含相似度分数
+            **kwargs: 其他搜索参数
+
+        Returns:
+            文档列表，如果include_score=True，则分数存储在metadata["score"]中
+        """
         index = self.get_index()
         if index is None or not hasattr(index, 'index') or index.index is None or index.index.ntotal == 0:
             return []
@@ -105,17 +116,19 @@ class DenseRetriever(BaseRetriever[DenseRetrieverConfig]):
         # 嵌入查询
         embedding_model = self.get_embedding()
         query_embedding = embedding_model.embed_query(query)
-        return self.similarity_search_by_vector(query_embedding, **kwargs)
-    
-    def similarity_search_by_vector(self, embedding: List[float], **kwargs: Any) -> List[Document]:
-        """向量相似度搜索"""
-        docs_and_scores = self.similarity_search_by_vector_with_score(embedding, **kwargs)
-        return [doc for doc, _ in docs_and_scores]
-    
-    def similarity_search_by_vector_with_score(
-        self, embedding: List[float], **kwargs: Any
-    ) -> List[Tuple[Document, float]]:
-        """向量搜索并返回分数"""
+        return self.similarity_search_by_vector(query_embedding, include_score=include_score, **kwargs)
+
+    def similarity_search_by_vector(self, embedding: List[float], include_score: bool = False, **kwargs: Any) -> List[Document]:
+        """向量相似度搜索
+
+        Args:
+            embedding: 查询嵌入向量
+            include_score: 是否在Document.metadata["score"]中包含相似度分数
+            **kwargs: 其他搜索参数
+
+        Returns:
+            文档列表，如果include_score=True，则分数存储在metadata["score"]中
+        """
         index = self.get_index()
         if index is None:
             return []
@@ -125,22 +138,22 @@ class DenseRetriever(BaseRetriever[DenseRetrieverConfig]):
         search_kwargs["metric"] = self.config.metric
 
         # 执行FAISS搜索
-        return RetrievalHelper.vector_search_with_faiss(index, embedding, search_kwargs)
-    
-    def similarity_search_with_score(
-        self, query: str, **kwargs: Any
-    ) -> List[Tuple[Document, float]]:
-        """搜索并返回分数"""
-        index = self.get_index()
-        if index is None:
-            return []
+        docs_and_scores = RetrievalHelper.vector_search_with_faiss(index, embedding, search_kwargs)
 
-        # 嵌入查询
-        embedding_model = self.get_embedding()
-        query_embedding = embedding_model.embed_query(query)
-
-        # 执行向量搜索
-        return self.similarity_search_by_vector_with_score(query_embedding, **kwargs)
+        if include_score:
+            # 将分数添加到文档的metadata中
+            documents = []
+            for doc, score in docs_and_scores:
+                # 创建文档副本以避免修改原始文档
+                doc_copy = Document(
+                    id=doc.id,
+                    content=doc.content,
+                    metadata={**doc.metadata, "score": score}
+                )
+                documents.append(doc_copy)
+            return documents
+        else:
+            return [doc for doc, _ in docs_and_scores]
     
     def max_marginal_relevance_search(
         self,
@@ -160,9 +173,9 @@ class DenseRetriever(BaseRetriever[DenseRetrieverConfig]):
         search_kwargs = {**self.config.search_kwargs, **kwargs}
         fetch_k = search_kwargs.get("fetch_k", 20)
 
-        # 获取候选文档
-        docs_and_scores = self.similarity_search_by_vector_with_score(
-            query_embedding, k=fetch_k, **kwargs
+        # 获取候选文档（使用内部方法获取分数）
+        docs_and_scores = RetrievalHelper.vector_search_with_faiss(
+            index, query_embedding, {**search_kwargs, "k": fetch_k, "metric": self.config.metric}
         )
 
         if not docs_and_scores:
@@ -206,28 +219,41 @@ class DenseRetriever(BaseRetriever[DenseRetrieverConfig]):
         
         try:
             if search_type == "similarity":
-                docs = self.similarity_search(query, **search_kwargs)
+                docs = self.similarity_search(query, include_score=with_score, **search_kwargs)
 
             elif search_type == "similarity_score_threshold":
-                # 使用带分数阈值的搜索
-                docs_and_scores = self.similarity_search_with_score(query, **search_kwargs)
-                docs = [doc for doc, _ in docs_and_scores]
+                # 使用带分数阈值的搜索，总是包含分数用于阈值过滤
+                docs = self.similarity_search(query, include_score=True, **search_kwargs)
+
+                # 应用分数阈值过滤
+                score_threshold = search_kwargs.get("score_threshold")
+                if score_threshold is not None:
+                    filtered_docs = []
+                    for doc in docs:
+                        score = doc.metadata.get("score", 0.0)
+                        if score >= score_threshold:
+                            filtered_docs.append(doc)
+                    docs = filtered_docs
+
+                    if len(docs) == 0:
+                        logger.warning(f"使用相关性分数阈值 {score_threshold} 没有检索到相关文档")
+
+                # 如果不需要返回分数，则移除分数信息
+                if not with_score:
+                    for doc in docs:
+                        if "score" in doc.metadata:
+                            doc.metadata = {k: v for k, v in doc.metadata.items() if k != "score"}
 
             elif search_type == "mmr":
                 docs = self.max_marginal_relevance_search(query, **search_kwargs)
 
+                # 如果需要分数，重新获取分数信息
+                if with_score:
+                    docs = self.similarity_search(query, include_score=True, k=len(docs), **search_kwargs)
+
             else:
                 raise ValueError(f"Unsupported search type: {search_type}")
-            
-            # 为文档添加分数到元数据（如果需要且支持）
-            if with_score and search_type != "similarity_score_threshold":
-                try:
-                    score_kwargs = {**search_kwargs, "k": len(docs)}
-                    docs_with_scores = self.similarity_search_with_score(query, **score_kwargs)
-                    docs = RetrievalHelper.add_scores_to_documents(docs, docs_with_scores)
-                except Exception as e:
-                    logger.debug(f"Unable to get scores: {e}")
-            
+
             logger.debug(f"Retrieved {len(docs)} documents, search type: {search_type}")
             return docs
             

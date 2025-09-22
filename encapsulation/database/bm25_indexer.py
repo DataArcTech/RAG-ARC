@@ -8,14 +8,11 @@ import threading
 import psutil
 import multiprocessing
 import gc
-import pickle
-from typing import Any, Callable, Dict, List, Optional, Literal, Union
+from typing import Any, Dict, List, Optional, Union
 from concurrent.futures import ProcessPoolExecutor
-from pydantic import Field, field_validator
 import jieba
 
-from core.utils.data_model import Document
-from encapsulation.database.vector_db.base import BaseIndex, BaseIndexConfig
+from encapsulation.data_model.data_model import Document
 from encapsulation.database.utils.TokenizerManager import TokenizerManager
 
 try:
@@ -41,68 +38,13 @@ EXCLUDED_METADATA_FIELDS = {
 }
 
 
-class BM25IndexBuilderConfig(BaseIndexConfig):
-    """BM25索引构建器配置"""
-    type: Literal["bm25_indexer"] = "bm25_indexer"
-
-    # 核心配置
-    index_path: str = Field(description="索引存储路径")
-    bm25_k1: float = Field(default=1.2, description="BM25 k1参数")
-    bm25_b: float = Field(default=0.75, description="BM25 b参数")
-
-    # 可选配置
-    preprocess_func_name: Optional[str] = Field(default=None, description="预处理函数名")
-    stopwords_file: Optional[str] = Field(default=None, description="停用词文件路径")
-    writer_heap_size: Optional[int] = Field(default=None, description="写入器堆大小")
-    batch_size: int = Field(default=50, description="批处理大小")
-    tokenize_batch_size: int = Field(default=200, description="分词批处理大小")
-    max_workers: Optional[int] = Field(default=None, description="最大工作进程数")
-    progress_interval: int = Field(default=500, description="进度报告间隔")
-    enable_gc: bool = Field(default=True, description="是否启用垃圾回收")
-    queue_maxsize: int = Field(default=1000, description="队列最大大小")
-
-    # 搜索配置
-    search_kwargs: Dict[str, Any] = Field(
-        default_factory=lambda: {
-            "use_phrase_query": False,
-            "k": 5,
-            "with_score": True
-        },
-        description="搜索参数配置"
-    )
-    k: int = Field(default=5, description="默认返回结果数量")
-    with_score: bool = Field(default=True, description="是否返回分数")
-
-    # 运行时字段
-    preprocess_func: Optional[Callable[[str], List[str]]] = Field(default=None, exclude=True)
-    progress_callback: Optional[Callable] = Field(default=None, exclude=True)
-    
-    @field_validator("bm25_k1")
-    @classmethod
-    def validate_bm25_k1(cls, v: float) -> float:
-        if v <= 0:
-            raise ValueError(f"bm25_k1 must be greater than 0, but got {v}")
-        return v
-    
-    @field_validator("bm25_b")
-    @classmethod
-    def validate_bm25_b(cls, v: float) -> float:
-        if not (0 <= v <= 1):
-            raise ValueError(f"bm25_b must be between 0 and 1, but got {v}")
-        return v
-    
-
-    def build(self) -> "BM25IndexBuilder":
-        """Build the BM25IndexBuilder instance"""
-        return BM25IndexBuilder(config=self)
-
 
 def init_jieba_worker():
     """Initialize jieba in the worker process to reduce initialization overhead"""
     return jieba
 
 
-class BM25IndexBuilder(BaseIndex):
+class BM25IndexBuilder():
     """
     基于Tantivy的BM25索引构建器
 
@@ -113,25 +55,32 @@ class BM25IndexBuilder(BaseIndex):
     - 多进程优化
     """
 
-    # Runtime instance variables (initialized when needed)
-    _index: Optional[Index] = None
-    _schema = None
-    _writer_heap_size: int = 0
-    _tokenizers_registered: bool = False
-    _executor: Optional[ProcessPoolExecutor] = None
-    _executor_closed: bool = False
-    _queue: queue.Queue = None
-    _writer_thread: Optional[threading.Thread] = None
-    _stop_event: threading.Event = None
-    _tokenizer_manager: TokenizerManager = None
-    _document_ids: Optional[set] = None  # 缓存的文档ID集合
+    def __init__(self, config):
+        """Initialize BM25IndexBuilder with configuration
+
+        Args:
+            config: BM25IndexBuilderConfig instance
+        """
+        self.config = config
+
+        # Runtime instance variables (initialized when needed)
+        self._index: Optional[Index] = None
+        self._schema = None
+        self._writer_heap_size: int = 0
+        self._tokenizers_registered: bool = False
+        self._executor: Optional[ProcessPoolExecutor] = None
+        self._executor_closed: bool = False
+        self._queue: queue.Queue = None
+        self._writer_thread: Optional[threading.Thread] = None
+        self._stop_event: threading.Event = None
+        self._tokenizer_manager: TokenizerManager = None
 
     @property
     def tokenizer_manager(self) -> TokenizerManager:
         """Lazy-initialized tokenizer manager"""
         if self._tokenizer_manager is None:
             self._tokenizer_manager = TokenizerManager(
-                custom_preprocess_func=self.config.preprocess_func,
+                custom_preprocess_func=None,  # Runtime injection no longer supported
                 custom_stopwords_file=self.config.stopwords_file
             )
         return self._tokenizer_manager
@@ -166,95 +115,36 @@ class BM25IndexBuilder(BaseIndex):
         """Get the Tantivy index instance"""
         return self._index
 
-    @property
-    def _ids_file_path(self) -> str:
-        """Get the path for storing document IDs"""
-        return os.path.join(self.config.index_path, "document_ids.pkl")
 
-    def _load_document_ids(self) -> set:
-        """Load document IDs from pickle file
-
-        Returns:
-            Set of document IDs
-        """
-        if self._document_ids is not None:
-            return self._document_ids
-
-        ids_file = self._ids_file_path
-        if os.path.exists(ids_file):
-            try:
-                with open(ids_file, 'rb') as f:
-                    self._document_ids = pickle.load(f)
-                logger.debug(f"Loaded {len(self._document_ids)} document IDs from {ids_file}")
-            except Exception as e:
-                logger.warning(f"Failed to load document IDs from {ids_file}: {e}")
-                self._document_ids = set()
-        else:
-            self._document_ids = set()
-
-        return self._document_ids
-
-    def _save_document_ids(self) -> None:
-        """Save document IDs to pickle file"""
-        if self._document_ids is None:
-            return
-
-        ids_file = self._ids_file_path
-        try:
-            os.makedirs(os.path.dirname(ids_file), exist_ok=True)
-            with open(ids_file, 'wb') as f:
-                pickle.dump(self._document_ids, f)
-            logger.debug(f"Saved {len(self._document_ids)} document IDs to {ids_file}")
-        except Exception as e:
-            logger.warning(f"Failed to save document IDs to {ids_file}: {e}")
-
-    def _add_document_ids(self, doc_ids: List[str]) -> None:
-        """Add document IDs to the cache and save to file
-
-        Args:
-            doc_ids: List of document IDs to add
-        """
-        if self._document_ids is None:
-            self._load_document_ids()
-
-        self._document_ids.update(doc_ids)
-        self._save_document_ids()
-
-    def _remove_document_ids(self, doc_ids: List[str]) -> None:
-        """Remove document IDs from the cache and save to file
-
-        Args:
-            doc_ids: List of document IDs to remove
-        """
-        if self._document_ids is None:
-            self._load_document_ids()
-
-        self._document_ids.difference_update(doc_ids)
-        self._save_document_ids()
-
-    def _clear_document_ids(self) -> None:
-        """Clear all document IDs from cache and file"""
-        self._document_ids = set()
-        ids_file = self._ids_file_path
-        if os.path.exists(ids_file):
-            try:
-                os.remove(ids_file)
-                logger.debug(f"Removed document IDs file: {ids_file}")
-            except Exception as e:
-                logger.warning(f"Failed to remove document IDs file {ids_file}: {e}")
-
-    def get_all_document_ids(self) -> set:
-        """Get all document IDs in the index
-
-        Returns:
-            Set of all document IDs
-        """
-        return self._load_document_ids().copy()
     
     
     def _set_tokenizer(self, documents: List[Document]):
         """Set tokenizer (proxied to TokenizerManager)"""
         self.tokenizer_manager.set_tokenizer_by_detection(documents)
+
+    def _set_tokenizer_from_existing_index(self):
+        """从现有索引中设置分词器 - 对于中文索引强制使用jieba"""
+        try:
+            if self._index is None:
+                logger.warning("Index not loaded, cannot set tokenizer from existing index")
+                return
+
+            # 检查索引是否有文档
+            searcher = self._index.searcher()
+            num_docs = searcher.num_docs
+
+            if num_docs == 0:
+                logger.warning("Index is empty, using default whitespace tokenizer")
+                return
+
+            # 对于现有的中文索引，直接设置为jieba分词器
+            # 这是因为我们的索引是用jieba构建的
+            logger.info(f"Loading existing index with {num_docs} documents, setting tokenizer to jieba for Chinese content")
+            self.tokenizer_manager._use_jieba = True
+            self.tokenizer_manager._load_stopwords()
+
+        except Exception as e:
+            logger.warning(f"Failed to set tokenizer from existing index: {e}, using default whitespace tokenizer")
 
     def _ensure_index_loaded(self) -> None:
         """Ensure index is loaded before operations
@@ -520,7 +410,14 @@ class BM25IndexBuilder(BaseIndex):
             self._set_tokenizer(documents)
         
         # For new indices, reinitialize with dynamic fields based on documents
-        index_exists = os.path.exists(self.config.index_path) and any(os.scandir(self.config.index_path)) if os.path.exists(self.config.index_path) else False
+        index_exists = False
+        if os.path.exists(self.config.index_path):
+            try:
+                with os.scandir(self.config.index_path) as entries:
+                    index_exists = any(entries)
+            except OSError:
+                index_exists = False
+
         if not index_exists:
             self._index = None  # Reset to force reinitialization with dynamic fields
             self._initialize_index(documents)
@@ -591,11 +488,9 @@ class BM25IndexBuilder(BaseIndex):
                         "throughput_docs_sec": round(processed_count / elapsed, 2)
                     }
                     logger.info(f"[IndexProgress] {json.dumps(stats, ensure_ascii=False)}")
-                    if self.config.progress_callback:
-                        self.config.progress_callback(processed_count, total_docs, stats)
 
-            # Final progress callback if not already called at the end
-            if processed_count % self.config.progress_interval != 0 and self.config.progress_callback:
+            # Final progress logging if not already logged at the end
+            if processed_count % self.config.progress_interval != 0:
                 elapsed = time.time() - start_time
                 stats = {
                     "processed": processed_count,
@@ -604,7 +499,6 @@ class BM25IndexBuilder(BaseIndex):
                     "throughput_docs_sec": round(processed_count / elapsed, 2)
                 }
                 logger.info(f"[IndexProgress] Final: {json.dumps(stats, ensure_ascii=False)}")
-                self.config.progress_callback(processed_count, total_docs, stats)
 
             self.processing_queue.put(None)
             self._writer_thread.join()
@@ -626,9 +520,7 @@ class BM25IndexBuilder(BaseIndex):
             if self.config.enable_gc:
                 gc.collect()
 
-        # 更新文档ID缓存
-        if added_ids:
-            self._add_document_ids(added_ids)
+
 
         return added_ids
 
@@ -655,16 +547,21 @@ class BM25IndexBuilder(BaseIndex):
         duplicate_ids = []
         existing_ids = set()
 
-        # 获取现有文档ID
-        try:
-            if self._index is not None:
-                existing_ids = self._load_document_ids()
+        # 获取现有文档ID - 直接从索引查询
+        existing_ids = set()
+        if self._index is not None:
+            try:
+                searcher = self._index.searcher()
+                # 查询所有文档ID（这里可以优化，但为了简单起见直接查询）
+                for doc in documents:
+                    query = self._index.parse_query(f'id:"{doc.id}"', ["id"])
+                    results = searcher.search(query, 1)
+                    if results.hits:
+                        existing_ids.add(doc.id)
                 logger.debug(f"Found {len(existing_ids)} existing document IDs in index")
-            else:
+            except Exception as e:
+                logger.debug(f"Error getting existing document IDs: {e}")
                 existing_ids = set()
-        except Exception as e:
-            logger.debug(f"Error getting existing document IDs: {e}")
-            existing_ids = set()
 
         # 检查文档列表中的重复ID（包括与现有文档的重复）
         seen_ids = set()
@@ -690,12 +587,14 @@ class BM25IndexBuilder(BaseIndex):
 
         return self._build_index(unique_documents)
 
-    def save_index(self, index_path: str, index_name: str = "index") -> None:
-        """保存索引状态（Tantivy自动持久化）"""
+    def save_index(self, index_path: str = None, index_name: str = "index") -> None:
+        """保存索引状态（Tantivy自动持久化）
+
+        Note: Tantivy automatically persists the index, so this method only logs the save location.
+        The index_path and index_name parameters are ignored for compatibility.
+        """
         self._ensure_index_loaded()
-        logger.info(f"Index saved at: {self.config.index_path}")
-        if index_path != self.config.index_path:
-            logger.debug(f"Using configured path {self.config.index_path}, ignoring {index_path}")
+        logger.info(f"Index automatically saved at: {self.config.index_path}")
 
     def build_index(self, documents: List[Document], embeddings: Optional[List[List[float]]] = None) -> None:
         """Build index from documents (only when index doesn't exist)
@@ -759,36 +658,51 @@ class BM25IndexBuilder(BaseIndex):
             logger.debug(f"BM25 index uses configured path {self.config.index_path}, ignoring provided path {index_path}")
         self.load_local()
 
-    def update(self, documents: List[Document], embeddings: Optional[List[List[float]]] = None) -> None:
-        """Update documents in the index by first deleting then adding
+    def update_index(self, documents: List[Document], embeddings: Optional[List[List[float]]] = None) -> Optional[bool]:
+        """Update documents in index
 
         Args:
             documents: List of Document objects to update
             embeddings: 预计算的嵌入向量（BM25不需要，忽略此参数）
+
+        Returns:
+            Optional[bool]: True if update successful, False otherwise, None if not implemented
         """
         if not documents:
-            return
+            return True
 
         # BM25 索引不需要 embeddings，忽略此参数
         if embeddings is not None:
             logger.debug("BM25 index does not use embeddings, ignoring embeddings parameter")
 
-        # 先删除现有文档，再添加更新的文档
-        doc_ids = [str(doc.id) for doc in documents if doc.id is not None]
-        if doc_ids:
-            logger.info(f"Update mode: attempting to delete {len(doc_ids)} existing documents")
-            deleted_count = self._delete_documents_by_ids(doc_ids)
-            logger.info(f"Update mode: successfully deleted {deleted_count} documents")
+        try:
+            # 先删除现有文档，再添加更新的文档
+            doc_ids = [str(doc.id) for doc in documents if doc.id is not None]
+            if doc_ids:
+                logger.info(f"Update mode: attempting to delete {len(doc_ids)} existing documents")
+                deleted_count = self._delete_documents_by_ids(doc_ids)
+                logger.info(f"Update mode: successfully deleted {deleted_count} documents")
 
-            # Ensure index is reloaded after deletion for consistency
-            if self._index is not None:
-                self._index.reload()
+                # Ensure index is reloaded after deletion for consistency
+                if self._index is not None:
+                    self._index.reload()
 
-        # 添加更新的文档
-        self._build_index(documents)
+            # 添加更新的文档
+            self._build_index(documents)
+            return True
+        except Exception as e:
+            logger.error(f"Error updating documents: {e}")
+            return False
 
-    def delete(self, ids: Optional[List[str]] = None, **kwargs: Any) -> Optional[bool]:
-        """删除指定ID的文档"""
+    def delete_index(self, ids: Optional[List[str]] = None, **kwargs: Any) -> Optional[bool]:
+        """Delete documents by IDs
+
+        Args:
+            ids: List of IDs to delete. If None, delete all. Default is None
+
+        Returns:
+            Optional[bool]: True if deletion successful, False otherwise, None if not implemented
+        """
         if ids is None:
             # 删除所有文档 - 重新创建空索引
             try:
@@ -799,8 +713,6 @@ class BM25IndexBuilder(BaseIndex):
 
                 # 重新创建空索引
                 self._initialize_index()
-                # 清空文档ID缓存
-                self._clear_document_ids()
                 logger.info("Successfully deleted all documents by recreating index")
                 return True
             except Exception as e:
@@ -814,9 +726,6 @@ class BM25IndexBuilder(BaseIndex):
 
         try:
             deleted_count = self._delete_documents_by_ids(unique_doc_ids)
-            if deleted_count > 0:
-                # 从ID缓存中移除已删除的文档ID
-                self._remove_document_ids(unique_doc_ids)
             return deleted_count > 0
         except Exception as e:
             logger.error(f"Error deleting documents: {e}")
@@ -901,8 +810,10 @@ class BM25IndexBuilder(BaseIndex):
         try:
             # Load existing index without dynamic fields (they're already in the schema)
             self._initialize_index()
-            # 加载文档ID缓存
-            self._load_document_ids()
+
+            # 设置分词器：从索引中获取样本文档来检测语言
+            self._set_tokenizer_from_existing_index()
+
             logger.info(f"Successfully loaded existing index from: {self.config.index_path}")
             return self
         except Exception as e:
@@ -937,8 +848,6 @@ class BM25IndexBuilder(BaseIndex):
             )
         
         try:
-            # 清空文档ID缓存（因为这是初始创建）
-            self._clear_document_ids()
             self._build_index(documents)
             return self
         except Exception:
@@ -1067,11 +976,11 @@ class BM25IndexBuilder(BaseIndex):
 
 
 
-    def get_index_stats(self) -> Dict[str, Any]:
-        """Get index statistics
-        
+    def get_vector_db_info(self) -> Dict[str, Any]:
+        """Get vector database information
+
         Returns:
-            Dictionary containing index statistics
+            Dictionary containing database info (size, dimensions, etc.)
         """
         try:
             if self._index is not None:

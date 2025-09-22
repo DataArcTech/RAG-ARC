@@ -8,12 +8,12 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from datetime import timezone
 from core.file_management.IndexManager import IndexManager, IndexManagerConfig, PostgreSQLDBConfig, LocalDBConfig
-from core.utils.data_model import Document
+from encapsulation.data_model.data_model import Document
 from encapsulation.database.relational_db.data_schema import ChunksMetadata, ChunksStatus
 from core.retrieval.dense import DenseRetrieverConfig
 from core.retrieval.tantivy_bm25 import TantivyBM25RetrieverConfig
 from encapsulation.database.vector_db.faiss import FaissIndexConfig
-from encapsulation.database.bm25_indexer import BM25IndexBuilderConfig
+from config.database.bm25_config import BM25IndexBuilderConfig
 from encapsulation.llm.huggingface import HuggingFaceEmbedConfig
 
 

@@ -100,7 +100,7 @@ def test_bm25_retriever_sharing():
     
     try:
         from core.retrieval.tantivy_bm25 import TantivyBM25Retriever, TantivyBM25RetrieverConfig
-        from encapsulation.database.bm25_indexer import BM25IndexBuilderConfig
+        from config.database.bm25_config import BM25IndexBuilderConfig
         
         # 创建相同的配置
         index_config = BM25IndexBuilderConfig(

@@ -169,7 +169,7 @@ class Neo4jGraphStore(GraphStore):
         self._execute_query(query, {
             'doc_id': document.id,
             'content': document.content,
-            'metadata': json.dumps(document.metadata) if document.metadata else "{}",
+            'metadata': json.dumps(document.metadata, ensure_ascii=False) if document.metadata else "{}",
             'create_time': datetime.now().isoformat(),
             'update_time': datetime.now().isoformat()
         })
@@ -188,7 +188,7 @@ class Neo4jGraphStore(GraphStore):
                 'document_id': doc_id,
                 'create_time': datetime.now().isoformat(),
                 'update_time': datetime.now().isoformat(),
-                'attributes': json.dumps(entity['attributes']) if entity.get('attributes') else "{}"
+                'attributes': json.dumps(entity['attributes'], ensure_ascii=False) if entity.get('attributes') else "{}"
             }
 
             # Create entity with dynamic label

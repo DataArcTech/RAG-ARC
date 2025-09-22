@@ -9,12 +9,12 @@ from framework.module import AbstractModule
 from framework.config import AbstractConfig
 
 from encapsulation.database.relational_db.data_schema import ChunksStatus
-from core.utils.data_model import Document
+from encapsulation.data_model.data_model import Document
 
 # Import configuration classes
-from encapsulation.database.vector_db.faiss import FaissIndexConfig
-from encapsulation.database.bm25_indexer import BM25IndexBuilderConfig
-from encapsulation.llm.huggingface import HuggingFaceEmbedConfig
+from config.encapsulaiton.faiss_config import FaissIndexConfig
+from config.database.bm25_config import BM25IndexBuilderConfig
+from config.llm.huggingface_config import HuggingFaceEmbedConfig
 
 logger = logging.getLogger(__name__)
 
@@ -428,7 +428,7 @@ class IndexManager(AbstractModule):
                     health_status[index_type] = {
                         "status": "unknown",
                         "exists": hasattr(indexer, 'index_exists') and indexer.index_exists(),
-                        "stats": indexer.get_index_stats() if hasattr(indexer, 'get_index_stats') else {}
+                        "stats": indexer.get_vector_db_info() if hasattr(indexer, 'get_vector_db_info') else {}
                     }
             except Exception as e:
                 logger.error(f"Health check failed for indexer {index_type}: {e}")

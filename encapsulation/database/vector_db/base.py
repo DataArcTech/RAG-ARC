@@ -1,147 +1,92 @@
 from __future__ import annotations
 
-import logging
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from typing import (
-    Any,
+    TYPE_CHECKING,
     Optional,
-    TypeVar,
     Sequence,
     List,
-    Generic,
-    Literal,
     Dict,
+    Any,
 )
-from core.utils.data_model import Document
-from framework.config import AbstractConfig
+
+
+from encapsulation.data_model.data_model import Document
 from framework.module import AbstractModule
 
 
-logger = logging.getLogger(__name__)
+class VectorDB(AbstractModule):
+    """Vector database base class - encapsulation layer for core database operations"""
 
-ConfigType = TypeVar("ConfigType", bound="BaseIndexConfig")
-
-
-class BaseIndexConfig(AbstractConfig):
-    """索引配置基类"""
-    type: Literal["index"] = "index"
-    index_name: str = "default_index"
-    index_path: Optional[str] = None
-
-    def build(self) -> "BaseIndex":
-        raise NotImplementedError("Subclasses must implement build() method")
-
-class BaseIndex(AbstractModule, Generic[ConfigType], ABC):
-    """索引基类，定义索引的基本操作接口"""
-    
-    config: ConfigType
-    
     @abstractmethod
-    def add(self, documents: List[Document], embeddings: Optional[List[List[float]]] = None) -> List[str]:
-        """添加文档到索引（会根据ID去重，重复ID的文档不会被添加）
+    def build_index(self, documents: List[Document]) -> None:
+        """Build index from documents
 
         Args:
-            documents: 要添加的文档列表
-            embeddings: 预计算的文档嵌入向量
-
-        Returns:
-            成功添加的文档ID列表
+            documents: List of Document objects to build index from
         """
         pass
 
     @abstractmethod
-    def delete(self, ids: Optional[List[str]] = None, **kwargs: Any) -> Optional[bool]:
-        """从索引中删除文档
+    def load_index(self, path: str) -> None:
+        """Load index from provided folder path
 
         Args:
-            ids: 要删除的文档ID列表，如果为None则删除所有文档
-            **kwargs: 其他删除条件
-
-        Returns:
-            删除是否成功
-        """
-        pass
-
-    @abstractmethod
-    def update(self, documents: List[Document], embeddings: Optional[List[List[float]]] = None) -> None:
-        """更新索引中的文档
-
-        Args:
-            documents: 要更新的文档列表（需要包含文档ID）
-            embeddings: 预计算的文档嵌入向量
+            path: Directory path containing saved vector database files
         """
         pass
 
     @abstractmethod
     def get_by_ids(self, ids: Sequence[str]) -> List[Document]:
-        """根据ID获取文档
-        
-        Args:
-            ids: 文档ID列表
-            
-        Returns:
-            对应的文档列表
-        """
-        pass
-
-    @abstractmethod
-    def save_index(self, index_path: str, index_name: str = "index") -> None:
-        """保存索引到磁盘
-        
-        Args:
-            index_path: 保存路径
-            index_name: 索引名称
-        """
-        pass
-
-    @abstractmethod
-    def load_index(self, index_path: Optional[str] = None) -> None:
-        """从磁盘加载索引
-        
-        Args:
-            index_path: 索引路径，如果为None则使用配置中的路径
-        """
-        pass
-
-    @abstractmethod
-    def build_index(self, documents: List[Document], embeddings: Optional[List[List[float]]] = None) -> None:
-        """构建索引（仅在索引不存在时使用，如果索引已存在会抛出异常）
+        """Get documents by IDs
 
         Args:
-            documents: 用于构建索引的文档列表
-            embeddings: 预计算的文档嵌入向量
+            ids: List of IDs to retrieve
 
-        Raises:
-            RuntimeError: 如果索引已存在
+        Returns:
+            List of documents
         """
         pass
 
     @abstractmethod
-    def index_exists(self) -> bool:
-        """检查索引是否存在
+    def delete_index(self, ids: Optional[List[str]] = None) -> Optional[bool]:
+        """Delete documents by IDs
+
+        Args:
+            ids: List of IDs to delete. If None, delete all. Default is None
 
         Returns:
-            bool: 索引是否存在
+            Optional[bool]: True if deletion successful, False otherwise, None if not implemented
         """
         pass
 
     @abstractmethod
-    def get_index_stats(self) -> Dict[str, Any]:
-        """获取索引统计信息
+    def save_index(self, path: str, name: str = "index") -> None:
+        """Save index to filesystem path
 
-        Returns:
-            Dict[str, Any]: 索引统计信息，包含文档数量、索引大小等
+        Args:
+            path: Directory path to save the vector database
+            name: Base name for saved files (without extension)
         """
         pass
 
-    def health_check(self) -> Dict[str, Any]:
-        """索引健康检查
+    @abstractmethod
+    def update_index(self, documents: List[Document]) -> Optional[bool]:
+        """Update documents in index
+
+        Args:
+            documents: List of Document objects to update
 
         Returns:
-            Dict[str, Any]: 健康检查结果，包含索引状态、统计信息等
+            Optional[bool]: True if update successful, False otherwise, None if not implemented
         """
-        return {
-            "exists": self.index_exists(),
-            "stats": self.get_index_stats() if self.index_exists() else {},
-            "status": "healthy" if self.index_exists() else "missing"
-        }
+        pass
+
+    @abstractmethod
+    def get_vector_db_info(self) -> Dict[str, Any]:
+        """Get vector database information
+
+        Returns:
+            Dictionary containing database info (size, dimensions, etc.)
+        """
+        pass

@@ -1,61 +1,17 @@
 import asyncio
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, List, TypeVar, Generic, Tuple, Literal, Dict, Optional, Union
-from typing import Annotated
-from pydantic import Field
+from typing import Any, List, Dict
 from framework.module import AbstractModule
-from framework.config import AbstractConfig
-from core.utils.data_model import Document
+from encapsulation.data_model.data_model import Document
 
-from encapsulation.database.vector_db.base import BaseIndexConfig
-from encapsulation.database.vector_db.faiss import FaissIndexConfig
-from encapsulation.llm.base import LLMBaseConfig
-from encapsulation.llm.huggingface import HuggingFaceEmbedConfig
-from encapsulation.llm.openai import OpenAIConfig
 
 logger = logging.getLogger(__name__)
 
-class BaseRetrieverConfig(AbstractConfig):
-    type: Literal["retriever"] = "retriever"
-
-    # Index configuration - 支持具体的索引类型
-    index_config: Annotated[
-        Union[FaissIndexConfig],
-        Field(discriminator="type")
-    ]
-
-    # Embedding configuration - 支持具体的嵌入模型类型
-    embedding_config: Optional[Annotated[
-        Union[HuggingFaceEmbedConfig, OpenAIConfig],
-        Field(discriminator="type")
-    ]] = None
-
-    # Search parameters, can be modified at runtime
-    search_kwargs: Dict[str, Any] = Field(default_factory=lambda: {"k": 5, "with_score": False, "score_threshold": None})
-
-    @abstractmethod
-    def build(self) -> "BaseRetriever":
-        raise NotImplementedError("Subclasses must implement build() method")
-    
-    @classmethod
-    def model_rebuild_all(cls):
-        """Rebuild all retriever config models to resolve forward references"""
-        # Import here to avoid circular imports
-        try:
-            from encapsulation.database.bm25_indexer import BM25IndexBuilderConfig
-            cls.model_rebuild()
-        except ImportError:
-            pass
-
-ConfigType = TypeVar("ConfigType", bound="BaseRetrieverConfig")
 
 
-
-class BaseRetriever(AbstractModule, Generic[ConfigType], ABC):
-    config: ConfigType
-
-    def __init__(self, config: ConfigType):
+class BaseRetriever(AbstractModule, ABC):
+    def __init__(self, config):
         self.config = config
         self._index = self.config.index_config.build()
         self._embedding = None
@@ -65,7 +21,11 @@ class BaseRetriever(AbstractModule, Generic[ConfigType], ABC):
         """尝试加载已存在的索引"""
         try:
             if hasattr(self._index, 'load_index'):
-                self._index.load_index()
+                # Check if the index has an index_path in its config
+                if hasattr(self._index.config, 'index_path') and self._index.config.index_path:
+                    self._index.load_index(self._index.config.index_path)
+                else:
+                    self._index.load_index()
                 logger.info(f"Successfully loaded existing index for {self.get_name()}")
         except Exception as e:
             message = f"Index not found for retriever {self.get_name()}: {e}"
@@ -106,6 +66,3 @@ class BaseRetriever(AbstractModule, Generic[ConfigType], ABC):
 
     def get_name(self) -> str:
         return self.config.type
-
-    # 索引CRUD操作已移至IndexManager
-    # Retriever专注于检索功能

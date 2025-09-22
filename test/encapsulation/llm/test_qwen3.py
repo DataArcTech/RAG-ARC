@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
 from framework.register import Register
 from encapsulation.llm.qwen3 import QwenConfig, QwenLLM
-from core.utils.data_model import Document
+from encapsulation.data_model.data_model import Document
 
 
 class TestQwenRerankerWithRegister(unittest.TestCase):
