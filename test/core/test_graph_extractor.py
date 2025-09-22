@@ -21,7 +21,7 @@ def usage_example():
     # 1. 配置LLM
     llm_config = OpenAIConfig(
         model_name="gpt-4.1-mini",
-        api_key="sk-2T06b7c7f9c3870049fbf8fada596b0f8ef908d1e233KLY2",  # 测试用的假key
+        api_key="sk-",  # 测试用的假key
         base_url="https://api.gptsapi.net/v1",
     )
     
