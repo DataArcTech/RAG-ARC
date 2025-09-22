@@ -5,6 +5,6 @@ sentence-transformers
 jieba
 openai
 tqdm
-
-faiss-cpu
 psycopg[binary]
+huggingface-hub
+pydantic

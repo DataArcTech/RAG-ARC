@@ -8,8 +8,6 @@ from encapsulation.data_model.data_model import Document
 
 logger = logging.getLogger(__name__)
 
-
-
 class BaseRetriever(AbstractModule, ABC):
     def __init__(self, config):
         self.config = config

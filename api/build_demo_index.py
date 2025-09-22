@@ -1,8 +1,6 @@
 import os
 import sys
 
-# 设置CUDA内存分配策略，减少内存碎片化
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -61,8 +59,9 @@ def build_demo_index():
         device="cuda:4", 
         encode_kwargs={
             "batch_size": 4,
-            "show_progress_bar": True
-        }
+            "show_progress_bar": True,
+        },
+        local_files_only=True
     )
 
     # FAISS索引配置

@@ -1,7 +1,6 @@
 import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from api.retrieval_api import api
 from encapsulation.data_model.data_model import Document
 
