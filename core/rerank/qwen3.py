@@ -1,0 +1,115 @@
+from typing import Dict, Any, Optional, List
+from .base import AbstractReranker
+from encapsulation.data_model.data_model import Document
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class Qwen3Reranker(AbstractReranker):
+    """
+    Qwen-based document reranker for RAG systems.
+
+    Uses Qwen's causal language model approach for sophisticated document relevance
+    scoring based on yes/no token prediction. Provides configurable batch processing
+    and top-k filtering for efficient reranking.
+
+    RAG Pipeline Position:
+        User Query → Query Rewrite → Retrieval → Rerank → LLM Generate Answer
+                                                   ↑ This component
+
+    Key features:
+    - Causal LM-based reranking with yes/no token scoring
+    - Configurable batch size for memory optimization
+    - Top-k filtering with default value from config
+    - Probability-based scoring with log-softmax normalization
+    - Integration with RAG-ARC LLM infrastructure
+    """
+
+    def __init__(self, config):
+        super().__init__(config)
+        # Build Qwen LLM from sub-config following framework pattern
+        self.qwen3_llm = config.qwen3_llm_config.build()
+
+    def rerank(
+        self,
+        query: str,
+        documents: List[Document],
+        **kwargs: Any
+    ) -> List[Document]:
+        """
+        Rerank documents using Qwen's causal language model approach.
+
+        All configuration is handled by the encapsulation layer. Core layer
+        focuses on document structure and metadata management.
+
+        Args:
+            query: User query to rank documents against
+            documents: List of Document objects from retrieval step
+            **kwargs: Parameters passed through to encapsulation layer
+
+        Returns:
+            List of Document objects reordered by relevance, with rerank scores
+            added to metadata
+
+        Raises:
+            ValueError: If query is empty or documents list is invalid
+            RuntimeError: If reranking process fails
+        """
+        if not query or not query.strip():
+            raise ValueError("Query cannot be empty")
+
+        if not documents:
+            logger.warning("Empty documents list provided to reranker")
+            return []
+
+        try:
+            # Pass all parameters to encapsulation layer
+            # Encapsulation layer handles all configuration (top_k, batch_size, instruction)
+            ranked_results = self.qwen3_llm.rerank(
+                query=query,
+                documents=documents,
+                **kwargs  # Pass through all parameters to encapsulation layer
+            )
+
+            # Convert results back to Document objects with metadata
+            # ranked_results is List[Tuple[int, float]] from encapsulation layer
+            reranked_documents = []
+            for doc_idx, score in ranked_results:
+                doc = documents[doc_idx]
+                # Preserve original metadata and add rerank score
+                new_metadata = doc.metadata.copy()
+                new_metadata["rerank_score"] = score
+                new_metadata["rerank_method"] = "qwen"
+
+                # Create new Document with updated metadata
+                reranked_doc = Document(
+                    content=doc.content,
+                    metadata=new_metadata,
+                    id=doc.id
+                )
+                reranked_documents.append(reranked_doc)
+
+            logger.info(f"Reranked {len(documents)} documents, returned {len(reranked_documents)}")
+            return reranked_documents
+
+        except Exception as e:
+            logger.error(f"Document reranking failed: {e}")
+            # Return original documents as fallback
+            logger.warning("Using original document order as fallback")
+            return documents
+
+    def get_reranker_info(self) -> Dict[str, Any]:
+        """
+        Get information about this reranker's configuration.
+
+        Returns:
+            Dictionary containing reranker information
+        """
+        return {
+            "type": "qwen_reranker",
+            "llm_info": self.qwen3_llm.get_model_info(),
+            "supports_batch_processing": True,
+            "fallback_strategy": "original_order"
+        }
