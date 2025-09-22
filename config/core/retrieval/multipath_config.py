@@ -1,7 +1,7 @@
 from typing import Literal, List, Optional, Any, Union, Annotated, Dict
 from pydantic import Field, ConfigDict
-from config.core.dense_config import DenseRetrieverConfig
-from config.core.tantivy_bm25_config import TantivyBM25RetrieverConfig
+from config.core.retrieval.dense_config import DenseRetrieverConfig
+from config.core.retrieval.tantivy_bm25_config import TantivyBM25RetrieverConfig
 from core.retrieval.multipath import MultiPathRetriever
 from framework.config import AbstractConfig
 class MultiPathRetrieverConfig(AbstractConfig):

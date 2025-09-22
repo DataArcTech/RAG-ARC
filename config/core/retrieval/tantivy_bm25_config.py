@@ -1,7 +1,7 @@
-from typing import Literal, Annotated, Dict, Any, Optional
+from typing import Literal, Dict, Any
 from pydantic import Field, ConfigDict
 from framework.config import AbstractConfig
-from config.encapsulaiton.bm25_config import BM25IndexBuilderConfig
+from config.encapsulation.database.bm25_config import BM25IndexBuilderConfig
 from core.retrieval.tantivy_bm25 import TantivyBM25Retriever
 
 class TantivyBM25RetrieverConfig(AbstractConfig):

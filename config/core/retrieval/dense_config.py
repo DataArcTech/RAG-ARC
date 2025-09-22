@@ -1,8 +1,8 @@
 from typing import Literal, Annotated, Dict, Any
 from pydantic import Field, ConfigDict
 from framework.config import AbstractConfig
-from config.encapsulaiton.faiss_config import FaissIndexConfig
-from config.llm.huggingface_config import HuggingFaceEmbedConfig
+from config.encapsulation.database.faiss_config import FaissIndexConfig
+from config.encapsulation.llm.huggingface_config import HuggingFaceEmbedConfig
 from core.retrieval.dense import DenseRetriever
 
 class DenseRetrieverConfig(AbstractConfig):
@@ -14,7 +14,6 @@ class DenseRetrieverConfig(AbstractConfig):
     index_name: str = Field(default="index", description="Name of the index")
 
     index_config: Annotated[FaissIndexConfig, Field(description="Index configuration")]
-    embedding_config: Annotated[HuggingFaceEmbedConfig, Field(description="Embedding configuration")]
     # Runtime dependencies (injected by vector database)
     metric: Literal["cosine", "l2", "ip"] = Field(default="cosine", description="Distance metric from vector database")
 
