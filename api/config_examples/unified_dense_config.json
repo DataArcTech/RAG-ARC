@@ -10,14 +10,9 @@
         "embedding_config": {
             "type": "huggingface_embedding",
             "model_name": "/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
-            "device": "cuda:7"
+            "device": "cuda:7",
+            "local_files_only": true
         }
-    },
-    "embedding_config": {
-        "type": "huggingface_embedding",
-        "model_name": "/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
-        "device": "cuda:7",
-        "local_files_only": true
     },
     "search_kwargs": {
         "k": 5,

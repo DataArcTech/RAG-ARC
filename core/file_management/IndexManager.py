@@ -12,8 +12,8 @@ from encapsulation.database.relational_db.data_schema import ChunksStatus
 from encapsulation.data_model.data_model import Document
 
 # Import configuration classes
-from config.encapsulaiton.faiss_config import FaissIndexConfig
-from config.database.bm25_config import BM25IndexBuilderConfig
+from config.encapsulaiton.database.faiss_config import FaissIndexConfig
+from config.encapsulaiton.database.bm25_config import BM25IndexBuilderConfig
 from config.llm.huggingface_config import HuggingFaceEmbedConfig
 
 logger = logging.getLogger(__name__)

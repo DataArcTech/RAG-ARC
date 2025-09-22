@@ -103,17 +103,8 @@ id\tname\ttype\tattributes
 head_id\ttype\ttail_id
 """
 
-MULTI_ROUND_PROMPT = """
-这是第{round_num}轮抽取。请基于前面轮次的结果，继续从文本中发现新的实体和关系。
 
-**重点关注**:
-- 前面轮次可能遗漏的细节信息
-- 实体间的隐含关系
-- 实体的补充属性
-- 文本中的深层语义信息
 
-{base_prompt}
-"""
 
 EXTRACTION_PROMPT_EN = """
 You are a professional knowledge graph extraction engine. Please extract entities, attributes, and relationships from the given text and output in TSV format.

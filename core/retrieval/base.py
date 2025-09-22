@@ -39,8 +39,8 @@ class BaseRetriever(AbstractModule, ABC):
 
     def get_embedding(self) -> Any:
         if self._embedding is None:
-            if hasattr(self.config, "embedding_config") and self.config.embedding_config is not None:
-                self._embedding = self.config.embedding_config.build()
+            if hasattr(self.config.index_config, "embedding_config") and self.config.index_config.embedding_config is not None:
+                self._embedding = self.config.index_config.embedding_config.build()
             else:
                 raise ValueError("This retriever does not have an embedding_config")
         return self._embedding

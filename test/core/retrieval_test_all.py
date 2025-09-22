@@ -9,13 +9,36 @@ from typing import List, Dict, Any
 # Add project root directory to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
+# Create a temporary fix for the import path issue
+import importlib.util
+import sys
+
+# Create a symbolic module mapping to fix the typo in other files
+if 'config.encapsulaiton' not in sys.modules:
+    try:
+        # Import the correct modules
+        import config.encapsulation.llm
+        import config.encapsulation.database
+        import config.encapsulation.llm.huggingface_config
+        import config.encapsulation.database.faiss_config
+
+        # Map the misspelled module names to the correct ones
+        sys.modules['config.encapsulaiton'] = config.encapsulation
+        sys.modules['config.encapsulaiton.llm'] = config.encapsulation.llm
+        sys.modules['config.encapsulaiton.database'] = config.encapsulation.database
+        sys.modules['config.encapsulaiton.llm.huggingface_config'] = config.encapsulation.llm.huggingface_config
+        sys.modules['config.encapsulaiton.database.faiss_config'] = config.encapsulation.database.faiss_config
+    except ImportError as e:
+        print(f"Warning: Could not create module mapping: {e}")
+        pass
+
 from encapsulation.data_model.data_model import Document
-from config.encapsulaiton.bm25_config import BM25IndexBuilderConfig
-from config.retrieval.tantivy_bm25_config import TantivyBM25RetrieverConfig
-from config.retrieval.multipath_config import MultiPathRetrieverConfig
-from config.retrieval.dense_config import DenseRetrieverConfig
-from config.encapsulaiton.faiss_config import FaissIndexConfig
-from config.llm.huggingface_config import HuggingFaceEmbedConfig
+from config.encapsulation.database.bm25_config import BM25IndexBuilderConfig
+from config.core.retrieval.tantivy_bm25_config import TantivyBM25RetrieverConfig
+from config.core.retrieval.multipath_config import MultiPathRetrieverConfig
+from config.core.retrieval.dense_config import DenseRetrieverConfig
+from config.encapsulation.database.faiss_config import FaissIndexConfig
+from config.encapsulation.llm.huggingface_config import HuggingFaceEmbedConfig
 
 # 设置日志级别
 logging.basicConfig(level=logging.WARNING)
@@ -65,7 +88,7 @@ def create_index_manager_and_build_indexes(documents: List[Document], index_conf
 
         elif index_type == "faiss":
             try:
-                from config.llm.huggingface_config import HuggingFaceEmbedConfig
+                from config.encapsulation.llm.huggingface_config import HuggingFaceEmbedConfig
 
                 # 创建嵌入模型配置并设置到索引配置中
                 embedding_config = HuggingFaceEmbedConfig(
@@ -75,7 +98,7 @@ def create_index_manager_and_build_indexes(documents: List[Document], index_conf
                 )
 
                 # 设置嵌入模型到索引配置中
-                index_config.embedding = embedding_config
+                index_config.embedding_config = embedding_config
 
                 # 重新构建索引以包含嵌入配置
                 index = index_config.build()
@@ -162,6 +185,7 @@ class TestBM25Retriever(unittest.TestCase):
             # 创建BM25检索器配置
             retriever_config = TantivyBM25RetrieverConfig(
                 type="tantivy_bm25",
+                index_path=os.path.join(self.temp_dir, "bm25_test"),
                 index_config=index_config,
                 search_kwargs={"k": 5, "with_score": True}
             )
@@ -195,6 +219,7 @@ class TestBM25Retriever(unittest.TestCase):
         json_str = f"""
         {{
             "type": "tantivy_bm25",
+            "index_path": "{os.path.join(self.temp_dir, 'bm25_json_test').replace(os.sep, '/')}",
             "search_kwargs": {{
                 "k": 10,
                 "with_score": true,
@@ -250,6 +275,7 @@ class TestBM25Retriever(unittest.TestCase):
         try:
             retriever_config = TantivyBM25RetrieverConfig(
                 type="tantivy_bm25",
+                index_path=os.path.join(self.temp_dir, "bm25_params_test"),
                 index_config=index_config,
                 search_kwargs={"k": 3, "with_score": True}
             )
@@ -305,7 +331,7 @@ class TestDenseRetriever(unittest.TestCase):
             metric="cosine",
             index_type="flat",
             normalize_L2=True,
-            embedding=embedding_config
+            embedding_config=embedding_config
         )
 
         # 使用IndexManager构建索引
@@ -316,6 +342,7 @@ class TestDenseRetriever(unittest.TestCase):
             # 创建Dense检索器配置
             retriever_config = DenseRetrieverConfig(
                 type="dense",
+                index_path=os.path.join(self.temp_dir, "dense_test"),
                 index_config=index_config,
                 embedding_config=embedding_config,
                 search_kwargs={"k": 5, "with_score": True}
@@ -365,6 +392,7 @@ class TestDenseRetriever(unittest.TestCase):
         json_str = f"""
         {{
             "type": "dense",
+            "index_path": "{os.path.join(self.temp_dir, 'dense_json_test').replace(os.sep, '/')}",
             "search_kwargs": {{
                 "k": 10,
                 "with_score": true
@@ -374,7 +402,13 @@ class TestDenseRetriever(unittest.TestCase):
                 "index_path": "{os.path.join(self.temp_dir, 'dense_json_test').replace(os.sep, '/')}",
                 "metric": "cosine",
                 "index_type": "flat",
-                "normalize_L2": true
+                "normalize_L2": true,
+                "embedding_config": {{
+                    "type": "huggingface_embedding",
+                    "model_name": "/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
+                    "task_types": "embedding",
+                    "device": "cuda:0"
+                }}
             }},
             "embedding_config": {{
                 "type": "huggingface_embedding",
@@ -395,7 +429,7 @@ class TestDenseRetriever(unittest.TestCase):
         self.assertEqual(config.embedding_config.model_name, "/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B")
 
         # 设置嵌入配置到索引配置中
-        config.index_config.embedding = config.embedding_config
+        config.index_config.embedding_config = config.embedding_config
 
         # 使用IndexManager构建索引
         index_configs = {"faiss": config.index_config}
@@ -448,6 +482,7 @@ class TestMultiPathRetriever(unittest.TestCase):
             "retrievers": [
                 {{
                     "type": "tantivy_bm25",
+                    "index_path": "{os.path.join(self.temp_dir, 'mp_bm25').replace(os.sep, '/')}",
                     "index_config": {{
                         "type": "bm25_indexer",
                         "index_path": "{os.path.join(self.temp_dir, 'mp_bm25').replace(os.sep, '/')}",
@@ -457,11 +492,18 @@ class TestMultiPathRetriever(unittest.TestCase):
                 }},
                 {{
                     "type": "dense",
+                    "index_path": "{os.path.join(self.temp_dir, 'mp_dense').replace(os.sep, '/')}",
                     "index_config": {{
                         "type": "faiss",
                         "index_path": "{os.path.join(self.temp_dir, 'mp_dense').replace(os.sep, '/')}",
                         "metric": "cosine",
-                        "index_type": "flat"
+                        "index_type": "flat",
+                        "embedding_config": {{
+                            "type": "huggingface_embedding",
+                            "model_name": "/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
+                            "task_types": "embedding",
+                            "device": "cuda:0"
+                        }}
                     }},
                     "embedding_config": {{
                         "type": "huggingface_embedding",
@@ -488,7 +530,7 @@ class TestMultiPathRetriever(unittest.TestCase):
         self.assertEqual(config.rrf_k, 60)
 
         # 设置嵌入配置到Dense检索器的索引配置中
-        config.retrievers[1].index_config.embedding = config.retrievers[1].embedding_config
+        config.retrievers[1].index_config.embedding_config = config.retrievers[1].embedding_config
 
         # 使用IndexManager构建索引
         index_configs = {

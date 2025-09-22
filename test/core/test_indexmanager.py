@@ -13,7 +13,7 @@ from encapsulation.database.relational_db.data_schema import ChunksMetadata, Chu
 from core.retrieval.dense import DenseRetrieverConfig
 from core.retrieval.tantivy_bm25 import TantivyBM25RetrieverConfig
 from encapsulation.database.vector_db.faiss import FaissIndexConfig
-from config.database.bm25_config import BM25IndexBuilderConfig
+from config.encapsulaiton.database.bm25_config import BM25IndexBuilderConfig
 from encapsulation.llm.huggingface import HuggingFaceEmbedConfig
 
 

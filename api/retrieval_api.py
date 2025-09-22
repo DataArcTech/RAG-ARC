@@ -11,9 +11,9 @@ from typing import Dict, List, Any, Optional, Literal
 from pathlib import Path
 
 from core.retrieval.base import BaseRetriever
-from config.core.dense_config import DenseRetrieverConfig
-from config.core.tantivy_bm25_config import TantivyBM25RetrieverConfig
-from config.core.multipath_config import MultiPathRetrieverConfig
+from config.core.retrieval.dense_config import DenseRetrieverConfig
+from config.core.retrieval.tantivy_bm25_config import TantivyBM25RetrieverConfig
+from config.core.retrieval.multipath_config import MultiPathRetrieverConfig
 from encapsulation.data_model.data_model import Document
 
 logger = logging.getLogger(__name__)
