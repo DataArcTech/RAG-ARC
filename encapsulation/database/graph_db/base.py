@@ -1,9 +1,10 @@
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from typing import Any, Dict, List, Optional, Sequence
 from encapsulation.data_model.data_model import Document
+from framework.module import AbstractModule
 
 
-class GraphStore(ABC):
+class GraphStore(AbstractModule):
     """Graph database base class for Document-based graphs"""
 
     @abstractmethod

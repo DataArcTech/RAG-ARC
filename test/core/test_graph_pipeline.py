@@ -9,12 +9,13 @@ from datetime import datetime
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
-from core.retrieval.graph_retrieveal.graph_retrieval import GraphRetrievalConfig, GraphRetrieval
-from core.file_management.extractor.graphextractor import GraphExtractorConfig, GraphExtractor
-from encapsulation.database.graph_db.neo4j_with_embedding import Neo4jVectorConfig
-from encapsulation.llm.huggingface import HuggingFaceEmbedConfig
-from encapsulation.llm.openai import OpenAIConfig
-
+from core.retrieval.graph_retrieveal.graph_retrieval import GraphRetrieval
+from core.file_management.extractor.graphextractor import GraphExtractor
+from config.encapsulation.database.neo4j_with_embedding_config import Neo4jVectorConfig
+from config.encapsulation.llm.huggingface_config import HuggingFaceEmbedConfig
+from config.encapsulation.llm.openai_config import OpenAIConfig
+from config.core.file_management.extractor.graphextractor_config import GraphExtractorConfig
+from config.core.retrieval.graph_retrieval_config import GraphRetrievalConfig
 from encapsulation.data_model.data_model import Document, GraphData
 
 # Configure logging
@@ -41,7 +42,7 @@ def create_production_configs() -> Dict[str, Any]:
         type="openai",
         model_name="gpt-4o-mini",
         task_types="chat",
-        api_key="sk-",  # Replace with actual API key
+        api_key="sk-2T06b7c7f9c3870049fbf8fada596b0f8ef908d1e233KLY2",  # Replace with actual API key
         base_url="https://api.gptsapi.net/v1",
         default_max_tokens=2000,
         default_temperature=0.1

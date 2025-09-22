@@ -1,32 +1,12 @@
 import logging
 import re
-from typing import Dict, List, Optional, Literal
-from pydantic import Field
+from typing import Dict, List
 
-from core.file_management.extractor.base import ExtractorBase, ExtractorBaseConfig
+from core.file_management.extractor.base import ExtractorBase
 from core.prompts.extractor_prompt import EXTRACTION_PROMPT, CLEANING_PROMPT, EXTRACTION_PROMPT_EN, CLEANING_PROMPT_EN
 from encapsulation.data_model.data_model import Document, GraphData
 
 logger = logging.getLogger(__name__)
-
-
-class GraphExtractorConfig(ExtractorBaseConfig):
-    """GraphExtractor配置"""
-    type: Literal['graph_extractor'] = 'graph_extractor'
-
-    entity_types: Optional[List[str]] = Field(default=None, description="预定义实体类型")
-    relation_types: Optional[List[str]] = Field(default=None, description="预定义关系类型")
-    extraction_prompt: Optional[str] = Field(default=None, description="用户自定义抽取prompt模板")
-    cleaning_prompt: Optional[str] = Field(default=None, description="用户自定义清洗prompt模板")
-    entity_examples: Optional[List[Dict]] = Field(default=None, description="实体示例")
-    relation_examples: Optional[List[List]] = Field(default=None, description="关系示例")
-
-    enable_cleaning: bool = Field(default=True, description="是否启用清洗")
-    enable_llm_cleaning: bool = Field(default=False, description="是否启用LLM辅助清洗")
-    max_rounds: int = Field(default=3, description="最大抽取轮数，设为1表示单轮抽取", ge=1)
-
-    def build(self) -> 'GraphExtractor':
-        return GraphExtractor(self)
 
 
 class GraphExtractor(ExtractorBase):

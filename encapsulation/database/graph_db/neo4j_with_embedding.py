@@ -2,30 +2,19 @@ from typing import Any, List, Dict, Annotated, Union, Literal
 from datetime import datetime
 import json
 from pydantic import Field
-from encapsulation.database.graph_db.neo4j import Neo4jConfig, Neo4jGraphStore
-from encapsulation.llm.huggingface import HuggingFaceEmbedConfig
-from encapsulation.llm.openai import OpenAIConfig
+from encapsulation.database.graph_db.neo4j import Neo4jGraphStore
 from encapsulation.data_model.data_model import Document, GraphData
 import logging
 
 logger = logging.getLogger(__name__)
 
-class Neo4jVectorConfig(Neo4jConfig):
-    """Neo4j Vector Graph Store Configuration Class with embedding support"""
-    type: Literal["neo4j_vector"] = "neo4j_vector"
 
-    # Embedding configuration
-    embedding: Annotated[Union[HuggingFaceEmbedConfig, OpenAIConfig], Field(discriminator="type")]
-
-    def build(self) -> "Neo4jVectorGraphStore":
-        """Build Neo4j vector graph store instance"""
-        return Neo4jVectorGraphStore(self)
 
 
 class Neo4jVectorGraphStore(Neo4jGraphStore):
     """Neo4j Vector Graph Store with embedding support for Documents and Entities"""
 
-    def __init__(self, config: Neo4jVectorConfig):
+    def __init__(self, config):
         """Initialize Neo4j vector graph store with embedding model"""
         super().__init__(config)
         self.embedding_model = config.embedding.build()

@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional, Literal, Sequence
+from typing import List, Dict, Any, Optional, Sequence
 from datetime import datetime
 import neo4j
 import json
@@ -18,37 +18,12 @@ neo4j_retry_errors = (
     neo4j.exceptions.WriteServiceUnavailable,
     neo4j.exceptions.ClientError,
 )
-from framework.config import AbstractConfig
-
-class Neo4jConfig(AbstractConfig):
-    """Neo4j Graph Store Configuration Class"""
-    type: Literal["neo4j"] = "neo4j"
-
-    # Database connection configuration
-    url: str = Field(
-        description="Neo4j database connection URL, e.g.: bolt://localhost:7687"
-    )
-    username: str = Field(
-        description="Database username"
-    )
-    password: str = Field(
-        description="Database password"
-    )
-    database: str = Field(
-        default="neo4j",
-        description="Database name"
-    )
-
-    def build(self) -> "Neo4jGraphStore":
-        """Build Neo4j graph store instance"""
-        return Neo4jGraphStore(self)
-
 
 
 class Neo4jGraphStore(GraphStore):
     """Neo4j Graph Store Implementation with BaseIndex interface"""
 
-    def __init__(self, config: Neo4jConfig):
+    def __init__(self, config):
         """Initialize Neo4j graph store"""
         self.config = config
         self._driver = None

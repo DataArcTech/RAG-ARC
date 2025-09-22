@@ -18,55 +18,12 @@ import logging
 import json
 import numpy as np
 import math
-from abc import ABC, abstractmethod
 
-from framework.config import AbstractConfig
-from framework.module import AbstractModule
-from encapsulation.database.graph_db.neo4j_with_embedding import Neo4jVectorConfig
 from encapsulation.data_model.data_model import Document
-from encapsulation.llm.base import LLMBaseConfig
-from pydantic import BaseModel
+from core.retrieval.graph_retrieveal.base import BaseGraphRetriever
 
 logger = logging.getLogger(__name__)
 
-
-class BaseGraphRetrieverConfig(BaseModel, ABC):
-    """Base configuration for graph-based retrievers"""
-
-    @abstractmethod
-    def build(self) -> "BaseGraphRetriever":
-        """Build the retriever instance"""
-        pass
-
-
-class BaseGraphRetriever(AbstractModule, ABC):
-    """Base class for graph-based retrievers"""
-
-    def __init__(self, config: BaseGraphRetrieverConfig):
-        self.config = config
-
-    @abstractmethod
-    def retrieve(self, query: str, top_k: int = 10) -> List[Document]:
-        """
-        Retrieve relevant documents for the given query
-
-        Args:
-            query: Natural language query
-            top_k: Number of top documents to return
-
-        Returns:
-            List of Document objects sorted by relevance
-        """
-        pass
-
-    def invoke(self, query: str, **kwargs) -> List[Document]:
-        """Standard interface method for compatibility"""
-        top_k = kwargs.get('k', kwargs.get('top_k', 10))
-        return self.retrieve(query, top_k)
-
-    def get_name(self) -> str:
-        """Get retriever name"""
-        return self.config.type
 
 
 @dataclass
@@ -102,61 +59,7 @@ class ChunkScore:
     mentioned_entities: List[str] = field(default_factory=list)
 
 
-class GraphRetrievalConfig(AbstractConfig):
-    """Graph Retrieval Configuration"""
-    type: Literal["graph_retrieval"] = "graph_retrieval"
 
-    # Neo4j configuration
-    neo4j_config: Neo4jVectorConfig
-
-    # LLM configuration for entity filtering (optional)
-    llm_config: Optional[LLMBaseConfig] = Field(default=None, description="LLM configuration for entity filtering")
-
-    # Retrieval parameters
-    k1_chunks: int = Field(default=20, description="Number of chunks to retrieve in semantic search")
-    k2_entities: int = Field(default=5, description="Number of entities to retrieve in semantic search")
-    
-    # Subgraph construction parameters
-    max_hops: int = Field(default=5, description="Maximum hops for subgraph expansion")
-    beam_size: int = Field(default=20, description="Beam size for subgraph expansion")
-    
-    # PPR parameters
-    damping_factor: float = Field(default=0.85, description="PPR damping factor")
-    max_iterations: int = Field(default=50, description="Maximum PPR iterations")
-    tolerance: float = Field(default=1e-6, description="PPR convergence tolerance")
-    
-    # Scoring parameters
-    beta1: float = Field(default=0.7, description="Weight for entity similarity in personalization")
-    beta2: float = Field(default=0.3, description="Weight for triple boost in personalization")
-    
-    # Chunk scoring parameters
-    mu1: float = Field(default=0.3, description="Weight for mention count in chunk scoring")
-    mu2: float = Field(default=0.3, description="Weight for TF-IDF in chunk scoring")
-    mu3: float = Field(default=0.4, description="Weight for embedding similarity in chunk scoring")
-    
-    # Path scoring parameters
-    gamma1: float = Field(default=0.4, description="Weight for path length in path scoring")
-    gamma2: float = Field(default=0.3, description="Weight for edge weights in path scoring")
-    gamma3: float = Field(default=0.3, description="Weight for entity specificity in path scoring")
-    
-    # Entity scoring parameters
-    lambda1: float = Field(default=0.6, description="Weight for path score in entity scoring")
-    lambda2: float = Field(default=0.4, description="Weight for PPR score in entity scoring")
-    
-    # Coverage parameters
-    eta: float = Field(default=0.2, description="Coverage boost factor")
-    top_k_entities: int = Field(default=10, description="Top K entities for coverage calculation")
-    
-    # Final fusion parameters
-    alpha: float = Field(default=0.6, description="Weight for graph score in final fusion")
-    beta: float = Field(default=0.4, description="Weight for embedding score in final fusion")
-    
-    # Chunk backtracking parameters
-    chunks_per_entity: int = Field(default=10, description="Number of chunks to retrieve per entity")
-    
-    def build(self) -> "GraphRetrieval":
-        """Build GraphRetrieval instance"""
-        return GraphRetrieval(self)
 
 
 class GraphRetrieval(BaseGraphRetriever):
@@ -171,7 +74,7 @@ class GraphRetrieval(BaseGraphRetriever):
     5. Fusion and Ranking
     """
 
-    def __init__(self, config: GraphRetrievalConfig):
+    def __init__(self, config):
         """Initialize Graph Retrieval System"""
         super().__init__(config)
 
