@@ -12,7 +12,7 @@ def load_real_data():
     """加载真实数据文件"""
     import json
 
-    data_file = "/data/FinAi_Mapping_Knowledge/chenmingzhen/RAG-ARC/test/tcl_gb_chunk.json"
+    data_file = "./test/tcl_gb_chunk.json"
     print(f"1. 加载真实数据文件: {data_file}")
 
     with open(data_file, 'r', encoding='utf-8') as f:
@@ -55,13 +55,15 @@ def build_demo_index():
     print("\n2. 创建FAISS索引配置...")
 
     embedding_config = HuggingFaceEmbedConfig(
-        model_name="/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
-        device="cuda:4", 
+        model_name="Qwen/Qwen3-Embedding-0.6B",
+        device="cuda:7", 
         encode_kwargs={
-            "batch_size": 4,
+            "batch_size": 16,
             "show_progress_bar": True,
+            # "multi_process": True
         },
-        local_files_only=True
+        use_china_mirror=True,
+        cache_folder="./models/Qwen"
     )
 
     # FAISS索引配置

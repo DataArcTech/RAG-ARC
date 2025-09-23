@@ -10,8 +10,8 @@ class FaissIndexConfig(AbstractConfig):
     index_path: str = None
     index_name: str = "index"
 
-    metric: Literal["cosine", "l2", "ip"]
-    index_type: Literal["flat", "ivf", "hnsw"]
+    metric: Literal["cosine", "l2", "ip"] = Field(default="cosine", description="Distance metric")
+    index_type: Literal["flat", "ivf", "hnsw"] = Field(default="flat", description="Index type")
     nlist: int = 100
     m: int = 8
     efConstruction: int = 40

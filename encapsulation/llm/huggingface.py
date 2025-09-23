@@ -1,15 +1,12 @@
 from encapsulation.llm.base import LLMBase
-from typing import Union, List, Dict, Any, Optional, Tuple, TYPE_CHECKING
-import logging
+from typing import Union, List, Dict, Any, Optional, Tuple
 import os
 
 from functools import cached_property
-import sentence_transformers
 
 from framework.shared_module_decorator import shared_module
 from encapsulation.data_model.schema import Document
 
-logger = logging.getLogger(__name__)
 
 @shared_module
 class HuggingFaceLLM(LLMBase):
@@ -63,7 +60,7 @@ class HuggingFaceLLM(LLMBase):
         super().__init__(config)
         self._setup_logging()
         # Initialize client immediately since we always need it for embeddings
-        self.client = self._create_client()
+        self._create_client()
 
     def _create_client(self):
         """Create HuggingFace SentenceTransformer client"""
@@ -81,7 +78,8 @@ class HuggingFaceLLM(LLMBase):
                 model_kwargs['local_files_only'] = True
             
             # 注意：SentenceTransformer.__init__ 不接受 mirror 参数
-            # 我们通过环境变量 HF_ENDPOINT 来设置镜像源
+            # 我们通过环境变量 HF_ENDPOINT 来设置镜像源，在这里导入sentence_transformers，一些机器中会因为环境变量设置太晚而无法生效
+            import sentence_transformers
             self._client = sentence_transformers.SentenceTransformer(
                 self.config.model_name,
                 cache_folder=self.config.cache_folder,
@@ -103,38 +101,54 @@ class HuggingFaceLLM(LLMBase):
             raise RuntimeError(f"Failed to initialize HuggingFace model: {str(e)}") from e
     
     def _embed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
-        """Generate text embeddings"""
-        # Handle single text vs list
-        is_single = isinstance(texts, str)
-        text_list = [texts] if is_single else texts
-        
-        try:
-            embeddings = self.embed_documents(text_list)
-            return embeddings[0] if is_single else embeddings
-        except Exception as e:
-            logger.error(f"Text embedding failed: {str(e)}")
-            raise
+        """Internal embedding implementation"""
+        if isinstance(texts, str):
+            return self.embed_query(texts)
+        else:
+            return self.embed_documents(texts)
     
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """Embed multiple documents"""
         try:
             # Clean texts
             texts = [text.replace("\n", " ") for text in texts]
-            
-            encode_kwargs = self.config.encode_kwargs or {}
             if self._client is not None:
-                embeddings = self._client.encode(
-                    texts,
-                    convert_to_tensor=False,
-                    **encode_kwargs
-                )
-                
-                return embeddings.tolist()
+                if self.config.multi_process:
+                    import sentence_transformers
+                    try:
+                        pool = self._client.start_multi_process_pool()
+                        embeddings = self._client.encode(texts, pool)
+                        sentence_transformers.SentenceTransformer.stop_multi_process_pool(pool)
+                        return embeddings.tolist()
+                    except RuntimeError as e:
+                        if "out of memory" in str(e).lower():
+                            self.logger.error(f"CUDA Out of Memory in multi-process mode!")
+                            self.logger.error(f"Try: config.multi_process = False or reduce batch_size")
+                            raise RuntimeError(f"CUDA Out of Memory in multi-process mode. Disable multi_process or reduce batch_size.") from e
+                        else:
+                            raise
+
+                else:
+                    encode_kwargs = self.config.encode_kwargs or {}
+                    try:
+                        embeddings = self._client.encode(
+                            texts,
+                            **encode_kwargs
+                        )
+                        return embeddings.tolist()
+                    except RuntimeError as e:
+                        if "out of memory" in str(e).lower():
+                            current_batch_size = encode_kwargs.get('batch_size', 'default')
+                            self.logger.error(f"CUDA Out of Memory! Current batch_size: {current_batch_size}")
+                            self.logger.error(f"Try reducing batch_size in encode_kwargs (e.g., batch_size=8, 4, or 1)")
+                            raise RuntimeError(f"CUDA Out of Memory. Please reduce batch_size. Current: {current_batch_size}") from e
+                        else:
+                            raise
             else:
                 raise RuntimeError("Model client not initialized")
-            
+        
         except Exception as e:
-            logger.error(f"Document embedding failed: {str(e)}")
+            self.logger.error(f"Document embedding failed: {str(e)}")
             raise RuntimeError(f"Document embedding failed: {str(e)}")
     
     def embed_query(self, text: str) -> List[float]:
@@ -176,13 +190,6 @@ class HuggingFaceLLM(LLMBase):
     async def _aembed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
         """Async embedding - just calls sync version for now"""
         return self._embed(texts)
-
-    def _embed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
-        """Internal embedding implementation"""
-        if isinstance(texts, str):
-            return self.embed_query(texts)
-        else:
-            return self.embed_documents(texts)
 
     def _rerank(self, query: str, documents: List['Document'], top_k: Optional[int] = None) -> List[Tuple[int, float]]:
         """HuggingFace embedding models don't support reranking"""

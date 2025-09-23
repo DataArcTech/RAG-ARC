@@ -61,6 +61,11 @@ class VectorDB(AbstractModule):
         pass
 
     @abstractmethod
+    def delete_all_index(self, confirm: bool = False) -> bool:
+        """Delete all documents. Requires confirmation."""
+        pass
+
+    @abstractmethod
     def save_index(self, path: str, name: str = "index") -> None:
         """Save index to filesystem path
 

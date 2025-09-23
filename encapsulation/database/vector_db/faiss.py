@@ -160,15 +160,7 @@ class FaissVectorDB(VectorDB):
         """
         logger.info(f"Building index from {len(documents)} documents")
 
-        # Check if embedding model is initialized
-        if self.embedding_model is None:
-            if hasattr(self.config, 'embedding_config') and self.config.embedding_config is not None:
-                logger.info("Initializing embedding model for index building")
-                self.embedding_model = self.config.embedding_config.build()
-            else:
-                raise ValueError("No embedding model available in config")
-
-        # Check if index is already built/loaded
+        # Check if index file is already built/loaded
         if self.index is not None and self.index.ntotal > 0:
             logger.error(f"Index already contains {self.index.ntotal} vectors")
             raise ValueError("Index already contains data. Use update_index() to add more documents or delete() first.")
@@ -248,23 +240,17 @@ class FaissVectorDB(VectorDB):
         # Extract texts for embedding
         texts = [doc.content for doc in documents]
 
-        # Use pre-built embedding model or build from config
-        if self.embedding_model is not None:
-            embeddings = self.embedding_model.embed_documents(texts)
-        else:
-            # Fallback: build embedding model from sub-config
-            embedding_model = self.config.embedding.build()
-            embeddings = embedding_model.embed_documents(texts)
+        # Compute embeddings
+        embeddings = self.embedding_model.embed(texts)
 
         embeddings_np = np.array(embeddings).astype(np.float32)
+        embeddings_np = self._normalize_vectors(embeddings_np)
 
         # Create index if it doesn't exist
         if self.index is None:
             dimension = embeddings_np.shape[1]
             self.index = self._create_index(dimension)
-
-        # Normalize vectors
-        embeddings_np = self._normalize_vectors(embeddings_np)
+            logger.info(f"Created new FAISS index with dimension {dimension}")
 
         # Train IVF index if not trained and we have enough data
         if (hasattr(self.index, 'is_trained') and
@@ -307,19 +293,12 @@ class FaissVectorDB(VectorDB):
         Returns:
             True if deletion successful, False if some IDs not found, None if not implemented
         """
-        if ids is None:
-            # Delete all
-            logger.info("Deleting all documents from index")
-            self.docstore.clear()
-            self.index_to_docstore_id.clear()
-            if self.index is not None:
-                self.index.reset()
-            logger.info("All documents deleted successfully")
+        if self.index is None:
+            logger.warning("No index to delete from")
             return True
 
-        if not ids:
-            logger.info("No IDs provided for deletion")
-            return True
+        if ids is None or not ids:
+            raise ValueError("Dangerous operation: delete_index requires specific IDs. Use delete_all_index() if you want to clear all data.")
 
         logger.info(f"Deleting {len(ids)} documents from index")
 
@@ -358,6 +337,32 @@ class FaissVectorDB(VectorDB):
             logger.info("Index is now empty after deletion")
 
         return True
+
+    def delete_all_index(self, confirm: bool = False) -> bool:
+        """Delete all documents from vector database
+
+        Args:
+            confirm: Set to True to confirm deletion
+
+        Returns:
+            True if deletion successful, False otherwise
+        """
+        if not confirm:
+            raise ValueError("Dangerous operation: delete_all_index requires confirm=True")
+        
+        if self.index is None:
+            logger.warning("No index to delete from")
+            return True
+        
+        logger.info("Deleting all documents from index")
+        self.docstore.clear()
+        self.index_to_docstore_id.clear()
+        if self.index is not None:
+            self.index.reset()
+        logger.info("All documents deleted successfully")
+        return True
+        
+
     
     def get_by_ids(self, ids: List[str]) -> List['Document']:
         """Retrieve documents by their IDs
@@ -455,9 +460,9 @@ class FaissVectorDB(VectorDB):
         """
         # Get embedding model name safely
         embedding_model_name = 'unknown'
-        if hasattr(self.config, 'embedding') and self.config.embedding is not None:
-            if hasattr(self.config.embedding, 'model_name'):
-                embedding_model_name = self.config.embedding.model_name
+        if hasattr(self.config, 'embedding_config') and self.config.embedding_config is not None:
+            if hasattr(self.config.embedding_config, 'model_name'):
+                embedding_model_name = self.config.embedding_config.model_name
 
         info = {
             "type": "faiss",

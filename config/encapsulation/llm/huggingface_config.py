@@ -17,7 +17,9 @@ class HuggingFaceEmbedConfig(AbstractConfig):
     encode_kwargs: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Encode kwargs for embedding model")
     kwargs: dict = Field(default_factory=dict, description="Additional configuration parameters")
 
+    multi_process: bool = Field(default=False, description="Whether to use multi-process encoding")
     use_china_mirror: bool = Field(default=False, description="Whether to use China mirror for model download")
     local_files_only: bool = Field(default=False, description="Whether to only look at local files (no internet)")
+    
     def build(self):
         return HuggingFaceLLM(self)
