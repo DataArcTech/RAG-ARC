@@ -2,7 +2,7 @@ from typing import List
 from abc import ABC, abstractmethod
 from collections import defaultdict
 
-from encapsulation.data_model.data_model import Document
+from encapsulation.data_model.schema import Document
 
 
 class FusionMethod(ABC):

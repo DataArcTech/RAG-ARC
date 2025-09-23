@@ -19,7 +19,7 @@ import json
 import numpy as np
 import math
 
-from encapsulation.data_model.data_model import Document
+from encapsulation.data_model.schema import Document
 from core.retrieval.graph_retrieveal.base import BaseGraphRetriever
 
 logger = logging.getLogger(__name__)

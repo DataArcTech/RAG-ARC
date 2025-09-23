@@ -3,7 +3,7 @@ from datetime import datetime
 import json
 from pydantic import Field
 from encapsulation.database.graph_db.neo4j import Neo4jGraphStore
-from encapsulation.data_model.data_model import Document, GraphData
+from encapsulation.data_model.schema import Document, GraphData
 import logging
 
 logger = logging.getLogger(__name__)

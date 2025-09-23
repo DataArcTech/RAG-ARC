@@ -2,7 +2,7 @@ import logging
 from typing import Any, List, Optional
 
 from core.retrieval.base import BaseRetriever
-from encapsulation.data_model.data_model import Document
+from encapsulation.data_model.schema import Document
 
 logger = logging.getLogger(__name__)
 

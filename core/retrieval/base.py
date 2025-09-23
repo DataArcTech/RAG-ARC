@@ -3,7 +3,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, List, Dict
 from framework.module import AbstractModule
-from encapsulation.data_model.data_model import Document
+from encapsulation.data_model.schema import Document
 
 
 logger = logging.getLogger(__name__)

@@ -6,7 +6,7 @@ import numpy as np
 from typing import Any, Optional, List, Dict
 
 from encapsulation.database.vector_db.base import VectorDB
-from encapsulation.data_model.data_model import Document
+from encapsulation.data_model.schema import Document
 from framework.shared_module_decorator import shared_module
 
 import logging

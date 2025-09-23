@@ -11,7 +11,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"
 
 from core.file_management.extractor.graphextractor import GraphExtractor
 from config.encapsulation.llm.openai_config import OpenAIConfig
-from encapsulation.data_model.data_model import Document, GraphData
+from encapsulation.data_model.schema import Document, GraphData
 from config.core.file_management.extractor.graphextractor_config import GraphExtractorConfig
 
 

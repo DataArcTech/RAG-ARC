@@ -16,7 +16,7 @@ from config.encapsulation.llm.huggingface_config import HuggingFaceEmbedConfig
 from config.encapsulation.llm.openai_config import OpenAIConfig
 from config.core.file_management.extractor.graphextractor_config import GraphExtractorConfig
 from config.core.retrieval.graph_retrieval_config import GraphRetrievalConfig
-from encapsulation.data_model.data_model import Document, GraphData
+from encapsulation.data_model.schema import Document, GraphData
 
 # Configure logging
 logging.basicConfig(

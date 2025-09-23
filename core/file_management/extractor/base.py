@@ -7,7 +7,7 @@ from typing import List
 import asyncio
 import logging
 
-from encapsulation.data_model.data_model import Document, GraphData
+from encapsulation.data_model.schema import Document, GraphData
 from framework.module import AbstractModule
 
 # Set up logger

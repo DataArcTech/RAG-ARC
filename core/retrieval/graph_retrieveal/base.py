@@ -1,6 +1,6 @@
 from framework.module import AbstractModule
 from abc import abstractmethod
-from encapsulation.data_model.data_model import Document
+from encapsulation.data_model.schema import Document
 from typing import List
 
 class BaseGraphRetriever(AbstractModule):

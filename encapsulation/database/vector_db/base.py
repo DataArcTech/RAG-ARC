@@ -11,7 +11,7 @@ from typing import (
 )
 
 
-from encapsulation.data_model.data_model import Document
+from encapsulation.data_model.schema import Document
 from framework.module import AbstractModule
 
 

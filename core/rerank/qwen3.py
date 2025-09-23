@@ -1,6 +1,6 @@
 from typing import Dict, Any, Optional, List
 from .base import AbstractReranker
-from encapsulation.data_model.data_model import Document
+from encapsulation.data_model.schema import Document
 
 import logging
 

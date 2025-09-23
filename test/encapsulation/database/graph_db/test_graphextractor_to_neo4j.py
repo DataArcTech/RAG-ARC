@@ -8,7 +8,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.
 try:
     from core.file_management.extractor.graphextractor import GraphExtractorConfig
     from encapsulation.llm.openai import OpenAIConfig
-    from encapsulation.data_model.data_model import Document
+    from encapsulation.data_model.schema import Document
     from encapsulation.database.graph_db.neo4j import Neo4jConfig, Neo4jGraphStore
     IMPORTS_AVAILABLE = True
 except ImportError as e:

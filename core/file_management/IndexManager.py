@@ -9,7 +9,7 @@ from framework.module import AbstractModule
 from framework.config import AbstractConfig
 
 from encapsulation.database.relational_db.data_schema import ChunksStatus
-from encapsulation.data_model.data_model import Document
+from encapsulation.data_model.schema import Document
 
 # Import configuration classes
 from config.encapsulaiton.database.faiss_config import FaissIndexConfig

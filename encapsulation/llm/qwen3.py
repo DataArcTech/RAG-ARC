@@ -1,5 +1,5 @@
 from encapsulation.llm.base import LLMBase
-from encapsulation.data_model.data_model import Document
+from encapsulation.data_model.schema import Document
 from typing import List, Dict, Any, Optional, Tuple
 import logging
 

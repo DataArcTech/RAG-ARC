@@ -3,7 +3,7 @@ from typing import List, Callable, Optional, Tuple
 import logging
 import jieba
 from pathlib import Path
-from encapsulation.data_model.data_model import Document
+from encapsulation.data_model.schema import Document
 
 logger = logging.getLogger(__name__)
 

@@ -32,7 +32,7 @@ if 'config.encapsulaiton' not in sys.modules:
         print(f"Warning: Could not create module mapping: {e}")
         pass
 
-from encapsulation.data_model.data_model import Document
+from encapsulation.data_model.schema import Document
 from config.encapsulation.database.bm25_config import BM25IndexBuilderConfig
 from config.core.retrieval.tantivy_bm25_config import TantivyBM25RetrieverConfig
 from config.core.retrieval.multipath_config import MultiPathRetrieverConfig

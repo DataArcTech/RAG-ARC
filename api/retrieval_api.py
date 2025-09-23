@@ -14,7 +14,7 @@ from core.retrieval.base import BaseRetriever
 from config.core.retrieval.dense_config import DenseRetrieverConfig
 from config.core.retrieval.tantivy_bm25_config import TantivyBM25RetrieverConfig
 from config.core.retrieval.multipath_config import MultiPathRetrieverConfig
-from encapsulation.data_model.data_model import Document
+from encapsulation.data_model.schema import Document
 
 logger = logging.getLogger(__name__)
 

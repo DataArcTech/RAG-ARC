@@ -7,7 +7,7 @@ from pydantic import Field
 
 import logging
 from encapsulation.database.graph_db.base import GraphStore
-from encapsulation.data_model.data_model import Document, GraphData
+from encapsulation.data_model.schema import Document, GraphData
 
 
 logger = logging.getLogger(__name__)

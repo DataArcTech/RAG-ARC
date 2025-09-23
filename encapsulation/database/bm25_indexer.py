@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Union
 from concurrent.futures import ProcessPoolExecutor
 import jieba
 
-from encapsulation.data_model.data_model import Document
+from encapsulation.data_model.schema import Document
 from encapsulation.database.utils.TokenizerManager import TokenizerManager
 
 try:

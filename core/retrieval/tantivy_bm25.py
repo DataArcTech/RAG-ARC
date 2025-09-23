@@ -5,7 +5,7 @@ from typing import Any, List, Optional, Union, Tuple, cast, Literal, Annotated, 
 from tantivy import Query, Occur, Order
 
 from core.retrieval.base import BaseRetriever
-from encapsulation.data_model.data_model import Document
+from encapsulation.data_model.schema import Document
 from framework.shared_module_decorator import shared_module
 
 logger = logging.getLogger(__name__)

@@ -4,7 +4,7 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from encapsulation.data_model.data_model import Document
+from encapsulation.data_model.schema import Document
 from config.encapsulaiton.database.faiss_config import FaissIndexConfig
 from config.encapsulaiton.llm.huggingface_config import HuggingFaceEmbedConfig
 

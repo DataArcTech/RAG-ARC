@@ -2,7 +2,7 @@ from abc import abstractmethod
 from typing import Dict, Any, List, Optional, Union, Tuple, AsyncGenerator
 import logging
 
-from encapsulation.data_model.data_model import Document
+from encapsulation.data_model.schema import Document
 from framework.module import AbstractModule
 
 logger = logging.getLogger(__name__)

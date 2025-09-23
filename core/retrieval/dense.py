@@ -2,7 +2,7 @@ from typing import Any, List, Dict, ClassVar, Collection
 import logging
 
 from core.retrieval.base import BaseRetriever
-from encapsulation.data_model.data_model import Document
+from encapsulation.data_model.schema import Document
 from core.utils.retrieval_helper import RetrievalHelper
 from framework.shared_module_decorator import shared_module
 

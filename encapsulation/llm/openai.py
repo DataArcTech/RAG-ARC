@@ -3,7 +3,7 @@ from typing import Dict, Any, List, Optional, Union, Tuple
 import openai
 import logging
 
-from encapsulation.data_model.data_model import Document
+from encapsulation.data_model.schema import Document
 
 logger = logging.getLogger(__name__)
 

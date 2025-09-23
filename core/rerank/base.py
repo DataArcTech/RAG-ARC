@@ -8,7 +8,7 @@ from typing import (
 )
 
 from framework.module import AbstractModule
-from encapsulation.data_model.data_model import Document
+from encapsulation.data_model.schema import Document
 
 
 class AbstractReranker(AbstractModule):

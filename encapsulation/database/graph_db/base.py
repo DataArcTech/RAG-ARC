@@ -1,6 +1,6 @@
 from abc import abstractmethod
 from typing import Any, Dict, List, Optional, Sequence
-from encapsulation.data_model.data_model import Document
+from encapsulation.data_model.schema import Document
 from framework.module import AbstractModule
 
 
