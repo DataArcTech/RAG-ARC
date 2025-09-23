@@ -23,7 +23,7 @@ class GraphStore(AbstractModule):
         raise NotImplementedError
     
     @abstractmethod
-    def delete_all_Index(self, confirm: bool = False) -> bool:
+    def delete_all_index(self, confirm: bool = False) -> bool:
         """Delete all documents and their graphs. Requires confirmation."""
         raise NotImplementedError
 

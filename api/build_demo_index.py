@@ -5,8 +5,8 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from encapsulation.data_model.schema import Document
-from config.encapsulaiton.database.faiss_config import FaissIndexConfig
-from config.encapsulaiton.llm.huggingface_config import HuggingFaceEmbedConfig
+from config.encapsulation.database.faiss_config import FaissIndexConfig
+from config.encapsulation.llm.huggingface_config import HuggingFaceEmbedConfig
 
 def load_real_data():
     """加载真实数据文件"""
@@ -94,7 +94,7 @@ def build_demo_index():
 
     # 6. 创建BM25索引配置
     print("\n6. 创建BM25索引配置...")
-    from config.encapsulaiton.database.bm25_config import BM25IndexBuilderConfig
+    from config.encapsulation.database.bm25_config import BM25IndexBuilderConfig
 
     bm25_config = BM25IndexBuilderConfig(
         index_path="./data/unified_bm25_index",

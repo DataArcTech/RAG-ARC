@@ -66,10 +66,10 @@ class Neo4jGraphStore(GraphStore):
     # BaseIndex Interface Implementation
     # =============================================================================
 
-    def build_index(self, documents: List[Document]) -> None:
+    def build_index(self, documents: List[Document]) -> List[str]:
         """Build graph from a list of Documents."""
 
-        self.add_documents(documents)
+        return self.add_documents(documents)
 
     def update_index(self, documents: List[Document]) -> Optional[bool]:
         """Update existing documents' graphs in the database."""
@@ -314,7 +314,7 @@ class Neo4jGraphStore(GraphStore):
                 document = Document(
                     content=doc_data.get('content', ''),
                     id=doc_data.get('id_', doc_id),
-                    metadata=json.loads(doc_data.get('metadata', '{}'))
+                    metadata=json.loads(doc_data.get('metadata') or '{}')
                 )
 
                 # Get graph data
@@ -343,7 +343,7 @@ class Neo4jGraphStore(GraphStore):
                 'id': entity_data.get('id_', '').replace(f"{doc_id}_", ""),  # Remove doc_id prefix
                 'entity_name': entity_data.get('entity_name', ''),
                 'entity_type': entity_data.get('entity_type', ''),
-                'attributes': json.loads(entity_data.get('attributes', '{}'))
+                'attributes': json.loads(entity_data.get('attributes') or '{}')
             }
 
             entities.append(entity)

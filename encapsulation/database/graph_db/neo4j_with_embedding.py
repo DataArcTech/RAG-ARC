@@ -162,7 +162,7 @@ class Neo4jVectorGraphStore(Neo4jGraphStore):
                 doc_data = doc_results[0]['d']
 
                 # Create document with embedding in metadata
-                metadata = json.loads(doc_data.get('metadata', '{}'))
+                metadata = json.loads(doc_data.get('metadata') or '{}')
                 if doc_data.get('embedding'):
                     metadata['embedding'] = doc_data['embedding']
 
@@ -198,7 +198,7 @@ class Neo4jVectorGraphStore(Neo4jGraphStore):
                 'id': entity_data.get('id_', '').replace(f"{doc_id}_", ""),  # Remove doc_id prefix
                 'entity_name': entity_data.get('entity_name', ''),
                 'entity_type': entity_data.get('entity_type', ''),
-                'attributes': json.loads(entity_data.get('attributes', '{}'))
+                'attributes': json.loads(entity_data.get('attributes') or '{}')
             }
 
             # Add embedding to attributes if available

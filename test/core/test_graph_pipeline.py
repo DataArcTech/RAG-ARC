@@ -42,7 +42,7 @@ def create_production_configs() -> Dict[str, Any]:
         type="openai",
         model_name="gpt-4o-mini",
         task_types="chat",
-        api_key="sk-2T06b7c7f9c3870049fbf8fada596b0f8ef908d1e233KLY2",  # Replace with actual API key
+        api_key="sk-",  # Replace with actual API key
         base_url="https://api.gptsapi.net/v1",
         default_max_tokens=2000,
         default_temperature=0.1
@@ -297,7 +297,7 @@ async def test_comprehensive_pipeline():
         logger.info(f"✓ LLM-enhanced retrieval completed in {phase_times['retrieval_llm']:.2f}s")
 
         # ===== PHASE 5: PERFORMANCE ANALYSIS =====
-        logger.info("\n📊 PHASE 5: PERFORMANCE ANALYSIS")
+        logger.info("\nPHASE 5: PERFORMANCE ANALYSIS")
         logger.info("-" * 50)
 
         # Overall performance summary

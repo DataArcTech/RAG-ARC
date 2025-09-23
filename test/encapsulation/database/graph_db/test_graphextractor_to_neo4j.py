@@ -6,13 +6,13 @@ from datetime import datetime
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../")))
 
 try:
-    from core.file_management.extractor.graphextractor import GraphExtractorConfig
-    from encapsulation.llm.openai import OpenAIConfig
+    from config.core.file_management.extractor.graphextractor_config import GraphExtractorConfig
+    from config.encapsulation.llm.openai_config import OpenAIConfig
     from encapsulation.data_model.schema import Document
-    from encapsulation.database.graph_db.neo4j import Neo4jConfig, Neo4jGraphStore
+    from config.encapsulation.database.neo4j_config import Neo4jConfig
     IMPORTS_AVAILABLE = True
 except ImportError as e:
-    print(f"❌ Import error: {e}")
+    print(f"Import error: {e}")
     IMPORTS_AVAILABLE = False
 
 
@@ -60,7 +60,7 @@ def setup_graphextractor():
     print("\n=== Setting up GraphExtractor ===")
     
     if not IMPORTS_AVAILABLE:
-        print("❌ Required imports not available")
+        print("Required imports not available")
         return None
     
     try:
@@ -84,7 +84,7 @@ def setup_graphextractor():
         
         extractor = config.build()
         
-        print("✅ GraphExtractor configured successfully")
+        print(" GraphExtractor configured successfully")
         print(f"   Entity types: {len(config.entity_types)}")
         print(f"   Relation types: {len(config.relation_types)}")
         print(f"   LLM cleaning enabled: {config.enable_llm_cleaning}")
@@ -93,7 +93,7 @@ def setup_graphextractor():
         return extractor
         
     except Exception as e:
-        print(f"❌ Failed to setup GraphExtractor: {e}")
+        print(f"Failed to setup GraphExtractor: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -104,14 +104,14 @@ def setup_neo4j_store():
     print("\n=== Setting up Neo4j Store ===")
     
     if not IMPORTS_AVAILABLE:
-        print("❌ Required imports not available")
+        print("Required imports not available")
         return None
     
     try:
         # Real Neo4j configuration
         config = Neo4jConfig(
             index_name="knowledge_graph_test",
-            url="neo4j://192.168.80.1:7660",
+            url="neo4j://192.168.80.1:6550",
             username="neo4j",
             password="12345678",
             database="neo4j"
@@ -121,15 +121,14 @@ def setup_neo4j_store():
         
         # Test connection
         health = store.health_check()
-        print(f"✅ Neo4j store configured successfully")
+        print(f" Neo4j store configured successfully")
         print(f"   Database: {config.url}")
-        print(f"   Index name: {config.index_name}")
         print(f"   Health status: {health.get('status', 'unknown')}")
         
         return store
         
     except Exception as e:
-        print(f"❌ Failed to setup Neo4j store: {e}")
+        print(f"Failed to setup Neo4j store: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -145,7 +144,7 @@ def run_extraction_pipeline(extractor, documents):
         # Extract graph data
         results = extractor(documents)
         
-        print(f"✅ Extraction completed")
+        print(f" Extraction completed")
         print(f"   Processed documents: {len(results)}")
         
         # Display results
@@ -153,7 +152,7 @@ def run_extraction_pipeline(extractor, documents):
         total_relations = 0
         
         for i, doc in enumerate(results):
-            print(f"\n📄 Document {i+1}: {doc.id}")
+            print(f"\n Document {i+1}: {doc.id}")
             print(f"   Entities: {len(doc.graph.entities)}")
             print(f"   Relations: {len(doc.graph.relations)}")
             
@@ -176,14 +175,14 @@ def run_extraction_pipeline(extractor, documents):
                 if len(doc.graph.relations) > 3:
                     print(f"     ... and {len(doc.graph.relations) - 3} more")
         
-        print(f"\n📊 Total extracted:")
+        print(f"\nTotal extracted:")
         print(f"   Entities: {total_entities}")
         print(f"   Relations: {total_relations}")
         
         return results
         
     except Exception as e:
-        print(f"❌ Extraction pipeline failed: {e}")
+        print(f"Extraction pipeline failed: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -196,18 +195,18 @@ def store_to_neo4j(store, documents):
     try:
         # Clear existing data for clean test
         print("Clearing existing test data...")
-        store.delete()
+        store.delete_all_index(confirm=True)
         
         # Add documents
         print(f"Adding {len(documents)} documents to Neo4j...")
-        added_ids = store.add(documents)
+        added_ids = store.build_index(documents)
         
-        print(f"✅ Successfully added {len(added_ids)} documents")
+        print(f" Successfully added {len(added_ids)} documents")
         print(f"   Document IDs: {added_ids}")
         
         # Get statistics
-        stats = store.get_index_stats()
-        print(f"\n📊 Database statistics:")
+        stats = store.get_graph_db_info()
+        print(f"\nDatabase statistics:")
         print(f"   Total documents: {stats.get('total_documents', 0)}")
         print(f"   Total entities: {stats.get('total_entities', 0)}")
         print(f"   Total relationships: {stats.get('total_relationships', 0)}")
@@ -215,7 +214,7 @@ def store_to_neo4j(store, documents):
         return True
         
     except Exception as e:
-        print(f"❌ Failed to store to Neo4j: {e}")
+        print(f"Failed to store to Neo4j: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -230,11 +229,11 @@ def verify_storage(store, original_documents):
         doc_ids = [doc.id for doc in original_documents]
         retrieved_docs = store.get_by_ids(doc_ids)
         
-        print(f"✅ Retrieved {len(retrieved_docs)} documents")
+        print(f" Retrieved {len(retrieved_docs)} documents")
         
         # Compare data
         for i, (original, retrieved) in enumerate(zip(original_documents, retrieved_docs)):
-            print(f"\n📄 Document {i+1}: {original.id}")
+            print(f"\n Document {i+1}: {original.id}")
             print(f"   Original entities: {len(original.graph.entities)}")
             print(f"   Retrieved entities: {len(retrieved.graph.entities)}")
             print(f"   Original relations: {len(original.graph.relations)}")
@@ -245,9 +244,9 @@ def verify_storage(store, original_documents):
             retrieved_entity_names = {e['entity_name'] for e in retrieved.graph.entities}
             
             if original_entity_names == retrieved_entity_names:
-                print(f"   ✅ Entity names preserved")
+                print(f"Entity names preserved")
             else:
-                print(f"   ⚠️ Entity names differ")
+                print(f"    Entity names differ")
                 print(f"      Missing: {original_entity_names - retrieved_entity_names}")
                 print(f"      Extra: {retrieved_entity_names - original_entity_names}")
             
@@ -256,16 +255,16 @@ def verify_storage(store, original_documents):
             retrieved_relations = {tuple(r) for r in retrieved.graph.relations}
             
             if original_relations == retrieved_relations:
-                print(f"   ✅ Relations preserved")
+                print(f"Relations preserved")
             else:
-                print(f"   ⚠️ Relations differ")
+                print(f"    Relations differ")
                 print(f"      Missing: {original_relations - retrieved_relations}")
                 print(f"      Extra: {retrieved_relations - original_relations}")
         
         return True
         
     except Exception as e:
-        print(f"❌ Verification failed: {e}")
+        print(f"Verification failed: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -279,7 +278,7 @@ def main():
     print("=" * 60)
     
     if not IMPORTS_AVAILABLE:
-        print("❌ Required imports not available")
+        print("Required imports not available")
         return
     
     # Setup components
@@ -288,21 +287,21 @@ def main():
     store = setup_neo4j_store()
     
     if not extractor or not store:
-        print("❌ Failed to setup required components")
+        print("Failed to setup required components")
         return
     
     # Run pipeline
     extracted_docs = run_extraction_pipeline(extractor, documents)
     
     if not extracted_docs:
-        print("❌ Extraction pipeline failed")
+        print("Extraction pipeline failed")
         return
     
     # Store to Neo4j
     storage_success = store_to_neo4j(store, extracted_docs)
     
     if not storage_success:
-        print("❌ Storage to Neo4j failed")
+        print("Storage to Neo4j failed")
         return
     
     # Verify storage
@@ -311,17 +310,9 @@ def main():
     # Final summary
     print("\n" + "=" * 60)
     if verification_success:
-        print("🎉 Complete Pipeline Test SUCCESSFUL!")
-        print("\n✅ Pipeline completed successfully:")
-        print("1. ✅ Created test documents")
-        print("2. ✅ Configured GraphExtractor with real LLM")
-        print("3. ✅ Configured Neo4j store with real database")
-        print("4. ✅ Extracted graph data using LLM")
-        print("5. ✅ Stored data to Neo4j with Document-Entity relationships")
-        print("6. ✅ Verified data integrity")
         
         print(f"\n🔍 Explore your data:")
-        print(f"Neo4j Browser: http://192.168.80.1:7460")
+        print(f"Neo4j Browser: http://192.168.80.1:6440")
         print(f"Sample queries:")
         print(f"  // Show all documents and their entities")
         print(f"  MATCH (d:Document)-[:CONTAINS]->(e:Entity) RETURN d, e")
@@ -330,7 +321,7 @@ def main():
         print(f"  // Show full graph")
         print(f"  MATCH (n) RETURN n LIMIT 50")
     else:
-        print("❌ Complete Pipeline Test FAILED!")
+        print(" Complete Pipeline Test FAILED!")
         print("Please check the logs above for details.")
 
 

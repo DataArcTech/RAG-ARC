@@ -280,7 +280,7 @@ class GraphRetrieval(BaseGraphRetriever):
                     'similarity': final_similarity,
                     'raw_similarity': similarity,
                     'mention_count': mention_count,
-                    'attributes': json.loads(result.get('attributes', '{}'))
+                    'attributes': json.loads(result.get('attributes') or '{}')
                 })
 
         # Sort by final similarity and return top k
@@ -333,7 +333,7 @@ class GraphRetrieval(BaseGraphRetriever):
                     'raw_similarity': similarity,
                     'entity_count': entity_count,
                     'entity_names': result.get('entity_names', []),
-                    'metadata': json.loads(result.get('metadata', '{}'))
+                    'metadata': json.loads(result.get('metadata') or '{}')
                 })
 
         # Sort by final similarity and return top k
