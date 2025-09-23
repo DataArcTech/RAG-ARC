@@ -1,25 +1,23 @@
 from typing import (
     Any,
     Optional,
-    BinaryIO,
     List,
     Tuple,
 )
 from io import BytesIO
 import logging
-from functools import cached_property
 
 from minio import Minio
 from minio.error import S3Error
 
 from .base import FileDB
-from framework.shared_module_decorator import shared_module
+from framework.singleton_decorator import singleton
 
 
 logger = logging.getLogger(__name__)
 
 
-@shared_module
+@singleton
 class MinIODB(FileDB):
     """
     MinIO S3-compatible blob storage implementation for distributed object storage.
@@ -88,13 +86,20 @@ class MinIODB(FileDB):
         
     Attributes:
         config: Configuration object with MinIO connection parameters
-        _client: Cached MinIO client instance (lazy-initialized)
+        client: MinIO client instance (initialized in __init__)
     """
-    
-    @cached_property
-    def client(self) -> Minio:
-        """Get MinIO client (cached)"""
-        client = Minio(
+
+    def __init__(self, config):
+        """Initialize MinIODB with config
+
+        Args:
+            config: Configuration object with MinIO connection parameters
+        """
+        super().__init__(config)
+        logger.info("Initializing MinIODB")
+
+        # Build MinIO client immediately
+        self.client = Minio(
             endpoint=self.config.endpoint,
             access_key=self.config.username,
             secret_key=self.config.password,
@@ -103,9 +108,8 @@ class MinIODB(FileDB):
         )
 
         # Ensure bucket exists
-        self._ensure_bucket_exists(client)
-
-        return client
+        self._ensure_bucket_exists(self.client)
+        logger.info(f"MinIODB initialized with bucket: {self.config.bucket_name}")
     
     def _ensure_bucket_exists(self, client: Minio) -> None:
         """Create bucket if it doesn't exist"""
@@ -158,49 +162,6 @@ class MinIODB(FileDB):
             logger.error(f"Error storing blob {key}: {e}")
             raise
     
-    def store_stream(
-        self,
-        key: str,
-        stream: BinaryIO,
-        content_type: Optional[str] = None,
-        **kwargs: Any,
-    ) -> Tuple[str, bool]:
-        """Store blob data from stream with given key"""
-        try:
-            client = self.client
-            bucket_name = self.config.bucket_name
-            
-            # Always overwrite - no conflict resolution needed since keys are unique
-            was_overwritten = False
-            storage_key = key
-            
-            key_exists = self.exists(key)
-            
-            if key_exists:
-                was_overwritten = True
-                logger.info(f"Overwriting existing blob with key: '{key}'")
-            
-            # Get stream size
-            stream.seek(0, 2)  # Seek to end
-            length = stream.tell()
-            stream.seek(0)     # Reset to beginning
-            
-            client.put_object(
-                bucket_name=bucket_name,
-                object_name=storage_key,
-                data=stream,
-                length=length,
-                content_type=content_type,
-                **kwargs
-            )
-            
-            logger.debug(f"Stored blob stream with key: {storage_key}")
-            return storage_key, was_overwritten
-            
-        except S3Error as e:
-            logger.error(f"Error storing blob stream {key}: {e}")
-            raise
-    
     def retrieve(self, key: str, **kwargs: Any) -> bytes:
         """Retrieve blob data by key"""
         try:
@@ -224,27 +185,6 @@ class MinIODB(FileDB):
             if e.code == 'NoSuchKey':
                 raise KeyError(f"Blob with key '{key}' not found")
             logger.error(f"Error retrieving blob {key}: {e}")
-            raise
-    
-    def retrieve_stream(self, key: str, **kwargs: Any) -> BinaryIO:
-        """Retrieve blob data as stream by key"""
-        try:
-            client = self.client
-            bucket_name = self.config.bucket_name
-            
-            response = client.get_object(
-                bucket_name=bucket_name,
-                object_name=key,
-                **kwargs
-            )
-            
-            logger.debug(f"Retrieved blob stream with key: {key}")
-            return response
-            
-        except S3Error as e:
-            if e.code == 'NoSuchKey':
-                raise KeyError(f"Blob with key '{key}' not found")
-            logger.error(f"Error retrieving blob stream {key}: {e}")
             raise
     
     def delete(self, key: str, **kwargs: Any) -> bool:

@@ -6,21 +6,18 @@ from typing import (
     Any,
     Optional,
     TypeVar,
-    BinaryIO,
     Dict,
     List,
     Tuple,
 )
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 
 from framework.module import AbstractModule
 
 BST = TypeVar("BST", bound="FileDB")
 
 
-@dataclass
 class FileDB(AbstractModule):
     """Blob storage base class - encapsulation layer for raw object storage operations"""
     
@@ -37,29 +34,6 @@ class FileDB(AbstractModule):
         Args:
             key: Unique identifier for the blob
             data: Binary data to store
-            content_type: MIME type of the content
-            **kwargs: Additional arguments
-            
-        Returns:
-            Tuple of (storage_key, was_overwritten)
-            - storage_key: The actual key used for storage
-            - was_overwritten: True if an existing blob was overwritten
-        """
-        pass
-
-    @abstractmethod
-    def store_stream(
-        self,
-        key: str,
-        stream: BinaryIO,
-        content_type: Optional[str] = None,
-        **kwargs: Any,
-    ) -> Tuple[str, bool]:
-        """Store blob data from stream with given key
-        
-        Args:
-            key: Unique identifier for the blob
-            stream: Binary stream to store
             content_type: MIME type of the content
             **kwargs: Additional arguments
             
@@ -92,22 +66,6 @@ class FileDB(AbstractModule):
             
         Returns:
             Binary data of the blob
-            
-        Raises:
-            KeyError: If blob with given key doesn't exist
-        """
-        pass
-
-    @abstractmethod
-    def retrieve_stream(self, key: str, **kwargs: Any) -> BinaryIO:
-        """Retrieve blob data as stream by key
-        
-        Args:
-            key: Unique identifier for the blob
-            **kwargs: Additional arguments
-            
-        Returns:
-            Binary stream of the blob
             
         Raises:
             KeyError: If blob with given key doesn't exist

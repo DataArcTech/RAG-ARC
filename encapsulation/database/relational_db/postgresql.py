@@ -16,18 +16,18 @@ from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
 from .base import RelationalDB
-from .data_schema import (
+from ...data_model.orm_models import (
     Base,
     FileMetadata, FileStatus,
     ParsedContentMetadata, ParsedContentStatus,
-    ChunksMetadata, ChunksStatus
+    ChunkMetadata, ChunkIndexStatus
 )
-from framework.shared_module_decorator import shared_module
+from framework.singleton_decorator import singleton
 
 logger = logging.getLogger(__name__)
 
 
-@shared_module
+@singleton
 class PostgreSQLDB(RelationalDB):
     """
     PostgreSQL implementation for relational database operations with hybrid SQLAlchemy/raw SQL approach.
@@ -176,24 +176,24 @@ class PostgreSQLDB(RelationalDB):
             with self.SessionMaker() as session:
                 session.add(file_metadata)
                 session.commit()
-                logger.debug(f"Stored file metadata for asset: {file_metadata.asset_id}")
-                return file_metadata.asset_id
+                logger.debug(f"Stored file metadata for asset: {file_metadata.file_id}")
+                return file_metadata.file_id
 
         except IntegrityError:
-            logger.error(f"File metadata with asset_id '{file_metadata.asset_id}' already exists")
-            raise ValueError(f"File metadata with asset_id '{file_metadata.asset_id}' already exists")
+            logger.error(f"File metadata with file_id '{file_metadata.file_id}' already exists")
+            raise ValueError(f"File metadata with file_id '{file_metadata.file_id}' already exists")
         except SQLAlchemyError as e:
             logger.error(f"Database error storing file metadata: {e}")
             raise
     
-    def get_file_metadata(self, asset_id: str, **kwargs: Any) -> Optional[FileMetadata]:
-        """Retrieve file metadata by asset ID using SQLAlchemy ORM"""
+    def get_file_metadata(self, file_id: str, **kwargs: Any) -> Optional[FileMetadata]:
+        """Retrieve file metadata by file ID using SQLAlchemy ORM"""
         try:
             with self.SessionMaker() as session:
-                file_metadata = session.query(FileMetadata).filter_by(asset_id=asset_id).first()
+                file_metadata = session.query(FileMetadata).filter_by(file_id=file_id).first()
 
                 if file_metadata:
-                    logger.debug(f"Retrieved file metadata for asset: {asset_id}")
+                    logger.debug(f"Retrieved file metadata for file: {file_id}")
                     return file_metadata
 
                 return None
@@ -204,7 +204,7 @@ class PostgreSQLDB(RelationalDB):
     
     def update_file_metadata(
         self,
-        asset_id: str,
+        file_id: str,
         updates: Dict[str, Any],
         **kwargs: Any,
     ) -> bool:
@@ -218,32 +218,32 @@ class PostgreSQLDB(RelationalDB):
                 updates['updated_at'] = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
 
                 # Update the record (SQLAlchemy handles enum conversion automatically)
-                rows_updated = session.query(FileMetadata).filter_by(asset_id=asset_id).update(updates)
+                rows_updated = session.query(FileMetadata).filter_by(file_id=file_id).update(updates)
                 session.commit()
 
                 if rows_updated > 0:
-                    logger.debug(f"Updated file metadata for asset: {asset_id}")
+                    logger.debug(f"Updated file metadata for file: {file_id}")
                     return True
 
-                logger.warning(f"No file metadata found to update for asset: {asset_id}")
+                logger.warning(f"No file metadata found to update for file: {file_id}")
                 return False
 
         except SQLAlchemyError as e:
             logger.error(f"Database error updating file metadata: {e}")
             raise
     
-    def delete_file_metadata(self, asset_id: str, **kwargs: Any) -> bool:
+    def delete_file_metadata(self, file_id: str, **kwargs: Any) -> bool:
         """Delete file metadata using SQLAlchemy ORM"""
         try:
             with self.SessionMaker() as session:
-                rows_deleted = session.query(FileMetadata).filter_by(asset_id=asset_id).delete()
+                rows_deleted = session.query(FileMetadata).filter_by(file_id=file_id).delete()
                 session.commit()
 
                 if rows_deleted > 0:
-                    logger.debug(f"Deleted file metadata for asset: {asset_id}")
+                    logger.debug(f"Deleted file metadata for file: {file_id}")
                     return True
 
-                logger.warning(f"No file metadata found to delete for asset: {asset_id}")
+                logger.warning(f"No file metadata found to delete for file: {file_id}")
                 return False
 
         except SQLAlchemyError as e:
@@ -252,13 +252,13 @@ class PostgreSQLDB(RelationalDB):
     
     def update_file_status(
         self,
-        asset_id: str,
+        file_id: str,
         new_status: FileStatus,
         **kwargs: Any,
     ) -> bool:
         """Update file processing status"""
         return self.update_file_metadata(
-            asset_id,
+            file_id,
             {'status': new_status},
             **kwargs
         )
@@ -396,7 +396,7 @@ class PostgreSQLDB(RelationalDB):
     
     def list_parsed_content_metadata(
         self,
-        source_asset_id: Optional[str] = None,
+        source_file_id: Optional[str] = None,
         status: Optional[ParsedContentStatus] = None,
         parser_type: Optional[str] = None,
         limit: Optional[int] = None,
@@ -409,8 +409,8 @@ class PostgreSQLDB(RelationalDB):
                 query = session.query(ParsedContentMetadata)
 
                 # Add filters
-                if source_asset_id:
-                    query = query.filter(ParsedContentMetadata.source_asset_id == source_asset_id)
+                if source_file_id:
+                    query = query.filter(ParsedContentMetadata.source_file_id == source_file_id)
                 if status:
                     query = query.filter(ParsedContentMetadata.status == status.value)
                 if parser_type:
@@ -434,129 +434,112 @@ class PostgreSQLDB(RelationalDB):
             logger.error(f"Database error listing parsed content metadata: {e}")
             raise
 
-    # ==================== CHUNKS METADATA METHODS ====================
+    # ==================== CHUNK METADATA METHODS ====================
 
-    def store_chunks_metadata(
+    def store_chunk_metadata(
         self,
-        chunks_metadata: ChunksMetadata,
+        chunk_metadata: ChunkMetadata,
         **kwargs: Any,
     ) -> str:
-        """Store chunks metadata using SQLAlchemy ORM"""
+        """Store chunk metadata using SQLAlchemy ORM"""
         try:
             with self.SessionMaker() as session:
-                session.add(chunks_metadata)
+                session.add(chunk_metadata)
                 session.commit()
-                logger.info(f"Stored chunks metadata: {chunks_metadata.chunks_id}")
-                return chunks_metadata.chunks_id
+                logger.info(f"Stored chunk metadata: {chunk_metadata.chunk_id}")
+                return chunk_metadata.chunk_id
 
         except IntegrityError as e:
             if "already exists" in str(e) or "duplicate key" in str(e):
-                raise ValueError(f"Chunks with ID {chunks_metadata.chunks_id} already exists")
+                raise ValueError(f"Chunk with ID {chunk_metadata.chunk_id} already exists")
             raise
         except SQLAlchemyError as e:
-            logger.error(f"Database error storing chunks metadata: {e}")
+            logger.error(f"Database error storing chunk metadata: {e}")
             raise
 
-    def get_chunks_metadata(self, chunks_id: str, **kwargs: Any) -> Optional[ChunksMetadata]:
-        """Get chunks metadata by chunks_id using SQLAlchemy ORM"""
+    def get_chunk_metadata(self, chunk_id: str, **kwargs: Any) -> Optional[ChunkMetadata]:
+        """Get chunk metadata by chunk_id using SQLAlchemy ORM"""
         try:
             with self.SessionMaker() as session:
-                chunks_metadata = session.query(ChunksMetadata).filter_by(chunks_id=chunks_id).first()
+                chunk_metadata = session.query(ChunkMetadata).filter_by(chunk_id=chunk_id).first()
 
-                if chunks_metadata:
-                    return chunks_metadata
+                if chunk_metadata:
+                    return chunk_metadata
                 return None
 
         except SQLAlchemyError as e:
-            logger.error(f"Database error getting chunks metadata for {chunks_id}: {e}")
+            logger.error(f"Database error getting chunk metadata for {chunk_id}: {e}")
             raise
 
-    def update_chunks_metadata(
+    def update_chunk_metadata(
         self,
-        chunks_id: str,
+        chunk_id: str,
         updates: Dict[str, Any],
         **kwargs: Any,
     ) -> bool:
-        """Update chunks metadata fields using SQLAlchemy ORM"""
+        """Update chunk metadata fields using SQLAlchemy ORM"""
         if not updates:
             return False
 
         try:
             with self.SessionMaker() as session:
-                # Always update the updated_at timestamp
-                updates['updated_at'] = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
-
                 # Update the record (SQLAlchemy handles enum conversion automatically)
-                rows_updated = session.query(ChunksMetadata).filter_by(chunks_id=chunks_id).update(updates)
+                rows_updated = session.query(ChunkMetadata).filter_by(chunk_id=chunk_id).update(updates)
                 session.commit()
 
                 if rows_updated > 0:
-                    logger.debug(f"Updated chunks metadata: {chunks_id}")
+                    logger.debug(f"Updated chunk metadata: {chunk_id}")
                     return True
                 else:
-                    logger.warning(f"No chunks found with ID: {chunks_id}")
+                    logger.warning(f"No chunk found with ID: {chunk_id}")
                     return False
 
         except SQLAlchemyError as e:
-            logger.error(f"Database error updating chunks metadata {chunks_id}: {e}")
+            logger.error(f"Database error updating chunk metadata {chunk_id}: {e}")
             raise
 
-    def delete_chunks_metadata(self, chunks_id: str, **kwargs: Any) -> bool:
-        """Delete chunks metadata using SQLAlchemy ORM"""
+    def delete_chunk_metadata(self, chunk_id: str, **kwargs: Any) -> bool:
+        """Delete chunk metadata using SQLAlchemy ORM"""
         try:
             with self.SessionMaker() as session:
-                rows_deleted = session.query(ChunksMetadata).filter_by(chunks_id=chunks_id).delete()
+                rows_deleted = session.query(ChunkMetadata).filter_by(chunk_id=chunk_id).delete()
                 session.commit()
 
                 if rows_deleted > 0:
-                    logger.info(f"Deleted chunks metadata: {chunks_id}")
+                    logger.info(f"Deleted chunk metadata: {chunk_id}")
                     return True
                 else:
-                    logger.warning(f"No chunks found with ID: {chunks_id}")
+                    logger.warning(f"No chunk found with ID: {chunk_id}")
                     return False
 
         except SQLAlchemyError as e:
-            logger.error(f"Database error deleting chunks metadata {chunks_id}: {e}")
+            logger.error(f"Database error deleting chunk metadata {chunk_id}: {e}")
             raise
 
-    def update_chunks_status(
-        self,
-        chunks_id: str,
-        new_status: ChunksStatus,
-        **kwargs: Any,
-    ) -> bool:
-        """Update chunks processing status"""
-
-        return self.update_chunks_metadata(
-            chunks_id,
-            {'status': new_status.value},
-            **kwargs
-        )
-
-    def list_chunks_metadata(
+    def list_chunk_metadata(
         self,
         source_parsed_content_id: Optional[str] = None,
-        status: Optional[ChunksStatus] = None,
-        chunking_strategy: Optional[str] = None,
+        index_status: Optional[ChunkIndexStatus] = None,
+        chunker_type: Optional[str] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
         **kwargs: Any,
-    ) -> List[ChunksMetadata]:
-        """List chunks metadata with optional filtering using SQLAlchemy ORM"""
+    ) -> List[ChunkMetadata]:
+        """List chunk metadata with optional filtering using SQLAlchemy ORM"""
         try:
             with self.SessionMaker() as session:
-                query = session.query(ChunksMetadata)
+                query = session.query(ChunkMetadata)
 
                 # Add filters
                 if source_parsed_content_id:
-                    query = query.filter(ChunksMetadata.source_parsed_content_id == source_parsed_content_id)
-                if status:
-                    query = query.filter(ChunksMetadata.status == status.value)
-                if chunking_strategy:
-                    query = query.filter(ChunksMetadata.chunking_strategy == chunking_strategy)
+                    query = query.filter(ChunkMetadata.source_parsed_content_id == source_parsed_content_id)
+                if index_status:
+                    query = query.filter(ChunkMetadata.index_status == index_status.value)
+                if chunker_type:
+                    query = query.filter(ChunkMetadata.chunker_type == chunker_type)
 
                 # Add ordering
-                query = query.order_by(ChunksMetadata.created_at.desc())
+                query = query.order_by(ChunkMetadata.created_at.desc())
 
                 # Add pagination
                 if offset:
@@ -564,11 +547,11 @@ class PostgreSQLDB(RelationalDB):
                 if limit:
                     query = query.limit(limit)
 
-                chunks_metadata_list = query.all()
-                logger.debug(f"Retrieved {len(chunks_metadata_list)} chunks metadata records")
+                chunk_metadata_list = query.all()
+                logger.debug(f"Retrieved {len(chunk_metadata_list)} chunk metadata records")
 
-                return chunks_metadata_list
+                return chunk_metadata_list
 
         except SQLAlchemyError as e:
-            logger.error(f"Database error listing chunks metadata: {e}")
+            logger.error(f"Database error listing chunk metadata: {e}")
             raise

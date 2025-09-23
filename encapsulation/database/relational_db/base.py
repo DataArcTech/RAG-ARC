@@ -13,9 +13,9 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
 if TYPE_CHECKING:
-    from .data_schema import FileMetadata, FileStatus
-    from .data_schema import ParsedContentMetadata, ParsedContentStatus
-    from .data_schema import ChunksMetadata, ChunksStatus
+    from ...data_model.orm_models import FileMetadata, FileStatus
+    from ...data_model.orm_models import ParsedContentMetadata, ParsedContentStatus
+    from ...data_model.orm_models import ChunkMetadata, ChunkIndexStatus
 
 from framework.module import AbstractModule
 
@@ -32,24 +32,24 @@ class RelationalDB(AbstractModule):
         **kwargs: Any,
     ) -> str:
         """Store file metadata
-        
+
         Args:
             file_metadata: FileMetadata object to store
             **kwargs: Additional arguments
-            
+
         Returns:
-            Asset ID of stored metadata
+            File ID of stored metadata
         """
         pass
 
     @abstractmethod
-    def get_file_metadata(self, asset_id: str, **kwargs: Any) -> Optional['FileMetadata']:
-        """Retrieve file metadata by asset ID
-        
+    def get_file_metadata(self, file_id: str, **kwargs: Any) -> Optional['FileMetadata']:
+        """Retrieve file metadata by file ID
+
         Args:
-            asset_id: Unique identifier for the file asset
+            file_id: Unique identifier for the file
             **kwargs: Additional arguments
-            
+
         Returns:
             FileMetadata object if found, None otherwise
         """
@@ -58,30 +58,30 @@ class RelationalDB(AbstractModule):
     @abstractmethod
     def update_file_metadata(
         self,
-        asset_id: str,
+        file_id: str,
         updates: Dict[str, Any],
         **kwargs: Any,
     ) -> bool:
         """Update file metadata
-        
+
         Args:
-            asset_id: Unique identifier for the file asset
+            file_id: Unique identifier for the file
             updates: Dictionary of fields to update
             **kwargs: Additional arguments
-            
+
         Returns:
             True if update successful, False otherwise
         """
         pass
 
     @abstractmethod
-    def delete_file_metadata(self, asset_id: str, **kwargs: Any) -> bool:
+    def delete_file_metadata(self, file_id: str, **kwargs: Any) -> bool:
         """Delete file metadata
-        
+
         Args:
-            asset_id: Unique identifier for the file asset
+            file_id: Unique identifier for the file
             **kwargs: Additional arguments
-            
+
         Returns:
             True if deletion successful, False otherwise
         """
@@ -90,17 +90,17 @@ class RelationalDB(AbstractModule):
     @abstractmethod
     def update_file_status(
         self,
-        asset_id: str,
+        file_id: str,
         new_status: 'FileStatus',
         **kwargs: Any,
     ) -> bool:
         """Update file processing status
-        
+
         Args:
-            asset_id: Unique identifier for the file asset
+            file_id: Unique identifier for the file
             new_status: New processing status
             **kwargs: Additional arguments
-            
+
         Returns:
             True if update successful, False otherwise
         """
@@ -213,7 +213,7 @@ class RelationalDB(AbstractModule):
     @abstractmethod
     def list_parsed_content_metadata(
         self,
-        source_asset_id: Optional[str] = None,
+        source_file_id: Optional[str] = None,
         status: Optional['ParsedContentStatus'] = None,
         parser_type: Optional[str] = None,
         limit: Optional[int] = None,
@@ -223,7 +223,7 @@ class RelationalDB(AbstractModule):
         """List parsed content metadata with optional filtering
 
         Args:
-            source_asset_id: Filter by source file asset ID
+            source_file_id: Filter by source file ID
             status: Filter by parsed content status
             parser_type: Filter by parser type
             limit: Maximum number of records to return
@@ -235,49 +235,49 @@ class RelationalDB(AbstractModule):
         """
         pass
 
-    # ==================== CHUNKS METADATA METHODS ====================
+    # ==================== CHUNK METADATA METHODS ====================
 
     @abstractmethod
-    def store_chunks_metadata(
+    def store_chunk_metadata(
         self,
-        chunks_metadata: 'ChunksMetadata',
+        chunk_metadata: 'ChunkMetadata',
         **kwargs: Any,
     ) -> str:
-        """Store chunks metadata
+        """Store chunk metadata
 
         Args:
-            chunks_metadata: ChunksMetadata object to store
+            chunk_metadata: ChunkMetadata object to store
             **kwargs: Additional arguments
 
         Returns:
-            Chunks ID of stored metadata
+            Chunk ID of stored metadata
         """
         pass
 
     @abstractmethod
-    def get_chunks_metadata(self, chunks_id: str, **kwargs: Any) -> Optional['ChunksMetadata']:
-        """Retrieve chunks metadata by ID
+    def get_chunk_metadata(self, chunk_id: str, **kwargs: Any) -> Optional['ChunkMetadata']:
+        """Retrieve chunk metadata by ID
 
         Args:
-            chunks_id: Unique identifier for the chunks
+            chunk_id: Unique identifier for the chunk
             **kwargs: Additional arguments
 
         Returns:
-            ChunksMetadata object if found, None otherwise
+            ChunkMetadata object if found, None otherwise
         """
         pass
 
     @abstractmethod
-    def update_chunks_metadata(
+    def update_chunk_metadata(
         self,
-        chunks_id: str,
+        chunk_id: str,
         updates: Dict[str, Any],
         **kwargs: Any,
     ) -> bool:
-        """Update chunks metadata
+        """Update chunk metadata
 
         Args:
-            chunks_id: Unique identifier for the chunks
+            chunk_id: Unique identifier for the chunk
             updates: Dictionary of fields to update
             **kwargs: Additional arguments
 
@@ -287,11 +287,11 @@ class RelationalDB(AbstractModule):
         pass
 
     @abstractmethod
-    def delete_chunks_metadata(self, chunks_id: str, **kwargs: Any) -> bool:
-        """Delete chunks metadata
+    def delete_chunk_metadata(self, chunk_id: str, **kwargs: Any) -> bool:
+        """Delete chunk metadata
 
         Args:
-            chunks_id: Unique identifier for the chunks
+            chunk_id: Unique identifier for the chunk
             **kwargs: Additional arguments
 
         Returns:
@@ -300,46 +300,27 @@ class RelationalDB(AbstractModule):
         pass
 
     @abstractmethod
-    def update_chunks_status(
-        self,
-        chunks_id: str,
-        new_status: 'ChunksStatus',
-        **kwargs: Any,
-    ) -> bool:
-        """Update chunks processing status
-
-        Args:
-            chunks_id: Unique identifier for the chunks
-            new_status: New processing status
-            **kwargs: Additional arguments
-
-        Returns:
-            True if update successful, False otherwise
-        """
-        pass
-
-    @abstractmethod
-    def list_chunks_metadata(
+    def list_chunk_metadata(
         self,
         source_parsed_content_id: Optional[str] = None,
-        status: Optional['ChunksStatus'] = None,
-        chunking_strategy: Optional[str] = None,
+        index_status: Optional['ChunkIndexStatus'] = None,
+        chunker_type: Optional[str] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
         **kwargs: Any,
-    ) -> List['ChunksMetadata']:
-        """List chunks metadata with optional filtering
+    ) -> List['ChunkMetadata']:
+        """List chunk metadata with optional filtering
 
         Args:
             source_parsed_content_id: Filter by source parsed content ID
-            status: Filter by chunks status
-            chunking_strategy: Filter by chunking strategy
+            index_status: Filter by chunk index status
+            chunker_type: Filter by chunker type
             limit: Maximum number of records to return
             offset: Number of records to skip
             **kwargs: Additional arguments
 
         Returns:
-            List of ChunksMetadata objects
+            List of ChunkMetadata objects
         """
         pass
 
@@ -355,10 +336,10 @@ class RelationalDB(AbstractModule):
             ThreadPoolExecutor(), self.store_file_metadata, file_metadata, **kwargs
         )
 
-    async def aget_file_metadata(self, asset_id: str, **kwargs: Any) -> Optional['FileMetadata']:
+    async def aget_file_metadata(self, file_id: str, **kwargs: Any) -> Optional['FileMetadata']:
         """Asynchronously retrieve file metadata"""
         return await asyncio.get_event_loop().run_in_executor(
-            ThreadPoolExecutor(), self.get_file_metadata, asset_id, **kwargs
+            ThreadPoolExecutor(), self.get_file_metadata, file_id, **kwargs
         )
 
     async def astore_parsed_content_metadata(
@@ -377,18 +358,18 @@ class RelationalDB(AbstractModule):
             ThreadPoolExecutor(), self.get_parsed_content_metadata, parsed_content_id, **kwargs
         )
 
-    async def astore_chunks_metadata(
+    async def astore_chunk_metadata(
         self,
-        chunks_metadata: 'ChunksMetadata',
+        chunk_metadata: 'ChunkMetadata',
         **kwargs: Any,
     ) -> str:
-        """Asynchronously store chunks metadata"""
+        """Asynchronously store chunk metadata"""
         return await asyncio.get_event_loop().run_in_executor(
-            ThreadPoolExecutor(), self.store_chunks_metadata, chunks_metadata, **kwargs
+            ThreadPoolExecutor(), self.store_chunk_metadata, chunk_metadata, **kwargs
         )
 
-    async def aget_chunks_metadata(self, chunks_id: str, **kwargs: Any) -> Optional['ChunksMetadata']:
-        """Asynchronously retrieve chunks metadata"""
+    async def aget_chunk_metadata(self, chunk_id: str, **kwargs: Any) -> Optional['ChunkMetadata']:
+        """Asynchronously retrieve chunk metadata"""
         return await asyncio.get_event_loop().run_in_executor(
-            ThreadPoolExecutor(), self.get_chunks_metadata, chunks_id, **kwargs
+            ThreadPoolExecutor(), self.get_chunk_metadata, chunk_id, **kwargs
         )

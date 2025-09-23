@@ -1,9 +1,7 @@
 import os
-import shutil
 from typing import (
     Any,
     Optional,
-    BinaryIO,
     List,
     Tuple,
 )
@@ -11,13 +9,13 @@ import logging
 from pathlib import Path
 
 from .base import FileDB
-from framework.shared_module_decorator import shared_module
+from framework.singleton_decorator import singleton
 
 
 logger = logging.getLogger(__name__)
 
 
-@shared_module
+@singleton
 class LocalDB(FileDB):
     """
     Local filesystem blob storage implementation for high-performance file operations.
@@ -26,7 +24,7 @@ class LocalDB(FileDB):
     supporting hierarchical key organization, collision handling, and extended attributes
     for metadata storage where supported by the filesystem.
     
-    Key features:
+    Key features: 
     - Hierarchical directory structure based on blob keys
     - Collision handling with overwrite/error/version modes
     - Extended attribute support for content-type metadata
@@ -130,45 +128,6 @@ class LocalDB(FileDB):
             logger.error(f"Error storing blob {key}: {e}")
             raise
     
-    def store_stream(
-        self,
-        key: str,
-        stream: BinaryIO,
-        content_type: Optional[str] = None,
-        **kwargs: Any,
-    ) -> Tuple[str, bool]:
-        """Store blob data from stream with given key"""
-        try:
-            # Since FileStore always generates unique keys, no collision handling needed
-            was_overwritten = False
-            storage_key = key
-            
-            key_exists = self.exists(key)
-            if key_exists:
-                was_overwritten = True
-                logger.info(f"Overwriting existing blob with key: '{key}'")
-            
-            file_path = self._get_full_path(storage_key)
-            self._ensure_parent_dir(file_path)
-            
-            with open(file_path, 'wb') as f:
-                shutil.copyfileobj(stream, f)
-            
-            # Store content type as extended attribute if supported
-            if content_type and hasattr(os, 'setxattr'):
-                try:
-                    os.setxattr(str(file_path), b'user.content_type', content_type.encode())
-                except OSError:
-                    # Extended attributes not supported on this filesystem
-                    pass
-            
-            logger.debug(f"Stored blob stream with key: {storage_key}")
-            return storage_key, was_overwritten
-            
-        except OSError as e:
-            logger.error(f"Error storing blob stream {key}: {e}")
-            raise
-    
     def retrieve(self, key: str, **kwargs: Any) -> bytes:
         """Retrieve blob data by key"""
         try:
@@ -185,22 +144,6 @@ class LocalDB(FileDB):
             
         except OSError as e:
             logger.error(f"Error retrieving blob {key}: {e}")
-            raise
-    
-    def retrieve_stream(self, key: str, **kwargs: Any) -> BinaryIO:
-        """Retrieve blob data as stream by key"""
-        try:
-            file_path = self._get_full_path(key)
-            
-            if not file_path.exists():
-                raise KeyError(f"Blob with key '{key}' not found")
-            
-            stream = open(file_path, 'rb')
-            logger.debug(f"Retrieved blob stream with key: {key}")
-            return stream
-            
-        except OSError as e:
-            logger.error(f"Error retrieving blob stream {key}: {e}")
             raise
     
     def delete(self, key: str, **kwargs: Any) -> bool:
@@ -305,7 +248,6 @@ class LocalDB(FileDB):
         self,
         key: str,
         expiration_seconds: int = 3600,
-        method: str = "GET",
         **kwargs: Any,
     ) -> str:
         """Generate presigned URL for blob access
@@ -315,13 +257,14 @@ class LocalDB(FileDB):
         """
         try:
             file_path = self._get_full_path(key)
-            
+
             if not file_path.exists():
                 raise KeyError(f"Blob with key '{key}' not found")
-            
-            # Convert to file:// URL
-            file_url = file_path.as_uri()
-            
+
+            # Convert to absolute path before generating URI
+            absolute_path = file_path.resolve()
+            file_url = absolute_path.as_uri()
+
             logger.debug(f"Generated file URL for key: {key}")
             logger.warning(f"Local filesystem doesn't support expiration. URL will not expire after {expiration_seconds} seconds")
             
