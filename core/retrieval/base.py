@@ -1,100 +1,66 @@
 import asyncio
+import logging
 from abc import ABC, abstractmethod
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any, List
-from pydantic import ConfigDict
-from core.utils.data_model import Document
+from typing import Any, List, Dict
+from framework.module import AbstractModule
+from encapsulation.data_model.schema import Document
 
-class BaseRetriever(ABC):
-    """检索器基类
-    
-    一个检索系统被定义为能够接受字符串查询并从某个源返回最"相关"文档的系统。
-    
-    使用方法:
-    检索器遵循标准的可运行接口，应通过 `invoke`, `ainvoke` 等标准方法使用。
-    
-    实现:
-    实现自定义检索器时，类应该实现 `_get_relevant_documents` 方法来定义检索文档的逻辑。
-    可选地，可以通过重写 `_aget_relevant_documents` 方法提供异步原生实现。
-    """
-    
-    model_config = ConfigDict(
-        arbitrary_types_allowed=True,
-    )
-    
-    def __init__(self, **kwargs):
-        """初始化检索器
-        
-        Args:
-            **kwargs: 其他参数，如 search_kwargs, tags, metadata 等
-        """
-        self.search_kwargs = kwargs.get("search_kwargs", {})
-        self.tags = kwargs.get("tags")
-        self.metadata = kwargs.get("metadata")
-    
+
+logger = logging.getLogger(__name__)
+
+class BaseRetriever(AbstractModule, ABC):
+    def __init__(self, config):
+        self.config = config
+        self._index = self.config.index_config.build()
+        self._embedding = None
+        self._load_existing_index()
+
+    def _load_existing_index(self) -> None:
+        """尝试加载已存在的索引"""
+        try:
+            if hasattr(self._index, 'load_index'):
+                # Check if the index has an index_path in its config
+                if hasattr(self._index.config, 'index_path') and self._index.config.index_path:
+                    self._index.load_index(self._index.config.index_path)
+                else:
+                    self._index.load_index()
+                logger.info(f"Successfully loaded existing index for {self.get_name()}")
+        except Exception as e:
+            message = f"Index not found for retriever {self.get_name()}: {e}"
+            logger.warning(f"{message}. Please use IndexManager to build the index first.")
+            raise RuntimeError(message)
+
+    def get_default_search_config(self) -> Dict[str, Any]:
+        return self.config.search_kwargs.copy()
+
+    @property
+    def index(self) -> Any:
+        return self._index
+
+    def get_embedding(self) -> Any:
+        if self._embedding is None:
+            if hasattr(self.config.index_config, "embedding_config") and self.config.index_config.embedding_config is not None:
+                self._embedding = self.config.index_config.embedding_config.build()
+            else:
+                raise ValueError("This retriever does not have an embedding_config")
+        return self._embedding
+
     def invoke(self, input: str, **kwargs: Any) -> List[Document]:
-        """调用检索器获取相关文档
-        
-        同步检索器调用的主要入口点。
-        
-        Args:
-            input: 查询字符串
-            **kwargs: 传递给检索器的其他参数
-            
-        Returns:
-            相关文档列表
-            
-        Examples:
-            >>> retriever.invoke("query")
-        """
-        return self._get_relevant_documents(input, **kwargs)
-    
+        default_config = self.get_default_search_config()
+        merged_kwargs = {**default_config, **kwargs}
+        return self._get_relevant_documents(input, **merged_kwargs)
+
     async def ainvoke(self, input: str, **kwargs: Any) -> List[Document]:
-        """异步调用检索器获取相关文档
-        
-        异步检索器调用的主要入口点。
-        
-        Args:
-            input: 查询字符串
-            **kwargs: 传递给检索器的其他参数
-            
-        Returns:
-            相关文档列表
-            
-        Examples:
-            >>> await retriever.ainvoke("query")
-        """
-        return await self._aget_relevant_documents(input, **kwargs)
-    
+        default_config = self.get_default_search_config()
+        merged_kwargs = {**default_config, **kwargs}
+        return await self._aget_relevant_documents(input, **merged_kwargs)
+
     @abstractmethod
     def _get_relevant_documents(self, query: str, **kwargs: Any) -> List[Document]:
-        """获取与查询相关的文档
-        
-        Args:
-            query: 用于查找相关文档的字符串
-            **kwargs: 其他参数
-            
-        Returns:
-            相关文档列表
-        """
         pass
-    
+
     async def _aget_relevant_documents(self, query: str, **kwargs: Any) -> List[Document]:
-        """异步获取与查询相关的文档
-        
-        Args:
-            query: 用于查找相关文档的字符串
-            **kwargs: 其他参数
-            
-        Returns:
-            相关文档列表
-        """
-        loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor() as executor:
-            return await loop.run_in_executor(
-                executor, self._get_relevant_documents, query, **kwargs
-            )
-    
+        return await asyncio.to_thread(self._get_relevant_documents, query, **kwargs)
+
     def get_name(self) -> str:
-        """获取检索器名称"""
-        return self.__class__.__name__
+        return self.config.type

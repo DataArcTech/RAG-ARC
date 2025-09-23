@@ -1,27 +1,63 @@
-from abc import ABC, abstractmethod
-from core.utils.data_model import Document
-import warnings
+from abc import abstractmethod
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Optional,
+    List,
+    Dict,
+)
 
-class RerankerBase(ABC):
+from framework.module import AbstractModule
+from encapsulation.data_model.schema import Document
+
+
+class AbstractReranker(AbstractModule):
     """
-    Reranker 基类，所有 Reranker 应该继承此类并实现 rerank 方法。
-    不建议直接实例化本类。
-    
-    使用方法：
-        class MyReranker(RerankerBase):
-            def rerank(self, query: str, documents: list[str], **kwargs) -> list[float]:
-                # 实现具体的重排序逻辑
-                ...
+    Abstract base class for document reranking in RAG systems.
+
+    Reranking is a critical component that reorders retrieved documents based on
+    their relevance to the user query, improving the quality of context provided
+    to the generation model.
+
+    RAG Pipeline Position:
+        User Query → Query Rewrite → Retrieval → Rerank → LLM Generate Answer
+                                                   ↑ This component
     """
-    def __init__(self):
-        if type(self) is RerankerBase:
-            warnings.warn("RerankerBase 是抽象基类，不应直接实例化。请继承并实现 rerank 方法。", UserWarning)
 
     @abstractmethod
-    def rerank(self, query: str, documents: list[Document], **kwargs) -> list[Document]:
+    def rerank(
+        self,
+        query: str,
+        documents: List["Document"],
+        **kwargs: Any
+    ) -> List["Document"]:
         """
-        Rerank the documents based on the query.
-        需要子类实现。
+        Rerank documents based on relevance to the query.
+
+        All configuration parameters are handled by the encapsulation layer.
+        Core layer focuses on document structure and metadata management.
+
+        Args:
+            query: User query to rank documents against
+            documents: List of Document objects from retrieval step
+            **kwargs: Parameters passed through to encapsulation layer
+
+        Returns:
+            List of Document objects reordered by relevance with rerank scores
+            in metadata
+
+        Raises:
+            ValueError: If query is empty or documents list is invalid
+            Exception: If reranking process fails
         """
-        warnings.warn("调用了未实现的 rerank 方法。请在子类中实现该方法。", UserWarning)
-        raise NotImplementedError("子类必须实现 rerank 方法。")
+        pass
+
+    @abstractmethod
+    def get_reranker_info(self) -> Dict[str, Any]:
+        """
+        Get information about this reranker's capabilities and configuration.
+
+        Returns:
+            Dictionary containing reranker information
+        """
+        pass

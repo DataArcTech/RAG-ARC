@@ -1,0 +1,22 @@
+{
+    "type": "dense",
+    "index_path": "./data/unified_faiss_index",
+    "index_config": {
+        "type": "faiss",
+        "index_path": "./data/unified_faiss_index",
+        "metric": "cosine",
+        "index_type": "flat",
+        "normalize_L2": true,
+        "embedding_config": {
+            "type": "huggingface_embedding",
+            "model_name": "/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
+            "device": "cuda:7",
+            "local_files_only": true
+        }
+    },
+    "search_kwargs": {
+        "k": 5,
+        "with_score": true,
+        "score_threshold": null
+    }
+}

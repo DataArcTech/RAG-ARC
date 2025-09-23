@@ -1,12 +1,13 @@
-from .base import LLMBase
+from encapsulation.llm.base import LLMBase
 from typing import Union, List, Dict, Any, Optional, Tuple, TYPE_CHECKING
 import logging
+import os
+
 from functools import cached_property
+import sentence_transformers
 
 from framework.shared_module_decorator import shared_module
-
-if TYPE_CHECKING:
-    from .document import Document
+from encapsulation.data_model.schema import Document
 
 logger = logging.getLogger(__name__)
 
@@ -60,35 +61,46 @@ class HuggingFaceLLM(LLMBase):
     def __init__(self, config):
         """Initialize HuggingFace with eager model creation"""
         super().__init__(config)
+        self._setup_logging()
         # Initialize client immediately since we always need it for embeddings
         self.client = self._create_client()
 
     def _create_client(self):
         """Create HuggingFace SentenceTransformer client"""
         try:
-            import sentence_transformers
-
-            model_name = getattr(self.config, 'model_name', 'sentence-transformers/all-mpnet-base-v2')
-            device = getattr(self.config, 'device', 'cpu')
-            cache_folder = getattr(self.config, 'cache_folder', None)
-            model_kwargs = getattr(self.config, 'model_kwargs', {})
-
-            client = sentence_transformers.SentenceTransformer(
-                model_name,
-                cache_folder=cache_folder,
-                device=device,
+            model_kwargs = self.config.model_kwargs or {}
+            
+            # 如果使用国内镜像源，设置环境变量
+            if self.config.use_china_mirror:
+                # 设置HF镜像源
+                os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+                self.logger.info("Set HF_ENDPOINT to https://hf-mirror.com")
+            
+            # 如果只使用本地文件（离线模式），添加相应参数
+            if self.config.local_files_only:
+                model_kwargs['local_files_only'] = True
+            
+            # 注意：SentenceTransformer.__init__ 不接受 mirror 参数
+            # 我们通过环境变量 HF_ENDPOINT 来设置镜像源
+            self._client = sentence_transformers.SentenceTransformer(
+                self.config.model_name,
+                cache_folder=self.config.cache_folder,
+                device=self.config.device,
                 **model_kwargs
             )
-
-            logger.info(f"HuggingFace model initialized: {model_name}")
-            return client
-
-        except ImportError:
-            logger.error("sentence-transformers library required for embedding task")
-            raise ImportError("sentence-transformers required for embedding task")
+            
+            self.logger.info(f"HuggingFace LLM initialized: {self.config.model_name}")
+            if self.config.use_china_mirror:
+                self.logger.info("Using China mirror for model download")
+            if self.config.local_files_only:
+                self.logger.info("Running in offline mode (local files only)")
+            
+        except ImportError as e:
+            self.logger.error(f"sentence-transformers required for embedding task: {str(e)}")
+            raise ImportError("sentence-transformers required for embedding task. Please install it with: pip install sentence-transformers") from e
         except Exception as e:
-            logger.error(f"Failed to initialize HuggingFace model: {str(e)}")
-            raise
+            self.logger.error(f"Failed to initialize HuggingFace model: {str(e)}")
+            raise RuntimeError(f"Failed to initialize HuggingFace model: {str(e)}") from e
     
     def _embed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
         """Generate text embeddings"""
@@ -109,15 +121,17 @@ class HuggingFaceLLM(LLMBase):
             # Clean texts
             texts = [text.replace("\n", " ") for text in texts]
             
-            encode_kwargs = getattr(self.config, 'encode_kwargs', {})
-            
-            embeddings = self.client.encode(
-                texts,
-                convert_to_tensor=False,
-                **encode_kwargs
-            )
-            
-            return embeddings.tolist()
+            encode_kwargs = self.config.encode_kwargs or {}
+            if self._client is not None:
+                embeddings = self._client.encode(
+                    texts,
+                    convert_to_tensor=False,
+                    **encode_kwargs
+                )
+                
+                return embeddings.tolist()
+            else:
+                raise RuntimeError("Model client not initialized")
             
         except Exception as e:
             logger.error(f"Document embedding failed: {str(e)}")
@@ -134,7 +148,9 @@ class HuggingFaceLLM(LLMBase):
             "device": getattr(self.config, 'device', 'cpu'),
             "cache_folder": getattr(self.config, 'cache_folder', None),
             "provider": "huggingface",
-            "model_type": "sentence_transformer"
+            "model_type": "sentence_transformer",
+            "use_china_mirror": self.config.use_china_mirror,
+            "local_files_only": self.config.local_files_only
         })
         return info
     
@@ -147,7 +163,27 @@ class HuggingFaceLLM(LLMBase):
     def _stream_chat(self, messages, max_tokens=None, temperature=None, **kwargs):
         """HuggingFace embedding models don't support streaming chat"""
         raise NotImplementedError("HuggingFace embedding models do not support streaming chat")
-    
+
+    async def _achat(self, messages: List[Dict[str, str]], max_tokens: Optional[int] = None, temperature: Optional[float] = None, **kwargs) -> str:
+        """HuggingFace embedding models don't support async chat"""
+        raise NotImplementedError("HuggingFace embedding models do not support async chat")
+
+    async def _astream_chat(self, messages: List[Dict[str, str]], max_tokens: Optional[int] = None, temperature: Optional[float] = None, **kwargs):
+        """HuggingFace embedding models don't support async streaming chat"""
+        raise NotImplementedError("HuggingFace embedding models do not support async streaming chat")
+        yield  # This will never be reached, but satisfies the async generator type
+
+    async def _aembed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
+        """Async embedding - just calls sync version for now"""
+        return self._embed(texts)
+
+    def _embed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
+        """Internal embedding implementation"""
+        if isinstance(texts, str):
+            return self.embed_query(texts)
+        else:
+            return self.embed_documents(texts)
+
     def _rerank(self, query: str, documents: List['Document'], top_k: Optional[int] = None) -> List[Tuple[int, float]]:
         """HuggingFace embedding models don't support reranking"""
         raise NotImplementedError("HuggingFace embedding models do not support reranking")

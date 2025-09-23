@@ -3,14 +3,16 @@ requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rag-arc"
+name = "RAG-ARC"
 version = "0.1.0"
-description = "RAG-ARC HTTP Server with MCP integration"
+description = "Retrieval-Augmented Generation Architecture"
 dependencies = [
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",
     "fastmcp>=0.1.0",
     "pydantic>=2.0.0",
+    "dill",
+    "faiss-gpu"
 ]
 
 [project.optional-dependencies]
@@ -20,4 +22,5 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
+where = ["."]
 include = ["api*", "core*", "config*", "framework*", "application*", "encapsulation*"]

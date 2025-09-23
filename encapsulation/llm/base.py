@@ -2,33 +2,28 @@ from abc import abstractmethod
 from typing import Dict, Any, List, Optional, Union, Tuple, AsyncGenerator
 import logging
 
-logger = logging.getLogger(__name__)
-
-# Import Document here to avoid circular imports
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from .document import Document
-
+from encapsulation.data_model.schema import Document
 from framework.module import AbstractModule
 
-
+logger = logging.getLogger(__name__)
 class LLMBase(AbstractModule):
     """
     Unified model base class supporting multiple task types
     Supports: chat, embedding, reranking
     """
 
+    def _setup_logging(self):
+        """Setup logging configuration"""
+        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+    
     def supports_task(self, task_type: str) -> bool:
         """Check if specified task type is supported"""
-        task_types = getattr(self.config, 'task_types', ['chat'])
-        return task_type in task_types
+        return task_type in self.config.task_types
     
     def validate_task_support(self, task_type: str):
         """Validate task support, raise exception if not supported"""
         if not self.supports_task(task_type):
-            model_name = getattr(self.config, 'model_name', 'default')
-            task_types = getattr(self.config, 'task_types', ['chat'])
-            raise ValueError(f"Model {model_name} does not support task: {task_type}. Supported: {task_types}")
+            raise ValueError(f"Model {self.config.model_name} does not support task: {task_type}. Supported: {self.config.task_types}")
     
     # ==================== CHAT METHODS ====================
     def chat(
@@ -194,7 +189,7 @@ class LLMBase(AbstractModule):
         return {
             "model_name": self.config.model_name,
             "task_types": self.config.task_types,
-            "config": self.config,
+            "config": self.config.kwargs,
             "class_name": self.__class__.__name__
         }
     

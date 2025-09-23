@@ -1,10 +1,9 @@
 from .base import LLMBase
-from typing import Dict, Any, List, Optional, Union, Tuple, TYPE_CHECKING
+from typing import Dict, Any, List, Optional, Union, Tuple
 import openai
 import logging
 
-if TYPE_CHECKING:
-    from .document import Document
+from encapsulation.data_model.schema import Document
 
 logger = logging.getLogger(__name__)
 

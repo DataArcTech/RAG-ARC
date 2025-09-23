@@ -1,0 +1,37 @@
+{
+    "type": "multipath",
+    "retrievers": [
+        {
+            "type": "dense",
+            "index_path": "./data/unified_faiss_index",
+            "index_config": {
+                "type": "faiss",
+                "index_path": "./data/unified_faiss_index",
+                "metric": "cosine",
+                "index_type": "flat",
+                "normalize_L2": true,
+                "embedding_config": {
+                    "type": "huggingface_embedding",
+                    "model_name": "/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
+                    "device": "cuda:7",
+                    "local_files_only": true
+                }
+            }
+        },
+        {
+            "type": "tantivy_bm25",
+            "index_path": "./data/unified_bm25_index",
+            "index_config": {
+                "type": "bm25_indexer",
+                "index_path": "./data/unified_bm25_index"
+            }
+        }
+    ],
+    "fusion_method": "rrf",
+    "rrf_k": 60,
+    "weights": null,
+    "search_kwargs": {
+        "k": 5,
+        "with_score": true
+    }
+}
