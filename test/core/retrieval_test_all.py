@@ -91,14 +91,14 @@ def create_index_manager_and_build_indexes(documents: List[Document], index_conf
                 from config.encapsulation.llm.huggingface_config import HuggingFaceEmbedConfig
 
                 # 创建嵌入模型配置并设置到索引配置中
-                embedding_config = HuggingFaceEmbedConfig(
-                    model_name="/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
-                    task_types="embedding",
-                    device="cuda:0"
-                )
+                # embedding_config = HuggingFaceEmbedConfig(
+                #     model_name="/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
+                #     task_types="embedding",
+                #     device="cuda:0"
+                # )
 
-                # 设置嵌入模型到索引配置中
-                index_config.embedding_config = embedding_config
+                # # 设置嵌入模型到索引配置中
+                # index_config.embedding_config = embedding_config
 
                 # 重新构建索引以包含嵌入配置
                 index = index_config.build()
@@ -409,12 +409,6 @@ class TestDenseRetriever(unittest.TestCase):
                     "task_types": "embedding",
                     "device": "cuda:0"
                 }}
-            }},
-            "embedding_config": {{
-                "type": "huggingface_embedding",
-                "model_name": "/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
-                "task_types": "embedding",
-                "device": "cuda:0"
             }}
         }}
         """
@@ -426,10 +420,9 @@ class TestDenseRetriever(unittest.TestCase):
         self.assertEqual(config.type, "dense")
         self.assertEqual(config.search_kwargs["k"], 10)
         self.assertEqual(config.index_config.metric, "cosine")
-        self.assertEqual(config.embedding_config.model_name, "/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B")
 
         # 设置嵌入配置到索引配置中
-        config.index_config.embedding_config = config.embedding_config
+        # config.index_config.embedding_config = config.embedding_config
 
         # 使用IndexManager构建索引
         index_configs = {"faiss": config.index_config}
@@ -504,12 +497,6 @@ class TestMultiPathRetriever(unittest.TestCase):
                             "task_types": "embedding",
                             "device": "cuda:0"
                         }}
-                    }},
-                    "embedding_config": {{
-                        "type": "huggingface_embedding",
-                        "model_name": "/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
-                        "task_types": "embedding",
-                        "device": "cuda:0"
                     }}
                 }}
             ],
@@ -529,8 +516,7 @@ class TestMultiPathRetriever(unittest.TestCase):
         self.assertEqual(config.fusion_method, "rrf")
         self.assertEqual(config.rrf_k, 60)
 
-        # 设置嵌入配置到Dense检索器的索引配置中
-        config.retrievers[1].index_config.embedding_config = config.retrievers[1].embedding_config
+        # 嵌入配置已经在index_config中正确设置，无需额外设置
 
         # 使用IndexManager构建索引
         index_configs = {
