@@ -61,6 +61,7 @@ class OpenAILLM(LLMBase):
         """Initialize OpenAI with eager client creation"""
         super().__init__(config)
         # Initialize client immediately since we always need it for API calls
+        self._setup_logging()
         self.client = self._create_client()
         self.async_client = self._create_async_client()
 
@@ -172,13 +173,19 @@ class OpenAILLM(LLMBase):
             model_name = getattr(self.config, 'model_name', 'gpt-4o-mini')
             default_max_tokens = getattr(self.config, 'max_tokens', 2000)
             default_temperature = getattr(self.config, 'temperature', 0.7)
-            
+
+            # Add stream_options if token count is requested
+            params = {}
+            if return_token_count:
+                params["stream_options"] = {"include_usage": True}
+
             stream = self.client.chat.completions.create(
                 model=model_name,
                 messages=messages,
                 max_tokens=max_tokens or default_max_tokens,
                 temperature=temperature or default_temperature,
                 stream=True,
+                **params,
                 **kwargs
             )
             

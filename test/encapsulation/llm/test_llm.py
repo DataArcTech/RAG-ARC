@@ -8,7 +8,8 @@ from typing import Dict, Any, List
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
 from framework.register import Register
-from encapsulation.llm.openai import OpenAIConfig, OpenAILLM
+from encapsulation.llm.openai import OpenAILLM
+from config.encapsulation.llm.openai_config import OpenAIConfig
 
 
 class TestOpenAIWithRegister(unittest.TestCase):

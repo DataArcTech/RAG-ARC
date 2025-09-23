@@ -52,16 +52,17 @@ class LLMBase(AbstractModule):
 
     def stream_chat(
         self,
-        messages: List[Dict[str, str]], 
+        messages: List[Dict[str, str]],
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        return_token_count: bool = False,
         **kwargs
     ):
         """
         Streaming chat completion
         """
         self.validate_task_support('chat')
-        return self._stream_chat(messages, max_tokens, temperature, **kwargs)
+        return self._stream_chat(messages, max_tokens, temperature, return_token_count, **kwargs)
     
     @abstractmethod
     def _stream_chat(
@@ -69,6 +70,7 @@ class LLMBase(AbstractModule):
         messages: List[Dict[str, str]],
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        return_token_count: bool = False,
         **kwargs
     ):
         """Internal streaming chat implementation"""
