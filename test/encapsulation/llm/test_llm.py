@@ -30,7 +30,7 @@ class TestOpenAIWithRegister(unittest.TestCase):
             "type": "openai",
             "model_name": "gpt-4.1-mini",
             "task_types": "chat",
-            "api_key": "sk-2T06b7c7f9c3870049fbf8fada596b0f8ef908d1e233KLY2",
+            "api_key": "sk-",
             "base_url": "https://api.gptsapi.net/v1",
             "max_retries": 3,
             "timeout": 60.0,
