@@ -29,96 +29,80 @@ class LLMBase(AbstractModule):
     def chat(
         self, 
         messages: List[Dict[str, str]], 
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
         **kwargs
     ) -> str:
         """
         Chat completion
         """
         self.validate_task_support('chat')
-        return self._chat(messages, max_tokens, temperature, **kwargs)
+        return self._chat(messages, **kwargs)
     
     @abstractmethod
     def _chat(
         self, 
         messages: List[Dict[str, str]], 
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
         **kwargs
-    ) -> str:
+    ) -> Tuple[str, Optional[Dict[str, int]]]:
         """Internal chat implementation"""
         pass
 
     def stream_chat(
         self,
         messages: List[Dict[str, str]], 
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
         **kwargs
-    ):
+    ) -> AsyncGenerator[str, None]:
         """
         Streaming chat completion
         """
         self.validate_task_support('chat')
-        return self._stream_chat(messages, max_tokens, temperature, **kwargs)
+        return self._stream_chat(messages, **kwargs)
     
     @abstractmethod
     def _stream_chat(
         self,
-        messages: List[Dict[str, str]],
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
+        messages: List[Dict[str, str]], 
         **kwargs
-    ):
+    ) -> AsyncGenerator[str, None]:
         """Internal streaming chat implementation"""
         pass
 
     # ==================== ASYNC CHAT METHODS ====================
     async def achat(
         self,
-        messages: List[Dict[str, str]],
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
+        messages: List[Dict[str, str]], 
         **kwargs
-    ) -> str:
+    ) -> Tuple[str, Optional[Dict[str, int]]]:
         """
         Async chat completion
         """
         self.validate_task_support('chat')
-        return await self._achat(messages, max_tokens, temperature, **kwargs)
+        return await self._achat(messages, **kwargs)
 
     @abstractmethod
     async def _achat(
         self,
-        messages: List[Dict[str, str]],
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
+        messages: List[Dict[str, str]], 
         **kwargs
-    ) -> str:
+    ) -> Tuple[str, Optional[Dict[str, int]]]:
         """Internal async chat implementation"""
         pass
 
     async def astream_chat(
         self,
-        messages: List[Dict[str, str]],
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
+        messages: List[Dict[str, str]], 
         **kwargs
     ) -> AsyncGenerator[str, None]:
         """
         Async streaming chat completion
         """
         self.validate_task_support('chat')
-        async for chunk in self._astream_chat(messages, max_tokens, temperature, **kwargs):
+        async for chunk in self._astream_chat(messages, **kwargs):
             yield chunk
 
     @abstractmethod
     async def _astream_chat(
         self,
         messages: List[Dict[str, str]],
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
         **kwargs
     ) -> AsyncGenerator[str, None]:
         """Internal async streaming chat implementation"""
@@ -223,7 +207,7 @@ class LLMBase(AbstractModule):
         messages.append({"role": "user", "content": user_message})
         
         return messages
-    
+       
     def __str__(self) -> str:
         """String representation"""
         return f"{self.__class__.__name__}(model_name='{self.config.model_name}', tasks={self.config.task_types})"

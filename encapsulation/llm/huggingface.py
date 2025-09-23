@@ -1,5 +1,5 @@
 from encapsulation.llm.base import LLMBase
-from typing import Union, List, Dict, Any, Optional, Tuple, TYPE_CHECKING
+from typing import AsyncGenerator, Union, List, Dict, Any, Optional, Tuple, TYPE_CHECKING
 import logging
 import os
 
@@ -156,19 +156,19 @@ class HuggingFaceLLM(LLMBase):
     
     # ==================== NOT SUPPORTED METHODS ====================
     
-    def _chat(self, messages, max_tokens=None, temperature=None, **kwargs):
+    def _chat(self, user_prompt: str, **kwargs):
         """HuggingFace embedding models don't support chat"""
         raise NotImplementedError("HuggingFace embedding models do not support chat")
     
-    def _stream_chat(self, messages, max_tokens=None, temperature=None, **kwargs):
+    def _stream_chat(self, user_prompt: str, **kwargs):
         """HuggingFace embedding models don't support streaming chat"""
         raise NotImplementedError("HuggingFace embedding models do not support streaming chat")
 
-    async def _achat(self, messages: List[Dict[str, str]], max_tokens: Optional[int] = None, temperature: Optional[float] = None, **kwargs) -> str:
+    async def _achat(self, user_prompt: str, **kwargs) -> Tuple[str, Optional[Dict[str, int]]]:
         """HuggingFace embedding models don't support async chat"""
         raise NotImplementedError("HuggingFace embedding models do not support async chat")
 
-    async def _astream_chat(self, messages: List[Dict[str, str]], max_tokens: Optional[int] = None, temperature: Optional[float] = None, **kwargs):
+    async def _astream_chat(self, user_prompt: str, **kwargs) -> AsyncGenerator[str, None]:
         """HuggingFace embedding models don't support async streaming chat"""
         raise NotImplementedError("HuggingFace embedding models do not support async streaming chat")
         yield  # This will never be reached, but satisfies the async generator type

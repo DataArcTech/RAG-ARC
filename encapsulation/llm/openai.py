@@ -1,5 +1,5 @@
 from .base import LLMBase
-from typing import Dict, Any, List, Optional, Union, Tuple
+from typing import AsyncGenerator, Dict, Any, List, Optional, Union, Tuple
 import openai
 import logging
 
@@ -117,31 +117,28 @@ class OpenAILLM(LLMBase):
     def _chat(
         self, 
         messages: List[Dict[str, str]], 
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
-        return_token_count: bool = False,
         **kwargs
-    ) -> Union[str, Tuple[str, Dict[str, int]]]:
+    ) -> Tuple[str, Optional[Dict[str, int]]]:
         """Internal chat implementation"""
+        # Use provided messages directly, or add system prompt if not present
+        if not messages or messages[0].get("role") != "system":
+            system_message = {"role": "system", "content": self.config.system_prompt}
+            messages = [system_message] + messages
+        
         self._validate_messages(messages)
-
-        # Get config values
-        model_name = getattr(self.config, 'model_name', 'gpt-4o-mini')
-        default_max_tokens = getattr(self.config, 'max_tokens', 2000)
-        default_temperature = getattr(self.config, 'temperature', 0.7)
         
         try:
             response = self.client.chat.completions.create(
-                model=model_name,
+                model=self.config.chat_model_name,
                 messages=messages,
-                max_tokens=max_tokens or default_max_tokens,
-                temperature=temperature or default_temperature,
+                max_tokens=self.config.chat_max_tokens,
+                temperature=self.config.chat_temperature,
                 **kwargs
             )
             
             result = response.choices[0].message.content.strip()
             
-            if return_token_count:
+            if self.config.chat_return_token_count:
                 token_stats = {
                     "input_tokens": response.usage.prompt_tokens if response.usage else 0,
                     "output_tokens": response.usage.completion_tokens if response.usage else 0,
@@ -149,7 +146,7 @@ class OpenAILLM(LLMBase):
                 }
                 return result, token_stats
             else:
-                return result
+                return result, None
                 
         except Exception as e:
             logger.error(f"Chat completion failed: {str(e)}")
@@ -158,26 +155,24 @@ class OpenAILLM(LLMBase):
     def _stream_chat(
         self,
         messages: List[Dict[str, str]], 
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
-        return_token_count: bool = False,
         **kwargs
-    ):
+    ) -> AsyncGenerator[str, None]:
         """
         Internal streaming chat implementation
         """
+        # Use provided messages directly, or add system prompt if not present
+        if not messages or messages[0].get("role") != "system":
+            system_message = {"role": "system", "content": self.config.system_prompt}
+            messages = [system_message] + messages
+        
         self._validate_messages(messages)
 
         try:
-            model_name = getattr(self.config, 'model_name', 'gpt-4o-mini')
-            default_max_tokens = getattr(self.config, 'max_tokens', 2000)
-            default_temperature = getattr(self.config, 'temperature', 0.7)
-            
             stream = self.client.chat.completions.create(
-                model=model_name,
+                model=self.config.chat_model_name,
                 messages=messages,
-                max_tokens=max_tokens or default_max_tokens,
-                temperature=temperature or default_temperature,
+                max_tokens= self.config.chat_max_tokens,
+                temperature=self.config.chat_temperature,
                 stream=True,
                 **kwargs
             )
@@ -194,7 +189,7 @@ class OpenAILLM(LLMBase):
                         yield content
                 
                 # Check for usage information (in final chunk)
-                if return_token_count and hasattr(chunk, 'usage') and chunk.usage is not None:
+                if self.config.chat_return_token_count and hasattr(chunk, 'usage') and chunk.usage is not None:
                     token_stats = {
                         "input_tokens": chunk.usage.prompt_tokens if chunk.usage else 0,
                         "output_tokens": chunk.usage.completion_tokens if chunk.usage else 0,
@@ -209,34 +204,37 @@ class OpenAILLM(LLMBase):
 
     async def _achat(
         self,
-        messages: List[Dict[str, str]],
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
-        return_token_count: bool = False,
+        messages: List[Dict[str, str]], 
         **kwargs
-    ) -> Union[str, Tuple[str, Dict[str, int]]]:
+    ) -> Tuple[str, Optional[Dict[str, int]]]:
         """
         Async function of chat
         """
+        # Use provided messages directly, or add system prompt if not present
+        if not messages or messages[0].get("role") != "system":
+            system_message = {"role": "system", "content": self.config.system_prompt}
+            messages = [system_message] + messages
+        
         self._validate_messages(messages)
-
-        # Get config values
-        model_name = getattr(self.config, 'model_name', 'gpt-4o-mini')
-        default_max_tokens = getattr(self.config, 'max_tokens', 2000)
-        default_temperature = getattr(self.config, 'temperature', 0.7)
 
         try:
             response = await self.async_client.chat.completions.create(
-                model=model_name,
+                model=self.config.chat_model_name,
                 messages=messages,
-                max_tokens=max_tokens or default_max_tokens,
-                temperature=temperature or default_temperature,
+                max_tokens=self.config.chat_max_tokens,
+                temperature=self.config.chat_temperature,
                 **kwargs
             )
             result = response.choices[0].message.content
-            if return_token_count:
-                return result, self._get_token_stats(response.usage)
-            return result
+            if self.config.chat_return_token_count:
+                token_stats = {
+                    "input_tokens": response.usage.prompt_tokens if response.usage else 0,
+                    "output_tokens": response.usage.completion_tokens if response.usage else 0,
+                    "total_tokens": response.usage.total_tokens if response.usage else 0
+                }
+                return result, token_stats
+            else:
+                return result, None
 
         except Exception as e:
             logger.error(f"Async chat failed: {str(e)}")
@@ -244,32 +242,29 @@ class OpenAILLM(LLMBase):
 
     async def _astream_chat(
         self,
-        messages: List[Dict[str, str]],
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
-        return_token_count: bool = False,
+        messages: List[Dict[str, str]], 
         **kwargs
-    ):
+    ) -> AsyncGenerator[str, None]:
         """
         Async function of stream chat
         """
+        # Use provided messages directly, or add system prompt if not present
+        if not messages or messages[0].get("role") != "system":
+            system_message = {"role": "system", "content": self.config.system_prompt}
+            messages = [system_message] + messages
+        
         self._validate_messages(messages)
-
-        # Get config values
-        model_name = getattr(self.config, 'model_name', 'gpt-4o-mini')
-        default_max_tokens = getattr(self.config, 'max_tokens', 2000)
-        default_temperature = getattr(self.config, 'temperature', 0.7)
 
         try:
             params = {}
-            if return_token_count:
+            if self.config.chat_return_token_count:
                 params["stream_options"] = {"include_usage": True}
 
             stream = await self.async_client.chat.completions.create(
-                model=model_name,
+                model=self.config.chat_model_name,
                 messages=messages,
-                max_tokens=max_tokens or default_max_tokens,
-                temperature=temperature or default_temperature,
+                max_tokens=self.config.chat_max_tokens,
+                temperature=self.config.chat_temperature,
                 stream=True,
                 **params,
                 **kwargs
@@ -279,8 +274,13 @@ class OpenAILLM(LLMBase):
                 if chunk.choices and chunk.choices[0].delta.content is not None:
                     yield chunk.choices[0].delta.content
 
-                if return_token_count and getattr(chunk, "usage", None):
-                    yield self._get_token_stats(chunk.usage)
+                if self.config.return_token_count and getattr(chunk, "usage", None):
+                    token_stats = {
+                        "input_tokens": chunk.usage.prompt_tokens if chunk.usage else 0,
+                        "output_tokens": chunk.usage.completion_tokens if chunk.usage else 0,
+                        "total_tokens": chunk.usage.total_tokens if chunk.usage else 0
+                    }
+                    yield token_stats
 
         except Exception as e:
             logger.error(f"Async streaming chat failed: {str(e)}")
@@ -305,16 +305,13 @@ class OpenAILLM(LLMBase):
             # Clean texts - remove newlines
             cleaned_texts = [text.replace("\n", " ") for text in text_list]
             
-            model_name = getattr(self.config, 'model_name', 'text-embedding-ada-002')
-            embedding_dimensions = getattr(self.config, 'embedding_dimensions', None)
-            
             # Create embedding request
             embedding_kwargs = {}
-            if embedding_dimensions:
-                embedding_kwargs['dimensions'] = embedding_dimensions
+            if self.config.embedding_dimensions:
+                embedding_kwargs['dimensions'] = self.config.embedding_dimensions
             
             response = self.client.embeddings.create(
-                model=model_name,
+                model=self.config.embedding_model_name,
                 input=cleaned_texts,
                 **embedding_kwargs
             )
@@ -346,14 +343,12 @@ class OpenAILLM(LLMBase):
                 raise ValueError(f"Invalid text: {text}")
 
         try:
-            model_name = getattr(self.config, 'model_name', 'text-embedding-ada-002')
-            
             embeddings = []
             batch_size = 100
             for i in range(0, len(text_list), batch_size):
                 batch = text_list[i:i+batch_size]
                 response = await self.async_client.embeddings.create(
-                    model=model_name,
+                    model=self.config.embedding_model_name,
                     input=batch
                 )
                 embeddings.extend(data.embedding for data in response.data)
@@ -408,14 +403,17 @@ class OpenAILLM(LLMBase):
         client = getattr(self, 'client', None)
         
         info.update({
-            "model": getattr(self.config, 'model_name', 'gpt-4o-mini'),
+            "chat_model": self.config.chat_model_name,
+            "embedding_model": self.config.embedding_model_name,
+            "chat_return_token_count": self.config.chat_return_token_count,
             "api_base": getattr(client, 'base_url', None) if client else None,
             "organization": getattr(client, 'organization', None) if client else None,
             "max_retries": getattr(client, 'max_retries', None) if client else None,
             "timeout": getattr(client, 'timeout', None) if client else None,
-            "default_max_tokens": getattr(self.config, 'max_tokens', 2000),
-            "default_temperature": getattr(self.config, 'temperature', 0.7),
-            "embedding_dimensions": getattr(self.config, 'embedding_dimensions', None),
+            "default_max_tokens": self.config.chat_max_tokens,
+            "default_temperature": self.config.chat_temperature,
+            "chat_max_tokens": self.config.chat_max_tokens,
+            "chat_temperature": self.config.chat_temperature,
             "provider": "openai"
         })
         return info

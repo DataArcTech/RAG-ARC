@@ -1,6 +1,5 @@
 from .base import LLMBase
-from .document import Document
-from typing import List, Dict, Any, Optional, Tuple, Union
+from typing import List, Dict, Any, Optional, Tuple, Union, AsyncGenerator
 import logging
 
 logger = logging.getLogger(__name__)
@@ -229,19 +228,19 @@ class QwenLLM(LLMBase):
     
     # ==================== NOT SUPPORTED METHODS ====================
     
-    def _chat(self, messages, max_tokens=None, temperature=None, **kwargs):
+    def _chat(self, messages: List[Dict[str, str]], **kwargs):
         """Qwen reranker models don't support chat"""
         raise NotImplementedError("Qwen reranker models do not support chat")
     
-    def _stream_chat(self, messages, max_tokens=None, temperature=None, **kwargs):
+    def _stream_chat(self, messages: List[Dict[str, str]], **kwargs):
         """Qwen reranker models don't support streaming chat"""
         raise NotImplementedError("Qwen reranker models do not support streaming chat")
 
-    async def _achat(self, messages, max_tokens=None, temperature=None, **kwargs):
+    async def _achat(self, messages: List[Dict[str, str]], **kwargs) -> Tuple[str, Optional[Dict[str, int]]]:
         """Qwen reranker models don't support async chat"""
         raise NotImplementedError("Qwen reranker models do not support async chat")
 
-    async def _astream_chat(self, messages, max_tokens=None, temperature=None, **kwargs):
+    async def _astream_chat(self, messages: List[Dict[str, str]], **kwargs) -> AsyncGenerator[str, None]:
         """Qwen reranker models don't support async streaming chat"""
         raise NotImplementedError("Qwen reranker models do not support async streaming chat")
 
