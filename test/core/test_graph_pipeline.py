@@ -70,7 +70,7 @@ def create_production_configs() -> Dict[str, Any]:
     # Graph retrieval configuration with LLM-based entity filtering
     retrieval_config = GraphRetrievalConfig(
         type="graph_retrieval",
-        neo4j_config=neo4j_config,
+        graph_config=neo4j_config,
         llm_config=llm_config,  # Enable LLM-based entity filtering
         k1_chunks=20,
         k2_entities=8,

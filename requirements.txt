@@ -8,3 +8,5 @@ tqdm
 psycopg[binary]
 huggingface-hub
 pydantic
+
+networkx

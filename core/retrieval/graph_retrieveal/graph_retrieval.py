@@ -78,9 +78,13 @@ class GraphRetrieval(BaseGraphRetriever):
         """Initialize Graph Retrieval System"""
         super().__init__(config)
 
-        # Initialize the graph store
-        self.graph_store = config.neo4j_config.build()
+        # Initialize the graph store (supports both Neo4j and NetworkX)
+        self.graph_store = config.graph_config.build()
         self.embedding_model = self.graph_store.embedding_model
+
+        # Determine graph store type for query adaptation
+        self.graph_store_type = config.graph_config.type
+        logger.info(f"Initialized graph store type: {self.graph_store_type}")
 
         # Initialize LLM for entity filtering (optional)
         self.llm = None
@@ -92,7 +96,289 @@ class GraphRetrieval(BaseGraphRetriever):
                 logger.warning(f"Failed to initialize LLM: {e}. Will use rule-based filtering.")
 
         logger.info("Graph Retrieval System initialized")
-    
+
+    def _execute_graph_query(self, query_type: str, params: dict = None) -> List[Dict[str, Any]]:
+        """Execute graph query with adaptation for different graph stores"""
+        if self.graph_store_type.startswith("neo4j"):
+            # Use Cypher queries for Neo4j
+            return self._execute_neo4j_query(query_type, params)
+        elif self.graph_store_type.startswith("networkx"):
+            # Use NetworkX-specific queries
+            return self._execute_networkx_query(query_type, params)
+        else:
+            raise ValueError(f"Unsupported graph store type: {self.graph_store_type}")
+
+    def _execute_neo4j_query(self, query_type: str, params: dict = None) -> List[Dict[str, Any]]:
+        """Execute Neo4j Cypher queries"""
+        params = params or {}
+
+        if query_type == "semantic_search_entities":
+            query = """
+            MATCH (e:Entity)
+            WHERE e.embedding IS NOT NULL
+            OPTIONAL MATCH (e)<-[:MENTIONS]-(d:Document)
+            WITH e, count(d) as mention_count
+            RETURN e.id_ as entity_id,
+                   e.entity_name as entity_name,
+                   e.entity_type as entity_type,
+                   e.embedding as embedding,
+                   mention_count,
+                   e.attributes as attributes
+            ORDER BY mention_count DESC
+            LIMIT 2000
+            """
+        elif query_type == "semantic_search_chunks":
+            query = """
+            MATCH (d:Document)
+            WHERE d.embedding IS NOT NULL
+            OPTIONAL MATCH (d)-[:MENTIONS]->(e:Entity)
+            WITH d, count(e) as entity_count, collect(e.entity_name) as entity_names
+            RETURN d.id_ as chunk_id,
+                   d.content as content,
+                   d.embedding as embedding,
+                   d.metadata as metadata,
+                   entity_count,
+                   entity_names
+            ORDER BY entity_count DESC
+            LIMIT 2000
+            """
+        elif query_type == "get_entity_data":
+            query = """
+            MATCH (e:Entity {id_: $entity_id})
+            RETURN e.entity_name as name, e.entity_type as type, e.attributes as attributes
+            """
+        elif query_type == "get_entity_neighbors":
+            query = """
+            MATCH (e1:Entity {id_: $entity_id})-[r]->(e2:Entity)
+            OPTIONAL MATCH (e2)<-[:MENTIONS]-(d:Document)
+            WITH e2, type(r) as relation_type, count(d) as mention_count
+            RETURN e2.id_ as neighbor_id, relation_type, mention_count
+            UNION
+            MATCH (e1:Entity)-[r]->(e2:Entity {id_: $entity_id})
+            OPTIONAL MATCH (e1)<-[:MENTIONS]-(d:Document)
+            WITH e1, type(r) as relation_type, count(d) as mention_count
+            RETURN e1.id_ as neighbor_id, relation_type, mention_count
+            """
+        elif query_type == "get_entity_degree":
+            query = """
+            MATCH (e:Entity {id_: $entity_id})-[r]-()
+            RETURN count(r) as degree
+            """
+        elif query_type == "get_entity_mentions":
+            query = """
+            MATCH (e:Entity {id_: $entity_id})<-[:MENTIONS]-(d:Document)
+            RETURN count(d) as mention_count
+            """
+        elif query_type == "get_chunk_entities":
+            query = """
+            MATCH (d:Document {id_: $chunk_id})-[:MENTIONS]->(e:Entity)
+            RETURN e.id_ as entity_id
+            """
+        elif query_type == "backtrack_chunks":
+            query = """
+            MATCH (e:Entity {id_: $entity_id})<-[:MENTIONS]-(d:Document)
+            WHERE d.embedding IS NOT NULL
+            RETURN d.id_ as chunk_id, d.content as content, d.embedding as embedding
+            LIMIT $chunks_per_entity
+            """
+        else:
+            raise ValueError(f"Unknown query type: {query_type}")
+
+        return self.graph_store.query(query, params)
+
+    def _execute_networkx_query(self, query_type: str, params: dict = None) -> List[Dict[str, Any]]:
+        """Execute NetworkX-specific queries"""
+        params = params or {}
+        results = []
+
+        if query_type == "semantic_search_entities":
+            # Get all entity nodes with embeddings
+            for node_id, node_data in self.graph_store.graph.nodes(data=True):
+                if (node_data.get('node_type') == 'Entity' and
+                    node_data.get('embedding')):
+
+                    # Count mentions (documents that mention this entity)
+                    mention_count = 0
+                    for edge in self.graph_store.graph.edges(data=True):
+                        source, target, edge_data = edge
+                        if (target == node_id and
+                            edge_data.get('relation_type') == 'MENTIONS'):
+                            mention_count += 1
+
+                    results.append({
+                        'entity_id': node_data.get('id_'),
+                        'entity_name': node_data.get('entity_name'),
+                        'entity_type': node_data.get('entity_type'),
+                        'embedding': node_data.get('embedding'),
+                        'mention_count': mention_count,
+                        'attributes': node_data.get('attributes', '{}')
+                    })
+
+            # Sort by mention count
+            results.sort(key=lambda x: x['mention_count'], reverse=True)
+            return results[:2000]
+
+        elif query_type == "semantic_search_chunks":
+            # Get all document nodes with embeddings
+            for node_id, node_data in self.graph_store.graph.nodes(data=True):
+                if (node_data.get('node_type') == 'Document' and
+                    node_data.get('embedding')):
+
+                    # Count entities and collect entity names
+                    entity_count = 0
+                    entity_names = []
+                    for edge in self.graph_store.graph.edges(data=True):
+                        source, target, edge_data = edge
+                        if (source == node_id and
+                            edge_data.get('relation_type') == 'MENTIONS'):
+                            entity_count += 1
+                            target_data = self.graph_store.graph.nodes[target]
+                            if target_data.get('entity_name'):
+                                entity_names.append(target_data['entity_name'])
+
+                    results.append({
+                        'chunk_id': node_data.get('id_'),
+                        'content': node_data.get('content'),
+                        'embedding': node_data.get('embedding'),
+                        'metadata': node_data.get('metadata', '{}'),
+                        'entity_count': entity_count,
+                        'entity_names': entity_names
+                    })
+
+            # Sort by entity count
+            results.sort(key=lambda x: x['entity_count'], reverse=True)
+            return results[:2000]
+
+        elif query_type == "get_entity_data":
+            entity_id = params.get('entity_id')
+            entity_node_id = f"entity_{entity_id}"
+
+            if self.graph_store.graph.has_node(entity_node_id):
+                node_data = self.graph_store.graph.nodes[entity_node_id]
+                return [{
+                    'name': node_data.get('entity_name'),
+                    'type': node_data.get('entity_type'),
+                    'attributes': node_data.get('attributes', '{}')
+                }]
+            return []
+
+        elif query_type == "get_entity_neighbors":
+            entity_id = params.get('entity_id')
+            entity_node_id = f"entity_{entity_id}"
+
+            if not self.graph_store.graph.has_node(entity_node_id):
+                return []
+
+            neighbors = []
+            # Get outgoing edges
+            for target in self.graph_store.graph.successors(entity_node_id):
+                edge_data = self.graph_store.graph.get_edge_data(entity_node_id, target)
+                if edge_data:
+                    for edge_key, edge_attrs in edge_data.items():
+                        if edge_attrs.get('relation_type') != 'MENTIONS':
+                            # Count mentions for target entity
+                            mention_count = 0
+                            for edge in self.graph_store.graph.edges(data=True):
+                                if (edge[1] == target and
+                                    edge[2].get('relation_type') == 'MENTIONS'):
+                                    mention_count += 1
+
+                            target_data = self.graph_store.graph.nodes[target]
+                            neighbors.append({
+                                'neighbor_id': target_data.get('id_'),
+                                'relation_type': edge_attrs.get('relation_type'),
+                                'mention_count': mention_count
+                            })
+
+            # Get incoming edges
+            for source in self.graph_store.graph.predecessors(entity_node_id):
+                edge_data = self.graph_store.graph.get_edge_data(source, entity_node_id)
+                if edge_data:
+                    for edge_key, edge_attrs in edge_data.items():
+                        if edge_attrs.get('relation_type') != 'MENTIONS':
+                            # Count mentions for source entity
+                            mention_count = 0
+                            for edge in self.graph_store.graph.edges(data=True):
+                                if (edge[1] == source and
+                                    edge[2].get('relation_type') == 'MENTIONS'):
+                                    mention_count += 1
+
+                            source_data = self.graph_store.graph.nodes[source]
+                            neighbors.append({
+                                'neighbor_id': source_data.get('id_'),
+                                'relation_type': edge_attrs.get('relation_type'),
+                                'mention_count': mention_count
+                            })
+
+            return neighbors
+
+        elif query_type == "get_entity_degree":
+            entity_id = params.get('entity_id')
+            entity_node_id = f"entity_{entity_id}"
+
+            if self.graph_store.graph.has_node(entity_node_id):
+                degree = self.graph_store.graph.degree(entity_node_id)
+                return [{'degree': degree}]
+            return [{'degree': 0}]
+
+        elif query_type == "get_entity_mentions":
+            entity_id = params.get('entity_id')
+            entity_node_id = f"entity_{entity_id}"
+
+            mention_count = 0
+            for edge in self.graph_store.graph.edges(data=True):
+                if (edge[1] == entity_node_id and
+                    edge[2].get('relation_type') == 'MENTIONS'):
+                    mention_count += 1
+
+            return [{'mention_count': mention_count}]
+
+        elif query_type == "get_chunk_entities":
+            chunk_id = params.get('chunk_id')
+            doc_node_id = f"doc_{chunk_id}"
+
+            entity_ids = []
+            for target in self.graph_store.graph.successors(doc_node_id):
+                edge_data = self.graph_store.graph.get_edge_data(doc_node_id, target)
+                if edge_data:
+                    for edge_key, edge_attrs in edge_data.items():
+                        if edge_attrs.get('relation_type') == 'MENTIONS':
+                            target_data = self.graph_store.graph.nodes[target]
+                            entity_ids.append({'entity_id': target_data.get('id_')})
+
+            return entity_ids
+
+        elif query_type == "backtrack_chunks":
+            entity_id = params.get('entity_id')
+            entity_node_id = f"entity_{entity_id}"
+            chunks_per_entity = params.get('chunks_per_entity', 10)
+
+            chunks = []
+            for source in self.graph_store.graph.predecessors(entity_node_id):
+                edge_data = self.graph_store.graph.get_edge_data(source, entity_node_id)
+                if edge_data:
+                    for edge_key, edge_attrs in edge_data.items():
+                        if edge_attrs.get('relation_type') == 'MENTIONS':
+                            source_data = self.graph_store.graph.nodes[source]
+                            if (source_data.get('node_type') == 'Document' and
+                                source_data.get('embedding')):
+                                chunks.append({
+                                    'chunk_id': source_data.get('id_'),
+                                    'content': source_data.get('content'),
+                                    'embedding': source_data.get('embedding')
+                                })
+
+                                if len(chunks) >= chunks_per_entity:
+                                    break
+
+                    if len(chunks) >= chunks_per_entity:
+                        break
+
+            return chunks
+
+        else:
+            raise ValueError(f"Unknown query type: {query_type}")
+
     def retrieve(self, query: str, top_k: int = 10) -> List[Document]:
         """
         Main retrieval method - returns List[Document]
@@ -239,22 +525,7 @@ class GraphRetrieval(BaseGraphRetriever):
         # Enhanced entity search with better filtering and scoring
 
         # Get entities with embeddings, including additional metadata for better scoring
-        query = """
-        MATCH (e:Entity)
-        WHERE e.embedding IS NOT NULL
-        OPTIONAL MATCH (e)<-[:MENTIONS]-(d:Document)
-        WITH e, count(d) as mention_count
-        RETURN e.id_ as entity_id,
-               e.entity_name as entity_name,
-               e.entity_type as entity_type,
-               e.embedding as embedding,
-               mention_count,
-               e.attributes as attributes
-        ORDER BY mention_count DESC
-        LIMIT 2000
-        """
-
-        results = self.graph_store.query(query)
+        results = self._execute_graph_query("semantic_search_entities")
         candidates = []
 
         for result in results:
@@ -292,22 +563,7 @@ class GraphRetrieval(BaseGraphRetriever):
         """Semantic search for document chunks using vector similarity"""
         # Enhanced chunk search with metadata and entity information
 
-        query = """
-        MATCH (d:Document)
-        WHERE d.embedding IS NOT NULL
-        OPTIONAL MATCH (d)-[:MENTIONS]->(e:Entity)
-        WITH d, count(e) as entity_count, collect(e.entity_name) as entity_names
-        RETURN d.id_ as chunk_id,
-               d.content as content,
-               d.embedding as embedding,
-               d.metadata as metadata,
-               entity_count,
-               entity_names
-        ORDER BY entity_count DESC
-        LIMIT 2000
-        """
-
-        results = self.graph_store.query(query)
+        results = self._execute_graph_query("semantic_search_chunks")
         candidates = []
 
         for result in results:
@@ -548,12 +804,7 @@ Selected indices:"""
 
     def get_entity_data(self, entity_id: str) -> Optional[Dict[str, Any]]:
         """Get entity data from graph store"""
-        query = """
-        MATCH (e:Entity {id_: $entity_id})
-        RETURN e.entity_name as name, e.entity_type as type, e.attributes as attributes
-        """
-
-        results = self.graph_store.query(query, {'entity_id': entity_id})
+        results = self._execute_graph_query("get_entity_data", {'entity_id': entity_id})
         if results:
             result = results[0]
             return {
@@ -567,19 +818,7 @@ Selected indices:"""
     def get_entity_neighbors(self, entity_id: str) -> List[Tuple[str, str, float]]:
         """Get entity neighbors with relation types and edge weights"""
         # Enhanced neighbor query with additional metadata for better edge weighting
-        query = """
-        MATCH (e1:Entity {id_: $entity_id})-[r]->(e2:Entity)
-        OPTIONAL MATCH (e2)<-[:MENTIONS]-(d:Document)
-        WITH e2, type(r) as relation_type, count(d) as mention_count
-        RETURN e2.id_ as neighbor_id, relation_type, mention_count
-        UNION
-        MATCH (e1:Entity)-[r]->(e2:Entity {id_: $entity_id})
-        OPTIONAL MATCH (e1)<-[:MENTIONS]-(d:Document)
-        WITH e1, type(r) as relation_type, count(d) as mention_count
-        RETURN e1.id_ as neighbor_id, relation_type, mention_count
-        """
-
-        results = self.graph_store.query(query, {'entity_id': entity_id})
+        results = self._execute_graph_query("get_entity_neighbors", {'entity_id': entity_id})
         neighbors = []
 
         for result in results:
@@ -637,12 +876,7 @@ Selected indices:"""
 
     def get_entity_specificity(self, entity_id: str) -> float:
         """Get entity specificity based on degree centrality"""
-        query = """
-        MATCH (e:Entity {id_: $entity_id})-[r]-()
-        RETURN count(r) as degree
-        """
-
-        results = self.graph_store.query(query, {'entity_id': entity_id})
+        results = self._execute_graph_query("get_entity_degree", {'entity_id': entity_id})
         degree = results[0]['degree'] if results else 0
 
         # Normalize degree to [0, 1] range (log scale)
@@ -650,12 +884,7 @@ Selected indices:"""
 
     def get_entity_importance(self, entity_id: str) -> float:
         """Get entity importance based on mention frequency"""
-        query = """
-        MATCH (e:Entity {id_: $entity_id})<-[:MENTIONS]-(d:Document)
-        RETURN count(d) as mention_count
-        """
-
-        results = self.graph_store.query(query, {'entity_id': entity_id})
+        results = self._execute_graph_query("get_entity_mentions", {'entity_id': entity_id})
         mention_count = results[0]['mention_count'] if results else 0
 
         # Normalize mention count to [0, 1] range (log scale)
@@ -863,14 +1092,7 @@ Selected indices:"""
 
         for entity_id, ppr_score in top_entities:
             # Get chunks mentioning this entity
-            query = """
-            MATCH (e:Entity {id_: $entity_id})<-[:MENTIONS]-(d:Document)
-            WHERE d.embedding IS NOT NULL
-            RETURN d.id_ as chunk_id, d.content as content, d.embedding as embedding
-            LIMIT $chunks_per_entity
-            """
-
-            results = self.graph_store.query(query, {
+            results = self._execute_graph_query("backtrack_chunks", {
                 'entity_id': entity_id,
                 'chunks_per_entity': self.config.chunks_per_entity
             })
@@ -915,12 +1137,7 @@ Selected indices:"""
 
     def _get_chunk_mentioned_entities(self, chunk_id: str) -> List[str]:
         """Get entities mentioned in a chunk"""
-        query = """
-        MATCH (d:Document {id_: $chunk_id})-[:MENTIONS]->(e:Entity)
-        RETURN e.id_ as entity_id
-        """
-
-        results = self.graph_store.query(query, {'chunk_id': chunk_id})
+        results = self._execute_graph_query("get_chunk_entities", {'chunk_id': chunk_id})
         return [result['entity_id'] for result in results]
 
     def _compute_enhanced_chunk_score(self, query: str, chunk_id: str, content: str,
@@ -1059,12 +1276,7 @@ Selected indices:"""
         # In production, would compute actual shortest paths from seed entities
 
         # For now, return a default score based on entity degree
-        query = """
-        MATCH (e:Entity {id_: $entity_id})-[r]-()
-        RETURN count(r) as degree
-        """
-
-        results = self.graph_store.query(query, {'entity_id': entity_id})
+        results = self._execute_graph_query("get_entity_degree", {'entity_id': entity_id})
         degree = results[0]['degree'] if results else 0
 
         # Simple scoring based on degree (higher degree = higher specificity)

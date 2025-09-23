@@ -1,9 +1,10 @@
-from typing import Optional, Literal
+from typing import Optional, Literal, Union, Annotated
 from pydantic import Field
 
 
 from framework.config import AbstractConfig
 from config.encapsulation.database.neo4j_with_embedding_config import Neo4jVectorConfig
+from config.encapsulation.database.networkx_with_embedding_config import NetworkXVectorConfig
 from config.encapsulation.llm.openai_config import OpenAIConfig
 from core.retrieval.graph_retrieveal.graph_retrieval import GraphRetrieval
 
@@ -13,8 +14,8 @@ class GraphRetrievalConfig(AbstractConfig):
     """Graph Retrieval Configuration"""
     type: Literal["graph_retrieval"] = "graph_retrieval"
 
-    # Neo4j configuration
-    neo4j_config: Neo4jVectorConfig
+    # Graph database configuration (supports both Neo4j and NetworkX)
+    graph_config: Annotated[Union[Neo4jVectorConfig, NetworkXVectorConfig], Field(discriminator="type")]
 
     # LLM configuration for entity filtering (optional)
     llm_config: Optional[OpenAIConfig] = Field(default=None, description="LLM configuration for entity filtering")
