@@ -520,27 +520,19 @@ class BM25IndexBuilder():
             if self.config.enable_gc:
                 gc.collect()
 
-
-
         return added_ids
 
-    def add(self, documents: List[Document], embeddings: Optional[List[List[float]]] = None) -> List[str]:
+    def add(self, documents: List[Document]) -> List[str]:
         """Add documents to the existing index (with ID deduplication)
 
         Args:
             documents: List of Document objects to add
-            embeddings: 预计算的嵌入向量（BM25不需要，忽略此参数，保持接口一致）
-
         Returns:
             List of document IDs that were successfully added to the index
         """
         if not documents:
             logger.warning("No documents provided for adding")
             return []
-
-        # BM25 索引不需要 embeddings，忽略此参数
-        if embeddings is not None:
-            logger.debug("BM25 index does not use embeddings, ignoring embeddings parameter")
 
         # 检查重复ID并过滤
         unique_documents = []
@@ -596,12 +588,11 @@ class BM25IndexBuilder():
         self._ensure_index_loaded()
         logger.info(f"Index automatically saved at: {self.config.index_path}")
 
-    def build_index(self, documents: List[Document], embeddings: Optional[List[List[float]]] = None) -> None:
+    def build_index(self, documents: List[Document]) -> None:
         """Build index from documents (only when index doesn't exist)
 
         Args:
             documents: List of Document objects to index
-            embeddings: 预计算的嵌入向量（BM25不需要，忽略此参数）
 
         Raises:
             RuntimeError: If index already exists
@@ -612,10 +603,6 @@ class BM25IndexBuilder():
                 "Index already exists. Use add() to add documents to existing index, "
                 "or delete the existing index first if you want to rebuild it."
             )
-
-        # BM25 索引不需要 embeddings，忽略此参数
-        if embeddings is not None:
-            logger.debug("BM25 index does not use embeddings, ignoring embeddings parameter")
 
         self.from_documents(documents)
 
@@ -658,22 +645,17 @@ class BM25IndexBuilder():
             logger.debug(f"BM25 index uses configured path {self.config.index_path}, ignoring provided path {index_path}")
         self.load_local()
 
-    def update_index(self, documents: List[Document], embeddings: Optional[List[List[float]]] = None) -> Optional[bool]:
+    def update_index(self, documents: List[Document]) -> Optional[bool]:
         """Update documents in index
 
         Args:
             documents: List of Document objects to update
-            embeddings: 预计算的嵌入向量（BM25不需要，忽略此参数）
 
         Returns:
             Optional[bool]: True if update successful, False otherwise, None if not implemented
         """
         if not documents:
             return True
-
-        # BM25 索引不需要 embeddings，忽略此参数
-        if embeddings is not None:
-            logger.debug("BM25 index does not use embeddings, ignoring embeddings parameter")
 
         try:
             # 先删除现有文档，再添加更新的文档
@@ -731,7 +713,6 @@ class BM25IndexBuilder():
             logger.error(f"Error deleting documents: {e}")
             return False
 
-    # TODO Modify to batch retrieval
     def get_by_ids(self, doc_ids: List[str]) -> List[Document]:
         """Retrieve documents by their IDs
         
@@ -853,7 +834,6 @@ class BM25IndexBuilder():
         except Exception:
             self.close()
             raise
-
 
 
     def search(

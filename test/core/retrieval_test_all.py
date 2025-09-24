@@ -13,31 +13,12 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"
 import importlib.util
 import sys
 
-# Create a symbolic module mapping to fix the typo in other files
-if 'config.encapsulaiton' not in sys.modules:
-    try:
-        # Import the correct modules
-        import config.encapsulation.llm
-        import config.encapsulation.database
-        import config.encapsulation.llm.huggingface_config
-        import config.encapsulation.database.faiss_config
-
-        # Map the misspelled module names to the correct ones
-        sys.modules['config.encapsulaiton'] = config.encapsulation
-        sys.modules['config.encapsulaiton.llm'] = config.encapsulation.llm
-        sys.modules['config.encapsulaiton.database'] = config.encapsulation.database
-        sys.modules['config.encapsulaiton.llm.huggingface_config'] = config.encapsulation.llm.huggingface_config
-        sys.modules['config.encapsulaiton.database.faiss_config'] = config.encapsulation.database.faiss_config
-    except ImportError as e:
-        print(f"Warning: Could not create module mapping: {e}")
-        pass
-
 from encapsulation.data_model.schema import Document
-from config.encapsulation.database.bm25_config import BM25IndexBuilderConfig
+from config.encapsulation.database.bm25_config import BM25BuilderConfig
 from config.core.retrieval.tantivy_bm25_config import TantivyBM25RetrieverConfig
 from config.core.retrieval.multipath_config import MultiPathRetrieverConfig
 from config.core.retrieval.dense_config import DenseRetrieverConfig
-from config.encapsulation.database.faiss_config import FaissIndexConfig
+from config.encapsulation.database.faiss_config import FaissVectorDBConfig
 from config.encapsulation.llm.huggingface_config import HuggingFaceEmbedConfig
 
 # 设置日志级别
@@ -90,24 +71,8 @@ def create_index_manager_and_build_indexes(documents: List[Document], index_conf
             try:
                 from config.encapsulation.llm.huggingface_config import HuggingFaceEmbedConfig
 
-                # 创建嵌入模型配置并设置到索引配置中
-                # embedding_config = HuggingFaceEmbedConfig(
-                #     model_name="/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
-                #     task_types="embedding",
-                #     device="cuda:0"
-                # )
-
-                # # 设置嵌入模型到索引配置中
-                # index_config.embedding_config = embedding_config
-
-                # 重新构建索引以包含嵌入配置
                 index = index_config.build()
-
-                # 使用build_index方法构建索引
                 index.build_index(documents)
-
-                # 保存索引
-                index.save_index(index_config.index_path)
 
             except Exception as e:
                 logger.warning(f"Failed to build FAISS index with embeddings: {e}")
@@ -170,7 +135,7 @@ class TestBM25Retriever(unittest.TestCase):
     def test_bm25_basic_functionality(self):
         """测试BM25基础功能"""
         # 创建BM25索引配置
-        index_config = BM25IndexBuilderConfig(
+        index_config = BM25BuilderConfig(
             type="bm25_indexer",
             index_path=os.path.join(self.temp_dir, "bm25_test"),
             bm25_k1=1.2,
@@ -263,7 +228,7 @@ class TestBM25Retriever(unittest.TestCase):
 
     def test_bm25_search_parameters(self):
         """测试BM25搜索参数"""
-        index_config = BM25IndexBuilderConfig(
+        index_config = BM25BuilderConfig(
             type="bm25_indexer",
             index_path=os.path.join(self.temp_dir, "bm25_params_test")
         )
@@ -319,13 +284,14 @@ class TestDenseRetriever(unittest.TestCase):
         """测试Dense基础功能"""
         # 创建嵌入配置
         embedding_config = HuggingFaceEmbedConfig(
-            model_name="/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
-            task_types="embedding",
-            device="cuda:0"
+            model_name="Qwen/Qwen3-Embedding-0.6B",
+            device="cuda:0",
+            use_china_mirror=True,
+            cache_folder="./models/Qwen"
         )
 
         # 创建Faiss索引配置
-        index_config = FaissIndexConfig(
+        index_config = FaissVectorDBConfig(
             type="faiss",
             index_path=os.path.join(self.temp_dir, "dense_test"),
             metric="cosine",
@@ -405,9 +371,10 @@ class TestDenseRetriever(unittest.TestCase):
                 "normalize_L2": true,
                 "embedding_config": {{
                     "type": "huggingface_embedding",
-                    "model_name": "/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
-                    "task_types": "embedding",
-                    "device": "cuda:0"
+                    "model_name": "Qwen/Qwen3-Embedding-0.6B",
+                    "device": "cuda:0",
+                    "use_china_mirror": true,
+                    "cache_folder": "./models/Qwen"
                 }}
             }}
         }}
@@ -493,9 +460,10 @@ class TestMultiPathRetriever(unittest.TestCase):
                         "index_type": "flat",
                         "embedding_config": {{
                             "type": "huggingface_embedding",
-                            "model_name": "/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B",
-                            "task_types": "embedding",
-                            "device": "cuda:0"
+                            "model_name": "Qwen/Qwen3-Embedding-0.6B",
+                            "device": "cuda:0",
+                            "use_china_mirror": true,
+                            "cache_folder": "./models/Qwen"
                         }}
                     }}
                 }}

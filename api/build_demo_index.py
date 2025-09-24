@@ -5,7 +5,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from encapsulation.data_model.schema import Document
-from config.encapsulation.database.faiss_config import FaissIndexConfig
+from config.encapsulation.database.faiss_config import FaissVectorDBConfig
 from config.encapsulation.llm.huggingface_config import HuggingFaceEmbedConfig
 
 def load_real_data():
@@ -58,7 +58,7 @@ def build_demo_index():
         model_name="Qwen/Qwen3-Embedding-0.6B",
         device="cuda:7", 
         encode_kwargs={
-            "batch_size": 16,
+            "batch_size": 8,
             "show_progress_bar": True,
             # "multi_process": True
         },
@@ -67,7 +67,7 @@ def build_demo_index():
     )
 
     # FAISS索引配置
-    faiss_config = FaissIndexConfig(
+    faiss_config = FaissVectorDBConfig(
         index_path="./data/unified_faiss_index",
         metric="cosine",
         index_type="flat",
@@ -96,9 +96,9 @@ def build_demo_index():
 
     # 6. 创建BM25索引配置
     print("\n6. 创建BM25索引配置...")
-    from config.encapsulation.database.bm25_config import BM25IndexBuilderConfig
+    from config.encapsulation.database.bm25_config import BM25BuilderConfig
 
-    bm25_config = BM25IndexBuilderConfig(
+    bm25_config = BM25BuilderConfig(
         index_path="./data/unified_bm25_index",
         bm25_k1=1.2,
         bm25_b=0.75
@@ -120,14 +120,14 @@ def build_demo_index():
     bm25_index = bm25_config.build()
 
     try:
-        bm25_index.from_documents(documents)
+        bm25_index.build_index(documents)
         print("✓ BM25索引构建完成")
     except Exception as e:
         print(f"✗ BM25索引构建失败: {e}")
         # 尝试使用add_documents方法
         try:
             print("尝试使用add_documents方法...")
-            bm25_index.add_documents(documents)
+            bm25_index.update_index(documents)
             print("✓ 使用add_documents方法成功")
         except Exception as e2:
             print(f"✗ add_documents也失败: {e2}")

@@ -4,7 +4,7 @@ from encapsulation.database.vector_db.faiss import FaissVectorDB
 from config.encapsulation.llm.huggingface_config import HuggingFaceEmbedConfig
 from pydantic import Field
 
-class FaissIndexConfig(AbstractConfig):
+class FaissVectorDBConfig(AbstractConfig):
     type: Literal["faiss"] = "faiss"
 
     index_path: str = None

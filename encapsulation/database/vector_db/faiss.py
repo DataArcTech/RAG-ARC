@@ -376,47 +376,31 @@ class FaissVectorDB(VectorDB):
         """
         return [self.docstore[doc_id] for doc_id in ids if doc_id in self.docstore]
 
-    def update_index(self, documents: List[Document]) -> Optional[bool]:
+    def update_index(self, documents: List[Document]) -> List[str]:
         """Update documents in index
 
         Args:
             documents: List of Document objects to update
 
         Returns:
-            Optional[bool]: True if update successful, False otherwise
+            Ltst  of document IDs that were successfully added to the index
         """
         logger.info(f"Updating index with {len(documents)} documents")
 
         # Check if embedding model is available
         if self.embedding_model is None:
             logger.error("No embedding model available for update")
-            return False
+            return []
 
         try:
-            # For FAISS, update is implemented as delete + add
-            # Extract IDs from documents
-            doc_ids = [doc.id for doc in documents if doc.id is not None]
-
-            # Delete existing documents with these IDs (only if they exist)
-            if doc_ids:
-                existing_ids = [doc_id for doc_id in doc_ids if doc_id in self.docstore]
-                if existing_ids:
-                    logger.info(f"Deleting {len(existing_ids)} existing documents for update")
-                    delete_result = self.delete_index(existing_ids)
-                    if delete_result is False:
-                        logger.error("Failed to delete existing documents")
-                        return False
-                else:
-                    logger.info("No existing documents to delete, adding new documents")
-
             # Add updated documents (embeddings will be generated automatically)
-            self._add_documents(documents)
+            doc_ids = self._add_documents(documents)
             logger.info(f"Update completed: {self.index.ntotal} total vectors")
-            return True
+            return doc_ids
 
         except Exception as e:
             logger.error(f"Update failed: {str(e)}")
-            return False
+            return []
     
     def save_index(self, path: str, name: str = "index") -> None:
         """Save index to filesystem path

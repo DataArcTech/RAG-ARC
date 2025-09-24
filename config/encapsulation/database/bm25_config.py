@@ -4,7 +4,7 @@ from framework.config import AbstractConfig
 from encapsulation.database.bm25_indexer import BM25IndexBuilder
 
 
-class BM25IndexBuilderConfig(AbstractConfig):
+class BM25BuilderConfig(AbstractConfig):
     """BM25索引构建器配置"""
     type: Literal["bm25_indexer"] = "bm25_indexer"
 

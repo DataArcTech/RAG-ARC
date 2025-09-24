@@ -1,7 +1,7 @@
 from typing import Literal, Dict, Any
 from pydantic import Field, ConfigDict
 from framework.config import AbstractConfig
-from config.encapsulation.database.bm25_config import BM25IndexBuilderConfig
+from config.encapsulation.database.bm25_config import BM25BuilderConfig
 from core.retrieval.tantivy_bm25 import TantivyBM25Retriever
 
 class TantivyBM25RetrieverConfig(AbstractConfig):
@@ -11,7 +11,7 @@ class TantivyBM25RetrieverConfig(AbstractConfig):
     
     index_path: str = Field(description="Path to the BM25 index")
     # Index configuration
-    index_config: BM25IndexBuilderConfig = Field(description="BM25 index configuration")
+    index_config: BM25BuilderConfig = Field(description="BM25 index configuration")
 
     # Search parameters
     search_kwargs: Dict[str, Any] = Field(

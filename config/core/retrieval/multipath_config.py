@@ -4,6 +4,8 @@ from config.core.retrieval.dense_config import DenseRetrieverConfig
 from config.core.retrieval.tantivy_bm25_config import TantivyBM25RetrieverConfig
 from core.retrieval.multipath import MultiPathRetriever
 from framework.config import AbstractConfig
+
+
 class MultiPathRetrieverConfig(AbstractConfig):
     """Configuration for MultiPath Retriever"""
     model_config = ConfigDict(arbitrary_types_allowed=True)
