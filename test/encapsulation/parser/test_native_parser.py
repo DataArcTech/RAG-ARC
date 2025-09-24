@@ -3,18 +3,8 @@ Test for Native Parser - testing all supported document formats
 """
 
 import os
-from typing import Literal
 
-from framework.config import AbstractConfig
-from encapsulation.parser.native import NativeParser
-
-
-class NativeParserConfig(AbstractConfig):
-    """Configuration for Native Parser testing"""
-    type: Literal["native"] = "native"
-
-    def build(self) -> NativeParser:
-        return NativeParser(self)
+from config.encapsulation.parser.native import NativeParserConfig
 
 
 def main():
@@ -29,7 +19,7 @@ def main():
         print("\n--- Test 1: build ---")
         parser = config.build()
         print(f"  Native Parser built from config")
-        print(f"  Output directory default: {getattr(parser.config, 'output_dir', 'output')}")
+        print(f"  Output directory from env: {os.getenv('RAG_OUTPUT_DIR', './output/parsed_documents')}")
 
         # 2. Test get_supported_extensions
         print("\n--- Test 2: get_supported_extensions ---")
@@ -48,14 +38,19 @@ def main():
             if os.path.exists(html_path):
                 print(f"  Found sample HTML: {html_path}")
                 try:
-                    results = parser.parse_file(html_path)
+                    # Read file as binary data
+                    with open(html_path, 'rb') as f:
+                        html_data = f.read()
+                    filename = os.path.basename(html_path)
+
+                    results = parser.parse_file(html_data, filename)
                     print(f"  Parsed HTML successfully")
                     print(f"  Results count: {len(results)}")
 
                     for i, result in enumerate(results):
                         print(f"    Result {i+1}:")
                         print(f"      Content type: {result.get('content_type')}")
-                        print(f"      File path: {result.get('file_path')}")
+                        print(f"      Filename: {result.get('filename')}")
                         if 'output_paths' in result:
                             print(f"      Output files: {len(result['output_paths'])}")
                         if 'metadata' in result:
@@ -91,7 +86,9 @@ def main():
                 f.write(html_content)
 
             try:
-                results = parser.parse_file(test_html_path)
+                # Convert string to bytes for testing
+                html_data = html_content.encode('utf-8')
+                results = parser.parse_file(html_data, "test_sample.html")
                 print(f"  Created and parsed test HTML successfully")
                 print(f"  Results count: {len(results)}")
             except Exception as e:
@@ -108,14 +105,19 @@ def main():
             if os.path.exists(docx_path):
                 print(f"  Found sample DOCX: {docx_path}")
                 try:
-                    results = parser.parse_file(docx_path)
+                    # Read file as binary data
+                    with open(docx_path, 'rb') as f:
+                        docx_data = f.read()
+                    filename = os.path.basename(docx_path)
+
+                    results = parser.parse_file(docx_data, filename)
                     print(f"  Parsed DOCX successfully")
                     print(f"  Results count: {len(results)}")
 
                     for i, result in enumerate(results):
                         print(f"    Result {i+1}:")
                         print(f"      Content type: {result.get('content_type')}")
-                        print(f"      File path: {result.get('file_path')}")
+                        print(f"      Filename: {result.get('filename')}")
                         if 'output_paths' in result:
                             print(f"      Output files: {len(result['output_paths'])}")
 
@@ -141,14 +143,19 @@ def main():
             if os.path.exists(excel_path):
                 print(f"  Found sample Excel: {excel_path}")
                 try:
-                    results = parser.parse_file(excel_path)
+                    # Read file as binary data
+                    with open(excel_path, 'rb') as f:
+                        excel_data = f.read()
+                    filename = os.path.basename(excel_path)
+
+                    results = parser.parse_file(excel_data, filename)
                     print(f"  Parsed Excel successfully")
                     print(f"  Results count: {len(results)}")
 
                     for i, result in enumerate(results):
                         print(f"    Result {i+1}:")
                         print(f"      Content type: {result.get('content_type')}")
-                        print(f"      File path: {result.get('file_path')}")
+                        print(f"      Filename: {result.get('filename')}")
 
                     excel_found = True
                     break
@@ -167,7 +174,9 @@ def main():
                 f.write(csv_content)
 
             try:
-                results = parser.parse_file(test_csv_path)
+                # Convert CSV string to bytes for testing
+                csv_data = csv_content.encode('utf-8')
+                results = parser.parse_file(csv_data, "test_sample.csv")
                 print(f"  Created and parsed test CSV successfully")
                 print(f"  Results count: {len(results)}")
             except Exception as e:
@@ -184,14 +193,19 @@ def main():
             if os.path.exists(pptx_path):
                 print(f"  Found sample PPTX: {pptx_path}")
                 try:
-                    results = parser.parse_file(pptx_path)
+                    # Read file as binary data
+                    with open(pptx_path, 'rb') as f:
+                        pptx_data = f.read()
+                    filename = os.path.basename(pptx_path)
+
+                    results = parser.parse_file(pptx_data, filename)
                     print(f"  Parsed PPTX successfully")
                     print(f"  Results count: {len(results)}")
 
                     for i, result in enumerate(results):
                         print(f"    Result {i+1}:")
                         print(f"      Content type: {result.get('content_type')}")
-                        print(f"      File path: {result.get('file_path')}")
+                        print(f"      Filename: {result.get('filename')}")
                         if 'output_paths' in result:
                             print(f"      Output files: {len(result['output_paths'])}")
 
@@ -204,69 +218,42 @@ def main():
             print(f"  No sample PPTX found in test paths: {sample_pptx_paths}")
             print(f"  Skipping PPTX parsing test")
 
-        # 7. Test URL detection
-        print("\n--- Test 7: url_detection ---")
-        test_urls = [
-            "https://example.com/page.html",
-            "http://example.com",
-            "https://example.com/file.docx"
-        ]
-
-        for url in test_urls:
-            is_url = parser._is_url(url)
-            if is_url:
-                is_html = parser._is_html_url(url)
-                print(f"  '{url}' -> URL: {is_url}, HTML: {is_html}")
-            else:
-                print(f"  '{url}' -> Not a URL")
-
-        # 8. Test error handling
-        print("\n--- Test 8: error_handling ---")
+        # 7. Test error handling
+        print("\n--- Test 7: error_handling ---")
 
         # Test unsupported file extension
         try:
-            parser.parse_file("nonexistent.txt")
+            # Create fake binary data for unsupported file
+            fake_data = b"fake content"
+            parser.parse_file(fake_data, "nonexistent.txt")
             print(f"  ERROR: Should have failed with unsupported extension")
         except ValueError as e:
             print(f"  Correctly caught unsupported extension: {e}")
         except Exception as e:
             print(f"  Unexpected error type: {e}")
 
-        # Test non-existent file
+        # Test with invalid data
         try:
-            parser.parse_file("nonexistent.docx")
-            print(f"  ERROR: Should have failed with non-existent file")
-        except FileNotFoundError as e:
-            print(f"  Correctly caught file not found: {e}")
+            # Create fake binary data for DOCX
+            fake_docx_data = b"fake docx content"
+            parser.parse_file(fake_docx_data, "fake.docx")
+            print(f"  ERROR: Should have failed with invalid DOCX data")
         except Exception as e:
-            print(f"  Unexpected error type: {e}")
+            print(f"  Correctly caught data error: {type(e).__name__}: {e}")
 
-        # Test unsupported URL
+        # 8. Test environment-based output directory
+        print("\n--- Test 8: environment_output_directory ---")
+        output_dir = os.getenv('RAG_OUTPUT_DIR', './output/parsed_documents')
+        print(f"  Using output directory from environment: {output_dir}")
+
+        # Test with the created HTML content
         try:
-            parser.parse_file("https://example.com/file.docx")
-            print(f"  ERROR: Should have failed with unsupported URL")
-        except ValueError as e:
-            print(f"  Correctly caught unsupported URL: {e}")
+            html_data = html_content.encode('utf-8')
+            results = parser.parse_file(html_data, "env_test.html")
+            print(f"  Environment output directory used successfully")
+            print(f"  Directory exists: {os.path.exists(output_dir)}")
         except Exception as e:
-            print(f"  Unexpected error type: {e}")
-
-        # 9. Test output directory creation
-        print("\n--- Test 9: output_directory_creation ---")
-        custom_output = "./test_output/custom_native_output"
-        print(f"  Testing custom output directory: {custom_output}")
-
-        if os.path.exists("./test_output/test_sample.html"):
-            try:
-                results = parser.parse_file(
-                    "./test_output/test_sample.html",
-                    output_dir=custom_output
-                )
-                print(f"  Output directory created and used successfully")
-                print(f"  Directory exists: {os.path.exists(custom_output)}")
-            except Exception as e:
-                print(f"  Failed to create custom output: {e}")
-        else:
-            print(f"  No test file available")
+            print(f"  Failed with environment output: {e}")
 
         print("\n All Native Parser tests completed!")
 

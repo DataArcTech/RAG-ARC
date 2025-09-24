@@ -1,16 +1,19 @@
 import os
 import json
 import logging
-from dataclasses import dataclass
 from typing import List, Optional
 from urllib.parse import urlparse
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from .base import ParserBase
+from framework.singleton_decorator import singleton
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@singleton
 class NativeParser(ParserBase):
     """
     Multi-format document parser supporting PDF, DOCX, Excel, PowerPoint, HTML, and images.
@@ -30,30 +33,19 @@ class NativeParser(ParserBase):
 
     def parse_file(
         self,
-        input_path: str,
-        output_dir: Optional[str] = None,
+        file_data: bytes,
+        filename: str,
         **kwargs
     ) -> List[dict]:
-        """Parse a file of any supported type"""
+        """Parse a file of any supported type from binary data"""
 
-        # Set up output directory
-        output_dir = output_dir or getattr(self.config, 'output_dir', 'output')
+        # Get output directory from environment variable
+        output_dir = os.getenv('NATIVE_PARSER_OUTPUT_DIR', './test_output/native')
         output_dir = os.path.abspath(output_dir)
         os.makedirs(output_dir, exist_ok=True)
 
-        # Handle URLs
-        if self._is_url(input_path):
-            if self._is_html_url(input_path):
-                return self._parse_html_url(input_path, output_dir, **kwargs)
-            else:
-                raise ValueError(f"Only HTML URLs are supported, got: {input_path}")
-
-        # Validate file exists
-        if not os.path.isfile(input_path):
-            raise FileNotFoundError(f"File not found: {input_path}")
-
         # Extract file extension and validate
-        _, file_ext = os.path.splitext(input_path)
+        base_filename, file_ext = os.path.splitext(filename)
         file_ext = file_ext.lower()
 
         if file_ext not in self.get_supported_extensions():
@@ -63,53 +55,38 @@ class NativeParser(ParserBase):
         # Route to appropriate parser method
         try:
             if file_ext == '.docx':
-                return self._parse_docx(input_path, output_dir, **kwargs)
+                return self._parse_docx(file_data, filename, output_dir, **kwargs)
             elif file_ext in ['.xlsx', '.xls', '.csv']:
-                return self._parse_excel(input_path, output_dir, **kwargs)
+                return self._parse_excel(file_data, filename, output_dir, **kwargs)
             elif file_ext == '.pptx':
-                return self._parse_ppt(input_path, output_dir, **kwargs)
+                return self._parse_ppt(file_data, filename, output_dir, **kwargs)
             elif file_ext == '.html':
-                return self._parse_html_file(input_path, output_dir, **kwargs)
+                return self._parse_html_content(file_data.decode('utf-8'), filename, base_filename, output_dir)
             else:
                 raise ValueError(f"File type '{file_ext}' is listed as supported but no handler exists")
 
         except Exception as e:
-            logger.error(f"Failed to parse {input_path}: {str(e)}")
-            raise RuntimeError(f"Failed to parse {input_path}: {str(e)}")
+            logger.error(f"Failed to parse {filename}: {str(e)}")
+            raise RuntimeError(f"Failed to parse {filename}: {str(e)}")
 
     def get_supported_extensions(self) -> List[str]:
         """Get all supported file extensions"""
         return ['.docx', '.xlsx', '.xls', '.csv', '.pptx', '.html']
 
-    def _is_url(self, path: str) -> bool:
-        """Check if path is a URL"""
+    def _parse_docx(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[dict]:
+        """Parse DOCX file from binary data and return structured results"""
         try:
-            result = urlparse(path)
-            return bool(result.scheme and result.netloc)
-        except:
-            return False
-
-    def _is_html_url(self, url: str) -> bool:
-        """Check if URL points to HTML content"""
-        return url.lower().endswith('.html') or not any(
-            url.lower().endswith(ext) for ext in self.get_supported_extensions()
-        )
-
-    # ==================== PRIVATE PARSING METHODS ====================
-
-    def _parse_docx(self, input_path: str, output_dir: str, **kwargs) -> List[dict]:
-        """Parse DOCX file and return structured results"""
-        try:
+            import io
             from docx import Document
 
-            filename = os.path.splitext(os.path.basename(input_path))[0]
-            save_dir = os.path.join(output_dir, filename)
+            base_filename = os.path.splitext(filename)[0]
+            save_dir = os.path.join(output_dir, base_filename)
             os.makedirs(save_dir, exist_ok=True)
 
-            print(f"Parsing DOCX: {filename}")
+            print(f"Parsing DOCX: {base_filename}")
 
-            # Parse DOCX content
-            doc = Document(input_path)
+            # Parse DOCX content from binary data
+            doc = Document(io.BytesIO(file_data))
 
             # Extract text content
             full_text = []
@@ -132,25 +109,25 @@ class NativeParser(ParserBase):
                 'text': '\n'.join(full_text),
                 'tables': tables_data,
                 'metadata': {
-                    'filename': filename,
+                    'filename': base_filename,
                     'paragraphs_count': len([p for p in doc.paragraphs if p.text.strip()]),
                     'tables_count': len(tables_data)
                 }
             }
 
             # Save as JSON
-            json_path = os.path.join(save_dir, f"{filename}.json")
+            json_path = os.path.join(save_dir, f"{base_filename}.json")
             with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(content, f, ensure_ascii=False, indent=2)
 
             # Save as Markdown
             md_content = self._convert_docx_to_markdown(content)
-            md_path = os.path.join(save_dir, f"{filename}.md")
+            md_path = os.path.join(save_dir, f"{base_filename}.md")
             with open(md_path, 'w', encoding='utf-8') as f:
                 f.write(md_content)
 
             result = {
-                'file_path': input_path,
+                'filename': filename,
                 'page_no': 0,
                 'content_type': 'docx',
                 'output_paths': {
@@ -166,28 +143,29 @@ class NativeParser(ParserBase):
             logger.error(f"DOCX parsing failed: {str(e)}")
             raise
 
-    def _parse_excel(self, input_path: str, output_dir: str, **kwargs) -> List[dict]:
-        """Parse Excel file and return structured results"""
+    def _parse_excel(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[dict]:
+        """Parse Excel file from binary data and return structured results"""
         try:
+            import io
             import pandas as pd
             import chardet
 
-            filename = os.path.splitext(os.path.basename(input_path))[0]
-            save_dir = os.path.join(output_dir, filename)
+            base_filename = os.path.splitext(filename)[0]
+            file_ext = os.path.splitext(filename)[1].lower()
+            save_dir = os.path.join(output_dir, base_filename)
             os.makedirs(save_dir, exist_ok=True)
 
-            print(f"Parsing Excel: {filename}")
+            print(f"Parsing Excel: {base_filename}")
 
-            # Read all sheets
-            if input_path.lower().endswith('.csv'):
+            # Read all sheets from binary data
+            if file_ext == '.csv':
                 # Detect encoding for CSV
-                with open(input_path, 'rb') as f:
-                    raw = f.read(10000)
-                    result = chardet.detect(raw)
-                    encoding = result['encoding'] or "utf-8"
-                sheets_data = {'Sheet1': pd.read_csv(input_path, encoding=encoding)}
+                encoding_result = chardet.detect(file_data[:10000])
+                encoding = encoding_result['encoding'] or "utf-8"
+                csv_content = file_data.decode(encoding)
+                sheets_data = {'Sheet1': pd.read_csv(io.StringIO(csv_content))}
             else:
-                sheets_data = pd.read_excel(input_path, sheet_name=None)
+                sheets_data = pd.read_excel(io.BytesIO(file_data), sheet_name=None)
 
             all_content = []
             sheet_results = []
@@ -208,16 +186,16 @@ class NativeParser(ParserBase):
                 all_content.append(sheet_content)
 
                 # Save individual sheet as CSV
-                csv_path = os.path.join(save_dir, f"{filename}_{sheet_name}.csv")
+                csv_path = os.path.join(save_dir, f"{base_filename}_{sheet_name}.csv")
                 df.to_csv(csv_path, index=False, encoding='utf-8')
 
                 # Save as JSON
-                json_path = os.path.join(save_dir, f"{filename}_{sheet_name}.json")
+                json_path = os.path.join(save_dir, f"{base_filename}_{sheet_name}.json")
                 with open(json_path, 'w', encoding='utf-8') as f:
                     json.dump(sheet_content, f, ensure_ascii=False, indent=2)
 
                 sheet_results.append({
-                    'file_path': input_path,
+                    'filename': filename,
                     'page_no': len(sheet_results),
                     'content_type': 'excel_sheet',
                     'sheet_name': sheet_name,
@@ -229,7 +207,7 @@ class NativeParser(ParserBase):
                 })
 
             # Save combined results
-            combined_json = os.path.join(save_dir, f"{filename}_combined.json")
+            combined_json = os.path.join(save_dir, f"{base_filename}_combined.json")
             with open(combined_json, 'w', encoding='utf-8') as f:
                 json.dump(all_content, f, ensure_ascii=False, indent=2)
 
@@ -239,18 +217,19 @@ class NativeParser(ParserBase):
             logger.error(f"Excel parsing failed: {str(e)}")
             raise
 
-    def _parse_ppt(self, input_path: str, output_dir: str, **kwargs) -> List[dict]:
-        """Parse PowerPoint file and return structured results"""
+    def _parse_ppt(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[dict]:
+        """Parse PowerPoint file from binary data and return structured results"""
         try:
+            import io
             from pptx import Presentation
 
-            filename = os.path.splitext(os.path.basename(input_path))[0]
-            save_dir = os.path.join(output_dir, filename)
+            base_filename = os.path.splitext(filename)[0]
+            save_dir = os.path.join(output_dir, base_filename)
             os.makedirs(save_dir, exist_ok=True)
 
-            print(f"Parsing PowerPoint: {filename}")
+            print(f"Parsing PowerPoint: {base_filename}")
 
-            prs = Presentation(input_path)
+            prs = Presentation(io.BytesIO(file_data))
             slides_data = []
             results = []
 
@@ -277,18 +256,18 @@ class NativeParser(ParserBase):
                 slides_data.append(slide_content)
 
                 # Save individual slide
-                slide_json = os.path.join(save_dir, f"{filename}_slide_{i+1}.json")
+                slide_json = os.path.join(save_dir, f"{base_filename}_slide_{i+1}.json")
                 with open(slide_json, 'w', encoding='utf-8') as f:
                     json.dump(slide_content, f, ensure_ascii=False, indent=2)
 
                 # Convert to markdown
                 md_content = self._convert_slide_to_markdown(slide_content)
-                slide_md = os.path.join(save_dir, f"{filename}_slide_{i+1}.md")
+                slide_md = os.path.join(save_dir, f"{base_filename}_slide_{i+1}.md")
                 with open(slide_md, 'w', encoding='utf-8') as f:
                     f.write(md_content)
 
                 results.append({
-                    'file_path': input_path,
+                    'filename': filename,
                     'page_no': i,
                     'content_type': 'ppt_slide',
                     'slide_number': i + 1,
@@ -304,7 +283,7 @@ class NativeParser(ParserBase):
                 })
 
             # Save combined presentation
-            combined_json = os.path.join(save_dir, f"{filename}_combined.json")
+            combined_json = os.path.join(save_dir, f"{base_filename}_combined.json")
             with open(combined_json, 'w', encoding='utf-8') as f:
                 json.dump(slides_data, f, ensure_ascii=False, indent=2)
 
@@ -314,41 +293,15 @@ class NativeParser(ParserBase):
             logger.error(f"PowerPoint parsing failed: {str(e)}")
             raise
 
-    def _parse_html_file(self, input_path: str, output_dir: str, **kwargs) -> List[dict]:
-        """Parse HTML file and return structured results"""
-        with open(input_path, 'r', encoding='utf-8') as f:
-            html_content = f.read()
-        filename = os.path.splitext(os.path.basename(input_path))[0]
-        return self._parse_html_content(html_content, input_path, filename, output_dir)
-
-    def _parse_html_url(self, url: str, output_dir: str, **kwargs) -> List[dict]:
-        """Parse HTML URL and return structured results"""
-        try:
-            import requests
-
-            print(f"Fetching HTML from URL: {url}")
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-            html_content = response.text
-
-            filename = urlparse(url).path.split('/')[-1] or 'webpage'
-            filename = os.path.splitext(filename)[0] or 'webpage'
-
-            return self._parse_html_content(html_content, url, filename, output_dir)
-
-        except Exception as e:
-            logger.error(f"HTML URL parsing failed: {str(e)}")
-            raise
-
-    def _parse_html_content(self, html_content: str, source_path: str, filename: str, output_dir: str) -> List[dict]:
+    def _parse_html_content(self, html_content: str, filename: str, base_filename: str, output_dir: str) -> List[dict]:
         """Parse HTML content and return structured results"""
         try:
             from bs4 import BeautifulSoup
 
-            save_dir = os.path.join(output_dir, filename)
+            save_dir = os.path.join(output_dir, base_filename)
             os.makedirs(save_dir, exist_ok=True)
 
-            print(f"Parsing HTML: {filename}")
+            print(f"Parsing HTML: {base_filename}")
 
             # Parse HTML
             soup = BeautifulSoup(html_content, 'html.parser')
@@ -362,8 +315,7 @@ class NativeParser(ParserBase):
                 'images': [],
                 'tables': [],
                 'metadata': {
-                    'url': source_path if source_path.startswith('http') else '',
-                    'filename': filename
+                    'filename': base_filename
                 }
             }
 
@@ -408,18 +360,18 @@ class NativeParser(ParserBase):
                     content['tables'].append(table_data)
 
             # Save results
-            json_path = os.path.join(save_dir, f"{filename}.json")
+            json_path = os.path.join(save_dir, f"{base_filename}.json")
             with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(content, f, ensure_ascii=False, indent=2)
 
             # Convert to markdown
             md_content = self._convert_html_to_markdown(content)
-            md_path = os.path.join(save_dir, f"{filename}.md")
+            md_path = os.path.join(save_dir, f"{base_filename}.md")
             with open(md_path, 'w', encoding='utf-8') as f:
                 f.write(md_content)
 
             result = {
-                'file_path': source_path,
+                'filename': filename,
                 'page_no': 0,
                 'content_type': 'html',
                 'output_paths': {

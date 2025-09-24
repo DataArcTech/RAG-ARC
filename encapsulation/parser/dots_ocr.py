@@ -1,11 +1,16 @@
 import os
-import sys
 import json
 import logging
+import io
 from dataclasses import dataclass, field
 from typing import List, Optional, Any
 from tqdm import tqdm
 from multiprocessing.pool import ThreadPool
+from PIL import Image
+import fitz
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from .base import ParserBase
 
@@ -15,11 +20,12 @@ from .dots_ocr_src.utils.layout_utils import pre_process_bboxes, post_process_ou
 from .dots_ocr_src.utils.consts import MIN_PIXELS, MAX_PIXELS, image_extensions
 from .dots_ocr_src.utils.format_transformer import layoutjson2md
 from .dots_ocr_src.utils.doc_utils import load_images_from_pdf
+from framework.singleton_decorator import singleton
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@singleton
 class DotsOCRParser(ParserBase):
     """
     DotsOCR-based document parser implementation for advanced OCR and layout analysis.
@@ -105,7 +111,7 @@ class DotsOCRParser(ParserBase):
             self.processor = AutoProcessor.from_pretrained(
                 model_path,
                 trust_remote_code=True,
-                use_fast=True
+                use_fast=True,
             )
             self.process_vision_info = process_vision_info
             
@@ -346,39 +352,56 @@ class DotsOCRParser(ParserBase):
         return result
 
     def parse_image(
-        self, 
-        input_path: str, 
-        filename: str, 
-        save_dir: str, 
+        self,
+        file_data: bytes,
+        filename: str,
+        save_dir: str,
         prompt_mode="prompt_layout_all_en",
-        bbox=None, 
+        bbox=None,
         fitz_preprocess=False,
         **kwargs
     ) -> List[dict]:
-        """Parse a single image file"""
-        
-        origin_image = fetch_image(input_path)
+        """Parse a single image file from binary data"""
+        origin_image = Image.open(io.BytesIO(file_data))
         result = self._parse_single_image(
-            origin_image, prompt_mode, save_dir, filename, 
+            origin_image, prompt_mode, save_dir, filename,
             source="image", bbox=bbox, fitz_preprocess=fitz_preprocess
         )
-        result['file_path'] = input_path
+        result['filename'] = filename
         return [result]
 
     def parse_pdf(
-        self, 
-        input_path: str, 
-        filename: str, 
-        save_dir: str, 
+        self,
+        file_data: bytes,
+        filename: str,
+        save_dir: str,
         prompt_mode="prompt_layout_all_en",
         **kwargs
     ) -> List[dict]:
-        """Parse a PDF file"""
+        """Parse a PDF file from binary data"""
+
+        import io
         
-        print(f"Loading PDF: {input_path}")
-        images_origin = load_images_from_pdf(input_path, dpi=getattr(self.config, 'dpi', 200))
+
+        print(f"Loading PDF: {filename}")
+
+        # Create fitz document from binary data
+        pdf_doc = fitz.open("pdf", file_data)
+        images_origin = []
+
+        for page_num in range(len(pdf_doc)):
+            page = pdf_doc.load_page(page_num)
+            # Convert page to image at specified DPI
+            dpi = getattr(self.config, 'dpi', 200)
+            mat = fitz.Matrix(dpi/72, dpi/72)
+            pix = page.get_pixmap(matrix=mat)
+            img_data = pix.tobytes("ppm")
+            image = Image.open(io.BytesIO(img_data))
+            images_origin.append(image)
+
+        pdf_doc.close()
         total_pages = len(images_origin)
-        
+
         tasks = [
             {
                 "origin_image": image,
@@ -406,22 +429,22 @@ class DotsOCRParser(ParserBase):
 
         results.sort(key=lambda x: x["page_no"])
         for result in results:
-            result['file_path'] = input_path
+            result['filename'] = filename
         return results
 
     def parse_file(
-        self, 
-        input_path: str,
-        output_dir: Optional[str] = None,
+        self,
+        file_data: bytes,
+        filename: str,
         prompt_mode="prompt_layout_all_en",
         bbox=None,
         fitz_preprocess=False,
         **kwargs
     ) -> List[dict]:
-        """Parse a file (PDF or image)"""
-        
+        """Parse a file (PDF or image) from binary data"""
+
         # Check if file type is supported
-        filename, file_ext = os.path.splitext(os.path.basename(input_path))
+        base_filename, file_ext = os.path.splitext(filename)
         file_ext = file_ext.lower()
         supported_extensions = self.get_supported_extensions()
 
@@ -430,22 +453,23 @@ class DotsOCRParser(ParserBase):
             logger.error(error_msg)
             raise ValueError(error_msg)
 
-        output_dir = output_dir or getattr(self.config, 'output_dir', './test_output/dots_ocr_results')
+        # Get output directory from environment variable
+        output_dir = os.getenv('DOTSOCR_OUTPUT_DIR', './dotsorc/output')
         output_dir = os.path.abspath(output_dir)
-        save_dir = os.path.join(output_dir, filename)
+        save_dir = os.path.join(output_dir, base_filename)
         os.makedirs(save_dir, exist_ok=True)
 
         if file_ext == '.pdf':
-            results = self.parse_pdf(input_path, filename, save_dir, prompt_mode, **kwargs)
+            results = self.parse_pdf(file_data, base_filename, save_dir, prompt_mode, **kwargs)
         elif file_ext in image_extensions:
             results = self.parse_image(
-                input_path, filename, save_dir, prompt_mode,
+                file_data, base_filename, save_dir, prompt_mode,
                 bbox=bbox, fitz_preprocess=fitz_preprocess, **kwargs
             )
 
         print(f"Parsing finished, results saved to {save_dir}")
 
-        with open(os.path.join(output_dir, f"{filename}.jsonl"), 'w', encoding="utf-8") as w:
+        with open(os.path.join(output_dir, f"{base_filename}.jsonl"), 'w', encoding="utf-8") as w:
             for result in results:
                 w.write(json.dumps(result, ensure_ascii=False) + '\n')
 

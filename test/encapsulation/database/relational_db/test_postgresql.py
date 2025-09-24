@@ -9,7 +9,6 @@ import os
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from framework.config import AbstractConfig
 from encapsulation.database.relational_db.postgresql import PostgreSQLDB
 from encapsulation.data_model.orm_models import (
     FileMetadata, FileStatus,
@@ -18,20 +17,8 @@ from encapsulation.data_model.orm_models import (
 )
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import Literal
-import uuid
 
-class PostgreSQLConfig(AbstractConfig):
-    """Configuration for PostgreSQL Database"""
-    type: Literal["postgresql"] = "postgresql"
-    host: str = "localhost"
-    port: int = 5432
-    database: str = "rag_arc_test"
-    user: str = "postgres"
-    password: str = "123"
-
-    def build(self) -> PostgreSQLDB:
-        return PostgreSQLDB(self)
+from config.encapsulation.database.relational_db.postgresql_config import PostgreSQLConfig
 
 def test_file_metadata_operations(db: PostgreSQLDB):
     """Test complete CRUD operations for FileMetadata"""

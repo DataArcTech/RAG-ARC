@@ -10,48 +10,17 @@ import json
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from framework.config import AbstractConfig
-from encapsulation.database.file_store import FileStore
-from encapsulation.database.file_db.local import LocalDB
-from encapsulation.database.relational_db.postgresql import PostgreSQLDB
+from config.encapsulation.database.file_db.local_config import LocalDBConfig
+from config.encapsulation.database.relational_db.postgresql_config import PostgreSQLConfig
+from config.encapsulation.database.file_store_config import FileStoreConfig
 from encapsulation.data_model.orm_models import (
     FileMetadata, FileStatus,
     ParsedContentMetadata, ParsedContentStatus,
     ChunkMetadata, ChunkIndexStatus
 )
 
-from typing import Literal
 
-class LocalFileConfig(AbstractConfig):
-    """Configuration for Local file storage"""
-    type: Literal["local_file_store"] = "local_file_store"
-    base_path: str = "./test_output"
-
-    def build(self) -> LocalDB:
-        return LocalDB(self)
-
-class PostgreSQLConfig(AbstractConfig):
-    """Configuration for PostgreSQL Database"""
-    type: Literal["postgresql"] = "postgresql"
-    host: str = "localhost"
-    port: int = 5432
-    database: str = "rag_arc_filestore_test"
-    user: str = "postgres"
-    password: str = "123"
-
-    def build(self) -> PostgreSQLDB:
-        return PostgreSQLDB(self)
-
-class FileStoreConfig(AbstractConfig):
-    """Configuration for FileStore"""
-    type: Literal["file_store"] = "file_store"
-    file_db_config: LocalFileConfig
-    relational_db_config: PostgreSQLConfig
-
-    def build(self) -> FileStore:
-        return FileStore(self)
-
-def test_file_operations(file_store: FileStore):
+def test_file_operations(file_store):
     """Test complete CRUD operations for Files"""
     print("\n=== FILE OPERATIONS ===")
 
@@ -101,7 +70,8 @@ def test_file_operations(file_store: FileStore):
 
     return file_metadata
 
-def test_parsed_content_operations(file_store: FileStore, source_file: FileMetadata):
+
+def test_parsed_content_operations(file_store, source_file: FileMetadata):
     """Test complete CRUD operations for Parsed Content"""
     print("\n=== PARSED CONTENT OPERATIONS ===")
 
@@ -151,7 +121,8 @@ def test_parsed_content_operations(file_store: FileStore, source_file: FileMetad
 
     return parsed_metadata
 
-def test_chunk_operations(file_store: FileStore, source_parsed: ParsedContentMetadata):
+
+def test_chunk_operations(file_store, source_parsed: ParsedContentMetadata):
     """Test complete CRUD operations for Chunks"""
     print("\n=== CHUNK OPERATIONS ===")
 
@@ -213,7 +184,8 @@ def test_chunk_operations(file_store: FileStore, source_parsed: ParsedContentMet
 
     return chunk_metadata
 
-def test_error_handling(file_store: FileStore):
+
+def test_error_handling(file_store):
     """Test error handling for non-existent resources"""
     print("\n=== ERROR HANDLING ===")
 
@@ -263,7 +235,8 @@ def test_error_handling(file_store: FileStore):
     assert chunk_valid is False
     print("  Non-existent chunk validation returns False")
 
-def test_cleanup_operations(file_store: FileStore):
+
+def test_cleanup_operations(file_store):
     """Test cleanup by creating and deleting test data"""
     print("\n=== CLEANUP OPERATIONS ===")
 
@@ -328,11 +301,12 @@ def test_cleanup_operations(file_store: FileStore):
     assert file_store.get_file_metadata(file_metadata.file_id) is None
     print("  File cleanup successful")
 
+
 def main():
     print("Testing FileStore Operations with coordinated blob and metadata storage...")
 
     # Use configured base path instead of temporary directory
-    file_db_config = LocalFileConfig()
+    file_db_config = LocalDBConfig()
     base_path = file_db_config.base_path
     print(f"Using blob storage directory: {base_path}")
 
@@ -397,6 +371,7 @@ def main():
         print(f"\nTest failed with error: {e}")
         import traceback
         traceback.print_exc()
+
 
 if __name__ == "__main__":
     main()

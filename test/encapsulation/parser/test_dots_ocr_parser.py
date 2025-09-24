@@ -3,23 +3,8 @@ Test for DotsOCR Parser - testing with real PDF documents and images
 """
 
 import os
-from typing import Literal
 
-from framework.config import AbstractConfig
-from encapsulation.parser.dots_ocr import DotsOCRParser
-
-
-class DotsOCRConfig(AbstractConfig):
-    """Configuration for DotsOCR Parser testing"""
-    type: Literal["dots_ocr"] = "dots_ocr"
-    use_hf: bool = False  # Use VLLM by default for testing
-    device: str = "cuda:4"
-    base_url: str = "http://localhost:8001/v1"
-    api_key: str = "sk-xxx"
-    model_name: str = "model"
-
-    def build(self) -> DotsOCRParser:
-        return DotsOCRParser(self)
+from config.encapsulation.parser.dots_ocr import DotsOCRConfig
 
 
 def main():
@@ -38,7 +23,7 @@ def main():
         print(f"  Device: {getattr(parser.config, 'device', 'auto')}")
         print(f"  Base URL: {getattr(parser.config, 'base_url', 'http://localhost:8000/v1')}")
         print(f"  Model name: {getattr(parser.config, 'model_name', 'model')}")
-        print(f"  Output directory: {getattr(parser.config, 'output_dir', './test_output/dots_ocr_results')}")
+        print(f"  Output directory from env: {os.getenv('DOTSOCR_OUTPUT_DIR', './dotsorc/output')}")
         print(f"  DPI setting: {getattr(parser.config, 'dpi', 200)}")
 
         # 2. Test get_supported_extensions
@@ -58,8 +43,14 @@ def main():
             if os.path.exists(image_path):
                 print(f"  Found sample image: {image_path}")
                 try:
+                    # Read file as binary data
+                    with open(image_path, 'rb') as f:
+                        image_data = f.read()
+                    filename = os.path.basename(image_path)
+
                     results = parser.parse_file(
-                        image_path,
+                        image_data,
+                        filename,
                         prompt_mode="prompt_layout_all_en"
                     )
                     print(f"  Parsed image successfully")
@@ -67,7 +58,7 @@ def main():
 
                     for i, result in enumerate(results):
                         print(f"    Result {i+1}:")
-                        print(f"      File path: {result.get('file_path')}")
+                        print(f"      Filename: {result.get('filename')}")
                         print(f"      Page: {result.get('page_no', 0)}")
                         print(f"      Input size: {result.get('input_width')}x{result.get('input_height')}")
                         if 'md_content_path' in result:
@@ -97,8 +88,14 @@ def main():
             if os.path.exists(pdf_path):
                 print(f"  Found sample PDF: {pdf_path}")
                 try:
+                    # Read file as binary data
+                    with open(pdf_path, 'rb') as f:
+                        pdf_data = f.read()
+                    filename = os.path.basename(pdf_path)
+
                     results = parser.parse_file(
-                        pdf_path,
+                        pdf_data,
+                        filename,
                         prompt_mode="prompt_layout_all_en"
                     )
                     print(f"  Parsed PDF successfully")
@@ -107,7 +104,7 @@ def main():
                     # Show first few pages
                     for i, result in enumerate(results[:3]):  # Show first 3 pages
                         print(f"    Page {result.get('page_no', i)}:")
-                        print(f"      File path: {result.get('file_path')}")
+                        print(f"      Filename: {result.get('filename')}")
                         print(f"      Input size: {result.get('input_width')}x{result.get('input_height')}")
                         if 'md_content_path' in result:
                             print(f"      Markdown saved: {result['md_content_path']}")
@@ -143,6 +140,11 @@ def main():
 
         if test_file:
             print(f"  Testing prompt modes with: {test_file}")
+            # Read test file data once
+            with open(test_file, 'rb') as f:
+                test_data = f.read()
+            test_filename = os.path.basename(test_file)
+
             for mode in prompt_modes:
                 try:
                     if mode == "prompt_grounding_ocr":
@@ -152,9 +154,9 @@ def main():
 
                     print(f"    Testing {mode}...")
                     results = parser.parse_file(
-                        test_file,
-                        prompt_mode=mode,
-                        output_dir=f"./test_output/dots_ocr_{mode}"
+                        test_data,
+                        test_filename,
+                        prompt_mode=mode
                     )
                     print(f"      Success: {len(results)} results")
                 except Exception as e:
@@ -167,35 +169,44 @@ def main():
 
         # Test unsupported file extension
         try:
-            parser.parse_file("nonexistent.txt")
+            # Create fake binary data for unsupported file
+            fake_data = b"fake content"
+            parser.parse_file(fake_data, "nonexistent.txt")
             print(f"  ERROR: Should have failed with unsupported extension")
         except ValueError as e:
             print(f"  Correctly caught unsupported extension: {e}")
         except Exception as e:
             print(f"  Unexpected error type: {e}")
 
-        # Test non-existent file
+        # Test with invalid data
         try:
-            parser.parse_file("nonexistent.pdf")
-            print(f"  ERROR: Should have failed with non-existent file")
+            # Create fake binary data for PDF
+            fake_pdf_data = b"fake pdf content"
+            parser.parse_file(fake_pdf_data, "fake.pdf")
+            print(f"  ERROR: Should have failed with invalid PDF data")
         except Exception as e:
-            print(f"  Correctly caught file error: {type(e).__name__}: {e}")
+            print(f"  Correctly caught data error: {type(e).__name__}: {e}")
 
-        # 7. Test output directory creation
-        print("\n--- Test 7: output_directory_creation ---")
-        custom_output = "./test_output/custom_dots_ocr_output"
-        print(f"  Testing custom output directory: {custom_output}")
+        # 7. Test environment-based output directory
+        print("\n--- Test 7: environment_output_directory ---")
+        output_dir = os.getenv('DOTSOCR_OUTPUT_DIR', './dotsorc/output')
+        print(f"  Using output directory from environment: {output_dir}")
 
         if test_file:
             try:
+                # Read test file data
+                with open(test_file, 'rb') as f:
+                    test_data = f.read()
+                test_filename = os.path.basename(test_file)
+
                 results = parser.parse_file(
-                    test_file,
-                    output_dir=custom_output
+                    test_data,
+                    test_filename
                 )
-                print(f"  Output directory created and used successfully")
-                print(f"  Directory exists: {os.path.exists(custom_output)}")
+                print(f"  Environment output directory used successfully")
+                print(f"  Directory exists: {os.path.exists(output_dir)}")
             except Exception as e:
-                print(f"  Failed to create custom output: {e}")
+                print(f"  Failed with environment output: {e}")
         else:
             print(f"  No test file available")
 

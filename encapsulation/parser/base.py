@@ -9,19 +9,19 @@ class ParserBase(AbstractModule):
     
     @abstractmethod
     def parse_file(
-        self, 
-        input_path: str,
-        output_dir: Optional[str] = None,
+        self,
+        file_data: bytes,
+        filename: str,
         **kwargs
     ) -> List[dict]:
         """
-        Parse a single file (PDF, image, etc.)
-        
+        Parse a file from binary data
+
         Args:
-            input_path: Path to input file
-            output_dir: Optional override for output directory
+            file_data: Binary content of the file
+            filename: Name of the file (used for extension detection and output naming)
             **kwargs: Additional parsing options
-            
+
         Returns:
             List of parsing result dictionaries
         """

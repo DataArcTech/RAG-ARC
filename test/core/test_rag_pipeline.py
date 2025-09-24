@@ -9,12 +9,12 @@ import os
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config.encapsulation.openai_config import OpenAIChatConfig
-from config.encapsulation.faiss_config import FaissIndexConfig
-from config.encapsulation.huggingface_config import HuggingFaceEmbeddingConfig
-from config.encapsulation.qwen_config import QwenLLMConfig
+from config.encapsulation.llm.openai_chat import OpenAIChatConfig
+from config.encapsulation.database.faiss_config import FaissVectorDBConfig
+from config.encapsulation.llm.huggingface_embedding import HuggingFaceEmbeddingConfig
+from config.encapsulation.llm.qwen_rerank import QwenRerankConfig
 from config.core.query_rewriter_config import OpenAIQueryRewriterConfig
-from config.core.dense_config import DenseRetrieverConfig
+from config.core.retrieval.dense_config import DenseRetrieverConfig
 from config.core.reranker_config import Qwen3RerankerConfig
 
 
@@ -62,7 +62,7 @@ def main():
     try:
         # Create retrieval configuration following unified_dense_config.json pattern
         embedding_config = HuggingFaceEmbeddingConfig()
-        faiss_config = FaissIndexConfig(embedding=embedding_config)
+        faiss_config = FaissVectorDBConfig(embedding=embedding_config)
         dense_config = DenseRetrieverConfig(
             index_config=faiss_config
         )
@@ -104,7 +104,7 @@ def main():
 
     try:
         # Create reranker configuration
-        qwen_llm_config = QwenLLMConfig()
+        qwen_llm_config = QwenRerankConfig()
         reranker_config = Qwen3RerankerConfig(
             qwen3_llm_config=qwen_llm_config
         )

@@ -1,26 +1,8 @@
 """
 Simple test to verify MinIODB implementation matches BlobStore interface
 """
-from pathlib import Path
-from io import BytesIO
-from typing import Literal
 
-from framework.config import AbstractConfig
-from encapsulation.database.file_db.minio import MinIODB
-
-
-class MinIOConfig(AbstractConfig):
-    """Configuration for MinIO blob store testing"""
-    type: Literal["minio_blob_store"] = "minio_blob_store"
-    endpoint: str = "localhost:9000"
-    username: str = "ROOTNAME"
-    password: str = "CHANGEME123"
-    bucket_name: str = "test-bucket"
-    secure: bool = False
-    region: str = "us-east-1"
-
-    def build(self) -> MinIODB:
-        return MinIODB(self)
+from config.encapsulation.database.file_db.minio_config import MinIOConfig
 
 
 def test_minio_blob_store():

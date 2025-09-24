@@ -1,6 +1,6 @@
 from framework.config import AbstractConfig
 from core.query_rewrite.openai_llm import OpenAIQueryRewriter
-from config.encapsulation.openai_config import OpenAIChatConfig
+from config.encapsulation.llm.openai_chat import OpenAIChatConfig
 from typing import Literal
 
 class OpenAIQueryRewriterConfig(AbstractConfig):
