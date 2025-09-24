@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 
 from config.encapsulation.database.bm25_config import BM25BuilderConfig
 from config.core.file_management.indexing.bm25_indexing_config import BM25IndexerConfig
-from config.encapsulation.llm.huggingface_config import HuggingFaceEmbedConfig
-from config.encapsulation.database.faiss_config import FaissVectorDBConfig
+from config.encapsulation.llm.huggingface_embedding import HuggingFaceEmbeddingConfig
+from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBConfig
 from config.core.file_management.indexing.faiss_indexing_config import FaissIndexerConfig
 
 
@@ -167,8 +167,7 @@ def test_faiss_indexing_from_json():
         print(f"创建了 {len(json_files)} 个JSON文件")
 
         # 配置embedding模型
-        embedding_config = HuggingFaceEmbedConfig(
-            type="huggingface_embedding",
+        embedding_config = HuggingFaceEmbeddingConfig(
             model_name="Qwen/Qwen3-Embedding-0.6B",
             device="cuda:0",
             use_china_mirror=True,

@@ -10,7 +10,7 @@ if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.encapsulation.llm.openai_chat import OpenAIChatConfig
-from config.encapsulation.database.faiss_config import FaissVectorDBConfig
+from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBConfig
 from config.encapsulation.llm.huggingface_embedding import HuggingFaceEmbeddingConfig
 from config.encapsulation.llm.qwen_rerank import QwenRerankConfig
 from config.core.query_rewriter_config import OpenAIQueryRewriterConfig

@@ -14,12 +14,15 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"
 
 from core.retrieval.graph_retrieveal.graph_retrieval import GraphRetrieval
 from core.file_management.extractor.graphextractor import GraphExtractor
-from config.encapsulation.database.networkx_with_embedding_config import NetworkXVectorConfig
-from config.encapsulation.llm.huggingface_config import HuggingFaceEmbedConfig
-from config.encapsulation.llm.openai_config import OpenAIConfig
+from config.encapsulation.database.graphdb.networkx_with_embedding_config import NetworkXVectorConfig
+from config.encapsulation.llm.huggingface_embedding import HuggingFaceEmbeddingConfig
+from config.encapsulation.llm.openai_chat import OpenAIChatConfig
 from config.core.file_management.extractor.graphextractor_config import GraphExtractorConfig
 from config.core.retrieval.graph_retrieval_config import GraphRetrievalConfig
 from encapsulation.data_model.schema import Document, GraphData
+
+from dotenv import load_dotenv
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(
@@ -33,20 +36,16 @@ def create_networkx_configs(temp_dir: str) -> Dict[str, Any]:
     """Create NetworkX-based configurations for the complete pipeline"""
     
     # Embedding configuration using HuggingFace model
-    embedding_config = HuggingFaceEmbedConfig(
-        type="huggingface_embedding",
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        device="cpu",  # Use CPU for compatibility
-        task_types="embedding"
+    embedding_config = HuggingFaceEmbeddingConfig(
+        model_name="Qwen/Qwen3-Embedding-0.6B",
+        device="cuda:0",  
+        use_china_mirror=True,
+        cache_folder="./models/Qwen"
     )
     
     # LLM configuration for extraction and entity filtering
-    llm_config = OpenAIConfig(
-        type="openai",
+    llm_config = OpenAIChatConfig(
         model_name="gpt-4o-mini",
-        task_types="chat",
-        api_key="sk-",  # Test key - replace with actual if needed
-        base_url="https://api.gptsapi.net/v1",
         default_max_tokens=2000,
         default_temperature=0.1
     )
@@ -244,8 +243,7 @@ async def test_networkx_complete_pipeline():
                     logger.error(f"    ✗ Failed to extract from document {doc.id}: {e}")
                     continue
         else:
-            # Create mock graph data for testing
-            extracted_docs = create_mock_graph_data(documents)
+            raise Exception("GraphExtractor not available")
         
         phase_times["extraction"] = time.time() - start_time
         logger.info(f"Data extraction completed in {phase_times['extraction']:.2f}s")
@@ -263,278 +261,6 @@ async def test_networkx_complete_pipeline():
             shutil.rmtree(temp_dir)
         logger.info("✅ Cleanup completed")
 
-
-def create_mock_graph_data(documents: List[Document]) -> List[Document]:
-    """Create mock graph data for testing when extraction is not available"""
-    logger.info("Creating mock graph data for testing...")
-    
-    mock_entities_relations = [
-        # AI Tech document
-        {
-            "entities": [
-                {
-                    "id": "ai",
-                    "entity_name": "人工智能",
-                    "entity_type": "技术",
-                    "attributes": {
-                        "应用领域": "工业自动化",
-                        "发展阶段": "快速发展",
-                        "核心技术": "机器学习、深度学习"
-                    }
-                },
-                {
-                    "id": "ml",
-                    "entity_name": "机器学习",
-                    "entity_type": "算法",
-                    "attributes": {
-                        "类型": "监督学习、无监督学习",
-                        "应用": "数据分析、模式识别",
-                        "优势": "自动优化、适应性强"
-                    }
-                },
-                {
-                    "id": "dl",
-                    "entity_name": "深度学习",
-                    "entity_type": "模型",
-                    "attributes": {
-                        "架构": "多层神经网络",
-                        "特点": "特征自动提取",
-                        "应用场景": "图像识别、自然语言处理"
-                    }
-                },
-                {
-                    "id": "nn",
-                    "entity_name": "神经网络",
-                    "entity_type": "技术",
-                    "attributes": {
-                        "结构": "输入层、隐藏层、输出层",
-                        "激活函数": "ReLU、Sigmoid、Tanh",
-                        "训练方法": "反向传播算法"
-                    }
-                }
-            ],
-            "relations": [
-                ["ai", "ml", "包含"],
-                ["ai", "dl", "包含"],
-                ["dl", "nn", "使用"]
-            ]
-        },
-        # HVAC System document
-        {
-            "entities": [
-                {
-                    "id": "hvac",
-                    "entity_name": "空调系统",
-                    "entity_type": "设备",
-                    "attributes": {
-                        "功能": "制冷、制热、通风",
-                        "能效等级": "一级能效",
-                        "控制方式": "变频控制"
-                    }
-                },
-                {
-                    "id": "evaporator",
-                    "entity_name": "蒸发器",
-                    "entity_type": "组件",
-                    "attributes": {
-                        "材质": "铜管铝翅片",
-                        "作用": "吸收热量",
-                        "设计要求": "高效换热、防腐蚀"
-                    }
-                },
-                {
-                    "id": "compressor",
-                    "entity_name": "压缩机",
-                    "entity_type": "组件",
-                    "attributes": {
-                        "类型": "涡旋式压缩机",
-                        "功率": "可变功率",
-                        "性能指标": "高效率、低噪音"
-                    }
-                },
-                {
-                    "id": "condenser",
-                    "entity_name": "冷凝器",
-                    "entity_type": "组件",
-                    "attributes": {
-                        "结构": "翅片管式",
-                        "散热方式": "强制风冷",
-                        "维护要求": "定期清洁、检查"
-                    }
-                }
-            ],
-            "relations": [
-                ["hvac", "evaporator", "包含"],
-                ["hvac", "compressor", "包含"],
-                ["hvac", "condenser", "包含"]
-            ]
-        },
-        # Quality Control document
-        {
-            "entities": [
-                {
-                    "id": "qc",
-                    "entity_name": "质量控制",
-                    "entity_type": "流程",
-                    "attributes": {
-                        "标准": "ISO 9001",
-                        "关键环节": "检测、分析、改进",
-                        "目标": "确保产品质量稳定"
-                    }
-                },
-                {
-                    "id": "detection",
-                    "entity_name": "检测设备",
-                    "entity_type": "设备",
-                    "attributes": {
-                        "精度": "±0.1%",
-                        "校准周期": "每6个月",
-                        "维护要求": "定期保养、环境控制"
-                    }
-                },
-                {
-                    "id": "analysis",
-                    "entity_name": "统计分析",
-                    "entity_type": "方法",
-                    "attributes": {
-                        "方法": "SPC统计过程控制",
-                        "指标": "Cp、Cpk、控制图",
-                        "频率": "实时监控"
-                    }
-                },
-                {
-                    "id": "deviation",
-                    "entity_name": "偏差控制",
-                    "entity_type": "流程",
-                    "attributes": {
-                        "控制限": "±3σ",
-                        "响应时间": "立即处理",
-                        "纠正措施": "根因分析、预防措施"
-                    }
-                }
-            ],
-            "relations": [
-                ["qc", "detection", "使用"],
-                ["qc", "analysis", "包含"],
-                ["qc", "deviation", "包含"]
-            ]
-        },
-        # Installation document
-        {
-            "entities": [
-                {
-                    "id": "installation",
-                    "entity_name": "设备安装",
-                    "entity_type": "流程",
-                    "attributes": {
-                        "标准": "GB/T 17758",
-                        "步骤": "定位、固定、连接、调试",
-                        "安全要求": "防护措施、操作规范"
-                    }
-                },
-                {
-                    "id": "outdoor_unit",
-                    "entity_name": "室外机",
-                    "entity_type": "设备",
-                    "attributes": {
-                        "重量": "45-65kg",
-                        "尺寸": "800×300×550mm",
-                        "安装要求": "水平安装、通风良好"
-                    }
-                },
-                {
-                    "id": "insulation",
-                    "entity_name": "保温套管",
-                    "entity_type": "组件",
-                    "attributes": {
-                        "材质": "橡塑保温材料",
-                        "厚度": "9-13mm",
-                        "性能": "保温、防凝露、阻燃"
-                    }
-                },
-                {
-                    "id": "position",
-                    "entity_name": "安装位置",
-                    "entity_type": "要求",
-                    "attributes": {
-                        "通风距离": "≥300mm",
-                        "承重要求": "≥1.5倍设备重量",
-                        "环境条件": "避免阳光直射、雨水侵蚀"
-                    }
-                }
-            ],
-            "relations": [
-                ["installation", "outdoor_unit", "涉及"],
-                ["installation", "insulation", "需要"],
-                ["installation", "position", "考虑"]
-            ]
-        },
-        # Performance document
-        {
-            "entities": [
-                {
-                    "id": "performance",
-                    "entity_name": "性能参数",
-                    "entity_type": "指标",
-                    "attributes": {
-                        "测试标准": "GB/T 7725",
-                        "测试条件": "额定工况",
-                        "评价指标": "制冷量、能效比、噪音"
-                    }
-                },
-                {
-                    "id": "cooling",
-                    "entity_name": "制冷量",
-                    "entity_type": "参数",
-                    "attributes": {
-                        "单位": "kW",
-                        "额定值": "3.5kW",
-                        "测试条件": "室内27℃/19℃，室外35℃"
-                    }
-                },
-                {
-                    "id": "efficiency",
-                    "entity_name": "能效比",
-                    "entity_type": "参数",
-                    "attributes": {
-                        "定义": "制冷量/输入功率",
-                        "等级": "一级能效≥3.40",
-                        "意义": "节能性能指标"
-                    }
-                },
-                {
-                    "id": "noise",
-                    "entity_name": "噪音控制",
-                    "entity_type": "要求",
-                    "attributes": {
-                        "室内机": "≤22dB(A)",
-                        "室外机": "≤52dB(A)",
-                        "测试距离": "1米处测量"
-                    }
-                }
-            ],
-            "relations": [
-                ["performance", "cooling", "包含"],
-                ["performance", "efficiency", "包含"],
-                ["performance", "noise", "包含"]
-            ]
-        }
-    ]
-    
-    extracted_docs = []
-    for i, doc in enumerate(documents):
-        if i < len(mock_entities_relations):
-            mock_data = mock_entities_relations[i]
-            graph_data = GraphData(
-                entities=mock_data["entities"],
-                relations=mock_data["relations"],
-                metadata={"document_id": doc.id}
-            )
-            doc.graph = graph_data
-            extracted_docs.append(doc)
-            logger.info(f"  Created mock graph data for {doc.id}: {len(graph_data.entities)} entities, {len(graph_data.relations)} relations")
-    
-    return extracted_docs
 
 
 async def continue_pipeline_test(configs: Dict[str, Any], extracted_docs: List[Document],

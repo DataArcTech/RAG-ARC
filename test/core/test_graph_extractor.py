@@ -1,28 +1,22 @@
-#!/usr/bin/env python3
-"""
-重构后的GraphExtractor使用示例
-"""
-
 import sys
 import os
 
 # 添加项目根目录到Python路径
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
-from core.file_management.extractor.graphextractor import GraphExtractor
-from config.encapsulation.llm.openai_config import OpenAIConfig
-from encapsulation.data_model.schema import Document, GraphData
+from config.encapsulation.llm.openai_chat import OpenAIChatConfig
+from encapsulation.data_model.schema import Document
 from config.core.file_management.extractor.graphextractor_config import GraphExtractorConfig
 
+from dotenv import load_dotenv 
+load_dotenv() 
 
 
 def usage_example():
     
     # 1. 配置LLM
-    llm_config = OpenAIConfig(
-        model_name="gpt-4.1-mini",
-        api_key="sk-",  # 测试用的假key
-        base_url="https://api.gptsapi.net/v1",
+    llm_config = OpenAIChatConfig(
+        model_name="gpt-4.1-mini"
     )
     
     # 2. 配置GraphExtractor

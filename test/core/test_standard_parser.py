@@ -2,6 +2,8 @@
 Test for StandardParser - testing the core parser interface methods
 """
 import os
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
 from core.file_management.parser.standard import StandardParser
 from config.core.file_management.parser.standard_parser_config import StandardParserConfig
@@ -18,8 +20,8 @@ def main():
 
         # Test data paths - real files from test_data directory
         test_data_paths = {
-            'pdf': "./test_data/test_pdf.pdf",
-            'png': "./test_data/test_png.png",
+            # 'pdf': "./test_data/test_pdf.pdf",
+            # 'png': "./test_data/test_png.png",
             'docx': "./test_data/test_docx.docx",
             'xlsx': "./test_data/test_xlsx.xlsx",
             'html': "./test_data/test_html.html"

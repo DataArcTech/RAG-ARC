@@ -1,7 +1,6 @@
 from .base import RerankLLMBase
 from typing import List, Dict, Any, Optional, Tuple, Union, TYPE_CHECKING
-import logging
-
+import logging 
 if TYPE_CHECKING:
     from encapsulation.data_model.schema import Document
 
@@ -70,6 +69,11 @@ class QwenRerankLLM(RerankLLMBase):
     def _create_client(self):
         """Create Qwen client and tokenizer"""
         try:
+            import os
+            if self.config.use_china_mirror:
+                os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+                logger.info("Set HF_ENDPOINT to https://hf-mirror.com")
+                
             from transformers import AutoTokenizer, AutoModelForCausalLM
             import torch
 

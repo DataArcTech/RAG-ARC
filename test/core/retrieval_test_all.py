@@ -18,8 +18,8 @@ from config.encapsulation.database.bm25_config import BM25BuilderConfig
 from config.core.retrieval.tantivy_bm25_config import TantivyBM25RetrieverConfig
 from config.core.retrieval.multipath_config import MultiPathRetrieverConfig
 from config.core.retrieval.dense_config import DenseRetrieverConfig
-from config.encapsulation.database.faiss_config import FaissVectorDBConfig
-from config.encapsulation.llm.huggingface_config import HuggingFaceEmbedConfig
+from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBConfig
+from config.encapsulation.llm.huggingface_embedding import HuggingFaceEmbeddingConfig
 
 # 设置日志级别
 logging.basicConfig(level=logging.WARNING)
@@ -58,7 +58,7 @@ def create_test_documents() -> List[Document]:
 
 
 def create_index_manager_and_build_indexes(documents: List[Document], index_configs: Dict[str, Any]) -> None:
-    """使用IndexManager构建索引（简化版本，直接使用索引器）"""
+    """构建索引"""
     for index_type, index_config in index_configs.items():
         index = index_config.build()
 
@@ -69,10 +69,8 @@ def create_index_manager_and_build_indexes(documents: List[Document], index_conf
 
         elif index_type == "faiss":
             try:
-                from config.encapsulation.llm.huggingface_config import HuggingFaceEmbedConfig
-
-                index = index_config.build()
                 index.build_index(documents)
+                index.save_index(index_config.index_path)
 
             except Exception as e:
                 logger.warning(f"Failed to build FAISS index with embeddings: {e}")
@@ -81,7 +79,6 @@ def create_index_manager_and_build_indexes(documents: List[Document], index_conf
                 os.makedirs(index_config.index_path, exist_ok=True)
 
         else:
-            # 通用方法
             if hasattr(index, 'add_documents'):
                 index.add_documents(documents)
             elif hasattr(index, 'add_texts'):
@@ -283,7 +280,7 @@ class TestDenseRetriever(unittest.TestCase):
     def test_dense_basic_functionality(self):
         """测试Dense基础功能"""
         # 创建嵌入配置
-        embedding_config = HuggingFaceEmbedConfig(
+        embedding_config = HuggingFaceEmbeddingConfig(
             model_name="Qwen/Qwen3-Embedding-0.6B",
             device="cuda:0",
             use_china_mirror=True,

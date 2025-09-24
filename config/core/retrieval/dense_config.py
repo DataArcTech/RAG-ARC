@@ -1,8 +1,7 @@
 from typing import Literal, Annotated, Dict, Any
 from pydantic import Field, ConfigDict
 from framework.config import AbstractConfig
-from config.encapsulation.database.faiss_config import FaissVectorDBConfig
-from config.encapsulation.llm.huggingface_config import HuggingFaceEmbedConfig
+from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBConfig
 from core.retrieval.dense import DenseRetriever
 
 class DenseRetrieverConfig(AbstractConfig):

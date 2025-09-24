@@ -1,9 +1,15 @@
 """
 Simple test to understand how OpenAI Chat LLM works
 """
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
 
 from config.encapsulation.llm.openai_chat import OpenAIChatConfig
 import asyncio
+
+from dotenv import load_dotenv
+load_dotenv()
 
 
 def main():

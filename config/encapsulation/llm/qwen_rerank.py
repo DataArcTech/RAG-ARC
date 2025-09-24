@@ -11,9 +11,11 @@ class QwenRerankConfig(AbstractConfig):
     type: Literal["qwen_rerank"] = "qwen_rerank"
 
     # Model configuration
-    model_name: str = "/finance_ML/dataarc_syn_database/model/Qwen/qwen_reranker_0.6B"  # Path to Qwen reranker model
+    model_name: str = "Qwen/Qwen3-Reranker-0.6B"  # Path to Qwen reranker model
     device: str = "cuda:0"  # Device for model inference (cuda:0, cuda:1, cpu)
     cache_folder: Optional[str] = None  # Local cache directory for model files
+
+    use_china_mirror: bool = False  # Whether to use China mirror for HuggingFace
 
     # Template configuration for Qwen conversation format
     prefix: str = "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n"  # System prompt template

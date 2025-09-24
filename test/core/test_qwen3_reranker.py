@@ -4,10 +4,7 @@ Test for Qwen Reranker functionality
 
 import sys
 import os
-
-# Add the project root to Python path for direct execution
-if __name__ == "__main__":
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
 from config.core.reranker_config import Qwen3RerankerConfig
 from config.encapsulation.llm.qwen_rerank import QwenRerankConfig
@@ -129,9 +126,13 @@ def main():
 
     # Test configuration without optional parameters
     print("\n--- Minimal Configuration Test ---")
-    minimal_llm_config = QwenRerankConfig()
+    minimal_llm_config = QwenRerankConfig(
+        model_name="Qwen/Qwen3-Reranker-0.6B",
+        use_china_mirror=True,
+        cache_folder="./models/Qwen"
+    )
     minimal_config = Qwen3RerankerConfig(
-        qwen3_llm_config=minimal_llm_config
+        qwen3_llm_config=minimal_llm_config,
     )
     minimal_reranker = minimal_config.build()
 

@@ -1,11 +1,16 @@
 """
 Simple test to understand how Embedding LLMs work (OpenAI and HuggingFace)
 """
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
 
 from config.encapsulation.llm.openai_embedding import OpenAIEmbeddingConfig
 from config.encapsulation.llm.huggingface_embedding import HuggingFaceEmbeddingConfig
 import asyncio
 
+from dotenv import load_dotenv
+load_dotenv()
 
 def test_openai_embedding():
     print("="*50)

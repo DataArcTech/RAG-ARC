@@ -4,13 +4,13 @@ Test for OpenAI Query Rewriter functionality
 
 import sys
 import os
-
-# Add the project root to Python path for direct execution
-if __name__ == "__main__":
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
 from config.encapsulation.llm.openai_chat import OpenAIChatConfig
 from config.core.query_rewriter_config import OpenAIQueryRewriterConfig
+
+from dotenv import load_dotenv
+load_dotenv()
 
 def main():
     print("Testing OpenAI Query Rewriter...")

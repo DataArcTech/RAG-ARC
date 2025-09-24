@@ -10,3 +10,8 @@ huggingface-hub
 pydantic
 
 networkx
+
+
+SQLAlchemy
+python-dotenv
+pymupdf

@@ -3,9 +3,9 @@ from pydantic import Field
 
 
 from framework.config import AbstractConfig
-from config.encapsulation.database.neo4j_with_embedding_config import Neo4jVectorConfig
-from config.encapsulation.database.networkx_with_embedding_config import NetworkXVectorConfig
-from config.encapsulation.llm.openai_config import OpenAIConfig
+from config.encapsulation.database.graphdb.neo4j_with_embedding_config import Neo4jVectorConfig
+from config.encapsulation.database.graphdb.networkx_with_embedding_config import NetworkXVectorConfig
+from config.encapsulation.llm.openai_chat import OpenAIChatConfig
 from core.retrieval.graph_retrieveal.graph_retrieval import GraphRetrieval
 
 
@@ -18,7 +18,7 @@ class GraphRetrievalConfig(AbstractConfig):
     graph_config: Annotated[Union[Neo4jVectorConfig, NetworkXVectorConfig], Field(discriminator="type")]
 
     # LLM configuration for entity filtering (optional)
-    llm_config: Optional[OpenAIConfig] = Field(default=None, description="LLM configuration for entity filtering")
+    llm_config: Optional[OpenAIChatConfig] = Field(default=None, description="LLM configuration for entity filtering")
 
     # Retrieval parameters
     k1_chunks: int = Field(default=20, description="Number of chunks to retrieve in semantic search")

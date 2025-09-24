@@ -2,6 +2,10 @@
 Test for Chunker - testing the core chunking strategies
 """
 
+import os
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
+
 from config.core.file_management.chunker.chunker_config import (
     TokenChunkerConfig,
     RecursiveChunkerConfig,
@@ -100,7 +104,10 @@ The history of natural language processing generally started in the 1950s, altho
         # 4. Test SemanticChunker
         print("\n--- Test 4: SemanticChunker ---")
         try:
-            hf_config = HuggingFaceEmbeddingConfig()
+            hf_config = HuggingFaceEmbeddingConfig(
+                use_china_mirror=True,
+                cache_folder="./models/Qwen"
+            )
             semantic_config = SemanticChunkerConfig(embedding=hf_config)
             semantic_chunker = semantic_config.build()
 

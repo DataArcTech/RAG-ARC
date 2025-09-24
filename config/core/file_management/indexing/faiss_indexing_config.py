@@ -2,7 +2,7 @@ from typing import Literal
 from pydantic import Field
 
 from framework.config import AbstractConfig
-from config.encapsulation.database.faiss_config import FaissVectorDBConfig
+from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBConfig
 from core.file_management.indexing.faiss_indexing import FaissIndexer
 
 

@@ -2,7 +2,7 @@ from framework.config import AbstractConfig
 from typing import List, Dict, Optional, Literal
 from pydantic import Field
 from core.file_management.extractor.graphextractor import GraphExtractor
-from config.encapsulation.llm.openai_config import OpenAIConfig
+from config.encapsulation.llm.openai_chat import OpenAIChatConfig
 
 
 class GraphExtractorConfig(AbstractConfig):
@@ -21,7 +21,7 @@ class GraphExtractorConfig(AbstractConfig):
     max_rounds: int = Field(default=3, description="max_rounds", ge=1)
 
     max_concurrent: int = Field(default=100, description="Maximum number of concurrent operations", ge=1)
-    llm_config: OpenAIConfig = Field(default=None, description="Configuration for the LLM to be used")
+    llm_config: OpenAIChatConfig = Field(default=None, description="Configuration for the LLM to be used")
 
     def model_post_init(self, __context) -> None:
         """Validate configuration after initialization"""

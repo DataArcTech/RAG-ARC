@@ -1,5 +1,6 @@
 from .base import EmbeddingLLMBase
 from typing import Union, List, Dict, Any
+import os
 import logging
 
 from framework.shared_module_decorator import shared_module
@@ -41,7 +42,7 @@ class HuggingFaceEmbeddingLLM(EmbeddingLLMBase):
         - device: Target device (cpu, cuda, cuda:0, etc.)
         - cache_folder: Local cache directory for models
         - model_kwargs: Additional model initialization parameters
-        - encode_kwargs: Encoding-specific parameters (batch_size, show_progress_bar, etc.)
+        - encode_kwargs: Encoding-specific parameters (batch_size, show_progress_bar, local_files_only, etc.)
     """
 
 
@@ -54,6 +55,10 @@ class HuggingFaceEmbeddingLLM(EmbeddingLLMBase):
     def _create_client(self):
         """Create HuggingFace SentenceTransformer client"""
         try:
+            if self.config.use_china_mirror:
+               os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+               logger.info("Set HF_ENDPOINT to https://hf-mirror.com")
+
             import sentence_transformers
 
             model_name = getattr(self.config, 'model_name', 'sentence-transformers/all-mpnet-base-v2')
@@ -81,15 +86,25 @@ class HuggingFaceEmbeddingLLM(EmbeddingLLMBase):
     def embed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
         """Generate text embeddings"""
         # Handle single text vs list
-        is_single = isinstance(texts, str)
-        text_list = [texts] if is_single else texts
-
+        # use embed_query and embed_documents
         try:
-            embeddings = self.embed_documents(text_list)
-            return embeddings[0] if is_single else embeddings
+            if isinstance(texts, str):
+                return self.embed_query(texts)
+            else:
+                return self.embed_documents(texts)
         except Exception as e:
             logger.error(f"Text embedding failed: {str(e)}")
             raise
+
+        # is_single = isinstance(texts, str)
+        # text_list = [texts] if is_single else texts
+
+        # try:
+        #     embeddings = self.embed_documents(text_list)
+        #     return embeddings[0] if is_single else embeddings
+        # except Exception as e:
+        #     logger.error(f"Text embedding failed: {str(e)}")
+        #     raise
 
     async def aembed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
         """Generate text embeddings asynchronously"""
@@ -107,25 +122,66 @@ class HuggingFaceEmbeddingLLM(EmbeddingLLMBase):
             logger.error(f"Async text embedding failed: {str(e)}")
             raise
 
+    # def embed_documents(self, texts: List[str]) -> List[List[float]]:
+    #     """Embed multiple documents"""
+    #     try:
+    #         # Clean texts
+    #         texts = [text.replace("\n", " ") for text in texts]
+
+    #         encode_kwargs = getattr(self.config, 'encode_kwargs', {})
+
+    #         embeddings = self.client.encode(
+    #             texts,
+    #             convert_to_tensor=False,
+    #             **encode_kwargs
+    #         )
+
+    #         return embeddings.tolist()
+
+    #     except Exception as e:
+    #         logger.error(f"Document embedding failed: {str(e)}")
+    #         raise RuntimeError(f"Document embedding failed: {str(e)}")
+
+
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        """Embed multiple documents"""
+        """Embed multiple documents more concisely."""
+        if self.client is None:
+            raise RuntimeError("Model client not initialized")
+
+        # 预处理文本
+        texts = [text.replace("\n", " ") for text in texts]
+        pool = None  # 初始化 pool
+
+        import sentence_transformers
         try:
-            # Clean texts
-            texts = [text.replace("\n", " ") for text in texts]
-
-            encode_kwargs = getattr(self.config, 'encode_kwargs', {})
-
-            embeddings = self.client.encode(
-                texts,
-                convert_to_tensor=False,
-                **encode_kwargs
-            )
-
+            if self.config.multi_process:
+                pool = self.client.start_multi_process_pool()
+                embeddings = self.client.encode(texts, pool)
+            else:
+                encode_kwargs = self.config.encode_kwargs or {}
+                embeddings = self.client.encode(texts, **encode_kwargs)
+            
             return embeddings.tolist()
 
-        except Exception as e:
-            logger.error(f"Document embedding failed: {str(e)}")
-            raise RuntimeError(f"Document embedding failed: {str(e)}")
+        except RuntimeError as e:
+            if "out of memory" not in str(e).lower():
+                raise 
+
+            if self.config.multi_process:
+                error_msg = "CUDA Out of Memory in multi-process mode. Disable multi_process or reduce batch_size."
+                logger.error("CUDA Out of Memory in multi-process mode!")
+                logger.error("Try: config.multi_process = False")
+            else:
+                batch_size = (self.config.encode_kwargs or {}).get('batch_size', 'default')
+                error_msg = f"CUDA Out of Memory. Please reduce batch_size. Current: {batch_size}"
+                logger.error(f"CUDA Out of Memory! Current batch_size: {batch_size}")
+                logger.error("Try reducing batch_size in encode_kwargs (e.g., batch_size=8, 4, or 1)")
+            
+            raise RuntimeError(error_msg) from e
+
+        finally:
+            if pool:
+                sentence_transformers.SentenceTransformer.stop_multi_process_pool(pool)
 
     def embed_query(self, text: str) -> List[float]:
         """Embed single query"""
