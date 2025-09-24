@@ -2,6 +2,7 @@ from .base import EmbeddingLLMBase
 from typing import Union, List, Dict, Any, Optional
 import openai
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +45,8 @@ class OpenAIEmbeddingLLM(EmbeddingLLMBase):
     def _create_client(self):
         """Create OpenAI client"""
         # Extract OpenAI-specific config parameters
-        api_key = getattr(self.config, 'api_key', None)
-        base_url = getattr(self.config, 'base_url', None)
+        api_key = os.getenv('OPENAI_API_KEY')
+        base_url = os.getenv('OPENAI_BASE_URL')
         organization = getattr(self.config, 'organization', None)
         max_retries = getattr(self.config, 'max_retries', 3)
         timeout = getattr(self.config, 'timeout', 60.0)
@@ -68,8 +69,8 @@ class OpenAIEmbeddingLLM(EmbeddingLLMBase):
         """Create OpenAI async client"""
         try:
             # Extract OpenAI-specific config parameters (same as sync client)
-            api_key = getattr(self.config, 'api_key', None)
-            base_url = getattr(self.config, 'base_url', None)
+            api_key = os.getenv('OPENAI_API_KEY')
+            base_url = os.getenv('OPENAI_BASE_URL')
             organization = getattr(self.config, 'organization', None)
             max_retries = getattr(self.config, 'max_retries', 3)
             timeout = getattr(self.config, 'timeout', 30)

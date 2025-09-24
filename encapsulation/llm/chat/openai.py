@@ -2,6 +2,7 @@ from .base import ChatLLMBase
 from typing import Dict, Any, List, Optional, Union, Tuple, AsyncGenerator
 import openai
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +48,8 @@ class OpenAIChatLLM(ChatLLMBase):
     def _create_client(self):
         """Create OpenAI client"""
         # Extract OpenAI-specific config parameters
-        api_key = getattr(self.config, 'api_key', None)
-        base_url = getattr(self.config, 'base_url', None)
+        api_key = os.getenv('OPENAI_API_KEY')
+        base_url = os.getenv('OPENAI_BASE_URL')
         organization = getattr(self.config, 'organization', None)
         max_retries = getattr(self.config, 'max_retries', 3)
         timeout = getattr(self.config, 'timeout', 60.0)
@@ -71,8 +72,8 @@ class OpenAIChatLLM(ChatLLMBase):
         """Create OpenAI async client"""
         try:
             # Extract OpenAI-specific config parameters (same as sync client)
-            api_key = getattr(self.config, 'api_key', None)
-            base_url = getattr(self.config, 'base_url', None)
+            api_key = os.getenv('OPENAI_API_KEY')
+            base_url = os.getenv('OPENAI_BASE_URL')
             organization = getattr(self.config, 'organization', None)
             max_retries = getattr(self.config, 'max_retries', 3)
             timeout = getattr(self.config, 'timeout', 30)

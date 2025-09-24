@@ -15,9 +15,9 @@ class OpenAIChatConfig(AbstractConfig):
     max_tokens: int = 2000  # Maximum tokens in response
     temperature: float = 0.7  # Response creativity (0.0-2.0, higher = more creative)
 
-    # API configuration
-    base_url: str = "https://api.gptsapi.net/v1"  # API endpoint URL
-    api_key: str = "sk-2T06b7c7f9c3870049fbf8fada596b0f8ef908d1e233KLY2"  # API key for authentication
+    # API configuration - loaded from environment variables
+    # OPENAI_API_KEY: API key for authentication
+    # OPENAI_BASE_URL: API endpoint URL (optional, defaults to OpenAI)
     organization: Optional[str] = None  # OpenAI organization ID (optional)
 
     # Connection configuration
