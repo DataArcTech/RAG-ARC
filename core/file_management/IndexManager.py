@@ -82,18 +82,7 @@ class IndexManagerConfig(AbstractConfig):
         description="Maximum concurrent builds, number of index types built simultaneously"
     )
 
-    # Retry configuration
-    max_retries: int = Field(
-        default=3,
-        description="Maximum retry attempts"
-    )
-    retry_delay: float = Field(
-        default=1.0,
-        description="Retry delay in seconds"
-    )
-    
-    def build(self) -> "IndexManager":
-        return IndexManager(self)
+
 
 
 

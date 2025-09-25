@@ -14,7 +14,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"
 
 from core.retrieval.graph_retrieveal.graph_retrieval import GraphRetrieval
 from core.file_management.extractor.graphextractor import GraphExtractor
-from config.encapsulation.database.graphdb.networkx_with_embedding_config import NetworkXVectorConfig
+from config.encapsulation.database.graph_db.networkx_with_embedding_config import NetworkXVectorConfig
 from config.encapsulation.llm.huggingface_embedding import HuggingFaceEmbeddingConfig
 from config.encapsulation.llm.openai_chat import OpenAIChatConfig
 from config.core.file_management.extractor.graphextractor_config import GraphExtractorConfig

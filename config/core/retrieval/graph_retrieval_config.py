@@ -3,8 +3,8 @@ from pydantic import Field
 
 
 from framework.config import AbstractConfig
-from config.encapsulation.database.graphdb.neo4j_with_embedding_config import Neo4jVectorConfig
-from config.encapsulation.database.graphdb.networkx_with_embedding_config import NetworkXVectorConfig
+from config.encapsulation.database.graph_db.neo4j_with_embedding_config import Neo4jVectorConfig
+from config.encapsulation.database.graph_db.networkx_with_embedding_config import NetworkXVectorConfig
 from config.encapsulation.llm.openai_chat import OpenAIChatConfig
 from core.retrieval.graph_retrieveal.graph_retrieval import GraphRetrieval
 
