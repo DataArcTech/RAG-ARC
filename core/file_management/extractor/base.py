@@ -49,6 +49,7 @@ class ExtractorBase(AbstractModule):
             return []
 
         semaphore = asyncio.Semaphore(self.config.max_concurrent)
+        logger.info(f"Starting concurrent extraction with max_concurrent={self.config.max_concurrent}")
 
         async def process_with_semaphore(doc: Document) -> Document:
             async with semaphore:
@@ -57,9 +58,21 @@ class ExtractorBase(AbstractModule):
         return await asyncio.gather(*[process_with_semaphore(doc) for doc in documents])
 
     def __call__(self, documents: List[Document]) -> List[Document]:
-        """sync interface for single-threaded execution"""
+        """sync interface that handles both sync and async contexts"""
         try:
-            loop = asyncio.get_running_loop()
-            return loop.run_until_complete(self.extract_concurrent(documents))
+            # Check if we're in an async context
+            asyncio.get_running_loop()
+            # If we're already in an event loop, create a new thread with its own event loop
+            import concurrent.futures
+
+            # Create a new thread with its own event loop for concurrent processing
+            def run_in_thread():
+                return asyncio.run(self.extract_concurrent(documents))
+
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(run_in_thread)
+                return future.result()
+
         except RuntimeError:
+            # No event loop running, safe to use asyncio.run
             return asyncio.run(self.extract_concurrent(documents))

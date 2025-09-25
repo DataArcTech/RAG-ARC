@@ -66,8 +66,9 @@ def create_networkx_configs(temp_dir: str) -> Dict[str, Any]:
         type="graph_extractor",
         llm_config=llm_config,
         enable_cleaning=True,
-        enable_llm_cleaning=True,
-        max_rounds=2
+        max_concurrent=100
+        # enable_llm_cleaning=True,
+        # max_rounds=2
     )
     
     # Graph retrieval configuration optimized for NetworkX
@@ -220,28 +221,31 @@ async def test_networkx_complete_pipeline():
         # Extract or create graph data
         extracted_docs = []
         if extraction_enabled:
-            # Real extraction using GraphExtractor
-            for i, doc in enumerate(documents, 1):
-                logger.info(f"  Processing document {i}/{len(documents)}: {doc.id}")
-                try:
-                    # Extract entities and relationships
-                    graph_data = await extractor.extract(doc)
-                    doc.graph = graph_data
-                    extracted_docs.append(doc)
-                    
-                    logger.info(f"    Extracted {len(graph_data.entities)} entities, {len(graph_data.relations)} relations")
-                    
-                    # Show sample entities
-                    if graph_data.entities:
-                        sample_entities = graph_data.entities[:2]
-                        for entity in sample_entities:
-                            entity_name = entity.get('entity_name', entity.get('name', 'Unknown'))
-                            entity_type = entity.get('entity_type', entity.get('type', 'Unknown'))
-                            logger.info(f"      Entity: {entity_name} ({entity_type})")
-                
-                except Exception as e:
-                    logger.error(f"    ✗ Failed to extract from document {doc.id}: {e}")
-                    continue
+            # Real extraction using GraphExtractor with concurrent processing via __call__ method
+            logger.info(f"  Processing {len(documents)} documents concurrently using extractor(documents) (max_concurrent={configs['extractor_config'].max_concurrent})")
+            try:
+                # Use extractor(documents) which internally calls extract_concurrent()
+                extracted_docs = extractor(documents)
+
+                # Log results for each document
+                for i, doc in enumerate(extracted_docs, 1):
+                    if doc.graph and not doc.graph.is_empty():
+                        logger.info(f"  Document {i}/{len(extracted_docs)}: {doc.id}")
+                        logger.info(f"    Extracted {len(doc.graph.entities)} entities, {len(doc.graph.relations)} relations")
+
+                        # Show sample entities
+                        if doc.graph.entities:
+                            sample_entities = doc.graph.entities[:2]
+                            for entity in sample_entities:
+                                entity_name = entity.get('entity_name', entity.get('name', 'Unknown'))
+                                entity_type = entity.get('entity_type', entity.get('type', 'Unknown'))
+                                logger.info(f"      Entity: {entity_name} ({entity_type})")
+                    else:
+                        logger.warning(f"  Document {i}/{len(extracted_docs)}: {doc.id} - No graph data extracted")
+
+            except Exception as e:
+                logger.error(f"    ✗ Failed to extract from documents: {e}")
+                raise
         else:
             raise Exception("GraphExtractor not available")
         
