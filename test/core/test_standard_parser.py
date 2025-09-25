@@ -20,11 +20,11 @@ def main():
 
         # Test data paths - real files from test_data directory
         test_data_paths = {
-            # 'pdf': "./test_data/test_pdf.pdf",
+            'pdf': "./test/test_pdf.pdf",
             # 'png': "./test_data/test_png.png",
-            'docx': "./test_data/test_docx.docx",
-            'xlsx': "./test_data/test_xlsx.xlsx",
-            'html': "./test_data/test_html.html"
+            'docx': "./test/test_docx.docx",
+            'xlsx': "./test/test_xlsx.xlsx",
+            # 'html': "./test_data/test_html.html"
         }
 
         # Load real test files
@@ -79,7 +79,12 @@ def main():
         print("\n--- Building DotsOCR parser ---")
         parser_with_dots = None
         try:
-            dots_config = DotsOCRConfig() 
+            # dots_config = DotsOCRConfig(cache_dir="./models/dots_ocr") 
+            dots_config = DotsOCRConfig(
+                model_path="/finance_ML/dataarc_syn_database/model/rednote-hilab/DotsOCR/",
+                device="cuda:1",
+                use_hf=True
+            )
             config_with_dots = StandardParserConfig(parser=dots_config)
             parser_with_dots = config_with_dots.build()
             print(f"  StandardParser built with DotsOCR parser config")
