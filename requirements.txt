@@ -6,6 +6,7 @@ jieba
 openai
 tqdm
 psycopg[binary]
+psycopg2
 huggingface-hub
 pydantic
 
@@ -15,3 +16,5 @@ networkx
 SQLAlchemy
 python-dotenv
 pymupdf
+python-docx
+chardet

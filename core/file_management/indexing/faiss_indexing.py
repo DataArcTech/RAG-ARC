@@ -25,7 +25,14 @@ class FaissIndexer(BaseIndexer):
         Adds a batch of documents to the FAISS index using a thread pool.
         """
         loop = asyncio.get_running_loop()
-        doc_ids = await loop.run_in_executor(
-            None, self.faiss_db.update_index, documents
-        )
+
+        def update_and_save(docs):
+            # Update the index
+            doc_ids = self.faiss_db.update_index(docs)
+            # Save the index to disk
+            if hasattr(self.faiss_db.config, 'index_path'):
+                self.faiss_db.save_index(self.faiss_db.config.index_path)
+            return doc_ids
+
+        doc_ids = await loop.run_in_executor(None, update_and_save, documents)
         return doc_ids or []

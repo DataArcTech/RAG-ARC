@@ -3,7 +3,6 @@
     "retrievers": [
         {
             "type": "dense",
-            "index_path": "./data/unified_faiss_index",
             "index_config": {
                 "type": "faiss",
                 "index_path": "./data/unified_faiss_index",
@@ -21,7 +20,6 @@
         },
         {
             "type": "tantivy_bm25",
-            "index_path": "./data/unified_bm25_index",
             "index_config": {
                 "type": "bm25_indexer",
                 "index_path": "./data/unified_bm25_index"

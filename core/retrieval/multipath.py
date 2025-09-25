@@ -27,17 +27,17 @@ class MultiPathRetriever(BaseRetriever):
     def _init_fusion_method(self):
         """初始化融合方法"""
         if self.config.fusion_method == "rrf":
-            from core.utils.Fusion import RRFusion
+            from core.utils.fusion import RRFusion
             self.config.fusion_instance = RRFusion(k=self.config.rrf_k)
         elif self.config.fusion_method == "weighted_sum":
-            from core.utils.Fusion import WeightedSumFusion
+            from core.utils.fusion import WeightedSumFusion
             weights = self.config.weights or [1.0] * len(self.config.retrievers)
             self.config.fusion_instance = WeightedSumFusion(weights=weights)
         elif self.config.fusion_method == "rank_fusion":
-            from core.utils.Fusion import RankFusion
+            from core.utils.fusion import RankFusion
             self.config.fusion_instance = RankFusion()
         else:
-            from core.utils.Fusion import RRFusion
+            from core.utils.fusion import RRFusion
             self.config.fusion_instance = RRFusion(k=self.config.rrf_k)
 
     def _get_relevant_documents(self, query: str, **kwargs: Any) -> List[Document]:

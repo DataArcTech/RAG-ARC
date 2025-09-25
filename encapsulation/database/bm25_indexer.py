@@ -804,16 +804,16 @@ class BM25IndexBuilder():
 
     def from_documents(self, documents: List[Document]) -> "BM25IndexBuilder":
         """Build index from document list (only for initial creation)
-        
+
         This method is intended for creating a new index from scratch.
         If you want to add documents to an existing index, use add_documents() instead.
-        
+
         Args:
             documents: List of Document objects to index
-            
+
         Returns:
             Self (BM25IndexBuilder instance)
-            
+
         Raises:
             ValueError: If documents list is empty
             RuntimeError: If index is already loaded (use add_documents instead)
@@ -821,13 +821,13 @@ class BM25IndexBuilder():
         """
         if not documents:
             raise ValueError("Documents list cannot be empty")
-        
+
         if self._index is not None:
             raise RuntimeError(
                 "Index is already loaded. from_documents() is only for initial index creation. "
                 "To add documents to existing index, use: builder.add_documents(documents)"
             )
-        
+
         try:
             self._build_index(documents)
             return self

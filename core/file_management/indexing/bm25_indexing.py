@@ -28,17 +28,27 @@ class BM25Indexer(BaseIndexer):
         loop = asyncio.get_running_loop()
 
         def build_or_update_index(docs):
-            # Check if index exists
-            if self.bm25_builder.index_exists():
-                # Index exists, update it
-                result = self.bm25_builder.update_index(docs)
-                if result:
+            try:
+                # Check if index exists
+                if self.bm25_builder.index_exists():
+                    # Index exists, update it
+                    result = self.bm25_builder.update_index(docs)
+                    if result:
+                        return [doc.id for doc in docs]
+                    return []
+                else:
+                    # Index doesn't exist, create new one using add
+                    # which handles initialization properly
+                    self.bm25_builder.add(docs)
                     return [doc.id for doc in docs]
-                return []
-            else:
-                # Index doesn't exist, create new one
-                self.bm25_builder.build_index(docs)
-                return [doc.id for doc in docs]
+            except RuntimeError as e:
+                if "Index has not been initialized" in str(e):
+                    # Force initialization and try again
+                    self.bm25_builder._initialize_index(docs)
+                    self.bm25_builder.add(docs)
+                    return [doc.id for doc in docs]
+                else:
+                    raise
 
         # The actual blocking call is executed in a separate thread.
         doc_ids = await loop.run_in_executor(None, build_or_update_index, documents)

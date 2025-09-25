@@ -98,7 +98,7 @@ class DotsOCRParser(ParserBase):
             from transformers import AutoModelForCausalLM, AutoProcessor
             from qwen_vl_utils import process_vision_info
 
-            model_path = "/home/yangcehao/doc_analysis/dots.ocr/weights/DotsOCR"
+            model_path = getattr(self.config, 'model_path')
             device = getattr(self.config, 'device', 'auto')  # Default to 'auto'
 
             self.model = AutoModelForCausalLM.from_pretrained(
@@ -106,7 +106,8 @@ class DotsOCRParser(ParserBase):
                 attn_implementation="flash_attention_2",
                 torch_dtype=torch.bfloat16,
                 device_map=device,
-                trust_remote_code=True
+                trust_remote_code=True,
+                cache_dir=getattr(self.config, 'cache_dir', None)
             )
             self.processor = AutoProcessor.from_pretrained(
                 model_path,

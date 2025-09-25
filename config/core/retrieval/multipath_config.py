@@ -12,9 +12,6 @@ class MultiPathRetrieverConfig(AbstractConfig):
 
     type: Literal["multipath"] = "multipath"
 
-    index_config: Optional[Any] = None
-    embedding_config: Optional[Any] = None
-
     retrievers: List[Annotated[
         Union["DenseRetrieverConfig", "TantivyBM25RetrieverConfig"],
         Field(discriminator="type")

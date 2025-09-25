@@ -12,7 +12,7 @@ def load_real_data():
     """加载真实数据文件"""
     import json
 
-    data_file = "./test/tcl_gb_chunk.json"
+    data_file = "./test/test.json"
     print(f"1. 加载真实数据文件: {data_file}")
 
     with open(data_file, 'r', encoding='utf-8') as f:
@@ -21,15 +21,13 @@ def load_real_data():
     documents = []
     for i, item in enumerate(data):
         # 创建文档ID
-        doc_id = f"tcl_doc_{i+1:04d}"
+        doc_id = item.get('id', f"doc_{i}")
 
         # 获取内容
         content = item.get('content', '')
 
         # 创建元数据
         metadata = item.get('metadata', {})
-        metadata['source'] = 'tcl_gb_chunk.json'
-        metadata['doc_index'] = i
 
         # 创建Document对象
         doc = Document(
@@ -58,7 +56,7 @@ def build_demo_index():
         model_name="Qwen/Qwen3-Embedding-0.6B",
         device="cuda:7", 
         encode_kwargs={
-            "batch_size": 8,
+            "batch_size": 16,
             "show_progress_bar": True,
             # "multi_process": True
         },

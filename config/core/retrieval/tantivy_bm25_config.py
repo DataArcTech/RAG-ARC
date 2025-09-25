@@ -9,7 +9,6 @@ class TantivyBM25RetrieverConfig(AbstractConfig):
     
     type: Literal["tantivy_bm25"] = "tantivy_bm25"
     
-    index_path: str = Field(description="Path to the BM25 index")
     # Index configuration
     index_config: BM25BuilderConfig = Field(description="BM25 index configuration")
 

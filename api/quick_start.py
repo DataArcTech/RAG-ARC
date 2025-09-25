@@ -19,7 +19,7 @@ def demo_dense_retriever():
 
         # 2. 执行搜索
         print("\n2. 执行Dense检索...")
-        queries = ["蒸发器设计规范", "换热器性能要求"]
+        queries = ["Who is the individual associated with the cryptocurrency industry facing a criminal trial on fraud and conspiracy charges, as reported by both The Verge and TechCrunch, and is accused by prosecutors of committing fraud for personal gain?", "Who is the figure associated with generative AI technology whose departure from OpenAI was considered shocking according to Fortune, and is also the subject of a prevailing theory suggesting a lack of full truthfulness with the board as reported by TechCrunch?"]
 
         for query in queries:
             print(f"\n查询: '{query}'")
@@ -59,7 +59,7 @@ def demo_bm25_retriever():
 
         # 3. 执行搜索
         print("\n3. 执行BM25检索...")
-        queries = ["蒸发器设计规范", "换热器性能要求"]
+        queries = ["Who is the individual associated with the cryptocurrency industry facing a criminal trial on fraud and conspiracy charges, as reported by both The Verge and TechCrunch, and is accused by prosecutors of committing fraud for personal gain?", "Who is the figure associated with generative AI technology whose departure from OpenAI was considered shocking according to Fortune, and is also the subject of a prevailing theory suggesting a lack of full truthfulness with the board as reported by TechCrunch?"]
 
         for query in queries:
             print(f"\n查询: '{query}'")
@@ -106,7 +106,7 @@ def demo_multipath_retriever():
 
         # 2. 执行搜索
         print("\n2. 执行MultiPath检索...")
-        queries = ["蒸发器设计规范", "换热器性能要求"]
+        queries = ["Who is the individual associated with the cryptocurrency industry facing a criminal trial on fraud and conspiracy charges, as reported by both The Verge and TechCrunch, and is accused by prosecutors of committing fraud for personal gain?", "Who is the figure associated with generative AI technology whose departure from OpenAI was considered shocking according to Fortune, and is also the subject of a prevailing theory suggesting a lack of full truthfulness with the board as reported by TechCrunch?"]
 
         for query in queries:
             print(f"\n查询: '{query}'")
