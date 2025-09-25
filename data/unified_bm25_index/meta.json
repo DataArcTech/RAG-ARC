@@ -5,43 +5,43 @@
   },
   "segments": [
     {
-      "segment_id": "3ceb5d9b-0520-43d2-a5ae-a7465793679a",
-      "max_doc": 164,
+      "segment_id": "e9b5f7dd-4d1c-481e-b02b-e52384f41334",
+      "max_doc": 2314,
       "deletes": null
     },
     {
-      "segment_id": "f88c06eb-ae4e-4e0d-bab1-fad15f32b238",
-      "max_doc": 164,
+      "segment_id": "2a86bfec-661d-404a-a004-4b6df9df9573",
+      "max_doc": 2286,
       "deletes": null
     },
     {
-      "segment_id": "e9a5518e-6d03-4b4f-94e9-567343b5037d",
-      "max_doc": 162,
+      "segment_id": "22e5706f-f19a-4759-bc85-f5eb9cf7687d",
+      "max_doc": 2238,
       "deletes": null
     },
     {
-      "segment_id": "22bad2b3-896b-482f-8cd9-9227b691f046",
-      "max_doc": 161,
+      "segment_id": "59f01950-3118-4a5c-bec3-d8635298b154",
+      "max_doc": 2236,
       "deletes": null
     },
     {
-      "segment_id": "d3e30fb8-c304-49b5-b688-3652c574440a",
-      "max_doc": 157,
+      "segment_id": "d3f354aa-08c7-4663-8b99-12c7d046181f",
+      "max_doc": 2213,
       "deletes": null
     },
     {
-      "segment_id": "33b9fa73-e114-4c6f-bb98-65c2ed3f7d59",
-      "max_doc": 155,
+      "segment_id": "09c4fefe-b835-42dd-b812-4ac9bcf0194b",
+      "max_doc": 2155,
       "deletes": null
     },
     {
-      "segment_id": "1defef29-d858-4509-b862-cb614f6ddcda",
-      "max_doc": 153,
+      "segment_id": "a91b7b17-898e-4d0e-b41a-8de1a2220323",
+      "max_doc": 2121,
       "deletes": null
     },
     {
-      "segment_id": "03cd4b70-f9c6-44eb-8990-9c54ae84dc80",
-      "max_doc": 151,
+      "segment_id": "9b306218-c6b8-41dc-ae7d-f262a6cde520",
+      "max_doc": 2012,
       "deletes": null
     }
   ],
@@ -100,6 +100,45 @@
       }
     },
     {
+      "name": "title",
+      "type": "text",
+      "options": {
+        "indexing": {
+          "record": "position",
+          "fieldnorms": true,
+          "tokenizer": "raw"
+        },
+        "stored": false,
+        "fast": true
+      }
+    },
+    {
+      "name": "published_at",
+      "type": "text",
+      "options": {
+        "indexing": {
+          "record": "position",
+          "fieldnorms": true,
+          "tokenizer": "raw"
+        },
+        "stored": false,
+        "fast": true
+      }
+    },
+    {
+      "name": "category",
+      "type": "text",
+      "options": {
+        "indexing": {
+          "record": "position",
+          "fieldnorms": true,
+          "tokenizer": "raw"
+        },
+        "stored": false,
+        "fast": true
+      }
+    },
+    {
       "name": "source",
       "type": "text",
       "options": {
@@ -113,7 +152,20 @@
       }
     },
     {
-      "name": "file_name",
+      "name": "url",
+      "type": "text",
+      "options": {
+        "indexing": {
+          "record": "position",
+          "fieldnorms": true,
+          "tokenizer": "raw"
+        },
+        "stored": false,
+        "fast": true
+      }
+    },
+    {
+      "name": "author",
       "type": "text",
       "options": {
         "indexing": {
@@ -126,5 +178,5 @@
       }
     }
   ],
-  "opstamp": 1275
+  "opstamp": 17583
 }
