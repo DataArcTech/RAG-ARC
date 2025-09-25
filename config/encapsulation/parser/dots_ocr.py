@@ -8,8 +8,7 @@ class DotsOCRConfig(AbstractConfig):
     type: Literal["dots_ocr"] = "dots_ocr"
 
     # Model configuration
-    # model_path: str = "rednote-hilab/dots.ocr"  # Default to HuggingFace model ID, can be local path
-    model_path: str = "/finance_ML/dataarc_syn_database/model/rednote-hilab/DotsOCR"
+    model_path: str = "rednote-hilab/dots.ocr"  # Default to HuggingFace model ID, can be local path
     cache_dir: Optional[str] = None
     use_hf: bool = True
     device: str = "cuda:1"
