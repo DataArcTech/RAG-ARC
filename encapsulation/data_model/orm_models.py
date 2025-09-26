@@ -72,8 +72,7 @@ class FileMetadata(Base):
 class ParsedContentStatus(Enum):
     """Status of parsed content"""
     STORED = "STORED"    
-    PARSED = "PARSED"
-    INDEXED = "INDEXED"
+    CHUNKED = "CHUNKED"
     FAILED = "FAILED"    # Mark as FAILED when error occurs and wait for validation
 
 

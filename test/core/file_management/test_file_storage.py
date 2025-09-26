@@ -2,13 +2,8 @@
 Test for FileStorage - testing the core file management interface methods
 """
 
-import os
-import sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
-
 import json
 
-from config.encapsulation.database.file_store_config import FileStoreConfig
 from config.encapsulation.database.file_db.local_config import LocalDBConfig
 from config.encapsulation.database.relational_db.postgresql_config import PostgreSQLConfig
 from config.core.file_management.file_storage_config import FileStorageConfig
@@ -19,12 +14,9 @@ def main():
 
     file_db_config = LocalDBConfig()
     relational_db_config = PostgreSQLConfig()
-    file_store_config = FileStoreConfig(
+    config = FileStorageConfig(
         file_db_config=file_db_config,
         relational_db_config=relational_db_config
-    )
-    config = FileStorageConfig(
-        data_store_config=file_store_config
     )
 
     try:
@@ -40,15 +32,16 @@ def main():
         print("\n--- Test 1: build ---")
         file_storage = config.build()
         print(f"  FileStorage built from config")
-        print(f"  Data store initialized: {file_storage.data_store is not None}")
+        print(f"  Blob store initialized: {file_storage.blob_store is not None}")
+        print(f"  Metadata store initialized: {file_storage.metadata_store is not None}")
         print(f"  Blob storage path: {file_db_config.base_path}")
         print(f"  Database: {relational_db_config.database}")
 
         # Setup database schema
         print("  Setting up database schema...")
         from encapsulation.data_model.orm_models import Base
-        Base.metadata.drop_all(file_storage.data_store.metadata_store.engine)
-        Base.metadata.create_all(file_storage.data_store.metadata_store.engine)
+        Base.metadata.drop_all(file_storage.metadata_store.engine)
+        Base.metadata.create_all(file_storage.metadata_store.engine)
         print("  Database schema recreated")
 
         # 2. Test upload_file
@@ -93,40 +86,32 @@ def main():
         nonexistent_content = file_storage.get_file_content("00000000-0000-0000-0000-000000000000")
         print(f"  Non-existent file content: {nonexistent_content}")
 
-        # 5. Test upload_multiple_files
-        print("\n--- Test 5: upload_multiple_files ---")
-        multiple_files = [
-            {
-                "filename": "doc1.txt",
-                "file_data": b"Content of document 1",
-                "content_type": "text/plain"
-            },
-            {
-                "filename": "doc2.md",
-                "file_data": b"# Document 2\nMarkdown content",
-                "content_type": "text/markdown"
-            },
-            {
-                "filename": "doc3.txt",
-                "file_data": b"Content of document 3",
-                "content_type": "text/plain"
-            }
+        # 5. Test additional file uploads for testing other methods
+        print("\n--- Test 5: upload_additional_files ---")
+        uploaded_files = []
+
+        additional_files = [
+            ("doc1.txt", b"Content of document 1", "text/plain"),
+            ("doc2.md", b"# Document 2\nMarkdown content", "text/markdown"),
+            ("doc3.txt", b"Content of document 3", "text/plain")
         ]
 
-        upload_result = file_storage.upload_multiple_files(
-            file_uploads=multiple_files,
-            validate_after_store=True,
-            fail_fast=False
-        )
-        print(f"  Upload status: {upload_result['status']}")
-        print(f"  Total files: {upload_result['total_files']}")
-        print(f"  Successful uploads: {upload_result['successful_uploads']}")
-        print(f"  Failed uploads: {upload_result['failed_uploads']}")
-        print(f"  Success rate: {upload_result['success_rate']:.1f}%")
+        for filename, file_data, content_type in additional_files:
+            try:
+                file_id = file_storage.upload_file(
+                    filename=filename,
+                    file_data=file_data,
+                    content_type=content_type,
+                    validate_after_store=True
+                )
+                file_metadata = file_storage.get_file_metadata(file_id)
+                uploaded_files.append(file_metadata)
+                print(f"  Uploaded {filename}: {file_id}")
+            except Exception as e:
+                print(f"  Failed to upload {filename}: {e}")
 
-        # Get successfully uploaded files
-        uploaded_files = [result['file_metadata'] for result in upload_result['results'] if result['success']]
-        print(f"  Successfully uploaded file IDs: {[f.file_id for f in uploaded_files]}")
+        print(f"  Successfully uploaded files: {len(uploaded_files)}")
+        print(f"  File IDs: {[f.file_id for f in uploaded_files]}")
 
         # 6. Test store_parsed_content
         print("\n--- Test 6: store_parsed_content ---")
@@ -162,30 +147,29 @@ def main():
         print(f"  Content matches original: {retrieved_parsed_content == parsed_data}")
         print(f"  Content preview: {retrieved_parsed_content[:50].decode('utf-8')}...")
 
-        # 9. Test store_multiple_parsed_content
-        print("\n--- Test 9: store_multiple_parsed_content ---")
-        multiple_parsed = []
-        for i, uploaded_file in enumerate(uploaded_files[:2]):  # Use first 2 uploaded files
-            multiple_parsed.append({
-                "source_file_id": uploaded_file.file_id,
-                "parser_type": "batch_parser",
-                "parsed_data": f"Batch parsed content {i+1}".encode('utf-8'),
-                "content_type": "text/markdown"
-            })
+        # 9. Test additional parsed content storage
+        print("\n--- Test 9: store_additional_parsed_content ---")
+        parsed_contents = []
 
-        parsed_result = file_storage.store_multiple_parsed_content(
-            parsed_content_list=multiple_parsed,
-            validate_after_store=True,
-            fail_fast=False
-        )
-        print(f"  Parsed content status: {parsed_result['status']}")
-        print(f"  Total contents: {parsed_result['total_contents']}")
-        print(f"  Successful storages: {parsed_result['successful_storages']}")
-        print(f"  Success rate: {parsed_result['success_rate']:.1f}%")
+        # Use first 2 uploaded files for testing
+        for i, uploaded_file in enumerate(uploaded_files[:2]):
+            try:
+                parsed_data = f"Batch parsed content {i+1}".encode('utf-8')
+                parsed_content_id = file_storage.store_parsed_content(
+                    source_file_id=uploaded_file.file_id,
+                    parser_type="batch_parser",
+                    parsed_data=parsed_data,
+                    content_type="text/markdown",
+                    validate_after_store=True
+                )
+                parsed_metadata = file_storage.get_parsed_content_metadata(parsed_content_id)
+                parsed_contents.append(parsed_metadata)
+                print(f"  Stored parsed content {i+1}: {parsed_content_id}")
+            except Exception as e:
+                print(f"  Failed to store parsed content {i+1}: {e}")
 
-        # Get successfully parsed contents
-        parsed_contents = [result['parsed_metadata'] for result in parsed_result['results'] if result['success']]
-        print(f"  Successfully parsed content IDs: {[p.parsed_content_id for p in parsed_contents]}")
+        print(f"  Successfully stored parsed contents: {len(parsed_contents)}")
+        print(f"  Parsed content IDs: {[p.parsed_content_id for p in parsed_contents]}")
 
         # 10. Test store_chunk
         print("\n--- Test 10: store_chunk ---")
@@ -234,34 +218,34 @@ def main():
         print(f"  Chunk content: {chunk_json['content']}")
         print(f"  Chunk metadata: {chunk_json['metadata']}")
 
-        # 13. Test store_multiple_chunks
-        print("\n--- Test 13: store_multiple_chunks ---")
-        multiple_chunks = []
+        # 13. Test additional chunk storage
+        print("\n--- Test 13: store_additional_chunks ---")
+        stored_chunks = []
+
+        # Store multiple chunks individually
         for i in range(3):
-            chunk_data = {
-                "chunk_id": i,
-                "content": f"Batch chunk {i+1} content",
-                "metadata": {"batch_test": True, "chunk_index": i}
-            }
-            multiple_chunks.append({
-                "source_parsed_content_id": parsed_content_id,
-                "chunker_type": "batch_chunker",
-                "chunk_data": json.dumps(chunk_data).encode('utf-8')
-            })
+            try:
+                chunk_data = {
+                    "chunk_id": i,
+                    "content": f"Batch chunk {i+1} content",
+                    "metadata": {"batch_test": True, "chunk_index": i}
+                }
+                chunk_bytes = json.dumps(chunk_data).encode('utf-8')
 
-        chunk_result = file_storage.store_multiple_chunks(
-            chunks_list=multiple_chunks,
-            validate_after_store=True,
-            fail_fast=False
-        )
-        print(f"  Chunk storage status: {chunk_result['status']}")
-        print(f"  Total chunks: {chunk_result['total_chunks']}")
-        print(f"  Successful storages: {chunk_result['successful_storages']}")
-        print(f"  Success rate: {chunk_result['success_rate']:.1f}%")
+                chunk_id = file_storage.store_chunk(
+                    source_parsed_content_id=parsed_content_id,
+                    chunker_type="batch_chunker",
+                    chunk_data=chunk_bytes,
+                    validate_after_store=True
+                )
+                chunk_metadata = file_storage.get_chunk_metadata(chunk_id)
+                stored_chunks.append(chunk_metadata)
+                print(f"  Stored chunk {i+1}: {chunk_id}")
+            except Exception as e:
+                print(f"  Failed to store chunk {i+1}: {e}")
 
-        # Get successfully stored chunks
-        stored_chunks = [result['chunk_metadata'] for result in chunk_result['results'] if result['success']]
-        print(f"  Successfully stored chunk IDs: {[c.chunk_id for c in stored_chunks]}")
+        print(f"  Successfully stored chunks: {len(stored_chunks)}")
+        print(f"  Chunk IDs: {[c.chunk_id for c in stored_chunks]}")
 
         # 14. Test delete operations
         print("\n--- Test 14: delete operations ---")

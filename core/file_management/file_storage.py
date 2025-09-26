@@ -7,8 +7,10 @@ from typing import (
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import logging
+import uuid
 
 from encapsulation.data_model.orm_models import FileMetadata, ParsedContentMetadata, ChunkMetadata
+from encapsulation.data_model.orm_models import FileStatus, ParsedContentStatus, ChunkIndexStatus
 
 from framework.module import AbstractModule
 
@@ -30,34 +32,64 @@ class FileStorage(AbstractModule):
     Core file storage interface for RAG system.
 
     Provides high-level file upload, validation, and parsed content storage
-    operations. Handles multi-file uploads with atomic validation and
-    cleanup of failed operations.
+    operations with coordination between blob storage and metadata storage.
 
     Key features:
-    - Multi-file upload with batch processing
     - File validation and metadata verification
     - Parsed content storage linked to source files
+    - Chunk storage linked to parsed content
     - Automatic cleanup on validation failures
     - Upload session tracking
     - Comprehensive error handling and reporting
 
     Architecture:
-        Application Layer -> FileStorage (Core) -> FileStore (Encapsulation) -> Storage Implementations
+        Application Layer -> FileStorage (Core) -> Blob Storage + Metadata Storage
 
     Dependencies:
-        data_store: DataStore implementation (e.g., FileStore)
+        blob_store: FileDB implementation (e.g., LocalDB, MinIODB)
+        metadata_store: RelationalDB implementation (e.g., PostgreSQLDB)
     """
 
     def __init__(self, config):
-        """Initialize FileStorage with eager data store creation"""
+        """Initialize FileStorage with eager blob and metadata store creation"""
         super().__init__(config)
-        # Build data store immediately since we always need it
-        self.data_store = self.config.data_store_config.build()
+        # Build stores directly (no intermediate data_store layer)
+        self.blob_store = config.file_db_config.build()
+        self.metadata_store = config.relational_db_config.build()
 
     def _generate_upload_session_id(self) -> str:
         """Generate unique upload session ID"""
-        import uuid
         return str(uuid.uuid4())
+
+    def _generate_file_id(self) -> str:
+        """Generate unique file ID"""
+        return str(uuid.uuid4())
+
+    def _generate_blob_key(self, file_id: str, filename: str) -> str:
+        """Generate blob storage key from file ID and filename"""
+        # Create hierarchical key: files/{first-2-chars-of-id}/{file-id}/{filename}
+        prefix = file_id[:2]
+        return f"files/{prefix}/{file_id}/{filename}"
+
+    def _generate_parsed_content_id(self) -> str:
+        """Generate unique parsed content ID"""
+        return str(uuid.uuid4())
+
+    def _generate_parsed_blob_key(self, parsed_content_id: str, source_file_id: str, parser_type: str) -> str:
+        """Generate blob storage key for parsed content"""
+        # Create hierarchical key: parsed/{first-2-chars-of-source-id}/{source-file-id}/{parsed-content-id}.{parser-type}
+        prefix = source_file_id[:2]
+        return f"parsed/{prefix}/{source_file_id}/{parsed_content_id}.{parser_type}"
+
+    def _generate_chunk_id(self) -> str:
+        """Generate unique chunk ID"""
+        return str(uuid.uuid4())
+
+    def _generate_chunk_blob_key(self, chunk_id: str, source_parsed_content_id: str, chunker_type: str) -> str:
+        """Generate blob storage key for chunk"""
+        # Create hierarchical key: chunks/{first-2-chars-of-source-id}/{source-parsed-content-id}/{chunk-id}.json
+        prefix = source_parsed_content_id[:2]
+        return f"chunks/{prefix}/{source_parsed_content_id}/{chunk_id}.json"
     
     def _validate_file_upload(
         self,
@@ -80,6 +112,200 @@ class FileStorage(AbstractModule):
         max_file_size = 100 * 1024 * 1024  # 100MB default limit
         if len(file_data) > max_file_size:
             raise FileValidationError(f"File too large (max {max_file_size} bytes)")
+
+    def _validate_stored_file(self, file_id: str, **kwargs: Any) -> bool:
+        """Validate that file was stored successfully"""
+        try:
+            # Get file metadata
+            metadata = self.metadata_store.get_file_metadata(file_id, **kwargs)
+            if not metadata:
+                logger.warning(f"File metadata not found for validation: {file_id}")
+                return False
+
+            # Check if blob exists
+            blob_exists = self.blob_store.exists(metadata.blob_key, **kwargs)
+            if not blob_exists:
+                logger.error(f"Blob validation failed - blob not found: {metadata.blob_key}")
+                # Update status to FAILED
+                self.metadata_store.update_file_status(file_id, FileStatus.FAILED, **kwargs)
+                return False
+
+            # If validation passes and status was FAILED, update to STORED
+            if metadata.status == FileStatus.FAILED:
+                self.metadata_store.update_file_status(file_id, FileStatus.STORED, **kwargs)
+
+            logger.info(f"File upload validation successful: {file_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to validate file upload {file_id}: {e}")
+            return False
+
+    def _cleanup_failed_file_upload(self, file_id: str, **kwargs: Any) -> bool:
+        """Clean up artifacts from failed file upload"""
+        try:
+            cleanup_success = True
+
+            # Get metadata to find blob key
+            metadata = self.metadata_store.get_file_metadata(file_id, **kwargs)
+            if metadata:
+                # Try to delete blob
+                try:
+                    if self.blob_store.exists(metadata.blob_key, **kwargs):
+                        blob_deleted = self.blob_store.delete(metadata.blob_key, **kwargs)
+                        if not blob_deleted:
+                            logger.warning(f"Failed to delete blob during cleanup: {metadata.blob_key}")
+                            cleanup_success = False
+                        else:
+                            logger.info(f"Deleted blob during cleanup: {metadata.blob_key}")
+                except Exception as blob_error:
+                    logger.error(f"Error deleting blob during cleanup: {blob_error}")
+                    cleanup_success = False
+
+            # Delete metadata
+            try:
+                metadata_deleted = self.metadata_store.delete_file_metadata(file_id, **kwargs)
+                if not metadata_deleted:
+                    logger.warning(f"Failed to delete metadata during cleanup: {file_id}")
+                    cleanup_success = False
+                else:
+                    logger.info(f"Deleted metadata during cleanup: {file_id}")
+            except Exception as metadata_error:
+                logger.error(f"Error deleting metadata during cleanup: {metadata_error}")
+                cleanup_success = False
+
+            return cleanup_success
+
+        except Exception as e:
+            logger.error(f"Failed to cleanup failed file upload {file_id}: {e}")
+            return False
+
+    def _validate_stored_parsed_content(self, parsed_content_id: str, **kwargs: Any) -> bool:
+        """Validate that parsed content was stored successfully"""
+        try:
+            # Get parsed content metadata
+            metadata = self.metadata_store.get_parsed_content_metadata(parsed_content_id, **kwargs)
+            if not metadata:
+                logger.warning(f"Parsed content metadata not found for validation: {parsed_content_id}")
+                return False
+
+            # Check if blob exists
+            blob_exists = self.blob_store.exists(metadata.blob_key, **kwargs)
+            if not blob_exists:
+                logger.error(f"Parsed content blob validation failed - blob not found: {metadata.blob_key}")
+                self.metadata_store.update_parsed_content_status(parsed_content_id, ParsedContentStatus.FAILED, **kwargs)
+                return False
+
+            # If validation passes and status was FAILED, update to STORED
+            if metadata.status == ParsedContentStatus.FAILED:
+                self.metadata_store.update_parsed_content_status(parsed_content_id, ParsedContentStatus.STORED, **kwargs)
+
+            logger.info(f"Parsed content upload validation successful: {parsed_content_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to validate parsed content upload {parsed_content_id}: {e}")
+            return False
+
+    def _cleanup_failed_parsed_content_upload(self, parsed_content_id: str, **kwargs: Any) -> bool:
+        """Clean up artifacts from failed parsed content upload"""
+        try:
+            cleanup_success = True
+
+            # Get metadata to find blob key
+            metadata = self.metadata_store.get_parsed_content_metadata(parsed_content_id, **kwargs)
+            if metadata:
+                # Try to delete blob
+                try:
+                    if self.blob_store.exists(metadata.blob_key, **kwargs):
+                        blob_deleted = self.blob_store.delete(metadata.blob_key, **kwargs)
+                        if not blob_deleted:
+                            logger.warning(f"Failed to delete parsed content blob during cleanup: {metadata.blob_key}")
+                            cleanup_success = False
+                        else:
+                            logger.info(f"Deleted parsed content blob during cleanup: {metadata.blob_key}")
+                except Exception as blob_error:
+                    logger.error(f"Error deleting parsed content blob during cleanup: {blob_error}")
+                    cleanup_success = False
+
+            # Delete metadata
+            try:
+                metadata_deleted = self.metadata_store.delete_parsed_content_metadata(parsed_content_id, **kwargs)
+                if not metadata_deleted:
+                    logger.warning(f"Failed to delete parsed content metadata during cleanup: {parsed_content_id}")
+                    cleanup_success = False
+                else:
+                    logger.info(f"Deleted parsed content metadata during cleanup: {parsed_content_id}")
+            except Exception as metadata_error:
+                logger.error(f"Error deleting parsed content metadata during cleanup: {metadata_error}")
+                cleanup_success = False
+
+            return cleanup_success
+
+        except Exception as e:
+            logger.error(f"Failed to cleanup failed parsed content upload {parsed_content_id}: {e}")
+            return False
+
+    def _cleanup_failed_chunk_upload(self, chunk_id: str, **kwargs: Any) -> bool:
+        """Clean up artifacts from failed chunk upload"""
+        try:
+            cleanup_success = True
+
+            # Get metadata to find blob key
+            metadata = self.metadata_store.get_chunk_metadata(chunk_id, **kwargs)
+            if metadata:
+                # Try to delete blob
+                try:
+                    if self.blob_store.exists(metadata.blob_key, **kwargs):
+                        blob_deleted = self.blob_store.delete(metadata.blob_key, **kwargs)
+                        if not blob_deleted:
+                            logger.warning(f"Failed to delete chunk blob during cleanup: {metadata.blob_key}")
+                            cleanup_success = False
+                        else:
+                            logger.info(f"Deleted chunk blob during cleanup: {metadata.blob_key}")
+                except Exception as blob_error:
+                    logger.error(f"Error deleting chunk blob during cleanup: {blob_error}")
+                    cleanup_success = False
+
+            # Delete metadata
+            try:
+                metadata_deleted = self.metadata_store.delete_chunk_metadata(chunk_id, **kwargs)
+                if not metadata_deleted:
+                    logger.warning(f"Failed to delete chunk metadata during cleanup: {chunk_id}")
+                    cleanup_success = False
+                else:
+                    logger.info(f"Deleted chunk metadata during cleanup: {chunk_id}")
+            except Exception as metadata_error:
+                logger.error(f"Error deleting chunk metadata during cleanup: {metadata_error}")
+                cleanup_success = False
+
+            return cleanup_success
+
+        except Exception as e:
+            logger.error(f"Failed to cleanup failed chunk upload {chunk_id}: {e}")
+            return False
+
+    def _validate_stored_chunk(self, chunk_id: str, **kwargs: Any) -> bool:
+        """Validate that chunk was stored successfully"""
+        try:
+            # Get chunk metadata
+            metadata = self.metadata_store.get_chunk_metadata(chunk_id, **kwargs)
+            if not metadata:
+                logger.warning(f"Chunk metadata not found for validation: {chunk_id}")
+                return False
+
+            # Check if blob exists
+            blob_exists = self.blob_store.exists(metadata.blob_key, **kwargs)
+            if not blob_exists:
+                logger.error(f"Chunk blob validation failed - blob not found: {metadata.blob_key}")
+                return False
+
+            logger.info(f"Chunk upload validation successful: {chunk_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to validate chunk upload {chunk_id}: {e}")
+            return False
     
     def upload_file(
         self,
@@ -90,7 +316,7 @@ class FileStorage(AbstractModule):
         **kwargs: Any,
     ) -> str:
         """
-        Upload a single file with validation.
+        Upload a single file with validation and coordination.
 
         Args:
             filename: Original filename
@@ -111,34 +337,82 @@ class FileStorage(AbstractModule):
             self._validate_file_upload(filename, file_data)
             logger.info(f"Validated file upload request: {filename}")
 
-            # Store file
-            file_metadata = self.data_store.store_file(
-                file_data=file_data,
+            # Generate IDs and keys
+            file_id = self._generate_file_id()
+            blob_key = self._generate_blob_key(file_id, filename)
+
+            # Calculate file properties
+            file_size = len(file_data)
+            content_type = content_type or "application/octet-stream"
+
+            # Create metadata object with STORED status
+            now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+            metadata = FileMetadata(
+                file_id=file_id,
+                blob_key=blob_key,
                 filename=filename,
+                status=FileStatus.STORED,
+                file_size=file_size,
                 content_type=content_type,
-                **kwargs
+                created_at=now,
+                updated_at=now
             )
 
-            logger.info(f"Stored file successfully: {filename} (file_id: {file_metadata.file_id})")
+            # Store metadata first through metadata store
+            logger.info(f"Storing metadata for file: {filename} (file_id: {file_id})")
+            stored_metadata_id = self.metadata_store.store_file_metadata(metadata, **kwargs)
+            assert stored_metadata_id == file_id
+
+            try:
+                # Store blob data through blob store
+                logger.info(f"Storing blob data for file: {filename} (key: {blob_key})")
+                stored_blob_key, was_overwritten = self.blob_store.store(
+                    blob_key,
+                    file_data,
+                    content_type=content_type,
+                    **kwargs
+                )
+
+                # Update metadata with final blob key
+                self.metadata_store.update_file_metadata(
+                    file_id,
+                    {
+                        'blob_key': stored_blob_key,  # Use actual stored key (may be versioned)
+                        'status': FileStatus.STORED,
+                        'updated_at': datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+                    },
+                    **kwargs
+                )
+
+                if was_overwritten:
+                    logger.warning(f"Blob was overwritten during storage: {stored_blob_key}")
+
+                logger.info(f"Successfully stored file: {filename} (file_id: {file_id}, blob_key: {stored_blob_key})")
+
+            except Exception as blob_error:
+                # Blob storage failed, update metadata status to FAILED
+                logger.error(f"Blob storage failed for {filename}: {blob_error}")
+                self.metadata_store.update_file_status(file_id, FileStatus.FAILED, **kwargs)
+                raise StorageOperationError(f"Blob storage failed: {str(blob_error)}")
 
             # Validate after storage if requested
             if validate_after_store:
-                validation_passed = self.data_store.validate_file_upload(file_metadata.file_id, **kwargs)
+                validation_passed = self._validate_stored_file(file_id, **kwargs)
 
                 if not validation_passed:
                     # Validation failed, cleanup
                     logger.error(f"File validation failed: {filename}")
-                    cleanup_success = self.data_store.cleanup_failed_file_upload(file_metadata.file_id, **kwargs)
+                    cleanup_success = self._cleanup_failed_file_upload(file_id, **kwargs)
                     if cleanup_success:
-                        logger.info(f"Cleaned up failed upload: {file_metadata.file_id}")
+                        logger.info(f"Cleaned up failed upload: {file_id}")
                     else:
-                        logger.warning(f"Failed to cleanup after validation failure: {file_metadata.file_id}")
+                        logger.warning(f"Failed to cleanup after validation failure: {file_id}")
 
                     raise StorageOperationError("File validation failed after storage")
 
                 logger.info(f"File validation passed: {filename}")
 
-            return file_metadata.file_id
+            return file_id
 
         except FileValidationError:
             # Re-raise validation errors as-is
@@ -147,117 +421,7 @@ class FileStorage(AbstractModule):
         except Exception as e:
             logger.error(f"Storage error for {filename}: {e}")
             raise StorageOperationError(f"Storage error: {str(e)}")
-    
-    def upload_multiple_files(
-        self,
-        file_uploads: List[Dict[str, Any]],
-        validate_after_store: bool = True,
-        fail_fast: bool = False,
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        """
-        Upload multiple files with batch validation.
 
-        Args:
-            file_uploads: List of file upload dictionaries, each containing:
-                - filename: str
-                - file_data: bytes
-                - content_type: Optional[str]
-            validate_after_store: Whether to validate each file after storing
-            fail_fast: Whether to stop on first failure
-            **kwargs: Additional arguments
-
-        Returns:
-            Dictionary with upload results:
-            - status: "success" | "failed" | "partial_success"
-            - total_files: int
-            - successful_uploads: int
-            - failed_uploads: int
-            - results: List[Dict] with individual file results
-            - upload_session_id: str
-            - timestamp: datetime
-        """
-        upload_session_id = self._generate_upload_session_id()
-        timestamp = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
-
-        logger.info(f"Starting multi-file upload session: {upload_session_id} ({len(file_uploads)} files)")
-
-        results = []
-        successful_uploads = 0
-        failed_uploads = 0
-
-        for i, file_upload in enumerate(file_uploads):
-            filename = file_upload["filename"]
-            logger.info(f"Processing file {i+1}/{len(file_uploads)}: {filename}")
-
-            try:
-                # Upload individual file
-                file_id = self.upload_file(
-                    filename=filename,
-                    file_data=file_upload["file_data"],
-                    content_type=file_upload.get("content_type"),
-                    validate_after_store=validate_after_store,
-                    **kwargs
-                )
-
-                # Get file metadata for the result
-                file_metadata = self.get_file_metadata(file_id)
-
-                # Success result
-                results.append({
-                    "filename": filename,
-                    "success": True,
-                    "file_id": file_id,
-                    "file_metadata": file_metadata,
-                    "error_message": None
-                })
-                successful_uploads += 1
-                logger.info(f"Successfully uploaded: {filename}")
-
-            except (FileValidationError, StorageOperationError) as e:
-                # Error result
-                results.append({
-                    "filename": filename,
-                    "success": False,
-                    "file_id": None,
-                    "file_metadata": None,
-                    "error_message": str(e)
-                })
-                failed_uploads += 1
-                logger.error(f"Failed to upload: {filename} - {str(e)}")
-
-                # Stop processing if fail_fast is enabled
-                if fail_fast:
-                    logger.warning(f"Stopping upload session due to failure (fail_fast enabled)")
-                    break
-
-        # Determine overall status
-        if successful_uploads == len(file_uploads):
-            overall_status = "success"
-        elif successful_uploads == 0:
-            overall_status = "failed"
-        else:
-            overall_status = "partial_success"
-
-        success_rate = (successful_uploads / len(file_uploads)) * 100 if file_uploads else 0.0
-
-        upload_result = {
-            "status": overall_status,
-            "total_files": len(file_uploads),
-            "successful_uploads": successful_uploads,
-            "failed_uploads": failed_uploads,
-            "success_rate": success_rate,
-            "results": results,
-            "upload_session_id": upload_session_id,
-            "timestamp": timestamp
-        }
-
-        logger.info(f"Completed upload session {upload_session_id}: "
-                   f"{successful_uploads}/{len(file_uploads)} successful "
-                   f"({success_rate:.1f}% success rate)")
-
-        return upload_result
-    
     def store_parsed_content(
         self,
         source_file_id: str,
@@ -268,7 +432,7 @@ class FileStorage(AbstractModule):
         **kwargs: Any,
     ) -> str:
         """
-        Store parsed content linked to source file.
+        Store parsed content linked to source file with coordination.
 
         Args:
             source_file_id: ID of the original file that was parsed
@@ -290,42 +454,83 @@ class FileStorage(AbstractModule):
             raise FileValidationError("parsed_data must be provided")
 
         try:
-            # Get data store
-            data_store = self.data_store
+            # Verify source file exists
+            source_metadata = self.metadata_store.get_file_metadata(source_file_id, **kwargs)
+            if not source_metadata:
+                raise ValueError(f"Source file {source_file_id} not found")
 
-            # Store parsed content
-            parsed_metadata = data_store.store_parsed_content(
-                parsed_data=parsed_data,
+            # Generate IDs and keys
+            parsed_content_id = self._generate_parsed_content_id()
+            blob_key = self._generate_parsed_blob_key(parsed_content_id, source_file_id, parser_type)
+
+            # Create parsed content metadata object
+            now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+            parsed_metadata = ParsedContentMetadata(
+                parsed_content_id=parsed_content_id,
                 source_file_id=source_file_id,
+                blob_key=blob_key,
                 parser_type=parser_type,
-                content_type=content_type,
-                **kwargs
+                status=ParsedContentStatus.STORED,
+                created_at=now,
+                updated_at=now,
+                content_type=content_type
             )
 
-            logger.info(f"Stored parsed content successfully: {parsed_metadata.parsed_content_id}")
+            # Store parsed metadata first
+            logger.info(f"Storing parsed content metadata: {parsed_content_id} (source: {source_file_id})")
+            stored_metadata_id = self.metadata_store.store_parsed_content_metadata(parsed_metadata, **kwargs)
+            assert stored_metadata_id == parsed_content_id
+
+            try:
+                # Store parsed content blob
+                logger.info(f"Storing parsed content blob: {blob_key}")
+                stored_blob_key, was_overwritten = self.blob_store.store(
+                    blob_key,
+                    parsed_data,
+                    content_type=content_type,
+                    **kwargs
+                )
+
+                # Update metadata with final blob key
+                self.metadata_store.update_parsed_content_metadata(
+                    parsed_content_id,
+                    {
+                        'blob_key': stored_blob_key,
+                        'status': ParsedContentStatus.STORED,
+                        'updated_at': datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+                    },
+                    **kwargs
+                )
+
+                if was_overwritten:
+                    logger.warning(f"Parsed content blob was overwritten: {stored_blob_key}")
+
+                logger.info(f"Successfully stored parsed content: {parsed_content_id} (blob_key: {stored_blob_key})")
+
+            except Exception as blob_error:
+                # Blob storage failed, update metadata status to FAILED
+                logger.error(f"Parsed content blob storage failed: {blob_error}")
+                self.metadata_store.update_parsed_content_status(parsed_content_id, ParsedContentStatus.FAILED, **kwargs)
+                raise StorageOperationError(f"Parsed content blob storage failed: {str(blob_error)}")
 
             # Validate after storage if requested
             if validate_after_store:
-                validation_passed = data_store.validate_parsed_content_upload(
-                    parsed_metadata.parsed_content_id, **kwargs
-                )
+                validation_passed = self._validate_stored_parsed_content(parsed_content_id, **kwargs)
 
                 if not validation_passed:
                     # Validation failed, cleanup
-                    logger.error(f"Parsed content validation failed: {parsed_metadata.parsed_content_id}")
-                    cleanup_success = data_store.cleanup_failed_parsed_content_upload(
-                        parsed_metadata.parsed_content_id, **kwargs
-                    )
+                    logger.error(f"Parsed content validation failed: {parsed_content_id}")
+                    cleanup_success = self._cleanup_failed_parsed_content_upload(parsed_content_id, **kwargs)
                     if cleanup_success:
-                        logger.info(f"Cleaned up failed parsed content: {parsed_metadata.parsed_content_id}")
+                        logger.info(f"Cleaned up failed parsed content: {parsed_content_id}")
                     else:
-                        logger.warning(f"Failed to cleanup after validation failure: {parsed_metadata.parsed_content_id}")
+                        logger.warning(f"Failed to cleanup after validation failure: {parsed_content_id}")
 
                     raise StorageOperationError("Parsed content validation failed after storage")
 
-                logger.info(f"Parsed content validation passed: {parsed_metadata.parsed_content_id}")
+                logger.info(f"Parsed content validation passed: {parsed_content_id}")
 
-            return parsed_metadata.parsed_content_id
+            return parsed_content_id
 
         except FileValidationError:
             # Re-raise validation errors as-is
@@ -335,117 +540,6 @@ class FileStorage(AbstractModule):
             logger.error(f"Parsed content storage error: {e}")
             raise StorageOperationError(f"Storage error: {str(e)}")
     
-    def store_multiple_parsed_content(
-        self,
-        parsed_content_list: List[Dict[str, Any]],
-        validate_after_store: bool = True,
-        fail_fast: bool = False,
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        """
-        Store multiple parsed content items with batch processing.
-
-        Args:
-            parsed_content_list: List of parsed content dictionaries, each containing:
-                - source_file_id: str
-                - parser_type: str
-                - parsed_data: bytes
-                - content_type: str (default: "text/markdown")
-            validate_after_store: Whether to validate each parsed content after storing
-            fail_fast: Whether to stop on first failure
-            **kwargs: Additional arguments
-
-        Returns:
-            Dictionary with storage results:
-            - status: "success" | "failed" | "partial_success"
-            - total_contents: int
-            - successful_storages: int
-            - failed_storages: int
-            - results: List[Dict] with individual content results
-            - processing_session_id: str
-            - timestamp: datetime
-        """
-        processing_session_id = self._generate_upload_session_id()
-        timestamp = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
-
-        logger.info(f"Starting multi-parsed content storage session: {processing_session_id} ({len(parsed_content_list)} contents)")
-
-        results = []
-        successful_storages = 0
-        failed_storages = 0
-
-        for i, parsed_content in enumerate(parsed_content_list):
-            source_file_id = parsed_content["source_file_id"]
-            logger.info(f"Processing parsed content {i+1}/{len(parsed_content_list)} for source: {source_file_id}")
-
-            try:
-                # Store individual parsed content
-                parsed_content_id = self.store_parsed_content(
-                    source_file_id=source_file_id,
-                    parser_type=parsed_content["parser_type"],
-                    parsed_data=parsed_content["parsed_data"],
-                    content_type=parsed_content.get("content_type", "text/markdown"),
-                    validate_after_store=validate_after_store,
-                    **kwargs
-                )
-
-                # Get parsed content metadata for the result
-                parsed_metadata = self.get_parsed_content_metadata(parsed_content_id)
-
-                # Success result
-                results.append({
-                    "source_file_id": source_file_id,
-                    "success": True,
-                    "parsed_content_id": parsed_content_id,
-                    "parsed_metadata": parsed_metadata,
-                    "error_message": None
-                })
-                successful_storages += 1
-                logger.info(f"Successfully stored parsed content: {parsed_content_id}")
-
-            except (FileValidationError, StorageOperationError) as e:
-                # Error result
-                results.append({
-                    "source_file_id": source_file_id,
-                    "success": False,
-                    "parsed_content_id": None,
-                    "parsed_metadata": None,
-                    "error_message": str(e)
-                })
-                failed_storages += 1
-                logger.error(f"Failed to store parsed content for source {source_file_id}: {str(e)}")
-
-                # Stop processing if fail_fast is enabled
-                if fail_fast:
-                    logger.warning(f"Stopping parsed content storage session due to failure (fail_fast enabled)")
-                    break
-
-        # Determine overall status
-        if successful_storages == len(parsed_content_list):
-            overall_status = "success"
-        elif successful_storages == 0:
-            overall_status = "failed"
-        else:
-            overall_status = "partial_success"
-
-        success_rate = (successful_storages / len(parsed_content_list)) * 100 if parsed_content_list else 0.0
-
-        storage_result = {
-            "status": overall_status,
-            "total_contents": len(parsed_content_list),
-            "successful_storages": successful_storages,
-            "failed_storages": failed_storages,
-            "success_rate": success_rate,
-            "results": results,
-            "processing_session_id": processing_session_id,
-            "timestamp": timestamp
-        }
-
-        logger.info(f"Completed parsed content storage session {processing_session_id}: "
-                   f"{successful_storages}/{len(parsed_content_list)} successful "
-                   f"({success_rate:.1f}% success rate)")
-
-        return storage_result
 
     def store_chunk(
         self,
@@ -456,7 +550,7 @@ class FileStorage(AbstractModule):
         **kwargs: Any,
     ) -> str:
         """
-        Store a single chunk linked to parsed content.
+        Store a single chunk linked to parsed content with coordination.
 
         Args:
             source_parsed_content_id: ID of the parsed content that was chunked
@@ -477,41 +571,79 @@ class FileStorage(AbstractModule):
             raise FileValidationError("chunk_data must be provided")
 
         try:
-            # Get data store
-            data_store = self.data_store
+            # Verify source parsed content exists
+            source_metadata = self.metadata_store.get_parsed_content_metadata(source_parsed_content_id, **kwargs)
+            if not source_metadata:
+                raise ValueError(f"Source parsed content {source_parsed_content_id} not found")
 
-            # Store chunk
-            chunk_metadata = data_store.store_chunk(
-                chunk_data=chunk_data,
+            # Generate IDs and keys
+            chunk_id = self._generate_chunk_id()
+            blob_key = self._generate_chunk_blob_key(chunk_id, source_parsed_content_id, chunker_type)
+
+            # Create chunk metadata object
+            now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+            chunk_metadata = ChunkMetadata(
+                chunk_id=chunk_id,
                 source_parsed_content_id=source_parsed_content_id,
+                blob_key=blob_key,
                 chunker_type=chunker_type,
-                **kwargs
+                index_status=ChunkIndexStatus.STORED,
+                created_at=now
             )
 
-            logger.info(f"Stored chunk successfully: {chunk_metadata.chunk_id}")
+            # Store chunk metadata first
+            logger.info(f"Storing chunk metadata: {chunk_id} (source: {source_parsed_content_id})")
+            stored_metadata_id = self.metadata_store.store_chunk_metadata(chunk_metadata, **kwargs)
+            assert stored_metadata_id == chunk_id
+
+            try:
+                # Store chunk blob
+                logger.info(f"Storing chunk blob: {blob_key}")
+                stored_blob_key, was_overwritten = self.blob_store.store(
+                    blob_key,
+                    chunk_data,
+                    content_type="application/json",
+                    **kwargs
+                )
+
+                # Update metadata with final blob key
+                self.metadata_store.update_chunk_metadata(
+                    chunk_id,
+                    {
+                        'blob_key': stored_blob_key
+                    },
+                    **kwargs
+                )
+
+                if was_overwritten:
+                    logger.warning(f"Chunk blob was overwritten: {stored_blob_key}")
+
+                logger.info(f"Successfully stored chunk: {chunk_id} (blob_key: {stored_blob_key})")
+
+            except Exception as blob_error:
+                # Blob storage failed, delete metadata
+                logger.error(f"Chunk blob storage failed: {blob_error}")
+                self.metadata_store.delete_chunk_metadata(chunk_id, **kwargs)
+                raise StorageOperationError(f"Chunk blob storage failed: {str(blob_error)}")
 
             # Validate after storage if requested
             if validate_after_store:
-                validation_passed = data_store.validate_chunk_upload(
-                    chunk_metadata.chunk_id, **kwargs
-                )
+                validation_passed = self._validate_stored_chunk(chunk_id, **kwargs)
 
                 if not validation_passed:
                     # Validation failed, cleanup
-                    logger.error(f"Chunk validation failed: {chunk_metadata.chunk_id}")
-                    cleanup_success = data_store.cleanup_failed_chunk_upload(
-                        chunk_metadata.chunk_id, **kwargs
-                    )
+                    logger.error(f"Chunk validation failed: {chunk_id}")
+                    cleanup_success = self._cleanup_failed_chunk_upload(chunk_id, **kwargs)
                     if cleanup_success:
-                        logger.info(f"Cleaned up failed chunk: {chunk_metadata.chunk_id}")
+                        logger.info(f"Cleaned up failed chunk: {chunk_id}")
                     else:
-                        logger.warning(f"Failed to cleanup after validation failure: {chunk_metadata.chunk_id}")
+                        logger.warning(f"Failed to cleanup after validation failure: {chunk_id}")
 
                     raise StorageOperationError("Chunk validation failed after storage")
 
-                logger.info(f"Chunk validation passed: {chunk_metadata.chunk_id}")
+                logger.info(f"Chunk validation passed: {chunk_id}")
 
-            return chunk_metadata.chunk_id
+            return chunk_id
 
         except FileValidationError:
             # Re-raise validation errors as-is
@@ -521,122 +653,10 @@ class FileStorage(AbstractModule):
             logger.error(f"Chunk storage error: {e}")
             raise StorageOperationError(f"Storage error: {str(e)}")
 
-    def store_multiple_chunks(
-        self,
-        chunks_list: List[Dict[str, Any]],
-        validate_after_store: bool = True,
-        fail_fast: bool = False,
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        """
-        Store multiple individual chunks with batch processing.
-
-        Args:
-            chunks_list: List of chunk dictionaries, each containing:
-                - source_parsed_content_id: str
-                - chunker_type: str
-                - chunk_data: bytes (JSON format)
-            validate_after_store: Whether to validate each chunk after storing
-            fail_fast: Whether to stop on first failure
-            **kwargs: Additional arguments
-
-        Returns:
-            Dictionary with storage results:
-            - status: "success" | "failed" | "partial_success"
-            - total_chunks: int
-            - successful_storages: int
-            - failed_storages: int
-            - results: List[Dict] with individual chunk results
-            - processing_session_id: str
-            - timestamp: datetime
-        """
-        processing_session_id = self._generate_upload_session_id()
-        timestamp = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
-
-        logger.info(f"Starting multi-chunk storage session: {processing_session_id} ({len(chunks_list)} chunks)")
-
-        results = []
-        successful_storages = 0
-        failed_storages = 0
-
-        for i, chunk_item in enumerate(chunks_list):
-            source_parsed_content_id = chunk_item["source_parsed_content_id"]
-            logger.info(f"Processing chunk {i+1}/{len(chunks_list)} for source: {source_parsed_content_id}")
-
-            try:
-                # Store individual chunk
-                chunk_id = self.store_chunk(
-                    source_parsed_content_id=source_parsed_content_id,
-                    chunker_type=chunk_item["chunker_type"],
-                    chunk_data=chunk_item["chunk_data"],
-                    validate_after_store=validate_after_store,
-                    **kwargs
-                )
-
-                # Get chunk metadata for the result
-                chunk_metadata = self.get_chunk_metadata(chunk_id)
-
-                # Success result
-                results.append({
-                    "source_parsed_content_id": source_parsed_content_id,
-                    "success": True,
-                    "chunk_id": chunk_id,
-                    "chunk_metadata": chunk_metadata,
-                    "error_message": None
-                })
-                successful_storages += 1
-                logger.info(f"Successfully stored chunk: {chunk_id}")
-
-            except (FileValidationError, StorageOperationError) as e:
-                # Error result
-                results.append({
-                    "source_parsed_content_id": source_parsed_content_id,
-                    "success": False,
-                    "chunk_id": None,
-                    "chunk_metadata": None,
-                    "error_message": str(e)
-                })
-                failed_storages += 1
-                logger.error(f"Failed to store chunk for source {source_parsed_content_id}: {str(e)}")
-
-                # Stop processing if fail_fast is enabled
-                if fail_fast:
-                    logger.warning(f"Stopping chunk storage session due to failure (fail_fast enabled)")
-                    break
-
-        # Determine overall status
-        if successful_storages == len(chunks_list):
-            overall_status = "success"
-        elif successful_storages == 0:
-            overall_status = "failed"
-        else:
-            overall_status = "partial_success"
-
-        success_rate = (successful_storages / len(chunks_list)) * 100 if chunks_list else 0.0
-
-        storage_result = {
-            "status": overall_status,
-            "total_chunks": len(chunks_list),
-            "successful_storages": successful_storages,
-            "failed_storages": failed_storages,
-            "success_rate": success_rate,
-            "results": results,
-            "processing_session_id": processing_session_id,
-            "timestamp": timestamp
-        }
-
-        logger.info(f"Completed chunk storage session {processing_session_id}: "
-                   f"{successful_storages}/{len(chunks_list)} successful "
-                   f"({success_rate:.1f}% success rate)")
-
-        return storage_result
-
-    
     def get_file_metadata(self, file_id: str, **kwargs: Any) -> Optional['FileMetadata']:
         """Retrieve file metadata by file ID"""
         try:
-            data_store = self.data_store
-            return data_store.get_file_metadata(file_id, **kwargs)
+            return self.metadata_store.get_file_metadata(file_id, **kwargs)
         except Exception as e:
             logger.error(f"Failed to get file metadata for {file_id}: {e}")
             raise StorageOperationError(f"Failed to retrieve file metadata: {e}")
@@ -644,8 +664,21 @@ class FileStorage(AbstractModule):
     def get_file_content(self, file_id: str, **kwargs: Any) -> Optional[bytes]:
         """Retrieve file content by file ID"""
         try:
-            data_store = self.data_store
-            return data_store.get_file_content(file_id, **kwargs)
+            # Get metadata to find blob key
+            metadata = self.metadata_store.get_file_metadata(file_id, **kwargs)
+            if not metadata:
+                logger.warning(f"File metadata not found for file_id: {file_id}")
+                return None
+
+            # Retrieve blob content
+            try:
+                content = self.blob_store.retrieve(metadata.blob_key, **kwargs)
+                logger.debug(f"Retrieved file content for file_id: {file_id}")
+                return content
+            except KeyError:
+                logger.error(f"Blob not found for file_id: {file_id}, blob_key: {metadata.blob_key}")
+                return None
+
         except Exception as e:
             logger.error(f"Failed to get file content for {file_id}: {e}")
             raise StorageOperationError(f"Failed to retrieve file content: {e}")
@@ -653,8 +686,7 @@ class FileStorage(AbstractModule):
     def get_parsed_content_metadata(self, parsed_content_id: str, **kwargs: Any) -> Optional['ParsedContentMetadata']:
         """Retrieve parsed content metadata by ID"""
         try:
-            data_store = self.data_store
-            return data_store.get_parsed_content_metadata(parsed_content_id, **kwargs)
+            return self.metadata_store.get_parsed_content_metadata(parsed_content_id, **kwargs)
         except Exception as e:
             logger.error(f"Failed to get parsed content metadata for {parsed_content_id}: {e}")
             raise StorageOperationError(f"Failed to retrieve parsed content metadata: {e}")
@@ -662,8 +694,21 @@ class FileStorage(AbstractModule):
     def get_parsed_content(self, parsed_content_id: str, **kwargs: Any) -> Optional[bytes]:
         """Retrieve parsed content by ID"""
         try:
-            data_store = self.data_store
-            return data_store.get_parsed_content(parsed_content_id, **kwargs)
+            # Get metadata to find blob key
+            metadata = self.metadata_store.get_parsed_content_metadata(parsed_content_id, **kwargs)
+            if not metadata:
+                logger.warning(f"Parsed content metadata not found for id: {parsed_content_id}")
+                return None
+
+            # Retrieve blob content
+            try:
+                content = self.blob_store.retrieve(metadata.blob_key, **kwargs)
+                logger.debug(f"Retrieved parsed content for id: {parsed_content_id}")
+                return content
+            except KeyError:
+                logger.error(f"Parsed content blob not found for id: {parsed_content_id}, blob_key: {metadata.blob_key}")
+                return None
+
         except Exception as e:
             logger.error(f"Failed to get parsed content for {parsed_content_id}: {e}")
             raise StorageOperationError(f"Failed to retrieve parsed content: {e}")
@@ -671,8 +716,7 @@ class FileStorage(AbstractModule):
     def get_chunk_metadata(self, chunk_id: str, **kwargs: Any) -> Optional['ChunkMetadata']:
         """Retrieve chunk metadata by ID"""
         try:
-            data_store = self.data_store
-            return data_store.get_chunk_metadata(chunk_id, **kwargs)
+            return self.metadata_store.get_chunk_metadata(chunk_id, **kwargs)
         except Exception as e:
             logger.error(f"Failed to get chunk metadata for {chunk_id}: {e}")
             raise StorageOperationError(f"Failed to retrieve chunk metadata: {e}")
@@ -680,17 +724,68 @@ class FileStorage(AbstractModule):
     def get_chunk_content(self, chunk_id: str, **kwargs: Any) -> Optional[bytes]:
         """Retrieve chunk content by ID"""
         try:
-            data_store = self.data_store
-            return data_store.get_chunk(chunk_id, **kwargs)
+            # Get metadata to find blob key
+            metadata = self.metadata_store.get_chunk_metadata(chunk_id, **kwargs)
+            if not metadata:
+                logger.warning(f"Chunk metadata not found for id: {chunk_id}")
+                return None
+
+            # Retrieve blob content
+            try:
+                content = self.blob_store.retrieve(metadata.blob_key, **kwargs)
+                logger.debug(f"Retrieved chunk content for id: {chunk_id}")
+                return content
+            except KeyError:
+                logger.error(f"Chunk blob not found for id: {chunk_id}, blob_key: {metadata.blob_key}")
+                return None
+
         except Exception as e:
             logger.error(f"Failed to get chunk content for {chunk_id}: {e}")
             raise StorageOperationError(f"Failed to retrieve chunk content: {e}")
-    
+
+    def update_file_metadata(self, file_id: str, **kwargs: Any) -> bool:
+        """Update file metadata by file ID"""
+        try:
+            result = self.metadata_store.update_file_metadata(file_id, kwargs, **kwargs)
+            if result:
+                logger.info(f"Updated file metadata: {file_id}")
+            else:
+                logger.warning(f"Failed to update file metadata: {file_id}")
+            return result
+        except Exception as e:
+            logger.error(f"Failed to update file metadata for {file_id}: {e}")
+            raise StorageOperationError(f"Failed to update file metadata: {e}")
+
+    def update_parsed_content_metadata(self, parsed_content_id: str, **kwargs: Any) -> bool:
+        """Update parsed content metadata by ID"""
+        try:
+            result = self.metadata_store.update_parsed_content_metadata(parsed_content_id, kwargs, **kwargs)
+            if result:
+                logger.info(f"Updated parsed content metadata: {parsed_content_id}")
+            else:
+                logger.warning(f"Failed to update parsed content metadata: {parsed_content_id}")
+            return result
+        except Exception as e:
+            logger.error(f"Failed to update parsed content metadata for {parsed_content_id}: {e}")
+            raise StorageOperationError(f"Failed to update parsed content metadata: {e}")
+
+    def update_chunk_metadata(self, chunk_id: str, **kwargs: Any) -> bool:
+        """Update chunk metadata by ID"""
+        try:
+            result = self.metadata_store.update_chunk_metadata(chunk_id, kwargs, **kwargs)
+            if result:
+                logger.info(f"Updated chunk metadata: {chunk_id}")
+            else:
+                logger.warning(f"Failed to update chunk metadata: {chunk_id}")
+            return result
+        except Exception as e:
+            logger.error(f"Failed to update chunk metadata for {chunk_id}: {e}")
+            raise StorageOperationError(f"Failed to update chunk metadata: {e}")
+
     def delete_file(self, file_id: str, **kwargs: Any) -> bool:
         """Delete file and cleanup associated data"""
         try:
-            data_store = self.data_store
-            return data_store.cleanup_failed_file_upload(file_id, **kwargs)
+            return self._cleanup_failed_file_upload(file_id, **kwargs)
         except Exception as e:
             logger.error(f"Failed to delete file {file_id}: {e}")
             raise StorageOperationError(f"Failed to delete file: {e}")
@@ -698,8 +793,7 @@ class FileStorage(AbstractModule):
     def delete_parsed_content(self, parsed_content_id: str, **kwargs: Any) -> bool:
         """Delete parsed content and cleanup associated data"""
         try:
-            data_store = self.data_store
-            return data_store.cleanup_failed_parsed_content_upload(parsed_content_id, **kwargs)
+            return self._cleanup_failed_parsed_content_upload(parsed_content_id, **kwargs)
         except Exception as e:
             logger.error(f"Failed to delete parsed content {parsed_content_id}: {e}")
             raise StorageOperationError(f"Failed to delete parsed content: {e}")
@@ -707,8 +801,7 @@ class FileStorage(AbstractModule):
     def delete_chunk(self, chunk_id: str, **kwargs: Any) -> bool:
         """Delete chunk and cleanup associated data"""
         try:
-            data_store = self.data_store
-            return data_store.cleanup_failed_chunk_upload(chunk_id, **kwargs)
+            return self._cleanup_failed_chunk_upload(chunk_id, **kwargs)
         except Exception as e:
             logger.error(f"Failed to delete chunk {chunk_id}: {e}")
             raise StorageOperationError(f"Failed to delete chunk: {e}")

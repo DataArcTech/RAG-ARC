@@ -7,6 +7,9 @@ from typing import (
 )
 import logging
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from .base import FileDB
 from framework.singleton_decorator import singleton
@@ -19,12 +22,12 @@ logger = logging.getLogger(__name__)
 class LocalDB(FileDB):
     """
     Local filesystem blob storage implementation for high-performance file operations.
-    
+
     This class provides a complete blob storage solution using the local filesystem,
     supporting hierarchical key organization, collision handling, and extended attributes
     for metadata storage where supported by the filesystem.
-    
-    Key features: 
+
+    Key features:
     - Hierarchical directory structure based on blob keys
     - Collision handling with overwrite/error/version modes
     - Extended attribute support for content-type metadata
@@ -32,49 +35,49 @@ class LocalDB(FileDB):
     - Optional empty directory cleanup
     - File URL generation for direct access
     - Comprehensive error handling and logging
-    
+
     Storage organization:
-    - Base directory: Configurable root storage path
+    - Base directory: Configured via RAG_FILE_STORAGE_PATH environment variable
     - Hierarchical structure: Mirrors blob key structure in directories
     - Version naming: file_v2.ext, file_v3.ext for versioned keys
     - Path safety: Removes '..' and leading '/' from keys
-    
+
     Collision handling modes:
         - "overwrite": Replace existing file (default)
         - "error": Raise KeyError if file exists
         - "version": Create versioned filename (file_v2.ext)
-        
+
     Performance considerations:
     - Direct filesystem I/O for maximum speed
     - Parent directory creation as needed
     - Optional cleanup of empty directories
     - Extended attributes may not be supported on all filesystems
     - Large file operations are memory efficient with streaming
-    
-    Configuration parameters:
-        base_path (str): Root directory for blob storage
-        cleanup_empty_dirs (bool): Remove empty directories during deletion
-        
+
+    Environment variables:
+        RAG_FILE_STORAGE_PATH (str): Root directory for blob storage (default: ./data/files)
+
     Typical usage:
-        >>> config = LocalConfig(base_path="/data/blobs")
+        >>> config = LocalConfig()  # No base_path needed
         >>> storage = LocalDB(config)
         >>> key, overwritten = storage.store("path/file.txt", data)
         >>> content = storage.retrieve("path/file.txt")
         >>> url = storage.generate_presigned_url("path/file.txt")
-        
+
     Security considerations:
     - Path traversal protection prevents '../' attacks
     - File permissions inherit from system umask
     - Extended attributes may expose metadata to filesystem users
     - Direct filesystem access bypasses application-level permissions
-        
+
     Attributes:
-        config: Configuration object with base_path and options
+        config: Configuration object (base_path no longer used)
     """
     
     def _get_base_path(self) -> Path:
-        """Get base storage directory path from config"""
-        base_path = Path(self.config.base_path)
+        """Get base storage directory path from environment variable"""
+        base_path_str = os.getenv('LOCAL_FILE_STORAGE_PATH', './data/files')
+        base_path = Path(base_path_str)
         base_path.mkdir(parents=True, exist_ok=True)
         return base_path
     
@@ -84,10 +87,6 @@ class LocalDB(FileDB):
         # Ensure key doesn't contain path traversal attempts
         safe_key = key.replace('..', '').lstrip('/')
         return base_path / safe_key
-    
-    def _ensure_parent_dir(self, file_path: Path) -> None:
-        """Ensure parent directory exists"""
-        file_path.parent.mkdir(parents=True, exist_ok=True)
     
     def store(
         self,
@@ -108,7 +107,7 @@ class LocalDB(FileDB):
                 logger.info(f"Overwriting existing blob with key: '{key}'")
             
             file_path = self._get_full_path(storage_key)
-            self._ensure_parent_dir(file_path)
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
             
             with open(file_path, 'wb') as f:
                 f.write(data)
