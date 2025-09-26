@@ -4,7 +4,7 @@ Test for Native Parser - testing all supported document formats
 
 import os
 
-from config.encapsulation.parser.native import NativeParserConfig
+from core.file_management.parser.native import NativeParserConfig
 
 
 def main():

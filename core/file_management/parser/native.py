@@ -1,20 +1,20 @@
 import os
 import json
 import logging
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from .base import ParserBase
+from .base import AbstractParser
 from framework.singleton_decorator import singleton
 
 logger = logging.getLogger(__name__)
 
 
 @singleton
-class NativeParser(ParserBase):
+class NativeParser(AbstractParser):
     """
     Multi-format document parser supporting PDF, DOCX, Excel, PowerPoint, HTML, and images.
 
@@ -35,8 +35,8 @@ class NativeParser(ParserBase):
         self,
         file_data: bytes,
         filename: str,
-        **kwargs
-    ) -> List[dict]:
+        **kwargs: Any
+    ) -> List[Dict[str, Any]]:
         """Parse a file of any supported type from binary data"""
 
         # Get output directory from environment variable
@@ -73,7 +73,7 @@ class NativeParser(ParserBase):
         """Get all supported file extensions"""
         return ['.docx', '.xlsx', '.xls', '.csv', '.pptx', '.html']
 
-    def _parse_docx(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[dict]:
+    def _parse_docx(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[Dict[str, Any]]:
         """Parse DOCX file from binary data and return structured results"""
         try:
             import io
@@ -143,7 +143,7 @@ class NativeParser(ParserBase):
             logger.error(f"DOCX parsing failed: {str(e)}")
             raise
 
-    def _parse_excel(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[dict]:
+    def _parse_excel(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[Dict[str, Any]]:
         """Parse Excel file from binary data and return structured results"""
         try:
             import io
@@ -217,7 +217,7 @@ class NativeParser(ParserBase):
             logger.error(f"Excel parsing failed: {str(e)}")
             raise
 
-    def _parse_ppt(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[dict]:
+    def _parse_ppt(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[Dict[str, Any]]:
         """Parse PowerPoint file from binary data and return structured results"""
         try:
             import io
@@ -293,7 +293,7 @@ class NativeParser(ParserBase):
             logger.error(f"PowerPoint parsing failed: {str(e)}")
             raise
 
-    def _parse_html_content(self, html_content: str, filename: str, base_filename: str, output_dir: str) -> List[dict]:
+    def _parse_html_content(self, html_content: str, filename: str, base_filename: str, output_dir: str) -> List[Dict[str, Any]]:
         """Parse HTML content and return structured results"""
         try:
             from bs4 import BeautifulSoup
