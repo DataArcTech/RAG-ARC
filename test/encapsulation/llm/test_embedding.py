@@ -1,16 +1,11 @@
 """
-Simple test to understand how Embedding LLMs work (OpenAI and HuggingFace)
+Simple test to understand how Embedding LLMs work (OpenAI and Qwen)
 """
-import sys
-import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
 
-from config.encapsulation.llm.openai_embedding import OpenAIEmbeddingConfig
-from config.encapsulation.llm.huggingface_embedding import HuggingFaceEmbeddingConfig
+from config.encapsulation.llm.embedding.openai import OpenAIEmbeddingConfig
+from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
 import asyncio
 
-from dotenv import load_dotenv
-load_dotenv()
 
 def test_openai_embedding():
     print("="*50)
@@ -79,12 +74,12 @@ def test_openai_embedding():
 
 def test_huggingface_embedding():
     print("\n" + "="*50)
-    print("TESTING HUGGINGFACE EMBEDDING LLM")
+    print("TESTING QWEN EMBEDDING LLM")
     print("="*50)
 
     try:
-        # Create HuggingFace Embedding LLM instance using configuration injection
-        config = HuggingFaceEmbeddingConfig()
+        # Create Qwen Embedding LLM instance using configuration injection
+        config = QwenEmbeddingConfig()
         embedding_llm = config.build()
 
         print(f"Model info: {embedding_llm.get_model_info()}")
@@ -160,7 +155,7 @@ def test_huggingface_embedding():
             print(f"Async test failed: {e}")
 
     except Exception as e:
-        print(f"HuggingFace embedding test failed: {e}")
+        print(f"Qwen embedding test failed: {e}")
         print("Note: This might fail if the model path doesn't exist or CUDA is not available")
 
 
@@ -170,7 +165,7 @@ def main():
     # Test OpenAI embedding
     test_openai_embedding()
 
-    # Test HuggingFace embedding
+    # Test Qwen embedding
     test_huggingface_embedding()
 
     print(f"\n" + "="*50)

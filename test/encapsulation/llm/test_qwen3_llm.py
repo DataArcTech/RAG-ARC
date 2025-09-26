@@ -1,11 +1,8 @@
 """
 Simple test to understand how Qwen Rerank LLM works
 """
-import sys
-import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
-from config.encapsulation.llm.qwen_rerank import QwenRerankConfig
+from config.encapsulation.llm.rerank.qwen import QwenRerankConfig
 from encapsulation.data_model.schema import Document
 
 

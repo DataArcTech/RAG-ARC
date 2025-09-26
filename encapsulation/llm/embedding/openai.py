@@ -1,8 +1,8 @@
 from .base import EmbeddingLLMBase
 from typing import Union, List, Dict, Any, Optional
-import openai
+from encapsulation.llm.utils.openai_client import create_openai_sync_client, create_openai_async_client
+from encapsulation.llm.utils.huggingface_client import create_sentence_transformer_client
 import logging
-import os
 
 logger = logging.getLogger(__name__)
 
@@ -33,60 +33,23 @@ class OpenAIEmbeddingLLM(EmbeddingLLMBase):
     """
 
     def __init__(self, config):
-        """Initialize OpenAI Embedding with eager client creation"""
+        """Initialize OpenAI Embedding with loading method support"""
         super().__init__(config)
         # Cache config values to avoid repeated getattr calls
         self.model_name = getattr(self.config, 'model_name', 'text-embedding-ada-002')
         self.embedding_dimensions = getattr(self.config, 'embedding_dimensions', None)
-        # Initialize client immediately since we always need it for API calls
-        self.client = self._create_client()
-        self.async_client = self._create_async_client()
+        self.loading_method = getattr(self.config, 'loading_method', 'openai')
 
-    def _create_client(self):
-        """Create OpenAI client"""
-        # Extract OpenAI-specific config parameters
-        api_key = os.getenv('OPENAI_API_KEY')
-        base_url = os.getenv('OPENAI_BASE_URL')
-        organization = getattr(self.config, 'organization', None)
-        max_retries = getattr(self.config, 'max_retries', 3)
-        timeout = getattr(self.config, 'timeout', 60.0)
-
-        try:
-            client = openai.OpenAI(
-                api_key=api_key,
-                base_url=base_url,
-                organization=organization,
-                max_retries=max_retries,
-                timeout=timeout
-            )
-            logger.info(f"OpenAI embedding client initialized: {self.model_name}")
-            return client
-        except Exception as e:
-            logger.error(f"Failed to initialize OpenAI client: {str(e)}")
-            raise
-
-    def _create_async_client(self):
-        """Create OpenAI async client"""
-        try:
-            # Extract OpenAI-specific config parameters (same as sync client)
-            api_key = os.getenv('OPENAI_API_KEY')
-            base_url = os.getenv('OPENAI_BASE_URL')
-            organization = getattr(self.config, 'organization', None)
-            max_retries = getattr(self.config, 'max_retries', 3)
-            timeout = getattr(self.config, 'timeout', 30)
-
-            async_client = openai.AsyncOpenAI(
-                api_key=api_key,
-                base_url=base_url,
-                organization=organization,
-                max_retries=max_retries,
-                timeout=timeout
-            )
-            logger.info(f"OpenAI async embedding client initialized: {self.model_name}")
-            return async_client
-        except Exception as e:
-            logger.error(f"Failed to initialize OpenAI async client: {str(e)}")
-            raise
+        # Initialize client based on loading method
+        if self.loading_method == 'openai':
+            self.client = create_openai_sync_client(self.config)
+            self.async_client = create_openai_async_client(self.config)
+        elif self.loading_method == 'huggingface':
+            # For HuggingFace sentence transformers
+            self.client = create_sentence_transformer_client(self.config)
+            self.async_client = None  # HuggingFace uses asyncio.to_thread wrapper
+        else:
+            raise ValueError(f"Unsupported loading method: {self.loading_method}")
 
     # ==================== EMBEDDING IMPLEMENTATION ====================
 

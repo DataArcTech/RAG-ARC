@@ -1,6 +1,9 @@
 from .base import RerankLLMBase
 from typing import List, Dict, Any, Optional, Tuple, Union, TYPE_CHECKING
-import logging 
+from encapsulation.llm.utils.openai_client import create_openai_sync_client, create_openai_async_client
+from encapsulation.llm.utils.huggingface_client import create_transformers_client, setup_rerank_tokens
+import logging
+
 if TYPE_CHECKING:
     from encapsulation.data_model.schema import Document
 
@@ -56,66 +59,37 @@ class QwenRerankLLM(RerankLLMBase):
     """
 
     def __init__(self, config):
-        """Initialize Qwen with eager model and tokenizer creation"""
+        """Initialize Qwen Rerank with loading method support"""
         super().__init__(config)
         # Cache config values to avoid repeated getattr calls
         self.model_name = getattr(self.config, 'model_name', 'Qwen/qwen_reranker_0.6B')
         self.device = getattr(self.config, 'device', 'cpu')
         self.cache_folder = getattr(self.config, 'cache_folder', None)
         self.instruction = getattr(self.config, 'instruction', "Given the user query, retrieve the relevant passages")
-        # Initialize client immediately since we always need it for reranking
-        self.client = self._create_client()
+        self.loading_method = getattr(self.config, 'loading_method', 'huggingface')
 
-    def _create_client(self):
-        """Create Qwen client and tokenizer"""
-        try:
-            import os
-            if self.config.use_china_mirror:
-                os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-                logger.info("Set HF_ENDPOINT to https://hf-mirror.com")
-                
-            from transformers import AutoTokenizer, AutoModelForCausalLM
-            import torch
+        # Initialize client based on loading method
+        if self.loading_method == 'openai':
+            self.client = create_openai_sync_client(self.config)
+            self.async_client = create_openai_async_client(self.config)
+        elif self.loading_method == 'huggingface':
+            # For Qwen rerank, we get (model, tokenizer) tuple
+            self.client, self._tokenizer = create_transformers_client(self.config)
+            self._setup_qwen_tokens()
+        else:
+            raise ValueError(f"Unsupported loading method: {self.loading_method}")
 
-            model_kwargs = getattr(self.config, 'model_kwargs', {})
+    def _setup_qwen_tokens(self):
+        """Setup Qwen-specific tokens and templates using generic utility function"""
+        rerank_setup = setup_rerank_tokens(self._tokenizer, self.config, model_type="qwen")
 
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                self.model_name,
-                cache_dir=self.cache_folder,
-                trust_remote_code=True,
-                padding_side='left'
-            )
-
-            client = AutoModelForCausalLM.from_pretrained(
-                self.model_name,
-                cache_dir=self.cache_folder,
-                trust_remote_code=True,
-                torch_dtype=torch.float16,
-                **model_kwargs
-            )
-            client.to(self.device)
-
-            # Initialize Qwen-specific tokens
-            self.token_false_id = self._tokenizer.convert_tokens_to_ids("no")
-            self.token_true_id = self._tokenizer.convert_tokens_to_ids("yes")
-
-            # Qwen conversation template - get from config or use defaults
-            self.prefix = getattr(self.config, 'prefix', "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n")
-            self.suffix = getattr(self.config, 'suffix', "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n")
-
-            # Tokenize prefix and suffix
-            self.prefix_tokens = self._tokenizer.encode(self.prefix, add_special_tokens=False)
-            self.suffix_tokens = self._tokenizer.encode(self.suffix, add_special_tokens=False)
-
-            logger.info(f"Qwen reranker initialized: {self.model_name}")
-            return client
-
-        except ImportError:
-            logger.error("transformers library required for reranking task")
-            raise ImportError("transformers required for reranking task")
-        except Exception as e:
-            logger.error(f"Failed to initialize Qwen model: {str(e)}")
-            raise
+        # Set instance attributes from utility function result
+        self.token_false_id = rerank_setup['token_false_id']
+        self.token_true_id = rerank_setup['token_true_id']
+        self.prefix = rerank_setup['prefix']
+        self.suffix = rerank_setup['suffix']
+        self.prefix_tokens = rerank_setup['prefix_tokens']
+        self.suffix_tokens = rerank_setup['suffix_tokens']
 
     def _format_instruction(self, instruction, query, doc):
         """Format instruction with query and document"""

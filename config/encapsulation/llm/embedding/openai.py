@@ -10,6 +10,9 @@ class OpenAIEmbeddingConfig(AbstractConfig):
     # Discriminator for config type identification
     type: Literal["openai_embedding"] = "openai_embedding"
 
+    # Loading method configuration - can choose between providers
+    loading_method: Literal["openai", "huggingface"] = "openai"  # Provider for model loading
+
     # Model configuration
     model_name: str = "text-embedding-3-small"  # OpenAI embedding model (text-embedding-ada-002, text-embedding-3-small, text-embedding-3-large)
     embedding_dimensions: Optional[int] = None  # Custom embedding dimensions (only for supported models like text-embedding-3-*)

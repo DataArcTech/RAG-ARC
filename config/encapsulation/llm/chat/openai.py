@@ -10,6 +10,9 @@ class OpenAIChatConfig(AbstractConfig):
     # Discriminator for config type identification
     type: Literal["openai_chat"] = "openai_chat"
 
+    # Loading method configuration - can choose between providers
+    loading_method: Literal["openai", "huggingface"] = "openai"  # Provider for model loading
+
     # Model configuration
     model_name: str = "gpt-4o-mini"  # OpenAI model name (gpt-4, gpt-4o-mini, gpt-3.5-turbo, etc.)
     max_tokens: int = 2000  # Maximum tokens in response
