@@ -1,7 +1,6 @@
 dill
 faiss-gpu; python_version<="3.12"
 tantivy
-sentence-transformers
 jieba
 openai
 tqdm
@@ -15,6 +14,14 @@ networkx
 
 SQLAlchemy
 python-dotenv
-pymupdf
 python-docx
 chardet
+
+transformers==4.51.3
+accelerate
+sentence-transformers
+qwen_vl_utils
+PyMuPDF
+flash-attn==2.8.0.post2
+# for GLIBC 2.31, please use flash-attn==2.7.4.post1. If GLIBC > 2.31, please use flash-attn==2.8.0.post2.
+vllm==0.9.1
