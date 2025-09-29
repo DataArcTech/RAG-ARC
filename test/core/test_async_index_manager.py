@@ -16,11 +16,11 @@ from core.file_management.index_manager import IndexManager
 from config.core.file_management.index_manager_config import IndexManagerConfig
 from core.file_management.file_storage import FileStorage
 from config.core.file_management.file_storage_config import FileStorageConfig
-from config.encapsulation.database.file_store_config import FileStoreConfig
+from config.core.file_management.file_storage_config import FileStorageConfig
 from config.encapsulation.database.file_db.local_config import LocalDBConfig
 from config.encapsulation.database.relational_db.postgresql_config import PostgreSQLConfig
 
-from config.core.file_management.parser.standard_parser_config import StandardParserConfig
+from config.core.file_management.parser_combinator_config import ParserCobinatorConfig
 from config.core.file_management.chunker.chunker_config import TokenChunkerConfig, RecursiveChunkerConfig
 
 from config.core.file_management.indexing.bm25_indexing_config import BM25IndexerConfig
@@ -28,11 +28,11 @@ from config.core.file_management.indexing.faiss_indexing_config import FaissInde
 from config.encapsulation.database.bm25_config import BM25BuilderConfig
 
 from config.encapsulation.faiss import FaissConfig
-from config.encapsulation.llm.huggingface_embedding import HuggingFaceEmbeddingConfig
+from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
 
 # Test file paths
 TEST_FILES = {
-    'pdf': '/data/FinAi_Mapping_Knowledge/chenmingzhen/RAG-ARC/test/test_pdf.pdf',
+    # 'pdf': '/data/FinAi_Mapping_Knowledge/chenmingzhen/RAG-ARC/test/test_pdf.pdf',
     'docx': '/data/FinAi_Mapping_Knowledge/chenmingzhen/RAG-ARC/test/test_docx.docx',
     'xlsx': '/data/FinAi_Mapping_Knowledge/chenmingzhen/RAG-ARC/test/test_xlsx.xlsx'
 }
@@ -57,7 +57,7 @@ def create_file_storage():
     )
 
     # File store config
-    file_store_config = FileStoreConfig(
+    file_store_config = FileStorageConfig(
         file_db_config=file_db_config,
         relational_db_config=postgresql_config
     )
@@ -74,7 +74,7 @@ def create_index_manager_with_hybrid():
     """Create IndexManager with both BM25 and FAISS indexing"""
     logger.info("Creating IndexManager with hybrid (BM25 + FAISS) indexing...")
 
-    parser_config = StandardParserConfig()
+    parser_config = ParserCobinatorConfig()
     chunker_config = RecursiveChunkerConfig(
         chunk_size=400,
         chunk_overlap=40
@@ -90,7 +90,7 @@ def create_index_manager_with_hybrid():
 
 
 
-    embedding_config = HuggingFaceEmbeddingConfig(
+    embedding_config = QwenEmbeddingConfig(
         model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
     faiss_config = FaissConfig(

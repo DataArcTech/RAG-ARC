@@ -4,10 +4,13 @@ Test for Qwen Reranker functionality
 
 import sys
 import os
+
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
 from config.core.reranker_config import Qwen3RerankerConfig
-from config.encapsulation.llm.qwen_rerank import QwenRerankConfig
+from config.encapsulation.llm.rerank.qwen import QwenRerankConfig
 from encapsulation.data_model.schema import Document
 
 
@@ -46,7 +49,11 @@ def main():
     print("Testing Qwen Reranker...")
 
     # Create configurations
-    llm_config = QwenRerankConfig()
+    llm_config = QwenRerankConfig(
+        cache_folder="./models/Qwen",
+        use_china_mirror=True,
+        device="cpu"  # 使用 CPU 避免 GPU 相关问题
+    )
     reranker_config = Qwen3RerankerConfig(
         qwen3_llm_config=llm_config
     )

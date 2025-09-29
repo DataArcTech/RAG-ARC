@@ -1,5 +1,5 @@
 from framework.config import AbstractConfig
-from config.encapsulation.llm.qwen_rerank import QwenRerankConfig
+from config.encapsulation.llm.rerank.qwen import QwenRerankConfig
 from core.rerank.qwen3 import Qwen3Reranker
 from typing import Literal
 

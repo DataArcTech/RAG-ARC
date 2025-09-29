@@ -1,8 +1,8 @@
 from typing import Annotated, Union, Literal, Optional
 from pydantic import Field
 from encapsulation.database.graph_db.networkx_with_embedding import NetworkXVectorGraphStore
-from config.encapsulation.llm.huggingface_embedding import HuggingFaceEmbeddingConfig
-from config.encapsulation.llm.openai_embedding import OpenAIEmbeddingConfig
+from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
+from config.encapsulation.llm.embedding.openai import OpenAIEmbeddingConfig
 from framework.config import AbstractConfig
 
 
@@ -66,7 +66,7 @@ class NetworkXVectorConfig(AbstractConfig):
     )
 
     # Embedding configuration - supports same models as Neo4j
-    embedding: Annotated[Union[HuggingFaceEmbeddingConfig, OpenAIEmbeddingConfig], Field(discriminator="type")]
+    embedding: Annotated[Union[QwenEmbeddingConfig, OpenAIEmbeddingConfig], Field(discriminator="type")]
 
     def build(self):
         return NetworkXVectorGraphStore(self)

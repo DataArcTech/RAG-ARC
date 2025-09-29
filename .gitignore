@@ -209,5 +209,6 @@ __pycache__/
 *.py[cod]
 .DS_Store
 
-/.data/
-/.models/
+data/
+models/
+benchmark/

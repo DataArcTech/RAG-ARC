@@ -1,3 +1,8 @@
+"""
+多轮抽取，每次将上一轮抽取的结果加入到上下文中，直到到达最大轮数或者无法抽取出新的entity或者relation。
+多轮抽取之间为串行关系，每次抽取必须依赖上一轮抽取结果。
+"""
+
 import logging
 import re
 from typing import Dict, List
@@ -29,10 +34,7 @@ class GraphExtractor(ExtractorBase):
                 # 构建prompt（支持中英双语）
                 prompt = self.build_extraction_prompt(document.content, accumulated_graph)
 
-                # 调用LLM
                 response = await self.llm.achat([{"role": "user", "content": prompt}])
-
-                # 解析响应
                 new_graph = self.parse_tsv_response(response)
 
                 # 如果没有新的抽取结果，提前结束
@@ -62,7 +64,7 @@ class GraphExtractor(ExtractorBase):
             return 'zh'  # 默认中文
 
         chinese_ratio = chinese_chars / total_chars
-        return 'zh' if chinese_ratio > 0.2 else 'en'
+        return 'zh' if chinese_ratio > 0.1 else 'en'
 
     def build_extraction_prompt(self, text: str, history: GraphData) -> str:
         """Build extraction prompt with user custom priority"""

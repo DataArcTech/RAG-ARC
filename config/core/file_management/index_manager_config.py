@@ -2,7 +2,7 @@ from typing import List, Union, Annotated, Literal
 from pydantic import Field
 
 from framework.config import AbstractConfig
-from config.core.file_management.parser.standard_parser_config import StandardParserConfig
+from config.core.file_management.parser_combinator_config import ParserCobinatorConfig
 from config.core.file_management.chunker.chunker_config import (
     TokenChunkerConfig,
     RecursiveChunkerConfig,
@@ -19,8 +19,8 @@ class IndexManagerConfig(AbstractConfig):
     type: Literal["index_manager"] = "index_manager"
 
     # Parser configuration
-    parser_config: StandardParserConfig = Field(
-        default_factory=lambda: StandardParserConfig(),
+    parser_config: ParserCobinatorConfig = Field(
+        default_factory=lambda: ParserCobinatorConfig(),
         description="Parser configuration for document parsing"
     )
 

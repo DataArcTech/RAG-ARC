@@ -2,7 +2,7 @@ from framework.config import AbstractConfig
 from typing import List, Dict, Optional, Literal
 from pydantic import Field
 from core.file_management.extractor.graphextractor import GraphExtractor
-from config.encapsulation.llm.openai_chat import OpenAIChatConfig
+from config.encapsulation.llm.chat.openai import OpenAIChatConfig
 
 
 class GraphExtractorConfig(AbstractConfig):

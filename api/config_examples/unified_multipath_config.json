@@ -10,9 +10,9 @@
                 "index_type": "flat",
                 "normalize_L2": true,
                 "embedding_config": {
-                    "type": "huggingface_embedding",
+                    "type": "qwen_embedding",
                     "model_name": "Qwen/Qwen3-Embedding-0.6B",
-                    "device": "cuda:7",
+                    "device": "cuda:0",
                     "use_china_mirror": true,
                     "cache_folder": "./models/Qwen"
                 }

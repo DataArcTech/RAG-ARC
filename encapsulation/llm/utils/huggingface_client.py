@@ -21,6 +21,11 @@ def create_sentence_transformer_client(config) -> Any:
         Exception: If client creation fails
     """
     try:
+        if getattr(config, 'use_china_mirror', False):
+            import os
+            os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+            logger.info("Set HF_ENDPOINT to https://hf-mirror.com")
+
         import sentence_transformers
 
         model_name = getattr(config, 'model_name', 'sentence-transformers/all-mpnet-base-v2')
@@ -107,7 +112,12 @@ def create_transformers_client(config) -> Tuple[Any, Any]:
         ImportError: If transformers library is not available
         Exception: If client creation fails
     """
-    try:
+    try: 
+        if getattr(config, 'use_china_mirror', False):
+            import os
+            os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+            logger.info("Set HF_ENDPOINT to https://hf-mirror.com")
+
         from transformers import AutoTokenizer, AutoModelForCausalLM
         import torch
 

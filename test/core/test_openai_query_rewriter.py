@@ -6,7 +6,7 @@ import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
-from config.encapsulation.llm.openai_chat import OpenAIChatConfig
+from config.encapsulation.llm.chat.openai import OpenAIChatConfig
 from config.core.query_rewriter_config import OpenAIQueryRewriterConfig
 
 from dotenv import load_dotenv

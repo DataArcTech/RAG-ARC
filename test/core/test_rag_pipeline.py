@@ -5,14 +5,12 @@ Test for complete RAG pipeline: Query Rewrite → Retrieval → Rerank → LLM G
 import sys
 import os
 
-# Add the project root to Python path for direct execution
-if __name__ == "__main__":
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
-from config.encapsulation.llm.openai_chat import OpenAIChatConfig
+from config.encapsulation.llm.chat.openai import OpenAIChatConfig
 from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBConfig
-from config.encapsulation.llm.huggingface_embedding import HuggingFaceEmbeddingConfig
-from config.encapsulation.llm.qwen_rerank import QwenRerankConfig
+from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
+from config.encapsulation.llm.rerank.qwen import QwenRerankConfig
 from config.core.query_rewriter_config import OpenAIQueryRewriterConfig
 from config.core.retrieval.dense_config import DenseRetrieverConfig
 from config.core.reranker_config import Qwen3RerankerConfig
@@ -61,8 +59,8 @@ def main():
 
     try:
         # Create retrieval configuration following unified_dense_config.json pattern
-        embedding_config = HuggingFaceEmbeddingConfig()
-        faiss_config = FaissVectorDBConfig(embedding=embedding_config)
+        embedding_config = QwenEmbeddingConfig(cache_folder="./models/Qwen", use_china_mirror=True)
+        faiss_config = FaissVectorDBConfig(embedding_config=embedding_config)
         dense_config = DenseRetrieverConfig(
             index_config=faiss_config
         )

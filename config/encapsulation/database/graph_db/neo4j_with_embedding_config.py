@@ -2,8 +2,8 @@
 from typing import Annotated, Union, Literal
 from pydantic import Field
 from encapsulation.database.graph_db.neo4j_with_embedding import Neo4jVectorGraphStore
-from config.encapsulation.llm.huggingface_embedding import HuggingFaceEmbeddingConfig
-from config.encapsulation.llm.openai_embedding import OpenAIEmbeddingConfig
+from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
+from config.encapsulation.llm.embedding.openai import OpenAIEmbeddingConfig
 from framework.config import AbstractConfig
 
 
@@ -28,7 +28,7 @@ class Neo4jVectorConfig(AbstractConfig):
     )
 
     # Embedding configuration
-    embedding: Annotated[Union[HuggingFaceEmbeddingConfig, OpenAIEmbeddingConfig], Field(discriminator="type")]
+    embedding: Annotated[Union[QwenEmbeddingConfig, OpenAIEmbeddingConfig], Field(discriminator="type")]
 
     def build(self):
         return Neo4jVectorGraphStore(self)

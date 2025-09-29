@@ -15,8 +15,8 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"
 from core.retrieval.graph_retrieveal.graph_retrieval import GraphRetrieval
 from core.file_management.extractor.graphextractor import GraphExtractor
 from config.encapsulation.database.graph_db.networkx_with_embedding_config import NetworkXVectorConfig
-from config.encapsulation.llm.huggingface_embedding import HuggingFaceEmbeddingConfig
-from config.encapsulation.llm.openai_chat import OpenAIChatConfig
+from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
+from config.encapsulation.llm.chat.openai import OpenAIChatConfig
 from config.core.file_management.extractor.graphextractor_config import GraphExtractorConfig
 from config.core.retrieval.graph_retrieval_config import GraphRetrievalConfig
 from encapsulation.data_model.schema import Document, GraphData
@@ -36,7 +36,7 @@ def create_networkx_configs(temp_dir: str) -> Dict[str, Any]:
     """Create NetworkX-based configurations for the complete pipeline"""
     
     # Embedding configuration using HuggingFace model
-    embedding_config = HuggingFaceEmbeddingConfig(
+    embedding_config = QwenEmbeddingConfig(
         model_name="Qwen/Qwen3-Embedding-0.6B",
         device="cuda:0",  
         use_china_mirror=True,

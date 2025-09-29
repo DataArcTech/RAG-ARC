@@ -14,9 +14,11 @@ class QwenEmbeddingConfig(AbstractConfig):
     loading_method: Literal["openai", "huggingface"] = "huggingface"  # Provider for model loading
 
     # Model configuration
-    model_name: str = "/finance_ML/dataarc_syn_database/model/Qwen/qwen_embedding_0.6B"  # Path to local model or HuggingFace model ID
+    model_name: str = "Qwen/Qwen3-Embedding-0.6B"  # Path to local model or HuggingFace model ID
     device: str = "cuda:0"  # Device for model inference (cuda:0, cuda:1, cpu)
     cache_folder: Optional[str] = None  # Local cache directory for model files
+
+    use_china_mirror: bool = False  # Whether to use domestic mirror source
 
     # Advanced configuration (optional)
     model_kwargs: Dict[str, Any] = {}  # Additional arguments passed to SentenceTransformer initialization

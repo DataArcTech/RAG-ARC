@@ -5,7 +5,7 @@ from core.file_management.chunker.token import TokenChunker
 from core.file_management.chunker.recursive import RecursiveChunker
 from core.file_management.chunker.markdown_header import MarkdownHeaderChunker
 from core.file_management.chunker.semantic import SemanticChunker
-from config.encapsulation.llm.huggingface_embedding import HuggingFaceEmbeddingConfig
+from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
 from typing import Literal, Optional, List, Union
 
 
@@ -68,7 +68,7 @@ class SemanticChunkerConfig(AbstractConfig):
     type: Literal["semantic_chunker"] = "semantic_chunker"
 
     # Required embedding configuration
-    embedding: HuggingFaceEmbeddingConfig  # Embedding model config for semantic analysis
+    embedding: QwenEmbeddingConfig  # Embedding model config for semantic analysis
 
     # Semantic analysis parameters (commented out as they use defaults)
     # buffer_size: int = 1  # Context window size around each sentence (default: 1)

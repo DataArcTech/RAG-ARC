@@ -19,7 +19,7 @@ from config.core.retrieval.tantivy_bm25_config import TantivyBM25RetrieverConfig
 from config.core.retrieval.multipath_config import MultiPathRetrieverConfig
 from config.core.retrieval.dense_config import DenseRetrieverConfig
 from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBConfig
-from config.encapsulation.llm.huggingface_embedding import HuggingFaceEmbeddingConfig
+from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
 
 # 设置日志级别
 logging.basicConfig(level=logging.WARNING)
@@ -280,7 +280,7 @@ class TestDenseRetriever(unittest.TestCase):
     def test_dense_basic_functionality(self):
         """测试Dense基础功能"""
         # 创建嵌入配置
-        embedding_config = HuggingFaceEmbeddingConfig(
+        embedding_config = QwenEmbeddingConfig(
             model_name="Qwen/Qwen3-Embedding-0.6B",
             device="cuda:0",
             use_china_mirror=True,
@@ -367,7 +367,7 @@ class TestDenseRetriever(unittest.TestCase):
                 "index_type": "flat",
                 "normalize_L2": true,
                 "embedding_config": {{
-                    "type": "huggingface_embedding",
+                    "type": "qwen_embedding",
                     "model_name": "Qwen/Qwen3-Embedding-0.6B",
                     "device": "cuda:0",
                     "use_china_mirror": true,
@@ -456,7 +456,7 @@ class TestMultiPathRetriever(unittest.TestCase):
                         "metric": "cosine",
                         "index_type": "flat",
                         "embedding_config": {{
-                            "type": "huggingface_embedding",
+                            "type": "qwen_embedding",
                             "model_name": "Qwen/Qwen3-Embedding-0.6B",
                             "device": "cuda:0",
                             "use_china_mirror": true,

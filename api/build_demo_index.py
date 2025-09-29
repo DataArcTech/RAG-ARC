@@ -6,7 +6,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from encapsulation.data_model.schema import Document
 from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBConfig
-from config.encapsulation.llm.huggingface_embedding import HuggingFaceEmbeddingConfig
+from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
 
 def load_real_data():
     """加载真实数据文件"""
@@ -52,7 +52,7 @@ def build_demo_index():
     # 2. 创建FAISS索引配置
     print("\n2. 创建FAISS索引配置...")
 
-    embedding_config = HuggingFaceEmbeddingConfig(
+    embedding_config = QwenEmbeddingConfig(
         model_name="Qwen/Qwen3-Embedding-0.6B",
         device="cuda:7", 
         encode_kwargs={
