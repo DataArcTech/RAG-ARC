@@ -1,24 +1,24 @@
 """
-Test for OpenAI Query Rewriter functionality
+Test for LLM Query Rewriter functionality
 """
 
 import sys
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
+
+# Add the project root to Python path for direct execution
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.encapsulation.llm.chat.openai import OpenAIChatConfig
-from config.core.query_rewriter_config import OpenAIQueryRewriterConfig
-
-from dotenv import load_dotenv
-load_dotenv()
+from config.core.query_rewrite_config import LLMQueryRewriterConfig
 
 def main():
-    print("Testing OpenAI Query Rewriter...")
+    print("Testing LLM Query Rewriter...")
 
     # Create configurations
     llm_config = OpenAIChatConfig()
-    rewriter_config = OpenAIQueryRewriterConfig(
-        openai_llm_config=llm_config
+    rewriter_config = LLMQueryRewriterConfig(
+        chat_llm_config=llm_config
     )
 
     # Build the query rewriter
@@ -44,21 +44,24 @@ def main():
         except Exception as e:
             print(f"Failed to rewrite '{query}': {e}")
 
-    # Test with instruction override
-    print("\n--- Instruction Override Test ---")
+    # Test with custom instruction in config
+    print("\n--- Custom Instruction Configuration Test ---")
     custom_instruction = "Rewrite queries to focus on technical programming concepts and code terminology"
-    test_query = "How does it work?"
 
+    custom_config = LLMQueryRewriterConfig(
+        chat_llm_config=llm_config,
+        instruction=custom_instruction
+    )
+    custom_rewriter = custom_config.build()
+
+    test_query = "How does it work?"
     try:
-        rewritten_with_instruction = query_rewriter.rewrite_query(
-            test_query,
-            instruction=custom_instruction
-        )
+        rewritten_with_instruction = custom_rewriter.rewrite_query(test_query)
         print(f"Original: '{test_query}'")
         print(f"Custom instruction: '{custom_instruction}'")
         print(f"Rewritten: '{rewritten_with_instruction}'")
     except Exception as e:
-        print(f"Instruction override test failed: {e}")
+        print(f"Custom instruction test failed: {e}")
 
     # Empty query test
     try:
@@ -80,8 +83,8 @@ def main():
 
     # Test configuration without optional parameters
     print("\n--- Minimal Configuration Test ---")
-    minimal_config = OpenAIQueryRewriterConfig(
-        openai_llm_config=llm_config
+    minimal_config = LLMQueryRewriterConfig(
+        chat_llm_config=llm_config
         # No instruction specified (will use default)
     )
     minimal_rewriter = minimal_config.build()
@@ -95,8 +98,8 @@ def main():
 
     # Test core layer instruction configuration
     print("\n--- Core Layer Instruction Configuration Test ---")
-    instruction_config = OpenAIQueryRewriterConfig(
-        openai_llm_config=llm_config,
+    instruction_config = LLMQueryRewriterConfig(
+        chat_llm_config=llm_config,
         instruction="Focus on scientific and academic terminology for research queries"
     )
     instruction_rewriter = instruction_config.build()
