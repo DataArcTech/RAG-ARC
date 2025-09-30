@@ -27,14 +27,14 @@ from config.core.file_management.indexing.bm25_indexing_config import BM25Indexe
 from config.core.file_management.indexing.faiss_indexing_config import FaissIndexerConfig
 from config.encapsulation.database.bm25_config import BM25BuilderConfig
 
-from config.encapsulation.faiss import FaissConfig
+from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBConfig
 from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
 
 # Test file paths
 TEST_FILES = {
-    # 'pdf': '/data/FinAi_Mapping_Knowledge/chenmingzhen/RAG-ARC/test/test_pdf.pdf',
-    'docx': '/data/FinAi_Mapping_Knowledge/chenmingzhen/RAG-ARC/test/test_docx.docx',
-    'xlsx': '/data/FinAi_Mapping_Knowledge/chenmingzhen/RAG-ARC/test/test_xlsx.xlsx'
+    'pdf': 'test/test_pdf.pdf',
+    'docx': 'test/test_docx.docx',
+    'xlsx': 'test/test_xlsx.xlsx'
 }
 
 
@@ -93,7 +93,7 @@ def create_index_manager_with_hybrid():
     embedding_config = QwenEmbeddingConfig(
         model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
-    faiss_config = FaissConfig(
+    faiss_config = FaissVectorDBConfig(
         index_path="./test_output/async_index_test/faiss_index",
         embedding_config=embedding_config
     )

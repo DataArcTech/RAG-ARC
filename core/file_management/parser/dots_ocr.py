@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import io
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, TYPE_CHECKING
 from tqdm import tqdm
 from multiprocessing.pool import ThreadPool
 from PIL import Image
@@ -20,6 +20,9 @@ from .dots_ocr_utils.prompts import dict_promptmode_to_prompt
 from .dots_ocr_utils.layout_utils import pre_process_bboxes, post_process_output, draw_layout_on_image
 from .dots_ocr_utils.consts import MIN_PIXELS, MAX_PIXELS, image_extensions
 from .dots_ocr_utils.format_transformer import layoutjson2md
+
+if TYPE_CHECKING:
+    from config.core.file_management.parser.dots_ocr import DotsOCRParserConfig
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +51,7 @@ class DotsOCRParser(AbstractParser):
         num_threads: Thread count for PDF processing
     """
 
-    def __init__(self, config):
+    def __init__(self, config: "DotsOCRParserConfig"):
         """Initialize DotsOCR parser with LLM service"""
         super().__init__(config)
 

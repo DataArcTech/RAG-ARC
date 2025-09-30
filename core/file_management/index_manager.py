@@ -5,7 +5,8 @@ from typing import List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from framework.module import AbstractModule
-from encapsulation.data_model.schema import Document
+from encapsulation.data_model.schema import Chunk
+from config.core.file_management.index_manager_config import IndexManagerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ class IndexManager(AbstractModule):
     5. Stores parsed content and chunks back to FileStorage
     """
 
-    def __init__(self, config, file_storage=None):
+    def __init__(self, config: IndexManagerConfig, file_storage=None):
         super().__init__(config)
 
         # Optional file_storage for async index_file method
@@ -310,11 +311,11 @@ class IndexManager(AbstractModule):
         """
         indexing_results = {}
 
-        # Convert chunks to Document objects for indexing
-        documents = []
+        # Convert chunks to Chunk objects for indexing
+        chunk_objects = []
         for i, (chunk, chunk_id) in enumerate(zip(chunks, chunk_ids)):
-            # Create Document object
-            # The exact format depends on the Document schema
+            # Create Chunk object
+            # The exact format depends on the Chunk schema
             try:
                 # Merge source_metadata into the main metadata
                 merged_metadata = chunk.get('metadata', {}).copy()
@@ -322,18 +323,18 @@ class IndexManager(AbstractModule):
                 if source_metadata:
                     merged_metadata.update(source_metadata)
 
-                doc = Document(
+                chunk_obj = Chunk(
                     id=chunk_id,
                     content=chunk['content'],
                     metadata=merged_metadata
                 )
-                documents.append(doc)
+                chunk_objects.append(chunk_obj)
             except Exception as e:
-                logger.error(f"Failed to create Document for chunk {i}: {e}")
+                logger.error(f"Failed to create Chunk for chunk {i}: {e}")
                 continue
 
-        if not documents:
-            logger.error("No valid documents created for indexing")
+        if not chunk_objects:
+            logger.error("No valid chunks created for indexing")
             return indexing_results
 
         # Index with each configured indexer
@@ -341,19 +342,19 @@ class IndexManager(AbstractModule):
             indexer_name = f"{type(indexer).__name__}_{i}"
 
             try:
-                logger.info(f"Indexing {len(documents)} documents with {indexer_name}")
+                logger.info(f"Indexing {len(chunk_objects)} chunks with {indexer_name}")
 
                 # Handle async indexer calls
-                indexed_ids = asyncio.run(indexer.update_index(documents))
+                indexed_ids = asyncio.run(indexer.update_index(chunk_objects))
 
                 indexing_results[indexer_name] = {
                     "success": True,
                     "indexed_count": len(indexed_ids) if indexed_ids else 0,
-                    "total_documents": len(documents),
+                    "total_chunks": len(chunk_objects),
                     "indexed_ids": indexed_ids or []
                 }
 
-                logger.info(f"Successfully indexed {len(indexed_ids) if indexed_ids else 0} documents with {indexer_name}")
+                logger.info(f"Successfully indexed {len(indexed_ids) if indexed_ids else 0} chunks with {indexer_name}")
 
             except Exception as e:
                 error_msg = f"Indexing failed with {indexer_name}: {str(e)}"
@@ -362,7 +363,7 @@ class IndexManager(AbstractModule):
                     "success": False,
                     "error_message": error_msg,
                     "indexed_count": 0,
-                    "total_documents": len(documents)
+                    "total_chunks": len(chunks)
                 }
 
         return indexing_results

@@ -19,7 +19,7 @@ from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
 from config.encapsulation.llm.chat.openai import OpenAIChatConfig
 from config.core.file_management.extractor.graphextractor_config import GraphExtractorConfig
 from config.core.retrieval.graph_retrieval_config import GraphRetrievalConfig
-from encapsulation.data_model.schema import Document, GraphData
+from encapsulation.data_model.schema import Chunk, GraphData
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -46,8 +46,8 @@ def create_networkx_configs(temp_dir: str) -> Dict[str, Any]:
     # LLM configuration for extraction and entity filtering
     llm_config = OpenAIChatConfig(
         model_name="gpt-4o-mini",
-        default_max_tokens=2000,
-        default_temperature=0.1
+        max_tokens=2000,
+        temperature=0.1
     )
     
     # NetworkX configuration with embedding support
@@ -75,6 +75,7 @@ def create_networkx_configs(temp_dir: str) -> Dict[str, Any]:
     retrieval_config = GraphRetrievalConfig(
         type="graph_retrieval",
         graph_config=networkx_config,  # Use NetworkX instead of Neo4j
+        embedding_config=embedding_config,
         llm_config=llm_config,  # Enable LLM-based entity filtering
         k1_chunks=20,
         k2_entities=8,
@@ -83,7 +84,6 @@ def create_networkx_configs(temp_dir: str) -> Dict[str, Any]:
         damping_factor=0.85,
         max_iterations=30,
         tolerance=1e-6,
-        # Scoring parameters optimized for technical documents
         beta1=0.7,
         beta2=0.3,
         mu1=0.3,
@@ -110,16 +110,16 @@ def create_networkx_configs(temp_dir: str) -> Dict[str, Any]:
     }
 
 
-def load_test_documents() -> List[Document]:
+def load_test_documents() -> List[Chunk]:
     """Load test documents from real data file or create sample documents"""
     try:
         # Try to load real documents
-        with open("test/tcl_gb_chunk.json", "r", encoding="utf-8") as f:
+        with open("./test/test.json", "r", encoding="utf-8") as f:
             data = json.load(f)
         
         documents = []
         for i, item in enumerate(data[:5]):  # Use first 5 documents for testing
-            doc = Document(
+            doc = Chunk(
                 id=f"doc_{i+1}",
                 content=item["content"],
                 metadata=item.get("metadata", {})
@@ -134,31 +134,31 @@ def load_test_documents() -> List[Document]:
         
         # Create sample technical documents
         sample_docs = [
-            Document(
+            Chunk(
                 id="doc_ai_tech",
                 content="人工智能技术在现代工业中的应用越来越广泛。机器学习算法可以优化生产流程，"
                        "深度学习模型能够进行质量检测，神经网络技术提升了自动化水平。",
                 metadata={"topic": "AI技术", "source": "技术文档"}
             ),
-            Document(
+            Chunk(
                 id="doc_hvac_system",
                 content="空调系统的设计需要考虑多个因素。蒸发器的效率直接影响制冷效果，"
                        "压缩机的性能决定了系统的能耗，冷凝器的设计关系到散热效果。",
                 metadata={"topic": "空调系统", "source": "设计规范"}
             ),
-            Document(
+            Chunk(
                 id="doc_quality_control",
                 content="质量控制是生产过程中的关键环节。检测设备需要定期校准，"
                        "测试数据要进行统计分析，偏差控制需要建立标准流程。",
                 metadata={"topic": "质量控制", "source": "操作手册"}
             ),
-            Document(
+            Chunk(
                 id="doc_installation",
                 content="设备安装位置的选择至关重要。室外机需要考虑通风条件，"
                        "保温套管要符合设计要求，安装角度影响运行效果。",
                 metadata={"topic": "设备安装", "source": "安装指南"}
             ),
-            Document(
+            Chunk(
                 id="doc_performance",
                 content="性能参数的测试包括多个指标。制冷量是核心参数，"
                        "能效比反映节能水平，噪音控制关系到用户体验。",
@@ -267,7 +267,7 @@ async def test_networkx_complete_pipeline():
 
 
 
-async def continue_pipeline_test(configs: Dict[str, Any], extracted_docs: List[Document],
+async def continue_pipeline_test(configs: Dict[str, Any], extracted_docs: List[Chunk],
                                 phase_times: Dict[str, float], temp_dir: str) -> Dict[str, Any]:
     """Continue the pipeline test with storage and retrieval phases"""
 
@@ -288,22 +288,22 @@ async def continue_pipeline_test(configs: Dict[str, Any], extracted_docs: List[D
     except Exception as e:
         logger.warning(f"Health check failed: {e}")
 
-    # Store documents and graph data
+    # Store chunks and graph data
     stored_count = 0
     for doc in extracted_docs:
         try:
-            # Store document with embedding
-            networkx_store.add_document(doc)
+            # Store chunks with embedding
+            networkx_store.add_chunk(doc)
 
             # Store graph data with entity embeddings
             if doc.graph and (doc.graph.entities or doc.graph.relations):
                 networkx_store.add_graph_data(doc.graph, doc.id)
 
             stored_count += 1
-            logger.info(f"  Stored document {doc.id} with graph data")
+            logger.info(f"  Stored chunk: {doc.id} with graph data")
 
         except Exception as e:
-            logger.error(f"  ✗ Failed to store document {doc.id}: {e}")
+            logger.error(f"  ✗ Failed to store chunk {doc.id}: {e}")
             continue
 
     # Save the graph to ensure persistence for retrieval
@@ -441,7 +441,7 @@ async def continue_pipeline_test(configs: Dict[str, Any], extracted_docs: List[D
         new_store.load_index(save_path)
 
         # Verify loaded data
-        loaded_docs = new_store.get_documents([doc.id for doc in extracted_docs[:3]])
+        loaded_docs = new_store.get_chunks([doc.id for doc in extracted_docs[:3]])
         loaded_stats = {
             "nodes": new_store.graph.number_of_nodes(),
             "edges": new_store.graph.number_of_edges()

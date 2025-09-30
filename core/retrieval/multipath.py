@@ -1,23 +1,26 @@
 import logging
-from typing import Any, List, Optional
+from typing import Any, List, TYPE_CHECKING
 
 from core.retrieval.base import BaseRetriever
-from encapsulation.data_model.schema import Document
+from encapsulation.data_model.schema import Chunk
+
+if TYPE_CHECKING:
+    from config.core.retrieval.multipath_config import MultiPathRetrieverConfig
 
 logger = logging.getLogger(__name__)
 
 
 class MultiPathRetriever(BaseRetriever):
     """
-    MultiPath检索器，使用多个检索器并融合结果。
+    MultiPath retriever, uses multiple retrievers and fuses results.
 
-    支持的融合方法：
+    Supported fusion methods:
     - rrf: Reciprocal Rank Fusion
-    - weighted_sum: 加权求和
-    - rank_fusion: 基于排名的融合
+    - weighted_sum: weighted sum
+    - rank_fusion: rank-based fusion
     """
     
-    def __init__(self, config):
+    def __init__(self, config: "MultiPathRetrieverConfig"):
         """Initialize MultiPathRetriever"""
         self.config = config
         self._index = None
@@ -25,7 +28,7 @@ class MultiPathRetriever(BaseRetriever):
         self._init_fusion_method()
 
     def _init_fusion_method(self):
-        """初始化融合方法"""
+        """Initialize fusion method"""
         if self.config.fusion_method == "rrf":
             from core.utils.fusion import RRFusion
             self.config.fusion_instance = RRFusion(k=self.config.rrf_k)
@@ -40,8 +43,8 @@ class MultiPathRetriever(BaseRetriever):
             from core.utils.fusion import RRFusion
             self.config.fusion_instance = RRFusion(k=self.config.rrf_k)
 
-    def _get_relevant_documents(self, query: str, **kwargs: Any) -> List[Document]:
-        """检索相关文档并融合结果"""
+    def _get_relevant_chunks(self, query: str, **kwargs: Any) -> List[Chunk]:
+        """Search relevant chunks and fuse results"""
         k = kwargs.get('k', self.config.search_kwargs.get('k', 5))
 
         if k <= 0:
@@ -53,15 +56,15 @@ class MultiPathRetriever(BaseRetriever):
         all_results = []
         for retriever in self.config.built_retrievers or []:
             try:
-                documents = retriever.invoke(query, **kwargs)
-                # 确保每个文档都有分数
-                for doc in documents:
-                    if doc.metadata is None:
-                        doc.metadata = {}
-                    if 'score' not in doc.metadata:
-                        doc.metadata['score'] = 1.0
-                all_results.append(documents)
-                logger.debug(f"Retriever {type(retriever).__name__} returned {len(documents)} results")
+                chunks = retriever.invoke(query, **kwargs)
+                # Ensure each chunk has a score
+                for chunk in chunks:
+                    if chunk.metadata is None:
+                        chunk.metadata = {}
+                    if 'score' not in chunk.metadata:
+                        chunk.metadata['score'] = 1.0
+                all_results.append(chunks)
+                logger.debug(f"Retriever {type(retriever).__name__} returned {len(chunks)} results")
             except Exception as e:
                 logger.error(f"Retriever {type(retriever).__name__} failed: {e}")
                 import traceback
@@ -73,31 +76,8 @@ class MultiPathRetriever(BaseRetriever):
 
         return self.config.fusion_instance.fuse(all_results, k)
 
-    def add_retriever(self, retriever: Any) -> None:
-        """添加检索器"""
-        if not hasattr(retriever, 'invoke'):
-            raise ValueError(f"Retriever must implement invoke method")
-        if self.config.built_retrievers is None:
-            self.config.built_retrievers = []
-        self.config.built_retrievers.append(retriever)
-
-    def remove_retriever(self, name: str) -> bool:
-        """移除指定名称的检索器"""
-        if not self.config.built_retrievers:
-            return False
-        for i, retriever in enumerate(self.config.built_retrievers):
-            if type(retriever).__name__ == name:
-                self.config.built_retrievers.pop(i)
-                return True
-        return False
-
-    def set_fusion_method(self, fusion_method: str) -> None:
-        """设置融合方法"""
-        self.config.fusion_method = fusion_method
-        self._init_fusion_method()
 
     def get_multipath_info(self) -> dict:
-        """获取多路径检索器信息"""
         retrievers = self.config.built_retrievers or []
         return {
             "retriever_count": len(retrievers),
@@ -105,54 +85,3 @@ class MultiPathRetriever(BaseRetriever):
             "fusion_method": self.config.fusion_method,
             "search_kwargs": self.config.search_kwargs
         }
-
-    # CRUD方法委托给所有子检索器
-    def add_documents(self, documents: List[Document]) -> List[str]:
-        """添加文档到所有子检索器"""
-        all_ids = []
-        for retriever in self.config.built_retrievers or []:
-            if hasattr(retriever, 'add_documents'):
-                all_ids.extend(retriever.add_documents(documents))
-        return all_ids
-
-    def delete_documents(self, ids: Optional[List[str]] = None, **kwargs: Any) -> Optional[bool]:
-        """从所有子检索器删除文档"""
-        results = []
-        for retriever in self.config.built_retrievers or []:
-            if hasattr(retriever, 'delete_documents'):
-                results.append(retriever.delete_documents(ids, **kwargs))
-        return all(r is not False for r in results) if results else None
-
-    def update_documents(self, documents: List[Document]) -> None:
-        """更新所有子检索器的文档"""
-        for retriever in self.config.built_retrievers or []:
-            if hasattr(retriever, 'update_documents'):
-                retriever.update_documents(documents)
-
-    def build_index(self, documents: List[Document]) -> None:
-        """在所有子检索器中构建索引"""
-        for retriever in self.config.built_retrievers or []:
-            if hasattr(retriever, 'build_index'):
-                retriever.build_index(documents)
-
-    def save_index(self, index_path: str, index_name: str = "index") -> None:
-        """保存所有子检索器的索引"""
-        for retriever in self.config.built_retrievers or []:
-            if hasattr(retriever, 'save_index'):
-                retriever.save_index(index_path, index_name)
-
-    def load_index(self, index_path: Optional[str] = None) -> None:
-        """加载所有子检索器的索引"""
-        for retriever in self.config.built_retrievers or []:
-            if hasattr(retriever, 'load_index'):
-                retriever.load_index(index_path)
-
-
-# 解决Pydantic模型定义问题
-try:
-    from core.retrieval.dense import DenseRetrieverConfig
-    from core.retrieval.tantivy_bm25 import TantivyBM25RetrieverConfig
-    MultiPathRetrieverConfig.model_rebuild()
-except ImportError:
-    # 如果导入失败，稍后会在实际使用时重建
-    pass

@@ -1,4 +1,4 @@
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, TYPE_CHECKING
 import logging
 import os
 from pathlib import Path
@@ -6,11 +6,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+if TYPE_CHECKING:
+    from config.core.file_management.parser_combinator_config import ParserCombinatorConfig
 
 logger = logging.getLogger(__name__)
 
 
-class ParserCobinator():
+class ParserCombinator():
     """
     Standard document parser that directly delegates to encapsulation parsers.
 
@@ -24,7 +26,7 @@ class ParserCobinator():
     - Support for all file types supported by encapsulation parsers
     """
 
-    def __init__(self, config):
+    def __init__(self, config: "ParserCombinatorConfig"):
         """Initialize ParserCobinator with parser subconfig"""
         super().__init__(config)
         # Build parser immediately from subconfig

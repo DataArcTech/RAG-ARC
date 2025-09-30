@@ -4,13 +4,13 @@ import json
 import logging
 
 from encapsulation.database.graph_db.networkx_graph import NetworkXGraphStore
-from encapsulation.data_model.schema import Document, GraphData
+from encapsulation.data_model.schema import Chunk, GraphData
 
 logger = logging.getLogger(__name__)
 
 
 class NetworkXVectorGraphStore(NetworkXGraphStore):
-    """NetworkX Vector Graph Store with embedding support for Documents and Entities"""
+    """NetworkX Vector Graph Store with embedding support for Chunks and Entities"""
 
     def __init__(self, config):
         """Initialize NetworkX vector graph store with embedding model"""
@@ -61,14 +61,14 @@ class NetworkXVectorGraphStore(NetworkXGraphStore):
 
         return embedding_list
 
-    def generate_document_embedding(self, document: Document) -> List[float]:
-        """Generate embedding for document content"""
+    def generate_chunk_embedding(self, chunk: Chunk) -> List[float]:
+        """Generate embedding for chunk content"""
         try:
-            if not document.content:
+            if not chunk.content:
                 return []
-            return self._get_cached_embedding(document.content)
+            return self._get_cached_embedding(chunk.content)
         except Exception as e:
-            logger.error(f"Failed to generate document embedding: {e}")
+            logger.error(f"Failed to generate chunk embedding: {e}")
             return []
 
     def generate_entity_embedding(self, entity: Dict[str, Any]) -> List[float]:
@@ -91,46 +91,46 @@ class NetworkXVectorGraphStore(NetworkXGraphStore):
             logger.error(f"Failed to generate entity embedding: {e}")
             return []
 
-    def add_document(self, document: Document) -> None:
-        """Add document node with embedding"""
-        # Generate embedding for document content
-        embedding = self.generate_document_embedding(document)
-        
-        doc_node_id = f"doc_{document.id}"
-        
-        # Add document node to NetworkX graph with embedding
+    def add_chunk(self, chunk: Chunk) -> None:
+        """Add chunk node with embedding"""
+        # Generate embedding for chunk content
+        embedding = self.generate_chunk_embedding(chunk)
+
+        chunk_node_id = f"chunk_{chunk.id}"
+
+        # Add chunk node to NetworkX graph with embedding
         self.graph.add_node(
-            doc_node_id,
-            node_type='Document',
-            id_=document.id,
-            content=document.content,
-            metadata=json.dumps(document.metadata, ensure_ascii=False) if document.metadata else "{}",
+            chunk_node_id,
+            node_type='Chunk',
+            id_=chunk.id,
+            content=chunk.content,
+            metadata=json.dumps(chunk.metadata, ensure_ascii=False) if chunk.metadata else "{}",
             embedding=embedding,
             create_time=datetime.now().isoformat(),
             update_time=datetime.now().isoformat()
         )
         
-        # Store document data separately for efficient retrieval (include embedding in metadata)
-        metadata_with_embedding = document.metadata.copy() if document.metadata else {}
+        # Store chunk data separately for efficient retrieval (include embedding in metadata)
+        metadata_with_embedding = chunk.metadata.copy() if chunk.metadata else {}
         if embedding:
             metadata_with_embedding['embedding'] = embedding
-            
-        self.documents[document.id] = {
-            'content': document.content,
+
+        self.chunks[chunk.id] = {
+            'content': chunk.content,
             'metadata': metadata_with_embedding,
             'create_time': datetime.now().isoformat(),
             'update_time': datetime.now().isoformat()
         }
 
-    def add_graph_data(self, graph_data: GraphData, doc_id: str) -> None:
+    def add_graph_data(self, graph_data: GraphData, chunk_id: str) -> None:
         """Add graph data (entities and relations) with entity embeddings"""
-        doc_node_id = f"doc_{doc_id}"
+        chunk_node_id = f"chunk_{chunk_id}"
         
         # Add entities with embeddings
-        entity_node_mapping = {}  # entity_name -> node_id for this document
+        entity_node_mapping = {}  # entity_name -> node_id for this chunk
         
         for entity in graph_data.entities:
-            entity_id = doc_id + '_' + entity['id']  # Prefix with doc_id to avoid conflicts
+            entity_id = chunk_id + '_' + entity['id']  # Prefix with chunk_id to avoid conflicts
             entity_node_id = f"entity_{entity_id}"
             entity_type = entity.get('entity_type', 'Entity')
             
@@ -145,7 +145,7 @@ class NetworkXVectorGraphStore(NetworkXGraphStore):
                 id_=entity_id,
                 entity_name=entity['entity_name'],
                 entity_type=entity_type,
-                document_id=doc_id,
+                chunk_id=chunk_id,
                 create_time=datetime.now().isoformat(),
                 update_time=datetime.now().isoformat(),
                 attributes=json.dumps(entity['attributes'], ensure_ascii=False) if entity.get('attributes') else "{}",
@@ -155,9 +155,9 @@ class NetworkXVectorGraphStore(NetworkXGraphStore):
             # Store mapping for relation creation
             entity_node_mapping[entity['entity_name']] = entity_node_id
             
-            # Create Document-Entity relationship
+            # Create Chunk-Entity relationship
             self.graph.add_edge(
-                doc_node_id,
+                chunk_node_id,
                 entity_node_id,
                 relation_type='MENTIONS',
                 create_time=datetime.now().isoformat()
@@ -168,7 +168,7 @@ class NetworkXVectorGraphStore(NetworkXGraphStore):
             if len(relation) >= 3:
                 head_name, relation_type, tail_name = relation[0], relation[1], relation[2]
                 
-                # Find entity nodes by name within this document
+                # Find entity nodes by name within this chunk
                 head_node_id = entity_node_mapping.get(head_name)
                 tail_node_id = entity_node_mapping.get(tail_name)
                 
@@ -178,55 +178,55 @@ class NetworkXVectorGraphStore(NetworkXGraphStore):
                         head_node_id,
                         tail_node_id,
                         relation_type=relation_type,
-                        document_id=doc_id,
+                        chunk_id=chunk_id,
                         create_time=datetime.now().isoformat()
                     )
                 else:
                     logger.warning(f"Could not find entities for relation: {head_name} -> {tail_name}")
 
-    def get_documents(self, ids: List[str]) -> List[Document]:
-        """Get documents with embeddings"""
-        documents = []
+    def get_chunks(self, ids: List[str]) -> List[Chunk]:
+        """Get chunks with embeddings"""
+        chunks = []
 
-        for doc_id in ids:
+        for chunk_id in ids:
             try:
-                # Check if document exists
-                if doc_id not in self.documents:
-                    logger.warning(f"Document not found: {doc_id}")
+                # Check if chunk exists
+                if chunk_id not in self.chunks:
+                    logger.warning(f"Chunk not found: {chunk_id}")
                     continue
 
-                doc_data = self.documents[doc_id]
+                chunk_data = self.chunks[chunk_id]
 
-                # Create document with embedding in metadata (already included from add_document)
-                document = Document(
-                    content=doc_data.get('content', ''),
-                    id=doc_id,
-                    metadata=doc_data.get('metadata', {})
+                # Create chunk with embedding in metadata (already included from add_chunk)
+                chunk = Chunk(
+                    content=chunk_data.get('content', ''),
+                    id=chunk_id,
+                    metadata=chunk_data.get('metadata', {})
                 )
 
                 # Get graph data with entity embeddings
-                document.graph = self.get_graph_data(doc_id)
-                documents.append(document)
+                chunk.graph = self.get_graph_data(chunk_id)
+                chunks.append(chunk)
 
             except Exception as e:
-                logger.error(f"Failed to get document {doc_id}: {e}")
+                logger.error(f"Failed to get chunk {chunk_id}: {e}")
                 continue
 
-        return documents
+        return chunks
 
-    def get_graph_data(self, doc_id: str) -> GraphData:
+    def get_graph_data(self, chunk_id: str) -> GraphData:
         """Get graph data with entity embeddings"""
-        # Get entities for this document with embeddings
+        # Get entities for this chunk with embeddings
         entities = []
         entity_nodes = []
         
         for node_id, node_data in self.graph.nodes(data=True):
             if (node_data.get('node_type') == 'Entity' and 
-                node_data.get('document_id') == doc_id):
+                node_data.get('chunk_id') == chunk_id):
                 entity_nodes.append((node_id, node_data))
                 
                 entity = {
-                    'id': node_data.get('id_', '').replace(f"{doc_id}_", ""),  # Remove doc_id prefix
+                    'id': node_data.get('id_', '').replace(f"{chunk_id}_", ""),  # Remove chunk_id prefix
                     'entity_name': node_data.get('entity_name', ''),
                     'entity_type': node_data.get('entity_type', ''),
                     'attributes': json.loads(node_data.get('attributes') or '{}')
@@ -238,13 +238,13 @@ class NetworkXVectorGraphStore(NetworkXGraphStore):
                 
                 entities.append(entity)
 
-        # Get relations between entities in this document (same as parent class)
+        # Get relations between entities in this chunk (same as parent class)
         relations = []
         for edge in self.graph.edges(data=True):
             source, target, edge_data = edge
             
-            # Check if this is an entity-entity relationship for this document
-            if (edge_data.get('document_id') == doc_id and 
+            # Check if this is an entity-entity relationship for this chunk
+            if (edge_data.get('chunk_id') == chunk_id and 
                 edge_data.get('relation_type') != 'MENTIONS'):
                 
                 # Get entity names from nodes
@@ -261,15 +261,12 @@ class NetworkXVectorGraphStore(NetworkXGraphStore):
 
         return GraphData(entities=entities, relations=relations, metadata={})
 
-    def delete_all_Index(self, confirm: bool = False) -> bool:
-        """Delete all documents and their graph data - implements abstract method"""
-        return self.delete_all_index(confirm)
 
-    def get_embeddings_by_type(self, node_type: str = 'Document') -> Dict[str, List[float]]:
+    def get_embeddings_by_type(self, node_type: str = 'Chunk') -> Dict[str, List[float]]:
         """Get all embeddings for nodes of a specific type
         
         Args:
-            node_type: Type of nodes to get embeddings for ('Document' or 'Entity')
+            node_type: Type of nodes to get embeddings for ('Chunk' or 'Entity')
             
         Returns:
             Dictionary mapping node IDs to their embeddings
@@ -278,8 +275,8 @@ class NetworkXVectorGraphStore(NetworkXGraphStore):
         
         for node_id, node_data in self.graph.nodes(data=True):
             if node_data.get('node_type') == node_type and node_data.get('embedding'):
-                if node_type == 'Document':
-                    # For documents, use the document ID
+                if node_type == 'Chunk':
+                    # For chunks, use the chunk ID
                     key = node_data.get('id_', node_id)
                 else:
                     # For entities, use entity name or node ID
@@ -288,13 +285,13 @@ class NetworkXVectorGraphStore(NetworkXGraphStore):
         
         return embeddings
 
-    def similarity_search(self, query_embedding: List[float], node_type: str = 'Document',
+    def similarity_search(self, query_embedding: List[float], node_type: str = 'Chunk',
                          top_k: int = None, similarity_threshold: float = None) -> List[Dict[str, Any]]:
         """Find most similar nodes based on embedding similarity
 
         Args:
             query_embedding: Query embedding vector
-            node_type: Type of nodes to search ('Document' or 'Entity')
+            node_type: Type of nodes to search ('Chunk' or 'Entity')
             top_k: Number of top results to return (uses config default if None)
             similarity_threshold: Minimum similarity threshold (uses config default if None)
 
@@ -330,8 +327,8 @@ class NetworkXVectorGraphStore(NetworkXGraphStore):
                     'data': node_data
                 }
 
-                if node_type == 'Document':
-                    result['document_id'] = node_data.get('id_')
+                if node_type == 'Chunk':
+                    result['chunk_id'] = node_data.get('id_')
                     result['content'] = node_data.get('content', '')
                 else:
                     result['entity_name'] = node_data.get('entity_name', '')

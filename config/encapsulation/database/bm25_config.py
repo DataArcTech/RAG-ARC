@@ -5,36 +5,33 @@ from encapsulation.database.bm25_indexer import BM25IndexBuilder
 
 
 class BM25BuilderConfig(AbstractConfig):
-    """BM25索引构建器配置"""
+    """bm25 index builder configuration"""
     type: Literal["bm25_indexer"] = "bm25_indexer"
 
-    # 核心配置
-    index_path: str = Field(description="索引存储路径")
-    bm25_k1: float = Field(default=1.2, description="BM25 k1参数")
-    bm25_b: float = Field(default=0.75, description="BM25 b参数")
+    index_path: str = Field(description="index storage path")
+    bm25_k1: float = Field(default=1.2, description="bm25 k1 parameter")
+    bm25_b: float = Field(default=0.75, description="bm25 b parameter")
 
-    # 可选配置
-    preprocess_func_name: Optional[str] = Field(default=None, description="预处理函数名")
-    stopwords_file: Optional[str] = Field(default=None, description="停用词文件路径")
-    writer_heap_size: Optional[int] = Field(default=None, description="写入器堆大小")
-    batch_size: int = Field(default=50, description="批处理大小")
-    tokenize_batch_size: int = Field(default=200, description="分词批处理大小")
-    max_workers: Optional[int] = Field(default=None, description="最大工作进程数")
-    progress_interval: int = Field(default=500, description="进度报告间隔")
-    enable_gc: bool = Field(default=True, description="是否启用垃圾回收")
-    queue_maxsize: int = Field(default=1000, description="队列最大大小")
+    preprocess_func_name: Optional[str] = Field(default=None, description="preprocessing function name")
+    stopwords_file: Optional[str] = Field(default=None, description="stopwords file path")
+    writer_heap_size: Optional[int] = Field(default=None, description="writer heap size")
+    batch_size: int = Field(default=50, description="batch size")
+    tokenize_batch_size: int = Field(default=200, description="tokenize batch size")
+    max_workers: Optional[int] = Field(default=None, description="maximum worker processes")
+    progress_interval: int = Field(default=500, description="progress report interval")
+    enable_gc: bool = Field(default=True, description="enable garbage collection")
+    queue_maxsize: int = Field(default=1000, description="queue max size")
 
-    # 搜索配置
     search_kwargs: Dict[str, Any] = Field(
-        default_factory=lambda: {
+        default={
             "use_phrase_query": False,
             "k": 5,
             "with_score": True
         },
-        description="搜索参数配置"
+        description="search parameters"
     )
-    k: int = Field(default=5, description="默认返回结果数量")
-    with_score: bool = Field(default=True, description="是否返回分数")
+    k: int = Field(default=5, description="default number of results")
+    with_score: bool = Field(default=True, description="return score")
 
     
     @field_validator("bm25_k1")
@@ -52,4 +49,4 @@ class BM25BuilderConfig(AbstractConfig):
         return v
 
     def build(self):
-        return BM25IndexBuilder(config=self)
+        return BM25IndexBuilder(self)

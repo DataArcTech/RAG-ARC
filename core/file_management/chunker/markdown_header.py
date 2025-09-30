@@ -1,17 +1,20 @@
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, TYPE_CHECKING
 import logging
 
 from .base import AbstractChunker
+
+if TYPE_CHECKING:
+    from config.core.file_management.chunker.chunker_config import MarkdownHeaderChunkerConfig
 
 logger = logging.getLogger(__name__)
 
 
 class MarkdownHeaderChunker(AbstractChunker):
     """
-    MarkdownHeaderChunker is a document chunker that splits markdown text based on header structure and hierarchy.
+    MarkdownHeaderChunker is a text chunker that splits markdown text based on header structure and hierarchy.
 
     This class implements structure-aware markdown splitting by identifying markdown headers and creating chunks based on document organization,
-    preserving header hierarchy information for better context understanding and maintaining the logical flow of markdown documents.
+    preserving header hierarchy information for better context understanding and maintaining the logical flow of markdown content.
 
     Key features:
     - Header-based document structure recognition and preservation
@@ -53,6 +56,10 @@ class MarkdownHeaderChunker(AbstractChunker):
         - Two levels: ["#", "##"] - Split on H1 and H2 headers
         - Detailed: ["#", "##", "###", "####"] - Split on multiple header levels
     """
+
+    def __init__(self, config: "MarkdownHeaderChunkerConfig"):
+        """Initialize MarkdownHeaderChunker with config"""
+        super().__init__(config)
 
     def chunk_text(
         self,

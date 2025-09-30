@@ -1,15 +1,18 @@
-from typing import List, Optional, Dict, Any, Union, Literal
+from typing import List, Optional, Dict, Any, Union, Literal, TYPE_CHECKING
 import re
 import logging
 
 from .base import AbstractChunker
+
+if TYPE_CHECKING:
+    from config.core.file_management.chunker.chunker_config import RecursiveChunkerConfig
 
 logger = logging.getLogger(__name__)
 
 
 class RecursiveChunker(AbstractChunker):
     """
-    RecursiveChunker is a document chunker that recursively splits text using multiple separators in priority order.
+    RecursiveChunker is a text chunker that recursively splits text using multiple separators in priority order.
 
     This class implements hierarchical text splitting using different separators (paragraphs, sentences, etc.) in a structured manner,
     preserving natural text boundaries where possible while maintaining specified chunk size constraints.
@@ -40,13 +43,13 @@ class RecursiveChunker(AbstractChunker):
         - Prioritizes natural boundaries over strict size limits for better readability
         - Recursive approach may have higher computational cost for deeply nested structures
         - Overlap mechanism maintains context but increases total content size
-        - For very large documents, consider using simpler chunking strategies
+        - For very large texts, consider using simpler chunking strategies
         - Regex separators provide flexibility but may impact performance
 
     Typical usage:
         >>> config = RecursiveChunkerConfig(chunk_size=500, separators=["\n\n", "\n", ". "])
         >>> chunker = RecursiveChunker(config=config)
-        >>> chunks = chunker.chunk_text("long document...")
+        >>> chunks = chunker.chunk_text("long text...")
         >>> info = chunker.get_chunker_info()
 
     Separator strategies:
@@ -54,6 +57,10 @@ class RecursiveChunker(AbstractChunker):
         - Sentences first: [". ", "! ", "? ", "\n", " ", ""]
         - Custom regex: [r"\n\n", r"\n", r"[.!?]\s+"] with is_separator_regex=True
     """
+
+    def __init__(self, config: "RecursiveChunkerConfig"):
+        """Initialize RecursiveChunker with config"""
+        super().__init__(config)
 
     def chunk_text(
         self,

@@ -21,7 +21,7 @@ class IndexManagerConfig(AbstractConfig):
     # Parser configuration
     parser_config: ParserCobinatorConfig = Field(
         default_factory=lambda: ParserCobinatorConfig(),
-        description="Parser configuration for document parsing"
+        description="Parser configuration for content parsing"
     )
 
     # Chunker configuration

@@ -3,7 +3,7 @@ from typing import List, Callable, Optional, Tuple
 import logging
 import jieba
 from pathlib import Path
-from encapsulation.data_model.schema import Document
+from encapsulation.data_model.schema import Chunk
 
 logger = logging.getLogger(__name__)
 
@@ -126,14 +126,14 @@ class TokenizerManager:
             # Default to whitespace tokenization until language detection is complete
             return self._whitespace_tokenize
 
-    def detect_language(self, documents: List[Document], sample_size: int = 20,
+    def detect_language(self, chunks: List[Chunk], sample_size: int = 20,
                        chinese_ratio_threshold: float = 0.1) -> Tuple[bool, dict]:
-        """Detect document language to decide whether to use jieba"""
-        if not documents:
-            return False, {"reason": "no_documents"}
+        """Detect chunk language to decide whether to use jieba"""
+        if not chunks:
+            return False, {"reason": "no_chunks"}
 
         chinese_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]')
-        sample_docs = documents[:sample_size] if len(documents) > sample_size else documents
+        sample_docs = chunks[:sample_size] if len(chunks) > sample_size else chunks
 
         total_chars, chinese_chars, docs_with_chinese = 0, 0, 0
         for doc in sample_docs:
@@ -169,13 +169,13 @@ class TokenizerManager:
         )
         return use_jieba, stats
 
-    def set_tokenizer_by_detection(self, documents: List[Document]) -> None:
-        """Automatically detect and set tokenizer based on document content"""
+    def set_tokenizer_by_detection(self, chunks: List[Chunk]) -> None:
+        """Automatically detect and set tokenizer based on chunk content"""
         if self.custom_preprocess_func is not None:
             logger.info("Custom preprocess_func provided, skipping language detection and tokenizer switch.")
             return
 
-        use_jieba, stats = self.detect_language(documents)
+        use_jieba, stats = self.detect_language(chunks)
         self._tokenizer_stats = stats
         
         if self._use_jieba == use_jieba:

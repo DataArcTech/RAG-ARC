@@ -11,4 +11,4 @@ class BM25IndexerConfig(AbstractConfig):
     index_config: BM25BuilderConfig = Field(description="BM25 index configuration")
 
     def build(self):
-        return BM25Indexer(self.index_config)
+        return BM25Indexer(self)

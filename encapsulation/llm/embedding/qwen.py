@@ -1,10 +1,13 @@
-from .base import EmbeddingLLMBase
-from typing import Union, List, Dict, Any
+import logging
+from typing import Union, List, Dict, Any, TYPE_CHECKING
+
+from encapsulation.llm.embedding.base import EmbeddingLLMBase
 from encapsulation.llm.utils.openai_client import create_openai_sync_client, create_openai_async_client
 from encapsulation.llm.utils.huggingface_client import create_sentence_transformer_client
-import logging
-
 from framework.shared_module_decorator import shared_module
+
+if TYPE_CHECKING:
+    from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +50,7 @@ class QwenEmbeddingLLM(EmbeddingLLMBase):
     """
 
 
-    def __init__(self, config):
+    def __init__(self, config: "QwenEmbeddingConfig"):
         """Initialize Qwen Embedding with loading method support"""
         super().__init__(config)
         self.loading_method = getattr(self.config, 'loading_method', 'huggingface')
@@ -69,7 +72,7 @@ class QwenEmbeddingLLM(EmbeddingLLMBase):
         text_list = [texts] if is_single else texts
 
         try:
-            embeddings = self.embed_documents(text_list)
+            embeddings = self.embed_chunks(text_list)
             return embeddings[0] if is_single else embeddings
         except Exception as e:
             logger.error(f"Text embedding failed: {str(e)}")
@@ -85,14 +88,14 @@ class QwenEmbeddingLLM(EmbeddingLLMBase):
 
         try:
             # Run the synchronous embedding in a thread pool
-            embeddings = await asyncio.to_thread(self.embed_documents, text_list)
+            embeddings = await asyncio.to_thread(self.embed_chunks, text_list)
             return embeddings[0] if is_single else embeddings
         except Exception as e:
             logger.error(f"Async text embedding failed: {str(e)}")
             raise
 
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        """Embed multiple documents"""
+    def embed_chunks(self, texts: List[str]) -> List[List[float]]:
+        """Embed multiple chunks"""
         try:
             # Clean texts
             texts = [text.replace("\n", " ") for text in texts]
@@ -108,12 +111,12 @@ class QwenEmbeddingLLM(EmbeddingLLMBase):
             return embeddings.tolist()
 
         except Exception as e:
-            logger.error(f"Document embedding failed: {str(e)}")
-            raise RuntimeError(f"Document embedding failed: {str(e)}")
+            logger.error(f"Chunk embedding failed: {str(e)}")
+            raise RuntimeError(f"Chunk embedding failed: {str(e)}")
 
     def embed_query(self, text: str) -> List[float]:
         """Embed single query"""
-        return self.embed_documents([text])[0]
+        return self.embed_chunks([text])[0]
 
     def get_model_info(self) -> Dict[str, Any]:
         """Get model information"""

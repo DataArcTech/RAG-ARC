@@ -4,24 +4,24 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from encapsulation.data_model.schema import Document
+from encapsulation.data_model.schema import Chunk
 from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBConfig
 from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
 
 def load_real_data():
-    """加载真实数据文件"""
+    """加载数据文件"""
     import json
 
     data_file = "./test/test.json"
-    print(f"1. 加载真实数据文件: {data_file}")
+    print(f"1. 加载数据文件: {data_file}")
 
     with open(data_file, 'r', encoding='utf-8') as f:
         data = json.load(f)
 
-    documents = []
+    chunks = []
     for i, item in enumerate(data):
-        # 创建文档ID
-        doc_id = item.get('id', f"doc_{i}")
+        # 创建Chunk ID
+        chunk_id = item.get('id', f"chunk_{i}")
 
         # 获取内容
         content = item.get('content', '')
@@ -29,16 +29,16 @@ def load_real_data():
         # 创建元数据
         metadata = item.get('metadata', {})
 
-        # 创建Document对象
-        doc = Document(
-            id=doc_id,
+        # 创建Chunk对象
+        chunk = Chunk(
+            id=chunk_id,
             content=content,
             metadata=metadata
         )
-        documents.append(doc)
+        chunks.append(chunk)
 
-    print(f"成功加载 {len(documents)} 个真实文档")
-    return documents
+    print(f"成功加载 {len(chunks)} 个Chunk")
+    return chunks
 
 
 def build_demo_index():
@@ -46,17 +46,17 @@ def build_demo_index():
     print("=== 构建演示索引 ===")
 
 
-    # 1. 加载真实数据
-    documents = load_real_data()
+    # 1. 加载数据
+    chunks = load_real_data()
 
     # 2. 创建FAISS索引配置
     print("\n2. 创建FAISS索引配置...")
 
     embedding_config = QwenEmbeddingConfig(
         model_name="Qwen/Qwen3-Embedding-0.6B",
-        device="cuda:7", 
+        device="cuda:0", 
         encode_kwargs={
-            "batch_size": 16,
+            "batch_size": 32,
             "show_progress_bar": True,
             # "multi_process": True
         },
@@ -78,7 +78,7 @@ def build_demo_index():
     # 3. 构建FAISS索引
     print("\n3. 构建FAISS索引...")
     faiss_index = faiss_config.build()
-    faiss_index.build_index(documents)
+    faiss_index.build_index(chunks)
     print("FAISS索引构建完成")
 
     # 4. 保存FAISS索引
@@ -114,21 +114,21 @@ def build_demo_index():
         print(f"删除现有BM25索引: {bm25_index_path}")
         shutil.rmtree(bm25_index_path)
 
-    print(f"准备构建BM25索引，文档数量: {len(documents)}")
+    print(f"准备构建BM25索引，Chunk数量: {len(chunks)}")
     bm25_index = bm25_config.build()
 
     try:
-        bm25_index.build_index(documents)
+        bm25_index.build_index(chunks)
         print("✓ BM25索引构建完成")
     except Exception as e:
         print(f"✗ BM25索引构建失败: {e}")
-        # 尝试使用add_documents方法
+        # 尝试使用add_chunks方法
         try:
-            print("尝试使用add_documents方法...")
-            bm25_index.update_index(documents)
-            print("✓ 使用add_documents方法成功")
+            print("尝试使用add_chunks方法...")
+            bm25_index.update_index(chunks)
+            print("✓ 使用add_chunks方法成功")
         except Exception as e2:
-            print(f"✗ add_documents也失败: {e2}")
+            print(f"✗ add_chunks也失败: {e2}")
             raise e
 
     # 8. 保存BM25索引
@@ -144,7 +144,7 @@ def build_demo_index():
 
     print("\n所有demo索引构建完成！")
     print("现在可以运行 python api/quick_start.py 来使用预构建的索引")
-    print(f"总共处理了 {len(documents)} 个文档")
+    print(f"总共处理了 {len(chunks)} 个Chunk")
         
 
 if __name__ == "__main__":

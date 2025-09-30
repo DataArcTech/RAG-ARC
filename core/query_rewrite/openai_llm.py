@@ -1,7 +1,12 @@
-from typing import Dict, Any, Optional
-from .base import AbstractQueryRewriter
-
 import logging
+
+from typing import Dict, Any, Optional, TYPE_CHECKING
+from core.query_rewrite.base import AbstractQueryRewriter
+
+if TYPE_CHECKING:
+    from config.core.query_rewriter_config import OpenAIQueryRewriterConfig
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +30,7 @@ class OpenAIQueryRewriter(AbstractQueryRewriter):
     - Integration with RAG-ARC LLM infrastructure
     """
 
-    def __init__(self, config):
+    def __init__(self, config: "OpenAIQueryRewriterConfig"):
         super().__init__(config)
         # Build LLM from sub-config following framework pattern
         self.openai_llm = config.openai_llm_config.build()

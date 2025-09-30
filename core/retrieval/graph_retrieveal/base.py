@@ -1,6 +1,6 @@
 from framework.module import AbstractModule
 from abc import abstractmethod
-from encapsulation.data_model.schema import Document
+from encapsulation.data_model.schema import Chunk
 from typing import List
 
 class BaseGraphRetriever(AbstractModule):
@@ -10,20 +10,20 @@ class BaseGraphRetriever(AbstractModule):
         self.config = config
 
     @abstractmethod
-    def retrieve(self, query: str, top_k: int = 10) -> List[Document]:
+    def retrieve(self, query: str, top_k: int = 10) -> List[Chunk]:
         """
-        Retrieve relevant documents for the given query
+        Retrieve relevant chunks for the given query
 
         Args:
             query: Natural language query
-            top_k: Number of top documents to return
+            top_k: Number of top chunks to return
 
         Returns:
-            List of Document objects sorted by relevance
+            List of Chunk objects sorted by relevance
         """
         pass
 
-    def invoke(self, query: str, **kwargs) -> List[Document]:
+    def invoke(self, query: str, **kwargs) -> List[Chunk]:
         """Standard interface method for compatibility"""
         top_k = kwargs.get('k', kwargs.get('top_k', 10))
         return self.retrieve(query, top_k)

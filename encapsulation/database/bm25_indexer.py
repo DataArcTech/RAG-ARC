@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Union
 from concurrent.futures import ProcessPoolExecutor
 import jieba
 
-from encapsulation.data_model.schema import Document
+from encapsulation.data_model.schema import Chunk
 from encapsulation.database.utils.TokenizerManager import TokenizerManager
 
 try:
@@ -46,13 +46,13 @@ def init_jieba_worker():
 
 class BM25IndexBuilder():
     """
-    基于Tantivy的BM25索引构建器
+    Based on Tantivy's BM25 implementation, this class provides a convenient
 
-    主要功能：
-    - 文档索引构建和管理
-    - 支持中文分词和多语言
-    - 流式处理和批量操作
-    - 多进程优化
+    main features include:
+    - Indexing and management of chunks
+    - Chinese tokenization and multi-language support
+    - Streaming and batch operations
+    - Multi-process optimization
     """
 
     def __init__(self, config):
@@ -118,18 +118,18 @@ class BM25IndexBuilder():
 
     
     
-    def _set_tokenizer(self, documents: List[Document]):
+    def _set_tokenizer(self, chunks: List[Chunk]):
         """Set tokenizer (proxied to TokenizerManager)"""
-        self.tokenizer_manager.set_tokenizer_by_detection(documents)
+        self.tokenizer_manager.set_tokenizer_by_detection(chunks)
 
     def _set_tokenizer_from_existing_index(self):
-        """从现有索引中设置分词器 - 对于中文索引强制使用jieba"""
+        """Set tokenizer based on existing index"""
         try:
             if self._index is None:
                 logger.warning("Index not loaded, cannot set tokenizer from existing index")
                 return
 
-            # 检查索引是否有文档
+            # Check if index has chunks
             searcher = self._index.searcher()
             num_docs = searcher.num_docs
 
@@ -137,9 +137,8 @@ class BM25IndexBuilder():
                 logger.warning("Index is empty, using default whitespace tokenizer")
                 return
 
-            # 对于现有的中文索引，直接设置为jieba分词器
-            # 这是因为我们的索引是用jieba构建的
-            logger.info(f"Loading existing index with {num_docs} documents, setting tokenizer to jieba for Chinese content")
+            # For existing Chinese indices, set tokenizer to jieba
+            logger.info(f"Loading existing index with {num_docs} chunks, setting tokenizer to jieba for Chinese content")
             self.tokenizer_manager._use_jieba = True
             self.tokenizer_manager._load_stopwords()
 
@@ -155,7 +154,7 @@ class BM25IndexBuilder():
         if self._index is None:
             raise RuntimeError(
                 "Index is not loaded. Call load_local() to load existing index "
-                "or from_documents() to create new index."
+                "or from_chunks() to create new index."
             )
 
     def _tokenize_batch_sequential(self, texts: List[str]) -> List[List[str]]:
@@ -203,34 +202,34 @@ class BM25IndexBuilder():
                 return self._tokenize_batch_sequential(texts)
         return results
 
-    def _extract_string_fields_from_documents(self, documents: List[Document]) -> set[str]:
-        """Extract string fields from document metadata for dynamic schema creation
-        
+    def _extract_string_fields_from_chunks(self, chunks: List[Chunk]) -> set[str]:
+        """Extract string fields from chunk metadata for dynamic schema creation
+
         Args:
-            documents: List of documents to analyze
-            
+            chunks: List of chunks to analyze
+
         Returns:
             Set of field names that contain string values
         """
         string_fields = set()
-        
-        for doc in documents:
-            if not doc.metadata:
+
+        for chunk in chunks:
+            if not chunk.metadata:
                 continue
-                
-            for key, value in doc.metadata.items():
+
+            for key, value in chunk.metadata.items():
                 # Only include string fields for filtering, exclude system/score fields
                 if isinstance(value, str) and key not in EXCLUDED_METADATA_FIELDS:
                     string_fields.add(key)
-        
+
         logger.debug(f"Extracted dynamic string fields: {string_fields}")
         return string_fields
 
-    def _initialize_index(self, documents: Optional[List[Document]] = None) -> None:
-        """Initialize the Tantivy index with dynamic schema based on document metadata
+    def _initialize_index(self, chunks: Optional[List[Chunk]] = None) -> None:
+        """Initialize the Tantivy index with dynamic schema based on chunk metadata
         
         Args:
-            documents: Optional list of documents to analyze for dynamic field creation
+            chunks: Optional list of chunks to analyze for dynamic field creation
         """
         if self._index is not None:
             return
@@ -242,9 +241,9 @@ class BM25IndexBuilder():
         schema_builder.add_text_field("content_tokens", tokenizer_name="custom", stored=True)
         schema_builder.add_json_field("metadata", stored=True)
         
-        # Add dynamic fields based on document metadata
-        if documents:
-            dynamic_fields = self._extract_string_fields_from_documents(documents)
+        # Add dynamic fields based on chunk metadata
+        if chunks:
+            dynamic_fields = self._extract_string_fields_from_chunks(chunks)
             for field_name in dynamic_fields:
                 schema_builder.add_text_field(field_name, tokenizer_name="raw", stored=False, fast=True)
                 logger.debug(f"Added dynamic field: {field_name}")
@@ -253,14 +252,12 @@ class BM25IndexBuilder():
 
         # Load existing index or create new one
         if os.path.exists(self.config.index_path):
-            # 使用with语句确保scandir正确关闭
             with os.scandir(self.config.index_path) as entries:
                 has_files = any(entries)
             if has_files:
                 logger.info(f"Loading existing index from: {self.config.index_path}")
                 self._index = Index.open(self.config.index_path)
             else:
-                # 目录存在但为空，创建新索引
                 logger.info(f"Creating new index at existing empty directory: {self.config.index_path}")
                 self._index = Index(self._schema, path=self.config.index_path)
         else:
@@ -324,8 +321,8 @@ class BM25IndexBuilder():
             self._batch_write_documents(batch_docs, writer)
 
     def _batch_write_documents(self, docs: List[TantivyDocument], writer) -> None:
-        """Write a batch of documents to the index
-        
+        """Write a batch of tantivy documents to the index
+
         Args:
             docs: List of Tantivy documents to write
             writer: Tantivy index writer
@@ -336,80 +333,80 @@ class BM25IndexBuilder():
             for d in docs:
                 writer.add_document(d)
         except Exception as e:
-            logger.error(f"Error writing batch of documents: {e}")
+            logger.error(f"Error writing batch of tantivy documents: {e}")
             raise
 
-    def _delete_documents_by_ids(self, doc_ids: List[str]) -> int:
-        """Delete documents by their IDs
-        
+    def _delete_chunks_by_ids(self, chunk_ids: List[str]) -> int:
+        """Delete chunks by their IDs
+
         Args:
-            doc_ids: List of document IDs to delete
-            
+            chunk_ids: List of chunk IDs to delete
+
         Returns:
-            Number of documents actually deleted
+            Number of chunks actually deleted
         """
-        if not doc_ids:
+        if not chunk_ids:
             return 0
         
         self._ensure_index_loaded()
             
         try:
-            # First, check which documents actually exist
+            # First, check which chunks actually exist
             searcher = self._index.searcher()
             existing_ids = []
             
-            for doc_id in doc_ids:
-                query = self._index.parse_query(f'id:"{doc_id}"', ["id"])
+            for chunk_id in chunk_ids:
+                query = self._index.parse_query(f'id:"{chunk_id}"', ["id"])
                 results = searcher.search(query, 1)
-                logger.info(f"Checking document {doc_id}: found {len(results.hits)} hits")
+                logger.info(f"Checking chunk {chunk_id}: found {len(results.hits)} hits")
                 if results.hits:
-                    existing_ids.append(doc_id)
+                    existing_ids.append(chunk_id)
             
             if not existing_ids:
-                logger.info("No documents found to delete")
+                logger.info("No chunks found to delete")
                 return 0
             
-            # Delete only existing documents
+            # Delete only existing chunks
             writer = self._index.writer(heap_size=self._writer_heap_size)
             deleted_count = 0
             
-            for doc_id in existing_ids:
-                delete_result = writer.delete_documents("id", doc_id)
-                logger.info(f"Deleting document {doc_id}: {delete_result} documents deleted")
+            for chunk_id in existing_ids:
+                delete_result = writer.delete_documents("id", chunk_id)
+                logger.info(f"Deleting chunk {chunk_id}: {delete_result} chunks deleted")
                 deleted_count += delete_result
             
-            logger.info(f"Committing deletion of {deleted_count} documents")
+            logger.info(f"Committing deletion of {deleted_count} chunks")
             writer.commit()
             logger.info("Reloading index after deletion")
             self._index.reload()
-            logger.info(f"Successfully deleted {deleted_count} documents from index (requested: {len(doc_ids)})")
+            logger.info(f"Successfully deleted {deleted_count} chunks from index (requested: {len(chunk_ids)})")
             return deleted_count
             
         except Exception as e:
-            logger.error(f"Error deleting documents: {e}")
+            logger.error(f"Error deleting chunks: {e}")
             raise
 
 
-    def _build_index(self, documents: List[Document]) -> List[str]:
+    def _build_index(self, chunks: List[Chunk]) -> List[str]:
         """Build index using producer-consumer pattern
         
         Args:
-            documents: List of Document objects to index
+            chunks: List of Chunk objects to index
             
         Returns:
-            List of document IDs that were added to the index
+            List of chunk IDs that were added to the index
             
         Raises:
             RuntimeError: If there's an error during index building
         """
-        if not documents:
-            logger.warning("No documents provided for indexing")
+        if not chunks:
+            logger.warning("No chunks provided for indexing")
             return []
         
         if self.tokenizer_manager.custom_preprocess_func is None:
-            self._set_tokenizer(documents)
+            self._set_tokenizer(chunks)
         
-        # For new indices, reinitialize with dynamic fields based on documents
+        # For new indices, reinitialize with dynamic fields based on chunks
         index_exists = False
         if os.path.exists(self.config.index_path):
             try:
@@ -420,12 +417,12 @@ class BM25IndexBuilder():
 
         if not index_exists:
             self._index = None  # Reset to force reinitialization with dynamic fields
-            self._initialize_index(documents)
+            self._initialize_index(chunks)
         
         if self._index is None:
             raise RuntimeError("Index has not been initialized")
             
-        total_docs = len(documents)
+        total_docs = len(chunks)
         added_ids, processed_count = [], 0
         
         # Ensure any previous writer thread is stopped
@@ -454,29 +451,29 @@ class BM25IndexBuilder():
         start_time = time.time()
         
         try:
-            for doc in documents:
-                content_tokens = self.tokenizer_manager.get_current_tokenizer()(doc.content or "")
-                doc_id = str(doc.id) if doc.id else str(uuid.uuid4())
-                
+            for chunk in chunks:
+                content_tokens = self.tokenizer_manager.get_current_tokenizer()(chunk.content or "")
+                chunk_id = str(chunk.id) if chunk.id else str(uuid.uuid4())
+
                 tantivy_doc = TantivyDocument()
-                tantivy_doc.add_text("id", doc_id)
-                tantivy_doc.add_text("content", doc.content or "")
+                tantivy_doc.add_text("id", chunk_id)
+                tantivy_doc.add_text("content", chunk.content or "")
                 tantivy_doc.add_text("content_tokens", " ".join(content_tokens))
-                
-                metadata = doc.metadata or {}
+
+                metadata = chunk.metadata or {}
                 tantivy_doc.add_json("metadata", metadata)
-                
+
                 # Dynamically add all string fields from metadata for filtering
                 for key, value in metadata.items():
                     if isinstance(value, str) and key not in EXCLUDED_METADATA_FIELDS:
                         try:
                             tantivy_doc.add_text(key, value)
                         except Exception as e:
-                            logger.warning(f"Failed to add field '{key}' to document: {e}")
+                            logger.warning(f"Failed to add field '{key}' to tantivy document: {e}")
                 
                 self.processing_queue.put(tantivy_doc)
 
-                added_ids.append(doc_id)
+                added_ids.append(chunk_id)
                 processed_count += 1
                 
                 if processed_count % self.config.progress_interval == 0:
@@ -506,7 +503,7 @@ class BM25IndexBuilder():
             self._index.reload()
             
             tokenizer_info = self.tokenizer_manager.get_tokenizer_info()
-            logger.info(f"Successfully built index with {len(added_ids)} documents using {tokenizer_info} tokenizer")
+            logger.info(f"Successfully built index with {len(added_ids)} chunks using {tokenizer_info} tokenizer")
             
         except Exception as e:
             logger.error(f"Error building index: {e}")
@@ -522,65 +519,65 @@ class BM25IndexBuilder():
 
         return added_ids
 
-    def add(self, documents: List[Document]) -> List[str]:
-        """Add documents to the existing index (with ID deduplication)
+    def add_chunks(self, chunks: List[Chunk]) -> List[str]:
+        """Add chunks to the existing index (with ID deduplication)
 
         Args:
-            documents: List of Document objects to add
+            chunks: List of Chunk objects to add
         Returns:
-            List of document IDs that were successfully added to the index
+            List of chunk IDs that were successfully added to the index
         """
-        if not documents:
-            logger.warning("No documents provided for adding")
+        if not chunks:
+            logger.warning("No chunks provided for adding")
             return []
 
-        # 检查重复ID并过滤
-        unique_documents = []
+        # Check for duplicate IDs and filter
+        unique_chunks = []
         duplicate_ids = []
         existing_ids = set()
 
-        # 获取现有文档ID - 直接从索引查询
+        # Get existing chunk IDs - directly query from index
         existing_ids = set()
         if self._index is not None:
             try:
                 searcher = self._index.searcher()
-                # 查询所有文档ID（这里可以优化，但为了简单起见直接查询）
-                for doc in documents:
-                    query = self._index.parse_query(f'id:"{doc.id}"', ["id"])
+                # Query all chunk IDs (this can be optimized, but for simplicity, just query directly)
+                for chunk in chunks:
+                    query = self._index.parse_query(f'id:"{chunk.id}"', ["id"])
                     results = searcher.search(query, 1)
                     if results.hits:
-                        existing_ids.add(doc.id)
-                logger.debug(f"Found {len(existing_ids)} existing document IDs in index")
+                        existing_ids.add(chunk.id)
+                logger.debug(f"Found {len(existing_ids)} existing chunk IDs in index")
             except Exception as e:
-                logger.debug(f"Error getting existing document IDs: {e}")
+                logger.debug(f"Error getting existing chunk IDs: {e}")
                 existing_ids = set()
 
-        # 检查文档列表中的重复ID（包括与现有文档的重复）
+        # Check for duplicate IDs in the list (including with existing chunks)
         seen_ids = set()
-        for doc in documents:
-            if doc.id in seen_ids:
-                # 文档列表内部重复
-                duplicate_ids.append(doc.id)
-                logger.warning(f"Duplicate document ID found: {doc.id}. Use update_documents() to update existing documents.")
-            elif doc.id in existing_ids:
-                # 与现有文档重复
-                duplicate_ids.append(doc.id)
-                logger.warning(f"Document with ID {doc.id} already exists. Use update() to update existing documents.")
+        for chunk in chunks:
+            if chunk.id in seen_ids:
+                # Duplicate within the list
+                duplicate_ids.append(chunk.id)
+                logger.warning(f"Duplicate chunk ID found: {chunk.id}. Use update_chunks() to update existing chunks.")
+            elif chunk.id in existing_ids:
+                # Duplicate with existing chunks
+                duplicate_ids.append(chunk.id)
+                logger.warning(f"Chunk with ID {chunk.id} already exists. Use update() to update existing chunks.")
             else:
-                seen_ids.add(doc.id)
-                unique_documents.append(doc)
+                seen_ids.add(chunk.id)
+                unique_chunks.append(chunk)
 
         if duplicate_ids:
-            logger.warning(f"Found {len(duplicate_ids)} duplicate document IDs: {duplicate_ids}")
+            logger.warning(f"Found {len(duplicate_ids)} duplicate chunk IDs: {duplicate_ids}")
 
-        if not unique_documents:
-            logger.warning("No unique documents to add after deduplication")
+        if not unique_chunks:
+            logger.warning("No unique chunks to add after deduplication")
             return []
 
-        return self._build_index(unique_documents)
+        return self._build_index(unique_chunks)
 
     def save_index(self, index_path: str = None, index_name: str = "index") -> None:
-        """保存索引状态（Tantivy自动持久化）
+        """Save index state (Tantivy automatically persists)
 
         Note: Tantivy automatically persists the index, so this method only logs the save location.
         The index_path and index_name parameters are ignored for compatibility.
@@ -588,39 +585,39 @@ class BM25IndexBuilder():
         self._ensure_index_loaded()
         logger.info(f"Index automatically saved at: {self.config.index_path}")
 
-    def build_index(self, documents: List[Document]) -> None:
-        """Build index from documents (only when index doesn't exist)
+    def build_index(self, chunks: List[Chunk]) -> None:
+        """Build index from chunks (only when index doesn't exist)
 
         Args:
-            documents: List of Document objects to index
+            chunks: List of Chunk objects to index
 
         Raises:
             RuntimeError: If index already exists
         """
-        # 检查索引是否已存在
+        # Check if index already exists
         if self.index_exists():
             raise RuntimeError(
-                "Index already exists. Use add() to add documents to existing index, "
+                "Index already exists. Use add() to add chunks to existing index, "
                 "or delete the existing index first if you want to rebuild it."
             )
 
-        self.from_documents(documents)
+        self.from_chunks(chunks)
 
     def index_exists(self) -> bool:
         """Check if index exists
 
         Returns:
-            bool: True if index exists and has documents, False otherwise
+            bool: True if index exists and has chunks, False otherwise
         """
         try:
-            # 检查索引是否已初始化
+            # Check if index is initialized
             if self._index is None:
                 return False
 
-            # 检查索引是否有文档
+            # Check if index has chunks
             if hasattr(self._index, 'searcher'):
                 searcher = self._index.searcher()
-                # 简单检查：尝试搜索所有文档
+                # Query all chunk IDs
                 from tantivy import Query
                 all_query = Query.all_query()
                 result = searcher.search(all_query, limit=1)
@@ -635,7 +632,7 @@ class BM25IndexBuilder():
         """Load index from storage (alias for load_local)
 
         Args:
-            index_path: 索引路径（BM25使用配置中的路径，忽略此参数）
+            index_path: Index path (ignored, uses configured path)
 
         Raises:
             FileNotFoundError: If index path does not exist
@@ -645,39 +642,37 @@ class BM25IndexBuilder():
             logger.debug(f"BM25 index uses configured path {self.config.index_path}, ignoring provided path {index_path}")
         self.load_local()
 
-    def update_index(self, documents: List[Document]) -> Optional[bool]:
-        """Update documents in index
+    def update_index(self, chunks: List[Chunk]) -> Optional[bool]:
+        """Update chunks in index
 
         Args:
-            documents: List of Document objects to update
+            chunks: List of Chunk objects to update
 
         Returns:
             Optional[bool]: True if update successful, False otherwise, None if not implemented
         """
-        if not documents:
+        if not chunks:
             return True
 
         try:
-            # 先删除现有文档，再添加更新的文档
-            doc_ids = [str(doc.id) for doc in documents if doc.id is not None]
-            if doc_ids:
-                logger.info(f"Update mode: attempting to delete {len(doc_ids)} existing documents")
-                deleted_count = self._delete_documents_by_ids(doc_ids)
-                logger.info(f"Update mode: successfully deleted {deleted_count} documents")
+            chunk_ids = [str(chunk.id) for chunk in chunks if chunk.id is not None]
+            if chunk_ids:
+                logger.info(f"Update mode: attempting to delete {len(chunk_ids)} existing chunks")
+                deleted_count = self._delete_chunks_by_ids(chunk_ids)
+                logger.info(f"Update mode: successfully deleted {deleted_count} chunks")
 
                 # Ensure index is reloaded after deletion for consistency
                 if self._index is not None:
                     self._index.reload()
 
-            # 添加更新的文档
-            self._build_index(documents)
+            self._build_index(chunks)
             return True
         except Exception as e:
-            logger.error(f"Error updating documents: {e}")
+            logger.error(f"Error updating chunks: {e}")
             return False
 
     def delete_index(self, ids: Optional[List[str]] = None, **kwargs: Any) -> Optional[bool]:
-        """Delete documents by IDs
+        """Delete chunks by IDs
 
         Args:
             ids: List of IDs to delete. If None, delete all. Default is None
@@ -686,56 +681,53 @@ class BM25IndexBuilder():
             Optional[bool]: True if deletion successful, False otherwise, None if not implemented
         """
         if ids is None:
-            # 删除所有文档 - 重新创建空索引
             try:
                 if self._index is not None:
-                    # 关闭当前索引
                     self._index = None
                     self._tokenizers_registered = False
 
-                # 重新创建空索引
                 self._initialize_index()
-                logger.info("Successfully deleted all documents by recreating index")
+                logger.info("Successfully deleted all chunks by recreating index")
                 return True
             except Exception as e:
-                logger.error(f"Error deleting all documents: {e}")
+                logger.error(f"Error deleting all chunks: {e}")
                 return False
 
         if not ids:
             return True
 
-        unique_doc_ids = list(set(ids))
+        unique_chunk_ids = list(set(ids))
 
         try:
-            deleted_count = self._delete_documents_by_ids(unique_doc_ids)
+            deleted_count = self._delete_chunks_by_ids(unique_chunk_ids)
             return deleted_count > 0
         except Exception as e:
-            logger.error(f"Error deleting documents: {e}")
+            logger.error(f"Error deleting chunks: {e}")
             return False
 
-    def get_by_ids(self, doc_ids: List[str]) -> List[Document]:
-        """Retrieve documents by their IDs
-        
+    def get_by_ids(self, chunk_ids: List[str]) -> List[Chunk]:
+        """Retrieve chunks by their IDs
+
         Args:
-            doc_ids: List of document IDs to retrieve
-            
+            chunk_ids: List of chunk IDs to retrieve
+
         Returns:
-            List of Document objects found
-            
+            List of Chunk objects found
+
         Raises:
             RuntimeError: If index is not initialized
         """
-        if not doc_ids:
+        if not chunk_ids:
             return []
             
         self._ensure_index_loaded()
-        documents = []
+        chunks = []
 
         try:
             searcher = self._index.searcher()
             
-            for doc_id in doc_ids:
-                query = self._index.parse_query(f'id:"{doc_id}"', ["id"])
+            for chunk_id in chunk_ids:
+                query = self._index.parse_query(f'id:"{chunk_id}"', ["id"])
                 results = searcher.search(query, 1)
 
                 if results.hits:
@@ -752,16 +744,16 @@ class BM25IndexBuilder():
                         except json.JSONDecodeError:
                             metadata_field = {}
 
-                    documents.append(Document(
+                    chunks.append(Chunk(
                         id=doc_id_field,
                         content=content_field,
                         metadata=metadata_field
                     ))
-            
-            return documents
+
+            return chunks
 
         except Exception as e:
-            logger.error(f"Error retrieving documents by IDs {doc_ids}: {e}")
+            logger.error(f"Error retrieving chunks by IDs {chunk_ids}: {e}")
             return []
 
     def load_local(self) -> "BM25IndexBuilder":
@@ -782,7 +774,6 @@ class BM25IndexBuilder():
         if not os.path.exists(self.config.index_path):
             raise FileNotFoundError(f"Index path does not exist: {self.config.index_path}")
         
-        # 使用with语句确保scandir正确关闭
         with os.scandir(self.config.index_path) as entries:
             has_files = any(entries)
         if not has_files:
@@ -792,7 +783,6 @@ class BM25IndexBuilder():
             # Load existing index without dynamic fields (they're already in the schema)
             self._initialize_index()
 
-            # 设置分词器：从索引中获取样本文档来检测语言
             self._set_tokenizer_from_existing_index()
 
             logger.info(f"Successfully loaded existing index from: {self.config.index_path}")
@@ -802,34 +792,34 @@ class BM25IndexBuilder():
             self.close()
             raise
 
-    def from_documents(self, documents: List[Document]) -> "BM25IndexBuilder":
-        """Build index from document list (only for initial creation)
+    def from_chunks(self, chunks: List[Chunk]) -> "BM25IndexBuilder":
+        """Build index from chunk list (only for initial creation)
 
         This method is intended for creating a new index from scratch.
-        If you want to add documents to an existing index, use add_documents() instead.
+        If you want to add chunks to an existing index, use add_chunks() instead.
 
         Args:
-            documents: List of Document objects to index
+            chunks: List of Chunk objects to index
 
         Returns:
             Self (BM25IndexBuilder instance)
 
         Raises:
-            ValueError: If documents list is empty
-            RuntimeError: If index is already loaded (use add_documents instead)
+            ValueError: If chunks list is empty
+            RuntimeError: If index is already loaded (use add_chunks instead)
             Exception: If there's an error during index building
         """
-        if not documents:
-            raise ValueError("Documents list cannot be empty")
+        if not chunks:
+            raise ValueError("Chunks list cannot be empty")
 
         if self._index is not None:
             raise RuntimeError(
-                "Index is already loaded. from_documents() is only for initial index creation. "
-                "To add documents to existing index, use: builder.add_documents(documents)"
+                "Index is already loaded. from_chunks() is only for initial index creation. "
+                "To add chunks to existing index, use: builder.add_chunks(chunks)"
             )
 
         try:
-            self._build_index(documents)
+            self._build_index(chunks)
             return self
         except Exception:
             self.close()
@@ -846,8 +836,8 @@ class BM25IndexBuilder():
         with_score: Optional[bool] = None,
         use_phrase_query: Optional[bool] = None,
         **kwargs: Any
-    ) -> List[Document]:
-        """执行搜索并返回文档列表"""
+    ) -> List[Chunk]:
+        """执行搜索并返回列表"""
         from tantivy import Query, Occur, Order
         
         # Use config defaults if parameters not provided
@@ -940,18 +930,18 @@ class BM25IndexBuilder():
                     # Ensure score is not included when with_score is False
                     metadata_field = {k: v for k, v in metadata_field.items() if k != "score"}
                 
-                document = Document(
+                chunk = Chunk(
                     id=tantivy_doc.get_first("id") or "",
                     content=tantivy_doc.get_first("content") or "",
                     metadata=metadata_field
                 )
 
-                results.append(document)
+                results.append(chunk)
             except Exception as e:
-                logger.warning(f"Failed to parse document from index: {e}")
+                logger.warning(f"Failed to parse chunk from index: {e}")
                 continue
 
-        logger.info(f"Retrieved {len(results)} documents for query: '{query}'")
+        logger.info(f"Retrieved {len(results)} chunks for query: '{query}'")
         return results
 
 
@@ -1008,7 +998,7 @@ class BM25IndexBuilder():
         
         return (
             f"{self.__class__.__name__}("
-            f"docs={num_docs}, "
+            f"chunks={num_docs}, "
             f"index_path='{self.config.index_path}', "
             f"workers={self.config.max_workers}, "
             f"tokenizer={tokenizer})"
@@ -1024,7 +1014,7 @@ class BM25IndexBuilder():
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        """上下文管理器退出，清理资源"""
+        """Context manager exit, clean up resources"""
         self.close()
         if exc_type is not None:
             logger.error(f"Exception in BM25IndexBuilder context: {exc_type.__name__}: {exc_val}")

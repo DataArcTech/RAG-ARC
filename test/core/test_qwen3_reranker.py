@@ -11,33 +11,33 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"
 
 from config.core.reranker_config import Qwen3RerankerConfig
 from config.encapsulation.llm.rerank.qwen import QwenRerankConfig
-from encapsulation.data_model.schema import Document
+from encapsulation.data_model.schema import Chunk
 
 
-def create_test_documents():
-    """Create sample documents for testing"""
+def create_test_chunks():
+    """Create sample chunks for testing"""
     return [
-        Document(
+        Chunk(
             content="Python is a high-level programming language known for its simplicity and readability.",
             metadata={"source": "doc1", "title": "Python Programming"},
             id="1"
         ),
-        Document(
+        Chunk(
             content="Machine learning is a subset of artificial intelligence that enables computers to learn.",
             metadata={"source": "doc2", "title": "Machine Learning Basics"},
             id="2"
         ),
-        Document(
+        Chunk(
             content="Climate change refers to long-term shifts in global temperatures and weather patterns.",
             metadata={"source": "doc3", "title": "Climate Science"},
             id="3"
         ),
-        Document(
+        Chunk(
             content="Deep learning uses neural networks with multiple layers to model complex patterns.",
             metadata={"source": "doc4", "title": "Deep Learning"},
             id="4"
         ),
-        Document(
+        Chunk(
             content="Natural language processing enables computers to understand and process human language.",
             metadata={"source": "doc5", "title": "NLP"},
             id="5"
@@ -52,7 +52,7 @@ def main():
     llm_config = QwenRerankConfig(
         cache_folder="./models/Qwen",
         use_china_mirror=True,
-        device="cpu"  # 使用 CPU 避免 GPU 相关问题
+        device="cpu"
     )
     reranker_config = Qwen3RerankerConfig(
         qwen3_llm_config=llm_config
@@ -63,12 +63,12 @@ def main():
 
     print(f"Reranker info: {reranker.get_reranker_info()}")
 
-    # Create test documents
-    documents = create_test_documents()
-    print(f"\nTotal documents: {len(documents)}")
+    # Create test chunks
+    chunks = create_test_chunks()
+    print(f"\nTotal chunks: {len(chunks)}")
 
-    # Test basic document reranking
-    print("\n--- Basic Document Reranking Test ---")
+    # Test basic chunk reranking
+    print("\n--- Basic Chunk Reranking Test ---")
     test_queries = [
         "What is Python programming?",
         "How does machine learning work?",
@@ -78,13 +78,13 @@ def main():
 
     for query in test_queries:
         try:
-            reranked_docs = reranker.rerank(query, documents, top_k=3)
+            reranked_chunks = reranker.rerank(query, chunks, top_k=3)
             print(f"Query: '{query}'")
-            print(f"Returned {len(reranked_docs)} documents (top_k=3)")
+            print(f"Returned {len(reranked_chunks)} chunks (top_k=3)")
 
-            for i, doc in enumerate(reranked_docs):
-                score = doc.metadata.get("rerank_score", "N/A")
-                title = doc.metadata.get("title", "No title")
+            for i, chunk in enumerate(reranked_chunks):
+                score = chunk.metadata.get("rerank_score", "N/A")
+                title = chunk.metadata.get("title", "No title")
                 print(f"  {i+1}. {title} (score: {score:.4f})")
             print("-" * 60)
         except Exception as e:
@@ -95,7 +95,7 @@ def main():
 
     # Empty query test
     try:
-        empty_result = reranker.rerank("", documents)
+        empty_result = reranker.rerank("", chunks)
         print(f"Empty query result: {len(empty_result)} documents")
     except ValueError as e:
         print(f"Expected error for empty query: {e}")
@@ -104,7 +104,7 @@ def main():
 
     # Whitespace-only query test
     try:
-        whitespace_result = reranker.rerank("   ", documents)
+        whitespace_result = reranker.rerank("   ", chunks)
         print(f"Whitespace query result: {len(whitespace_result)} documents")
     except ValueError as e:
         print(f"Expected error for whitespace query: {e}")
@@ -120,7 +120,7 @@ def main():
 
     # Test with single document
     print("\n--- Single Document Test ---")
-    single_doc = [documents[0]]
+    single_doc = [chunks[0]]
 
     try:
         single_result = reranker.rerank("Python programming", single_doc)
@@ -144,7 +144,7 @@ def main():
     minimal_reranker = minimal_config.build()
 
     try:
-        minimal_result = minimal_reranker.rerank("test query", documents[:3], top_k=2)
+        minimal_result = minimal_reranker.rerank("test query", chunks[:3], top_k=2)
         print(f"Minimal config result: {len(minimal_result)} documents")
         print(f"Minimal config info: {minimal_reranker.get_reranker_info()}")
     except Exception as e:
@@ -152,7 +152,7 @@ def main():
 
     # Test metadata preservation
     print("\n--- Metadata Preservation Test ---")
-    test_doc = Document(
+    test_doc = Chunk(
         content="Test content for metadata preservation",
         metadata={"original_score": 0.95, "source": "test", "custom_field": "preserved"},
         id="test_id"

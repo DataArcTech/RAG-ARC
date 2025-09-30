@@ -5,18 +5,18 @@ from encapsulation.llm.utils.huggingface_client import create_transformers_clien
 import logging
 
 if TYPE_CHECKING:
-    from encapsulation.data_model.schema import Document
+    from encapsulation.data_model.schema import Chunk
 
 logger = logging.getLogger(__name__)
 
 
 class QwenRerankLLM(RerankLLMBase):
     """
-    Qwen reranker model implementation for advanced document relevance scoring.
+    Qwen reranker model implementation for advanced chunk relevance scoring.
 
     This class provides a complete reranking solution using Qwen's causal language model approach,
-    supporting sophisticated query-document relevance assessment with yes/no token prediction.
-    Optimized for high-precision document ranking with customizable instruction templates.
+    supporting sophisticated query-chunk relevance assessment with yes/no token prediction.
+    Optimized for high-precision chunk ranking with customizable instruction templates.
 
     Key features:
     - Causal LM-based reranking with yes/no token scoring
@@ -32,8 +32,8 @@ class QwenRerankLLM(RerankLLMBase):
         _tokenizer: Lazy-initialized AutoTokenizer instance
 
     Core methods:
-        - rerank/_rerank: Main document reranking interface
-        - compute_scores: Batch scoring for query-document pairs
+        - rerank/_rerank: Main chunk reranking interface
+        - compute_scores: Batch scoring for query-chunk pairs
         - compute_logits: Low-level logit computation with yes/no tokens
         - format_instruction: Template formatting for different query types
 
@@ -91,11 +91,11 @@ class QwenRerankLLM(RerankLLMBase):
         self.prefix_tokens = rerank_setup['prefix_tokens']
         self.suffix_tokens = rerank_setup['suffix_tokens']
 
-    def _format_instruction(self, instruction, query, doc):
-        """Format instruction with query and document"""
+    def _format_instruction(self, instruction, query, chunk):
+        """Format instruction with query and chunk"""
         if instruction is None:
             instruction = self.instruction
-        output = f"<Instruct>: {instruction}\n<Query>: {query}\n<Document>: {doc}"
+        output = f"<Instruct>: {instruction}\n<Query>: {query}\n<Chunk>: {chunk}"
         return output
 
     def _process_inputs(self, pairs):
@@ -141,8 +141,8 @@ class QwenRerankLLM(RerankLLMBase):
             return scores
 
     def _compute_scores(self, pairs, instruction=None, **kwargs):
-        """Compute scores for query-document pairs"""
-        pairs = [self._format_instruction(instruction, query, doc) for query, doc in pairs]
+        """Compute scores for query-chunk pairs"""
+        pairs = [self._format_instruction(instruction, query, chunk) for query, chunk in pairs]
         inputs = self._process_inputs(pairs)
         scores = self._compute_logits(inputs)
         return scores
@@ -150,7 +150,7 @@ class QwenRerankLLM(RerankLLMBase):
     def rerank(
         self,
         query: str,
-        documents: List['Document'],
+        chunks: List['Chunk'],
         top_k: Optional[int] = None
     ) -> List[Tuple[int, float]]:
         """
@@ -158,19 +158,19 @@ class QwenRerankLLM(RerankLLMBase):
 
         Args:
             query: Query text
-            documents: List of Document objects
+            chunks: List of Chunk objects
             top_k: Return top k results
 
         Returns:
-            List of (doc_index, score) tuples sorted by relevance
+            List of (chunk_index, score) tuples sorted by relevance
         """
         try:
             # Default batch size and instruction for internal method
             batch_size = 8
             instruction = None
 
-            # Create query-document pairs using Document.content
-            pairs = [(query, doc.content) for doc in documents]
+            # Create query-chunk pairs using Chunk.content
+            pairs = [(query, doc.content) for doc in chunks]
 
             # Compute scores in batches
             all_scores = []
@@ -180,14 +180,14 @@ class QwenRerankLLM(RerankLLMBase):
                 all_scores.extend(batch_scores)
 
             # Create (index, score) pairs and sort by score descending
-            ranked_docs = [(i, float(score)) for i, score in enumerate(all_scores)]
-            ranked_docs.sort(key=lambda x: x[1], reverse=True)
+            ranked_chunks = [(i, float(score)) for i, score in enumerate(all_scores)]
+            ranked_chunks.sort(key=lambda x: x[1], reverse=True)
 
             # Apply top_k filtering if specified
             if top_k is not None:
-                ranked_docs = ranked_docs[:top_k]
+                ranked_chunks = ranked_chunks[:top_k]
 
-            return ranked_docs
+            return ranked_chunks
 
         except Exception as e:
             logger.error(f"Reranking failed: {str(e)}")

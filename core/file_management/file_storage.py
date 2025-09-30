@@ -3,6 +3,7 @@ from typing import (
     Optional,
     List,
     Dict,
+    TYPE_CHECKING,
 )
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -13,6 +14,9 @@ from encapsulation.data_model.orm_models import FileMetadata, ParsedContentMetad
 from encapsulation.data_model.orm_models import FileStatus, ParsedContentStatus, ChunkIndexStatus
 
 from framework.module import AbstractModule
+
+if TYPE_CHECKING:
+    from config.core.file_management.file_storage_config import FileStorageConfig
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +54,7 @@ class FileStorage(AbstractModule):
         metadata_store: RelationalDB implementation (e.g., PostgreSQLDB)
     """
 
-    def __init__(self, config):
+    def __init__(self, config: "FileStorageConfig"):
         """Initialize FileStorage with eager blob and metadata store creation"""
         super().__init__(config)
         # Build stores directly (no intermediate data_store layer)

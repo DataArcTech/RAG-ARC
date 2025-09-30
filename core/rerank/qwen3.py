@@ -1,6 +1,9 @@
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, List, TYPE_CHECKING
 from .base import AbstractReranker
-from encapsulation.data_model.schema import Document
+from encapsulation.data_model.schema import Chunk
+
+if TYPE_CHECKING:
+    from config.core.reranker_config import Qwen3RerankerConfig
 
 import logging
 
@@ -9,9 +12,9 @@ logger = logging.getLogger(__name__)
 
 class Qwen3Reranker(AbstractReranker):
     """
-    Qwen-based document reranker for RAG systems.
+    Qwen-based chunk reranker for RAG systems.
 
-    Uses Qwen's causal language model approach for sophisticated document relevance
+    Uses Qwen's causal language model approach for sophisticated chunk relevance
     scoring based on yes/no token prediction. Provides configurable batch processing
     and top-k filtering for efficient reranking.
 
@@ -27,7 +30,7 @@ class Qwen3Reranker(AbstractReranker):
     - Integration with RAG-ARC LLM infrastructure
     """
 
-    def __init__(self, config):
+    def __init__(self, config: "Qwen3RerankerConfig"):
         super().__init__(config)
         # Build Qwen LLM from sub-config following framework pattern
         self.qwen3_llm = config.qwen3_llm_config.build()
@@ -35,33 +38,33 @@ class Qwen3Reranker(AbstractReranker):
     def rerank(
         self,
         query: str,
-        documents: List[Document],
+        chunks: List[Chunk],
         **kwargs: Any
-    ) -> List[Document]:
+    ) -> List[Chunk]:
         """
-        Rerank documents using Qwen's causal language model approach.
+        Rerank chunks using Qwen's causal language model approach.
 
         All configuration is handled by the encapsulation layer. Core layer
-        focuses on document structure and metadata management.
+        focuses on chunk structure and metadata management.
 
         Args:
-            query: User query to rank documents against
-            documents: List of Document objects from retrieval step
+            query: User query to rank chunks against
+            chunks: List of Chunk objects from retrieval step
             **kwargs: Parameters passed through to encapsulation layer
 
         Returns:
-            List of Document objects reordered by relevance, with rerank scores
+            List of Chunk objects reordered by relevance, with rerank scores
             added to metadata
 
         Raises:
-            ValueError: If query is empty or documents list is invalid
+            ValueError: If query is empty or chunks list is invalid
             RuntimeError: If reranking process fails
         """
         if not query or not query.strip():
             raise ValueError("Query cannot be empty")
 
-        if not documents:
-            logger.warning("Empty documents list provided to reranker")
+        if not chunks:
+            logger.warning("Empty chunks list provided to reranker")
             return []
 
         try:
@@ -69,36 +72,36 @@ class Qwen3Reranker(AbstractReranker):
             # Encapsulation layer handles all configuration (top_k, batch_size, instruction)
             ranked_results = self.qwen3_llm.rerank(
                 query=query,
-                documents=documents,
+                chunks=chunks,
                 **kwargs  # Pass through all parameters to encapsulation layer
             )
 
-            # Convert results back to Document objects with metadata
+            # Convert results back to Chunk objects with metadata
             # ranked_results is List[Tuple[int, float]] from encapsulation layer
-            reranked_documents = []
-            for doc_idx, score in ranked_results:
-                doc = documents[doc_idx]
+            reranked_chunks = []
+            for chunk_idx, score in ranked_results:
+                chunk = chunks[chunk_idx]
                 # Preserve original metadata and add rerank score
-                new_metadata = doc.metadata.copy()
+                new_metadata = chunk.metadata.copy()
                 new_metadata["rerank_score"] = score
                 new_metadata["rerank_method"] = "qwen"
 
-                # Create new Document with updated metadata
-                reranked_doc = Document(
-                    content=doc.content,
+                # Create new Chunk with updated metadata
+                reranked_chunk = Chunk(
+                    content=chunk.content,
                     metadata=new_metadata,
-                    id=doc.id
+                    id=chunk.id
                 )
-                reranked_documents.append(reranked_doc)
+                reranked_chunks.append(reranked_chunk)
 
-            logger.info(f"Reranked {len(documents)} documents, returned {len(reranked_documents)}")
-            return reranked_documents
+            logger.info(f"Reranked {len(chunks)} chunks, returned {len(reranked_chunks)}")
+            return reranked_chunks
 
         except Exception as e:
-            logger.error(f"Document reranking failed: {e}")
+            logger.error(f"Chunk reranking failed: {e}")
             # Return original documents as fallback
-            logger.warning("Using original document order as fallback")
-            return documents
+            logger.warning("Using original chunk order as fallback")
+            return chunks
 
     def get_reranker_info(self) -> Dict[str, Any]:
         """

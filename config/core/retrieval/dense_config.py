@@ -5,7 +5,6 @@ from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBCo
 from core.retrieval.dense import DenseRetriever
 
 class DenseRetrieverConfig(AbstractConfig):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
     
     type: Literal["dense"] = "dense"
 
@@ -13,9 +12,8 @@ class DenseRetrieverConfig(AbstractConfig):
     # Runtime dependencies (injected by vector database)
     metric: Literal["cosine", "l2", "ip"] = Field(default="cosine", description="Distance metric from vector database")
 
-    # Search parameters
     search_kwargs: Dict[str, Any] = Field(
-        default_factory=lambda: {
+        default={
             "k": 5,
             "with_score": True,
             "score_threshold": None

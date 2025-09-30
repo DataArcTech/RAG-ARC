@@ -1,7 +1,7 @@
 """
-检索辅助函数模块
+Retrieval helper module
 
-包含各种检索相关的辅助函数，如相关性评分函数、搜索结果处理等
+Contains various retrieval-related helper functions, such as relevance score functions, search result processing, etc.
 """
 
 import math
@@ -15,54 +15,54 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SearchResult:
-    """搜索结果数据结构"""
-    document: Any  # 避免循环导入，使用Any
+    """Search result data structure"""
+    chunk: Any  # Avoid circular imports, use Any
     score: float
     distance: float
 
 
 class RetrievalHelper:
-    """检索辅助函数类，包含各种相关性评分和搜索处理方法"""
+    """Retrieval helper class, contains various relevance score and search processing methods"""
     
     @staticmethod
     def euclidean_relevance_score_fn(distance: float) -> float:
-        """欧几里得距离的相关性评分函数
+        """Euclidean distance relevance score function
         
-        返回[0, 1]范围内的相似性分数，其中1表示最相似
+        Returns similarity score in [0, 1], where 1 means most similar
         
         Args:
-            distance: 欧几里得距离
+            distance: Euclidean distance
             
         Returns:
-            相关性分数，范围[0, 1]
+            Relevance score, range [0, 1]
         """
         return 1.0 - distance / math.sqrt(2)
     
     @staticmethod
     def cosine_relevance_score_fn(distance: float) -> float:
-        """余弦距离的相关性评分函数
+        """Cosine distance relevance score function
         
-        将距离归一化为[0, 1]范围内的分数
+        Normalize distance to [0, 1] range
         
         Args:
-            distance: 余弦距离
+            distance: cosine distance
             
         Returns:
-            相关性分数，范围[0, 1]
+            Relevance score, range [0, 1]
         """
         return 1.0 - distance
     
     @staticmethod
     def max_inner_product_relevance_score_fn(distance: float) -> float:
-        """最大内积的相关性评分函数
+        """Maximum inner product relevance score function
         
-        将距离归一化为[0, 1]范围内的分数
+        Normalize distance to [0, 1] range
         
         Args:
-            distance: 内积距离
+            distance: inner product distance
             
         Returns:
-            相关性分数，范围[0, 1]
+            Relevance score, range [0, 1]
         """
         if distance > 0:
             return 1.0 - distance
@@ -70,16 +70,16 @@ class RetrievalHelper:
     
     @staticmethod
     def get_relevance_score_fn(metric_type: str) -> Callable[[float], float]:
-        """根据度量类型选择相关性评分函数
+        """Select relevance score function based on metric type
         
         Args:
-            metric_type: 度量类型，可以是'euclidean', 'cosine', 'inner_product'等
+            metric_type: metric type, can be 'euclidean', 'cosine', 'inner_product', etc.
             
         Returns:
-            相关性评分函数
+            Relevance score function
             
         Raises:
-            NotImplementedError: 如果度量类型不支持
+            NotImplementedError: if metric type is not supported
         """
         if metric_type.lower() in ['euclidean', 'l2']:
             return RetrievalHelper.euclidean_relevance_score_fn
@@ -88,7 +88,7 @@ class RetrievalHelper:
         elif metric_type.lower() in ['inner_product', 'ip', 'dot']:
             return RetrievalHelper.max_inner_product_relevance_score_fn
         else:
-            raise NotImplementedError(f"不支持的度量类型: {metric_type}")
+            raise NotImplementedError(f"Unsupported metric type: {metric_type}")
     
     @staticmethod
     def process_search_results_with_relevance_scores(
@@ -96,33 +96,33 @@ class RetrievalHelper:
         relevance_score_fn: Callable[[float], float],
         score_threshold: Optional[float] = None
     ) -> List[Tuple[Any, float]]:
-        """处理搜索结果并应用相关性评分
+        """Process search results and apply relevance scores
         
         Args:
-            docs_and_scores: 文档和分数的元组列表
-            relevance_score_fn: 相关性评分函数
-            score_threshold: 可选的分数阈值，用于过滤结果
+            docs_and_scores: list of (chunk, score) tuples
+            relevance_score_fn: relevance score function
+            score_threshold: optional score threshold, used for filtering results
             
         Returns:
-            处理后的(文档, 相关性分数)元组列表
+            list of processed (chunk, relevance score) tuples
         """
-        # 应用相关性评分函数
+        # Apply relevance score function
         docs_and_similarities = [
             (doc, relevance_score_fn(score)) 
             for doc, score in docs_and_scores
         ]
         
-        # 验证分数范围
+        # Verify score range
         if any(
             similarity < 0.0 or similarity > 1.0
             for _, similarity in docs_and_similarities
         ):
             warnings.warn(
-                f"相关性分数必须在0和1之间，得到 {docs_and_similarities}",
+                f"Relevance score must be between 0 and 1, got {docs_and_similarities}",
                 stacklevel=2,
             )
         
-        # 应用分数阈值过滤
+        # Apply score threshold filtering
         if score_threshold is not None:
             docs_and_similarities = [
                 (doc, similarity)
@@ -131,8 +131,7 @@ class RetrievalHelper:
             ]
             if len(docs_and_similarities) == 0:
                 logger.warning(
-                    "使用相关性分数阈值 %s 没有检索到相关文档",
-                    score_threshold,
+                    f"Using relevance score threshold {score_threshold} did not retrieve any relevant chunks",
                 )
         
         return docs_and_similarities
@@ -144,7 +143,7 @@ class RetrievalHelper:
         lambda_mult: float = 0.5,
         k: int = 4
     ) -> List[int]:
-        """最大边际相关性算法
+        """
         
         选择既与查询相关又彼此多样化的文档索引
         
@@ -270,24 +269,24 @@ class RetrievalHelper:
             raise ValueError(f"不支持的相似度度量: {metric}")
     
     @staticmethod
-    def mmr_select_documents(
+    def mmr_select_chunks(
         docs_and_scores: List[Tuple[Any, float]],
         embeddings: List[List[float]],
         query_embedding: List[float],
         k: int,
         lambda_mult: float = 0.5,
     ) -> List[Any]:
-        """最大边际相关性文档选择算法
+        """Maximal marginal relevance search (diversity)
         
         Args:
-            docs_and_scores: 文档和分数的元组列表
-            embeddings: 候选文档的嵌入向量列表
-            query_embedding: 查询的嵌入向量
-            k: 要选择的文档数量
-            lambda_mult: 多样性权重，0到1之间
+            docs_and_scores: list of (chunk, score) tuples
+            embeddings: list of candidate chunks' embedding vectors
+            query_embedding: query embedding vector
+            k: number of chunks to select
+            lambda_mult: diversity weight, between 0 and 1, 0 means max diversity, 1 means max relevance
             
         Returns:
-            选中的文档列表
+            list of selected chunks
         """
         import numpy as np
         
@@ -298,32 +297,32 @@ class RetrievalHelper:
         selected_embeddings = []
         remaining_indices = list(range(len(docs_and_scores)))
         
-        # 选择第一个文档（最相似的）
+        # Select first chunk (most similar)
         first_idx = remaining_indices.pop(0)
         selected_indices.append(first_idx)
         selected_embeddings.append(embeddings[first_idx])
         
-        # 选择剩余的k-1个文档
+        # Select remaining k-1 chunks
         for _ in range(k - 1):
             if not remaining_indices:
                 break
                 
             mmr_scores = []
             for idx in remaining_indices:
-                # 计算与查询的相似性
+                # Calculate similarity with query
                 query_sim = np.dot(query_embedding, embeddings[idx])
                 
-                # 计算与已选择文档的最大相似性
+                # Calculate maximum similarity with selected chunks
                 max_sim = 0
                 for selected_emb in selected_embeddings:
                     sim = np.dot(selected_emb, embeddings[idx])
                     max_sim = max(max_sim, sim)
                 
-                # MMR分数
+                # MMR score
                 mmr_score = lambda_mult * query_sim - (1 - lambda_mult) * max_sim
                 mmr_scores.append((idx, mmr_score))
             
-            # 选择MMR分数最高的文档
+            # Select chunk with highest MMR score
             best_idx, _ = max(mmr_scores, key=lambda x: x[1])
             selected_indices.append(best_idx)
             selected_embeddings.append(embeddings[best_idx])
@@ -333,16 +332,16 @@ class RetrievalHelper:
     
     @staticmethod
     def select_relevance_score_fn_by_metric(metric: str) -> Callable[[float], float]:
-        """根据向量数据库度量类型选择相关性评分函数
+        """Select relevance score function based on vector database metric type
         
         Args:
-            metric: 度量类型，支持'cosine', 'l2', 'ip'等
+            metric: metric type, supports 'cosine', 'l2', 'ip', etc.
             
         Returns:
-            相关性评分函数
+            relevance score function
             
         Raises:
-            ValueError: 如果度量类型不支持
+            ValueError: if metric type is not supported
         """
         if metric.lower() in ['cosine', 'cos']:
             return RetrievalHelper.cosine_relevance_score_fn
@@ -351,23 +350,23 @@ class RetrievalHelper:
         elif metric.lower() in ['ip', 'inner_product', 'dot']:
             return RetrievalHelper.max_inner_product_relevance_score_fn
         else:
-            raise ValueError(f"不支持的度量类型: {metric}")
+            raise ValueError(f"Unsupported metric type: {metric}")
     
     @staticmethod
     def normalize_vectors_for_cosine(embeddings: List[List[float]]) -> List[List[float]]:
-        """为余弦相似度归一化向量
+        """Normalize vectors for cosine similarity
 
         Args:
-            embeddings: 嵌入向量列表
+            embeddings: list of embedding vectors
 
         Returns:
-            归一化后的嵌入向量列表
+            normalized embedding vectors
         """
         import numpy as np
 
         embeddings_array = np.array(embeddings)
         norms = np.linalg.norm(embeddings_array, axis=1, keepdims=True)
-        # 避免除零
+        # Avoid division by zero
         norms = np.where(norms == 0, 1, norms)
         normalized = embeddings_array / norms
         return normalized.tolist()
@@ -378,15 +377,15 @@ class RetrievalHelper:
         embedding: List[float],
         search_kwargs: Dict[str, Any]
     ) -> List[Tuple[Any, float]]:
-        """使用FAISS执行向量搜索
+        """Execute vector search with FAISS
 
         Args:
-            index: FAISS索引对象
-            embedding: 查询嵌入向量
-            search_kwargs: 搜索参数，包含k, score_threshold等
+            index: FAISS index object
+            embedding: query embedding vector
+            search_kwargs: search parameters, including k, score_threshold, etc.
 
         Returns:
-            (文档, 分数)元组列表
+            list of (chunk, score) tuples
         """
         import numpy as np
         import faiss
@@ -394,46 +393,46 @@ class RetrievalHelper:
         if not hasattr(index, 'index') or index.index is None or index.index.ntotal == 0:
             return []
 
-        # 获取搜索参数
+        # Get search parameters
         k = search_kwargs.get("k", 5)
         score_threshold = search_kwargs.get("score_threshold")
         metric = search_kwargs.get("metric", "cosine")
 
-        # 准备查询向量
+        # Prepare query vector
         query_vector = np.array([embedding]).astype(np.float32)
 
-        # 检查是否需要归一化
+        # Check if normalization is needed
         if hasattr(index.config, 'normalize_L2') and index.config.normalize_L2:
             faiss.normalize_L2(query_vector)
         elif hasattr(index.config, 'metric') and index.config.metric == "cosine":
             faiss.normalize_L2(query_vector)
 
-        # 执行搜索
+        # Execute search
         k = min(k, index.index.ntotal)
         distances, indices = index.index.search(query_vector, k)
 
         results = []
         for distance, idx in zip(distances[0], indices[0]):
-            if idx == -1:  # FAISS返回-1表示无效结果
+            if idx == -1:  # FAISS returns -1 for invalid results
                 continue
 
             doc_id = index.index_to_docstore_id[idx]
             doc = index.docstore[doc_id]
 
-            # 对于cosine度量，FAISS返回的是相似度分数而不是距离
+            # For cosine metric, FAISS returns similarity score instead of distance
             if metric == "cosine":
                 similarity_score = float(distance)
             else:
-                # 对于其他度量，需要转换距离为相似度
+                # For other metrics, convert distance to similarity score
                 relevance_score_fn = RetrievalHelper.select_relevance_score_fn_by_metric(metric)
                 similarity_score = relevance_score_fn(float(distance))
 
             results.append((doc, similarity_score))
 
-        # 按相似度分数降序排序
+        # Sort by similarity score in descending order
         results.sort(key=lambda x: x[1], reverse=True)
 
-        # 应用分数阈值过滤（如果指定）
+        # Apply score threshold filtering (if specified)
         if score_threshold is not None:
             results = [
                 (doc, score) for doc, score in results
@@ -442,7 +441,7 @@ class RetrievalHelper:
 
             if len(results) == 0:
                 logger.warning(
-                    f"使用分数阈值 {score_threshold} 没有检索到相关文档"
+                    f"Using score threshold {score_threshold} did not retrieve any relevant chunks"
                 )
 
         return results
@@ -450,51 +449,51 @@ class RetrievalHelper:
     @staticmethod
     def mmr_search(
         query_embedding: List[float],
-        docs_and_scores: List[Tuple[Any, float]],
+        chunks_and_scores: List[Tuple[Any, float]],
         embedding_model: Any,
         search_kwargs: Dict[str, Any]
     ) -> List[Any]:
-        """最大边际相关性搜索
+        """Maximal marginal relevance search (diversity)
 
         Args:
-            query_embedding: 查询嵌入向量
-            docs_and_scores: 候选(文档, 分数)元组列表
-            embedding_model: 嵌入模型
-            search_kwargs: 搜索参数，包含k, lambda_mult等
+            query_embedding: query embedding vector
+            chunks_and_scores: list of candidate (chunk, score) tuples
+            embedding_model: embedding model
+            search_kwargs: search parameters, including k, lambda_mult, etc.
 
         Returns:
-            选中的文档列表
+            list of selected chunks
         """
         import numpy as np
 
-        if not docs_and_scores:
+        if not chunks_and_scores:
             return []
 
-        # 获取搜索参数
+        # Get search parameters
         k = search_kwargs.get("k", 4)
         lambda_mult = search_kwargs.get("lambda_mult", 0.5)
         normalize_for_cosine = search_kwargs.get("normalize_for_cosine", True)
 
-        # 获取候选文档的嵌入向量
+        # Get candidate chunks' embedding vectors
         candidate_embeddings = []
-        for doc, _ in docs_and_scores:
-            doc_embedding = embedding_model.embed_query(doc.content)
+        for doc, _ in chunks_and_scores:
+            doc_embedding = embedding_model.embed(doc.content)
             candidate_embeddings.append(doc_embedding)
 
-        # 转换为numpy数组
+        # Convert to numpy arrays
         query_emb_norm = np.array(query_embedding)
         candidate_embs_norm = np.array(candidate_embeddings)
 
-        # 归一化处理（如果需要）
+        # Normalize if needed
         if normalize_for_cosine:
             query_emb_norm = query_emb_norm / np.linalg.norm(query_emb_norm)
             candidate_embs_norm = candidate_embs_norm / np.linalg.norm(
                 candidate_embs_norm, axis=1, keepdims=True
             )
 
-        # 使用MMR选择文档
-        return RetrievalHelper.mmr_select_documents(
-            docs_and_scores,
+        # Use MMR to select chunks
+        return RetrievalHelper.mmr_select_chunks(
+            chunks_and_scores,
             candidate_embs_norm.tolist(),
             query_emb_norm.tolist(),
             k,
@@ -502,23 +501,23 @@ class RetrievalHelper:
         )
 
     @staticmethod
-    def add_scores_to_documents(
-        docs: List[Any],
-        docs_with_scores: List[Tuple[Any, float]]
+    def add_scores_to_chunks(
+        chunks: List[Any],
+        chunks_with_scores: List[Tuple[Any, float]]
     ) -> List[Any]:
-        """为文档添加分数到元数据中
+        """Add scores to chunks' metadata
 
         Args:
-            docs: 文档列表
-            docs_with_scores: (文档, 分数)元组列表
+            chunks: list of chunks
+            chunks_with_scores: list of (chunk, score) tuples
 
         Returns:
-            添加了分数元数据的文档列表
+            list of chunks with scores added to metadata
         """
-        score_dict = {doc.id: score for doc, score in docs_with_scores}
+        score_dict = {chunk.id: score for chunk, score in chunks_with_scores}
 
-        for doc in docs:
-            if doc.id in score_dict:
-                doc.metadata = {**(doc.metadata or {}), "score": score_dict[doc.id]}
+        for chunk in chunks:
+            if chunk.id in score_dict:
+                chunk.metadata = {**(chunk.metadata or {}), "score": score_dict[chunk.id]}
 
-        return docs
+        return chunks

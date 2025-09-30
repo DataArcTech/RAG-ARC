@@ -1,23 +1,24 @@
 import logging
 from pydantic import Field, ConfigDict
-from typing import Any, List, Optional, Union, Tuple, cast, Literal, Annotated, Dict
+from typing import Any, List, Optional, Union, Tuple, cast, TYPE_CHECKING, Dict
 
 from tantivy import Query, Occur, Order
 
 from core.retrieval.base import BaseRetriever
-from encapsulation.data_model.schema import Document
-from framework.shared_module_decorator import shared_module
+from encapsulation.data_model.schema import Chunk
+
+if TYPE_CHECKING:
+    from config.core.retrieval.tantivy_bm25_config import TantivyBM25RetrieverConfig
 
 logger = logging.getLogger(__name__)
 
 
 
-@shared_module
 class TantivyBM25Retriever(BaseRetriever):
     """
-    TantivyBM25Retriever is a high-performance document retriever based on the Tantivy search engine.
+    TantivyBM25Retriever is a high-performance chunk retriever based on the Tantivy search engine.
     
-    This class implements BM25 retrieval for document collections by leveraging Tantivy's capabilities,
+    This class implements BM25 retrieval for chunk collections by leveraging Tantivy's capabilities,
     supporting dynamic filtering, phrase queries, and robust error handling.
     
     Key features:
@@ -37,7 +38,7 @@ class TantivyBM25Retriever(BaseRetriever):
         
     Core methods:
         - invoke: Main entry point for synchronous retrieval
-        - _get_relevant_documents: Execute search and return structured results
+        - _get_relevant_chunks: Execute search and return structured results
         - reload_searcher: Reload searcher to reflect latest index state
         
     Performance considerations:
@@ -52,7 +53,7 @@ class TantivyBM25Retriever(BaseRetriever):
         >>> results = retriever.invoke("query", filters={"category": "news", "author": "john"})
     """
 
-    def __init__(self, config):
+    def __init__(self, config: "TantivyBM25RetrieverConfig"):
         """Initialize TantivyBM25Retriever with configuration
 
         Args:
@@ -60,14 +61,13 @@ class TantivyBM25Retriever(BaseRetriever):
         """
         self.config = config
         self._index = self.config.index_config.build()
-        self._embedding = None
         self._load_existing_index()
 
         # Runtime instance variables
         self.searcher = None
 
     def _load_existing_index(self) -> None:
-        """尝试加载已存在的索引"""
+        """Try to load an existing index"""
         try:
             if hasattr(self._index, 'load_index'):
                 # Check if the index has an index_path in its config
@@ -78,7 +78,7 @@ class TantivyBM25Retriever(BaseRetriever):
                 logger.info(f"Successfully loaded existing index for {self.get_name()}")
         except Exception as e:
             message = f"Index not found for retriever {self.get_name()}: {e}"
-            logger.warning(f"{message}. Index will be empty until documents are added.")
+            logger.warning(f"{message}. Index will be empty until chunks are added.")
             # Don't raise an error, just continue with an empty index
 
     def _ensure_searcher(self):
@@ -180,7 +180,7 @@ class TantivyBM25Retriever(BaseRetriever):
             logger.info(f"Using OR query for tokens: {filtered_tokens} on content_tokens field")
             return Query.boolean_query(term_queries)
 
-    def _get_relevant_documents(
+    def _get_relevant_chunks(
         self,
         query: str,
         k: Optional[int] = None,
@@ -190,12 +190,12 @@ class TantivyBM25Retriever(BaseRetriever):
         with_score: Optional[bool] = None,
         use_phrase_query: Optional[bool] = None,
         **kwargs: Any
-    ) -> List[Document]:
+    ) -> List[Chunk]:
         """Execute search and return structured results
         
         Args:
             query: Query string
-            k: Number of documents to return (default from config)
+            k: Number of chunks to return (default from config)
             filters: Dictionary of field names and their values to filter by
             order_by_field: Field to sort by
             order_desc: Whether to sort in descending order
@@ -204,7 +204,7 @@ class TantivyBM25Retriever(BaseRetriever):
             **kwargs: Additional parameters
             
         Returns:
-            List of Document objects
+            List of Chunk objects
         """
         # Use config defaults if parameters not provided
         k = k if k is not None else self.config.search_kwargs.get("k", 5)
@@ -272,16 +272,16 @@ class TantivyBM25Retriever(BaseRetriever):
                     # Ensure score is not included when with_score is False
                     metadata = {k: v for k, v in metadata.items() if k != "score"}
                 
-                document = Document(
+                chunk = Chunk(
                     id=tantivy_doc.get_first("id") or "",
                     content=tantivy_doc.get_first("content") or "",
                     metadata=metadata
                 )
 
-                results.append(document)
+                results.append(chunk)
             except Exception as e:
-                logger.warning(f"Failed to parse document from index: {e}")
+                logger.warning(f"Failed to parse chunk from index: {e}")
                 continue
 
-        logger.info(f"Retrieved {len(results)} documents for query: '{query}'")
+        logger.info(f"Retrieved {len(results)} chunks for query: '{query}'")
         return results

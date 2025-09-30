@@ -2,150 +2,150 @@ from typing import List
 from abc import ABC, abstractmethod
 from collections import defaultdict
 
-from encapsulation.data_model.schema import Document
+from encapsulation.data_model.schema import Chunk
 
 
 class FusionMethod(ABC):
-    """融合方法的抽象基类"""
+    """Abstract base class for fusion methods"""
     
     @abstractmethod
-    def fuse(self, results: List[List[Document]], top_k: int) -> List[Document]:
+    def fuse(self, results: List[List[Chunk]], top_k: int) -> List[Chunk]:
         """
-        融合多个检索器的结果
+        Fuse results from multiple retrievers
         
         Args:
-            results: 每个检索器的结果列表，每个列表包含Document对象
-            top_k: 返回的最终结果数量
+            results: list of results from each retriever, each list contains Chunk objects
+            top_k: number of final results to return
             
         Returns:
-            融合后的Document列表，分数存储在metadata['score']中
+            List of fused Chunk objects, scores stored in metadata['score']
         """
         pass
 
 
 class RRFusion(FusionMethod):
-    """Reciprocal Rank Fusion (RRF) 方法"""
+    """Reciprocal Rank Fusion (RRF) method"""
     
     def __init__(self, k: float = 60.0):
         """
         Args:
-            k: RRF中的常数，默认为60.0
+            k: constant in RRF, defaults to 60.0
         """
         self.k = k
     
-    def fuse(self, results: List[List[Document]], top_k: int) -> List[Document]:
-        # 计算RRF分数
+    def fuse(self, results: List[List[Chunk]], top_k: int) -> List[Chunk]:
+        # Calculate RRF scores
         rrf_scores = defaultdict(float)
-        document_map = {}
+        chunk_map = {}
         
         for retriever_results in results:
-            for rank, document in enumerate(retriever_results, 1):  # rank从1开始
+            for rank, chunk in enumerate(retriever_results, 1):  # rank starts from 1
                 rrf_score = 1.0 / (self.k + rank)
-                # 使用文档内容作为key来去重
-                content_key = document.content
+                # Use chunk content as key to deduplicate
+                content_key = chunk.content
                 rrf_scores[content_key] += rrf_score
-                document_map[content_key] = document
+                chunk_map[content_key] = chunk
         
-        # 按RRF分数排序
+        # Sort by RRF scores
         sorted_items = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
         
-        # 构建最终结果，将分数放到文档的metadata中
-        fused_documents = []
+        # Build final results, put scores in chunk's metadata
+        fused_chunks = []
         for content, rrf_score in sorted_items[:top_k]:
-            document = document_map[content]
-            # 将RRF分数添加到文档的metadata中
-            if document.metadata is None:
-                document.metadata = {}
-            document.metadata["score"] = rrf_score
+            chunk = chunk_map[content]
+            # Add RRF score to chunk's metadata
+            if chunk.metadata is None:
+                chunk.metadata = {}
+            chunk.metadata["score"] = rrf_score
             
-            fused_documents.append(document)
+            fused_chunks.append(chunk)
         
-        return fused_documents
+        return fused_chunks
 
 
 class WeightedSumFusion(FusionMethod):
-    """加权求和融合方法"""
+    """Weighted sum fusion method"""
 
     def __init__(self, weights: List[float]):
         """
         Args:
-            weights: 每个检索器的权重列表
+            weights: list of weights for each retriever
         """
         if not weights or len(weights) == 0:
             raise ValueError("Weights list cannot be empty")
         if any(w < 0 for w in weights):
             raise ValueError("All weights must be non-negative")
 
-        # 归一化权重
+        # Normalize weights
         total_weight = sum(weights)
         if total_weight == 0:
             raise ValueError("Sum of weights cannot be zero")
         self.weights = [w / total_weight for w in weights]
 
-    def fuse(self, results: List[List[Document]], top_k: int) -> List[Document]:
+    def fuse(self, results: List[List[Chunk]], top_k: int) -> List[Chunk]:
         if len(results) != len(self.weights):
             raise ValueError(f"Number of result lists ({len(results)}) must match number of weights ({len(self.weights)})")
 
-        # 计算加权分数
+        # Calculate weighted scores
         weighted_scores = defaultdict(float)
-        document_map = {}
+        chunk_map = {}
 
         for retriever_idx, retriever_results in enumerate(results):
             weight = self.weights[retriever_idx]
 
-            for document in retriever_results:
-                content_key = document.content
-                # 获取原始分数，如果没有则使用1.0
-                original_score = document.metadata.get('score', 1.0) if document.metadata else 1.0
+            for chunk in retriever_results:
+                content_key = chunk.content
+                # Get original score, use 1.0 if not present
+                original_score = chunk.metadata.get('score', 1.0) if chunk.metadata else 1.0
                 weighted_scores[content_key] += weight * original_score
-                document_map[content_key] = document
+                chunk_map[content_key] = chunk
 
-        # 按加权分数排序
+        # Sort by weighted scores
         sorted_items = sorted(weighted_scores.items(), key=lambda x: x[1], reverse=True)
 
-        # 构建最终结果
-        fused_documents = []
+        # Build final results
+        fused_chunks = []
         for content, weighted_score in sorted_items[:top_k]:
-            document = document_map[content]
-            if document.metadata is None:
-                document.metadata = {}
-            document.metadata["score"] = weighted_score
-            fused_documents.append(document)
+            chunk = chunk_map[content]
+            if chunk.metadata is None:
+                chunk.metadata = {}
+            chunk.metadata["score"] = weighted_score
+            fused_chunks.append(chunk)
 
-        return fused_documents
+        return fused_chunks
 
 
 class RankFusion(FusionMethod):
-    """基于排名的融合方法"""
+    """Rank-based fusion method"""
 
     def __init__(self):
-        """排名融合不需要额外参数"""
+        """Rank fusion does not require additional parameters"""
         pass
 
-    def fuse(self, results: List[List[Document]], top_k: int) -> List[Document]:
-        # 计算排名分数（排名越靠前分数越高）
+    def fuse(self, results: List[List[Chunk]], top_k: int) -> List[Chunk]:
+        # Calculate rank scores (higher rank = higher score)
         rank_scores = defaultdict(float)
-        document_map = {}
+        chunk_map = {}
 
         for retriever_results in results:
             max_rank = len(retriever_results)
-            for rank, document in enumerate(retriever_results):
-                content_key = document.content
-                # 排名分数：最高排名得到最高分数
+            for rank, chunk in enumerate(retriever_results):
+                content_key = chunk.content
+                # Rank score: highest rank gets highest score
                 rank_score = max_rank - rank
                 rank_scores[content_key] += rank_score
-                document_map[content_key] = document
+                chunk_map[content_key] = chunk
 
-        # 按排名分数排序
+        # Sort by rank scores
         sorted_items = sorted(rank_scores.items(), key=lambda x: x[1], reverse=True)
 
-        # 构建最终结果
-        fused_documents = []
+        # Build final results
+        fused_chunks = []
         for content, rank_score in sorted_items[:top_k]:
-            document = document_map[content]
-            if document.metadata is None:
-                document.metadata = {}
-            document.metadata["score"] = rank_score
-            fused_documents.append(document)
+            chunk = chunk_map[content]
+            if chunk.metadata is None:
+                chunk.metadata = {}
+            chunk.metadata["score"] = rank_score
+            fused_chunks.append(chunk)
 
-        return fused_documents
+        return fused_chunks

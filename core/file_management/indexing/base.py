@@ -7,7 +7,7 @@ import uuid
 from abc import ABC, abstractmethod
 
 from framework.module import AbstractModule
-from encapsulation.data_model.schema import Document
+from encapsulation.data_model.schema import Chunk
 
 logger = logging.getLogger(__name__)
 
@@ -19,9 +19,9 @@ class BaseIndexer(AbstractModule, ABC):
     This class provides the core, reusable logic for:
     - Handling single file or list of file paths.
     - Concurrently loading and parsing JSON files in a non-blocking way.
-    - Transforming file content into Document objects.
+    - Transforming file content into Chunk objects.
 
-    Subclasses must implement the `_batch_add_documents` method to provide
+    Subclasses must implement the `_batch_add_chunks` method to provide
     the specific indexing logic for their backend (e.g., BM25, FAISS).
     """
 
@@ -29,16 +29,16 @@ class BaseIndexer(AbstractModule, ABC):
         self.config = config
 
     @abstractmethod
-    async def update_index(self, documents: List[Document]) -> List[str]:
+    async def update_index(self, chunks: List[Chunk]) -> List[str]:
         """
-        Abstract method to add a batch of documents to the specific index.
+        Abstract method to add a batch of chunks to the specific index.
         This is the primary method that subclasses must implement.
 
         Args:
-            documents: A list of Document objects to be indexed.
+            chunks: A list of Chunk objects to be indexed.
 
         Returns:
-            A list of document IDs that were successfully added.
+            A list of chunk IDs that were successfully added.
         """
         pass
 
@@ -59,23 +59,23 @@ class BaseIndexer(AbstractModule, ABC):
         load_tasks = [self.load_chunk_from_file(path) for path in chunk_file_paths]
         results = await asyncio.gather(*load_tasks, return_exceptions=True)
         
-        documents_to_index = []
+        chunks_to_index = []
         for i, res in enumerate(results):
-            if isinstance(res, Document):
-                documents_to_index.append(res)
+            if isinstance(res, Chunk):
+                chunks_to_index.append(res)
             elif isinstance(res, Exception):
-                logger.error(f"Failed to load document from {chunk_file_paths[i]}: {res}")
+                logger.error(f"Failed to load chunk from {chunk_file_paths[i]}: {res}")
         
-        if not documents_to_index:
-            logger.error("All files failed to load. No documents to index.")
+        if not chunks_to_index:
+            logger.error("All files failed to load. No chunks to index.")
             return False
             
         try:
-            logger.info(f"Submitting a batch of {len(documents_to_index)} documents to the indexer.")
-            doc_ids = await self.update_index(documents_to_index)
+            logger.info(f"Submitting a batch of {len(chunks_to_index)} chunks to the indexer.")
+            chunk_ids = await self.update_index(chunks_to_index)
             
-            if doc_ids:
-                logger.info(f"Successfully indexed a batch of {len(doc_ids)} documents.")
+            if chunk_ids:
+                logger.info(f"Successfully indexed a batch of {len(chunk_ids)} chunks.")
                 return True
             else:
                 logger.error("Indexer returned no IDs for the batch, indicating a failure.")
@@ -84,31 +84,31 @@ class BaseIndexer(AbstractModule, ABC):
             logger.error(f"An error occurred during the batch indexing process: {e}")
             return False
 
-    async def load_chunk_from_file(self, file_path: str) -> Document:
+    async def load_chunk_from_file(self, file_path: str) -> Chunk:
         """
-        Loads a single Document from a JSON file in a non-blocking way.
+        Loads a single Chunk from a JSON file in a non-blocking way.
         """
         path = Path(file_path)
         if not path.is_file():
             raise FileNotFoundError(f"Chunk file does not exist or is not a file: {file_path}")
-            
+
         loop = asyncio.get_running_loop()
-        
+
         content = await loop.run_in_executor(None, path.read_text, 'utf-8')
         chunk_data = await loop.run_in_executor(None, json.loads, content)
-        
-        return self.create_document_from_chunk(chunk_data)
+
+        return self.create_chunk_from_chunk_data(chunk_data)
 
     @staticmethod
-    def create_document_from_chunk(chunk_data: Dict[str, Any]) -> Document:
+    def create_chunk_from_chunk_data(chunk_data: Dict[str, Any]) -> Chunk:
         """
-        Creates a Document object from a chunk data dictionary.
+        Creates a Chunk object from a chunk data dictionary.
         """
         content = chunk_data.get('content', '')
         if not content:
-            logger.warning("Chunk data contains empty content for a document.")
-            
+            logger.warning("Chunk data contains empty content for a chunk.")
+
         metadata = chunk_data.get('metadata', {})
-        doc_id = chunk_data.get('id', str(uuid.uuid4()))
-            
-        return Document(id=doc_id, content=content, metadata=metadata)
+        chunk_id = chunk_data.get('id', str(uuid.uuid4()))
+
+        return Chunk(id=chunk_id, content=content, metadata=metadata)

@@ -12,14 +12,14 @@ from config.core.file_management.chunker.chunker_config import (
     MarkdownHeaderChunkerConfig,
     SemanticChunkerConfig
 )
-from config.encapsulation.llm.huggingface_embedding import HuggingFaceEmbeddingConfig
+from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
 
 
 def main():
     print("Testing Chunker - Core Chunking Strategies")
 
     # Test data
-    simple_text = "This is a simple test document. It contains multiple sentences. Each sentence should be processed correctly."
+    simple_text = "This is a simple test text. It contains multiple sentences. Each sentence should be processed correctly."
 
     markdown_text = """# Main Title
 This is the introduction paragraph under the main title.
@@ -104,7 +104,7 @@ The history of natural language processing generally started in the 1950s, altho
         # 4. Test SemanticChunker
         print("\n--- Test 4: SemanticChunker ---")
         try:
-            hf_config = HuggingFaceEmbeddingConfig(
+            hf_config = QwenEmbeddingConfig(
                 use_china_mirror=True,
                 cache_folder="./models/Qwen"
             )
@@ -130,7 +130,7 @@ The history of natural language processing generally started in the 1950s, altho
         # 5. Test chunker with metadata
         print("\n--- Test 5: Chunking with Source Metadata ---")
         source_metadata = {
-            "document_id": "test_doc_001",
+            "chunk_id": "test_chunk_001",
             "source": "test_document.txt",
             "author": "Test Author",
             "created_at": "2024-01-01"

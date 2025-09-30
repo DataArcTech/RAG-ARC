@@ -24,14 +24,14 @@ class AbstractChunker(AbstractModule):
 
         Args:
             text: The input text to be chunked
-            metadata: Optional metadata about the source document
+            metadata: Optional metadata about the source content
             **kwargs: Strategy-specific chunking options
 
         Returns:
             List of chunk dictionaries, each containing:
             - content: The chunk text content
             - metadata: Chunk-specific metadata (start_idx, end_idx, chunk_id, etc.)
-            - source_metadata: Original document metadata (if provided)
+            - source_metadata: Original source metadata (if provided)
 
         Raises:
             ValueError: If text is invalid or chunking parameters are invalid

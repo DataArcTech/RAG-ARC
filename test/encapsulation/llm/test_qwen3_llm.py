@@ -2,8 +2,12 @@
 Simple test to understand how Qwen Rerank LLM works
 """
 
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
+
 from config.encapsulation.llm.rerank.qwen import QwenRerankConfig
-from encapsulation.data_model.schema import Document
+from encapsulation.data_model.schema import Chunk
 
 
 def main():
@@ -11,13 +15,13 @@ def main():
 
     try:
         # Create Qwen Rerank LLM instance using configuration injection
-        config = QwenRerankConfig()
+        config = QwenRerankConfig(use_china_mirror=True, cache_folder="./models/Qwen")
         qwen_llm = config.build()
 
         print(f"Model info: {qwen_llm.get_model_info()}")
 
-        # Test reranking functionality with Document objects
-        print("\n--- Document Object Reranking Test ---")
+        # Test reranking functionality with Chunk objects
+        print("\n--- Chunk Object Reranking Test ---")
         query = "What is machine learning?"
         documents_text = [
             "Machine learning is a subset of artificial intelligence that focuses on algorithms.",
@@ -29,31 +33,31 @@ def main():
             "Supervised learning trains models using labeled data examples."
         ]
 
-        # Create Document objects
-        documents = [
-            Document(content=doc, metadata={"source": f"doc_{i}", "type": "text"}, id=f"doc_{i}")
+        # Create Chunk objects
+        chunks = [
+            Chunk(content=doc, metadata={"source": f"doc_{i}", "type": "text"}, id=f"doc_{i}")
             for i, doc in enumerate(documents_text)
         ]
 
         try:
-            # Test basic reranking with Document objects
-            reranked_results = qwen_llm.rerank(query, documents)
+            # Test basic reranking with Chunk objects
+            reranked_results = qwen_llm.rerank(query, chunks)
             print(f"Query: {query}")
-            print(f"Number of documents: {len(documents)}")
+            print(f"Number of documents: {len(chunks)}")
             print(f"Reranked results (top 5):")
 
             for i, (doc_idx, score) in enumerate(reranked_results[:5]):
-                doc = documents[doc_idx]
+                doc = chunks[doc_idx]
                 print(f"  Rank {i+1}: Score {score:.4f} - Doc {doc.id}")
                 print(f"    Content: {doc.content[:80]}...")
 
             # Test with top_k parameter
             print(f"\n--- Top-K Reranking Test ---")
-            top_3_results = qwen_llm.rerank(query, documents, top_k=3)
+            top_3_results = qwen_llm.rerank(query, chunks, top_k=3)
             print(f"Top 3 results:")
 
             for i, (doc_idx, score) in enumerate(top_3_results):
-                doc = documents[doc_idx]
+                doc = chunks[doc_idx]
                 print(f"  Rank {i+1}: Score {score:.4f} - Doc {doc.id}")
                 print(f"    Content: {doc.content[:60]}...")
 
@@ -65,7 +69,7 @@ def main():
 
         # Single document
         try:
-            single_doc = [Document(content="single document", metadata={"source": "single"}, id="single")]
+            single_doc = [Chunk(content="single document", metadata={"source": "single"}, id="single")]
             single_doc_result = qwen_llm.rerank("test query", single_doc)
             print(f"Single document reranking: {single_doc_result}")
         except Exception as e:
@@ -73,7 +77,7 @@ def main():
 
         # Empty query edge case
         try:
-            test_docs = documents[:2]
+            test_docs = chunks[:2]
             empty_query_result = qwen_llm.rerank("", test_docs)
             print(f"Empty query test: {len(empty_query_result)} results")
         except Exception as e:
@@ -83,7 +87,7 @@ def main():
         print(f"\n--- Performance Test ---")
         large_docs_text = [f"Document {i}: This is test document number {i} with some content." for i in range(20)]
         large_docs = [
-            Document(content=doc_text, metadata={"source": f"perf_doc_{i}"}, id=f"perf_doc_{i}")
+            Chunk(content=doc_text, metadata={"source": f"perf_doc_{i}"}, id=f"perf_doc_{i}")
             for i, doc_text in enumerate(large_docs_text)
         ]
 
@@ -114,7 +118,7 @@ def main():
 
         for test_query in query_tests:
             try:
-                results = qwen_llm.rerank(test_query, documents[:4], top_k=2)
+                results = qwen_llm.rerank(test_query, chunks[:4], top_k=2)
                 print(f"Query: '{test_query}' -> Top result score: {results[0][1]:.4f}")
             except Exception as e:
                 print(f"Query '{test_query}' failed: {e}")

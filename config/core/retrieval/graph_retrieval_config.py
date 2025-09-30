@@ -7,6 +7,8 @@ from config.encapsulation.database.graph_db.neo4j_with_embedding_config import N
 from config.encapsulation.database.graph_db.networkx_with_embedding_config import NetworkXVectorConfig
 from config.encapsulation.llm.chat.openai import OpenAIChatConfig
 from core.retrieval.graph_retrieveal.graph_retrieval import GraphRetrieval
+from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
+from config.encapsulation.llm.embedding.openai import OpenAIEmbeddingConfig
 
 
 
@@ -16,6 +18,8 @@ class GraphRetrievalConfig(AbstractConfig):
 
     # Graph database configuration (supports both Neo4j and NetworkX)
     graph_config: Annotated[Union[Neo4jVectorConfig, NetworkXVectorConfig], Field(discriminator="type")]
+
+    embedding_config: Annotated[Union[QwenEmbeddingConfig, OpenAIEmbeddingConfig], Field(discriminator="type")]
 
     # LLM configuration for entity filtering (optional)
     llm_config: Optional[OpenAIChatConfig] = Field(default=None, description="LLM configuration for entity filtering")

@@ -1,38 +1,41 @@
 import asyncio
 import logging
-from typing import List
+from typing import List, TYPE_CHECKING
 
 from core.file_management.indexing.base import BaseIndexer
-from encapsulation.data_model.schema import Document
+from encapsulation.data_model.schema import Chunk
+
+if TYPE_CHECKING:
+    from config.core.file_management.indexing.faiss_indexing_config import FaissIndexerConfig
 
 logger = logging.getLogger(__name__)
 
 
 class FaissIndexer(BaseIndexer):
     """
-    Concrete implementation for indexing documents using FaissVectorDB.
+    Concrete implementation for indexing chunks using FaissVectorDB.
     """
 
-    def __init__(self, config):
+    def __init__(self, config: "FaissIndexerConfig"):
         """
         Initializes the Faiss indexer and its specific database instance.
         """
         super().__init__(config)
-        self.faiss_db = config.build()
+        self.faiss_db = config.index_config.build()
 
-    async def update_index(self, documents: List[Document]) -> List[str]:
+    async def update_index(self, chunks: List[Chunk]) -> List[str]:
         """
-        Adds a batch of documents to the FAISS index using a thread pool.
+        Adds a batch of chunks to the FAISS index using a thread pool.
         """
         loop = asyncio.get_running_loop()
 
-        def update_and_save(docs):
+        def update_and_save(chunks: List[Chunk]):
             # Update the index
-            doc_ids = self.faiss_db.update_index(docs)
+            chunk_ids = self.faiss_db.update_index(chunks)
             # Save the index to disk
             if hasattr(self.faiss_db.config, 'index_path'):
                 self.faiss_db.save_index(self.faiss_db.config.index_path)
-            return doc_ids
+            return chunk_ids
 
-        doc_ids = await loop.run_in_executor(None, update_and_save, documents)
-        return doc_ids or []
+        chunk_ids = await loop.run_in_executor(None, update_and_save, chunks)
+        return chunk_ids or []

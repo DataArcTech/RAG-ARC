@@ -8,7 +8,7 @@ from pathlib import Path
 
 import logging
 from encapsulation.database.graph_db.base import GraphStore
-from encapsulation.data_model.schema import Document, GraphData
+from encapsulation.data_model.schema import Chunk, GraphData
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +34,8 @@ class NetworkXGraphStore(GraphStore):
             else:
                 self.graph = nx.DiGraph()
 
-        # Store documents separately for efficient retrieval
-        self.documents = {}  # doc_id -> document data
+        # Store chunks separately for efficient retrieval
+        self.chunks = {}  # chunk_id -> chunk data
 
         # Auto-save configuration
         self.auto_save = getattr(config, 'auto_save', False)
@@ -80,82 +80,82 @@ class NetworkXGraphStore(GraphStore):
     # BaseIndex Interface Implementation
     # =============================================================================
 
-    def build_index(self, documents: List[Document]) -> List[str]:
-        """Build graph from a list of Documents."""
-        return self.add_documents(documents)
+    def build_index(self, chunks: List[Chunk]) -> List[str]:
+        """Build graph from a list of Chunks."""
+        return self.add_chunks(chunks)
 
-    def update_index(self, documents: List[Document]) -> Optional[bool]:
-        """Update existing documents' graphs in the database."""
+    def update_index(self, chunks: List[Chunk]) -> Optional[bool]:
+        """Update existing chunks' graphs in the database."""
         try:
-            self.update_documents(documents)
+            self.update_chunks(chunks)
             return True
         except Exception as e:
             logger.error(f"Failed to update index: {e}")
             return False
 
-    def add_documents(self, documents: List[Document]) -> List[str]:
-        """Add multiple documents to the graph"""
+    def add_chunks(self, chunks: List[Chunk]) -> List[str]:
+        """Add multiple chunks to the graph"""
         added_ids = []
 
-        for doc in documents:
+        for chunk in chunks:
             try:
-                # Check if document already exists
-                if doc.id in self.documents:
-                    logger.warning(f"Document with ID {doc.id} already exists, skipping...")
+                # Check if chunk already exists
+                if chunk.id in self.chunks:
+                    logger.warning(f"Chunk with ID {chunk.id} already exists, skipping...")
                     continue
 
-                # Add document
-                self.add_document(doc)
+                # Add chunk
+                self.add_chunk(chunk)
 
                 # Add graph data if available
-                if hasattr(doc, 'graph') and doc.graph:
-                    self.add_graph_data(doc.graph, doc.id)
+                if hasattr(chunk, 'graph') and chunk.graph:
+                    self.add_graph_data(chunk.graph, chunk.id)
 
-                added_ids.append(doc.id)
-                logger.info(f"Successfully added document: {doc.id}")
+                added_ids.append(chunk.id)
+                logger.info(f"Successfully added chunk: {chunk.id}")
 
             except Exception as e:
-                logger.error(f"Failed to add document {doc.id}: {e}")
+                logger.error(f"Failed to add chunk {chunk.id}: {e}")
                 continue
 
-        # Auto-save if enabled and documents were added
+        # Auto-save if enabled and chunks were added
         if added_ids:
             self._auto_save_if_enabled()
 
         return added_ids
 
-    def add_document(self, document: Document) -> None:
-        """Add document node to the graph"""
-        doc_node_id = f"doc_{document.id}"
-        
-        # Add document node to NetworkX graph
+    def add_chunk(self, chunk: Chunk) -> None:
+        """Add chunk node to the graph"""
+        chunk_node_id = f"chunk_{chunk.id}"
+
+        # Add chunk node to NetworkX graph
         self.graph.add_node(
-            doc_node_id,
-            node_type='Document',
-            id_=document.id,
-            content=document.content,
-            metadata=json.dumps(document.metadata, ensure_ascii=False) if document.metadata else "{}",
+            chunk_node_id,
+            node_type='Chunk',
+            id_=chunk.id,
+            content=chunk.content,
+            metadata=json.dumps(chunk.metadata, ensure_ascii=False) if chunk.metadata else "{}",
             create_time=datetime.now().isoformat(),
             update_time=datetime.now().isoformat()
         )
-        
-        # Store document data separately for efficient retrieval
-        self.documents[document.id] = {
-            'content': document.content,
-            'metadata': document.metadata or {},
+
+        # Store chunk data separately for efficient retrieval
+        self.chunks[chunk.id] = {
+            'content': chunk.content,
+            'metadata': chunk.metadata or {},
             'create_time': datetime.now().isoformat(),
             'update_time': datetime.now().isoformat()
         }
 
-    def add_graph_data(self, graph_data: GraphData, doc_id: str) -> None:
+    def add_graph_data(self, graph_data: GraphData, chunk_id: str) -> None:
         """Add graph data (entities and relations) to the graph"""
-        doc_node_id = f"doc_{doc_id}"
+        chunk_node_id = f"chunk_{chunk_id}"
         
         # Add entities
-        entity_node_mapping = {}  # entity_name -> node_id for this document
+        entity_node_mapping = {}  # entity_name -> node_id for this chunk
         
         for entity in graph_data.entities:
-            entity_id = doc_id + '_' + entity['id']  # Prefix with doc_id to avoid conflicts
+            entity_id = chunk_id + '_' + entity['id']  # Prefix with chunk_id to avoid conflicts
             entity_node_id = f"entity_{entity_id}"
             entity_type = entity.get('entity_type', 'Entity')
             
@@ -167,7 +167,7 @@ class NetworkXGraphStore(GraphStore):
                 id_=entity_id,
                 entity_name=entity['entity_name'],
                 entity_type=entity_type,
-                document_id=doc_id,
+                chunk_id=chunk_id,
                 create_time=datetime.now().isoformat(),
                 update_time=datetime.now().isoformat(),
                 attributes=json.dumps(entity['attributes'], ensure_ascii=False) if entity.get('attributes') else "{}"
@@ -176,9 +176,9 @@ class NetworkXGraphStore(GraphStore):
             # Store mapping for relation creation
             entity_node_mapping[entity['entity_name']] = entity_node_id
             
-            # Create Document-Entity relationship
+            # Create Chunk-Entity relationship
             self.graph.add_edge(
-                doc_node_id,
+                chunk_node_id,
                 entity_node_id,
                 relation_type='MENTIONS',
                 create_time=datetime.now().isoformat()
@@ -189,7 +189,7 @@ class NetworkXGraphStore(GraphStore):
             if len(relation) >= 3:
                 head_name, relation_type, tail_name = relation[0], relation[1], relation[2]
                 
-                # Find entity nodes by name within this document
+                # Find entity nodes by name within this chunk
                 head_node_id = entity_node_mapping.get(head_name)
                 tail_node_id = entity_node_mapping.get(tail_name)
                 
@@ -199,43 +199,43 @@ class NetworkXGraphStore(GraphStore):
                         head_node_id,
                         tail_node_id,
                         relation_type=relation_type,
-                        document_id=doc_id,
+                        chunk_id=chunk_id,
                         create_time=datetime.now().isoformat()
                     )
                 else:
                     logger.warning(f"Could not find entities for relation: {head_name} -> {tail_name}")
 
     def delete_index(self, ids: Optional[List[str]] = None) -> Optional[bool]:
-        """Delete documents and their graphs by IDs. Delete all if ids is None."""
+        """Delete chunks and their graphs by IDs. Delete all if ids is None."""
         if ids is None:
-            raise ValueError("Dangerous operation: delete_index requires specific IDs. Use delete_all_documents() if you want to clear all data.")
+            raise ValueError("Dangerous operation: delete_index requires specific IDs. Use delete_all_chunks() if you want to clear all data.")
         else:
             # Remove duplicates from ids list while preserving order
             unique_ids = list(dict.fromkeys(ids))  # Preserves order, removes duplicates
             if len(unique_ids) != len(ids):
                 logger.info(f"Removed {len(ids) - len(unique_ids)} duplicate IDs from delete list")
-            return self.delete_documents(unique_ids)
+            return self.delete_chunks(unique_ids)
 
-    def delete_documents(self, ids: Optional[List[str]] = None) -> bool:
-        """Delete documents and their graph data"""
+    def delete_index(self, ids: Optional[List[str]] = None) -> bool:
+        """Delete chunks and their graph data"""
         try:
             if not ids:
-                raise ValueError("Must provide document IDs to delete")
+                raise ValueError("Must provide chunk IDs to delete")
 
             # Remove duplicates from ids list while preserving order
             unique_ids = list(dict.fromkeys(ids))
             if len(unique_ids) != len(ids):
                 logger.info(f"Removed {len(ids) - len(unique_ids)} duplicate IDs from delete list")
 
-            # Delete specific documents and their related data
-            for doc_id in unique_ids:
-                doc_node_id = f"doc_{doc_id}"
-                
-                # Find all entity nodes related to this document
+            # Delete specific chunks and their related data
+            for chunk_id in unique_ids:
+                chunk_node_id = f"chunk_{chunk_id}"
+
+                # Find all entity nodes related to this chunk
                 entity_nodes_to_remove = []
                 for node_id, node_data in self.graph.nodes(data=True):
                     if (node_data.get('node_type') == 'Entity' and 
-                        node_data.get('document_id') == doc_id):
+                        node_data.get('chunk_id') == chunk_id):
                         entity_nodes_to_remove.append(node_id)
                 
                 # Remove entity nodes and their edges
@@ -243,112 +243,112 @@ class NetworkXGraphStore(GraphStore):
                     if self.graph.has_node(entity_node_id):
                         self.graph.remove_node(entity_node_id)
                 
-                # Remove document node
-                if self.graph.has_node(doc_node_id):
-                    self.graph.remove_node(doc_node_id)
+                # Remove chunk node
+                if self.graph.has_node(chunk_node_id):
+                    self.graph.remove_node(chunk_node_id)
                 
-                # Remove from documents storage
-                if doc_id in self.documents:
-                    del self.documents[doc_id]
-                
-                logger.info(f"Deleted document: {doc_id}")
+                # Remove from chunks storage
+                if chunk_id in self.chunks:
+                    del self.chunks[chunk_id]
+
+                logger.info(f"Deleted chunk: {chunk_id}")
 
             # Auto-save if enabled
             self._auto_save_if_enabled()
             return True
 
         except Exception as e:
-            logger.error(f"Failed to delete documents: {e}")
+            logger.error(f"Failed to delete chunks: {e}")
             return False
 
     def delete_all_index(self, confirm: bool = False) -> bool:
-        """Delete all documents and their graph data"""
+        """Delete all chunks and their graph data"""
         if not confirm:
-            raise ValueError("Dangerous operation: delete_all_documents requires confirm=True")
+            raise ValueError("Dangerous operation: delete_all_chunks requires confirm=True")
         try:
             self.graph.clear()
-            self.documents.clear()
+            self.chunks.clear()
             logger.info("Deleted all data from NetworkX graph")
             return True
         except Exception as e:
             logger.error(f"Failed to delete all data: {e}")
             return False
 
-    def update_documents(self, documents: List[Document]) -> None:
-        """Update documents and their graph data"""
-        for doc in documents:
+    def update_chunks(self, chunks: List[Chunk]) -> None:
+        """Update chunks and their graph data"""
+        for chunk in chunks:
             try:
-                # Delete existing graph data for this document
-                self.delete_documents([doc.id])
+                # Delete existing graph data for this chunk
+                self.delete_index([chunk.id])
 
-                # Add updated document and graph data
-                self.add_documents([doc])
+                # Add updated chunk and graph data
+                self.add_chunks([chunk])
 
-                logger.info(f"Successfully updated document: {doc.id}")
+                logger.info(f"Successfully updated chunk: {chunk.id}")
 
             except Exception as e:
-                logger.error(f"Failed to update document {doc.id}: {e}")
+                logger.error(f"Failed to update chunk {chunk.id}: {e}")
 
-    def get_by_ids(self, ids: Sequence[str]) -> List[Document]:
-        """Get documents by IDs"""
-        return self.get_documents(list(ids))
+    def get_by_ids(self, ids: Sequence[str]) -> List[Chunk]:
+        """Get chunks by IDs"""
+        return self.get_chunks(list(ids))
 
-    def get_documents(self, ids: List[str]) -> List[Document]:
-        """Retrieve documents by their IDs"""
-        documents = []
+    def get_chunks(self, ids: List[str]) -> List[Chunk]:
+        """Retrieve chunks by their IDs"""
+        chunks = []
 
-        for doc_id in ids:
+        for chunk_id in ids:
             try:
-                # Check if document exists
-                if doc_id not in self.documents:
-                    logger.warning(f"⚠️ Document not found: {doc_id}")
+                # Check if chunk exists
+                if chunk_id not in self.chunks:
+                    logger.warning(f"⚠️ Chunk not found: {chunk_id}")
                     continue
 
-                doc_data = self.documents[doc_id]
+                chunk_data = self.chunks[chunk_id]
 
-                # Create document
-                document = Document(
-                    content=doc_data.get('content', ''),
-                    id=doc_id,
-                    metadata=doc_data.get('metadata', {})
+                # Create chunk
+                chunk = Chunk(
+                    content=chunk_data.get('content', ''),
+                    id=chunk_id,
+                    metadata=chunk_data.get('metadata', {})
                 )
 
                 # Get graph data
-                document.graph = self.get_graph_data(doc_id)
-                documents.append(document)
+                chunk.graph = self.get_graph_data(chunk_id)
+                chunks.append(chunk)
 
             except Exception as e:
-                logger.error(f"Failed to get document {doc_id}: {e}")
+                logger.error(f"Failed to get chunk {chunk_id}: {e}")
                 continue
 
-        return documents
+        return chunks
 
-    def get_graph_data(self, doc_id: str) -> GraphData:
-        """Get graph data for a specific document"""
-        # Get entities for this document
+    def get_graph_data(self, chunk_id: str) -> GraphData:
+        """Get graph data for a specific chunk"""
+        # Get entities for this chunk
         entities = []
         entity_nodes = []
         
         for node_id, node_data in self.graph.nodes(data=True):
             if (node_data.get('node_type') == 'Entity' and 
-                node_data.get('document_id') == doc_id):
+                node_data.get('chunk_id') == chunk_id):
                 entity_nodes.append((node_id, node_data))
                 
                 entity = {
-                    'id': node_data.get('id_', '').replace(f"{doc_id}_", ""),  # Remove doc_id prefix
+                    'id': node_data.get('id_', '').replace(f"{chunk_id}_", ""),  # Remove chunk_id prefix
                     'entity_name': node_data.get('entity_name', ''),
                     'entity_type': node_data.get('entity_type', ''),
                     'attributes': json.loads(node_data.get('attributes') or '{}')
                 }
                 entities.append(entity)
 
-        # Get relations between entities in this document
+        # Get relations between entities in this chunk
         relations = []
         for edge in self.graph.edges(data=True):
             source, target, edge_data = edge
             
-            # Check if this is an entity-entity relationship for this document
-            if (edge_data.get('document_id') == doc_id and 
+            # Check if this is an entity-entity relationship for this chunk
+            if (edge_data.get('chunk_id') == chunk_id and 
                 edge_data.get('relation_type') != 'MENTIONS'):
                 
                 # Get entity names from nodes
@@ -371,7 +371,7 @@ class NetworkXGraphStore(GraphStore):
             # Create directory if it doesn't exist
             Path(path).mkdir(parents=True, exist_ok=True)
 
-            # Save graph and documents
+            # Save graph and chunks
             graph_file = os.path.join(path, f"{name}_graph.pkl")
             docs_file = os.path.join(path, f"{name}_docs.pkl")
 
@@ -379,7 +379,7 @@ class NetworkXGraphStore(GraphStore):
                 pickle.dump(self.graph, f)
 
             with open(docs_file, 'wb') as f:
-                pickle.dump(self.documents, f)
+                pickle.dump(self.chunks, f)
 
             logger.info(f"Successfully saved NetworkX graph to {path}")
 
@@ -396,14 +396,14 @@ class NetworkXGraphStore(GraphStore):
             if not os.path.exists(graph_file) or not os.path.exists(docs_file):
                 logger.warning(f"Index files not found in {path}, starting with empty graph")
                 self.graph = nx.MultiDiGraph()
-                self.documents = {}
+                self.chunks = {}
                 return
 
             with open(graph_file, 'rb') as f:
                 self.graph = pickle.load(f)
 
             with open(docs_file, 'rb') as f:
-                self.documents = pickle.load(f)
+                self.chunks = pickle.load(f)
 
             logger.info(f"Successfully loaded NetworkX graph from {path}")
 
@@ -418,7 +418,7 @@ class NetworkXGraphStore(GraphStore):
         The query parameter can be:
         - 'nodes': return all nodes
         - 'edges': return all edges
-        - 'documents': return all document IDs
+        - 'chunks': return all chunk IDs
         - 'entities': return all entity nodes
         - 'stats': return graph statistics
         """
@@ -429,8 +429,8 @@ class NetworkXGraphStore(GraphStore):
                 return list(self.graph.nodes(data=True))
             elif query == 'edges':
                 return list(self.graph.edges(data=True))
-            elif query == 'documents':
-                return list(self.documents.keys())
+            elif query == 'chunks':
+                return list(self.chunks.keys())
             elif query == 'entities':
                 return [(node_id, data) for node_id, data in self.graph.nodes(data=True)
                        if data.get('node_type') == 'Entity']
@@ -470,8 +470,8 @@ class NetworkXGraphStore(GraphStore):
     def get_graph_db_info(self) -> Dict[str, Any]:
         """Return statistics or metadata about the graph database."""
         try:
-            # Count documents
-            total_documents = len(self.documents)
+            # Count chunks
+            total_chunks = len(self.chunks)
 
             # Count entities
             total_entities = sum(1 for _, data in self.graph.nodes(data=True)
@@ -486,7 +486,7 @@ class NetworkXGraphStore(GraphStore):
                                        if data.get('relation_type') == 'MENTIONS')
 
             return {
-                'total_documents': total_documents,
+                'total_chunks': total_chunks,
                 'total_entities': total_entities,
                 'total_relationships': total_relationships,
                 'mentions_relationships': mentions_relationships,
@@ -498,7 +498,7 @@ class NetworkXGraphStore(GraphStore):
         except Exception as e:
             logger.error(f"Error getting graph statistics: {e}")
             return {
-                'total_documents': 0,
+                'total_chunks': 0,
                 'total_entities': 0,
                 'total_relationships': 0,
                 'error': str(e)

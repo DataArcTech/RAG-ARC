@@ -8,14 +8,14 @@ from typing import (
 )
 
 from framework.module import AbstractModule
-from encapsulation.data_model.schema import Document
+from encapsulation.data_model.schema import Chunk
 
 
 class AbstractReranker(AbstractModule):
     """
-    Abstract base class for document reranking in RAG systems.
+    Abstract base class for chunks reranking in RAG systems.
 
-    Reranking is a critical component that reorders retrieved documents based on
+    Reranking is a critical component that reorders retrieved chunks based on
     their relevance to the user query, improving the quality of context provided
     to the generation model.
 
@@ -28,26 +28,26 @@ class AbstractReranker(AbstractModule):
     def rerank(
         self,
         query: str,
-        documents: List["Document"],
+        chunks: List["Chunk"],
         **kwargs: Any
-    ) -> List["Document"]:
+    ) -> List["Chunk"]:
         """
-        Rerank documents based on relevance to the query.
+        Rerank chunks based on relevance to the query.
 
         All configuration parameters are handled by the encapsulation layer.
-        Core layer focuses on document structure and metadata management.
+        Core layer focuses on chunk structure and metadata management.
 
         Args:
-            query: User query to rank documents against
-            documents: List of Document objects from retrieval step
+            query: User query to rank chunks against
+            chunks: List of Chunk objects from retrieval step
             **kwargs: Parameters passed through to encapsulation layer
 
         Returns:
-            List of Document objects reordered by relevance with rerank scores
+            List of Chunk objects reordered by relevance with rerank scores
             in metadata
 
         Raises:
-            ValueError: If query is empty or documents list is invalid
+            ValueError: If query is empty or chunks list is invalid
             Exception: If reranking process fails
         """
         pass

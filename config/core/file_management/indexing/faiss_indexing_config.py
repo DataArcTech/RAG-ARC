@@ -11,4 +11,4 @@ class FaissIndexerConfig(AbstractConfig):
     index_config: FaissVectorDBConfig = Field(description="FAISS index configuration")
 
     def build(self):
-        return FaissIndexer(self.index_config)
+        return FaissIndexer(self)

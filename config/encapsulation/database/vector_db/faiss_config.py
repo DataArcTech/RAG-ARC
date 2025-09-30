@@ -7,7 +7,7 @@ from pydantic import Field
 class FaissVectorDBConfig(AbstractConfig):
     type: Literal["faiss"] = "faiss"
 
-    index_path: str = None
+    index_path: str = "./data/faiss_index"
     index_name: str = "index"
 
     metric: Literal["cosine", "l2", "ip"] = Field(default="cosine", description="Distance metric")

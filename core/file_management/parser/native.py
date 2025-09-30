@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, TYPE_CHECKING
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
@@ -9,6 +9,9 @@ load_dotenv()
 
 from .base import AbstractParser
 from framework.singleton_decorator import singleton
+
+if TYPE_CHECKING:
+    from config.core.file_management.parser.native import NativeParserConfig
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,10 @@ class NativeParser(AbstractParser):
     - Images: JPG/PNG (requires DotsOCR integration)
     - PDF: (requires DotsOCR integration)
     """
+
+    def __init__(self, config: "NativeParserConfig"):
+        """Initialize NativeParser"""
+        super().__init__(config)
 
     def parse_file(
         self,

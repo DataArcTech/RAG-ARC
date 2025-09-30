@@ -11,7 +11,7 @@ from typing import (
 )
 
 
-from encapsulation.data_model.schema import Document
+from encapsulation.data_model.schema import Chunk
 from framework.module import AbstractModule
 
 
@@ -19,11 +19,11 @@ class VectorDB(AbstractModule):
     """Vector database base class - encapsulation layer for core database operations"""
 
     @abstractmethod
-    def build_index(self, documents: List[Document]) -> None:
-        """Build index from documents
+    def build_index(self, chunks: List[Chunk]) -> None:
+        """Build index from chunks
 
         Args:
-            documents: List of Document objects to build index from
+            chunks: List of Chunk objects to build index from
         """
         pass
 
@@ -37,20 +37,20 @@ class VectorDB(AbstractModule):
         pass
 
     @abstractmethod
-    def get_by_ids(self, ids: Sequence[str]) -> List[Document]:
-        """Get documents by IDs
+    def get_by_ids(self, ids: Sequence[str]) -> List[Chunk]:
+        """Get chunks by IDs
 
         Args:
             ids: List of IDs to retrieve
 
         Returns:
-            List of documents
+            List of chunks
         """
         pass
 
     @abstractmethod
     def delete_index(self, ids: Optional[List[str]] = None) -> Optional[bool]:
-        """Delete documents by IDs
+        """Delete chunks by IDs
 
         Args:
             ids: List of IDs to delete. If None, delete all. Default is None
@@ -62,7 +62,7 @@ class VectorDB(AbstractModule):
 
     @abstractmethod
     def delete_all_index(self, confirm: bool = False) -> bool:
-        """Delete all documents. Requires confirmation."""
+        """Delete all chunks. Requires confirmation."""
         pass
 
     @abstractmethod
@@ -76,11 +76,11 @@ class VectorDB(AbstractModule):
         pass
 
     @abstractmethod
-    def update_index(self, documents: List[Document]) -> Optional[bool]:
-        """Update documents in index
+    def update_index(self, chunks: List[Chunk]) -> Optional[bool]:
+        """Update chunks in index
 
         Args:
-            documents: List of Document objects to update
+            chunks: List of Chunk objects to update
 
         Returns:
             Optional[bool]: True if update successful, False otherwise, None if not implemented

@@ -2,7 +2,7 @@ import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from api.retrieval_api import api
-from encapsulation.data_model.schema import Document
+from encapsulation.data_model.schema import Chunk
 
 def demo_dense_retriever():
     """演示Dense检索器"""
@@ -25,9 +25,9 @@ def demo_dense_retriever():
             print(f"\n查询: '{query}'")
             results = api.search("dense_retriever", query, k=3)
 
-            for i, doc in enumerate(results, 1):
-                score = doc.metadata.get('score', 'N/A') if doc.metadata else 'N/A'
-                print(f"  {i}. [ID:{doc.id}] {doc.content[:60]}... (分数: {score})")
+            for i, chunk in enumerate(results, 1):
+                score = chunk.metadata.get('score', 'N/A') if chunk.metadata else 'N/A'
+                print(f"  {i}. [ID:{chunk.id}] {chunk.content[:60]}... (分数: {score})")
 
         # 3. 获取检索器信息
         print("\n3. Dense检索器信息:")
@@ -68,10 +68,10 @@ def demo_bm25_retriever():
                 print(f"找到 {len(results)} 个结果:")
 
                 if results:
-                    for i, doc in enumerate(results, 1):
-                        score = doc.metadata.get('score', 'N/A') if doc.metadata else 'N/A'
-                        content_preview = doc.content[:80].replace('\n', ' ')
-                        print(f"  {i}. [ID:{doc.id}] {content_preview}... (分数: {score})")
+                    for i, chunk in enumerate(results, 1):
+                        score = chunk.metadata.get('score', 'N/A') if chunk.metadata else 'N/A'
+                        content_preview = chunk.content[:80].replace('\n', ' ')
+                        print(f"  {i}. [ID:{chunk.id}] {content_preview}... (分数: {score})")
                 else:
                     print("  没有找到相关结果")
             except Exception as e:
@@ -112,9 +112,9 @@ def demo_multipath_retriever():
             print(f"\n查询: '{query}'")
             results = api.search("multipath_retriever", query, k=3)
 
-            for i, doc in enumerate(results, 1):
-                score = doc.metadata.get('score', 'N/A') if doc.metadata else 'N/A'
-                print(f"  {i}. [ID:{doc.id}] {doc.content[:60]}... (分数: {score})")
+            for i, chunk in enumerate(results, 1):
+                score = chunk.metadata.get('score', 'N/A') if chunk.metadata else 'N/A'
+                print(f"  {i}. [ID:{chunk.id}] {chunk.content[:60]}... (分数: {score})")
 
         # 3. 获取检索器信息
         print("\n3. MultiPath检索器信息:")

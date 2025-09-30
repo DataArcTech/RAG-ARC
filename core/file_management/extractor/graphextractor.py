@@ -1,47 +1,50 @@
 """
-多轮抽取，每次将上一轮抽取的结果加入到上下文中，直到到达最大轮数或者无法抽取出新的entity或者relation。
-多轮抽取之间为串行关系，每次抽取必须依赖上一轮抽取结果。
+Multi-round extraction: in each round, the results extracted from the previous round are added to the context, continuing until the maximum number of rounds is reached or no new entities or relations can be extracted.
+The multi-round extraction process is sequential, with each extraction depending on the results of the previous round.
 """
 
 import logging
 import re
-from typing import Dict, List
+from typing import Dict, List, TYPE_CHECKING
 
 from core.file_management.extractor.base import ExtractorBase
 from core.prompts.extractor_prompt import EXTRACTION_PROMPT, CLEANING_PROMPT, EXTRACTION_PROMPT_EN, CLEANING_PROMPT_EN
-from encapsulation.data_model.schema import Document, GraphData
+from encapsulation.data_model.schema import Chunk, GraphData
+
+if TYPE_CHECKING:
+    from config.core.file_management.extractor.graphextractor_config import GraphExtractorConfig
 
 logger = logging.getLogger(__name__)
 
 
 class GraphExtractor(ExtractorBase):
-    """优化的GraphExtractor，支持多轮抽取、清洗和中英双语"""
+    """Optimized GraphExtractor, supporting multi-round extraction, cleaning, and bilingual support"""
 
-    def __init__(self, config):
+    def __init__(self, config: "GraphExtractorConfig"):
         super().__init__(config)
         self.logger = logging.getLogger(__name__)
 
-    async def extract(self, document: Document) -> GraphData:
-        """主抽取方法：根据max_rounds自动支持单轮或多轮抽取"""
-        if not document.content:
+    async def extract(self, chunk: Chunk) -> GraphData:
+        """Main extraction method: automatically supports single-round or multi-round extraction based on max_rounds"""
+        if not chunk.content:
             return GraphData()
 
         accumulated_graph = GraphData()
 
-        # 根据max_rounds驱动的抽取循环（1轮=单轮抽取，>1轮=多轮抽取）
+        # Extraction loop driven by max_rounds (1 round = single-round extraction, >1 round = multi-round extraction)
         for round_num in range(self.config.max_rounds):
             try:
-                # 构建prompt（支持中英双语）
-                prompt = self.build_extraction_prompt(document.content, accumulated_graph)
+                # Build prompt (supporting bilingual support)
+                prompt = self.build_extraction_prompt(chunk.content, accumulated_graph)
 
                 response = await self.llm.achat([{"role": "user", "content": prompt}])
                 new_graph = self.parse_tsv_response(response)
 
-                # 如果没有新的抽取结果，提前结束
+                # If there are no new extraction results, end early
                 if not new_graph.entities and not new_graph.relations:
                     break
 
-                # 合并结果
+                # Merge results
                 accumulated_graph = self.merge_graph_data(accumulated_graph, new_graph)
 
             except Exception as e:
@@ -50,18 +53,18 @@ class GraphExtractor(ExtractorBase):
 
         # Clean data if enabled
         if self.config.enable_cleaning:
-            accumulated_graph = await self.clean_graph_data(accumulated_graph, document)
+            accumulated_graph = await self.clean_graph_data(accumulated_graph, chunk)
 
         # Convert IDs to entity names for final output
         return self.convert_final_output_to_names(accumulated_graph)
 
     def detect_language(self, text: str) -> str:
-        """检测文本语言（中文或英文）"""
+        """Detect text language (Chinese or English)"""
         chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
         total_chars = len(re.sub(r'\s', '', text))
 
         if total_chars == 0:
-            return 'zh'  # 默认中文
+            return 'zh'  # Default Chinese
 
         chinese_ratio = chinese_chars / total_chars
         return 'zh' if chinese_ratio > 0.1 else 'en'
@@ -95,7 +98,7 @@ class GraphExtractor(ExtractorBase):
         )
 
     def generate_schema_string(self, language: str = 'zh') -> str:
-        """生成schema字符串（支持中英双语）"""
+        """Generate schema string (supporting bilingual support)"""
         parts = []
 
         if self.config.entity_types:
@@ -115,7 +118,7 @@ class GraphExtractor(ExtractorBase):
         return "\n".join(parts)
 
     def generate_examples_string(self, language: str = 'zh') -> str:
-        """生成示例字符串（支持中英双语）"""
+        """Generate example string (supporting bilingual support)"""
         parts = []
 
         if self.config.entity_examples:
@@ -187,13 +190,13 @@ class GraphExtractor(ExtractorBase):
         return GraphData(entities=entities, relations=relations)
 
     def build_history_string(self, history: GraphData, language: str = 'zh') -> str:
-        """构建历史数据字符串"""
+        """Build history data string"""
         if history.is_empty():
             return ""
 
         history_parts = []
 
-        # 构建实体部分
+        # Build entity part
         if history.entities:
             if language == 'en':
                 history_parts.extend([
@@ -214,7 +217,7 @@ class GraphExtractor(ExtractorBase):
                 attr_str = self.format_attributes_string(entity.get('attributes', {}))
                 history_parts.append(f"{entity_id}\t{entity_name}\t{entity_type}\t{attr_str}")
 
-        # 构建关系部分
+        # Build relation part
         if history.relations:
             if not history.entities:
                 history_parts.append("Previous extracted data:")
@@ -249,7 +252,7 @@ class GraphExtractor(ExtractorBase):
             return ''
         return '|#|'.join(f'{k}|->|{v}' for k, v in attributes.items() if k and v is not None)
 
-    async def clean_graph_data(self, graph_data: GraphData, document: Document) -> GraphData:
+    async def clean_graph_data(self, graph_data: GraphData, chunk: Chunk) -> GraphData:
         """Clean graph data"""
         try:
             # Basic cleaning
@@ -258,7 +261,7 @@ class GraphExtractor(ExtractorBase):
 
             # LLM-assisted cleaning (optional)
             if self.config.enable_llm_cleaning:
-                return await self.llm_clean(GraphData(cleaned_entities, cleaned_relations), document)
+                return await self.llm_clean(GraphData(cleaned_entities, cleaned_relations), chunk)
 
             return GraphData(cleaned_entities, cleaned_relations)
         except Exception as e:
@@ -273,13 +276,13 @@ class GraphExtractor(ExtractorBase):
             name = entity.get('entity_name', '').strip()
             entity_type = entity.get('entity_type', '').strip()
 
-            # 去重
+            # Deduplicate
             key = (name.lower(), entity_type.lower())
             if key in seen:
                 continue
             seen.add(key)
 
-            # 格式检查
+            # Format check
             if self.is_valid_entity(name):
                 cleaned.append(entity)
 
@@ -317,22 +320,22 @@ class GraphExtractor(ExtractorBase):
         return cleaned
 
     def is_valid_entity(self, name: str) -> bool:
-        """检查实体名称是否有效"""
+        """Check if entity name is valid"""
         if not name or len(name.strip()) < 2:
             return False
 
-        # 过滤纯数字
+        # Filter pure numbers
         if re.match(r'^\d+$', name) or re.match(r'^[\d\s\.,;:!?()\[\]{}""''\-_]+$', name):
             return False
 
         return True
 
     def merge_graph_data(self, history: GraphData, new_extraction: GraphData) -> GraphData:
-        """合并历史数据和新抽取结果"""
+        """Merge history data and new extraction results"""
         merged_entities = list(history.entities)
         merged_relations = list(history.relations)
 
-        # 合并实体
+        # Merge entities
         entity_keys = {(e.get('entity_name', ''), e.get('entity_type', '')) for e in merged_entities}
         for entity in new_extraction.entities:
             key = (entity.get('entity_name', ''), entity.get('entity_type', ''))
@@ -340,7 +343,7 @@ class GraphExtractor(ExtractorBase):
                 merged_entities.append(entity)
                 entity_keys.add(key)
 
-        # 合并关系
+        # Merge relations
         relation_keys = {(str(r[0]), str(r[1]), str(r[2])) for r in merged_relations if len(r) >= 3}
         for relation in new_extraction.relations:
             if len(relation) >= 3:
@@ -351,11 +354,11 @@ class GraphExtractor(ExtractorBase):
 
         return GraphData(entities=merged_entities, relations=merged_relations)
 
-    async def llm_clean(self, graph_data: GraphData, document: Document) -> GraphData:
+    async def llm_clean(self, graph_data: GraphData, chunk: Chunk) -> GraphData:
         """LLM-assisted graph data cleaning"""
         try:
-            language = self.detect_language(document.content)
-            prompt = self.build_cleaning_prompt(document.content, graph_data, language)
+            language = self.detect_language(chunk.content)
+            prompt = self.build_cleaning_prompt(chunk.content, graph_data, language)
             response = await self.llm.achat([{"role": "user", "content": prompt}])
             cleaned_graph = self.parse_tsv_response(response)
 
@@ -387,10 +390,10 @@ class GraphExtractor(ExtractorBase):
         )
 
     def format_graph_for_cleaning(self, graph_data: GraphData) -> str:
-        """将图数据格式化为清洗prompt中使用的字符串"""
+        """Format graph data as string for cleaning prompt"""
         parts = []
 
-        # 格式化实体
+        # Format entities
         if graph_data.entities:
             parts.extend([
                 "### ENTITIES",
@@ -403,7 +406,7 @@ class GraphExtractor(ExtractorBase):
                 attr_str = self.format_attributes_string(entity.get('attributes', {}))
                 parts.append(f"{entity_id}\t{entity_name}\t{entity_type}\t{attr_str}")
 
-        # 格式化关系
+        # Format relations
         if graph_data.relations:
             if parts:
                 parts.append("")
@@ -419,8 +422,8 @@ class GraphExtractor(ExtractorBase):
 
 
     def convert_final_output_to_names(self, graph_data: GraphData) -> GraphData:
-        """将最终输出的关系中的ID转换为实体名"""
-        # 创建ID到名称的映射
+        """Convert IDs in final output relationships to entity names"""
+        # Create ID to name mapping
         id_to_name = {}
         for entity in graph_data.entities:
             entity_id = entity.get('id', '')
@@ -428,7 +431,7 @@ class GraphExtractor(ExtractorBase):
             if entity_id and entity_name:
                 id_to_name[entity_id] = entity_name
 
-        # 转换关系中的ID为名称
+        # Convert IDs in relationships to names
         converted_relations = []
         for relation in graph_data.relations:
             if isinstance(relation, list) and len(relation) >= 3:
@@ -439,10 +442,10 @@ class GraphExtractor(ExtractorBase):
             else:
                 converted_relations.append(relation)
 
-        # 返回最终输出格式的图数据
+        # Return final output format graph data
         return GraphData(
-            entities=graph_data.entities,     # 实体保持不变
-            relations=converted_relations,    # 关系使用实体名
+            entities=graph_data.entities,     # Entities remain unchanged
+            relations=converted_relations,    # Relationships use entity names
             metadata=graph_data.metadata
         )
 

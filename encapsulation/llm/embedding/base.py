@@ -26,8 +26,8 @@ class EmbeddingLLMBase(AbstractModule):
         pass
 
     # ==================== CONVENIENCE METHODS ====================
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        """Embed multiple documents - always returns list of embeddings"""
+    def embed_chunks(self, texts: List[str]) -> List[List[float]]:
+        """Embed multiple chunks - always returns list of embeddings"""
         result = self.embed(texts)
         if isinstance(texts, str):
             return [result] if isinstance(result[0], (int, float)) else result

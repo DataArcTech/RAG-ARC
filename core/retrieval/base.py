@@ -3,7 +3,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, List, Dict
 from framework.module import AbstractModule
-from encapsulation.data_model.schema import Document
+from encapsulation.data_model.schema import Chunk
 
 
 logger = logging.getLogger(__name__)
@@ -12,7 +12,6 @@ class BaseRetriever(AbstractModule, ABC):
     def __init__(self, config):
         self.config = config
         self._index = self.config.index_config.build()
-        self._embedding = None
         self._load_existing_index()
 
     def _load_existing_index(self) -> None:
@@ -37,30 +36,22 @@ class BaseRetriever(AbstractModule, ABC):
     def index(self) -> Any:
         return self._index
 
-    def get_embedding(self) -> Any:
-        if self._embedding is None:
-            if hasattr(self.config.index_config, "embedding_config") and self.config.index_config.embedding_config is not None:
-                self._embedding = self.config.index_config.embedding_config.build()
-            else:
-                raise ValueError("This retriever does not have an embedding_config")
-        return self._embedding
-
-    def invoke(self, input: str, **kwargs: Any) -> List[Document]:
+    def invoke(self, input: str, **kwargs: Any) -> List[Chunk]:
         default_config = self.get_default_search_config()
         merged_kwargs = {**default_config, **kwargs}
-        return self._get_relevant_documents(input, **merged_kwargs)
+        return self._get_relevant_chunks(input, **merged_kwargs)
 
-    async def ainvoke(self, input: str, **kwargs: Any) -> List[Document]:
+    async def ainvoke(self, input: str, **kwargs: Any) -> List[Chunk]:
         default_config = self.get_default_search_config()
         merged_kwargs = {**default_config, **kwargs}
-        return await self._aget_relevant_documents(input, **merged_kwargs)
+        return await self._aget_relevant_chunks(input, **merged_kwargs)
 
     @abstractmethod
-    def _get_relevant_documents(self, query: str, **kwargs: Any) -> List[Document]:
+    def _get_relevant_chunks(self, query: str, **kwargs: Any) -> List[Chunk]:
         pass
 
-    async def _aget_relevant_documents(self, query: str, **kwargs: Any) -> List[Document]:
-        return await asyncio.to_thread(self._get_relevant_documents, query, **kwargs)
+    async def _aget_relevant_chunks(self, query: str, **kwargs: Any) -> List[Chunk]:
+        return await asyncio.to_thread(self._get_relevant_chunks, query, **kwargs)
 
     def get_name(self) -> str:
         return self.config.type

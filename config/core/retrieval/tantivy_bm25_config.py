@@ -21,7 +21,7 @@ class TantivyBM25RetrieverConfig(AbstractConfig):
         },
         description="""Additional search parameters. Supported parameters:
         - use_phrase_query (bool): Whether to use phrase queries for better relevance (default: False)
-        - k (int): Number of documents to return (default: 5)
+        - k (int): Number of chunks to return (default: 5)
         - filters (dict): Dictionary of field names and their values to filter by
         - order_by_field (str): Field to sort by
         - order_desc (bool): Whether to sort in descending order (default: True)

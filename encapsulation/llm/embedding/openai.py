@@ -132,8 +132,8 @@ class OpenAIEmbeddingLLM(EmbeddingLLMBase):
 
     # ==================== CONVENIENCE METHODS ====================
 
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        """Embed multiple documents - always returns list of embeddings"""
+    def embed_chunks(self, texts: List[str]) -> List[List[float]]:
+        """Embed multiple chunks - always returns list of embeddings"""
         return self.embed(texts) if isinstance(texts, list) else [self.embed(texts)]
 
     def embed_query(self, text: str) -> List[float]:

@@ -1,6 +1,9 @@
 """
 Simple test to understand how Embedding LLMs work (OpenAI and Qwen)
 """
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
 
 from config.encapsulation.llm.embedding.openai import OpenAIEmbeddingConfig
 from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
@@ -46,9 +49,9 @@ def test_openai_embedding():
     print(f"\n--- Convenience Methods Test ---")
     try:
         query_embedding = embedding_llm.embed_query("What is the meaning of life?")
-        doc_embeddings = embedding_llm.embed_documents(["Document 1", "Document 2"])
+        doc_embeddings = embedding_llm.embed_chunks(["Chunk 1", "Chunk 2"])
         print(f"Query embedding shape: {len(query_embedding)}")
-        print(f"Document embeddings shape: {len(doc_embeddings)}x{len(doc_embeddings[0])}")
+        print(f"Chunk embeddings shape: {len(doc_embeddings)}x{len(doc_embeddings[0])}")
     except Exception as e:
         print(f"Convenience methods test failed: {e}")
 
@@ -79,7 +82,7 @@ def test_huggingface_embedding():
 
     try:
         # Create Qwen Embedding LLM instance using configuration injection
-        config = QwenEmbeddingConfig()
+        config = QwenEmbeddingConfig(use_china_mirror=True, cache_folder="./models/Qwen")
         embedding_llm = config.build()
 
         print(f"Model info: {embedding_llm.get_model_info()}")
@@ -110,9 +113,9 @@ def test_huggingface_embedding():
         # Test convenience methods
         print(f"\n--- Convenience Methods Test ---")
         query_embedding = embedding_llm.embed_query("What is the meaning of life?")
-        doc_embeddings = embedding_llm.embed_documents(["Document 1", "Document 2"])
+        doc_embeddings = embedding_llm.embed_chunks(["Chunk 1", "Chunk 2"])
         print(f"Query embedding shape: {len(query_embedding)}")
-        print(f"Document embeddings shape: {len(doc_embeddings)}x{len(doc_embeddings[0])}")
+        print(f"Chunk embeddings shape: {len(doc_embeddings)}x{len(doc_embeddings[0])}")
 
         # Test async functionality
         print(f"\n--- Async Embedding Test ---")

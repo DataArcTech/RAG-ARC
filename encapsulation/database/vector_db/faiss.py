@@ -3,18 +3,20 @@ import pickle
 import os
 import uuid
 import numpy as np
-from typing import Any, Optional, List, Dict
+from typing import Any, Optional, List, Dict, TYPE_CHECKING
 
 from encapsulation.database.vector_db.base import VectorDB
-from encapsulation.data_model.schema import Document
+from encapsulation.data_model.schema import Chunk
 from framework.shared_module_decorator import shared_module
+
+if TYPE_CHECKING:
+    from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBConfig
 
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-@shared_module
 class FaissVectorDB(VectorDB):
     """
     FAISS-based vector database implementation for high-performance similarity search and retrieval.
@@ -30,7 +32,7 @@ class FaissVectorDB(VectorDB):
     - Maximal Marginal Relevance (MMR) search for diversity
     - Persistent storage with save/load functionality
     - Asynchronous operations support
-    - Dynamic document addition and deletion
+    - Dynamic chunk addition and deletion
 
     Main parameters:
         config: Configuration object containing embedding, index_type, metric, etc.
@@ -41,17 +43,17 @@ class FaissVectorDB(VectorDB):
         index: FAISS index instance
 
     Core methods:
-        - _add_documents/aadd_documents: Add Document objects to the vector store
+        - _add_chunks/aadd_chunks: Add Chunk objects to the vector store
         - similarity_search_by_vector: Search by embedding vector
         - max_marginal_relevance_search: MMR-based diverse search
-        - delete: Remove documents by IDs
+        - delete: Remove chunks by IDs
         - save_local/load_local: Persist and restore index
-        - from_documents: Create instance from document collection
+        - from_chunks: Create instance from chunk collection
 
     Performance considerations:
-        - Flat index: Best for small collections (<10K documents)
-        - IVF index: Good for medium collections (10K-1M documents)
-        - HNSW index: Best for large collections (>1M documents)
+        - Flat index: Best for small collections (<10K chunks)
+        - IVF index: Good for medium collections (10K-1M chunks)
+        - HNSW index: Best for large collections (>1M chunks)
         - Cosine similarity requires vector normalization
         - Index training required for IVF with sufficient data (>=100 vectors)
 
@@ -68,11 +70,11 @@ class FaissVectorDB(VectorDB):
         metric: Distance metric
         normalize_L2: Vector normalization flag
         index: FAISS index instance
-        docstore: Document storage mapping
-        index_to_docstore_id: Index to document ID mapping
+        docstore: Chunk storage mapping
+        index_to_docstore_id: Index to chunk ID mapping
     """
 
-    def __init__(self, config):
+    def __init__(self, config: "FaissVectorDBConfig"):
         """Initialize FaissVectorDB with config
 
         Args:
@@ -81,19 +83,13 @@ class FaissVectorDB(VectorDB):
         super().__init__(config)
         logger.info("Initializing FaissVectorDB")
 
-        # Build embedding model from config if available
-        if hasattr(config, 'embedding_config') and config.embedding_config is not None:
-            logger.info("Building embedding model from config")
-            self.embedding_model = config.embedding_config.build()
-            logger.info(f"Embedding model initialized: {type(self.embedding_model).__name__}")
-        else:
-            logger.warning("No embedding model provided in config")
-            self.embedding_model = None
+        # Build embedding model from config
+        self.embedding_model = self.config.embedding_config.build()
         
         # initialize faiss attributes
         self.index = None  # faiss index
-        self.docstore = {}  # Dictionary to store documents by ID
-        self.index_to_docstore_id = {}  # Mapping from index position to document ID
+        self.docstore = {}  # Dictionary to store chunks by ID
+        self.index_to_docstore_id = {}  # Mapping from index position to chunk ID
 
     
     def load_index(self, path: str):
@@ -141,10 +137,10 @@ class FaissVectorDB(VectorDB):
             with open(pkl_path, 'rb') as f:
                 data = pickle.load(f)
 
-            # Load document store and mappings
+            # Load chunk store and mappings
             self.docstore = data.get("docstore", {})
             self.index_to_docstore_id = data.get("index_to_docstore_id", {})
-            logger.info(f"Loaded {len(self.docstore)} documents from metadata")
+            logger.info(f"Loaded {len(self.docstore)} chunks from metadata")
 
             # Save pkl file parameters to override config values
             self.index_type = data.get("index_type")
@@ -152,20 +148,20 @@ class FaissVectorDB(VectorDB):
             self.normalize_L2 = data.get("normalize_L2")
             logger.info(f"Index configuration: type={self.index_type}, metric={self.metric}")
     
-    def build_index(self, documents: List[Document]):
-        """Build index from documents
+    def build_index(self, chunks: List[Chunk]):
+        """Build index from chunks
 
         Args:
-            documents: List of Document objects to build index from
+            chunks: List of Chunk objects to build index from
         """
-        logger.info(f"Building index from {len(documents)} documents")
+        logger.info(f"Building index from {len(chunks)} chunks")
 
         # Check if index file is already built/loaded
         if self.index is not None and self.index.ntotal > 0:
             logger.error(f"Index already contains {self.index.ntotal} vectors")
-            raise ValueError("Index already contains data. Use update_index() to add more documents or delete() first.")
+            raise ValueError("Index already contains data. Use update_index() to add more chunks or delete() first.")
 
-        self._add_documents(documents)
+        self._add_chunks(chunks)
     
     def _create_index(self, dimension: int) -> faiss.Index:
         """Create FAISS index based on configuration"""
@@ -220,25 +216,25 @@ class FaissVectorDB(VectorDB):
             faiss.normalize_L2(vectors)
         return vectors
     
-    def _add_documents(
+    def _add_chunks(
         self,
-        documents: List[Document],
+        chunks: List[Chunk],
         **kwargs: Any,
     ) -> List[str]:
-        """Internal method to add Document objects to vector database
+        """Internal method to add Chunk objects to vector database
 
         Args:
-            documents: List of Document objects to add
+            chunks: List of Chunk objects to add
             **kwargs: Additional arguments
 
         Returns:
-            List of document IDs for added documents
+            List of chunk IDs for added chunks
         """
-        if not documents:
+        if not chunks:
             return []
 
         # Extract texts for embedding
-        texts = [doc.content for doc in documents]
+        texts = [chunk.content for chunk in chunks]
 
         # Compute embeddings
         embeddings = self.embedding_model.embed(texts)
@@ -265,29 +261,29 @@ class FaissVectorDB(VectorDB):
         self.index.add(embeddings_np)
         logger.info(f"Added {len(embeddings_np)} vectors to index (total: {self.index.ntotal})")
 
-        # Store documents directly
+        # Store chunks directly
         doc_ids = []
-        for i, doc in enumerate(documents):
+        for i, chunk in enumerate(chunks):
             # Generate ID if not provided
-            doc_id = doc.id if doc.id is not None else str(uuid.uuid4())
-            doc.id = doc_id  # Ensure doc has an ID
-            doc_ids.append(doc_id)
+            chunk_id = chunk.id if chunk.id is not None else str(uuid.uuid4())
+            chunk.id = chunk_id  # Ensure chunk has an ID
+            doc_ids.append(chunk_id)
 
-            self.docstore[doc_id] = doc
-            self.index_to_docstore_id[start_index + i] = doc_id
+            self.docstore[chunk_id] = chunk
+            self.index_to_docstore_id[start_index + i] = chunk_id
 
-        logger.info(f"Stored {len(doc_ids)} documents in docstore")
+        logger.info(f"Stored {len(doc_ids)} chunks in docstore")
         return doc_ids
 
     def delete_index(self, ids: Optional[List[str]] = None, **kwargs: Any) -> Optional[bool]:
-        """Delete documents from vector database
+        """Delete chunks from vector database
 
         Note: FAISS doesn't support direct deletion, so this method rebuilds
-        the entire index with remaining documents. This can be expensive for
+        the entire index with remaining chunks. This can be expensive for
         large collections.
 
         Args:
-            ids: List of document IDs to delete; if None, deletes all documents
+            ids: List of chunk IDs to delete; if None, deletes all chunks
             **kwargs: Additional arguments
 
         Returns:
@@ -300,7 +296,7 @@ class FaissVectorDB(VectorDB):
         if ids is None or not ids:
             raise ValueError("Dangerous operation: delete_index requires specific IDs. Use delete_all_index() if you want to clear all data.")
 
-        logger.info(f"Deleting {len(ids)} documents from index")
+        logger.info(f"Deleting {len(ids)} chunks from index")
 
         # Check if IDs to delete exist
         missing_ids = [doc_id for doc_id in ids if doc_id not in self.docstore]
@@ -308,7 +304,7 @@ class FaissVectorDB(VectorDB):
             logger.warning(f"IDs not found: {missing_ids}")
             return False
 
-        # Get documents to keep
+        # Get chunks to keep
         remaining_docs = []
         remaining_texts = []
         remaining_metadatas = []
@@ -321,7 +317,7 @@ class FaissVectorDB(VectorDB):
                 remaining_metadatas.append(doc.metadata)
                 remaining_ids.append(doc_id)
 
-        logger.info(f"Keeping {len(remaining_docs)} documents, rebuilding index")
+        logger.info(f"Keeping {len(remaining_docs)} chunks, rebuilding index")
 
         # Clear current storage
         self.docstore.clear()
@@ -329,17 +325,17 @@ class FaissVectorDB(VectorDB):
         if self.index is not None:
             self.index.reset()
 
-        # Re-add remaining documents
+        # Re-add remaining chunks
         if remaining_docs:
-            self._add_documents(remaining_docs)
-            logger.info(f"Index rebuilt with {len(remaining_docs)} remaining documents")
+            self._add_chunks(remaining_docs)
+            logger.info(f"Index rebuilt with {len(remaining_docs)} remaining chunks")
         else:
             logger.info("Index is now empty after deletion")
 
         return True
 
     def delete_all_index(self, confirm: bool = False) -> bool:
-        """Delete all documents from vector database
+        """Delete all chunks from vector database
 
         Args:
             confirm: Set to True to confirm deletion
@@ -354,38 +350,38 @@ class FaissVectorDB(VectorDB):
             logger.warning("No index to delete from")
             return True
         
-        logger.info("Deleting all documents from index")
+        logger.info("Deleting all chunks from index")
         self.docstore.clear()
         self.index_to_docstore_id.clear()
         if self.index is not None:
             self.index.reset()
-        logger.info("All documents deleted successfully")
+        logger.info("All chunks deleted successfully")
         return True
         
 
     
-    def get_by_ids(self, ids: List[str]) -> List['Document']:
-        """Retrieve documents by their IDs
+    def get_by_ids(self, ids: List[str]) -> List['Chunk']:
+        """Retrieve chunks by their IDs
 
         Args:
-            ids: List of document IDs to retrieve
+            ids: List of chunk IDs to retrieve
 
         Returns:
-            List of documents corresponding to the provided IDs
+            List of chunks corresponding to the provided IDs
             Missing IDs are silently skipped
         """
         return [self.docstore[doc_id] for doc_id in ids if doc_id in self.docstore]
 
-    def update_index(self, documents: List[Document]) -> List[str]:
-        """Update documents in index
+    def update_index(self, chunks: List[Chunk]) -> List[str]:
+        """Update chunks in index
 
         Args:
-            documents: List of Document objects to update
+            chunks: List of Chunk objects to update
 
         Returns:
-            Ltst  of document IDs that were successfully added to the index
+            List of chunk IDs that were successfully added to the index
         """
-        logger.info(f"Updating index with {len(documents)} documents")
+        logger.info(f"Updating index with {len(chunks)} chunks")
 
         # Check if embedding model is available
         if self.embedding_model is None:
@@ -393,10 +389,10 @@ class FaissVectorDB(VectorDB):
             return []
 
         try:
-            # Add updated documents (embeddings will be generated automatically)
-            doc_ids = self._add_documents(documents)
+            # Add updated chunks (embeddings will be generated automatically)
+            chunk_ids = self._add_chunks(chunks)
             logger.info(f"Update completed: {self.index.ntotal} total vectors")
-            return doc_ids
+            return chunk_ids
 
         except Exception as e:
             logger.error(f"Update failed: {str(e)}")
@@ -433,7 +429,7 @@ class FaissVectorDB(VectorDB):
         pkl_path = os.path.join(path, f"{name}.pkl")
         with open(pkl_path, "wb") as f:
             pickle.dump(data, f)
-        logger.info(f"Metadata saved: {pkl_path} ({len(self.docstore)} documents)")
+        logger.info(f"Metadata saved: {pkl_path} ({len(self.docstore)} chunks)")
     
     
     def get_vector_db_info(self) -> Dict[str, Any]:
@@ -453,7 +449,7 @@ class FaissVectorDB(VectorDB):
             "index_type": getattr(self, 'saved_index_type', getattr(self.config, 'index_type', 'flat')),
             "metric": getattr(self, 'saved_metric', getattr(self.config, 'metric', 'cosine')),
             "normalize_L2": getattr(self, 'saved_normalize_L2', getattr(self.config, 'normalize_L2', False)),
-            "document_count": len(self.docstore),
+            "chunk_count": len(self.docstore),
             "embedding_model": embedding_model_name
         }
 
@@ -471,5 +467,5 @@ class FaissVectorDB(VectorDB):
                 "is_trained": False
             })
 
-        logger.info(f"Vector DB info: {info['document_count']} docs, {info['vector_count']} vectors")
+        logger.info(f"Vector DB info: {info['chunk_count']} chunks, {info['vector_count']} vectors")
         return info

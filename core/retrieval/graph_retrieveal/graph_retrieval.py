@@ -11,7 +11,7 @@ This module implements a sophisticated graph-based retrieval system that combine
 Based on the design document specifications.
 """
 
-from typing import List, Dict, Any, Optional, Tuple, Literal, Union
+from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
 from dataclasses import dataclass, field
 from pydantic import Field
 import logging
@@ -19,8 +19,11 @@ import json
 import numpy as np
 import math
 
-from encapsulation.data_model.schema import Document
+from encapsulation.data_model.schema import Chunk
 from core.retrieval.graph_retrieveal.base import BaseGraphRetriever
+
+if TYPE_CHECKING:
+    from config.core.retrieval.graph_retrieval_config import GraphRetrievalConfig
 
 logger = logging.getLogger(__name__)
 
@@ -74,13 +77,13 @@ class GraphRetrieval(BaseGraphRetriever):
     5. Fusion and Ranking
     """
 
-    def __init__(self, config):
+    def __init__(self, config: "GraphRetrievalConfig"):
         """Initialize Graph Retrieval System"""
         super().__init__(config)
 
         # Initialize the graph store (supports both Neo4j and NetworkX)
         self.graph_store = config.graph_config.build()
-        self.embedding_model = self.graph_store.embedding_model
+        self.embedding_model = config.embedding_config.build()
 
         # Determine graph store type for query adaptation
         self.graph_store_type = config.graph_config.type
@@ -116,7 +119,7 @@ class GraphRetrieval(BaseGraphRetriever):
             query = """
             MATCH (e:Entity)
             WHERE e.embedding IS NOT NULL
-            OPTIONAL MATCH (e)<-[:MENTIONS]-(d:Document)
+            OPTIONAL MATCH (e)<-[:MENTIONS]-(d:Chunk)
             WITH e, count(d) as mention_count
             RETURN e.id_ as entity_id,
                    e.entity_name as entity_name,
@@ -129,7 +132,7 @@ class GraphRetrieval(BaseGraphRetriever):
             """
         elif query_type == "semantic_search_chunks":
             query = """
-            MATCH (d:Document)
+            MATCH (d:Chunk)
             WHERE d.embedding IS NOT NULL
             OPTIONAL MATCH (d)-[:MENTIONS]->(e:Entity)
             WITH d, count(e) as entity_count, collect(e.entity_name) as entity_names
@@ -150,12 +153,12 @@ class GraphRetrieval(BaseGraphRetriever):
         elif query_type == "get_entity_neighbors":
             query = """
             MATCH (e1:Entity {id_: $entity_id})-[r]->(e2:Entity)
-            OPTIONAL MATCH (e2)<-[:MENTIONS]-(d:Document)
+            OPTIONAL MATCH (e2)<-[:MENTIONS]-(d:Chunk)
             WITH e2, type(r) as relation_type, count(d) as mention_count
             RETURN e2.id_ as neighbor_id, relation_type, mention_count
             UNION
             MATCH (e1:Entity)-[r]->(e2:Entity {id_: $entity_id})
-            OPTIONAL MATCH (e1)<-[:MENTIONS]-(d:Document)
+            OPTIONAL MATCH (e1)<-[:MENTIONS]-(d:Chunk)
             WITH e1, type(r) as relation_type, count(d) as mention_count
             RETURN e1.id_ as neighbor_id, relation_type, mention_count
             """
@@ -166,17 +169,17 @@ class GraphRetrieval(BaseGraphRetriever):
             """
         elif query_type == "get_entity_mentions":
             query = """
-            MATCH (e:Entity {id_: $entity_id})<-[:MENTIONS]-(d:Document)
+            MATCH (e:Entity {id_: $entity_id})<-[:MENTIONS]-(d:Chunk)
             RETURN count(d) as mention_count
             """
         elif query_type == "get_chunk_entities":
             query = """
-            MATCH (d:Document {id_: $chunk_id})-[:MENTIONS]->(e:Entity)
+            MATCH (d:Chunk {id_: $chunk_id})-[:MENTIONS]->(e:Entity)
             RETURN e.id_ as entity_id
             """
         elif query_type == "backtrack_chunks":
             query = """
-            MATCH (e:Entity {id_: $entity_id})<-[:MENTIONS]-(d:Document)
+            MATCH (e:Entity {id_: $entity_id})<-[:MENTIONS]-(d:Chunk)
             WHERE d.embedding IS NOT NULL
             RETURN d.id_ as chunk_id, d.content as content, d.embedding as embedding
             LIMIT $chunks_per_entity
@@ -197,7 +200,7 @@ class GraphRetrieval(BaseGraphRetriever):
                 if (node_data.get('node_type') == 'Entity' and
                     node_data.get('embedding')):
 
-                    # Count mentions (documents that mention this entity)
+                    # Count mentions (chunks that mention this entity)
                     mention_count = 0
                     for edge in self.graph_store.graph.edges(data=True):
                         source, target, edge_data = edge
@@ -219,9 +222,9 @@ class GraphRetrieval(BaseGraphRetriever):
             return results[:2000]
 
         elif query_type == "semantic_search_chunks":
-            # Get all document nodes with embeddings
+            # Get all chunk nodes with embeddings
             for node_id, node_data in self.graph_store.graph.nodes(data=True):
-                if (node_data.get('node_type') == 'Document' and
+                if (node_data.get('node_type') == 'Chunk' and
                     node_data.get('embedding')):
 
                     # Count entities and collect entity names
@@ -335,11 +338,11 @@ class GraphRetrieval(BaseGraphRetriever):
 
         elif query_type == "get_chunk_entities":
             chunk_id = params.get('chunk_id')
-            doc_node_id = f"doc_{chunk_id}"
+            chunk_node_id = f"chunk_{chunk_id}"
 
             entity_ids = []
-            for target in self.graph_store.graph.successors(doc_node_id):
-                edge_data = self.graph_store.graph.get_edge_data(doc_node_id, target)
+            for target in self.graph_store.graph.successors(chunk_node_id):
+                edge_data = self.graph_store.graph.get_edge_data(chunk_node_id, target)
                 if edge_data:
                     for edge_key, edge_attrs in edge_data.items():
                         if edge_attrs.get('relation_type') == 'MENTIONS':
@@ -360,7 +363,7 @@ class GraphRetrieval(BaseGraphRetriever):
                     for edge_key, edge_attrs in edge_data.items():
                         if edge_attrs.get('relation_type') == 'MENTIONS':
                             source_data = self.graph_store.graph.nodes[source]
-                            if (source_data.get('node_type') == 'Document' and
+                            if (source_data.get('node_type') == 'Chunk' and
                                 source_data.get('embedding')):
                                 chunks.append({
                                     'chunk_id': source_data.get('id_'),
@@ -379,16 +382,16 @@ class GraphRetrieval(BaseGraphRetriever):
         else:
             raise ValueError(f"Unknown query type: {query_type}")
 
-    def retrieve(self, query: str, top_k: int = 10) -> List[Document]:
+    def retrieve(self, query: str, top_k: int = 10) -> List[Chunk]:
         """
-        Main retrieval method - returns List[Document]
+        Main retrieval method - returns List[Chunk]
 
         Args:
             query: Natural language query
             top_k: Number of top documents to return
 
         Returns:
-            List of Document objects sorted by relevance
+            List of Chunk objects sorted by relevance
         """
         logger.info(f"Starting retrieval for query: {query}")
 
@@ -413,28 +416,28 @@ class GraphRetrieval(BaseGraphRetriever):
         final_scores = self.fusion_and_ranking(chunk_scores)
         logger.info(f"Final ranking completed, returning top {min(top_k, len(final_scores))} chunks")
 
-        # Convert ChunkScore objects to Document objects
-        documents = []
+        # Convert ChunkScore objects to Chunk objects
+        chunks = []
         for chunk_score in final_scores[:top_k]:
-            # Get the original document
+            # Get the original chunk
             try:
-                doc_list = self.graph_store.get_documents([chunk_score.chunk_id])
-                if doc_list:
-                    doc = doc_list[0]
+                chunk_list = self.graph_store.get_chunks([chunk_score.chunk_id])
+                if chunk_list:
+                    chunk = chunk_list[0]
 
                     # Add scores to metadata
-                    doc.metadata = doc.metadata or {}
-                    doc.metadata.update({
+                    chunk.metadata = chunk.metadata or {}
+                    chunk.metadata.update({
                         'score': chunk_score.final_score,
                         'graph_score': chunk_score.graph_score,
                         'embedding_score': chunk_score.embedding_score,
                         'mentioned_entities': chunk_score.mentioned_entities
                     })
 
-                    documents.append(doc)
+                    chunks.append(chunk)
                 else:
-                    # Create a document from chunk score if original not found
-                    doc = Document(
+                    # Create a chunk from chunk score if original not found
+                    chunk = Chunk(
                         id=chunk_score.chunk_id,
                         content=chunk_score.content,
                         metadata={
@@ -444,12 +447,12 @@ class GraphRetrieval(BaseGraphRetriever):
                             'mentioned_entities': chunk_score.mentioned_entities
                         }
                     )
-                    documents.append(doc)
+                    chunks.append(chunk)
 
             except Exception as e:
-                logger.warning(f"Could not retrieve document {chunk_score.chunk_id}: {e}")
-                # Create a fallback document
-                doc = Document(
+                logger.warning(f"Could not retrieve chunk {chunk_score.chunk_id}: {e}")
+                # Create a fallback chunk
+                chunk = Chunk(
                     id=chunk_score.chunk_id,
                     content=chunk_score.content,
                     metadata={
@@ -459,9 +462,9 @@ class GraphRetrieval(BaseGraphRetriever):
                         'mentioned_entities': chunk_score.mentioned_entities
                     }
                 )
-                documents.append(doc)
+                chunks.append(chunk)
 
-        return documents
+        return chunks
 
     def retrieve_with_scores(self, query: str, top_k: int = 10) -> List[ChunkScore]:
         """
@@ -560,7 +563,7 @@ class GraphRetrieval(BaseGraphRetriever):
 
 
     def semantic_search_chunks(self, query_embedding: List[float], top_k: int) -> List[Dict[str, Any]]:
-        """Semantic search for document chunks using vector similarity"""
+        """Semantic search for chunk chunks using vector similarity"""
         # Enhanced chunk search with metadata and entity information
 
         results = self._execute_graph_query("semantic_search_chunks")
@@ -730,7 +733,7 @@ Selected indices:"""
 
                 # Get LLM response
                 messages = [{"role": "user", "content": prompt}]
-                response = self.llm.chat(messages, max_tokens=500, temperature=0.1)
+                response = self.llm.chat(messages)
 
                 # Parse LLM response to get selected entity indices
                 try:
@@ -836,7 +839,7 @@ Selected indices:"""
         """Compute edge weight based on relation type and entity importance"""
         # Base weight by relation type
         relation_weights = {
-            'MENTIONS': 0.5,  # Document-entity relation (lower weight)
+            'MENTIONS': 0.5,  # Chunk-entity relation (lower weight)
             'RELATED_TO': 1.0,
             'PART_OF': 1.2,
             'INSTANCE_OF': 1.1,

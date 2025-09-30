@@ -1,9 +1,12 @@
-from typing import List, Optional, Dict, Any, Tuple, Literal, Union, cast
+from typing import List, Optional, Dict, Any, Tuple, Literal, Union, cast, TYPE_CHECKING
 import re
 import numpy as np
 import logging
 
 from .base import AbstractChunker
+
+if TYPE_CHECKING:
+    from config.core.file_management.chunker.chunker_config import SemanticChunkerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +26,7 @@ Matrix = Union[List[List[float]], List[np.ndarray], np.ndarray]
 
 class SemanticChunker(AbstractChunker):
     """
-    SemanticChunker is a document chunker that uses semantic similarity analysis to create meaningful text chunks.
+    SemanticChunker is a text chunker that uses semantic similarity analysis to create meaningful text chunks.
 
     This class implements advanced chunking based on semantic coherence by analyzing the similarity between sentences using embeddings
     to determine natural breakpoints, creating chunks based on topic coherence rather than arbitrary size limits.
@@ -71,7 +74,7 @@ class SemanticChunker(AbstractChunker):
         ...     breakpoint_threshold_amount=90
         ... )
         >>> chunker = SemanticChunker(config=config)
-        >>> chunks = chunker.chunk_text("long document with multiple topics...")
+        >>> chunks = chunker.chunk_text("long text with multiple topics...")
         >>> info = chunker.get_chunker_info()
 
     Breakpoint strategies:
@@ -86,7 +89,7 @@ class SemanticChunker(AbstractChunker):
         - Optional: simsimd for optimized similarity calculations
     """
 
-    def __init__(self, config):
+    def __init__(self, config: "SemanticChunkerConfig"):
         """Initialize SemanticChunker with embedding model"""
         super().__init__(config)
         # Build embeddings immediately since we always need it
@@ -110,7 +113,7 @@ class SemanticChunker(AbstractChunker):
 
         Args:
             text: Text content to be chunked
-            metadata: Optional source document metadata, will be passed to each chunk
+            metadata: Optional source metadata, will be passed to each chunk
             **kwargs: Runtime parameter overrides
                 buffer_size (int): Context window size, overrides config value
                 breakpoint_threshold_type (str): Threshold method, overrides config value
@@ -342,7 +345,7 @@ class SemanticChunker(AbstractChunker):
             {"sentence": x, "index": i} for i, x in enumerate(single_sentences_list)
         ]
         sentences = self._combine_sentences(_sentences, buffer_size)
-        embeddings_list = embeddings.embed_documents(
+        embeddings_list = embeddings.embed_chunks(
             [x["combined_sentence"] for x in sentences]
         )
         for i, sentence in enumerate(sentences):

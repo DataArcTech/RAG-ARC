@@ -1,14 +1,17 @@
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, TYPE_CHECKING
 import logging
 
 from .base import AbstractChunker
+
+if TYPE_CHECKING:
+    from config.core.file_management.chunker.chunker_config import TokenChunkerConfig
 
 logger = logging.getLogger(__name__)
 
 
 class TokenChunker(AbstractChunker):
     """
-    TokenChunker is a document chunker based on model tokenizers, suitable for scenarios requiring precise token count control.
+    TokenChunker is a text chunker based on model tokenizers, suitable for scenarios requiring precise token count control.
 
     This class implements token-aware text chunking by integrating tokenizer libraries like tiktoken, ensuring chunks respect token boundaries
     and stay within specified token limits for LLM processing pipelines.
@@ -38,7 +41,7 @@ class TokenChunker(AbstractChunker):
     Performance considerations:
         - Token-level chunking ensures LLM compatibility
         - Overlap mechanism maintains semantic continuity but increases total token consumption
-        - For large documents, recommend adjusting chunk_size to balance performance and precision
+        - For large texts, recommend adjusting chunk_size to balance performance and precision
         - tiktoken library provides efficient token encoding performance
 
     Typical usage:
@@ -51,6 +54,10 @@ class TokenChunker(AbstractChunker):
         - tiktoken: For token encoding and decoding
         - Corresponding model tokenizer configuration
     """
+
+    def __init__(self, config: "TokenChunkerConfig"):
+        """Initialize TokenChunker with tokenizer configuration"""
+        super().__init__(config)
 
     def chunk_text(
         self,
@@ -66,7 +73,7 @@ class TokenChunker(AbstractChunker):
 
         Args:
             text: Text content to be chunked
-            metadata: Optional source document metadata, will be passed to each chunk
+            metadata: Optional source metadata, will be passed to each chunk
             **kwargs: Runtime parameter overrides
                 chunk_size (int): Maximum tokens per chunk, overrides config value
                 chunk_overlap (int): Chunk overlap tokens, overrides config value
@@ -81,7 +88,7 @@ class TokenChunker(AbstractChunker):
                 - end_idx: Ending position in original text
                 - token_count: Token count of this chunk
                 - strategy: Chunking strategy identifier ('token')
-            - source_metadata: Original document metadata (if provided)
+            - source_metadata: Original source metadata (if provided)
 
         Raises:
             ImportError: If tiktoken library is not installed
