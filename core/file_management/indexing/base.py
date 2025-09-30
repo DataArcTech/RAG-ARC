@@ -25,9 +25,6 @@ class BaseIndexer(AbstractModule, ABC):
     the specific indexing logic for their backend (e.g., BM25, FAISS).
     """
 
-    def __init__(self, config):
-        self.config = config
-
     @abstractmethod
     async def update_index(self, chunks: List[Chunk]) -> List[str]:
         """

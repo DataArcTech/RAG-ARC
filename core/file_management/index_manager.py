@@ -300,7 +300,7 @@ class IndexManager(AbstractModule):
 
     def _index_chunks(self, chunks: List[Dict[str, Any]], chunk_ids: List[str]) -> Dict[str, Any]:
         """
-        Index chunks using configured indexers.
+        Index chunks using configured indexers concurrently.
 
         Args:
             chunks: List of chunk dictionaries
@@ -337,36 +337,80 @@ class IndexManager(AbstractModule):
             logger.error("No valid chunks created for indexing")
             return indexing_results
 
-        # Index with each configured indexer
-        for i, indexer in enumerate(self.indexers):
-            indexer_name = f"{type(indexer).__name__}_{i}"
+        # Run all indexers concurrently in a single event loop
+        async def run_all_indexers():
+            """Run all indexers concurrently"""
+            tasks = []
+            for i, indexer in enumerate(self.indexers):
+                indexer_name = f"{type(indexer).__name__}_{i}"
+                tasks.append(self._index_with_single_indexer(indexer, indexer_name, chunk_objects))
 
-            try:
-                logger.info(f"Indexing {len(chunk_objects)} chunks with {indexer_name}")
+            return await asyncio.gather(*tasks, return_exceptions=True)
 
-                # Handle async indexer calls
-                indexed_ids = asyncio.run(indexer.update_index(chunk_objects))
+        # Execute all indexers concurrently
+        results = asyncio.run(run_all_indexers())
 
-                indexing_results[indexer_name] = {
-                    "success": True,
-                    "indexed_count": len(indexed_ids) if indexed_ids else 0,
-                    "total_chunks": len(chunk_objects),
-                    "indexed_ids": indexed_ids or []
-                }
+        # Process results
+        for i, result in enumerate(results):
+            indexer_name = f"{type(self.indexers[i]).__name__}_{i}"
 
-                logger.info(f"Successfully indexed {len(indexed_ids) if indexed_ids else 0} chunks with {indexer_name}")
-
-            except Exception as e:
-                error_msg = f"Indexing failed with {indexer_name}: {str(e)}"
+            if isinstance(result, Exception):
+                error_msg = f"Indexing failed with {indexer_name}: {str(result)}"
                 logger.error(error_msg, exc_info=True)
                 indexing_results[indexer_name] = {
                     "success": False,
                     "error_message": error_msg,
                     "indexed_count": 0,
-                    "total_chunks": len(chunks)
+                    "total_chunks": len(chunk_objects)
                 }
+            else:
+                indexing_results[indexer_name] = result
+                if result["success"]:
+                    logger.info(f"Successfully indexed {result['indexed_count']} chunks with {indexer_name}")
 
         return indexing_results
+
+    async def _index_with_single_indexer(
+        self,
+        indexer,
+        indexer_name: str,
+        chunk_objects: List[Chunk]
+    ) -> Dict[str, Any]:
+        """
+        Index chunks with a single indexer.
+
+        This is a helper method that allows concurrent execution of multiple indexers.
+
+        Args:
+            indexer: The indexer instance
+            indexer_name: Name of the indexer for logging
+            chunk_objects: List of Chunk objects to index
+
+        Returns:
+            Dictionary with indexing result for this indexer
+        """
+        try:
+            logger.info(f"Indexing {len(chunk_objects)} chunks with {indexer_name}")
+
+            # Call the indexer's async update_index method
+            indexed_ids = await indexer.update_index(chunk_objects)
+
+            return {
+                "success": True,
+                "indexed_count": len(indexed_ids) if indexed_ids else 0,
+                "total_chunks": len(chunk_objects),
+                "indexed_ids": indexed_ids or []
+            }
+
+        except Exception as e:
+            error_msg = f"Indexing failed with {indexer_name}: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return {
+                "success": False,
+                "error_message": error_msg,
+                "indexed_count": 0,
+                "total_chunks": len(chunk_objects)
+            }
 
     def process_multiple_files(
         self,

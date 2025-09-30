@@ -28,7 +28,7 @@ class DenseRetriever(BaseRetriever):
     """Allowed search types"""
     
     def __init__(self, config: "DenseRetrieverConfig"):
-        self.config = config
+        super().__init__(config)
         # initialize embedding model
         if hasattr(config, 'index_config') and config.index_config is not None:
             if hasattr(config.index_config, 'embedding_config') and config.index_config.embedding_config is not None:

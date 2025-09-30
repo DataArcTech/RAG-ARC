@@ -6,13 +6,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from framwork.module import AbstractModule
+
 if TYPE_CHECKING:
     from config.core.file_management.parser_combinator_config import ParserCombinatorConfig
 
 logger = logging.getLogger(__name__)
 
 
-class ParserCombinator():
+class ParserCombinator(AbstractModule):
     """
     Standard document parser that directly delegates to encapsulation parsers.
 
