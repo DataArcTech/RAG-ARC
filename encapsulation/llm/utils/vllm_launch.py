@@ -3,12 +3,17 @@ import subprocess
 import sys
 from pathlib import Path
 import argparse
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 def launch_vllm_server(hf_model_path="weights/DotsOCR", num_gpus="0", gpu_memory_utilization=0.95, port=8001):
     # 1. 检查模型路径
     model_path = Path(hf_model_path).resolve()
     if not model_path.exists():
-        print(f"error: 模型路径不存在: {model_path}")
+        logger.info(f"error: 模型路径不存在: {model_path}")
         sys.exit(1)
 
     # 2. 设置环境变量
@@ -26,18 +31,18 @@ def launch_vllm_server(hf_model_path="weights/DotsOCR", num_gpus="0", gpu_memory
 
         inject_line = "from DotsOCR import modeling_dots_ocr_vllm"
         if inject_line not in vllm_content:
-            print("修改 vllm CLI 引入 DotsOCR 模型...")
+            logger.info("修改 vllm CLI 引入 DotsOCR 模型...")
             sed_cmd = f"sed -i '/^from vllm\\.entrypoints\\.cli\\.main import main$/a\\{inject_line}' {vllm_path}"
             subprocess.run(sed_cmd, shell=True, check=True)
         else:
-            print("vllm CLI 已包含 DotsOCR 模型")
+            logger.info("vllm CLI 已包含 DotsOCR 模型")
 
     except subprocess.CalledProcessError as e:
-        print(f"error: 获取 vllm 路径失败: {e}")
+        logger.info(f"error: 获取 vllm 路径失败: {e}")
         sys.exit(1)
 
     # 4. 启动 vllm server
-    print(" 正在启动 vLLM 服务...")
+    logger.info(" 正在启动 vLLM 服务...")
     cmd = [
         "vllm", "serve", str(model_path),
         "--tensor-parallel-size", "1",
@@ -51,7 +56,7 @@ def launch_vllm_server(hf_model_path="weights/DotsOCR", num_gpus="0", gpu_memory
     try:
         subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as e:
-        print(f"error: vLLM 启动失败: {e}")
+        logger.info(f"error: vLLM 启动失败: {e}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Launch vLLM server with dots_ocr model.")

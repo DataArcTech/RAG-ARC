@@ -11,9 +11,9 @@ from config.encapsulation.llm.chat.openai import OpenAIChatConfig
 from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBConfig
 from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
 from config.encapsulation.llm.rerank.qwen import QwenRerankConfig
-from config.core.query_rewriter_config import OpenAIQueryRewriterConfig
+from config.core.query_rewrite_config import LLMQueryRewriterConfig
 from config.core.retrieval.dense_config import DenseRetrieverConfig
-from config.core.reranker_config import Qwen3RerankerConfig
+from config.core.rerank_config import LLMRerankerConfig
 
 
 def main():
@@ -24,7 +24,7 @@ def main():
 
     # Create query rewriter configuration
     llm_config = OpenAIChatConfig()
-    rewriter_config = OpenAIQueryRewriterConfig(
+    rewriter_config = LLMQueryRewriterConfig(
         openai_llm_config=llm_config
     )
 
@@ -102,7 +102,7 @@ def main():
     try:
         # Create reranker configuration
         qwen_llm_config = QwenRerankConfig()
-        reranker_config = Qwen3RerankerConfig(
+        reranker_config = LLMRerankerConfig(
             qwen3_llm_config=qwen_llm_config
         )
 

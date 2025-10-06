@@ -1,5 +1,8 @@
 from .base import ChatLLMBase
-from typing import Dict, Any, List, Optional, Union, Tuple, AsyncGenerator
+from typing import Dict, Any, List, Optional, Union, Tuple, AsyncGenerator, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from config.encapsulation.llm.chat.openai import OpenAIChatConfig
 from encapsulation.llm.utils.openai_client import create_openai_sync_client, create_openai_async_client
 from encapsulation.llm.utils.huggingface_client import create_transformers_client
 import logging
@@ -34,7 +37,7 @@ class OpenAIChatLLM(ChatLLMBase):
         - max_retries: Automatic retry attempts
     """
 
-    def __init__(self, config):
+    def __init__(self, config: "OpenAIChatConfig"):
         """Initialize OpenAI Chat with loading method support"""
         super().__init__(config)
         # Cache config values to avoid repeated getattr calls

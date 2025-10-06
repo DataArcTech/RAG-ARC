@@ -98,7 +98,7 @@ class DotsOCRParser(AbstractParser):
                 bbox=bbox, fitz_preprocess=fitz_preprocess, **kwargs
             )
 
-        print(f"Parsing finished, results saved to {save_dir}")
+        logger.info(f"Parsing finished, results saved to {save_dir}")
 
         with open(os.path.join(output_dir, f"{base_filename}.jsonl"), 'w', encoding="utf-8") as w:
             for result in results:
@@ -139,7 +139,7 @@ class DotsOCRParser(AbstractParser):
     ) -> List[Dict[str, Any]]:
         """Parse a PDF file from binary data"""
 
-        print(f"Loading PDF: {filename}")
+        logger.info(f"Loading PDF: {filename}")
 
         # Create fitz document from binary data
         pdf_doc = fitz.open("pdf", file_data)
@@ -174,7 +174,7 @@ class DotsOCRParser(AbstractParser):
 
         # Use single thread for stability
         num_threads = min(total_pages, getattr(self.config, 'num_threads', 1))
-        print(f"Parsing PDF with {total_pages} pages using {num_threads} threads...")
+        logger.info(f"Parsing PDF with {total_pages} pages using {num_threads} threads...")
 
         results = []
         with ThreadPool(num_threads) as pool:
@@ -266,7 +266,7 @@ class DotsOCRParser(AbstractParser):
                 try:
                     image_with_layout = draw_layout_on_image(origin_image, cells)
                 except Exception as e:
-                    print(f"Error drawing layout on image: {e}")
+                    logger.info(f"Error drawing layout on image: {e}")
                     image_with_layout = origin_image
 
                 json_file_path = os.path.join(save_dir, f"{save_name}.json")

@@ -1,0 +1,63 @@
+{
+    "type": "rag_inference",
+    "query_rewrite_config": {
+        "type": "llm_query_rewriter",
+        "chat_llm_config": {
+            "type": "openai_chat",
+            "model_name": "gpt-4o-mini",
+            "openai_api_key": "${OPENAI_API_KEY}",
+            "openai_base_url": "${OPENAI_BASE_URL}"
+        }
+    },
+    "retrieval_config": {
+        "type": "multipath",
+        "retrievers": [
+            {
+                "type": "dense",
+                "index_config": {
+                    "type": "faiss",
+                    "index_path": "./data/unified_faiss_index",
+                    "metric": "cosine",
+                    "index_type": "flat",
+                    "normalize_L2": true,
+                    "embedding_config": {
+                        "type": "qwen_embedding",
+                        "model_name": "Qwen/Qwen3-Embedding-0.6B",
+                        "device": "cuda:0",
+                        "use_china_mirror": true,
+                        "cache_folder": "./models/Qwen"
+                    }
+                }
+            },
+            {
+                "type": "tantivy_bm25",
+                "index_config": {
+                    "type": "bm25_indexer",
+                    "index_path": "./data/unified_bm25_index"
+                }
+            }
+        ],
+        "fusion_method": "rrf",
+        "rrf_k": 60,
+        "weights": null,
+        "search_kwargs": {
+            "k": 5,
+            "with_score": true
+        }
+    },
+    "reranker_config": {
+        "type": "llm_reranker",
+        "rerank_llm_config": {
+            "type": "qwen_rerank",
+            "model_name": "Qwen/Qwen3-Reranker-0.6B",
+            "device": "cuda:1",
+            "use_china_mirror": true,
+            "cache_folder": "./models/Qwen"
+        }
+    },
+    "llm_config": {
+        "type": "openai_chat",
+        "openai_api_key": "${OPENAI_API_KEY}",
+        "openai_base_url": "${OPENAI_BASE_URL}"
+    }
+}

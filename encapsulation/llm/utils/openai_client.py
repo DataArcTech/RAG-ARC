@@ -2,10 +2,6 @@
 
 import openai
 import logging
-import os
-from dotenv import load_dotenv
-
-load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +20,8 @@ def create_openai_sync_client(config) -> openai.OpenAI:
         Exception: If client creation fails
     """
     # Extract OpenAI-specific config parameters
-    api_key = os.getenv('OPENAI_API_KEY')
-    base_url = os.getenv('OPENAI_BASE_URL')
+    api_key = config.openai_api_key
+    base_url = config.openai_base_url
     organization = getattr(config, 'organization', None)
     max_retries = getattr(config, 'max_retries', 3)
     timeout = getattr(config, 'timeout', 60.0)
@@ -59,8 +55,8 @@ def create_openai_async_client(config) -> openai.AsyncOpenAI:
         Exception: If client creation fails
     """
     # Extract OpenAI-specific config parameters (same as sync client)
-    api_key = os.getenv('OPENAI_API_KEY')
-    base_url = os.getenv('OPENAI_BASE_URL')
+    api_key = config.openai_api_key
+    base_url = config.openai_base_url
     organization = getattr(config, 'organization', None)
     max_retries = getattr(config, 'max_retries', 3)
     timeout = getattr(config, 'timeout', 30)

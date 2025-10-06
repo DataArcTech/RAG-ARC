@@ -12,10 +12,15 @@ Features:
 import json
 import re
 import os
+import logging
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 from collections import Counter
 import traceback
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -43,8 +48,8 @@ class OutputCleaner:
     def clean_list_data(self, data: List[Dict], case_id: int) -> CleanedData:
         """Cleans list-type data"""
         
-        print(f"🔧 Cleaning List data - Case {case_id}")
-        print(f"  Original items: {len(data)}")
+        logger.info(f"🔧 Cleaning List data - Case {case_id}")
+        logger.info(f"  Original items: {len(data)}")
         
         cleaned_data = []
         operations = {
@@ -65,7 +70,7 @@ class OutputCleaner:
                 
                 # Check bbox length - core logic
                 if isinstance(bbox, list) and len(bbox) == 3:
-                    print(f"  ⚠️ Item {i}: bbox has only 3 coordinates. Removing bbox, keeping category and text.")
+                    logger.info(f"  ⚠️ Item {i}: bbox has only 3 coordinates. Removing bbox, keeping category and text.")
                     # Keep only category and text, ensuring order is preserved
                     new_item = {}
                     if 'category' in item:
@@ -83,7 +88,7 @@ class OutputCleaner:
                     cleaned_data.append(item.copy())
                     continue
                 else:
-                    print(f"  ❌ Item {i}: Abnormal bbox format, skipping.")
+                    logger.info(f"  ❌ Item {i}: Abnormal bbox format, skipping.")
                     operations['removed_items'] += 1
                     continue
             else:
@@ -95,7 +100,7 @@ class OutputCleaner:
                     operations['removed_items'] += 1
         
         operations['final_count'] = len(cleaned_data)
-        print(f"  ✅ Cleaning complete: {len(cleaned_data)} items, {operations['bbox_fixes']} bbox fixes, {operations['removed_items']} items removed")
+        logger.info(f"  ✅ Cleaning complete: {len(cleaned_data)} items, {operations['bbox_fixes']} bbox fixes, {operations['removed_items']} items removed")
         
         return CleanedData(
             case_id=case_id,
@@ -109,8 +114,8 @@ class OutputCleaner:
     def clean_string_data(self, data_str: str, case_id: int) -> CleanedData:
         """Cleans string-type data"""
         
-        print(f"🔧 Cleaning String data - Case {case_id}")
-        print(f"  Original length: {len(data_str):,}")
+        logger.info(f"🔧 Cleaning String data - Case {case_id}")
+        logger.info(f"  Original length: {len(data_str):,}")
         
         operations = {
             'type': 'str',
@@ -144,7 +149,7 @@ class OutputCleaner:
             
             if final_data is not None:
                 operations['final_objects'] = len(final_data)
-                print(f"  ✅ Cleaning complete: {len(final_data)} objects")
+                logger.info(f"  ✅ Cleaning complete: {len(final_data)} objects")
                 
                 return CleanedData(
                     case_id=case_id,
@@ -158,7 +163,7 @@ class OutputCleaner:
                 raise Exception("Could not parse the cleaned data")
                 
         except Exception as e:
-            print(f"  ❌ Cleaning failed: {e}")
+            logger.info(f"  ❌ Cleaning failed: {e}")
             return CleanedData(
                 case_id=case_id,
                 original_type='str',
@@ -181,7 +186,7 @@ class OutputCleaner:
         text = self.missing_delimiter_pattern.sub(replace_delimiter, text)
         
         if fixes > 0:
-            print(f"    ✅ Fixed {fixes} missing delimiters")
+            logger.info(f"    ✅ Fixed {fixes} missing delimiters")
         
         return text, fixes
     
@@ -200,7 +205,7 @@ class OutputCleaner:
             
             # If there is only one dict object, do not truncate to avoid deleting the only object
             if bbox_count <= 1:
-                print(f"    ⚠️ Only {bbox_count} dict objects found, skipping truncation to avoid deleting all content")
+                logger.info(f"    ⚠️ Only {bbox_count} dict objects found, skipping truncation to avoid deleting all content")
                 return text, False
             
             # Find the position of the last '{"bbox":'
@@ -214,7 +219,7 @@ class OutputCleaner:
                 if truncated_text.endswith(','):
                     truncated_text = truncated_text[:-1]
                 
-                print(f"    ✂️ Truncated the last incomplete element, length reduced from {len(text):,} to {len(truncated_text):,}")
+                logger.info(f"    ✂️ Truncated the last incomplete element, length reduced from {len(text):,} to {len(truncated_text):,}")
                 return truncated_text, True
         
         return text, False
@@ -228,7 +233,7 @@ class OutputCleaner:
         if not dict_matches:
             return text, 0
         
-        print(f"    📊 Found {len(dict_matches)} dict objects")
+        logger.info(f"    📊 Found {len(dict_matches)} dict objects")
         
         # Deduplication while preserving order: only keep the first occurrence of a dict
         unique_dicts = []
@@ -247,10 +252,10 @@ class OutputCleaner:
         if total_duplicates > 0:
             # Reconstruct the JSON array, preserving the original order
             new_text = '[' + ', '.join(unique_dicts) + ']'
-            print(f"    ✅ Removed {total_duplicates} duplicate dicts, keeping {len(unique_dicts)} unique dicts (order preserved)")
+            logger.info(f"    ✅ Removed {total_duplicates} duplicate dicts, keeping {len(unique_dicts)} unique dicts (order preserved)")
             return new_text, total_duplicates
         else:
-            print(f"    ✅ No duplicate dict objects found")
+            logger.info(f"    ✅ No duplicate dict objects found")
             return text, 0
     
     def _ensure_json_format(self, text: str) -> str:
@@ -276,7 +281,7 @@ class OutputCleaner:
             if isinstance(data, list):
                 return data
         except json.JSONDecodeError as e:
-            print(f"    ❌ JSON parsing failed: {e}")
+            logger.info(f"    ❌ JSON parsing failed: {e}")
             
             # fallback1: Extract valid dict objects
             valid_dicts = []
@@ -290,7 +295,7 @@ class OutputCleaner:
                     continue
             
             if valid_dicts:
-                print(f"    ✅ Extracted {len(valid_dicts)} valid dicts")
+                logger.info(f"    ✅ Extracted {len(valid_dicts)} valid dicts")
                 return valid_dicts
             
             # fallback2: Special handling for a single incomplete dict
@@ -337,21 +342,21 @@ class OutputCleaner:
             if text_content:
                 fixed_dict["text"] = text_content
             
-            print(f"    🔧 Special fix: single incomplete dict → {fixed_dict}")
+            logger.info(f"    🔧 Special fix: single incomplete dict → {fixed_dict}")
             return [fixed_dict]
             
         except Exception as e:
-            print(f"    ❌ Special fix failed: {e}")
+            logger.info(f"    ❌ Special fix failed: {e}")
             return None
     
     def remove_duplicate_category_text_pairs_and_bbox(self, data_list: List[dict], case_id: int) -> List[dict]:
         """Removes duplicate category-text pairs and duplicate bboxes"""
         
         if not data_list or len(data_list) <= 1:
-            print(f"    📊 Data length {len(data_list)} <= 1, skipping deduplication check")
+            logger.info(f"    📊 Data length {len(data_list)} <= 1, skipping deduplication check")
             return data_list
         
-        print(f"    📊 Original data length: {len(data_list)}")
+        logger.info(f"    📊 Original data length: {len(data_list)}")
         
         # 1. Count occurrences and positions of each category-text pair
         category_text_pairs = {}
@@ -384,8 +389,8 @@ class OutputCleaner:
                 positions_to_remove = positions[1:]
                 duplicates_to_remove.update(positions_to_remove)
                 
-                print(f"    🔍 Found duplicate category-text pair: category='{category}', first 50 chars of text='{text[:50]}...'")
-                print(f"        Count: {len(positions)}, removing at positions: {positions_to_remove}")
+                logger.info(f"    🔍 Found duplicate category-text pair: category='{category}', first 50 chars of text='{text[:50]}...'")
+                logger.info(f"        Count: {len(positions)}, removing at positions: {positions_to_remove}")
         
         # 3b. Process bboxes that appear 2 or more times
         for bbox_key, positions in bbox_pairs.items():
@@ -394,11 +399,11 @@ class OutputCleaner:
                 positions_to_remove = positions[1:]
                 duplicates_to_remove.update(positions_to_remove)
                 
-                print(f"    🔍 Found duplicate bbox: {list(bbox_key)}")
-                print(f"        Count: {len(positions)}, removing at positions: {positions_to_remove}")
+                logger.info(f"    🔍 Found duplicate bbox: {list(bbox_key)}")
+                logger.info(f"        Count: {len(positions)}, removing at positions: {positions_to_remove}")
         
         if not duplicates_to_remove:
-            print(f"    ✅ No category-text pairs or bboxes found exceeding the duplication threshold")
+            logger.info(f"    ✅ No category-text pairs or bboxes found exceeding the duplication threshold")
             return data_list
         
         # 4. Remove duplicate items from the original data (preserving order)
@@ -410,8 +415,8 @@ class OutputCleaner:
             else:
                 removed_count += 1
         
-        print(f"    ✅ Deduplication complete: Removed {removed_count} duplicate items")
-        print(f"    📊 Cleaned data length: {len(cleaned_data)}")
+        logger.info(f"    ✅ Deduplication complete: Removed {removed_count} duplicate items")
+        logger.info(f"    📊 Cleaned data length: {len(cleaned_data)}")
         
         return cleaned_data
 
@@ -431,13 +436,13 @@ class OutputCleaner:
                 result.cleaned_data = deduplicated_data
             return result.cleaned_data
         except Exception as e:
-            print(f"❌ Case cleaning failed: {e}")
+            logger.info(f"❌ Case cleaning failed: {e}")
             return model_output
     
     def clean_all_data(self, jsonl_path: str) -> List[CleanedData]:
         """Cleans all data from a JSONL file"""
         
-        print(f"🚀 Starting to clean JSONL file: {jsonl_path}")
+        logger.info(f"🚀 Starting to clean JSONL file: {jsonl_path}")
         
         with open(jsonl_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
@@ -450,21 +455,21 @@ class OutputCleaner:
                     predict_field = data.get('predict')
                     case_id = i + 1
                     
-                    print(f"\n{'='*50}")
-                    print(f"🎯 Cleaning Case {case_id}")
-                    print(f"{'='*50}")
+                    logger.info(f"\n{'='*50}")
+                    logger.info(f"🎯 Cleaning Case {case_id}")
+                    logger.info(f"{'='*50}")
                     
                     # Select cleaning method based on data type
                     if isinstance(predict_field, list):
-                        print("📊 Data type: List")
+                        logger.info("📊 Data type: List")
                         result = self.clean_list_data(predict_field, case_id)
                     else:
-                        print("📊 Data type: String")
+                        logger.info("📊 Data type: String")
                         result = self.clean_string_data(str(predict_field), case_id)
                     
                     # Add deduplication step: remove duplicate category-text pairs and bboxes
                     if result and hasattr(result, 'success') and result.success and result.cleaned_data:
-                        print("🔄 Checking for and removing duplicate category-text pairs and bboxes...")
+                        logger.info("🔄 Checking for and removing duplicate category-text pairs and bboxes...")
                         original_data = result.cleaned_data
                         deduplicated_data = self.remove_duplicate_category_text_pairs_and_bbox(original_data, case_id)
                         # Update the cleaned_data in the CleanedData object
@@ -475,21 +480,21 @@ class OutputCleaner:
                     self.cleaned_results.append(result)
                     
                 except Exception as e:
-                    print(f"❌ Case {i+1} cleaning failed: {e}")
-                    traceback.print_exc()
+                    logger.info(f"❌ Case {i+1} cleaning failed: {e}")
+                    traceback.logger.info_exc()
         
         save_path = jsonl_path.replace('.jsonl', '_filtered.jsonl')
         with open(save_path, 'w') as w:
             for data in datas:
                 w.write(json.dumps(data, ensure_ascii=False) + '\n')
-        print(f"✅ Saved cleaned data to: {save_path}")
+        logger.info(f"✅ Saved cleaned data to: {save_path}")
 
         return self.cleaned_results
     
     def save_cleaned_data(self, output_dir: str):
         """Saves the cleaned data"""
         
-        print(f"\n💾 Saving cleaned data to: {output_dir}")
+        logger.info(f"\n💾 Saving cleaned data to: {output_dir}")
         os.makedirs(output_dir, exist_ok=True)
         
         # 1. Save cleaned data for each case
@@ -501,7 +506,7 @@ class OutputCleaner:
             with open(case_filepath, 'w', encoding='utf-8') as f:
                 json.dump(result.cleaned_data, f, ensure_ascii=False, indent=2)
             
-            print(f"  ✅ Case {result.case_id}: {len(result.cleaned_data)} objects → {case_filename}")
+            logger.info(f"  ✅ Case {result.case_id}: {len(result.cleaned_data)} objects → {case_filename}")
         
         # 2. Save all cleaned data to a single file
         all_cleaned_data = []
@@ -520,7 +525,7 @@ class OutputCleaner:
         with open(all_data_filepath, 'w', encoding='utf-8') as f:
             json.dump(all_cleaned_data, f, ensure_ascii=False, indent=2)
         
-        print(f"  📁 All data: {len(all_cleaned_data)} cases → all_cleaned_data.json")
+        logger.info(f"  📁 All data: {len(all_cleaned_data)} cases → all_cleaned_data.json")
         
         # 3. Generate a cleaning report
         self._generate_cleaning_report(output_dir)
@@ -591,10 +596,10 @@ class OutputCleaner:
         with open(report_filepath, 'w', encoding='utf-8') as f:
             f.write('\n'.join(report))
         
-        print(f"  📋 Cleaning report: cleaning_report.txt")
+        logger.info(f"  📋 Cleaning report: cleaning_report.txt")
         
-        # Also print to console
-        print(f"\n{chr(10).join(report)}")
+        # Also logger.info to console
+        logger.info(f"\n{chr(10).join(report)}")
 
 
 def main():
@@ -615,8 +620,8 @@ def main():
     # Save the cleaned data
     cleaner.save_cleaned_data(output_dir)
     
-    print(f"\n🎉 Data cleaning complete!")
-    print(f"📁 Cleaned data saved in: {output_dir}")
+    logger.info(f"\n🎉 Data cleaning complete!")
+    logger.info(f"📁 Cleaned data saved in: {output_dir}")
 
 
 if __name__ == "__main__":

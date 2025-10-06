@@ -62,7 +62,7 @@ def main():
                 print(f"    Content: {doc.content[:60]}...")
 
         except Exception as e:
-            print(f"Document reranking test failed: {e}")
+            print(f"Chunk reranking test failed: {e}")
 
         # Test edge cases
         print(f"\n--- Edge Cases Test ---")

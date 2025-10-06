@@ -2,11 +2,8 @@ from typing import List, Optional, Dict, Any, TYPE_CHECKING
 import logging
 import os
 from pathlib import Path
-from dotenv import load_dotenv
 
-load_dotenv()
-
-from framwork.module import AbstractModule
+from framework.module import AbstractModule
 
 if TYPE_CHECKING:
     from config.core.file_management.parser_combinator_config import ParserCombinatorConfig
@@ -93,7 +90,7 @@ class ParserCombinator(AbstractModule):
 
         # Try DotsOCR parser
         try:
-            from config.encapsulation.parser.dots_ocr import DotsOCRConfig
+            from config.core.file_management.parser.dots_ocr import DotsOCRConfig
             # Build dots_ocr parser using default config
             dots_ocr_config = DotsOCRConfig()
             dots_ocr_parser = dots_ocr_config.build()
@@ -105,7 +102,7 @@ class ParserCombinator(AbstractModule):
 
         # Try Native parser
         try:
-            from config.encapsulation.parser.native import NativeParserConfig
+            from config.core.file_management.parser.native import NativeParserConfig
             # Build native parser using default config
             native_config = NativeParserConfig()
             native_parser = native_config.build()

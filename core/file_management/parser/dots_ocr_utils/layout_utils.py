@@ -1,9 +1,14 @@
 from PIL import Image
 from typing import Dict, List
+import logging
 
 import fitz
 from io import BytesIO
 import json
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 from .image_utils import smart_resize
 from .consts import MIN_PIXELS, MAX_PIXELS
@@ -217,7 +222,7 @@ def post_process_output(response, prompt_mode, origin_image, input_image, min_pi
         )
         return cells, False
     except Exception as e:
-        print(f"cells post process error: {e}, when using {prompt_mode}")
+        logger.info(f"cells post process error: {e}, when using {prompt_mode}")
         json_load_failed = True
 
     if json_load_failed:

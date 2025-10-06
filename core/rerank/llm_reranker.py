@@ -1,6 +1,6 @@
 from typing import Dict, Any, List, TYPE_CHECKING
 from .base import AbstractReranker
-from encapsulation.data_model.schema import Document
+from encapsulation.data_model.schema import Chunk
 
 import logging
 
@@ -39,33 +39,33 @@ class LLMReranker(AbstractReranker):
     def rerank(
         self,
         query: str,
-        documents: List[Document],
+        chunks: List[Chunk],
         **kwargs: Any
-    ) -> List[Document]:
+    ) -> List[Chunk]:
         """
-        Rerank documents using any reranking LLM.
+        Rerank chunks using any reranking LLM.
 
         All configuration is handled by the encapsulation layer. Core layer
-        focuses on document structure and metadata management.
+        focuses on chunk structure and metadata management.
 
         Args:
-            query: User query to rank documents against
-            documents: List of Document objects from retrieval step
+            query: User query to rank chunks against
+            chunks: List of Chunk objects from retrieval step
             **kwargs: Parameters passed through to encapsulation layer
 
         Returns:
-            List of Document objects reordered by relevance, with rerank scores
+            List of Chunk objects reordered by relevance, with rerank scores
             added to metadata
 
         Raises:
-            ValueError: If query is empty or documents list is invalid
+            ValueError: If query is empty or chunks list is invalid
             RuntimeError: If reranking process fails
         """
         if not query or not query.strip():
             raise ValueError("Query cannot be empty")
 
-        if not documents:
-            logger.warning("Empty documents list provided to reranker")
+        if not chunks:
+            logger.warning("Empty chunks list provided to reranker")
             return []
 
         try:
@@ -73,36 +73,37 @@ class LLMReranker(AbstractReranker):
             # Encapsulation layer handles all configuration (top_k, batch_size, instruction)
             ranked_results = self.rerank_llm.rerank(
                 query=query,
-                documents=documents,
+                chunks=chunks,
                 **kwargs  # Pass through all parameters to encapsulation layer
             )
 
-            # Convert results back to Document objects with metadata
+            # Convert results back to Chunk objects with metadata
             # ranked_results is List[Tuple[int, float]] from encapsulation layer
-            reranked_documents = []
-            for doc_idx, score in ranked_results:
-                doc = documents[doc_idx]
+            reranked_chunks = []
+            for chunk_idx, score in ranked_results:
+                chunk = chunks[chunk_idx]
                 # Preserve original metadata and add rerank score
-                new_metadata = doc.metadata.copy()
+                new_metadata = chunk.metadata.copy()
                 new_metadata["rerank_score"] = score
                 new_metadata["rerank_method"] = self.rerank_llm.get_model_info().get("provider", "llm")
 
-                # Create new Document with updated metadata
-                reranked_doc = Document(
-                    content=doc.content,
+                # Create new Chunk with updated metadata
+                reranked_chunk = Chunk(
+                    content=chunk.content,
                     metadata=new_metadata,
-                    id=doc.id
+                    id=chunk.id,
+                    graph=chunk.graph
                 )
-                reranked_documents.append(reranked_doc)
+                reranked_chunks.append(reranked_chunk)
 
-            logger.info(f"Reranked {len(documents)} documents, returned {len(reranked_documents)}")
-            return reranked_documents
+            logger.info(f"Reranked {len(chunks)} chunks, returned {len(reranked_chunks)}")
+            return reranked_chunks
 
         except Exception as e:
-            logger.error(f"Document reranking failed: {e}")
-            # Return original documents as fallback
-            logger.warning("Using original document order as fallback")
-            return documents
+            logger.error(f"Chunk reranking failed: {e}")
+            # Return original chunks as fallback
+            logger.warning("Using original chunk order as fallback")
+            return chunks
 
     def get_reranker_info(self) -> Dict[str, Any]:
         """

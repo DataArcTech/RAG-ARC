@@ -90,7 +90,7 @@ class NativeParser(AbstractParser):
             save_dir = os.path.join(output_dir, base_filename)
             os.makedirs(save_dir, exist_ok=True)
 
-            print(f"Parsing DOCX: {base_filename}")
+            logger.info(f"Parsing DOCX: {base_filename}")
 
             # Parse DOCX content from binary data
             doc = Document(io.BytesIO(file_data))
@@ -162,7 +162,7 @@ class NativeParser(AbstractParser):
             save_dir = os.path.join(output_dir, base_filename)
             os.makedirs(save_dir, exist_ok=True)
 
-            print(f"Parsing Excel: {base_filename}")
+            logger.info(f"Parsing Excel: {base_filename}")
 
             # Read all sheets from binary data
             if file_ext == '.csv':
@@ -234,7 +234,7 @@ class NativeParser(AbstractParser):
             save_dir = os.path.join(output_dir, base_filename)
             os.makedirs(save_dir, exist_ok=True)
 
-            print(f"Parsing PowerPoint: {base_filename}")
+            logger.info(f"Parsing PowerPoint: {base_filename}")
 
             prs = Presentation(io.BytesIO(file_data))
             slides_data = []
@@ -308,7 +308,7 @@ class NativeParser(AbstractParser):
             save_dir = os.path.join(output_dir, base_filename)
             os.makedirs(save_dir, exist_ok=True)
 
-            print(f"Parsing HTML: {base_filename}")
+            logger.info(f"Parsing HTML: {base_filename}")
 
             # Parse HTML
             soup = BeautifulSoup(html_content, 'html.parser')

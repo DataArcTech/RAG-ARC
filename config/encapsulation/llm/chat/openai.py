@@ -19,8 +19,8 @@ class OpenAIChatConfig(AbstractConfig):
     temperature: float = 0.7  # Response creativity (0.0-2.0, higher = more creative)
 
     # API configuration - loaded from environment variables
-    # OPENAI_API_KEY: API key for authentication
-    # OPENAI_BASE_URL: API endpoint URL (optional, defaults to OpenAI)
+    openai_api_key: str # API key for authentication
+    openai_base_url: str # API endpoint URL (optional, defaults to OpenAI)
     organization: Optional[str] = None  # OpenAI organization ID (optional)
 
     # Connection configuration

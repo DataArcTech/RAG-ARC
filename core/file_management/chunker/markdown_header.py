@@ -48,8 +48,8 @@ class MarkdownHeaderChunker(AbstractChunker):
         >>> chunker = MarkdownHeaderChunker(config=config)
         >>> chunks = chunker.chunk_text(markdown_content)
         >>> for chunk in chunks:
-        ...     print(f"Header: {chunk['metadata']['header']}")
-        ...     print(f"Content: {chunk['content']}")
+        ...     logger.info(f"Header: {chunk['metadata']['header']}")
+        ...     logger.info(f"Content: {chunk['content']}")
 
     Header strategies:
         - Top-level only: ["#"] - Split only on H1 headers
@@ -219,7 +219,7 @@ class MarkdownHeaderChunker(AbstractChunker):
 
         for line in lines:
             stripped_line = line.strip()
-            stripped_line = "".join(filter(str.isprintable, stripped_line))
+            stripped_line = "".join(filter(str.islogger.infoable, stripped_line))
 
             # Code block detection
             if not in_code_block:

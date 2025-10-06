@@ -5,7 +5,7 @@ import logging
 from framework.module import AbstractModule
 
 if TYPE_CHECKING:
-    from encapsulation.data_model.schema import Document
+    from encapsulation.data_model.schema import Chunk
 
 logger = logging.getLogger(__name__)
 
@@ -21,19 +21,19 @@ class RerankLLMBase(AbstractModule):
     def rerank(
         self,
         query: str,
-        documents: List['Document'],
+        chunks: List['Chunk'],
         top_k: Optional[int] = None
     ) -> List[Tuple[int, float]]:
         """
-        Document reranking
+        Chunk reranking
 
         Args:
             query: Query text
-            documents: List of Document objects
+            chunks: List of Chunk objects
             top_k: Return top k results
 
         Returns:
-            List of (document_index, score) tuples sorted by score
+            List of (chunk_index, score) tuples sorted by score
         """
         pass
 

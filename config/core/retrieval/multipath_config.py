@@ -1,9 +1,14 @@
 from typing import Literal, List, Optional, Any, Union, Annotated, Dict
 from pydantic import Field, ConfigDict
+import logging
 from config.core.retrieval.dense_config import DenseRetrieverConfig
 from config.core.retrieval.tantivy_bm25_config import TantivyBM25RetrieverConfig
 from core.retrieval.multipath import MultiPathRetriever
 from framework.config import AbstractConfig
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 
 class MultiPathRetrieverConfig(AbstractConfig):
@@ -42,9 +47,11 @@ class MultiPathRetrieverConfig(AbstractConfig):
         """Build the MultiPathRetriever instance"""
         built_retrievers = []
         for idx, retriever_config in enumerate(self.retrievers):
+            logger.info(f"Building retriever {idx} of type {retriever_config.type}...")
             if not hasattr(retriever_config, 'build'):
                 raise TypeError(f"Retriever config at position {idx} does not provide a build() method")
             built_retrievers.append(retriever_config.build())
+            logger.info(f"Retriever {idx} built successfully")
 
         self.built_retrievers = built_retrievers
         

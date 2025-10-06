@@ -1,4 +1,9 @@
 import fitz
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 import numpy as np
 import enum
 from pydantic import BaseModel, Field
@@ -49,7 +54,7 @@ def load_images_from_pdf(pdf_file, dpi=200, start_page_id=0, end_page_id=None) -
             else pdf_page_num - 1
         )
         if end_page_id > pdf_page_num - 1:
-            print('end_page_id is out of range, use images length')
+            logger.info('end_page_id is out of range, use images length')
             end_page_id = pdf_page_num - 1
 
         for index in range(0, doc.page_count):

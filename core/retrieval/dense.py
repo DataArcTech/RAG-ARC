@@ -29,14 +29,20 @@ class DenseRetriever(BaseRetriever):
     
     def __init__(self, config: "DenseRetrieverConfig"):
         super().__init__(config)
+        logger.info("DenseRetriever: Initializing embedding model...")
         # initialize embedding model
         if hasattr(config, 'index_config') and config.index_config is not None:
             if hasattr(config.index_config, 'embedding_config') and config.index_config.embedding_config is not None:
                 self.embedding = config.index_config.embedding_config.build()
+        logger.info("DenseRetriever: Embedding model initialized")
 
+        logger.info("DenseRetriever: Building index...")
         self._index = self.config.index_config.build()
+        logger.info("DenseRetriever: Index built, loading existing index...")
         self._load_existing_index()
+        logger.info("DenseRetriever: Index loaded, ensuring initialization...")
         self._ensure_index_initialized()
+        logger.info("DenseRetriever: Initialization complete")
 
     def _load_existing_index(self) -> None:
         """Try to load an existing index"""

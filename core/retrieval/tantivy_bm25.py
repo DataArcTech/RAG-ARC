@@ -59,9 +59,13 @@ class TantivyBM25Retriever(BaseRetriever):
         Args:
             config: TantivyBM25RetrieverConfig instance
         """
+        logger.info("TantivyBM25Retriever: Initializing...")
         self.config = config
+        logger.info("TantivyBM25Retriever: Building index...")
         self._index = self.config.index_config.build()
+        logger.info("TantivyBM25Retriever: Index built, loading existing index...")
         self._load_existing_index()
+        logger.info("TantivyBM25Retriever: Index loaded successfully")
 
         # Runtime instance variables
         self.searcher = None
