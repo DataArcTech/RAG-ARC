@@ -1,7 +1,7 @@
 """Configuration for ChunkStorage (Core Layer)"""
 
 from framework.config import AbstractConfig
-from core.file_management.storage.chunk_storage import ChunkStorage
+from core.file_management.storage.chunk import ChunkStorage
 from config.encapsulation.database.file_db.local_config import LocalDBConfig
 from config.encapsulation.database.relational_db.postgresql_config import PostgreSQLConfig
 from typing import Literal

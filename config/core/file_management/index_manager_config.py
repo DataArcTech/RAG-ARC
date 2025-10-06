@@ -2,7 +2,7 @@ from typing import List, Union, Annotated, Literal
 from pydantic import Field
 
 from framework.config import AbstractConfig
-from config.core.file_management.parser_combinator_config import ParserCobinatorConfig
+from config.core.file_management.parser_combinator_config import ParserCombinatorConfig
 from config.core.file_management.chunker.chunker_config import (
     TokenChunkerConfig,
     RecursiveChunkerConfig,
@@ -11,6 +11,7 @@ from config.core.file_management.chunker.chunker_config import (
 )
 from config.core.file_management.indexing.faiss_indexing_config import FaissIndexerConfig
 from config.core.file_management.indexing.bm25_indexing_config import BM25IndexerConfig
+from config.core.file_management.indexing.graph_indexing.networkx_indexing_config import NetworkXGraphIndexerConfig
 
 from core.file_management.index_manager import IndexManager
 
@@ -19,8 +20,8 @@ class IndexManagerConfig(AbstractConfig):
     type: Literal["index_manager"] = "index_manager"
 
     # Parser configuration
-    parser_config: ParserCobinatorConfig = Field(
-        default_factory=lambda: ParserCobinatorConfig(),
+    parser_config: ParserCombinatorConfig = Field(
+        default_factory=lambda: ParserCombinatorConfig(),
         description="Parser configuration for content parsing"
     )
 
@@ -35,7 +36,7 @@ class IndexManagerConfig(AbstractConfig):
 
     # Indexer configurations (optional, can be empty list if no indexing needed)
     indexer_configs: List[Annotated[
-        Union[FaissIndexerConfig, BM25IndexerConfig],
+        Union[FaissIndexerConfig, BM25IndexerConfig, NetworkXGraphIndexerConfig],
         Field(discriminator="type")
     ]] = Field(
         default_factory=list,

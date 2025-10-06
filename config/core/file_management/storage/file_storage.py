@@ -1,7 +1,7 @@
 """Configuration for FileStorage (Core Layer)"""
 
 from framework.config import AbstractConfig
-from core.file_management.storage.file_storage import FileStorage
+from core.file_management.storage.file import FileStorage
 from config.encapsulation.database.file_db.local_config import LocalDBConfig
 from config.encapsulation.database.relational_db.postgresql_config import PostgreSQLConfig
 from typing import Literal

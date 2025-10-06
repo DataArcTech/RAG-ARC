@@ -1,7 +1,7 @@
 """Configuration for ParsedContentStorage (Core Layer)"""
 
 from framework.config import AbstractConfig
-from core.file_management.storage.parsed_content_storage import ParsedContentStorage
+from core.file_management.storage.parsed_content import ParsedContentStorage
 from config.encapsulation.database.file_db.local_config import LocalDBConfig
 from config.encapsulation.database.relational_db.postgresql_config import PostgreSQLConfig
 from typing import Literal

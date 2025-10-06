@@ -18,8 +18,8 @@ class OpenAIEmbeddingConfig(AbstractConfig):
     embedding_dimensions: Optional[int] = None  # Custom embedding dimensions (only for supported models like text-embedding-3-*)
 
     # API configuration - loaded from environment variables
-    OPENAI_API_KEY: str # API key for authentication
-    OPENAI_BASE_URL: str # API endpoint URL (optional, defaults to OpenAI)
+    openai_api_key: str # API key for authentication
+    openai_base_url: str # API endpoint URL (optional, defaults to OpenAI)
     organization: Optional[str] = None  # OpenAI organization ID (optional)
 
     # Connection configuration

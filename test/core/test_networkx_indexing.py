@@ -33,11 +33,15 @@ async def test_networkx_indexing():
         # 1. Configure LLM for graph extraction
         llm_config = OpenAIChatConfig(
             model_name="gpt-4o-mini",
+            openai_api_key=os.getenv("OPENAI_API_KEY", ""),
+            openai_base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
         )
         
         # 2. Configure embedding model for NetworkX
         embedding_config = OpenAIEmbeddingConfig(
             model_name="text-embedding-3-small",
+            openai_api_key=os.getenv("OPENAI_API_KEY", ""),
+            openai_base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
         )
         
         # 3. Configure GraphExtractor

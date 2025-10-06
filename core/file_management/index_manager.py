@@ -1,12 +1,14 @@
 import logging
 import json
 import asyncio
-from typing import List, Dict, Any
+from typing import List, Dict, Any, TYPE_CHECKING
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from framework.module import AbstractModule
 from encapsulation.data_model.schema import Chunk
-from config.core.file_management.index_manager_config import IndexManagerConfig
+
+if TYPE_CHECKING:
+    from config.core.file_management.index_manager_config import IndexManagerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -18,14 +20,16 @@ class IndexManager(AbstractModule):
     2. Parses the file using StandardParser
     3. Chunks the parsed content using configured chunker
     4. Indexes the chunks using configured indexers
-    5. Stores parsed content and chunks back to FileStorage
+    5. Stores parsed content and chunks back to storage modules
     """
 
-    def __init__(self, config: IndexManagerConfig, file_storage=None):
+    def __init__(self, config: "IndexManagerConfig", file_storage=None, parsed_content_storage=None, chunk_storage=None):
         super().__init__(config)
 
-        # Optional file_storage for async index_file method
+        # Optional storage instances for async index_file method
         self.file_storage = file_storage
+        self.parsed_content_storage = parsed_content_storage
+        self.chunk_storage = chunk_storage
 
         # Build parser
         self.parser = self.config.parser_config.build()
@@ -60,13 +64,17 @@ class IndexManager(AbstractModule):
             None,
             self.process_file,
             file_id,
-            self.file_storage
+            self.file_storage,
+            self.parsed_content_storage,
+            self.chunk_storage
         )
 
     def process_file(
         self,
         file_id: str,
         file_storage,
+        parsed_content_storage,
+        chunk_storage,
         **kwargs: Any
     ) -> Dict[str, Any]:
         """
@@ -74,7 +82,9 @@ class IndexManager(AbstractModule):
 
         Args:
             file_id: ID of the file to process
-            file_storage: FileStorage instance to retrieve file content and store results
+            file_storage: FileStorage instance to retrieve file content
+            parsed_content_storage: ParsedContentStorage instance to store parsed content
+            chunk_storage: ChunkStorage instance to store chunks
             **kwargs: Additional arguments passed to parser, chunker, and indexers
 
         Returns:
@@ -175,7 +185,7 @@ class IndexManager(AbstractModule):
             # Convert parsed text to bytes for storage
             parsed_data = parsed_text.encode('utf-8')
 
-            parsed_content_id = file_storage.store_parsed_content(
+            parsed_content_id = parsed_content_storage.store_parsed_content(
                 source_file_id=file_id,
                 parser_type=parser_type_name,
                 parsed_data=parsed_data,
@@ -219,7 +229,7 @@ class IndexManager(AbstractModule):
                 # Convert chunk to JSON bytes for storage
                 chunk_data = json.dumps(chunk, ensure_ascii=False).encode('utf-8')
 
-                chunk_id = file_storage.store_chunk(
+                chunk_id = chunk_storage.store_chunk(
                     source_parsed_content_id=parsed_content_id,
                     chunker_type=chunker_info["strategy"],
                     chunk_data=chunk_data,

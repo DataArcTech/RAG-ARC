@@ -12,15 +12,14 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 # Import required modules
-from core.file_management.index_manager import IndexManager
 from config.core.file_management.index_manager_config import IndexManagerConfig
-from core.file_management.file_storage import FileStorage
-from config.core.file_management.file_storage_config import FileStorageConfig
-from config.core.file_management.file_storage_config import FileStorageConfig
+from config.core.file_management.storage.file_storage import FileStorageConfig
+from config.core.file_management.storage.parsed_content_storage import ParsedContentStorageConfig
+from config.core.file_management.storage.chunk_storage import ChunkStorageConfig
 from config.encapsulation.database.file_db.local_config import LocalDBConfig
 from config.encapsulation.database.relational_db.postgresql_config import PostgreSQLConfig
 
-from config.core.file_management.parser_combinator_config import ParserCobinatorConfig
+from config.core.file_management.parser_combinator_config import ParserCombinatorConfig
 from config.core.file_management.chunker.chunker_config import TokenChunkerConfig, RecursiveChunkerConfig
 
 from config.core.file_management.indexing.bm25_indexing_config import BM25IndexerConfig
@@ -38,43 +37,52 @@ TEST_FILES = {
 }
 
 
-def create_file_storage():
-    """Create FileStorage instance with real database configuration"""
-    logger.info("Creating FileStorage instance...")
+def create_storage_instances():
+    """Create all storage instances with shared database configuration"""
+    logger.info("Creating storage instances...")
 
-    # Local file storage config
+    # Shared configurations
     file_db_config = LocalDBConfig(
         base_path="./test_output/async_index_test"
     )
 
-    # PostgreSQL config
     postgresql_config = PostgreSQLConfig(
         host="localhost",
-        port=5432,
+        port=18080,  # PostgreSQL is running on port 18080
         database="rag_test",
-        user="chenmingzhen",
-        password=""  # No password needed for local user
+        user="postgres",
+        password="123"
     )
 
-    # File store config
-    file_store_config = FileStorageConfig(
+    # Create all three storage configs
+    file_storage_config = FileStorageConfig(
         file_db_config=file_db_config,
         relational_db_config=postgresql_config
     )
 
-    # File storage config
-    file_storage_config = FileStorageConfig(
-        data_store_config=file_store_config
+    parsed_content_storage_config = ParsedContentStorageConfig(
+        file_db_config=file_db_config,
+        relational_db_config=postgresql_config
     )
 
-    return file_storage_config.build()
+    chunk_storage_config = ChunkStorageConfig(
+        file_db_config=file_db_config,
+        relational_db_config=postgresql_config
+    )
+
+    # Build all storage instances
+    file_storage = file_storage_config.build()
+    parsed_content_storage = parsed_content_storage_config.build()
+    chunk_storage = chunk_storage_config.build()
+
+    return file_storage, parsed_content_storage, chunk_storage
 
 
 def create_index_manager_with_hybrid():
     """Create IndexManager with both BM25 and FAISS indexing"""
     logger.info("Creating IndexManager with hybrid (BM25 + FAISS) indexing...")
 
-    parser_config = ParserCobinatorConfig()
+    parser_config = ParserCombinatorConfig()
     chunker_config = RecursiveChunkerConfig(
         chunk_size=400,
         chunk_overlap=40
@@ -91,7 +99,9 @@ def create_index_manager_with_hybrid():
 
 
     embedding_config = QwenEmbeddingConfig(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        use_china_mirror=True,
+        cache_folder="./models"
     )
     faiss_config = FaissVectorDBConfig(
         index_path="./test_output/async_index_test/faiss_index",
@@ -115,12 +125,14 @@ async def test_async_index_file():
     logger.info("=== Testing Async index_file Method ===")
 
     try:
-        # Create FileStorage
-        file_storage = create_file_storage()
+        # Create all storage instances
+        file_storage, parsed_content_storage, chunk_storage = create_storage_instances()
 
-        # Create IndexManager with file_storage
+        # Create IndexManager with all storage instances
         index_manager = create_index_manager_with_hybrid()
         index_manager.file_storage = file_storage
+        index_manager.parsed_content_storage = parsed_content_storage
+        index_manager.chunk_storage = chunk_storage
 
         # Content type mapping
         content_types = {
