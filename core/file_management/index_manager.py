@@ -262,6 +262,92 @@ class IndexManager(AbstractModule):
 
         return result
 
+    def _delete_chunks_from_indexers(self, chunk_ids: List[str]) -> Dict[str, Any]:
+        """
+        Delete chunks from all configured indexers concurrently.
+
+        Args:
+            chunk_ids: List of chunk IDs to delete
+
+        Returns:
+            Dictionary with deletion results for each indexer
+        """
+        deletion_results = {}
+
+        # Run all indexer deletions concurrently in a single event loop
+        async def run_all_deletions():
+            """Run all indexer deletions concurrently"""
+            tasks = []
+            for i, indexer in enumerate(self.indexers):
+                indexer_name = f"{type(indexer).__name__}_{i}"
+                tasks.append(self._delete_with_single_indexer(indexer, indexer_name, chunk_ids))
+
+            return await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Execute all deletions concurrently
+        results = asyncio.run(run_all_deletions())
+
+        # Process results
+        for i, result in enumerate(results):
+            indexer_name = f"{type(self.indexers[i]).__name__}_{i}"
+
+            if isinstance(result, Exception):
+                error_msg = f"Deletion failed with {indexer_name}: {str(result)}"
+                logger.error(error_msg, exc_info=True)
+                deletion_results[indexer_name] = {
+                    "success": False,
+                    "error_message": error_msg,
+                    "deleted_count": 0,
+                    "total_chunks": len(chunk_ids)
+                }
+            else:
+                deletion_results[indexer_name] = result
+                if result["success"]:
+                    logger.info(f"Successfully deleted {len(chunk_ids)} chunks from {indexer_name}")
+
+        return deletion_results
+
+    async def _delete_with_single_indexer(
+        self,
+        indexer,
+        indexer_name: str,
+        chunk_ids: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Delete chunks with a single indexer.
+
+        This is a helper method that allows concurrent execution of multiple indexers.
+
+        Args:
+            indexer: The indexer instance
+            indexer_name: Name of the indexer for logging
+            chunk_ids: List of chunk IDs to delete
+
+        Returns:
+            Dictionary with deletion result for this indexer
+        """
+        try:
+            logger.info(f"Deleting {len(chunk_ids)} chunks from {indexer_name}")
+
+            # Call the indexer's async delete_chunks method
+            success = await indexer.delete_chunks(chunk_ids)
+
+            return {
+                "success": success,
+                "deleted_count": len(chunk_ids) if success else 0,
+                "total_chunks": len(chunk_ids)
+            }
+
+        except Exception as e:
+            error_msg = f"Deletion failed with {indexer_name}: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return {
+                "success": False,
+                "error_message": error_msg,
+                "deleted_count": 0,
+                "total_chunks": len(chunk_ids)
+            }
+
     def _extract_text_from_parse_result(self, parse_result: Dict[str, Any]) -> str:
         """
         Extract text content from parser result.
@@ -505,3 +591,154 @@ class IndexManager(AbstractModule):
         logger.info(f"Batch processing completed: {results['successful_files']}/{results['total_files']} successful ({success_rate:.1f}%)")
 
         return results
+
+    async def delete_file(self, file_id: str) -> Dict[str, Any]:
+        """
+        Async method for deleting a file and all its associated data.
+        This is the main entry point for external usage.
+
+        Args:
+            file_id: The ID of the file to delete
+
+        Returns:
+            Dict containing deletion results
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            self.delete_file_data,
+            file_id,
+            self.file_storage,
+            self.parsed_content_storage,
+            self.chunk_storage
+        )
+
+    def delete_file_data(
+        self,
+        file_id: str,
+        file_storage,
+        parsed_content_storage,
+        chunk_storage,
+        **kwargs: Any
+    ) -> Dict[str, Any]:
+        """
+        Delete a file and all its associated data (chunks and index entries).
+
+        This method:
+        1. Finds all parsed content associated with the file
+        2. Finds all chunks associated with each parsed content
+        3. Deletes chunks from all configured indexers
+        4. Deletes chunk metadata and blobs
+        5. Optionally deletes the original file
+
+        Note: Parsed content is NOT deleted, only chunks and index entries are removed.
+
+        Args:
+            file_id: ID of the file to delete
+            file_storage: FileStorage instance
+            parsed_content_storage: ParsedContentStorage instance
+            chunk_storage: ChunkStorage instance
+            **kwargs: Additional arguments (e.g., delete_source_file=True to also delete the original file)
+
+        Returns:
+            Dictionary containing deletion results:
+            - success: bool - Whether the entire deletion succeeded
+            - file_id: str - Input file ID
+            - deleted_chunk_ids: List[str] - IDs of deleted chunks
+            - indexer_deletion_results: Dict - Results from each indexer
+            - error_message: str - Error message if failed
+        """
+        result = {
+            "success": False,
+            "file_id": file_id,
+            "deleted_chunk_ids": [],
+            "indexer_deletion_results": {},
+            "error_message": None
+        }
+
+        try:
+            logger.info(f"Starting deletion pipeline for file_id: {file_id}")
+
+            # Step 1: Find all parsed content for this file
+            logger.info(f"Step 1: Finding parsed content for file {file_id}")
+            parsed_content_list = parsed_content_storage.metadata_store.list_parsed_content_metadata(
+                source_file_id=file_id,
+                **kwargs
+            )
+
+            if not parsed_content_list:
+                logger.warning(f"No parsed content found for file_id: {file_id}")
+                # Still consider this a success since there's nothing to delete
+                result["success"] = True
+                return result
+
+            logger.info(f"Found {len(parsed_content_list)} parsed content entries")
+
+            # Step 2: For each parsed content, find and delete all chunks
+            all_chunk_ids = []
+            for parsed_content in parsed_content_list:
+                parsed_content_id = parsed_content.parsed_content_id
+
+                # Find all chunks for this parsed content
+                logger.info(f"Step 2: Finding chunks for parsed_content_id: {parsed_content_id}")
+                chunk_list = chunk_storage.metadata_store.list_chunk_metadata(
+                    source_parsed_content_id=parsed_content_id,
+                    **kwargs
+                )
+
+                if chunk_list:
+                    chunk_ids = [chunk.chunk_id for chunk in chunk_list]
+                    all_chunk_ids.extend(chunk_ids)
+                    logger.info(f"Found {len(chunk_ids)} chunks for parsed_content {parsed_content_id}")
+
+            # Step 3: Delete chunks from all indexers
+            if all_chunk_ids and self.indexers:
+                logger.info(f"Step 3: Deleting {len(all_chunk_ids)} chunks from {len(self.indexers)} indexers")
+                deletion_results = self._delete_chunks_from_indexers(all_chunk_ids)
+                result["indexer_deletion_results"] = deletion_results
+            else:
+                logger.info("Step 3: No chunks to delete from indexers")
+
+            # Step 4: Delete chunk metadata and blobs
+            if all_chunk_ids:
+                logger.info(f"Step 4: Deleting {len(all_chunk_ids)} chunk metadata and blobs")
+                for chunk_id in all_chunk_ids:
+                    try:
+                        # Delete chunk blob
+                        chunk_metadata = chunk_storage.metadata_store.get_chunk_metadata(chunk_id, **kwargs)
+                        if chunk_metadata:
+                            chunk_storage.blob_store.delete(chunk_metadata.blob_key, **kwargs)
+                            logger.debug(f"Deleted chunk blob: {chunk_metadata.blob_key}")
+
+                        # Delete chunk metadata
+                        chunk_storage.metadata_store.delete_chunk_metadata(chunk_id, **kwargs)
+                        logger.debug(f"Deleted chunk metadata: {chunk_id}")
+
+                        result["deleted_chunk_ids"].append(chunk_id)
+
+                    except Exception as e:
+                        logger.error(f"Failed to delete chunk {chunk_id}: {e}")
+                        continue
+
+                logger.info(f"Successfully deleted {len(result['deleted_chunk_ids'])} chunks")
+
+            # Step 5: Optionally delete the source file
+            if kwargs.get('delete_source_file', False):
+                logger.info(f"Step 5: Deleting source file {file_id}")
+                try:
+                    file_storage.delete_file(file_id, **kwargs)
+                    logger.info(f"Successfully deleted source file: {file_id}")
+                except Exception as e:
+                    logger.error(f"Failed to delete source file {file_id}: {e}")
+                    # Don't fail the entire operation if source file deletion fails
+
+            # Success!
+            result["success"] = True
+            logger.info(f"Successfully completed deletion pipeline for file_id: {file_id}")
+
+        except Exception as e:
+            error_msg = f"Deletion pipeline failed for file_id {file_id}: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            result["error_message"] = error_msg
+
+        return result

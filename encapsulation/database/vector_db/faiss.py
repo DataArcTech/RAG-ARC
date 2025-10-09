@@ -32,7 +32,7 @@ class FaissVectorDB(VectorDB):
     - Maximal Marginal Relevance (MMR) search for diversity
     - Persistent storage with save/load functionality
     - Asynchronous operations support
-    - Dynamic chunk addition and deletion
+    - Dynamic chunk addition and soft-delete (avoids expensive index rebuilding)
 
     Main parameters:
         config: Configuration object containing embedding, index_type, metric, etc.
@@ -46,8 +46,9 @@ class FaissVectorDB(VectorDB):
         - _add_chunks/aadd_chunks: Add Chunk objects to the vector store
         - similarity_search_by_vector: Search by embedding vector
         - max_marginal_relevance_search: MMR-based diverse search
-        - delete: Remove chunks by IDs
-        - save_local/load_local: Persist and restore index
+        - delete_index: Soft-delete chunks by IDs (fast, no rebuild)
+        - hard_delete_index: Hard-delete chunks by IDs (slow, rebuilds index)
+        - save_index/load_index: Persist and restore index
         - from_chunks: Create instance from chunk collection
 
     Performance considerations:
@@ -85,11 +86,12 @@ class FaissVectorDB(VectorDB):
 
         # Build embedding model from config
         self.embedding_model = self.config.embedding_config.build()
-        
+
         # initialize faiss attributes
         self.index = None  # faiss index
         self.docstore = {}  # Dictionary to store chunks by ID
         self.index_to_docstore_id = {}  # Mapping from index position to chunk ID
+        self.deleted_ids = set()  # Set to track soft-deleted chunk IDs
 
     
     def load_index(self, path: str):
@@ -140,7 +142,8 @@ class FaissVectorDB(VectorDB):
             # Load chunk store and mappings
             self.docstore = data.get("docstore", {})
             self.index_to_docstore_id = data.get("index_to_docstore_id", {})
-            logger.info(f"Loaded {len(self.docstore)} chunks from metadata")
+            self.deleted_ids = set(data.get("deleted_ids", []))
+            logger.info(f"Loaded {len(self.docstore)} chunks from metadata ({len(self.deleted_ids)} soft-deleted)")
 
             # Save pkl file parameters to override config values
             self.index_type = data.get("index_type")
@@ -276,14 +279,13 @@ class FaissVectorDB(VectorDB):
         return doc_ids
 
     def delete_index(self, ids: Optional[List[str]] = None, **kwargs: Any) -> Optional[bool]:
-        """Delete chunks from vector database
+        """Delete chunks from vector database using soft-delete
 
-        Note: FAISS doesn't support direct deletion, so this method rebuilds
-        the entire index with remaining chunks. This can be expensive for
-        large collections.
+        This method uses soft-delete to mark chunks as deleted without rebuilding
+        the entire index. Soft-deleted chunks are filtered out during search and retrieval.
 
         Args:
-            ids: List of chunk IDs to delete; if None, deletes all chunks
+            ids: List of chunk IDs to delete; if None, raises an error
             **kwargs: Additional arguments
 
         Returns:
@@ -296,7 +298,7 @@ class FaissVectorDB(VectorDB):
         if ids is None or not ids:
             raise ValueError("Dangerous operation: delete_index requires specific IDs. Use delete_all_index() if you want to clear all data.")
 
-        logger.info(f"Deleting {len(ids)} chunks from index")
+        logger.info(f"Soft-deleting {len(ids)} chunks from index")
 
         # Check if IDs to delete exist
         missing_ids = [doc_id for doc_id in ids if doc_id not in self.docstore]
@@ -304,24 +306,58 @@ class FaissVectorDB(VectorDB):
             logger.warning(f"IDs not found: {missing_ids}")
             return False
 
-        # Get chunks to keep
+        # Mark chunks as deleted (soft-delete)
+        for doc_id in ids:
+            if doc_id not in self.deleted_ids:
+                self.deleted_ids.add(doc_id)
+                logger.debug(f"Soft-deleted chunk: {doc_id}")
+
+        logger.info(f"Soft-deleted {len(ids)} chunks (total deleted: {len(self.deleted_ids)})")
+        return True
+
+    def hard_delete_index(self, ids: Optional[List[str]] = None, **kwargs: Any) -> Optional[bool]:
+        """Hard-delete chunks from vector database by rebuilding the index
+
+        This method physically removes chunks by rebuilding the entire index with
+        remaining chunks. This is expensive but reclaims storage space.
+        Use this when you need to compact the index after many soft-deletes.
+
+        Args:
+            ids: List of chunk IDs to delete; if None, raises an error
+            **kwargs: Additional arguments
+
+        Returns:
+            True if deletion successful, False if some IDs not found, None if not implemented
+        """
+        if self.index is None:
+            logger.warning("No index to delete from")
+            return True
+
+        if ids is None or not ids:
+            raise ValueError("Dangerous operation: hard_delete_index requires specific IDs. Use delete_all_index() if you want to clear all data.")
+
+        logger.info(f"Hard-deleting {len(ids)} chunks from index (rebuilding)")
+
+        # Check if IDs to delete exist
+        missing_ids = [doc_id for doc_id in ids if doc_id not in self.docstore]
+        if missing_ids:
+            logger.warning(f"IDs not found: {missing_ids}")
+            return False
+
+        # Get chunks to keep (excluding both specified IDs and soft-deleted IDs)
+        ids_to_remove = set(ids)
         remaining_docs = []
-        remaining_texts = []
-        remaining_metadatas = []
-        remaining_ids = []
 
         for doc_id, doc in self.docstore.items():
-            if doc_id not in ids:
+            if doc_id not in ids_to_remove and doc_id not in self.deleted_ids:
                 remaining_docs.append(doc)
-                remaining_texts.append(doc.content)
-                remaining_metadatas.append(doc.metadata)
-                remaining_ids.append(doc_id)
 
         logger.info(f"Keeping {len(remaining_docs)} chunks, rebuilding index")
 
         # Clear current storage
         self.docstore.clear()
         self.index_to_docstore_id.clear()
+        self.deleted_ids.clear()
         if self.index is not None:
             self.index.reset()
 
@@ -345,21 +381,64 @@ class FaissVectorDB(VectorDB):
         """
         if not confirm:
             raise ValueError("Dangerous operation: delete_all_index requires confirm=True")
-        
+
         if self.index is None:
             logger.warning("No index to delete from")
             return True
-        
+
         logger.info("Deleting all chunks from index")
         self.docstore.clear()
         self.index_to_docstore_id.clear()
+        self.deleted_ids.clear()
         if self.index is not None:
             self.index.reset()
         logger.info("All chunks deleted successfully")
         return True
-        
 
-    
+    def compact_index(self) -> bool:
+        """Compact the index by removing all soft-deleted chunks
+
+        This method rebuilds the index to physically remove all soft-deleted chunks,
+        reclaiming storage space. Use this periodically when you have many soft-deleted chunks.
+
+        Returns:
+            True if compaction successful, False otherwise
+        """
+        if self.index is None:
+            logger.warning("No index to compact")
+            return True
+
+        if not self.deleted_ids:
+            logger.info("No soft-deleted chunks to compact")
+            return True
+
+        logger.info(f"Compacting index: removing {len(self.deleted_ids)} soft-deleted chunks")
+
+        # Get all non-deleted chunks
+        remaining_docs = []
+        for doc_id, doc in self.docstore.items():
+            if doc_id not in self.deleted_ids:
+                remaining_docs.append(doc)
+
+        logger.info(f"Keeping {len(remaining_docs)} active chunks, rebuilding index")
+
+        # Clear current storage
+        self.docstore.clear()
+        self.index_to_docstore_id.clear()
+        self.deleted_ids.clear()
+        if self.index is not None:
+            self.index.reset()
+
+        # Re-add remaining chunks
+        if remaining_docs:
+            self._add_chunks(remaining_docs)
+            logger.info(f"Index compacted: {len(remaining_docs)} chunks remaining")
+        else:
+            logger.info("Index is now empty after compaction")
+
+        return True
+
+
     def get_by_ids(self, ids: List[str]) -> List['Chunk']:
         """Retrieve chunks by their IDs
 
@@ -368,9 +447,13 @@ class FaissVectorDB(VectorDB):
 
         Returns:
             List of chunks corresponding to the provided IDs
-            Missing IDs are silently skipped
+            Missing IDs and soft-deleted IDs are silently skipped
         """
-        return [self.docstore[doc_id] for doc_id in ids if doc_id in self.docstore]
+        return [
+            self.docstore[doc_id]
+            for doc_id in ids
+            if doc_id in self.docstore and doc_id not in self.deleted_ids
+        ]
 
     def update_index(self, chunks: List[Chunk]) -> List[str]:
         """Update chunks in index
@@ -421,6 +504,7 @@ class FaissVectorDB(VectorDB):
         data = {
             "docstore": self.docstore,
             "index_to_docstore_id": self.index_to_docstore_id,
+            "deleted_ids": list(self.deleted_ids),  # Convert set to list for serialization
             "index_type": getattr(self, 'saved_index_type', getattr(self.config, 'index_type', 'flat')),
             "metric": getattr(self, 'saved_metric', getattr(self.config, 'metric', 'cosine')),
             "normalize_L2": getattr(self, 'saved_normalize_L2', getattr(self.config, 'normalize_L2', False)),
@@ -444,12 +528,17 @@ class FaissVectorDB(VectorDB):
             if hasattr(self.config.embedding_config, 'model_name'):
                 embedding_model_name = self.config.embedding_config.model_name
 
+        # Calculate active (non-deleted) chunk count
+        active_chunk_count = len(self.docstore) - len(self.deleted_ids)
+
         info = {
             "type": "faiss",
             "index_type": getattr(self, 'saved_index_type', getattr(self.config, 'index_type', 'flat')),
             "metric": getattr(self, 'saved_metric', getattr(self.config, 'metric', 'cosine')),
             "normalize_L2": getattr(self, 'saved_normalize_L2', getattr(self.config, 'normalize_L2', False)),
-            "chunk_count": len(self.docstore),
+            "chunk_count": active_chunk_count,
+            "total_chunks": len(self.docstore),
+            "deleted_chunks": len(self.deleted_ids),
             "embedding_model": embedding_model_name
         }
 
@@ -467,5 +556,5 @@ class FaissVectorDB(VectorDB):
                 "is_trained": False
             })
 
-        logger.info(f"Vector DB info: {info['chunk_count']} chunks, {info['vector_count']} vectors")
+        logger.info(f"Vector DB info: {info['chunk_count']} active chunks ({info['deleted_chunks']} deleted), {info['vector_count']} vectors")
         return info

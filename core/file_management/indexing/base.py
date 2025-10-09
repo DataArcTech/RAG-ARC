@@ -39,6 +39,20 @@ class BaseIndexer(AbstractModule, ABC):
         """
         pass
 
+    @abstractmethod
+    async def delete_chunks(self, chunk_ids: List[str]) -> bool:
+        """
+        Abstract method to delete a batch of chunks from the specific index.
+        This is the primary deletion method that subclasses must implement.
+
+        Args:
+            chunk_ids: A list of chunk IDs to be deleted.
+
+        Returns:
+            True if deletion was successful, False otherwise.
+        """
+        pass
+
     async def index_chunk_files(self, chunk_file_paths: Union[str, List[str]]) -> bool:
         """
         Asynchronously loads and indexes one or more chunk JSON files.

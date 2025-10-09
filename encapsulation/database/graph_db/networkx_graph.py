@@ -205,17 +205,6 @@ class NetworkXGraphStore(GraphStore):
                 else:
                     logger.warning(f"Could not find entities for relation: {head_name} -> {tail_name}")
 
-    def delete_index(self, ids: Optional[List[str]] = None) -> Optional[bool]:
-        """Delete chunks and their graphs by IDs. Delete all if ids is None."""
-        if ids is None:
-            raise ValueError("Dangerous operation: delete_index requires specific IDs. Use delete_all_chunks() if you want to clear all data.")
-        else:
-            # Remove duplicates from ids list while preserving order
-            unique_ids = list(dict.fromkeys(ids))  # Preserves order, removes duplicates
-            if len(unique_ids) != len(ids):
-                logger.info(f"Removed {len(ids) - len(unique_ids)} duplicate IDs from delete list")
-            return self.delete_chunks(unique_ids)
-
     def delete_index(self, ids: Optional[List[str]] = None) -> bool:
         """Delete chunks and their graph data"""
         try:

@@ -56,3 +56,21 @@ class BM25Indexer(BaseIndexer):
         # The actual blocking call is executed in a separate thread.
         chunk_ids = await loop.run_in_executor(None, build_or_update_index, chunks)
         return chunk_ids or []
+
+    async def delete_chunks(self, chunk_ids: List[str]) -> bool:
+        """
+        Deletes a batch of chunks from the BM25 index.
+        """
+        loop = asyncio.get_running_loop()
+
+        def delete_from_index(ids: List[str]):
+            try:
+                # Delete chunks from BM25 index
+                result = self.bm25_builder.delete_index(ids)
+                return result
+            except Exception as e:
+                logger.error(f"Failed to delete chunks from BM25 index: {e}")
+                return False
+
+        result = await loop.run_in_executor(None, delete_from_index, chunk_ids)
+        return result if result is not None else False

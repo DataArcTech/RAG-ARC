@@ -153,4 +153,43 @@ class NetworkXGraphIndexer(BaseIndexer):
 
         logger.info(f"Successfully added {len(added_chunk_ids)} chunks to NetworkX graph store")
         return added_chunk_ids
-        
+
+    async def delete_chunks(self, chunk_ids: List[str]) -> bool:
+        """
+        Deletes a batch of chunks from the NetworkX graph index.
+
+        Args:
+            chunk_ids: A list of chunk IDs to be deleted
+
+        Returns:
+            True if deletion was successful, False otherwise
+        """
+        if not chunk_ids:
+            logger.warning("No chunk IDs provided for deletion")
+            return False
+
+        try:
+            loop = asyncio.get_running_loop()
+
+            # Delete chunks from NetworkX store
+            result = await loop.run_in_executor(
+                None,
+                self.networkx_store.delete_index,
+                chunk_ids
+            )
+
+            # Save index if storage path is configured
+            if result and hasattr(self.networkx_store, 'storage_path') and self.networkx_store.storage_path:
+                await loop.run_in_executor(
+                    None,
+                    self.networkx_store.save_index,
+                    self.networkx_store.storage_path,
+                    self.networkx_store.index_name
+                )
+                logger.info(f"Saved graph index after deletion to {self.networkx_store.storage_path}")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error during NetworkX graph deletion: {e}", exc_info=True)
+            return False

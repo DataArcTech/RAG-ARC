@@ -417,6 +417,11 @@ class RetrievalHelper:
                 continue
 
             doc_id = index.index_to_docstore_id[idx]
+
+            # Skip soft-deleted documents
+            if hasattr(index, 'deleted_ids') and doc_id in index.deleted_ids:
+                continue
+
             doc = index.docstore[doc_id]
 
             # For cosine metric, FAISS returns similarity score instead of distance

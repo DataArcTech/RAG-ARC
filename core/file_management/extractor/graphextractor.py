@@ -8,7 +8,10 @@ import re
 from typing import Dict, List, TYPE_CHECKING
 
 from core.file_management.extractor.base import ExtractorBase
-from core.prompts.extractor_prompt import EXTRACTION_PROMPT, CLEANING_PROMPT, EXTRACTION_PROMPT_EN, CLEANING_PROMPT_EN
+from core.prompts.extractor_prompt import (
+    EXTRACTION_PROMPT, CLEANING_PROMPT, EXTRACTION_PROMPT_EN, CLEANING_PROMPT_EN,
+    EXTRACTION_PROMPT_SIMPLE, EXTRACTION_PROMPT_SIMPLE_EN
+)
 from encapsulation.data_model.schema import Chunk, GraphData
 
 if TYPE_CHECKING:
@@ -71,31 +74,48 @@ class GraphExtractor(ExtractorBase):
 
     def build_extraction_prompt(self, text: str, history: GraphData) -> str:
         """Build extraction prompt with user custom priority"""
-        if self.config.extraction_prompt:
-            template = self.config.extraction_prompt
-            language = self.detect_language(text)
-        else:
-            language = self.detect_language(text)
-            if language == 'en':
-                template = EXTRACTION_PROMPT_EN
+        language = self.detect_language(text)
+
+        # Use simplified prompt for single-round extraction (max_rounds == 1)
+        if self.config.max_rounds == 1:
+            if self.config.extraction_prompt:
+                template = self.config.extraction_prompt
             else:
-                template = EXTRACTION_PROMPT
+                if language == 'en':
+                    template = EXTRACTION_PROMPT_SIMPLE_EN
+                else:
+                    template = EXTRACTION_PROMPT_SIMPLE
 
-        if language == 'en':
-            schema_str = self.generate_schema_string(language='en')
-            history_str = self.build_history_string(history, language='en')
-            examples_str = self.generate_examples_string(language='en')
+            # For single-round extraction, we don't need history
+            schema_str = self.generate_schema_string(language=language)
+            examples_str = self.generate_examples_string(language=language)
+
+            return template.format(
+                text=text,
+                schema=schema_str,
+                examples=examples_str
+            )
+
+        # Use full prompt for multi-round extraction (max_rounds > 1)
         else:
-            schema_str = self.generate_schema_string(language='zh')
-            history_str = self.build_history_string(history, language='zh')
-            examples_str = self.generate_examples_string(language='zh')
+            if self.config.extraction_prompt:
+                template = self.config.extraction_prompt
+            else:
+                if language == 'en':
+                    template = EXTRACTION_PROMPT_EN
+                else:
+                    template = EXTRACTION_PROMPT
 
-        return template.format(
-            text=text,
-            schema=schema_str,
-            history=history_str,
-            examples=examples_str
-        )
+            schema_str = self.generate_schema_string(language=language)
+            history_str = self.build_history_string(history, language=language)
+            examples_str = self.generate_examples_string(language=language)
+
+            return template.format(
+                text=text,
+                schema=schema_str,
+                history=history_str,
+                examples=examples_str
+            )
 
     def generate_schema_string(self, language: str = 'zh') -> str:
         """Generate schema string (supporting bilingual support)"""

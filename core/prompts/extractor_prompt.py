@@ -329,3 +329,116 @@ e2\tBeijing University\tOrganization\ttype|->|university|#|founded|->|1898
 ### RELATIONS
 e1\tgraduated from\te2
 """
+
+
+# Simplified prompts for single-round extraction (max_rounds == 1)
+# These prompts omit history and incremental extraction logic to reduce token usage
+
+EXTRACTION_PROMPT_SIMPLE = """
+你是一个知识图谱抽取引擎，负责将文本转化为结构化的TSV数据。
+
+## 抽取原则与目标
+本次任务的目标是将文本转化为结构化知识图谱。抽取应遵循以下原则：
+1.  **结构优先**: 优先抽取能构成文本核心事实框架的关系(Relations)，作为图谱的结构基础。
+2.  **属性补充**: 围绕已识别的实体，抽取其描述性属性(Attributes)，以完善信息细节。
+3.  **信息保真**: 最终的图谱应准确反映原文的核心信息。
+---
+## 输入信息
+**文本内容**:
+{text}
+
+**Schema约束**:
+{schema}
+
+**参考示例**:
+{examples}
+---
+## 抽取指令
+1.  **实体与属性抽取**:
+    * **实体规则**:
+        * 识别关系框架中的核心参与者作为实体。
+        * 分配唯一ID (e.g., e1, e2...)。
+        * 实体名称为名词或名词短语。
+        * 实体类型遵循Schema。
+        * **实体类型定义**: `entity_type` 必须是通用、抽象的分类。任何具体的角色、职业或业务描述都应作为 `attributes` 抽取，而非类型。
+    * **属性规则**:
+        * 抽取实体必要的描述性特征。
+        * 属性值应直接采用原文中的表述。
+        * 避免将关系抽取为属性。
+        * 格式: `key|->|value`，多个属性用`|#|`分隔。
+
+2.  **关系抽取**:
+    * 优先抽取体现文本主旨的核心关系。
+    * 关系类型遵循Schema。若无，尽可能从原文中抽取。
+    * `head_id`和`tail_id`必须使用实体ID。
+
+## 输出格式 (TSV)
+### ENTITIES
+id\tname\ttype\tattributes
+
+### RELATIONS
+head_id\ttype\ttail_id
+---
+## 输出示例
+### ENTITIES
+e1\t张三\t人物\t年龄|->|30|#|职业|->|工程师
+e2\t北京大学\t组织\t类型|->|高等院校|#|成立时间|->|1898年
+
+### RELATIONS
+e1\t毕业于\te2
+"""
+
+
+EXTRACTION_PROMPT_SIMPLE_EN = """
+You are a knowledge graph extraction engine responsible for converting text into structured TSV data.
+
+## Extraction Principles and Goal
+The goal of this task is to convert text into a structured knowledge graph. The extraction should adhere to the following principles:
+1.  **Structure-First**: Prioritize extracting relations that form the core factual framework of the text, serving as the graph's structural foundation.
+2.  **Attribute Supplementation**: Around the identified entities, extract their descriptive attributes to complete the informational details.
+3.  **Information Fidelity**: The final graph must accurately reflect the core information of the original text.
+---
+## Input Information
+**Text Content**:
+{text}
+
+**Schema Constraints**:
+{schema}
+
+**Reference Examples**:
+{examples}
+---
+## Extraction Instructions
+1.  **Entity and Attribute Extraction**:
+    * **Entity Rules**:
+        * Identify core participants within the relationship framework as entities.
+        * Assign unique IDs (e.g., e1, e2...).
+        * Entity names must be nouns or noun phrases.
+        * Entity types must adhere to the Schema.
+        * Entity types: `entity_type` must be generic, high-level categories. Any specific roles, occupations, or business descriptions should be extracted as attributes rather than types.
+    * **Attribute Rules**:
+        * Extract necessary descriptive features for each entity.
+        * Attribute values should be directly taken from the original text.
+        * Avoid extracting relationships as attributes.
+        * Format: Strictly use `key|->|value`, with `|#|` separating multiple attributes.
+
+2.  **Relationship Extraction**:
+    * Prioritize extracting core relationships that reflect the main subject of the text.
+    * Relationship types must adhere to the Schema. If not, extract from the original text.
+    * `head_id` and `tail_id` must use entity IDs.
+
+## Output Format (TSV)
+### ENTITIES
+id\tname\ttype\tattributes
+
+### RELATIONS
+head_id\ttype\ttail_id
+---
+## Output Example
+### ENTITIES
+e1\tJohn Smith\tPerson\tage|->|30|#|occupation|->|engineer
+e2\tBeijing University\tOrganization\ttype|->|university|#|founded|->|1898
+
+### RELATIONS
+e1\tgraduated from\te2
+"""
