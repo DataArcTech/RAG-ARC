@@ -5,35 +5,40 @@ from encapsulation.data_model.schema import Chunk
 import logging
 
 if TYPE_CHECKING:
-    from config.core.rerank_config import LLMRerankerConfig
+    from config.core.rerank_config import ListwiseRerankerConfig
 
 logger = logging.getLogger(__name__)
 
 
-class LLMReranker(AbstractReranker):
+class ListwiseReranker(AbstractReranker):
     """
-    LLM-based document reranker for RAG systems.
+    Listwise LLM-based document reranker for RAG systems.
 
-    Uses any reranking LLM to score and reorder documents based on relevance to the query.
-    This implementation is LLM-agnostic and works with any RerankLLMBase implementation
-    from the encapsulation layer (Qwen, BGE, Cohere, etc.).
+    Uses listwise ranking approach where the LLM ranks all documents at once
+    by outputting a ranked list of indices. This implementation is LLM-agnostic
+    and works with any chat LLM that supports OpenAI-compatible API.
 
     RAG Pipeline Position:
         User Query → Query Rewrite → Retrieval → Rerank → LLM Generate Answer
                                                    ↑ This component
 
     Key features:
-    - LLM-agnostic: Works with any RerankLLMBase implementation
-    - Configurable batch size for memory optimization
+    - Listwise ranking: Ranks all documents together for better global ordering
+    - Reasoning-based: LLM provides step-by-step reasoning for ranking decisions
+    - LLM-agnostic: Works with any OpenAI-compatible chat API
+    - Configurable prompts: Supports custom prompt templates
     - Top-k filtering with default value from config
-    - Score normalization and metadata enrichment
+    - Score assignment based on ranking position
     - Integration with RAG-ARC LLM infrastructure via dependency injection
+
+    Differences from LLMReranker:
+    - LLMReranker: Uses pointwise/pairwise scoring models (e.g., Qwen reranker)
+    - ListwiseReranker: Uses chat LLMs with listwise ranking approach
     """
 
-    def __init__(self, config: "LLMRerankerConfig"):
+    def __init__(self, config: "ListwiseRerankerConfig"):
         super().__init__(config)
-        # Build rerank LLM from sub-config following framework pattern
-        # Accepts any RerankLLMBase implementation (Qwen, BGE, Cohere, etc.)
+        # Build listwise rerank LLM from sub-config following framework pattern
         self.rerank_llm = config.rerank_llm_config.build()
 
     def rerank(
@@ -43,7 +48,7 @@ class LLMReranker(AbstractReranker):
         **kwargs: Any
     ) -> List[Chunk]:
         """
-        Rerank chunks using any reranking LLM.
+        Rerank chunks using listwise ranking approach.
 
         All configuration is handled by the encapsulation layer. Core layer
         focuses on chunk structure and metadata management.
@@ -70,7 +75,7 @@ class LLMReranker(AbstractReranker):
 
         try:
             # Pass all parameters to encapsulation layer
-            # Encapsulation layer handles all configuration (top_k, batch_size, instruction)
+            # Encapsulation layer handles all configuration (top_k, temperature, prompt_template)
             ranked_results = self.rerank_llm.rerank(
                 query=query,
                 chunks=chunks,
@@ -85,7 +90,7 @@ class LLMReranker(AbstractReranker):
                 # Preserve original metadata and add rerank score
                 new_metadata = chunk.metadata.copy()
                 new_metadata["rerank_score"] = score
-                new_metadata["rerank_method"] = self.rerank_llm.get_model_info().get("provider", "llm")
+                new_metadata["rerank_method"] = "listwise"
 
                 # Create new Chunk with updated metadata
                 reranked_chunk = Chunk(
@@ -96,11 +101,11 @@ class LLMReranker(AbstractReranker):
                 )
                 reranked_chunks.append(reranked_chunk)
 
-            logger.info(f"Reranked {len(chunks)} chunks, returned {len(reranked_chunks)}")
+            logger.info(f"Listwise reranked {len(chunks)} chunks, returned {len(reranked_chunks)}")
             return reranked_chunks
 
         except Exception as e:
-            logger.error(f"Chunk reranking failed: {e}")
+            logger.error(f"Listwise chunk reranking failed: {e}")
             # Return original chunks as fallback
             logger.warning("Using original chunk order as fallback")
             return chunks
@@ -113,8 +118,10 @@ class LLMReranker(AbstractReranker):
             Dictionary containing reranker information
         """
         return {
-            "type": "llm_reranker",
+            "type": "listwise_reranker",
             "llm_info": self.rerank_llm.get_model_info(),
-            "supports_batch_processing": True,
+            "ranking_approach": "listwise",
+            "supports_reasoning": True,
             "fallback_strategy": "original_order"
         }
+
