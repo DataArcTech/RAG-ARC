@@ -608,7 +608,6 @@ class IndexManager(AbstractModule):
             None,
             self.delete_file_data,
             file_id,
-            self.file_storage,
             self.parsed_content_storage,
             self.chunk_storage
         )
@@ -616,34 +615,33 @@ class IndexManager(AbstractModule):
     def delete_file_data(
         self,
         file_id: str,
-        file_storage,
         parsed_content_storage,
         chunk_storage,
         **kwargs: Any
     ) -> Dict[str, Any]:
         """
-        Delete a file and all its associated data (chunks and index entries).
+        Delete a file and all its associated data (parsed content, chunks and index entries).
 
         This method:
         1. Finds all parsed content associated with the file
         2. Finds all chunks associated with each parsed content
         3. Deletes chunks from all configured indexers
         4. Deletes chunk metadata and blobs
-        5. Optionally deletes the original file
+        5. Deletes parsed content metadata and blobs
 
-        Note: Parsed content is NOT deleted, only chunks and index entries are removed.
+        Note: The original file is preserved. Only parsed content and chunks are deleted.
 
         Args:
             file_id: ID of the file to delete
-            file_storage: FileStorage instance
             parsed_content_storage: ParsedContentStorage instance
             chunk_storage: ChunkStorage instance
-            **kwargs: Additional arguments (e.g., delete_source_file=True to also delete the original file)
+            **kwargs: Additional arguments
 
         Returns:
             Dictionary containing deletion results:
             - success: bool - Whether the entire deletion succeeded
             - file_id: str - Input file ID
+            - deleted_parsed_content_ids: List[str] - IDs of deleted parsed content
             - deleted_chunk_ids: List[str] - IDs of deleted chunks
             - indexer_deletion_results: Dict - Results from each indexer
             - error_message: str - Error message if failed
@@ -651,6 +649,7 @@ class IndexManager(AbstractModule):
         result = {
             "success": False,
             "file_id": file_id,
+            "deleted_parsed_content_ids": [],
             "deleted_chunk_ids": [],
             "indexer_deletion_results": {},
             "error_message": None
@@ -722,15 +721,26 @@ class IndexManager(AbstractModule):
 
                 logger.info(f"Successfully deleted {len(result['deleted_chunk_ids'])} chunks")
 
-            # Step 5: Optionally delete the source file
-            if kwargs.get('delete_source_file', False):
-                logger.info(f"Step 5: Deleting source file {file_id}")
+            # Step 5: Delete parsed content metadata and blobs
+            logger.info(f"Step 5: Deleting {len(parsed_content_list)} parsed content entries")
+            for parsed_content in parsed_content_list:
+                parsed_content_id = parsed_content.parsed_content_id
                 try:
-                    file_storage.delete_file(file_id, **kwargs)
-                    logger.info(f"Successfully deleted source file: {file_id}")
+                    # Delete parsed content blob
+                    parsed_content_storage.blob_store.delete(parsed_content.blob_key, **kwargs)
+                    logger.debug(f"Deleted parsed content blob: {parsed_content.blob_key}")
+
+                    # Delete parsed content metadata
+                    parsed_content_storage.metadata_store.delete_parsed_content_metadata(parsed_content_id, **kwargs)
+                    logger.debug(f"Deleted parsed content metadata: {parsed_content_id}")
+
+                    result["deleted_parsed_content_ids"].append(parsed_content_id)
+
                 except Exception as e:
-                    logger.error(f"Failed to delete source file {file_id}: {e}")
-                    # Don't fail the entire operation if source file deletion fails
+                    logger.error(f"Failed to delete parsed content {parsed_content_id}: {e}")
+                    continue
+
+            logger.info(f"Successfully deleted {len(result['deleted_parsed_content_ids'])} parsed content entries")
 
             # Success!
             result["success"] = True

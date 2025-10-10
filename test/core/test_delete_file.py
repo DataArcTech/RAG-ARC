@@ -227,25 +227,24 @@ def test_file_deletion():
                 assert chunk_metadata is not None, f"Chunk metadata should exist for {chunk_id}"
         print(f"  All {total_chunks} chunk metadata exist")
         
-        # 5. Delete the first file (only chunks and index entries, not parsed content)
+        # 5. Delete the first file (parsed content, chunks and index entries)
         print("\n5. Deleting the first file...")
         file_to_delete = file_ids[0]
         delete_result = index_manager.delete_file_data(
             file_id=file_to_delete,
-            file_storage=file_storage,
             parsed_content_storage=parsed_content_storage,
-            chunk_storage=chunk_storage,
-            delete_source_file=False  # Keep source file for now
+            chunk_storage=chunk_storage
         )
 
         if not delete_result["success"]:
             raise Exception(f"Deletion failed: {delete_result.get('error_message')}")
 
         print(f"Deleted file 1 successfully")
+        print(f"  Deleted {len(delete_result['deleted_parsed_content_ids'])} parsed content")
         print(f"  Deleted {len(delete_result['deleted_chunk_ids'])} chunks")
         print(f"  Indexer deletion results:")
         for indexer_name, result in delete_result['indexer_deletion_results'].items():
-            print(f"    - {indexer_name}: {result}")
+            print(f"- {indexer_name}: {result}")
         
         # 6. Verify first file's data is deleted
         print("\n6. Verifying first file's data is deleted...")
@@ -253,20 +252,20 @@ def test_file_deletion():
         # Check file (should still exist since we didn't delete it)
         file_metadata = file_storage.get_file_metadata(file_to_delete)
         assert file_metadata is not None, "File metadata should still exist"
-        print(f"  File metadata still exists (as expected)")
+        print(f"File metadata still exists (as expected)")
 
-        # Check parsed content (should still exist - we don't delete it)
+        # Check parsed content (should be deleted)
         deleted_parsed_content_id = all_parsed_content_ids[0]
         parsed_metadata = parsed_content_storage.get_parsed_content_metadata(deleted_parsed_content_id)
-        assert parsed_metadata is not None, "Parsed content metadata should still exist"
-        print(f"  Parsed content metadata still exists (as expected)")
+        assert parsed_metadata is None, "Parsed content metadata should be deleted"
+        print(f"Parsed content metadata deleted")
 
         # Check chunks of deleted file (should be deleted)
         deleted_chunk_ids = all_chunk_ids_by_file[file_to_delete]
         for chunk_id in deleted_chunk_ids:
             chunk_metadata = chunk_storage.get_chunk_metadata(chunk_id)
             assert chunk_metadata is None, f"Chunk metadata should be deleted for {chunk_id}"
-        print(f"  All {len(deleted_chunk_ids)} chunk metadata of file 1 deleted")
+        print(f"All {len(deleted_chunk_ids)} chunk metadata of file 1 deleted")
 
         # Check chunks of other files (should still exist)
         other_files_chunks = 0
@@ -275,9 +274,10 @@ def test_file_deletion():
                 chunk_metadata = chunk_storage.get_chunk_metadata(chunk_id)
                 assert chunk_metadata is not None, f"Chunk metadata of file {i} should still exist"
                 other_files_chunks += 1
-        print(f"  All {other_files_chunks} chunk metadata of other files still exist")
-        
-        
+        print(f"All {other_files_chunks} chunk metadata of other files still exist")
+
+
+
     except Exception as e:
         print(f"\n✗ Test failed with error: {e}")
         import traceback
