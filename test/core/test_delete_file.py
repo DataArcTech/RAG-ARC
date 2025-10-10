@@ -228,6 +228,7 @@ def test_file_deletion():
         print(f"  All {total_chunks} chunk metadata exist")
         
         # 5. Delete the first file (parsed content, chunks and index entries)
+        # Deletion order: indexers -> chunks -> parsed_data
         print("\n5. Deleting the first file...")
         file_to_delete = file_ids[0]
         delete_result = index_manager.delete_file_data(
@@ -244,7 +245,7 @@ def test_file_deletion():
         print(f"  Deleted {len(delete_result['deleted_chunk_ids'])} chunks")
         print(f"  Indexer deletion results:")
         for indexer_name, result in delete_result['indexer_deletion_results'].items():
-            print(f"- {indexer_name}: {result}")
+            print(f"    - {indexer_name}: {result}")
         
         # 6. Verify first file's data is deleted
         print("\n6. Verifying first file's data is deleted...")
@@ -276,7 +277,34 @@ def test_file_deletion():
                 other_files_chunks += 1
         print(f"All {other_files_chunks} chunk metadata of other files still exist")
 
+        # 7. Test the synchronous delete_file method with the second file
+        print("\n7. Testing synchronous delete_file method with the second file...")
+        file_to_delete_2 = file_ids[1]
+        delete_result_2 = index_manager.delete_file(file_to_delete_2)
 
+        if not delete_result_2["success"]:
+            raise Exception(f"Deletion via delete_file failed: {delete_result_2.get('error_message')}")
+
+        print(f"Deleted file 2 successfully using delete_file method")
+        print(f"  Deleted {len(delete_result_2['deleted_parsed_content_ids'])} parsed content")
+        print(f"  Deleted {len(delete_result_2['deleted_chunk_ids'])} chunks")
+        print(f"  Indexer deletion results:")
+        for indexer_name, result in delete_result_2['indexer_deletion_results'].items():
+            print(f"    - {indexer_name}: {result}")
+
+        # Verify second file's data is deleted
+        deleted_parsed_content_id_2 = all_parsed_content_ids[1]
+        parsed_metadata_2 = parsed_content_storage.get_parsed_content_metadata(deleted_parsed_content_id_2)
+        assert parsed_metadata_2 is None, "Parsed content metadata of file 2 should be deleted"
+        print(f"Verified file 2's parsed content metadata deleted")
+
+        deleted_chunk_ids_2 = all_chunk_ids_by_file[file_to_delete_2]
+        for chunk_id in deleted_chunk_ids_2:
+            chunk_metadata = chunk_storage.get_chunk_metadata(chunk_id)
+            assert chunk_metadata is None, f"Chunk metadata of file 2 should be deleted for {chunk_id}"
+        print(f"Verified all {len(deleted_chunk_ids_2)} chunk metadata of file 2 deleted")
+
+        print("\n✓ All tests passed successfully!")
 
     except Exception as e:
         print(f"\n✗ Test failed with error: {e}")

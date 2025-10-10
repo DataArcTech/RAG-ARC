@@ -592,9 +592,9 @@ class IndexManager(AbstractModule):
 
         return results
 
-    async def delete_file(self, file_id: str) -> Dict[str, Any]:
+    def delete_file(self, file_id: str) -> Dict[str, Any]:
         """
-        Async method for deleting a file and all its associated data.
+        Synchronous method for deleting a file and all its associated data.
         This is the main entry point for external usage.
 
         Args:
@@ -603,10 +603,7 @@ class IndexManager(AbstractModule):
         Returns:
             Dict containing deletion results
         """
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None,
-            self.delete_file_data,
+        return self.delete_file_data(
             file_id,
             self.parsed_content_storage,
             self.chunk_storage
@@ -625,9 +622,9 @@ class IndexManager(AbstractModule):
         This method:
         1. Finds all parsed content associated with the file
         2. Finds all chunks associated with each parsed content
-        3. Deletes chunks from all configured indexers
-        4. Deletes chunk metadata and blobs
-        5. Deletes parsed content metadata and blobs
+        3. Deletes chunks from all configured indexers (FIRST)
+        4. Deletes chunk metadata and blobs (SECOND)
+        5. Deletes parsed content metadata and blobs (THIRD)
 
         Note: The original file is preserved. Only parsed content and chunks are deleted.
 
@@ -673,7 +670,7 @@ class IndexManager(AbstractModule):
 
             logger.info(f"Found {len(parsed_content_list)} parsed content entries")
 
-            # Step 2: For each parsed content, find and delete all chunks
+            # Step 2: For each parsed content, find all chunks
             all_chunk_ids = []
             for parsed_content in parsed_content_list:
                 parsed_content_id = parsed_content.parsed_content_id
@@ -690,15 +687,27 @@ class IndexManager(AbstractModule):
                     all_chunk_ids.extend(chunk_ids)
                     logger.info(f"Found {len(chunk_ids)} chunks for parsed_content {parsed_content_id}")
 
-            # Step 3: Delete chunks from all indexers
+            # Step 3: Delete chunks from all indexers FIRST
             if all_chunk_ids and self.indexers:
                 logger.info(f"Step 3: Deleting {len(all_chunk_ids)} chunks from {len(self.indexers)} indexers")
                 deletion_results = self._delete_chunks_from_indexers(all_chunk_ids)
                 result["indexer_deletion_results"] = deletion_results
+
+                # Check if indexer deletion was successful
+                all_indexers_successful = all(
+                    res.get("success", False) for res in deletion_results.values()
+                )
+                if not all_indexers_successful:
+                    error_msg = "Failed to delete chunks from some indexers"
+                    logger.error(error_msg)
+                    result["error_message"] = error_msg
+                    return result
+
+                logger.info("Successfully deleted chunks from all indexers")
             else:
                 logger.info("Step 3: No chunks to delete from indexers")
 
-            # Step 4: Delete chunk metadata and blobs
+            # Step 4: Delete chunk metadata and blobs (SECOND, after indexer deletion succeeds)
             if all_chunk_ids:
                 logger.info(f"Step 4: Deleting {len(all_chunk_ids)} chunk metadata and blobs")
                 for chunk_id in all_chunk_ids:
@@ -721,7 +730,7 @@ class IndexManager(AbstractModule):
 
                 logger.info(f"Successfully deleted {len(result['deleted_chunk_ids'])} chunks")
 
-            # Step 5: Delete parsed content metadata and blobs
+            # Step 5: Delete parsed content metadata and blobs (THIRD, after chunks are deleted)
             logger.info(f"Step 5: Deleting {len(parsed_content_list)} parsed content entries")
             for parsed_content in parsed_content_list:
                 parsed_content_id = parsed_content.parsed_content_id
