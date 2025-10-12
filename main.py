@@ -8,6 +8,7 @@ load_dotenv()
 
 import app_registration
 from api.routers import mcp
+from api.routers import knowledge as knowledge_router
 
 # initialize components
 app_registration.initialize()
@@ -35,3 +36,4 @@ async def health_check():
     return "ok"
 
 app.mount("/mcp", mcp.mcp_app)
+app.include_router(knowledge_router.router)

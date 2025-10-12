@@ -2,12 +2,15 @@
 MCP Server implementation using FastMCP
 """
 import uuid
+from fastapi import UploadFile, File
 from fastmcp import Context, FastMCP
 from typing import Dict, Any
 from framework.register import Register
 from config.application.rag_inference_config import RAGInferenceConfig
+import logging
 
 SESSIONS = {} # mock session table
+logger = logging.getLogger(__name__)
 
 mcp = FastMCP("RAG-ARC MCP Server")
 registrator = Register() # singleton
@@ -47,4 +50,3 @@ async def chat(
     await ctx.report_progress(100, 100, "done")
     # return {"session_id": session_id, "reply": reply}
     return {"session_id": "fake_session_id", "reply": reply}
-

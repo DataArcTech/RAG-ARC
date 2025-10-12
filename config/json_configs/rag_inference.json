@@ -15,7 +15,6 @@
             {
                 "type": "dense",
                 "index_config": {
-                    "type": "faiss",
                     "index_path": "./data/unified_faiss_index",
                     "metric": "cosine",
                     "index_type": "flat",

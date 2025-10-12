@@ -6,11 +6,46 @@ build-backend = "setuptools.build_meta"
 name = "RAG-ARC"
 version = "0.1.0"
 description = "Retrieval-Augmented Generation Architecture"
+requires-python = ">=3.11"
 dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "fastmcp>=0.1.0",
+    "pydantic>=2.0.0",
     "dill",
-    "faiss-gpu"
+    # Use CUDA-enabled FAISS on Linux x86_64, otherwise fall back to CPU build
+    "faiss-gpu-cu12; platform_system == 'Linux' and platform_machine == 'x86_64'",
+    "faiss-cpu; platform_system != 'Linux' or platform_machine != 'x86_64'",
+    "python-dotenv",
+    "pillow>=11.3.0",
+    "pymupdf>=1.24.10",
+    "tqdm>=4.67.1",
+    "openai>=2.2.0",
+    "psutil>=7.1.0",
+    "jieba>=0.42.1",
+    "tantivy>=0.25.0",
+    "networkx>=3.5",
+    "sqlalchemy>=2.0.43",
+    "torch==2.4.1",
+    "sentence-transformers>=3.0.1",
+    "torchvision==0.19.1",
+    "torchaudio==2.4.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "httpx>=0.25.0",
+]
+
+# Optional extras to force a specific FAISS flavor when desired
+cpu = [
+    "faiss-cpu",
+]
+gpu = [
+    "faiss-gpu-cu12; platform_system == 'Linux' and platform_machine == 'x86_64'",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core*", "encapsulation*", "framework*", "api*", "application*"]
+include = ["api*", "core*", "config*", "framework*", "application*", "encapsulation*"]

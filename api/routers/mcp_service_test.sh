@@ -1,4 +1,4 @@
-ENDPOINT="http://192.168.80.1:8005/mcp/"
+ENDPOINT="http://localhost:8005/mcp/"
 
 echo "Testing MCP Server at $ENDPOINT"
 echo "=================================="

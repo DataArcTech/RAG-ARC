@@ -1,5 +1,6 @@
 {
     "type": "dense",
+    "index_path": "./data/unified_faiss_index",
     "index_config": {
         "type": "faiss",
         "index_path": "./data/unified_faiss_index",
@@ -7,7 +8,7 @@
         "index_type": "flat",
         "normalize_L2": true,
         "embedding_config": {
-            "type": "qwen_embedding",
+            "type": "huggingface_embedding",
             "model_name": "Qwen/Qwen3-Embedding-0.6B",
             "device": "cuda:7",
             "use_china_mirror": true,

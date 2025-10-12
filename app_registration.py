@@ -1,5 +1,6 @@
 import logging
 import os
+from config.application.knowledge_config import KnowledgeConfig
 from config.application.rag_inference_config import RAGInferenceConfig
 from framework.register import Register
 
@@ -13,6 +14,7 @@ registrator = Register()
 def initialize():
     try:
         registrator.register(config_path="config/json_configs/rag_inference.json", app_name="rag_inference", config_type=RAGInferenceConfig)
+        registrator.register(config_path="config/json_configs/knowledge.json", app_name="knowledge", config_type=KnowledgeConfig)
     except Exception as e:
         logger.error(f"Failed to initialize RAG inference: {e}")
         # Continue without RAG inference for now
