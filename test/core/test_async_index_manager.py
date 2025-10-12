@@ -37,87 +37,6 @@ TEST_FILES = {
 }
 
 
-def create_storage_instances():
-    """Create all storage instances with shared database configuration"""
-    logger.info("Creating storage instances...")
-
-    # Shared configurations
-    file_db_config = LocalDBConfig(
-        base_path="./test_output/async_index_test"
-    )
-
-    postgresql_config = PostgreSQLConfig(
-        host="localhost",
-        port=18080,  # PostgreSQL is running on port 18080
-        database="rag_test",
-        user="postgres",
-        password="123"
-    )
-
-    # Create all three storage configs
-    file_storage_config = FileStorageConfig(
-        file_db_config=file_db_config,
-        relational_db_config=postgresql_config
-    )
-
-    parsed_content_storage_config = ParsedContentStorageConfig(
-        file_db_config=file_db_config,
-        relational_db_config=postgresql_config
-    )
-
-    chunk_storage_config = ChunkStorageConfig(
-        file_db_config=file_db_config,
-        relational_db_config=postgresql_config
-    )
-
-    # Build all storage instances
-    file_storage = file_storage_config.build()
-    parsed_content_storage = parsed_content_storage_config.build()
-    chunk_storage = chunk_storage_config.build()
-
-    return file_storage, parsed_content_storage, chunk_storage
-
-
-def create_index_manager_with_hybrid():
-    """Create IndexManager with both BM25 and FAISS indexing"""
-    logger.info("Creating IndexManager with hybrid (BM25 + FAISS) indexing...")
-
-    parser_config = ParserCombinatorConfig()
-    chunker_config = RecursiveChunkerConfig(
-        chunk_size=400,
-        chunk_overlap=40
-    )
-
-    # BM25 indexer config
-    bm25_builder_config = BM25BuilderConfig(
-        index_path="./test_output/async_index_test/bm25_index"
-    )
-    bm25_indexer_config = BM25IndexerConfig(
-        index_config=bm25_builder_config
-    )
-
-
-
-    embedding_config = QwenEmbeddingConfig(
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        use_china_mirror=True,
-        cache_folder="./models"
-    )
-    faiss_config = FaissVectorDBConfig(
-        index_path="./test_output/async_index_test/faiss_index",
-        embedding_config=embedding_config
-    )
-    faiss_indexer_config = FaissIndexerConfig(
-        index_config=faiss_config
-    )
-
-    config = IndexManagerConfig(
-        parser_config=parser_config,
-        chunker_config=chunker_config,
-        indexer_configs=[bm25_indexer_config, faiss_indexer_config]
-    )
-
-    return config.build()
 
 
 async def test_async_index_file():
@@ -125,14 +44,79 @@ async def test_async_index_file():
     logger.info("=== Testing Async index_file Method ===")
 
     try:
-        # Create all storage instances
-        file_storage, parsed_content_storage, chunk_storage = create_storage_instances()
+            # Create all storage instances
+        file_db_config = LocalDBConfig(
+            base_path="./test_output/async_index_test"
+        )
 
-        # Create IndexManager with all storage instances
-        index_manager = create_index_manager_with_hybrid()
-        index_manager.file_storage = file_storage
-        index_manager.parsed_content_storage = parsed_content_storage
-        index_manager.chunk_storage = chunk_storage
+        postgresql_config = PostgreSQLConfig(
+            host="localhost",
+            port=18080,  # PostgreSQL is running on port 18080
+            database="rag_test",
+            user="postgres",
+            password="123"
+        )
+
+        # Create all three storage configs
+        file_storage_config = FileStorageConfig(
+            file_db_config=file_db_config,
+            relational_db_config=postgresql_config
+        )
+
+        parsed_content_storage_config = ParsedContentStorageConfig(
+            file_db_config=file_db_config,
+            relational_db_config=postgresql_config
+        )
+
+        chunk_storage_config = ChunkStorageConfig(
+            file_db_config=file_db_config,
+            relational_db_config=postgresql_config
+        )
+
+        # Build all storage instances
+        file_storage = file_storage_config.build()
+        parsed_content_storage = parsed_content_storage_config.build()
+        chunk_storage = chunk_storage_config.build()
+
+        parser_config = ParserCombinatorConfig()
+        chunker_config = RecursiveChunkerConfig(
+            chunk_size=400,
+            chunk_overlap=40
+        )
+
+        # BM25 indexer config
+        bm25_builder_config = BM25BuilderConfig(
+            index_path="./test_output/async_index_test/bm25_index"
+        )
+        bm25_indexer_config = BM25IndexerConfig(
+            index_config=bm25_builder_config
+        )
+
+
+
+        embedding_config = QwenEmbeddingConfig(
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            use_china_mirror=True,
+            cache_folder="./models"
+        )
+        faiss_config = FaissVectorDBConfig(
+            index_path="./test_output/async_index_test/faiss_index",
+            embedding_config=embedding_config
+        )
+        faiss_indexer_config = FaissIndexerConfig(
+            index_config=faiss_config
+        )
+
+        config = IndexManagerConfig(
+            parser_config=parser_config,
+            chunker_config=chunker_config,
+            indexer_configs=[bm25_indexer_config, faiss_indexer_config],
+            file_storage_config=file_storage_config,
+            chunk_storage_config=chunk_storage_config,
+            parsed_content_storage_config=parsed_content_storage_config
+        )
+
+        index_manager = config.build()
 
         # Content type mapping
         content_types = {

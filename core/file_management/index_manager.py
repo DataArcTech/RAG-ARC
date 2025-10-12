@@ -23,13 +23,13 @@ class IndexManager(AbstractModule):
     5. Stores parsed content and chunks back to storage modules
     """
 
-    def __init__(self, config: "IndexManagerConfig", file_storage=None, parsed_content_storage=None, chunk_storage=None):
+    def __init__(self, config: "IndexManagerConfig"):
         super().__init__(config)
 
-        # Optional storage instances for async index_file method
-        self.file_storage = file_storage
-        self.parsed_content_storage = parsed_content_storage
-        self.chunk_storage = chunk_storage
+        # Build storage instances
+        self.file_storage = config.file_storage_config.build()
+        self.parsed_content_storage = config.parsed_content_storage_config.build()
+        self.chunk_storage = config.chunk_storage_config.build()
 
         # Build parser
         self.parser = self.config.parser_config.build()
@@ -48,6 +48,7 @@ class IndexManager(AbstractModule):
 
         logger.info(f"IndexManager initialized with {len(self.indexers)} indexers")
 
+
     async def index_file(self, file_id: str) -> Dict[str, Any]:
         """
         Async method for indexing a file by file_id.
@@ -59,22 +60,27 @@ class IndexManager(AbstractModule):
         Returns:
             Dict containing indexing results
         """
+        # Validate file_id
+        if file_id is None or not isinstance(file_id, str) or not file_id.strip():
+            error_msg = "file_id must be a non-empty string"
+            logger.error(error_msg)
+            return {
+                "success": False,
+                "file_id": file_id,
+                "error_message": error_msg
+            }
+
+
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             None,
             self.process_file,
-            file_id,
-            self.file_storage,
-            self.parsed_content_storage,
-            self.chunk_storage
+            file_id
         )
 
     def process_file(
         self,
         file_id: str,
-        file_storage,
-        parsed_content_storage,
-        chunk_storage,
         **kwargs: Any
     ) -> Dict[str, Any]:
         """
@@ -117,16 +123,20 @@ class IndexManager(AbstractModule):
 
             # Step 1: Get file content from FileStorage
             logger.info(f"Step 1: Retrieving file content for {file_id}")
-            file_content = file_storage.get_file_content(file_id)
+            file_content = self.file_storage.get_file_content(file_id)
             if file_content is None:
                 raise ValueError(f"File content not found for file_id: {file_id}")
 
             # Get file metadata for filename
-            file_metadata = file_storage.get_file_metadata(file_id)
+            file_metadata = self.file_storage.get_file_metadata(file_id)
             if file_metadata is None:
                 raise ValueError(f"File metadata not found for file_id: {file_id}")
 
             filename = file_metadata.filename
+            if not filename:
+                logger.warning(f"File metadata has empty filename for file_id: {file_id}")
+                filename = f"unknown_file_{file_id}"
+
             logger.info(f"Retrieved file: {filename} ({len(file_content)} bytes)")
 
             # Step 2: Parse the file
@@ -139,6 +149,9 @@ class IndexManager(AbstractModule):
 
             if not parse_results:
                 raise ValueError(f"Parser returned no results for file: {filename}")
+
+            if not isinstance(parse_results, list):
+                parse_results = [parse_results]
 
             logger.info(f"Parser returned {len(parse_results)} results")
 
@@ -153,12 +166,19 @@ class IndexManager(AbstractModule):
                 concatenated_texts = []
 
                 for i, parse_result in enumerate(parse_results):
+                    if parse_result is None:
+                        logger.warning(f"Parse result {i+1} is None, skipping")
+                        continue
+
                     text_content = self._extract_text_from_parse_result(parse_result)
                     if text_content:
                         logger.info(f"Extracted {len(text_content)} characters from result {i+1}")
                         concatenated_texts.append(text_content)
                     else:
                         logger.warning(f"No text content found in parse result {i+1}")
+
+                if not concatenated_texts:
+                    raise ValueError("No valid text content extracted from any parse results")
 
                 # Join all texts with double newlines to separate different sections
                 parsed_text = "\n\n".join(concatenated_texts)
@@ -168,7 +188,7 @@ class IndexManager(AbstractModule):
                 parse_result = parse_results[0]
 
             if not parsed_text:
-                raise ValueError(f"No text content extracted from parsed result")
+                raise ValueError("No text content extracted from parsed result")
 
             logger.info(f"Extracted {len(parsed_text)} characters of text content")
 
@@ -185,7 +205,7 @@ class IndexManager(AbstractModule):
             # Convert parsed text to bytes for storage
             parsed_data = parsed_text.encode('utf-8')
 
-            parsed_content_id = parsed_content_storage.store_parsed_content(
+            parsed_content_id = self.parsed_content_storage.store_parsed_content(
                 source_file_id=file_id,
                 parser_type=parser_type_name,
                 parsed_data=parsed_data,
@@ -193,13 +213,17 @@ class IndexManager(AbstractModule):
                 **kwargs
             )
 
+            if not parsed_content_id:
+                raise ValueError("Failed to store parsed content")
+
             result["parsed_content_id"] = parsed_content_id
             logger.info(f"Stored parsed content with ID: {parsed_content_id}")
 
             # Step 4: Chunk the parsed text
             logger.info(f"Step 4: Chunking parsed text")
             chunker_info = self.chunker.get_chunker_info()
-            result["metadata"]["chunker_type"] = chunker_info["strategy"]
+            chunker_strategy = chunker_info.get("strategy", type(self.chunker).__name__)
+            result["metadata"]["chunker_type"] = chunker_strategy
 
             # Prepare metadata for chunking
             chunk_metadata = {
@@ -216,7 +240,7 @@ class IndexManager(AbstractModule):
             )
 
             if not chunks:
-                raise ValueError(f"Chunker returned no chunks for parsed text")
+                raise ValueError("Chunker returned no chunks")
 
             logger.info(f"Created {len(chunks)} chunks")
             result["metadata"]["num_chunks"] = len(chunks)
@@ -226,21 +250,34 @@ class IndexManager(AbstractModule):
             chunk_ids = []
 
             for i, chunk in enumerate(chunks):
+                if chunk is None:
+                    logger.warning(f"Chunk {i+1}/{len(chunks)} is None, skipping")
+                    continue
+
                 # Convert chunk to JSON bytes for storage
-                chunk_data = json.dumps(chunk, ensure_ascii=False).encode('utf-8')
+                try:
+                    chunk_data = json.dumps(chunk, ensure_ascii=False).encode('utf-8')
+                    chunk_id = self.chunk_storage.store_chunk(
+                        source_parsed_content_id=parsed_content_id,
+                        chunker_type=chunker_strategy,
+                        chunk_data=chunk_data,
+                        **kwargs
+                    )
 
-                chunk_id = chunk_storage.store_chunk(
-                    source_parsed_content_id=parsed_content_id,
-                    chunker_type=chunker_info["strategy"],
-                    chunk_data=chunk_data,
-                    **kwargs
-                )
+                    if chunk_id:
+                        chunk_ids.append(chunk_id)
+                        logger.debug(f"Stored chunk {i+1}/{len(chunks)} with ID: {chunk_id}")
+                    else:
+                        logger.warning(f"Failed to store chunk {i+1}/{len(chunks)}")
+                except Exception as e:
+                    logger.error(f"Failed to store chunk {i+1}/{len(chunks)}: {str(e)}")
+                    continue
 
-                chunk_ids.append(chunk_id)
-                logger.debug(f"Stored chunk {i+1}/{len(chunks)} with ID: {chunk_id}")
+            if not chunk_ids:
+                raise ValueError("Failed to store any chunks")
 
             result["chunk_ids"] = chunk_ids
-            logger.info(f"Stored all {len(chunk_ids)} chunks")
+            logger.info(f"Stored {len(chunk_ids)}/{len(chunks)} chunks successfully")
 
             # Step 6: Index the chunks (if indexers are configured)
             if self.indexers:
@@ -274,14 +311,12 @@ class IndexManager(AbstractModule):
         """
         deletion_results = {}
 
-        # Run all indexer deletions concurrently in a single event loop
+        # Run all indexer deletions concurrently
         async def run_all_deletions():
-            """Run all indexer deletions concurrently"""
             tasks = []
             for i, indexer in enumerate(self.indexers):
                 indexer_name = f"{type(indexer).__name__}_{i}"
                 tasks.append(self._delete_with_single_indexer(indexer, indexer_name, chunk_ids))
-
             return await asyncio.gather(*tasks, return_exceptions=True)
 
         # Execute all deletions concurrently
@@ -292,17 +327,16 @@ class IndexManager(AbstractModule):
             indexer_name = f"{type(self.indexers[i]).__name__}_{i}"
 
             if isinstance(result, Exception):
-                error_msg = f"Deletion failed with {indexer_name}: {str(result)}"
-                logger.error(error_msg, exc_info=True)
+                logger.error(f"Deletion failed with {indexer_name}: {str(result)}")
                 deletion_results[indexer_name] = {
                     "success": False,
-                    "error_message": error_msg,
+                    "error_message": str(result),
                     "deleted_count": 0,
                     "total_chunks": len(chunk_ids)
                 }
             else:
                 deletion_results[indexer_name] = result
-                if result["success"]:
+                if result.get("success"):
                     logger.info(f"Successfully deleted {len(chunk_ids)} chunks from {indexer_name}")
 
         return deletion_results
@@ -328,22 +362,18 @@ class IndexManager(AbstractModule):
         """
         try:
             logger.info(f"Deleting {len(chunk_ids)} chunks from {indexer_name}")
-
-            # Call the indexer's async delete_chunks method
             success = await indexer.delete_chunks(chunk_ids)
 
             return {
-                "success": success,
+                "success": bool(success),
                 "deleted_count": len(chunk_ids) if success else 0,
                 "total_chunks": len(chunk_ids)
             }
-
         except Exception as e:
-            error_msg = f"Deletion failed with {indexer_name}: {str(e)}"
-            logger.error(error_msg, exc_info=True)
+            logger.error(f"Deletion failed with {indexer_name}: {str(e)}")
             return {
                 "success": False,
-                "error_message": error_msg,
+                "error_message": str(e),
                 "deleted_count": 0,
                 "total_chunks": len(chunk_ids)
             }
@@ -358,8 +388,8 @@ class IndexManager(AbstractModule):
         Returns:
             Extracted text content as string
         """
-        # The exact format depends on the parser used
-        # This is a generic implementation that handles common formats
+        if not parse_result:
+            return ""
 
         # Try to find text content in various possible keys
         text_keys = ['content', 'text', 'markdown', 'md_content', 'extracted_text']
@@ -370,25 +400,32 @@ class IndexManager(AbstractModule):
                 if isinstance(content, str):
                     return content
                 elif isinstance(content, bytes):
-                    return content.decode('utf-8')
+                    try:
+                        return content.decode('utf-8')
+                    except Exception as e:
+                        logger.warning(f"Failed to decode bytes content from key '{key}': {e}")
 
         # If we have output_paths, try to read from markdown file
-        if 'output_paths' in parse_result and 'markdown' in parse_result['output_paths']:
-            markdown_path = parse_result['output_paths']['markdown']
-            try:
-                with open(markdown_path, 'r', encoding='utf-8') as f:
-                    return f.read()
-            except Exception as e:
-                logger.warning(f"Failed to read markdown file {markdown_path}: {e}")
+        if 'output_paths' in parse_result:
+            output_paths = parse_result['output_paths']
+            if isinstance(output_paths, dict) and 'markdown' in output_paths:
+                markdown_path = output_paths['markdown']
+                if markdown_path:
+                    try:
+                        with open(markdown_path, 'r', encoding='utf-8') as f:
+                            return f.read()
+                    except Exception as e:
+                        logger.warning(f"Failed to read markdown file {markdown_path}: {e}")
 
         # If we have md_content_path, try to read from it
         if 'md_content_path' in parse_result:
             md_path = parse_result['md_content_path']
-            try:
-                with open(md_path, 'r', encoding='utf-8') as f:
-                    return f.read()
-            except Exception as e:
-                logger.warning(f"Failed to read markdown file {md_path}: {e}")
+            if md_path:
+                try:
+                    with open(md_path, 'r', encoding='utf-8') as f:
+                        return f.read()
+                except Exception as e:
+                    logger.warning(f"Failed to read markdown file {md_path}: {e}")
 
         # Fallback: convert the entire result to string
         logger.warning("Could not find text content in standard keys, using string representation")
@@ -410,11 +447,17 @@ class IndexManager(AbstractModule):
         # Convert chunks to Chunk objects for indexing
         chunk_objects = []
         for i, (chunk, chunk_id) in enumerate(zip(chunks, chunk_ids)):
-            # Create Chunk object
-            # The exact format depends on the Chunk schema
+            if not chunk or not chunk_id:
+                logger.warning(f"Chunk or chunk_id at index {i} is invalid, skipping")
+                continue
+
             try:
+                if 'content' not in chunk:
+                    logger.warning(f"Chunk at index {i} missing 'content' field, skipping")
+                    continue
+
                 # Merge source_metadata into the main metadata
-                merged_metadata = chunk.get('metadata', {}).copy()
+                merged_metadata = chunk.get('metadata', {}).copy() if chunk.get('metadata') else {}
                 source_metadata = chunk.get('source_metadata', {})
                 if source_metadata:
                     merged_metadata.update(source_metadata)
@@ -430,17 +473,15 @@ class IndexManager(AbstractModule):
                 continue
 
         if not chunk_objects:
-            logger.error("No valid chunks created for indexing")
+            logger.warning("No valid chunks created for indexing")
             return indexing_results
 
-        # Run all indexers concurrently in a single event loop
+        # Run all indexers concurrently
         async def run_all_indexers():
-            """Run all indexers concurrently"""
             tasks = []
             for i, indexer in enumerate(self.indexers):
                 indexer_name = f"{type(indexer).__name__}_{i}"
                 tasks.append(self._index_with_single_indexer(indexer, indexer_name, chunk_objects))
-
             return await asyncio.gather(*tasks, return_exceptions=True)
 
         # Execute all indexers concurrently
@@ -451,18 +492,17 @@ class IndexManager(AbstractModule):
             indexer_name = f"{type(self.indexers[i]).__name__}_{i}"
 
             if isinstance(result, Exception):
-                error_msg = f"Indexing failed with {indexer_name}: {str(result)}"
-                logger.error(error_msg, exc_info=True)
+                logger.error(f"Indexing failed with {indexer_name}: {str(result)}")
                 indexing_results[indexer_name] = {
                     "success": False,
-                    "error_message": error_msg,
+                    "error_message": str(result),
                     "indexed_count": 0,
                     "total_chunks": len(chunk_objects)
                 }
             else:
                 indexing_results[indexer_name] = result
-                if result["success"]:
-                    logger.info(f"Successfully indexed {result['indexed_count']} chunks with {indexer_name}")
+                if result.get("success"):
+                    logger.info(f"Successfully indexed {result.get('indexed_count', 0)} chunks with {indexer_name}")
 
         return indexing_results
 
@@ -487,8 +527,6 @@ class IndexManager(AbstractModule):
         """
         try:
             logger.info(f"Indexing {len(chunk_objects)} chunks with {indexer_name}")
-
-            # Call the indexer's async update_index method
             indexed_ids = await indexer.update_index(chunk_objects)
 
             return {
@@ -497,13 +535,11 @@ class IndexManager(AbstractModule):
                 "total_chunks": len(chunk_objects),
                 "indexed_ids": indexed_ids or []
             }
-
         except Exception as e:
-            error_msg = f"Indexing failed with {indexer_name}: {str(e)}"
-            logger.error(error_msg, exc_info=True)
+            logger.error(f"Indexing failed with {indexer_name}: {str(e)}")
             return {
                 "success": False,
-                "error_message": error_msg,
+                "error_message": str(e),
                 "indexed_count": 0,
                 "total_chunks": len(chunk_objects)
             }
@@ -511,7 +547,6 @@ class IndexManager(AbstractModule):
     def process_multiple_files(
         self,
         file_ids: List[str],
-        file_storage,
         max_workers: int = 3,
         **kwargs: Any
     ) -> Dict[str, Any]:
@@ -520,17 +555,46 @@ class IndexManager(AbstractModule):
 
         Args:
             file_ids: List of file IDs to process
-            file_storage: FileStorage instance
             max_workers: Maximum number of parallel workers
             **kwargs: Additional arguments passed to process_file
 
         Returns:
             Dictionary containing batch processing results
         """
-        logger.info(f"Starting batch processing for {len(file_ids)} files")
+        # Validate inputs
+        if file_ids is None:
+            logger.error("file_ids parameter is None")
+            return {
+                "total_files": 0,
+                "successful_files": 0,
+                "failed_files": 0,
+                "results": {},
+                "error_message": "file_ids parameter is None"
+            }
+
+        if not isinstance(file_ids, list):
+            logger.error(f"file_ids is not a list: {type(file_ids).__name__}")
+            return {
+                "total_files": 0,
+                "successful_files": 0,
+                "failed_files": 0,
+                "results": {},
+                "error_message": f"file_ids must be a list, got {type(file_ids).__name__}"
+            }
+
+        if max_workers is None or max_workers < 1:
+            logger.warning(f"Invalid max_workers: {max_workers}, using default value 3")
+            max_workers = 3
+
+        # Filter out None file_ids
+        valid_file_ids = [fid for fid in file_ids if fid is not None and isinstance(fid, str) and fid.strip()]
+        if len(valid_file_ids) < len(file_ids):
+            logger.warning(f"Filtered out {len(file_ids) - len(valid_file_ids)} invalid file_ids")
+
+        logger.info(f"Starting batch processing for {len(valid_file_ids)} files")
 
         results = {
-            "total_files": len(file_ids),
+            "total_files": len(valid_file_ids),
             "successful_files": 0,
             "failed_files": 0,
             "results": {},
@@ -545,8 +609,8 @@ class IndexManager(AbstractModule):
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
             future_to_file_id = {
-                executor.submit(self.process_file, file_id, file_storage, **kwargs): file_id
-                for file_id in file_ids
+                executor.submit(self.process_file, file_id, **kwargs): file_id
+                for file_id in valid_file_ids
             }
 
             # Collect results
@@ -555,17 +619,33 @@ class IndexManager(AbstractModule):
 
                 try:
                     result = future.result()
+
+                    if result is None:
+                        logger.error(f"process_file returned None for file_id: {file_id}")
+                        result = {
+                            "success": False,
+                            "file_id": file_id,
+                            "error_message": "process_file returned None"
+                        }
+
                     results["results"][file_id] = result
 
-                    if result["success"]:
+                    if result.get("success", False):
                         results["successful_files"] += 1
-                        results["summary"]["total_chunks_created"] += result["metadata"]["num_chunks"]
-                        results["summary"]["total_indexers_used"].update(result["metadata"]["indexers_used"])
+                        metadata = result.get("metadata", {})
+                        if metadata is not None:
+                            num_chunks = metadata.get("num_chunks", 0)
+                            if num_chunks is not None:
+                                results["summary"]["total_chunks_created"] += num_chunks
+                            indexers_used = metadata.get("indexers_used", [])
+                            if indexers_used is not None:
+                                results["summary"]["total_indexers_used"].update(indexers_used)
                     else:
                         results["failed_files"] += 1
+                        error_message = result.get("error_message", "Unknown error")
                         results["summary"]["processing_errors"].append({
                             "file_id": file_id,
-                            "error": result["error_message"]
+                            "error": error_message
                         })
 
                 except Exception as e:
@@ -592,28 +672,33 @@ class IndexManager(AbstractModule):
 
         return results
 
-    def delete_file(self, file_id: str) -> Dict[str, Any]:
+    def delete_file(self, file_id: str, **kwargs: Any) -> Dict[str, Any]:
         """
         Synchronous method for deleting a file and all its associated data.
         This is the main entry point for external usage.
 
         Args:
             file_id: The ID of the file to delete
+            **kwargs: Additional arguments
 
         Returns:
             Dict containing deletion results
         """
-        return self.delete_file_data(
-            file_id,
-            self.parsed_content_storage,
-            self.chunk_storage
-        )
+        # Validate file_id
+        if file_id is None or not isinstance(file_id, str) or not file_id.strip():
+            error_msg = "file_id must be a non-empty string"
+            logger.error(error_msg)
+            return {
+                "success": False,
+                "file_id": file_id,
+                "error_message": error_msg
+            }
+
+        return self.delete_file_data(file_id, **kwargs)
 
     def delete_file_data(
         self,
         file_id: str,
-        parsed_content_storage,
-        chunk_storage,
         **kwargs: Any
     ) -> Dict[str, Any]:
         """
@@ -630,8 +715,6 @@ class IndexManager(AbstractModule):
 
         Args:
             file_id: ID of the file to delete
-            parsed_content_storage: ParsedContentStorage instance
-            chunk_storage: ChunkStorage instance
             **kwargs: Additional arguments
 
         Returns:
@@ -657,14 +740,13 @@ class IndexManager(AbstractModule):
 
             # Step 1: Find all parsed content for this file
             logger.info(f"Step 1: Finding parsed content for file {file_id}")
-            parsed_content_list = parsed_content_storage.metadata_store.list_parsed_content_metadata(
+            parsed_content_list = self.parsed_content_storage.metadata_store.list_parsed_content_metadata(
                 source_file_id=file_id,
                 **kwargs
             )
 
             if not parsed_content_list:
                 logger.warning(f"No parsed content found for file_id: {file_id}")
-                # Still consider this a success since there's nothing to delete
                 result["success"] = True
                 return result
 
@@ -673,17 +755,24 @@ class IndexManager(AbstractModule):
             # Step 2: For each parsed content, find all chunks
             all_chunk_ids = []
             for parsed_content in parsed_content_list:
+                if not parsed_content or not hasattr(parsed_content, 'parsed_content_id'):
+                    logger.warning("Invalid parsed_content, skipping")
+                    continue
+
                 parsed_content_id = parsed_content.parsed_content_id
+                if not parsed_content_id:
+                    logger.warning("parsed_content has empty parsed_content_id, skipping")
+                    continue
 
                 # Find all chunks for this parsed content
                 logger.info(f"Step 2: Finding chunks for parsed_content_id: {parsed_content_id}")
-                chunk_list = chunk_storage.metadata_store.list_chunk_metadata(
+                chunk_list = self.chunk_storage.metadata_store.list_chunk_metadata(
                     source_parsed_content_id=parsed_content_id,
                     **kwargs
                 )
 
                 if chunk_list:
-                    chunk_ids = [chunk.chunk_id for chunk in chunk_list]
+                    chunk_ids = [chunk.chunk_id for chunk in chunk_list if chunk and hasattr(chunk, 'chunk_id') and chunk.chunk_id]
                     all_chunk_ids.extend(chunk_ids)
                     logger.info(f"Found {len(chunk_ids)} chunks for parsed_content {parsed_content_id}")
 
@@ -711,45 +800,49 @@ class IndexManager(AbstractModule):
             if all_chunk_ids:
                 logger.info(f"Step 4: Deleting {len(all_chunk_ids)} chunk metadata and blobs")
                 for chunk_id in all_chunk_ids:
+                    if not chunk_id:
+                        continue
+
                     try:
                         # Delete chunk blob
-                        chunk_metadata = chunk_storage.metadata_store.get_chunk_metadata(chunk_id, **kwargs)
-                        if chunk_metadata:
-                            chunk_storage.blob_store.delete(chunk_metadata.blob_key, **kwargs)
+                        chunk_metadata = self.chunk_storage.metadata_store.get_chunk_metadata(chunk_id, **kwargs)
+                        if chunk_metadata and hasattr(chunk_metadata, 'blob_key') and chunk_metadata.blob_key:
+                            self.chunk_storage.blob_store.delete(chunk_metadata.blob_key, **kwargs)
                             logger.debug(f"Deleted chunk blob: {chunk_metadata.blob_key}")
 
                         # Delete chunk metadata
-                        chunk_storage.metadata_store.delete_chunk_metadata(chunk_id, **kwargs)
+                        self.chunk_storage.metadata_store.delete_chunk_metadata(chunk_id, **kwargs)
                         logger.debug(f"Deleted chunk metadata: {chunk_id}")
-
                         result["deleted_chunk_ids"].append(chunk_id)
-
                     except Exception as e:
                         logger.error(f"Failed to delete chunk {chunk_id}: {e}")
-                        continue
 
-                logger.info(f"Successfully deleted {len(result['deleted_chunk_ids'])} chunks")
+                logger.info(f"Successfully deleted {len(result['deleted_chunk_ids'])}/{len(all_chunk_ids)} chunks")
 
             # Step 5: Delete parsed content metadata and blobs (THIRD, after chunks are deleted)
             logger.info(f"Step 5: Deleting {len(parsed_content_list)} parsed content entries")
             for parsed_content in parsed_content_list:
-                parsed_content_id = parsed_content.parsed_content_id
-                try:
-                    # Delete parsed content blob
-                    parsed_content_storage.blob_store.delete(parsed_content.blob_key, **kwargs)
-                    logger.debug(f"Deleted parsed content blob: {parsed_content.blob_key}")
-
-                    # Delete parsed content metadata
-                    parsed_content_storage.metadata_store.delete_parsed_content_metadata(parsed_content_id, **kwargs)
-                    logger.debug(f"Deleted parsed content metadata: {parsed_content_id}")
-
-                    result["deleted_parsed_content_ids"].append(parsed_content_id)
-
-                except Exception as e:
-                    logger.error(f"Failed to delete parsed content {parsed_content_id}: {e}")
+                if not parsed_content or not hasattr(parsed_content, 'parsed_content_id'):
                     continue
 
-            logger.info(f"Successfully deleted {len(result['deleted_parsed_content_ids'])} parsed content entries")
+                parsed_content_id = parsed_content.parsed_content_id
+                if not parsed_content_id:
+                    continue
+
+                try:
+                    # Delete parsed content blob
+                    if hasattr(parsed_content, 'blob_key') and parsed_content.blob_key:
+                        self.parsed_content_storage.blob_store.delete(parsed_content.blob_key, **kwargs)
+                        logger.debug(f"Deleted parsed content blob: {parsed_content.blob_key}")
+
+                    # Delete parsed content metadata
+                    self.parsed_content_storage.metadata_store.delete_parsed_content_metadata(parsed_content_id, **kwargs)
+                    logger.debug(f"Deleted parsed content metadata: {parsed_content_id}")
+                    result["deleted_parsed_content_ids"].append(parsed_content_id)
+                except Exception as e:
+                    logger.error(f"Failed to delete parsed content {parsed_content_id}: {e}")
+
+            logger.info(f"Successfully deleted {len(result['deleted_parsed_content_ids'])}/{len(parsed_content_list)} parsed content entries")
 
             # Success!
             result["success"] = True

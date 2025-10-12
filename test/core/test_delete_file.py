@@ -143,16 +143,17 @@ def test_file_deletion():
         index_manager_config = IndexManagerConfig(
             parser_config=parser_config,
             chunker_config=chunker_config,
-            indexer_configs=[bm25_indexer_config, faiss_indexer_config, graph_indexer_config]
+            # indexer_configs=[bm25_indexer_config, faiss_indexer_config, graph_indexer_config],
+            indexer_configs=[faiss_indexer_config, bm25_indexer_config],
+            file_storage_config=file_storage_config,
+            parsed_content_storage_config=parsed_content_storage_config,
+            chunk_storage_config=chunk_storage_config
         )
 
         # Build IndexManager with storage instances
         from core.file_management.index_manager import IndexManager
         index_manager = IndexManager(
-            config=index_manager_config,
-            file_storage=file_storage,
-            parsed_content_storage=parsed_content_storage,
-            chunk_storage=chunk_storage
+            config=index_manager_config
         )
         
         print("Configurations set up successfully")
