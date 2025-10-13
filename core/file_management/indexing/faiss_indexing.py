@@ -40,19 +40,17 @@ class FaissIndexer(BaseIndexer):
         chunk_ids = await loop.run_in_executor(None, update_and_save, chunks)
         return chunk_ids or []
 
-    async def delete_chunks(self, chunk_ids: List[str]) -> bool:
+    def delete_chunks(self, chunk_ids: List[str]) -> bool:
         """
-        Deletes a batch of chunks from the FAISS index using soft-delete.
+        Deletes a batch of chunks from the FAISS index using soft-delete (synchronous).
         """
-        loop = asyncio.get_running_loop()
-
-        def delete_and_save(ids: List[str]):
+        try:
             # Delete chunks from index (soft-delete)
-            result = self.faiss_db.delete_index(ids)
+            result = self.faiss_db.delete_index(chunk_ids)
             # Save the index to disk
             if hasattr(self.faiss_db.config, 'index_path'):
                 self.faiss_db.save_index(self.faiss_db.config.index_path)
-            return result
-
-        result = await loop.run_in_executor(None, delete_and_save, chunk_ids)
-        return result if result is not None else False
+            return result if result is not None else False
+        except Exception as e:
+            logger.error(f"Failed to delete chunks from FAISS index: {e}")
+            return False

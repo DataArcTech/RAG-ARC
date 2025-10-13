@@ -337,7 +337,7 @@ class BM25IndexBuilder():
             raise
 
     def _delete_chunks_by_ids(self, chunk_ids: List[str]) -> int:
-        """Delete chunks by their IDs
+        """Delete chunks by their IDs with retry mechanism for lock conflicts
 
         Args:
             chunk_ids: List of chunk IDs to delete
@@ -347,44 +347,72 @@ class BM25IndexBuilder():
         """
         if not chunk_ids:
             return 0
-        
-        self._ensure_index_loaded()
-            
-        try:
-            # First, check which chunks actually exist
-            searcher = self._index.searcher()
-            existing_ids = []
-            
-            for chunk_id in chunk_ids:
-                query = self._index.parse_query(f'id:"{chunk_id}"', ["id"])
-                results = searcher.search(query, 1)
-                logger.info(f"Checking chunk {chunk_id}: found {len(results.hits)} hits")
-                if results.hits:
-                    existing_ids.append(chunk_id)
-            
-            if not existing_ids:
-                logger.info("No chunks found to delete")
+
+        # Try to load index if not loaded
+        if self._index is None:
+            try:
+                logger.info("Index not loaded, attempting to load from disk for deletion")
+                self.load_local()
+            except (FileNotFoundError, RuntimeError) as e:
+                logger.warning(f"Cannot load index for deletion: {e}")
+                # Index doesn't exist, nothing to delete
                 return 0
-            
-            # Delete only existing chunks
-            writer = self._index.writer(heap_size=self._writer_heap_size)
-            deleted_count = 0
-            
-            for chunk_id in existing_ids:
-                delete_result = writer.delete_documents("id", chunk_id)
-                logger.info(f"Deleting chunk {chunk_id}: {delete_result} chunks deleted")
-                deleted_count += delete_result
-            
-            logger.info(f"Committing deletion of {deleted_count} chunks")
-            writer.commit()
-            logger.info("Reloading index after deletion")
-            self._index.reload()
-            logger.info(f"Successfully deleted {deleted_count} chunks from index (requested: {len(chunk_ids)})")
-            return deleted_count
-            
-        except Exception as e:
-            logger.error(f"Error deleting chunks: {e}")
-            raise
+
+        # Retry mechanism for lock conflicts
+        max_retries = 3
+        retry_delay = 0.1  # seconds
+
+        for attempt in range(max_retries):
+            try:
+                # First, check which chunks actually exist
+                searcher = self._index.searcher()
+                existing_ids = []
+
+                for chunk_id in chunk_ids:
+                    query = self._index.parse_query(f'id:"{chunk_id}"', ["id"])
+                    results = searcher.search(query, 1)
+                    logger.info(f"Checking chunk {chunk_id}: found {len(results.hits)} hits")
+                    if results.hits:
+                        existing_ids.append(chunk_id)
+
+                if not existing_ids:
+                    logger.info("No chunks found to delete")
+                    return 0
+
+                # Delete only existing chunks
+                writer = self._index.writer(heap_size=self.writer_heap_size)
+                deleted_count = 0
+
+                for chunk_id in existing_ids:
+                    delete_result = writer.delete_documents("id", chunk_id)
+                    logger.info(f"Deleting chunk {chunk_id}: {delete_result} chunks deleted")
+                    deleted_count += delete_result
+
+                logger.info(f"Committing deletion of {deleted_count} chunks")
+                writer.commit()
+                logger.info("Reloading index after deletion")
+                self._index.reload()
+                logger.info(f"Successfully deleted {deleted_count} chunks from index (requested: {len(chunk_ids)})")
+                return deleted_count
+
+            except Exception as e:
+                error_msg = str(e)
+                # Check if it's a lock conflict
+                if "LockBusy" in error_msg or "Failed to acquire" in error_msg:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Lock conflict on attempt {attempt + 1}/{max_retries}, retrying in {retry_delay}s...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                        continue
+                    else:
+                        logger.error(f"Failed to acquire lock after {max_retries} attempts")
+                        raise
+                else:
+                    # Other errors, don't retry
+                    logger.error(f"Error deleting chunks: {e}")
+                    raise
+
+        return 0
 
 
     def _build_index(self, chunks: List[Chunk]) -> List[str]:

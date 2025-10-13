@@ -10,6 +10,7 @@ huggingface-hub
 pydantic
 
 networkx
+igraph
 
 
 SQLAlchemy

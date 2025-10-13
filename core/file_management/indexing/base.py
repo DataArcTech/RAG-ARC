@@ -40,10 +40,10 @@ class BaseIndexer(AbstractModule, ABC):
         pass
 
     @abstractmethod
-    async def delete_chunks(self, chunk_ids: List[str]) -> bool:
+    def delete_chunks(self, chunk_ids: List[str]) -> bool:
         """
         Abstract method to delete a batch of chunks from the specific index.
-        This is the primary deletion method that subclasses must implement.
+        This is a synchronous method to ensure compatibility with synchronous deletion pipelines.
 
         Args:
             chunk_ids: A list of chunk IDs to be deleted.

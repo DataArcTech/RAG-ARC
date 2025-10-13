@@ -301,7 +301,7 @@ class IndexManager(AbstractModule):
 
     def _delete_chunks_from_indexers(self, chunk_ids: List[str]) -> Dict[str, Any]:
         """
-        Delete chunks from all configured indexers concurrently.
+        Delete chunks from all configured indexers using ThreadPoolExecutor.
 
         Args:
             chunk_ids: List of chunk IDs to delete
@@ -311,44 +311,43 @@ class IndexManager(AbstractModule):
         """
         deletion_results = {}
 
-        # Run all indexer deletions concurrently
-        async def run_all_deletions():
-            tasks = []
+        # Use ThreadPoolExecutor for concurrent deletion
+        with ThreadPoolExecutor(max_workers=len(self.indexers)) as executor:
+            future_to_indexer = {}
+
             for i, indexer in enumerate(self.indexers):
                 indexer_name = f"{type(indexer).__name__}_{i}"
-                tasks.append(self._delete_with_single_indexer(indexer, indexer_name, chunk_ids))
-            return await asyncio.gather(*tasks, return_exceptions=True)
+                future = executor.submit(self._delete_with_single_indexer_sync, indexer, indexer_name, chunk_ids)
+                future_to_indexer[future] = (indexer, indexer_name)
 
-        # Execute all deletions concurrently
-        results = asyncio.run(run_all_deletions())
+            # Collect results
+            for future in as_completed(future_to_indexer):
+                indexer, indexer_name = future_to_indexer[future]
 
-        # Process results
-        for i, result in enumerate(results):
-            indexer_name = f"{type(self.indexers[i]).__name__}_{i}"
-
-            if isinstance(result, Exception):
-                logger.error(f"Deletion failed with {indexer_name}: {str(result)}")
-                deletion_results[indexer_name] = {
-                    "success": False,
-                    "error_message": str(result),
-                    "deleted_count": 0,
-                    "total_chunks": len(chunk_ids)
-                }
-            else:
-                deletion_results[indexer_name] = result
-                if result.get("success"):
-                    logger.info(f"Successfully deleted {len(chunk_ids)} chunks from {indexer_name}")
+                try:
+                    result = future.result()
+                    deletion_results[indexer_name] = result
+                    if result.get("success"):
+                        logger.info(f"Successfully deleted {len(chunk_ids)} chunks from {indexer_name}")
+                except Exception as e:
+                    logger.error(f"Deletion failed with {indexer_name}: {str(e)}")
+                    deletion_results[indexer_name] = {
+                        "success": False,
+                        "error_message": str(e),
+                        "deleted_count": 0,
+                        "total_chunks": len(chunk_ids)
+                    }
 
         return deletion_results
 
-    async def _delete_with_single_indexer(
+    def _delete_with_single_indexer_sync(
         self,
         indexer,
         indexer_name: str,
         chunk_ids: List[str]
     ) -> Dict[str, Any]:
         """
-        Delete chunks with a single indexer.
+        Delete chunks with a single indexer (synchronous).
 
         This is a helper method that allows concurrent execution of multiple indexers.
 
@@ -362,7 +361,12 @@ class IndexManager(AbstractModule):
         """
         try:
             logger.info(f"Deleting {len(chunk_ids)} chunks from {indexer_name}")
-            success = await indexer.delete_chunks(chunk_ids)
+            success = indexer.delete_chunks(chunk_ids)
+
+            if success:
+                logger.info(f"Successfully deleted {len(chunk_ids)} chunks from {indexer_name}")
+            else:
+                logger.warning(f"Deletion returned False for {indexer_name}")
 
             return {
                 "success": bool(success),
@@ -370,7 +374,7 @@ class IndexManager(AbstractModule):
                 "total_chunks": len(chunk_ids)
             }
         except Exception as e:
-            logger.error(f"Deletion failed with {indexer_name}: {str(e)}")
+            logger.error(f"Deletion failed with {indexer_name}: {str(e)}", exc_info=True)
             return {
                 "success": False,
                 "error_message": str(e),
@@ -788,11 +792,17 @@ class IndexManager(AbstractModule):
                 )
                 if not all_indexers_successful:
                     error_msg = "Failed to delete chunks from some indexers"
-                    logger.error(error_msg)
+                    logger.warning(error_msg)
+                    # Log which indexers failed
+                    failed_indexers = [
+                        name for name, res in deletion_results.items()
+                        if not res.get("success", False)
+                    ]
+                    logger.warning(f"Failed indexers: {failed_indexers}")
+                    # Store error but continue with metadata deletion
                     result["error_message"] = error_msg
-                    return result
-
-                logger.info("Successfully deleted chunks from all indexers")
+                else:
+                    logger.info("Successfully deleted chunks from all indexers")
             else:
                 logger.info("Step 3: No chunks to delete from indexers")
 

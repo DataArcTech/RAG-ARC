@@ -32,45 +32,46 @@ class BM25Indexer(BaseIndexer):
 
         def build_or_update_index(chunks_list):
             try:
-                # Check if index exists
-                if self.bm25_builder.index_exists():
-                    # Index exists, update it
+                # Check if index is already loaded in memory
+                if self.bm25_builder._index is not None:
+                    # Index is loaded, use update_index to update existing chunks
+                    logger.info(f"Index already loaded, updating {len(chunks_list)} chunks")
                     result = self.bm25_builder.update_index(chunks_list)
                     if result:
                         return [chunk.id for chunk in chunks_list]
                     return []
-                else:
-                    # Index doesn't exist, create new one using add
-                    # which handles initialization properly
-                    self.bm25_builder.add_chunks(chunks_list)
-                    return [chunk.id for chunk in chunks_list]
-            except RuntimeError as e:
-                if "Index has not been initialized" in str(e):
-                    # Force initialization and try again
-                    self.bm25_builder._initialize_index(chunks_list) 
+
+                # Index not loaded, try to load existing index or create new one
+                try:
+                    # Try to load existing index from disk
+                    self.bm25_builder.load_local()
+                    logger.info(f"Loaded existing index, updating {len(chunks_list)} chunks")
+                    result = self.bm25_builder.update_index(chunks_list)
+                    if result:
+                        return [chunk.id for chunk in chunks_list]
+                    return []
+                except (FileNotFoundError, RuntimeError) as e:
+                    # No existing index, create new one
+                    logger.info(f"No existing index found, creating new index with {len(chunks_list)} chunks")
                     self.bm25_builder.from_chunks(chunks_list)
                     return [chunk.id for chunk in chunks_list]
-                else:
-                    raise
+
+            except Exception as e:
+                logger.error(f"Failed to build or update index: {e}", exc_info=True)
+                raise
 
         # The actual blocking call is executed in a separate thread.
         chunk_ids = await loop.run_in_executor(None, build_or_update_index, chunks)
         return chunk_ids or []
 
-    async def delete_chunks(self, chunk_ids: List[str]) -> bool:
+    def delete_chunks(self, chunk_ids: List[str]) -> bool:
         """
-        Deletes a batch of chunks from the BM25 index.
+        Deletes a batch of chunks from the BM25 index (synchronous).
         """
-        loop = asyncio.get_running_loop()
-
-        def delete_from_index(ids: List[str]):
-            try:
-                # Delete chunks from BM25 index
-                result = self.bm25_builder.delete_index(ids)
-                return result
-            except Exception as e:
-                logger.error(f"Failed to delete chunks from BM25 index: {e}")
-                return False
-
-        result = await loop.run_in_executor(None, delete_from_index, chunk_ids)
-        return result if result is not None else False
+        try:
+            # Delete chunks from BM25 index
+            result = self.bm25_builder.delete_index(chunk_ids)
+            return result if result is not None else False
+        except Exception as e:
+            logger.error(f"Failed to delete chunks from BM25 index: {e}")
+            return False
