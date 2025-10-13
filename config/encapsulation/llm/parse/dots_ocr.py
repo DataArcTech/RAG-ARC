@@ -15,7 +15,7 @@ class DotsOCRConfig(AbstractConfig):
 
     # HuggingFace configuration
     
-    model_path: str = "/path/to/weights/DotsOCR"
+    model_path: str = "rednote-hilab/dots.ocr"
 
     # VLLM configuration (when loading_method="vllm")
     base_url: str = "http://localhost:8000/v1"

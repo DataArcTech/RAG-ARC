@@ -1,0 +1,93 @@
+{
+    "file_storage_config": {
+        "type": "file_storage",
+        "file_db_config": {
+            "type": "local_blob_store",
+            "base_path": "./data/file_store"
+        },
+        "relational_db_config": {
+            "type": "postgresql",
+            "host": "localhost",
+            "port": 5555,
+            "database": "rag_test",
+            "user": "postgres",
+            "password": "123"
+        }
+    },
+    "index_manager_config": {
+        "type": "index_manager",
+        "file_storage_config": {
+            "type": "file_storage",
+            "file_db_config": {
+                "type": "local_blob_store",
+                "base_path": "./data/file_store"
+            },
+            "relational_db_config": {
+                "type": "postgresql",
+                "host": "localhost",
+                "port": 5555,
+                "database": "rag_test",
+                "user": "postgres",
+                "password": "123"
+            }
+        },
+        "parsed_content_storage_config": {
+            "type": "parsed_content_storage",
+            "file_db_config": {
+                "type": "local_blob_store",
+                "base_path": "./data/parsed_content_store"
+            },
+            "relational_db_config": {
+                "type": "postgresql",
+                "host": "localhost",
+                "port": 5555,
+                "database": "rag_test",
+                "user": "postgres",
+                "password": "123"
+            }
+        },
+        "chunk_storage_config": {
+            "type": "chunk_storage",
+            "file_db_config": {
+                "type": "local_blob_store",
+                "base_path": "./data/chunk_store"
+            },
+            "relational_db_config": {
+                "type": "postgresql",
+                "host": "localhost",
+                "port": 5555,
+                "database": "rag_test",
+                "user": "postgres",
+                "password": "123"
+            }
+        },
+        "chunker_config": {
+            "type": "token_chunker"
+        },
+        "indexer_configs": [
+            {
+                "type": "faiss_indexer",
+                "index_config": {
+                    "type": "faiss",
+                    "index_path": "./data/unified_faiss_index",
+                    "embedding_config": {
+                        "type": "qwen_embedding",
+                        "model_name": "Qwen/Qwen3-Embedding-0.6B",
+                        "device": "cuda:0",
+                        "use_china_mirror": true,
+                        "cache_folder": "./models/Qwen"
+                    }
+                }
+            },
+            {
+                "type": "bm25_indexer",
+                "index_config": {
+                    "type": "bm25_builder",
+                    "index_path": "./data/unified_bm25_index"
+                }
+            }
+        ]
+    }
+}
+
+

@@ -6,7 +6,7 @@ from encapsulation.database.bm25_indexer import BM25IndexBuilder
 
 class BM25BuilderConfig(AbstractConfig):
     """bm25 index builder configuration"""
-    type: Literal["bm25_indexer"] = "bm25_indexer"
+    type: Literal["bm25_builder"] = "bm25_builder"
 
     index_path: str = Field(description="index storage path")
     bm25_k1: float = Field(default=1.2, description="bm25 k1 parameter")
