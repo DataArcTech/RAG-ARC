@@ -384,9 +384,10 @@ class BM25IndexBuilder():
                 deleted_count = 0
 
                 for chunk_id in existing_ids:
-                    delete_result = writer.delete_documents("id", chunk_id)
-                    logger.info(f"Deleting chunk {chunk_id}: {delete_result} chunks deleted")
-                    deleted_count += delete_result
+                    # Use delete_documents_by_term for exact matching (id field has tokenizer="raw")
+                    writer.delete_documents_by_term("id", chunk_id)
+                    logger.info(f"Deleted chunk {chunk_id}")
+                    deleted_count += 1
 
                 logger.info(f"Committing deletion of {deleted_count} chunks")
                 writer.commit()
