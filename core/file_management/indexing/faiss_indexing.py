@@ -23,6 +23,14 @@ class FaissIndexer(BaseIndexer):
         super().__init__(config)
         self.faiss_db = config.index_config.build()
 
+        # Load existing index if it exists
+        try:
+            if hasattr(self.faiss_db.config, 'index_path'):
+                self.faiss_db.load_index(self.faiss_db.config.index_path)
+                logger.info(f"Loaded existing FAISS index from {self.faiss_db.config.index_path}")
+        except Exception as e:
+            logger.info(f"No existing FAISS index found or failed to load: {e}. Will create new index when chunks are added.")
+
     async def update_index(self, chunks: List[Chunk]) -> List[str]:
         """
         Adds a batch of chunks to the FAISS index using a thread pool.

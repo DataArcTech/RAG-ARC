@@ -1,1 +1,2 @@
-# RAG-ARC - RAG-Factory-Refactor
+# RAG-ARC
+

@@ -17,6 +17,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+@shared_module
 class FaissVectorDB(VectorDB):
     """
     FAISS-based vector database implementation for high-performance similarity search and retrieval.

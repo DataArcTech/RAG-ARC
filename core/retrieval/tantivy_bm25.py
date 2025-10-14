@@ -1,5 +1,4 @@
 import logging
-from pydantic import Field, ConfigDict
 from typing import Any, List, Optional, Union, Tuple, cast, TYPE_CHECKING, Dict
 
 from tantivy import Query, Occur, Order
@@ -54,11 +53,6 @@ class TantivyBM25Retriever(BaseRetriever):
     """
 
     def __init__(self, config: "TantivyBM25RetrieverConfig"):
-        """Initialize TantivyBM25Retriever with configuration
-
-        Args:
-            config: TantivyBM25RetrieverConfig instance
-        """
         logger.info("TantivyBM25Retriever: Initializing...")
         self.config = config
         logger.info("TantivyBM25Retriever: Building index...")
@@ -85,13 +79,6 @@ class TantivyBM25Retriever(BaseRetriever):
             logger.warning(f"{message}. Index will be empty until chunks are added.")
             # Don't raise an error, just continue with an empty index
 
-    def _ensure_searcher(self):
-        """Ensure searcher is initialized"""
-        if self.searcher is None:
-            index_instance = self.index
-            if index_instance.index is None:
-                raise RuntimeError("Index is not loaded. Please load the index first.")
-            self.searcher = index_instance.index.searcher()
 
     def reload_searcher(self) -> None:
         """Reload searcher to reflect latest index state
@@ -196,7 +183,7 @@ class TantivyBM25Retriever(BaseRetriever):
         **kwargs: Any
     ) -> List[Chunk]:
         """Execute search and return structured results
-        
+
         Args:
             query: Query string
             k: Number of chunks to return (default from config)
@@ -206,7 +193,7 @@ class TantivyBM25Retriever(BaseRetriever):
             with_score: Whether to include score in metadata (default from config)
             use_phrase_query: Whether to use phrase queries (default from config)
             **kwargs: Additional parameters
-            
+
         Returns:
             List of Chunk objects
         """
@@ -215,21 +202,22 @@ class TantivyBM25Retriever(BaseRetriever):
         filters = filters or {}
         with_score = with_score if with_score is not None else self.config.search_kwargs.get("with_score", False)
         use_phrase_query = use_phrase_query if use_phrase_query is not None else self.config.search_kwargs.get("use_phrase_query", False)
-        
+
         # Validate k parameter
         if k <= 0:
             raise ValueError(f"Parameter 'k' must be greater than 0, got {k}")
-        
-        # Merge additional search_kwargs from config
-        merged_search_kwargs = {**self.config.search_kwargs, **kwargs}
 
         if not query.strip():
             logger.info("Empty query received, returning empty results.")
             return []
 
+        index_instance = self.index
+        if index_instance.index is None:
+            logger.warning("BM25 index is not loaded. Returning empty results.")
+            return []
+
         # 1. Preprocess query
         try:
-            index_instance = self.index
             query_tokens = index_instance.tokenizer_manager.get_current_tokenizer()(query)
             logger.debug(f"Query tokens: {query_tokens}")
         except Exception as e:
@@ -250,7 +238,9 @@ class TantivyBM25Retriever(BaseRetriever):
 
         # 4. Execute search
         try:
-            self._ensure_searcher()
+            # Always create a fresh searcher to ensure we see the latest index state
+            # This is critical after deletions to avoid serving stale results
+            self.searcher = index_instance.index.searcher()
             order = Order.Desc if order_desc else Order.Asc
             search_result = self.searcher.search(
                 final_query,

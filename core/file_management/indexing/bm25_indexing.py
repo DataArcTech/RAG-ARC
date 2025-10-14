@@ -71,6 +71,7 @@ class BM25Indexer(BaseIndexer):
         try:
             # Delete chunks from BM25 index
             result = self.bm25_builder.delete_index(chunk_ids)
+            logger.info(f"Deletion result: {result}")
             return result if result is not None else False
         except Exception as e:
             logger.error(f"Failed to delete chunks from BM25 index: {e}")

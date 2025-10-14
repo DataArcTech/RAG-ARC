@@ -407,11 +407,16 @@ class RetrievalHelper:
         elif hasattr(index.config, 'metric') and index.config.metric == "cosine":
             faiss.normalize_L2(query_vector)
 
+        # Calculate fetch_k to account for soft-deleted documents
+        # Fetch more results than needed to compensate for deleted documents
+        deleted_count = len(index.deleted_ids) if hasattr(index, 'deleted_ids') else 0
+        fetch_k = min(k + deleted_count, index.index.ntotal)
+
         # Execute search
-        k = min(k, index.index.ntotal)
-        distances, indices = index.index.search(query_vector, k)
+        distances, indices = index.index.search(query_vector, fetch_k)
 
         results = []
+        skipped_count = 0
         for distance, idx in zip(distances[0], indices[0]):
             if idx == -1:  # FAISS returns -1 for invalid results
                 continue
@@ -420,6 +425,7 @@ class RetrievalHelper:
 
             # Skip soft-deleted documents
             if hasattr(index, 'deleted_ids') and doc_id in index.deleted_ids:
+                skipped_count += 1
                 continue
 
             doc = index.docstore[doc_id]
@@ -433,6 +439,11 @@ class RetrievalHelper:
                 similarity_score = relevance_score_fn(float(distance))
 
             results.append((doc, similarity_score))
+
+            # Stop once we have k results (after filtering deleted documents)
+            if len(results) >= k:
+                break
+
 
         # Sort by similarity score in descending order
         results.sort(key=lambda x: x[1], reverse=True)

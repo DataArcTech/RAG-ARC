@@ -36,34 +36,9 @@ class DenseRetriever(BaseRetriever):
                 self.embedding = config.index_config.embedding_config.build()
         logger.info("DenseRetriever: Embedding model initialized")
 
-        logger.info("DenseRetriever: Building index...")
-        self._index = self.config.index_config.build()
-        logger.info("DenseRetriever: Index built, loading existing index...")
-        self._load_existing_index()
-        logger.info("DenseRetriever: Index loaded, ensuring initialization...")
         self._ensure_index_initialized()
         logger.info("DenseRetriever: Initialization complete")
 
-    def _load_existing_index(self) -> None:
-        """Try to load an existing index"""
-        try:
-            if hasattr(self._index, 'load_index'):
-                # Check if the index has an index_path in its config
-                if hasattr(self._index.config, 'index_path') and self._index.config.index_path:
-                    self._index.load_index(self._index.config.index_path)
-                else:
-                    self._index.load_index()
-                logger.info(f"Successfully loaded existing index for {self.get_name()}")
-        except Exception as e:
-            message = f"Index not found for retriever {self.get_name()}: {e}"
-            logger.warning(f"{message}. Index will be empty until chunks are added.")
-            # Don't raise an error, just continue with an empty index
-    
-    def get_index(self):
-        """Get the vector index"""
-        if self._index is None:
-            raise ValueError("Index not initialized")
-        return self._index
 
     def _ensure_index_initialized(self) -> None:
         """Ensure the index is initialized (built by IndexManager)"""
@@ -117,8 +92,7 @@ class DenseRetriever(BaseRetriever):
         Returns:
             list of chunks, if include_score=True, then score is stored in metadata["score"]
         """
-        index = self.get_index()
-        if index is None or not hasattr(index, 'index') or index.index is None or index.index.ntotal == 0:
+        if self._index is None or not hasattr(self._index, 'index') or self._index.index is None or self._index.index.ntotal == 0:
             return []
 
 
@@ -136,8 +110,7 @@ class DenseRetriever(BaseRetriever):
         Returns:
             list of chunks, if include_score=True, then score is stored in metadata["score"]
         """
-        index = self.get_index()
-        if index is None:
+        if self._index is None:
             return []
 
         # Merge search parameters
@@ -145,7 +118,7 @@ class DenseRetriever(BaseRetriever):
         search_kwargs["metric"] = self.config.metric
 
         # Execute FAISS search
-        chunks_and_scores = RetrievalHelper.vector_search_with_faiss(index, embedding, search_kwargs)
+        chunks_and_scores = RetrievalHelper.vector_search_with_faiss(self._index, embedding, search_kwargs)
 
         if include_score:
             # Add scores to chunks' metadata
@@ -168,8 +141,7 @@ class DenseRetriever(BaseRetriever):
         **kwargs: Any,
     ) -> List[Chunk]:
         """Max marginal relevance search (diversity)"""
-        index = self.get_index()
-        if index is None:
+        if self._index is None:
             return []
 
 
@@ -181,7 +153,7 @@ class DenseRetriever(BaseRetriever):
 
         # Get candidate chunks (using internal method to get scores)
         chunks_and_scores = RetrievalHelper.vector_search_with_faiss(
-            index, query_embedding, {**search_kwargs, "k": fetch_k, "metric": self.config.metric}
+            self._index, query_embedding, {**search_kwargs, "k": fetch_k, "metric": self.config.metric}
         )
 
         if not chunks_and_scores:
@@ -189,8 +161,8 @@ class DenseRetriever(BaseRetriever):
 
         # Prepare MMR search parameters
         search_kwargs["normalize_for_cosine"] = (
-            (hasattr(index.config, 'normalize_L2') and index.config.normalize_L2) or
-            (hasattr(index.config, 'metric') and index.config.metric == "cosine")
+            (hasattr(self._index.config, 'normalize_L2') and self._index.config.normalize_L2) or
+            (hasattr(self._index.config, 'metric') and self._index.config.metric == "cosine")
         )
 
         # Use MMR to select chunks

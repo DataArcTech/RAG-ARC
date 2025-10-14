@@ -26,8 +26,7 @@ class BaseRetriever(AbstractModule, ABC):
                 logger.info(f"Successfully loaded existing index for {self.get_name()}")
         except Exception as e:
             message = f"Index not found for retriever {self.get_name()}: {e}"
-            logger.warning(f"{message}. Please use IndexManager to build the index first.")
-            raise RuntimeError(message)
+            logger.warning(f"{message}. Index will be empty until chunks are added.")
 
     def get_default_search_config(self) -> Dict[str, Any]:
         return self.config.search_kwargs.copy()

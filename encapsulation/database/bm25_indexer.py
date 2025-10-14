@@ -14,6 +14,7 @@ import jieba
 
 from encapsulation.data_model.schema import Chunk
 from encapsulation.database.utils.TokenizerManager import TokenizerManager
+from framework.shared_module_decorator import shared_module
 
 try:
     from tantivy import (
@@ -44,6 +45,7 @@ def init_jieba_worker():
     return jieba
 
 
+@shared_module
 class BM25IndexBuilder():
     """
     Based on Tantivy's BM25 implementation, this class provides a convenient
@@ -256,7 +258,12 @@ class BM25IndexBuilder():
                 has_files = any(entries)
             if has_files:
                 logger.info(f"Loading existing index from: {self.config.index_path}")
-                self._index = Index.open(self.config.index_path)
+                try:
+                    self._index = Index.open(self.config.index_path)
+                except Exception as e:
+                    logger.error(f"Failed to load existing index at {self.config.index_path}: {str(e)}")
+                    logger.error("Please check index intergerity or delete manually")
+                    raise RuntimeError("Index corrupted or incompatible - manual intervention required")
             else:
                 logger.info(f"Creating new index at existing empty directory: {self.config.index_path}")
                 self._index = Index(self._schema, path=self.config.index_path)
