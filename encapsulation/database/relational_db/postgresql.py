@@ -7,6 +7,7 @@ from typing import (
     List,
     Dict,
 )
+import uuid
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -18,6 +19,9 @@ from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from .base import RelationalDB
 from ...data_model.orm_models import (
     Base,
+    User,
+    ChatSession,
+    ChatMessage,
     FileMetadata, FileStatus,
     ParsedContentMetadata, ParsedContentStatus,
     ChunkMetadata, ChunkIndexStatus
@@ -266,14 +270,30 @@ class PostgreSQLDB(RelationalDB):
     def list_file_metadata(
         self,
         status: Optional[FileStatus] = None,
+        owner_id: Optional[uuid.UUID] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
         **kwargs: Any,
     ) -> List[FileMetadata]:
-        """List file metadata with optional filtering using SQLAlchemy ORM"""
+        """
+        List file metadata with optional filtering using SQLAlchemy ORM
+
+        Args:
+            status: Optional file status filter
+            owner_id: Optional owner ID filter (for user isolation)
+            limit: Maximum number of records to return
+            offset: Number of records to skip
+
+        Returns:
+            List of FileMetadata objects
+        """
         try:
             with self.SessionMaker() as session:
                 query = session.query(FileMetadata)
+
+                # ✅ Add owner_id filter (for user isolation)
+                if owner_id:
+                    query = query.filter(FileMetadata.owner_id == owner_id)
 
                 # Add status filter
                 if status:
@@ -554,4 +574,307 @@ class PostgreSQLDB(RelationalDB):
 
         except SQLAlchemyError as e:
             logger.error(f"Database error listing chunk metadata: {e}")
+            raise
+
+    # ==================== USER MANAGEMENT ====================
+
+    def store_user(self, user: User, **kwargs: Any) -> str:
+        """Store user metadata using SQLAlchemy ORM"""
+        try:
+            with self.SessionMaker() as session:
+                session.add(user)
+                session.commit()
+                logger.debug(f"Stored user: {user.id}")
+                return str(user.id)
+
+        except IntegrityError as e:
+            logger.error(f"Integrity error storing user (duplicate username?): {e}")
+            raise ValueError(f"User with username '{user.user_name}' already exists")
+        except SQLAlchemyError as e:
+            logger.error(f"Database error storing user: {e}")
+            raise
+
+    def get_user(self, user_id: str, **kwargs: Any) -> Optional[User]:
+        """Get user by ID using SQLAlchemy ORM"""
+        try:
+            with self.SessionMaker() as session:
+                user = session.query(User).filter_by(id=user_id).first()
+                if user:
+                    # Detach from session to avoid lazy loading issues
+                    session.expunge(user)
+                return user
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error getting user {user_id}: {e}")
+            raise
+
+    def get_user_by_username(self, user_name: str, **kwargs: Any) -> Optional[User]:
+        """Get user by username using SQLAlchemy ORM"""
+        try:
+            with self.SessionMaker() as session:
+                user = session.query(User).filter_by(user_name=user_name).first()
+                if user:
+                    # Detach from session to avoid lazy loading issues
+                    session.expunge(user)
+                return user
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error getting user by username {user_name}: {e}")
+            raise
+
+    def list_users(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        **kwargs: Any
+    ) -> List[User]:
+        """List all users with pagination using SQLAlchemy ORM"""
+        try:
+            with self.SessionMaker() as session:
+                query = session.query(User).order_by(User.created_at.desc())
+
+                if offset:
+                    query = query.offset(offset)
+                if limit:
+                    query = query.limit(limit)
+
+                users = query.all()
+                # Detach from session
+                for user in users:
+                    session.expunge(user)
+
+                logger.debug(f"Retrieved {len(users)} users")
+                return users
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error listing users: {e}")
+            raise
+
+    def update_user(self, user_id: str, updates: dict, **kwargs: Any) -> bool:
+        """Update user metadata using SQLAlchemy ORM"""
+        try:
+            with self.SessionMaker() as session:
+                rows_updated = session.query(User).filter_by(id=user_id).update(updates)
+                session.commit()
+
+                if rows_updated > 0:
+                    logger.debug(f"Updated user: {user_id}")
+                    return True
+                else:
+                    logger.warning(f"No user found with ID: {user_id}")
+                    return False
+
+        except IntegrityError as e:
+            logger.error(f"Integrity error updating user (duplicate username?): {e}")
+            raise ValueError(f"Username already exists")
+        except SQLAlchemyError as e:
+            logger.error(f"Database error updating user {user_id}: {e}")
+            raise
+
+    def delete_user(self, user_id: str, **kwargs: Any) -> bool:
+        """Delete user using SQLAlchemy ORM (cascades to sessions and messages)"""
+        try:
+            with self.SessionMaker() as session:
+                rows_deleted = session.query(User).filter_by(id=user_id).delete()
+                session.commit()
+
+                if rows_deleted > 0:
+                    logger.info(f"Deleted user: {user_id}")
+                    return True
+                else:
+                    logger.warning(f"No user found with ID: {user_id}")
+                    return False
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error deleting user {user_id}: {e}")
+            raise
+
+    # ==================== CHAT SESSION MANAGEMENT ====================
+
+    def store_chat_session(self, session: ChatSession, **kwargs: Any) -> str:
+        """Store chat session metadata using SQLAlchemy ORM"""
+        try:
+            with self.SessionMaker() as db_session:
+                db_session.add(session)
+                db_session.commit()
+                logger.debug(f"Stored chat session: {session.id}")
+                return str(session.id)
+
+        except IntegrityError as e:
+            logger.error(f"Integrity error storing chat session (invalid user_id?): {e}")
+            raise ValueError(f"Invalid user_id or constraint violation")
+        except SQLAlchemyError as e:
+            logger.error(f"Database error storing chat session: {e}")
+            raise
+
+    def get_chat_session(self, session_id: str, **kwargs: Any) -> Optional[ChatSession]:
+        """Get chat session by ID using SQLAlchemy ORM"""
+        try:
+            with self.SessionMaker() as db_session:
+                chat_session = db_session.query(ChatSession).filter_by(id=session_id).first()
+                if chat_session:
+                    # Detach from session to avoid lazy loading issues
+                    db_session.expunge(chat_session)
+                return chat_session
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error getting chat session {session_id}: {e}")
+            raise
+
+    def list_chat_sessions_by_user(
+        self,
+        user_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        **kwargs: Any
+    ) -> List[ChatSession]:
+        """List all chat sessions for a specific user using SQLAlchemy ORM"""
+        try:
+            with self.SessionMaker() as db_session:
+                query = db_session.query(ChatSession).filter_by(user_id=user_id).order_by(ChatSession.updated_at.desc())
+
+                if offset:
+                    query = query.offset(offset)
+                if limit:
+                    query = query.limit(limit)
+
+                sessions = query.all()
+                # Detach from session
+                for s in sessions:
+                    db_session.expunge(s)
+
+                logger.debug(f"Retrieved {len(sessions)} chat sessions for user {user_id}")
+                return sessions
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error listing chat sessions for user {user_id}: {e}")
+            raise
+
+    def update_chat_session(self, session_id: str, updates: dict, **kwargs: Any) -> bool:
+        """Update chat session metadata using SQLAlchemy ORM"""
+        try:
+            with self.SessionMaker() as db_session:
+                rows_updated = db_session.query(ChatSession).filter_by(id=session_id).update(updates)
+                db_session.commit()
+
+                if rows_updated > 0:
+                    logger.debug(f"Updated chat session: {session_id}")
+                    return True
+                else:
+                    logger.warning(f"No chat session found with ID: {session_id}")
+                    return False
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error updating chat session {session_id}: {e}")
+            raise
+
+    def delete_chat_session(self, session_id: str, **kwargs: Any) -> bool:
+        """Delete chat session using SQLAlchemy ORM (cascades to messages)"""
+        try:
+            with self.SessionMaker() as db_session:
+                rows_deleted = db_session.query(ChatSession).filter_by(id=session_id).delete()
+                db_session.commit()
+
+                if rows_deleted > 0:
+                    logger.info(f"Deleted chat session: {session_id}")
+                    return True
+                else:
+                    logger.warning(f"No chat session found with ID: {session_id}")
+                    return False
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error deleting chat session {session_id}: {e}")
+            raise
+
+    # ==================== CHAT MESSAGE MANAGEMENT ====================
+
+    def store_chat_message(self, message: ChatMessage, **kwargs: Any) -> str:
+        """Store chat message metadata using SQLAlchemy ORM"""
+        try:
+            with self.SessionMaker() as db_session:
+                db_session.add(message)
+                db_session.commit()
+                logger.debug(f"Stored chat message: {message.id}")
+                return str(message.id)
+
+        except IntegrityError as e:
+            logger.error(f"Integrity error storing chat message (invalid session_id?): {e}")
+            raise ValueError(f"Invalid session_id or constraint violation")
+        except SQLAlchemyError as e:
+            logger.error(f"Database error storing chat message: {e}")
+            raise
+
+    def get_chat_message(self, message_id: str, **kwargs: Any) -> Optional[ChatMessage]:
+        """Get chat message by ID using SQLAlchemy ORM"""
+        try:
+            with self.SessionMaker() as db_session:
+                message = db_session.query(ChatMessage).filter_by(id=message_id).first()
+                if message:
+                    # Detach from session to avoid lazy loading issues
+                    db_session.expunge(message)
+                return message
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error getting chat message {message_id}: {e}")
+            raise
+
+    def list_chat_messages_by_session(
+        self,
+        session_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        **kwargs: Any
+    ) -> List[ChatMessage]:
+        """List all chat messages for a specific session using SQLAlchemy ORM"""
+        try:
+            with self.SessionMaker() as db_session:
+                query = db_session.query(ChatMessage).filter_by(session_id=session_id).order_by(ChatMessage.created_at.asc())
+
+                if offset:
+                    query = query.offset(offset)
+                if limit:
+                    query = query.limit(limit)
+
+                messages = query.all()
+                # Detach from session
+                for msg in messages:
+                    db_session.expunge(msg)
+
+                logger.debug(f"Retrieved {len(messages)} chat messages for session {session_id}")
+                return messages
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error listing chat messages for session {session_id}: {e}")
+            raise
+
+    def delete_chat_message(self, message_id: str, **kwargs: Any) -> bool:
+        """Delete chat message using SQLAlchemy ORM"""
+        try:
+            with self.SessionMaker() as db_session:
+                rows_deleted = db_session.query(ChatMessage).filter_by(id=message_id).delete()
+                db_session.commit()
+
+                if rows_deleted > 0:
+                    logger.info(f"Deleted chat message: {message_id}")
+                    return True
+                else:
+                    logger.warning(f"No chat message found with ID: {message_id}")
+                    return False
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error deleting chat message {message_id}: {e}")
+            raise
+
+    def delete_chat_messages_by_session(self, session_id: str, **kwargs: Any) -> int:
+        """Delete all chat messages for a specific session using SQLAlchemy ORM"""
+        try:
+            with self.SessionMaker() as db_session:
+                rows_deleted = db_session.query(ChatMessage).filter_by(session_id=session_id).delete()
+                db_session.commit()
+
+                logger.info(f"Deleted {rows_deleted} chat messages for session {session_id}")
+                return rows_deleted
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error deleting chat messages for session {session_id}: {e}")
             raise

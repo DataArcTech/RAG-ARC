@@ -133,6 +133,7 @@ class ChunkStorage(AbstractModule):
         source_parsed_content_id: str,
         chunker_type: str,
         chunk_data: bytes,
+        chunk_index: int,
         validate_after_store: bool = True,
         **kwargs: Any,
     ) -> str:
@@ -143,6 +144,7 @@ class ChunkStorage(AbstractModule):
             source_parsed_content_id: ID of the parsed content that was chunked
             chunker_type: Type of chunker used (e.g., "semantic_chunker", "token_chunker")
             chunk_data: Binary chunk data (JSON format)
+            chunk_index: Index of the chunk within the parsed content (0-based)
             validate_after_store: Whether to validate after storing
             **kwargs: Additional arguments
 
@@ -174,6 +176,7 @@ class ChunkStorage(AbstractModule):
                 source_parsed_content_id=source_parsed_content_id,
                 blob_key=blob_key,
                 chunker_type=chunker_type,
+                chunk_index=chunk_index,
                 index_status=ChunkIndexStatus.STORED,
                 created_at=now
             )

@@ -261,6 +261,7 @@ class IndexManager(AbstractModule):
                         source_parsed_content_id=parsed_content_id,
                         chunker_type=chunker_strategy,
                         chunk_data=chunk_data,
+                        chunk_index=i,  # Pass the chunk index
                         **kwargs
                     )
 
@@ -279,12 +280,22 @@ class IndexManager(AbstractModule):
             result["chunk_ids"] = chunk_ids
             logger.info(f"Stored {len(chunk_ids)}/{len(chunks)} chunks successfully")
 
+            # Update parsed content status to CHUNKED
+            self._update_parsed_content_status_to_chunked(parsed_content_id, **kwargs)
+
             # Step 6: Index the chunks (if indexers are configured)
             if self.indexers:
                 logger.info(f"Step 6: Indexing chunks with {len(self.indexers)} indexers")
                 indexing_results = self._index_chunks(chunks, chunk_ids)
                 result["indexing_results"] = indexing_results
                 result["metadata"]["indexers_used"] = list(indexing_results.keys())
+
+                # Step 7: Update chunk metadata status for successfully indexed chunks
+                chunks_updated = self._update_indexed_chunks_status(chunk_ids, indexing_results, **kwargs)
+
+                # Step 8: Update file metadata status if indexing succeeded
+                if chunks_updated:
+                    self._update_file_status_to_indexed(file_id, **kwargs)
             else:
                 logger.info("Step 6: No indexers configured, skipping indexing")
 
@@ -548,6 +559,130 @@ class IndexManager(AbstractModule):
                 "total_chunks": len(chunk_objects)
             }
 
+    def _update_indexed_chunks_status(
+        self,
+        chunk_ids: List[str],
+        indexing_results: Dict[str, Any],
+        **kwargs: Any
+    ) -> bool:
+        """
+        Update chunk metadata status to INDEXED for successfully indexed chunks.
+
+        Args:
+            chunk_ids: List of chunk IDs that were indexed
+            indexing_results: Results from indexers
+            **kwargs: Additional arguments
+
+        Returns:
+            bool: True if any chunks were successfully updated, False otherwise
+        """
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from encapsulation.data_model.orm_models import ChunkIndexStatus
+
+        # Check if any indexer succeeded
+        any_success = any(
+            result.get("success", False)
+            for result in indexing_results.values()
+        )
+
+        if not any_success:
+            logger.warning("No indexer succeeded, skipping chunk status update")
+            return False
+
+        # Collect successfully indexed chunk IDs from all indexers
+        successfully_indexed_ids = set()
+        for indexer_name, result in indexing_results.items():
+            if result.get("success", False):
+                indexed_ids = result.get("indexed_ids", [])
+                if indexed_ids:
+                    successfully_indexed_ids.update(indexed_ids)
+
+        if not successfully_indexed_ids:
+            logger.warning("No chunks were successfully indexed")
+            return False
+
+        # Update status for each successfully indexed chunk
+        now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+        updated_count = 0
+        failed_count = 0
+
+        for chunk_id in successfully_indexed_ids:
+            try:
+                success = self.chunk_storage.metadata_store.update_chunk_metadata(
+                    chunk_id,
+                    {
+                        "index_status": ChunkIndexStatus.INDEXED,
+                        "indexed_at": now
+                    },
+                    **kwargs
+                )
+                if success:
+                    updated_count += 1
+                else:
+                    failed_count += 1
+                    logger.warning(f"Failed to update status for chunk {chunk_id}")
+            except Exception as e:
+                failed_count += 1
+                logger.error(f"Error updating status for chunk {chunk_id}: {e}")
+
+        logger.info(f"Updated chunk status: {updated_count} succeeded, {failed_count} failed")
+        return updated_count > 0
+
+    def _update_file_status_to_indexed(
+        self,
+        file_id: str,
+        **kwargs: Any
+    ) -> None:
+        """
+        Update file metadata status to INDEXED after successful indexing.
+
+        Args:
+            file_id: File ID to update
+            **kwargs: Additional arguments
+        """
+        from encapsulation.data_model.orm_models import FileStatus
+
+        try:
+            success = self.file_storage.metadata_store.update_file_metadata(
+                file_id,
+                {"status": FileStatus.INDEXED},
+                **kwargs
+            )
+            if success:
+                logger.info(f"Updated file {file_id} status to INDEXED")
+            else:
+                logger.warning(f"Failed to update file {file_id} status to INDEXED")
+        except Exception as e:
+            logger.error(f"Error updating file {file_id} status: {e}")
+
+    def _update_parsed_content_status_to_chunked(
+        self,
+        parsed_content_id: str,
+        **kwargs: Any
+    ) -> None:
+        """
+        Update parsed content metadata status to CHUNKED after successful chunking.
+
+        Args:
+            parsed_content_id: Parsed content ID to update
+            **kwargs: Additional arguments
+        """
+        from encapsulation.data_model.orm_models import ParsedContentStatus
+
+        try:
+            success = self.parsed_content_storage.metadata_store.update_parsed_content_metadata(
+                parsed_content_id,
+                {"status": ParsedContentStatus.CHUNKED},
+                **kwargs
+            )
+            if success:
+                logger.info(f"Updated parsed content {parsed_content_id} status to CHUNKED")
+            else:
+                logger.warning(f"Failed to update parsed content {parsed_content_id} status to CHUNKED")
+        except Exception as e:
+            logger.error(f"Error updating parsed content {parsed_content_id} status: {e}")
+
     def process_multiple_files(
         self,
         file_ids: List[str],
@@ -711,11 +846,15 @@ class IndexManager(AbstractModule):
         This method:
         1. Finds all parsed content associated with the file
         2. Finds all chunks associated with each parsed content
-        3. Deletes chunks from all configured indexers (FIRST)
-        4. Deletes chunk metadata and blobs (SECOND)
-        5. Deletes parsed content metadata and blobs (THIRD)
+        3. Deletes chunks from all configured indexers (FIRST - not covered by CASCADE)
+        4. Deletes chunk blobs (SECOND - not covered by CASCADE)
+        5. Deletes parsed content blobs (THIRD - not covered by CASCADE)
 
-        Note: The original file is preserved. Only parsed content and chunks are deleted.
+        Note:
+        - Chunk metadata and parsed content metadata are automatically deleted via CASCADE
+          when parsed_content_metadata is deleted (which happens when file_metadata is deleted)
+        - However, indexer data and blob files must be manually deleted as they are not
+          managed by the database
 
         Args:
             file_id: ID of the file to delete
@@ -781,6 +920,7 @@ class IndexManager(AbstractModule):
                     logger.info(f"Found {len(chunk_ids)} chunks for parsed_content {parsed_content_id}")
 
             # Step 3: Delete chunks from all indexers FIRST
+            # REQUIRED: Indexer data (FAISS, BM25) is NOT managed by database CASCADE
             if all_chunk_ids and self.indexers:
                 logger.info(f"Step 3: Deleting {len(all_chunk_ids)} chunks from {len(self.indexers)} indexers")
                 deletion_results = self._delete_chunks_from_indexers(all_chunk_ids)
@@ -806,31 +946,35 @@ class IndexManager(AbstractModule):
             else:
                 logger.info("Step 3: No chunks to delete from indexers")
 
-            # Step 4: Delete chunk metadata and blobs (SECOND, after indexer deletion succeeds)
+            # Step 4: Delete chunk blobs (SECOND, after indexer deletion succeeds)
+            # REQUIRED: Blob files are NOT managed by database CASCADE
+            # NOTE: Chunk metadata will be automatically deleted via CASCADE when parsed_content_metadata is deleted
             if all_chunk_ids:
-                logger.info(f"Step 4: Deleting {len(all_chunk_ids)} chunk metadata and blobs")
+                logger.info(f"Step 4: Deleting {len(all_chunk_ids)} chunk blobs")
                 for chunk_id in all_chunk_ids:
                     if not chunk_id:
                         continue
 
                     try:
-                        # Delete chunk blob
+                        # Delete chunk blob (REQUIRED - not covered by CASCADE)
                         chunk_metadata = self.chunk_storage.metadata_store.get_chunk_metadata(chunk_id, **kwargs)
                         if chunk_metadata and hasattr(chunk_metadata, 'blob_key') and chunk_metadata.blob_key:
                             self.chunk_storage.blob_store.delete(chunk_metadata.blob_key, **kwargs)
                             logger.debug(f"Deleted chunk blob: {chunk_metadata.blob_key}")
 
-                        # Delete chunk metadata
+                        # Delete chunk metadata (will also be deleted by CASCADE, but doing it explicitly for clarity)
                         self.chunk_storage.metadata_store.delete_chunk_metadata(chunk_id, **kwargs)
                         logger.debug(f"Deleted chunk metadata: {chunk_id}")
                         result["deleted_chunk_ids"].append(chunk_id)
                     except Exception as e:
                         logger.error(f"Failed to delete chunk {chunk_id}: {e}")
 
-                logger.info(f"Successfully deleted {len(result['deleted_chunk_ids'])}/{len(all_chunk_ids)} chunks")
+                logger.info(f"Successfully deleted {len(result['deleted_chunk_ids'])}/{len(all_chunk_ids)} chunk blobs")
 
-            # Step 5: Delete parsed content metadata and blobs (THIRD, after chunks are deleted)
-            logger.info(f"Step 5: Deleting {len(parsed_content_list)} parsed content entries")
+            # Step 5: Delete parsed content blobs (THIRD, after chunks are deleted)
+            # REQUIRED: Blob files are NOT managed by database CASCADE
+            # NOTE: Parsed content metadata will be automatically deleted via CASCADE when file_metadata is deleted
+            logger.info(f"Step 5: Deleting {len(parsed_content_list)} parsed content blobs")
             for parsed_content in parsed_content_list:
                 if not parsed_content or not hasattr(parsed_content, 'parsed_content_id'):
                     continue
@@ -840,19 +984,19 @@ class IndexManager(AbstractModule):
                     continue
 
                 try:
-                    # Delete parsed content blob
+                    # Delete parsed content blob (REQUIRED - not covered by CASCADE)
                     if hasattr(parsed_content, 'blob_key') and parsed_content.blob_key:
                         self.parsed_content_storage.blob_store.delete(parsed_content.blob_key, **kwargs)
                         logger.debug(f"Deleted parsed content blob: {parsed_content.blob_key}")
 
-                    # Delete parsed content metadata
+                    # Delete parsed content metadata (will also be deleted by CASCADE, but doing it explicitly for clarity)
                     self.parsed_content_storage.metadata_store.delete_parsed_content_metadata(parsed_content_id, **kwargs)
                     logger.debug(f"Deleted parsed content metadata: {parsed_content_id}")
                     result["deleted_parsed_content_ids"].append(parsed_content_id)
                 except Exception as e:
                     logger.error(f"Failed to delete parsed content {parsed_content_id}: {e}")
 
-            logger.info(f"Successfully deleted {len(result['deleted_parsed_content_ids'])}/{len(parsed_content_list)} parsed content entries")
+            logger.info(f"Successfully deleted {len(result['deleted_parsed_content_ids'])}/{len(parsed_content_list)} parsed content blobs")
 
             # Success!
             result["success"] = True

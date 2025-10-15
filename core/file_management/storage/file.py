@@ -50,7 +50,7 @@ class FileStorage(AbstractModule):
         metadata_store: RelationalDB implementation (e.g., PostgreSQLDB)
     """
 
-    def __init__(self, config):
+    def __init__(self, config:"FileStorageConfig"):
         """Initialize FileStorage with eager blob and metadata store creation"""
         super().__init__(config)
         # Build stores directly (no intermediate data_store layer)
@@ -164,6 +164,7 @@ class FileStorage(AbstractModule):
         self,
         filename: str,
         file_data: bytes,
+        owner_id: uuid.UUID,
         content_type: Optional[str] = None,
         validate_after_store: bool = True,
         **kwargs: Any,
@@ -174,6 +175,7 @@ class FileStorage(AbstractModule):
         Args:
             filename: Original filename
             file_data: Binary file data
+            owner_id: UUID of the user who owns this file
             content_type: MIME type of the file
             validate_after_store: Whether to validate after storing
             **kwargs: Additional arguments
@@ -202,6 +204,7 @@ class FileStorage(AbstractModule):
             now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
             metadata = FileMetadata(
                 file_id=file_id,
+                owner_id=owner_id,
                 blob_key=blob_key,
                 filename=filename,
                 status=FileStatus.STORED,
