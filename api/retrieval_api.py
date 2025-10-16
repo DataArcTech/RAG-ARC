@@ -93,33 +93,36 @@ class RetrievalAPI:
             raise
     
     def search(
-        self, 
-        retriever_name: str, 
-        query: str, 
+        self,
+        retriever_name: str,
+        query: str,
         k: int = 5,
+        owner_id: str = None,
         **kwargs
     ) -> List[Chunk]:
         """
         执行搜索
-        
+
         Args:
             retriever_name: 检索器名称
             query: 查询文本
             k: 返回结果数量
+            owner_id: 用户ID,用于用户隔离检索
             **kwargs: 其他搜索参数
-            
+
         Returns:
             搜索结果文档列表
         """
         if retriever_name not in self.retrievers:
             raise ValueError(f"Retriever '{retriever_name}' not found")
-        
+
         try:
             retriever = self.retrievers[retriever_name]
-            results = retriever.invoke(query, k=k, **kwargs)
-            logger.debug(f"Search completed: {len(results)} results for query '{query}'")
+            # Pass owner_id to retriever for user isolation
+            results = retriever.invoke(query, k=k, owner_id=owner_id, **kwargs)
+            logger.debug(f"Search completed: {len(results)} results for query '{query}' (owner_id={owner_id})")
             return results
-            
+
         except Exception as e:
             logger.error(f"Search failed for retriever {retriever_name}: {e}")
             raise

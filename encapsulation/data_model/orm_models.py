@@ -224,6 +224,9 @@ class ChunkMetadata(Base):
     # Foreign key to source parsed content
     source_parsed_content_id: Mapped[str] = mapped_column(String(255), ForeignKey("parsed_content_metadata.parsed_content_id"), nullable=False)
 
+    # Owner information (for user isolation in retrieval)
+    owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("user.id"), nullable=False, index=True)
+
     # File storage reference
     blob_key: Mapped[str] = mapped_column(String(500), nullable=False)
 
@@ -240,3 +243,4 @@ class ChunkMetadata(Base):
 
     # Relationship
     source_parsed_content: Mapped["ParsedContentMetadata"] = relationship(back_populates="chunks")
+    owner: Mapped["User"] = relationship()

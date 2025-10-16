@@ -134,6 +134,7 @@ class ChunkStorage(AbstractModule):
         chunker_type: str,
         chunk_data: bytes,
         chunk_index: int,
+        owner_id: uuid.UUID = None,
         validate_after_store: bool = True,
         **kwargs: Any,
     ) -> str:
@@ -145,6 +146,7 @@ class ChunkStorage(AbstractModule):
             chunker_type: Type of chunker used (e.g., "semantic_chunker", "token_chunker")
             chunk_data: Binary chunk data (JSON format)
             chunk_index: Index of the chunk within the parsed content (0-based)
+            owner_id: UUID of the user who owns this chunk (for retrieval filtering)
             validate_after_store: Whether to validate after storing
             **kwargs: Additional arguments
 
@@ -165,6 +167,14 @@ class ChunkStorage(AbstractModule):
             if not source_metadata:
                 raise ValueError(f"Source parsed content {source_parsed_content_id} not found")
 
+            # Get owner_id from source file if not provided
+            if owner_id is None:
+                # Get file metadata through parsed content -> file relationship
+                file_metadata = self.metadata_store.get_file_metadata(source_metadata.source_file_id, **kwargs)
+                if not file_metadata:
+                    raise ValueError(f"Source file {source_metadata.source_file_id} not found")
+                owner_id = file_metadata.owner_id
+
             # Generate IDs and keys
             chunk_id = self._generate_chunk_id()
             blob_key = self._generate_chunk_blob_key(chunk_id, source_parsed_content_id, chunker_type)
@@ -174,6 +184,7 @@ class ChunkStorage(AbstractModule):
             chunk_metadata = ChunkMetadata(
                 chunk_id=chunk_id,
                 source_parsed_content_id=source_parsed_content_id,
+                owner_id=owner_id,
                 blob_key=blob_key,
                 chunker_type=chunker_type,
                 chunk_index=chunk_index,

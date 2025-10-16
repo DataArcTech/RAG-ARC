@@ -85,7 +85,6 @@ def test_bm25_indexing_from_json():
         
         # 配置BM25构建器
         bm25_builder_config = BM25BuilderConfig(
-            type="bm25_indexer",
             index_path=bm25_index_path,
             bm25_k1=1.2,
             bm25_b=0.75,
@@ -96,7 +95,6 @@ def test_bm25_indexing_from_json():
         
         # 配置BM25索引器
         indexer_config = BM25IndexerConfig(
-            type="bm25_indexer",
             index_config=bm25_builder_config
         )
         

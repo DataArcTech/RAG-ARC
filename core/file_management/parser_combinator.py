@@ -13,30 +13,103 @@ logger = logging.getLogger(__name__)
 
 class ParserCombinator(AbstractModule):
     """
-    Standard document parser that directly delegates to encapsulation parsers.
+    Parser combinator that combines OCR parser and Native parser.
 
-    This parser provides a unified interface to the encapsulation layer parsers
-    (DotsOCR, Native) with automatic parser selection based on file type.
+    This combinator provides intelligent parser selection based on file type:
+    - OCR Parser (DotsOCR/VLM): For PDF and image files (.pdf, .jpg, .jpeg, .png)
+    - Native Parser: For office documents and text files (.docx, .xlsx, .pptx, .html, .txt, etc.)
 
     Features:
     - Automatic parser selection based on file extension
-    - Direct delegation to encapsulation parsers
-    - Minimal processing overhead
-    - Support for all file types supported by encapsulation parsers
+    - Fallback mechanism if primary parser fails
+    - Support for all file types from both parsers
+    - Configurable parser instances
+
+    Architecture:
+        ParserCombinator
+        ├── OCR Parser (for PDF/images)
+        └── Native Parser (for office/text documents)
     """
 
     def __init__(self, config: "ParserCombinatorConfig"):
-        """Initialize ParserCobinator with parser subconfig"""
+        """Initialize ParserCombinator with OCR and Native parsers"""
         super().__init__(config)
-        # Build parser immediately from subconfig
-        parser_config = getattr(self.config, 'parser', None)
-        if parser_config is not None:
-            logger.debug(f"Parser specified, build parser by config")
-            self.parser = parser_config.build()
+
+        # Get base output directory from config
+        base_output_dir = getattr(self.config, 'base_output_dir', './data/parsed_files')
+        base_output_dir = os.path.abspath(base_output_dir)
+        logger.info(f"ParserCombinator base output directory: {base_output_dir}")
+
+        # Create base directory
+        os.makedirs(base_output_dir, exist_ok=True)
+
+        # Build OCR parser if configured
+        ocr_parser_config = getattr(self.config, 'ocr_parser', None)
+        if ocr_parser_config is not None:
+            logger.info(f"Building OCR parser: {ocr_parser_config.type}")
+
+            # Set output directory for OCR parser based on type
+            if ocr_parser_config.type == "dots_ocr_parser":
+                ocr_output_dir = os.path.join(base_output_dir, "dots_ocr")
+                os.environ['DOTSOCR_OUTPUT_DIR'] = ocr_output_dir
+                logger.info(f"DotsOCR output directory: {ocr_output_dir}")
+            elif ocr_parser_config.type == "vlm_ocr_parser":
+                ocr_output_dir = os.path.join(base_output_dir, "vlm_ocr")
+                os.environ['VLMOCR_OUTPUT_DIR'] = ocr_output_dir
+                logger.info(f"VLM OCR output directory: {ocr_output_dir}")
+
+            self.ocr_parser = ocr_parser_config.build()
         else:
-            # No parser config, will need to auto-select per file extension
-            logger.debug(f"Parser not specified, auto select available parser")
-            self.parser = None
+            logger.warning("OCR parser not configured, PDF/image files will not be supported")
+            self.ocr_parser = None
+
+        # Build Native parser if configured
+        native_parser_config = getattr(self.config, 'native_parser', None)
+        if native_parser_config is not None:
+            logger.info(f"Building Native parser: {native_parser_config.type}")
+
+            # Set output directory for Native parser
+            native_output_dir = os.path.join(base_output_dir, "native")
+            os.environ['NATIVE_PARSER_OUTPUT_DIR'] = native_output_dir
+            logger.info(f"Native parser output directory: {native_output_dir}")
+
+            self.native_parser = native_parser_config.build()
+        else:
+            logger.warning("Native parser not configured, office/text files will not be supported")
+            self.native_parser = None
+
+        # Validate at least one parser is configured
+        if self.ocr_parser is None and self.native_parser is None:
+            raise ValueError("At least one parser (OCR or Native) must be configured")
+
+        # Build extension to parser mapping
+        self._build_extension_mapping()
+
+    def _build_extension_mapping(self):
+        """Build mapping from file extensions to parsers"""
+        self.extension_to_parser = {}
+
+        # Map OCR parser extensions
+        if self.ocr_parser:
+            ocr_extensions = self.ocr_parser.get_supported_extensions()
+            for ext in ocr_extensions:
+                self.extension_to_parser[ext] = ('ocr', self.ocr_parser)
+            logger.info(f"OCR parser supports: {ocr_extensions}")
+
+        # Map Native parser extensions
+        if self.native_parser:
+            native_extensions = self.native_parser.get_supported_extensions()
+            for ext in native_extensions:
+                self.extension_to_parser[ext] = ('native', self.native_parser)
+            logger.info(f"Native parser supports: {native_extensions}")
+
+        # Log all supported extensions
+        all_extensions = list(self.extension_to_parser.keys())
+        logger.info(f"ParserCombinator supports {len(all_extensions)} file types: {all_extensions}")
+
+    def get_supported_extensions(self) -> List[str]:
+        """Get all supported file extensions from both parsers"""
+        return list(self.extension_to_parser.keys())
 
     def parse_file(
         self,
@@ -45,80 +118,70 @@ class ParserCombinator(AbstractModule):
         **kwargs: Any
     ) -> List[Dict[str, Any]]:
         """
-        Parse a file from binary data using appropriate encapsulation parser.
+        Parse a file from binary data using appropriate parser.
+
+        Automatically selects the correct parser based on file extension:
+        - OCR parser for PDF and images
+        - Native parser for office documents and text files
 
         Args:
             file_data: Binary content of the file
             filename: Name of the file (used for extension detection and output naming)
-            **kwargs: Additional parsing options passed to encapsulation parser
+            **kwargs: Additional parsing options passed to the selected parser
 
         Returns:
-            List of parsing result dictionaries from encapsulation parser
+            List of parsing result dictionaries from the selected parser
 
         Raises:
-            ValueError: If file type not supported or parser not available
+            ValueError: If file type not supported by any configured parser
             Exception: If parsing fails
         """
         # Get file extension
         file_ext = Path(filename).suffix.lower()
 
-        # Use configured parser or auto-select by extension
-        if self.parser is not None:
-            parser = self.parser
-        else:
-            parser = self._select_parser_by_extension(file_ext)
+        # Select parser based on extension
+        if file_ext not in self.extension_to_parser:
+            supported = ', '.join(self.get_supported_extensions())
+            raise ValueError(
+                f"File extension '{file_ext}' not supported. "
+                f"Supported extensions: {supported}"
+            )
 
-        # Parse using configured parser
+        parser_type, parser = self.extension_to_parser[file_ext]
+
+        # Parse using selected parser
         try:
-            logger.info(f"Parsing {filename} using {parser.__class__.__name__}")
+            logger.info(f"Parsing {filename} using {parser_type} parser ({parser.__class__.__name__})")
             results = parser.parse_file(
                 file_data=file_data,
                 filename=filename,
                 **kwargs
             )
-            logger.info(f"Successfully parsed {filename}, got {len(results)} results")
+            logger.info(f"Successfully parsed {filename} with {parser_type} parser, got {len(results)} results")
             return results
 
         except Exception as e:
-            logger.error(f"Failed to parse {filename}: {str(e)}")
+            logger.error(f"Failed to parse {filename} with {parser_type} parser: {str(e)}")
             raise
 
-    def _select_parser_by_extension(self, file_ext: str):
-        """Auto-select parser based on file extension"""
-        # Try to build available parsers and check their supported extensions
-        available_parsers = []
+    def get_parser_info(self) -> Dict[str, Any]:
+        """
+        Get information about configured parsers and their supported file types.
 
-        # Try DotsOCR parser
-        try:
-            from config.core.file_management.parser.dots_ocr import DotsOCRConfig
-            # Build dots_ocr parser using default config
-            dots_ocr_config = DotsOCRConfig()
-            dots_ocr_parser = dots_ocr_config.build()
-            supported_extensions = dots_ocr_parser.get_supported_extensions()
-            if file_ext in supported_extensions:
-                available_parsers.append(("dots_ocr", dots_ocr_parser))
-        except Exception as e:
-            logger.debug(f"DotsOCR parser not available: {e}")
-
-        # Try Native parser
-        try:
-            from config.core.file_management.parser.native import NativeParserConfig
-            # Build native parser using default config
-            native_config = NativeParserConfig()
-            native_parser = native_config.build()
-            supported_extensions = native_parser.get_supported_extensions()
-            if file_ext in supported_extensions:
-                available_parsers.append(("native", native_parser))
-        except Exception as e:
-            logger.debug(f"Native parser not available: {e}")
-
-        if not available_parsers:
-            raise ValueError(
-                f"No parser available for file type '{file_ext}'. "
-                f"Please ensure DotsOCR or Native parser are properly configured."
-            )
-
-        # Use first compatible parser
-        parser_name, parser_instance = available_parsers[0]
-        logger.info(f"Auto-selected parser '{parser_name}' for file type '{file_ext}'")
-        return parser_instance
+        Returns:
+            Dictionary containing parser configuration and supported extensions
+        """
+        info = {
+            "ocr_parser": {
+                "configured": self.ocr_parser is not None,
+                "type": self.ocr_parser.__class__.__name__ if self.ocr_parser else None,
+                "supported_extensions": self.ocr_parser.get_supported_extensions() if self.ocr_parser else []
+            },
+            "native_parser": {
+                "configured": self.native_parser is not None,
+                "type": self.native_parser.__class__.__name__ if self.native_parser else None,
+                "supported_extensions": self.native_parser.get_supported_extensions() if self.native_parser else []
+            },
+            "all_supported_extensions": self.get_supported_extensions()
+        }
+        return info

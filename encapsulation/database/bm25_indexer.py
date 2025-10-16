@@ -242,11 +242,17 @@ class BM25IndexBuilder():
         schema_builder.add_text_field("content", stored=True, tokenizer_name="raw")
         schema_builder.add_text_field("content_tokens", tokenizer_name="custom", stored=True)
         schema_builder.add_json_field("metadata", stored=True)
-        
+
+        # Add owner_id field for user isolation (stored for retrieval)
+        schema_builder.add_text_field("owner_id", stored=True, tokenizer_name="raw", fast=True)
+        logger.debug("Added owner_id field for user isolation")
+
         # Add dynamic fields based on chunk metadata
         if chunks:
             dynamic_fields = self._extract_string_fields_from_chunks(chunks)
             for field_name in dynamic_fields:
+                if field_name == "owner_id":  # Skip owner_id as it's already added
+                    continue
                 schema_builder.add_text_field(field_name, tokenizer_name="raw", stored=False, fast=True)
                 logger.debug(f"Added dynamic field: {field_name}")
         
@@ -260,6 +266,8 @@ class BM25IndexBuilder():
                 logger.info(f"Loading existing index from: {self.config.index_path}")
                 try:
                     self._index = Index.open(self.config.index_path)
+                    # Get schema from the loaded index
+                    self._schema = self._index.schema
                 except Exception as e:
                     logger.error(f"Failed to load existing index at {self.config.index_path}: {str(e)}")
                     logger.error("Please check index intergerity or delete manually")
@@ -495,6 +503,10 @@ class BM25IndexBuilder():
                 tantivy_doc.add_text("id", chunk_id)
                 tantivy_doc.add_text("content", chunk.content or "")
                 tantivy_doc.add_text("content_tokens", " ".join(content_tokens))
+
+                # Add owner_id for user isolation
+                owner_id = chunk.owner_id if hasattr(chunk, 'owner_id') and chunk.owner_id else ""
+                tantivy_doc.add_text("owner_id", owner_id)
 
                 metadata = chunk.metadata or {}
                 tantivy_doc.add_json("metadata", metadata)
@@ -772,6 +784,7 @@ class BM25IndexBuilder():
                     
                     doc_id_field = tantivy_doc.get_first("id") or ""
                     content_field = tantivy_doc.get_first("content") or ""
+                    owner_id_field = tantivy_doc.get_first("owner_id") or ""
                     metadata_field = tantivy_doc.get_first("metadata") or {}
 
                     if isinstance(metadata_field, str):
@@ -783,6 +796,7 @@ class BM25IndexBuilder():
                     chunks.append(Chunk(
                         id=doc_id_field,
                         content=content_field,
+                        owner_id=owner_id_field,
                         metadata=metadata_field
                     ))
 
@@ -965,10 +979,11 @@ class BM25IndexBuilder():
                 else:
                     # Ensure score is not included when with_score is False
                     metadata_field = {k: v for k, v in metadata_field.items() if k != "score"}
-                
+
                 chunk = Chunk(
                     id=tantivy_doc.get_first("id") or "",
                     content=tantivy_doc.get_first("content") or "",
+                    owner_id=tantivy_doc.get_first("owner_id") or "",
                     metadata=metadata_field
                 )
 

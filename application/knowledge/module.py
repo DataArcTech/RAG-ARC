@@ -28,6 +28,7 @@ class Knowledge(AbstractModule):
             doc_id = self.file_storage.upload_file(
                 filename=file.filename,
                 file_data=file.file.read(),
+                owner_id=user_id,
                 content_type=file.content_type
             )
             # Start indexing in background (fire-and-forget)
@@ -79,14 +80,14 @@ class Knowledge(AbstractModule):
         return Response(content=content, media_type=metadata.content_type, headers=headers)
 
     def delete_file(self, doc_id: str, user_id: uuid.UUID):
-        # currently only the file owner can delete the file
-        # if self.file_storage.get_file(doc_id).owner_id != user_id:
-        #     raise ValueError("You are not allowed to delete this file")
-        
         # Check if the file exists before attempting deletion
         metadata = self.file_storage.get_file_metadata(doc_id)
         if not metadata:
             raise HTTPException(status_code=404, detail="File not found")
+
+        # Only the file owner can delete the file
+        if metadata.owner_id != user_id:
+            raise HTTPException(status_code=403, detail="You are not allowed to delete this file")
         
         # Delete all file data including derived artifacts and file metadata
         # This handles the complete deletion in the correct order to avoid foreign key constraint violations

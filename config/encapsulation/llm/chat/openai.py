@@ -1,5 +1,6 @@
 """Configuration for OpenAI Chat LLM"""
 
+import os
 from framework.config import AbstractConfig
 from encapsulation.llm.chat.openai import OpenAIChatLLM
 from typing import Literal, Optional
@@ -19,8 +20,8 @@ class OpenAIChatConfig(AbstractConfig):
     temperature: float = 0.7  # Response creativity (0.0-2.0, higher = more creative)
 
     # API configuration - loaded from environment variables
-    openai_api_key: str # API key for authentication
-    openai_base_url: str # API endpoint URL (optional, defaults to OpenAI)
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")  # API key for authentication
+    openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")  # API endpoint URL
     organization: Optional[str] = None  # OpenAI organization ID (optional)
 
     # Connection configuration

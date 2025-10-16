@@ -22,10 +22,10 @@ def main():
     # ===================== QUERY REWRITE COMPONENT =====================
     print("\n=== Step 1: Query Rewrite ===")
 
-    # Create query rewriter configuration
+    # Create query rewriter configuration (reads from environment variables)
     llm_config = OpenAIChatConfig()
     rewriter_config = LLMQueryRewriterConfig(
-        openai_llm_config=llm_config
+        chat_llm_config=llm_config
     )
 
     # Build the query rewriter
@@ -103,7 +103,7 @@ def main():
         # Create reranker configuration
         qwen_llm_config = QwenRerankConfig()
         reranker_config = LLMRerankerConfig(
-            qwen3_llm_config=qwen_llm_config
+            rerank_llm_config=qwen_llm_config
         )
 
         # Build the reranker

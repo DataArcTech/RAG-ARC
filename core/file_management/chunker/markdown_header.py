@@ -219,7 +219,7 @@ class MarkdownHeaderChunker(AbstractChunker):
 
         for line in lines:
             stripped_line = line.strip()
-            stripped_line = "".join(filter(str.islogger.infoable, stripped_line))
+            stripped_line = "".join(filter(str.isprintable, stripped_line))
 
             # Code block detection
             if not in_code_block:

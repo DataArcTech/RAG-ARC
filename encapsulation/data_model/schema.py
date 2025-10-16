@@ -61,6 +61,7 @@ class GraphData:
 class Chunk:
     """Chunk data structure"""
     content: str
+    owner_id: Optional[str] = None  # User ID (UUID string format) for access control
     metadata: Dict[str, Any] = field(default_factory=dict)
     id: Optional[str] = None
     graph: Optional[GraphData] = None

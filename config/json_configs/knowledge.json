@@ -61,6 +61,14 @@
                 "password": "123"
             }
         },
+        "parser_config": {
+            "type": "parser_combinator",
+            "base_output_dir": "./data/parsed_files",
+            "ocr_parser": null,
+            "native_parser": {
+                "type": "native_parser"
+            }
+        },
         "chunker_config": {
             "type": "token_chunker"
         },

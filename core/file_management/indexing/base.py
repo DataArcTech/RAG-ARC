@@ -122,4 +122,9 @@ class BaseIndexer(AbstractModule, ABC):
         metadata = chunk_data.get('metadata', {})
         chunk_id = chunk_data.get('id', str(uuid.uuid4()))
 
-        return Chunk(id=chunk_id, content=content, metadata=metadata)
+        # Extract owner_id from metadata or source_metadata
+        owner_id = metadata.get('owner_id', '')
+        if not owner_id and 'source_metadata' in chunk_data:
+            owner_id = chunk_data['source_metadata'].get('owner_id', '')
+
+        return Chunk(id=chunk_id, content=content, owner_id=owner_id, metadata=metadata)

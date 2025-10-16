@@ -69,6 +69,10 @@ class NativeParser(AbstractParser):
                 return self._parse_ppt(file_data, filename, output_dir, **kwargs)
             elif file_ext == '.html':
                 return self._parse_html_content(file_data.decode('utf-8'), filename, base_filename, output_dir)
+            elif file_ext == '.txt':
+                return self._parse_txt(file_data, filename, output_dir, **kwargs)
+            elif file_ext == '.md':
+                return self._parse_md(file_data, filename, output_dir, **kwargs)
             else:
                 raise ValueError(f"File type '{file_ext}' is listed as supported but no handler exists")
 
@@ -78,7 +82,7 @@ class NativeParser(AbstractParser):
 
     def get_supported_extensions(self) -> List[str]:
         """Get all supported file extensions"""
-        return ['.docx', '.xlsx', '.xls', '.csv', '.pptx', '.html']
+        return ['.docx', '.xlsx', '.xls', '.csv', '.pptx', '.html', '.txt', '.md']
 
     def _parse_docx(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[Dict[str, Any]]:
         """Parse DOCX file from binary data and return structured results"""
@@ -489,3 +493,76 @@ class NativeParser(AbstractParser):
             md_lines.append('')
 
         return '\n'.join(md_lines)
+
+    def _parse_txt(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[Dict[str, Any]]:
+        """Parse plain text file from binary data and return structured results"""
+        try:
+            # Decode text content
+            text_content = file_data.decode('utf-8', errors='ignore')
+
+            # Create output directory
+            base_filename = os.path.splitext(filename)[0]
+            save_dir = os.path.join(output_dir, base_filename)
+            os.makedirs(save_dir, exist_ok=True)
+
+            # Save as markdown (plain text is valid markdown)
+            md_filename = f"{base_filename}.md"
+            md_path = os.path.join(save_dir, md_filename)
+
+            with open(md_path, 'w', encoding='utf-8') as f:
+                f.write(text_content)
+
+            logger.info(f"TXT parsing complete: {filename} -> {md_path}")
+
+            return [{
+                "type": "text",
+                "content": text_content,
+                "metadata": {
+                    "source_file": filename,
+                    "output_file": md_path,
+                    "format": "txt"
+                }
+            }]
+
+        except Exception as e:
+            logger.error(f"TXT parsing failed: {str(e)}")
+            raise
+
+    def _parse_md(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[Dict[str, Any]]:
+        """
+        Parse Markdown file from binary data - direct save without conversion.
+
+        For .md files, we simply save them as-is since they're already in Markdown format.
+        No conversion or processing is needed.
+        """
+        try:
+            # Decode markdown content
+            md_content = file_data.decode('utf-8', errors='ignore')
+
+            # Create output directory
+            base_filename = os.path.splitext(filename)[0]
+            save_dir = os.path.join(output_dir, base_filename)
+            os.makedirs(save_dir, exist_ok=True)
+
+            # Save markdown file directly (no conversion needed)
+            md_filename = f"{base_filename}.md"
+            md_path = os.path.join(save_dir, md_filename)
+
+            with open(md_path, 'w', encoding='utf-8') as f:
+                f.write(md_content)
+
+            logger.info(f"MD file saved directly: {filename} -> {md_path}")
+
+            return [{
+                "type": "markdown",
+                "content": md_content,
+                "metadata": {
+                    "source_file": filename,
+                    "output_file": md_path,
+                    "format": "md"
+                }
+            }]
+
+        except Exception as e:
+            logger.error(f"MD file processing failed: {str(e)}")
+            raise

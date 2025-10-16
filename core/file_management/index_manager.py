@@ -226,11 +226,13 @@ class IndexManager(AbstractModule):
             result["metadata"]["chunker_type"] = chunker_strategy
 
             # Prepare metadata for chunking
+            # Note: owner_id is added to metadata so it can be extracted when creating Chunk objects
             chunk_metadata = {
                 "source_file_id": file_id,
                 "parsed_content_id": parsed_content_id,
                 "filename": filename,
-                "parser_type": parser_type_name
+                "parser_type": parser_type_name,
+                "owner_id": str(file_metadata.owner_id)  # Will be extracted as Chunk.owner_id field
             }
 
             chunks = self.chunker.chunk_text(
@@ -477,9 +479,15 @@ class IndexManager(AbstractModule):
                 if source_metadata:
                     merged_metadata.update(source_metadata)
 
+                # Extract owner_id from metadata or source_metadata
+                owner_id = merged_metadata.get('owner_id', '')
+                if not owner_id and source_metadata:
+                    owner_id = source_metadata.get('owner_id', '')
+
                 chunk_obj = Chunk(
                     id=chunk_id,
                     content=chunk['content'],
+                    owner_id=owner_id,
                     metadata=merged_metadata
                 )
                 chunk_objects.append(chunk_obj)

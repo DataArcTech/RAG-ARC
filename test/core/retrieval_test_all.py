@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 import logging
+import uuid
 from typing import List, Dict, Any
 
 # Add project root directory to path
@@ -28,30 +29,38 @@ logger = logging.getLogger(__name__)
 
 def create_test_chunks() -> List[Chunk]:
     """Create test chunks for retrieval testing"""
+    # Use a fixed test user ID for all chunks
+    test_owner_id = "12345678-1234-5678-1234-567812345678"
+
     return [
         Chunk(
             id="tech_001",
             content="Python is a high-level programming language widely used for machine learning and data science applications.",
+            owner_id=test_owner_id,
             metadata={"category": "technology", "language": "english", "difficulty": "intermediate"}
         ),
         Chunk(
             id="tech_002",
             content="Deep learning neural networks can solve complex problems like image recognition and natural language processing.",
+            owner_id=test_owner_id,
             metadata={"category": "technology", "language": "english", "difficulty": "advanced"}
         ),
         Chunk(
             id="science_001",
             content="Quantum computing leverages quantum mechanical phenomena to process information in fundamentally new ways.",
+            owner_id=test_owner_id,
             metadata={"category": "science", "language": "english", "difficulty": "advanced"}
         ),
         Chunk(
             id="chinese_001",
             content="机器学习是人工智能的重要分支，包括监督学习和无监督学习等多种方法。",
+            owner_id=test_owner_id,
             metadata={"category": "technology", "language": "chinese", "difficulty": "intermediate"}
         ),
         Chunk(
             id="chinese_002",
             content="深度学习使用神经网络来解决复杂的模式识别问题，在图像处理和自然语言处理领域有广泛应用。",
+            owner_id=test_owner_id,
             metadata={"category": "technology", "language": "chinese", "difficulty": "advanced"}
         )
     ]
@@ -63,7 +72,7 @@ def create_index_manager_and_build_indexes(chunks: List[Chunk], index_configs: D
         index = index_config.build()
 
         # 根据索引类型使用不同的方法
-        if index_type == "bm25_indexer":
+        if index_type == "bm25_builder":
             index.build_index(chunks)
             index.save_index(index_config.index_path)
 
@@ -133,14 +142,14 @@ class TestBM25Retriever(unittest.TestCase):
         """测试BM25基础功能"""
         # 创建BM25索引配置
         index_config = BM25BuilderConfig(
-            type="bm25_indexer",
+            type="bm25_builder",
             index_path=os.path.join(self.temp_dir, "bm25_test"),
             bm25_k1=1.2,
             bm25_b=0.75
         )
 
         # 使用索引器构建索引
-        index_configs = {"bm25_indexer": index_config}
+        index_configs = {"bm25_builder": index_config}
         create_index_manager_and_build_indexes(self.chunks, index_configs)
 
         try:
@@ -188,7 +197,7 @@ class TestBM25Retriever(unittest.TestCase):
                 "use_phrase_query": false
             }},
             "index_config": {{
-                "type": "bm25_indexer",
+                "type": "bm25_builder",
                 "index_path": "{os.path.join(self.temp_dir, 'bm25_json_test').replace(os.sep, '/')}",
                 "bm25_k1": 1.5,
                 "bm25_b": 0.8,
@@ -207,7 +216,7 @@ class TestBM25Retriever(unittest.TestCase):
         self.assertEqual(config.index_config.bm25_b, 0.8)
 
         # 使用IndexManager构建索引
-        index_configs = {"bm25_indexer": config.index_config}
+        index_configs = {"bm25_builder": config.index_config}
         create_index_manager_and_build_indexes(self.chunks, index_configs)
 
         try:
@@ -226,12 +235,12 @@ class TestBM25Retriever(unittest.TestCase):
     def test_bm25_search_parameters(self):
         """测试BM25搜索参数"""
         index_config = BM25BuilderConfig(
-            type="bm25_indexer",
+            type="bm25_builder",
             index_path=os.path.join(self.temp_dir, "bm25_params_test")
         )
 
         # 使用IndexManager构建索引
-        index_configs = {"bm25_indexer": index_config}
+        index_configs = {"bm25_builder": index_config}
         create_index_manager_and_build_indexes(self.chunks, index_configs)
 
         try:
@@ -441,7 +450,7 @@ class TestMultiPathRetriever(unittest.TestCase):
                     "type": "tantivy_bm25",
                     "index_path": "{os.path.join(self.temp_dir, 'mp_bm25').replace(os.sep, '/')}",
                     "index_config": {{
-                        "type": "bm25_indexer",
+                        "type": "bm25_builder",
                         "index_path": "{os.path.join(self.temp_dir, 'mp_bm25').replace(os.sep, '/')}",
                         "bm25_k1": 1.2,
                         "bm25_b": 0.75
@@ -485,7 +494,7 @@ class TestMultiPathRetriever(unittest.TestCase):
 
         # 使用IndexManager构建索引
         index_configs = {
-            "bm25_indexer": config.retrievers[0].index_config,
+            "bm25_builder": config.retrievers[0].index_config,
             "faiss": config.retrievers[1].index_config
         }
         create_index_manager_and_build_indexes(self.chunks, index_configs)

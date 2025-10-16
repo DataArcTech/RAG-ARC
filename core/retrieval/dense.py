@@ -87,7 +87,7 @@ class DenseRetriever(BaseRetriever):
         Args:
             query: query string
             include_score: whether to include similarity score in Chunk.metadata["score"]
-            **kwargs: other search parameters
+            **kwargs: other search parameters (including owner_id for user isolation)
 
         Returns:
             list of chunks, if include_score=True, then score is stored in metadata["score"]
@@ -105,7 +105,7 @@ class DenseRetriever(BaseRetriever):
         Args:
             embedding: query embedding vector
             include_score: whether to include similarity score in Chunk.metadata["score"]
-            **kwargs: other search parameters
+            **kwargs: other search parameters (including owner_id for user isolation)
 
         Returns:
             list of chunks, if include_score=True, then score is stored in metadata["score"]
@@ -113,12 +113,43 @@ class DenseRetriever(BaseRetriever):
         if self._index is None:
             return []
 
+        # Extract owner_id for filtering
+        owner_id = kwargs.pop('owner_id', None)
+
         # Merge search parameters
         search_kwargs = {**self.config.search_kwargs, **kwargs}
         search_kwargs["metric"] = self.config.metric
 
+        # If owner_id filtering is needed, over-fetch to ensure we get enough results
+        original_k = search_kwargs.get("k", 5)
+        if owner_id is not None:
+            # Over-fetch multiplier: fetch more results to compensate for filtering
+            # Default to 3x, can be configured via over_fetch_multiplier parameter
+            over_fetch_multiplier = kwargs.pop('over_fetch_multiplier', 3)
+            search_kwargs["k"] = min(original_k * over_fetch_multiplier, self._index.index.ntotal if self._index.index else original_k)
+            logger.debug(f"Over-fetching {search_kwargs['k']} results (original k={original_k}, multiplier={over_fetch_multiplier})")
+
         # Execute FAISS search
         chunks_and_scores = RetrievalHelper.vector_search_with_faiss(self._index, embedding, search_kwargs)
+
+        # Filter by owner_id if provided (user isolation)
+        if owner_id is not None:
+            owner_id_str = str(owner_id)
+            before_filter_count = len(chunks_and_scores)
+            chunks_and_scores = [
+                (chunk, score) for chunk, score in chunks_and_scores
+                if chunk.owner_id == owner_id_str
+            ]
+            after_filter_count = len(chunks_and_scores)
+            logger.debug(f"Filtered results by owner_id={owner_id_str}: {after_filter_count}/{before_filter_count} chunks")
+
+            # Trim to original k if we have more than needed
+            if len(chunks_and_scores) > original_k:
+                chunks_and_scores = chunks_and_scores[:original_k]
+                logger.debug(f"Trimmed to {original_k} chunks")
+            elif len(chunks_and_scores) < original_k:
+                logger.warning(f"Only retrieved {len(chunks_and_scores)} chunks for owner_id={owner_id_str}, requested {original_k}")
+
 
         if include_score:
             # Add scores to chunks' metadata
@@ -128,6 +159,7 @@ class DenseRetriever(BaseRetriever):
                 chunk_copy = Chunk(
                     id=chunk.id,
                     content=chunk.content,
+                    owner_id=chunk.owner_id,
                     metadata={**chunk.metadata, "score": score}
                 )
                 chunks.append(chunk_copy)
@@ -147,9 +179,20 @@ class DenseRetriever(BaseRetriever):
 
         query_embedding = self.embedding.embed(query)
 
+        # Extract owner_id for filtering
+        owner_id = kwargs.pop('owner_id', None)
+
         # Merge search parameters
         search_kwargs = {**self.config.search_kwargs, **kwargs}
         fetch_k = search_kwargs.get("fetch_k", 20)
+
+        # If owner_id filtering is needed, over-fetch to ensure we get enough candidates
+        if owner_id is not None:
+            # Over-fetch multiplier for MMR (need more candidates for diversity)
+            over_fetch_multiplier = kwargs.pop('over_fetch_multiplier', 3)
+            original_fetch_k = fetch_k
+            fetch_k = min(fetch_k * over_fetch_multiplier, self._index.index.ntotal if self._index.index else fetch_k)
+            logger.debug(f"MMR over-fetching {fetch_k} candidates (original fetch_k={original_fetch_k}, multiplier={over_fetch_multiplier})")
 
         # Get candidate chunks (using internal method to get scores)
         chunks_and_scores = RetrievalHelper.vector_search_with_faiss(
@@ -158,6 +201,23 @@ class DenseRetriever(BaseRetriever):
 
         if not chunks_and_scores:
             return []
+
+        # Filter by owner_id if provided (user isolation)
+        if owner_id is not None:
+            owner_id_str = str(owner_id)
+            before_filter_count = len(chunks_and_scores)
+            chunks_and_scores = [
+                (chunk, score) for chunk, score in chunks_and_scores
+                if chunk.owner_id == owner_id_str
+            ]
+            after_filter_count = len(chunks_and_scores)
+            logger.debug(f"MMR filtered results by owner_id={owner_id_str}: {after_filter_count}/{before_filter_count} chunks")
+
+            if after_filter_count == 0:
+                logger.warning(f"No chunks found for owner_id={owner_id_str} after filtering")
+                return []
+            elif after_filter_count < search_kwargs.get("k", 4):
+                logger.warning(f"Only {after_filter_count} chunks available for MMR, requested {search_kwargs.get('k', 4)}")
 
         # Prepare MMR search parameters
         search_kwargs["normalize_for_cosine"] = (

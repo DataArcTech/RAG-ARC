@@ -1,7 +1,8 @@
 from framework.config import AbstractConfig
-from typing import Literal, List, Annotated
+from typing import Literal, List, Annotated, Union
 from encapsulation.database.vector_db.faiss import FaissVectorDB
 from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
+from config.encapsulation.llm.embedding.openai import OpenAIEmbeddingConfig
 from pydantic import Field
 
 class FaissVectorDBConfig(AbstractConfig):
@@ -19,7 +20,7 @@ class FaissVectorDBConfig(AbstractConfig):
     train_size: int = 10000
     normalize_L2: bool = True
 
-    embedding_config: Annotated[QwenEmbeddingConfig, Field(discriminator="type")]
+    embedding_config: Annotated[Union[QwenEmbeddingConfig, OpenAIEmbeddingConfig], Field(discriminator="type")]
 
     def build(self):
         return FaissVectorDB(self)

@@ -4,8 +4,10 @@ from fastapi import (
     HTTPException,
     UploadFile,
     status,
+    Query,
 )
 from pydantic import BaseModel
+from typing import Optional
 from framework.register import Register
 
 
@@ -19,14 +21,35 @@ registrator = Register()
     response_model=str,
     status_code=status.HTTP_201_CREATED,
 )
-def upload_file(file: UploadFile):
+def upload_file(
+    file: UploadFile,
+    owner_id: Optional[str] = Query(default="00000000-0000-0000-0000-000000000000", description="User ID (UUID format)")
+):
+    """
+    Upload a file to the knowledge base
+
+    Args:
+        file: File to upload
+        owner_id: User ID (UUID format). Defaults to a placeholder UUID.
+                  After adding JWT authentication, this will be extracted from the token.
+
+    Returns:
+        Document ID
+    """
     try:
-        print(f"Uploading file: {file.filename}")
+        print(f"Uploading file: {file.filename} for owner_id: {owner_id}")
         knowledge = registrator.get_object("knowledge")
-        doc_id = knowledge.upload_file(file, 0)
+        # Convert string UUID to UUID object
+        owner_uuid = uuid.UUID(owner_id)
+        doc_id = knowledge.upload_file(file, owner_uuid)
         return doc_id
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid owner_id format: {str(e)}",
+        )
     except Exception as e:
-        raise HTTPException( 
+        raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to upload file: {str(e)}",
         )
@@ -48,14 +71,21 @@ async def download_file(file_id: str):
 
 
 @router.delete("/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_file(file_id: str):
+async def delete_file(file_id: str, owner_id: str = Query(..., description="Owner ID of the file")):
     knowledge = registrator.get_object("knowledge")
     try:
-        knowledge.delete_file(file_id, 0)
+        import uuid
+        owner_uuid = uuid.UUID(owner_id)
+        knowledge.delete_file(file_id, owner_uuid)
         return None
     except HTTPException:
-        # surface 404s if thrown by storage layer
+        # surface 404s and 403s if thrown by storage layer
         raise
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid owner_id format: {str(e)}",
+        )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
