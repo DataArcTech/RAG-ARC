@@ -1,0 +1,14 @@
+{
+    "type": "account",
+    "user_storage_config": {
+        "type": "user_storage",
+        "relational_db_config": {
+            "type": "postgresql",
+            "host": "localhost",
+            "port": 5555,
+            "database": "rag_test",
+            "user": "postgres",
+            "password": "123"
+        }
+    }
+}

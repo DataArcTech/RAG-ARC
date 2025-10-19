@@ -1,19 +1,22 @@
 import uuid
 from fastapi import (
     APIRouter,
+    Depends,
     HTTPException,
     UploadFile,
     status,
-    Query,
 )
-from pydantic import BaseModel
-from typing import Optional
+from typing import Annotated
+from api.routers.auth import get_current_user
+from encapsulation.data_model.orm_models import User
 from framework.register import Register
-
+import uuid
 
 router = APIRouter(prefix="/knowledge", tags=["files"])
 
 registrator = Register()
+account_handler = registrator.get_object("account")
+knowledge_handler = registrator.get_object("knowledge")
 
 
 @router.post(
@@ -23,30 +26,33 @@ registrator = Register()
 )
 def upload_file(
     file: UploadFile,
-    owner_id: Optional[str] = Query(default="00000000-0000-0000-0000-000000000000", description="User ID (UUID format)")
+    user: Annotated[User | None, Depends(get_current_user)],
 ):
     """
     Upload a file to the knowledge base
 
     Args:
         file: File to upload
-        owner_id: User ID (UUID format). Defaults to a placeholder UUID.
+        owner_id: User ID string. Defaults to a placeholder string.
                   After adding JWT authentication, this will be extracted from the token.
 
     Returns:
         Document ID
     """
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required"
+        )
     try:
-        print(f"Uploading file: {file.filename} for owner_id: {owner_id}")
-        knowledge = registrator.get_object("knowledge")
+        print(f"Uploading file: {file.filename} for owner_id: {user.id}")
         # Convert string UUID to UUID object
-        owner_uuid = uuid.UUID(owner_id)
-        doc_id = knowledge.upload_file(file, owner_uuid)
+        doc_id = knowledge_handler.upload_file(file, user.id)
         return doc_id
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid owner_id format: {str(e)}",
+            detail=f"Invalid user.id format: {str(e)}",
         )
     except Exception as e:
         raise HTTPException(
@@ -56,10 +62,14 @@ def upload_file(
 
 
 @router.get("/{file_id}/download")
-async def download_file(file_id: str):
-    knowledge = registrator.get_object("knowledge")
+async def download_file(file_id: str, user: Annotated[User | None, Depends(get_current_user)]):
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required"
+        )
     try:
-        return knowledge.get_file(str(file_id))
+        return knowledge_handler.get_file(file_id, user.id)
     except HTTPException:
         # re-raise 404s from underlying module
         raise
@@ -71,12 +81,14 @@ async def download_file(file_id: str):
 
 
 @router.delete("/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_file(file_id: str, owner_id: str = Query(..., description="Owner ID of the file")):
-    knowledge = registrator.get_object("knowledge")
+async def delete_file(file_id: str, user: Annotated[User | None, Depends(get_current_user)]):
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required"
+        )
     try:
-        import uuid
-        owner_uuid = uuid.UUID(owner_id)
-        knowledge.delete_file(file_id, owner_uuid)
+        knowledge_handler.delete_file(file_id, user.id)
         return None
     except HTTPException:
         # surface 404s and 403s if thrown by storage layer
@@ -84,7 +96,7 @@ async def delete_file(file_id: str, owner_id: str = Query(..., description="Owne
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid owner_id format: {str(e)}",
+            detail=f"Invalid user.id format: {str(e)}",
         )
     except Exception as e:
         raise HTTPException(

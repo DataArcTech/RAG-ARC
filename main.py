@@ -7,12 +7,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import app_registration
+
+# initialize components BEFORE importing routers that depend on them
+app_registration.initialize()
+
 from api.routers import mcp
 from api.routers import knowledge as knowledge_router
 from api.routers import rag_inference
-
-# initialize components
-app_registration.initialize()
+from api.routers import session as session_router
+from api.routers import auth as auth_router
 
 
 # Configure logging
@@ -39,3 +42,5 @@ async def health_check():
 app.mount("/mcp", mcp.mcp_app)
 app.include_router(knowledge_router.router)
 app.include_router(rag_inference.router)
+app.include_router(session_router.router)
+app.include_router(auth_router.router)

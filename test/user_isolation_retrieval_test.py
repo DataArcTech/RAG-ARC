@@ -16,7 +16,7 @@ def test_chunk_with_owner_id_field():
     """Test that chunks can be created with owner_id as a separate field"""
     print("\n=== Test 1: Chunk with owner_id field ===")
 
-    owner_id = str(uuid.uuid4())
+    owner_id = uuid.uuid4()
     chunk = Chunk(
         id=str(uuid.uuid4()),
         content="Test content for user isolation",
@@ -38,8 +38,8 @@ def test_owner_id_filtering():
     print("\n=== Test 2: Owner ID filtering ===")
 
     # Create chunks for different users
-    user1_id = str(uuid.uuid4())
-    user2_id = str(uuid.uuid4())
+    user1_id = uuid.uuid4()
+    user2_id = uuid.uuid4()
 
     chunks = [
         Chunk(id="1", content="User 1 doc 1", owner_id=user1_id),

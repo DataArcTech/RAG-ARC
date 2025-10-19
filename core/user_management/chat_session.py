@@ -50,17 +50,13 @@ class ChatSessionStorage(AbstractModule):
         super().__init__(config)
         self.metadata_store = config.relational_db_config.build()
 
-    def _generate_session_id(self) -> str:
-        """Generate unique session ID"""
-        return str(uuid.uuid4())
-
     def _validate_session_creation(
         self,
-        user_id: str,
+        user_id: uuid.UUID,
         name: str
     ) -> None:
         """Validate session creation parameters"""
-        if not user_id or not user_id.strip():
+        if not user_id:
             raise ChatSessionValidationError("User ID cannot be empty")
 
         if not name or not name.strip():
@@ -71,15 +67,9 @@ class ChatSessionStorage(AbstractModule):
         if len(name) > max_name_length:
             raise ChatSessionValidationError(f"Session name too long (max {max_name_length} characters)")
 
-        # Validate user_id format (should be valid UUID)
-        try:
-            uuid.UUID(user_id)
-        except ValueError:
-            raise ChatSessionValidationError("Invalid user ID format")
-
     def create_session(
         self,
-        user_id: str,
+        user_id: uuid.UUID,
         name: str,
         **kwargs: Any
     ) -> str:
@@ -107,27 +97,21 @@ class ChatSessionStorage(AbstractModule):
             if not user:
                 raise ChatSessionValidationError(f"User {user_id} not found")
 
-            # Generate session ID
-            session_id = self._generate_session_id()
-
             # Create session metadata
             session_metadata = ChatSession(
-                id=uuid.UUID(session_id),
-                user_id=uuid.UUID(user_id),
+                user_id=user_id,
                 name=name,
                 created_at=datetime.now(),
                 updated_at=datetime.now()
             )
 
             # Store session metadata
-            logger.info(f"Creating chat session: {name} for user {user_id} (session_id: {session_id})")
             stored_session_id = self.metadata_store.store_chat_session(session_metadata, **kwargs)
 
             if not stored_session_id:
                 raise StorageOperationError("Failed to store chat session metadata")
 
-            logger.info(f"Successfully created chat session: {name} (session_id: {session_id})")
-            return session_id
+            return stored_session_id
 
         except ChatSessionValidationError:
             raise
@@ -138,14 +122,14 @@ class ChatSessionStorage(AbstractModule):
 
     def get_session(
         self,
-        session_id: str,
+        session_id: uuid.UUID,
         **kwargs: Any
     ) -> Optional[ChatSession]:
         """
         Get chat session by ID.
 
         Args:
-            session_id: Session ID
+            session_id: Session ID as UUID
             **kwargs: Additional arguments
 
         Returns:
@@ -159,7 +143,7 @@ class ChatSessionStorage(AbstractModule):
 
     def list_sessions_by_user(
         self,
-        user_id: str,
+        user_id: uuid.UUID,
         limit: int = 100,
         offset: int = 0,
         **kwargs: Any
@@ -168,7 +152,7 @@ class ChatSessionStorage(AbstractModule):
         List all chat sessions for a specific user.
 
         Args:
-            user_id: User ID
+            user_id: User ID as UUID
             limit: Maximum number of sessions to return
             offset: Number of sessions to skip
             **kwargs: Additional arguments
@@ -189,7 +173,7 @@ class ChatSessionStorage(AbstractModule):
 
     def update_session(
         self,
-        session_id: str,
+        session_id: uuid.UUID,
         updates: dict,
         **kwargs: Any
     ) -> bool:
@@ -197,7 +181,7 @@ class ChatSessionStorage(AbstractModule):
         Update chat session metadata.
 
         Args:
-            session_id: Session ID
+            session_id: Session ID as UUID
             updates: Dictionary of fields to update
             **kwargs: Additional arguments
 
@@ -224,7 +208,7 @@ class ChatSessionStorage(AbstractModule):
 
     def delete_session(
         self,
-        session_id: str,
+        session_id: uuid.UUID,
         **kwargs: Any
     ) -> bool:
         """
@@ -234,7 +218,7 @@ class ChatSessionStorage(AbstractModule):
         due to foreign key constraints.
 
         Args:
-            session_id: Session ID
+            session_id: Session ID as UUID
             **kwargs: Additional arguments
 
         Returns:
@@ -255,18 +239,31 @@ class ChatSessionStorage(AbstractModule):
             logger.error(f"Failed to delete chat session {session_id}: {e}")
             return False
 
+    def get_user_session_count(
+        self,
+        user_id: uuid.UUID
+    ) -> int:
+        """
+        Get the number of sessions for a user.
+        """
+        try:
+            return self.metadata_store.get_user_session_count(user_id)
+        except Exception as e:
+            logger.error(f"Failed to get user session count for user {user_id}: {e}")
+            return 0
+
     def verify_session_ownership(
         self,
-        session_id: str,
-        user_id: str,
+        session_id: uuid.UUID,
+        user_id: uuid.UUID,
         **kwargs: Any
     ) -> bool:
         """
         Verify that a session belongs to a specific user.
 
         Args:
-            session_id: Session ID
-            user_id: User ID
+            session_id: Session ID as UUID
+            user_id: User ID as UUID
             **kwargs: Additional arguments
 
         Returns:
@@ -276,7 +273,7 @@ class ChatSessionStorage(AbstractModule):
             session = self.get_session(session_id, **kwargs)
             if not session:
                 return False
-            return str(session.user_id) == user_id
+            return session.user_id == user_id
         except Exception as e:
             logger.error(f"Failed to verify session ownership: {e}")
             return False

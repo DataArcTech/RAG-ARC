@@ -578,14 +578,14 @@ class PostgreSQLDB(RelationalDB):
 
     # ==================== USER MANAGEMENT ====================
 
-    def store_user(self, user: User, **kwargs: Any) -> str:
+    def store_user(self, user: User, **kwargs: Any) -> uuid.UUID:
         """Store user metadata using SQLAlchemy ORM"""
         try:
             with self.SessionMaker() as session:
                 session.add(user)
                 session.commit()
                 logger.debug(f"Stored user: {user.id}")
-                return str(user.id)
+                return user.id
 
         except IntegrityError as e:
             logger.error(f"Integrity error storing user (duplicate username?): {e}")
@@ -594,7 +594,7 @@ class PostgreSQLDB(RelationalDB):
             logger.error(f"Database error storing user: {e}")
             raise
 
-    def get_user(self, user_id: str, **kwargs: Any) -> Optional[User]:
+    def get_user(self, user_id: uuid.UUID, **kwargs: Any) -> Optional[User]:
         """Get user by ID using SQLAlchemy ORM"""
         try:
             with self.SessionMaker() as session:
@@ -650,7 +650,7 @@ class PostgreSQLDB(RelationalDB):
             logger.error(f"Database error listing users: {e}")
             raise
 
-    def update_user(self, user_id: str, updates: dict, **kwargs: Any) -> bool:
+    def update_user(self, user_id: uuid.UUID, updates: dict, **kwargs: Any) -> bool:
         """Update user metadata using SQLAlchemy ORM"""
         try:
             with self.SessionMaker() as session:
@@ -671,7 +671,7 @@ class PostgreSQLDB(RelationalDB):
             logger.error(f"Database error updating user {user_id}: {e}")
             raise
 
-    def delete_user(self, user_id: str, **kwargs: Any) -> bool:
+    def delete_user(self, user_id: uuid.UUID, **kwargs: Any) -> bool:
         """Delete user using SQLAlchemy ORM (cascades to sessions and messages)"""
         try:
             with self.SessionMaker() as session:
@@ -707,7 +707,7 @@ class PostgreSQLDB(RelationalDB):
             logger.error(f"Database error storing chat session: {e}")
             raise
 
-    def get_chat_session(self, session_id: str, **kwargs: Any) -> Optional[ChatSession]:
+    def get_chat_session(self, session_id: uuid.UUID, **kwargs: Any) -> Optional[ChatSession]:
         """Get chat session by ID using SQLAlchemy ORM"""
         try:
             with self.SessionMaker() as db_session:
@@ -723,7 +723,7 @@ class PostgreSQLDB(RelationalDB):
 
     def list_chat_sessions_by_user(
         self,
-        user_id: str,
+        user_id: uuid.UUID,
         limit: int = 100,
         offset: int = 0,
         **kwargs: Any
@@ -750,7 +750,16 @@ class PostgreSQLDB(RelationalDB):
             logger.error(f"Database error listing chat sessions for user {user_id}: {e}")
             raise
 
-    def update_chat_session(self, session_id: str, updates: dict, **kwargs: Any) -> bool:
+    def get_user_session_count(self, user_id: uuid.UUID, **kwargs: Any) -> int:
+        """Get the number of sessions for a user using SQLAlchemy ORM"""
+        try:
+            with self.SessionMaker() as db_session:
+                return db_session.query(ChatSession).filter_by(user_id=user_id).count()
+        except SQLAlchemyError as e:
+            logger.error(f"Database error getting user session count for user {user_id}: {e}")
+            return 0
+
+    def update_chat_session(self, session_id: uuid.UUID, updates: dict, **kwargs: Any) -> bool:
         """Update chat session metadata using SQLAlchemy ORM"""
         try:
             with self.SessionMaker() as db_session:
@@ -768,7 +777,7 @@ class PostgreSQLDB(RelationalDB):
             logger.error(f"Database error updating chat session {session_id}: {e}")
             raise
 
-    def delete_chat_session(self, session_id: str, **kwargs: Any) -> bool:
+    def delete_chat_session(self, session_id: uuid.UUID, **kwargs: Any) -> bool:
         """Delete chat session using SQLAlchemy ORM (cascades to messages)"""
         try:
             with self.SessionMaker() as db_session:
@@ -788,14 +797,14 @@ class PostgreSQLDB(RelationalDB):
 
     # ==================== CHAT MESSAGE MANAGEMENT ====================
 
-    def store_chat_message(self, message: ChatMessage, **kwargs: Any) -> str:
+    def store_chat_message(self, message: ChatMessage, **kwargs: Any) -> Optional[ChatMessage]:
         """Store chat message metadata using SQLAlchemy ORM"""
         try:
             with self.SessionMaker() as db_session:
                 db_session.add(message)
                 db_session.commit()
                 logger.debug(f"Stored chat message: {message.id}")
-                return str(message.id)
+                return message
 
         except IntegrityError as e:
             logger.error(f"Integrity error storing chat message (invalid session_id?): {e}")
@@ -804,7 +813,7 @@ class PostgreSQLDB(RelationalDB):
             logger.error(f"Database error storing chat message: {e}")
             raise
 
-    def get_chat_message(self, message_id: str, **kwargs: Any) -> Optional[ChatMessage]:
+    def get_chat_message(self, message_id: uuid.UUID, **kwargs: Any) -> Optional[ChatMessage]:
         """Get chat message by ID using SQLAlchemy ORM"""
         try:
             with self.SessionMaker() as db_session:
@@ -820,7 +829,7 @@ class PostgreSQLDB(RelationalDB):
 
     def list_chat_messages_by_session(
         self,
-        session_id: str,
+        session_id: uuid.UUID,
         limit: int = 100,
         offset: int = 0,
         **kwargs: Any
@@ -847,7 +856,7 @@ class PostgreSQLDB(RelationalDB):
             logger.error(f"Database error listing chat messages for session {session_id}: {e}")
             raise
 
-    def delete_chat_message(self, message_id: str, **kwargs: Any) -> bool:
+    def delete_chat_message(self, message_id: uuid.UUID, **kwargs: Any) -> bool:
         """Delete chat message using SQLAlchemy ORM"""
         try:
             with self.SessionMaker() as db_session:
@@ -865,7 +874,7 @@ class PostgreSQLDB(RelationalDB):
             logger.error(f"Database error deleting chat message {message_id}: {e}")
             raise
 
-    def delete_chat_messages_by_session(self, session_id: str, **kwargs: Any) -> int:
+    def delete_chat_messages_by_session(self, session_id: uuid.UUID, **kwargs: Any) -> int:
         """Delete all chat messages for a specific session using SQLAlchemy ORM"""
         try:
             with self.SessionMaker() as db_session:

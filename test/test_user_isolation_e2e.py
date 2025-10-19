@@ -23,9 +23,9 @@ from config.core.retrieval.multipath_config import MultiPathRetrieverConfig
 
 def create_test_documents_for_users():
     """为3个用户创建测试文档"""
-    user1_id = str(uuid.uuid4())
-    user2_id = str(uuid.uuid4())
-    user3_id = str(uuid.uuid4())
+    user1_id = uuid.uuid4()
+    user2_id = uuid.uuid4()
+    user3_id = uuid.uuid4()
     
     chunks = []
     

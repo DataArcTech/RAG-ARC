@@ -13,6 +13,54 @@ echo "==========================================="
 curl -sS "$API_BASE/" | grep -q "ok" || { echo "❌ Health check failed"; exit 1; }
 echo "✅ Health check PASS"
 
+# 0.5) Authentication setup
+echo -e "\n0.5. Setting up authentication:"
+AUTH_ENDPOINT="$API_BASE/auth"
+
+# Register test user
+echo "Registering test user..."
+REGISTER_RESPONSE=$(curl -sS -w "\n%{http_code}" "$AUTH_ENDPOINT/register" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "Test User",
+    "user_name": "testuser",
+    "password": "testpass123"
+  }')
+
+REGISTER_STATUS=$(echo "$REGISTER_RESPONSE" | tail -n1)
+if [ "$REGISTER_STATUS" = "201" ]; then
+  echo "✅ User registered successfully"
+elif [ "$REGISTER_STATUS" = "400" ]; then
+  echo "ℹ️  User already exists, continuing..."
+else
+  echo "❌ User registration failed (status $REGISTER_STATUS)"
+  echo "$REGISTER_RESPONSE"
+  exit 1
+fi
+
+# Login to get auth token
+echo "Logging in to get auth token..."
+LOGIN_RESPONSE=$(curl -sS -w "\n%{http_code}" "$AUTH_ENDPOINT/token" \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'username=testuser&password=testpass123')
+
+LOGIN_STATUS=$(echo "$LOGIN_RESPONSE" | tail -n1)
+if [ "$LOGIN_STATUS" != "200" ]; then
+  echo "❌ Login failed (status $LOGIN_STATUS)"
+  echo "$LOGIN_RESPONSE"
+  exit 1
+fi
+
+# Extract access token
+AUTH_TOKEN=$(echo "$LOGIN_RESPONSE" | sed '$d' | grep -o '"access_token":"[^"]*"' | sed 's/"access_token":"//' | sed 's/"//')
+if [ -z "$AUTH_TOKEN" ]; then
+  echo "❌ Could not extract auth token from login response"
+  echo "$LOGIN_RESPONSE"
+  exit 1
+fi
+
+echo "✅ Authentication successful, token obtained"
+
 # 1) Initialize MCP and capture session ID
 echo -e "\n1. Initialize MCP connection:"
 INIT_RESPONSE=$(curl -i -s "$MCP_ENDPOINT" \
@@ -81,15 +129,17 @@ CREATE_CHAT_RESPONSE=$(curl -i -s "$MCP_ENDPOINT" \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
   -H "mcp-session-id: $SESSION_ID" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 3,
-    "method": "tools/call",
-    "params": {
-      "name": "create_chat",
-      "arguments": {}
+  -d "{
+    \"jsonrpc\": \"2.0\",
+    \"id\": 3,
+    \"method\": \"tools/call\",
+    \"params\": {
+      \"name\": \"create_chat\",
+      \"arguments\": {
+        \"auth_token\": \"$AUTH_TOKEN\"
+      }
     }
-  }')
+  }")
 
 echo "$CREATE_CHAT_RESPONSE" | grep -E "(data: |event: )"
 echo
@@ -138,7 +188,8 @@ CHAT_RESPONSE=$(curl -i -s "$MCP_ENDPOINT" \
       \"name\": \"chat\",
       \"arguments\": {
         \"session_id\": \"$CHAT_SESSION_ID\",
-        \"query\": \"Give me 10 best amazon deals?\"
+        \"query\": \"Give me 10 best amazon deals?\",
+        \"auth_token\": \"$AUTH_TOKEN\"
       }
     }
   }")
@@ -193,7 +244,8 @@ while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
     "name": "chat",
     "arguments": {
       "session_id": "$CHAT_SESSION_ID",
-      "query": "who is the author of Venom: The Black Suit Saga?"
+      "query": "who is the author of Venom: The Black Suit Saga?",
+      "auth_token": "$AUTH_TOKEN"
     }
   }
 }

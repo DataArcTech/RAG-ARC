@@ -1,7 +1,7 @@
 """Configuration for UserStorage (Core Layer)"""
 
 from framework.config import AbstractConfig
-from core.file_management.storage.user import UserStorage
+from core.user_management.user import UserStorage
 from config.encapsulation.database.relational_db.postgresql_config import PostgreSQLConfig
 from typing import Literal
 

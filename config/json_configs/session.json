@@ -1,0 +1,14 @@
+{
+    "type": "chat_session",
+    "session_storage_config": {
+        "type": "chat_session_storage",
+        "relational_db_config": {
+            "type": "postgresql",
+            "host": "localhost",
+            "port": 5555,
+            "database": "rag_test",
+            "user": "postgres",
+            "password": "123"
+        }
+    }
+}

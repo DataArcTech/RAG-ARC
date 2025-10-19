@@ -50,10 +50,6 @@ class UserStorage(AbstractModule):
         super().__init__(config)
         self.metadata_store = config.relational_db_config.build()
 
-    def _generate_user_id(self) -> str:
-        """Generate unique user ID"""
-        return str(uuid.uuid4())
-
     def _validate_user_creation(
         self,
         user_name: str,
@@ -84,7 +80,7 @@ class UserStorage(AbstractModule):
         user_name: str,
         hashed_password: str,
         **kwargs: Any
-    ) -> str:
+    ) -> uuid.UUID:
         """
         Create a new user.
 
@@ -94,7 +90,7 @@ class UserStorage(AbstractModule):
             **kwargs: Additional arguments
 
         Returns:
-            User ID
+            User ID as UUID
 
         Raises:
             UserValidationError: If validation fails
@@ -109,12 +105,8 @@ class UserStorage(AbstractModule):
             if existing_user:
                 raise UserValidationError(f"Username '{user_name}' already exists")
 
-            # Generate user ID
-            user_id = self._generate_user_id()
-
             # Create user metadata
             user_metadata = User(
-                id=uuid.UUID(user_id),
                 user_name=user_name,
                 hashed_password=hashed_password,
                 created_at=datetime.now(),
@@ -122,14 +114,14 @@ class UserStorage(AbstractModule):
             )
 
             # Store user metadata
-            logger.info(f"Creating user: {user_name} (user_id: {user_id})")
+            logger.info(f"Creating user: {user_name}")
             stored_user_id = self.metadata_store.store_user(user_metadata, **kwargs)
 
             if not stored_user_id:
                 raise StorageOperationError("Failed to store user metadata")
 
-            logger.info(f"Successfully created user: {user_name} (user_id: {user_id})")
-            return user_id
+            logger.info(f"Successfully created user: {user_name} (user_id: {str(stored_user_id)})")
+            return stored_user_id
 
         except UserValidationError:
             raise
@@ -140,14 +132,14 @@ class UserStorage(AbstractModule):
 
     def get_user(
         self,
-        user_id: str,
+        user_id: uuid.UUID,
         **kwargs: Any
     ) -> Optional[User]:
         """
         Get user by ID.
 
         Args:
-            user_id: User ID
+            user_id: User ID as UUID
             **kwargs: Additional arguments
 
         Returns:
@@ -161,23 +153,23 @@ class UserStorage(AbstractModule):
 
     def get_user_by_username(
         self,
-        user_name: str,
+        username: str,
         **kwargs: Any
     ) -> Optional[User]:
         """
         Get user by username.
 
         Args:
-            user_name: Username
+            username: Username
             **kwargs: Additional arguments
 
         Returns:
             User metadata or None if not found
         """
         try:
-            return self.metadata_store.get_user_by_username(user_name, **kwargs)
+            return self.metadata_store.get_user_by_username(username, **kwargs)
         except Exception as e:
-            logger.error(f"Failed to get user by username {user_name}: {e}")
+            logger.error(f"Failed to get user by username {username}: {e}")
             return None
 
     def list_users(
@@ -205,7 +197,7 @@ class UserStorage(AbstractModule):
 
     def update_user(
         self,
-        user_id: str,
+        user_id: uuid.UUID,
         updates: dict,
         **kwargs: Any
     ) -> bool:
@@ -213,7 +205,7 @@ class UserStorage(AbstractModule):
         Update user metadata.
 
         Args:
-            user_id: User ID
+            user_id: User ID as UUID
             updates: Dictionary of fields to update
             **kwargs: Additional arguments
 
@@ -226,7 +218,7 @@ class UserStorage(AbstractModule):
                 # Check if new username already exists
                 new_username = updates['user_name']
                 existing_user = self.metadata_store.get_user_by_username(new_username, **kwargs)
-                if existing_user and str(existing_user.id) != user_id:
+                if existing_user and existing_user.id != user_id:
                     raise UserValidationError(f"Username '{new_username}' already exists")
 
             # Add updated_at timestamp
@@ -250,7 +242,7 @@ class UserStorage(AbstractModule):
 
     def delete_user(
         self,
-        user_id: str,
+        user_id: uuid.UUID,
         **kwargs: Any
     ) -> bool:
         """
@@ -260,7 +252,7 @@ class UserStorage(AbstractModule):
         due to foreign key constraints.
 
         Args:
-            user_id: User ID
+            user_id: User ID as UUID
             **kwargs: Additional arguments
 
         Returns:

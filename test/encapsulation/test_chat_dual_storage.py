@@ -17,6 +17,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"
 
 
 import time
+import uuid
 from config.encapsulation.database.relational_db.postgresql_config import PostgreSQLConfig
 from config.encapsulation.database.cache_db.redis_config import RedisConfig
 from config.core.file_management.storage.chat_message_storage import ChatMessageStorageConfig
@@ -146,7 +147,7 @@ def test_dual_layer_write(session_id: str, redis_db):
     message_ids = []
     for i in range(5):
         msg_id = message_storage.create_message(
-            session_id=session_id,
+            session_id=uuid.UUID(session_id),
             content={
                 "role": "user" if i % 2 == 0 else "assistant",
                 "content": f"Test message {i+1}",
@@ -167,7 +168,7 @@ def test_dual_layer_write(session_id: str, redis_db):
 
     # Verify PostgreSQL
     messages_from_db = message_storage.metadata_store.list_chat_messages_by_session(
-        session_id=session_id,
+        session_id=uuid.UUID(session_id),
         limit=100
     )
     print(f"\n PostgreSQL 状态:")
@@ -197,7 +198,7 @@ def test_cache_hit(session_id: str):
 
     # Measure read time from Redis
     start_time = time.time()
-    messages = message_storage.list_messages_by_session(session_id, limit=5)
+    messages = message_storage.list_messages_by_session(uuid.UUID(session_id), limit=5)
     redis_time = time.time() - start_time
 
     print(f"\n 缓存命中性能:")
@@ -237,7 +238,7 @@ def test_cache_miss(session_id: str, redis_db):
 
     # Measure read time from PostgreSQL
     start_time = time.time()
-    messages = message_storage.list_messages_by_session(session_id, limit=5)
+    messages = message_storage.list_messages_by_session(uuid.UUID(session_id), limit=5)
     pg_time = time.time() - start_time
 
     print(f"\n 缓存未命中性能:")
@@ -291,7 +292,7 @@ def test_cache_invalidation(session_id: str, message_ids: list, redis_db):
 
     # Verify PostgreSQL
     messages_from_db = message_storage.metadata_store.list_chat_messages_by_session(
-        session_id=session_id,
+        session_id=uuid.UUID(session_id),
         limit=100
     )
     print(f"PostgreSQL 剩余消息数: {len(messages_from_db)}")

@@ -1,7 +1,7 @@
 """Configuration for ChatMessageStorage (Core Layer)"""
 
 from framework.config import AbstractConfig
-from core.file_management.storage.chat_message import ChatMessageStorage
+from core.user_management.chat_message import ChatMessageStorage
 from config.encapsulation.database.relational_db.postgresql_config import PostgreSQLConfig
 from config.encapsulation.database.cache_db.redis_config import RedisConfig
 from typing import Literal, Optional
@@ -35,5 +35,5 @@ class ChatMessageStorageConfig(AbstractConfig):
     cache_ttl: Optional[int] = 604800  # Cache TTL in seconds (default: 7 days, None = no expiration)
 
     def build(self) -> ChatMessageStorage:
-        return ChatMessageStorage(self)
+        return ChatMessageStorage(config=self)
 

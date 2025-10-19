@@ -4,6 +4,7 @@ set -euo pipefail
 
 API_BASE="http://localhost:8005"
 KNOWLEDGE_ENDPOINT="$API_BASE/knowledge"
+AUTH_ENDPOINT="$API_BASE/auth"
 
 echo "Testing Knowledge REST API Comprehensive Flow at $KNOWLEDGE_ENDPOINT"
 echo "=================================================================="
@@ -12,11 +13,70 @@ echo "=================================================================="
 echo "0) Health check:"
 curl -sS "$API_BASE/" | grep -q "ok" && echo "✅ Health check PASS" || { echo "❌ Health check failed"; exit 1; }
 
-# 1) Use test JSON file for upload
+# 1) Ensure test user exists and login to get authentication token
+echo -e "\n1) Ensure test user exists and login:"
+
+# First, try to login
+LOGIN_PRECHECK_RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST "$AUTH_ENDPOINT/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "username=test_user&password=test_password")
+
+LOGIN_PRECHECK_BODY=$(echo "$LOGIN_PRECHECK_RESPONSE" | sed '$d')
+LOGIN_PRECHECK_STATUS=$(echo "$LOGIN_PRECHECK_RESPONSE" | tail -n1)
+
+if [ "$LOGIN_PRECHECK_STATUS" = "200" ]; then
+  echo "✅ User test_user already exists"
+  ACCESS_TOKEN=$(echo "$LOGIN_PRECHECK_BODY" | grep -o '"access_token":"[^"]*"' | sed 's/"access_token":"//' | sed 's/"//')
+else
+  echo "Registering test_user since login failed..."
+  REGISTER_RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST "$API_BASE/auth/register" \
+    -H "Content-Type: application/json" \
+    -d '{"name": "Test User", "user_name": "test_user", "password": "test_password"}')
+
+  REGISTER_BODY=$(echo "$REGISTER_RESPONSE" | sed '$d')
+  REGISTER_STATUS=$(echo "$REGISTER_RESPONSE" | tail -n1)
+
+  echo "Register Status: $REGISTER_STATUS"
+  echo "Register Body:   $REGISTER_BODY"
+
+  if [ "$REGISTER_STATUS" != "201" ]; then
+    echo "❌ User registration failed (expected 201, got $REGISTER_STATUS)"
+    exit 1
+  else
+    echo "✅ test_user successfully registered"
+  fi
+
+  # Now login to get token
+  LOGIN_RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST "$AUTH_ENDPOINT/token" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "username=test_user&password=test_password")
+
+  LOGIN_BODY=$(echo "$LOGIN_RESPONSE" | sed '$d')
+  LOGIN_STATUS=$(echo "$LOGIN_RESPONSE" | tail -n1)
+
+  echo "Login Status: $LOGIN_STATUS"
+  echo "Login Body:   $LOGIN_BODY"
+
+  if [ "$LOGIN_STATUS" != "200" ]; then
+    echo "❌ Login failed (expected 200)"
+    exit 1
+  fi
+
+  ACCESS_TOKEN=$(echo "$LOGIN_BODY" | grep -o '"access_token":"[^"]*"' | sed 's/"access_token":"//' | sed 's/"//')
+fi
+
+if [ -z "$ACCESS_TOKEN" ]; then
+  echo "❌ Did not receive an access token"
+  exit 1
+fi
+echo "✅ Authentication PASS - access_token: ${ACCESS_TOKEN:0:20}..."
+
+# 2) Use test html file for upload
 TEST_FILE="./test/test2.html"
 
-echo -e "\n1) Upload file: $TEST_FILE"
-UPLOAD_RESPONSE=$(curl -sS -w "\n%{http_code}" -F "file=@$TEST_FILE;type=application/json" "$KNOWLEDGE_ENDPOINT")
+echo -e "\n2) Upload file: $TEST_FILE"
+UPLOAD_RESPONSE=$(curl -sS -w "\n%{http_code}" -F "file=@$TEST_FILE;type=application/json" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" "$KNOWLEDGE_ENDPOINT")
 
 # Split body and status code
 UPLOAD_BODY=$(echo "$UPLOAD_RESPONSE" | sed '$d')
@@ -38,12 +98,13 @@ if ! echo "$FILE_ID" | grep -q "-"; then
 fi
 echo "✅ Upload PASS - file_id: $FILE_ID"
 
-# 2) Download the file
-echo -e "\n2) Download file: $FILE_ID"
+# 3) Download the file
+echo -e "\n3) Download file: $FILE_ID"
 DOWNLOAD_HEADERS=$(mktemp)
 DOWNLOAD_FILE="/tmp/downloaded.json"
 
-HTTP_CODE=$(curl -sS -D "$DOWNLOAD_HEADERS" -o "$DOWNLOAD_FILE" -w "%{http_code}" "$KNOWLEDGE_ENDPOINT/$FILE_ID/download")
+HTTP_CODE=$(curl -sS -D "$DOWNLOAD_HEADERS" -o "$DOWNLOAD_FILE" -w "%{http_code}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" "$KNOWLEDGE_ENDPOINT/$FILE_ID/download")
 
 echo "Status: $HTTP_CODE"
 grep -i "content-disposition" "$DOWNLOAD_HEADERS" || true
@@ -65,14 +126,15 @@ echo "✅ Download PASS"
 echo -e "\n⏳ Waiting for indexing to complete (10 seconds)..."
 sleep 10
 
-# 3) Test RAG inference chat functionality with uploaded content
-echo -e "\n3) Test RAG inference chat with uploaded content"
+# 4) Test RAG inference chat functionality with uploaded content
+echo -e "\n4) Test RAG inference chat with uploaded content"
 SEARCH_QUERY="who is the author of Venom: The Black Suit Saga?"
 echo "Searching for: '$SEARCH_QUERY'"
 
 # Test chat endpoint to verify uploaded content is searchable
 CHAT_RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST "$API_BASE/rag_inference/chat" \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
   -d "{\"query\": \"$SEARCH_QUERY\"}")
 
 CHAT_BODY=$(echo "$CHAT_RESPONSE" | sed '$d')
@@ -99,9 +161,10 @@ if ! echo "$CHAT_BODY" | grep -q "Yuxuan Zhou"; then
 fi
 echo "✅ RAG inference chat with uploaded content PASS"
 
-# 4) Delete the file
-echo -e "\n4) Delete file: $FILE_ID"
-DELETE_CODE=$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE "$KNOWLEDGE_ENDPOINT/$FILE_ID")
+# 5) Delete the file
+echo -e "\n5) Delete file: $FILE_ID"
+DELETE_CODE=$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
+  -H "Authorization: Bearer $ACCESS_TOKEN" "$KNOWLEDGE_ENDPOINT/$FILE_ID")
 echo "Status: $DELETE_CODE"
 if [ "$DELETE_CODE" != "204" ]; then
   echo "❌ Delete failed (expected 204)"
@@ -109,9 +172,10 @@ if [ "$DELETE_CODE" != "204" ]; then
 fi
 echo "✅ Delete PASS"
 
-# 5) Ensure download now returns 404
-echo -e "\n5) Verify downloading deleted file returns 404"
-CODE_AFTER_DELETE=$(curl -sS -o /dev/null -w "%{http_code}" "$KNOWLEDGE_ENDPOINT/$FILE_ID/download")
+# 6) Ensure download now returns 404
+echo -e "\n6) Verify downloading deleted file returns 404"
+CODE_AFTER_DELETE=$(curl -sS -o /dev/null -w "%{http_code}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" "$KNOWLEDGE_ENDPOINT/$FILE_ID/download")
 echo "Status: $CODE_AFTER_DELETE"
 if [ "$CODE_AFTER_DELETE" != "404" ]; then
   echo "❌ Expected 404 when downloading deleted file"
@@ -119,9 +183,10 @@ if [ "$CODE_AFTER_DELETE" != "404" ]; then
 fi
 echo "✅ 404 after delete PASS"
 
-# 6) Verify second delete returns 404 (non-existent)
-echo -e "\n6) Re-delete should return 404"
-SECOND_DELETE_CODE=$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE "$KNOWLEDGE_ENDPOINT/$FILE_ID")
+# 7) Verify second delete returns 404 (non-existent)
+echo -e "\n7) Re-delete should return 404"
+SECOND_DELETE_CODE=$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
+  -H "Authorization: Bearer $ACCESS_TOKEN" "$KNOWLEDGE_ENDPOINT/$FILE_ID")
 echo "Status: $SECOND_DELETE_CODE"
 if [ "$SECOND_DELETE_CODE" != "404" ]; then
   echo "❌ Expected 404 on second delete"
@@ -129,8 +194,8 @@ if [ "$SECOND_DELETE_CODE" != "404" ]; then
 fi
 echo "✅ 404 on second delete PASS"
 
-# 7) Verify deleted file content is no longer searchable
-echo -e "\n7) Verify deleted file content is no longer searchable"
+# 8) Verify deleted file content is no longer searchable
+echo -e "\n8) Verify deleted file content is no longer searchable"
 # Extract some content from the test file to search for
 SEARCH_QUERY="who is the author of Venom: The Black Suit Saga?"
 echo "Searching for: '$SEARCH_QUERY'"
@@ -138,6 +203,7 @@ echo "Searching for: '$SEARCH_QUERY'"
 # Perform search to verify the deleted file's content is not retrievable
 SEARCH_RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST "$API_BASE/rag_inference/chat" \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
   -d "{\"query\": \"$SEARCH_QUERY\"}")
 
 SEARCH_BODY=$(echo "$SEARCH_RESPONSE" | sed '$d')

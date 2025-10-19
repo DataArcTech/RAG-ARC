@@ -5,11 +5,8 @@ from typing import (
     Dict,
     TYPE_CHECKING,
 )
-from datetime import datetime
 import logging
 import uuid
-import asyncio
-import json
 
 from encapsulation.data_model.orm_models import ChatMessage
 
@@ -83,10 +80,6 @@ class ChatMessageStorage(AbstractModule):
         self.cache_max_messages = config.cache_max_messages
         self.cache_ttl = config.cache_ttl
 
-    def _generate_message_id(self) -> str:
-        """Generate unique message ID"""
-        return str(uuid.uuid4())
-
     def _get_cache_key(self, session_id: str) -> str:
         """Get Redis cache key for a session's messages"""
         return f"chat:session:{session_id}:messages"
@@ -115,51 +108,43 @@ class ChatMessageStorage(AbstractModule):
 
     def _validate_message_creation(
         self,
-        session_id: str,
-        content: Dict[str, Any]
+        chat_message: ChatMessage
     ) -> None:
         """Validate message creation parameters"""
-        if not session_id or not session_id.strip():
+        if not chat_message.session_id:
             raise ChatMessageValidationError("Session ID cannot be empty")
 
-        if not content:
+        if not chat_message.content:
             raise ChatMessageValidationError("Message content cannot be empty")
 
-        # Validate session_id format (should be valid UUID)
-        try:
-            uuid.UUID(session_id)
-        except ValueError:
-            raise ChatMessageValidationError("Invalid session ID format")
-
         # Validate content structure
-        if not isinstance(content, dict):
+        if not isinstance(chat_message.content, dict):
             raise ChatMessageValidationError("Message content must be a dictionary")
 
         # Validate required fields
-        if 'role' not in content:
+        if 'role' not in chat_message.content:
             raise ChatMessageValidationError("Message content must include 'role' field")
 
-        if 'content' not in content:
+        if 'content' not in chat_message.content:
             raise ChatMessageValidationError("Message content must include 'content' field")
 
         # Validate role
         valid_roles = ['user', 'assistant', 'system']
-        if content['role'] not in valid_roles:
-            raise ChatMessageValidationError(f"Invalid role: {content['role']}. Must be one of {valid_roles}")
+        if chat_message.content['role'] not in valid_roles:
+            raise ChatMessageValidationError(f"Invalid role: {chat_message.content['role']}. Must be one of {valid_roles}")
 
         # Validate content text
-        if not isinstance(content['content'], str):
+        if not isinstance(chat_message.content['content'], str):
             raise ChatMessageValidationError("Message 'content' field must be a string")
 
-        if not content['content'].strip():
+        if not chat_message.content['content'].strip():
             raise ChatMessageValidationError("Message content text cannot be empty")
 
     def create_message(
         self,
-        session_id: str,
-        content: Dict[str, Any],
+        chat_message: ChatMessage,
         **kwargs: Any
-    ) -> str:
+    ) -> ChatMessage:
         """
         Create a new chat message with dual-layer storage.
 
@@ -169,17 +154,11 @@ class ChatMessageStorage(AbstractModule):
         3. Trim Redis list to keep only recent messages
 
         Args:
-            session_id: Session ID this message belongs to
-            content: Message content dictionary with structure:
-                {
-                    "role": "user" | "assistant" | "system",
-                    "content": "message text",
-                    "metadata": {...}  # optional
-                }
+            chat_message: ChatMessage object, 
             **kwargs: Additional arguments
 
         Returns:
-            Message ID
+            ChatMessage object
 
         Raises:
             ChatMessageValidationError: If validation fails
@@ -187,54 +166,22 @@ class ChatMessageStorage(AbstractModule):
         """
         try:
             # Validate input
-            self._validate_message_creation(session_id, content)
+            self._validate_message_creation(chat_message)
 
             # Verify session exists
-            session = self.metadata_store.get_chat_session(session_id, **kwargs)
+            session = self.metadata_store.get_chat_session(chat_message.session_id, **kwargs)
             if not session:
-                raise ChatMessageValidationError(f"Chat session {session_id} not found")
+                raise ChatMessageValidationError(f"Chat session {chat_message.session_id} not found")
 
-            # Generate message ID
-            message_id = self._generate_message_id()
+            # Write to PostgreSQL (persistent storage)
+            logger.info(f"Creating chat message for session {chat_message.session_id} (role: {chat_message.content.get('role', 'user')})")
+            chat_message = self.metadata_store.store_chat_message(chat_message, **kwargs)
 
-            # Create message metadata
-            message_metadata = ChatMessage(
-                id=uuid.UUID(message_id),
-                session_id=uuid.UUID(session_id),
-                content=content,
-                created_at=datetime.now()
-            )
+            if not chat_message:
+                raise StorageOperationError("Failed to create chat message")
 
-            # 1. Write to Redis first (fast response)
-            if self.cache_store:
-                try:
-                    cache_key = self._get_cache_key(session_id)
-                    cache_data = self._message_to_cache_format(message_metadata)
-
-                    # Push to list (newest at head)
-                    self.cache_store.lpush(cache_key, cache_data)
-
-                    # Trim to keep only recent messages
-                    self.cache_store.ltrim(cache_key, 0, self.cache_max_messages - 1)
-
-                    # Set TTL if configured
-                    if self.cache_ttl:
-                        self.cache_store.expire(cache_key, self.cache_ttl)
-
-                    logger.debug(f"Cached message {message_id} in Redis")
-                except Exception as e:
-                    logger.warning(f"Failed to cache message in Redis: {e}")
-                    # Continue even if Redis fails
-
-            # 2. Write to PostgreSQL (persistent storage)
-            logger.info(f"Creating chat message for session {session_id} (message_id: {message_id}, role: {content['role']})")
-            stored_message_id = self.metadata_store.store_chat_message(message_metadata, **kwargs)
-
-            if not stored_message_id:
-                raise StorageOperationError("Failed to store chat message metadata")
-
-            logger.info(f"Successfully created chat message (message_id: {message_id})")
-            return message_id
+            logger.info(f"Successfully created chat message (message_id: {chat_message.id})")
+            return chat_message
 
         except ChatMessageValidationError:
             raise
@@ -245,28 +192,27 @@ class ChatMessageStorage(AbstractModule):
 
     def get_message(
         self,
-        message_id: str,
-        **kwargs: Any
+        message_id: uuid.UUID
     ) -> Optional[ChatMessage]:
         """
         Get chat message by ID.
 
         Args:
-            message_id: Message ID
+            message_id: Message ID as UUID
             **kwargs: Additional arguments
 
         Returns:
             ChatMessage metadata or None if not found
         """
         try:
-            return self.metadata_store.get_chat_message(message_id, **kwargs)
+            return self.metadata_store.get_chat_message(message_id)
         except Exception as e:
             logger.error(f"Failed to get chat message {message_id}: {e}")
             return None
 
     def list_messages_by_session(
         self,
-        session_id: str,
+        session_id: uuid.UUID,
         limit: int = 100,
         offset: int = 0,
         **kwargs: Any
@@ -280,7 +226,7 @@ class ChatMessageStorage(AbstractModule):
         3. Backfill Redis with PostgreSQL data
 
         Args:
-            session_id: Session ID
+            session_id: Session ID as UUID
             limit: Maximum number of messages to return
             offset: Number of messages to skip
             **kwargs: Additional arguments
@@ -289,41 +235,6 @@ class ChatMessageStorage(AbstractModule):
             List of chat message metadata, ordered by created_at (oldest first)
         """
         try:
-            # If offset > 0, skip Redis and go directly to PostgreSQL
-            # (Redis only stores recent messages)
-            if offset == 0 and self.cache_store:
-                try:
-                    cache_key = self._get_cache_key(session_id)
-                    cached_messages = self.cache_store.lrange(cache_key, 0, limit - 1)
-
-                    if cached_messages and len(cached_messages) >= limit:
-                        # Redis has enough data, convert to ChatMessage objects
-                        logger.debug(f"Retrieved {len(cached_messages)} messages from Redis cache")
-
-                        # Convert cache format to ChatMessage objects
-                        # Note: Redis stores newest first, but we need oldest first
-                        messages = []
-                        for cache_data in reversed(cached_messages):
-                            msg_dict = cache_data
-                            # Create a minimal ChatMessage object
-                            msg = ChatMessage(
-                                id=uuid.UUID(msg_dict["message_id"]),
-                                session_id=uuid.UUID(msg_dict["session_id"]),
-                                content={
-                                    "role": msg_dict["role"],
-                                    "content": msg_dict["content"],
-                                    "metadata": msg_dict.get("metadata", {})
-                                },
-                                created_at=datetime.fromisoformat(msg_dict["created_at"]) if msg_dict.get("created_at") else datetime.now()
-                            )
-                            messages.append(msg)
-
-                        return messages
-
-                except Exception as e:
-                    logger.warning(f"Failed to read from Redis cache: {e}")
-                    # Fall through to PostgreSQL
-
             # Read from PostgreSQL
             messages = self.metadata_store.list_chat_messages_by_session(
                 session_id=session_id,
@@ -331,27 +242,6 @@ class ChatMessageStorage(AbstractModule):
                 offset=offset,
                 **kwargs
             )
-
-            # Backfill Redis if offset == 0 and cache is enabled
-            if offset == 0 and self.cache_store and messages:
-                try:
-                    cache_key = self._get_cache_key(session_id)
-
-                    # Clear existing cache
-                    self.cache_store.delete(cache_key)
-
-                    # Push messages to Redis (newest first)
-                    for msg in reversed(messages[:self.cache_max_messages]):
-                        cache_data = self._message_to_cache_format(msg)
-                        self.cache_store.lpush(cache_key, cache_data)
-
-                    # Set TTL if configured
-                    if self.cache_ttl:
-                        self.cache_store.expire(cache_key, self.cache_ttl)
-
-                    logger.debug(f"Backfilled Redis cache with {len(messages)} messages")
-                except Exception as e:
-                    logger.warning(f"Failed to backfill Redis cache: {e}")
 
             return messages
 
@@ -361,14 +251,14 @@ class ChatMessageStorage(AbstractModule):
 
     def delete_message(
         self,
-        message_id: str,
+        message_id: uuid.UUID,
         **kwargs: Any
     ) -> bool:
         """
         Delete chat message from both Redis and PostgreSQL.
 
         Args:
-            message_id: Message ID
+            message_id: Message ID as UUID
             **kwargs: Additional arguments
 
         Returns:
@@ -405,14 +295,14 @@ class ChatMessageStorage(AbstractModule):
 
     def delete_messages_by_session(
         self,
-        session_id: str,
+        session_id: uuid.UUID,
         **kwargs: Any
     ) -> int:
         """
         Delete all messages for a specific session from both Redis and PostgreSQL.
 
         Args:
-            session_id: Session ID
+            session_id: Session ID as UUID
             **kwargs: Additional arguments
 
         Returns:
@@ -439,49 +329,3 @@ class ChatMessageStorage(AbstractModule):
         except Exception as e:
             logger.error(f"Failed to delete messages for session {session_id}: {e}")
             return 0
-
-    def get_conversation_history(
-        self,
-        session_id: str,
-        limit: int = 50,
-        **kwargs: Any
-    ) -> List[Dict[str, Any]]:
-        """
-        Get conversation history for a session in a format suitable for LLM APIs.
-
-        Args:
-            session_id: Session ID
-            limit: Maximum number of messages to return (most recent)
-            **kwargs: Additional arguments
-
-        Returns:
-            List of message dictionaries in format:
-            [
-                {"role": "user", "content": "..."},
-                {"role": "assistant", "content": "..."},
-                ...
-            ]
-        """
-        try:
-            messages = self.list_messages_by_session(
-                session_id=session_id,
-                limit=limit,
-                offset=0,
-                **kwargs
-            )
-
-            # Convert to LLM API format
-            history = []
-            for msg in messages:
-                if msg.content and isinstance(msg.content, dict):
-                    history.append({
-                        "role": msg.content.get("role", "user"),
-                        "content": msg.content.get("content", "")
-                    })
-
-            return history
-
-        except Exception as e:
-            logger.error(f"Failed to get conversation history for session {session_id}: {e}")
-            return []
-

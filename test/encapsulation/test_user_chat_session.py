@@ -10,6 +10,7 @@ Tests:
 """
 
 import sys
+import uuid
 sys.path.insert(0, '.')
 
 from config.encapsulation.database.relational_db.postgresql_config import PostgreSQLConfig
@@ -17,9 +18,9 @@ from config.core.file_management.storage.user_storage import UserStorageConfig
 from config.core.file_management.storage.chat_session_storage import ChatSessionStorageConfig
 from config.core.file_management.storage.chat_message_storage import ChatMessageStorageConfig
 from encapsulation.database.relational_db.postgresql import PostgreSQLDB
-from core.file_management.storage.user import UserStorage
-from core.file_management.storage.chat_session import ChatSessionStorage
-from core.file_management.storage.chat_message import ChatMessageStorage
+from core.user_management.user import UserStorage
+from core.user_management.chat_session import ChatSessionStorage
+from core.user_management.chat_message import ChatMessageStorage
 import hashlib
 
 
@@ -86,7 +87,7 @@ def test_user_management():
     print("\n 通过用户名获取用户...")
     user2 = user_storage.get_user_by_username("bob_test")
     assert user2 is not None, "User 2 should exist"
-    assert str(user2.id) == user2_id, "User ID should match"
+    assert user2.id == user2_id, "User ID should match"
     print(f" 获取用户成功: {user2.user_name} (ID: {user2.id})")
 
     # Test 4: List users
@@ -110,7 +111,7 @@ def test_user_management():
     return user1_id, user2_id
 
 
-def test_chat_session_management(user1_id: str, user2_id: str):
+def test_chat_session_management(user1_id, user2_id):
     """Test chat session management operations"""
     print("\n" + "=" * 80)
     print("测试 2: 聊天会话管理")
@@ -194,7 +195,7 @@ def test_chat_message_management(session1_id: str, session2_id: str):
     # Test 1: Create messages
     print("\n 创建聊天消息...")
     msg1_id = message_storage.create_message(
-        session_id=session1_id,
+        session_id=uuid.UUID(session1_id),
         content={
             "role": "user",
             "content": "What is machine learning?",
@@ -204,7 +205,7 @@ def test_chat_message_management(session1_id: str, session2_id: str):
     print(f" 创建消息 1: user message (ID: {msg1_id})")
 
     msg2_id = message_storage.create_message(
-        session_id=session1_id,
+        session_id=uuid.UUID(session1_id),
         content={
             "role": "assistant",
             "content": "Machine learning is a subset of artificial intelligence...",
@@ -214,7 +215,7 @@ def test_chat_message_management(session1_id: str, session2_id: str):
     print(f" 创建消息 2: assistant message (ID: {msg2_id})")
 
     msg3_id = message_storage.create_message(
-        session_id=session1_id,
+        session_id=uuid.UUID(session1_id),
         content={
             "role": "user",
             "content": "Can you give me an example?",
@@ -250,7 +251,7 @@ def test_chat_message_management(session1_id: str, session2_id: str):
     return msg1_id, msg2_id, msg3_id
 
 
-def test_cascade_deletion(user1_id: str):
+def test_cascade_deletion(user1_id):
     """Test cascade deletion"""
     print("\n" + "=" * 80)
     print("测试 4: 级联删除")

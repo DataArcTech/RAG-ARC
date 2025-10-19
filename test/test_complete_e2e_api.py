@@ -40,14 +40,14 @@ def test_complete_workflow():
     print("=" * 80)
 
     # 创建3个测试用户
-    user1_id = str(uuid.uuid4())
-    user2_id = str(uuid.uuid4())
-    user3_id = str(uuid.uuid4())
+    user1_id = uuid.uuid4()
+    user2_id = uuid.uuid4()
+    user3_id = uuid.uuid4()
 
     print(f"\n📊 创建测试用户:")
-    print(f"  - User 1: {user1_id[:8]}...")
-    print(f"  - User 2: {user2_id[:8]}...")
-    print(f"  - User 3: {user3_id[:8]}...")
+    print(f"  - User 1: {str(user1_id)[:8]}...")
+    print(f"  - User 2: {str(user2_id)[:8]}...")
+    print(f"  - User 3: {str(user3_id)[:8]}...")
 
     # 在数据库中创建用户（避免外键约束错误）
     from dotenv import load_dotenv
@@ -65,8 +65,8 @@ def test_complete_workflow():
     with db.SessionMaker() as session:
         for user_id in [user1_id, user2_id, user3_id]:
             user = User(
-                id=uuid.UUID(user_id),
-                user_name=f"test_user_{user_id[:8]}",
+                id=user_id,
+                user_name=f"test_user_{str(user_id)[:8]}",
                 hashed_password="dummy_hash",  # 测试用的假密码
                 created_at=now,
                 updated_at=now
@@ -316,7 +316,7 @@ JavaScript powers modern web applications with frameworks like React, Vue, and A
 
     # User 1 发送消息
     msg1_id = message_storage.create_message(
-        session_id=user1_session_id,
+        session_id=uuid.UUID(user1_session_id),
         content={
             "role": "user",
             "content": "What are the key features of Python?",
@@ -326,7 +326,7 @@ JavaScript powers modern web applications with frameworks like React, Vue, and A
     print(f"  ✓ User 1 消息 1 创建成功 (ID: {msg1_id[:8]}...)")
 
     msg2_id = message_storage.create_message(
-        session_id=user1_session_id,
+        session_id=uuid.UUID(user1_session_id),
         content={
             "role": "assistant",
             "content": "Python has several key features: dynamic typing, interpreted execution, extensive standard library, and clean syntax.",
@@ -337,7 +337,7 @@ JavaScript powers modern web applications with frameworks like React, Vue, and A
 
     # User 2 发送消息
     msg3_id = message_storage.create_message(
-        session_id=user2_session_id,
+        session_id=uuid.UUID(user2_session_id),
         content={
             "role": "user",
             "content": "Explain Java's object-oriented features",
@@ -349,7 +349,7 @@ JavaScript powers modern web applications with frameworks like React, Vue, and A
     # 测试从 Redis 读取消息（应该很快）
     print(f"\n🔍 测试从 Redis 缓存读取消息...")
     start_time = time.time()
-    messages = message_storage.list_messages_by_session(user1_session_id, limit=10)
+    messages = message_storage.list_messages_by_session(uuid.UUID(user1_session_id), limit=10)
     redis_read_time = time.time() - start_time
 
     assert len(messages) == 2, f"Expected 2 messages, got {len(messages)}"
@@ -359,7 +359,7 @@ JavaScript powers modern web applications with frameworks like React, Vue, and A
 
     # 测试获取对话历史
     print(f"\n📜 测试获取对话历史...")
-    history = message_storage.get_conversation_history(user1_session_id, limit=10)
+    history = message_storage.get_conversation_history(uuid.UUID(user1_session_id), limit=10)
     assert len(history) == 2, f"Expected 2 history entries, got {len(history)}"
     assert history[0]["role"] == "user", "First history entry should be user"
     assert history[1]["role"] == "assistant", "Second history entry should be assistant"
@@ -390,7 +390,7 @@ JavaScript powers modern web applications with frameworks like React, Vue, and A
 
         # 再次读取（应该从 PostgreSQL 读取并回填 Redis）
         start_time = time.time()
-        messages_from_pg = message_storage.list_messages_by_session(user1_session_id, limit=10)
+        messages_from_pg = message_storage.list_messages_by_session(uuid.UUID(user1_session_id), limit=10)
         pg_read_time = time.time() - start_time
 
         assert len(messages_from_pg) == 2, f"Expected 2 messages from PostgreSQL, got {len(messages_from_pg)}"

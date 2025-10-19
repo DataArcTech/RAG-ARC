@@ -1,5 +1,6 @@
 from typing import TYPE_CHECKING
 import logging
+import uuid
 from framework.module import AbstractModule
 
 # Set up logging
@@ -28,7 +29,7 @@ class RAGInference(AbstractModule):
         self.llm = self.config.llm_config.build()
         logger.info("LLM built successfully")
 
-    def chat(self, query: str, owner_id: str = None) -> str:
+    def chat(self, query: str, owner_id: uuid.UUID) -> str:
         """
         Chat with RAG system
 

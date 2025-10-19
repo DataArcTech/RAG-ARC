@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 import uuid
 import asyncio
 from fastapi.responses import Response
-from fastapi import UploadFile, HTTPException
+from fastapi import File, UploadFile, HTTPException
 
 class Knowledge(AbstractModule):
     def __init__(self, config: 'KnowledgeConfig'):
@@ -20,9 +20,6 @@ class Knowledge(AbstractModule):
         self.file_storage = config.file_storage_config.build()
         self.file_index = config.index_manager_config.build()
     
-    # def _is_file_owner(self, file: File, user_id: uuid.UUID) -> bool:
-    #     return file.owner_id == user_id
-
     def upload_file(self, file: UploadFile, user_id: uuid.UUID) -> str:
         try:
             doc_id = self.file_storage.upload_file(
@@ -67,10 +64,14 @@ class Knowledge(AbstractModule):
         except Exception as e:
             logger.error(f"Background indexing failed for file_id: {doc_id}, exception: {str(e)}")
 
-    def get_file(self, doc_id: str) -> Response:
+    def get_file(self, doc_id: str, user_id: uuid.UUID) -> Response:
         metadata = self.file_storage.get_file_metadata(doc_id)
+
         if metadata is None:
             raise HTTPException(status_code=404, detail="File not found")
+
+        if metadata.owner_id != user_id:
+            raise HTTPException(status_code=403, detail="You are not allowed to access this file")
 
         content = self.file_storage.get_file_content(doc_id)
         if content is None:

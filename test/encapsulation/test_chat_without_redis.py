@@ -6,6 +6,7 @@ This test verifies that the system works correctly when Redis is disabled.
 
 import sys
 import os
+import uuid
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
 from config.encapsulation.database.relational_db.postgresql_config import PostgreSQLConfig
@@ -88,7 +89,7 @@ def test_without_redis():
     message_ids = []
     for i in range(5):
         msg_id = message_storage.create_message(
-            session_id=session_id,
+            session_id=uuid.UUID(session_id),
             content={
                 "role": "user" if i % 2 == 0 else "assistant",
                 "content": f"Test message {i+1} without Redis",
@@ -101,7 +102,7 @@ def test_without_redis():
     # ==================== Test Message Retrieval ====================
     print("\n 测试消息读取...")
     
-    messages = message_storage.list_messages_by_session(session_id, limit=10)
+    messages = message_storage.list_messages_by_session(uuid.UUID(session_id), limit=10)
     print(f" 读取到 {len(messages)} 条消息")
     
     assert len(messages) == 5, "Should have 5 messages"
@@ -124,7 +125,7 @@ def test_without_redis():
     # ==================== Test Conversation History ====================
     print("\n测试对话历史...")
     
-    history = message_storage.get_conversation_history(session_id, limit=10)
+    history = message_storage.get_conversation_history(uuid.UUID(session_id), limit=10)
     print(f" 获取对话历史: {len(history)} 条消息")
     
     for i, msg in enumerate(history):
