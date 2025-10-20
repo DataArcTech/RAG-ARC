@@ -1,5 +1,5 @@
-import datetime
 import uuid
+from datetime import datetime
 from typing import Annotated, Any
 from fastapi import APIRouter, Depends, WebSocket, status, HTTPException
 from pydantic import BaseModel
@@ -29,7 +29,7 @@ def list_session_messages(
 async def create_session(
     current_user: Annotated[User | None, Depends(get_current_user)],
 ):
-    chat_name = f"Chat {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}"
+    chat_name = f"Chat {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     return session_handler.create_session(current_user.id, chat_name)
 
 
