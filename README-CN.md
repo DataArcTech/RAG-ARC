@@ -74,7 +74,10 @@ RAG-ARC在成本效率和准确性方面都带来了显著提升：
 - **可扩展架构** 支持企业级部署
 
 <div align="center">
-<img src="assets/performance.png" alt="性能对比" width="90%"/>
+  <h3>📊 性能对比</h3>
+  <img src="assets/accuracy_comparison.png" alt="Accuracy Comparison" width="80%" style="margin-bottom: 20px;"/><br>
+  <img src="assets/recall_comparison.png" alt="Recall Comparison" width="80%" style="margin-bottom: 20px;"/><br>
+  <img src="assets/token_cost_comparison.png" alt="Token Cost Comparison" width="80%"/>
 </div>
 
 ## 📁 项目结构
