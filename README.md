@@ -74,8 +74,12 @@ RAG-ARC delivers significant improvements in both cost efficiency and accuracy:
 - **Scalable Architecture** supporting enterprise-level deployments
 
 <div align="center">
-<img src="assets/performance.png" alt="Performance Comparison" width="90%"/>
+  <h3>📊 Performance Comparison</h3>
+  <img src="assets/accuracy_comparison.png" alt="Accuracy Comparison" width="80%" style="margin-bottom: 20px;"/><br>
+  <img src="assets/recall_comparison.png" alt="Recall Comparison" width="80%" style="margin-bottom: 20px;"/><br>
+  <img src="assets/token_cost_comparison.png" alt="Token Cost Comparison" width="80%"/>
 </div>
+
 
 ## 📁 Project Structure
 
