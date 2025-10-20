@@ -20,9 +20,9 @@
 
 ### 🎯 Core Use Cases
 
-🔗 **Multi-hop Reasoning & Summarization**: Solve complex questions requiring multi-step reasoning<br>
-📚 **Knowledge-Intensive Tasks**: Handle problems dependent on large amounts of structured knowledge<br>
-🌐 **Cross-Domain Applications**: Easily support academic papers, personal knowledge bases, private/enterprise knowledge bases with minimal schema intervention<br>
+🧩 **Full RAG Pipeline Support**: Covers the complete pipeline—from document parsing, text chunking, and embedding generation to multi-path retrieval, graph extraction, reranking, and knowledge graph management.<br>
+📚 **Knowledge-Intensive Tasks**: Ideal for question answering, reasoning, and content generation tasks that rely on large-scale structured and unstructured knowledge, ensuring high recall and semantic consistency.<br>
+🌐 **Cross-Domain Applications**: Supports both Standard RAG and GraphRAG modes, making it adaptable for academic research, personal knowledge bases, and enterprise-level knowledge management systems.<br>
 
 ## 🏗️ Architecture
 
@@ -51,9 +51,14 @@ RAG-ARC introduces several key innovations that together build a sophisticated i
 - Configurable weights and fusion methods
 
 ### 🌐 Graph Structure Extraction
-- Event-based graph extraction capability
-- Entity and relationship extraction for knowledge graph construction
-- Neo4j graph database integration
+- Extracts entities and relations from facts to build structured knowledge graphs
+- Seamlessly integrates with Neo4j graph database
+- Enables knowledge-graph-driven reasoning and QA
+
+### 🧠 GraphRAG
+- Lightweight, incrementally updatable graph construction suitable for enterprise deployment
+- Incorporates Subgraph PPR (Personalized PageRank):
+Compared to HippoRAG2’s full-graph PPR, subgraph PPR achieves higher reasoning precision and efficiency
 
 ### 📈 Re-ranking (Rerank)
 - Qwen3 model for precise result re-ranking
@@ -67,11 +72,14 @@ RAG-ARC introduces several key innovations that together build a sophisticated i
 
 ## 📊 Performance
 
-RAG-ARC delivers significant improvements in both cost efficiency and accuracy:
+Built upon the HippoRAG2 evolution, RAG-ARC delivers significant improvements in both efficiency and recall performance:
 
-- **33.6% Token Cost Reduction** through optimized retrieval and ranking
-- **16.62% Accuracy Improvement** with multi-path retrieval and fusion ranking
-- **Scalable Architecture** supporting enterprise-level deployments
+- 🚀 22.9% Token Cost Reduction
+Through optimized prompt strategies, it reduces token consumption without sacrificing accuracy.
+- 🎯 5.3% Recall Rate Increase
+Pruning-based optimizations yield more comprehensive and relevant retrieval.
+- 🔁 Incremental Knowledge Graph Updates
+Supports updating graph data without full reconstruction—reducing computational and maintenance overhead.
 
 <div align="center">
   <h3>📊 Performance Comparison</h3>
