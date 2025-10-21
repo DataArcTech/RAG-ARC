@@ -1,3 +1,4 @@
+from encapsulation.data_model.schema import Chunk
 from fastapi import WebSocket, status
 from encapsulation.data_model.orm_models import ChatMessage
 from framework.singleton_decorator import singleton
@@ -22,8 +23,8 @@ class ConnectionManager:
                 # WebSocket already closed
                 pass
 
-    async def send_message(self, message: ChatMessage, websocket: WebSocket):
-        # Convert ChatMessage to a serializable dictionary
+
+    async def send_response(self, message: ChatMessage, chunks: list[Chunk], websocket: WebSocket):
         message_dict = {
             "id": str(message.id),
             "session_id": str(message.session_id),
@@ -32,4 +33,14 @@ class ConnectionManager:
                 message.created_at.isoformat() if message.created_at else None
             ),
         }
-        await websocket.send_json(message_dict)
+        chunks_dict = [{
+            "id": str(chunk.id),
+            "content": chunk.content,
+            "metadata": chunk.metadata,
+            "graph": chunk.graph.to_dict(),
+        } for chunk in chunks]
+        response_dict = {
+            "message": message_dict,
+            "chunks": chunks_dict,
+        }
+        await websocket.send_json(response_dict)

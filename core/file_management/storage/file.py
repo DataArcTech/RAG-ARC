@@ -2,6 +2,7 @@ from typing import (
     Any,
     Optional,
     TYPE_CHECKING,
+    List,
 )
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -328,3 +329,41 @@ class FileStorage(AbstractModule):
         except Exception as e:
             logger.error(f"Failed to delete file {file_id}: {e}")
             raise StorageOperationError(f"Failed to delete file: {e}")
+
+    def list_files_by_owner(
+        self,
+        owner_id: uuid.UUID,
+        status: Optional['FileStatus'] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+        **kwargs: Any
+    ) -> List['FileMetadata']:
+        """
+        List all files for a specific owner with optional filtering.
+
+        Args:
+            owner_id: UUID of the file owner
+            status: Optional file status filter
+            limit: Maximum number of records to return
+            offset: Number of records to skip
+            **kwargs: Additional arguments
+
+        Returns:
+            List of FileMetadata objects
+
+        Raises:
+            StorageOperationError: If listing operation fails
+        """
+        try:
+            files = self.metadata_store.list_file_metadata(
+                owner_id=owner_id,
+                status=status,
+                limit=limit,
+                offset=offset,
+                **kwargs
+            )
+            logger.debug(f"Retrieved {len(files)} files for owner {owner_id}")
+            return files
+        except Exception as e:
+            logger.error(f"Failed to list files for owner {owner_id}: {e}")
+            raise StorageOperationError(f"Failed to list files: {e}")
