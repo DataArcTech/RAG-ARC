@@ -18,11 +18,11 @@ class MultiPathRetrieverConfig(AbstractConfig):
     type: Literal["multipath"] = "multipath"
 
     retrievers: List[Annotated[
-        Union["DenseRetrieverConfig", "TantivyBM25RetrieverConfig"],
+        Union["DenseRetrieverConfig", "TantivyBM25RetrieverConfig", "PrunedHippoRAGRetrievalConfig"],
         Field(discriminator="type")
     ]] = Field(
         default_factory=list,
-        description="List of retriever config objects"
+        description="List of retriever config objects (supports dense, tantivy_bm25, pruned_hipporag)"
     )
 
     fusion_method: str = Field(default="rrf", description="Fusion method: 'rrf', 'weighted_sum', 'rank_fusion'")
@@ -54,5 +54,12 @@ class MultiPathRetrieverConfig(AbstractConfig):
             logger.info(f"Retriever {idx} built successfully")
 
         self.built_retrievers = built_retrievers
-        
+
         return MultiPathRetriever(self)
+
+
+# Import after class definition to avoid circular imports
+from config.core.retrieval.pruned_hipporag_config import PrunedHippoRAGRetrievalConfig
+
+# Rebuild the model to include the forward reference
+MultiPathRetrieverConfig.model_rebuild()

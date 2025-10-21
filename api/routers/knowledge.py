@@ -1,4 +1,3 @@
-import uuid
 from fastapi import (
     APIRouter,
     Depends,
@@ -10,9 +9,8 @@ from fastapi import (
 from typing import Annotated, Optional, List
 from pydantic import BaseModel
 from api.routers.auth import get_current_user
-from encapsulation.data_model.orm_models import User, FileStatus
+from encapsulation.data_model.orm_models import User
 from framework.register import Register
-import uuid
 
 router = APIRouter(prefix="/knowledge", tags=["files"])
 
@@ -193,4 +191,78 @@ async def list_files(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve files: {str(e)}",
+        )
+
+
+class GraphExportRequest(BaseModel):
+    """Request model for graph export"""
+    max_nodes: int = 500
+    max_edges: int = 2000
+    include_node_types: Optional[List[str]] = None  # e.g., ['chunk', 'entity', 'fact']
+
+
+@router.post("/graph/export", status_code=status.HTTP_200_OK)
+def export_knowledge_graph(
+    request: GraphExportRequest,
+    user: Annotated[User | None, Depends(get_current_user)],
+):
+    """
+    Export the complete knowledge graph for the current user
+
+    Args:
+        request: GraphExportRequest with export parameters
+        user: Current authenticated user
+
+    Returns:
+        Graph data in Cytoscape.js format with nodes and edges
+    """
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required"
+        )
+
+    try:
+        # Get the RAG inference handler to access the retriever
+        rag_inference = registrator.get_object("rag_inference")
+
+        # Find graph_store from retriever (support both direct and multipath retrievers)
+        graph_store = None
+
+        # Check if retriever has graph_store directly
+        if hasattr(rag_inference.retriever, 'graph_store'):
+            graph_store = rag_inference.retriever.graph_store
+        # Check if it's a multipath retriever with sub-retrievers
+        elif hasattr(rag_inference.retriever, 'retrievers'):
+            # Find the first retriever with graph_store
+            for sub_retriever in rag_inference.retriever.retrievers:
+                if hasattr(sub_retriever, 'graph_store'):
+                    graph_store = sub_retriever.graph_store
+                    break
+
+        if graph_store is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Current retriever does not support graph visualization"
+            )
+
+        # Import GraphExporter
+        from encapsulation.database.utils.graph_export_utils import GraphExporter
+
+        # Export full graph
+        graph_data = GraphExporter.export_full_graph(
+            graph_store=graph_store,
+            max_nodes=request.max_nodes,
+            max_edges=request.max_edges,
+            include_node_types=request.include_node_types
+        )
+
+        return graph_data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to export knowledge graph: {str(e)}",
         )

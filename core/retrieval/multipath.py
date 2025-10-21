@@ -54,9 +54,18 @@ class MultiPathRetriever(BaseRetriever):
             return []
 
         all_results = []
+        subgraph_info = None  # Store subgraph info from graph retriever
+
         for retriever in self.config.built_retrievers or []:
             try:
                 chunks = retriever.invoke(query, **kwargs)
+
+                # Check if this is a graph retriever with subgraph info
+                if chunks and hasattr(chunks[0], 'metadata') and chunks[0].metadata:
+                    if '_subgraph_info' in chunks[0].metadata:
+                        subgraph_info = chunks[0].metadata.pop('_subgraph_info')
+                        logger.info(f"Captured subgraph info from {type(retriever).__name__}")
+
                 # Ensure each chunk has a score
                 for chunk in chunks:
                     if chunk.metadata is None:
@@ -74,8 +83,22 @@ class MultiPathRetriever(BaseRetriever):
         if not all_results or all(len(results) == 0 for results in all_results):
             return []
 
-        return self.config.fusion_instance.fuse(all_results, k)
+        fused_chunks = self.config.fusion_instance.fuse(all_results, k)
 
+        # Attach subgraph info to first chunk if available
+        if subgraph_info and fused_chunks:
+            if fused_chunks[0].metadata is None:
+                fused_chunks[0].metadata = {}
+            fused_chunks[0].metadata['_subgraph_info'] = subgraph_info
+            logger.info("Attached subgraph info to fused results")
+
+        return fused_chunks
+
+
+    @property
+    def retrievers(self):
+        """Expose built retrievers for external access"""
+        return self.config.built_retrievers or []
 
     def get_multipath_info(self) -> dict:
         retrievers = self.config.built_retrievers or []

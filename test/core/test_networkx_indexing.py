@@ -144,7 +144,7 @@ async def test_networkx_indexing():
         print("Retrieving chunks and verifying graph data...")
         print("=" * 80)
         
-        retrieved_chunks = networkx_store.get_chunks(chunk_ids)
+        retrieved_chunks = networkx_store.get_by_ids(chunk_ids)
         
         for chunk in retrieved_chunks:
             print(f"\n  Chunk ID: {chunk.id}")

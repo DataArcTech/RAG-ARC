@@ -421,7 +421,7 @@ class GraphRetrieval(BaseGraphRetriever):
         for chunk_score in final_scores[:top_k]:
             # Get the original chunk
             try:
-                chunk_list = self.graph_store.get_chunks([chunk_score.chunk_id])
+                chunk_list = self.graph_store.get_by_ids([chunk_score.chunk_id])
                 if chunk_list:
                     chunk = chunk_list[0]
 

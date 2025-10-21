@@ -229,7 +229,7 @@ echo "✅ Download PASS"
 
 # Wait for indexing before testing search functionality
 echo -e "\n⏳ Waiting for indexing to complete (10 seconds)..."
-sleep 10
+sleep 20
 
 # 5) Test RAG inference chat functionality with uploaded content
 echo -e "\n5) Test RAG inference chat with uploaded content"
@@ -265,6 +265,172 @@ if ! echo "$CHAT_BODY" | grep -q "Yuxuan Zhou"; then
   exit 1
 fi
 echo "✅ RAG inference chat with uploaded content PASS"
+
+# 5.1) Test full graph export functionality
+echo -e "\n5.1) Test full graph export functionality"
+echo "Endpoint: $KNOWLEDGE_ENDPOINT/graph/export"
+echo "Token (first 20 chars): ${ACCESS_TOKEN:0:20}..."
+
+FULL_GRAPH_RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST "$KNOWLEDGE_ENDPOINT/graph/export" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -d '{"max_nodes": 500, "max_edges": 2000}')
+
+FULL_GRAPH_BODY=$(echo "$FULL_GRAPH_RESPONSE" | sed '$d')
+FULL_GRAPH_STATUS=$(echo "$FULL_GRAPH_RESPONSE" | tail -n1)
+
+echo "Full Graph Status: $FULL_GRAPH_STATUS"
+if [ "$FULL_GRAPH_STATUS" != "200" ]; then
+  echo "Response Body: $FULL_GRAPH_BODY"
+fi
+
+if [ "$FULL_GRAPH_STATUS" != "200" ]; then
+  echo "❌ Full graph export failed (expected 200)"
+  exit 1
+fi
+
+# Validate full graph response structure
+echo "Validating full graph response structure..."
+echo "$FULL_GRAPH_BODY" | python3 -c "
+import sys
+import json
+
+try:
+    data = json.load(sys.stdin)
+
+    # Check if response has expected structure
+    assert 'nodes' in data, 'Missing nodes field'
+    assert 'edges' in data, 'Missing edges field'
+    assert isinstance(data['nodes'], list), 'nodes should be a list'
+    assert isinstance(data['edges'], list), 'edges should be a list'
+
+    # Check node structure
+    if len(data['nodes']) > 0:
+        node = data['nodes'][0]
+        assert 'id' in node, 'Node missing id field'
+        assert 'type' in node, 'Node missing type field'
+        print(f'✅ Full graph structure is valid')
+        print(f'✅ Total nodes: {len(data[\"nodes\"])}')
+        print(f'✅ Total edges: {len(data[\"edges\"])}')
+
+        # Show node types distribution
+        node_types = {}
+        for node in data['nodes']:
+            node_type = node.get('type', 'unknown')
+            node_types[node_type] = node_types.get(node_type, 0) + 1
+        print(f'✅ Node types: {node_types}')
+    else:
+        print('⚠️  No nodes in full graph')
+
+except AssertionError as e:
+    print(f'❌ Validation failed: {e}')
+    sys.exit(1)
+except Exception as e:
+    print(f'❌ Error: {e}')
+    sys.exit(1)
+"
+
+if [ $? -ne 0 ]; then
+  echo "❌ Full graph validation failed"
+  exit 1
+fi
+
+# Save full graph to file for inspection
+FULL_GRAPH_FILE="/tmp/full_graph_export.json"
+echo "$FULL_GRAPH_BODY" > "$FULL_GRAPH_FILE"
+echo "✅ Full graph exported to: $FULL_GRAPH_FILE"
+
+# 5.2) Test subgraph export functionality with RAG query
+echo -e "\n5.2) Test subgraph export functionality with RAG query"
+SUBGRAPH_QUERY="who is the author of Venom: The Black Suit Saga?"
+echo "Querying for subgraph: '$SUBGRAPH_QUERY'"
+
+SUBGRAPH_RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST "$API_BASE/rag_inference/chat" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -d "{\"query\": \"$SUBGRAPH_QUERY\", \"return_subgraph\": true}")
+
+SUBGRAPH_BODY=$(echo "$SUBGRAPH_RESPONSE" | sed '$d')
+SUBGRAPH_STATUS=$(echo "$SUBGRAPH_RESPONSE" | tail -n1)
+
+echo "Subgraph Status: $SUBGRAPH_STATUS"
+
+if [ "$SUBGRAPH_STATUS" != "200" ]; then
+  echo "❌ Subgraph export failed (expected 200)"
+  exit 1
+fi
+
+# Validate subgraph response structure
+echo "Validating subgraph response structure..."
+echo "$SUBGRAPH_BODY" | python3 -c "
+import sys
+import json
+
+try:
+    data = json.load(sys.stdin)
+
+    # Check if response has expected structure
+    assert 'subgraph' in data, 'Missing subgraph field'
+    subgraph = data['subgraph']
+
+    assert 'nodes' in subgraph, 'Subgraph missing nodes field'
+    assert 'edges' in subgraph, 'Subgraph missing edges field'
+    assert isinstance(subgraph['nodes'], list), 'nodes should be a list'
+    assert isinstance(subgraph['edges'], list), 'edges should be a list'
+
+    # Check node structure
+    if len(subgraph['nodes']) > 0:
+        node = subgraph['nodes'][0]
+        assert 'id' in node, 'Node missing id field'
+        assert 'type' in node, 'Node missing type field'
+        print(f'✅ Subgraph structure is valid')
+        print(f'✅ Subgraph nodes: {len(subgraph[\"nodes\"])}')
+        print(f'✅ Subgraph edges: {len(subgraph[\"edges\"])}')
+
+        # Show node types distribution
+        node_types = {}
+        for node in subgraph['nodes']:
+            node_type = node.get('type', 'unknown')
+            node_types[node_type] = node_types.get(node_type, 0) + 1
+        print(f'✅ Node types: {node_types}')
+
+        # Check for seed entities if present
+        seed_count = sum(1 for node in subgraph['nodes'] if node.get('is_seed', False))
+        if seed_count > 0:
+            print(f'✅ Seed entities: {seed_count}')
+
+        # Check for PPR scores if present
+        ppr_count = sum(1 for node in subgraph['nodes'] if 'ppr_score' in node)
+        if ppr_count > 0:
+            print(f'✅ Nodes with PPR scores: {ppr_count}')
+    else:
+        print('⚠️  No nodes in subgraph')
+
+except AssertionError as e:
+    print(f'❌ Validation failed: {e}')
+    sys.exit(1)
+except Exception as e:
+    print(f'❌ Error: {e}')
+    sys.exit(1)
+"
+
+if [ $? -ne 0 ]; then
+  echo "❌ Subgraph validation failed"
+  exit 1
+fi
+
+# Save subgraph to file for inspection
+SUBGRAPH_FILE="/tmp/subgraph_export.json"
+echo "$SUBGRAPH_BODY" | python3 -c "
+import sys
+import json
+
+data = json.load(sys.stdin)
+if 'subgraph' in data:
+    with open('$SUBGRAPH_FILE', 'w') as f:
+        json.dump(data['subgraph'], f, indent=2, ensure_ascii=False)
+"
+echo "✅ Subgraph exported to: $SUBGRAPH_FILE"
 
 # 6) Delete the file
 echo -e "\n6) Delete file: $FILE_ID"
@@ -342,5 +508,10 @@ echo "✅ Second file cleanup PASS"
 
 # Cleanup temporary files
 rm -f "$DOWNLOAD_HEADERS" "$DOWNLOAD_FILE"
+
+# Note: Graph export files are kept for inspection
+echo -e "\n📊 Graph export files saved for inspection:"
+echo "   - Full graph: $FULL_GRAPH_FILE"
+echo "   - Subgraph: $SUBGRAPH_FILE"
 
 echo -e "\n🎉 All Knowledge API comprehensive tests passed!"

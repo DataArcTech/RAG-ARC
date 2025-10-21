@@ -279,10 +279,15 @@ class NetworkXGraphStore(GraphStore):
                 logger.error(f"Failed to update chunk {chunk.id}: {e}")
 
     def get_by_ids(self, ids: Sequence[str]) -> List[Chunk]:
-        """Get chunks by IDs"""
-        return self.get_chunks(list(ids))
+        """Retrieve chunks (including their graphs) by IDs."""
+        ids_list = list(ids)
+        return self._get_chunks_impl(ids_list)
 
     def get_chunks(self, ids: List[str]) -> List[Chunk]:
+        """Deprecated: Use get_by_ids instead"""
+        return self._get_chunks_impl(ids)
+
+    def _get_chunks_impl(self, ids: List[str]) -> List[Chunk]:
         """Retrieve chunks by their IDs"""
         chunks = []
 

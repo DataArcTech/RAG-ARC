@@ -26,7 +26,9 @@ class BaseGraphRetriever(AbstractModule):
     def invoke(self, query: str, **kwargs) -> List[Chunk]:
         """Standard interface method for compatibility"""
         top_k = kwargs.get('k', kwargs.get('top_k', 10))
-        return self.retrieve(query, top_k)
+        owner_id = kwargs.get('owner_id')
+        return_subgraph_info = kwargs.get('return_subgraph_info', False)
+        return self.retrieve(query, top_k, return_subgraph_info=return_subgraph_info, owner_id=owner_id)
 
     def get_name(self) -> str:
         """Get retriever name"""

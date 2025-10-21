@@ -36,29 +36,41 @@ manager = ConnectionManager()
 
 class ChatRequest(BaseModel):
     query: str
+    return_subgraph: bool = False  # Optional parameter to request subgraph data
+
+
+class ChatResponse(BaseModel):
+    """Response model for chat endpoint"""
+    response: str
+    subgraph: dict | None = None  # Subgraph visualization data (only if requested)
+
 
 # This currently only supports one round of chat, will support multiple rounds once user login is supported.
-@router.post("/chat", response_model=str, status_code=status.HTTP_200_OK)
+@router.post("/chat", response_model=ChatResponse, status_code=status.HTTP_200_OK)
 def chat(
     request: ChatRequest,
     current_user: Annotated[User | None, Depends(get_current_user)],
 ):
     """
-    Chat endpoint with optional user isolation
+    Chat endpoint with optional user isolation and subgraph visualization
 
     Args:
-        request: ChatRequest containing query and optional owner_id
+        request: ChatRequest containing query and optional return_subgraph flag
 
     Returns:
-        LLM response
+        ChatResponse with LLM response and optional subgraph data
     """
     if current_user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required"
         )
-    response, chunks = rag_inference_handler.chat(request.query, owner_id=current_user.id)
-    return response
+    response, chunks, subgraph_data = rag_inference_handler.chat(
+        request.query,
+        owner_id=current_user.id,
+        return_subgraph=request.return_subgraph
+    )
+    return ChatResponse(response=response, subgraph=subgraph_data)
 
 
 

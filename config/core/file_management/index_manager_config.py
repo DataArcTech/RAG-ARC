@@ -12,6 +12,7 @@ from config.core.file_management.chunker.chunker_config import (
 from config.core.file_management.indexing.faiss_indexing_config import FaissIndexerConfig
 from config.core.file_management.indexing.bm25_indexing_config import BM25IndexerConfig
 from config.core.file_management.indexing.graph_indexing.networkx_indexing_config import NetworkXGraphIndexerConfig
+from config.core.file_management.indexing.graph_indexing.pruned_hipporag_indexing_config import PrunedHippoRAGIndexerConfig
 from config.core.file_management.storage.file_storage import FileStorageConfig
 from config.core.file_management.storage.parsed_content_storage import ParsedContentStorageConfig
 from config.core.file_management.storage.chunk_storage import ChunkStorageConfig
@@ -44,7 +45,7 @@ class IndexManagerConfig(AbstractConfig):
 
     # Indexer configurations (optional, can be empty list if no indexing needed)
     indexer_configs: List[Annotated[
-        Union[FaissIndexerConfig, BM25IndexerConfig, NetworkXGraphIndexerConfig],
+        Union[FaissIndexerConfig, BM25IndexerConfig, NetworkXGraphIndexerConfig, PrunedHippoRAGIndexerConfig],
         Field(discriminator="type")
     ]] = Field(
         default_factory=list,

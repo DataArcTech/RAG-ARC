@@ -1,5 +1,5 @@
 from chunk import Chunk
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Dict, Any
 import logging
 import uuid
 from framework.module import AbstractModule
@@ -30,22 +30,74 @@ class RAGInference(AbstractModule):
         self.llm = self.config.llm_config.build()
         logger.info("LLM built successfully")
 
-    def chat(self, query: str, owner_id: uuid.UUID) -> tuple[str, list[Chunk]]:
+    def chat(self, query: str, owner_id: uuid.UUID, return_subgraph: bool = False) -> tuple[str, list[Chunk], Optional[Dict[str, Any]]]:
         """
         Chat with RAG system
 
         Args:
             query: User query
             owner_id: User ID for user-isolated retrieval
+            return_subgraph: If True, return subgraph visualization data
 
         Returns:
-            LLM response
+            Tuple of (LLM response, chunks, subgraph_data)
+            - subgraph_data is None if return_subgraph=False or retriever doesn't support it
         """
         query = self.query_rewriter.rewrite_query(query)
 
-        # Pass owner_id to retriever for user isolation
-        chunks = self.retriever.invoke(query, owner_id=owner_id)
+        # Pass owner_id and return_subgraph_info to retriever
+        # All retrievers support invoke() method which will handle these parameters
+        chunks = self.retriever.invoke(
+            query,
+            owner_id=owner_id,
+            return_subgraph_info=return_subgraph
+        )
+
+        # Extract subgraph info BEFORE reranking (to avoid losing it after reordering)
+        subgraph_info = None
+        if return_subgraph and chunks:
+            for chunk in chunks:
+                if hasattr(chunk, 'metadata') and chunk.metadata and '_subgraph_info' in chunk.metadata:
+                    subgraph_info = chunk.metadata.pop('_subgraph_info')
+                    logger.info("Extracted subgraph info before reranking")
+                    break
+
         chunks = self.reranker.rerank(query, chunks)
+
+        # Export subgraph data if subgraph_info is available
+        subgraph_data = None
+        if subgraph_info:
+            # Import GraphExporter here to avoid circular dependency
+            try:
+                from encapsulation.database.utils.graph_export_utils import GraphExporter
+
+                # Find graph_store from retriever or its children
+                graph_store = None
+                if hasattr(self.retriever, 'graph_store'):
+                    # Direct graph retriever
+                    graph_store = self.retriever.graph_store
+                elif hasattr(self.retriever, 'config') and hasattr(self.retriever.config, 'built_retrievers'):
+                    # Multipath retriever: find graph retriever
+                    for child_retriever in self.retriever.config.built_retrievers:
+                        if hasattr(child_retriever, 'graph_store'):
+                            graph_store = child_retriever.graph_store
+                            break
+
+                if graph_store:
+                    subgraph_data = GraphExporter.export_subgraph(
+                        graph_store=graph_store,
+                        subgraph_node_indices=set(subgraph_info['subgraph_nodes']),
+                        seed_entity_ids=set(subgraph_info['seed_entity_ids']),
+                        retrieved_chunk_ids=subgraph_info['retrieved_chunk_ids'],
+                        node_ppr_scores=subgraph_info.get('node_ppr_scores', {})
+                    )
+                    logger.info(f"Exported subgraph: {len(subgraph_data.get('nodes', []))} nodes, {len(subgraph_data.get('edges', []))} edges")
+                else:
+                    logger.warning("Graph store not found in retriever")
+            except Exception as e:
+                logger.warning(f"Failed to export subgraph: {e}")
+                import traceback
+                logger.debug(f"Traceback: {traceback.format_exc()}")
 
         # Format chunks and query as messages
         messages = []
@@ -59,4 +111,4 @@ class RAGInference(AbstractModule):
         logger.info(f"Reranked chunks: {[getattr(chunk, 'content', str(chunk)) for chunk in chunks]}")
         logger.info(f"Prepared messages for LLM: {messages}")
         response = self.llm.chat(messages)
-        return (response, chunks)
+        return (response, chunks, subgraph_data)
