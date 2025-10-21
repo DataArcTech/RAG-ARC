@@ -1,6 +1,6 @@
 from framework.module import AbstractModule
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List, Optional
 
 if TYPE_CHECKING:
     from config.application.knowledge_config import KnowledgeConfig
@@ -13,6 +13,7 @@ import uuid
 import asyncio
 from fastapi.responses import Response
 from fastapi import File, UploadFile, HTTPException
+from encapsulation.data_model.orm_models import FileMetadata, FileStatus
 
 class Knowledge(AbstractModule):
     def __init__(self, config: 'KnowledgeConfig'):
@@ -111,4 +112,36 @@ class Knowledge(AbstractModule):
         except Exception as e:
             logger.error(f"Error during file deletion for {doc_id}: {e}")
             raise HTTPException(status_code=500, detail="Failed to delete file")
+
+    def list_user_files(
+        self,
+        user_id: uuid.UUID,
+        status: Optional[FileStatus] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None
+    ) -> List[FileMetadata]:
+        """
+        Get all files for a specific user.
+        
+        Args:
+            user_id: UUID of the file owner
+            status: Optional filter by file status
+            limit: Maximum number of files to return
+            offset: Number of files to skip (for pagination)
+            
+        Returns:
+            List of FileMetadata objects
+        """
+        try:
+            files = self.file_storage.list_files_by_owner(
+                owner_id=user_id,
+                status=status,
+                limit=limit,
+                offset=offset
+            )
+            logger.info(f"Retrieved {len(files)} files for user {user_id}")
+            return files
+        except Exception as e:
+            logger.error(f"Failed to list files for user {user_id}: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to retrieve files: {str(e)}")
         

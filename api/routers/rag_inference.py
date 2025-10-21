@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 from typing import Annotated
 from fastapi import (
     APIRouter,
@@ -50,17 +51,14 @@ def chat(
 
     Returns:
         LLM response
-
-    Note:
-        owner_id is optional for backward compatibility.
-        After adding JWT authentication, it will be extracted from the token.
     """
     if current_user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required"
         )
-    return rag_inference_handler.chat(request.query, owner_id=current_user.id)
+    response, chunks = rag_inference_handler.chat(request.query, owner_id=current_user.id)
+    return response
 
 
 
@@ -111,13 +109,13 @@ async def websocket_endpoint(
             history_text = "\n".join(
                 f"{msg.content['role']}: {msg.content['content']}" for msg in history_messages
             )
-            assistant_response = rag_inference_handler.chat(history_text, current_user.id)
+            assistant_response, chunks = rag_inference_handler.chat(history_text, current_user.id)
             logger.info(f"Assistant response generated: {assistant_response} (session_id={session_id})")
             assistant_message = ChatMessage(session_id=session_id, content={"role": "assistant", "content": assistant_response}, created_at=datetime.now())
             assistant_message = message_handler.create_message(assistant_message)
             logger.info(f"Assistant message created: {assistant_message.id}")
             # Send the assistant response back to the client
-            await manager.send_message(assistant_message, websocket)
+            await manager.send_response(assistant_message, chunks, websocket)
 
     except WebSocketDisconnect:
         logger.info(f"WebSocketDisconnect for session {session_id} and user {getattr(current_user, 'id', None)}")

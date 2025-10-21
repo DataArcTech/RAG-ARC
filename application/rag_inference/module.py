@@ -1,3 +1,4 @@
+from chunk import Chunk
 from typing import TYPE_CHECKING
 import logging
 import uuid
@@ -29,7 +30,7 @@ class RAGInference(AbstractModule):
         self.llm = self.config.llm_config.build()
         logger.info("LLM built successfully")
 
-    def chat(self, query: str, owner_id: uuid.UUID) -> str:
+    def chat(self, query: str, owner_id: uuid.UUID) -> tuple[str, list[Chunk]]:
         """
         Chat with RAG system
 
@@ -58,4 +59,4 @@ class RAGInference(AbstractModule):
         logger.info(f"Reranked chunks: {[getattr(chunk, 'content', str(chunk)) for chunk in chunks]}")
         logger.info(f"Prepared messages for LLM: {messages}")
         response = self.llm.chat(messages)
-        return response
+        return (response, chunks)
