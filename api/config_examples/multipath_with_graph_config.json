@@ -1,0 +1,78 @@
+{
+    "type": "multipath",
+    "retrievers": [
+        {
+            "type": "dense",
+            "index_config": {
+                "type": "faiss",
+                "index_path": "./data/unified_faiss_index",
+                "metric": "cosine",
+                "index_type": "flat",
+                "normalize_L2": true,
+                "embedding_config": {
+                    "type": "qwen_embedding",
+                    "model_name": "Qwen/Qwen3-Embedding-0.6B",
+                    "device": "cuda:0",
+                    "use_china_mirror": true,
+                    "cache_folder": "./models/Qwen"
+                }
+            }
+        },
+        {
+            "type": "tantivy_bm25",
+            "index_config": {
+                "type": "bm25_builder",
+                "index_path": "./data/unified_bm25_index"
+            }
+        },
+        {
+            "type": "pruned_hipporag_optimized",
+            "graph_store_config": {
+                "type": "pruned_hipporag_igraph_optimized",
+                "storage_path": "./data/graph_index",
+                "embedding": {
+                    "type": "qwen_embedding",
+                    "model_name": "Qwen/Qwen3-Embedding-0.6B",
+                    "device": "cuda:0",
+                    "use_china_mirror": true,
+                    "cache_folder": "./models/Qwen"
+                },
+                "fact_faiss_config": {
+                    "type": "faiss",
+                    "index_path": "./data/graph_index/fact_index",
+                    "metric": "cosine",
+                    "index_type": "flat",
+                    "normalize_L2": true
+                },
+                "entity_faiss_config": {
+                    "type": "faiss",
+                    "index_path": "./data/graph_index/entity_index",
+                    "metric": "cosine",
+                    "index_type": "hnsw",
+                    "normalize_L2": true,
+                    "hnsw_m": 16,
+                    "hnsw_ef_construction": 200,
+                    "hnsw_ef_search": 50
+                }
+            },
+            "llm_config": {
+                "type": "openai_chat",
+                "model_name": "gpt-4o-mini",
+                "temperature": 0.0,
+                "max_tokens": 2000
+            },
+            "fact_retrieval_top_k": 50,
+            "enable_llm_reranking": true,
+            "damping_factor": 0.5,
+            "max_ppr_iterations": 100
+        }
+    ],
+    "fusion_method": "rrf",
+    "rrf_k": 60,
+    "weights": null,
+    "search_kwargs": {
+        "k": 10,
+        "with_score": true
+    }
+}
+
