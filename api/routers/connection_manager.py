@@ -24,7 +24,7 @@ class ConnectionManager:
                 pass
 
 
-    async def send_response(self, message: ChatMessage, chunks: list[Chunk], websocket: WebSocket):
+    async def send_response(self, message: ChatMessage, chunks: list[Chunk], websocket: WebSocket, subgraph: dict | None = None):
         message_dict = {
             "id": str(message.id),
             "session_id": str(message.session_id),
@@ -43,4 +43,7 @@ class ConnectionManager:
             "message": message_dict,
             "chunks": chunks_dict,
         }
+        # Add subgraph data if provided
+        if subgraph is not None:
+            response_dict["subgraph"] = subgraph
         await websocket.send_json(response_dict)

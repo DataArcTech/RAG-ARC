@@ -42,6 +42,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     """Response model for chat endpoint"""
     response: str
+    chunks: list | None = None
     subgraph: dict | None = None  # Subgraph visualization data (only if requested)
 
 
@@ -70,7 +71,7 @@ def chat(
         owner_id=current_user.id,
         return_subgraph=request.return_subgraph
     )
-    return ChatResponse(response=response, subgraph=subgraph_data)
+    return ChatResponse(response=response, chunks=chunks, subgraph=subgraph_data)
 
 
 
@@ -100,8 +101,25 @@ async def websocket_endpoint(
 
     try:
         while True:
-            user_message_text = await websocket.receive_text()
-            logger.info(f"Received user message: {user_message_text} (session_id={session_id}, user={getattr(current_user, 'id', None)})")
+            # Receive message as text first, then try to parse as JSON
+            message_text = await websocket.receive_text()
+
+            # Try to parse as JSON for new format with additional parameters
+            try:
+                message_data = json.loads(message_text)
+                if isinstance(message_data, dict):
+                    user_message_text = message_data.get("query", message_data.get("content", ""))
+                    return_subgraph = message_data.get("return_subgraph", False)
+                else:
+                    # If JSON parsed but not a dict, treat as plain text
+                    user_message_text = message_text
+                    return_subgraph = False
+            except (json.JSONDecodeError, ValueError):
+                # Not JSON, treat as plain text (backward compatibility)
+                user_message_text = message_text
+                return_subgraph = False
+
+            logger.info(f"Received user message: {user_message_text} (session_id={session_id}, user={getattr(current_user, 'id', None)}, return_subgraph={return_subgraph})")
 
             user_message = ChatMessage(
                 session_id=session_id,
@@ -121,13 +139,17 @@ async def websocket_endpoint(
             history_text = "\n".join(
                 f"{msg.content['role']}: {msg.content['content']}" for msg in history_messages
             )
-            assistant_response, chunks = rag_inference_handler.chat(history_text, current_user.id)
+            assistant_response, chunks, subgraph_data = rag_inference_handler.chat(
+                history_text,
+                current_user.id,
+                return_subgraph=return_subgraph
+            )
             logger.info(f"Assistant response generated: {assistant_response} (session_id={session_id})")
             assistant_message = ChatMessage(session_id=session_id, content={"role": "assistant", "content": assistant_response}, created_at=datetime.now())
             assistant_message = message_handler.create_message(assistant_message)
             logger.info(f"Assistant message created: {assistant_message.id}")
             # Send the assistant response back to the client
-            await manager.send_response(assistant_message, chunks, websocket)
+            await manager.send_response(assistant_message, chunks, websocket, subgraph=subgraph_data)
 
     except WebSocketDisconnect:
         logger.info(f"WebSocketDisconnect for session {session_id} and user {getattr(current_user, 'id', None)}")
