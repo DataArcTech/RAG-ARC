@@ -310,6 +310,18 @@ class IndexManager(AbstractModule):
             logger.error(error_msg, exc_info=True)
             result["error_message"] = error_msg
 
+            # Update file status to FAILED
+            try:
+                from encapsulation.data_model.orm_models import FileStatus
+                self.file_storage.metadata_store.update_file_status(
+                    file_id,
+                    FileStatus.FAILED,
+                    **kwargs
+                )
+                logger.info(f"Updated file {file_id} status to FAILED due to indexing error")
+            except Exception as status_error:
+                logger.error(f"Failed to update file status to FAILED for {file_id}: {status_error}")
+
         return result
 
     def _delete_chunks_from_indexers(self, chunk_ids: List[str]) -> Dict[str, Any]:

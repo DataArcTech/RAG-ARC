@@ -1,23 +1,10 @@
-"""
-Pruned HippoRAG Graph Store using igraph + FAISS + SQLite
-
-Architecture:
-- Fact索引：FAISS Flat (精确搜索，需要全量scores)
-- Entity索引：FAISS HNSW (同义边计算，必须加速)
-- Chunk索引：numpy数组 (子图规模小，暴力搜索最快)
-- 元数据：SQLite (SQL查询、事务、引用计数)
-- 图结构：igraph (PPR计算)
-"""
-
 import os
 import json
 import logging
-import hashlib
-import re
 import pickle
 import sqlite3
+import re
 from typing import List, Dict, Any, Optional, Sequence, TYPE_CHECKING
-from datetime import datetime
 from collections import defaultdict
 import numpy as np
 import igraph as ig
@@ -25,6 +12,7 @@ import faiss
 
 from encapsulation.database.graph_db.base import GraphStore
 from encapsulation.data_model.schema import Chunk, GraphData
+from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id, text_processing
 from framework.shared_module_decorator import shared_module
 
 if TYPE_CHECKING:
@@ -33,72 +21,75 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def compute_mdhash_id(content: str, prefix: str = "") -> str:
-    """Compute MD5 hash ID for content"""
-    return prefix + hashlib.md5(content.encode()).hexdigest()
-
-
-def text_processing(text):
-    """
-    Text processing function matching HippoRAG
-    Removes special characters, converts to lowercase, and strips whitespace
-    """
-    if isinstance(text, list):
-        return [text_processing(t) for t in text]
-    if not isinstance(text, str):
-        text = str(text)
-    return re.sub('[^A-Za-z0-9 ]', ' ', text.lower()).strip()
-
-
 @shared_module
 class PrunedHippoRAGIGraphStore(GraphStore):
     """
-    Pruned HippoRAG Graph Store using igraph + FAISS + SQLite
+    Pruned HippoRAG Graph Store using hybrid storage.
 
-    1. Fact使用FAISS Flat索引 (精确搜索)
-    2. Entity使用FAISS HNSW索引 (同义边加速)
-    3. Chunk使用numpy数组 (暴力搜索)
-    4. 元数据使用SQLite (SQL查询、引用计数)
-    5. 图结构使用igraph (PPR计算)
+    This graph store implements a multi-component storage system:
+
+    1. **Facts**: FAISS Flat index for exact similarity search
+       - Stores fact embeddings for dense retrieval
+       - Used to find relevant facts given a query
+
+    2. **Entities**: FAISS HNSW index for approximate nearest neighbor search
+       - Stores entity embeddings
+       - Used to compute synonymy edges between similar entities
+
+    3. **Chunks**: In-memory numpy array for brute-force search
+       - Stores chunk embeddings
+       - Used for dense passage retrieval fallback
+
+    4. **Metadata**: SQLite database
+       - Stores chunks, entities, facts, and their relationships
+       - Provides efficient querying and filtering
+
+    5. **Graph**: igraph undirected graph
+       - Represents the knowledge graph structure
+       - Nodes: chunks and entities
+       - Edges: chunk-entity relations, entity-entity relations (facts), synonymy edges
+       - Used for Personalized PageRank during retrieval
     """
 
     def __init__(self, config: "PrunedHippoRAGIGraphConfig"):
-        """Initialize Pruned HippoRAG graph store"""
+        """
+        Initialize the Pruned HippoRAG Graph Store.
+
+        Args:
+            config: Configuration object containing all storage parameters
+        """
         super().__init__(config)
-        
-        # 1. Initialize embedding model
+
+        # Initialize embedding model
         self.embedding_model = config.embedding.build()
-        
-        # 2. Initialize igraph
+
+        # Initialize undirected graph
         self.graph = ig.Graph(directed=False)
-        
-        # 3. Initialize FAISS indices (fact: Flat, entity: HNSW)
+
+        # Initialize FAISS indices for facts and entities
         self._init_faiss_indices()
-        
-        # 4. Initialize SQLite database
+
+        # Initialize SQLite database for metadata
         self._init_sqlite_db()
-        
-        # 5. Initialize chunk embeddings (numpy array, not FAISS)
-        self.chunk_embeddings = {}  # chunk_id -> embedding (dict)
-        self._chunk_embeddings_array = None  # Pre-computed numpy array
-        self._chunk_ids_list = None  # Corresponding chunk_id list
-        
-        # 6. Node mappings
-        self.node_to_idx = {}  # node_id -> vertex index
-        self.idx_to_node = {}  # vertex index -> node_id
-        self.node_to_node_stats = defaultdict(float)  # (from_node, to_node) -> weight
-        
-        # 7. Storage configuration
+
+        # In-memory chunk embeddings (not stored in FAISS)
+        self.chunk_embeddings = {}
+        self._chunk_embeddings_array = None
+        self._chunk_ids_list = None
+
+        # Graph node mappings
+        self.node_to_idx = {}  # node_id -> graph_index
+        self.idx_to_node = {}  # graph_index -> node_id
+        self.node_to_node_stats = defaultdict(float)  # (node_id, node_id) -> edge_weight
+
+        # Storage configuration
         self.storage_path = getattr(config, 'storage_path', './data/graph_index')
         self.index_name = getattr(config, 'index_name', 'index')
-        
-        # 8. Synonymy edge configuration
+
+        # Synonymy edge configuration
         self.add_synonymy_edges = getattr(config, 'add_synonymy_edges', False)
         self.synonymy_edge_topk = getattr(config, 'synonymy_edge_topk', 100)
         self.synonymy_edge_sim_threshold = getattr(config, 'synonymy_edge_sim_threshold', 0.8)
-
-        # 9. Lazy loading with dirty flag for graph cache invalidation
-        self._graph_dirty = True  # Mark as dirty initially, will build on first access
 
         logger.info("Pruned HippoRAG graph store initialized")
         logger.info(f"  - Fact index: FAISS Flat (exact search)")
@@ -108,25 +99,29 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         logger.info(f"  - Graph: igraph")
 
     def _init_faiss_indices(self):
-        """Initialize FAISS indices (fact: Flat, entity: HNSW)"""
-        from encapsulation.database.vector_db.faiss import FaissVectorDB
+        """
+        Initialize FAISS indices for facts and entities.
+
+        - Fact index: FAISS Flat (exact search) for fact retrieval
+        - Entity index: FAISS HNSW (approximate search) for synonymy edge computation
+        """
         from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBConfig
-        
+
         storage_path = getattr(self.config, 'storage_path', './data/graph_index')
         os.makedirs(storage_path, exist_ok=True)
-        
-        # ✅ Fact index - use Flat (exact search for all facts)
+
+        # Initialize fact index (FAISS Flat for exact search)
         fact_config = FaissVectorDBConfig(
             embedding_config=self.config.embedding,
-            index_type='flat',  # ✅ Flat, not HNSW
+            index_type='flat',
             metric='cosine',
             normalize_L2=True,
             index_path=os.path.join(storage_path, 'fact_index'),
             index_name='index'
         )
         self.fact_faiss_db = fact_config.build()
-        
-        # Try to load existing fact index
+
+        # Load existing fact index if available
         fact_index_path = os.path.join(storage_path, 'fact_index')
         if os.path.exists(fact_index_path):
             try:
@@ -134,11 +129,11 @@ class PrunedHippoRAGIGraphStore(GraphStore):
                 logger.info(f"Loaded existing fact index: {self.fact_faiss_db.index.ntotal} facts")
             except Exception as e:
                 logger.warning(f"Failed to load fact index: {e}")
-        
-        # ✅ Entity index - use HNSW (synonymy edge acceleration)
+
+        # Initialize entity index (FAISS HNSW for approximate search)
         entity_config = FaissVectorDBConfig(
             embedding_config=self.config.embedding,
-            index_type='hnsw',  # ✅ HNSW, only place using approximate search
+            index_type='hnsw',
             metric='cosine',
             normalize_L2=True,
             m=getattr(self.config, 'hnsw_M', 32),
@@ -148,8 +143,8 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             index_name='index'
         )
         self.entity_faiss_db = entity_config.build()
-        
-        # Try to load existing entity index
+
+        # Load existing entity index if available
         entity_index_path = os.path.join(storage_path, 'entity_index')
         if os.path.exists(entity_index_path):
             try:
@@ -157,20 +152,27 @@ class PrunedHippoRAGIGraphStore(GraphStore):
                 logger.info(f"Loaded existing entity index: {self.entity_faiss_db.index.ntotal} entities")
             except Exception as e:
                 logger.warning(f"Failed to load entity index: {e}")
-        
-        # ❌ Chunk does NOT use FAISS - use numpy array for brute-force search
-        
+
         logger.info("FAISS indices initialized (fact: Flat, entity: HNSW)")
 
     def _init_sqlite_db(self):
-        """Initialize SQLite database for metadata"""
+        """
+        Initialize SQLite database for metadata storage.
+
+        Creates tables for:
+        - chunks: Document chunks with content and metadata
+        - entities: Extracted entities with names and types
+        - facts: Knowledge graph triples (head, relation, tail)
+        - chunk_entity_relations: Links between chunks and entities
+        - synonymy_edges: Similarity-based edges between entities
+        """
         storage_path = getattr(self.config, 'storage_path', './data/graph_index')
         os.makedirs(storage_path, exist_ok=True)
-        
+
         self.db_path = os.path.join(storage_path, 'metadata.db')
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         cursor = self.conn.cursor()
-        
+
         # Chunks table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS chunks (
@@ -182,7 +184,7 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             )
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_chunks_owner ON chunks(owner_id)')
-        
+
         # Entities table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS entities (
@@ -194,8 +196,8 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             )
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(entity_name)')
-        
-        # Facts table
+
+        # Facts table (knowledge graph triples)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS facts (
                 fact_id TEXT PRIMARY KEY,
@@ -208,8 +210,8 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_facts_head ON facts(head)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_facts_tail ON facts(tail)')
-        
-        # Chunk-Entity relations table (for reference counting)
+
+        # Chunk-entity relations table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS chunk_entity_relations (
                 chunk_id TEXT NOT NULL,
@@ -223,7 +225,7 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_ce_entity ON chunk_entity_relations(entity_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_ce_chunk ON chunk_entity_relations(chunk_id)')
 
-        # Synonymy edges table (for entity similarity edges)
+        # Synonymy edges table (similarity-based entity connections)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS synonymy_edges (
                 entity_id_1 TEXT NOT NULL,
@@ -241,11 +243,15 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         self.conn.commit()
         logger.info(f"SQLite database initialized at {self.db_path}")
 
-    def add_chunk(self, chunk: Chunk):
-        """Add chunk to store"""
+    def _add_chunk_no_commit(self, chunk: Chunk):
+        """
+        Add a chunk to the database without committing (for batch operations).
+
+        Args:
+            chunk: Chunk object to add
+        """
         chunk_id = chunk.id
-        
-        # 1. Store to SQLite
+
         cursor = self.conn.cursor()
         cursor.execute('''
             INSERT OR REPLACE INTO chunks (chunk_id, content, owner_id, metadata)
@@ -256,129 +262,146 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             chunk.owner_id,
             json.dumps(chunk.metadata) if chunk.metadata else '{}'
         ))
-        self.conn.commit()
-        
-        # 2. ✅ Generate and store embedding (use dict, not FAISS)
+
+        # Mark chunk embeddings array as dirty
         if chunk_id not in self.chunk_embeddings:
-            embedding = self.embedding_model.embed(chunk.content)
-            if isinstance(embedding, list):
-                embedding = np.array(embedding)
-            # Normalize for cosine similarity
-            embedding = embedding / (np.linalg.norm(embedding) + 1e-10)
-            self.chunk_embeddings[chunk_id] = embedding
-            
-            # Mark array needs rebuild
             self._chunk_embeddings_array = None
-        
-        # 3. Add to graph
+
+        # Add chunk node to graph if not exists
         if chunk_id not in self.node_to_idx:
             vertex_idx = self.graph.vcount()
             self.graph.add_vertex(name=chunk_id, node_type='chunk')
             self.node_to_idx[chunk_id] = vertex_idx
             self.idx_to_node[vertex_idx] = chunk_id
-        
+
         logger.debug(f"Added chunk {chunk_id}")
 
-    def add_graph_data(self, graph_data: GraphData, chunk_id: str) -> List[str]:
+    def add_chunk(self, chunk: Chunk):
         """
-        Add graph data (entities and relations) from extraction
-        
+        Add a chunk to the database and commit.
+
+        Args:
+            chunk: Chunk object to add
+        """
+        self._add_chunk_no_commit(chunk)
+        self.conn.commit()
+
+    def _add_graph_data_no_commit(self, graph_data: GraphData, chunk_id: str) -> List[str]:
+        """
+        Add graph data (entities and facts) for a chunk without committing.
+
+        This method:
+        1. Processes and normalizes relation triples
+        2. Extracts unique entities from triples
+        3. Adds entities to database and graph
+        4. Creates chunk-entity relations
+        5. Adds facts to database
+
+        Args:
+            graph_data: GraphData object containing entities and relations
+            chunk_id: ID of the chunk this graph data belongs to
+
         Returns:
-            List of new entity IDs
+            List of newly created entity IDs
         """
-        # Process triples
+        # Process and normalize relation triples
         processed_triples = []
         for relation in graph_data.relations:
             if len(relation) >= 3:
-                processed_triple = [
-                    text_processing(relation[0]),
-                    text_processing(relation[1]),
-                    text_processing(relation[2])
-                ]
-                if processed_triple[0] and processed_triple[2]:
-                    processed_triples.append(processed_triple)
-        
-        # Extract entities from triples
+                head = text_processing(relation[0])
+                rel_type = text_processing(relation[1])
+                tail = text_processing(relation[2])
+
+                if head and tail:  # Only keep triples with valid head and tail
+                    processed_triples.append([head, rel_type, tail])
+
+        # Extract unique entities from triples
         triple_entities = set()
         for triple in processed_triples:
             triple_entities.add(triple[0])  # head
             triple_entities.add(triple[2])  # tail
-        
+
         new_entity_ids = []
         cursor = self.conn.cursor()
-        
-        # Add entities
+
+        # Add entities to database and graph
         for entity_name in triple_entities:
             entity_id = compute_mdhash_id(entity_name, prefix='entity-')
-            
-            # Check if entity exists
-            cursor.execute('SELECT entity_id FROM entities WHERE entity_id = ?', (entity_id,))
-            exists = cursor.fetchone()
-            
-            if not exists:
-                # Insert to SQLite
+
+            # Add entity node to graph if not exists
+            if entity_id not in self.node_to_idx:
                 cursor.execute('''
-                    INSERT INTO entities (entity_id, entity_name, entity_type, attributes)
+                    INSERT OR IGNORE INTO entities (entity_id, entity_name, entity_type, attributes)
                     VALUES (?, ?, ?, ?)
                 ''', (entity_id, entity_name, 'Entity', '{}'))
-                
-                # Add to graph
-                if entity_id not in self.node_to_idx:
-                    vertex_idx = self.graph.vcount()
-                    self.graph.add_vertex(name=entity_id, node_type='entity', entity_name=entity_name)
-                    self.node_to_idx[entity_id] = vertex_idx
-                    self.idx_to_node[vertex_idx] = entity_id
-                
+
+                vertex_idx = self.graph.vcount()
+                self.graph.add_vertex(name=entity_id, node_type='entity', entity_name=entity_name)
+                self.node_to_idx[entity_id] = vertex_idx
+                self.idx_to_node[vertex_idx] = entity_id
+
                 new_entity_ids.append(entity_id)
-            
-            # Add chunk-entity relation
+
+            # Create chunk-entity relation
             cursor.execute('''
                 INSERT OR IGNORE INTO chunk_entity_relations (chunk_id, entity_id, weight)
                 VALUES (?, ?, ?)
-            ''', (chunk_id, entity_id, 1.0))
+            ''', (chunk_id, entity_id, 2.0))
 
-            # Incrementally add chunk-entity edge to graph
-            self._add_edge_to_graph(chunk_id, entity_id, 1.0)
-        
-        # Add facts
-        for triple in processed_triples:
-            head_name, relation_type, tail_name = triple[0], triple[1], triple[2]
-            head_id = compute_mdhash_id(head_name, prefix='entity-')
-            tail_id = compute_mdhash_id(tail_name, prefix='entity-')
-            
-            fact_tuple = tuple(triple)
-            fact_text = str(fact_tuple)
+        # Initialize fact cache if needed
+        if not hasattr(self, '_fact_ids_cache'):
+            self._fact_ids_cache = set()
+
+        # Add facts to database
+        for head_name, relation_type, tail_name in processed_triples:
+            fact_text = str((head_name, relation_type, tail_name))
             fact_id = compute_mdhash_id(fact_text, prefix='fact-')
-            
-            # Check if fact exists
-            cursor.execute('SELECT fact_id FROM facts WHERE fact_id = ?', (fact_id,))
-            exists = cursor.fetchone()
-            
-            if not exists:
-                # Insert to SQLite
+
+            if fact_id not in self._fact_ids_cache:
                 cursor.execute('''
-                    INSERT INTO facts (fact_id, head, relation, tail, text)
+                    INSERT OR IGNORE INTO facts (fact_id, head, relation, tail, text)
                     VALUES (?, ?, ?, ?, ?)
                 ''', (fact_id, head_name, relation_type, tail_name, fact_text))
 
-                # Incrementally add entity-entity edge to graph
-                self._add_edge_to_graph(head_id, tail_id, 1.0)
+                self._fact_ids_cache.add(fact_id)
 
-        self.conn.commit()
         logger.debug(f"Added graph data for chunk {chunk_id}: {len(triple_entities)} entities, {len(processed_triples)} facts")
 
         return new_entity_ids
 
+    def add_graph_data(self, graph_data: GraphData, chunk_id: str) -> List[str]:
+        """
+        Add graph data for a chunk and commit.
+
+        Args:
+            graph_data: GraphData object containing entities and relations
+            chunk_id: ID of the chunk this graph data belongs to
+
+        Returns:
+            List of newly created entity IDs
+        """
+        result = self._add_graph_data_no_commit(graph_data, chunk_id)
+        self.conn.commit()
+        return result
+
     def _add_edge_to_graph(self, from_node: str, to_node: str, weight: float):
         """
-        Incrementally add edge to graph (bidirectional for undirected graph)
+        Incrementally add an edge to the graph.
 
-        This method adds edges to both node_to_node_stats and the igraph object,
-        enabling true incremental updates without needing to rebuild the entire graph.
+        This method enables true incremental updates without rebuilding the entire graph.
+        Edges are stored bidirectionally in node_to_node_stats for symmetric weight lookup,
+        but only added once to the undirected igraph.
+
+        Args:
+            from_node: Source node ID
+            to_node: Target node ID
+            weight: Edge weight
         """
+        # Skip self-loops
         if from_node == to_node:
             return
 
+        # Skip if nodes don't exist
         if from_node not in self.node_to_idx or to_node not in self.node_to_idx:
             return
 
@@ -391,7 +414,7 @@ class PrunedHippoRAGIGraphStore(GraphStore):
 
         edge_exists = edge_key_1 in self.node_to_node_stats or edge_key_2 in self.node_to_node_stats
 
-        # Update statistics (bidirectional)
+        # Update statistics (bidirectional for symmetric lookup)
         self.node_to_node_stats[edge_key_1] += weight
         self.node_to_node_stats[edge_key_2] += weight
 
@@ -403,20 +426,49 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             except Exception as e:
                 logger.warning(f"Failed to add edge {from_node} -> {to_node}: {e}")
 
-    def _add_edge_weight(self, from_node: str, to_node: str, weight: float):
-        """
-        Legacy method - now just calls _add_edge_to_graph
-        Kept for backward compatibility
-        """
-        self._add_edge_to_graph(from_node, to_node, weight)
-
     def batch_generate_embeddings(self):
-        """Batch generate embeddings and add to FAISS"""
+        """
+        Batch generate embeddings for all facts, entities, and chunks.
+
+        This method processes embeddings in the following order:
+        1. Chunk embeddings: Generated and stored in memory (not in FAISS)
+        2. Entity embeddings: Generated and added to FAISS HNSW index
+        3. Fact embeddings: Generated and added to FAISS Flat index
+
+        Only new items (not already in FAISS/memory) are processed.
+        """
         logger.info("Batch generating embeddings...")
 
         cursor = self.conn.cursor()
 
-        # 1. ✅ Generate entity embeddings and add to FAISS HNSW
+        cursor.execute('SELECT chunk_id, content FROM chunks')
+        chunks_data = cursor.fetchall()
+
+        new_chunks = []
+        new_chunk_ids = []
+        for chunk_id, content in chunks_data:
+            if chunk_id not in self.chunk_embeddings:
+                new_chunks.append(content)
+                new_chunk_ids.append(chunk_id)
+
+        if new_chunks:
+            logger.info(f"Batch generating embeddings for {len(new_chunks)} chunks...")
+            # Batch generate all chunk embeddings at once
+            chunk_embeddings = self.embedding_model.embed(new_chunks)
+
+            # Store embeddings
+            for chunk_id, embedding in zip(new_chunk_ids, chunk_embeddings):
+                if isinstance(embedding, list):
+                    embedding = np.array(embedding)
+                # Normalize for cosine similarity
+                embedding = embedding / (np.linalg.norm(embedding) + 1e-10)
+                self.chunk_embeddings[chunk_id] = embedding
+
+            # Mark array needs rebuild
+            self._chunk_embeddings_array = None
+            logger.info(f"Chunk embeddings generated for {len(new_chunks)} chunks")
+
+        # Generate entity embeddings and add to FAISS HNSW
         cursor.execute('SELECT entity_id, entity_name FROM entities')
         entities = cursor.fetchall()
 
@@ -448,7 +500,7 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             self.entity_faiss_db.save_index(entity_index_path, 'index')
             logger.info(f"Saved entity index to {entity_index_path}")
 
-        # 2. ✅ Generate fact embeddings and add to FAISS Flat
+        # Generate fact embeddings and add to FAISS Flat
         cursor.execute('SELECT fact_id, text FROM facts')
         facts = cursor.fetchall()
 
@@ -468,12 +520,25 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             self.fact_faiss_db.save_index(fact_index_path, 'index')
             logger.info(f"Saved fact index to {fact_index_path}")
 
-        # 3. ❌ Chunk embeddings already generated in add_chunk, no FAISS needed
-
         logger.info("Batch embedding generation completed!")
 
     def build_graph(self):
-        """Build graph from SQLite data (including synonymy edges if available)"""
+        """
+        Build the knowledge graph from SQLite data.
+
+        This method constructs an undirected igraph from the database:
+
+        **Nodes**:
+        - Chunk nodes: Document chunks
+        - Entity nodes: Extracted entities
+
+        **Edges** (stored bidirectionally for symmetric weight lookup):
+        - Chunk-entity edges: Links between chunks and their entities (weight = 1.0 per edge)
+        - Entity-entity edges (facts): Links between entities via facts (weight = 1.0 per fact, cumulative)
+        - Synonymy edges: Similarity-based links between entities (weight = similarity score)
+
+        The graph is rebuilt from scratch using batch edge addition for performance.
+        """
         logger.info("Building graph from SQLite data...")
 
         # Clear existing graph and rebuild from scratch
@@ -505,15 +570,16 @@ class PrunedHippoRAGIGraphStore(GraphStore):
                 self.idx_to_node[vertex_idx] = entity_id
 
         # Collect all edges in node_to_node_stats
-        # 1. Add chunk-entity edges
+        # 1. Add chunk-entity edges (BIDIRECTIONAL: chunk <-> entity)
         cursor.execute('SELECT chunk_id, entity_id, weight FROM chunk_entity_relations')
         relations = cursor.fetchall()
         for chunk_id, entity_id, weight in relations:
-            # Update statistics (bidirectional)
-            self.node_to_node_stats[(chunk_id, entity_id)] += weight
-            self.node_to_node_stats[(entity_id, chunk_id)] += weight
+            # Update statistics (BIDIRECTIONAL: both directions)
+            # Using += to match HippoRAG's _add_edge_weight behavior
+            self.node_to_node_stats[(chunk_id, entity_id)] += 1.0
+            self.node_to_node_stats[(entity_id, chunk_id)] += 1.0
 
-        # 2. Add entity-entity edges from facts
+        # 2. Add entity-entity edges from facts (BIDIRECTIONAL: head <-> tail)
         # Build entity name to ID mapping for fast lookup
         cursor.execute('SELECT entity_id, entity_name FROM entities')
         entity_name_to_id = {name: eid for eid, name in cursor.fetchall()}
@@ -524,11 +590,12 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             head_id = entity_name_to_id.get(head_name)
             tail_id = entity_name_to_id.get(tail_name)
             if head_id and tail_id and head_id != tail_id:
-                # Update statistics (bidirectional)
+                # Update statistics (BIDIRECTIONAL: both directions)
+                # Multiple facts between same entities will accumulate weight (co-occurrence count)
                 self.node_to_node_stats[(head_id, tail_id)] += 1.0
                 self.node_to_node_stats[(tail_id, head_id)] += 1.0
 
-        # 3. Add synonymy edges (if table exists and has data)
+        # 3. Add synonymy edges (UNIDIRECTIONAL - no need for bidirectional)
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='synonymy_edges'")
         if cursor.fetchone():
             cursor.execute('SELECT entity_id_1, entity_id_2, similarity FROM synonymy_edges')
@@ -536,17 +603,10 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             if synonymy_edges:
                 logger.info(f"Loading {len(synonymy_edges)} unidirectional synonymy edges from SQLite...")
                 for entity_id_1, entity_id_2, similarity in synonymy_edges:
-                    # ✅ FIXED: Keep synonymy edges UNIDIRECTIONAL (same as standard version)
-                    # SQLite stores unidirectional edges, we keep them unidirectional in node_to_node_stats
-                    # This is different from chunk-entity and entity-fact edges which are bidirectional
+                    # Synonymy edges stored UNIDIRECTIONAL (igraph undirected handles traversal)
                     self.node_to_node_stats[(entity_id_1, entity_id_2)] = similarity
 
         # Build graph from node_to_node_stats
-        # ✅ FIXED: Directly add all edges from node_to_node_stats (same as standard version)
-        # No need to filter by from_idx < to_idx because:
-        # - Chunk-entity edges are already bidirectional in node_to_node_stats
-        # - Entity-fact edges are already bidirectional in node_to_node_stats
-        # - Synonymy edges are unidirectional in node_to_node_stats
         valid_edges = []
         edge_weights = []
 
@@ -557,15 +617,29 @@ class PrunedHippoRAGIGraphStore(GraphStore):
                 valid_edges.append((from_idx, to_idx))
                 edge_weights.append(weight)
 
-        # Add edges to graph
+        # Add edges to graph (batch operation for performance)
         if valid_edges:
+            logger.info(f"Adding {len(valid_edges)} edges to igraph (batch mode)...")
             self.graph.add_edges(valid_edges)
             self.graph.es['weight'] = edge_weights
 
         logger.info(f"Graph built: {self.graph.vcount()} nodes, {self.graph.ecount()} edges")
 
     def _add_synonymy_edges(self):
-        """Add synonymy edges using FAISS HNSW and save to SQLite"""
+        """
+        Add synonymy edges between similar entities using FAISS HNSW.
+
+        This method:
+        1. Retrieves all entities from the database
+        2. Filters out short entities (<=2 alphanumeric characters)
+        3. Performs batch FAISS search to find top-k similar entities
+        4. Filters results by similarity threshold
+        5. Excludes entity pairs already connected by facts
+        6. Stores synonymy edges in SQLite database
+
+        Synonymy edges connect entities with similar embeddings, enabling
+        the graph to capture semantic relationships beyond explicit facts.
+        """
         if not self.add_synonymy_edges:
             logger.info("Synonymy edges disabled")
             return
@@ -659,9 +733,8 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         # Process results
         logger.info("Processing search results...")
 
-        # Debug: Log first entity's results
         if len(valid_entities) > 0:
-            first_entity_id, first_entity_name = valid_entities[0]
+            _, first_entity_name = valid_entities[0]
             first_distances = distances_batch[0]
             first_indices = indices_batch[0]
             logger.info(f"DEBUG: First entity '{first_entity_name}' top-5 neighbors:")
@@ -680,7 +753,6 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             if i > 0 and i % 1000 == 0:
                 logger.info(f"Processed {i}/{len(valid_entities)} entities, found {num_synonym_edges} synonymy edges so far")
 
-            # Process results (same as original version)
             num_added = 0
             for idx, distance in zip(indices, distances):
                 if idx == -1:  # FAISS returns -1 for empty results
@@ -706,16 +778,12 @@ class PrunedHippoRAGIGraphStore(GraphStore):
                     continue
 
                 # FAISS with metric='cosine' returns NEGATIVE inner product
-                # For normalized vectors: inner_product = cosine_similarity
-                # So: distance = -cosine_similarity
-                # Therefore: cosine_similarity = -distance
                 similarity = -float(distance)
 
-                # Check threshold (same as original)
+                # Check threshold
                 if similarity < self.synonymy_edge_sim_threshold:
                     break  # Distances are sorted, can break early
 
-                # Check if edge already exists in EITHER direction (same as standard version)
                 edge_key = (entity_id, neighbor_entity_id)
                 reverse_edge_key = (neighbor_entity_id, entity_id)
 
@@ -729,7 +797,6 @@ class PrunedHippoRAGIGraphStore(GraphStore):
                     existing_entity_entity_edges.add(edge_key)
                     existing_entity_entity_edges.add(reverse_edge_key)
 
-                # Limit max neighbors per entity (same as original)
                 if num_added >= 100:
                     break
 
@@ -743,27 +810,46 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             )
             self.conn.commit()
 
-            # Incrementally add synonymy edges to graph
-            # Note: Synonymy edges are UNIDIRECTIONAL in storage but we add them as undirected edges
+            logger.info(f"Adding {len(edges_to_add)} synonymy edges to graph (batch mode)...")
+
+            # Prepare batch data for igraph
+            valid_edges = []
+            edge_weights = []
+
             for entity_id_1, entity_id_2, similarity in edges_to_add:
                 # Add edge to node_to_node_stats (unidirectional, as stored in SQLite)
                 self.node_to_node_stats[(entity_id_1, entity_id_2)] = similarity
 
-                # Add edge to igraph (will be undirected since graph is undirected)
+                # Prepare edge for batch addition to igraph
                 if entity_id_1 in self.node_to_idx and entity_id_2 in self.node_to_idx:
                     idx_1 = self.node_to_idx[entity_id_1]
                     idx_2 = self.node_to_idx[entity_id_2]
-                    try:
-                        self.graph.add_edge(idx_1, idx_2, weight=similarity)
-                    except Exception as e:
-                        logger.warning(f"Failed to add synonymy edge {entity_id_1} -> {entity_id_2}: {e}")
+                    valid_edges.append((idx_1, idx_2))
+                    edge_weights.append(similarity)
+
+            # Batch add all edges at once (much faster than individual add_edge calls)
+            if valid_edges:
+                try:
+                    self.graph.add_edges(valid_edges)
+                    # Set weights for all edges
+                    edge_ids = self.graph.get_eids(valid_edges)
+                    self.graph.es[edge_ids]['weight'] = edge_weights
+                    logger.info(f"Successfully added {len(valid_edges)} synonymy edges to graph")
+                except Exception as e:
+                    logger.warning(f"Failed to batch add synonymy edges: {e}")
 
             logger.info(f"Added {num_synonym_edges} unique synonymy edges ({len(edges_to_add)} directional edges)")
         else:
             logger.info("No synonymy edges to add")
 
     def _rebuild_chunk_embeddings_array(self):
-        """Rebuild chunk embeddings array for brute-force search"""
+        """
+        Rebuild chunk embeddings array for dense passage retrieval.
+
+        This method creates a numpy array of chunk embeddings ordered by chunk IDs,
+        enabling efficient brute-force similarity search during retrieval.
+        The array is cached and only rebuilt when marked as dirty.
+        """
         if self._chunk_embeddings_array is not None:
             return  # Already built
 
@@ -782,13 +868,42 @@ class PrunedHippoRAGIGraphStore(GraphStore):
     # ========== GraphStore Interface Implementation ==========
 
     def build_index(self, chunks: List[Chunk]) -> None:
-        """Build graph from a list of Chunks"""
+        """
+        Build the complete graph index from a list of chunks.
+
+        This method performs the following steps:
+        1. Adds all chunks to SQLite database
+        2. Extracts and adds graph data (entities and facts) to SQLite
+        3. Generates embeddings for facts, entities, and chunks
+        4. Builds the igraph structure from SQLite data
+        5. Optionally computes synonymy edges
+        6. Rebuilds chunk embeddings array for dense retrieval
+
+        Args:
+            chunks: List of Chunk objects to index
+        """
         logger.info(f"Building index from {len(chunks)} chunks...")
 
-        for chunk in chunks:
-            self.add_chunk(chunk)
-            if chunk.graph and not chunk.graph.is_empty():
-                self.add_graph_data(chunk.graph, chunk.id)
+        batch_size = 1000
+        total_chunks = len(chunks)
+
+        from tqdm import tqdm
+
+        logger.info("Step 1: Adding chunks and graph data to SQLite...")
+        for i in tqdm(range(0, total_chunks, batch_size), desc="Processing chunks"):
+            batch_end = min(i + batch_size, total_chunks)
+            batch = chunks[i:batch_end]
+
+            # Process batch (SQLite only, no igraph operations)
+            for chunk in batch:
+                self._add_chunk_no_commit(chunk)
+                if chunk.graph and not chunk.graph.is_empty():
+                    self._add_graph_data_no_commit(chunk.graph, chunk.id)
+
+            # Commit once per batch
+            self.conn.commit()
+
+        logger.info(f"All {total_chunks} chunks added to SQLite")
 
         # Batch generate embeddings
         self.batch_generate_embeddings()
@@ -806,7 +921,22 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         logger.info("Index building completed")
 
     def update_index(self, chunks: List[Chunk]) -> Optional[bool]:
-        """Update existing chunks' graphs in the database"""
+        """
+        Update the graph index with new or modified chunks.
+
+        This method performs incremental updates:
+        1. Adds new chunks and graph data to SQLite
+        2. Generates embeddings for new items
+        3. Rebuilds the graph structure from SQLite
+        4. Optionally recomputes synonymy edges
+        5. Rebuilds chunk embeddings array
+
+        Args:
+            chunks: List of Chunk objects to add/update
+
+        Returns:
+            True if successful, False otherwise
+        """
         logger.info(f"Updating index with {len(chunks)} chunks...")
 
         try:
@@ -855,7 +985,20 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             return False
 
     def delete_index(self, ids: Optional[List[str]] = None) -> Optional[bool]:
-        """Delete chunks and their graphs by IDs"""
+        """
+        Delete chunks and their associated graph data by IDs.
+
+        This method:
+        1. Deletes chunks from SQLite (cascades to relations)
+        2. Rebuilds the graph structure from remaining data
+        3. Rebuilds chunk embeddings array
+
+        Args:
+            ids: List of chunk IDs to delete
+
+        Returns:
+            True if successful, False otherwise
+        """
         if ids is None or len(ids) == 0:
             logger.warning("No chunk IDs provided for deletion")
             return False
@@ -932,7 +1075,7 @@ class PrunedHippoRAGIGraphStore(GraphStore):
 
         self.conn.commit()
 
-        # 5. ✅ Delete from chunk_embeddings (not FAISS)
+        # 5. Delete from chunk_embeddings (not FAISS)
         for chunk_id in chunk_ids:
             if chunk_id in self.chunk_embeddings:
                 del self.chunk_embeddings[chunk_id]
@@ -982,7 +1125,15 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         return True
 
     def get_by_ids(self, ids: Sequence[str]) -> List[Chunk]:
-        """Retrieve chunks (including their graphs) by IDs"""
+        """
+        Retrieve chunks and their associated graph data by IDs.
+
+        Args:
+            ids: Sequence of chunk IDs to retrieve
+
+        Returns:
+            List of Chunk objects with graph data in metadata
+        """
         chunks = []
         cursor = self.conn.cursor()
 
@@ -1009,7 +1160,15 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         return chunks
 
     def _get_graph_data(self, chunk_id: str) -> GraphData:
-        """Get graph data for a specific chunk"""
+        """
+        Get graph data (entities and relations) for a specific chunk.
+
+        Args:
+            chunk_id: ID of the chunk
+
+        Returns:
+            GraphData object containing entities and relations for the chunk
+        """
         cursor = self.conn.cursor()
 
         # Get entities for this chunk
@@ -1050,7 +1209,20 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         return GraphData(entities=entities, relations=relations, metadata={})
 
     def save_index(self, path: str, name: str = "index") -> None:
-        """Persist the graph database to filesystem"""
+        """
+        Persist the graph database to filesystem.
+
+        This method saves:
+        1. Graph structure (igraph object) as pickle
+        2. Node mappings (node_to_idx, idx_to_node) as pickle
+        3. Chunk embeddings as pickle
+        4. FAISS indices for facts and entities
+        5. SQLite database (already persisted)
+
+        Args:
+            path: Directory path to save the index
+            name: Base name for index files
+        """
         os.makedirs(path, exist_ok=True)
 
         # 1. Save graph structure
@@ -1068,7 +1240,7 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             }, f)
         logger.info(f"Saved mappings to {mappings_path}")
 
-        # 3. ✅ Save chunk embeddings (use pickle, not FAISS)
+        # 3. Save chunk embeddings
         chunk_embeddings_path = os.path.join(path, f"{name}_chunk_embeddings.pkl")
         with open(chunk_embeddings_path, 'wb') as f:
             pickle.dump(self.chunk_embeddings, f)
@@ -1084,9 +1256,6 @@ class PrunedHippoRAGIGraphStore(GraphStore):
                 pickle.dump(self._chunk_ids_list, f)
             logger.info(f"Saved chunk embeddings array to {chunk_array_path}")
 
-        # 5. ✅ SQLite auto-saves (every operation commits)
-        # 6. ✅ FAISS auto-saves (in batch_generate_embeddings)
-
         logger.info(f"Index saved to {path}")
         logger.info(f"  Graph: {self.graph.vcount()} nodes, {self.graph.ecount()} edges")
         logger.info(f"  Facts (FAISS Flat): {self.fact_faiss_db.index.ntotal if self.fact_faiss_db.index else 0}")
@@ -1094,7 +1263,20 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         logger.info(f"  Chunks (numpy array): {len(self.chunk_embeddings)}")
 
     def load_index(self, path: str, name: str = "index") -> None:
-        """Load persisted graph database from filesystem"""
+        """
+        Load persisted graph database from filesystem.
+
+        This method loads:
+        1. Graph structure (igraph object) from pickle
+        2. Node mappings (node_to_idx, idx_to_node) from pickle
+        3. Chunk embeddings from pickle
+        4. FAISS indices for facts and entities
+        5. SQLite database (already connected)
+
+        Args:
+            path: Directory path containing the index
+            name: Base name for index files
+        """
         logger.info(f"Loading index from {path}...")
 
         # 1. Load graph structure
@@ -1113,7 +1295,7 @@ class PrunedHippoRAGIGraphStore(GraphStore):
                 self.node_to_node_stats = defaultdict(float, mappings['node_to_node_stats'])
             logger.info(f"Loaded mappings")
 
-        # 3. ✅ Load chunk embeddings (from pickle, not FAISS)
+        # 3. Load chunk embeddings
         chunk_embeddings_path = os.path.join(path, f"{name}_chunk_embeddings.pkl")
         if os.path.exists(chunk_embeddings_path):
             with open(chunk_embeddings_path, 'rb') as f:
@@ -1134,7 +1316,7 @@ class PrunedHippoRAGIGraphStore(GraphStore):
                 logger.info("Pre-computed array not found, rebuilding...")
                 self._rebuild_chunk_embeddings_array()
 
-        # 4. ✅ Reconnect SQLite to the correct database path
+        # 4. Reconnect SQLite to the correct database path
         db_path = os.path.join(path, 'metadata.db')
         if os.path.exists(db_path):
             # Close existing connection if any
@@ -1148,18 +1330,34 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         else:
             logger.warning(f"SQLite database not found at {db_path}")
 
-        # 5. ✅ FAISS auto-loads (in _init_faiss_indices)
+        # 5. FAISS auto-loads (in _init_faiss_indices)
 
         logger.info(f"Index loaded from {path}")
 
-    def query(self, query: str, params: Optional[Dict[str, Any]] = None) -> Any:
-        """Run a query on the graph database"""
-        # This is a placeholder - implement based on your query needs
+    def query(self, _query: str, _params: Optional[Dict[str, Any]] = None) -> Any:
+        """
+        Query method (not implemented for graph store).
+
+        Graph stores use specialized retrieval methods instead of generic queries.
+
+        Args:
+            _query: Query string (unused)
+            _params: Query parameters (unused)
+
+        Returns:
+            None
+        """
         logger.warning("query() method not implemented for graph store")
         return None
 
     def get_graph_db_info(self) -> Dict[str, Any]:
-        """Return statistics or metadata about the graph database"""
+        """
+        Return statistics and metadata about the graph database.
+
+        Returns:
+            Dictionary containing counts of chunks, entities, facts, relations,
+            graph nodes/edges, and FAISS index sizes
+        """
         cursor = self.conn.cursor()
 
         # Count chunks
@@ -1181,13 +1379,11 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         return {
             'type': 'pruned_hipporag_igraph',
             'storage_path': self.storage_path,
-            # Standard keys (compatible with other implementations)
             'num_nodes': self.graph.vcount(),
             'num_edges': self.graph.ecount(),
             'num_chunks': chunk_count,
             'num_entities': entity_count,
             'num_facts': fact_count,
-            # Additional graph store specific info
             'chunk_entity_relations': relation_count,
             'fact_index_type': 'FAISS Flat',
             'fact_index_size': self.fact_faiss_db.index.ntotal if self.fact_faiss_db.index else 0,

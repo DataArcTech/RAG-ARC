@@ -98,12 +98,15 @@ class GraphExporter:
         cursor.execute('SELECT fact_id, head, relation, tail FROM facts')
         fact_relations = {fid: (head, relation, tail) for fid, head, relation, tail in cursor.fetchall()}
 
-        # Export edges
-        edge_count = 0
-        for edge in graph.es:
-            if edge_count >= max_edges:
-                break
+        # Collect edges by type for uniform sampling
+        edges_by_type = {
+            'mentions': [],
+            'fact_relation': [],
+            'synonymy': [],
+            'other': []
+        }
 
+        for edge in graph.es:
             source_idx = edge.source
             target_idx = edge.target
 
@@ -134,11 +137,11 @@ class GraphExporter:
                 edge_obj['source'] = source_id  # chunk_id
                 edge_obj['target'] = entity_id_to_name.get(target_id, target_id)  # entity_name
                 edge_obj['relation'] = 'mentions'
+                edges_by_type['mentions'].append(edge_obj)
 
             elif source_type == 'entity' and target_type == 'chunk':
-                edge_obj['source'] = entity_id_to_name.get(source_id, source_id)  # entity_name
-                edge_obj['target'] = target_id  # chunk_id
-                edge_obj['relation'] = 'mentioned_by'
+                # Skip reverse edge (mentioned_by), as edges are undirected
+                continue
 
             elif source_type == 'entity' and target_type == 'entity':
                 source_name = entity_id_to_name.get(source_id, source_id)
@@ -152,26 +155,40 @@ class GraphExporter:
                         edge_obj['target'] = target_name
                         edge_obj['relation'] = relation
                         relation_found = True
+                        edges_by_type['fact_relation'].append(edge_obj)
                         break
                     elif head == target_name and tail == source_name:
                         edge_obj['source'] = target_name
                         edge_obj['target'] = source_name
                         edge_obj['relation'] = relation
                         relation_found = True
+                        edges_by_type['fact_relation'].append(edge_obj)
                         break
 
                 if not relation_found:
                     edge_obj['source'] = source_name
                     edge_obj['target'] = target_name
                     edge_obj['relation'] = 'synonymy'
+                    edges_by_type['synonymy'].append(edge_obj)
 
             else:
                 edge_obj['source'] = source_id
                 edge_obj['target'] = target_id
                 edge_obj['relation'] = 'related'
+                edges_by_type['other'].append(edge_obj)
 
-            edges.append(edge_obj)
-            edge_count += 1
+        # Uniformly sample edges from different types
+        # Allocate edge quota: mentions (50%), fact_relation (35%), synonymy (10%), other (5%)
+        mentions_quota = int(max_edges * 0.50)
+        fact_quota = int(max_edges * 0.35)
+        synonymy_quota = int(max_edges * 0.10)
+        other_quota = max_edges - mentions_quota - fact_quota - synonymy_quota
+
+        # Sample edges based on quota
+        edges.extend(edges_by_type['mentions'][:mentions_quota])
+        edges.extend(edges_by_type['fact_relation'][:fact_quota])
+        edges.extend(edges_by_type['synonymy'][:synonymy_quota])
+        edges.extend(edges_by_type['other'][:other_quota])
         
         logger.info(f"Exported {len(nodes)} nodes and {len(edges)} edges")
         
@@ -262,7 +279,7 @@ class GraphExporter:
         cursor.execute('SELECT fact_id, head, relation, tail FROM facts')
         fact_relations = {fid: (head, relation, tail) for fid, head, relation, tail in cursor.fetchall()}
 
-        # Export edges
+        # Export edges (no limit for subgraph, but still skip reverse edges)
         subgraph_node_set = set(subgraph_node_indices)
         for edge in graph.es:
             source_idx = edge.source
@@ -298,10 +315,8 @@ class GraphExporter:
                 edge_obj['relation'] = 'mentions'
 
             elif source_type == 'entity' and target_type == 'chunk':
-                # Entity mentioned by chunk
-                edge_obj['source'] = entity_id_to_name.get(source_id, source_id)  # entity_name
-                edge_obj['target'] = target_id  # chunk_id
-                edge_obj['relation'] = 'mentioned_by'
+                # Skip reverse edge (mentioned_by), as edges are undirected
+                continue
 
             elif source_type == 'entity' and target_type == 'entity':
                 # Entity-entity relation (synonymy or fact-based)

@@ -1,0 +1,38 @@
+dill
+faiss-gpu; python_version<="3.12"
+tantivy
+jieba
+openai
+tqdm
+psycopg[binary]
+psycopg2
+huggingface-hub
+pydantic
+fastapi
+fastmcp
+uvicorn
+bs4
+
+networkx
+igraph
+hnswlib
+
+SQLAlchemy
+PyJWT
+redis
+passlib
+python-dotenv
+python-docx
+xlrd
+chardet
+websockets
+
+transformers==4.51.3
+torch == 2.4.1
+accelerate
+sentence-transformers
+qwen_vl_utils
+PyMuPDF
+flash-attn==2.8.0.post2
+# for GLIBC 2.31, please use flash-attn==2.7.4.post1. If GLIBC > 2.31, please use flash-attn==2.8.0.post2.
+vllm==0.9.1
