@@ -367,3 +367,28 @@ class FileStorage(AbstractModule):
         except Exception as e:
             logger.error(f"Failed to list files for owner {owner_id}: {e}")
             raise StorageOperationError(f"Failed to list files: {e}")
+
+    def count_files(
+        self,
+        owner_id: uuid.UUID | None = None,
+        status: FileStatus | None = None
+    ) -> int:
+        """
+        Count all files for a specific owner with optional filtering.
+
+        Args:
+            owner_id: UUID of the file owner
+            status: Optional file status filter
+
+        Returns:
+            Total count of files for the owner
+
+        Raises:
+            StorageOperationError: If counting operation fails
+        """
+        try:
+            count = self.metadata_store.count_file_metadata(owner_id, status)
+            return count
+        except Exception as e:
+            logger.error(f"Failed to count files for owner {owner_id}: {e}")
+            raise StorageOperationError(f"Failed to count files: {e}")

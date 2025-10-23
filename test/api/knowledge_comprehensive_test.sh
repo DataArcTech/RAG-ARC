@@ -201,6 +201,38 @@ if [ "$LIST_PAGINATED_STATUS" != "200" ]; then
   exit 1
 fi
 
+# Extract total counts and verify they match
+echo "Verifying total counts match between paginated and non-paginated requests..."
+TOTAL_FROM_PAGINATED=$(echo "$LIST_PAGINATED_BODY" | python3 -c "
+import sys
+import json
+try:
+    data = json.load(sys.stdin)
+    print(data.get('total', 0))
+except:
+    print(0)
+")
+
+TOTAL_FROM_NON_PAGINATED=$(echo "$LIST_BODY" | python3 -c "
+import sys
+import json
+try:
+    data = json.load(sys.stdin)
+    print(data.get('total', 0))
+except:
+    print(0)
+")
+
+echo "Total from paginated request (limit=1, offset=0): $TOTAL_FROM_PAGINATED"
+echo "Total from non-paginated request: $TOTAL_FROM_NON_PAGINATED"
+
+if [ "$TOTAL_FROM_PAGINATED" != "$TOTAL_FROM_NON_PAGINATED" ]; then
+  echo "❌ Total counts do not match! Paginated: $TOTAL_FROM_PAGINATED, Non-paginated: $TOTAL_FROM_NON_PAGINATED"
+  exit 1
+fi
+
+echo "✅ Total counts match between paginated and non-paginated requests"
+
 echo "✅ List files functionality PASS"
 
 # 4) Download the file

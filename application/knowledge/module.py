@@ -144,4 +144,30 @@ class Knowledge(AbstractModule):
         except Exception as e:
             logger.error(f"Failed to list files for user {user_id}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to retrieve files: {str(e)}")
+    
+    def count_user_files(
+        self,
+        user_id: uuid.UUID,
+        status: FileStatus | None = None
+    ) -> int:
+        """
+        Count all files for a specific user.
+        
+        Args:
+            user_id: UUID of the file owner
+            status: Optional filter by file status
+            
+        Returns:
+            Total count of files for the user
+        """
+        try:
+            count = self.file_storage.count_files(
+                owner_id=user_id,
+                status=status
+            )
+            logger.info(f"Counted {count} files for user {user_id}")
+            return count
+        except Exception as e:
+            logger.error(f"Failed to count files for user {user_id}: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to count files: {str(e)}")
         

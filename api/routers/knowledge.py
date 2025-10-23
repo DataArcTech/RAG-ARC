@@ -160,11 +160,15 @@ async def list_files(
             detail="Authentication required"
         )
     try:
+        # Get files for current page
         files = knowledge_handler.list_user_files(
             user_id=user.id,
             limit=limit,
             offset=offset
         )
+        
+        # Get total count of files for the user
+        total_count = knowledge_handler.count_user_files(user.id)
         
         # Convert FileMetadata objects to FileInfo response models
         file_infos = [
@@ -182,7 +186,7 @@ async def list_files(
         
         return FileListResponse(
             files=file_infos,
-            total=len(file_infos)
+            total=total_count
         )
     except HTTPException:
         # Re-raise HTTP exceptions

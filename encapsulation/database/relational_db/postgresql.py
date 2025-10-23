@@ -317,6 +317,40 @@ class PostgreSQLDB(RelationalDB):
             logger.error(f"Database error listing file metadata: {e}")
             raise
     
+    def count_file_metadata(
+        self,
+        owner_id: uuid.UUID | None = None,
+        status: FileStatus | None = None,
+    ) -> int:
+        """
+        Count file metadata with optional filtering using SQLAlchemy ORM
+
+        Args:
+            owner_id: Owner ID filter (for user isolation)
+            status: File status filter
+
+        Returns:
+            Total count of file metadata records matching the criteria
+        """
+        try:
+            with self.SessionMaker() as session:
+                query = session.query(FileMetadata)
+
+                # Add owner_id filter (for user isolation)
+                if owner_id:
+                    query = query.filter(FileMetadata.owner_id == owner_id)
+
+                # Add status filter
+                if status:
+                    query = query.filter(FileMetadata.status == status.value)
+    
+                count = query.count()
+                return count
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error counting file metadata: {e}")
+            raise
+    
     def store_parsed_content_metadata(
         self,
         parsed_metadata: ParsedContentMetadata,
