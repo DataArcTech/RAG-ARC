@@ -11,7 +11,7 @@ class DotsOCRConfig(AbstractConfig):
     loading_method: Literal["huggingface", "vllm"] = "huggingface"
     use_china_mirror: bool = False
     cache_folder: Optional[str] = None
-    use_snapshot_download: bool = True  # Use snapshot_download to avoid dynamic module issues
+    use_snapshot_download: bool = False  # Use snapshot_download to avoid dynamic module issues
 
     # Model configuration
     device: str = "cuda:0"

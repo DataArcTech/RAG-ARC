@@ -137,34 +137,41 @@ def _create_transformers_base(config, tokenizer_class, model_class, **kwargs):
             logger.info("Using default HuggingFace cache folder")
 
         # If use_snapshot_download is enabled and cache_folder is provided, download the complete model first
+        is_local_path = False
         if use_snapshot_download and cache_folder:
             local_model_path = _download_model_snapshot(model_path, cache_folder, use_china_mirror)
             # Use the local path for loading
             model_path = local_model_path
+            is_local_path = True
             logger.info(f"Using local model path: {model_path}")
 
         # Merge with provided model_kwargs
         final_model_kwargs = {**model_kwargs, **kwargs.get('model_kwargs', {})}
         tokenizer_kwargs = kwargs.get('tokenizer_kwargs', {})
 
+        # Prepare loading kwargs - don't use cache_dir for local paths
+        load_kwargs = {
+            'trust_remote_code': True,
+        }
+        if not is_local_path:
+            load_kwargs['cache_dir'] = cache_folder
+            load_kwargs['force_download'] = force_download
+
         # Create tokenizer/processor with retry logic
         logger.info(f"Loading tokenizer/processor from: {model_path}")
         try:
             tokenizer = tokenizer_class.from_pretrained(
                 model_path,
-                cache_dir=cache_folder,
-                trust_remote_code=True,
-                force_download=force_download,
+                **load_kwargs,
                 **tokenizer_kwargs
             )
         except OSError as e:
-            if "Consistency check failed" in str(e):
+            if "Consistency check failed" in str(e) and not is_local_path:
                 logger.warning(f"Consistency check failed, retrying with force_download=True: {e}")
+                retry_kwargs = {**load_kwargs, 'force_download': True}
                 tokenizer = tokenizer_class.from_pretrained(
                     model_path,
-                    cache_dir=cache_folder,
-                    trust_remote_code=True,
-                    force_download=True,
+                    **retry_kwargs,
                     **tokenizer_kwargs
                 )
             else:
@@ -175,19 +182,16 @@ def _create_transformers_base(config, tokenizer_class, model_class, **kwargs):
         try:
             model = model_class.from_pretrained(
                 model_path,
-                cache_dir=cache_folder,
-                trust_remote_code=True,
-                force_download=force_download,
+                **load_kwargs,
                 **final_model_kwargs
             )
         except OSError as e:
-            if "Consistency check failed" in str(e):
+            if "Consistency check failed" in str(e) and not is_local_path:
                 logger.warning(f"Consistency check failed, retrying with force_download=True: {e}")
+                retry_kwargs = {**load_kwargs, 'force_download': True}
                 model = model_class.from_pretrained(
                     model_path,
-                    cache_dir=cache_folder,
-                    trust_remote_code=True,
-                    force_download=True,
+                    **retry_kwargs,
                     **final_model_kwargs
                 )
             else:
