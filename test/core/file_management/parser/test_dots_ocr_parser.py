@@ -4,6 +4,8 @@ Separated by loading method: HuggingFace vs VLLM
 """
 
 import os
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../")))
 
 from config.core.file_management.parser.dots_ocr import DotsOCRParserConfig
 from config.encapsulation.llm.parse.dots_ocr import DotsOCRConfig
@@ -16,7 +18,7 @@ def get_test_files():
     ]
 
     sample_pdf_paths = [
-        "./test_data/test_pdf.pdf",
+        "./test/test_pdf.pdf",
     ]
 
     return sample_image_paths, sample_pdf_paths
@@ -168,7 +170,10 @@ def test_huggingface_loading_method():
     try:
         # Create HuggingFace config
         hf_service_config = DotsOCRConfig(
-            loading_method="huggingface"
+            loading_method="huggingface",
+            use_china_mirror=True,
+            cache_folder="./models/dots_ocr",
+            use_snapshot_download=True
         )
 
         hf_parser_config = DotsOCRParserConfig(

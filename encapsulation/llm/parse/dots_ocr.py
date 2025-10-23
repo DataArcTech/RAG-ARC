@@ -1,5 +1,5 @@
 import logging
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from PIL import Image
 import base64
 from io import BytesIO
@@ -8,6 +8,9 @@ from .base import ParseLLMBase
 from ..utils.vllm_client import create_vllm_client
 from ..utils.huggingface_client import create_vision_language_model
 from framework.singleton_decorator import singleton
+
+if TYPE_CHECKING:
+    from config.encapsulation.llm.parse.dots_ocr import DotsOCRConfig
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +36,7 @@ class DotsOCRLLM(ParseLLMBase):
         For VLLM: base_url, api_key, model_name, temperature, etc.
     """
 
-    def __init__(self, config):
+    def __init__(self, config: "DotsOCRConfig"):
         """Initialize DotsOCR LLM with loading method support"""
         super().__init__(config)
 

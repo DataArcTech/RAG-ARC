@@ -1,9 +1,59 @@
 """HuggingFace client creation utilities"""
 
 import logging
+import os
 from typing import Any, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def _download_model_snapshot(model_path: str, cache_folder: str, use_china_mirror: bool = False) -> str:
+    """
+    Download complete model snapshot using huggingface_hub
+
+    Args:
+        model_path: HuggingFace model repository ID
+        cache_folder: Local cache directory
+        use_china_mirror: Whether to use China mirror
+
+    Returns:
+        Local path to the downloaded model
+    """
+    try:
+        from huggingface_hub import snapshot_download
+
+        # Set mirror before importing/using huggingface_hub
+        if use_china_mirror:
+            os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+            logger.info("Set HF_ENDPOINT to https://hf-mirror.com for snapshot download")
+
+        logger.info(f"Downloading model snapshot from {model_path} to {cache_folder}")
+
+        # Download to local_dir without symlinks to avoid module import issues
+        local_model_path = os.path.join(cache_folder, "model")
+
+        # Check if model already exists
+        if os.path.exists(local_model_path) and os.path.isdir(local_model_path):
+            # Check if it has essential files
+            config_file = os.path.join(local_model_path, "config.json")
+            if os.path.exists(config_file):
+                logger.info(f"Model already exists at {local_model_path}, skipping download")
+                return local_model_path
+
+        snapshot_download(
+            repo_id=model_path,
+            cache_dir=cache_folder,
+            local_dir=local_model_path,
+            local_dir_use_symlinks=False,
+            resume_download=True
+        )
+
+        logger.info(f"Model snapshot downloaded successfully to: {local_model_path}")
+        return local_model_path
+
+    except Exception as e:
+        logger.error(f"Failed to download model snapshot: {str(e)}")
+        raise
 
 
 def create_sentence_transformer_client(config) -> Any:
@@ -33,6 +83,13 @@ def create_sentence_transformer_client(config) -> Any:
         cache_folder = getattr(config, 'cache_folder', None)
         model_kwargs = getattr(config, 'model_kwargs', {})
 
+        # Log cache folder information
+        if cache_folder:
+            logger.info(f"Using custom cache folder: {cache_folder}")
+        else:
+            logger.info("Using default SentenceTransformer cache folder")
+
+        logger.info(f"Loading SentenceTransformer model: {model_name}")
         client = sentence_transformers.SentenceTransformer(
             model_name,
             cache_folder=cache_folder,
@@ -40,7 +97,7 @@ def create_sentence_transformer_client(config) -> Any:
             **model_kwargs
         )
 
-        logger.info(f"SentenceTransformer client initialized: {model_name}")
+        logger.info(f"SentenceTransformer client initialized successfully: {model_name}")
         return client
 
     except ImportError:
@@ -69,27 +126,75 @@ def _create_transformers_base(config, tokenizer_class, model_class, **kwargs):
         device = getattr(config, 'device', 'cpu')
         cache_folder = getattr(config, 'cache_folder', None)
         model_kwargs = getattr(config, 'model_kwargs', {})
+        force_download = getattr(config, 'force_download', False)
+        use_china_mirror = getattr(config, 'use_china_mirror', False)
+        use_snapshot_download = getattr(config, 'use_snapshot_download', False)
+
+        # Log cache folder information
+        if cache_folder:
+            logger.info(f"Using custom cache folder: {cache_folder}")
+        else:
+            logger.info("Using default HuggingFace cache folder")
+
+        # If use_snapshot_download is enabled and cache_folder is provided, download the complete model first
+        if use_snapshot_download and cache_folder:
+            local_model_path = _download_model_snapshot(model_path, cache_folder, use_china_mirror)
+            # Use the local path for loading
+            model_path = local_model_path
+            logger.info(f"Using local model path: {model_path}")
 
         # Merge with provided model_kwargs
         final_model_kwargs = {**model_kwargs, **kwargs.get('model_kwargs', {})}
         tokenizer_kwargs = kwargs.get('tokenizer_kwargs', {})
 
-        # Create tokenizer/processor
-        tokenizer = tokenizer_class.from_pretrained(
-            model_path,
-            cache_dir=cache_folder,
-            trust_remote_code=True,
-            **tokenizer_kwargs
-        )
+        # Create tokenizer/processor with retry logic
+        logger.info(f"Loading tokenizer/processor from: {model_path}")
+        try:
+            tokenizer = tokenizer_class.from_pretrained(
+                model_path,
+                cache_dir=cache_folder,
+                trust_remote_code=True,
+                force_download=force_download,
+                **tokenizer_kwargs
+            )
+        except OSError as e:
+            if "Consistency check failed" in str(e):
+                logger.warning(f"Consistency check failed, retrying with force_download=True: {e}")
+                tokenizer = tokenizer_class.from_pretrained(
+                    model_path,
+                    cache_dir=cache_folder,
+                    trust_remote_code=True,
+                    force_download=True,
+                    **tokenizer_kwargs
+                )
+            else:
+                raise
 
-        # Create model
-        model = model_class.from_pretrained(
-            model_path,
-            cache_dir=cache_folder,
-            trust_remote_code=True,
-            **final_model_kwargs
-        )
+        # Create model with retry logic
+        logger.info(f"Loading model from: {model_path}")
+        try:
+            model = model_class.from_pretrained(
+                model_path,
+                cache_dir=cache_folder,
+                trust_remote_code=True,
+                force_download=force_download,
+                **final_model_kwargs
+            )
+        except OSError as e:
+            if "Consistency check failed" in str(e):
+                logger.warning(f"Consistency check failed, retrying with force_download=True: {e}")
+                model = model_class.from_pretrained(
+                    model_path,
+                    cache_dir=cache_folder,
+                    trust_remote_code=True,
+                    force_download=True,
+                    **final_model_kwargs
+                )
+            else:
+                raise
+
         model.to(device)
+        logger.info(f"Model loaded successfully and moved to device: {device}")
 
         return model, tokenizer
 
@@ -150,6 +255,12 @@ def create_vision_language_model(config) -> Tuple[Any, Any, Any]:
         Exception: If model creation fails
     """
     try:
+        if getattr(config, 'use_china_mirror', False):
+            import os
+            os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+            logger.info("Set HF_ENDPOINT to https://hf-mirror.com")
+
+            
         from transformers import AutoProcessor, AutoModelForCausalLM
         from qwen_vl_utils import process_vision_info
         import torch

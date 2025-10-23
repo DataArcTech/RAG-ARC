@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, Optional
 from framework.config import AbstractConfig
 from encapsulation.llm.parse.dots_ocr import DotsOCRLLM
 
@@ -9,12 +9,15 @@ class DotsOCRConfig(AbstractConfig):
 
     # Loading method configuration
     loading_method: Literal["huggingface", "vllm"] = "huggingface"
+    use_china_mirror: bool = False
+    cache_folder: Optional[str] = None
+    use_snapshot_download: bool = True  # Use snapshot_download to avoid dynamic module issues
 
     # Model configuration
     device: str = "cuda:0"
 
     # HuggingFace configuration
-    
+
     model_path: str = "rednote-hilab/dots.ocr"
 
     # VLLM configuration (when loading_method="vllm")

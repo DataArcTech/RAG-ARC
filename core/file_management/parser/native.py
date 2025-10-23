@@ -166,7 +166,16 @@ class NativeParser(AbstractParser):
             save_dir = os.path.join(output_dir, base_filename)
             os.makedirs(save_dir, exist_ok=True)
 
-            logger.info(f"Parsing Excel: {base_filename}")
+            logger.info(f"Parsing Excel: {base_filename}, file size: {len(file_data)} bytes")
+
+            # Validate file data
+            if not file_data or len(file_data) == 0:
+                raise ValueError(f"File data is empty for {filename}")
+
+            # Check if file data looks like a valid Excel file (should start with PK for .xlsx)
+            if file_ext == '.xlsx' and not file_data.startswith(b'PK'):
+                logger.warning(f"File {filename} does not appear to be a valid .xlsx file (missing PK header)")
+                logger.debug(f"First 100 bytes: {file_data[:100]}")
 
             # Read all sheets from binary data
             if file_ext == '.csv':
@@ -176,7 +185,26 @@ class NativeParser(AbstractParser):
                 csv_content = file_data.decode(encoding)
                 sheets_data = {'Sheet1': pd.read_csv(io.StringIO(csv_content))}
             else:
-                sheets_data = pd.read_excel(io.BytesIO(file_data), sheet_name=None)
+                # Explicitly specify engine to avoid pandas auto-detection issues
+                # .xlsx files use openpyxl, .xls files use xlrd
+                if file_ext == '.xlsx':
+                    engine = 'openpyxl'
+                elif file_ext == '.xls':
+                    # Check if xlrd is available for .xls files
+                    try:
+                        import xlrd
+                        engine = 'xlrd'
+                    except ImportError:
+                        raise RuntimeError(
+                            f"Cannot parse .xls file '{filename}': xlrd library is not installed. "
+                            "Please install it with: pip install xlrd"
+                        )
+                else:
+                    # Should not reach here based on supported extensions check
+                    engine = None
+
+                logger.debug(f"Using pandas engine: {engine} for {file_ext} file")
+                sheets_data = pd.read_excel(io.BytesIO(file_data), sheet_name=None, engine=engine)
 
             all_content = []
             sheet_results = []
