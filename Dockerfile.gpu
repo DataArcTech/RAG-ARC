@@ -1,0 +1,73 @@
+# 1. Use NVIDIA CUDA base image for GPU support
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+
+# 2. Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# 3. Install Python 3.11 and system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-dev \
+    python3.11-distutils \
+    python3-pip \
+    build-essential \
+    curl \
+    git \
+    libpq-dev \
+    && apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# 4. Set Python 3.11 as default
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 && \
+    update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
+
+# 5. Create and set working directory
+WORKDIR /rag_arc
+
+# 6. Copy only dependency files first (for better caching)
+COPY pyproject.toml /rag_arc/
+
+# 7. Install Python dependencies with GPU support
+# Use Tsinghua mirror for faster downloads in China
+# Increase timeout and retries for large packages
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
+    pip config set global.timeout 300 && \
+    pip install --upgrade pip --default-timeout=300 --retries 5 && \
+    pip install torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 \
+        --index-url https://download.pytorch.org/whl/cu121 \
+        --default-timeout=600 --retries 5 && \
+    pip install faiss-gpu-cu12 --default-timeout=300 --retries 5 && \
+    pip install -e . --default-timeout=300 --retries 5 && \
+    pip install --upgrade --force-reinstall cffi cryptography --default-timeout=300 --retries 5
+
+# 8. Copy the rest of the project files (after dependencies are installed)
+COPY . /rag_arc/
+
+# 9. Create necessary directories
+RUN mkdir -p \
+    /rag_arc/data/parsed_files \
+    /rag_arc/data/file_store \
+    /rag_arc/data/chunk_store \
+    /rag_arc/data/faiss_index \
+    /rag_arc/data/unified_faiss_index \
+    /rag_arc/data/unified_bm25_index \
+    /rag_arc/data/graph_index \
+    /rag_arc/data/graph_index_neo4j \
+    /rag_arc/local/files \
+    /rag_arc/models
+
+# 10. Expose application port
+EXPOSE 8000
+
+# 11. Start the application
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+

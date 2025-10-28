@@ -226,6 +226,11 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         query_embedding = self._get_query_embedding(query)
 
         try:
+            # Check if fact index exists and is initialized
+            if self.graph_store.fact_faiss_db.index is None:
+                logger.warning("Fact FAISS index is not initialized")
+                return np.array([]), []
+
             total_facts = self.graph_store.fact_faiss_db.index.ntotal
             if total_facts == 0:
                 logger.warning("No facts in FAISS index")

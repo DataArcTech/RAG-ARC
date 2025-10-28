@@ -135,7 +135,50 @@ RAG-ARC/
 
 ## 🚀 Quick Start
 
-### 💻 Installation
+### 🐳 Docker Deployment (Recommended)
+
+**Two-step deployment:**
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/DataArcTech/RAG-ARC.git
+cd RAG-ARC
+
+# 2. Build Docker images (one-time setup)
+./build.sh
+
+# 3. Start all services
+./start.sh
+```
+
+The deployment includes:
+- ✅ **PostgreSQL 16**: Metadata storage
+- ✅ **Redis 7**: Caching layer
+- ✅ **Neo4j**: Knowledge graph database
+- ✅ **RAG-ARC App**: FastAPI application with GPU support
+
+**What the scripts do:**
+
+`build.sh`:
+- Checks Docker environment
+- Creates .env configuration
+- Selects CPU/GPU mode (auto-detect NVIDIA GPU)
+- Pulls base images (PostgreSQL, Redis, Neo4j)
+- Builds RAG-ARC application image
+
+`start.sh`:
+- Creates Docker network
+- Starts all 4 containers
+- Waits for services to be ready
+- Verifies deployment
+
+**Access the service:**
+- API: http://localhost:8000
+- API Docs: http://localhost:8000/docs
+
+📖 **See [Docker Deployment Guide](README.Docker.md) for detailed instructions and troubleshooting**
+
+### 💻 Local Installation
 
 ```bash
 # 1. Clone the repository

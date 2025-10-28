@@ -1,10 +1,19 @@
-from typing import Literal
+from typing import Literal, Union
 from pydantic import Field
 
 from framework.config import AbstractConfig
 from config.core.file_management.extractor.hipporag2_extractor_config import HippoRAG2ExtractorConfig
-from config.encapsulation.database.graph_db.pruned_hipporag_igraph_config import PrunedHippoRAGIGraphConfig
 from core.file_management.indexing.graph_indexing.pruned_hipporag_indexing import PrunedHippoRAGIndexer
+
+# Import both graph store configs
+try:
+    from config.encapsulation.database.graph_db.pruned_hipporag_igraph_config import PrunedHippoRAGIGraphConfig
+    IGRAPH_AVAILABLE = True
+except ImportError:
+    IGRAPH_AVAILABLE = False
+    PrunedHippoRAGIGraphConfig = None
+
+from config.encapsulation.database.graph_db.pruned_hipporag_neo4j_config import PrunedHippoRAGNeo4jConfig
 
 
 class PrunedHippoRAGIndexerConfig(AbstractConfig):
@@ -21,8 +30,8 @@ class PrunedHippoRAGIndexerConfig(AbstractConfig):
         description="Configuration for the HippoRAG2Extractor to extract graph data from chunks"
     )
     
-    graph_store_config: PrunedHippoRAGIGraphConfig = Field(
-        description="Configuration for the Pruned HippoRAG graph store"
+    graph_store_config: Union[PrunedHippoRAGIGraphConfig, PrunedHippoRAGNeo4jConfig] = Field(
+        description="Configuration for the Pruned HippoRAG graph store (igraph or Neo4j)"
     )
 
     def build(self):

@@ -250,8 +250,14 @@ def export_knowledge_graph(
                 detail="Current retriever does not support graph visualization"
             )
 
-        # Import GraphExporter
-        from encapsulation.database.utils.graph_export_utils import GraphExporter
+        # Import appropriate GraphExporter based on graph_store type
+        # Check by class name to avoid import issues
+        graph_store_class_name = graph_store.__class__.__name__
+
+        if graph_store_class_name == 'PrunedHippoRAGNeo4jStore':
+            from encapsulation.database.utils.graph_export_utils_neo4j import GraphExporterNeo4j as GraphExporter
+        else:
+            from encapsulation.database.utils.graph_export_utils import GraphExporter
 
         # Export full graph
         graph_data = GraphExporter.export_full_graph(

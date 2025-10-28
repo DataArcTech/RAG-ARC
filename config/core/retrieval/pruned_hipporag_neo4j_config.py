@@ -3,15 +3,27 @@ from pydantic import Field
 
 from framework.config import AbstractConfig
 from config.encapsulation.llm.chat.openai import OpenAIChatConfig
-from config.encapsulation.database.graph_db.pruned_hipporag_igraph_config import PrunedHippoRAGIGraphConfig
-from core.retrieval.graph_retrieveal.pruned_hipporag import PrunedHippoRAGRetriever
+from config.encapsulation.database.graph_db.pruned_hipporag_neo4j_config import PrunedHippoRAGNeo4jConfig
+from core.retrieval.graph_retrieveal.pruned_hipporag_neo4j import PrunedHippoRAGNeo4jRetriever
 
 
-class PrunedHippoRAGRetrievalConfig(AbstractConfig):
-    type: Literal["pruned_hipporag_retrieval"] = "pruned_hipporag_retrieval"
+class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
+    """
+    Configuration for Pruned HippoRAG Retrieval with Neo4j backend.
 
-    # Graph store configuration
-    graph_config: PrunedHippoRAGIGraphConfig
+    This configuration uses the same retrieval algorithm as the igraph version,
+    but with Neo4j as the graph database backend instead of SQLite + igraph.
+
+    Key differences from igraph version:
+    - Graph storage: Neo4j instead of SQLite
+    - Graph queries: Cypher instead of SQL
+    - PageRank: Extracted subgraph to igraph (same as igraph version)
+    - FAISS indices: Same (facts and entities)
+    """
+    type: Literal["pruned_hipporag_neo4j_retrieval"] = "pruned_hipporag_neo4j_retrieval"
+
+    # Neo4j graph store configuration
+    graph_config: PrunedHippoRAGNeo4jConfig
 
     # Optional LLM configuration for fact reranking
     llm_config: Optional[OpenAIChatConfig] = None
@@ -74,6 +86,12 @@ class PrunedHippoRAGRetrievalConfig(AbstractConfig):
         description="Weight assigned to passage nodes in PPR initialization"
     )
 
+    # PPR backend selection
+    ppr_backend: Literal["push", "igraph"] = Field(
+        default="push",
+        description="PPR computation backend: 'push' (fast, recommended) or 'igraph' (fallback)"
+    )
+
     def build(self):
-        return PrunedHippoRAGRetriever(config=self)
+        return PrunedHippoRAGNeo4jRetriever(config=self)
 

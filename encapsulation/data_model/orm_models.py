@@ -133,7 +133,7 @@ class FileMetadata(Base):
     file_id: Mapped[str] = mapped_column(String(255), primary_key=True)
 
     # User info
-    owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("user.id"), nullable=False)
+    owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("user.id"), nullable=False, index=True)
 
     # Storage information
     blob_key: Mapped[str] = mapped_column(String(500), nullable=False)

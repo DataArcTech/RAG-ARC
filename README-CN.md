@@ -154,7 +154,50 @@ RAG-ARC/
 
 ## 🚀 快速开始
 
-### 💻 安装
+### 🐳 Docker部署（推荐）
+
+**两步部署：**
+
+```bash
+# 1. 克隆仓库
+git clone https://github.com/DataArcTech/RAG-ARC.git
+cd RAG-ARC
+
+# 2. 构建Docker镜像（一次性设置）
+./build.sh
+
+# 3. 启动所有服务
+./start.sh
+```
+
+部署包含以下服务：
+- ✅ **PostgreSQL 16**：元数据存储
+- ✅ **Redis 7**：缓存层
+- ✅ **Neo4j**：知识图谱数据库
+- ✅ **RAG-ARC应用**：支持GPU的FastAPI应用
+
+**脚本功能说明：**
+
+`build.sh`：
+- 检查Docker环境
+- 创建.env配置文件
+- 选择CPU/GPU模式（自动检测NVIDIA GPU）
+- 拉取基础镜像（PostgreSQL、Redis、Neo4j）
+- 构建RAG-ARC应用镜像
+
+`start.sh`：
+- 创建Docker网络
+- 启动全部4个容器
+- 等待服务就绪
+- 验证部署状态
+
+**访问服务：**
+- API服务：http://localhost:8000
+- API文档：http://localhost:8000/docs
+
+📖 **详细说明和故障排除请参见 [Docker部署指南（中文）](README.Docker-CN.md) 或 [Docker Deployment Guide (English)](README.Docker.md)**
+
+### 💻 本地安装
 
 ```bash
 # 1. 克隆仓库

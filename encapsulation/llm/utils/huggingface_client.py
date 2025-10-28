@@ -269,16 +269,25 @@ def create_vision_language_model(config) -> Tuple[Any, Any, Any]:
         from qwen_vl_utils import process_vision_info
         import torch
 
+        # Try to use flash_attention_2 if available, otherwise fall back to default
+        model_kwargs = {
+            'torch_dtype': torch.bfloat16,
+            'device_map': getattr(config, 'device', 'auto')
+        }
+
+        try:
+            import flash_attn
+            model_kwargs['attn_implementation'] = "flash_attention_2"
+            logger.info("Using flash_attention_2 for Vision-Language model")
+        except ImportError:
+            logger.warning("flash_attn not available, using default attention implementation")
+
         model, processor = _create_transformers_base(
             config,
             AutoProcessor,
             AutoModelForCausalLM,
             tokenizer_kwargs={'use_fast': True},
-            model_kwargs={
-                'attn_implementation': "flash_attention_2",
-                'torch_dtype': torch.bfloat16,
-                'device_map': getattr(config, 'device', 'auto')
-            }
+            model_kwargs=model_kwargs
         )
 
         logger.info(f"HuggingFace Vision-Language model loaded successfully from {getattr(config, 'model_path', 'unknown')}")

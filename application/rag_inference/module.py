@@ -69,8 +69,6 @@ class RAGInference(AbstractModule):
         if subgraph_info:
             # Import GraphExporter here to avoid circular dependency
             try:
-                from encapsulation.database.utils.graph_export_utils import GraphExporter
-
                 # Find graph_store from retriever or its children
                 graph_store = None
                 if hasattr(self.retriever, 'graph_store'):
@@ -84,13 +82,30 @@ class RAGInference(AbstractModule):
                             break
 
                 if graph_store:
-                    subgraph_data = GraphExporter.export_subgraph(
-                        graph_store=graph_store,
-                        subgraph_node_indices=set(subgraph_info['subgraph_nodes']),
-                        seed_entity_ids=set(subgraph_info['seed_entity_ids']),
-                        retrieved_chunk_ids=subgraph_info['retrieved_chunk_ids'],
-                        node_ppr_scores=subgraph_info.get('node_ppr_scores', {})
-                    )
+                    # Import appropriate GraphExporter based on graph_store type
+                    # Check by class name to avoid import issues
+                    graph_store_class_name = graph_store.__class__.__name__
+
+                    if graph_store_class_name == 'PrunedHippoRAGNeo4jStore':
+                        from encapsulation.database.utils.graph_export_utils_neo4j import GraphExporterNeo4j as GraphExporter
+                        # Neo4j version uses node IDs (strings)
+                        subgraph_data = GraphExporter.export_subgraph(
+                            graph_store=graph_store,
+                            subgraph_node_ids=set(subgraph_info['subgraph_nodes']),
+                            seed_entity_ids=set(subgraph_info['seed_entity_ids']),
+                            retrieved_chunk_ids=subgraph_info['retrieved_chunk_ids'],
+                            node_ppr_scores=subgraph_info.get('node_ppr_scores', {})
+                        )
+                    else:
+                        from encapsulation.database.utils.graph_export_utils import GraphExporter
+                        # igraph version uses node indices (integers)
+                        subgraph_data = GraphExporter.export_subgraph(
+                            graph_store=graph_store,
+                            subgraph_node_indices=set(subgraph_info['subgraph_nodes']),
+                            seed_entity_ids=set(subgraph_info['seed_entity_ids']),
+                            retrieved_chunk_ids=subgraph_info['retrieved_chunk_ids'],
+                            node_ppr_scores=subgraph_info.get('node_ppr_scores', {})
+                        )
                     logger.info(f"Exported subgraph: {len(subgraph_data.get('nodes', []))} nodes, {len(subgraph_data.get('edges', []))} edges")
                 else:
                     logger.warning("Graph store not found in retriever")
