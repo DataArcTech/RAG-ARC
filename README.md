@@ -182,7 +182,7 @@ The deployment includes:
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/your-username/RAG-ARC.git
+git clone https://github.com/DataArcTech/RAG-ARC.git
 cd RAG-ARC
 
 # 2. Create and activate virtual environment
