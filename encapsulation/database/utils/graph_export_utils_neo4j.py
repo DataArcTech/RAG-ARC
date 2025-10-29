@@ -23,23 +23,25 @@ class GraphExporterNeo4j:
     ) -> Dict[str, Any]:
         """
         Export complete graph for visualization
-        
+
         Args:
             graph_store: PrunedHippoRAGNeo4jStore instance
             max_nodes: Maximum number of nodes to export (for performance)
             max_edges: Maximum number of edges to export
             include_node_types: List of node types to include ['chunk', 'entity']
                                If None, include all types
-        
+
         Returns:
-            Dict with 'nodes' and 'edges' in Cytoscape.js format
+            Dict with 'chunks', 'nodes' (entities), 'edges', and 'metadata'
         """
         if include_node_types is None:
             include_node_types = ['chunk', 'entity']
-        
-        nodes = []
+
+        chunks = []
+        nodes = []  # Only entities
         edges = []
-        
+        categories_set = set()  # Track unique entity types
+
         # Get node statistics
         count_query = """
         MATCH (n)
@@ -64,7 +66,8 @@ class GraphExporterNeo4j:
             RETURN COALESCE(n.chunk_id, n.entity_id) AS node_id,
                    CASE WHEN n:Chunk THEN 'chunk' ELSE 'entity' END AS node_type,
                    n.content AS content,
-                   n.entity_text AS entity_text
+                   n.entity_name AS entity_name,
+                   n.entity_type AS entity_type
             """
             sampled_nodes = graph_store._execute_query(node_query, {'max_nodes': max_nodes})
         else:
@@ -74,35 +77,46 @@ class GraphExporterNeo4j:
             RETURN COALESCE(n.chunk_id, n.entity_id) AS node_id,
                    CASE WHEN n:Chunk THEN 'chunk' ELSE 'entity' END AS node_type,
                    n.content AS content,
-                   n.entity_text AS entity_text
+                   n.entity_name AS entity_name,
+                   n.entity_type AS entity_type
             """
             sampled_nodes = graph_store._execute_query(node_query)
 
-        # Export nodes
+        # Export nodes - separate chunks and entities
         node_set = set()
         for record in sampled_nodes:
             node_id = record['node_id']
             node_type = record['node_type']
-            
+
             # Filter by node type
             if node_type not in include_node_types:
                 continue
-            
-            node_set.add(node_id)
-            
-            # Build simplified node structure
-            node_obj = {
-                'id': node_id,
-                'type': node_type
-            }
-            
-            # Add type-specific fields
-            if node_type == 'chunk' and record.get('content'):
-                node_obj['content'] = record['content']
-            elif node_type == 'entity' and record.get('entity_text'):
-                node_obj['entity_text'] = record['entity_text']
 
-            nodes.append(node_obj)
+            node_set.add(node_id)
+
+            # Build node structure based on type
+            if node_type == 'chunk':
+                chunk_obj = {
+                    'id': node_id,
+                    'type': 'chunk'
+                }
+                if record.get('content'):
+                    chunk_obj['content'] = record['content']
+                chunks.append(chunk_obj)
+
+            elif node_type == 'entity':
+                entity_obj = {
+                    'id': node_id
+                }
+                # Use 'name' instead of 'entity_name' or 'entity_text'
+                if record.get('entity_name'):
+                    entity_obj['name'] = record['entity_name']
+                # Use 'category' for entity_type
+                entity_type = record.get('entity_type', 'Entity')
+                entity_obj['category'] = entity_type
+                categories_set.add(entity_type)
+
+                nodes.append(entity_obj)
         
         # Collect edges by type for uniform sampling
         edges_by_type = {
@@ -124,8 +138,8 @@ class GraphExporterNeo4j:
                r.predicate AS predicate,
                CASE WHEN n1:Chunk THEN 'chunk' ELSE 'entity' END AS source_type,
                CASE WHEN n2:Chunk THEN 'chunk' ELSE 'entity' END AS target_type,
-               n1.entity_text AS source_text,
-               n2.entity_text AS target_text
+               n1.entity_name AS source_name,
+               n2.entity_name AS target_name
         """
         edge_results = graph_store._execute_query(edge_query, {'node_ids': list(node_set)})
 
@@ -157,7 +171,7 @@ class GraphExporterNeo4j:
             # Determine relation and source/target display
             if source_type == 'chunk' and target_type == 'entity':
                 edge_obj['source'] = source_id  # chunk_id
-                edge_obj['target'] = record.get('target_text') or target_id  # entity_text or entity_id
+                edge_obj['target'] = record.get('target_name') or target_id  # entity_name or entity_id
                 edge_obj['relation'] = 'mentions'
                 edges_by_type['mentions'].append(edge_obj)
 
@@ -166,24 +180,24 @@ class GraphExporterNeo4j:
                 continue
 
             elif source_type == 'entity' and target_type == 'entity':
-                source_text = record.get('source_text') or source_id
-                target_text = record.get('target_text') or target_id
+                source_name = record.get('source_name') or source_id
+                target_name = record.get('target_name') or target_id
 
                 if rel_type == 'RELATES_TO':
                     # Fact relation - use predicate from edge
                     predicate = record.get('predicate') or 'related'
-                    edge_obj['source'] = source_text
-                    edge_obj['target'] = target_text
+                    edge_obj['source'] = source_name
+                    edge_obj['target'] = target_name
                     edge_obj['relation'] = predicate
                     edges_by_type['fact_relation'].append(edge_obj)
                 elif rel_type == 'SIMILAR_TO':
-                    edge_obj['source'] = source_text
-                    edge_obj['target'] = target_text
+                    edge_obj['source'] = source_name
+                    edge_obj['target'] = target_name
                     edge_obj['relation'] = 'synonymy'
                     edges_by_type['synonymy'].append(edge_obj)
                 else:
-                    edge_obj['source'] = source_text
-                    edge_obj['target'] = target_text
+                    edge_obj['source'] = source_name
+                    edge_obj['target'] = target_name
                     edge_obj['relation'] = 'related'
                     edges_by_type['other'].append(edge_obj)
             else:
@@ -198,29 +212,34 @@ class GraphExporterNeo4j:
         fact_quota = int(max_edges * 0.35)
         synonymy_quota = int(max_edges * 0.10)
         other_quota = max_edges - mentions_quota - fact_quota - synonymy_quota
-        
+
         # Sample edges based on quota
         edges.extend(edges_by_type['mentions'][:mentions_quota])
         edges.extend(edges_by_type['fact_relation'][:fact_quota])
         edges.extend(edges_by_type['synonymy'][:synonymy_quota])
         edges.extend(edges_by_type['other'][:other_quota])
-        
-        logger.info(f"Exported {len(nodes)} nodes and {len(edges)} edges")
-        
+
+        logger.info(f"Exported {len(chunks)} chunks, {len(nodes)} entities, and {len(edges)} edges")
+
         # Get total edge count
         edge_count_query = "MATCH ()-[r]-() RETURN count(r)/2 AS total_edges"
         edge_count_result = graph_store._execute_query(edge_count_query)
         total_edges = edge_count_result[0]['total_edges'] if edge_count_result else 0
-        
+
+        # Build categories list from unique entity types
+        categories = [{'name': cat} for cat in sorted(categories_set)]
+
         return {
-            'nodes': nodes,
+            'chunks': chunks,
+            'nodes': nodes,  # Only entities
             'edges': edges,
             'metadata': {
                 'total_nodes': total_nodes,
                 'total_edges': int(total_edges),
-                'exported_nodes': len(nodes),
+                'exported_nodes': len(chunks) + len(nodes),
                 'exported_edges': len(edges),
-                'sampled': total_nodes > max_nodes
+                'sampled': total_nodes > max_nodes,
+                'categories': categories
             }
         }
     
@@ -243,10 +262,12 @@ class GraphExporterNeo4j:
             node_ppr_scores: Dict mapping node_id to PPR score
 
         Returns:
-            Dict with 'nodes' and 'edges' in simplified format
+            Dict with 'chunks', 'nodes' (entities), 'edges', and 'metadata'
         """
-        nodes = []
+        chunks = []
+        nodes = []  # Only entities
         edges = []
+        categories_set = set()  # Track unique entity types
 
         seed_entity_ids = seed_entity_ids or set()
         retrieved_chunk_ids = retrieved_chunk_ids or []
@@ -255,13 +276,15 @@ class GraphExporterNeo4j:
         if not subgraph_node_ids:
             logger.warning("No subgraph nodes provided")
             return {
+                'chunks': [],
                 'nodes': [],
                 'edges': [],
                 'metadata': {
                     'total_nodes': 0,
                     'total_edges': 0,
                     'seed_entities': len(seed_entity_ids),
-                    'retrieved_chunks': len(retrieved_chunk_ids)
+                    'retrieved_chunks': len(retrieved_chunk_ids),
+                    'categories': []
                 }
             }
 
@@ -272,45 +295,52 @@ class GraphExporterNeo4j:
         RETURN COALESCE(n.chunk_id, n.entity_id) AS node_id,
                CASE WHEN n:Chunk THEN 'chunk' ELSE 'entity' END AS node_type,
                n.content AS content,
-               n.entity_text AS entity_text
+               n.entity_name AS entity_name,
+               n.entity_type AS entity_type
         """
         node_results = graph_store._execute_query(node_query, {'node_ids': list(subgraph_node_ids)})
 
-        # Build entity_id to entity_text mapping
-        entity_id_to_text = {}
-        for record in node_results:
-            if record['node_type'] == 'entity' and record.get('entity_text'):
-                entity_id_to_text[record['node_id']] = record['entity_text']
-
-        # Export nodes
+        # Export nodes - separate chunks and entities
         seed_marked_count = 0
         for record in node_results:
             node_id = record['node_id']
             node_type = record['node_type']
 
-            # Build simplified node structure
-            node_obj = {
-                'id': node_id,
-                'type': node_type
-            }
+            # Build node structure based on type
+            if node_type == 'chunk':
+                chunk_obj = {
+                    'id': node_id,
+                    'type': 'chunk'
+                }
+                if record.get('content'):
+                    chunk_obj['content'] = record['content']
+                # Add PPR score if available
+                if node_ppr_scores and node_id in node_ppr_scores:
+                    chunk_obj['ppr_score'] = node_ppr_scores[node_id]
+                chunks.append(chunk_obj)
 
-            # Add type-specific fields
-            if node_type == 'chunk' and record.get('content'):
-                node_obj['content'] = record['content']
             elif node_type == 'entity':
-                if record.get('entity_text'):
-                    node_obj['entity_text'] = record['entity_text']
+                entity_obj = {
+                    'id': node_id
+                }
+                # Use 'name' instead of 'entity_name' or 'entity_text'
+                if record.get('entity_name'):
+                    entity_obj['name'] = record['entity_name']
+                # Use 'category' for entity_type
+                entity_type = record.get('entity_type', 'Entity')
+                entity_obj['category'] = entity_type
+                categories_set.add(entity_type)
 
                 # Mark seed entities (check if node_id is in seed_entity_ids set)
                 if seed_entity_ids and node_id in seed_entity_ids:
-                    node_obj['is_seed'] = True
+                    entity_obj['is_seed'] = True
                     seed_marked_count += 1
 
-            # Add PPR score if available
-            if node_ppr_scores and node_id in node_ppr_scores:
-                node_obj['ppr_score'] = node_ppr_scores[node_id]
+                # Add PPR score if available
+                if node_ppr_scores and node_id in node_ppr_scores:
+                    entity_obj['ppr_score'] = node_ppr_scores[node_id]
 
-            nodes.append(node_obj)
+                nodes.append(entity_obj)
 
         if seed_entity_ids:
             logger.info(f"Marked {seed_marked_count} seed entities out of {len(seed_entity_ids)} provided")
@@ -327,8 +357,8 @@ class GraphExporterNeo4j:
                r.predicate AS predicate,
                CASE WHEN n1:Chunk THEN 'chunk' ELSE 'entity' END AS source_type,
                CASE WHEN n2:Chunk THEN 'chunk' ELSE 'entity' END AS target_type,
-               n1.entity_text AS source_text,
-               n2.entity_text AS target_text
+               n1.entity_name AS source_name,
+               n2.entity_name AS target_name
         """
         edge_results = graph_store._execute_query(edge_query, {'node_ids': list(subgraph_node_ids)})
 
@@ -358,7 +388,7 @@ class GraphExporterNeo4j:
             if source_type == 'chunk' and target_type == 'entity':
                 # Chunk mentions entity
                 edge_obj['source'] = source_id  # chunk_id
-                edge_obj['target'] = record.get('target_text') or target_id  # entity_text or entity_id
+                edge_obj['target'] = record.get('target_name') or target_id  # entity_name or entity_id
                 edge_obj['relation'] = 'mentions'
 
             elif source_type == 'entity' and target_type == 'chunk':
@@ -367,23 +397,23 @@ class GraphExporterNeo4j:
 
             elif source_type == 'entity' and target_type == 'entity':
                 # Entity-entity relation (synonymy or fact-based)
-                source_text = record.get('source_text') or source_id
-                target_text = record.get('target_text') or target_id
+                source_name = record.get('source_name') or source_id
+                target_name = record.get('target_name') or target_id
 
                 if rel_type == 'RELATES_TO':
                     # Fact relation - use predicate from edge
                     predicate = record.get('predicate') or 'related'
-                    edge_obj['source'] = source_text
-                    edge_obj['target'] = target_text
+                    edge_obj['source'] = source_name
+                    edge_obj['target'] = target_name
                     edge_obj['relation'] = predicate
 
                 elif rel_type == 'SIMILAR_TO':
-                    edge_obj['source'] = source_text
-                    edge_obj['target'] = target_text
+                    edge_obj['source'] = source_name
+                    edge_obj['target'] = target_name
                     edge_obj['relation'] = 'synonymy'
                 else:
-                    edge_obj['source'] = source_text
-                    edge_obj['target'] = target_text
+                    edge_obj['source'] = source_name
+                    edge_obj['target'] = target_name
                     edge_obj['relation'] = 'related'
 
             else:
@@ -394,16 +424,21 @@ class GraphExporterNeo4j:
 
             edges.append(edge_obj)
 
-        logger.info(f"Exported subgraph: {len(nodes)} nodes, {len(edges)} edges")
+        logger.info(f"Exported subgraph: {len(chunks)} chunks, {len(nodes)} entities, {len(edges)} edges")
+
+        # Build categories list from unique entity types
+        categories = [{'name': cat} for cat in sorted(categories_set)]
 
         return {
-            'nodes': nodes,
+            'chunks': chunks,
+            'nodes': nodes,  # Only entities
             'edges': edges,
             'metadata': {
-                'total_nodes': len(nodes),
+                'total_nodes': len(chunks) + len(nodes),
                 'total_edges': len(edges),
                 'seed_entities': len(seed_entity_ids),
-                'retrieved_chunks': len(retrieved_chunk_ids)
+                'retrieved_chunks': len(retrieved_chunk_ids),
+                'categories': categories
             }
         }
 

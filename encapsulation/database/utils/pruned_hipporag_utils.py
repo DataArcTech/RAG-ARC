@@ -2,8 +2,9 @@ import re
 import hashlib
 
 
-# Regex pattern for text normalization (remove special characters, keep alphanumeric and spaces)
-TEXT_NORMALIZATION_PATTERN = re.compile('[^A-Za-z0-9 ]')
+# Regex pattern for text normalization (remove special characters, keep alphanumeric, Chinese characters, and spaces)
+# \u4e00-\u9fff: Chinese characters (CJK Unified Ideographs)
+TEXT_NORMALIZATION_PATTERN = re.compile('[^A-Za-z0-9\u4e00-\u9fff ]')
 
 
 def normalize_entity_text(text: str) -> str:

@@ -292,7 +292,7 @@ class PrunedHippoRAGIGraphStore(GraphStore):
 
         This method:
         1. Processes and normalizes relation triples
-        2. Extracts unique entities from triples
+        2. Extracts unique entities from triples with their types
         3. Adds entities to database and graph
         4. Creates chunk-entity relations
         5. Adds facts to database
@@ -304,6 +304,18 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         Returns:
             List of newly created entity IDs
         """
+        # Build entity name to type mapping from graph.entities
+        # IMPORTANT: Use text_processing() on entity names to match processed triple entities
+        entity_name_to_type = {}
+        for entity_dict in graph_data.entities:
+            entity_name = entity_dict.get('entity_name')
+            entity_type = entity_dict.get('entity_type', 'Entity')
+            if entity_name:
+                # Process entity name to match the processed names in triples
+                processed_name = text_processing(entity_name)
+                if processed_name:
+                    entity_name_to_type[processed_name] = entity_type
+
         # Process and normalize relation triples
         processed_triples = []
         for relation in graph_data.relations:
@@ -327,16 +339,18 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         # Add entities to database and graph
         for entity_name in triple_entities:
             entity_id = compute_mdhash_id(entity_name, prefix='entity-')
+            # Get entity type from mapping, default to 'Entity'
+            entity_type = entity_name_to_type.get(entity_name, 'Entity')
 
             # Add entity node to graph if not exists
             if entity_id not in self.node_to_idx:
                 cursor.execute('''
                     INSERT OR IGNORE INTO entities (entity_id, entity_name, entity_type, attributes)
                     VALUES (?, ?, ?, ?)
-                ''', (entity_id, entity_name, 'Entity', '{}'))
+                ''', (entity_id, entity_name, entity_type, '{}'))
 
                 vertex_idx = self.graph.vcount()
-                self.graph.add_vertex(name=entity_id, node_type='entity', entity_name=entity_name)
+                self.graph.add_vertex(name=entity_id, node_type='entity', entity_name=entity_name, entity_type=entity_type)
                 self.node_to_idx[entity_id] = vertex_idx
                 self.idx_to_node[vertex_idx] = entity_id
 
@@ -560,12 +574,12 @@ class PrunedHippoRAGIGraphStore(GraphStore):
                 self.idx_to_node[vertex_idx] = chunk_id
 
         # Add entity nodes
-        cursor.execute('SELECT entity_id, entity_name FROM entities')
+        cursor.execute('SELECT entity_id, entity_name, entity_type FROM entities')
         entities = cursor.fetchall()
-        for entity_id, entity_name in entities:
+        for entity_id, entity_name, entity_type in entities:
             if entity_id not in self.node_to_idx:
                 vertex_idx = self.graph.vcount()
-                self.graph.add_vertex(name=entity_id, node_type='entity', entity_name=entity_name)
+                self.graph.add_vertex(name=entity_id, node_type='entity', entity_name=entity_name, entity_type=entity_type)
                 self.node_to_idx[entity_id] = vertex_idx
                 self.idx_to_node[vertex_idx] = entity_id
 

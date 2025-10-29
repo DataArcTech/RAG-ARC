@@ -23,30 +23,32 @@ class GraphExporter:
     ) -> Dict[str, Any]:
         """
         Export complete graph for visualization
-        
+
         Args:
             graph_store: PrunedHippoRAGIGraphStore instance
             max_nodes: Maximum number of nodes to export (for performance)
             max_edges: Maximum number of edges to export
             include_node_types: List of node types to include ['chunk', 'entity', 'fact']
                                If None, include all types
-        
+
         Returns:
-            Dict with 'nodes' and 'edges' in Cytoscape.js format
+            Dict with 'chunks', 'nodes' (entities), 'edges', and 'metadata'
         """
         if include_node_types is None:
             include_node_types = ['chunk', 'entity', 'fact']
-        
-        nodes = []
+
+        chunks = []
+        nodes = []  # Only entities
         edges = []
-        
+        categories_set = set()  # Track unique entity types
+
         graph = graph_store.graph
         idx_to_node = graph_store.idx_to_node
-        
+
         # Get node statistics
         total_nodes = graph.vcount()
         logger.info(f"Exporting graph with {total_nodes} nodes")
-        
+
         # Sample nodes if too many
         if total_nodes > max_nodes:
             logger.warning(f"Graph has {total_nodes} nodes, sampling {max_nodes} nodes")
@@ -55,13 +57,13 @@ class GraphExporter:
             node_indices = sorted(range(total_nodes), key=lambda i: degrees[i], reverse=True)[:max_nodes]
         else:
             node_indices = range(total_nodes)
-        
-        # Build entity_id to entity_name mapping
-        cursor = graph_store.conn.cursor()
-        cursor.execute('SELECT entity_id, entity_name FROM entities')
-        entity_id_to_name = {eid: name for eid, name in cursor.fetchall()}
 
-        # Export nodes
+        # Build entity_id to entity_name and entity_type mapping
+        cursor = graph_store.conn.cursor()
+        cursor.execute('SELECT entity_id, entity_name, entity_type FROM entities')
+        entity_id_to_info = {eid: (name, etype) for eid, name, etype in cursor.fetchall()}
+
+        # Export nodes - separate chunks and entities
         node_set = set(node_indices)
         for idx in node_indices:
             node_id = idx_to_node.get(idx)
@@ -75,24 +77,36 @@ class GraphExporter:
             if node_type not in include_node_types:
                 continue
 
-            # Build simplified node structure
-            node_obj = {
-                'id': node_id,
-                'type': node_type
-            }
-
-            # Add type-specific fields
+            # Build node structure based on type
             if node_type == 'chunk':
                 cursor.execute('SELECT content FROM chunks WHERE chunk_id = ?', (node_id,))
                 row = cursor.fetchone()
+                chunk_obj = {
+                    'id': node_id,
+                    'type': 'chunk'
+                }
                 if row:
-                    node_obj['content'] = row[0]
+                    chunk_obj['content'] = row[0]
+                chunks.append(chunk_obj)
 
             elif node_type == 'entity':
-                entity_name = entity_id_to_name.get(node_id, '')
-                node_obj['entity_name'] = entity_name
+                entity_info = entity_id_to_info.get(node_id)
+                entity_obj = {
+                    'id': node_id
+                }
+                if entity_info:
+                    entity_name, entity_type = entity_info
+                    # Use 'name' instead of 'entity_name'
+                    entity_obj['name'] = entity_name
+                    # Use 'category' for entity_type
+                    entity_obj['category'] = entity_type or 'Entity'
+                    categories_set.add(entity_type or 'Entity')
+                else:
+                    entity_obj['name'] = ''
+                    entity_obj['category'] = 'Entity'
+                    categories_set.add('Entity')
 
-            nodes.append(node_obj)
+                nodes.append(entity_obj)
         
         # Build fact_id to relation mapping
         cursor.execute('SELECT fact_id, head, relation, tail FROM facts')
@@ -135,7 +149,9 @@ class GraphExporter:
             # Determine relation and source/target display
             if source_type == 'chunk' and target_type == 'entity':
                 edge_obj['source'] = source_id  # chunk_id
-                edge_obj['target'] = entity_id_to_name.get(target_id, target_id)  # entity_name
+                # Get entity name from entity_id_to_info
+                entity_info = entity_id_to_info.get(target_id)
+                edge_obj['target'] = entity_info[0] if entity_info else target_id  # entity_name
                 edge_obj['relation'] = 'mentions'
                 edges_by_type['mentions'].append(edge_obj)
 
@@ -144,8 +160,10 @@ class GraphExporter:
                 continue
 
             elif source_type == 'entity' and target_type == 'entity':
-                source_name = entity_id_to_name.get(source_id, source_id)
-                target_name = entity_id_to_name.get(target_id, target_id)
+                source_info = entity_id_to_info.get(source_id)
+                target_info = entity_id_to_info.get(target_id)
+                source_name = source_info[0] if source_info else source_id
+                target_name = target_info[0] if target_info else target_id
 
                 # Try to find relation from facts and determine correct direction
                 relation_found = False
@@ -189,18 +207,23 @@ class GraphExporter:
         edges.extend(edges_by_type['fact_relation'][:fact_quota])
         edges.extend(edges_by_type['synonymy'][:synonymy_quota])
         edges.extend(edges_by_type['other'][:other_quota])
-        
-        logger.info(f"Exported {len(nodes)} nodes and {len(edges)} edges")
-        
+
+        logger.info(f"Exported {len(chunks)} chunks, {len(nodes)} entities, and {len(edges)} edges")
+
+        # Build categories list from unique entity types
+        categories = [{'name': cat} for cat in sorted(categories_set)]
+
         return {
-            'nodes': nodes,
+            'chunks': chunks,
+            'nodes': nodes,  # Only entities
             'edges': edges,
             'metadata': {
                 'total_nodes': total_nodes,
                 'total_edges': graph.ecount(),
-                'exported_nodes': len(nodes),
+                'exported_nodes': len(chunks) + len(nodes),
                 'exported_edges': len(edges),
-                'sampled': total_nodes > max_nodes
+                'sampled': total_nodes > max_nodes,
+                'categories': categories
             }
         }
     
@@ -223,10 +246,12 @@ class GraphExporter:
             node_ppr_scores: Dict mapping node_id to PPR score
 
         Returns:
-            Dict with 'nodes' and 'edges' in simplified format
+            Dict with 'chunks', 'nodes' (entities), 'edges', and 'metadata'
         """
-        nodes = []
+        chunks = []
+        nodes = []  # Only entities
         edges = []
+        categories_set = set()  # Track unique entity types
 
         graph = graph_store.graph
         idx_to_node = graph_store.idx_to_node
@@ -235,12 +260,12 @@ class GraphExporter:
         retrieved_chunk_ids = retrieved_chunk_ids or []
         node_ppr_scores = node_ppr_scores or {}
 
-        # Build entity_id to entity_name mapping
+        # Build entity_id to entity_name and entity_type mapping
         cursor = graph_store.conn.cursor()
-        cursor.execute('SELECT entity_id, entity_name FROM entities')
-        entity_id_to_name = {eid: name for eid, name in cursor.fetchall()}
+        cursor.execute('SELECT entity_id, entity_name, entity_type FROM entities')
+        entity_id_to_info = {eid: (name, etype) for eid, name, etype in cursor.fetchall()}
 
-        # Export nodes
+        # Export nodes - separate chunks and entities
         for idx in subgraph_node_indices:
             node_id = idx_to_node.get(idx)
             if not node_id:
@@ -248,32 +273,47 @@ class GraphExporter:
 
             node_type = graph.vs[idx]['node_type']
 
-            # Build simplified node structure
-            node_obj = {
-                'id': node_id,
-                'type': node_type
-            }
-
-            # Add type-specific fields
+            # Build node structure based on type
             if node_type == 'chunk':
                 cursor.execute('SELECT content FROM chunks WHERE chunk_id = ?', (node_id,))
                 row = cursor.fetchone()
+                chunk_obj = {
+                    'id': node_id,
+                    'type': 'chunk'
+                }
                 if row:
-                    node_obj['content'] = row[0]
+                    chunk_obj['content'] = row[0]
+                # Add PPR score if available
+                if node_id in node_ppr_scores:
+                    chunk_obj['ppr_score'] = node_ppr_scores[node_id]
+                chunks.append(chunk_obj)
 
             elif node_type == 'entity':
-                entity_name = entity_id_to_name.get(node_id, '')
-                node_obj['entity_name'] = entity_name
+                entity_info = entity_id_to_info.get(node_id)
+                entity_obj = {
+                    'id': node_id
+                }
+                if entity_info:
+                    entity_name, entity_type = entity_info
+                    # Use 'name' instead of 'entity_name'
+                    entity_obj['name'] = entity_name
+                    # Use 'category' for entity_type
+                    entity_obj['category'] = entity_type or 'Entity'
+                    categories_set.add(entity_type or 'Entity')
+                else:
+                    entity_obj['name'] = ''
+                    entity_obj['category'] = 'Entity'
+                    categories_set.add('Entity')
 
                 # Mark seed entities
                 if node_id in seed_entity_ids:
-                    node_obj['is_seed'] = True
+                    entity_obj['is_seed'] = True
 
-            # Add PPR score if available
-            if node_id in node_ppr_scores:
-                node_obj['ppr_score'] = node_ppr_scores[node_id]
+                # Add PPR score if available
+                if node_id in node_ppr_scores:
+                    entity_obj['ppr_score'] = node_ppr_scores[node_id]
 
-            nodes.append(node_obj)
+                nodes.append(entity_obj)
         
         # Build fact_id to relation mapping
         cursor.execute('SELECT fact_id, head, relation, tail FROM facts')
@@ -311,7 +351,9 @@ class GraphExporter:
             if source_type == 'chunk' and target_type == 'entity':
                 # Chunk mentions entity
                 edge_obj['source'] = source_id  # chunk_id
-                edge_obj['target'] = entity_id_to_name.get(target_id, target_id)  # entity_name
+                # Get entity name from entity_id_to_info
+                entity_info = entity_id_to_info.get(target_id)
+                edge_obj['target'] = entity_info[0] if entity_info else target_id  # entity_name
                 edge_obj['relation'] = 'mentions'
 
             elif source_type == 'entity' and target_type == 'chunk':
@@ -320,8 +362,10 @@ class GraphExporter:
 
             elif source_type == 'entity' and target_type == 'entity':
                 # Entity-entity relation (synonymy or fact-based)
-                source_name = entity_id_to_name.get(source_id, source_id)
-                target_name = entity_id_to_name.get(target_id, target_id)
+                source_info = entity_id_to_info.get(source_id)
+                target_info = entity_id_to_info.get(target_id)
+                source_name = source_info[0] if source_info else source_id
+                target_name = target_info[0] if target_info else target_id
 
                 # Try to find relation from facts and determine correct direction
                 relation_found = False
@@ -355,15 +399,20 @@ class GraphExporter:
 
             edges.append(edge_obj)
 
-        logger.info(f"Exported subgraph: {len(nodes)} nodes, {len(edges)} edges")
+        logger.info(f"Exported subgraph: {len(chunks)} chunks, {len(nodes)} entities, {len(edges)} edges")
+
+        # Build categories list from unique entity types
+        categories = [{'name': cat} for cat in sorted(categories_set)]
 
         return {
-            'nodes': nodes,
+            'chunks': chunks,
+            'nodes': nodes,  # Only entities
             'edges': edges,
             'metadata': {
-                'total_nodes': len(nodes),
+                'total_nodes': len(chunks) + len(nodes),
                 'total_edges': len(edges),
                 'seed_entities': len(seed_entity_ids),
-                'retrieved_chunks': len(retrieved_chunk_ids)
+                'retrieved_chunks': len(retrieved_chunk_ids),
+                'categories': categories
             }
         }

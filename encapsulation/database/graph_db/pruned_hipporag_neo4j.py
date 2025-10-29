@@ -274,7 +274,7 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
 
         # Collect all data
         chunk_data = []
-        entity_data = {}  # entity_id -> entity_name (deduplicated)
+        entity_data = {}  # entity_id -> (entity_name, entity_type) (deduplicated)
         mention_data = []
         fact_data = []
         new_entity_ids = []
@@ -292,6 +292,18 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
 
             # Process graph data
             if chunk.graph and not chunk.graph.is_empty():
+                # Build entity name to type mapping from graph.entities
+                # IMPORTANT: Use text_processing() on entity names to match processed triple entities
+                entity_name_to_type = {}
+                for entity_dict in chunk.graph.entities:
+                    entity_name = entity_dict.get('entity_name')
+                    entity_type = entity_dict.get('entity_type', 'Entity')
+                    if entity_name:
+                        # Process entity name to match the processed names in triples
+                        processed_name = text_processing(entity_name)
+                        if processed_name:
+                            entity_name_to_type[processed_name] = entity_type
+
                 # Process and normalize relation triples
                 processed_triples = []
                 for relation in chunk.graph.relations:
@@ -313,7 +325,9 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
                 for entity_name in triple_entities:
                     entity_id = compute_mdhash_id(entity_name, prefix='entity-')
                     if entity_id not in entity_data:
-                        entity_data[entity_id] = entity_name
+                        # Get entity type from mapping, default to 'Entity'
+                        entity_type = entity_name_to_type.get(entity_name, 'Entity')
+                        entity_data[entity_id] = (entity_name, entity_type)
 
                     # Collect mention data
                     mention_data.append({
@@ -340,8 +354,8 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
 
         # Prepare entity list for batch insertion
         entity_list = [
-            {'entity_id': eid, 'entity_name': name}
-            for eid, name in entity_data.items()
+            {'entity_id': eid, 'entity_name': name, 'entity_type': etype}
+            for eid, (name, etype) in entity_data.items()
         ]
 
         logger.info(f"Batch data prepared: {len(chunk_data)} chunks, {len(entity_list)} entities, "
@@ -371,7 +385,7 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
                     MERGE (e:Entity {entity_id: entity.entity_id})
                     ON CREATE SET e.entity_name = entity.entity_name,
                                   e.entity_text = entity.entity_name,
-                                  e.entity_type = 'Entity',
+                                  e.entity_type = entity.entity_type,
                                   e.node_type = 'entity',
                                   e.attributes = '{}',
                                   e.created_at = datetime(),
@@ -379,6 +393,7 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
                                   e.is_new = true
                     ON MATCH SET e.entity_name = entity.entity_name,
                                  e.entity_text = entity.entity_name,
+                                 e.entity_type = entity.entity_type,
                                  e.updated_at = datetime(),
                                  e.is_new = false
                     RETURN e.entity_id AS entity_id, e.is_new AS is_new

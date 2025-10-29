@@ -87,7 +87,6 @@
                 "type": "pruned_hipporag_neo4j_indexer",
                 "extractor_config": {
                     "type": "hipporag2_extractor",
-                    "combined_mode": false,
                     "llm_config": {
                         "type": "openai_chat",
                         "model_name": "gpt-4o-mini",
