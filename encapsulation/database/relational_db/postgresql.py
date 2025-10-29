@@ -123,7 +123,7 @@ class PostgreSQLDB(RelationalDB):
         # Build connection string for psycopg3
         connection_string = (
             f"postgresql+psycopg://{self.config.user}:{self.config.password}"
-            f"@{self.config.host}:{getattr(self.config, 'port', 5432)}/{self.config.database}"
+            f"@{self.config.host}:{int(getattr(self.config, 'port', "5432"))}/{self.config.database}"
         )
 
         engine = create_engine(
@@ -146,7 +146,7 @@ class PostgreSQLDB(RelationalDB):
             # Connect to postgres database to create our target database
             admin_connection_string = (
                 f"postgresql+psycopg://{self.config.user}:{self.config.password}"
-                f"@{self.config.host}:{getattr(self.config, 'port', 5432)}/postgres"
+                f"@{self.config.host}:{int(getattr(self.config, 'port', "5432"))}/postgres"
             )
             
             admin_engine = create_engine(admin_connection_string, isolation_level="AUTOCOMMIT")
@@ -343,7 +343,7 @@ class PostgreSQLDB(RelationalDB):
                 # Add status filter
                 if status:
                     query = query.filter(FileMetadata.status == status.value)
-    
+
                 count = query.count()
                 return count
 

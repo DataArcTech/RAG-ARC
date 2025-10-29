@@ -10,6 +10,7 @@ class KnowledgeConfig(AbstractConfig):
     type: Literal["knowledge"] = "knowledge"
     index_manager_config: IndexManagerConfig
     file_storage_config: FileStorageConfig
+    max_concurrent_indexing: int = 5  # Maximum number of concurrent indexing operations
 
     def build(self):
         return Knowledge(self)

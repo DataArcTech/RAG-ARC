@@ -16,7 +16,7 @@ Redis is used for:
 
 Configuration:
     host: Redis server hostname
-    port: Redis server port (default: 6379)
+    port: Redis server port (default: "6379")
     db: Redis database number (default: 0)
     password: Redis password (optional)
     max_connections: Maximum connections in pool (default: 50)
@@ -51,7 +51,7 @@ class RedisDB(CacheDB):
     - Persistence with RDB + AOF (configured on Redis server)
     
     Usage:
-        >>> config = RedisConfig(host="localhost", port=6379, db=0)
+        >>> config = RedisConfig(host="localhost", port="6379", db="0")
         >>> redis_db = RedisDB(config)
         >>> redis_db.set("key", {"data": "value"}, ttl=3600)
         >>> value = redis_db.get("key")
@@ -69,8 +69,8 @@ class RedisDB(CacheDB):
         # Create connection pool
         self.pool = ConnectionPool(
             host=config.host,
-            port=config.port,
-            db=config.db,
+            port=int(config.port),
+            db=int(config.db),
             password=config.password if config.password else None,
             max_connections=config.max_connections,
             decode_responses=config.decode_responses,

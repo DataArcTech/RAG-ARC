@@ -6,7 +6,7 @@ from fastapi import (
     status,
     Query,
 )
-from typing import Annotated, Optional, List
+from typing import Annotated, Optional, List, Dict, Any
 from pydantic import BaseModel
 from api.routers.auth import get_current_user
 from encapsulation.data_model.orm_models import User
@@ -198,11 +198,71 @@ async def list_files(
         )
 
 
+class IndexTriggerRequest(BaseModel):
+    """Request model for triggering indexing"""
+    file_ids: List[str]
+
+class IndexTriggerResponse(BaseModel):
+    """Response model for index triggering results"""
+    total_files: int
+    status: str
+    message: str
+
 class GraphExportRequest(BaseModel):
     """Request model for graph export"""
     max_nodes: int = 500
     max_edges: int = 2000
     include_node_types: Optional[List[str]] = None  # e.g., ['chunk', 'entity', 'fact']
+
+
+@router.post(
+    "/trigger_indexing",
+    response_model=IndexTriggerResponse,
+    status_code=status.HTTP_200_OK,
+)
+def trigger_indexing(
+    request: IndexTriggerRequest,
+    user: Annotated[User | None, Depends(get_current_user)],
+):
+    """
+    Trigger indexing for multiple files.
+
+    Args:
+        request: IndexTriggerRequest containing list of file IDs
+        user: Current authenticated user
+
+    Returns:
+        IndexTriggerResponse with indexing results
+    """
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required"
+        )
+
+    if not request.file_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="file_ids list cannot be empty"
+        )
+
+    try:
+        result = knowledge_handler.trigger_indexing(request.file_ids, user.id)
+        
+        return IndexTriggerResponse(
+            total_files=result.get('total_files', 0),
+            status=result.get('status', 'indexing_started'),
+            message=result.get('message', 'Indexing started in background')
+        )
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions (404, 403)
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to trigger indexing: {str(e)}",
+        )
 
 
 @router.post("/graph/export", status_code=status.HTTP_200_OK)

@@ -34,10 +34,10 @@ class RedisConfig(AbstractConfig):
     type: Literal["redis"] = "redis"
 
     # Redis connection configuration (read from environment variables)
-    host: str = os.getenv("REDIS_HOST", "localhost")  
-    port: int = int(os.getenv("REDIS_PORT", "6379"))
-    db: int = int(os.getenv("REDIS_DB", "0"))
-    password: Optional[str] = os.getenv("REDIS_PASSWORD", None) 
+    host: str = "localhost" 
+    port: str = "6379"
+    db: str = "0"
+    password: Optional[str] = None
 
     # Connection pool configuration
     max_connections: int = 50  # Maximum connections in pool
