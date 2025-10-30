@@ -38,15 +38,24 @@ class FileListResponse(BaseModel):
     """Response model for file list"""
     files: List[FileInfo]
     total: int
+    
+class UploadResponse(BaseModel):
+    """Response model for file upload"""
+    job_id: str
+    file_id: str | None = None
+    status: str = "accepted"
 
 @router.post(
     "",
-    response_model=str,
+    response_model=UploadResponse,
     status_code=status.HTTP_201_CREATED,
 )
 def upload_file(
     file: UploadFile,
     user: Annotated[User | None, Depends(get_current_user)],
+    callback_url: str | None = Form(default=None),
+    job_id: str | None = Form(default=None),
+    callback_secret: str | None = Form(default=None),
 ):
     """
     Upload a file to the knowledge base
@@ -66,9 +75,17 @@ def upload_file(
         )
     try:
         print(f"Uploading file: {file.filename} for owner_id: {user.id}")
-        # Convert string UUID to UUID object
-        doc_id = knowledge_handler.upload_file(file, user.id)
-        return doc_id
+        upload_result = knowledge_handler.upload_file(
+            file,
+            user.id,
+            callback_url=callback_url,
+            job_id=job_id,
+            callback_secret=callback_secret,
+        )
+        return UploadResponse(
+            job_id=upload_result["job_id"],
+            file_id=upload_result.get("file_id"),
+        )
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -79,7 +96,6 @@ def upload_file(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to upload file: {str(e)}",
         )
-
 
 @router.get("/{file_id}/download")
 async def download_file(file_id: str, user: Annotated[User | None, Depends(get_current_user)]):
