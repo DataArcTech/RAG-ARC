@@ -17,9 +17,10 @@ from framework.singleton_decorator import singleton
 # Import DotsOCR utilities
 from .dots_ocr_utils.image_utils import fetch_image, smart_resize, get_image_by_fitz_doc
 from .dots_ocr_utils.prompts import dict_promptmode_to_prompt
-from .dots_ocr_utils.layout_utils import pre_process_bboxes, post_process_output, draw_layout_on_image
+from .dots_ocr_utils.layout_utils import pre_process_bboxes, post_process_output
+# from .dots_ocr_utils.layout_utils import draw_layout_on_image  # Not needed - image output disabled
 from .dots_ocr_utils.consts import MIN_PIXELS, MAX_PIXELS, image_extensions
-from .dots_ocr_utils.format_transformer import layoutjson2md
+from .dots_ocr_utils.format_transformer import layoutjson2md, clean_base64_images
 
 if TYPE_CHECKING:
     from config.core.file_management.parser.dots_ocr import DotsOCRParserConfig
@@ -244,69 +245,80 @@ class DotsOCRParser(AbstractParser):
             )
 
             if filtered and prompt_mode != 'prompt_layout_only_en':
-                json_file_path = os.path.join(save_dir, f"{save_name}.json")
-                with open(json_file_path, 'w', encoding="utf-8") as w:
-                    json.dump(response, w, ensure_ascii=False, indent=4)
+                # json_file_path = os.path.join(save_dir, f"{save_name}.json")
+                # with open(json_file_path, 'w', encoding="utf-8") as w:
+                #     json.dump(response, w, ensure_ascii=False, indent=4)
 
-                image_layout_path = os.path.join(save_dir, f"{save_name}.jpg")
-                origin_image.save(image_layout_path)
-                result.update({
-                    'layout_info_path': json_file_path,
-                    'layout_image_path': image_layout_path,
-                })
+                # Don't save image layout - not needed
+                # image_layout_path = os.path.join(save_dir, f"{save_name}.jpg")
+                # origin_image.save(image_layout_path)
+                # result.update({
+                #     'layout_info_path': json_file_path,
+                #     # 'layout_image_path': image_layout_path,
+                # })
 
                 md_file_path = os.path.join(save_dir, f"{save_name}.md")
                 with open(md_file_path, "w", encoding="utf-8") as md_file:
-                    md_file.write(cells)
+                    # Clean base64 images from markdown content
+                    cleaned_cells = clean_base64_images(cells)
+                    md_file.write(cleaned_cells)
                 result.update({
                     'md_content_path': md_file_path,
                     'filtered': True
                 })
             else:
-                try:
-                    image_with_layout = draw_layout_on_image(origin_image, cells)
-                except Exception as e:
-                    logger.info(f"Error drawing layout on image: {e}")
-                    image_with_layout = origin_image
+                # Don't draw layout on image - not needed
+                # try:
+                #     image_with_layout = draw_layout_on_image(origin_image, cells)
+                # except Exception as e:
+                #     logger.info(f"Error drawing layout on image: {e}")
+                #     image_with_layout = origin_image
 
                 json_file_path = os.path.join(save_dir, f"{save_name}.json")
                 with open(json_file_path, 'w', encoding="utf-8") as w:
                     json.dump(cells, w, ensure_ascii=False, indent=4)
 
-                image_layout_path = os.path.join(save_dir, f"{save_name}.jpg")
-                image_with_layout.save(image_layout_path)
+                # Don't save image layout - not needed
+                # image_layout_path = os.path.join(save_dir, f"{save_name}.jpg")
+                # image_with_layout.save(image_layout_path)
                 result.update({
                     'layout_info_path': json_file_path,
-                    'layout_image_path': image_layout_path,
+                    # 'layout_image_path': image_layout_path,
                 })
 
                 if prompt_mode != "prompt_layout_only_en":
+                    # Only generate one markdown file (with page headers/footers)
                     md_content = layoutjson2md(origin_image, cells, text_key='text')
-                    md_content_no_hf = layoutjson2md(origin_image, cells, text_key='text', no_page_hf=True)
+                    # Don't generate _nohf.md - not needed
+                    # md_content_no_hf = layoutjson2md(origin_image, cells, text_key='text', no_page_hf=True)
 
                     md_file_path = os.path.join(save_dir, f"{save_name}.md")
                     with open(md_file_path, "w", encoding="utf-8") as md_file:
                         md_file.write(md_content)
 
-                    md_nohf_file_path = os.path.join(save_dir, f"{save_name}_nohf.md")
-                    with open(md_nohf_file_path, "w", encoding="utf-8") as md_file:
-                        md_file.write(md_content_no_hf)
+                    # Don't save _nohf.md - not needed
+                    # md_nohf_file_path = os.path.join(save_dir, f"{save_name}_nohf.md")
+                    # with open(md_nohf_file_path, "w", encoding="utf-8") as md_file:
+                    #     md_file.write(md_content_no_hf)
 
                     result.update({
                         'md_content_path': md_file_path,
-                        'md_content_nohf_path': md_nohf_file_path,
+                        # 'md_content_nohf_path': md_nohf_file_path,
                     })
         else:
-            image_layout_path = os.path.join(save_dir, f"{save_name}.jpg")
-            origin_image.save(image_layout_path)
-            result.update({
-                'layout_image_path': image_layout_path,
-            })
+            # Don't save image layout - not needed
+            # image_layout_path = os.path.join(save_dir, f"{save_name}.jpg")
+            # origin_image.save(image_layout_path)
+            # result.update({
+            #     'layout_image_path': image_layout_path,
+            # })
 
             md_content = response
             md_file_path = os.path.join(save_dir, f"{save_name}.md")
             with open(md_file_path, "w", encoding="utf-8") as md_file:
-                md_file.write(md_content)
+                # Clean base64 images from markdown content
+                cleaned_md_content = clean_base64_images(md_content)
+                md_file.write(cleaned_md_content)
             result.update({
                 'md_content_path': md_file_path,
             })

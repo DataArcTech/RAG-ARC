@@ -4,7 +4,7 @@ import json
 import re
 
 from PIL import Image
-from .image_utils import PILimage_to_base64
+# from .image_utils import PILimage_to_base64  # No longer needed - base64 images removed
 
 
 def has_latex_markdown(text: str) -> bool:
@@ -141,18 +141,44 @@ def clean_text(text: str) -> str:
     return text
 
 
+def clean_base64_images(markdown_text: str) -> str:
+    """
+    Remove base64 image data from markdown text.
+
+    This function removes markdown image syntax containing base64 data:
+    - ![](data:image;base64,...)
+    - ![alt text](data:image;base64,...)
+    - ![](data:image/png;base64,...)
+    - ![](data:image/jpeg;base64,...)
+
+    Args:
+        markdown_text: The markdown text to clean.
+
+    Returns:
+        str: The cleaned markdown text without base64 images.
+    """
+    # Pattern to match markdown images with base64 data
+    # Matches: ![...](data:image...base64,...)
+    base64_image_pattern = r'!\[([^\]]*)\]\(data:image[^)]*base64,[^)]*\)'
+
+    # Replace base64 images with a simple placeholder
+    cleaned_text = re.sub(base64_image_pattern, '[Image]', markdown_text)
+
+    return cleaned_text
+
+
 def layoutjson2md(image: Image.Image, cells: list, text_key: str = 'text', no_page_hf: bool = False) -> str:
     """
     Converts a layout JSON format to Markdown.
-    
+
     In the layout JSON, formulas are LaTeX, tables are HTML, and text is Markdown.
-    
+
     Args:
         image: A PIL Image object.
         cells: A list of dictionaries, each representing a layout cell.
         text_key: The key for the text field in the cell dictionary.
         no_page_header_footer: If True, skips page headers and footers.
-        
+
     Returns:
         str: The text in Markdown format.
     """
@@ -161,21 +187,24 @@ def layoutjson2md(image: Image.Image, cells: list, text_key: str = 'text', no_pa
     for i, cell in enumerate(cells):
         x1, y1, x2, y2 = [int(coord) for coord in cell['bbox']]
         text = cell.get(text_key, "")
-        
+
         if no_page_hf and cell['category'] in ['Page-header', 'Page-footer']:
             continue
-        
+
         if cell['category'] == 'Picture':
-            image_crop = image.crop((x1, y1, x2, y2))
-            image_base64 = PILimage_to_base64(image_crop)
-            text_items.append(f"![]({image_base64})")
+            # Skip base64 image data to keep markdown clean
+            text_items.append(f"[Image: Picture at position ({x1}, {y1}, {x2}, {y2})]")
         elif cell['category'] == 'Formula':
             text_items.append(get_formula_in_markdown(text))
-        else:            
+        else:
             text = clean_text(text)
             text_items.append(f"{text}")
 
     markdown_text = '\n\n'.join(text_items)
+
+    # Post-processing: Clean any remaining base64 images that might exist in text content
+    markdown_text = clean_base64_images(markdown_text)
+
     return markdown_text
 
 
