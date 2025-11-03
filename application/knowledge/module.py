@@ -272,7 +272,7 @@ class Knowledge(AbstractModule):
     def get_indexing_status(self) -> Dict[str, Any]:
         """
         Get current indexing semaphore status for monitoring.
-        
+
         Returns:
             Dictionary containing semaphore status information
         """
@@ -280,11 +280,30 @@ class Knowledge(AbstractModule):
         available_slots = self.indexing_semaphore._value
         waiting_tasks = len(self.indexing_semaphore._waiters)
         active_tasks = max_concurrent - available_slots
-        
+
         return {
             "max_concurrent_indexing": max_concurrent,
             "available_slots": available_slots,
             "waiting_tasks": waiting_tasks,
             "active_tasks": active_tasks
         }
-        
+
+    async def shutdown(self):
+        """
+        Shutdown the Knowledge module and flush all pending indexer data.
+        Should be called when the application is shutting down.
+        """
+        logger.info("Shutting down Knowledge module...")
+
+        # Shutdown all indexers to flush pending chunks
+        if hasattr(self.file_index, 'indexers') and self.file_index.indexers:
+            for indexer in self.file_index.indexers:
+                if hasattr(indexer, 'shutdown'):
+                    try:
+                        logger.info(f"Shutting down indexer: {type(indexer).__name__}")
+                        await indexer.shutdown()
+                    except Exception as e:
+                        logger.error(f"Error shutting down indexer {type(indexer).__name__}: {e}")
+
+        logger.info("Knowledge module shutdown complete")
+

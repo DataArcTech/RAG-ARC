@@ -10,5 +10,19 @@ class BM25IndexerConfig(AbstractConfig):
     type: Literal["bm25_indexer"] = "bm25_indexer"
     index_config: BM25BuilderConfig = Field(description="BM25 index configuration")
 
+    # Batch processing configuration
+    batch_size: int = Field(
+        default=100,
+        description="Number of chunks to accumulate before flushing to index"
+    )
+    flush_interval: float = Field(
+        default=5.0,
+        description="Time interval (in seconds) to periodically flush pending chunks"
+    )
+    immediate_flush_threshold: int = Field(
+        default=10,
+        description="If pending chunks <= this threshold, flush immediately instead of waiting. Set to 0 to disable."
+    )
+
     def build(self):
         return BM25Indexer(self)
