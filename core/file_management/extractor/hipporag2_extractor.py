@@ -11,6 +11,7 @@ This extractor follows HippoRAG2's approach:
 """
 
 import logging
+import re
 from typing import List, TYPE_CHECKING, Tuple
 
 from core.file_management.extractor.base import ExtractorBase
@@ -19,7 +20,12 @@ from core.prompts.hipporag2_extractor_prompt import (
     HIPPORAG2_NER_ONE_SHOT_INPUT, HIPPORAG2_NER_ONE_SHOT_OUTPUT,
     HIPPORAG2_NER_ONE_SHOT_INPUT_WITH_TYPES, HIPPORAG2_NER_ONE_SHOT_OUTPUT_WITH_TYPES,
     HIPPORAG2_NER_PROMPT, HIPPORAG2_NER_PROMPT_WITH_TYPES,
-    HIPPORAG2_TRIPLE_SYSTEM, HIPPORAG2_TRIPLE_ONE_SHOT_INPUT, HIPPORAG2_TRIPLE_ONE_SHOT_OUTPUT, HIPPORAG2_TRIPLE_PROMPT
+    HIPPORAG2_TRIPLE_SYSTEM, HIPPORAG2_TRIPLE_ONE_SHOT_INPUT, HIPPORAG2_TRIPLE_ONE_SHOT_OUTPUT, HIPPORAG2_TRIPLE_PROMPT,
+    HIPPORAG2_NER_SYSTEM_ZH, HIPPORAG2_NER_SYSTEM_WITH_TYPES_ZH,
+    HIPPORAG2_NER_ONE_SHOT_INPUT_ZH, HIPPORAG2_NER_ONE_SHOT_OUTPUT_ZH,
+    HIPPORAG2_NER_ONE_SHOT_INPUT_WITH_TYPES_ZH, HIPPORAG2_NER_ONE_SHOT_OUTPUT_WITH_TYPES_ZH,
+    HIPPORAG2_NER_PROMPT_ZH, HIPPORAG2_NER_PROMPT_WITH_TYPES_ZH,
+    HIPPORAG2_TRIPLE_SYSTEM_ZH, HIPPORAG2_TRIPLE_ONE_SHOT_INPUT_ZH, HIPPORAG2_TRIPLE_ONE_SHOT_OUTPUT_ZH, HIPPORAG2_TRIPLE_PROMPT_ZH
 )
 from encapsulation.data_model.schema import Chunk, GraphData
 
@@ -45,6 +51,25 @@ class HippoRAG2Extractor(ExtractorBase):
         super().__init__(config)
         self.logger = logging.getLogger(__name__)
         self.entity_types = getattr(config, 'entity_types', None)  # Optional entity types to extract
+
+    def detect_language(self, text: str) -> str:
+        """
+        Detect text language (Chinese or English)
+
+        Args:
+            text: Input text to detect language
+
+        Returns:
+            'zh' for Chinese, 'en' for English
+        """
+        chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
+        total_chars = len(re.sub(r'\s', '', text))
+
+        if total_chars == 0:
+            return 'en'
+
+        chinese_ratio = chinese_chars / total_chars
+        return 'zh' if chinese_ratio > 0.1 else 'en'
 
     async def extract(self, chunk: Chunk) -> GraphData:
         """
@@ -79,7 +104,7 @@ class HippoRAG2Extractor(ExtractorBase):
             if not entities:
                 self.logger.warning("No entities extracted, skipping triple extraction")
                 return GraphData()
-            
+            print(entities)
             # Stage 2: Triple Extraction using extracted entities
             triples = await self.extract_triples(chunk.content, entities)
             
@@ -132,7 +157,6 @@ class HippoRAG2Extractor(ExtractorBase):
             # Extract just entity names for the prompt
             entity_names = [entity[0] for entity in entities]
             prompt = self.build_triple_prompt(text, entity_names)
-
             response = await self.llm.achat([{"role": "user", "content": prompt}])
 
             triples = self.parse_triple_response(response)
@@ -147,6 +171,7 @@ class HippoRAG2Extractor(ExtractorBase):
     def build_ner_prompt(self, text: str) -> str:
         """
         Build NER prompt - always outputs entity types in TSV format
+        Supports both Chinese and English
 
         Args:
             text: Input text to extract entities from
@@ -158,37 +183,73 @@ class HippoRAG2Extractor(ExtractorBase):
             - If self.entity_types is specified: uses HIPPORAG2_NER_PROMPT_WITH_TYPES
             - If self.entity_types is None: uses HIPPORAG2_NER_PROMPT (LLM auto-determines types)
             - Both formats output entity\ttype TSV format
+            - Language is auto-detected (Chinese or English)
         """
+        # Detect language
+        language = self.detect_language(text)
+
         if self.entity_types:
             # Use entity type-specific prompt (only extract specified types)
             entity_types_str = ', '.join(self.entity_types)
-            return HIPPORAG2_NER_PROMPT_WITH_TYPES.format(
-                system=HIPPORAG2_NER_SYSTEM_WITH_TYPES,
-                entity_types=entity_types_str,
-                example_input=HIPPORAG2_NER_ONE_SHOT_INPUT_WITH_TYPES,
-                example_output=HIPPORAG2_NER_ONE_SHOT_OUTPUT_WITH_TYPES,
-                passage=text
-            )
+            if language == 'zh':
+                return HIPPORAG2_NER_PROMPT_WITH_TYPES_ZH.format(
+                    system=HIPPORAG2_NER_SYSTEM_WITH_TYPES_ZH,
+                    entity_types=entity_types_str,
+                    example_input=HIPPORAG2_NER_ONE_SHOT_INPUT_WITH_TYPES_ZH,
+                    example_output=HIPPORAG2_NER_ONE_SHOT_OUTPUT_WITH_TYPES_ZH,
+                    passage=text
+                )
+            else:
+                return HIPPORAG2_NER_PROMPT_WITH_TYPES.format(
+                    system=HIPPORAG2_NER_SYSTEM_WITH_TYPES,
+                    entity_types=entity_types_str,
+                    example_input=HIPPORAG2_NER_ONE_SHOT_INPUT_WITH_TYPES,
+                    example_output=HIPPORAG2_NER_ONE_SHOT_OUTPUT_WITH_TYPES,
+                    passage=text
+                )
         else:
             # Use auto-type prompt (LLM determines entity types)
-            return HIPPORAG2_NER_PROMPT.format(
-                system=HIPPORAG2_NER_SYSTEM,
-                example_input=HIPPORAG2_NER_ONE_SHOT_INPUT,
-                example_output=HIPPORAG2_NER_ONE_SHOT_OUTPUT,
-                passage=text
-            )
+            if language == 'zh':
+                return HIPPORAG2_NER_PROMPT_ZH.format(
+                    system=HIPPORAG2_NER_SYSTEM_ZH,
+                    example_input=HIPPORAG2_NER_ONE_SHOT_INPUT_ZH,
+                    example_output=HIPPORAG2_NER_ONE_SHOT_OUTPUT_ZH,
+                    passage=text
+                )
+            else:
+                return HIPPORAG2_NER_PROMPT.format(
+                    system=HIPPORAG2_NER_SYSTEM,
+                    example_input=HIPPORAG2_NER_ONE_SHOT_INPUT,
+                    example_output=HIPPORAG2_NER_ONE_SHOT_OUTPUT,
+                    passage=text
+                )
 
     def build_triple_prompt(self, text: str, entities: List[str]) -> str:
-        """Build triple extraction prompt"""
+        """
+        Build triple extraction prompt
+        Supports both Chinese and English
+        """
         entities_str = '\n'.join(entities)
 
-        return HIPPORAG2_TRIPLE_PROMPT.format(
-            system=HIPPORAG2_TRIPLE_SYSTEM,
-            example_input=HIPPORAG2_TRIPLE_ONE_SHOT_INPUT,
-            example_output=HIPPORAG2_TRIPLE_ONE_SHOT_OUTPUT,
-            passage=text,
-            entities=entities_str
-        )
+        # Detect language
+        language = self.detect_language(text)
+
+        if language == 'zh':
+            return HIPPORAG2_TRIPLE_PROMPT_ZH.format(
+                system=HIPPORAG2_TRIPLE_SYSTEM_ZH,
+                example_input=HIPPORAG2_TRIPLE_ONE_SHOT_INPUT_ZH,
+                example_output=HIPPORAG2_TRIPLE_ONE_SHOT_OUTPUT_ZH,
+                passage=text,
+                entities=entities_str
+            )
+        else:
+            return HIPPORAG2_TRIPLE_PROMPT.format(
+                system=HIPPORAG2_TRIPLE_SYSTEM,
+                example_input=HIPPORAG2_TRIPLE_ONE_SHOT_INPUT,
+                example_output=HIPPORAG2_TRIPLE_ONE_SHOT_OUTPUT,
+                passage=text,
+                entities=entities_str
+            )
 
     def parse_ner_response(self, response: str) -> List[Tuple[str, str]]:
         """

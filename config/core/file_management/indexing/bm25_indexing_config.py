@@ -13,15 +13,11 @@ class BM25IndexerConfig(AbstractConfig):
     # Batch processing configuration
     batch_size: int = Field(
         default=100,
-        description="Number of chunks to accumulate before flushing to index"
+        description="Number of chunks to accumulate before triggering a flush"
     )
     flush_interval: float = Field(
         default=5.0,
         description="Time interval (in seconds) to periodically flush pending chunks"
-    )
-    immediate_flush_threshold: int = Field(
-        default=10,
-        description="If pending chunks <= this threshold, flush immediately instead of waiting. Set to 0 to disable."
     )
 
     def build(self):

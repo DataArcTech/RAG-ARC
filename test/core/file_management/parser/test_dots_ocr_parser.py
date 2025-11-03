@@ -174,7 +174,8 @@ def test_huggingface_loading_method():
             loading_method="huggingface",
             use_china_mirror=True,
             cache_folder="./models/dots_ocr",
-            use_snapshot_download=True
+            use_snapshot_download=True,
+            device="cuda:1"
         )
 
         hf_parser_config = DotsOCRParserConfig(

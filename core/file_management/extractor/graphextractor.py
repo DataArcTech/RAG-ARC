@@ -345,7 +345,7 @@ class GraphExtractor(ExtractorBase):
             return False
 
         # Filter pure numbers
-        if re.match(r'^\d+$', name) or re.match(r'^[\d\s\.,;:!?()\[\]{}""''\-_]+$', name):
+        if re.match(r'^\d+$', name) or re.match(r'^[\d\s\.,;:!?()\[\]{}""''\\-_]+$', name):
             return False
 
         return True

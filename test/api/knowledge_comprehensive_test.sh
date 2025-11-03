@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-API_BASE="http://localhost:8005"
+API_BASE="http://localhost:8000"
 KNOWLEDGE_ENDPOINT="$API_BASE/knowledge"
 AUTH_ENDPOINT="$API_BASE/auth"
 
@@ -441,23 +441,37 @@ try:
     assert isinstance(data['nodes'], list), 'nodes should be a list'
     assert isinstance(data['edges'], list), 'edges should be a list'
 
-    # Check node structure
+    # Check chunks if present
+    total_chunks = 0
+    if 'chunks' in data and isinstance(data['chunks'], list):
+        total_chunks = len(data['chunks'])
+        if total_chunks > 0:
+            chunk = data['chunks'][0]
+            assert 'id' in chunk, 'Chunk missing id field'
+            assert 'type' in chunk, 'Chunk missing type field'
+            assert chunk['type'] == 'chunk', 'Chunk type should be \"chunk\"'
+
+    # Check entity node structure (nodes array contains entities)
     if len(data['nodes']) > 0:
         node = data['nodes'][0]
         assert 'id' in node, 'Node missing id field'
-        assert 'type' in node, 'Node missing type field'
+        # Entity nodes use 'name' and 'category' instead of 'type'
+        assert 'name' in node or 'category' in node, 'Entity node missing name or category field'
         print(f'✅ Full graph structure is valid')
-        print(f'✅ Total nodes: {len(data[\"nodes\"])}')
+        print(f'✅ Total chunks: {total_chunks}')
+        print(f'✅ Total entity nodes: {len(data[\"nodes\"])}')
         print(f'✅ Total edges: {len(data[\"edges\"])}')
 
-        # Show node types distribution
-        node_types = {}
+        # Show entity categories distribution
+        categories = {}
         for node in data['nodes']:
-            node_type = node.get('type', 'unknown')
-            node_types[node_type] = node_types.get(node_type, 0) + 1
-        print(f'✅ Node types: {node_types}')
+            category = node.get('category', 'unknown')
+            categories[category] = categories.get(category, 0) + 1
+        print(f'✅ Entity categories: {categories}')
     else:
-        print('⚠️  No nodes in full graph')
+        print(f'✅ Full graph structure is valid')
+        print(f'✅ Total chunks: {total_chunks}')
+        print(f'⚠️  No entity nodes in full graph')
 
 except AssertionError as e:
     print(f'❌ Validation failed: {e}')
@@ -521,21 +535,32 @@ try:
     assert isinstance(subgraph['nodes'], list), 'nodes should be a list'
     assert isinstance(subgraph['edges'], list), 'edges should be a list'
 
-    # Check node structure
+    # Check chunks if present
+    total_chunks = 0
+    if 'chunks' in subgraph and isinstance(subgraph['chunks'], list):
+        total_chunks = len(subgraph['chunks'])
+        if total_chunks > 0:
+            chunk = subgraph['chunks'][0]
+            assert 'id' in chunk, 'Chunk missing id field'
+            assert 'type' in chunk, 'Chunk missing type field'
+
+    # Check entity node structure (nodes array contains entities)
     if len(subgraph['nodes']) > 0:
         node = subgraph['nodes'][0]
         assert 'id' in node, 'Node missing id field'
-        assert 'type' in node, 'Node missing type field'
+        # Entity nodes use 'name' and 'category' instead of 'type'
+        assert 'name' in node or 'category' in node, 'Entity node missing name or category field'
         print(f'✅ Subgraph structure is valid')
-        print(f'✅ Subgraph nodes: {len(subgraph[\"nodes\"])}')
+        print(f'✅ Subgraph chunks: {total_chunks}')
+        print(f'✅ Subgraph entity nodes: {len(subgraph[\"nodes\"])}')
         print(f'✅ Subgraph edges: {len(subgraph[\"edges\"])}')
 
-        # Show node types distribution
-        node_types = {}
+        # Show entity categories distribution
+        categories = {}
         for node in subgraph['nodes']:
-            node_type = node.get('type', 'unknown')
-            node_types[node_type] = node_types.get(node_type, 0) + 1
-        print(f'✅ Node types: {node_types}')
+            category = node.get('category', 'unknown')
+            categories[category] = categories.get(category, 0) + 1
+        print(f'✅ Entity categories: {categories}')
 
         # Check for seed entities if present
         seed_count = sum(1 for node in subgraph['nodes'] if node.get('is_seed', False))
@@ -547,7 +572,9 @@ try:
         if ppr_count > 0:
             print(f'✅ Nodes with PPR scores: {ppr_count}')
     else:
-        print('⚠️  No nodes in subgraph')
+        print(f'✅ Subgraph structure is valid')
+        print(f'✅ Subgraph chunks: {total_chunks}')
+        print('⚠️  No entity nodes in subgraph')
 
 except AssertionError as e:
     print(f'❌ Validation failed: {e}')

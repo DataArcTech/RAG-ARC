@@ -29,7 +29,6 @@ class BM25Indexer(BaseIndexer):
         # Batch processing configuration
         self.batch_size = config.batch_size
         self.flush_interval = config.flush_interval
-        self.immediate_flush_threshold = config.immediate_flush_threshold
 
         # Async lock to ensure only one coroutine writes to the index
         self._write_lock = asyncio.Lock()
@@ -138,10 +137,12 @@ class BM25Indexer(BaseIndexer):
         """
         Adds chunks to the pending queue for batch processing.
 
-        Flush strategies:
-        1. If pending chunks >= batch_size: flush immediately
-        2. If pending chunks <= immediate_flush_threshold: flush immediately (for small uploads)
-        3. Otherwise: wait for periodic flush
+        This method is NON-BLOCKING - it adds chunks to the queue and returns immediately.
+        The actual indexing happens in the background flush worker.
+
+        Flush trigger strategies:
+        1. If pending chunks >= batch_size: trigger immediate flush (non-blocking)
+        2. Otherwise: wait for periodic flush
         """
         if not chunks:
             return []
@@ -154,19 +155,13 @@ class BM25Indexer(BaseIndexer):
         total_pending = len(self._pending_chunks)
         logger.info(f"Added {len(chunks)} chunks to pending queue. Total pending: {total_pending}")
 
-        # Strategy 1: Batch size reached - flush immediately
+        # Strategy 1: Batch size reached - trigger immediate flush (non-blocking)
         if total_pending >= self.batch_size:
-            logger.info(f"Batch size ({self.batch_size}) reached, flushing immediately")
-            return await self._flush_pending_chunks()
+            logger.info(f"Batch size ({self.batch_size}) reached, triggering immediate flush")
+            # Create a flush task but don't wait for it
+            asyncio.create_task(self._flush_pending_chunks())
 
-        # Strategy 2: Small upload - flush immediately to reduce latency
-        if self.immediate_flush_threshold > 0 and total_pending <= self.immediate_flush_threshold:
-            logger.info(f"Small batch ({total_pending} <= {self.immediate_flush_threshold}), flushing immediately")
-            return await self._flush_pending_chunks()
-
-        # Strategy 3: Medium batch - wait for periodic flush
-        logger.info(f"Medium batch ({total_pending}), waiting for periodic flush")
-        # Return the chunk IDs optimistically (they will be indexed later)
+        # Return chunk IDs immediately (they will be indexed by background worker)
         return [chunk.id for chunk in chunks]
 
     async def shutdown(self):

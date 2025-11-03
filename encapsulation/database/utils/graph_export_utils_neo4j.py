@@ -6,6 +6,7 @@ for frontend visualization using Cytoscape.js or other graph libraries.
 """
 
 import logging
+import re
 from typing import Dict, List, Any, Set, Optional
 
 logger = logging.getLogger(__name__)
@@ -13,7 +14,47 @@ logger = logging.getLogger(__name__)
 
 class GraphExporterNeo4j:
     """Export graph data from Neo4j for visualization"""
-    
+
+    @staticmethod
+    def _should_filter_entity(entity_name: str) -> bool:
+        """
+        Check if an entity should be filtered out
+
+        Filters out:
+        - Pure numbers (integers, decimals)
+        - Timestamps (Unix timestamps, millisecond timestamps)
+        - Common time formats (YYYY-MM-DD, HH:MM:SS, etc.)
+
+        Args:
+            entity_name: Entity name to check
+
+        Returns:
+            True if entity should be filtered out, False otherwise
+        """
+        if not entity_name or not isinstance(entity_name, str):
+            return False
+
+        entity_name = entity_name.strip()
+
+        # Check for pure numbers (integers or decimals)
+        if re.match(r'^-?\d+(\.\d+)?$', entity_name):
+            return True
+
+        # Check for Unix timestamps (10 digits) or millisecond timestamps (13 digits)
+        if re.match(r'^\d{10}$', entity_name) or re.match(r'^\d{13}$', entity_name):
+            return True
+
+        # Check for common date/time formats
+        # YYYY-MM-DD, YYYY/MM/DD, YYYY-MM-DD HH:MM:SS, etc.
+        if re.match(r'^\d{4}[-/]\d{2}[-/]\d{2}', entity_name):
+            return True
+
+        # Check for time format HH:MM:SS or HH:MM
+        if re.match(r'^\d{2}:\d{2}(:\d{2})?$', entity_name):
+            return True
+
+        return False
+
     @staticmethod
     def export_full_graph(
         graph_store,
@@ -105,13 +146,19 @@ class GraphExporterNeo4j:
                 chunks.append(chunk_obj)
 
             elif node_type == 'entity':
+                entity_name = record.get('entity_name')
+
+                # Filter out entities that are pure numbers, timestamps, or time formats
+                if GraphExporterNeo4j._should_filter_entity(entity_name):
+                    continue
+
                 entity_obj = {
                     'id': node_id,
                     'type': 'entity'
                 }
                 # Use 'name' instead of 'entity_name' or 'entity_text'
-                if record.get('entity_name'):
-                    entity_obj['name'] = record['entity_name']
+                if entity_name:
+                    entity_obj['name'] = entity_name
                 # Use 'category' for entity_type
                 entity_type = record.get('entity_type', 'Entity')
                 entity_obj['category'] = entity_type
@@ -157,6 +204,10 @@ class GraphExporterNeo4j:
             if source_id not in node_set or target_id not in node_set:
                 continue
 
+            # Skip SIMILAR_TO relationships
+            if rel_type == 'SIMILAR_TO':
+                continue
+
             # Avoid duplicate edges (undirected)
             edge_key = tuple(sorted([source_id, target_id]))
             if edge_key in seen_edges:
@@ -191,11 +242,6 @@ class GraphExporterNeo4j:
                     edge_obj['target'] = target_name
                     edge_obj['relation'] = predicate
                     edges_by_type['fact_relation'].append(edge_obj)
-                elif rel_type == 'SIMILAR_TO':
-                    edge_obj['source'] = source_name
-                    edge_obj['target'] = target_name
-                    edge_obj['relation'] = 'synonymy'
-                    edges_by_type['synonymy'].append(edge_obj)
                 else:
                     edge_obj['source'] = source_name
                     edge_obj['target'] = target_name
@@ -321,13 +367,19 @@ class GraphExporterNeo4j:
                 chunks.append(chunk_obj)
 
             elif node_type == 'entity':
+                entity_name = record.get('entity_name')
+
+                # Filter out entities that are pure numbers, timestamps, or time formats
+                if GraphExporterNeo4j._should_filter_entity(entity_name):
+                    continue
+
                 entity_obj = {
                     'id': node_id,
                     'type': 'entity'
                 }
                 # Use 'name' instead of 'entity_name' or 'entity_text'
-                if record.get('entity_name'):
-                    entity_obj['name'] = record['entity_name']
+                if entity_name:
+                    entity_obj['name'] = entity_name
                 # Use 'category' for entity_type
                 entity_type = record.get('entity_type', 'Entity')
                 entity_obj['category'] = entity_type
@@ -374,6 +426,10 @@ class GraphExporterNeo4j:
             source_type = record['source_type']
             target_type = record['target_type']
 
+            # Skip SIMILAR_TO relationships
+            if rel_type == 'SIMILAR_TO':
+                continue
+
             # Avoid duplicate edges (undirected)
             edge_key = tuple(sorted([source_id, target_id]))
             if edge_key in seen_edges:
@@ -398,7 +454,7 @@ class GraphExporterNeo4j:
                 continue
 
             elif source_type == 'entity' and target_type == 'entity':
-                # Entity-entity relation (synonymy or fact-based)
+                # Entity-entity relation (fact-based)
                 source_name = record.get('source_name') or source_id
                 target_name = record.get('target_name') or target_id
 
@@ -408,11 +464,6 @@ class GraphExporterNeo4j:
                     edge_obj['source'] = source_name
                     edge_obj['target'] = target_name
                     edge_obj['relation'] = predicate
-
-                elif rel_type == 'SIMILAR_TO':
-                    edge_obj['source'] = source_name
-                    edge_obj['target'] = target_name
-                    edge_obj['relation'] = 'synonymy'
                 else:
                     edge_obj['source'] = source_name
                     edge_obj['target'] = target_name

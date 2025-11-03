@@ -6,6 +6,7 @@ for frontend visualization using Cytoscape.js or other graph libraries.
 """
 
 import logging
+import re
 from typing import Dict, List, Any, Set, Optional
 
 logger = logging.getLogger(__name__)
@@ -13,7 +14,47 @@ logger = logging.getLogger(__name__)
 
 class GraphExporter:
     """Export graph data for visualization"""
-    
+
+    @staticmethod
+    def _should_filter_entity(entity_name: str) -> bool:
+        """
+        Check if an entity should be filtered out
+
+        Filters out:
+        - Pure numbers (integers, decimals)
+        - Timestamps (Unix timestamps, millisecond timestamps)
+        - Common time formats (YYYY-MM-DD, HH:MM:SS, etc.)
+
+        Args:
+            entity_name: Entity name to check
+
+        Returns:
+            True if entity should be filtered out, False otherwise
+        """
+        if not entity_name or not isinstance(entity_name, str):
+            return False
+
+        entity_name = entity_name.strip()
+
+        # Check for pure numbers (integers or decimals)
+        if re.match(r'^-?\d+(\.\d+)?$', entity_name):
+            return True
+
+        # Check for Unix timestamps (10 digits) or millisecond timestamps (13 digits)
+        if re.match(r'^\d{10}$', entity_name) or re.match(r'^\d{13}$', entity_name):
+            return True
+
+        # Check for common date/time formats
+        # YYYY-MM-DD, YYYY/MM/DD, YYYY-MM-DD HH:MM:SS, etc.
+        if re.match(r'^\d{4}[-/]\d{2}[-/]\d{2}', entity_name):
+            return True
+
+        # Check for time format HH:MM:SS or HH:MM
+        if re.match(r'^\d{2}:\d{2}(:\d{2})?$', entity_name):
+            return True
+
+        return False
+
     @staticmethod
     def export_full_graph(
         graph_store,
@@ -97,17 +138,20 @@ class GraphExporter:
                 }
                 if entity_info:
                     entity_name, entity_type = entity_info
+
+                    # Filter out entities that are pure numbers, timestamps, or time formats
+                    if GraphExporter._should_filter_entity(entity_name):
+                        continue
+
+                    entity_obj = {
+                        'id': node_id
+                    }
                     # Use 'name' instead of 'entity_name'
                     entity_obj['name'] = entity_name
                     # Use 'category' for entity_type
                     entity_obj['category'] = entity_type or 'Entity'
                     categories_set.add(entity_type or 'Entity')
-                else:
-                    entity_obj['name'] = ''
-                    entity_obj['category'] = 'Entity'
-                    categories_set.add('Entity')
-
-                nodes.append(entity_obj)
+                    nodes.append(entity_obj)
         
         # Build fact_id to relation mapping
         cursor.execute('SELECT fact_id, head, relation, tail FROM facts')
@@ -184,11 +228,8 @@ class GraphExporter:
                         edges_by_type['fact_relation'].append(edge_obj)
                         break
 
-                if not relation_found:
-                    edge_obj['source'] = source_name
-                    edge_obj['target'] = target_name
-                    edge_obj['relation'] = 'synonymy'
-                    edges_by_type['synonymy'].append(edge_obj)
+                # If no fact relation found, skip (no synonymy edges anymore)
+                # SIMILAR_TO relationships are filtered out
 
             else:
                 edge_obj['source'] = source_id
@@ -297,25 +338,29 @@ class GraphExporter:
                 }
                 if entity_info:
                     entity_name, entity_type = entity_info
+
+                    # Filter out entities that are pure numbers, timestamps, or time formats
+                    if GraphExporter._should_filter_entity(entity_name):
+                        continue
+
+                    entity_obj = {
+                        'id': node_id
+                    }
                     # Use 'name' instead of 'entity_name'
                     entity_obj['name'] = entity_name
                     # Use 'category' for entity_type
                     entity_obj['category'] = entity_type or 'Entity'
                     categories_set.add(entity_type or 'Entity')
-                else:
-                    entity_obj['name'] = ''
-                    entity_obj['category'] = 'Entity'
-                    categories_set.add('Entity')
 
-                # Mark seed entities
-                if node_id in seed_entity_ids:
-                    entity_obj['is_seed'] = True
+                    # Mark seed entities
+                    if node_id in seed_entity_ids:
+                        entity_obj['is_seed'] = True
 
-                # Add PPR score if available
-                if node_id in node_ppr_scores:
-                    entity_obj['ppr_score'] = node_ppr_scores[node_id]
+                    # Add PPR score if available
+                    if node_id in node_ppr_scores:
+                        entity_obj['ppr_score'] = node_ppr_scores[node_id]
 
-                nodes.append(entity_obj)
+                    nodes.append(entity_obj)
         
         # Build fact_id to relation mapping
         cursor.execute('SELECT fact_id, head, relation, tail FROM facts')
@@ -387,11 +432,10 @@ class GraphExporter:
                         relation_found = True
                         break
 
+                # If no fact relation found, skip (no synonymy edges anymore)
+                # SIMILAR_TO relationships are filtered out
                 if not relation_found:
-                    # No fact found, assume synonymy (bidirectional)
-                    edge_obj['source'] = source_name
-                    edge_obj['target'] = target_name
-                    edge_obj['relation'] = 'synonymy'
+                    continue
 
             else:
                 # Fallback for other edge types
