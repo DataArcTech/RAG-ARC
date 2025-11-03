@@ -19,10 +19,15 @@ from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from .base import RelationalDB
 from ...data_model.orm_models import (
     Base,
-    User,
+    User, UserStatus,
+    Department,
+    Role, RoleType,
     ChatSession,
     ChatMessage,
-    FileMetadata, FileStatus,
+    FileMetadata, FileStatus, FileVisibility,
+    FileUserPermission,
+    FileDepartmentPermission,
+    AuditLog, AuditAction,
     ParsedContentMetadata, ParsedContentStatus,
     ChunkMetadata, ChunkIndexStatus
 )
