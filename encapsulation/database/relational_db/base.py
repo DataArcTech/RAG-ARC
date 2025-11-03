@@ -10,7 +10,7 @@ from typing import (
     Dict,
 )
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 if TYPE_CHECKING:
     from ...data_model.orm_models import FileMetadata, FileStatus
@@ -332,15 +332,11 @@ class RelationalDB(AbstractModule):
         **kwargs: Any,
     ) -> str:
         """Asynchronously store file metadata"""
-        return await asyncio.get_event_loop().run_in_executor(
-            ThreadPoolExecutor(), self.store_file_metadata, file_metadata, **kwargs
-        )
+        return await self.store_file_metadata(file_metadata, **kwargs)
 
     async def aget_file_metadata(self, file_id: str, **kwargs: Any) -> Optional['FileMetadata']:
         """Asynchronously retrieve file metadata"""
-        return await asyncio.get_event_loop().run_in_executor(
-            ThreadPoolExecutor(), self.get_file_metadata, file_id, **kwargs
-        )
+        return await self.get_file_metadata(file_id, **kwargs)
 
     async def astore_parsed_content_metadata(
         self,
@@ -348,15 +344,11 @@ class RelationalDB(AbstractModule):
         **kwargs: Any,
     ) -> str:
         """Asynchronously store parsed content metadata"""
-        return await asyncio.get_event_loop().run_in_executor(
-            ThreadPoolExecutor(), self.store_parsed_content_metadata, parsed_content_metadata, **kwargs
-        )
+        return await self.store_parsed_content_metadata(parsed_content_metadata, **kwargs)
 
     async def aget_parsed_content_metadata(self, parsed_content_id: str, **kwargs: Any) -> Optional['ParsedContentMetadata']:
         """Asynchronously retrieve parsed content metadata"""
-        return await asyncio.get_event_loop().run_in_executor(
-            ThreadPoolExecutor(), self.get_parsed_content_metadata, parsed_content_id, **kwargs
-        )
+        return await self.get_parsed_content_metadata(parsed_content_id, **kwargs)
 
     async def astore_chunk_metadata(
         self,
@@ -364,12 +356,8 @@ class RelationalDB(AbstractModule):
         **kwargs: Any,
     ) -> str:
         """Asynchronously store chunk metadata"""
-        return await asyncio.get_event_loop().run_in_executor(
-            ThreadPoolExecutor(), self.store_chunk_metadata, chunk_metadata, **kwargs
-        )
+        return await self.store_chunk_metadata(chunk_metadata, **kwargs)
 
     async def aget_chunk_metadata(self, chunk_id: str, **kwargs: Any) -> Optional['ChunkMetadata']:
         """Asynchronously retrieve chunk metadata"""
-        return await asyncio.get_event_loop().run_in_executor(
-            ThreadPoolExecutor(), self.get_chunk_metadata, chunk_id, **kwargs
-        )
+        return await self.get_chunk_metadata(chunk_id, **kwargs)

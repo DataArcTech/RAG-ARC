@@ -1,8 +1,9 @@
-from typing import List, Optional, Dict, Any, TYPE_CHECKING
+from typing import List, Optional, Dict, Any, Tuple, TYPE_CHECKING
 import logging
 import os
 from pathlib import Path
 
+from core.file_management.parser.base import AbstractParser
 from framework.module import AbstractModule
 
 if TYPE_CHECKING:
@@ -87,7 +88,7 @@ class ParserCombinator(AbstractModule):
 
     def _build_extension_mapping(self):
         """Build mapping from file extensions to parsers"""
-        self.extension_to_parser = {}
+        self.extension_to_parser: Dict[str, Tuple[str, AbstractParser]] = {}
 
         # Map OCR parser extensions
         if self.ocr_parser:
@@ -111,7 +112,7 @@ class ParserCombinator(AbstractModule):
         """Get all supported file extensions from both parsers"""
         return list(self.extension_to_parser.keys())
 
-    def parse_file(
+    async def parse_file(
         self,
         file_data: bytes,
         filename: str,
@@ -152,7 +153,7 @@ class ParserCombinator(AbstractModule):
         # Parse using selected parser
         try:
             logger.info(f"Parsing {filename} using {parser_type} parser ({parser.__class__.__name__})")
-            results = parser.parse_file(
+            results = await parser.parse_file(
                 file_data=file_data,
                 filename=filename,
                 **kwargs

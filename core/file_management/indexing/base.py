@@ -103,10 +103,7 @@ class BaseIndexer(AbstractModule, ABC):
         if not path.is_file():
             raise FileNotFoundError(f"Chunk file does not exist or is not a file: {file_path}")
 
-        loop = asyncio.get_running_loop()
-
-        content = await loop.run_in_executor(None, path.read_text, 'utf-8')
-        chunk_data = await loop.run_in_executor(None, json.loads, content)
+        chunk_data = json.loads(path.read_text(encoding='utf-8'))
 
         return self.create_chunk_from_chunk_data(chunk_data)
 

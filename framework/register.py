@@ -35,6 +35,7 @@ class Register:
             return obj
 
     def register(self, config_path: str, app_name: str, config_type: AbstractConfig):
+        logger.info(f"Registering {app_name} with config path {config_path}")
         with open(config_path, "r") as f:
             try:
                 json_str = f.read()

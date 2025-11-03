@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 import uuid
 import asyncio
 from fastapi.responses import Response
-from fastapi import File, UploadFile, HTTPException
+from fastapi import UploadFile, HTTPException
 from encapsulation.data_model.orm_models import FileMetadata, FileStatus
 
 class Knowledge(AbstractModule):
@@ -22,10 +22,9 @@ class Knowledge(AbstractModule):
         self.file_index = config.index_manager_config.build()
         
         # Semaphore to control concurrent indexing operations
-        max_concurrent_indexing = config.max_concurrent_indexing
-        self.indexing_semaphore = asyncio.Semaphore(max_concurrent_indexing)
+        self.indexing_semaphore = asyncio.Semaphore(config.max_concurrent_indexing)
     
-    def upload_file(self, file: UploadFile, user_id: uuid.UUID) -> str:
+    async def upload_file(self, file: UploadFile, user_id: uuid.UUID) -> str:
         try:
             doc_id = self.file_storage.upload_file(
                 filename=file.filename,
@@ -34,28 +33,16 @@ class Knowledge(AbstractModule):
                 content_type=file.content_type
             )
             # Start indexing in background (fire-and-forget)
-            self._start_background_indexing(doc_id)
+            # execute file indexing without waiting for it to complete
+            task = asyncio.create_task(self._index_file_background(doc_id))
+            # Add error callback to log any unhandled exceptions
+            task.add_done_callback(lambda t: logger.error(f"Background indexing task failed: {t.exception()}") if t.exception() else None)
             logger.info(f"File {file.filename} uploaded with ID {doc_id}, indexing started in background")
             return doc_id
 
         except Exception as e:
             logger.error(e)
             raise
-
-    def _start_background_indexing(self, doc_id: str):
-        """Start background indexing task safely"""
-        try:
-            # Try to get the current event loop
-            loop = asyncio.get_running_loop()
-            # If we're in an async context, create the task
-            loop.create_task(self._index_file_background(doc_id))
-        except RuntimeError:
-            # No event loop running, start a new one in a thread
-            import threading
-            def run_async():
-                asyncio.run(self._index_file_background(doc_id))
-            thread = threading.Thread(target=run_async, daemon=True)
-            thread.start()
 
     async def _index_file_background(self, doc_id: str):
         """Background task for indexing files with semaphore control"""
@@ -178,7 +165,7 @@ class Knowledge(AbstractModule):
             logger.error(f"Failed to count files for user {user_id}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to count files: {str(e)}")
 
-    def trigger_indexing(self, file_ids: List[str], user_id: uuid.UUID) -> Dict[str, Any]:
+    async def trigger_indexing(self, file_ids: List[str], user_id: uuid.UUID) -> str:
         """
         Trigger indexing for multiple files asynchronously.
         
@@ -187,87 +174,79 @@ class Knowledge(AbstractModule):
             user_id: UUID of the user requesting the indexing
             
         Returns:
-            Dictionary containing basic info about the triggered indexing
+            String containing basic info about the triggered indexing or error message
         """
-        try:
-            # Validate files and collect valid ones
-            valid_file_ids = []
-            invalid_files = []
-            
-            for file_id in file_ids:
-                try:
-                    metadata = self.file_storage.get_file_metadata(file_id)
-                    if metadata is None:
-                        invalid_files.append(f"File not found: {file_id}")
-                        continue
-                    if metadata.owner_id != user_id:
-                        invalid_files.append(f"You are not allowed to access file: {file_id}")
-                        continue
-                    valid_file_ids.append(file_id)
-                except Exception as e:
-                    invalid_files.append(f"Error accessing file {file_id}: {str(e)}")
-                    continue
-            
-            # If no valid files, return error
-            if not valid_file_ids:
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"No valid files to index. Issues: {'; '.join(invalid_files)}"
-                )
-            
-            logger.info(f"Triggering async indexing for {len(valid_file_ids)} valid files (out of {len(file_ids)} requested) for user {user_id}")
-            
-            # Start background indexing task for valid files only
-            self._start_background_indexing_multiple_files(valid_file_ids, user_id)
-            
-            # Return immediately with basic info
-            message = f"Indexing started for {len(valid_file_ids)} files in background"
-            if invalid_files:
-                message += f". Skipped {len(invalid_files)} invalid files: {'; '.join(invalid_files)}"
-            
-            return {
-                "total_files": len(file_ids),  # Return original count for consistency with test expectations
-                "status": "indexing_started",
-                "message": message
-            }
-            
-        except HTTPException:
-            # Re-raise HTTP exceptions (400, 403)
-            raise
-        except Exception as e:
-            logger.error(f"Failed to trigger indexing for user {user_id}: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to trigger indexing: {str(e)}")
+        # Validate files and collect those eligible for indexing
+        # Only allow indexing of STORED or FAILED files
+        # Skip files that are INDEXED, or in intermediate states (PARSED, CHUNKED) indicating processing is in progress
+        valid_files = []
+        invalid_files = []
+        skipped_files = []
 
-    def _start_background_indexing_multiple_files(self, file_ids: List[str], user_id: uuid.UUID):
-        """Start background indexing task for multiple files safely"""
-        try:
-            # Try to get the current event loop
-            loop = asyncio.get_running_loop()
-            # If we're in an async context, create the task
-            loop.create_task(self._index_multiple_files_background(file_ids, user_id))
-        except RuntimeError:
-            # No event loop running, start a new one in a thread
-            import threading
-            def run_async():
-                asyncio.run(self._index_multiple_files_background(file_ids, user_id))
-            thread = threading.Thread(target=run_async, daemon=True)
-            thread.start()
+        for file_id in file_ids:
+            try:
+                metadata = self.file_storage.get_file_metadata(file_id)
+                if not metadata:
+                    invalid_files.append(f"File not found or invalid: {file_id}")
+                    continue
+                if metadata.owner_id != user_id:
+                    invalid_files.append(f"You are not authorized to operate on this file: {file_id}")
+                    continue
+
+                # Only allow indexing for STORED or FAILED files
+                # Skip files that are already indexed or in intermediate processing states
+                if metadata.status == FileStatus.STORED or metadata.status == FileStatus.FAILED:
+                    valid_files.append(file_id)
+                else:
+                    skipped_files.append(file_id)
+            except Exception as e:
+                invalid_files.append(file_id)
+                logger.exception(f"Error accessing file {file_id}")
+                continue
+
+        # If all files are invalid or already indexed/in progress, directly return
+        if not valid_files:
+            message_parts = []
+            if invalid_files:
+                message_parts.append(f"Invalid files: {'; '.join(invalid_files)}")
+            if skipped_files:
+                message_parts.append(f"Skipped files (already indexed or in progress): {'; '.join(skipped_files)}")
+            message_parts.append("No files scheduled for indexing.")
+            return "\n".join(message_parts)
+
+        logger.info(
+            f"Triggering indexing for files: {'; '.join(valid_files)}"
+        )
+
+        # Start background indexing task for files not indexed yet only
+        await self._index_multiple_files_background(valid_files, user_id)
+
+        # Return immediately with basic info
+        message_parts = [
+            f"Indexing started for files: {'; '.join(valid_files)}"
+        ]
+        if skipped_files:
+            message_parts.append(f"Skipped files (already indexed or in progress): {'; '.join(skipped_files)}")
+        if invalid_files:
+            message_parts.append(f"Invalid files: {'; '.join(invalid_files)}")
+
+        return "\n".join(message_parts)
 
     async def _index_multiple_files_background(self, file_ids: List[str], user_id: uuid.UUID):
         """Background task for indexing multiple files with semaphore control"""
-        async with self.indexing_semaphore:
-            try:
-                logger.info(f"Starting background indexing for {len(file_ids)} files for user {user_id} (semaphore acquired)")
-                
-                # Use the IndexManager's process_multiple_files method
-                result = self.file_index.process_multiple_files(file_ids)
-                
-                logger.info(f"Background indexing completed for user {user_id}: {result.get('successful_files', 0)} successful, {result.get('failed_files', 0)} failed out of {result.get('total_files', 0)} files")
-                
-            except Exception as e:
-                logger.error(f"Background indexing failed for user {user_id}: {str(e)}")
-            finally:
-                logger.debug(f"Background indexing semaphore released for user {user_id} ({len(file_ids)} files)")
+        
+        try:
+            logger.info(f"Starting background indexing for {len(file_ids)} files for user {user_id} (semaphore acquired)")
+            
+            # Use the IndexManager's process_multiple_files method
+            result = await self.file_index.process_multiple_files(file_ids)
+            
+            logger.info(f"Background indexing completed for user {user_id}: {result.get('successful_files', 0)} successful, {result.get('failed_files', 0)} failed out of {result.get('total_files', 0)} files")
+            
+        except Exception as e:
+            logger.error(f"Background indexing failed for user {user_id}: {str(e)}")
+        finally:
+            logger.debug(f"Background indexing semaphore released for user {user_id} ({len(file_ids)} files)")
 
     def get_indexing_status(self) -> Dict[str, Any]:
         """

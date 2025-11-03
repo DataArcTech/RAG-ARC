@@ -18,6 +18,7 @@ class ExtractorBase(AbstractModule):
     def __init__(self, config):
         super().__init__(config)
         self.llm = config.llm_config.build()
+        self.extraction_semaphore = asyncio.Semaphore(config.max_concurrent)
 
     @abstractmethod
     async def extract(self, chunk: Chunk) -> GraphData:
@@ -33,45 +34,26 @@ class ExtractorBase(AbstractModule):
 
     async def process_chunk(self, chunk: Chunk) -> Chunk:
         """process a single chunk"""
-        try:
-            graph_data = await self.extract(chunk)
-            chunk.graph = graph_data
-            return chunk
-        except Exception as e:
-            logger.error(f"Error processing chunk {chunk.id}: {e}", exc_info=True)
-            chunk.graph = GraphData()  # return empty graph data
-            return chunk
+        async with self.extraction_semaphore:
+            try:
+                graph_data = await self.extract(chunk)
+                chunk.graph = graph_data
+                return chunk
+            except Exception as e:
+                logger.error(f"Error processing chunk {chunk.id}: {e}", exc_info=True)
+                chunk.graph = GraphData()  # return empty graph data
+                return chunk
 
     async def extract_concurrent(self, chunks: List[Chunk]) -> List[Chunk]:
         """extract from multiple chunks concurrently"""
         if not chunks:
             return []
 
-        semaphore = asyncio.Semaphore(self.config.max_concurrent)
         logger.info(f"Starting concurrent extraction with max_concurrent={self.config.max_concurrent}")
 
-        async def process_with_semaphore(chunk: Chunk) -> Chunk:
-            async with semaphore:
-                return await self.process_chunk(chunk)
+        # process_chunk handles all exceptions internally, so we don't need return_exceptions=True
+        tasks = [self.process_chunk(chunk) for chunk in chunks]
+        return await asyncio.gather(*tasks)
 
-        return await asyncio.gather(*[process_with_semaphore(chunk) for chunk in chunks])
-
-    def __call__(self, chunks: List[Chunk]) -> List[Chunk]:
-        """sync interface that handles both sync and async contexts"""
-        try:
-            # Check if we're in an async context
-            asyncio.get_running_loop()
-            # If we're already in an event loop, create a new thread with its own event loop
-            import concurrent.futures
-
-            # Create a new thread with its own event loop for concurrent processing
-            def run_in_thread():
-                return asyncio.run(self.extract_concurrent(chunks))
-
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(run_in_thread)
-                return future.result()
-
-        except RuntimeError:
-            # No event loop running, safe to use asyncio.run
-            return asyncio.run(self.extract_concurrent(chunks))
+    async def __call__(self, chunks: List[Chunk]) -> List[Chunk]:
+        return await self.extract_concurrent(chunks)

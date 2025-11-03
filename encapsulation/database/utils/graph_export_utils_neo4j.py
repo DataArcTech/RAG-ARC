@@ -106,7 +106,8 @@ class GraphExporterNeo4j:
 
             elif node_type == 'entity':
                 entity_obj = {
-                    'id': node_id
+                    'id': node_id,
+                    'type': 'entity'
                 }
                 # Use 'name' instead of 'entity_name' or 'entity_text'
                 if record.get('entity_name'):
@@ -321,7 +322,8 @@ class GraphExporterNeo4j:
 
             elif node_type == 'entity':
                 entity_obj = {
-                    'id': node_id
+                    'id': node_id,
+                    'type': 'entity'
                 }
                 # Use 'name' instead of 'entity_name' or 'entity_text'
                 if record.get('entity_name'):

@@ -3,7 +3,7 @@ Test for Native Parser - testing all supported document formats
 """
 
 import os
-
+import asyncio
 from core.file_management.parser.native import NativeParserConfig
 
 
@@ -43,7 +43,7 @@ def main():
                         html_data = f.read()
                     filename = os.path.basename(html_path)
 
-                    results = parser.parse_file(html_data, filename)
+                    results = asyncio.run(parser.parse_file(html_data, filename))
                     print(f"  Parsed HTML successfully")
                     print(f"  Results count: {len(results)}")
 
@@ -88,7 +88,7 @@ def main():
             try:
                 # Convert string to bytes for testing
                 html_data = html_content.encode('utf-8')
-                results = parser.parse_file(html_data, "test_sample.html")
+                results = asyncio.run(parser.parse_file(html_data, "test_sample.html"))
                 print(f"  Created and parsed test HTML successfully")
                 print(f"  Results count: {len(results)}")
             except Exception as e:
@@ -110,7 +110,7 @@ def main():
                         docx_data = f.read()
                     filename = os.path.basename(docx_path)
 
-                    results = parser.parse_file(docx_data, filename)
+                    results = asyncio.run(parser.parse_file(docx_data, filename))
                     print(f"  Parsed DOCX successfully")
                     print(f"  Results count: {len(results)}")
 
@@ -148,7 +148,7 @@ def main():
                         excel_data = f.read()
                     filename = os.path.basename(excel_path)
 
-                    results = parser.parse_file(excel_data, filename)
+                    results = asyncio.run(parser.parse_file(excel_data, filename))
                     print(f"  Parsed Excel successfully")
                     print(f"  Results count: {len(results)}")
 
@@ -176,7 +176,7 @@ def main():
             try:
                 # Convert CSV string to bytes for testing
                 csv_data = csv_content.encode('utf-8')
-                results = parser.parse_file(csv_data, "test_sample.csv")
+                results = asyncio.run(parser.parse_file(csv_data, "test_sample.csv"))
                 print(f"  Created and parsed test CSV successfully")
                 print(f"  Results count: {len(results)}")
             except Exception as e:
@@ -198,7 +198,7 @@ def main():
                         pptx_data = f.read()
                     filename = os.path.basename(pptx_path)
 
-                    results = parser.parse_file(pptx_data, filename)
+                    results = asyncio.run(parser.parse_file(pptx_data, filename))
                     print(f"  Parsed PPTX successfully")
                     print(f"  Results count: {len(results)}")
 
@@ -225,7 +225,7 @@ def main():
         try:
             # Create fake binary data for unsupported file
             fake_data = b"fake content"
-            parser.parse_file(fake_data, "nonexistent.txt")
+            asyncio.run(parser.parse_file(fake_data, "nonexistent.txt"))
             print(f"  ERROR: Should have failed with unsupported extension")
         except ValueError as e:
             print(f"  Correctly caught unsupported extension: {e}")
@@ -236,7 +236,7 @@ def main():
         try:
             # Create fake binary data for DOCX
             fake_docx_data = b"fake docx content"
-            parser.parse_file(fake_docx_data, "fake.docx")
+            asyncio.run(parser.parse_file(fake_docx_data, "fake.docx"))
             print(f"  ERROR: Should have failed with invalid DOCX data")
         except Exception as e:
             print(f"  Correctly caught data error: {type(e).__name__}: {e}")
@@ -249,7 +249,7 @@ def main():
         # Test with the created HTML content
         try:
             html_data = html_content.encode('utf-8')
-            results = parser.parse_file(html_data, "env_test.html")
+            results = asyncio.run(parser.parse_file(html_data, "env_test.html"))
             print(f"  Environment output directory used successfully")
             print(f"  Directory exists: {os.path.exists(output_dir)}")
         except Exception as e:

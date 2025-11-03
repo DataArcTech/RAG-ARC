@@ -3,6 +3,7 @@ Test for DotsOCR Parser (Core Layer) - testing with real PDF documents and image
 Separated by loading method: HuggingFace vs VLLM
 """
 
+import asyncio
 import os
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../")))
@@ -72,7 +73,7 @@ def test_file_parsing(parser, loading_method_name):
                     image_data = f.read()
                 filename = os.path.basename(image_path)
 
-                results = parser.parse_file(image_data, filename)
+                results = asyncio.run(parser.parse_file(image_data, filename))
                 print(f"  Parsed image successfully")
                 print(f"  Results count: {len(results)}")
 
@@ -109,7 +110,7 @@ def test_file_parsing(parser, loading_method_name):
                     pdf_data = f.read()
                 filename = os.path.basename(pdf_path)
 
-                results = parser.parse_file(pdf_data, filename)
+                results = asyncio.run(parser.parse_file(pdf_data, filename))
                 print(f"  Parsed PDF successfully")
                 print(f"  Results count (pages): {len(results)}")
 
@@ -144,7 +145,7 @@ def test_error_handling(parser, loading_method_name):
     try:
         # Create fake binary data for unsupported file
         fake_data = b"fake content"
-        parser.parse_file(fake_data, "nonexistent.txt")
+        asyncio.run(parser.parse_file(fake_data, "nonexistent.txt"))
         print(f"  ERROR: Should have failed with unsupported extension")
     except ValueError as e:
         print(f"  Correctly caught unsupported extension: {e}")
@@ -155,7 +156,7 @@ def test_error_handling(parser, loading_method_name):
     try:
         # Create fake binary data for PDF
         fake_pdf_data = b"fake pdf content"
-        parser.parse_file(fake_pdf_data, "fake.pdf")
+        asyncio.run(parser.parse_file(fake_pdf_data, "fake.pdf"))
         print(f"  ERROR: Should have failed with invalid PDF data")
     except Exception as e:
         print(f"  Correctly caught data error: {type(e).__name__}: {e}")

@@ -13,7 +13,7 @@ class AbstractParser(AbstractModule):
     """
 
     @abstractmethod
-    def parse_file(
+    async def parse_file(
         self,
         file_data: bytes,
         filename: str,

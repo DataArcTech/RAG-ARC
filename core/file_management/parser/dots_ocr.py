@@ -62,7 +62,7 @@ class DotsOCRParser(AbstractParser):
             raise ValueError("DotsOCR parser requires dots_ocr configuration")
         self.llm_service = dots_ocr_config.build()
 
-    def parse_file(
+    async def parse_file(
         self,
         file_data: bytes,
         filename: str,

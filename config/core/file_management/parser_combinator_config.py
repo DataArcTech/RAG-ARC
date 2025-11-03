@@ -50,5 +50,7 @@ class ParserCombinatorConfig(AbstractConfig):
     # Native parser for office documents and text files (optional)
     native_parser: Optional[NativeParserConfig] = None
 
+    concurrent_num: int = 20
+
     def build(self) -> ParserCombinator:
         return ParserCombinator(self)

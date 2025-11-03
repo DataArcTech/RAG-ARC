@@ -35,17 +35,12 @@ class FaissIndexer(BaseIndexer):
         """
         Adds a batch of chunks to the FAISS index using a thread pool.
         """
-        loop = asyncio.get_running_loop()
 
-        def update_and_save(chunks: List[Chunk]):
-            # Update the index
-            chunk_ids = self.faiss_db.update_index(chunks)
-            # Save the index to disk
-            if hasattr(self.faiss_db.config, 'index_path'):
-                self.faiss_db.save_index(self.faiss_db.config.index_path)
-            return chunk_ids
-
-        chunk_ids = await loop.run_in_executor(None, update_and_save, chunks)
+        # Update the index
+        chunk_ids = self.faiss_db.update_index(chunks)
+        # Save the index to disk
+        if hasattr(self.faiss_db.config, 'index_path'):
+            self.faiss_db.save_index(self.faiss_db.config.index_path)
         return chunk_ids or []
 
     def delete_chunks(self, chunk_ids: List[str]) -> bool:

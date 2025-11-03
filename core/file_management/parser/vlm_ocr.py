@@ -55,7 +55,7 @@ class VLMOcrParser(AbstractParser):
             raise ValueError("VLM OCR parser requires vlm_ocr configuration")
         self.llm_service = vlm_ocr_config.build()
 
-    def parse_file(
+    async def parse_file(
         self,
         file_data: bytes,
         filename: str,

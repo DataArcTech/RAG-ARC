@@ -65,21 +65,11 @@ class NetworkXGraphIndexer(BaseIndexer):
             logger.info(f"Successfully extracted graph data from {len(extracted_chunks)} chunks")
 
             # Step 2: Add chunks and graph data to NetworkX store
-            loop = asyncio.get_running_loop()
-            chunk_ids = await loop.run_in_executor(
-                None,
-                self._add_to_graph_store,
-                extracted_chunks
-            )
+            chunk_ids = self._add_to_graph_store(extracted_chunks)
 
             # Step 3: Save index if storage path is configured
             if hasattr(self.networkx_store, 'storage_path') and self.networkx_store.storage_path:
-                await loop.run_in_executor(
-                    None,
-                    self.networkx_store.save_index,
-                    self.networkx_store.storage_path,
-                    self.networkx_store.index_name
-                )
+                self.networkx_store.save_index(self.networkx_store.storage_path, self.networkx_store.index_name)
                 logger.info(f"Saved graph index to {self.networkx_store.storage_path}")
 
             return chunk_ids

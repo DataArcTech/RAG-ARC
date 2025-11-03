@@ -11,7 +11,7 @@ from typing import (
     Tuple,
 )
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 from framework.module import AbstractModule
 
@@ -52,9 +52,7 @@ class FileDB(AbstractModule):
         **kwargs: Any,
     ) -> Tuple[str, bool]:
         """Asynchronously store blob data"""
-        return await asyncio.get_event_loop().run_in_executor(
-            ThreadPoolExecutor(), self.store, key, data, content_type, **kwargs
-        )
+        return await self.store(key, data, content_type, **kwargs)
 
     @abstractmethod
     def retrieve(self, key: str, **kwargs: Any) -> bytes:
@@ -74,9 +72,7 @@ class FileDB(AbstractModule):
 
     async def aretrieve(self, key: str, **kwargs: Any) -> bytes:
         """Asynchronously retrieve blob data"""
-        return await asyncio.get_event_loop().run_in_executor(
-            ThreadPoolExecutor(), self.retrieve, key, **kwargs
-        )
+        return await self.retrieve(key, **kwargs)
 
     @abstractmethod
     def delete(self, key: str, **kwargs: Any) -> bool:

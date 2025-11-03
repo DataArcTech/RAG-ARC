@@ -30,8 +30,7 @@ class FileInfo(BaseModel):
     file_size: int
     content_type: str
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 
 class FileListResponse(BaseModel):
@@ -44,7 +43,7 @@ class FileListResponse(BaseModel):
     response_model=str,
     status_code=status.HTTP_201_CREATED,
 )
-def upload_file(
+async def upload_file(
     file: UploadFile,
     user: Annotated[User | None, Depends(get_current_user)],
 ):
@@ -67,7 +66,7 @@ def upload_file(
     try:
         print(f"Uploading file: {file.filename} for owner_id: {user.id}")
         # Convert string UUID to UUID object
-        doc_id = knowledge_handler.upload_file(file, user.id)
+        doc_id = await knowledge_handler.upload_file(file, user.id)
         return doc_id
     except ValueError as e:
         raise HTTPException(
@@ -204,8 +203,6 @@ class IndexTriggerRequest(BaseModel):
 
 class IndexTriggerResponse(BaseModel):
     """Response model for index triggering results"""
-    total_files: int
-    status: str
     message: str
 
 class GraphExportRequest(BaseModel):
@@ -220,7 +217,7 @@ class GraphExportRequest(BaseModel):
     response_model=IndexTriggerResponse,
     status_code=status.HTTP_200_OK,
 )
-def trigger_indexing(
+async def trigger_indexing(
     request: IndexTriggerRequest,
     user: Annotated[User | None, Depends(get_current_user)],
 ):
@@ -247,12 +244,10 @@ def trigger_indexing(
         )
 
     try:
-        result = knowledge_handler.trigger_indexing(request.file_ids, user.id)
+        result = await knowledge_handler.trigger_indexing(request.file_ids, user.id)
         
         return IndexTriggerResponse(
-            total_files=result.get('total_files', 0),
-            status=result.get('status', 'indexing_started'),
-            message=result.get('message', 'Indexing started in background')
+            message=result
         )
         
     except HTTPException:

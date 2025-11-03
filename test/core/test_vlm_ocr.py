@@ -1,6 +1,6 @@
 import sys
 import os
-
+import asyncio
 # 添加项目根目录到Python路径
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
@@ -25,6 +25,6 @@ parser = config.build()
 with open("/home/dataarc/chenmingzhen/RAG-ARC-backend/RAG-ARC/test/test_pdf.pdf", "rb") as f:
     file_data = f.read()
 
-results = parser.parse_file(file_data, "document.pdf")
+results = asyncio.run(parser.parse_file(file_data, "document.pdf"))
 
 print(results)

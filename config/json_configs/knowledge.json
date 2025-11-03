@@ -1,4 +1,5 @@
 {
+    "max_concurrent_indexing": 20,
     "file_storage_config": {
         "type": "file_storage",
         "file_db_config": {

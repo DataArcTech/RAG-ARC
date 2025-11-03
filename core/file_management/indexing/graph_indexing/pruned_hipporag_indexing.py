@@ -70,12 +70,7 @@ class PrunedHippoRAGIndexer(BaseIndexer):
             # - Computing synonymy edges (if enabled)
             # - Building graph structure
             # - Rebuilding chunk embeddings array
-            loop = asyncio.get_running_loop()
-            success = await loop.run_in_executor(
-                None,
-                self.graph_store.update_index,
-                extracted_chunks
-            )
+            success = self.graph_store.update_index(extracted_chunks)
 
             if not success:
                 logger.error("Failed to update graph store")
@@ -86,12 +81,7 @@ class PrunedHippoRAGIndexer(BaseIndexer):
 
             # Step 3: Save index if storage path is configured
             if hasattr(self.graph_store, 'storage_path') and self.graph_store.storage_path:
-                await loop.run_in_executor(
-                    None,
-                    self.graph_store.save_index,
-                    self.graph_store.storage_path,
-                    self.graph_store.index_name
-                )
+                self.graph_store.save_index(self.graph_store.storage_path, self.graph_store.index_name)
                 logger.info(f"Saved graph index to {self.graph_store.storage_path}")
 
             return chunk_ids
@@ -115,7 +105,7 @@ class PrunedHippoRAGIndexer(BaseIndexer):
         try:
             # Use the extractor's __call__ method which handles concurrent extraction
             # This internally calls extract_concurrent() with proper semaphore control
-            extracted_chunks = self.extractor(chunks)
+            extracted_chunks = await self.extractor(chunks)
 
             # Filter out chunks that failed extraction (empty graph data)
             valid_chunks = []

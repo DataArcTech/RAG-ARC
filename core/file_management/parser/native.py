@@ -38,7 +38,7 @@ class NativeParser(AbstractParser):
         """Initialize NativeParser"""
         super().__init__(config)
 
-    def parse_file(
+    async def parse_file(
         self,
         file_data: bytes,
         filename: str,

@@ -71,14 +71,9 @@ class IndexManager(AbstractModule):
             }
 
 
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None,
-            self.process_file,
-            file_id
-        )
+        return await self.process_file(file_id)
 
-    def process_file(
+    async def process_file(
         self,
         file_id: str,
         **kwargs: Any
@@ -141,7 +136,7 @@ class IndexManager(AbstractModule):
 
             # Step 2: Parse the file
             logger.info(f"Step 2: Parsing file {filename}")
-            parse_results = self.parser.parse_file(
+            parse_results = await self.parser.parse_file(
                 file_data=file_content,
                 filename=filename,
                 **kwargs
@@ -288,7 +283,7 @@ class IndexManager(AbstractModule):
             # Step 6: Index the chunks (if indexers are configured)
             if self.indexers:
                 logger.info(f"Step 6: Indexing chunks with {len(self.indexers)} indexers")
-                indexing_results = self._index_chunks(chunks, chunk_ids)
+                indexing_results = await self._index_chunks(chunks, chunk_ids)
                 result["indexing_results"] = indexing_results
                 result["metadata"]["indexers_used"] = list(indexing_results.keys())
 
@@ -460,7 +455,7 @@ class IndexManager(AbstractModule):
         logger.warning("Could not find text content in standard keys, using string representation")
         return str(parse_result)
 
-    def _index_chunks(self, chunks: List[Dict[str, Any]], chunk_ids: List[str]) -> Dict[str, Any]:
+    async def _index_chunks(self, chunks: List[Dict[str, Any]], chunk_ids: List[str]) -> Dict[str, Any]:
         """
         Index chunks using configured indexers concurrently.
 
@@ -512,15 +507,13 @@ class IndexManager(AbstractModule):
             return indexing_results
 
         # Run all indexers concurrently
-        async def run_all_indexers():
-            tasks = []
-            for i, indexer in enumerate(self.indexers):
-                indexer_name = f"{type(indexer).__name__}_{i}"
-                tasks.append(self._index_with_single_indexer(indexer, indexer_name, chunk_objects))
-            return await asyncio.gather(*tasks, return_exceptions=True)
-
+        tasks = []
+        for i, indexer in enumerate(self.indexers):
+            indexer_name = f"{type(indexer).__name__}_{i}"
+            tasks.append(self._index_with_single_indexer(indexer, indexer_name, chunk_objects))
+        
         # Execute all indexers concurrently
-        results = asyncio.run(run_all_indexers())
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Process results
         for i, result in enumerate(results):
@@ -703,10 +696,9 @@ class IndexManager(AbstractModule):
         except Exception as e:
             logger.error(f"Error updating parsed content {parsed_content_id} status: {e}")
 
-    def process_multiple_files(
+    async def process_multiple_files(
         self,
         file_ids: List[str],
-        max_workers: int = 3,
         **kwargs: Any
     ) -> Dict[str, Any]:
         """
@@ -714,7 +706,6 @@ class IndexManager(AbstractModule):
 
         Args:
             file_ids: List of file IDs to process
-            max_workers: Maximum number of parallel workers
             **kwargs: Additional arguments passed to process_file
 
         Returns:
@@ -741,10 +732,6 @@ class IndexManager(AbstractModule):
                 "error_message": f"file_ids must be a list, got {type(file_ids).__name__}"
             }
 
-        if max_workers is None or max_workers < 1:
-            logger.warning(f"Invalid max_workers: {max_workers}, using default value 3")
-            max_workers = 3
-
         # Filter out None file_ids
         valid_file_ids = [fid for fid in file_ids if fid is not None and isinstance(fid, str) and fid.strip()]
         if len(valid_file_ids) < len(file_ids):
@@ -765,62 +752,58 @@ class IndexManager(AbstractModule):
         }
 
         # Process files in parallel
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
-            future_to_file_id = {
-                executor.submit(self.process_file, file_id, **kwargs): file_id
-                for file_id in valid_file_ids
-            }
+        # Submit all tasks
+        tasks = [self.process_file(file_id, **kwargs) for file_id in valid_file_ids]
+        processed_files = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Collect results
-            for future in as_completed(future_to_file_id):
-                file_id = future_to_file_id[future]
-
-                try:
-                    result = future.result()
-
-                    if result is None:
-                        logger.error(f"process_file returned None for file_id: {file_id}")
-                        result = {
-                            "success": False,
-                            "file_id": file_id,
-                            "error_message": "process_file returned None"
-                        }
-
-                    results["results"][file_id] = result
-
-                    if result.get("success", False):
-                        results["successful_files"] += 1
-                        metadata = result.get("metadata", {})
-                        if metadata is not None:
-                            num_chunks = metadata.get("num_chunks", 0)
-                            if num_chunks is not None:
-                                results["summary"]["total_chunks_created"] += num_chunks
-                            indexers_used = metadata.get("indexers_used", [])
-                            if indexers_used is not None:
-                                results["summary"]["total_indexers_used"].update(indexers_used)
-                    else:
-                        results["failed_files"] += 1
-                        error_message = result.get("error_message", "Unknown error")
-                        results["summary"]["processing_errors"].append({
-                            "file_id": file_id,
-                            "error": error_message
-                        })
-
-                except Exception as e:
-                    error_msg = f"Unexpected error processing file {file_id}: {str(e)}"
-                    logger.error(error_msg, exc_info=True)
-
-                    results["results"][file_id] = {
+        # Collect results
+        for file_id, processed_file in zip(valid_file_ids, processed_files):
+            try:
+                # Handle exceptions from asyncio.gather
+                if isinstance(processed_file, Exception):
+                    logger.error(f"process_file raised exception for file_id: {file_id}: {processed_file}")
+                    result = {
                         "success": False,
                         "file_id": file_id,
-                        "error_message": error_msg
+                        "error_message": str(processed_file)
                     }
+                elif processed_file is None:
+                    logger.error(f"process_file returned None for file_id: {file_id}")
+                    result = {
+                        "success": False,
+                        "file_id": file_id,
+                        "error_message": "process_file returned None"
+                    }
+                else:
+                    result = processed_file
+
+                results["results"][file_id] = result
+
+                if result.get("success", False):
+                    results["successful_files"] += 1
+                    metadata = result.get("metadata", {})
+                    if metadata is not None:
+                        num_chunks = metadata.get("num_chunks", 0)
+                        if num_chunks is not None:
+                            results["summary"]["total_chunks_created"] += num_chunks
+                        indexers_used = metadata.get("indexers_used", [])
+                        if indexers_used is not None:
+                            results["summary"]["total_indexers_used"].update(indexers_used)
+                else:
                     results["failed_files"] += 1
+                    error_message = result.get("error_message", "Unknown error")
                     results["summary"]["processing_errors"].append({
                         "file_id": file_id,
-                        "error": error_msg
+                        "error": error_message
                     })
+
+            except Exception as e:
+                logger.exception(f"Unexpected error processing file {file_id}")
+                results["failed_files"] += 1
+                results["summary"]["processing_errors"].append({
+                    "file_id": file_id,
+                    "error": str(e)
+                })
 
         # Convert set to list for JSON serialization
         results["summary"]["total_indexers_used"] = list(results["summary"]["total_indexers_used"])

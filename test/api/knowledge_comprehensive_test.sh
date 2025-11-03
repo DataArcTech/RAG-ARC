@@ -102,9 +102,9 @@ echo "✅ Upload PASS - file_id: $FILE_ID"
 echo -e "\n3) Test list files functionality"
 
 # Upload a second test file for list files testing
-TEST_FILE_2="./test/test.json"
+TEST_FILE_2="./test/test_docx.docx"
 echo "Uploading second test file: $TEST_FILE_2"
-UPLOAD_RESPONSE_2=$(curl -sS -w "\n%{http_code}" -F "file=@$TEST_FILE_2;type=application/json" \
+UPLOAD_RESPONSE_2=$(curl -sS -w "\n%{http_code}" -F "file=@$TEST_FILE_2;type=application/docx" \
   -H "Authorization: Bearer $ACCESS_TOKEN" "$KNOWLEDGE_ENDPOINT")
 
 UPLOAD_BODY_2=$(echo "$UPLOAD_RESPONSE_2" | sed '$d')
@@ -259,12 +259,117 @@ if ! diff -q "$TEST_FILE" "$DOWNLOAD_FILE" > /dev/null; then
 fi
 echo "✅ Download PASS"
 
-# Wait for indexing before testing search functionality
-echo -e "\n⏳ Waiting for indexing to complete (10 seconds)..."
-sleep 20
+# 5) Test bulk trigger_indexing on newly uploaded files (should index them)
+echo -e "\n5) Test bulk trigger_indexing on newly uploaded files"
+echo "Uploading a new test file for bulk indexing test..."
+TEST_FILE_3="./test/test.json"
+UPLOAD_RESPONSE_3=$(curl -sS -w "\n%{http_code}" -F "file=@$TEST_FILE_3;type=application/json" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" "$KNOWLEDGE_ENDPOINT")
 
-# 5) Test RAG inference chat functionality with uploaded content
-echo -e "\n5) Test RAG inference chat with uploaded content"
+UPLOAD_BODY_3=$(echo "$UPLOAD_RESPONSE_3" | sed '$d')
+UPLOAD_STATUS_3=$(echo "$UPLOAD_RESPONSE_3" | tail -n1)
+
+echo "Upload 3 Status: $UPLOAD_STATUS_3"
+echo "Upload 3 Body:   $UPLOAD_BODY_3"
+
+if [ "$UPLOAD_STATUS_3" != "201" ]; then
+  echo "❌ Third upload failed (expected 201)"
+  exit 1
+fi
+
+FILE_ID_3=$(echo "$UPLOAD_BODY_3" | tr -d '"')
+echo "✅ Third upload PASS - file_id: $FILE_ID_3"
+
+# Wait a short moment for file to be stored (not indexed yet)
+echo "⏳ Waiting briefly for file to be stored (2 seconds)..."
+sleep 2
+
+# Now trigger indexing immediately - should start indexing, not skip
+echo "Triggering indexing for newly uploaded file..."
+TRIGGER_RESPONSE_NEW=$(curl -sS -w "\n%{http_code}" -X POST "$KNOWLEDGE_ENDPOINT/trigger_indexing" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -d "{\"file_ids\": [\"$FILE_ID_3\"]}")
+
+TRIGGER_BODY_NEW=$(echo "$TRIGGER_RESPONSE_NEW" | sed '$d')
+TRIGGER_CODE_NEW=$(echo "$TRIGGER_RESPONSE_NEW" | tail -n1)
+
+echo "Trigger Status: $TRIGGER_CODE_NEW"
+echo "Trigger Body:   $TRIGGER_BODY_NEW"
+
+if [ "$TRIGGER_CODE_NEW" != "200" ]; then
+  echo "❌ trigger_indexing failed (expected 200)"
+  exit 1
+fi
+
+TRIGGER_MESSAGE_NEW=$(echo "$TRIGGER_BODY_NEW" | python3 -c '
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    print(data.get("message", ""))
+except Exception:
+    print("")
+')
+
+echo "Trigger message: $TRIGGER_MESSAGE_NEW"
+
+# When file is newly uploaded and not indexed, should see "Indexing started"
+if ! echo "$TRIGGER_MESSAGE_NEW" | grep -q "Indexing started for files"; then
+  echo "❌ Expected message to contain 'Indexing started for files' when triggering indexing on new files"
+  echo "   Got message: $TRIGGER_MESSAGE_NEW"
+  exit 1
+fi
+
+# Verify the file_id appears in the message
+if ! echo "$TRIGGER_MESSAGE_NEW" | grep -q "$FILE_ID_3"; then
+  echo "❌ Expected file_id $FILE_ID_3 to appear in the response message"
+  echo "   Got message: $TRIGGER_MESSAGE_NEW"
+  exit 1
+fi
+
+echo "✅ trigger_indexing correctly started indexing for new file"
+
+# Wait for indexing to complete
+echo -e "\n⏳ Waiting for indexing to complete (30 seconds)..."
+sleep 30
+
+# 6) Verify bulk trigger_indexing skips already indexed files (nothing_to_do)
+echo -e "\n6) Verify trigger_indexing skips already indexed files"
+TRIGGER_RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST "$KNOWLEDGE_ENDPOINT/trigger_indexing" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -d "{\"file_ids\": [\"$FILE_ID\", \"$FILE_ID_2\"]}")
+
+TRIGGER_BODY=$(echo "$TRIGGER_RESPONSE" | sed '$d')
+TRIGGER_CODE=$(echo "$TRIGGER_RESPONSE" | tail -n1)
+
+echo "Trigger Status: $TRIGGER_CODE"
+echo "Trigger Body:   $TRIGGER_BODY"
+
+if [ "$TRIGGER_CODE" != "200" ]; then
+  echo "❌ trigger_indexing failed (expected 200)"
+  exit 1
+fi
+
+TRIGGER_MESSAGE=$(echo "$TRIGGER_BODY" | python3 -c '
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    print(data.get("message", ""))
+except Exception:
+    print("")
+')
+
+# When files are already indexed, the message should indicate they were skipped
+if ! echo "$TRIGGER_MESSAGE" | grep -q "No files scheduled for indexing"; then
+  echo "❌ Expected message to contain 'No files scheduled for indexing' when re-triggering already indexed files"
+  echo "   Got message: $TRIGGER_MESSAGE"
+  exit 1
+fi
+echo "✅ trigger_indexing correctly skipped already indexed files"
+
+# 7) Test RAG inference chat functionality with uploaded content
+echo -e "\n7) Test RAG inference chat with uploaded content"
 SEARCH_QUERY="who is the author of Venom: The Black Suit Saga?"
 echo "Searching for: '$SEARCH_QUERY'"
 
@@ -298,8 +403,8 @@ if ! echo "$CHAT_BODY" | grep -q "Yuxuan Zhou"; then
 fi
 echo "✅ RAG inference chat with uploaded content PASS"
 
-# 5.1) Test full graph export functionality
-echo -e "\n5.1) Test full graph export functionality"
+# 7.1) Test full graph export functionality
+echo -e "\n7.1) Test full graph export functionality"
 echo "Endpoint: $KNOWLEDGE_ENDPOINT/graph/export"
 echo "Token (first 20 chars): ${ACCESS_TOKEN:0:20}..."
 
@@ -372,8 +477,8 @@ FULL_GRAPH_FILE="/tmp/full_graph_export.json"
 echo "$FULL_GRAPH_BODY" > "$FULL_GRAPH_FILE"
 echo "✅ Full graph exported to: $FULL_GRAPH_FILE"
 
-# 5.2) Test subgraph export functionality with RAG query
-echo -e "\n5.2) Test subgraph export functionality with RAG query"
+# 7.2) Test subgraph export functionality with RAG query
+echo -e "\n7.2) Test subgraph export functionality with RAG query"
 SUBGRAPH_QUERY="who is the author of Venom: The Black Suit Saga?"
 echo "Querying for subgraph: '$SUBGRAPH_QUERY'"
 
@@ -470,8 +575,8 @@ if 'subgraph' in data:
 "
 echo "✅ Subgraph exported to: $SUBGRAPH_FILE"
 
-# 6) Delete the file
-echo -e "\n6) Delete file: $FILE_ID"
+# 8) Delete the file
+echo -e "\n8) Delete file: $FILE_ID"
 DELETE_CODE=$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
   -H "Authorization: Bearer $ACCESS_TOKEN" "$KNOWLEDGE_ENDPOINT/$FILE_ID")
 echo "Status: $DELETE_CODE"
@@ -481,8 +586,8 @@ if [ "$DELETE_CODE" != "204" ]; then
 fi
 echo "✅ Delete PASS"
 
-# 7) Ensure download now returns 404
-echo -e "\n7) Verify downloading deleted file returns 404"
+# 9) Ensure download now returns 404
+echo -e "\n9) Verify downloading deleted file returns 404"
 CODE_AFTER_DELETE=$(curl -sS -o /dev/null -w "%{http_code}" \
   -H "Authorization: Bearer $ACCESS_TOKEN" "$KNOWLEDGE_ENDPOINT/$FILE_ID/download")
 echo "Status: $CODE_AFTER_DELETE"
@@ -492,8 +597,8 @@ if [ "$CODE_AFTER_DELETE" != "404" ]; then
 fi
 echo "✅ 404 after delete PASS"
 
-# 8) Verify second delete returns 404 (non-existent)
-echo -e "\n8) Re-delete should return 404"
+# 10) Verify second delete returns 404 (non-existent)
+echo -e "\n10) Re-delete should return 404"
 SECOND_DELETE_CODE=$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
   -H "Authorization: Bearer $ACCESS_TOKEN" "$KNOWLEDGE_ENDPOINT/$FILE_ID")
 echo "Status: $SECOND_DELETE_CODE"
@@ -503,8 +608,8 @@ if [ "$SECOND_DELETE_CODE" != "404" ]; then
 fi
 echo "✅ 404 on second delete PASS"
 
-# 9) Verify deleted file content is no longer searchable
-echo -e "\n9) Verify deleted file content is no longer searchable"
+# 11) Verify deleted file content is no longer searchable
+echo -e "\n11) Verify deleted file content is no longer searchable"
 # Extract some content from the test file to search for
 SEARCH_QUERY="who is the author of Venom: The Black Suit Saga?"
 echo "Searching for: '$SEARCH_QUERY'"
@@ -533,8 +638,10 @@ if echo "$SEARCH_BODY" | grep -q "Yuxuan Zhou"; then
 fi
 echo "✅ Deleted content no longer searchable PASS"
 
-# 10) Cleanup second test file
-echo -e "\n10) Cleanup second test file: $FILE_ID_2"
+# 12) Cleanup test files
+echo -e "\n12) Cleanup test files"
+
+# Cleanup second test file
 DELETE_CODE_2=$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
   -H "Authorization: Bearer $ACCESS_TOKEN" "$KNOWLEDGE_ENDPOINT/$FILE_ID_2")
 echo "Delete 2 Status: $DELETE_CODE_2"
@@ -543,6 +650,16 @@ if [ "$DELETE_CODE_2" != "204" ]; then
   exit 1
 fi
 echo "✅ Second file cleanup PASS"
+
+# Cleanup third test file
+DELETE_CODE_3=$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
+  -H "Authorization: Bearer $ACCESS_TOKEN" "$KNOWLEDGE_ENDPOINT/$FILE_ID_3")
+echo "Delete 3 Status: $DELETE_CODE_3"
+if [ "$DELETE_CODE_3" != "204" ]; then
+  echo "❌ Third file delete failed (expected 204)"
+  exit 1
+fi
+echo "✅ Third file cleanup PASS"
 
 # Cleanup temporary files
 rm -f "$DOWNLOAD_HEADERS" "$DOWNLOAD_FILE"

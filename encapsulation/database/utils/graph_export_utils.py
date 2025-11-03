@@ -92,7 +92,8 @@ class GraphExporter:
             elif node_type == 'entity':
                 entity_info = entity_id_to_info.get(node_id)
                 entity_obj = {
-                    'id': node_id
+                    'id': node_id,
+                    'type': 'entity'
                 }
                 if entity_info:
                     entity_name, entity_type = entity_info
@@ -291,7 +292,8 @@ class GraphExporter:
             elif node_type == 'entity':
                 entity_info = entity_id_to_info.get(node_id)
                 entity_obj = {
-                    'id': node_id
+                    'id': node_id,
+                    'type': 'entity'
                 }
                 if entity_info:
                     entity_name, entity_type = entity_info
