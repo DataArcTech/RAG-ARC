@@ -23,6 +23,16 @@ class Base(DeclarativeBase):
 
 # ==================== ENUMS ====================
 
+# Enum to indicate permission target type (user, department, or all)
+class PermissionReceiverType(enum.Enum):
+    USER = "user"
+    DEPARTMENT = "department"
+    ALL = "all"
+
+class PermissionType(enum.Enum):
+    VIEW = "view"
+    EDIT = "edit"
+
 class UserStatus(enum.Enum):
     """User account status"""
     ACTIVE = "ACTIVE"
@@ -42,18 +52,7 @@ class PermissionAction(enum.Enum):
     """Available permission actions"""
     VIEW = "VIEW"
     EDIT = "EDIT"
-    DELETE = "DELETE"
-    SHARE = "SHARE"
     MANAGE = "MANAGE"  # Includes permission management
-
-
-class FileVisibility(enum.Enum):
-    """File visibility levels"""
-    PRIVATE = "PRIVATE"           # Only owner
-    SHARED = "SHARED"             # Explicitly shared users/departments
-    DEPARTMENT = "DEPARTMENT"     # All department members
-    PUBLIC = "PUBLIC"             # Everyone (including guests)
-
 
 class AuditAction(enum.Enum):
     """Audit log action types"""
@@ -103,7 +102,8 @@ class Department(Base):
         back_populates="parent_department", cascade="all, delete-orphan"
     )
     members: Mapped[List["User"]] = relationship(back_populates="department")
-    file_permissions: Mapped[List["FileDepartmentPermission"]] = relationship(
+    # Files shared with this department, could be either view or edit permission
+    file_permissions: Mapped[List["FilePermission"]] = relationship(
         back_populates="department"
     )
 
@@ -145,7 +145,8 @@ class User(Base):
     role: Mapped[Optional["Role"]] = relationship(back_populates="users")
     files: Mapped[List["FileMetadata"]] = relationship(back_populates="owner")
     chat_sessions: Mapped[List["ChatSession"]] = relationship(back_populates="user")
-    file_permissions: Mapped[List["FileUserPermission"]] = relationship(
+    # Files shared with this user, could be either view or edit permission
+    file_permissions: Mapped[List["FilePermission"]] = relationship(
         back_populates="user"
     )
     audit_logs: Mapped[List["AuditLog"]] = relationship(back_populates="user")
@@ -270,11 +271,6 @@ class FileMetadata(Base):
     blob_key: Mapped[str] = mapped_column(String(500), nullable=False)
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
 
-    # Visibility and access control
-    visibility: Mapped[FileVisibility] = mapped_column(
-        SQLEnum(FileVisibility), default=FileVisibility.PRIVATE, nullable=False
-    )
-
     # Processing status
     status: Mapped[FileStatus] = mapped_column(SQLEnum(FileStatus), nullable=False)
 
@@ -291,21 +287,18 @@ class FileMetadata(Base):
     parsed_contents: Mapped[List["ParsedContentMetadata"]] = relationship(
         back_populates="source_file", cascade="all, delete-orphan"
     )
-    user_permissions: Mapped[List["FileUserPermission"]] = relationship(
-        back_populates="file", cascade="all, delete-orphan"
-    )
-    department_permissions: Mapped[List["FileDepartmentPermission"]] = relationship(
+    permissions: Mapped[List["FilePermission"]] = relationship(
         back_populates="file", cascade="all, delete-orphan"
     )
     audit_logs: Mapped[List["AuditLog"]] = relationship(back_populates="file")
 
 
-class FileUserPermission(Base):
+class FilePermission(Base):
     """
-    Explicit file permissions for individual users.
-    Used when files are shared with specific users.
+        Explicit file permissions for users/departments/all.
+        Used when files are shared with specific users/departments/all.
     """
-    __tablename__ = 'file_user_permission'
+    __tablename__ = 'file_permission'
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -313,15 +306,22 @@ class FileUserPermission(Base):
     file_id: Mapped[str] = mapped_column(
         String(255), ForeignKey("file_metadata.file_id"), nullable=False, index=True
     )
+
+    permission_receiver_type: Mapped["PermissionReceiverType"] = mapped_column(
+        SQLEnum(PermissionReceiverType), nullable=False, default=PermissionReceiverType.USER
+    )
+
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("user.id"), nullable=False, index=True
     )
+    department_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("department.id"), nullable=False, index=True
+    )
 
-    # Permissions
-    can_view: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    can_edit: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    can_delete: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    can_share: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Permission type (view, edit)
+    permission_type: Mapped["PermissionType"] = mapped_column(
+        SQLEnum(PermissionType), nullable=False, default=PermissionType.VIEW
+    )
 
     # Grant information
     granted_by: Mapped[uuid.UUID] = mapped_column(
@@ -331,45 +331,11 @@ class FileUserPermission(Base):
     expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
     # Relationships
-    file: Mapped["FileMetadata"] = relationship(back_populates="user_permissions")
+    file: Mapped["FileMetadata"] = relationship(back_populates="permissions")
     user: Mapped["User"] = relationship(
         foreign_keys=[user_id], back_populates="file_permissions"
     )
-
-
-class FileDepartmentPermission(Base):
-    """
-    File permissions for entire departments.
-    Enables department-wide sharing.
-    """
-    __tablename__ = 'file_department_permission'
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    file_id: Mapped[str] = mapped_column(
-        String(255), ForeignKey("file_metadata.file_id"), nullable=False, index=True
-    )
-    department_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("department.id"), nullable=False, index=True
-    )
-
-    # Permissions
-    can_view: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    can_edit: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    can_delete: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    can_share: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-
-    # Grant information
-    granted_by: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("user.id"), nullable=False
-    )
-    granted_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
-
-    # Relationships
-    file: Mapped["FileMetadata"] = relationship(back_populates="department_permissions")
     department: Mapped["Department"] = relationship(back_populates="file_permissions")
-
 
 # ==================== AUDIT LOG ====================
 
