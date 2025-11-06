@@ -147,7 +147,10 @@ class User(Base):
     chat_sessions: Mapped[List["ChatSession"]] = relationship(back_populates="user")
     # Files shared with this user, could be either view or edit permission
     file_permissions: Mapped[List["FilePermission"]] = relationship(
-        back_populates="user"
+        "FilePermission",
+        foreign_keys="[FilePermission.user_id]",
+        back_populates="user",
+        primaryjoin="User.id == FilePermission.user_id"
     )
     audit_logs: Mapped[List["AuditLog"]] = relationship(back_populates="user")
 
@@ -199,7 +202,7 @@ class ChatSession(Base):
 
     # Session metadata
     is_shared: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    metadata: Mapped[Optional[dict]] = mapped_column(JSON)
+    session_metadata: Mapped[Optional[dict]] = mapped_column("session_metadata", JSON)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
@@ -311,11 +314,11 @@ class FilePermission(Base):
         SQLEnum(PermissionReceiverType), nullable=False, default=PermissionReceiverType.USER
     )
 
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("user.id"), nullable=False, index=True
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("user.id"), nullable=True, index=True
     )
-    department_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("department.id"), nullable=False, index=True
+    department_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("department.id"), nullable=True, index=True
     )
 
     # Permission type (view, edit)
@@ -328,7 +331,6 @@ class FilePermission(Base):
         UUID(as_uuid=True), ForeignKey("user.id"), nullable=False
     )
     granted_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
-    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
     # Relationships
     file: Mapped["FileMetadata"] = relationship(back_populates="permissions")
@@ -365,7 +367,7 @@ class AuditLog(Base):
 
     # Action metadata (flexible JSON field)
     # Format: {"ip": "192.168.1.1", "user_agent": "...", "details": {...}}
-    metadata: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    log_metadata: Mapped[dict] = mapped_column("log_metadata", JSON, default=dict, nullable=False)
 
     # Status and result
     success: Mapped[bool] = mapped_column(Boolean, nullable=False)

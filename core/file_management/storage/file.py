@@ -392,3 +392,68 @@ class FileStorage(AbstractModule):
         except Exception as e:
             logger.error(f"Failed to count files for owner {owner_id}: {e}")
             raise StorageOperationError(f"Failed to count files: {e}")
+
+    def list_accessible_files(
+        self,
+        user_id: uuid.UUID,
+        status: Optional['FileStatus'] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None
+    ) -> List['FileMetadata']:
+        """
+        List all files accessible to a user (owned files + files with permissions).
+
+        Args:
+            user_id: UUID of the user to check access for
+            status: Optional file status filter
+            limit: Maximum number of records to return
+            offset: Number of records to skip
+
+        Returns:
+            List of FileMetadata objects accessible to the user
+
+        Raises:
+            StorageOperationError: If listing operation fails
+        """
+        try:
+            files = self.metadata_store.list_accessible_files(
+                user_id=user_id,
+                status=status,
+                limit=limit,
+                offset=offset
+            )
+            logger.debug(f"Retrieved {len(files)} accessible files for user {user_id}")
+            return files
+        except Exception as e:
+            logger.exception(f"Failed to list accessible files for user {user_id}")
+            raise StorageOperationError(f"Failed to list accessible files: {e}")
+
+    def count_accessible_files(
+        self,
+        user_id: uuid.UUID,
+        status: Optional['FileStatus'] = None
+    ) -> int:
+        """
+        Count all files accessible to a user (owned files + files with permissions).
+
+        Args:
+            user_id: UUID of the user to check access for
+            status: Optional file status filter
+            **kwargs: Additional arguments
+
+        Returns:
+            Total count of files accessible to the user
+
+        Raises:
+            StorageOperationError: If counting operation fails
+        """
+        try:
+            count = self.metadata_store.count_accessible_files(
+                user_id=user_id,
+                status=status
+            )
+            logger.debug(f"Counted {count} accessible files for user {user_id}")
+            return count
+        except Exception as e:
+            logger.exception(f"Failed to count accessible files for user {user_id}")
+            raise StorageOperationError(f"Failed to count accessible files: {e}")

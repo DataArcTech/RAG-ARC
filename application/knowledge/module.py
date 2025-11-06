@@ -11,9 +11,14 @@ logger = logging.getLogger(__name__)
 
 import uuid
 import asyncio
+from datetime import datetime
+from typing import Optional
 from fastapi.responses import Response
 from fastapi import UploadFile, HTTPException
-from encapsulation.data_model.orm_models import FileMetadata, FileStatus
+from encapsulation.data_model.orm_models import (
+    FileMetadata, FileStatus,
+    FilePermission, PermissionReceiverType, PermissionType
+)
 
 class Knowledge(AbstractModule):
     def __init__(self, config: 'KnowledgeConfig'):
@@ -65,7 +70,9 @@ class Knowledge(AbstractModule):
         if metadata is None:
             raise HTTPException(status_code=404, detail="File not found")
 
-        if metadata.owner_id != user_id:
+        # Check if user has access (owner or has VIEW/EDIT permission)
+        permission_type = self.check_file_access(doc_id, user_id)
+        if permission_type is None:
             raise HTTPException(status_code=403, detail="You are not allowed to access this file")
 
         content = self.file_storage.get_file_content(doc_id)
@@ -115,28 +122,28 @@ class Knowledge(AbstractModule):
         offset: Optional[int] = None
     ) -> List[FileMetadata]:
         """
-        Get all files for a specific user.
+        Get all files accessible to a specific user (files with permissions only).
         
         Args:
-            user_id: UUID of the file owner
+            user_id: UUID of the user
             status: Optional filter by file status
             limit: Maximum number of files to return
             offset: Number of files to skip (for pagination)
             
         Returns:
-            List of FileMetadata objects
+            List of FileMetadata objects accessible to the user
         """
         try:
-            files = self.file_storage.list_files_by_owner(
-                owner_id=user_id,
+            files = self.file_storage.list_accessible_files(
+                user_id=user_id,
                 status=status,
                 limit=limit,
                 offset=offset
             )
-            logger.info(f"Retrieved {len(files)} files for user {user_id}")
+            logger.info(f"Retrieved {len(files)} accessible files for user {user_id}")
             return files
         except Exception as e:
-            logger.error(f"Failed to list files for user {user_id}: {e}")
+            logger.error(f"Failed to list accessible files for user {user_id}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to retrieve files: {str(e)}")
     
     def count_user_files(
@@ -145,24 +152,24 @@ class Knowledge(AbstractModule):
         status: FileStatus | None = None
     ) -> int:
         """
-        Count all files for a specific user.
+        Count all files accessible to a specific user (files with permissions).
         
         Args:
-            user_id: UUID of the file owner
+            user_id: UUID of the user
             status: Optional filter by file status
             
         Returns:
-            Total count of files for the user
+            Total count of files accessible to the user
         """
         try:
-            count = self.file_storage.count_files(
-                owner_id=user_id,
+            count = self.file_storage.count_accessible_files(
+                user_id=user_id,
                 status=status
             )
-            logger.info(f"Counted {count} files for user {user_id}")
+            logger.info(f"Counted {count} accessible files for user {user_id}")
             return count
         except Exception as e:
-            logger.error(f"Failed to count files for user {user_id}: {e}")
+            logger.error(f"Failed to count accessible files for user {user_id}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to count files: {str(e)}")
 
     async def trigger_indexing(self, file_ids: List[str], user_id: uuid.UUID) -> str:
@@ -285,4 +292,247 @@ class Knowledge(AbstractModule):
                         logger.error(f"Error shutting down indexer {type(indexer).__name__}: {e}")
 
         logger.info("Knowledge module shutdown complete")
+
+    # ==================== FILE PERMISSION MANAGEMENT ====================
+    def get_file_id_by_permission_id(
+        self,
+        permission_id: uuid.UUID
+    ) -> Optional[str]:
+        """
+        Get the file ID by permission ID.
+
+        Args:
+            permission_id: Permission ID to look up
+
+        Returns:
+            File ID string if permission exists, None otherwise
+        """
+        permission = self.file_storage.metadata_store.get_file_permission(permission_id)
+        if not permission or not permission.file_id:
+            return None
+        return permission.file_id
+
+    def grant_file_permission(
+        self,
+        file_id: str,
+        receiver_type: PermissionReceiverType,
+        permission_type: PermissionType,
+        granted_by: uuid.UUID,
+        user_id: Optional[uuid.UUID] = None,
+        department_id: Optional[uuid.UUID] = None
+    ) -> uuid.UUID:
+        """
+        Grant file permission to a user, department, or all users.
+
+        Args:
+            file_id: File ID to grant permission for
+            receiver_type: Type of receiver (USER, DEPARTMENT, or ALL)
+            permission_type: Type of permission (VIEW or EDIT)
+            granted_by: User ID who is granting the permission
+            user_id: User ID if receiver_type is USER
+            department_id: Department ID if receiver_type is DEPARTMENT
+
+        Returns:
+            Permission ID (UUID) of the created permission
+
+        Raises:
+            HTTPException: If file not found or user doesn't have permission to grant
+        """
+        metadata = self.file_storage.get_file_metadata(file_id)
+        if not metadata:
+            raise HTTPException(status_code=404, detail="File not found")
+
+        # Check if user has EDIT permission to grant permissions
+        if self.check_file_access(file_id, granted_by) != PermissionType.EDIT:
+            raise HTTPException(status_code=403, detail="You are not allowed to grant permissions for this file")
+
+        try:
+            permission_id = self.file_storage.metadata_store.grant_file_permission(
+                file_id=file_id,
+                receiver_type=receiver_type,
+                permission_type=permission_type,
+                granted_by=granted_by,
+                user_id=user_id,
+                department_id=department_id,
+            )
+            logger.info(f"Granted {permission_type.value} permission for file {file_id} to {receiver_type.value}")
+            return permission_id
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            logger.error(f"Failed to grant file permission: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to grant permission: {str(e)}")
+
+    def revoke_file_permission(
+        self,
+        permission_id: uuid.UUID,
+        user_id: uuid.UUID
+    ) -> bool:
+        """
+        Revoke a file permission by permission ID.
+
+        Args:
+            permission_id: Permission ID to revoke
+            user_id: User ID requesting the revocation (must have EDIT permission)
+
+        Returns:
+            True if permission was revoked, False if not found
+
+        Raises:
+            HTTPException: If user doesn't have permission to revoke
+        """
+        # Get permission to check user has EDIT permission to revoke permissions
+        permission = self.file_storage.metadata_store.get_file_permission(permission_id)
+        if not permission:
+            raise HTTPException(status_code=404, detail="Permission not found")
+        if self.check_file_access(permission.file_id, user_id) != PermissionType.EDIT:
+            raise HTTPException(status_code=403, detail="You are not allowed to revoke permissions for this file")
+        
+        try:
+            result = self.file_storage.metadata_store.revoke_file_permission(
+                permission_id=permission_id
+            )
+            if result:
+                logger.info(f"Revoked permission {permission_id}")
+            return result
+        except Exception as e:
+            logger.error(f"Failed to revoke file permission: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to revoke permission: {str(e)}")
+
+
+    def list_file_permissions(
+        self,
+        file_id: str,
+        user_id: uuid.UUID
+    ) -> List[FilePermission]:
+        """
+        List all permissions for a specific file.
+
+        Args:
+            file_id: File ID to list permissions for
+            user_id: User ID requesting the list (must have VIEW or EDIT permission)
+
+        Returns:
+            List of FilePermission objects
+
+        Raises:
+            HTTPException: If file not found or user doesn't have permission
+        """
+        # Check if file exists
+        metadata = self.file_storage.get_file_metadata(file_id)
+        if not metadata:
+            raise HTTPException(status_code=404, detail="File not found")
+
+        # Check if user has VIEW or EDIT permission to list permissions
+        permission_type = self.check_file_access(file_id, user_id)
+        if permission_type is None:
+            raise HTTPException(status_code=403, detail="You are not allowed to list permissions for this file")
+
+        try:
+            permissions = self.file_storage.metadata_store.list_file_permissions(file_id)
+            logger.info(f"Retrieved {len(permissions)} permissions for file {file_id}")
+            return permissions
+        except Exception as e:
+            logger.error(f"Failed to list file permissions: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to list permissions: {str(e)}")
+
+    def list_user_permissions(
+        self,
+        user_id: uuid.UUID
+    ) -> List[FilePermission]:
+        """
+        List all permissions granted to a specific user (direct grants and department grants).
+
+        Args:
+            user_id: User ID to list permissions for
+
+        Returns:
+            List of FilePermission objects
+
+        Raises:
+            HTTPException: If user not found
+        """
+        try:
+            permissions = self.file_storage.metadata_store.list_user_permissions(user_id)
+            logger.info(f"Retrieved {len(permissions)} permissions for user {user_id}")
+            return permissions
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except Exception as e:
+            logger.error(f"Failed to list user permissions: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to list permissions: {str(e)}")
+
+    def check_file_access(
+        self,
+        file_id: str,
+        user_id: uuid.UUID
+    ) -> Optional[PermissionType]:
+        """
+        Check if a user has access to a file and return the permission type.
+
+        Args:
+            file_id: File ID to check
+            user_id: User ID to check access for
+
+        Returns:
+            PermissionType (VIEW or EDIT) if user has access, None otherwise
+        """
+        try:
+            permission_type = self.file_storage.metadata_store.check_file_access(
+                file_id=file_id,
+                user_id=user_id
+            )
+            return permission_type
+        except Exception as e:
+            logger.error(f"Failed to check file access: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to check access: {str(e)}")
+
+    def update_file_permission(
+        self,
+        permission_id: uuid.UUID,
+        permission_type: PermissionType,
+        user_id: uuid.UUID,
+    ) -> bool:
+        """
+        Update an existing file permission.
+
+        Args:
+            permission_id: Permission ID to update
+            permission_type: New permission type (VIEW or EDIT)
+            user_id: User ID requesting the update (must have EDIT permission)
+
+        Returns:
+            True if permission was updated, False if not found
+
+        Raises:
+            HTTPException: If permission not found or user doesn't have permission
+        """
+        # Get permission to check user has EDIT permission to update permissions
+        permission = self.file_storage.metadata_store.get_file_permission(permission_id)
+        if not permission:
+            raise HTTPException(status_code=404, detail="Permission not found")
+        
+        file_id = permission.file_id
+
+        # Check if user has EDIT permission
+        if self.check_file_access(file_id, user_id) != PermissionType.EDIT:
+            raise HTTPException(
+                status_code=403,
+                detail="Only users with EDIT permission can update permissions"
+            )
+
+        try:
+            result = self.file_storage.metadata_store.update_file_permission(
+                permission_id=permission_id,
+                permission_type=permission_type,
+            )
+            
+            if result:
+                logger.info(f"Updated permission {permission_id}")
+            return result
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to update file permission: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to update permission: {str(e)}")
 

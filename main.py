@@ -17,6 +17,7 @@ from api.routers import knowledge as knowledge_router
 from api.routers import rag_inference
 from api.routers import session as session_router
 from api.routers import auth as auth_router
+from api.routers import user as user_router
 
 
 # Configure logging
@@ -66,3 +67,4 @@ app.include_router(knowledge_router.router)
 app.include_router(rag_inference.router)
 app.include_router(session_router.router)
 app.include_router(auth_router.router)
+app.include_router(user_router.router)
