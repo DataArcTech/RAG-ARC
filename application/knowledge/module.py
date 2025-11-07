@@ -49,8 +49,12 @@ class Knowledge(AbstractModule):
             logger.error(e)
             raise
 
-    async def _index_file_background(self, doc_id: str):
-        """Background task for indexing files with semaphore control"""
+    async def _index_file_background(self, doc_id: str) -> Dict[str, Any]:
+        """Background task for indexing files with semaphore control
+        
+        Returns:
+            Dict with indexing result containing 'success' (bool) and 'file_id' (str) keys
+        """
         async with self.indexing_semaphore:
             try:
                 logger.info(f"Starting background indexing for file_id: {doc_id} (semaphore acquired)")
@@ -59,8 +63,10 @@ class Knowledge(AbstractModule):
                     logger.info(f"Background indexing completed successfully for file_id: {doc_id}")
                 else:
                     logger.error(f"Background indexing failed for file_id: {doc_id}, error: {result.get('error_message')}")
+                return result
             except Exception as e:
                 logger.error(f"Background indexing failed for file_id: {doc_id}, exception: {str(e)}")
+                return {"success": False, "file_id": doc_id, "error_message": str(e)}
             finally:
                 logger.debug(f"Background indexing semaphore released for file_id: {doc_id}")
 
@@ -240,20 +246,33 @@ class Knowledge(AbstractModule):
         return "\n".join(message_parts)
 
     async def _index_multiple_files_background(self, file_ids: List[str], user_id: uuid.UUID):
-        """Background task for indexing multiple files with semaphore control"""
+        """Background task for indexing multiple files with semaphore control
         
-        try:
-            logger.info(f"Starting background indexing for {len(file_ids)} files for user {user_id} (semaphore acquired)")
-            
-            # Use the IndexManager's process_multiple_files method
-            result = await self.file_index.process_multiple_files(file_ids)
-            
-            logger.info(f"Background indexing completed for user {user_id}: {result.get('successful_files', 0)} successful, {result.get('failed_files', 0)} failed out of {result.get('total_files', 0)} files")
-            
-        except Exception as e:
-            logger.error(f"Background indexing failed for user {user_id}: {str(e)}")
-        finally:
-            logger.debug(f"Background indexing semaphore released for user {user_id} ({len(file_ids)} files)")
+        Reuses _index_file_background for each file, ensuring consistent semaphore control
+        and preventing GPU OOM when processing multiple files concurrently.
+        Each file will acquire the semaphore individually, so they are processed with
+        controlled concurrency based on max_concurrent_indexing configuration.
+        """
+        logger.info(f"Starting background indexing for {len(file_ids)} files for user {user_id}")
+        
+        # Reuse _index_file_background for each file
+        # This ensures each file goes through semaphore control, preventing GPU OOM
+        # The semaphore in _index_file_background will limit concurrent processing
+        tasks = [self._index_file_background(file_id) for file_id in file_ids]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Count successes and failures
+        successful = 0
+        failed = 0
+        for result in results:
+            if isinstance(result, Exception):
+                failed += 1
+            elif isinstance(result, dict) and result.get("success", False):
+                successful += 1
+            else:
+                failed += 1
+        
+        logger.info(f"Background indexing completed for user {user_id}: {successful} successful, {failed} failed out of {len(file_ids)} files")
 
     def get_indexing_status(self) -> Dict[str, Any]:
         """
