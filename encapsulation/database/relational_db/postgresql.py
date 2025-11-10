@@ -1027,7 +1027,12 @@ class PostgreSQLDB(RelationalDB):
             with self.SessionMaker() as db_session:
                 db_session.add(message)
                 db_session.commit()
-                logger.debug(f"Stored chat message: {message.id}")
+                # Expunge the object to avoid lazy loading issues when accessing attributes
+                # This prevents SQLAlchemy from trying to reload the object from the database
+                # which could fail if the database schema doesn't match the model exactly
+                message_id = message.id
+                db_session.expunge(message)
+                logger.debug(f"Stored chat message: {message_id}")
                 return message
 
         except IntegrityError as e:

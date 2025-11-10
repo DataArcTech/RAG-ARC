@@ -1,10 +1,11 @@
 """
 MCP Server implementation using FastMCP
 """
-from datetime import datetime
+import datetime
 import uuid
 from fastmcp import Context, FastMCP
 from typing import Dict, Any
+from encapsulation.data_model.schema import Chunk, GraphData
 from framework.register import Register
 from api.routers.auth import get_current_user_from_token
 from api.routers.session import validate_user_session
@@ -42,11 +43,10 @@ async def create_chat(auth_token: str) -> Dict[str, Any]:
         
         # Create session using session handler
         session_handler = registrator.get_object("chat_session")
-        import datetime
         chat_name = f"Chat {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        session = session_handler.create_session(current_user.id, chat_name)
+        session_id = session_handler.create_session(current_user.id, chat_name)
         
-        return {"session_id": str(session.id)}
+        return {"session_id": str(session_id)}
         
     except Exception as e:
         logger.error(f"Error in create_chat function: {str(e)}")
@@ -95,16 +95,34 @@ async def chat(
         
         # Get RAG inference and chat with user isolation
         rag_inference = registrator.get_object("rag_inference")
-        reply = rag_inference.chat(query, owner_id=current_user.id)
-        
+        response: str = ""
+        chunks: list[Chunk] = []
+        subgraph_data: GraphData = None
+        response_text, chunks, subgraph_data = rag_inference.chat(query, owner_id=current_user.id)
+
         # Create message in the session
         message_handler = registrator.get_object("chat_message")
-        message_handler.create_message(ChatMessage(session_id=session_uuid, content={"role": "user", "content": query}, created_at=datetime.now()))
-        message_handler.create_message(ChatMessage(session_id=session_uuid, content={"role": "assistant", "content": reply}, created_at=datetime.now()))
+        message_handler.create_message(ChatMessage(
+            session_id=session_uuid, 
+            source_file_ids=[chunk.id for chunk in chunks],
+            content={"role": "user", "content": query}, 
+            created_at=datetime.datetime.now()
+        ))
+        message_handler.create_message(ChatMessage(
+            session_id=session_uuid,
+            source_file_ids=[chunk.id for chunk in chunks],
+            content={"role": "assistant", "content": response_text}, 
+            created_at=datetime.datetime.now()
+        ))
         
         await ctx.report_progress(100, 100, "done")
         
-        return {"session_id": session_id, "reply": reply}
+        return {
+            "session_id": session_id,
+            "response": response_text,
+            "chunks": chunks,
+            "subgraph": subgraph_data,
+        }
         
     except Exception as e:
         logger.error(f"Error in chat function: {str(e)}")

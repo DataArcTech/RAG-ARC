@@ -15,6 +15,7 @@ from api.routers.auth import get_current_user, ws_get_current_user
 from api.routers.connection_manager import ConnectionManager
 from api.routers.auth import validate_user_session
 from encapsulation.data_model.orm_models import ChatMessage, User
+from encapsulation.data_model.schema import Chunk, GraphData
 from framework.register import Register
 from encapsulation.data_model.orm_models import ChatMessage
 import uuid
@@ -66,8 +67,12 @@ def chat(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required"
         )
+    response: str = ""
+    chunks: list[Chunk] = []
+    subgraph_data: GraphData = None
     response, chunks, subgraph_data = rag_inference_handler.chat(
         request.query,
+        source_file_ids=[chunk.id for chunk in chunks],
         owner_id=current_user.id,
         return_subgraph=request.return_subgraph
     )

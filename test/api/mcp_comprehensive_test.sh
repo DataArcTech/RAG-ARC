@@ -199,18 +199,19 @@ echo
 echo "Full chat response body:"
 echo "$CHAT_RESPONSE" | sed -n '/^\r$/,$p' | tail -n +2
 
-echo "$CHAT_RESPONSE" | grep -q 'reply' && echo "✅ [basic chat] PASS" || echo "❌ [basic chat] Did not find 'reply' in response"
+echo "$CHAT_RESPONSE" | grep -q '"response"' && echo "✅ [basic chat] PASS" || echo "❌ [basic chat] Did not find 'response' in response"
 
 # 6) Test retrieval functionality by uploading content and querying it
 echo -e "\n6. Testing MCP retrieval functionality:"
 echo "========================================="
 
-# Upload test JSON file via REST
+# Upload test HTML file via REST
 TEST_FILE="./test/test2.html"
-UUID_SUFFIX=$(uuidgen | tr 'A-Z' 'a-z')
 
 echo "Uploading test file: $TEST_FILE"
-UPLOAD_RESPONSE=$(curl -sS -w "\n%{http_code}" -F "file=@$TEST_FILE;type=application/json" "$KNOWLEDGE_ENDPOINT")
+UPLOAD_RESPONSE=$(curl -sS -w "\n%{http_code}" \
+  -H "Authorization: Bearer $AUTH_TOKEN" \
+  -F "file=@$TEST_FILE" "$KNOWLEDGE_ENDPOINT")
 UPLOAD_BODY=$(echo "$UPLOAD_RESPONSE" | sed '$d')
 UPLOAD_STATUS=$(echo "$UPLOAD_RESPONSE" | tail -n1)
 

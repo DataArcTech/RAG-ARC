@@ -203,6 +203,20 @@ BEGIN
     END IF;
 END $$;
 
+-- 7. Add source_file_ids column to chat_message table if it doesn't exist
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'chat_message' AND column_name = 'source_file_ids'
+    ) THEN
+        ALTER TABLE chat_message ADD COLUMN source_file_ids JSON;
+        RAISE NOTICE 'Added source_file_ids column to chat_message table';
+    ELSE
+        RAISE NOTICE 'Column chat_message.source_file_ids already exists, skipping';
+    END IF;
+END $$;
+
 -- Migration completed
 DO $$
 BEGIN

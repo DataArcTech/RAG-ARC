@@ -1,4 +1,4 @@
-from chunk import Chunk
+from encapsulation.data_model.schema import Chunk
 from typing import TYPE_CHECKING, Optional, Dict, Any
 import logging
 import uuid

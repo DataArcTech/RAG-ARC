@@ -25,24 +25,42 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    Lifespan context manager for FastAPI application.
-    Handles startup and shutdown events.
-    """
-    # Startup
-    logger.info("Application starting up...")
-    yield
-    # Shutdown
+async def shutdown_knowledge_module():
+    """Shutdown Knowledge module to flush pending BM25 chunks."""
     logger.info("Application shutting down...")
     try:
-        # Shutdown Knowledge module to flush pending BM25 chunks
         knowledge = app_registration.registrator.get_object("knowledge")
         if knowledge and hasattr(knowledge, 'shutdown'):
             await knowledge.shutdown()
     except Exception as e:
         logger.error(f"Error during shutdown: {e}")
+
+
+@asynccontextmanager
+async def _noop_context():
+    """No-op async context manager for when MCP lifespan is not available."""
+    yield
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Lifespan context manager for FastAPI application.
+    Handles startup and shutdown events for both FastAPI and FastMCP.
+    """
+    # Startup
+    logger.info("Application starting up...")
+    
+    # Get MCP lifespan if it exists
+    mcp_lifespan = getattr(mcp.mcp_app, 'lifespan', None)
+    
+    # Use MCP lifespan if available, otherwise use a no-op context manager
+    mcp_context = mcp_lifespan(mcp.mcp_app) if mcp_lifespan else _noop_context()
+    
+    async with mcp_context:
+        yield
+        # Shutdown Knowledge module to flush pending BM25 chunks
+        await shutdown_knowledge_module()
 
 
 app = FastAPI(title="RAG-ARC HTTP Server", lifespan=lifespan)
