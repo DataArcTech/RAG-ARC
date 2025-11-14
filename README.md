@@ -200,7 +200,7 @@ cp .env.example .env
 
 RAG-ARC uses a modular configuration system. Key configuration files are located in `config/json_configs/`:
 
-- `rag_inference.json`: RAG pipeline configuration
+- `rag_inference.json`: RAG retrieval configuration
 - `knowledge.json`: Knowledge management configuration
 - `account.json`: User account configuration
 

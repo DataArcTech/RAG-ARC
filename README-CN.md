@@ -217,7 +217,7 @@ cp .env.example .env
 
 RAG-ARC使用模块化配置系统。关键配置文件位于`config/json_configs/`：
 
-- `rag_inference.json`：RAG流水线配置
+- `rag_inference.json`：RAG检索配置
 - `knowledge.json`：知识管理配置
 - `account.json`：用户账户配置
 

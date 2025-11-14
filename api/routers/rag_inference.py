@@ -18,6 +18,10 @@ from encapsulation.data_model.orm_models import ChatMessage, User
 from encapsulation.data_model.schema import Chunk, GraphData
 from framework.register import Register
 from encapsulation.data_model.orm_models import ChatMessage
+from application.rag_inference.module import RAGInference
+from application.account.chat_message import ChatMessageManager
+from application.account.chat_session import ChatSessionManager
+from application.account.user import Account
 import uuid
 import logging
 
@@ -28,10 +32,10 @@ logger.setLevel(logging.INFO)
 router = APIRouter(prefix="/rag_inference", tags=["rag_inference"])
 
 registrator = Register()
-session_handler = registrator.get_object("chat_session")
-message_handler = registrator.get_object("chat_message")
-rag_inference_handler = registrator.get_object("rag_inference")
-account_handler = registrator.get_object("account")
+session_handler: ChatSessionManager = registrator.get_object("chat_session")
+message_handler: ChatMessageManager = registrator.get_object("chat_message")
+rag_inference_handler: RAGInference = registrator.get_object("rag_inference")
+account_handler: Account = registrator.get_object("account")
 
 manager = ConnectionManager()
 
@@ -72,7 +76,6 @@ def chat(
     subgraph_data: GraphData = None
     response, chunks, subgraph_data = rag_inference_handler.chat(
         request.query,
-        source_file_ids=[chunk.id for chunk in chunks],
         owner_id=current_user.id,
         return_subgraph=request.return_subgraph
     )

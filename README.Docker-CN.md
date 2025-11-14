@@ -148,9 +148,9 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 # Neo4j密码（建议修改）
 NEO4J_PASSWORD=12345678  # 修改为安全的密码
 
-# 可选：嵌入模型配置
-# EMBEDDING_MODEL_NAME=BAAI/bge-large-zh-v1.5
-# EMBEDDING_DEVICE=cuda  # 或 cpu
+# 可选：本地运行模型配置
+# EMBEDDING_MODEL_NAME=BAAI/bge-large-zh-v1.5 # 或Qwen/Qwen3-Embedding-0.6B
+# DEVICE=cuda:0  # 或 cpu
 ```
 
 ### 脚本自动配置

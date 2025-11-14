@@ -20,10 +20,11 @@ from encapsulation.data_model.orm_models import User
 from app_registration import Register
 from api.routers.auth import get_current_user
 from api.routers.auth import Token
+from application.account.user import Account
 
 router = APIRouter(prefix="/user", tags=["user"])
 registrator = Register()
-account_handler = registrator.get_object("account")
+account_handler: Account = registrator.get_object("account")
 
 
 @router.get("/me")

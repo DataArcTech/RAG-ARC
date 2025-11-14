@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from encapsulation.data_model.orm_models import ChatSession, User
 from app_registration import Register
+from application.account.user import Account
 
 # Get secret key from environment variable, fallback to default for development
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "f33efd136032819f6017e92272c14afc941eca4fbb94ca266b1d8fa5d8d91107")
@@ -29,7 +30,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 30
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/token")
 
 registrator = Register()
-account_handler = registrator.get_object("account")
+account_handler: Account = registrator.get_object("account")
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)

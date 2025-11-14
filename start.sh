@@ -311,7 +311,7 @@ start_app() {
     
     CONTAINER_ID=$(docker ps -q -f name=rag-arc-app)
     
-    print_message "$GREEN" "✅ Application started"
+    print_message "$GREEN" "✅ Starting application"
     print_message "$NC" "   Container ID: $CONTAINER_ID"
     print_message "$NC" "   Access URL: http://localhost:${PORT}"
     echo ""
@@ -340,6 +340,7 @@ wait_for_service() {
     print_message "$YELLOW" "⚠️  Service startup timeout, please check logs"
     print_message "$NC" "   Run: docker logs rag-arc-app"
     echo ""
+    exit 1;
 }
 
 # Show deployment info

@@ -136,6 +136,7 @@ celerybeat.pid
 
 # Environments
 .env
+!.env.example
 .envrc
 .venv
 env/
@@ -210,5 +211,6 @@ __pycache__/
 .DS_Store
 
 data/
+local/
 models/
 benchmark/

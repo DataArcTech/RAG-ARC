@@ -2,11 +2,11 @@
 
 set -euo pipefail
 
-API_BASE="http://localhost:8005"
+API_BASE="http://localhost:8000"
 SESSION_ENDPOINT="$API_BASE/session"
 AUTH_ENDPOINT="$API_BASE/auth"
 KNOWLEDGE_ENDPOINT="$API_BASE/knowledge"
-STREAM_CHAT_ENDPOINT="ws://localhost:8005/rag_inference/stream_chat"
+STREAM_CHAT_ENDPOINT="ws://localhost:8000/rag_inference/stream_chat"
 
 echo "Testing Stream Chat WebSocket API Comprehensive Flow"
 echo "===================================================="
@@ -143,7 +143,7 @@ import os
 async def test_websocket():
     session_id = sys.argv[1]
     access_token = sys.argv[2]
-    uri = f"ws://localhost:8005/rag_inference/stream_chat/{session_id}"
+    uri = f"ws://localhost:8000/rag_inference/stream_chat/{session_id}"
     
     try:
         # Connect to WebSocket with JWT authentication via cookies
@@ -157,7 +157,7 @@ async def test_websocket():
             
             # Wait for response with timeout
             try:
-                response = await asyncio.wait_for(websocket.recv(), timeout=30.0)
+                response = await asyncio.wait_for(websocket.recv(), timeout=120.0)
                 print(f"✅ Received response: {response}")
                 
                 # Try to parse as JSON
@@ -216,7 +216,7 @@ import time
 async def test_multiple_messages():
     session_id = sys.argv[1]
     access_token = sys.argv[2]
-    uri = f"ws://localhost:8005/rag_inference/stream_chat/{session_id}"
+    uri = f"ws://localhost:8000/rag_inference/stream_chat/{session_id}"
     
     try:
         # Connect to WebSocket with JWT authentication via cookies
@@ -300,7 +300,7 @@ import sys
 
 async def test_unauthorized_websocket():
     session_id = sys.argv[1]
-    uri = f"ws://localhost:8005/rag_inference/stream_chat/{session_id}"
+    uri = f"ws://localhost:8000/rag_inference/stream_chat/{session_id}"
 
     # The connection should be closed quickly due to missing authentication cookie, so we expect a policy violation (1008) error code
     try:
@@ -349,7 +349,7 @@ import sys
 async def test_nonexistent_session():
     session_id = sys.argv[1]
     access_token = sys.argv[2]
-    uri = f"ws://localhost:8005/rag_inference/stream_chat/{session_id}"
+    uri = f"ws://localhost:8000/rag_inference/stream_chat/{session_id}"
     
     # The connection may be established but should be closed immediately when session validation fails
     try:

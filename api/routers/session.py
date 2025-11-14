@@ -9,6 +9,9 @@ from encapsulation.database.relational_db.postgresql import PostgreSQLDB
 from encapsulation.data_model.orm_models import User
 from framework.register import Register
 from api.routers.auth import validate_user_session
+from application.account.chat_session import ChatSessionManager
+from application.account.chat_message import ChatMessageManager
+from application.account.user import Account
 
 
 class MessageContent(BaseModel):
@@ -16,9 +19,9 @@ class MessageContent(BaseModel):
 router = APIRouter(prefix="/session", tags=["session"])
 
 registry = Register()
-session_handler = registry.get_object("chat_session")
-message_handler = registry.get_object("chat_message")
-account_handler = registry.get_object("account")
+session_handler: ChatSessionManager = registry.get_object("chat_session")
+message_handler: ChatMessageManager = registry.get_object("chat_message")
+account_handler: Account = registry.get_object("account")
 
 def list_session_messages(
     session_id: uuid.UUID,

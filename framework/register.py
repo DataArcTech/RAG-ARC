@@ -29,7 +29,12 @@ class Register:
             # Replace ${VAR_NAME} with environment variable values
             def replace_env_var(match):
                 var_name = match.group(1)
-                return os.getenv(var_name, match.group(0))  # Return original if not found
+                env_value = os.getenv(var_name)
+                if env_value is None:
+                    # Environment variable not set - log warning and return original
+                    logger.warning(f"Environment variable '{var_name}' is not set, using placeholder '{match.group(0)}'")
+                    return match.group(0)  # Return original placeholder
+                return env_value
             return re.sub(r'\$\{([^}]+)\}', replace_env_var, obj)
         else:
             return obj

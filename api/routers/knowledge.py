@@ -20,12 +20,14 @@ from encapsulation.data_model.orm_models import (
 )
 from framework.register import Register
 import uuid
+from application.knowledge.module import Knowledge
+from application.account.user import Account
 
 router = APIRouter(prefix="/knowledge", tags=["files"])
 
 registrator = Register()
-account_handler = registrator.get_object("account")
-knowledge_handler = registrator.get_object("knowledge")
+account_handler: Account = registrator.get_object("account")
+knowledge_handler: Knowledge = registrator.get_object("knowledge")
 
 
 # Response models

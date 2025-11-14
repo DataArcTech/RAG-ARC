@@ -21,8 +21,8 @@
                     "normalize_L2": true,
                     "embedding_config": {
                         "type": "qwen_embedding",
-                        "model_name": "Qwen/Qwen3-Embedding-0.6B",
-                        "device": "cuda:0",
+                        "model_name": "${EMBEDDING_MODEL_NAME}",
+                        "device": "${DEVICE}",
                         "use_china_mirror": true,
                         "cache_folder": "./models/Qwen"
                     }
@@ -47,8 +47,8 @@
                     "index_name": "index",
                     "embedding": {
                         "type": "qwen_embedding",
-                        "model_name": "Qwen/Qwen3-Embedding-0.6B",
-                        "device": "cuda:0",
+                        "model_name": "${EMBEDDING_MODEL_NAME}",
+                        "device": "${DEVICE}",
                         "use_china_mirror": true,
                         "cache_folder": "./models/Qwen"
                     },
@@ -83,7 +83,7 @@
         "rerank_llm_config": {
             "type": "qwen_rerank",
             "model_name": "Qwen/Qwen3-Reranker-0.6B",
-            "device": "cuda:1",
+            "device": "${DEVICE}",
             "use_china_mirror": true,
             "cache_folder": "./models/Qwen"
         }
