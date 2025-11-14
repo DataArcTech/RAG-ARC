@@ -1,5 +1,3 @@
-<div align="center">
-
 # 🧠 RAG-ARC: Retrieval-Augmented Generation Architecture
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -11,8 +9,6 @@
 *A modular, high-performance Retrieval-Augmented Generation framework with multi-path retrieval, graph extraction, and fusion ranking*
 
 [📘 中文文档](README-CN.md) • [⭐ Key Features](#key-features) • [🏗️ Architecture](#architecture) • [🚀 Quick Start](#quick-start)
-
-</div>
 
 ## 🎯 Project Overview
 
@@ -58,7 +54,7 @@ RAG-ARC introduces several key innovations that together build a sophisticated i
 ### 🧠 GraphRAG
 - Lightweight, incrementally updatable graph construction suitable for enterprise deployment
 - Incorporates Subgraph PPR (Personalized PageRank):
-Compared to HippoRAG2’s full-graph PPR, subgraph PPR achieves higher reasoning precision and efficiency
+Compared to HippoRAG2's full-graph PPR, subgraph PPR achieves higher reasoning precision and efficiency
 
 ### 📈 Re-ranking (Rerank)
 - Qwen3 model for precise result re-ranking
@@ -69,16 +65,17 @@ Compared to HippoRAG2’s full-graph PPR, subgraph PPR achieves higher reasoning
 - Factory pattern for LLM, Embedding, Retriever component creation
 - Layered architecture: config, core, encapsulation, application, api
 - Singleton pattern for tokenizer management and database connections
+- Shared mechanism for retriever and embedding model instance reuse to improve system performance
 
 ## 📊 Performance
 
 Built upon the HippoRAG2 evolution, RAG-ARC delivers significant improvements in both efficiency and recall performance:
 
-- 🚀 22.9% Token Cost Reduction
+- 🚀 **22.9% Token Cost Reduction**
 Through optimized prompt strategies, it reduces token consumption without sacrificing accuracy.
-- 🎯 5.3% Recall Rate Increase
+- 🎯 **5.3% Recall Rate Increase**
 Pruning-based optimizations yield more comprehensive and relevant retrieval.
-- 🔁 Incremental Knowledge Graph Updates
+- 🔁 **Incremental Knowledge Graph Updates**
 Supports updating graph data without full reconstruction—reducing computational and maintenance overhead.
 
 <div align="center">
@@ -240,6 +237,91 @@ curl -X POST "http://localhost:8000/rag_inference/chat" \
 - **Data Validation**: Pydantic v2
 - **Serialization**: Dill
 - **LLM Support**: Qwen3, OpenAI API, HuggingFace models
+
+## 🔧 Advanced Configuration
+
+### Multi-Path Retrieval Configuration
+
+RAG-ARC supports configurable multi-path retrieval with the following components:
+
+1. **Dense Retrieval**: Uses FAISS for vector similarity search
+2. **Sparse Retrieval**: BM25 implementation via Tantivy
+3. **Graph Retrieval**: Neo4j-based knowledge graph retrieval with Pruned HippoRAG
+
+The fusion method can be configured to use:
+- **Reciprocal Rank Fusion (RRF)**: Default method for combining results
+- **Weighted Sum**: Custom weights for each retrieval path
+- **Rank Fusion**: Rank-based combination approach
+
+### GraphRAG Implementation
+
+RAG-ARC implements an enhanced GraphRAG approach based on HippoRAG2 with key improvements:
+
+1. **Subgraph PPR**: Instead of computing Personalized PageRank on the entire graph, RAG-ARC computes it on relevant subgraphs for better efficiency and accuracy
+2. **Query-Aware Pruning**: Dynamically adjusts the number of neighbors retained during graph expansion based on entity relevance to the query
+3. **Incremental Updates**: Supports updating the knowledge graph without full reconstruction
+
+### Document Processing Pipeline
+
+The document processing pipeline consists of several stages:
+
+1. **File Storage**: Documents are stored in a configurable storage backend (local filesystem or cloud storage)
+2. **Parsing**: Multiple parsers support different document types:
+   - Native parsers for standard formats (PDF, DOCX, PPTX, etc.)
+   - OCR parsers for scanned documents (using DOTS-OCR or VLM-based approaches)
+3. **Chunking**: Text is split into chunks using configurable strategies:
+   - Token-based chunking
+   - Semantic chunking
+   - Recursive chunking
+   - Markdown header-based chunking
+4. **Indexing**: Chunks are indexed in multiple systems:
+   - FAISS for dense retrieval
+   - Tantivy for sparse retrieval
+   - Neo4j for graph-based retrieval
+
+## 📊 API Endpoints
+
+RAG-ARC provides a comprehensive REST API with the following key endpoints:
+
+### Knowledge Management
+- `POST /knowledge`: Upload documents
+- `GET /knowledge`: List user documents
+- `GET /knowledge/{doc_id}`: Download documents
+- `DELETE /knowledge/{doc_id}`: Delete documents
+
+### RAG Inference
+- `POST /rag_inference/chat`: Chat with the RAG system
+- `POST /rag_inference/stream_chat/{session_id}`: WebSocket-based streaming chat
+
+### User Management
+- `POST /auth/register`: User registration
+- `POST /auth/login`: User authentication
+- `POST /auth/refresh`: Token refresh
+
+### Session Management
+- `POST /session`: Create chat sessions
+- `GET /session`: List user sessions
+- `GET /session/{session_id}`: Get session details
+- `DELETE /session/{session_id}`: Delete sessions
+
+## 🔒 Security & Authentication
+
+RAG-ARC implements JWT-based authentication with the following features:
+
+- User registration and login
+- Role-based access control
+- Document-level permissions (VIEW/EDIT)
+- Secure password hashing with bcrypt
+- Token refresh mechanism
+
+## 📈 Monitoring & Observability
+
+RAG-ARC includes built-in monitoring capabilities:
+
+- Logging with configurable levels
+- Performance metrics collection
+- Health check endpoints
+- Indexing status monitoring
 
 ## 🤝 Contributing
 
