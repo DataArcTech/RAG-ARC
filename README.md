@@ -182,16 +182,19 @@ The deployment includes:
 git clone https://github.com/DataArcTech/RAG-ARC.git
 cd RAG-ARC
 
-# 2. Create and activate virtual environment
-python -m venv venv
-source venv/bin/activate  # Linux/macOS
+# 2. Install uv if not already installed
+pip install uv
+
+# 3. Create virtual environment
+uv venv
+source .venv/bin/activate  # Linux/macOS
 # or
-venv\Scripts\activate     # Windows
+.venv\Scripts\activate     # Windows
 
-# 3. Install dependencies
-pip install -e .
+# 4. Install dependencies in editable mode
+uv pip install -e .
 
-# 4. Copy and configure environment variables
+# 5. Copy and configure environment variables
 cp .env.example .env
 # Edit .env to configure your settings
 ```

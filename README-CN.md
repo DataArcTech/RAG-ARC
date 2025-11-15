@@ -194,21 +194,24 @@ cd RAG-ARC
 
 ### 💻 本地安装
 
-```bash
+``bash
 # 1. 克隆仓库
 git clone https://github.com/DataArcTech/RAG-ARC.git
 cd RAG-ARC
 
-# 2. 创建并激活虚拟环境
-python -m venv venv
-source venv/bin/activate  # Linux/macOS
+# 2. 安装uv（如果尚未安装）
+pip install uv
+
+# 3. 创建虚拟环境
+uv venv
+source .venv/bin/activate  # Linux/macOS
 # 或者
-venv\Scripts\activate     # Windows
+.venv\Scripts\activate     # Windows
 
-# 3. 安装依赖
-pip install -e .
+# 4. 以可编辑模式安装依赖
+uv pip install -e .
 
-# 4. 复制并配置环境变量
+# 5. 复制并配置环境变量
 cp .env.example .env
 # 编辑.env以配置您的设置
 ```
@@ -223,14 +226,14 @@ RAG-ARC使用模块化配置系统。关键配置文件位于`config/json_config
 
 ### 🏃 运行服务
 
-```bash
+``bash
 # 启动FastAPI服务器
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ### 🧪 使用示例
 
-```bash
+``bash
 # 上传文档
 curl -X POST "http://localhost:8000/knowledge" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
