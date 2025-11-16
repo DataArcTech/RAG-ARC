@@ -213,18 +213,16 @@ git clone https://github.com/DataArcTech/RAG-ARC.git
 cd RAG-ARC
 
 # 2. 安装uv（如果尚未安装）
-pip install uv
+# 推荐：使用国内镜像（国内更快）
+curl -LsSf https://astral.ac.cn/uv/install.sh | sh
+# 备选：使用官方安装器
+# curl -LsSf https://astral.sh/uv/install.sh | sh
+# 或添加到PATH：export PATH="$HOME/.local/bin:$PATH"
 
-# 3. 创建虚拟环境
-uv venv
-source .venv/bin/activate  # Linux/macOS
-# 或者
-.venv\Scripts\activate     # Windows
+# 3. 安装依赖（uv会自动创建虚拟环境）
+uv sync
 
-# 4. 以可编辑模式安装依赖
-uv pip install -e .
-
-# 5. 复制并配置环境变量
+# 4. 复制并配置环境变量
 cp .env.example .env
 # 编辑.env以配置您的设置
 ```
@@ -240,8 +238,8 @@ RAG-ARC使用模块化配置系统。关键配置文件位于`config/json_config
 ### 🏃 运行服务
 
 ```bash
-# 启动FastAPI服务器
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+# 启动FastAPI服务器（uv run会自动管理虚拟环境）
+uv run uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ### 🧪 使用示例

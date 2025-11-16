@@ -196,7 +196,7 @@ class TokenChunker(AbstractChunker):
             raise ImportError(
                 "Could not import tiktoken python package. "
                 "This is needed for TokenChunker. "
-                "Please install it with `pip install tiktoken`."
+                "Please install dependencies with: uv sync"
             )
 
         model_name = getattr(self.config, 'model_name', None)
@@ -239,7 +239,7 @@ class TokenChunker(AbstractChunker):
             raise ImportError(
                 "Could not import tiktoken python package. "
                 "This is needed for TokenChunker. "
-                "Please install it with `pip install tiktoken`."
+                "Please install dependencies with: uv sync"
             )
 
         model_name = getattr(self.config, 'model_name', None)

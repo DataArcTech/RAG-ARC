@@ -1,24 +1,60 @@
 # 1. Use NVIDIA CUDA base image for GPU support
 FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
 
-# 2. Set environment variables
+# 2. Build arguments for region-specific configuration
+ARG UV_INSTALL_URL=https://astral.sh/uv/install.sh
+ARG UV_INDEX_URL=https://pypi.org/simple
+ARG APT_GET_URL=
+ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu121
+
+# 3. Set environment variables
 ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
     DEBIAN_FRONTEND=noninteractive \
     NVIDIA_VISIBLE_DEVICES=all \
-    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    UV_HTTP_TIMEOUT=300 \
+    UV_INDEX_URL=${UV_INDEX_URL}
 
-# 3. Install Python 3.11 and system dependencies
-RUN apt-get update && \
+# 4. Install Python 3.11 and system dependencies
+# Fix GPG signature issues when using mirror by using http instead of https
+RUN MIRROR_URL="${APT_GET_URL:-http://archive.ubuntu.com}" && \
+    # Force convert https:// to http:// to avoid GPG signature issues
+    MIRROR_URL=$(echo "$MIRROR_URL" | sed 's|^https://|http://|') && \
+    echo "Configuring apt mirror: $MIRROR_URL..." && \
+    # Use http instead of https for mirrors to avoid GPG issues
+    sed -i "s|http://archive.ubuntu.com|${MIRROR_URL}|g" /etc/apt/sources.list && \
+    sed -i "s|https://archive.ubuntu.com|${MIRROR_URL}|g" /etc/apt/sources.list || true && \
+    sed -i "s|http://security.ubuntu.com|${MIRROR_URL}|g" /etc/apt/sources.list && \
+    sed -i "s|https://security.ubuntu.com|${MIRROR_URL}|g" /etc/apt/sources.list || true && \
+    # Configure apt timeout and retry settings
+    echo 'Acquire::http::Timeout "600";' > /etc/apt/apt.conf.d/99timeout && \
+    echo 'Acquire::ftp::Timeout "600";' >> /etc/apt/apt.conf.d/99timeout && \
+    echo 'Acquire::Retries "10";' >> /etc/apt/apt.conf.d/99timeout && \
+    echo 'Acquire::http::MaxParallelDownloads "4";' >> /etc/apt/apt.conf.d/99timeout && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
     software-properties-common \
-    && add-apt-repository ppa:deadsnakes/ppa \
-    && apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    gnupg2 \
+    && echo "Checking if Python 3.11 is available in official Ubuntu repository..." && \
+    (apt-cache show python3.11 2>/dev/null | grep -q "Version:" && \
+     echo "Python 3.11 found in official repository, using it instead of deadsnakes PPA" || \
+     (echo "Python 3.11 not in official repo, adding deadsnakes PPA..." && \
+      add-apt-repository -y ppa:deadsnakes/ppa && \
+      if [ -n "$APT_GET_URL" ]; then \
+          echo "Replacing PPA with USTC Launchpad proxy for faster downloads in Mainland China..." && \
+          find /etc/apt/sources.list.d/ -type f -name "*deadsnakes*.list" \
+              -exec sed -i.bak -r 's#deb(-src)?\s*https?://ppa\.launchpadcontent\.net#deb\1 http://launchpad.proxy.ustclug.org#ig' {} \; && \
+          find /etc/apt/sources.list.d/ -type f -name "*deadsnakes*.list" \
+              -exec sed -i.bak -r 's#deb(-src)?\s*https?://ppa\.launchpad\.net#deb\1 http://launchpad.proxy.ustclug.org#ig' {} \; || true; \
+      fi && \
+      echo "Updating package lists (this may take a while for PPA)..." && \
+      apt-get update)) && \
+    echo "Installing Python 3.11 and dependencies..." && \
+    apt-get install -y --no-install-recommends \
     python3.11 \
     python3.11-dev \
     python3.11-distutils \
-    python3-pip \
     build-essential \
     curl \
     git \
@@ -26,33 +62,40 @@ RUN apt-get update && \
     && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# 4. Set Python 3.11 as default
+# 5. Set Python 3.11 as default
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 && \
     update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
 
-# 5. Create and set working directory
+# 6. Install uv
+RUN curl -LsSf ${UV_INSTALL_URL} | sh && \
+    mv /root/.local/bin/uv /usr/local/bin/uv && \
+    chmod +x /usr/local/bin/uv
+
+# 7. Create and set working directory
 WORKDIR /rag_arc
 
-# 6. Copy only dependency files first (for better caching)
-COPY pyproject.toml /rag_arc/
+# 8. Copy only dependency files first (for better caching)
+COPY pyproject.toml uv.lock /rag_arc/
 
-# 7. Install Python dependencies with GPU support
-# Use Tsinghua mirror for faster downloads in China
-# Increase timeout and retries for large packages
-RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
-    pip config set global.timeout 300 && \
-    pip install --upgrade pip --default-timeout=300 --retries 5 && \
-    pip install torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 \
-        --index-url https://download.pytorch.org/whl/cu121 \
-        --default-timeout=600 --retries 5 && \
-    pip install faiss-gpu-cu12 --default-timeout=300 --retries 5 && \
-    pip install -e . --default-timeout=300 --retries 5 && \
-    pip install --upgrade --force-reinstall cffi cryptography --default-timeout=300 --retries 5
+# 9. Install Python dependencies using uv sync with virtual environment
+# Use --no-cache and configure index URL based on region
+# First install all dependencies except PyTorch
+RUN uv sync --no-cache --index-url ${UV_INDEX_URL} && \
+    # Install PyTorch with CUDA support from PyTorch index
+    # This is an exception as PyTorch CUDA packages are typically not on PyPI
+    # Use uv pip install only for PyTorch as it requires a specific index
+    uv pip install --no-cache --index-url ${PYTORCH_INDEX_URL} \
+        torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 || \
+    uv pip install --no-cache --index-url ${UV_INDEX_URL} \
+        torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1
 
-# 8. Copy the rest of the project files (after dependencies are installed)
+# 10. Copy the rest of the project files (after dependencies are installed)
 COPY . /rag_arc/
 
-# 9. Create necessary directories
+# 11. Reinstall the package in editable mode using uv sync
+RUN uv sync --no-cache --index-url ${UV_INDEX_URL}
+
+# 12. Create necessary directories
 RUN mkdir -p \
     /rag_arc/data/parsed_files \
     /rag_arc/data/file_store \
@@ -65,9 +108,11 @@ RUN mkdir -p \
     /rag_arc/local/files \
     /rag_arc/models
 
-# 10. Expose application port
+# 13. Expose application port
 EXPOSE 8000
 
-# 11. Start the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 14. Set PATH to include virtual environment
+ENV PATH="/rag_arc/.venv/bin:$PATH"
 
+# 15. Start the application
+CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

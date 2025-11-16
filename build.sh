@@ -78,6 +78,32 @@ create_env() {
     echo ""
 }
 
+# Select region for mirror selection
+select_region() {
+    print_message "$BLUE" "🌍 Selecting region for package mirrors..."
+    echo ""
+    
+    print_message "$NC" "1) Mainland China (Use Tsinghua mirror) [Default]"
+    print_message "$NC" "2) Outside China (Use official source)"
+    echo ""
+    read -p "Are you in Mainland China? (1/2, default 1): " -n 1 -r
+    echo ""
+    
+    # Default to China
+    if [[ $REPLY == "2" ]]; then
+        REGION="overseas"
+        UV_INSTALL_URL="https://astral.sh/uv/install.sh"
+        UV_INDEX_URL="https://pypi.org/simple"
+        print_message "$GREEN" "✅ Selected: Outside China (using official sources)"
+    else
+        REGION="china"
+        UV_INSTALL_URL="https://astral.ac.cn/uv/install.sh"
+        UV_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
+        print_message "$GREEN" "✅ Selected: Mainland China (using Tsinghua mirror)"
+    fi
+    echo ""
+}
+
 # Select hardware mode
 select_mode() {
     print_message "$BLUE" "🎯 Selecting hardware mode..."
@@ -116,6 +142,24 @@ select_mode() {
             MODE="cpu"
             print_message "$GREEN" "✅ Selected CPU mode (default)"
         fi
+    fi
+    echo ""
+}
+
+# Clean Docker build cache
+clean_docker_cache() {
+    print_message "$BLUE" "🧹 Cleaning Docker build cache..."
+    echo ""
+    
+    print_message "$YELLOW" "⚠️  This will remove all Docker build cache"
+    read -p "Continue? (y/N): " -n 1 -r
+    echo ""
+    
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        docker builder prune -af
+        print_message "$GREEN" "✅ Docker build cache cleaned"
+    else
+        print_message "$YELLOW" "⏭️  Skipping cache cleanup"
     fi
     echo ""
 }
@@ -159,9 +203,50 @@ build_app_image() {
     
     print_message "$NC" "   Dockerfile: $DOCKERFILE"
     print_message "$NC" "   Image Tag: $IMAGE_TAG"
+    print_message "$NC" "   Region: $REGION"
+    print_message "$NC" "   UV Install URL: $UV_INSTALL_URL"
+    print_message "$NC" "   Package Index: $UV_INDEX_URL"
+    
+    # Set APT_GET_URL based on region selection
+    # Use http instead of https to avoid GPG signature issues
+    if [ "$REGION" == "china" ]; then
+        APT_GET_URL="http://mirrors.tuna.tsinghua.edu.cn"
+        print_message "$NC" "   Apt Mirror: Tsinghua (Ubuntu) + USTC (PPA)"
+    else
+        APT_GET_URL=""
+        print_message "$NC" "   Apt Mirror: Official sources"
+    fi
+    
+    # Set PYTORCH_INDEX_URL based on region selection (only for GPU mode)
+    # CPU mode uses PyPI for torch (already configured via UV_INDEX_URL)
+    # GPU mode needs PyTorch official index for CUDA packages
+    if [ "$MODE" == "gpu" ]; then
+        if [ "$REGION" == "china" ]; then
+            PYTORCH_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pytorch/whl/cu121"
+            print_message "$NC" "   PyTorch Mirror: Tsinghua (CUDA)"
+        else
+            PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cu121"
+            print_message "$NC" "   PyTorch Mirror: Official (CUDA)"
+        fi
+    else
+        PYTORCH_INDEX_URL=""
+        print_message "$NC" "   PyTorch: PyPI (via UV_INDEX_URL)"
+    fi
     echo ""
     
-    docker build -f $DOCKERFILE -t $IMAGE_TAG .
+    # Build Docker image with all build arguments
+    BUILD_ARGS=(
+        --build-arg UV_INSTALL_URL="$UV_INSTALL_URL"
+        --build-arg UV_INDEX_URL="$UV_INDEX_URL"
+        --build-arg APT_GET_URL="$APT_GET_URL"
+    )
+    
+    # Add PYTORCH_INDEX_URL only for GPU mode
+    if [ "$MODE" == "gpu" ]; then
+        BUILD_ARGS+=(--build-arg PYTORCH_INDEX_URL="$PYTORCH_INDEX_URL")
+    fi
+    
+    docker build --no-cache -f $DOCKERFILE -t $IMAGE_TAG "${BUILD_ARGS[@]}" .
     
     print_message "$GREEN" "✅ Application image built successfully"
     echo ""
@@ -187,12 +272,26 @@ show_summary() {
 main() {
     print_header
     check_docker
+    
+    # Check for command line arguments
+    if [ "$1" == "--clean-cache" ] || [ "$1" == "-c" ]; then
+        clean_docker_cache
+    fi
+    
     create_env
+    select_region
     select_mode
+    
+    # Ask if user wants to clean cache before building
+    if [ "$1" != "--clean-cache" ] && [ "$1" != "-c" ]; then
+        print_message "$YELLOW" "💡 Tip: Use --clean-cache or -c flag to clean Docker cache before building"
+        echo ""
+    fi
+    
     pull_base_images
     build_app_image
     show_summary
 }
 
-main
+main "$@"
 

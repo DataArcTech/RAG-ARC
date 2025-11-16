@@ -197,7 +197,7 @@ class NativeParser(AbstractParser):
                     except ImportError:
                         raise RuntimeError(
                             f"Cannot parse .xls file '{filename}': xlrd library is not installed. "
-                            "Please install it with: pip install xlrd"
+                            "Please install dependencies with: uv sync"
                         )
                 else:
                     # Should not reach here based on supported extensions check

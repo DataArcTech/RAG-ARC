@@ -22,7 +22,7 @@ try:
         Tokenizer, TextAnalyzerBuilder, Filter
     )
 except ImportError:
-    raise ImportError("Please install tantivy: pip install tantivy")
+    raise ImportError("Please install dependencies with: uv sync")
 
 logger = logging.getLogger(__name__)
 

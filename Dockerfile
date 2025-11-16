@@ -2,12 +2,17 @@
 # This version uses CPU-only dependencies and calls external LLM APIs
 FROM python:3.11-slim
 
-# 2. Set environment variables
-ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+# 2. Build arguments for region-specific configuration
+ARG UV_INSTALL_URL=https://astral.sh/uv/install.sh
+ARG UV_INDEX_URL=https://pypi.org/simple
 
-# 3. Install system dependencies
+# 3. Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    UV_HTTP_TIMEOUT=300 \
+    UV_INDEX_URL=${UV_INDEX_URL}
+
+# 4. Install system dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
@@ -17,24 +22,28 @@ RUN apt-get update && \
     && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# 4. Create and set working directory
+# 5. Install uv
+RUN curl -LsSf ${UV_INSTALL_URL} | sh && \
+    mv /root/.local/bin/uv /usr/local/bin/uv && \
+    chmod +x /usr/local/bin/uv
+
+# 6. Create and set working directory
 WORKDIR /rag_arc
 
-# 5. Copy only dependency files first (for better caching)
-COPY pyproject.toml /rag_arc/
+# 7. Copy only dependency files first (for better caching)
+COPY pyproject.toml uv.lock /rag_arc/
 
-# 6. Install Python dependencies
-# Use Tsinghua mirror for faster downloads in China
-# Increase timeout and retries for large packages
-RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
-    pip config set global.timeout 300 && \
-    pip install --upgrade pip --default-timeout=300 --retries 5 && \
-    pip install -e . --default-timeout=300 --retries 5
+# 8. Install Python dependencies using uv sync with virtual environment
+# Use --no-cache and configure index URL based on region
+RUN uv sync --no-cache --index-url ${UV_INDEX_URL}
 
-# 7. Copy the rest of the project files (after dependencies are installed)
+# 9. Copy the rest of the project files (after dependencies are installed)
 COPY . /rag_arc/
 
-# 8. Create necessary directories
+# 10. Reinstall the package in editable mode using uv sync
+RUN uv sync --no-cache --index-url ${UV_INDEX_URL}
+
+# 11. Create necessary directories
 RUN mkdir -p \
     /rag_arc/data/parsed_files \
     /rag_arc/data/file_store \
@@ -47,9 +56,11 @@ RUN mkdir -p \
     /rag_arc/local/files \
     /rag_arc/models
 
-# 9. Expose application port
+# 12. Expose application port
 EXPOSE 8000
 
-# 10. Start the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 13. Set PATH to include virtual environment
+ENV PATH="/rag_arc/.venv/bin:$PATH"
 
+# 14. Start the application
+CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

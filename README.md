@@ -196,18 +196,17 @@ git clone https://github.com/DataArcTech/RAG-ARC.git
 cd RAG-ARC
 
 # 2. Install uv if not already installed
-pip install uv
+# Recommended: Using China mirror (faster in China)
+curl -LsSf https://astral.ac.cn/uv/install.sh | sh
+# Alternative: Using official installer
+# curl -LsSf https://astral.sh/uv/install.sh | sh
+# Or add to PATH: export PATH="$HOME/.local/bin:$PATH"
 
-# 3. Create virtual environment
-uv venv
-source .venv/bin/activate  # Linux/macOS
-# or
-.venv\Scripts\activate     # Windows
+# 3. Install dependencies (uv will automatically create a virtual environment)
+# Tsinghua mirror is configured in pyproject.toml
+uv sync
 
-# 4. Install dependencies in editable mode
-uv pip install -e .
-
-# 5. Copy and configure environment variables
+# 4. Copy and configure environment variables
 cp .env.example .env
 # Edit .env to configure your settings
 ```
@@ -223,8 +222,8 @@ RAG-ARC uses a modular configuration system. Key configuration files are located
 ### 🏃 Running the Service
 
 ```bash
-# Start the FastAPI server
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+# Start the FastAPI server (uv run automatically manages the virtual environment)
+uv run uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ### 🧪 Example Usage

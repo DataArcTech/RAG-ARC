@@ -32,6 +32,8 @@ confirm_clean() {
     print_message "$RED" "   - PostgreSQL database"
     print_message "$RED" "   - Redis cache"
     print_message "$RED" "   - Neo4j graph database"
+    print_message "$RED" "   - Docker build cache"
+    print_message "$RED" "   - All unused Docker images, containers, networks, and volumes"
     echo ""
     print_message "$YELLOW" "This action cannot be undone!"
     echo ""
@@ -112,6 +114,39 @@ clean_local_data() {
     echo ""
 }
 
+# Clean Docker build cache
+clean_build_cache() {
+    print_message "$BLUE" "🔨 Cleaning Docker build cache..."
+    
+    # Clean unused build cache
+    docker builder prune -f 2>/dev/null || true
+    
+    print_message "$GREEN" "✅ Docker build cache cleaned"
+    echo ""
+}
+
+# Clean all unused Docker resources (images, containers, networks, volumes)
+clean_all_docker_resources() {
+    print_message "$BLUE" "🧹 Cleaning all unused Docker resources..."
+    
+    # Clean all unused containers, networks, images (both dangling and unreferenced), and optionally, volumes
+    docker system prune -a -f --volumes 2>/dev/null || true
+    
+    print_message "$GREEN" "✅ All unused Docker resources cleaned"
+    echo ""
+}
+
+# Clean unused Docker images
+clean_unused_images() {
+    print_message "$BLUE" "🖼️  Cleaning unused Docker images..."
+    
+    # Remove all unused images, not just dangling ones
+    docker image prune -a -f 2>/dev/null || true
+    
+    print_message "$GREEN" "✅ Unused Docker images cleaned"
+    echo ""
+}
+
 # Show summary
 show_summary() {
     print_message "$GREEN" "✅ Docker data cleanup completed!"
@@ -120,6 +155,8 @@ show_summary() {
     print_message "$BLUE" "  - Containers: rag-arc-app, rag-arc-postgres, rag-arc-redis, rag-arc-neo4j"
     print_message "$BLUE" "  - Volumes: rag-arc-postgres-data, rag-arc-redis-data, rag-arc-neo4j-data"
     print_message "$BLUE" "  - Local directories: ./data/postgresql, ./data/neo4j, ./data/redis, ./data/graph_index_neo4j"
+    print_message "$BLUE" "  - Docker build cache"
+    print_message "$BLUE" "  - All unused Docker images, containers, networks, and volumes"
     echo ""
     print_message "$YELLOW" "Next steps:"
     print_message "$YELLOW" "  1. Run './start.sh' to start fresh containers"
@@ -135,6 +172,9 @@ main() {
     remove_containers
     remove_volumes
     clean_local_data
+    clean_build_cache
+    clean_unused_images
+    clean_all_docker_resources
     show_summary
 }
 
