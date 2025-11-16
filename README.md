@@ -53,8 +53,7 @@ RAG-ARC introduces several key innovations that together build a sophisticated i
 
 ### 🧠 GraphRAG
 - Lightweight, incrementally updatable graph construction suitable for enterprise deployment
-- Incorporates Subgraph PPR (Personalized PageRank):
-Compared to HippoRAG2's full-graph PPR, subgraph PPR achieves higher reasoning precision and efficiency
+- Incorporates Subgraph PPR (Personalized PageRank): Compared to HippoRAG2's full-graph PPR, subgraph PPR achieves higher reasoning precision and efficiency
 
 ### 📈 Re-ranking (Rerank)
 - Qwen3 model for precise result re-ranking
@@ -134,7 +133,7 @@ RAG-ARC/
 
 ### 🐳 Docker Deployment (Recommended)
 
-**Two-step deployment:**
+**Three-step deployment:**
 
 ```bash
 # 1. Clone the repository
@@ -169,11 +168,25 @@ The deployment includes:
 - Waits for services to be ready
 - Verifies deployment
 
+`stop.sh`:
+- Stops all running containers (keeps data)
+
+`cleanup.sh`:
+- Removes all containers and Docker volumes
+- Removes Docker network
+- **Keeps local data directories** (`./data`, `./local`, `./models`)
+- Use when you want to clean Docker resources but keep your data
+
+`clean-docker-data.sh`:
+- Removes all containers and Docker volumes
+- **Also removes local data directories** (`./data/postgresql`, `./data/neo4j`, `./data/redis`, `./data/graph_index_neo4j`)
+- Use when you want a complete cleanup (⚠️ **This will delete all data!**)
+
 **Access the service:**
 - API: http://localhost:8000
 - API Docs: http://localhost:8000/docs
 
-📖 **See [Docker Deployment Guide](README.Docker.md) for detailed instructions and troubleshooting**
+📖 **See [Docker Deployment Guide (English)](README.Docker.md) or [Docker部署指南（中文）](README.Docker-CN.md) for detailed instructions and troubleshooting**
 
 ### 💻 Local Installation
 
@@ -201,7 +214,7 @@ cp .env.example .env
 
 ### ⚙️ Configuration
 
-RAG-ARC uses a modular configuration system. Key configuration files are located in `config/json_configs/`:
+RAG-ARC uses a modular configuration system. Key configuration files are located in `config/json_configs/`, where you can control which GPU each model uses, which models are used in business processes, and other different parameters:
 
 - `rag_inference.json`: RAG retrieval configuration
 - `knowledge.json`: Knowledge management configuration
@@ -227,6 +240,39 @@ curl -X POST "http://localhost:8000/rag_inference/chat" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"query": "What is RAG-ARC?"}'
+
+# Get Token (Login)
+curl -X POST "http://localhost:8000/auth/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "username=YOUR_USERNAME&password=YOUR_PASSWORD"
+
+# Register a new user
+curl -X POST "http://localhost:8000/auth/register" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "New User", "user_name": "YOUR_USERNAME", "password": "YOUR_PASSWORD"}'
+
+# Create a new chat session
+curl -X POST "http://localhost:8000/session" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+
+# List messages in a session
+curl -X GET "http://localhost:8000/session/YOUR_SESSION_ID/messages" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+### WebSocket streaming chat (Python example, requires websockets library):
+
+```python
+import asyncio
+import websockets
+
+async def chat():
+    uri = 'ws://localhost:8000/rag_inference/stream_chat/YOUR_SESSION_ID'
+    async with websockets.connect(uri, additional_headers=[('Cookie', 'auth_token=YOUR_ACCESS_TOKEN')]) as ws:
+        await ws.send('Hello, RAG-ARC!')
+        print(await ws.recv())
+
+asyncio.run(chat())
 ```
 
 ## 🛠️ Technology Stack
@@ -288,18 +334,17 @@ RAG-ARC provides a comprehensive REST API with the following key endpoints:
 
 ### Knowledge Management
 - `POST /knowledge`: Upload documents
-- `GET /knowledge`: List user documents
-- `GET /knowledge/{doc_id}`: Download documents
+- `GET /knowledge/list_files`: List user documents
+- `GET /knowledge/{doc_id}/download`: Download documents
 - `DELETE /knowledge/{doc_id}`: Delete documents
 
 ### RAG Inference
 - `POST /rag_inference/chat`: Chat with the RAG system
-- `POST /rag_inference/stream_chat/{session_id}`: WebSocket-based streaming chat
+- `WebSocket /rag_inference/stream_chat/{session_id}`: WebSocket-based streaming chat
 
 ### User Management
 - `POST /auth/register`: User registration
-- `POST /auth/login`: User authentication
-- `POST /auth/refresh`: Token refresh
+- `POST /auth/token`: User authentication (login)
 
 ### Session Management
 - `POST /session`: Create chat sessions

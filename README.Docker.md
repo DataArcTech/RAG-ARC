@@ -99,8 +99,8 @@ docker logs -f rag-arc-neo4j
 
 ### Manage Containers
 ```bash
-# Stop all containers
-docker stop rag-arc-app rag-arc-postgres rag-arc-redis rag-arc-neo4j
+# Stop all containers (keeps data)
+./stop.sh
 
 # Start all containers (after stopping)
 docker start rag-arc-postgres rag-arc-redis rag-arc-neo4j rag-arc-app
@@ -108,11 +108,13 @@ docker start rag-arc-postgres rag-arc-redis rag-arc-neo4j rag-arc-app
 # Restart all services (recommended way)
 ./start.sh
 
-# Remove all containers
-docker rm -f rag-arc-app rag-arc-postgres rag-arc-redis rag-arc-neo4j
+# Cleanup Docker resources (keeps local data)
+./cleanup.sh
+# This removes containers, volumes, and network but keeps ./data, ./local, ./models
 
-# Remove all volumes (⚠️ This will delete all data!)
-docker volume rm rag-arc-postgres-data rag-arc-redis-data rag-arc-neo4j-data rag-arc-neo4j-logs
+# Complete cleanup (⚠️ This will delete all data including local directories!)
+./clean-docker-data.sh
+# This removes everything: containers, volumes, and local data directories
 ```
 
 ### Rebuild Application
@@ -148,9 +150,9 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 # Neo4j Password (Recommended to change)
 NEO4J_PASSWORD=12345678  # Change this to a secure password
 
-# Optional: Local Model Configuration
-# EMBEDDING_MODEL_NAME=BAAI/bge-large-zh-v1.5 or Qwen/Qwen3-Embedding-0.6B
-# DEVICE=cuda:0  # or cpu
+# Local Model Configuration
+EMBEDDING_MODEL_NAME=BAAI/bge-large-zh-v1.5 # or Qwen/Qwen3-Embedding-0.6B
+DEVICE=cuda:0  # or cpu
 ```
 
 ### Auto-configured by Scripts

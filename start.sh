@@ -320,8 +320,11 @@ start_app() {
 # Wait for service to start
 wait_for_service() {
     print_message "$BLUE" "⏳ Waiting for service to start..."
+    print_message "$YELLOW" "   Note: First startup may take 10-20 minutes to download/load models"
+    print_message "$YELLOW" "   Checking every 5 seconds (max 20 minutes)..."
+    echo ""
     
-    MAX_ATTEMPTS=60
+    MAX_ATTEMPTS=240
     ATTEMPT=0
     
     while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
@@ -332,13 +335,31 @@ wait_for_service() {
         fi
         
         ATTEMPT=$((ATTEMPT + 1))
-        echo -n "."
-        sleep 2
+        
+        # Show progress every 12 attempts (1 minute)
+        if [ $((ATTEMPT % 12)) -eq 0 ]; then
+            ELAPSED=$((ATTEMPT * 5 / 60))
+            echo ""
+            print_message "$YELLOW" "   Still waiting... (${ELAPSED} minutes elapsed)"
+            print_message "$NC" "   You can check progress with: docker logs -f rag-arc-app"
+            echo ""
+        else
+            echo -n "."
+        fi
+        
+        sleep 5  # Increased from 2 to 5 seconds
     done
     
     echo ""
-    print_message "$YELLOW" "⚠️  Service startup timeout, please check logs"
+    print_message "$YELLOW" "⚠️  Service startup timeout after 10 minutes"
+    print_message "$NC" "   This is often due to model downloading/loading on first startup"
+    print_message "$NC" "   Please check logs to see if model is still loading:"
     print_message "$NC" "   Run: docker logs rag-arc-app"
+    print_message "$NC" ""
+    print_message "$NC" "   If model is still loading, you can:"
+    print_message "$NC" "   1. Wait longer and check logs periodically"
+    print_message "$NC" "   2. Check if model files exist in ./models directory"
+    print_message "$NC" "   3. Verify network connection for model download"
     echo ""
     exit 1;
 }
@@ -362,9 +383,10 @@ show_info() {
     print_message "$NC" "   - View postgres logs: docker logs -f rag-arc-postgres"
     print_message "$NC" "   - View redis logs: docker logs -f rag-arc-redis"
     print_message "$NC" "   - View neo4j logs: docker logs -f rag-arc-neo4j"
-    print_message "$NC" "   - Stop all: docker stop rag-arc-app rag-arc-postgres rag-arc-redis rag-arc-neo4j"
-    print_message "$NC" "   - Start all: docker start rag-arc-postgres rag-arc-redis rag-arc-neo4j rag-arc-app"
-    print_message "$NC" "   - Remove all: docker rm -f rag-arc-app rag-arc-postgres rag-arc-redis rag-arc-neo4j"
+    print_message "$NC" "   - Stop all: ./stop.sh"
+    print_message "$NC" "   - Start all: ./start.sh"
+    print_message "$NC" "   - Remove all: ./cleanup.sh"
+    print_message "$NC" "   - Clean Docker data: ./clean-docker-data.sh"
     echo ""
     print_message "$NC" "🔧 Restart services:"
     print_message "$NC" "   ./start.sh"

@@ -67,8 +67,7 @@ RAG-ARC 系统架构概览
 ### 🧠 GraphRAG
 
 * 采用简洁高效的建图方式，**支持增量更新**，便于企业级部署
-* 引入 **子图 PPR（Personalized PageRank）**：
-  相比 HippoRAG2 在全图范围内的 PPR 计算，子图 PPR 实现了 **更精准的定位与更高的推理效率**
+* 引入 **子图 PPR（Personalized PageRank）**：相比 HippoRAG2 在全图范围内的 PPR 计算，子图 PPR 实现了 **更精准的定位与更高的推理效率**
 
 ### 📈 重排序（Rerank）
 
@@ -151,7 +150,7 @@ RAG-ARC/
 
 ### 🐳 Docker部署（推荐）
 
-**两步部署：**
+**三步部署：**
 
 ```bash
 # 1. 克隆仓库
@@ -186,6 +185,20 @@ cd RAG-ARC
 - 等待服务就绪
 - 验证部署状态
 
+`stop.sh`：
+- 停止所有运行中的容器（保留数据）
+
+`cleanup.sh`：
+- 删除所有容器和Docker卷
+- 删除Docker网络
+- **保留本地数据目录**（`./data`、`./local`、`./models`）
+- 适用于清理Docker资源但保留数据的情况
+
+`clean-docker-data.sh`：
+- 删除所有容器和Docker卷
+- **同时删除本地数据目录**（`./data/postgresql`、`./data/neo4j`、`./data/redis`、`./data/graph_index_neo4j`）
+- 适用于需要完全清理的情况（⚠️ **这将删除所有数据！**）
+
 **访问服务：**
 - API服务：http://localhost:8000
 - API文档：http://localhost:8000/docs
@@ -194,7 +207,7 @@ cd RAG-ARC
 
 ### 💻 本地安装
 
-``bash
+```bash
 # 1. 克隆仓库
 git clone https://github.com/DataArcTech/RAG-ARC.git
 cd RAG-ARC
@@ -218,7 +231,7 @@ cp .env.example .env
 
 ### ⚙️ 配置
 
-RAG-ARC使用模块化配置系统。关键配置文件位于`config/json_configs/`：
+RAG-ARC使用模块化配置系统。关键配置文件位于`config/json_configs/`,在这里，你可以控制选择每个模型使用的显卡，业务流程中使用的模型等不同的参数：
 
 - `rag_inference.json`：RAG检索配置
 - `knowledge.json`：知识管理配置
@@ -226,14 +239,14 @@ RAG-ARC使用模块化配置系统。关键配置文件位于`config/json_config
 
 ### 🏃 运行服务
 
-``bash
+```bash
 # 启动FastAPI服务器
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ### 🧪 使用示例
 
-``bash
+```bash
 # 上传文档
 curl -X POST "http://localhost:8000/knowledge" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
@@ -244,6 +257,39 @@ curl -X POST "http://localhost:8000/rag_inference/chat" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"query": "什么是RAG-ARC?"}'
+
+# 获取Token（登录）
+curl -X POST "http://localhost:8000/auth/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "username=YOUR_USERNAME&password=YOUR_PASSWORD"
+
+# 注册新用户
+curl -X POST "http://localhost:8000/auth/register" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "新用户", "user_name": "YOUR_USERNAME", "password": "YOUR_PASSWORD"}'
+
+# 创建新对话会话
+curl -X POST "http://localhost:8000/session" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+
+# 列出会话内消息
+curl -X GET "http://localhost:8000/session/YOUR_SESSION_ID/messages" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+### WebSocket流式对话（Python示例，需先安装websockets库）：
+
+```python
+import asyncio
+import websockets
+
+async def chat():
+    uri = 'ws://localhost:8000/rag_inference/stream_chat/YOUR_SESSION_ID'
+    async with websockets.connect(uri, additional_headers=[('Cookie', 'auth_token=YOUR_ACCESS_TOKEN')]) as ws:
+        await ws.send('你好，RAG-ARC!')
+        print(await ws.recv())
+
+asyncio.run(chat())
 ```
 
 ## 🛠️ 技术栈
@@ -305,18 +351,17 @@ RAG-ARC 提供了全面的 REST API，包含以下关键端点：
 
 ### 知识管理
 - `POST /knowledge`：上传文档
-- `GET /knowledge`：列出用户文档
-- `GET /knowledge/{doc_id}`：下载文档
+- `GET /knowledge/list_files`：列出用户文档
+- `GET /knowledge/{doc_id}/download`：下载文档
 - `DELETE /knowledge/{doc_id}`：删除文档
 
 ### RAG 推理
 - `POST /rag_inference/chat`：与 RAG 系统对话
-- `POST /rag_inference/stream_chat/{session_id}`：基于 WebSocket 的流式对话
+- `WebSocket /rag_inference/stream_chat/{session_id}`：基于 WebSocket 的流式对话
 
 ### 用户管理
 - `POST /auth/register`：用户注册
-- `POST /auth/login`：用户认证
-- `POST /auth/refresh`：令牌刷新
+- `POST /auth/token`：用户认证（登录）
 
 ### 会话管理
 - `POST /session`：创建聊天会话

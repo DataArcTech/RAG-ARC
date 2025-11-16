@@ -99,8 +99,8 @@ docker logs -f rag-arc-neo4j
 
 ### 管理容器
 ```bash
-# 停止所有容器
-docker stop rag-arc-app rag-arc-postgres rag-arc-redis rag-arc-neo4j
+# 停止所有容器（保留数据）
+./stop.sh
 
 # 启动所有容器（停止后）
 docker start rag-arc-postgres rag-arc-redis rag-arc-neo4j rag-arc-app
@@ -108,11 +108,13 @@ docker start rag-arc-postgres rag-arc-redis rag-arc-neo4j rag-arc-app
 # 重启所有服务（推荐方式）
 ./start.sh
 
-# 删除所有容器
-docker rm -f rag-arc-app rag-arc-postgres rag-arc-redis rag-arc-neo4j
+# 清理Docker资源（保留本地数据）
+./cleanup.sh
+# 这会删除容器、卷和网络，但保留 ./data、./local、./models
 
-# 删除所有卷（⚠️ 这将删除所有数据！）
-docker volume rm rag-arc-postgres-data rag-arc-redis-data rag-arc-neo4j-data rag-arc-neo4j-logs
+# 完全清理（⚠️ 这将删除所有数据，包括本地目录！）
+./clean-docker-data.sh
+# 这会删除所有内容：容器、卷和本地数据目录
 ```
 
 ### 重新构建应用
@@ -148,9 +150,9 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 # Neo4j密码（建议修改）
 NEO4J_PASSWORD=12345678  # 修改为安全的密码
 
-# 可选：本地运行模型配置
-# EMBEDDING_MODEL_NAME=BAAI/bge-large-zh-v1.5 # 或Qwen/Qwen3-Embedding-0.6B
-# DEVICE=cuda:0  # 或 cpu
+# 本地运行模型配置
+EMBEDDING_MODEL_NAME=BAAI/bge-large-zh-v1.5 # 或Qwen/Qwen3-Embedding-0.6B
+DEVICE=cuda:0  # 或 cpu
 ```
 
 ### 脚本自动配置
