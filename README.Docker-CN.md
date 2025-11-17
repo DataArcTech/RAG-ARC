@@ -102,10 +102,7 @@ docker logs -f rag-arc-neo4j
 # 停止所有容器（保留数据）
 ./stop.sh
 
-# 启动所有容器（停止后）
-docker start rag-arc-postgres rag-arc-redis rag-arc-neo4j rag-arc-app
-
-# 重启所有服务（推荐方式）
+# 重启所有服务
 ./start.sh
 
 # 清理Docker资源（保留本地数据）
@@ -309,16 +306,17 @@ docker restart rag-arc-app
 
 **问题**：需要重置所有数据
 ```bash
-# 停止所有容器
-docker stop rag-arc-app rag-arc-postgres rag-arc-redis rag-arc-neo4j
+# 使用清理脚本
+./cleanup.sh
 
-# 删除所有容器
-docker rm rag-arc-app rag-arc-postgres rag-arc-redis rag-arc-neo4j
+# 然后重启服务
+./start.sh
+```
 
-# 删除所有卷（⚠️ 这会删除所有数据！）
-docker volume rm rag-arc-postgres-data rag-arc-redis-data rag-arc-neo4j-data rag-arc-neo4j-logs
-
-# 重启服务
+或者使用完全清理脚本（⚠️ 这会删除所有数据，包括本地目录！）：
+```bash
+./clean-docker-data.sh
+# 然后重启服务
 ./start.sh
 ```
 

@@ -174,7 +174,7 @@ class ParsedContentStorage(AbstractModule):
             blob_key = self._generate_parsed_blob_key(parsed_content_id, source_file_id, parser_type)
 
             # Create parsed content metadata object
-            now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+            now = datetime.now(tz=datetime.now().astimezone().tzinfo)
             parsed_metadata = ParsedContentMetadata(
                 parsed_content_id=parsed_content_id,
                 source_file_id=source_file_id,
@@ -207,7 +207,7 @@ class ParsedContentStorage(AbstractModule):
                     {
                         'blob_key': stored_blob_key,
                         'status': ParsedContentStatus.STORED,
-                        'updated_at': datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+                        'updated_at': datetime.now(tz=datetime.now().astimezone().tzinfo)
                     },
                     **kwargs
                 )

@@ -180,7 +180,7 @@ class ChunkStorage(AbstractModule):
             blob_key = self._generate_chunk_blob_key(chunk_id, source_parsed_content_id, chunker_type)
 
             # Create chunk metadata object
-            now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+            now = datetime.now(tz=datetime.now().astimezone().tzinfo)
             chunk_metadata = ChunkMetadata(
                 chunk_id=chunk_id,
                 source_parsed_content_id=source_parsed_content_id,

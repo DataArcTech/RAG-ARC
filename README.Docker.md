@@ -102,10 +102,7 @@ docker logs -f rag-arc-neo4j
 # Stop all containers (keeps data)
 ./stop.sh
 
-# Start all containers (after stopping)
-docker start rag-arc-postgres rag-arc-redis rag-arc-neo4j rag-arc-app
-
-# Restart all services (recommended way)
+# Restart all services
 ./start.sh
 
 # Cleanup Docker resources (keeps local data)
@@ -309,16 +306,17 @@ docker restart rag-arc-app
 
 **Problem**: Need to reset all data
 ```bash
-# Stop all containers
-docker stop rag-arc-app rag-arc-postgres rag-arc-redis rag-arc-neo4j
+# Use cleanup script
+./cleanup.sh
 
-# Remove all containers
-docker rm rag-arc-app rag-arc-postgres rag-arc-redis rag-arc-neo4j
+# Then restart services
+./start.sh
+```
 
-# Remove all volumes (⚠️ This deletes all data!)
-docker volume rm rag-arc-postgres-data rag-arc-redis-data rag-arc-neo4j-data rag-arc-neo4j-logs
-
-# Restart services
+Or use the complete cleanup script (⚠️ This will delete all data including local directories!):
+```bash
+./clean-docker-data.sh
+# Then restart services
 ./start.sh
 ```
 

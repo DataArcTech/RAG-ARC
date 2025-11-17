@@ -97,7 +97,7 @@ select_region() {
         print_message "$GREEN" "✅ Selected: Outside China (using official sources)"
     else
         REGION="china"
-        UV_INSTALL_URL="https://astral.ac.cn/uv/install.sh"
+        UV_INSTALL_URL="https://gitee.com/wangnov/uv-custom/releases/download/0.9.9/uv-installer-custom.sh"
         UV_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
         print_message "$GREEN" "✅ Selected: Mainland China (using Tsinghua mirror)"
     fi

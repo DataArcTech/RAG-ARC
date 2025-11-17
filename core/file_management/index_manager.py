@@ -3,9 +3,12 @@ import json
 import asyncio
 from typing import List, Dict, Any, TYPE_CHECKING
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from encapsulation.data_model.orm_models import ChunkIndexStatus
 
 from framework.module import AbstractModule
 from encapsulation.data_model.schema import Chunk
+
 
 if TYPE_CHECKING:
     from config.core.file_management.index_manager_config import IndexManagerConfig
@@ -589,10 +592,6 @@ class IndexManager(AbstractModule):
         Returns:
             bool: True if any chunks were successfully updated, False otherwise
         """
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-        from encapsulation.data_model.orm_models import ChunkIndexStatus
-
         # Check if any indexer succeeded
         any_success = any(
             result.get("success", False)
@@ -616,7 +615,7 @@ class IndexManager(AbstractModule):
             return False
 
         # Update status for each successfully indexed chunk
-        now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+        now = datetime.now(tz=datetime.now().astimezone().tzinfo)
         updated_count = 0
         failed_count = 0
 

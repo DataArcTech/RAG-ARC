@@ -202,7 +202,7 @@ class FileStorage(AbstractModule):
             content_type = content_type or "application/octet-stream"
 
             # Create metadata object with STORED status
-            now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+            now = datetime.now(tz=datetime.now().astimezone().tzinfo)
             metadata = FileMetadata(
                 file_id=file_id,
                 owner_id=owner_id,
@@ -236,7 +236,7 @@ class FileStorage(AbstractModule):
                     {
                         'blob_key': stored_blob_key,  # Use actual stored key (may be versioned)
                         'status': FileStatus.STORED,
-                        'updated_at': datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+                        'updated_at': datetime.now(tz=datetime.now().astimezone().tzinfo)
                     },
                     **kwargs
                 )

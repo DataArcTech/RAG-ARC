@@ -61,7 +61,7 @@ def test_complete_workflow():
     db_config = PostgreSQLConfig()
     db = db_config.build()
 
-    now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+    now = datetime.now(tz=datetime.now().astimezone().tzinfo)
     with db.SessionMaker() as session:
         for user_id in [user1_id, user2_id, user3_id]:
             user = User(

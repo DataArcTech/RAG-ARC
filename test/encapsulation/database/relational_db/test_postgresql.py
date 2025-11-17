@@ -25,7 +25,7 @@ def test_file_metadata_operations(db: PostgreSQLDB):
     print("\n=== FILE METADATA OPERATIONS ===")
 
     # Create test file metadata
-    now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+    now = datetime.now(tz=datetime.now().astimezone().tzinfo)
     file_metadata = FileMetadata(
         file_id="test-file-123",
         blob_key="assets/te/test-file-123/document.pdf",
@@ -78,7 +78,7 @@ def test_parsed_content_operations(db: PostgreSQLDB, source_file: FileMetadata):
     print("\n=== PARSED CONTENT METADATA OPERATIONS ===")
 
     # Create test parsed content metadata
-    now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+    now = datetime.now(tz=datetime.now().astimezone().tzinfo)
     parsed_metadata = ParsedContentMetadata(
         parsed_content_id="parsed-123",
         source_file_id=source_file.file_id,
@@ -133,7 +133,7 @@ def test_chunk_operations(db: PostgreSQLDB, source_parsed: ParsedContentMetadata
     print("\n=== CHUNK METADATA OPERATIONS ===")
 
     # Create test chunk metadata
-    now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+    now = datetime.now(tz=datetime.now().astimezone().tzinfo)
     chunk_metadata = ChunkMetadata(
         chunk_id="chunk-123",
         source_parsed_content_id=source_parsed.parsed_content_id,  # Back to ParsedContent reference
@@ -164,7 +164,7 @@ def test_chunk_operations(db: PostgreSQLDB, source_parsed: ParsedContentMetadata
     print("3. Testing chunk update (indexing simulation)...")
     success = db.update_chunk_metadata("chunk-123", {
         "index_status": ChunkIndexStatus.INDEXED,  # Using enum directly
-        "indexed_at": datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+        "indexed_at": datetime.now(tz=datetime.now().astimezone().tzinfo)
     })
     if success:
         updated = db.get_chunk_metadata("chunk-123")

@@ -223,7 +223,7 @@ class PostgreSQLDB(RelationalDB):
         try:
             with self.SessionMaker() as session:
                 # Add updated_at timestamp
-                updates['updated_at'] = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+                updates['updated_at'] = datetime.now(tz=datetime.now().astimezone().tzinfo)
 
                 # Update the record (SQLAlchemy handles enum conversion automatically)
                 rows_updated = session.query(FileMetadata).filter_by(file_id=file_id).update(updates)
@@ -590,7 +590,7 @@ class PostgreSQLDB(RelationalDB):
         try:
             with self.SessionMaker() as session:
                 # Add updated_at timestamp
-                updates['updated_at'] = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+                updates['updated_at'] = datetime.now(tz=datetime.now().astimezone().tzinfo)
 
                 # Update the record (SQLAlchemy handles enum conversion automatically)
                 rows_updated = session.query(ParsedContentMetadata).filter_by(parsed_content_id=parsed_content_id).update(updates)

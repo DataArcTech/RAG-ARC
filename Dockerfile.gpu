@@ -59,6 +59,7 @@ RUN MIRROR_URL="${APT_GET_URL:-http://archive.ubuntu.com}" && \
     curl \
     git \
     libpq-dev \
+    tzdata \
     && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
