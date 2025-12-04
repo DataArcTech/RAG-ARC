@@ -1,5 +1,6 @@
 """Configuration for Qwen Rerank LLM"""
 
+import os
 from framework.config import AbstractConfig
 from encapsulation.llm.rerank.qwen import QwenRerankLLM
 from typing import Literal, Optional
@@ -10,13 +11,13 @@ class QwenRerankConfig(AbstractConfig):
     # Discriminator for config type identification
     type: Literal["qwen_rerank"] = "qwen_rerank"
 
-    # Loading method configuration - can choose between providers
-    loading_method: Literal["openai", "huggingface"] = "huggingface"  # Provider for model loading
+    # Loading method configuration - Qwen reranker currently relies on HuggingFace models
+    loading_method: Literal["huggingface"] = "huggingface"
 
     # Model configuration
-    model_name: str = "Qwen/Qwen3-Reranker-0.6B"  # Path to Qwen reranker model
-    device: str = "cuda:0"  # Device for model inference (cuda:0, cuda:1, cpu)
-    cache_folder: Optional[str] = None  # Local cache directory for model files
+    model_name: str = os.getenv("RERANKER_MODEL_NAME", "Qwen/Qwen3-Reranker-0.6B")
+    device: str = os.getenv("RERANKER_DEVICE", os.getenv("DEVICE", "cuda:0"))
+    cache_folder: Optional[str] = os.getenv("RERANKER_CACHE_FOLDER", "./models/Qwen")
 
     use_china_mirror: bool = False  # Whether to use domestic mirror source
 

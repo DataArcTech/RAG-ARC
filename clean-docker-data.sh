@@ -28,17 +28,18 @@ print_header() {
 
 # Confirm before cleaning
 confirm_clean() {
-    print_message "$RED" "⚠️  WARNING: This will delete all Docker data for:"
-    print_message "$RED" "   - PostgreSQL database"
-    print_message "$RED" "   - Redis cache"
-    print_message "$RED" "   - Neo4j graph database"
-    print_message "$RED" "   - Docker build cache"
-    print_message "$RED" "   - All unused Docker images, containers, networks, and volumes"
+    print_message "$RED" "⚠️  WARNING: This will delete the following RAG-ARC Docker resources:"
+    print_message "$RED" "   - RAG-ARC containers (rag-arc-*)"
+    print_message "$RED" "   - RAG-ARC volumes (rag-arc-*)"
+    print_message "$RED" "   - RAG-ARC application images (rag_arc:v1, rag_arc:v1-gpu)"
+    print_message "$RED" "   - PostgreSQL, Redis, Neo4j databases"
+    print_message "$RED" "   - Local data directories (./data/)"
     echo ""
+    print_message "$YELLOW" "ℹ️  Base images (postgres, redis, neo4j) will be preserved"
     print_message "$YELLOW" "This action cannot be undone!"
     echo ""
     read -p "Are you sure you want to continue? (yes/no): " response
-    
+
     if [[ "$response" != "yes" ]]; then
         print_message "$YELLOW" "❌ Operation cancelled"
         exit 0
@@ -116,47 +117,39 @@ clean_local_data() {
 
 # Clean Docker build cache
 clean_build_cache() {
-    print_message "$BLUE" "🔨 Cleaning Docker build cache..."
-    
-    # Clean unused build cache
-    docker builder prune -f 2>/dev/null || true
-    
+    print_message "$BLUE" "🔨 Cleaning RAG-ARC Docker build cache..."
+
+    # Only clean RAG-ARC related build cache
+    docker builder prune --filter "label=project=rag-arc" -f 2>/dev/null || true
+
     print_message "$GREEN" "✅ Docker build cache cleaned"
     echo ""
 }
 
-# Clean all unused Docker resources (images, containers, networks, volumes)
-clean_all_docker_resources() {
-    print_message "$BLUE" "🧹 Cleaning all unused Docker resources..."
-    
-    # Clean all unused containers, networks, images (both dangling and unreferenced), and optionally, volumes
-    docker system prune -a -f --volumes 2>/dev/null || true
-    
-    print_message "$GREEN" "✅ All unused Docker resources cleaned"
-    echo ""
-}
+# Remove RAG-ARC application images
+remove_images() {
+    print_message "$BLUE" "🖼️  Removing RAG-ARC application images..."
 
-# Clean unused Docker images
-clean_unused_images() {
-    print_message "$BLUE" "🖼️  Cleaning unused Docker images..."
-    
-    # Remove all unused images, not just dangling ones
-    docker image prune -a -f 2>/dev/null || true
-    
-    print_message "$GREEN" "✅ Unused Docker images cleaned"
+    # Remove both CPU and GPU versions of the RAG-ARC app image
+    docker rmi rag_arc:v1 2>/dev/null || true
+    docker rmi rag_arc:v1-gpu 2>/dev/null || true
+
+    print_message "$GREEN" "✅ RAG-ARC application images removed"
     echo ""
 }
 
 # Show summary
 show_summary() {
-    print_message "$GREEN" "✅ Docker data cleanup completed!"
+    print_message "$GREEN" "✅ RAG-ARC Docker data cleanup completed!"
     echo ""
     print_message "$BLUE" "Summary of cleaned items:"
     print_message "$BLUE" "  - Containers: rag-arc-app, rag-arc-postgres, rag-arc-redis, rag-arc-neo4j"
     print_message "$BLUE" "  - Volumes: rag-arc-postgres-data, rag-arc-redis-data, rag-arc-neo4j-data"
+    print_message "$BLUE" "  - Images: rag_arc:v1, rag_arc:v1-gpu"
     print_message "$BLUE" "  - Local directories: ./data/postgresql, ./data/neo4j, ./data/redis, ./data/graph_index_neo4j"
-    print_message "$BLUE" "  - Docker build cache"
-    print_message "$BLUE" "  - All unused Docker images, containers, networks, and volumes"
+    print_message "$BLUE" "  - RAG-ARC build cache"
+    echo ""
+    print_message "$YELLOW" "⚠️  Note: Base images (PostgreSQL, Redis, Neo4j) are preserved as they may be used by other projects"
     echo ""
     print_message "$YELLOW" "Next steps:"
     print_message "$YELLOW" "  1. Run './start.sh' to start fresh containers"
@@ -172,9 +165,8 @@ main() {
     remove_containers
     remove_volumes
     clean_local_data
+    remove_images
     clean_build_cache
-    clean_unused_images
-    clean_all_docker_resources
     show_summary
 }
 

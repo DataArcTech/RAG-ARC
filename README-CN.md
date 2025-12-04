@@ -195,8 +195,11 @@ cd RAG-ARC
 - 适用于清理Docker资源但保留数据的情况
 
 `clean-docker-data.sh`：
-- 删除所有容器和Docker卷
+- 删除RAG-ARC容器和Docker卷
+- **删除RAG-ARC应用镜像**（rag_arc:v1, rag_arc:v1-gpu）
 - **同时删除本地数据目录**（`./data/postgresql`、`./data/neo4j`、`./data/redis`、`./data/graph_index_neo4j`）
+- **⚠️ 安全提示：只会删除RAG-ARC相关的资源（容器、卷、镜像），不会删除系统上所有的Docker资源**
+- **ℹ️ 基础镜像（PostgreSQL、Redis、Neo4j）会被保留**，因为它们可能被其他项目使用
 - 适用于需要完全清理的情况（⚠️ **这将删除所有数据！**）
 
 **访问服务：**
@@ -234,6 +237,44 @@ RAG-ARC使用模块化配置系统。关键配置文件位于`config/json_config
 - `rag_inference.json`：RAG检索配置
 - `knowledge.json`：知识管理配置
 - `account.json`：用户账户配置
+- `.env`：运行时参数（模型、账号、端口等）。当需要在本地直接访问容器中的 PostgreSQL / Redis / Neo4j 时，可设置 `DEVELOP_MODE=true`（等同于开启 `EXPOSE_*` 变量），上述服务会开放到 `localhost`；默认关闭以确保安全。
+
+### 🌐 通过 `.env` 切换模型调用方式
+
+每个模型都可以单独选择“OpenAI API”或“本地模型”，在 `.env` 中配置即可：
+
+| 组件 | API 模式示例 | 本地模式示例 |
+| --- | --- | --- |
+| Chat | `CHAT_MODEL_PROVIDER=openai`<br>`CHAT_MODEL_NAME=gpt-4o-mini`<br>`CHAT_API_KEY=sk-...`<br>`CHAT_API_BASE_URL=https://api.openai.com/v1` | `CHAT_MODEL_PROVIDER=huggingface`<br>`CHAT_MODEL_NAME=Qwen/Qwen2.5-7B`<br>`cache_folder=./models/Qwen`（按需设置） |
+| Embedding | `EMBEDDING_MODEL_PROVIDER=openai`<br>`OPENAI_EMBEDDING_MODEL=text-embedding-3-large`<br>`EMBEDDING_API_KEY=sk-...` | `EMBEDDING_MODEL_PROVIDER=huggingface`<br>`EMBEDDING_MODEL_NAME=Qwen/Qwen3-Embedding-0.6B`<br>`cache_folder=./models/Qwen` |
+| OCR | `OCR_MODEL_PROVIDER=openai`<br>`OPENAI_OCR_MODEL=gpt-4o`<br>`OCR_API_KEY=sk-...` | `OCR_MODEL_PROVIDER=vllm` 或 `dots_ocr_parser`，提前把模型放在 `./models/dots_ocr` |
+| Reranker | API 模式默认使用基于 Chat LLM 的 listwise reranker（共用 `CHAT_MODEL_PROVIDER`），无需额外配置 | 本地模式下 `rag_inference_local.json` 会加载 `Qwen/Qwen3-Reranker-0.6B`（通过 `RERANKER_MODEL_NAME`、`RERANKER_CACHE_FOLDER` 指定，模型需预先下载到 `./models/Qwen`） |
+
+如果想进一步自定义流程，可在 `.env` 中设置 `RAG_INFERENCE_CONFIG_PATH`、`KNOWLEDGE_CONFIG_PATH` 指向你自己的 JSON 文件。
+
+如需直接切换官方提供的两套配置，可设置 `MODEL_PROFILE=api` 或 `MODEL_PROFILE=local`（或自行指定配置文件路径）。
+
+**⚠️ 重要提示：使用Docker部署时**，如果更改了模型提供商（例如从`openai`切换到`huggingface`，或更改`MODEL_PROFILE`），您**必须重新构建Docker镜像**才能应用更改：
+```bash
+./build.sh  # 使用新的.env设置重新构建
+./start.sh  # 重启服务
+```
+
+### 📦 预下载本地模型
+
+**⚠️ 本地模式所需**：只有在 `MODEL_PROFILE=local` 或显式将嵌入提供商切换为 HuggingFace 时，才需要下载；默认 API 模式使用 OpenAI 嵌入，可跳过此步骤。
+
+运行本地模式前，可先下载对应的 HuggingFace 模型，以避免 Docker 里以 root 身份下载：
+
+```bash
+# 下载本地模式所需的全部模型（embedding/reranker/minilm）
+uv run python download_models.py
+
+# 或下载特定组件
+uv run python download_models.py --components embedding reranker minilm
+```
+
+脚本会把权重放在 `./models/Qwen`、`./models/dots_ocr` 和 `./models/all-MiniLM-L6-v2`。脚本开头提供了 `HF_ENDPOINT` 的注释示例，如需使用国内镜像（如 https://hf-mirror.com ），取消注释即可。
 
 ### 🏃 运行服务
 
@@ -241,6 +282,37 @@ RAG-ARC使用模块化配置系统。关键配置文件位于`config/json_config
 # 启动FastAPI服务器（uv run会自动管理虚拟环境）
 uv run uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+### 🖥️ CLI 调试（跳过 HTTP 层）
+
+需要快速验证算法时，可直接通过命令行驱动整个 RAG 流程，而无需启动 FastAPI：
+
+```bash
+# 在本地文件夹中批量导入/索引/建图
+uv run rag-arc ingest-folder ./example/docs --owner-id 00000000-0000-0000-0000-000000000000
+
+# 查看已导入文件及状态（JSON 输出）
+uv run rag-arc list-files --owner-id 00000000-0000-0000-0000-000000000000 --json
+
+# 对已有文件重新触发索引
+uv run rag-arc trigger-index FILE_ID1 FILE_ID2
+
+# 完整聊天链路（包含 LLM）
+uv run rag-arc chat "什么是RAG-ARC？"
+
+# 仅通过图检索问答（默认输出子图信息）
+uv run rag-arc graph-qa "X 和 Y 之间有什么关系？" --json
+
+# 仅检查检索/重排，导出子图并打印 JSON
+uv run rag-arc pipeline "什么是RAG-ARC？" --skip-llm --subgraph --json
+
+# 导出完整图谱到 JSON 文件
+uv run rag-arc export-graph --output graph.json
+```
+
+CLI 仍会连接 `.env` 中配置的 PostgreSQL / Redis / Neo4j / MinIO 等基础服务，因此虽然不用启动 `rag-arc-app` 容器，但这些依赖必须保持可用。
+
+> 📚 更详细的命令说明（单文件导入、文件管理、触发索引、图导出等）见 `cli/README-CN.md`。
 
 ### 🧪 使用示例
 
