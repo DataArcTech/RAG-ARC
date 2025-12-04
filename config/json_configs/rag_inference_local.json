@@ -18,8 +18,11 @@
                     "index_type": "flat",
                     "normalize_L2": true,
                     "embedding_config": {
-                        "type": "openai_embedding",
-                        "model_name": "${OPENAI_EMBEDDING_MODEL}"
+                        "type": "qwen_embedding",
+                        "model_name": "${EMBEDDING_MODEL_NAME}",
+                        "device": "${DEVICE}",
+                        "use_china_mirror": true,
+                        "cache_folder": "./models/Qwen"
                     }
                 }
             },
@@ -41,8 +44,11 @@
                     "storage_path": "./data/graph_index_neo4j",
                     "index_name": "index",
                     "embedding": {
-                        "type": "openai_embedding",
-                        "model_name": "${OPENAI_EMBEDDING_MODEL}"
+                        "type": "qwen_embedding",
+                        "model_name": "${EMBEDDING_MODEL_NAME}",
+                        "device": "${DEVICE}",
+                        "use_china_mirror": true,
+                        "cache_folder": "./models/Qwen"
                     },
                     "add_synonymy_edges": true,
                     "synonymy_edge_topk": 100,
@@ -73,14 +79,11 @@
     "reranker_config": {
         "type": "llm_reranker",
         "rerank_llm_config": {
-            "type": "listwise_rerank",
-            "chat_llm_config": {
-                "type": "openai_chat",
-                "model_name": "${OPENAI_CHAT_MODEL}",
-                "temperature": 0.0,
-                "openai_api_key": "${OPENAI_API_KEY}",
-                "openai_base_url": "${OPENAI_BASE_URL}"
-            }
+            "type": "qwen_rerank",
+            "model_name": "${RERANKER_MODEL_NAME}",
+            "device": "${DEVICE}",
+            "use_china_mirror": true,
+            "cache_folder": "${RERANKER_CACHE_FOLDER}"
         }
     },
     "llm_config": {

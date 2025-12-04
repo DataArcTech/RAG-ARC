@@ -178,8 +178,11 @@ The deployment includes:
 - Use when you want to clean Docker resources but keep your data
 
 `clean-docker-data.sh`:
-- Removes all containers and Docker volumes
+- Removes RAG-ARC containers and Docker volumes
+- **Removes RAG-ARC application images** (rag_arc:v1, rag_arc:v1-gpu)
 - **Also removes local data directories** (`./data/postgresql`, `./data/neo4j`, `./data/redis`, `./data/graph_index_neo4j`)
+- **⚠️ SAFETY NOTE: Only removes RAG-ARC specific resources (containers, volumes, images), not all Docker resources on your system**
+- **ℹ️ Base images (PostgreSQL, Redis, Neo4j) are preserved** as they may be used by other projects
 - Use when you want a complete cleanup (⚠️ **This will delete all data!**)
 
 **Access the service:**
@@ -218,6 +221,46 @@ RAG-ARC uses a modular configuration system. Key configuration files are located
 - `rag_inference.json`: RAG retrieval configuration
 - `knowledge.json`: Knowledge management configuration
 - `account.json`: User account configuration
+
+### 🌐 LLM Profiles via `.env`
+
+每个能力都可以独立选择“OpenAI API”或“本地模型”，只需在 `.env` 中设置以下变量：
+
+| 组件 | API 模式示例 | 本地模式示例 |
+| --- | --- | --- |
+| Chat | `CHAT_MODEL_PROVIDER=openai`<br>`CHAT_MODEL_NAME=gpt-4o-mini`<br>`CHAT_API_KEY=sk-...`<br>`CHAT_API_BASE_URL=https://api.openai.com/v1` | `CHAT_MODEL_PROVIDER=huggingface`<br>`CHAT_MODEL_NAME=Qwen/Qwen2.5-7B`<br>`cache_folder=./models/Qwen`（按需设置） |
+| Embedding | `EMBEDDING_MODEL_PROVIDER=openai`<br>`OPENAI_EMBEDDING_MODEL=text-embedding-3-large`<br>`EMBEDDING_API_KEY=sk-...` | `EMBEDDING_MODEL_PROVIDER=huggingface`<br>`EMBEDDING_MODEL_NAME=Qwen/Qwen3-Embedding-0.6B`<br>`cache_folder=./models/Qwen` |
+| OCR | `OCR_MODEL_PROVIDER=openai`<br>`OPENAI_OCR_MODEL=gpt-4o`<br>`OCR_API_KEY=sk-...` | `OCR_MODEL_PROVIDER=vllm` or `dots_ocr_parser` with models placed under `./models/dots_ocr` |
+| Reranker | API profile uses the built-in listwise reranker powered by `CHAT_MODEL_PROVIDER`; no extra setup needed | For local profile, `rag_inference_local.json` loads `Qwen/Qwen3-Reranker-0.6B` from `./models/Qwen` (configure via `RERANKER_MODEL_NAME` / `RERANKER_CACHE_FOLDER`) |
+
+每个 provider 都会在对应 API key 为空时退回到 `OPENAI_API_KEY` / `OPENAI_BASE_URL`，也可以通过 `RAG_INFERENCE_CONFIG_PATH` / `KNOWLEDGE_CONFIG_PATH` 指定完全自定义的配置文件。
+
+To switch the bundled pipeline between API and local defaults without editing JSON, set `MODEL_PROFILE=api` or `MODEL_PROFILE=local` in `.env` (or point `*_CONFIG_PATH` to your own files).
+
+**⚠️ IMPORTANT: When using Docker deployment**, if you change model providers (e.g., switching from `openai` to `huggingface`, or changing `MODEL_PROFILE`), you **must rebuild the Docker image** to apply the changes:
+```bash
+./build.sh  # Rebuild with new .env settings
+./start.sh  # Restart services
+```
+
+### 📦 Download Local Models
+
+**⚠️ REQUIRED MODEL**: The `sentence-transformers/all-MiniLM-L6-v2` model is **mandatory** for the system to function correctly, as it's used for semantic chunking and text processing. Make sure to download it before starting the service.
+
+When running with local providers (or `MODEL_PROFILE=local`), download the required HuggingFace weights ahead of time:
+
+```bash
+# Download all models (including the required all-MiniLM-L6-v2)
+uv run python download_models.py
+
+# Or download specific components
+uv run python download_models.py --components embedding reranker minilm
+
+# Download only the required MiniLM model
+uv run python download_models.py --components minilm
+```
+
+The script populates `./models/Qwen`, `./models/dots_ocr`, and `./models/all-MiniLM-L6-v2` using `huggingface_hub.snapshot_download`. Inside the script you'll find an optional comment for enabling the `https://hf-mirror.com` endpoint—remove the comment if you need the China mirror.
 
 ### 🏃 Running the Service
 

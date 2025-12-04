@@ -4,6 +4,16 @@
 
 set -e
 
+# Load .env so host-side tooling is available to this script
+if [ -f .env ]; then
+    set -a
+    source .env
+    set +a
+fi
+
+MODEL_PROFILE=${MODEL_PROFILE:-api}
+PROFILE_MODE=${MODEL_PROFILE,,}
+
 # Color definitions
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -320,7 +330,11 @@ start_app() {
 # Wait for service to start
 wait_for_service() {
     print_message "$BLUE" "⏳ Waiting for service to start..."
-    print_message "$YELLOW" "   Note: First startup may take 10-20 minutes to download/load models"
+    if [ "$PROFILE_MODE" = "local" ]; then
+        print_message "$YELLOW" "   Local mode: first startup may take extra time to load HuggingFace models"
+    else
+        print_message "$YELLOW" "   API mode: verifying remote endpoints and warm-up may take a few minutes"
+    fi
     print_message "$YELLOW" "   Checking every 5 seconds (max 20 minutes)..."
     echo ""
     
@@ -352,14 +366,20 @@ wait_for_service() {
     
     echo ""
     print_message "$YELLOW" "⚠️  Service startup timeout after 10 minutes"
-    print_message "$NC" "   This is often due to model downloading/loading on first startup"
-    print_message "$NC" "   Please check logs to see if model is still loading:"
+    print_message "$NC" "   Please check logs to see current progress:"
     print_message "$NC" "   Run: docker logs rag-arc-app"
     print_message "$NC" ""
-    print_message "$NC" "   If model is still loading, you can:"
-    print_message "$NC" "   1. Wait longer and check logs periodically"
-    print_message "$NC" "   2. Check if model files exist in ./models directory"
-    print_message "$NC" "   3. Verify network connection for model download"
+    if [ "$PROFILE_MODE" = "local" ]; then
+        print_message "$NC" "   Local profile detected: ensure ./models has required checkpoints"
+        print_message "$NC" "   1. Run: uv run python download_models.py"
+        print_message "$NC" "   2. Verify cache folders match \"cache_folder\" paths in JSON configs"
+        print_message "$NC" "   3. Check network/mirror settings if downloads keep failing"
+    else
+        print_message "$NC" "   API profile detected: verify CHAT/EMBEDDING/OCR endpoints and keys"
+        print_message "$NC" "   1. Confirm provider-specific API keys/base URLs in .env"
+        print_message "$NC" "   2. Ensure outbound network access is allowed"
+        print_message "$NC" "   3. Review proxy/middle-layer logs for throttling or auth failures"
+    fi
     echo ""
     exit 1;
 }
@@ -413,4 +433,3 @@ main() {
 }
 
 main
-

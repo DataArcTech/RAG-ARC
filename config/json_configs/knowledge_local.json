@@ -66,14 +66,15 @@
             "type": "parser_combinator",
             "base_output_dir": "./data/parsed_files",
             "ocr_parser": {
-                "type": "vlm_ocr_parser",
-                    "vlm_ocr": {
-                        "type": "vlm_ocr",
-                        "loading_method": "openai",
-                        "model_name": "${OPENAI_OCR_MODEL}",
-                        "max_tokens": 4096,
-                        "temperature": 0.0
-                    }
+                "type": "dots_ocr_parser",
+                "dots_ocr": {
+                    "type": "dots_ocr",
+                    "loading_method": "huggingface",
+                    "use_china_mirror": true,
+                    "cache_folder": "./models/dots_ocr",
+                    "use_snapshot_download": true,
+                    "device": "${DEVICE}"
+                }
             },
             "native_parser": {
                 "type": "native_parser"
@@ -106,8 +107,11 @@
                     "storage_path": "./data/graph_index_neo4j",
                     "index_name": "index",
                     "embedding": {
-                        "type": "openai_embedding",
-                        "model_name": "${OPENAI_EMBEDDING_MODEL}"
+                        "type": "qwen_embedding",
+                        "model_name": "${EMBEDDING_MODEL_NAME}",
+                        "device": "${DEVICE}",
+                        "use_china_mirror": true,
+                        "cache_folder": "./models/Qwen"
                     },
                     "add_synonymy_edges": true,
                     "synonymy_edge_topk": 100,
@@ -125,8 +129,11 @@
                     "index_type": "flat",
                     "normalize_L2": true,
                     "embedding_config": {
-                        "type": "openai_embedding",
-                        "model_name": "${OPENAI_EMBEDDING_MODEL}"
+                        "type": "qwen_embedding",
+                        "model_name": "${EMBEDDING_MODEL_NAME}",
+                        "device": "${DEVICE}",
+                        "use_china_mirror": true,
+                        "cache_folder": "./models/Qwen"
                     }
                 }
             },

@@ -21,7 +21,7 @@ def create_openai_sync_client(config) -> openai.OpenAI:
     """
     # Extract OpenAI-specific config parameters
     api_key = config.openai_api_key
-    base_url = config.openai_base_url
+    base_url = getattr(config, 'openai_base_url', None) or None
     organization = getattr(config, 'organization', None)
     max_retries = getattr(config, 'max_retries', 3)
     timeout = getattr(config, 'timeout', 60.0)
@@ -56,7 +56,7 @@ def create_openai_async_client(config) -> openai.AsyncOpenAI:
     """
     # Extract OpenAI-specific config parameters (same as sync client)
     api_key = config.openai_api_key
-    base_url = config.openai_base_url
+    base_url = getattr(config, 'openai_base_url', None) or None
     organization = getattr(config, 'organization', None)
     max_retries = getattr(config, 'max_retries', 3)
     timeout = getattr(config, 'timeout', 30)
