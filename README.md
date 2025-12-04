@@ -8,7 +8,7 @@
 
 *A modular, high-performance Retrieval-Augmented Generation framework with multi-path retrieval, graph extraction, and fusion ranking*
 
-[📘 Chinese Docs](README-CN.md) • [⭐ Key Features](#key-features) • [🏗️ Architecture](#architecture) • [🚀 Quick Start](#quick-start)
+[📘 中文文档](README-CN.md) • [⭐ Key Features](#key-features) • [🏗️ Architecture](#architecture) • [🚀 Quick Start](#quick-start)
 
 ## 🎯 Project Overview
 
@@ -189,7 +189,7 @@ The deployment includes:
 - API: http://localhost:8000
 - API Docs: http://localhost:8000/docs
 
-📖 **See [Docker Deployment Guide (English)](README.Docker.md) or [Docker Deployment Guide (Chinese)](README.Docker-CN.md) for detailed instructions and troubleshooting**
+📖 **See [Docker Deployment Guide (English)](README.Docker.md) or [Docker部署指南（中文）](README.Docker-CN.md) for detailed instructions and troubleshooting**
 
 ### 💻 Local Installation
 
