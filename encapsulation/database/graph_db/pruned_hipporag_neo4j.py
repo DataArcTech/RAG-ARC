@@ -1154,6 +1154,20 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         else:
             logger.warning("No valid new chunk embeddings to append")
 
+    def clear_chunk_embeddings_cache(self) -> None:
+        """Remove cached chunk embeddings so they can be regenerated with the current embedding model."""
+        logger.warning("Clearing chunk embeddings cache")
+        self.chunk_embeddings = {}
+        self._chunk_embeddings_array = None
+        self._chunk_ids_list = None
+        embeddings_path = os.path.join(self.storage_path, f"{self.index_name}_chunk_embeddings.pkl")
+        try:
+            if os.path.exists(embeddings_path):
+                os.remove(embeddings_path)
+                logger.info("Removed cached chunk embeddings file: %s", embeddings_path)
+        except OSError as exc:
+            logger.warning("Failed to remove chunk embeddings file %s: %s", embeddings_path, exc)
+
     def _rebuild_chunk_embeddings_array(self):
         """
         Rebuild chunk embeddings array for dense passage retrieval.
@@ -1703,4 +1717,3 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         if self._driver:
             self._driver.close()
             logger.info("Neo4j driver closed")
-

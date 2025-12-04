@@ -11,6 +11,26 @@ if [ -f .env ]; then
     set +a
 fi
 
+DEVELOP_MODE=${DEVELOP_MODE:-false}
+if [[ "$DEVELOP_MODE" == "true" ]]; then
+    EXPOSE_NEO4J=true
+    EXPOSE_POSTGRES=true
+    EXPOSE_REDIS=true
+fi
+HOST_UID=${HOST_UID_OVERRIDE:-$(id -u)}
+HOST_GID=${HOST_GID_OVERRIDE:-$(id -g)}
+
+prepare_host_directories() {
+    print_message "$BLUE" "🧱 Ensuring host directories (data/local/models) exist and are writable..."
+    for dir in data local models; do
+        mkdir -p "$dir"
+        if command -v chown >/dev/null 2>&1; then
+            sudo chown -R "$HOST_UID:$HOST_GID" "$dir" 2>/dev/null || chown -R "$HOST_UID:$HOST_GID" "$dir" || true
+        fi
+        chmod -R ug+rwx "$dir" 2>/dev/null || true
+    done
+    echo ""
+}
 MODEL_PROFILE=${MODEL_PROFILE:-api}
 PROFILE_MODE=${MODEL_PROFILE,,}
 
@@ -165,10 +185,18 @@ create_network() {
 # Start PostgreSQL container
 start_postgres() {
     print_message "$BLUE" "🗄️  Starting PostgreSQL..."
-    
+    EXPOSE_POSTGRES=${EXPOSE_POSTGRES:-false}
+    POSTGRES_HOST_PORT=${POSTGRES_HOST_PORT:-${POSTGRES_PORT:-5555}}
+    POSTGRES_PORTS=""
+    if [[ "$EXPOSE_POSTGRES" == "true" ]]; then
+        POSTGRES_PORTS="-p ${POSTGRES_HOST_PORT}:5432"
+        print_message "$GREEN" "   Exposing PostgreSQL on localhost:${POSTGRES_HOST_PORT}"
+    fi
+
     docker run -d \
         --name rag-arc-postgres \
         --network rag-arc-network \
+        $POSTGRES_PORTS \
         -e POSTGRES_USER=${POSTGRES_USER:-postgres} \
         -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres123} \
         -e POSTGRES_DB=${POSTGRES_DB:-rag_arc} \
@@ -182,10 +210,18 @@ start_postgres() {
 # Start Redis container
 start_redis() {
     print_message "$BLUE" "📦 Starting Redis..."
-    
+    EXPOSE_REDIS=${EXPOSE_REDIS:-false}
+    REDIS_HOST_PORT=${REDIS_HOST_PORT:-${REDIS_PORT:-6379}}
+    REDIS_PORTS=""
+    if [[ "$EXPOSE_REDIS" == "true" ]]; then
+        REDIS_PORTS="-p ${REDIS_HOST_PORT}:6379"
+        print_message "$GREEN" "   Exposing Redis on localhost:${REDIS_HOST_PORT}"
+    fi
+
     docker run -d \
         --name rag-arc-redis \
         --network rag-arc-network \
+        $REDIS_PORTS \
         -v rag-arc-redis-data:/data \
         redis:7-alpine redis-server --appendonly yes
     
@@ -420,6 +456,7 @@ main() {
     check_docker
     check_images
     detect_app_image
+    prepare_host_directories
     stop_old_containers
     create_network
     start_postgres

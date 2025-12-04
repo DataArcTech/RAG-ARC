@@ -830,6 +830,18 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
             logger.warning("No passage embeddings available")
             return np.zeros(len(self.passage_node_keys))
 
+        if self.passage_embeddings_array.shape[1] != query_embedding.shape[0]:
+            logger.error(
+                "Embedding dimension mismatch detected (passages=%s, query=%s). "
+                "Clearing cached chunk embeddings to avoid inconsistent state.",
+                self.passage_embeddings_array.shape[1],
+                query_embedding.shape[0],
+            )
+            if hasattr(self.graph_store, "clear_chunk_embeddings_cache"):
+                self.graph_store.clear_chunk_embeddings_cache()
+            self.passage_embeddings_array = np.array([], dtype=np.float32)
+            return np.zeros(len(self.passage_node_keys))
+
         # Fast dot product using numpy
         # If embeddings are float16, convert query to float16 for consistency
         if self.passage_embeddings_array.dtype == np.float16:
@@ -897,4 +909,3 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
                        f"avg={np.mean(list(entity_relevance_scores.values())):.3f}")
 
         return entity_relevance_scores
-

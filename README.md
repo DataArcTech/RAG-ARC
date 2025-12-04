@@ -8,7 +8,7 @@
 
 *A modular, high-performance Retrieval-Augmented Generation framework with multi-path retrieval, graph extraction, and fusion ranking*
 
-[📘 中文文档](README-CN.md) • [⭐ Key Features](#key-features) • [🏗️ Architecture](#architecture) • [🚀 Quick Start](#quick-start)
+[📘 Chinese Docs](README-CN.md) • [⭐ Key Features](#key-features) • [🏗️ Architecture](#architecture) • [🚀 Quick Start](#quick-start)
 
 ## 🎯 Project Overview
 
@@ -189,7 +189,7 @@ The deployment includes:
 - API: http://localhost:8000
 - API Docs: http://localhost:8000/docs
 
-📖 **See [Docker Deployment Guide (English)](README.Docker.md) or [Docker部署指南（中文）](README.Docker-CN.md) for detailed instructions and troubleshooting**
+📖 **See [Docker Deployment Guide (English)](README.Docker.md) or [Docker Deployment Guide (Chinese)](README.Docker-CN.md) for detailed instructions and troubleshooting**
 
 ### 💻 Local Installation
 
@@ -221,19 +221,20 @@ RAG-ARC uses a modular configuration system. Key configuration files are located
 - `rag_inference.json`: RAG retrieval configuration
 - `knowledge.json`: Knowledge management configuration
 - `account.json`: User account configuration
+- `.env`: runtime knobs (providers, database credentials, etc.). Set `DEVELOP_MODE=true` when you want all Docker services (PostgreSQL/Redis/Neo4j) to expose their ports to `localhost` for debugging; it remains `false` by default for security.
 
 ### 🌐 LLM Profiles via `.env`
 
-每个能力都可以独立选择“OpenAI API”或“本地模型”，只需在 `.env` 中设置以下变量：
+Each capability can independently use either the OpenAI API or local models—configure the following variables in `.env`:
 
-| 组件 | API 模式示例 | 本地模式示例 |
+| Component | API profile example | Local profile example |
 | --- | --- | --- |
-| Chat | `CHAT_MODEL_PROVIDER=openai`<br>`CHAT_MODEL_NAME=gpt-4o-mini`<br>`CHAT_API_KEY=sk-...`<br>`CHAT_API_BASE_URL=https://api.openai.com/v1` | `CHAT_MODEL_PROVIDER=huggingface`<br>`CHAT_MODEL_NAME=Qwen/Qwen2.5-7B`<br>`cache_folder=./models/Qwen`（按需设置） |
+| Chat | `CHAT_MODEL_PROVIDER=openai`<br>`CHAT_MODEL_NAME=gpt-4o-mini`<br>`CHAT_API_KEY=sk-...`<br>`CHAT_API_BASE_URL=https://api.openai.com/v1` | `CHAT_MODEL_PROVIDER=huggingface`<br>`CHAT_MODEL_NAME=Qwen/Qwen2.5-7B`<br>`cache_folder=./models/Qwen` (optional) |
 | Embedding | `EMBEDDING_MODEL_PROVIDER=openai`<br>`OPENAI_EMBEDDING_MODEL=text-embedding-3-large`<br>`EMBEDDING_API_KEY=sk-...` | `EMBEDDING_MODEL_PROVIDER=huggingface`<br>`EMBEDDING_MODEL_NAME=Qwen/Qwen3-Embedding-0.6B`<br>`cache_folder=./models/Qwen` |
 | OCR | `OCR_MODEL_PROVIDER=openai`<br>`OPENAI_OCR_MODEL=gpt-4o`<br>`OCR_API_KEY=sk-...` | `OCR_MODEL_PROVIDER=vllm` or `dots_ocr_parser` with models placed under `./models/dots_ocr` |
 | Reranker | API profile uses the built-in listwise reranker powered by `CHAT_MODEL_PROVIDER`; no extra setup needed | For local profile, `rag_inference_local.json` loads `Qwen/Qwen3-Reranker-0.6B` from `./models/Qwen` (configure via `RERANKER_MODEL_NAME` / `RERANKER_CACHE_FOLDER`) |
 
-每个 provider 都会在对应 API key 为空时退回到 `OPENAI_API_KEY` / `OPENAI_BASE_URL`，也可以通过 `RAG_INFERENCE_CONFIG_PATH` / `KNOWLEDGE_CONFIG_PATH` 指定完全自定义的配置文件。
+Each provider falls back to `OPENAI_API_KEY` / `OPENAI_BASE_URL` when its dedicated key is empty, and you can point `RAG_INFERENCE_CONFIG_PATH` / `KNOWLEDGE_CONFIG_PATH` to fully customized JSON files.
 
 To switch the bundled pipeline between API and local defaults without editing JSON, set `MODEL_PROFILE=api` or `MODEL_PROFILE=local` in `.env` (or point `*_CONFIG_PATH` to your own files).
 
@@ -245,19 +246,16 @@ To switch the bundled pipeline between API and local defaults without editing JS
 
 ### 📦 Download Local Models
 
-**⚠️ REQUIRED MODEL**: The `sentence-transformers/all-MiniLM-L6-v2` model is **mandatory** for the system to function correctly, as it's used for semantic chunking and text processing. Make sure to download it before starting the service.
+**⚠️ Local-only model**: The weights are required **only when running in local profile or when you explicitly switch the embedding provider to HuggingFace**. In pure API mode (default), all embeddings come from OpenAI and you can skip this download step.
 
 When running with local providers (or `MODEL_PROFILE=local`), download the required HuggingFace weights ahead of time:
 
 ```bash
-# Download all models (including the required all-MiniLM-L6-v2)
+# Download all local models (embedding/reranker/minilm)
 uv run python download_models.py
 
 # Or download specific components
 uv run python download_models.py --components embedding reranker minilm
-
-# Download only the required MiniLM model
-uv run python download_models.py --components minilm
 ```
 
 The script populates `./models/Qwen`, `./models/dots_ocr`, and `./models/all-MiniLM-L6-v2` using `huggingface_hub.snapshot_download`. Inside the script you'll find an optional comment for enabling the `https://hf-mirror.com` endpoint—remove the comment if you need the China mirror.
@@ -268,6 +266,37 @@ The script populates `./models/Qwen`, `./models/dots_ocr`, and `./models/all-Min
 # Start the FastAPI server (uv run automatically manages the virtual environment)
 uv run uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+### 🖥️ CLI Debugging (no HTTP layer)
+
+You can run the retrieval/rerank/LLM pipeline from the command line without launching the FastAPI server:
+
+```bash
+# Bulk ingest (upload + indexing + graph build) from a local folder
+uv run rag-arc ingest-folder ./example/docs --owner-id YOUR_UUID
+
+# Inspect stored files and statuses (JSON output)
+uv run rag-arc list-files --owner-id YOUR_UUID --json
+
+# Re-run indexing/graph build for existing files
+uv run rag-arc trigger-index FILE_ID_1 FILE_ID_2
+
+# Full chat pipeline (LLM included)
+uv run rag-arc chat "What is RAG-ARC?"
+
+# Graph-only QA (returns graph subgraph metadata by default)
+uv run rag-arc graph-qa "What relations exist between X and Y?" --json
+
+# Inspect retrieval/rerank only, export graph metadata, and print JSON
+uv run rag-arc pipeline "What is RAG-ARC?" --skip-llm --subgraph --json
+
+# Export the entire graph to a JSON file
+uv run rag-arc export-graph --output graph.json
+```
+
+The CLI still connects to the same PostgreSQL/Redis/Neo4j/MinIO services defined in `.env`, so ensure those dependencies are reachable even though the `rag-arc-app` container is not started.
+
+> 📚 See `cli/README.md` for the full command reference (ingest-file/folder, list/delete, trigger-index, export-graph, chat/pipeline/graph-qa).
 
 ### 🧪 Example Usage
 

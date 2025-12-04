@@ -55,61 +55,73 @@ def _resolve_provider(env_var: str, api_default: str, local_default: str) -> str
     profile = os.getenv("MODEL_PROFILE", "api").lower()
     return local_default if profile == "local" else api_default
 
-def initialize():
+def _register_app(app_name: str, config_path: str, config_type):
     try:
-        rag_config_path = _resolve_config_path(
-            "RAG_INFERENCE_CONFIG_PATH",
-            "config/json_configs/rag_inference.json",
-            {
-                "api": "config/json_configs/rag_inference.json",
-                "local": "config/json_configs/rag_inference_local.json"
-            }
-        )
-        knowledge_config_path = _resolve_config_path(
-            "KNOWLEDGE_CONFIG_PATH",
-            "config/json_configs/knowledge.json",
-            {
-                "api": "config/json_configs/knowledge.json",
-                "local": "config/json_configs/knowledge_local.json"
-            }
-        )
+        registrator.register(config_path=config_path, app_name=app_name, config_type=config_type)
+        return True
+    except Exception as exc:
+        logger.error("Failed to register %s (%s): %s", app_name, config_path, exc)
+        return False
 
-        profile = os.getenv("MODEL_PROFILE", "api").lower()
-        logger.info(
-            "MODEL_PROFILE=%s | rag_config=%s | knowledge_config=%s",
-            profile,
-            rag_config_path,
-            knowledge_config_path
-        )
-        chat_provider = _resolve_provider("CHAT_MODEL_PROVIDER", "openai", "huggingface")
-        embedding_provider = _resolve_provider("EMBEDDING_MODEL_PROVIDER", "openai", "huggingface")
-        ocr_provider = _resolve_provider("OCR_MODEL_PROVIDER", "openai", "vllm") if profile == "api" else "dots_ocr_parser"
-        reranker_provider = "listwise(chat)" if profile != "local" else f"qwen_local({os.getenv('RERANKER_MODEL_NAME', 'Qwen/Qwen3-Reranker-0.6B')})"
-        logger.info(
-            "Provider summary -> chat=%s, embedding=%s, ocr=%s, reranker=%s",
-            chat_provider,
-            embedding_provider,
-            ocr_provider,
-            reranker_provider
-        )
 
-        registrator.register(config_path=rag_config_path, app_name="rag_inference", config_type=RAGInferenceConfig)
-        registrator.register(config_path=knowledge_config_path, app_name="knowledge", config_type=KnowledgeConfig)
-        registrator.register(
-            config_path=_resolve_config_path("ACCOUNT_CONFIG_PATH", "config/json_configs/account.json"),
-            app_name="account",
-            config_type=AccountConfig
-        )
-        registrator.register(
-            config_path=_resolve_config_path("SESSION_CONFIG_PATH", "config/json_configs/session.json"),
-            app_name="chat_session",
-            config_type=ChatSessionConfig
-        )
-        registrator.register(
-            config_path=_resolve_config_path("CHAT_MESSAGE_CONFIG_PATH", "config/json_configs/chat_message.json"),
-            app_name="chat_message",
-            config_type=ChatMessageManagerConfig
-        )
-    except Exception as e:
-        logger.error(f"Failed to initialize RAG inference: {e}")
-        # Continue without RAG inference for now
+def initialize():
+    rag_config_path = _resolve_config_path(
+        "RAG_INFERENCE_CONFIG_PATH",
+        "config/json_configs/rag_inference.json",
+        {
+            "api": "config/json_configs/rag_inference.json",
+            "local": "config/json_configs/rag_inference_local.json"
+        }
+    )
+    knowledge_config_path = _resolve_config_path(
+        "KNOWLEDGE_CONFIG_PATH",
+        "config/json_configs/knowledge.json",
+        {
+            "api": "config/json_configs/knowledge.json",
+            "local": "config/json_configs/knowledge_local.json"
+        }
+    )
+
+    profile = os.getenv("MODEL_PROFILE", "api").lower()
+    logger.info(
+        "MODEL_PROFILE=%s | rag_config=%s | knowledge_config=%s",
+        profile,
+        rag_config_path,
+        knowledge_config_path
+    )
+    chat_provider = _resolve_provider("CHAT_MODEL_PROVIDER", "openai", "huggingface")
+    embedding_provider = _resolve_provider("EMBEDDING_MODEL_PROVIDER", "openai", "huggingface")
+    ocr_provider = _resolve_provider("OCR_MODEL_PROVIDER", "openai", "vllm") if profile == "api" else "dots_ocr_parser"
+    reranker_provider = "listwise(chat)" if profile != "local" else f"qwen_local({os.getenv('RERANKER_MODEL_NAME', 'Qwen/Qwen3-Reranker-0.6B')})"
+    logger.info(
+        "Provider summary -> chat=%s, embedding=%s, ocr=%s, reranker=%s",
+        chat_provider,
+        embedding_provider,
+        ocr_provider,
+        reranker_provider
+    )
+
+    rag_ready = _register_app("rag_inference", rag_config_path, RAGInferenceConfig)
+    knowledge_ready = _register_app("knowledge", knowledge_config_path, KnowledgeConfig)
+
+    if not knowledge_ready:
+        logger.error("Knowledge module failed to initialize; CLI ingestion operations will be unavailable.")
+
+    _register_app(
+        "account",
+        _resolve_config_path("ACCOUNT_CONFIG_PATH", "config/json_configs/account.json"),
+        AccountConfig,
+    )
+    _register_app(
+        "chat_session",
+        _resolve_config_path("SESSION_CONFIG_PATH", "config/json_configs/session.json"),
+        ChatSessionConfig,
+    )
+    _register_app(
+        "chat_message",
+        _resolve_config_path("CHAT_MESSAGE_CONFIG_PATH", "config/json_configs/chat_message.json"),
+        ChatMessageManagerConfig,
+    )
+
+    if not rag_ready:
+        logger.warning("RAG inference module is unavailable; CLI chat commands will fail until dependencies are ready.")

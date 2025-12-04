@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import get_args, get_origin, Literal, TYPE_CHECKING
 from pydantic import BaseModel, Field, field_validator
 from typing import Annotated
@@ -37,7 +35,7 @@ class AbstractConfig(BaseModel):
 
         # 2) its annotation must be Literal["..."]
         typ_ann = ann["type"]
-        # Handle string annotations (from __future__ import annotations)
+        # Handle string annotations
         if isinstance(typ_ann, str):
             # For string annotations, we can't easily check the origin
             # Just check that it looks like a Literal

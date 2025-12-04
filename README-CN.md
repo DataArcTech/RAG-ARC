@@ -237,6 +237,7 @@ RAG-ARC使用模块化配置系统。关键配置文件位于`config/json_config
 - `rag_inference.json`：RAG检索配置
 - `knowledge.json`：知识管理配置
 - `account.json`：用户账户配置
+- `.env`：运行时参数（模型、账号、端口等）。当需要在本地直接访问容器中的 PostgreSQL / Redis / Neo4j 时，可设置 `DEVELOP_MODE=true`（等同于开启 `EXPOSE_*` 变量），上述服务会开放到 `localhost`；默认关闭以确保安全。
 
 ### 🌐 通过 `.env` 切换模型调用方式
 
@@ -261,19 +262,16 @@ RAG-ARC使用模块化配置系统。关键配置文件位于`config/json_config
 
 ### 📦 预下载本地模型
 
-**⚠️ 必需模型**：`sentence-transformers/all-MiniLM-L6-v2` 模型是**系统正常运行所必需的**，它用于语义分块和文本处理。请确保在启动服务前下载此模型。
+**⚠️ 本地模式所需**：只有在 `MODEL_PROFILE=local` 或显式将嵌入提供商切换为 HuggingFace 时，才需要下载；默认 API 模式使用 OpenAI 嵌入，可跳过此步骤。
 
 运行本地模式前，可先下载对应的 HuggingFace 模型，以避免 Docker 里以 root 身份下载：
 
 ```bash
-# 下载所有模型（包括必需的 all-MiniLM-L6-v2）
+# 下载本地模式所需的全部模型（embedding/reranker/minilm）
 uv run python download_models.py
 
 # 或下载特定组件
 uv run python download_models.py --components embedding reranker minilm
-
-# 仅下载必需的 MiniLM 模型
-uv run python download_models.py --components minilm
 ```
 
 脚本会把权重放在 `./models/Qwen`、`./models/dots_ocr` 和 `./models/all-MiniLM-L6-v2`。脚本开头提供了 `HF_ENDPOINT` 的注释示例，如需使用国内镜像（如 https://hf-mirror.com ），取消注释即可。
@@ -284,6 +282,37 @@ uv run python download_models.py --components minilm
 # 启动FastAPI服务器（uv run会自动管理虚拟环境）
 uv run uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+### 🖥️ CLI 调试（跳过 HTTP 层）
+
+需要快速验证算法时，可直接通过命令行驱动整个 RAG 流程，而无需启动 FastAPI：
+
+```bash
+# 在本地文件夹中批量导入/索引/建图
+uv run rag-arc ingest-folder ./example/docs --owner-id 00000000-0000-0000-0000-000000000000
+
+# 查看已导入文件及状态（JSON 输出）
+uv run rag-arc list-files --owner-id 00000000-0000-0000-0000-000000000000 --json
+
+# 对已有文件重新触发索引
+uv run rag-arc trigger-index FILE_ID1 FILE_ID2
+
+# 完整聊天链路（包含 LLM）
+uv run rag-arc chat "什么是RAG-ARC？"
+
+# 仅通过图检索问答（默认输出子图信息）
+uv run rag-arc graph-qa "X 和 Y 之间有什么关系？" --json
+
+# 仅检查检索/重排，导出子图并打印 JSON
+uv run rag-arc pipeline "什么是RAG-ARC？" --skip-llm --subgraph --json
+
+# 导出完整图谱到 JSON 文件
+uv run rag-arc export-graph --output graph.json
+```
+
+CLI 仍会连接 `.env` 中配置的 PostgreSQL / Redis / Neo4j / MinIO 等基础服务，因此虽然不用启动 `rag-arc-app` 容器，但这些依赖必须保持可用。
+
+> 📚 更详细的命令说明（单文件导入、文件管理、触发索引、图导出等）见 `cli/README-CN.md`。
 
 ### 🧪 使用示例
 
