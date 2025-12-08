@@ -209,6 +209,9 @@ curl -LsSf https://astral.ac.cn/uv/install.sh | sh
 # Tsinghua mirror is configured in pyproject.toml
 uv sync
 
+# Optional: Install development dependencies (for running tests)
+uv sync --extra dev
+
 # 4. Copy and configure environment variables
 cp .env.example .env
 # Edit .env to configure your settings
@@ -484,6 +487,29 @@ We welcome contributions from the community! Here's how you can help:
 3. 💾 Commit your changes (`git commit -m 'Add some AmazingFeature'`)
 4. 📤 Push to the branch (`git push origin feature/AmazingFeature`)
 5. 🔄 Open a Pull Request
+
+### 🧪 Running Tests
+
+To run the test suite, first install development dependencies:
+
+```bash
+# Install development dependencies (includes pytest and pytest-asyncio)
+uv sync --extra dev
+
+# Run all tests
+uv run pytest
+
+# Run specific test file
+uv run pytest test/deepsearch/test_planner.py
+
+# Run tests with verbose output
+uv run pytest -v
+
+# Run tests with short traceback
+uv run pytest --tb=short
+```
+
+**Note**: Tests require environment variables to be configured in `.env` file, especially API keys for LLM providers.
 
 ### 🔧 Development Guidelines
 
