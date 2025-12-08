@@ -238,7 +238,7 @@ class DeepSearchPlanner:
             plan_dir.mkdir(parents=True, exist_ok=True)
             path = plan_dir / f"{plan_id}_plan.json"
             with path.open("w", encoding="utf-8") as fp:
-                json.dump(artifact, fp, indent=2)
+                json.dump(artifact, fp, indent=2, ensure_ascii=False)
             return path
         except OSError as exc:
             logger.warning("Failed to persist DeepSearch plan %s: %s", plan_id, exc)
