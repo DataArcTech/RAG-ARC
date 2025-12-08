@@ -225,6 +225,9 @@ curl -LsSf https://astral.ac.cn/uv/install.sh | sh
 # 3. 安装依赖（uv会自动创建虚拟环境）
 uv sync
 
+# 可选：安装开发依赖（用于运行测试）
+uv sync --extra dev
+
 # 4. 复制并配置环境变量
 cp .env.example .env
 # 编辑.env以配置您的设置
@@ -469,6 +472,29 @@ RAG-ARC 包含内置的监控功能：
 3. 💾 提交更改（`git commit -m 'Add some AmazingFeature'`）
 4. 📤 推送到分支（`git push origin feature/AmazingFeature`）
 5. 🔄 打开Pull Request
+
+### 🧪 运行测试
+
+要运行测试套件，首先需要安装开发依赖：
+
+```bash
+# 安装开发依赖（包含 pytest 和 pytest-asyncio）
+uv sync --extra dev
+
+# 运行所有测试
+uv run pytest
+
+# 运行特定测试文件
+uv run pytest test/deepsearch/test_planner.py
+
+# 运行测试并显示详细输出
+uv run pytest -v
+
+# 运行测试并显示简短的错误信息
+uv run pytest --tb=short
+```
+
+**注意**：测试需要在 `.env` 文件中配置环境变量，特别是 LLM 提供商的 API 密钥。
 
 ### 🔧 开发指南
 
