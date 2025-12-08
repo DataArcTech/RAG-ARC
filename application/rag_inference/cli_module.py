@@ -122,7 +122,7 @@ class RAGInferenceCLIModule:
 
     def get_graph_store(self):
         """Expose the underlying graph store for export/debugging."""
-        return self._locate_graph_store()
+        return self._rag.get_graph_store()
 
     def _get_graph_retriever(self) -> Optional[BaseGraphRetriever]:
         retriever = self._rag.retriever
@@ -163,7 +163,7 @@ class RAGInferenceCLIModule:
 
     def _export_subgraph(self, subgraph_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         try:
-            graph_store = self._locate_graph_store()
+            graph_store = self._rag.get_graph_store()
             if not graph_store:
                 logger.warning("Graph store not found in retriever")
                 return None
@@ -203,14 +203,4 @@ class RAGInferenceCLIModule:
             return None
 
     def _locate_graph_store(self):
-        graph_retriever = self._get_graph_retriever()
-        if graph_retriever and hasattr(graph_retriever, "graph_store"):
-            return graph_retriever.graph_store
-        retriever = self._rag.retriever
-        if hasattr(retriever, "graph_store"):
-            return retriever.graph_store
-        if hasattr(retriever, "config") and hasattr(retriever.config, "built_retrievers"):
-            for child_retriever in retriever.config.built_retrievers:
-                if hasattr(child_retriever, "graph_store"):
-                    return child_retriever.graph_store
-        return None
+        return self._rag.get_graph_store()

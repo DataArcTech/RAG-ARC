@@ -1,8 +1,9 @@
 from encapsulation.data_model.schema import Chunk
-from typing import TYPE_CHECKING, Optional, Dict, Any
+from typing import TYPE_CHECKING, Optional, Dict, Any, List
 import logging
 import uuid
 from framework.module import AbstractModule
+from core.utils.owner_guard import normalize_owner_id
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -21,6 +22,14 @@ class RAGInference(AbstractModule):
         logger.info("Building retriever...")
         self.retriever = self.config.retrieval_config.build()
         logger.info("Retriever built successfully")
+        self.graph_retriever = None
+        graph_cls_name = "PrunedHippoRAGNeo4jRetriever"
+        if hasattr(self.retriever, "retrievers"):
+            for candidate in self.retriever.retrievers:
+                if candidate.__class__.__name__ == graph_cls_name:
+                    self.graph_retriever = candidate
+                    logger.info("Detected graph retriever for admin/global access")
+                    break
         
         logger.info("Building reranker...")
         self.reranker = self.config.reranker_config.build()
@@ -45,13 +54,23 @@ class RAGInference(AbstractModule):
         """
         query = self.query_rewriter.rewrite_query(query)
 
-        # Pass owner_id and return_subgraph_info to retriever
-        # All retrievers support invoke() method which will handle these parameters
-        chunks = self.retriever.invoke(
+        # Pass owner_id and return_subgraph_info to the configured retriever.
+        chunks: list[Chunk] = self.retriever.invoke(
             query,
             owner_id=owner_id,
             return_subgraph_info=return_subgraph
         )
+
+        # Admin/global mode: if multipath returns nothing, fall back to the graph retriever.
+        if owner_id is None and not chunks and self.graph_retriever is not None:
+            logger.info("Admin/global mode: multipath returned 0 results, falling back to graph retriever")
+            graph_chunks = self.graph_retriever.invoke(
+                query,
+                owner_id=None,
+                return_subgraph_info=return_subgraph
+            )
+            if graph_chunks:
+                chunks = graph_chunks
 
         # Extract subgraph info BEFORE reranking (to avoid losing it after reordering)
         subgraph_info = None
@@ -69,17 +88,7 @@ class RAGInference(AbstractModule):
         if subgraph_info:
             # Import GraphExporter here to avoid circular dependency
             try:
-                # Find graph_store from retriever or its children
-                graph_store = None
-                if hasattr(self.retriever, 'graph_store'):
-                    # Direct graph retriever
-                    graph_store = self.retriever.graph_store
-                elif hasattr(self.retriever, 'config') and hasattr(self.retriever.config, 'built_retrievers'):
-                    # Multipath retriever: find graph retriever
-                    for child_retriever in self.retriever.config.built_retrievers:
-                        if hasattr(child_retriever, 'graph_store'):
-                            graph_store = child_retriever.graph_store
-                            break
+                graph_store = self._locate_graph_store()
 
                 if graph_store:
                     # Import appropriate GraphExporter based on graph_store type
@@ -127,3 +136,75 @@ class RAGInference(AbstractModule):
         logger.info(f"Prepared messages for LLM: {messages}")
         response = self.llm.chat(messages)
         return (response, chunks, subgraph_data)
+
+    def _locate_graph_store(self):
+        """Locate the configured graph store if one exists."""
+        candidate_retrievers: List[Any] = []
+        if self.graph_retriever is not None:
+            candidate_retrievers.append(self.graph_retriever)
+
+        if hasattr(self.retriever, 'graph_store'):
+            candidate_retrievers.append(self.retriever)
+
+        if hasattr(self.retriever, 'retrievers'):
+            candidate_retrievers.extend(self.retriever.retrievers or [])
+
+        nested = getattr(getattr(self.retriever, 'config', None), 'built_retrievers', None)
+        if nested:
+            candidate_retrievers.extend(nested)
+
+        for retriever in candidate_retrievers:
+            graph_store = getattr(retriever, 'graph_store', None)
+            if graph_store is not None:
+                return graph_store
+        return None
+
+    def get_graph_store(self):
+        """Expose the underlying graph store for CLI and admin APIs."""
+        return self._locate_graph_store()
+
+    def export_graph_overview(
+        self,
+        owner_id: Optional[uuid.UUID],
+        max_nodes: int = 1000,
+        max_edges: int = 5000,
+        include_node_types: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Export a graph overview for visual inspection.
+
+        Args:
+            owner_id: Optional owner scope. None returns all owners (admin use).
+            max_nodes: Maximum number of nodes to sample.
+            max_edges: Maximum number of edges to sample.
+            include_node_types: Optional white-list of node types.
+
+        Returns:
+            Graph overview payload compatible with frontend graph viewers.
+        """
+        graph_store = self._locate_graph_store()
+        if graph_store is None:
+            raise RuntimeError("Graph store is not configured for the current retriever profile")
+
+        normalized_owner = normalize_owner_id(owner_id) if owner_id is not None else None
+        graph_store_class_name = graph_store.__class__.__name__
+
+        if graph_store_class_name == 'PrunedHippoRAGNeo4jStore':
+            from encapsulation.database.utils.graph_export_utils_neo4j import GraphExporterNeo4j as GraphExporter
+        else:
+            from encapsulation.database.utils.graph_export_utils import GraphExporter
+
+        overview = GraphExporter.export_full_graph(
+            graph_store=graph_store,
+            max_nodes=max_nodes,
+            max_edges=max_edges,
+            include_node_types=include_node_types,
+            owner_id=normalized_owner,
+        )
+        logger.info(
+            "Exported graph overview (owner_scope=%s) with %d nodes and %d edges",
+            normalized_owner,
+            len(overview.get('nodes', [])) + len(overview.get('chunks', [])),
+            len(overview.get('edges', [])),
+        )
+        return overview

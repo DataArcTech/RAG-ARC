@@ -1,8 +1,16 @@
 import os
 import sys
+import uuid
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from api.retrieval_api import api
 from encapsulation.data_model.schema import Chunk
+
+OWNER_ID = (
+    os.getenv("QUICK_START_OWNER_ID")
+    or os.getenv("DEVELOP_OWNER_ID")
+    or os.getenv("ADMIN_OWNER_ID")
+    or str(uuid.uuid4())
+)
 
 def demo_dense_retriever():
     """演示Dense检索器"""
@@ -23,7 +31,7 @@ def demo_dense_retriever():
 
         for query in queries:
             print(f"\n查询: '{query}'")
-            results = api.search("dense_retriever", query, k=3)
+            results = api.search("dense_retriever", query, k=3, owner_id=OWNER_ID)
 
             for i, chunk in enumerate(results, 1):
                 score = chunk.metadata.get('score', 'N/A') if chunk.metadata else 'N/A'
@@ -64,7 +72,7 @@ def demo_bm25_retriever():
         for query in queries:
             print(f"\n查询: '{query}'")
             try:
-                results = api.search("bm25_retriever", query, k=3)
+                results = api.search("bm25_retriever", query, k=3, owner_id=OWNER_ID)
                 print(f"找到 {len(results)} 个结果:")
 
                 if results:
@@ -110,7 +118,7 @@ def demo_multipath_retriever():
 
         for query in queries:
             print(f"\n查询: '{query}'")
-            results = api.search("multipath_retriever", query, k=3)
+            results = api.search("multipath_retriever", query, k=3, owner_id=OWNER_ID)
 
             for i, chunk in enumerate(results, 1):
                 score = chunk.metadata.get('score', 'N/A') if chunk.metadata else 'N/A'

@@ -60,7 +60,8 @@ class GraphExporterNeo4j:
         graph_store,
         max_nodes: int = 1000,
         max_edges: int = 5000,
-        include_node_types: Optional[List[str]] = None
+        include_node_types: Optional[List[str]] = None,
+        owner_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Export complete graph for visualization
@@ -78,18 +79,29 @@ class GraphExporterNeo4j:
         if include_node_types is None:
             include_node_types = ['chunk', 'entity']
 
+        owner_key = None
+        if owner_id is not None:
+            owner_key = graph_store._owner_key(owner_id)
+
         chunks = []
         nodes = []  # Only entities
         edges = []
         categories_set = set()  # Track unique entity types
 
         # Get node statistics
-        count_query = """
+        params = {'global_owner': graph_store.OWNER_GLOBAL_KEY}
+        owner_clause = ""
+        if owner_key is not None:
+            owner_clause = "AND COALESCE(n.owner_id, $global_owner) = $owner_id"
+            params['owner_id'] = owner_key
+
+        count_query = f"""
         MATCH (n)
         WHERE n:Chunk OR n:Entity
+          {owner_clause}
         RETURN count(n) AS total_nodes
         """
-        result = graph_store._execute_query(count_query)
+        result = graph_store._execute_query(count_query, params)
         total_nodes = result[0]['total_nodes'] if result else 0
         logger.info(f"Exporting graph with {total_nodes} nodes")
 
@@ -98,10 +110,11 @@ class GraphExporterNeo4j:
             logger.warning(f"Graph has {total_nodes} nodes, sampling {max_nodes} nodes")
             # Sample nodes by degree (keep high-degree nodes)
             # Use COUNT {} instead of size() for Neo4j 5.x compatibility
-            node_query = """
+            node_query = f"""
             MATCH (n)
             WHERE n:Chunk OR n:Entity
-            WITH n, COUNT { (n)--() } AS degree
+              {owner_clause}
+            WITH n, COUNT {{ (n)--() }} AS degree
             ORDER BY degree DESC
             LIMIT $max_nodes
             RETURN COALESCE(n.chunk_id, n.entity_id) AS node_id,
@@ -110,18 +123,19 @@ class GraphExporterNeo4j:
                    n.entity_name AS entity_name,
                    n.entity_type AS entity_type
             """
-            sampled_nodes = graph_store._execute_query(node_query, {'max_nodes': max_nodes})
+            sampled_nodes = graph_store._execute_query(node_query, {**params, 'max_nodes': max_nodes})
         else:
-            node_query = """
+            node_query = f"""
             MATCH (n)
             WHERE n:Chunk OR n:Entity
+              {owner_clause}
             RETURN COALESCE(n.chunk_id, n.entity_id) AS node_id,
                    CASE WHEN n:Chunk THEN 'chunk' ELSE 'entity' END AS node_type,
                    n.content AS content,
                    n.entity_name AS entity_name,
                    n.entity_type AS entity_type
             """
-            sampled_nodes = graph_store._execute_query(node_query)
+            sampled_nodes = graph_store._execute_query(node_query, params)
 
         # Export nodes - separate chunks and entities
         node_set = set()
@@ -175,10 +189,21 @@ class GraphExporterNeo4j:
         }
         
         # Query edges between sampled nodes
-        edge_query = """
+        edge_clause = ""
+        edge_params = {'node_ids': list(node_set), 'global_owner': graph_store.OWNER_GLOBAL_KEY}
+        if owner_key is not None:
+            edge_clause = """
+          AND COALESCE(n1.owner_id, $global_owner) = $owner_id
+          AND COALESCE(n2.owner_id, $global_owner) = $owner_id
+          AND COALESCE(r.owner_id, $global_owner) = $owner_id
+            """
+            edge_params['owner_id'] = owner_key
+
+        edge_query = f"""
         MATCH (n1)-[r]-(n2)
         WHERE (COALESCE(n1.chunk_id, n1.entity_id) IN $node_ids)
           AND (COALESCE(n2.chunk_id, n2.entity_id) IN $node_ids)
+          {edge_clause}
         RETURN COALESCE(n1.chunk_id, n1.entity_id) AS source_id,
                COALESCE(n2.chunk_id, n2.entity_id) AS target_id,
                type(r) AS rel_type,
@@ -189,7 +214,7 @@ class GraphExporterNeo4j:
                n1.entity_name AS source_name,
                n2.entity_name AS target_name
         """
-        edge_results = graph_store._execute_query(edge_query, {'node_ids': list(node_set)})
+        edge_results = graph_store._execute_query(edge_query, edge_params)
 
         seen_edges = set()
         for record in edge_results:
@@ -269,8 +294,22 @@ class GraphExporterNeo4j:
         logger.info(f"Exported {len(chunks)} chunks, {len(nodes)} entities, and {len(edges)} edges")
 
         # Get total edge count
-        edge_count_query = "MATCH ()-[r]-() RETURN count(r)/2 AS total_edges"
-        edge_count_result = graph_store._execute_query(edge_count_query)
+        edge_count_clause = ""
+        edge_count_params = {'global_owner': graph_store.OWNER_GLOBAL_KEY}
+        if owner_key is not None:
+            edge_count_clause = """
+        WHERE COALESCE(n1.owner_id, $global_owner) = $owner_id
+          AND COALESCE(n2.owner_id, $global_owner) = $owner_id
+          AND COALESCE(r.owner_id, $global_owner) = $owner_id
+            """
+            edge_count_params['owner_id'] = owner_key
+
+        edge_count_query = f"""
+        MATCH (n1)-[r]-(n2)
+        {edge_count_clause}
+        RETURN count(r)/2 AS total_edges
+        """
+        edge_count_result = graph_store._execute_query(edge_count_query, edge_count_params)
         total_edges = edge_count_result[0]['total_edges'] if edge_count_result else 0
 
         # Build categories list from unique entity types
@@ -286,7 +325,8 @@ class GraphExporterNeo4j:
                 'exported_nodes': len(chunks) + len(nodes),
                 'exported_edges': len(edges),
                 'sampled': total_nodes > max_nodes,
-                'categories': categories
+                'categories': categories,
+                'owner_scope': owner_key,
             }
         }
     
@@ -494,4 +534,3 @@ class GraphExporterNeo4j:
                 'categories': categories
             }
         }
-

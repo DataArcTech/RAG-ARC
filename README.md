@@ -214,6 +214,21 @@ cp .env.example .env
 # Edit .env to configure your settings
 ```
 
+### 🔐 Optional: Admin Access
+
+Some management APIs (for example, exporting a full graph overview) require an administrator identity. To enable admin-only features:
+
+1. Create or choose a user that should act as the global admin.
+2. Set the environment variable `ADMIN_OWNER_ID` (or the same key inside `.env`) to that user’s UUID, for example:
+   ```bash
+   export ADMIN_OWNER_ID=00000000-0000-0000-0000-00000000ABCD
+   ```
+3. Restart the FastAPI service so the new configuration takes effect.
+
+Once configured, authenticated requests from that administrator may pass `include_all_owners=true` or specify `target_owner_id=<UUID>` on endpoints such as `/rag_inference/chat` and `/rag_inference/graph_overview`, while regular users remain isolated to their own data.
+
+> Admin runs still execute the full multipath stack (dense/BM25/graph). Dense and BM25 accept `owner_id=None` so they can see all chunks; if multipath returns zero results, the system automatically falls back to the graph retriever to expose the global subgraph.
+
 ### ⚙️ Configuration
 
 RAG-ARC uses a modular configuration system. Key configuration files are located in `config/json_configs/`, where you can control which GPU each model uses, which models are used in business processes, and other different parameters:

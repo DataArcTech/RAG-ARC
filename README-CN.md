@@ -230,6 +230,21 @@ cp .env.example .env
 # 编辑.env以配置您的设置
 ```
 
+### 🔐 可选：管理员视角
+
+部分管理型 API（如导出所有租户的图数据）需要管理员身份才能调用。启用方法：
+
+1. 创建或挑选一个用户作为超级管理员。
+2. 在环境变量或 `.env` 中设置 `ADMIN_OWNER_ID=<该用户的UUID>`，例如：
+   ```bash
+   export ADMIN_OWNER_ID=00000000-0000-0000-0000-00000000ABCD
+   ```
+3. 重启 FastAPI 服务，使配置生效。
+
+完成后，使用该管理员账号发起请求即可在 `/rag_inference/chat`、`/rag_inference/graph_overview` 等接口中传入 `include_all_owners=true` 或 `target_owner_id=<UUID>`，实现跨租户的数据巡检；普通用户依旧只能访问自己的数据。
+
+> 管理员请求会先执行完整的 multipath 流程（dense/BM25 在 `owner_id=None` 下可访问所有 chunk），若全部检索器仍返回空结果，再自动回退到图检索以输出全局子图。
+
 ### ⚙️ 配置
 
 RAG-ARC使用模块化配置系统。关键配置文件位于`config/json_configs/`,在这里，你可以控制选择每个模型使用的显卡，业务流程中使用的模型等不同的参数：

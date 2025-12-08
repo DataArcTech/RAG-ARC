@@ -9,6 +9,7 @@ from collections import defaultdict
 from encapsulation.data_model.schema import Chunk
 from core.retrieval.graph_retrieveal.base import BaseGraphRetriever
 from encapsulation.database.utils.pruned_hipporag_utils import normalize_entity_text, compute_entity_id
+from core.utils.owner_guard import is_admin_owner
 
 if TYPE_CHECKING:
     from config.core.retrieval.pruned_hipporag_config import PrunedHippoRAGRetrievalConfig
@@ -103,6 +104,10 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
 
         logger.info(f"Built mappings for {len(self.passage_node_idxs)} passage nodes")
 
+    @staticmethod
+    def _owner_to_str(owner_id: Optional[uuid.UUID]) -> Optional[str]:
+        return str(owner_id) if owner_id is not None else None
+
     def retrieve(self, query: str, top_k: int = 10, return_subgraph_info: bool = False, owner_id: Optional[uuid.UUID] = None) -> List[Chunk]:
         """
         Main retrieval method implementing the Pruned HippoRAG algorithm.
@@ -126,11 +131,15 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         """
         logger.info(f"Retrieving for query: {query} (owner_id={owner_id})")
 
+        if owner_id is not None and is_admin_owner(owner_id):
+            logger.info("Admin owner detected, retrieving across all owners")
+            owner_id = None
+
         # Rebuild node mappings for the current owner
         self._build_node_mappings(owner_id=owner_id)
 
         # Step 1: Retrieve relevant facts
-        query_fact_scores, fact_ids = self._get_fact_scores_faiss(query)
+        query_fact_scores, fact_ids = self._get_fact_scores_faiss(query, owner_id=owner_id)
 
         if query_fact_scores is None or len(query_fact_scores) == 0:
             logger.warning("No facts found, falling back to dense retrieval")
@@ -138,11 +147,16 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
 
         # Step 2: Rerank facts (optional)
         if self.config.enable_llm_reranking and self.llm_client:
-            top_k_facts, top_k_fact_indices = self._rerank_facts(query, query_fact_scores, fact_ids)
+            top_k_facts, top_k_fact_indices = self._rerank_facts(
+                query,
+                query_fact_scores,
+                fact_ids,
+                owner_id=owner_id
+            )
         else:
             link_top_k = self.config.fact_retrieval_top_k
             top_k_fact_indices = np.argsort(query_fact_scores)[-link_top_k:][::-1].tolist()
-            top_k_facts = self._get_facts_by_indices(top_k_fact_indices, fact_ids)
+            top_k_facts = self._get_facts_by_indices(top_k_fact_indices, fact_ids, owner_id=owner_id)
 
         if not top_k_facts:
             logger.warning("No facts after reranking, falling back to dense retrieval")
@@ -151,7 +165,7 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         logger.info(f"Selected {len(top_k_facts)} facts after LLM filtering")
 
         # Step 3: Extract seed entities from facts
-        seed_entity_ids = self._extract_entity_ids_from_facts(top_k_facts)
+        seed_entity_ids = self._extract_entity_ids_from_facts(top_k_facts, owner_id=owner_id)
 
         if not seed_entity_ids:
             logger.warning("No seed entities found, falling back to dense retrieval")
@@ -166,14 +180,16 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
                 seed_entity_ids,
                 top_k_facts,
                 query_fact_scores,
-                top_k_fact_indices
+                top_k_fact_indices,
+                owner_id=owner_id
             )
             logger.info(f"[Query-Aware] Computed relevance scores for {len(entity_relevance_scores)} entities")
 
         # Step 5: Expand subgraph around seed entities
         subgraph_nodes, subgraph_chunk_ids = self._expand_subgraph(
             seed_entity_ids,
-            entity_relevance_scores=entity_relevance_scores
+            entity_relevance_scores=entity_relevance_scores,
+            owner_id=owner_id
         )
 
         logger.info(f"Subgraph: {len(subgraph_nodes)} nodes, {len(subgraph_chunk_ids)} chunks")
@@ -184,7 +200,8 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
             query_fact_scores,
             top_k_facts,
             top_k_fact_indices,
-            subgraph_nodes
+            subgraph_nodes,
+            owner_id=owner_id
         )
 
         # Step 7: Convert to Chunk objects
@@ -213,12 +230,13 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         logger.info(f"Retrieved {len(chunks)} chunks")
         return chunks
 
-    def _get_fact_scores_faiss(self, query: str) -> Tuple[np.ndarray, List[str]]:
+    def _get_fact_scores_faiss(self, query: str, owner_id: Optional[uuid.UUID] = None) -> Tuple[np.ndarray, List[str]]:
         """
         Retrieve relevant facts using FAISS dense retrieval.
 
         Args:
             query: Query string
+            owner_id: Optional owner ID for tenant-aware filtering (unused in base implementation)
 
         Returns:
             Tuple of (normalized_scores, fact_ids)
@@ -267,7 +285,33 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
             if len(query_fact_scores) > 0:
                 query_fact_scores = self._min_max_normalize(query_fact_scores)
 
-            return query_fact_scores, fact_ids
+            if owner_id is None or len(query_fact_scores) == 0:
+                return query_fact_scores, fact_ids
+
+            owner_str = self._owner_to_str(owner_id)
+            filtered_scores = []
+            filtered_ids = []
+            docstore = getattr(self.graph_store.fact_faiss_db, 'docstore', {})
+
+            for score, fact_id in zip(query_fact_scores, fact_ids):
+                chunk = docstore.get(fact_id)
+                if not chunk:
+                    continue
+                fact_owner = getattr(chunk, 'owner_id', None)
+                if fact_owner is None and chunk.metadata:
+                    fact_owner = chunk.metadata.get('owner_id')
+
+                if fact_owner is None:
+                    continue
+
+                if str(fact_owner) == owner_str:
+                    filtered_scores.append(score)
+                    filtered_ids.append(fact_id)
+
+            if not filtered_scores:
+                return np.array([]), []
+
+            return np.array(filtered_scores), filtered_ids
 
         except Exception as e:
             logger.error(f"FAISS fact retrieval failed: {e}")
@@ -290,7 +334,12 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
             return np.zeros_like(scores)
         return (scores - min_score) / (max_score - min_score)
 
-    def _get_facts_by_indices(self, indices: List[int], fact_ids: List[str]) -> List[Tuple]:
+    def _get_facts_by_indices(
+        self,
+        indices: List[int],
+        fact_ids: List[str],
+        owner_id: Optional[uuid.UUID] = None
+    ) -> List[Tuple]:
         """
         Retrieve fact triples from database by their indices.
 
@@ -317,7 +366,7 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
 
         return facts
 
-    def _extract_entity_ids_from_facts(self, facts: List[Tuple]) -> Set[str]:
+    def _extract_entity_ids_from_facts(self, facts: List[Tuple], owner_id: Optional[uuid.UUID] = None) -> Set[str]:
         """
         Extract unique entity IDs from fact triples.
 
@@ -350,7 +399,8 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         seed_entity_ids: Set[str],
         top_k_facts: List[Tuple],
         query_fact_scores: np.ndarray,
-        top_k_fact_indices: List[int]
+        top_k_fact_indices: List[int],
+        owner_id: Optional[uuid.UUID] = None
     ) -> dict:
         """
         Compute relevance scores for entities based on their associated fact scores.
@@ -481,7 +531,8 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
     def _expand_subgraph(
         self,
         seed_entity_ids: Set[str],
-        entity_relevance_scores: dict = None
+        entity_relevance_scores: dict = None,
+        owner_id: Optional[uuid.UUID] = None
     ) -> Tuple[Set[int], Set[str]]:
         """
         Expand a subgraph around seed entities using multi-hop traversal.
@@ -584,7 +635,8 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         query_fact_scores: np.ndarray,
         top_k_facts: List[Tuple],
         top_k_fact_indices: List[int],
-        subgraph_nodes: Set[int]
+        subgraph_nodes: Set[int],
+        owner_id: Optional[uuid.UUID] = None
     ) -> Tuple[List[str], List[float], np.ndarray]:
         """
         Perform graph search on the expanded subgraph using Personalized PageRank.
@@ -611,11 +663,21 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
 
         # Get entity-to-chunk counts for normalization
         cursor = self.graph_store.conn.cursor()
-        cursor.execute('''
-            SELECT entity_id, COUNT(DISTINCT chunk_id) as chunk_count
-            FROM chunk_entity_relations
-            GROUP BY entity_id
-        ''')
+        owner_str = self._owner_to_str(owner_id)
+        if owner_str:
+            cursor.execute('''
+                SELECT cer.entity_id, COUNT(DISTINCT cer.chunk_id) as chunk_count
+                FROM chunk_entity_relations cer
+                JOIN chunks c ON cer.chunk_id = c.chunk_id
+                WHERE c.owner_id = ?
+                GROUP BY cer.entity_id
+            ''', (owner_str,))
+        else:
+            cursor.execute('''
+                SELECT entity_id, COUNT(DISTINCT chunk_id) as chunk_count
+                FROM chunk_entity_relations
+                GROUP BY entity_id
+            ''')
         entity_to_chunk_count = {row[0]: row[1] for row in cursor.fetchall()}
 
         node_to_idx = self.graph_store.node_to_idx
@@ -625,7 +687,7 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
             fact_score = query_fact_scores[top_k_fact_indices[rank]] if query_fact_scores.ndim > 0 else query_fact_scores
 
             for entity_text in [f[0], f[2]]:  # head and tail
-                entity_id = compute_entity_id(normalize_entity_text(entity_text))
+                entity_id = compute_entity_id(normalize_entity_text(entity_text), owner_id=owner_str)
                 entity_idx = node_to_idx.get(entity_id)
 
                 if entity_idx is not None:
@@ -676,7 +738,8 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         ppr_sorted_doc_ids, ppr_sorted_doc_scores, ppr_scores = self._run_ppr_with_weights(
             node_weights=node_weights,
             damping=self.config.damping_factor,
-            subgraph_nodes=subgraph_list
+            subgraph_nodes=subgraph_list,
+            owner_id=owner_id
         )
 
         assert len(ppr_sorted_doc_ids) == len(self.passage_node_idxs), \
@@ -696,7 +759,8 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         self,
         node_weights: np.ndarray,
         damping: float = 0.5,
-        subgraph_nodes: List[int] = None
+        subgraph_nodes: List[int] = None,
+        owner_id: Optional[uuid.UUID] = None
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Run Personalized PageRank with weighted reset probabilities.
@@ -894,7 +958,8 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         self,
         query: str,
         query_fact_scores: np.ndarray,
-        fact_ids: List[str]
+        fact_ids: List[str],
+        owner_id: Optional[uuid.UUID] = None
     ) -> Tuple[List[Tuple], List[int]]:
         """
         Rerank facts using LLM to improve relevance.
@@ -911,7 +976,7 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
 
         # Get top-k candidate facts by score
         candidate_fact_indices = np.argsort(query_fact_scores)[-link_top_k:][::-1].tolist()
-        candidate_facts = self._get_facts_by_indices(candidate_fact_indices, fact_ids)
+        candidate_facts = self._get_facts_by_indices(candidate_fact_indices, fact_ids, owner_id=owner_id)
 
         try:
             # Use LLM to rerank and filter facts
@@ -982,4 +1047,3 @@ Return only the numbers of the selected facts, separated by commas (e.g., "1,3,5
             logger.warning(f"Failed to parse LLM response: {e}")
             max_facts = min(len_after_rerank, len(candidate_facts))
             return candidate_facts[:max_facts], candidate_fact_indices[:max_facts]
-
