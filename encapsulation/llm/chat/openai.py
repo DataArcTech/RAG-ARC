@@ -68,11 +68,12 @@ class OpenAIChatLLM(ChatLLMBase):
         self._validate_messages(messages)
 
         try:
+            temperature = kwargs.pop("temperature", self.temperature)
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
                 max_tokens=self.max_tokens,
-                temperature=self.temperature,
+                temperature=temperature,
                 **kwargs
             )
 
@@ -94,11 +95,12 @@ class OpenAIChatLLM(ChatLLMBase):
         self._validate_messages(messages)
 
         try:
+            temperature = kwargs.pop("temperature", self.temperature)
             stream = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
                 max_tokens=self.max_tokens,
-                temperature=self.temperature,
+                temperature=temperature,
                 stream=True,
                 **kwargs
             )
@@ -126,11 +128,12 @@ class OpenAIChatLLM(ChatLLMBase):
         self._validate_messages(messages)
 
         try:
+            temperature = kwargs.pop("temperature", self.temperature)
             response = await self.async_client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
                 max_tokens=self.max_tokens,
-                temperature=self.temperature,
+                temperature=temperature,
                 **kwargs
             )
             result = response.choices[0].message.content
@@ -151,11 +154,12 @@ class OpenAIChatLLM(ChatLLMBase):
         self._validate_messages(messages)
 
         try:
+            temperature = kwargs.pop("temperature", self.temperature)
             stream = await self.async_client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
                 max_tokens=self.max_tokens,
-                temperature=self.temperature,
+                temperature=temperature,
                 stream=True,
                 **kwargs
             )

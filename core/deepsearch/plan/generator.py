@@ -145,7 +145,7 @@ class PlanGenerator:
         return await asyncio.to_thread(self._call_llm, question, context=context)
 
     def _parse_llm_response(self, response: str) -> List[dict]:
-        response = response.strip()
+        response = self._extract_json_payload(response)
         try:
             data = json.loads(response)
             if isinstance(data, list):
@@ -153,6 +153,23 @@ class PlanGenerator:
         except json.JSONDecodeError:
             logger.warning("Planner LLM returned non-JSON response, switching to rule-based plan")
         return []
+
+    def _extract_json_payload(self, payload: str) -> str:
+        """Handle ```json fenced blocks or extra commentary around JSON."""
+        text = (payload or "").strip()
+        if not text:
+            return ""
+
+        fence = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+        if fence:
+            return fence.group(1).strip()
+
+        start = text.find("[")
+        end = text.rfind("]")
+        if 0 <= start < end:
+            return text[start : end + 1]
+
+        return text
 
     def _fallback_plan(self, question: str) -> List[dict]:
         clauses = re.split(r"[?。.!]", question)
