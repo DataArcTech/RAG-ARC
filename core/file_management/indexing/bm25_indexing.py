@@ -2,7 +2,6 @@ import asyncio
 import logging
 from typing import List, TYPE_CHECKING
 from collections import deque
-import time
 import threading
 
 from core.file_management.indexing.base import BaseIndexer
@@ -40,44 +39,6 @@ class BM25Indexer(BaseIndexer):
         # Pending chunks queue for batch processing
         self._pending_chunks: deque[Chunk] = deque()
 
-        # Last flush timestamp
-        self._last_flush_time = time.time()
-
-        # Background flush task
-        self._flush_task: asyncio.Task = None
-        self._shutdown = False
-
-    def _start_background_flush(self):
-        """Start the background flush task if not already running."""
-        if self._flush_task is None or self._flush_task.done():
-            self._flush_task = asyncio.create_task(self._background_flush_worker())
-            logger.info("Started background flush worker")
-
-    async def _background_flush_worker(self):
-        """Background worker that periodically flushes pending chunks."""
-        logger.info(f"Background flush worker started with interval: {self.flush_interval}s")
-
-        while not self._shutdown:
-            try:
-                await asyncio.sleep(self.flush_interval)
-
-                # Check if there are pending chunks and enough time has passed
-                with self._pending_lock:
-                    pending_count = len(self._pending_chunks)
-                if pending_count:
-                    current_time = time.time()
-                    time_since_last_flush = current_time - self._last_flush_time
-
-                    if time_since_last_flush >= self.flush_interval:
-                        logger.info(f"Background flush triggered: {pending_count} pending chunks")
-                        await self._flush_pending_chunks()
-
-            except asyncio.CancelledError:
-                logger.info("Background flush worker cancelled")
-                break
-            except Exception as e:
-                logger.error(f"Error in background flush worker: {e}", exc_info=True)
-
     async def _flush_pending_chunks(self) -> List[str]:
         """Flush all pending chunks to the index."""
         with self._pending_lock:
@@ -101,9 +62,6 @@ class BM25Indexer(BaseIndexer):
                 self._build_or_update_index_sync,
                 chunks_to_index
             )
-
-            # Update last flush time
-            self._last_flush_time = time.time()
 
             logger.info(f"Successfully flushed {len(chunk_ids)} chunks")
             return chunk_ids
@@ -168,7 +126,6 @@ class BM25Indexer(BaseIndexer):
     async def shutdown(self):
         """Shutdown the indexer and flush any pending chunks."""
         logger.info("Shutting down BM25Indexer...")
-        self._shutdown = True
 
         # Flush any remaining pending chunks
         with self._pending_lock:
@@ -176,15 +133,6 @@ class BM25Indexer(BaseIndexer):
         if pending_count:
             logger.info(f"Flushing {pending_count} remaining chunks before shutdown")
             await self._flush_pending_chunks()
-
-        # Cancel background flush task
-        if self._flush_task and not self._flush_task.done():
-            self._flush_task.cancel()
-            try:
-                await self._flush_task
-            except asyncio.CancelledError:
-                pass
-
         logger.info("BM25Indexer shutdown complete")
 
     def _remove_pending_chunks(self, chunk_ids: List[str]) -> None:

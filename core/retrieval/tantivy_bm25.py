@@ -209,14 +209,15 @@ class TantivyBM25Retriever(BaseRetriever):
         if owner_id is None:
             logger.warning("owner_id '%s' could not be normalized; returning no results", owner_input)
             return []
+        owner_id_str = owner_id
 
         # Use config defaults if parameters not provided
         k = k if k is not None else self.config.search_kwargs.get("k", 5)
         filters = filters or {}
 
         # Add owner_id to filters
-        filters['owner_id'] = owner_id
-        logger.debug(f"Added owner_id filter: {owner_id}")
+        filters['owner_id'] = owner_id_str
+        logger.debug(f"Added owner_id filter: {owner_id_str}")
 
         with_score = with_score if with_score is not None else self.config.search_kwargs.get("with_score", False)
         use_phrase_query = use_phrase_query if use_phrase_query is not None else self.config.search_kwargs.get("use_phrase_query", False)
