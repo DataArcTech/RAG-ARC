@@ -53,11 +53,12 @@ def test_export_graph_overview_falls_back_to_igraph_exporter():
     rag = _make_rag_with_store(store)
     payload = {"chunks": [{"id": "c"}], "nodes": [], "edges": [], "metadata": {}}
 
-    with patch(
-        "encapsulation.database.utils.graph_export_utils.GraphExporter.export_full_graph",
-        return_value=payload,
-    ) as mock_export:
-        result = rag.export_graph_overview(owner_id=None, max_nodes=100, max_edges=200, include_node_types=None)
+    with patch("application.rag_inference.module.get_admin_owner_id", return_value=None):
+        with patch(
+            "encapsulation.database.utils.graph_export_utils.GraphExporter.export_full_graph",
+            return_value=payload,
+        ) as mock_export:
+            result = rag.export_graph_overview(owner_id=None, max_nodes=100, max_edges=200, include_node_types=None)
 
     assert result is payload
     _, kwargs = mock_export.call_args

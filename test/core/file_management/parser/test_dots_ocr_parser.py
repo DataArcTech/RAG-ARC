@@ -6,7 +6,14 @@ Separated by loading method: HuggingFace vs VLLM
 import asyncio
 import os
 import sys
+import pytest
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../")))
+
+pytestmark = pytest.mark.skipif(
+    os.getenv("RUN_RAGARC_INTEGRATION_TESTS") != "1",
+    reason="Requires OCR models and GPU resources; set RUN_RAGARC_INTEGRATION_TESTS=1 to enable.",
+)
 
 from config.core.file_management.parser.dots_ocr import DotsOCRParserConfig
 from config.encapsulation.llm.parse.dots_ocr import DotsOCRConfig
@@ -25,7 +32,7 @@ def get_test_files():
     return sample_image_paths, sample_pdf_paths
 
 
-def test_basic_functionality(parser, loading_method_name):
+def _run_basic_functionality(parser, loading_method_name):
     """Test basic parser functionality (common for both loading methods)"""
     print(f"\n=== Testing {loading_method_name} Basic Functionality ===")
 
@@ -55,7 +62,7 @@ def test_basic_functionality(parser, loading_method_name):
         print(f"  Failed to get LLM service info: {e}")
 
 
-def test_file_parsing(parser, loading_method_name):
+def _run_file_parsing(parser, loading_method_name):
     """Test file parsing functionality (common for both loading methods)"""
     print(f"\n=== Testing {loading_method_name} File Parsing ===")
 
@@ -137,7 +144,7 @@ def test_file_parsing(parser, loading_method_name):
         print(f"  Skipping PDF parsing test")
 
 
-def test_error_handling(parser, loading_method_name):
+def _run_error_handling(parser, loading_method_name):
     """Test error handling (common for both loading methods)"""
     print(f"\n=== Testing {loading_method_name} Error Handling ===")
 
@@ -185,9 +192,9 @@ def test_huggingface_loading_method():
         hf_parser = hf_parser_config.build()
 
         # Run all tests
-        test_basic_functionality(hf_parser, "HuggingFace")
-        test_file_parsing(hf_parser, "HuggingFace")
-        test_error_handling(hf_parser, "HuggingFace")
+        _run_basic_functionality(hf_parser, "HuggingFace")
+        _run_file_parsing(hf_parser, "HuggingFace")
+        _run_error_handling(hf_parser, "HuggingFace")
 
         print(f"\n✅ HuggingFace loading method tests completed successfully!")
 
@@ -217,9 +224,9 @@ def test_vllm_loading_method():
         vllm_parser = vllm_parser_config.build()
 
         # Run all tests
-        test_basic_functionality(vllm_parser, "VLLM")
-        test_file_parsing(vllm_parser, "VLLM")
-        test_error_handling(vllm_parser, "VLLM")
+        _run_basic_functionality(vllm_parser, "VLLM")
+        _run_file_parsing(vllm_parser, "VLLM")
+        _run_error_handling(vllm_parser, "VLLM")
 
         print(f"\n✅ VLLM loading method tests completed successfully!")
 

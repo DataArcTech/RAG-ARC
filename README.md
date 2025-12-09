@@ -229,6 +229,20 @@ Once configured, authenticated requests from that administrator may pass `includ
 
 > Admin runs still execute the full multipath stack (dense/BM25/graph). Dense and BM25 accept `owner_id=None` so they can see all chunks; if multipath returns zero results, the system automatically falls back to the graph retriever to expose the global subgraph.
 
+#### 🧪 Integration/Test Environment Flags
+
+Some test suites interact with external databases or large models. Use the following `.env` flags to opt-in only when those services are available:
+
+| Variable | Purpose |
+| --- | --- |
+| `RUN_RAGARC_INTEGRATION_TESTS=1` | Enable GPU/model-heavy suites (NetworkX graph pipeline, OCR, user-isolation E2E, etc.). |
+| `RUN_RAGARC_POSTGRES_TESTS=1` | Run pure PostgreSQL integration tests in `test/encapsulation/database/relational_db`. Requires the DB to be reachable. |
+| `RUN_RAGARC_CHAT_STORAGE_TESTS=1` | Enable chat storage tests that touch both PostgreSQL and Redis (`test/encapsulation/test_chat_*`). |
+| `RUN_RAGARC_VECTOR_TESTS=1` | Enable Faiss/Qwen dense vector soft-delete scenarios. |
+| `RAGARC_E2E_TOKEN=<JWT>` | Bearer token used by `test/test_complete_e2e_api.py` to authenticate HTTP calls when `RUN_RAGARC_INTEGRATION_TESTS=1`. |
+
+Leave these empty to skip the associated suites (the default). When set, pytest will assume the required infrastructure is running locally or accessible via the connection details in `.env`.
+
 ### ⚙️ Configuration
 
 RAG-ARC uses a modular configuration system. Key configuration files are located in `config/json_configs/`, where you can control which GPU each model uses, which models are used in business processes, and other different parameters:

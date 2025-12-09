@@ -76,12 +76,14 @@ dependencies = [
     # Scientific computing
     "numpy>=1.24.0",
     "scipy>=1.10.0",
+    "pytest-asyncio>=0.24.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
     "httpx>=0.25.0",
+    "pytest-asyncio>=0.24.0",
 ]
 # Optional extras to force a specific FAISS flavor when desired
 cpu = [
@@ -93,6 +95,12 @@ gpu = [
 
 [project.scripts]
 rag-arc = "cli.rag:app"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "integration: marks tests that require external services (set RUN_RAGARC_INTEGRATION_TESTS=1 to run)",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

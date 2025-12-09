@@ -13,8 +13,14 @@ Tests:
 
 import sys
 import os
+import pytest
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
+pytestmark = pytest.mark.skipif(
+    os.getenv("RUN_RAGARC_CHAT_STORAGE_TESTS") != "1",
+    reason="Requires Redis/PostgreSQL services; set RUN_RAGARC_CHAT_STORAGE_TESTS=1 to run.",
+)
 
 import time
 import uuid
@@ -35,23 +41,21 @@ def hash_password(password: str) -> str:
 def get_db_config():
     """Get PostgreSQL configuration"""
     return PostgreSQLConfig(
-        type="postgresql",
-        host="localhost",
-        port=5555,
-        database="rag_test",
-        user="postgres",
-        password="123"
+        host=os.getenv("POSTGRES_HOST", "localhost"),
+        port=str(os.getenv("POSTGRES_PORT", "5432")),
+        database=os.getenv("POSTGRES_DB", "rag_test"),
+        user=os.getenv("POSTGRES_USER", "postgres"),
+        password=os.getenv("POSTGRES_PASSWORD", "123")
     )
 
 
 def get_redis_config():
     """Get Redis configuration"""
     return RedisConfig(
-        type="redis",
-        host="localhost",
-        port=6379,
-        db=0,
-        password=None
+        host=os.getenv("REDIS_HOST", "localhost"),
+        port=str(os.getenv("REDIS_PORT", "6379")),
+        db=str(os.getenv("REDIS_DB", "0")),
+        password=os.getenv("REDIS_PASSWORD")
     )
 
 
@@ -348,4 +352,3 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
-

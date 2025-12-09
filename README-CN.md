@@ -245,6 +245,20 @@ cp .env.example .env
 
 > 管理员请求会先执行完整的 multipath 流程（dense/BM25 在 `owner_id=None` 下可访问所有 chunk），若全部检索器仍返回空结果，再自动回退到图检索以输出全局子图。
 
+#### 🧪 集成测试相关环境变量
+
+某些测试需要真实数据库、Redis 或 Faiss/Qwen 模型支撑，可在 `.env` 中按需设置以下开关：
+
+| 变量 | 作用 |
+| --- | --- |
+| `RUN_RAGARC_INTEGRATION_TESTS=1` | 启用依赖 GPU/大模型的综合测试，例如 NetworkX 图流程、OCR、用户隔离 E2E。 |
+| `RUN_RAGARC_POSTGRES_TESTS=1` | 允许执行 PostgreSQL 集成测试（`test/encapsulation/database/relational_db`）。 |
+| `RUN_RAGARC_CHAT_STORAGE_TESTS=1` | 打开同时访问 PostgreSQL + Redis 的聊天存储测试。 |
+| `RUN_RAGARC_VECTOR_TESTS=1` | 启用 Faiss/Qwen 软删除相关测试。 |
+| `RAGARC_E2E_TOKEN=<JWT>` | 提供给 `test/test_complete_e2e_api.py` 用的 Bearer Token，用于调用 FastAPI 接口。 |
+
+默认留空（或 0）即跳过这些测试；只有在对应服务已经部署并且希望运行完整集成用例时，才需要设置为 `1`。
+
 ### ⚙️ 配置
 
 RAG-ARC使用模块化配置系统。关键配置文件位于`config/json_configs/`,在这里，你可以控制选择每个模型使用的显卡，业务流程中使用的模型等不同的参数：
