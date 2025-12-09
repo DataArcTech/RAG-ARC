@@ -45,7 +45,7 @@ dependencies = [
 
     # Graph databases
     "networkx>=3.5",
-    "igraph>=0.11.0",
+    "python-igraph>=0.11.0",
     "neo4j>=5.15.0",
     "hnswlib>=0.7.0",
 
@@ -54,8 +54,9 @@ dependencies = [
     "psycopg>=3.2.10",
     "psycopg2-binary>=2.9.0",
 
-    # Cache and messaging
+    # Cache and messaging / storage
     "redis>=6.4.0",
+    "minio>=7.2.7",
 
     # Authentication
     "passlib>=1.7.4",
@@ -75,12 +76,14 @@ dependencies = [
     # Scientific computing
     "numpy>=1.24.0",
     "scipy>=1.10.0",
+    "pytest-asyncio>=0.24.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
     "httpx>=0.25.0",
+    "pytest-asyncio>=0.24.0",
 ]
 # Optional extras to force a specific FAISS flavor when desired
 cpu = [
@@ -92,6 +95,12 @@ gpu = [
 
 [project.scripts]
 rag-arc = "cli.rag:app"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "integration: marks tests that require external services (set RUN_RAGARC_INTEGRATION_TESTS=1 to run)",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

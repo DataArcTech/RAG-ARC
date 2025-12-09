@@ -60,7 +60,9 @@ class GraphExporter:
         graph_store,
         max_nodes: int = 1000,
         max_edges: int = 5000,
-        include_node_types: Optional[List[str]] = None
+        include_node_types: Optional[List[str]] = None,
+        owner_id: Optional[str] = None,
+        owner_scope_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Export complete graph for visualization
@@ -71,12 +73,19 @@ class GraphExporter:
             max_edges: Maximum number of edges to export
             include_node_types: List of node types to include ['chunk', 'entity', 'fact']
                                If None, include all types
+            owner_id: Optional owner scope; when provided, only export data for that owner
 
         Returns:
             Dict with 'chunks', 'nodes' (entities), 'edges', and 'metadata'
         """
         if include_node_types is None:
             include_node_types = ['chunk', 'entity', 'fact']
+
+        # Normalize owner scope using graph store helper when available
+        owner_filter = None
+        normalizer = getattr(graph_store, "_normalize_owner_id", None)
+        if owner_id is not None:
+            owner_filter = normalizer(owner_id) if normalizer else str(owner_id)
 
         chunks = []
         nodes = []  # Only entities
@@ -99,13 +108,34 @@ class GraphExporter:
         else:
             node_indices = range(total_nodes)
 
-        # Build entity_id to entity_name and entity_type mapping
         cursor = graph_store.conn.cursor()
-        cursor.execute('SELECT entity_id, entity_name, entity_type FROM entities')
-        entity_id_to_info = {eid: (name, etype) for eid, name, etype in cursor.fetchall()}
+
+        # Load chunk metadata/content for quick lookup
+        chunk_query = 'SELECT chunk_id, content, owner_id FROM chunks'
+        chunk_params: tuple = ()
+        if owner_filter is not None:
+            chunk_query += ' WHERE owner_id = ?'
+            chunk_params = (owner_filter,)
+        cursor.execute(chunk_query, chunk_params)
+        chunk_info = {
+            chunk_id: {'content': content, 'owner_id': owner or None}
+            for chunk_id, content, owner in cursor.fetchall()
+        }
+
+        # Build entity_id to entity_name and entity_type mapping (with owner scope)
+        entity_query = 'SELECT entity_id, entity_name, entity_type, owner_id FROM entities'
+        entity_params: tuple = ()
+        if owner_filter is not None:
+            entity_query += ' WHERE owner_id = ?'
+            entity_params = (owner_filter,)
+        cursor.execute(entity_query, entity_params)
+        entity_id_to_info = {
+            eid: (name, etype, owner or None)
+            for eid, name, etype, owner in cursor.fetchall()
+        }
 
         # Export nodes - separate chunks and entities
-        node_set = set(node_indices)
+        node_set = set()
         for idx in node_indices:
             node_id = idx_to_node.get(idx)
             if not node_id:
@@ -118,16 +148,27 @@ class GraphExporter:
             if node_type not in include_node_types:
                 continue
 
+            # Owner filtering
+            if owner_filter is not None:
+                if node_type == 'chunk':
+                    chunk_meta = chunk_info.get(node_id)
+                    if not chunk_meta or chunk_meta['owner_id'] != owner_filter:
+                        continue
+                elif node_type == 'entity':
+                    entity_meta = entity_id_to_info.get(node_id)
+                    if not entity_meta or entity_meta[2] != owner_filter:
+                        continue
+
+            node_set.add(idx)
+
             # Build node structure based on type
             if node_type == 'chunk':
-                cursor.execute('SELECT content FROM chunks WHERE chunk_id = ?', (node_id,))
-                row = cursor.fetchone()
-                chunk_obj = {
-                    'id': node_id,
-                    'type': 'chunk'
-                }
-                if row:
-                    chunk_obj['content'] = row[0]
+                chunk_meta = chunk_info.get(node_id)
+                if chunk_meta is None:
+                    continue
+                chunk_obj = {'id': node_id, 'type': 'chunk'}
+                if chunk_meta.get('content'):
+                    chunk_obj['content'] = chunk_meta['content']
                 chunks.append(chunk_obj)
 
             elif node_type == 'entity':
@@ -137,7 +178,7 @@ class GraphExporter:
                     'type': 'entity'
                 }
                 if entity_info:
-                    entity_name, entity_type = entity_info
+                    entity_name, entity_type, _ = entity_info
 
                     # Filter out entities that are pure numbers, timestamps, or time formats
                     if GraphExporter._should_filter_entity(entity_name):
@@ -152,10 +193,19 @@ class GraphExporter:
                     entity_obj['category'] = entity_type or 'Entity'
                     categories_set.add(entity_type or 'Entity')
                     nodes.append(entity_obj)
-        
-        # Build fact_id to relation mapping
-        cursor.execute('SELECT fact_id, head, relation, tail FROM facts')
-        fact_relations = {fid: (head, relation, tail) for fid, head, relation, tail in cursor.fetchall()}
+
+        # Build fact_id to relation mapping scoped by owner when requested
+        fact_query = 'SELECT fact_id, head, relation, tail, owner_id FROM facts'
+        fact_params: tuple = ()
+        if owner_filter is not None:
+            fact_query += ' WHERE owner_id = ?'
+            fact_params = (owner_filter,)
+        cursor.execute(fact_query, fact_params)
+        fact_relations = {}
+        for fid, head, relation, tail, owner in cursor.fetchall():
+            if owner_filter is not None and owner != owner_filter:
+                continue
+            fact_relations[fid] = (head, relation, tail)
 
         # Collect edges by type for uniform sampling
         edges_by_type = {
@@ -184,6 +234,26 @@ class GraphExporter:
             # Determine edge type and relation
             source_type = graph.vs[source_idx]['node_type']
             target_type = graph.vs[target_idx]['node_type']
+
+            # Owner filtering - ensure both endpoints were included
+            if owner_filter is not None:
+                if source_type == 'chunk':
+                    chunk_meta = chunk_info.get(source_id)
+                    if not chunk_meta or chunk_meta['owner_id'] != owner_filter:
+                        continue
+                elif source_type == 'entity':
+                    entity_meta = entity_id_to_info.get(source_id)
+                    if not entity_meta or entity_meta[2] != owner_filter:
+                        continue
+
+                if target_type == 'chunk':
+                    chunk_meta = chunk_info.get(target_id)
+                    if not chunk_meta or chunk_meta['owner_id'] != owner_filter:
+                        continue
+                elif target_type == 'entity':
+                    entity_meta = entity_id_to_info.get(target_id)
+                    if not entity_meta or entity_meta[2] != owner_filter:
+                        continue
 
             # Build edge object with source/target as entity_name or chunk_id
             edge_obj = {
@@ -255,6 +325,8 @@ class GraphExporter:
         # Build categories list from unique entity types
         categories = [{'name': cat} for cat in sorted(categories_set)]
 
+        scope_value = owner_scope_label if owner_scope_label is not None else owner_filter
+
         return {
             'chunks': chunks,
             'nodes': nodes,  # Only entities
@@ -265,7 +337,8 @@ class GraphExporter:
                 'exported_nodes': len(chunks) + len(nodes),
                 'exported_edges': len(edges),
                 'sampled': total_nodes > max_nodes,
-                'categories': categories
+                'categories': categories,
+                'owner_scope': scope_value,
             }
         }
     

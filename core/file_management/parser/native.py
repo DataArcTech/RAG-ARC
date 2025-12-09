@@ -9,6 +9,7 @@ load_dotenv()
 
 from .base import AbstractParser
 from framework.singleton_decorator import singleton
+from core.utils.path_guard import ensure_writable_dir
 
 if TYPE_CHECKING:
     from config.core.file_management.parser.native import NativeParserConfig
@@ -48,8 +49,9 @@ class NativeParser(AbstractParser):
 
         # Get output directory from environment variable
         output_dir = os.getenv('NATIVE_PARSER_OUTPUT_DIR', './test_output/native')
-        output_dir = os.path.abspath(output_dir)
-        os.makedirs(output_dir, exist_ok=True)
+        runtime_root = os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime")
+        fallback_dir = os.path.join(runtime_root, "native_parser_output")
+        output_dir = ensure_writable_dir(os.path.abspath(output_dir), fallback_dir)
 
         # Extract file extension and validate
         base_filename, file_ext = os.path.splitext(filename)

@@ -17,6 +17,7 @@ from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 from collections import Counter
 import traceback
+from core.utils.path_guard import ensure_writable_dir
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -495,7 +496,9 @@ class OutputCleaner:
         """Saves the cleaned data"""
         
         logger.info(f"\n💾 Saving cleaned data to: {output_dir}")
-        os.makedirs(output_dir, exist_ok=True)
+        runtime_root = os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime")
+        fallback_dir = os.path.join(runtime_root, "dotsocr_clean")
+        output_dir = ensure_writable_dir(output_dir, fallback_dir)
         
         # 1. Save cleaned data for each case
         for result in self.cleaned_results:

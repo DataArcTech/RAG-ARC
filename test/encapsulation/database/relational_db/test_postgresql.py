@@ -4,10 +4,16 @@ Simple test to understand how PostgreSQL database operations work with SQLAlchem
 
 import sys
 import os
+import pytest
 
 # Add the project root to Python path for direct execution
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+pytestmark = pytest.mark.skipif(
+    os.getenv("RUN_RAGARC_POSTGRES_TESTS") != "1",
+    reason="Requires a running PostgreSQL instance; set RUN_RAGARC_POSTGRES_TESTS=1 to enable.",
+)
 
 from encapsulation.database.relational_db.postgresql import PostgreSQLDB
 from encapsulation.data_model.orm_models import (
@@ -19,6 +25,72 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from config.encapsulation.database.relational_db.postgresql_config import PostgreSQLConfig
+import uuid
+
+
+def _build_postgres_config() -> PostgreSQLConfig:
+    """Build PostgreSQL config using environment overrides."""
+    return PostgreSQLConfig(
+        host=os.getenv("POSTGRES_HOST", PostgreSQLConfig.model_fields["host"].default),
+        port=str(os.getenv("POSTGRES_PORT", PostgreSQLConfig.model_fields["port"].default)),
+        database=os.getenv("POSTGRES_DB", PostgreSQLConfig.model_fields["database"].default),
+        user=os.getenv("POSTGRES_USER", PostgreSQLConfig.model_fields["user"].default),
+        password=os.getenv("POSTGRES_PASSWORD", PostgreSQLConfig.model_fields["password"].default),
+    )
+
+
+@pytest.fixture(scope="module")
+def db():
+    """Provide a PostgreSQL connection or skip if unavailable."""
+    config = _build_postgres_config()
+    try:
+        return config.build()
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"PostgreSQL unavailable: {exc}")
+
+
+@pytest.fixture
+def source_file(db: PostgreSQLDB):
+    """Insert a temporary file metadata row for downstream tests."""
+    now = datetime.now(tz=datetime.now().astimezone().tzinfo)
+    file_id = f"test-file-{uuid.uuid4()}"
+    file_metadata = FileMetadata(
+        file_id=file_id,
+        blob_key=f"assets/te/{file_id}/document.pdf",
+        filename="document.pdf",
+        status=FileStatus.STORED,
+        file_size=1024000,
+        content_type="application/pdf",
+        created_at=now,
+        updated_at=now
+    )
+    db.store_file_metadata(file_metadata)
+    try:
+        yield file_metadata
+    finally:
+        db.delete_file_metadata(file_id)
+
+
+@pytest.fixture
+def source_parsed(db: PostgreSQLDB, source_file: FileMetadata):
+    """Insert a temporary parsed content row for chunk tests."""
+    now = datetime.now(tz=datetime.now().astimezone().tzinfo)
+    parsed_id = f"parsed-{uuid.uuid4()}"
+    parsed_metadata = ParsedContentMetadata(
+        parsed_content_id=parsed_id,
+        source_file_id=source_file.file_id,
+        blob_key=f"parsed/te/{source_file.file_id}/{parsed_id}.markdown",
+        parser_type="pdf_parser",
+        status=ParsedContentStatus.STORED,
+        content_type="text/markdown",
+        created_at=now,
+        updated_at=now
+    )
+    db.store_parsed_content_metadata(parsed_metadata)
+    try:
+        yield parsed_metadata
+    finally:
+        db.delete_parsed_content_metadata(parsed_id)
 
 def test_file_metadata_operations(db: PostgreSQLDB):
     """Test complete CRUD operations for FileMetadata"""
@@ -26,9 +98,10 @@ def test_file_metadata_operations(db: PostgreSQLDB):
 
     # Create test file metadata
     now = datetime.now(tz=datetime.now().astimezone().tzinfo)
+    file_id = f"test-file-{uuid.uuid4()}"
     file_metadata = FileMetadata(
-        file_id="test-file-123",
-        blob_key="assets/te/test-file-123/document.pdf",
+        file_id=file_id,
+        blob_key=f"assets/te/{file_id}/document.pdf",
         filename="document.pdf",
         status=FileStatus.STORED,  # Using new enum value
         file_size=1024000,
@@ -44,7 +117,7 @@ def test_file_metadata_operations(db: PostgreSQLDB):
 
     # Test READ
     print("2. Testing file metadata retrieval...")
-    retrieved = db.get_file_metadata("test-file-123")
+    retrieved = db.get_file_metadata(file_id)
     if retrieved:
         print(f"  Retrieved: {retrieved.filename} - Status: {retrieved.status}")
         print(f"  Status type: {type(retrieved.status)} (should be FileStatus enum)")
@@ -53,9 +126,9 @@ def test_file_metadata_operations(db: PostgreSQLDB):
 
     # Test UPDATE
     print("3. Testing file metadata update...")
-    success = db.update_file_metadata("test-file-123", {
+    success = db.update_file_metadata(file_id, {
         "status": FileStatus.PARSED,  # Using new enum progression
-        "blob_key": "assets/te/test-file-123/document-v2.pdf"
+        "blob_key": f"assets/te/{file_id}/document-v2.pdf"
     })
     if success:
         updated = db.get_file_metadata("test-file-123")
@@ -71,6 +144,8 @@ def test_file_metadata_operations(db: PostgreSQLDB):
     for f in file_list:
         print(f"     - {f.filename} ({f.status})")
 
+    # Cleanup
+    db.delete_file_metadata(file_id)
     return retrieved
 
 def test_parsed_content_operations(db: PostgreSQLDB, source_file: FileMetadata):
@@ -79,10 +154,11 @@ def test_parsed_content_operations(db: PostgreSQLDB, source_file: FileMetadata):
 
     # Create test parsed content metadata
     now = datetime.now(tz=datetime.now().astimezone().tzinfo)
+    parsed_id = f"parsed-{uuid.uuid4()}"
     parsed_metadata = ParsedContentMetadata(
-        parsed_content_id="parsed-123",
+        parsed_content_id=parsed_id,
         source_file_id=source_file.file_id,
-        blob_key="parsed/te/test-file-123/parsed-123.markdown",
+        blob_key=f"parsed/te/{source_file.file_id}/{parsed_id}.markdown",
         parser_type="pdf_parser",
         status=ParsedContentStatus.STORED,  # Using new enum value
         content_type="text/markdown",
@@ -97,7 +173,7 @@ def test_parsed_content_operations(db: PostgreSQLDB, source_file: FileMetadata):
 
     # Test READ
     print("2. Testing parsed content retrieval...")
-    retrieved = db.get_parsed_content_metadata("parsed-123")
+    retrieved = db.get_parsed_content_metadata(parsed_id)
     if retrieved:
         print(f"  Retrieved: {retrieved.parser_type} - Status: {retrieved.status}")
         print(f"  Content type: {retrieved.content_type}")
@@ -106,7 +182,7 @@ def test_parsed_content_operations(db: PostgreSQLDB, source_file: FileMetadata):
 
     # Test UPDATE
     print("3. Testing parsed content update...")
-    success = db.update_parsed_content_metadata("parsed-123", {
+    success = db.update_parsed_content_metadata(parsed_id, {
         "status": ParsedContentStatus.PARSED,  # Progress to next status
         "parser_type": "updated_pdf_parser"
     })
@@ -126,6 +202,7 @@ def test_parsed_content_operations(db: PostgreSQLDB, source_file: FileMetadata):
     )
     print(f"  Found {len(parsed_list)} parsed content for source file")
 
+    db.delete_parsed_content_metadata(parsed_id)
     return retrieved
 
 def test_chunk_operations(db: PostgreSQLDB, source_parsed: ParsedContentMetadata):
@@ -134,10 +211,11 @@ def test_chunk_operations(db: PostgreSQLDB, source_parsed: ParsedContentMetadata
 
     # Create test chunk metadata
     now = datetime.now(tz=datetime.now().astimezone().tzinfo)
+    chunk_id = f"chunk-{uuid.uuid4()}"
     chunk_metadata = ChunkMetadata(
-        chunk_id="chunk-123",
+        chunk_id=chunk_id,
         source_parsed_content_id=source_parsed.parsed_content_id,  # Back to ParsedContent reference
-        blob_key="chunks/pa/parsed-123/chunk-123.json",
+        blob_key=f"chunks/pa/{source_parsed.parsed_content_id}/{chunk_id}.json",
         chunker_type="semantic",
         index_status=ChunkIndexStatus.STORED,  # Using new enum value
         created_at=now,
@@ -152,7 +230,7 @@ def test_chunk_operations(db: PostgreSQLDB, source_parsed: ParsedContentMetadata
 
     # Test READ
     print("2. Testing chunk retrieval...")
-    retrieved = db.get_chunk_metadata("chunk-123")
+    retrieved = db.get_chunk_metadata(chunk_id)
     if retrieved:
         print(f"  Retrieved: {retrieved.chunker_type} - Status: {retrieved.index_status}")
         print(f"  Created at: {retrieved.created_at}")
@@ -162,7 +240,7 @@ def test_chunk_operations(db: PostgreSQLDB, source_parsed: ParsedContentMetadata
 
     # Test UPDATE (simulate indexing)
     print("3. Testing chunk update (indexing simulation)...")
-    success = db.update_chunk_metadata("chunk-123", {
+    success = db.update_chunk_metadata(chunk_id, {
         "index_status": ChunkIndexStatus.INDEXED,  # Using enum directly
         "indexed_at": datetime.now(tz=datetime.now().astimezone().tzinfo)
     })
@@ -182,23 +260,60 @@ def test_chunk_operations(db: PostgreSQLDB, source_parsed: ParsedContentMetadata
     )
     print(f"    Found {len(chunk_list)} indexed chunks for source parsed content")
 
+    db.delete_chunk_metadata(chunk_id)
     return retrieved
 
 def test_cleanup_operations(db: PostgreSQLDB):
     """Test cleanup by deleting all test data"""
     print("\n=== CLEANUP OPERATIONS ===")
 
-    # Delete in reverse order (chunk -> parsed -> file) due to dependencies
+    now = datetime.now(tz=datetime.now().astimezone().tzinfo)
+    file_id = f"cleanup-file-{uuid.uuid4()}"
+    parsed_id = f"cleanup-parsed-{uuid.uuid4()}"
+    chunk_id = f"cleanup-chunk-{uuid.uuid4()}"
+
+    db.store_file_metadata(FileMetadata(
+        file_id=file_id,
+        blob_key=f"assets/cleanup/{file_id}/document.pdf",
+        filename="cleanup.pdf",
+        status=FileStatus.STORED,
+        file_size=1024,
+        content_type="application/pdf",
+        created_at=now,
+        updated_at=now,
+    ))
+
+    db.store_parsed_content_metadata(ParsedContentMetadata(
+        parsed_content_id=parsed_id,
+        source_file_id=file_id,
+        blob_key=f"parsed/cleanup/{file_id}/{parsed_id}.markdown",
+        parser_type="pdf_parser",
+        status=ParsedContentStatus.STORED,
+        content_type="text/markdown",
+        created_at=now,
+        updated_at=now,
+    ))
+
+    db.store_chunk_metadata(ChunkMetadata(
+        chunk_id=chunk_id,
+        source_parsed_content_id=parsed_id,
+        blob_key=f"chunks/cleanup/{parsed_id}/{chunk_id}.json",
+        chunker_type="semantic",
+        index_status=ChunkIndexStatus.STORED,
+        created_at=now,
+        indexed_at=None,
+    ))
+
     print("1. Deleting chunk metadata...")
-    chunk_deleted = db.delete_chunk_metadata("chunk-123")
+    chunk_deleted = db.delete_chunk_metadata(chunk_id)
     print(f"  Chunk deleted: {chunk_deleted}")
 
     print("2. Deleting parsed content metadata...")
-    parsed_deleted = db.delete_parsed_content_metadata("parsed-123")
+    parsed_deleted = db.delete_parsed_content_metadata(parsed_id)
     print(f"  Parsed content deleted: {parsed_deleted}")
 
     print("3. Deleting file metadata...")
-    file_deleted = db.delete_file_metadata("test-file-123")
+    file_deleted = db.delete_file_metadata(file_id)
     print(f"  File metadata deleted: {file_deleted}")
 
 def main():

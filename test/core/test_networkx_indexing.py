@@ -3,9 +3,15 @@ import os
 import asyncio
 import tempfile
 from pathlib import Path
+import pytest
 
 # Add project root to Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
+
+pytestmark = pytest.mark.skipif(
+    os.getenv("RUN_RAGARC_INTEGRATION_TESTS") != "1",
+    reason="Requires OpenAI credentials and external services; set RUN_RAGARC_INTEGRATION_TESTS=1 to run.",
+)
 
 from dotenv import load_dotenv
 from encapsulation.data_model.schema import Chunk
@@ -241,4 +247,3 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
-

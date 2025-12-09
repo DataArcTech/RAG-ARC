@@ -18,13 +18,27 @@ config = VLMOcrParserConfig(
 )
 
 
-parser = config.build()
+def test_vlm_ocr_parser():
+    """Test VLM OCR parser with a PDF file"""
+    parser = config.build()
+
+    # Use relative path from project root
+    test_pdf_path = os.path.join(os.path.dirname(__file__), "../../test/test_pdf.pdf")
+
+    # Skip test if file doesn't exist
+    if not os.path.exists(test_pdf_path):
+        import pytest
+        pytest.skip(f"Test PDF file not found at {test_pdf_path}")
+
+    # Read file content
+    with open(test_pdf_path, "rb") as f:
+        file_data = f.read()
+
+    results = asyncio.run(parser.parse_file(file_data, "document.pdf"))
+
+    print(results)
+    assert results is not None
 
 
-# 读取文件内容
-with open("/home/dataarc/chenmingzhen/RAG-ARC-backend/RAG-ARC/test/test_pdf.pdf", "rb") as f:
-    file_data = f.read()
-
-results = asyncio.run(parser.parse_file(file_data, "document.pdf"))
-
-print(results)
+if __name__ == "__main__":
+    test_vlm_ocr_parser()

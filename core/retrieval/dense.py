@@ -1,9 +1,10 @@
-from typing import Any, List, Dict, ClassVar, Collection, TYPE_CHECKING
+from typing import Any, List, Dict, ClassVar, Collection, TYPE_CHECKING, Optional
 import logging
 
 from core.retrieval.base import BaseRetriever
 from encapsulation.data_model.schema import Chunk
 from core.utils.retrieval_helper import RetrievalHelper
+from core.utils.owner_guard import normalize_owner_id, is_admin_owner
 
 if TYPE_CHECKING:
     from config.core.retrieval.dense_config import DenseRetrieverConfig
@@ -51,6 +52,26 @@ class DenseRetriever(BaseRetriever):
             raise RuntimeError("Index exists but contains no data. Please use IndexManager to build the index first.")
 
         logger.debug(f"Index initialized successfully for {self.get_name()}")
+
+    @staticmethod
+    def _chunk_matches_owner(chunk: Chunk, owner_key: str) -> bool:
+        """
+        Return True when the chunk belongs to the requested owner.
+
+        owner_key is already normalized (canonical string form).
+        """
+        if not owner_key:
+            return False
+
+        chunk_owner: Optional[Any] = getattr(chunk, "owner_id", None)
+        if chunk_owner is None and getattr(chunk, "metadata", None):
+            chunk_owner = chunk.metadata.get("owner_id")
+
+        if chunk_owner is None:
+            return False
+
+        normalized_chunk_owner = normalize_owner_id(chunk_owner)
+        return normalized_chunk_owner == owner_key
 
     def _validate_search_config(self, search_type: str, search_kwargs: Dict[str, Any]) -> None:
         """Validate search configuration
@@ -115,6 +136,18 @@ class DenseRetriever(BaseRetriever):
 
         # Extract owner_id for filtering
         owner_id = kwargs.pop('owner_id', None)
+        if owner_id is None:
+            logger.warning("Dense retrieval requires an owner_id; returning no results")
+            return []
+
+        owner_key = normalize_owner_id(owner_id)
+        if owner_key is None:
+            logger.warning("owner_id '%s' could not be normalized; returning no results", owner_id)
+            return []
+
+        global_scope = is_admin_owner(owner_id)
+        if global_scope:
+            owner_key = None
 
         # Merge search parameters
         search_kwargs = {**self.config.search_kwargs, **kwargs}
@@ -122,7 +155,7 @@ class DenseRetriever(BaseRetriever):
 
         # If owner_id filtering is needed, over-fetch to ensure we get enough results
         original_k = search_kwargs.get("k", 5)
-        if owner_id is not None:
+        if owner_key is not None:
             # Over-fetch multiplier: fetch more results to compensate for filtering
             # Default to 3x, can be configured via over_fetch_multiplier parameter
             over_fetch_multiplier = kwargs.pop('over_fetch_multiplier', 3)
@@ -133,22 +166,21 @@ class DenseRetriever(BaseRetriever):
         chunks_and_scores = RetrievalHelper.vector_search_with_faiss(self._index, embedding, search_kwargs)
 
         # Filter by owner_id if provided (user isolation)
-        if owner_id is not None:
-            owner_id_str = str(owner_id)
+        if owner_key is not None:
             before_filter_count = len(chunks_and_scores)
             chunks_and_scores = [
                 (chunk, score) for chunk, score in chunks_and_scores
-                if chunk.owner_id == owner_id_str
+                if self._chunk_matches_owner(chunk, owner_key)
             ]
             after_filter_count = len(chunks_and_scores)
-            logger.debug(f"Filtered results by owner_id={owner_id_str}: {after_filter_count}/{before_filter_count} chunks")
+            logger.debug(f"Filtered results by owner_id={owner_key}: {after_filter_count}/{before_filter_count} chunks")
 
             # Trim to original k if we have more than needed
             if len(chunks_and_scores) > original_k:
                 chunks_and_scores = chunks_and_scores[:original_k]
                 logger.debug(f"Trimmed to {original_k} chunks")
             elif len(chunks_and_scores) < original_k:
-                logger.warning(f"Only retrieved {len(chunks_and_scores)} chunks for owner_id={owner_id_str}, requested {original_k}")
+                logger.warning(f"Only retrieved {len(chunks_and_scores)} chunks for owner_id={owner_key}, requested {original_k}")
 
 
         if include_score:
@@ -181,13 +213,25 @@ class DenseRetriever(BaseRetriever):
 
         # Extract owner_id for filtering
         owner_id = kwargs.pop('owner_id', None)
+        if owner_id is None:
+            logger.warning("Dense retrieval requires an owner_id; returning no results")
+            return []
+
+        owner_key = normalize_owner_id(owner_id)
+        if owner_key is None:
+            logger.warning("owner_id '%s' could not be normalized; returning no results", owner_id)
+            return []
+
+        global_scope = is_admin_owner(owner_id)
+        if global_scope:
+            owner_key = None
 
         # Merge search parameters
         search_kwargs = {**self.config.search_kwargs, **kwargs}
         fetch_k = search_kwargs.get("fetch_k", 20)
 
         # If owner_id filtering is needed, over-fetch to ensure we get enough candidates
-        if owner_id is not None:
+        if owner_key is not None:
             # Over-fetch multiplier for MMR (need more candidates for diversity)
             over_fetch_multiplier = kwargs.pop('over_fetch_multiplier', 3)
             original_fetch_k = fetch_k
@@ -203,18 +247,17 @@ class DenseRetriever(BaseRetriever):
             return []
 
         # Filter by owner_id if provided (user isolation)
-        if owner_id is not None:
-            owner_id_str = str(owner_id)
+        if owner_key is not None:
             before_filter_count = len(chunks_and_scores)
             chunks_and_scores = [
                 (chunk, score) for chunk, score in chunks_and_scores
-                if chunk.owner_id == owner_id_str
+                if self._chunk_matches_owner(chunk, owner_key)
             ]
             after_filter_count = len(chunks_and_scores)
-            logger.debug(f"MMR filtered results by owner_id={owner_id_str}: {after_filter_count}/{before_filter_count} chunks")
+            logger.debug(f"MMR filtered results by owner_id={owner_key}: {after_filter_count}/{before_filter_count} chunks")
 
             if after_filter_count == 0:
-                logger.warning(f"No chunks found for owner_id={owner_id_str} after filtering")
+                logger.warning(f"No chunks found for owner_id={owner_key} after filtering")
                 return []
             elif after_filter_count < search_kwargs.get("k", 4):
                 logger.warning(f"Only {after_filter_count} chunks available for MMR, requested {search_kwargs.get('k', 4)}")

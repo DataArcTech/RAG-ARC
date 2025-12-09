@@ -13,6 +13,7 @@ import uuid
 import asyncio
 from datetime import datetime
 from typing import Optional
+from functools import partial
 from fastapi.responses import Response
 from fastapi import UploadFile, HTTPException
 from encapsulation.data_model.orm_models import (
@@ -28,6 +29,114 @@ class Knowledge(AbstractModule):
         
         # Semaphore to control concurrent indexing operations
         self.indexing_semaphore = asyncio.Semaphore(config.max_concurrent_indexing)
+        self._active_index_tasks: Dict[str, asyncio.Task] = {}
+        self._files_marked_for_deletion: set[str] = set()
+        self._files_marked_for_deletion_by_owner: Dict[uuid.UUID, set[str]] = {}
+        self._file_owner_cache: Dict[str, uuid.UUID] = {}
+        self._active_deletion_tasks: Dict[str, asyncio.Task] = {}
+        self._deletion_failures: Dict[str, str] = {}
+
+    def _track_background_task(self, doc_id: str, task: asyncio.Task) -> None:
+        """Register a background indexing task so it can be cancelled or awaited later."""
+        self._active_index_tasks[doc_id] = task
+
+        def _cleanup(fut: asyncio.Task, file_id: str = doc_id) -> None:
+            self._active_index_tasks.pop(file_id, None)
+            if fut.cancelled():
+                logger.info(f"Background indexing task cancelled for file_id: {file_id}")
+            elif fut.exception():
+                logger.error(
+                    f"Background indexing task failed for file_id {file_id}: {fut.exception()}",
+                    exc_info=True
+                )
+
+        task.add_done_callback(_cleanup)
+
+    async def _cancel_indexing_task(self, doc_id: str) -> None:
+        """Cancel an active background indexing task for the specified file."""
+        task = self._active_index_tasks.get(doc_id)
+        if not task:
+            return
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            logger.info(f"Cancelled indexing task awaited for file_id: {doc_id}")
+
+    def _mark_file_for_deletion(self, doc_id: str, owner_id: Optional[uuid.UUID] = None) -> None:
+        """Mark a file so background tasks can skip further processing."""
+        self._files_marked_for_deletion.add(doc_id)
+        resolved_owner = self._resolve_owner_for_file(doc_id, owner_id)
+        if resolved_owner is not None:
+            owner_set = self._files_marked_for_deletion_by_owner.setdefault(resolved_owner, set())
+            owner_set.add(doc_id)
+            self._file_owner_cache[doc_id] = resolved_owner
+
+    def _unmark_file_for_deletion(self, doc_id: str) -> None:
+        self._files_marked_for_deletion.discard(doc_id)
+        owner_id = self._file_owner_cache.pop(doc_id, None)
+        if owner_id is not None:
+            owner_set = self._files_marked_for_deletion_by_owner.get(owner_id)
+            if owner_set is not None:
+                owner_set.discard(doc_id)
+                if not owner_set:
+                    self._files_marked_for_deletion_by_owner.pop(owner_id, None)
+
+    def _is_file_marked_for_deletion(self, doc_id: str) -> bool:
+        return doc_id in self._files_marked_for_deletion
+
+    def _resolve_owner_for_file(
+        self,
+        doc_id: str,
+        explicit_owner: Optional[uuid.UUID] = None
+    ) -> Optional[uuid.UUID]:
+        if explicit_owner is not None:
+            return explicit_owner
+        cached_owner = self._file_owner_cache.get(doc_id)
+        if cached_owner is not None:
+            return cached_owner
+        try:
+            metadata = self.file_storage.get_file_metadata(doc_id)
+        except Exception:
+            metadata = None
+        if metadata and getattr(metadata, "owner_id", None) is not None:
+            owner_id = metadata.owner_id
+            self._file_owner_cache[doc_id] = owner_id
+            return owner_id
+        return None
+
+    async def _run_blocking(self, func, *args, **kwargs):
+        """Run a blocking function in a separate thread to avoid blocking the event loop."""
+        loop = asyncio.get_running_loop()
+        bound = partial(func, *args, **kwargs)
+        return await loop.run_in_executor(None, bound)
+    
+    def _track_deletion_task(self, doc_id: str, task: asyncio.Task) -> None:
+        """Register a background deletion task so we don't schedule duplicates."""
+        self._active_deletion_tasks[doc_id] = task
+
+        def _cleanup(fut: asyncio.Task, file_id: str = doc_id) -> None:
+            self._active_deletion_tasks.pop(file_id, None)
+            if fut.cancelled():
+                logger.info(f"Background deletion task cancelled for file_id: {file_id}")
+            elif fut.exception():
+                logger.error(
+                    f"Background deletion task failed for file_id {file_id}: {fut.exception()}",
+                    exc_info=True
+                )
+
+        task.add_done_callback(_cleanup)
+
+    async def _cancel_deletion_task(self, doc_id: str) -> None:
+        task = self._active_deletion_tasks.get(doc_id)
+        if not task:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            logger.info(f"Cancelled deletion task awaited for file_id: {doc_id}")
     
     async def upload_file(self, file: UploadFile, user_id: uuid.UUID) -> str:
         try:
@@ -40,8 +149,7 @@ class Knowledge(AbstractModule):
             # Start indexing in background (fire-and-forget)
             # execute file indexing without waiting for it to complete
             task = asyncio.create_task(self._index_file_background(doc_id))
-            # Add error callback to log any unhandled exceptions
-            task.add_done_callback(lambda t: logger.error(f"Background indexing task failed: {t.exception()}") if t.exception() else None)
+            self._track_background_task(doc_id, task)
             logger.info(f"File {file.filename} uploaded with ID {doc_id}, indexing started in background")
             return doc_id
 
@@ -55,8 +163,16 @@ class Knowledge(AbstractModule):
         Returns:
             Dict with indexing result containing 'success' (bool) and 'file_id' (str) keys
         """
+        if self._is_file_marked_for_deletion(doc_id):
+            logger.info(f"Skipping indexing for file_id {doc_id} because it is marked for deletion")
+            return {"success": False, "file_id": doc_id, "error_message": "file scheduled for deletion"}
+
         async with self.indexing_semaphore:
             try:
+                if self._is_file_marked_for_deletion(doc_id):
+                    logger.info(f"Aborting indexing for file_id {doc_id}; deletion scheduled")
+                    return {"success": False, "file_id": doc_id, "error_message": "file scheduled for deletion"}
+
                 logger.info(f"Starting background indexing for file_id: {doc_id} (semaphore acquired)")
                 result = await self.file_index.index_file(doc_id)
                 if result.get("success"):
@@ -64,6 +180,9 @@ class Knowledge(AbstractModule):
                 else:
                     logger.error(f"Background indexing failed for file_id: {doc_id}, error: {result.get('error_message')}")
                 return result
+            except asyncio.CancelledError:
+                logger.info(f"Background indexing task cancelled for file_id: {doc_id}")
+                raise
             except Exception as e:
                 logger.error(f"Background indexing failed for file_id: {doc_id}, exception: {str(e)}")
                 return {"success": False, "file_id": doc_id, "error_message": str(e)}
@@ -74,6 +193,8 @@ class Knowledge(AbstractModule):
         metadata = self.file_storage.get_file_metadata(doc_id)
 
         if metadata is None:
+            raise HTTPException(status_code=404, detail="File not found")
+        if metadata.status == FileStatus.DELETED or self._is_file_marked_for_deletion(doc_id):
             raise HTTPException(status_code=404, detail="File not found")
 
         # Check if user has access (owner or has VIEW/EDIT permission)
@@ -88,37 +209,121 @@ class Knowledge(AbstractModule):
         headers = {"Content-Disposition": f"attachment; filename=\"{metadata.filename}\""}
         return Response(content=content, media_type=metadata.content_type, headers=headers)
 
-    def delete_file(self, doc_id: str, user_id: uuid.UUID):
+    async def mark_file_deleted_cli(self, doc_id: str, user_id: uuid.UUID) -> Dict[str, Any]:
+        """Mark a file as deleted for CLI scenarios without triggering heavy cleanup."""
+        metadata = await self._run_blocking(self.file_storage.get_file_metadata, doc_id)
+        if not metadata:
+            raise HTTPException(status_code=404, detail="File not found")
+
+        if metadata.owner_id != user_id:
+            raise HTTPException(status_code=403, detail="You are not allowed to delete this file")
+
+        failure_reason = self._deletion_failures.get(doc_id)
+        if metadata.status == FileStatus.DELETED and not failure_reason:
+            logger.info(f"[CLI] File {doc_id} already marked as deleted")
+            return {"status": "deleted", "file_id": doc_id}
+
+        await self._cancel_indexing_task(doc_id)
+        await self._cancel_deletion_task(doc_id)
+
+        if not self._is_file_marked_for_deletion(doc_id):
+            self._mark_file_for_deletion(doc_id, metadata.owner_id)
+
+        await self._run_blocking(
+            self.file_storage.metadata_store.update_file_status,
+            doc_id,
+            FileStatus.DELETED
+        )
+
+        self._deletion_failures.pop(doc_id, None)
+        logger.info(f"[CLI] Marked file {doc_id} as deleted (metadata only)")
+        response = {"status": "marked", "file_id": doc_id}
+        if failure_reason:
+            response["previous_failure"] = failure_reason
+        return response
+
+    async def delete_file(self, doc_id: str, user_id: uuid.UUID) -> Dict[str, Any]:
         # Check if the file exists before attempting deletion
-        metadata = self.file_storage.get_file_metadata(doc_id)
+        metadata = await self._run_blocking(self.file_storage.get_file_metadata, doc_id)
         if not metadata:
             raise HTTPException(status_code=404, detail="File not found")
 
         # Only the file owner can delete the file
         if metadata.owner_id != user_id:
             raise HTTPException(status_code=403, detail="You are not allowed to delete this file")
-        
-        # Delete all file data including derived artifacts and file metadata
-        # This handles the complete deletion in the correct order to avoid foreign key constraint violations
+
+        failure_reason = self._deletion_failures.get(doc_id)
+
+        if metadata.status == FileStatus.DELETED and not failure_reason:
+            logger.info(f"File {doc_id} already deleted")
+            return {"status": "deleted", "file_id": doc_id}
+
+        if self._is_file_marked_for_deletion(doc_id) and not failure_reason:
+            logger.info(f"Deletion already scheduled for {doc_id}")
+            return {"status": "deleting", "file_id": doc_id}
+
+        # Ensure background indexing/deletion is not running for this file
+        await self._cancel_indexing_task(doc_id)
+        await self._cancel_deletion_task(doc_id)
+
+        self._mark_file_for_deletion(doc_id, metadata.owner_id)
+
+        # Mark file as DELETED to hide immediately (physical cleanup happens in background)
+        await self._run_blocking(
+            self.file_storage.metadata_store.update_file_status,
+            doc_id,
+            FileStatus.DELETED
+        )
+
+        # Schedule deletion in background
+        delete_task = asyncio.create_task(self._delete_file_background(doc_id))
+        self._track_deletion_task(doc_id, delete_task)
+        logger.info(f"Deletion scheduled for file_id: {doc_id}")
+
+        response = {"status": "deleting", "file_id": doc_id}
+        if failure_reason:
+            response["previous_failure"] = failure_reason
+        return response
+
+    async def _delete_file_background(self, doc_id: str) -> None:
+        """Execute the deletion pipeline asynchronously."""
+        logger.info(f"Background deletion started for file_id: {doc_id}")
+        success = False
         try:
-            deletion_result = self.file_index.delete_file_data(doc_id, delete_file_metadata=True)
-            # IndexManager.delete_file_data returns a dict with a "success" flag
+            deletion_result = await self._run_blocking(
+                self.file_index.delete_file_data,
+                doc_id,
+                delete_file_metadata=True
+            )
+
             if not deletion_result.get("success", False):
                 error_msg = deletion_result.get("error_message", "")
                 if error_msg and "file_id must be a non-empty string" not in error_msg:
-                    logger.error(f"File deletion failed for {doc_id}: {error_msg}")
-                    raise HTTPException(status_code=500, detail=f"Failed to delete file: {error_msg}")
-                else:
-                    logger.info(f"No indexed content found for file {doc_id}, but deletion completed")
+                    logger.error(f"Deletion pipeline failed for {doc_id}: {error_msg}")
+                    raise RuntimeError(error_msg)
+                logger.info(f"No indexed content found for file {doc_id}, continuing deletion workflow")
 
-            if not self.file_storage.delete_file(doc_id):
-                raise HTTPException(status_code=500, detail="Failed to delete file")
-        except HTTPException:
-            # Propagate 4xx errors up to the router
-            raise
+            storage_deleted = await self._run_blocking(self.file_storage.delete_file, doc_id)
+            if not storage_deleted:
+                raise RuntimeError("File storage deletion returned False")
+
+            logger.info(f"Background deletion completed for file_id: {doc_id}")
+            success = True
         except Exception as e:
-            logger.error(f"Error during file deletion for {doc_id}: {e}")
-            raise HTTPException(status_code=500, detail="Failed to delete file")
+            logger.error(f"Background deletion failed for {doc_id}: {e}")
+            self._deletion_failures[doc_id] = str(e)
+            try:
+                await self._run_blocking(
+                    self.file_storage.metadata_store.update_file_status,
+                    doc_id,
+                    FileStatus.DELETED
+                )
+            except Exception as status_error:
+                logger.error(f"Failed to persist DELETED status after deletion failure for {doc_id}: {status_error}")
+        finally:
+            if success:
+                self._deletion_failures.pop(doc_id, None)
+                self._unmark_file_for_deletion(doc_id)
 
     def list_user_files(
         self,
@@ -146,6 +351,11 @@ class Knowledge(AbstractModule):
                 limit=limit,
                 offset=offset
             )
+            if status is None:
+                files = [
+                    file for file in files
+                    if self._is_active_status(file.status) and not self._is_file_marked_for_deletion(file.file_id)
+                ]
             logger.info(f"Retrieved {len(files)} accessible files for user {user_id}")
             return files
         except Exception as e:
@@ -168,15 +378,45 @@ class Knowledge(AbstractModule):
             Total count of files accessible to the user
         """
         try:
-            count = self.file_storage.count_accessible_files(
-                user_id=user_id,
-                status=status
-            )
+            if status is None:
+                total = self.file_storage.count_accessible_files(user_id=user_id)
+                deleted = self.file_storage.count_accessible_files(user_id=user_id, status=FileStatus.DELETED)
+                mark_only = len(self._files_marked_for_deletion_by_owner.get(user_id, set()))
+                count = max(total - deleted - mark_only, 0)
+            else:
+                count = self.file_storage.count_accessible_files(
+                    user_id=user_id,
+                    status=status
+                )
             logger.info(f"Counted {count} accessible files for user {user_id}")
             return count
         except Exception as e:
             logger.error(f"Failed to count accessible files for user {user_id}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to count files: {str(e)}")
+
+    def _is_active_status(self, status: FileStatus) -> bool:
+        return status != FileStatus.DELETED
+
+    def is_file_active(self, file_id: str) -> bool:
+        """
+        Determine if a file is still visible for retrieval/listing purposes.
+        """
+        try:
+            metadata = self.file_storage.get_file_metadata(file_id)
+        except Exception as e:
+            logger.debug(f"Failed to fetch metadata for file {file_id}: {e}")
+            return False
+
+        if not metadata:
+            return False
+
+        if not self._is_active_status(metadata.status):
+            return False
+
+        if self._is_file_marked_for_deletion(file_id):
+            return False
+
+        return True
 
     async def trigger_indexing(self, file_ids: List[str], user_id: uuid.UUID) -> str:
         """
@@ -554,4 +794,3 @@ class Knowledge(AbstractModule):
         except Exception as e:
             logger.error(f"Failed to update file permission: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to update permission: {str(e)}")
-

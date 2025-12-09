@@ -13,6 +13,7 @@ load_dotenv()
 
 from .base import AbstractParser
 from framework.singleton_decorator import singleton
+from core.utils.path_guard import ensure_writable_dir
 
 # Import DotsOCR utilities
 from .dots_ocr_utils.image_utils import fetch_image, smart_resize, get_image_by_fitz_doc
@@ -87,7 +88,9 @@ class DotsOCRParser(AbstractParser):
 
         # Get output directory from environment variable
         output_dir = os.getenv('DOTSOCR_OUTPUT_DIR', './dotsorc/output')
-        output_dir = os.path.abspath(output_dir)
+        runtime_root = os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime")
+        fallback_dir = os.path.join(runtime_root, "dotsocr_output")
+        output_dir = ensure_writable_dir(os.path.abspath(output_dir), fallback_dir)
         save_dir = os.path.join(output_dir, base_filename)
         os.makedirs(save_dir, exist_ok=True)
 

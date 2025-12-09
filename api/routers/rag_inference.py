@@ -1,6 +1,6 @@
 from datetime import datetime
 import json
-from typing import Annotated
+from typing import Annotated, Any, Dict, List, Optional
 from fastapi import (
     APIRouter,
     Depends,
@@ -8,9 +8,9 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
     status,
+    Query,
 )
 from pydantic import BaseModel
-from typing import Optional
 from api.routers.auth import get_current_user, ws_get_current_user
 from api.routers.connection_manager import ConnectionManager
 from api.routers.auth import validate_user_session
@@ -24,6 +24,7 @@ from application.account.chat_session import ChatSessionManager
 from application.account.user import Account
 import uuid
 import logging
+from core.utils.owner_guard import is_admin_owner, get_admin_owner_id
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -42,6 +43,8 @@ manager = ConnectionManager()
 class ChatRequest(BaseModel):
     query: str
     return_subgraph: bool = False  # Optional parameter to request subgraph data
+    target_owner_id: uuid.UUID | None = None  # Admin-only override
+    include_all_owners: bool = False  # Admin-only flag for global retrieval
 
 
 class ChatResponse(BaseModel):
@@ -49,6 +52,14 @@ class ChatResponse(BaseModel):
     response: str
     chunks: list | None = None
     subgraph: dict | None = None  # Subgraph visualization data (only if requested)
+
+
+class GraphOverviewResponse(BaseModel):
+    """Response payload for the admin graph overview endpoint."""
+    chunks: List[Dict[str, Any]]
+    nodes: List[Dict[str, Any]]
+    edges: List[Dict[str, Any]]
+    metadata: Dict[str, Any]
 
 
 # This currently only supports one round of chat, will support multiple rounds once user login is supported.
@@ -71,16 +82,90 @@ def chat(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required"
         )
+    effective_owner_id: uuid.UUID | None = current_user.id
+
+    if request.include_all_owners:
+        if not is_admin_owner(current_user.id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only admin users can access all owners"
+            )
+        admin_owner = get_admin_owner_id()
+        if admin_owner is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="ADMIN_OWNER_ID is not configured"
+            )
+        try:
+            effective_owner_id = uuid.UUID(admin_owner)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="ADMIN_OWNER_ID must be a valid UUID"
+            ) from exc
+    elif request.target_owner_id:
+        if not is_admin_owner(current_user.id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only admin users can override owner scope"
+            )
+        effective_owner_id = request.target_owner_id
+
     response: str = ""
     chunks: list[Chunk] = []
     subgraph_data: GraphData = None
     response, chunks, subgraph_data = rag_inference_handler.chat(
         request.query,
-        owner_id=current_user.id,
+        owner_id=effective_owner_id,
         return_subgraph=request.return_subgraph
     )
     return ChatResponse(response=response, chunks=chunks, subgraph=subgraph_data)
 
+
+@router.get("/graph_overview", response_model=GraphOverviewResponse, status_code=status.HTTP_200_OK)
+def graph_overview(
+    current_user: Annotated[User | None, Depends(get_current_user)],
+    include_all_owners: bool = Query(
+        default=True,
+        description="Return the union of all owners when true (admin only).",
+    ),
+    target_owner_id: Optional[uuid.UUID] = Query(
+        default=None,
+        description="Specific owner scope when include_all_owners is false.",
+    ),
+    max_nodes: int = Query(default=1000, ge=10, le=5000),
+    max_edges: int = Query(default=5000, ge=10, le=20000),
+    include_node_types: Optional[List[str]] = Query(default=None),
+):
+    """Admin-only endpoint to export a graph overview for visualization."""
+    if current_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required"
+        )
+
+    if not is_admin_owner(current_user.id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admin users can export graph overviews"
+        )
+
+    owner_scope: Optional[uuid.UUID] = None
+    if not include_all_owners:
+        if target_owner_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="target_owner_id is required when include_all_owners is false"
+            )
+        owner_scope = target_owner_id
+
+    overview = rag_inference_handler.export_graph_overview(
+        owner_id=owner_scope,
+        max_nodes=max_nodes,
+        max_edges=max_edges,
+        include_node_types=include_node_types,
+    )
+    return GraphOverviewResponse(**overview)
 
 
 @router.websocket("/stream_chat/{session_id}")
@@ -113,19 +198,43 @@ async def websocket_endpoint(
             message_text = await websocket.receive_text()
 
             # Try to parse as JSON for new format with additional parameters
+            override_all = False
             try:
                 message_data = json.loads(message_text)
+                target_owner_override = None
                 if isinstance(message_data, dict):
                     user_message_text = message_data.get("query", message_data.get("content", ""))
                     return_subgraph = message_data.get("return_subgraph", False)
+                    target_owner = message_data.get("target_owner_id")
+                    include_all_owners = bool(message_data.get("include_all_owners"))
+                    if target_owner:
+                        try:
+                            target_owner_override = uuid.UUID(str(target_owner))
+                        except ValueError:
+                            await manager.disconnect(websocket, status.WS_1007_INVALID_FRAME_PAYLOAD_DATA)
+                            return
+                    else:
+                        target_owner_override = None
+                    if include_all_owners:
+                        if not is_admin_owner(current_user.id):
+                            await manager.disconnect(websocket, status.WS_1008_POLICY_VIOLATION)
+                            return
+                        target_owner_override = None
+                        override_all = True
+                    else:
+                        override_all = False
                 else:
                     # If JSON parsed but not a dict, treat as plain text
                     user_message_text = message_text
                     return_subgraph = False
+                    target_owner_override = None
+                    override_all = False
             except (json.JSONDecodeError, ValueError):
                 # Not JSON, treat as plain text (backward compatibility)
                 user_message_text = message_text
                 return_subgraph = False
+                target_owner_override = None
+                override_all = False
 
             logger.info(f"Received user message: {user_message_text} (session_id={session_id}, user={getattr(current_user, 'id', None)}, return_subgraph={return_subgraph})")
 
@@ -147,9 +256,26 @@ async def websocket_endpoint(
             history_text = "\n".join(
                 f"{msg.content['role']}: {msg.content['content']}" for msg in history_messages
             )
+            effective_owner: uuid.UUID | None = current_user.id
+            if target_owner_override:
+                if not is_admin_owner(current_user.id):
+                    await manager.disconnect(websocket, status.WS_1008_POLICY_VIOLATION)
+                    return
+                effective_owner = target_owner_override
+            if override_all:
+                admin_owner = get_admin_owner_id()
+                if admin_owner is None:
+                    await manager.disconnect(websocket, status.WS_1011_INTERNAL_ERROR)
+                    return
+                try:
+                    effective_owner = uuid.UUID(admin_owner)
+                except ValueError:
+                    await manager.disconnect(websocket, status.WS_1011_INTERNAL_ERROR)
+                    return
+
             assistant_response, chunks, subgraph_data = rag_inference_handler.chat(
                 history_text,
-                current_user.id,
+                effective_owner,
                 return_subgraph=return_subgraph
             )
             logger.info(f"Assistant response generated: {assistant_response} (session_id={session_id})")

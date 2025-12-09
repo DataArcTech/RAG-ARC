@@ -5,6 +5,7 @@ from tantivy import Query, Occur, Order
 
 from core.retrieval.base import BaseRetriever
 from encapsulation.data_model.schema import Chunk
+from core.utils.owner_guard import normalize_owner_id
 
 if TYPE_CHECKING:
     from config.core.retrieval.tantivy_bm25_config import TantivyBM25RetrieverConfig
@@ -198,17 +199,25 @@ class TantivyBM25Retriever(BaseRetriever):
             List of Chunk objects
         """
         # Extract owner_id for user isolation
-        owner_id = kwargs.pop('owner_id', None)
-        owner_id_str = str(owner_id) if owner_id is not None else None
+        owner_input = kwargs.pop('owner_id', None)
+
+        if owner_input is None:
+            logger.warning("BM25 retrieval requires an owner_id; returning no results")
+            return []
+
+        owner_id = normalize_owner_id(owner_input)
+        if owner_id is None:
+            logger.warning("owner_id '%s' could not be normalized; returning no results", owner_input)
+            return []
+        owner_id_str = owner_id
 
         # Use config defaults if parameters not provided
         k = k if k is not None else self.config.search_kwargs.get("k", 5)
         filters = filters or {}
 
-        # Add owner_id to filters if provided
-        if owner_id_str is not None:
-            filters['owner_id'] = owner_id_str
-            logger.debug(f"Added owner_id filter: {owner_id_str}")
+        # Add owner_id to filters
+        filters['owner_id'] = owner_id_str
+        logger.debug(f"Added owner_id filter: {owner_id_str}")
 
         with_score = with_score if with_score is not None else self.config.search_kwargs.get("with_score", False)
         use_phrase_query = use_phrase_query if use_phrase_query is not None else self.config.search_kwargs.get("use_phrase_query", False)

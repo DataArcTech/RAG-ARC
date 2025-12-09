@@ -1,16 +1,21 @@
-
 import os
 import sys
 import uuid
 import tempfile
 import shutil
 from pathlib import Path
+import pytest
 
 # 设置 HuggingFace 镜像
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+pytestmark = pytest.mark.skipif(
+    os.getenv("RUN_RAGARC_INTEGRATION_TESTS") != "1",
+    reason="Requires Faiss/Tantivy resources and large models; set RUN_RAGARC_INTEGRATION_TESTS=1 to run.",
+)
 
 from encapsulation.data_model.schema import Chunk
 from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBConfig
@@ -107,9 +112,9 @@ def test_user_isolation_with_dense_retriever():
     # 创建测试数据
     chunks, user1_id, user2_id, user3_id = create_test_documents_for_users()
     print(f"\n📊 Created {len(chunks)} test documents:")
-    print(f"  - User 1 ({user1_id[:8]}...): 10 Python docs")
-    print(f"  - User 2 ({user2_id[:8]}...): 10 Java docs")
-    print(f"  - User 3 ({user3_id[:8]}...): 10 JavaScript docs")
+    print(f"  - User 1 ({str(user1_id)[:8]}...): 10 Python docs")
+    print(f"  - User 2 ({str(user2_id)[:8]}...): 10 Java docs")
+    print(f"  - User 3 ({str(user3_id)[:8]}...): 10 JavaScript docs")
     
     # 创建临时目录
     temp_dir = tempfile.mkdtemp(prefix="test_user_isolation_")
@@ -161,7 +166,7 @@ def test_user_isolation_with_dense_retriever():
         
         query = "programming language features and syntax"
         print(f"Query: '{query}'")
-        print(f"User: User 1 ({user1_id[:8]}...)")
+        print(f"User: User 1 ({str(user1_id)[:8]}...)")
         
         # 不使用 over-fetching
         print(f"\n  [Without over-fetching]")
@@ -199,7 +204,7 @@ def test_user_isolation_with_dense_retriever():
         
         query = "object oriented programming concepts"
         print(f"Query: '{query}'")
-        print(f"User: User 2 ({user2_id[:8]}...)")
+        print(f"User: User 2 ({str(user2_id)[:8]}...)")
         
         results_user2 = retriever.similarity_search(
             query,
@@ -222,7 +227,7 @@ def test_user_isolation_with_dense_retriever():
         
         query = "asynchronous programming and functions"
         print(f"Query: '{query}'")
-        print(f"User: User 3 ({user3_id[:8]}...)")
+        print(f"User: User 3 ({str(user3_id)[:8]}...)")
         
         results_user3 = retriever.similarity_search(
             query,
@@ -273,9 +278,9 @@ def test_user_isolation_with_bm25_retriever():
     # 创建测试数据
     chunks, user1_id, user2_id, user3_id = create_test_documents_for_users()
     print(f"\n📊 Created {len(chunks)} test documents:")
-    print(f"  - User 1 ({user1_id[:8]}...): 10 Python docs")
-    print(f"  - User 2 ({user2_id[:8]}...): 10 Java docs")
-    print(f"  - User 3 ({user3_id[:8]}...): 10 JavaScript docs")
+    print(f"  - User 1 ({str(user1_id)[:8]}...): 10 Python docs")
+    print(f"  - User 2 ({str(user2_id)[:8]}...): 10 Java docs")
+    print(f"  - User 3 ({str(user3_id)[:8]}...): 10 JavaScript docs")
 
     # 创建临时目录
     temp_dir = tempfile.mkdtemp(prefix="test_bm25_isolation_")
@@ -315,7 +320,7 @@ def test_user_isolation_with_bm25_retriever():
 
         query = "programming language"
         print(f"Query: '{query}'")
-        print(f"User: User 1 ({user1_id[:8]}...)")
+        print(f"User: User 1 ({str(user1_id)[:8]}...)")
 
         results_user1 = retriever._get_relevant_chunks(
             query,
@@ -338,7 +343,7 @@ def test_user_isolation_with_bm25_retriever():
 
         query = "object oriented"
         print(f"Query: '{query}'")
-        print(f"User: User 2 ({user2_id[:8]}...)")
+        print(f"User: User 2 ({str(user2_id)[:8]}...)")
 
         results_user2 = retriever._get_relevant_chunks(
             query,
@@ -360,7 +365,7 @@ def test_user_isolation_with_bm25_retriever():
 
         query = "asynchronous"
         print(f"Query: '{query}'")
-        print(f"User: User 3 ({user3_id[:8]}...)")
+        print(f"User: User 3 ({str(user3_id)[:8]}...)")
 
         results_user3 = retriever._get_relevant_chunks(
             query,
@@ -488,9 +493,9 @@ def test_user_isolation_with_multipath_retriever():
             ))
 
         print(f"\n📊 Created {len(chunks)} test documents:")
-        print(f"  - User 1 ({user1_id[:8]}...): {len(python_docs)} Python docs")
-        print(f"  - User 2 ({user2_id[:8]}...): {len(java_docs)} Java docs")
-        print(f"  - User 3 ({user3_id[:8]}...): {len(js_docs)} JavaScript docs")
+        print(f"  - User 1 ({str(user1_id)[:8]}...): {len(python_docs)} Python docs")
+        print(f"  - User 2 ({str(user2_id)[:8]}...): {len(java_docs)} Java docs")
+        print(f"  - User 3 ({str(user3_id)[:8]}...): {len(js_docs)} JavaScript docs")
 
         # 配置 Embedding 模型
         print("\n🔧 Configuring embedding model...")
@@ -568,7 +573,7 @@ def test_user_isolation_with_multipath_retriever():
         print("-"*80)
         query = "programming language features"
         print(f"Query: '{query}'")
-        print(f"User: User 1 ({user1_id[:8]}...)")
+        print(f"User: User 1 ({str(user1_id)[:8]}...)")
 
         results_user1 = retriever.invoke(
             query,
@@ -592,7 +597,7 @@ def test_user_isolation_with_multipath_retriever():
         print("-"*80)
         query = "object oriented programming"
         print(f"Query: '{query}'")
-        print(f"User: User 2 ({user2_id[:8]}...)")
+        print(f"User: User 2 ({str(user2_id)[:8]}...)")
 
         results_user2 = retriever.invoke(
             query,
@@ -615,7 +620,7 @@ def test_user_isolation_with_multipath_retriever():
         print("-"*80)
         query = "asynchronous programming"
         print(f"Query: '{query}'")
-        print(f"User: User 3 ({user3_id[:8]}...)")
+        print(f"User: User 3 ({str(user3_id)[:8]}...)")
 
         results_user3 = retriever.invoke(
             query,
@@ -680,4 +685,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

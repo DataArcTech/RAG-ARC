@@ -16,12 +16,14 @@ The CLI lets you exercise the full RAG pipeline (ingestion → indexing/graph bu
 | Ingestion | `uv run rag-arc ingest-file ./doc.pdf --owner-id <UUID>` | Upload + chunk + index + build graph for a single file (always pass a stable `--owner-id`). |
 | Ingestion | `uv run rag-arc ingest-folder ./docs --pattern '*.pdf' --owner-id <UUID>` | Bulk ingest every file in a folder, recursive by default. |
 | Knowledge mgmt | `uv run rag-arc list-files --json --owner-id <UUID>` | List files accessible to the owner (filter by status/limit/offset). |
-| Knowledge mgmt | `uv run rag-arc delete-file FILE_ID --owner-id <UUID>` | Delete a file and its derived artifacts. |
+| Knowledge mgmt | `uv run rag-arc delete-file FILE_ID --owner-id <UUID>` | Mark a file as deleted (metadata only, no cleanup). |
 | Knowledge mgmt | `uv run rag-arc trigger-index FILE_ID [FILE_ID ...] --owner-id <UUID>` | Re-run indexing for one or more files. |
 | Graph tooling | `uv run rag-arc export-graph --output graph.json --owner-id <UUID>` | Export the entire graph (Neo4j or igraph) to stdout or a JSON file. |
 | Retrieval | `uv run rag-arc chat "What is RAG-ARC?" --owner-id <UUID>` | Full pipeline (multi-path retrieval + rerank + LLM). |
 | Retrieval | `uv run rag-arc pipeline "What is RAG-ARC?" --skip-llm --subgraph --owner-id <UUID>` | Inspect rewrite/retrieval/rerank without calling the LLM. |
 | Graph QA | `uv run rag-arc graph-qa "Explain relation between X and Y" --owner-id <UUID>` | Run graph-only question answering and return subgraph metadata. |
+
+> The CLI's `delete-file` command is meant for lightweight testing and therefore only updates file metadata/status. For the real asynchronous cleanup pipeline (chunks, indexes, blobs, graph), call the REST API `DELETE /knowledge/{file_id}` instead.
 
 Always pass `--owner-id <UUID>` when you want to reuse the same tenant/user data. If omitted, the CLI falls back to the cached owner UUID (or generates one on first use), which might differ between environments.
 

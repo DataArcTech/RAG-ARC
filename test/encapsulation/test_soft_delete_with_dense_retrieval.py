@@ -5,8 +5,15 @@ import sys
 import os
 import tempfile
 import shutil
+import pytest
+import uuid
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "./")))
+
+pytestmark = pytest.mark.skipif(
+    os.getenv("RUN_RAGARC_VECTOR_TESTS") != "1",
+    reason="Requires large embedding models and Faiss assets; set RUN_RAGARC_VECTOR_TESTS=1 to run.",
+)
 
 from encapsulation.data_model.schema import Chunk
 from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBConfig
@@ -26,17 +33,18 @@ def test_soft_delete_with_retrieval():
     try:
         # 1. Create test data with meaningful content
         print("\n1. Creating test data...")
+        owner_id = uuid.uuid4()
         test_chunks = [
-            Chunk(id="doc_1", content="Python is a high-level programming language", metadata={"topic": "python"}),
-            Chunk(id="doc_2", content="Java is an object-oriented programming language", metadata={"topic": "java"}),
-            Chunk(id="doc_3", content="Python has excellent data science libraries", metadata={"topic": "python"}),
-            Chunk(id="doc_4", content="JavaScript is used for web development", metadata={"topic": "javascript"}),
-            Chunk(id="doc_5", content="Python is popular for machine learning", metadata={"topic": "python"}),
-            Chunk(id="doc_6", content="Java runs on the Java Virtual Machine", metadata={"topic": "java"}),
-            Chunk(id="doc_7", content="Python has simple and readable syntax", metadata={"topic": "python"}),
-            Chunk(id="doc_8", content="C++ is a powerful systems programming language", metadata={"topic": "cpp"}),
-            Chunk(id="doc_9", content="Python supports multiple programming paradigms", metadata={"topic": "python"}),
-            Chunk(id="doc_10", content="Rust provides memory safety without garbage collection", metadata={"topic": "rust"}),
+            Chunk(id="doc_1", owner_id=owner_id, content="Python is a high-level programming language", metadata={"topic": "python"}),
+            Chunk(id="doc_2", owner_id=owner_id, content="Java is an object-oriented programming language", metadata={"topic": "java"}),
+            Chunk(id="doc_3", owner_id=owner_id, content="Python has excellent data science libraries", metadata={"topic": "python"}),
+            Chunk(id="doc_4", owner_id=owner_id, content="JavaScript is used for web development", metadata={"topic": "javascript"}),
+            Chunk(id="doc_5", owner_id=owner_id, content="Python is popular for machine learning", metadata={"topic": "python"}),
+            Chunk(id="doc_6", owner_id=owner_id, content="Java runs on the Java Virtual Machine", metadata={"topic": "java"}),
+            Chunk(id="doc_7", owner_id=owner_id, content="Python has simple and readable syntax", metadata={"topic": "python"}),
+            Chunk(id="doc_8", owner_id=owner_id, content="C++ is a powerful systems programming language", metadata={"topic": "cpp"}),
+            Chunk(id="doc_9", owner_id=owner_id, content="Python supports multiple programming paradigms", metadata={"topic": "python"}),
+            Chunk(id="doc_10", owner_id=owner_id, content="Rust provides memory safety without garbage collection", metadata={"topic": "rust"}),
         ]
         print(f" Created {len(test_chunks)} test chunks")
         
@@ -75,7 +83,7 @@ def test_soft_delete_with_retrieval():
         # 3. Test retrieval before deletion
         print("\n3. Testing retrieval BEFORE soft-delete...")
         query = "Tell me about Python programming"
-        results_before = retriever.invoke(query)
+        results_before = retriever.invoke(query, owner_id=owner_id)
         print(f"   Query: '{query}'")
         print(f"   Retrieved {len(results_before)} chunks:")
         for i, chunk in enumerate(results_before, 1):
@@ -92,7 +100,7 @@ def test_soft_delete_with_retrieval():
         print(f"   Deleting chunks: {ids_to_delete}")
         
         # Get the vector database from retriever
-        index = retriever.get_index()
+        index = retriever._index
         result = index.delete_index(ids_to_delete)
         assert result == True, "Soft-delete should succeed"
         print(f" Soft-deleted {len(ids_to_delete)} chunks")
@@ -109,7 +117,7 @@ def test_soft_delete_with_retrieval():
         
         # 5. Test retrieval after deletion
         print("\n5. Testing retrieval AFTER soft-delete...")
-        results_after = retriever.invoke(query)
+        results_after = retriever.invoke(query, owner_id=owner_id)
         print(f"   Query: '{query}'")
         print(f"   Retrieved {len(results_after)} chunks:")
         for i, chunk in enumerate(results_after, 1):
@@ -130,7 +138,7 @@ def test_soft_delete_with_retrieval():
         # 6. Test with different query
         print("\n6. Testing with different query...")
         query2 = "What is Java used for?"
-        results_java = retriever.invoke(query2)
+        results_java = retriever.invoke(query2, owner_id=owner_id)
         print(f"   Query: '{query2}'")
         print(f"   Retrieved {len(results_java)} chunks:")
         for i, chunk in enumerate(results_java, 1):
@@ -151,7 +159,7 @@ def test_soft_delete_with_retrieval():
         )
         retriever_mmr = dense_config_mmr.build()
         
-        results_mmr = retriever_mmr.invoke(query, search_type="mmr")
+        results_mmr = retriever_mmr.invoke(query, search_type="mmr", owner_id=owner_id)
         print(f"   Query: '{query}'")
         print(f"   Retrieved {len(results_mmr)} chunks (MMR):")
         for i, chunk in enumerate(results_mmr, 1):
@@ -172,7 +180,7 @@ def test_soft_delete_with_retrieval():
         )
         retriever_new = dense_config_new.build()
         
-        results_reloaded = retriever_new.invoke(query)
+        results_reloaded = retriever_new.invoke(query, owner_id=owner_id)
         print(f"   Query: '{query}'")
         print(f"   Retrieved {len(results_reloaded)} chunks after reload:")
         for i, chunk in enumerate(results_reloaded, 1):
@@ -187,7 +195,7 @@ def test_soft_delete_with_retrieval():
         
         # 9. Test compact_index
         print("\n9. Testing compact_index...")
-        index_new = retriever_new.get_index()
+        index_new = retriever_new._index
         info_before_compact = index_new.get_vector_db_info()
         print(f"   Before compact: {info_before_compact['chunk_count']} active, {info_before_compact['deleted_chunks']} deleted, {info_before_compact['vector_count']} vectors")
         
@@ -237,4 +245,3 @@ def test_soft_delete_with_retrieval():
 
 if __name__ == "__main__":
     test_soft_delete_with_retrieval()
-

@@ -8,9 +8,15 @@ import tempfile
 import shutil
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+import pytest
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
+
+pytestmark = pytest.mark.skipif(
+    os.getenv("RUN_RAGARC_INTEGRATION_TESTS") != "1",
+    reason="Requires OpenAI/Qwen credentials and large models; set RUN_RAGARC_INTEGRATION_TESTS=1 to run.",
+)
 
 from core.retrieval.graph_retrieveal.graph_retrieval import GraphRetrieval
 from core.file_management.extractor.graphextractor import GraphExtractor
@@ -221,33 +227,39 @@ async def test_networkx_complete_pipeline():
         # Extract or create graph data
         extracted_docs = []
         if extraction_enabled:
-            # Real extraction using GraphExtractor with concurrent processing via __call__ method
-            logger.info(f"  Processing {len(documents)} documents concurrently using extractor(documents) (max_concurrent={configs['extractor_config'].max_concurrent})")
+            logger.info(
+                "  Processing %d documents concurrently using extractor(documents) (max_concurrent=%d)",
+                len(documents),
+                configs["extractor_config"].max_concurrent,
+            )
             try:
-                # Use extractor(documents) which internally calls extract_concurrent()
-                extracted_docs = extractor(documents)
+                extracted_docs = await extractor(documents)
 
-                # Log results for each document
                 for i, doc in enumerate(extracted_docs, 1):
                     if doc.graph and not doc.graph.is_empty():
-                        logger.info(f"  Document {i}/{len(extracted_docs)}: {doc.id}")
-                        logger.info(f"    Extracted {len(doc.graph.entities)} entities, {len(doc.graph.relations)} relations")
-
-                        # Show sample entities
+                        logger.info("  Document %d/%d: %s", i, len(extracted_docs), doc.id)
+                        logger.info(
+                            "    Extracted %d entities, %d relations",
+                            len(doc.graph.entities),
+                            len(doc.graph.relations),
+                        )
                         if doc.graph.entities:
-                            sample_entities = doc.graph.entities[:2]
-                            for entity in sample_entities:
-                                entity_name = entity.get('entity_name', entity.get('name', 'Unknown'))
-                                entity_type = entity.get('entity_type', entity.get('type', 'Unknown'))
-                                logger.info(f"      Entity: {entity_name} ({entity_type})")
+                            for entity in doc.graph.entities[:2]:
+                                entity_name = entity.get("entity_name", entity.get("name", "Unknown"))
+                                entity_type = entity.get("entity_type", entity.get("type", "Unknown"))
+                                logger.info("      Entity: %s (%s)", entity_name, entity_type)
                     else:
-                        logger.warning(f"  Document {i}/{len(extracted_docs)}: {doc.id} - No graph data extracted")
-
-            except Exception as e:
-                logger.error(f"    ✗ Failed to extract from documents: {e}")
+                        logger.warning(
+                            "  Document %d/%d: %s - No graph data extracted",
+                            i,
+                            len(extracted_docs),
+                            doc.id,
+                        )
+            except Exception as e:  # noqa: BLE001
+                logger.error("    ✗ Failed to extract from documents: %s", e)
                 raise
         else:
-            raise Exception("GraphExtractor not available")
+            raise RuntimeError("GraphExtractor not available")
         
         phase_times["extraction"] = time.time() - start_time
         logger.info(f"Data extraction completed in {phase_times['extraction']:.2f}s")

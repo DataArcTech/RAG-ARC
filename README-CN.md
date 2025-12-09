@@ -230,6 +230,35 @@ cp .env.example .env
 # 编辑.env以配置您的设置
 ```
 
+### 🔐 可选：管理员视角
+
+部分管理型 API（如导出所有租户的图数据）需要管理员身份才能调用。启用方法：
+
+1. 创建或挑选一个用户作为超级管理员。
+2. 在环境变量或 `.env` 中设置 `ADMIN_OWNER_ID=<该用户的UUID>`，例如：
+   ```bash
+   export ADMIN_OWNER_ID=00000000-0000-0000-0000-00000000ABCD
+   ```
+3. 重启 FastAPI 服务，使配置生效。
+
+完成后，使用该管理员账号发起请求即可在 `/rag_inference/chat`、`/rag_inference/graph_overview` 等接口中传入 `include_all_owners=true` 或 `target_owner_id=<UUID>`，实现跨租户的数据巡检；普通用户依旧只能访问自己的数据。
+
+> 管理员请求会先执行完整的 multipath 流程（dense/BM25 在 `owner_id=None` 下可访问所有 chunk），若全部检索器仍返回空结果，再自动回退到图检索以输出全局子图。
+
+#### 🧪 集成测试相关环境变量
+
+某些测试需要真实数据库、Redis 或 Faiss/Qwen 模型支撑，可在 `.env` 中按需设置以下开关：
+
+| 变量 | 作用 |
+| --- | --- |
+| `RUN_RAGARC_INTEGRATION_TESTS=1` | 启用依赖 GPU/大模型的综合测试，例如 NetworkX 图流程、OCR、用户隔离 E2E。 |
+| `RUN_RAGARC_POSTGRES_TESTS=1` | 允许执行 PostgreSQL 集成测试（`test/encapsulation/database/relational_db`）。 |
+| `RUN_RAGARC_CHAT_STORAGE_TESTS=1` | 打开同时访问 PostgreSQL + Redis 的聊天存储测试。 |
+| `RUN_RAGARC_VECTOR_TESTS=1` | 启用 Faiss/Qwen 软删除相关测试。 |
+| `RAGARC_E2E_TOKEN=<JWT>` | 提供给 `test/test_complete_e2e_api.py` 用的 Bearer Token，用于调用 FastAPI 接口。 |
+
+默认留空（或 0）即跳过这些测试；只有在对应服务已经部署并且希望运行完整集成用例时，才需要设置为 `1`。
+
 ### ⚙️ 配置
 
 RAG-ARC使用模块化配置系统。关键配置文件位于`config/json_configs/`,在这里，你可以控制选择每个模型使用的显卡，业务流程中使用的模型等不同的参数：
@@ -311,6 +340,8 @@ uv run rag-arc export-graph --output graph.json
 ```
 
 CLI 仍会连接 `.env` 中配置的 PostgreSQL / Redis / Neo4j / MinIO 等基础服务，因此虽然不用启动 `rag-arc-app` 容器，但这些依赖必须保持可用。
+
+> ⚠️ 删除提示：`uv run rag-arc delete-file FILE_ID` **仅会把文件状态标记为 `DELETED`**，方便本地快速验证检索隔离，不会执行索引、向量库、图谱或 Blob 的真正清理。若需完整的后台删除流程，请调用 HTTP API `DELETE /knowledge/{file_id}`；CLI 不再支持触发全量清理。
 
 > 📚 更详细的命令说明（单文件导入、文件管理、触发索引、图导出等）见 `cli/README-CN.md`。
 

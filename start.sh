@@ -328,6 +328,7 @@ start_app() {
     RUN_CMD="docker run -d \
         --name rag-arc-app \
         --network rag-arc-network \
+        --user ${HOST_UID}:${HOST_GID} \
         -p ${PORT}:8000 \
         -e POSTGRES_HOST=rag-arc-postgres \
         -e POSTGRES_PORT=5432 \

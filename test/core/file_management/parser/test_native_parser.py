@@ -4,7 +4,7 @@ Test for Native Parser - testing all supported document formats
 
 import os
 import asyncio
-from core.file_management.parser.native import NativeParserConfig
+from config.core.file_management.parser.native import NativeParserConfig
 
 
 def main():
