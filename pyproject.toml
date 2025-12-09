@@ -45,7 +45,7 @@ dependencies = [
 
     # Graph databases
     "networkx>=3.5",
-    "igraph>=0.11.0",
+    "python-igraph>=0.11.0",
     "neo4j>=5.15.0",
     "hnswlib>=0.7.0",
 
@@ -54,8 +54,9 @@ dependencies = [
     "psycopg>=3.2.10",
     "psycopg2-binary>=2.9.0",
 
-    # Cache and messaging
+    # Cache and messaging / storage
     "redis>=6.4.0",
+    "minio>=7.2.7",
 
     # Authentication
     "passlib>=1.7.4",
