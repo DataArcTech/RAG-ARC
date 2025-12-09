@@ -311,6 +311,8 @@ uv run rag-arc export-graph --output graph.json
 
 The CLI still connects to the same PostgreSQL/Redis/Neo4j/MinIO services defined in `.env`, so ensure those dependencies are reachable even though the `rag-arc-app` container is not started.
 
+> ⚠️ Deletion note: `uv run rag-arc delete-file FILE_ID` **only marks the file status as `DELETED`** to support quick UI/retrieval isolation tests. It does not trigger any chunk/index/blob cleanup. For the full asynchronous deletion pipeline (indexes, vector stores, graph, blobs), call the HTTP API `DELETE /knowledge/{file_id}`; the CLI no longer schedules full cleanup jobs.
+
 > 📚 See `cli/README.md` for the full command reference (ingest-file/folder, list/delete, trigger-index, export-graph, chat/pipeline/graph-qa).
 
 ### 🧪 Example Usage

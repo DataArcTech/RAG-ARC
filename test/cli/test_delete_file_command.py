@@ -13,10 +13,6 @@ class _StubKnowledge:
         self.calls.append(("mark", file_id, owner_id))
         return {"status": "marked"}
 
-    async def delete_file(self, file_id: str, owner_id: uuid.UUID):
-        self.calls.append(("full", file_id, owner_id))
-        return {"status": "deleting"}
-
 
 def _fake_ctx() -> CLIContext:
     return CLIContext(owner_id=uuid.uuid4())
@@ -36,17 +32,3 @@ def test_cli_delete_file_marks_only(monkeypatch):
     assert stub.calls[0][0] == "mark"
     assert stub.calls[0][1] == "file-123"
     assert "marked as deleted" in result.stdout
-
-
-def test_cli_delete_file_full_cleanup(monkeypatch):
-    runner = CliRunner()
-    stub = _StubKnowledge()
-
-    monkeypatch.setattr(rag, "_get_knowledge_module", lambda: stub)
-    monkeypatch.setattr(rag, "initialize", lambda owner_id=None: _fake_ctx())
-
-    result = runner.invoke(rag.app, ["delete-file", "file-abc", "--full"])
-
-    assert result.exit_code == 0
-    assert stub.calls[0][0] == "full"
-    assert "Deletion scheduled" in result.stdout

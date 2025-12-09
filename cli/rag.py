@@ -305,21 +305,11 @@ def list_files(
 def delete_file(
     file_id: str = typer.Argument(..., help="File ID to delete."),
     owner_id: str = typer.Option(None, help="Optional owner UUID overriding default."),
-    full_cleanup: bool = typer.Option(
-        False,
-        "--full/--mark-only",
-        help="Run the full asynchronous cleanup pipeline instead of metadata-only marking.",
-    ),
 ) -> None:
-    """Delete a file and all derived artifacts."""
+    """Soft delete a file for CLI testing (metadata-only)."""
     ctx = initialize(owner_id=owner_id)
     knowledge = _get_knowledge_module()
     try:
-        if full_cleanup:
-            result = asyncio.run(knowledge.delete_file(file_id, ctx.owner_id))
-            status_msg = result.get("status") if isinstance(result, dict) else "deleting"
-            typer.echo(f"Deletion scheduled for {file_id} (status: {status_msg}).")
-            return
         result = asyncio.run(knowledge.mark_file_deleted_cli(file_id, ctx.owner_id))
     except Exception as exc:  # noqa: BLE001
         typer.secho(f"Failed to delete file: {exc}", fg=typer.colors.RED)

@@ -327,6 +327,8 @@ uv run rag-arc export-graph --output graph.json
 
 CLI 仍会连接 `.env` 中配置的 PostgreSQL / Redis / Neo4j / MinIO 等基础服务，因此虽然不用启动 `rag-arc-app` 容器，但这些依赖必须保持可用。
 
+> ⚠️ 删除提示：`uv run rag-arc delete-file FILE_ID` **仅会把文件状态标记为 `DELETED`**，方便本地快速验证检索隔离，不会执行索引、向量库、图谱或 Blob 的真正清理。若需完整的后台删除流程，请调用 HTTP API `DELETE /knowledge/{file_id}`；CLI 不再支持触发全量清理。
+
 > 📚 更详细的命令说明（单文件导入、文件管理、触发索引、图导出等）见 `cli/README-CN.md`。
 
 ### 🧪 使用示例

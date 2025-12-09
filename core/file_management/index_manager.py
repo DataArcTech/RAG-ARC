@@ -823,8 +823,9 @@ class IndexManager(AbstractModule):
                         if not res.get("success", False)
                     ]
                     logger.warning(f"Failed indexers: {failed_indexers}")
-                    # Store error but continue with metadata deletion
+                    # Abort further deletion to keep metadata for retry
                     result["error_message"] = error_msg
+                    return result
                 else:
                     logger.info("Successfully deleted chunks from all indexers")
             else:

@@ -16,14 +16,14 @@ CLI 提供从“文档接入 → 索引/建图 → 检索问答”的完整算�
 | 文档导入 | `uv run rag-arc ingest-file ./doc.pdf --owner-id <UUID>` | 上传并完成切分、索引、建图（单文件，推荐始终指定 `--owner-id`）。 |
 | 文档导入 | `uv run rag-arc ingest-folder ./docs --pattern '*.pdf' --owner-id <UUID>` | 按文件夹批量导入，默认递归子目录。 |
 | 知识管理 | `uv run rag-arc list-files --json --owner-id <UUID>` | 列出当前 Owner 下的文件，可按状态/分页过滤。 |
-| 知识管理 | `uv run rag-arc delete-file FILE_ID --owner-id <UUID>` | 默认仅将文件状态标记为删除（元数据操作），使用 `--full` 可触发完整清理。 |
+| 知识管理 | `uv run rag-arc delete-file FILE_ID --owner-id <UUID>` | 仅标记删除（元数据操作，不会清理索引/存储）。 |
 | 知识管理 | `uv run rag-arc trigger-index FILE_ID [FILE_ID ...] --owner-id <UUID>` | 对既有文件重新触发索引/建图。 |
 | 图工具 | `uv run rag-arc export-graph --output graph.json --owner-id <UUID>` | 导出完整图谱（Neo4j/igraph）到终端或 JSON 文件。 |
 | 检索问答 | `uv run rag-arc chat "什么是RAG-ARC？" --owner-id <UUID>` | 多路径检索 + 重排 + LLM 的完整对话。 |
 | 检索问答 | `uv run rag-arc pipeline "什么是RAG-ARC？" --skip-llm --subgraph --owner-id <UUID>` | 仅查看改写/检索/重排（可导出子图）。 |
 | 图问答 | `uv run rag-arc graph-qa "X和Y之间有什么关系?" --owner-id <UUID>` | 仅走图检索链路，并返回子图元数据。 |
 
-> 注意：CLI 的 `delete-file` 命令定位为轻量测试，默认只更新文件状态/元数据，不会执行耗时的索引、图谱清理。如需与 API 相同的完整异步删除流程，请添加 `--full` 选项。
+> 注意：CLI 的 `delete-file` 命令定位为轻量测试，仅更新文件状态/元数据，不会执行耗时的索引、向量、图谱和 Blob 清理。如需完整的后台删除流程，请调用 HTTP API `DELETE /knowledge/{file_id}`。
 
 强烈建议每次运行都显式传入 `--owner-id <UUID>`，以便复用同一租户/用户的数据。未指定时 CLI 会优先使用环境变量或缓存的默认 UUID，行为可能因机器而异。
 
