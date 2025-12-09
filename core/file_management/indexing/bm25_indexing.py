@@ -99,14 +99,11 @@ class BM25Indexer(BaseIndexer):
 
     async def update_index(self, chunks: List[Chunk]) -> List[str]:
         """
-        Adds chunks to the pending queue for batch processing.
+        Adds chunks to the pending queue and immediately flushes them.
 
-        This method is NON-BLOCKING - it adds chunks to the queue and returns immediately.
-        The actual indexing happens in the background flush worker.
-
-        Flush trigger strategies:
-        1. If pending chunks >= batch_size: trigger immediate flush (non-blocking)
-        2. Otherwise: wait for periodic flush
+        Legacy batch/interval knobs are still wired through the config for backward
+        compatibility, but the current deletion guarantees require us to block until
+        `_flush_pending_chunks` completes so callers know data is durable.
         """
         if not chunks:
             return []
