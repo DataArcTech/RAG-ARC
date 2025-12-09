@@ -13,6 +13,7 @@ import faiss
 from encapsulation.database.graph_db.base import GraphStore
 from encapsulation.data_model.schema import Chunk, GraphData
 from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id, text_processing
+from core.utils.path_guard import ensure_writable_dir
 from framework.shared_module_decorator import shared_module
 
 if TYPE_CHECKING:
@@ -102,7 +103,14 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         self.node_to_node_stats = defaultdict(float)  # (node_id, node_id) -> edge_weight
 
         # Storage configuration
-        self.storage_path = getattr(config, 'storage_path', './data/graph_index')
+        storage_path = getattr(config, 'storage_path', './data/graph_index')
+        fallback_storage = os.path.join(
+            os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime"),
+            "graph_index"
+        )
+        resolved_storage = ensure_writable_dir(storage_path, fallback_storage)
+        self.storage_path = resolved_storage
+        setattr(self.config, 'storage_path', resolved_storage)
         self.index_name = getattr(config, 'index_name', 'index')
 
         # Synonymy edge configuration

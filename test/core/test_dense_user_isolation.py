@@ -86,3 +86,9 @@ def test_mmr_search_filters_by_owner_before_fusion():
 
     assert chunks == [chunk_for_owner]
     assert captured_inputs == [[(chunk_for_owner, 0.9)]]
+
+
+def test_dense_retriever_rejects_missing_owner():
+    retriever = _make_dense_retriever()
+    chunks = retriever.similarity_search_by_vector(embedding=[0.0, 0.0], owner_id=None)
+    assert chunks == []

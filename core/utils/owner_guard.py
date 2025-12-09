@@ -38,3 +38,17 @@ def normalize_owner_id(owner_id: OwnerLike) -> Optional[str]:
         return str(uuid.UUID(str(owner_id)))
     except ValueError:
         return str(owner_id)
+
+
+def get_admin_owner_id() -> Optional[str]:
+    """Expose the normalized ADMIN_OWNER_ID value."""
+    return _read_admin_owner_id()
+
+
+def is_global_admin_scope(owner_id: OwnerLike) -> bool:
+    """Return True if the provided owner_id corresponds to ADMIN_OWNER_ID."""
+    admin_id = _read_admin_owner_id()
+    if not admin_id:
+        return False
+    normalized = normalize_owner_id(owner_id)
+    return normalized == admin_id

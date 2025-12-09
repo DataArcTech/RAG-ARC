@@ -62,6 +62,7 @@ class GraphExporterNeo4j:
         max_edges: int = 5000,
         include_node_types: Optional[List[str]] = None,
         owner_id: Optional[str] = None,
+        owner_scope_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Export complete graph for visualization
@@ -315,6 +316,8 @@ class GraphExporterNeo4j:
         # Build categories list from unique entity types
         categories = [{'name': cat} for cat in sorted(categories_set)]
 
+        scope_value = owner_scope_label if owner_scope_label is not None else owner_key
+
         return {
             'chunks': chunks,
             'nodes': nodes,  # Only entities
@@ -326,7 +329,7 @@ class GraphExporterNeo4j:
                 'exported_edges': len(edges),
                 'sampled': total_nodes > max_nodes,
                 'categories': categories,
-                'owner_scope': owner_key,
+                'owner_scope': scope_value,
             }
         }
     

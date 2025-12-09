@@ -305,16 +305,27 @@ def list_files(
 def delete_file(
     file_id: str = typer.Argument(..., help="File ID to delete."),
     owner_id: str = typer.Option(None, help="Optional owner UUID overriding default."),
+    full_cleanup: bool = typer.Option(
+        False,
+        "--full/--mark-only",
+        help="Run the full asynchronous cleanup pipeline instead of metadata-only marking.",
+    ),
 ) -> None:
     """Delete a file and all derived artifacts."""
     ctx = initialize(owner_id=owner_id)
     knowledge = _get_knowledge_module()
     try:
-        knowledge.delete_file(file_id, ctx.owner_id)
+        if full_cleanup:
+            result = asyncio.run(knowledge.delete_file(file_id, ctx.owner_id))
+            status_msg = result.get("status") if isinstance(result, dict) else "deleting"
+            typer.echo(f"Deletion scheduled for {file_id} (status: {status_msg}).")
+            return
+        result = asyncio.run(knowledge.mark_file_deleted_cli(file_id, ctx.owner_id))
     except Exception as exc:  # noqa: BLE001
         typer.secho(f"Failed to delete file: {exc}", fg=typer.colors.RED)
         raise typer.Exit(code=1)
-    typer.echo(f"Deleted file {file_id} successfully.")
+    status_msg = result.get("status") if isinstance(result, dict) else "marked"
+    typer.echo(f"File {file_id} marked as deleted (status: {status_msg}).")
 
 
 @app.command("trigger-index")
@@ -365,11 +376,14 @@ def export_graph(
     else:
         from encapsulation.database.utils.graph_export_utils import GraphExporter
 
+    scope = str(ctx.owner_id) if ctx.owner_id else None
     graph_data = GraphExporter.export_full_graph(
         graph_store=graph_store,
         max_nodes=max_nodes,
         max_edges=max_edges,
         include_node_types=include_node_types,
+        owner_id=scope,
+        owner_scope_label=scope or "GLOBAL_ADMIN",
     )
 
     json_payload = json.dumps(graph_data, ensure_ascii=False, indent=2)

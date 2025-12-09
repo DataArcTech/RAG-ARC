@@ -882,9 +882,11 @@ class IndexManager(AbstractModule):
 
             logger.info(f"Successfully deleted {len(result['deleted_parsed_content_ids'])}/{len(parsed_content_list)} parsed content blobs")
 
-            # Success!
-            result["success"] = True
-            logger.info(f"Successfully completed deletion pipeline for file_id: {file_id}")
+            if result["error_message"]:
+                logger.warning(f"Deletion pipeline for file_id {file_id} completed with errors: {result['error_message']}")
+            else:
+                result["success"] = True
+                logger.info(f"Successfully completed deletion pipeline for file_id: {file_id}")
 
         except Exception as e:
             error_msg = f"Deletion pipeline failed for file_id {file_id}: {str(e)}"

@@ -12,6 +12,7 @@ import neo4j
 from encapsulation.database.graph_db.base import GraphStore
 from encapsulation.data_model.schema import Chunk, GraphData
 from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id, text_processing
+from core.utils.path_guard import ensure_writable_dir
 from framework.shared_module_decorator import shared_module
 
 if TYPE_CHECKING:
@@ -107,6 +108,16 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         # (Neo4j doesn't use SQLite conn, but base class expects it)
         self.conn = None
 
+        # Ensure storage path is writable
+        storage_path = getattr(config, 'storage_path', './data/graph_index_neo4j')
+        fallback_storage = os.path.join(
+            os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime"),
+            "graph_index_neo4j"
+        )
+        resolved_storage = ensure_writable_dir(storage_path, fallback_storage)
+        self.storage_path = resolved_storage
+        setattr(self.config, 'storage_path', resolved_storage)
+
         # Initialize Neo4j schema (constraints and indices)
         self._init_neo4j_schema()
 
@@ -132,8 +143,6 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         # Cache version counter - incremented on any modification (add/delete)
         self._cache_version: int = 0
 
-        # Storage configuration
-        self.storage_path = getattr(config, 'storage_path', './data/graph_index_neo4j')
         self.index_name = getattr(config, 'index_name', 'index')
 
         # Synonymy edge configuration
@@ -822,28 +831,44 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         Returns:
             List of (neighbor_id, weight) tuples
         """
-        owner_key = self._owner_key(owner_id)
+        all_owners = owner_id is None
+        owner_key = None if all_owners else self._owner_key(owner_id)
 
         if self._cache_loaded and self._graph_cache is not None:
+            if all_owners:
+                aggregated = []
+                for shard in self._graph_cache.values():
+                    aggregated.extend(shard.get(node_id, []))
+                return aggregated
             owner_neighbors = self._graph_cache.get(owner_key, {})
             return list(owner_neighbors.get(node_id, []))
 
         # Optimized query: use single MATCH with OR condition
-        query = """
-        MATCH (n)-[r]-(neighbor)
-        WHERE (n.chunk_id = $node_id OR n.entity_id = $node_id)
-          AND COALESCE(n.owner_id, $global_owner) = $owner_id
-          AND COALESCE(neighbor.owner_id, $global_owner) = $owner_id
-          AND COALESCE(r.owner_id, $global_owner) = $owner_id
-        RETURN COALESCE(neighbor.chunk_id, neighbor.entity_id) AS neighbor_id,
-               COALESCE(r.weight, r.similarity, 1.0) AS weight
-        """
+        if all_owners:
+            query = """
+            MATCH (n)-[r]-(neighbor)
+            WHERE (n.chunk_id = $node_id OR n.entity_id = $node_id)
+            RETURN COALESCE(neighbor.chunk_id, neighbor.entity_id) AS neighbor_id,
+                   COALESCE(r.weight, r.similarity, 1.0) AS weight
+            """
+            params = {'node_id': node_id}
+        else:
+            query = """
+            MATCH (n)-[r]-(neighbor)
+            WHERE (n.chunk_id = $node_id OR n.entity_id = $node_id)
+              AND COALESCE(n.owner_id, $global_owner) = $owner_id
+              AND COALESCE(neighbor.owner_id, $global_owner) = $owner_id
+              AND COALESCE(r.owner_id, $global_owner) = $owner_id
+            RETURN COALESCE(neighbor.chunk_id, neighbor.entity_id) AS neighbor_id,
+                   COALESCE(r.weight, r.similarity, 1.0) AS weight
+            """
+            params = {
+                'node_id': node_id,
+                'owner_id': owner_key,
+                'global_owner': self.OWNER_GLOBAL_KEY
+            }
 
-        results = self._execute_query(query, {
-            'node_id': node_id,
-            'owner_id': owner_key,
-            'global_owner': self.OWNER_GLOBAL_KEY
-        })
+        results = self._execute_query(query, params)
 
         neighbors = []
         for record in results:
@@ -902,6 +927,12 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             logger.warning("Entity chunk count cache not built, returning 0")
             return 0
 
+        if owner_id is None:
+            total = 0
+            for owner_counts in self._entity_chunk_count_cache.values():
+                total += owner_counts.get(entity_id, 0)
+            return total
+
         owner_key = self._owner_key(owner_id)
         owner_counts = self._entity_chunk_count_cache.get(owner_key, {})
         return owner_counts.get(entity_id, 0)
@@ -919,6 +950,13 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         if self._entity_chunk_count_cache is None:
             logger.warning("Entity chunk count cache not built, returning empty dict")
             return {}
+
+        if owner_id is None:
+            aggregated: Dict[str, int] = {eid: 0 for eid in entity_ids}
+            for owner_counts in self._entity_chunk_count_cache.values():
+                for eid in entity_ids:
+                    aggregated[eid] += owner_counts.get(eid, 0)
+            return aggregated
 
         owner_key = self._owner_key(owner_id)
         owner_counts = self._entity_chunk_count_cache.get(owner_key, {})
@@ -1050,34 +1088,53 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         if not node_ids:
             return {}
 
-        owner_key = self._owner_key(owner_id)
+        all_owners = owner_id is None
+        owner_key = None if all_owners else self._owner_key(owner_id)
 
         # Use cache if loaded
         if self._cache_loaded and self._graph_cache is not None:
-            owner_neighbors = self._graph_cache.get(owner_key, {})
-            neighbors_map = {}
-            for nid in node_ids:
-                neighbors_map[nid] = owner_neighbors.get(nid, [])
+            neighbors_map = {nid: [] for nid in node_ids}
+            if all_owners:
+                for shard in self._graph_cache.values():
+                    for nid in node_ids:
+                        if nid in shard:
+                            neighbors_map[nid].extend(shard.get(nid, []))
+            else:
+                owner_neighbors = self._graph_cache.get(owner_key, {})
+                for nid in node_ids:
+                    neighbors_map[nid] = owner_neighbors.get(nid, [])
             return neighbors_map
 
         # Fallback to Neo4j query
-        query = """
-        UNWIND $node_ids AS nid
-        MATCH (n)-[r]-(neighbor)
-        WHERE (n.chunk_id = nid OR n.entity_id = nid)
-          AND COALESCE(n.owner_id, $global_owner) = $owner_id
-          AND COALESCE(neighbor.owner_id, $global_owner) = $owner_id
-          AND COALESCE(r.owner_id, $global_owner) = $owner_id
-        RETURN nid AS node_id,
-               COALESCE(neighbor.chunk_id, neighbor.entity_id) AS neighbor_id,
-               COALESCE(r.weight, r.similarity, 1.0) AS weight
-        """
+        if all_owners:
+            query = """
+            UNWIND $node_ids AS nid
+            MATCH (n)-[r]-(neighbor)
+            WHERE (n.chunk_id = nid OR n.entity_id = nid)
+            RETURN nid AS node_id,
+                   COALESCE(neighbor.chunk_id, neighbor.entity_id) AS neighbor_id,
+                   COALESCE(r.weight, r.similarity, 1.0) AS weight
+            """
+            params = {'node_ids': node_ids}
+        else:
+            query = """
+            UNWIND $node_ids AS nid
+            MATCH (n)-[r]-(neighbor)
+            WHERE (n.chunk_id = nid OR n.entity_id = nid)
+              AND COALESCE(n.owner_id, $global_owner) = $owner_id
+              AND COALESCE(neighbor.owner_id, $global_owner) = $owner_id
+              AND COALESCE(r.owner_id, $global_owner) = $owner_id
+            RETURN nid AS node_id,
+                   COALESCE(neighbor.chunk_id, neighbor.entity_id) AS neighbor_id,
+                   COALESCE(r.weight, r.similarity, 1.0) AS weight
+            """
+            params = {
+                'node_ids': node_ids,
+                'owner_id': owner_key,
+                'global_owner': self.OWNER_GLOBAL_KEY
+            }
 
-        results = self._execute_query(query, {
-            'node_ids': node_ids,
-            'owner_id': owner_key,
-            'global_owner': self.OWNER_GLOBAL_KEY
-        })
+        results = self._execute_query(query, params)
 
         # Group by node_id
         neighbors_map = {nid: [] for nid in node_ids}
@@ -1111,8 +1168,14 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             logger.error("Graph cache not loaded, cannot extract subgraph")
             return ig.Graph(directed=False), {}, {}
 
-        owner_key = self._owner_key(owner_id)
-        owner_cache = self._graph_cache.get(owner_key, {})
+        if owner_id is None:
+            owner_cache: Dict[str, List[Tuple[str, float]]] = {}
+            for shard in self._graph_cache.values():
+                for node_id, neighbors in shard.items():
+                    owner_cache.setdefault(node_id, []).extend(neighbors)
+        else:
+            owner_key = self._owner_key(owner_id)
+            owner_cache = self._graph_cache.get(owner_key, {})
 
         logger.info(f"Extracting subgraph with {len(subgraph_node_ids)} nodes from cache...")
 
@@ -1175,8 +1238,14 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
 
         from encapsulation.database.utils.ppr_push import extract_subgraph_adjacency, ppr_push
 
-        owner_key = self._owner_key(owner_id)
-        owner_cache = self._graph_cache.get(owner_key, {})
+        if owner_id is None:
+            owner_cache: Dict[str, List[Tuple[str, float]]] = {}
+            for shard in self._graph_cache.values():
+                for node_id, neighbors in shard.items():
+                    owner_cache.setdefault(node_id, []).extend(neighbors)
+        else:
+            owner_key = self._owner_key(owner_id)
+            owner_cache = self._graph_cache.get(owner_key, {})
 
         # Extract subgraph adjacency from cache
         subgraph_adj = extract_subgraph_adjacency(owner_cache, subgraph_nodes)

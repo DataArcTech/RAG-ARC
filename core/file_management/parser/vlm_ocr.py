@@ -13,6 +13,7 @@ load_dotenv()
 
 from .base import AbstractParser
 from framework.singleton_decorator import singleton
+from core.utils.path_guard import ensure_writable_dir
 
 # Import only necessary utilities
 from .dots_ocr_utils.consts import image_extensions
@@ -75,7 +76,9 @@ class VLMOcrParser(AbstractParser):
 
         # Get output directory from environment variable
         output_dir = os.getenv('VLMOCR_OUTPUT_DIR', './vlmocr/output')
-        output_dir = os.path.abspath(output_dir)
+        runtime_root = os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime")
+        fallback_dir = os.path.join(runtime_root, "vlmocr_output")
+        output_dir = ensure_writable_dir(os.path.abspath(output_dir), fallback_dir)
         save_dir = os.path.join(output_dir, base_filename)
         os.makedirs(save_dir, exist_ok=True)
 
@@ -223,6 +226,5 @@ class VLMOcrParser(AbstractParser):
             cleaned = cleaned[:-3].rstrip('\n')
 
         return cleaned
-
 
 

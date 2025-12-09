@@ -15,6 +15,7 @@ import jieba
 from encapsulation.data_model.schema import Chunk
 from encapsulation.database.utils.TokenizerManager import TokenizerManager
 from framework.shared_module_decorator import shared_module
+from core.utils.path_guard import ensure_writable_dir
 
 try:
     from tantivy import (
@@ -64,6 +65,9 @@ class BM25IndexBuilder():
             config: BM25IndexBuilderConfig instance
         """
         self.config = config
+        runtime_root = os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime")
+        fallback = os.path.join(runtime_root, os.path.basename(self.config.index_path) or "bm25_index")
+        self.config.index_path = ensure_writable_dir(self.config.index_path, fallback)
 
         # Runtime instance variables (initialized when needed)
         self._index: Optional[Index] = None

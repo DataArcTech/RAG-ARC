@@ -110,7 +110,7 @@ async def download_file(file_id: str, user: Annotated[User | None, Depends(get_c
         )
 
 
-@router.delete("/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{file_id}", status_code=status.HTTP_202_ACCEPTED)
 async def delete_file(file_id: str, user: Annotated[User | None, Depends(get_current_user)]):
     if user is None:
         raise HTTPException(
@@ -118,8 +118,8 @@ async def delete_file(file_id: str, user: Annotated[User | None, Depends(get_cur
             detail="Authentication required"
         )
     try:
-        knowledge_handler.delete_file(file_id, user.id)
-        return None
+        result = await knowledge_handler.delete_file(file_id, user.id)
+        return result
     except HTTPException:
         # surface 404s and 403s if thrown by storage layer
         raise
@@ -326,11 +326,14 @@ def export_knowledge_graph(
             from encapsulation.database.utils.graph_export_utils import GraphExporter
 
         # Export full graph
+        scope = str(user.id)
         graph_data = GraphExporter.export_full_graph(
             graph_store=graph_store,
             max_nodes=request.max_nodes,
             max_edges=request.max_edges,
-            include_node_types=request.include_node_types
+            include_node_types=request.include_node_types,
+            owner_id=scope,
+            owner_scope_label=scope,
         )
 
         return graph_data

@@ -62,6 +62,7 @@ class GraphExporter:
         max_edges: int = 5000,
         include_node_types: Optional[List[str]] = None,
         owner_id: Optional[str] = None,
+        owner_scope_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Export complete graph for visualization
@@ -324,6 +325,8 @@ class GraphExporter:
         # Build categories list from unique entity types
         categories = [{'name': cat} for cat in sorted(categories_set)]
 
+        scope_value = owner_scope_label if owner_scope_label is not None else owner_filter
+
         return {
             'chunks': chunks,
             'nodes': nodes,  # Only entities
@@ -335,7 +338,7 @@ class GraphExporter:
                 'exported_edges': len(edges),
                 'sampled': total_nodes > max_nodes,
                 'categories': categories,
-                'owner_scope': owner_filter,
+                'owner_scope': scope_value,
             }
         }
     

@@ -167,13 +167,19 @@ def test_graph_cache_filters_neighbors_by_owner():
 
     neighbors_a = store.get_neighbors_with_weights('entity-a', owner_id=owner_a)
     neighbors_b = store.get_neighbors_with_weights('entity-a', owner_id=owner_b)
+    neighbors_global = store.get_neighbors_with_weights('entity-a', owner_id=None)
     assert neighbors_a == [('chunk-a', 0.9)]
     assert neighbors_b == [('chunk-b', 0.8)]
+    assert sorted(neighbors_global) == [('chunk-a', 0.9), ('chunk-b', 0.8)]
 
     # batch lookup only returns neighbors for supplied owner
     batch = store.get_batch_neighbors_with_weights(['entity-a', 'shared-node'], owner_id=owner_a)
     assert batch['entity-a'] == [('chunk-a', 0.9)]
     assert batch['shared-node'] == []
+
+    batch_global = store.get_batch_neighbors_with_weights(['entity-a', 'shared-node'], owner_id=None)
+    assert sorted(batch_global['entity-a']) == [('chunk-a', 0.9), ('chunk-b', 0.8)]
+    assert batch_global['shared-node'] == [('global-chunk', 0.7)]
 
 
 def test_fact_scores_filtered_by_owner_id():
@@ -202,7 +208,7 @@ def test_fact_scores_filtered_by_owner_id():
 
 
 def test_retriever_all_owner_mode(monkeypatch):
-    """Admin/global mode (owner_id=None) should fall back to dense retrieval without crashing."""
+    """Requests without owner_id should now return empty results."""
     monkeypatch.delenv("ADMIN_OWNER_ID", raising=False)
     retriever = object.__new__(PrunedHippoRAGRetriever)
     retriever.config = SimpleNamespace(
@@ -223,7 +229,7 @@ def test_retriever_all_owner_mode(monkeypatch):
     retriever._build_node_mappings = lambda owner_id=None: None
     retriever._get_fact_scores_faiss = lambda query, owner_id=None: (np.array([]), [])
     retriever._dense_passage_retrieval = lambda query, top_k, owner_id=None: ["dense-fallback"]
-    assert retriever.retrieve("test query", owner_id=None) == ["dense-fallback"]
+    assert retriever.retrieve("test query", owner_id=None) == []
 
 
 def test_admin_owner_detection(monkeypatch):
@@ -232,6 +238,32 @@ def test_admin_owner_detection(monkeypatch):
     monkeypatch.setenv("ADMIN_OWNER_ID", str(admin_id))
     assert is_admin_owner(admin_id) is True
     assert is_admin_owner(uuid.uuid4()) is False
+
+
+def test_retrieve_requires_owner_scope():
+    retriever = object.__new__(PrunedHippoRAGRetriever)
+    result = retriever.retrieve("test", owner_id=None)
+    assert result == []
+
+
+def test_extract_entity_ids_retains_owner_scope(monkeypatch):
+    monkeypatch.delenv("ADMIN_OWNER_ID", raising=False)
+    retriever = object.__new__(PrunedHippoRAGRetriever)
+    retriever.graph_store = SimpleNamespace(node_to_idx={
+        compute_mdhash_id("alpha", prefix='entity-', owner_id='owner-a'): 1,
+        compute_mdhash_id("alpha", prefix='entity-', owner_id='owner-b'): 2,
+        compute_mdhash_id("beta", prefix='entity-', owner_id='owner-a'): 3,
+        compute_mdhash_id("beta", prefix='entity-', owner_id='owner-b'): 4,
+    })
+
+    facts = [
+        ("Alpha", "related", "Beta", "owner-a"),
+        ("Alpha", "related", "Beta", "owner-b"),
+    ]
+
+    entity_ids = retriever._extract_entity_ids_from_facts(facts)
+    assert compute_mdhash_id("alpha", prefix='entity-', owner_id='owner-a') in entity_ids
+    assert compute_mdhash_id("alpha", prefix='entity-', owner_id='owner-b') in entity_ids
 
 def test_compute_ppr_push_uses_owner_specific_cache(monkeypatch):
     """Push-based PPR should only see the cache/shards for the requested owner."""
@@ -267,6 +299,9 @@ def test_compute_ppr_push_uses_owner_specific_cache(monkeypatch):
 
     store.compute_ppr_push({'node-a'}, {'node-a': 1.0}, owner_id=owner_b)
     assert captured_adjacencies[1] == store._graph_cache[store._owner_key(owner_b)]
+
+    store.compute_ppr_push({'node-a'}, {'node-a': 1.0}, owner_id=None)
+    assert captured_adjacencies[2]['node-a'] == [('node-b', 1.0), ('node-c', 1.0)]
 
 
 def test_convert_to_chunks_restores_owner_type():

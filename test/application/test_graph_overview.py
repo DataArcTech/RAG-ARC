@@ -41,6 +41,7 @@ def test_export_graph_overview_uses_neo4j_exporter():
     assert mock_export.call_count == 1
     _, kwargs = mock_export.call_args
     assert kwargs["owner_id"] == str(owner_id)
+    assert kwargs["owner_scope_label"] == str(owner_id)
     assert kwargs["max_nodes"] == 321
     assert kwargs["max_edges"] == 654
     assert kwargs["include_node_types"] == ["chunk", "entity"]
@@ -61,6 +62,7 @@ def test_export_graph_overview_falls_back_to_igraph_exporter():
     assert result is payload
     _, kwargs = mock_export.call_args
     assert kwargs["owner_id"] is None
+    assert kwargs["owner_scope_label"] == "GLOBAL_ADMIN"
     assert kwargs["max_nodes"] == 100
     assert kwargs["max_edges"] == 200
 

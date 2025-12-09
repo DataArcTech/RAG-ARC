@@ -9,7 +9,7 @@ from collections import defaultdict
 from encapsulation.data_model.schema import Chunk
 from core.retrieval.graph_retrieveal.base import BaseGraphRetriever
 from encapsulation.database.utils.pruned_hipporag_utils import normalize_entity_text, compute_entity_id
-from core.utils.owner_guard import is_admin_owner
+from core.utils.owner_guard import is_admin_owner, normalize_owner_id
 
 if TYPE_CHECKING:
     from config.core.retrieval.pruned_hipporag_config import PrunedHippoRAGRetrievalConfig
@@ -131,19 +131,27 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         """
         logger.info(f"Retrieving for query: {query} (owner_id={owner_id})")
 
-        if owner_id is not None and is_admin_owner(owner_id):
-            logger.info("Admin owner detected, retrieving across all owners")
-            owner_id = None
+        if owner_id is None:
+            logger.warning("Owner ID is required for graph retrieval; returning empty results")
+            return []
+
+        normalized_owner = normalize_owner_id(owner_id)
+        if normalized_owner is None:
+            logger.warning("Unable to normalize owner_id '%s'; returning empty results", owner_id)
+            return []
+
+        is_global_scope = is_admin_owner(owner_id)
+        owner_filter = None if is_global_scope else owner_id
 
         # Rebuild node mappings for the current owner
-        self._build_node_mappings(owner_id=owner_id)
+        self._build_node_mappings(owner_id=owner_filter)
 
         # Step 1: Retrieve relevant facts
-        query_fact_scores, fact_ids = self._get_fact_scores_faiss(query, owner_id=owner_id)
+        query_fact_scores, fact_ids = self._get_fact_scores_faiss(query, owner_id=owner_filter)
 
         if query_fact_scores is None or len(query_fact_scores) == 0:
             logger.warning("No facts found, falling back to dense retrieval")
-            return self._dense_passage_retrieval(query, top_k, owner_id=owner_id)
+            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter)
 
         # Step 2: Rerank facts (optional)
         if self.config.enable_llm_reranking and self.llm_client:
@@ -151,25 +159,25 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
                 query,
                 query_fact_scores,
                 fact_ids,
-                owner_id=owner_id
+                owner_id=owner_filter
             )
         else:
             link_top_k = self.config.fact_retrieval_top_k
             top_k_fact_indices = np.argsort(query_fact_scores)[-link_top_k:][::-1].tolist()
-            top_k_facts = self._get_facts_by_indices(top_k_fact_indices, fact_ids, owner_id=owner_id)
+            top_k_facts = self._get_facts_by_indices(top_k_fact_indices, fact_ids, owner_id=owner_filter)
 
         if not top_k_facts:
             logger.warning("No facts after reranking, falling back to dense retrieval")
-            return self._dense_passage_retrieval(query, top_k, owner_id=owner_id)
+            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter)
 
         logger.info(f"Selected {len(top_k_facts)} facts after LLM filtering")
 
         # Step 3: Extract seed entities from facts
-        seed_entity_ids = self._extract_entity_ids_from_facts(top_k_facts, owner_id=owner_id)
+        seed_entity_ids = self._extract_entity_ids_from_facts(top_k_facts)
 
         if not seed_entity_ids:
             logger.warning("No seed entities found, falling back to dense retrieval")
-            return self._dense_passage_retrieval(query, top_k, owner_id=owner_id)
+            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter)
 
         logger.info(f"Extracted {len(seed_entity_ids)} seed entities from {len(top_k_facts)} facts")
 
@@ -181,7 +189,7 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
                 top_k_facts,
                 query_fact_scores,
                 top_k_fact_indices,
-                owner_id=owner_id
+                owner_id=owner_filter
             )
             logger.info(f"[Query-Aware] Computed relevance scores for {len(entity_relevance_scores)} entities")
 
@@ -189,8 +197,8 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         subgraph_nodes, subgraph_chunk_ids = self._expand_subgraph(
             seed_entity_ids,
             entity_relevance_scores=entity_relevance_scores,
-            owner_id=owner_id
-        )
+                owner_id=owner_filter
+            )
 
         logger.info(f"Subgraph: {len(subgraph_nodes)} nodes, {len(subgraph_chunk_ids)} chunks")
 
@@ -201,11 +209,11 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
             top_k_facts,
             top_k_fact_indices,
             subgraph_nodes,
-            owner_id=owner_id
+            owner_id=owner_filter
         )
 
         # Step 7: Convert to Chunk objects
-        chunks = self._convert_to_chunks(sorted_doc_ids[:top_k], sorted_doc_scores[:top_k], owner_id=owner_id)
+        chunks = self._convert_to_chunks(sorted_doc_ids[:top_k], sorted_doc_scores[:top_k], owner_id=owner_filter)
 
         # Optionally attach subgraph information for visualization
         if return_subgraph_info and chunks:
@@ -339,7 +347,7 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         indices: List[int],
         fact_ids: List[str],
         owner_id: Optional[uuid.UUID] = None
-    ) -> List[Tuple]:
+    ) -> List[Tuple[str, str, str, Optional[str]]]:
         """
         Retrieve fact triples from database by their indices.
 
@@ -357,16 +365,16 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
             if idx < len(fact_ids):
                 fact_id = fact_ids[idx]
                 cursor.execute(
-                    "SELECT head, relation, tail FROM facts WHERE fact_id = ?",
+                    "SELECT head, relation, tail, owner_id FROM facts WHERE fact_id = ?",
                     (fact_id,)
                 )
                 row = cursor.fetchone()
                 if row:
-                    facts.append((row[0], row[1], row[2]))
+                    facts.append((row[0], row[1], row[2], row[3]))
 
         return facts
 
-    def _extract_entity_ids_from_facts(self, facts: List[Tuple], owner_id: Optional[uuid.UUID] = None) -> Set[str]:
+    def _extract_entity_ids_from_facts(self, facts: List[Tuple[str, str, str, Optional[str]]]) -> Set[str]:
         """
         Extract unique entity IDs from fact triples.
 
@@ -376,20 +384,16 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         Returns:
             Set of entity IDs appearing in the facts
         """
-        entity_ids = set()
-        cursor = self.graph_store.conn.cursor()
+        entity_ids: Set[str] = set()
 
-        # Build entity name to ID mapping
-        cursor.execute('SELECT entity_id, entity_name FROM entities')
-        entity_name_to_id = {name: eid for eid, name in cursor.fetchall()}
+        for head_name, _, tail_name, fact_owner in facts:
+            owner_scope = normalize_owner_id(fact_owner)
+            head_id = compute_entity_id(normalize_entity_text(head_name), owner_id=owner_scope)
+            tail_id = compute_entity_id(normalize_entity_text(tail_name), owner_id=owner_scope)
 
-        # Extract entities from fact heads and tails
-        for head_name, _, tail_name in facts:
-            head_id = entity_name_to_id.get(head_name)
-            tail_id = entity_name_to_id.get(tail_name)
-            if head_id:
+            if head_id in self.graph_store.node_to_idx:
                 entity_ids.add(head_id)
-            if tail_id:
+            if tail_id in self.graph_store.node_to_idx:
                 entity_ids.add(tail_id)
 
         return entity_ids
@@ -421,8 +425,9 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         entity_to_fact_scores = defaultdict(list)
 
         for fact_idx, fact in zip(top_k_fact_indices, top_k_facts):
-            head_id = compute_entity_id(normalize_entity_text(fact[0]))
-            tail_id = compute_entity_id(normalize_entity_text(fact[2]))
+            fact_owner = normalize_owner_id(fact[3])
+            head_id = compute_entity_id(normalize_entity_text(fact[0]), owner_id=fact_owner)
+            tail_id = compute_entity_id(normalize_entity_text(fact[2]), owner_id=fact_owner)
 
             fact_score = float(query_fact_scores[fact_idx]) if query_fact_scores.ndim > 0 else float(query_fact_scores)
 

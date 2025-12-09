@@ -24,7 +24,7 @@ from application.account.chat_session import ChatSessionManager
 from application.account.user import Account
 import uuid
 import logging
-from core.utils.owner_guard import is_admin_owner
+from core.utils.owner_guard import is_admin_owner, get_admin_owner_id
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -90,7 +90,19 @@ def chat(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only admin users can access all owners"
             )
-        effective_owner_id = None
+        admin_owner = get_admin_owner_id()
+        if admin_owner is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="ADMIN_OWNER_ID is not configured"
+            )
+        try:
+            effective_owner_id = uuid.UUID(admin_owner)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="ADMIN_OWNER_ID must be a valid UUID"
+            ) from exc
     elif request.target_owner_id:
         if not is_admin_owner(current_user.id):
             raise HTTPException(
@@ -251,7 +263,15 @@ async def websocket_endpoint(
                     return
                 effective_owner = target_owner_override
             if override_all:
-                effective_owner = None
+                admin_owner = get_admin_owner_id()
+                if admin_owner is None:
+                    await manager.disconnect(websocket, status.WS_1011_INTERNAL_ERROR)
+                    return
+                try:
+                    effective_owner = uuid.UUID(admin_owner)
+                except ValueError:
+                    await manager.disconnect(websocket, status.WS_1011_INTERNAL_ERROR)
+                    return
 
             assistant_response, chunks, subgraph_data = rag_inference_handler.chat(
                 history_text,

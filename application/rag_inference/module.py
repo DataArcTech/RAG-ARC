@@ -3,7 +3,8 @@ from typing import TYPE_CHECKING, Optional, Dict, Any, List
 import logging
 import uuid
 from framework.module import AbstractModule
-from core.utils.owner_guard import normalize_owner_id
+from core.utils.owner_guard import normalize_owner_id, is_admin_owner, get_admin_owner_id
+from framework.register import Register
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -11,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from config.application.rag_inference_config import RAGInferenceConfig
+    from application.knowledge.module import Knowledge
  
 class RAGInference(AbstractModule):
     def __init__(self, config: 'RAGInferenceConfig'):
@@ -38,6 +40,7 @@ class RAGInference(AbstractModule):
         logger.info("Building llm...")
         self.llm = self.config.llm_config.build()
         logger.info("LLM built successfully")
+        self._knowledge_module: Optional["Knowledge"] = None
 
     def chat(self, query: str, owner_id: uuid.UUID, return_subgraph: bool = False) -> tuple[str, list[Chunk], Optional[Dict[str, Any]]]:
         """
@@ -52,25 +55,27 @@ class RAGInference(AbstractModule):
             Tuple of (LLM response, chunks, subgraph_data)
             - subgraph_data is None if return_subgraph=False or retriever doesn't support it
         """
-        query = self.query_rewriter.rewrite_query(query)
+        rewritten_query = self.query_rewriter.rewrite_query(query)
 
         # Pass owner_id and return_subgraph_info to the configured retriever.
         chunks: list[Chunk] = self.retriever.invoke(
-            query,
+            rewritten_query,
             owner_id=owner_id,
             return_subgraph_info=return_subgraph
         )
 
         # Admin/global mode: if multipath returns nothing, fall back to the graph retriever.
-        if owner_id is None and not chunks and self.graph_retriever is not None:
+        if owner_id is not None and is_admin_owner(owner_id) and not chunks and self.graph_retriever is not None:
             logger.info("Admin/global mode: multipath returned 0 results, falling back to graph retriever")
             graph_chunks = self.graph_retriever.invoke(
-                query,
-                owner_id=None,
+                rewritten_query,
+                owner_id=owner_id,
                 return_subgraph_info=return_subgraph
             )
             if graph_chunks:
                 chunks = graph_chunks
+
+        chunks = self._filter_chunks_by_file_status(chunks)
 
         # Extract subgraph info BEFORE reranking (to avoid losing it after reordering)
         subgraph_info = None
@@ -81,7 +86,7 @@ class RAGInference(AbstractModule):
                     logger.info("Extracted subgraph info before reranking")
                     break
 
-        chunks = self.reranker.rerank(query, chunks)
+        chunks = self.reranker.rerank(rewritten_query, chunks)
 
         # Export subgraph data if subgraph_info is available
         subgraph_data = None
@@ -128,9 +133,9 @@ class RAGInference(AbstractModule):
         for i, chunk in enumerate(chunks):
             chunk_content = f"Chunk {i+1}:\n{chunk.content}"
             messages.append({"role": "user", "content": chunk_content})
-        messages.append({"role": "user", "content": f"Based on the above chunks, please answer question: {query}"})
+        messages.append({"role": "user", "content": f"Based on the above chunks, please answer question: {rewritten_query}"})
         logger.info(f"Invoked chat with query: {query} (owner_id={owner_id})")
-        logger.info(f"Query rewritten to: {self.query_rewriter.rewrite_query(query)}")
+        logger.info(f"Query rewritten to: {rewritten_query}")
         logger.info(f"Retrieved chunks: {[getattr(chunk, 'content', str(chunk)) for chunk in chunks]}")
         logger.info(f"Reranked chunks: {[getattr(chunk, 'content', str(chunk)) for chunk in chunks]}")
         logger.info(f"Prepared messages for LLM: {messages}")
@@ -163,6 +168,34 @@ class RAGInference(AbstractModule):
         """Expose the underlying graph store for CLI and admin APIs."""
         return self._locate_graph_store()
 
+    def _get_knowledge_module(self) -> Optional["Knowledge"]:
+        if self._knowledge_module is None:
+            try:
+                registrator = Register()
+                knowledge_module = registrator.get_object("knowledge")
+                self._knowledge_module = knowledge_module
+            except Exception as e:
+                logger.warning(f"Failed to locate knowledge module for file filtering: {e}")
+                self._knowledge_module = None
+        return self._knowledge_module
+
+    def _filter_chunks_by_file_status(self, chunks: List[Chunk]) -> List[Chunk]:
+        knowledge_module = self._get_knowledge_module()
+        if knowledge_module is None:
+            return chunks
+
+        filtered_chunks: List[Chunk] = []
+        for chunk in chunks:
+            file_id = None
+            if hasattr(chunk, "metadata") and chunk.metadata:
+                file_id = chunk.metadata.get("source_file_id")
+
+            if not file_id or knowledge_module.is_file_active(file_id):
+                filtered_chunks.append(chunk)
+        if len(filtered_chunks) != len(chunks):
+            logger.info(f"Filtered out {len(chunks) - len(filtered_chunks)} chunks from deleting files")
+        return filtered_chunks
+
     def export_graph_overview(
         self,
         owner_id: Optional[uuid.UUID],
@@ -187,6 +220,9 @@ class RAGInference(AbstractModule):
             raise RuntimeError("Graph store is not configured for the current retriever profile")
 
         normalized_owner = normalize_owner_id(owner_id) if owner_id is not None else None
+        owner_scope_label = normalized_owner
+        if owner_scope_label is None:
+            owner_scope_label = get_admin_owner_id() or "GLOBAL_ADMIN"
         graph_store_class_name = graph_store.__class__.__name__
 
         if graph_store_class_name == 'PrunedHippoRAGNeo4jStore':
@@ -200,6 +236,7 @@ class RAGInference(AbstractModule):
             max_edges=max_edges,
             include_node_types=include_node_types,
             owner_id=normalized_owner,
+            owner_scope_label=owner_scope_label,
         )
         logger.info(
             "Exported graph overview (owner_scope=%s) with %d nodes and %d edges",

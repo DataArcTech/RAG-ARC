@@ -4,7 +4,7 @@ import logging
 from core.retrieval.base import BaseRetriever
 from encapsulation.data_model.schema import Chunk
 from core.utils.retrieval_helper import RetrievalHelper
-from core.utils.owner_guard import normalize_owner_id
+from core.utils.owner_guard import normalize_owner_id, is_admin_owner
 
 if TYPE_CHECKING:
     from config.core.retrieval.dense_config import DenseRetrieverConfig
@@ -136,7 +136,18 @@ class DenseRetriever(BaseRetriever):
 
         # Extract owner_id for filtering
         owner_id = kwargs.pop('owner_id', None)
+        if owner_id is None:
+            logger.warning("Dense retrieval requires an owner_id; returning no results")
+            return []
+
         owner_key = normalize_owner_id(owner_id)
+        if owner_key is None:
+            logger.warning("owner_id '%s' could not be normalized; returning no results", owner_id)
+            return []
+
+        global_scope = is_admin_owner(owner_id)
+        if global_scope:
+            owner_key = None
 
         # Merge search parameters
         search_kwargs = {**self.config.search_kwargs, **kwargs}
@@ -202,7 +213,18 @@ class DenseRetriever(BaseRetriever):
 
         # Extract owner_id for filtering
         owner_id = kwargs.pop('owner_id', None)
+        if owner_id is None:
+            logger.warning("Dense retrieval requires an owner_id; returning no results")
+            return []
+
         owner_key = normalize_owner_id(owner_id)
+        if owner_key is None:
+            logger.warning("owner_id '%s' could not be normalized; returning no results", owner_id)
+            return []
+
+        global_scope = is_admin_owner(owner_id)
+        if global_scope:
+            owner_key = None
 
         # Merge search parameters
         search_kwargs = {**self.config.search_kwargs, **kwargs}

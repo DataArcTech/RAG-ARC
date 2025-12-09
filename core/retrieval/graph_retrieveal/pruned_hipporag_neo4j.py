@@ -6,7 +6,7 @@ from typing import List, Tuple, Set, Dict, TYPE_CHECKING, Optional, Union
 
 from encapsulation.data_model.schema import Chunk
 from core.retrieval.graph_retrieveal.pruned_hipporag import PrunedHippoRAGRetriever
-from core.utils.owner_guard import is_admin_owner
+from core.utils.owner_guard import is_admin_owner, normalize_owner_id
 
 if TYPE_CHECKING:
     from config.core.retrieval.pruned_hipporag_neo4j_config import PrunedHippoRAGNeo4jRetrievalConfig
@@ -625,19 +625,30 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
         """
         logger.info(f"Retrieving for query: {query} (owner_id={owner_id})")
 
-        if owner_id is not None and is_admin_owner(owner_id):
+        if owner_id is None:
+            logger.warning("Owner ID is required for graph retrieval; returning empty results")
+            return []
+
+        normalized_owner = normalize_owner_id(owner_id)
+        if normalized_owner is None:
+            logger.warning("Unable to normalize owner_id '%s'; returning empty results", owner_id)
+            return []
+
+        if is_admin_owner(owner_id):
             logger.info("Admin owner detected, retrieving across all owners")
-            owner_id = None
+            owner_filter = None
+        else:
+            owner_filter = owner_id
 
         # Rebuild node mappings for the current owner
-        self._build_node_mappings(owner_id=owner_id)
+        self._build_node_mappings(owner_id=owner_filter)
 
         # Step 1: Retrieve relevant facts
-        query_fact_scores, fact_ids = self._get_fact_scores_faiss(query, owner_id=owner_id)
+        query_fact_scores, fact_ids = self._get_fact_scores_faiss(query, owner_id=owner_filter)
 
         if query_fact_scores is None or len(query_fact_scores) == 0:
             logger.warning("No facts found, falling back to dense retrieval")
-            return self._dense_passage_retrieval(query, top_k, owner_id=owner_id)
+            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter)
 
         # Step 2: Rerank facts (optional)
         if self.config.enable_llm_reranking and self.llm_client:
@@ -645,25 +656,25 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
                 query,
                 query_fact_scores,
                 fact_ids,
-                owner_id=owner_id
+                owner_id=owner_filter
             )
         else:
             link_top_k = self.config.fact_retrieval_top_k
             top_k_fact_indices = np.argsort(query_fact_scores)[-link_top_k:][::-1].tolist()
-            top_k_facts = self._get_facts_by_indices(top_k_fact_indices, fact_ids, owner_id=owner_id)
+            top_k_facts = self._get_facts_by_indices(top_k_fact_indices, fact_ids, owner_id=owner_filter)
 
         if not top_k_facts:
             logger.warning("No facts after reranking, falling back to dense retrieval")
-            return self._dense_passage_retrieval(query, top_k, owner_id=owner_id)
+            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter)
 
         logger.info(f"Selected {len(top_k_facts)} facts after LLM filtering")
 
         # Step 3: Extract seed entities from facts
-        seed_entity_ids = self._extract_entity_ids_from_facts(top_k_facts, owner_id=owner_id)
+        seed_entity_ids = self._extract_entity_ids_from_facts(top_k_facts)
 
         if not seed_entity_ids:
             logger.warning("No seed entities found, falling back to dense retrieval")
-            return self._dense_passage_retrieval(query, top_k, owner_id=owner_id)
+            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter)
 
         logger.info(f"Extracted {len(seed_entity_ids)} seed entities from {len(top_k_facts)} facts")
 
@@ -675,7 +686,7 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
                 top_k_facts,
                 query_fact_scores,
                 top_k_fact_indices,
-                owner_id=owner_id
+                owner_id=owner_filter
             )
             logger.info(f"[Query-Aware] Computed relevance scores for {len(entity_relevance_scores)} entities")
 
@@ -683,8 +694,8 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
         subgraph_nodes, subgraph_chunk_ids = self._expand_subgraph(
             seed_entity_ids,
             entity_relevance_scores=entity_relevance_scores,
-            owner_id=owner_id
-        )
+                owner_id=owner_filter
+            )
 
         logger.info(f"Subgraph: {len(subgraph_nodes)} nodes, {len(subgraph_chunk_ids)} chunks")
 
@@ -695,11 +706,11 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
             top_k_facts,
             top_k_fact_indices,
             subgraph_nodes,
-            owner_id=owner_id
+            owner_id=owner_filter
         )
 
         # Step 7: Convert to Chunk objects
-        chunks = self._convert_to_chunks(sorted_doc_ids[:top_k], sorted_doc_scores[:top_k], owner_id=owner_id)
+        chunks = self._convert_to_chunks(sorted_doc_ids[:top_k], sorted_doc_scores[:top_k], owner_id=owner_filter)
 
         # Optionally attach subgraph information for visualization
         if return_subgraph_info and chunks:
@@ -838,7 +849,7 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
         indices: List[int],
         fact_ids: List[str],
         owner_id: Optional[uuid.UUID] = None
-    ) -> List[Tuple]:
+    ) -> List[Tuple[str, str, str, Optional[str]]]:
         """
         Retrieve fact triples from FAISS docstore (no database query needed).
 
@@ -850,7 +861,7 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
             List of fact triples (head, relation, tail)
         """
         import ast
-        facts = []
+        facts: List[Tuple[str, str, str, Optional[str]]] = []
         owner_str = self._owner_to_str(owner_id)
 
         for idx in indices:
@@ -860,36 +871,41 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
                 if fact_id in self.graph_store.fact_faiss_db.docstore:
                     chunk = self.graph_store.fact_faiss_db.docstore[fact_id]
 
-                    if owner_str:
-                        fact_owner = getattr(chunk, 'owner_id', None)
-                        if fact_owner is None and chunk.metadata:
-                            fact_owner = chunk.metadata.get('owner_id')
-                        if fact_owner is None or str(fact_owner) != owner_str:
-                            continue
+                    fact_owner = getattr(chunk, 'owner_id', None)
+                    if fact_owner is None and chunk.metadata:
+                        fact_owner = chunk.metadata.get('owner_id')
+
+                    if owner_str and str(fact_owner) != owner_str:
+                        continue
 
                     fact_content = chunk.content
+                    parsed_fact: Optional[Tuple[str, str, str]] = None
 
-                    # Handle different formats
                     if isinstance(fact_content, tuple) and len(fact_content) == 3:
-                        facts.append(fact_content)
+                        parsed_fact = (fact_content[0], fact_content[1], fact_content[2])
                     elif isinstance(fact_content, str):
                         # Try to parse as Python literal (tuple string representation)
                         try:
                             parsed = ast.literal_eval(fact_content)
                             if isinstance(parsed, tuple) and len(parsed) == 3:
-                                facts.append(parsed)
-                                continue
-                        except:
-                            pass
+                                parsed_fact = (parsed[0], parsed[1], parsed[2])
+                            else:
+                                parts = fact_content.split(' | ')
+                                if len(parts) == 3:
+                                    parsed_fact = (parts[0], parts[1], parts[2])
+                        except Exception:
+                            parts = fact_content.split(' | ')
+                            if len(parts) == 3:
+                                parsed_fact = (parts[0], parts[1], parts[2])
+                    elif isinstance(fact_content, (list, np.ndarray)) and len(fact_content) >= 3:
+                        parsed_fact = (fact_content[0], fact_content[1], fact_content[2])
 
-                        # Fallback: parse as "head | relation | tail"
-                        parts = fact_content.split(' | ')
-                        if len(parts) == 3:
-                            facts.append((parts[0], parts[1], parts[2]))
+                    if parsed_fact:
+                        facts.append((parsed_fact[0], parsed_fact[1], parsed_fact[2], fact_owner))
 
         return facts
 
-    def _extract_entity_ids_from_facts(self, facts: List[Tuple], owner_id: Optional[uuid.UUID] = None) -> Set[str]:
+    def _extract_entity_ids_from_facts(self, facts: List[Tuple[str, str, str, Optional[str]]]) -> Set[str]:
         """
         Extract unique entity IDs from fact triples using Neo4j.
 
@@ -902,10 +918,9 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
         from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id, text_processing
 
         entity_ids = set()
-        owner_str = self._owner_to_str(owner_id)
 
-        # Directly compute entity IDs from names (same as during indexing)
-        for head_name, _, tail_name in facts:
+        for head_name, _, tail_name, fact_owner in facts:
+            owner_str = self._owner_to_str(fact_owner)
             head_normalized = text_processing(head_name)
             tail_normalized = text_processing(tail_name)
             head_id = compute_mdhash_id(head_normalized, prefix='entity-', owner_id=owner_str)
@@ -979,16 +994,15 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
         from collections import defaultdict
         from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id, text_processing
 
-        owner_str = self._owner_to_str(owner_id)
-
         # Collect fact scores for each entity
         entity_to_fact_scores = defaultdict(list)
 
         for fact_idx, fact in zip(top_k_fact_indices, top_k_facts):
+            fact_owner = self._owner_to_str(fact[3])
             head_name = text_processing(fact[0])
             tail_name = text_processing(fact[2])
-            head_id = compute_mdhash_id(head_name, prefix='entity-', owner_id=owner_str)
-            tail_id = compute_mdhash_id(tail_name, prefix='entity-', owner_id=owner_str)
+            head_id = compute_mdhash_id(head_name, prefix='entity-', owner_id=fact_owner)
+            tail_id = compute_mdhash_id(tail_name, prefix='entity-', owner_id=fact_owner)
 
             fact_score = float(query_fact_scores[fact_idx]) if query_fact_scores.ndim > 0 else float(query_fact_scores)
 

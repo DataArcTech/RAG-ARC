@@ -36,6 +36,8 @@ class RAGInferenceCLIModule:
         return_subgraph: bool = False,
         skip_llm: bool = False,
     ) -> PipelineArtifacts:
+        if owner_id is None:
+            raise ValueError("owner_id is required for pipeline execution")
         return self._run_with_retriever(
             retriever=self._rag.retriever,
             query=query,
@@ -51,6 +53,8 @@ class RAGInferenceCLIModule:
         return_subgraph: bool = True,
         skip_llm: bool = False,
     ) -> PipelineArtifacts:
+        if owner_id is None:
+            raise ValueError("owner_id is required for graph pipeline execution")
         graph_retriever = self._get_graph_retriever()
         if graph_retriever is None:
             raise RuntimeError("Graph retriever is not configured in the current profile")

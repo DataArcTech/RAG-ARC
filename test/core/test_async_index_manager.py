@@ -46,6 +46,10 @@ TEST_FILES = {
 
 
 
+import pytest
+
+
+@pytest.mark.asyncio
 async def test_async_index_file():
     """Test the async index_file method with multiple file types"""
     logger.info("=== Testing Async index_file Method ===")
