@@ -109,6 +109,10 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
 
         # Entity chunk count cache (computed from graph cache)
         self._entity_chunk_count_cache: Optional[Dict[str, int]] = None
+        
+        # Cache version counter - incremented on any modification (add/delete)
+        # Retrievers can use this to detect when to refresh their caches
+        self._cache_version: int = 0
 
         # Storage configuration
         self.storage_path = getattr(config, 'storage_path', './data/graph_index_neo4j')
@@ -1154,20 +1158,6 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         else:
             logger.warning("No valid new chunk embeddings to append")
 
-    def clear_chunk_embeddings_cache(self) -> None:
-        """Remove cached chunk embeddings so they can be regenerated with the current embedding model."""
-        logger.warning("Clearing chunk embeddings cache")
-        self.chunk_embeddings = {}
-        self._chunk_embeddings_array = None
-        self._chunk_ids_list = None
-        embeddings_path = os.path.join(self.storage_path, f"{self.index_name}_chunk_embeddings.pkl")
-        try:
-            if os.path.exists(embeddings_path):
-                os.remove(embeddings_path)
-                logger.info("Removed cached chunk embeddings file: %s", embeddings_path)
-        except OSError as exc:
-            logger.warning("Failed to remove chunk embeddings file %s: %s", embeddings_path, exc)
-
     def _rebuild_chunk_embeddings_array(self):
         """
         Rebuild chunk embeddings array for dense passage retrieval.
@@ -1336,7 +1326,10 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             self._append_chunk_embeddings(new_chunk_ids)
             logger.info("Step 5 completed: Chunk embeddings appended")
 
-            logger.info("✅ Index update completed successfully (incremental)")
+            # Step 6: Increment cache version to notify retrievers
+            self._cache_version += 1
+            
+            logger.info(f"✅ Index update completed successfully (incremental, cache_version={self._cache_version})")
             return True
 
         except Exception as e:
@@ -1365,7 +1358,23 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         return self.delete_chunks(ids)
 
     def delete_chunks(self, chunk_ids: List[str]) -> bool:
-        """Delete chunks and clean up orphan nodes"""
+        """Delete chunks and clean up orphan nodes.
+        
+        This method:
+        1. Finds entities that will become orphans after chunk deletion
+        2. Finds facts (RELATES_TO relationships) involving orphan entities
+        3. Deletes orphan facts from FAISS (soft-delete)
+        4. Deletes orphan entities from FAISS (soft-delete)
+        5. Deletes orphan entities and their relationships from Neo4j
+        6. Deletes chunks from Neo4j
+        7. Updates in-memory caches (chunk_embeddings, graph_cache)
+        
+        Args:
+            chunk_ids: List of chunk IDs to delete
+            
+        Returns:
+            True if deletion was successful, False otherwise
+        """
         logger.info(f"Deleting {len(chunk_ids)} chunks...")
 
         try:
@@ -1378,50 +1387,45 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             WITH e, deleted_chunks, collect(DISTINCT all_c.chunk_id) AS all_chunks
             WHERE size(all_chunks) = size(deleted_chunks)
               AND all(dc IN deleted_chunks WHERE dc IN all_chunks)
-            RETURN e.entity_id AS entity_id
+            RETURN e.entity_id AS entity_id, e.entity_name AS entity_name
             """
 
             orphan_results = self._execute_query(orphan_query, {'chunk_ids': chunk_ids})
             orphan_entities = [record['entity_id'] for record in orphan_results]
+            orphan_entity_names = [record['entity_name'] for record in orphan_results]
 
+            orphan_fact_ids = []
+            
             # 2. Delete orphan entities and their facts
             if orphan_entities:
-                # Find facts involving orphan entities
+                # Find facts (RELATES_TO relationships) involving orphan entities
+                # Facts are stored as RELATES_TO relationships with fact_id property
                 fact_query = """
                 UNWIND $entity_ids AS entity_id
-                MATCH (e:Entity {entity_id: entity_id})
-                MATCH (f:Fact)
-                WHERE f.head = e.entity_name OR f.tail = e.entity_name
-                RETURN DISTINCT f.fact_id AS fact_id
+                MATCH (e:Entity {entity_id: entity_id})-[r:RELATES_TO]-()
+                RETURN DISTINCT r.fact_id AS fact_id
                 """
 
                 fact_results = self._execute_query(fact_query, {'entity_ids': orphan_entities})
-                orphan_fact_ids = [record['fact_id'] for record in fact_results]
+                orphan_fact_ids = [record['fact_id'] for record in fact_results if record['fact_id']]
 
-                # Delete facts from FAISS
+                # Delete facts from FAISS (soft-delete)
                 if orphan_fact_ids:
                     self.fact_faiss_db.delete_index(orphan_fact_ids)
-                    logger.info(f"Deleted {len(orphan_fact_ids)} orphan facts from FAISS")
+                    logger.info(f"Soft-deleted {len(orphan_fact_ids)} orphan facts from FAISS")
 
-                # Delete entities from FAISS
+                # Delete entities from FAISS (soft-delete)
                 self.entity_faiss_db.delete_index(orphan_entities)
-                logger.info(f"Deleted {len(orphan_entities)} orphan entities from FAISS")
+                logger.info(f"Soft-deleted {len(orphan_entities)} orphan entities from FAISS")
 
-                # Delete facts from Neo4j
-                delete_facts_query = """
-                UNWIND $fact_ids AS fact_id
-                MATCH (f:Fact {fact_id: fact_id})
-                DELETE f
-                """
-                self._execute_query(delete_facts_query, {'fact_ids': orphan_fact_ids})
-
-                # Delete entities from Neo4j
+                # Delete entities from Neo4j (DETACH DELETE removes all relationships including RELATES_TO)
                 delete_entities_query = """
                 UNWIND $entity_ids AS entity_id
                 MATCH (e:Entity {entity_id: entity_id})
                 DETACH DELETE e
                 """
                 self._execute_query(delete_entities_query, {'entity_ids': orphan_entities})
+                logger.info(f"Deleted {len(orphan_entities)} orphan entities from Neo4j")
 
             # 3. Delete chunks from Neo4j (DETACH DELETE removes all relationships)
             delete_chunks_query = """
@@ -1430,24 +1434,72 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             DETACH DELETE c
             """
             self._execute_query(delete_chunks_query, {'chunk_ids': chunk_ids})
+            logger.info(f"Deleted {len(chunk_ids)} chunks from Neo4j")
 
-            # 4. Delete from chunk_embeddings (not FAISS)
+            # 4. Delete from chunk_embeddings
             for chunk_id in chunk_ids:
                 if chunk_id in self.chunk_embeddings:
                     del self.chunk_embeddings[chunk_id]
 
-            # Mark array needs rebuild
+            # 5. Invalidate chunk embeddings array (mark for rebuild)
             self._chunk_embeddings_array = None
+            self._chunk_ids_list = None
 
-            logger.info(f"Deleted {len(chunk_ids)} chunks, {len(orphan_entities)} orphan entities")
+            # 6. Update graph cache and entity count cache
+            self._invalidate_graph_cache_for_deleted_nodes(chunk_ids, orphan_entities)
+
+            # 7. Increment cache version to notify retrievers
+            self._cache_version += 1
+            
+            logger.info(f"✅ Deleted {len(chunk_ids)} chunks, {len(orphan_entities)} orphan entities, "
+                       f"{len(orphan_fact_ids)} orphan facts (cache_version={self._cache_version})")
             return True
 
         except Exception as e:
             logger.error(f"Failed to delete chunks: {e}", exc_info=True)
             return False
+    
+    def get_cache_version(self) -> int:
+        """Get current cache version (incremented on add/delete)."""
+        return self._cache_version
+    
+    def _invalidate_graph_cache_for_deleted_nodes(self, chunk_ids: List[str], entity_ids: List[str]):
+        """Remove deleted nodes and their edges from graph cache."""
+        if not self._cache_loaded or not self._graph_cache:
+            return
+        
+        deleted_nodes = set(chunk_ids) | set(entity_ids)
+        if not deleted_nodes:
+            return
+        
+        # Remove deleted nodes
+        for node_id in deleted_nodes:
+            self._graph_cache.pop(node_id, None)
+        
+        # Clean edges pointing to deleted nodes
+        for node_id in self._graph_cache:
+            self._graph_cache[node_id] = [
+                (n, w) for n, w in self._graph_cache[node_id] if n not in deleted_nodes
+            ]
+        
+        # Rebuild entity chunk count cache
+        self._entity_chunk_count_cache = None
+        self._build_entity_chunk_count_cache()
 
     def delete_all_index(self, confirm: bool = False) -> bool:
-        """Delete all chunks and their graphs"""
+        """Delete all chunks and their graphs.
+        
+        This method completely clears all data:
+        1. Deletes all nodes and relationships from Neo4j
+        2. Reinitializes FAISS indices (clears all vectors)
+        3. Clears all in-memory caches
+        
+        Args:
+            confirm: Must be True to confirm the operation
+            
+        Returns:
+            True if successful, False otherwise
+        """
         if not confirm:
             logger.warning("delete_all_index requires confirm=True")
             return False
@@ -1471,8 +1523,18 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             self.chunk_embeddings = {}
             self._chunk_embeddings_array = None
             self._chunk_ids_list = None
+            
+            # Clear graph cache
+            self._graph_cache = {}
+            self._cache_loaded = True  # Mark as loaded (empty cache is valid)
+            
+            # Clear entity chunk count cache
+            self._entity_chunk_count_cache = {}
+            
+            # Increment cache version
+            self._cache_version += 1
 
-            logger.info("All index data deleted")
+            logger.info(f"✅ All index data deleted (cache_version={self._cache_version})")
             return True
 
         except Exception as e:
@@ -1613,6 +1675,7 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         1. Chunk embeddings from pickle
         2. FAISS indices for facts and entities
         3. Neo4j data (already persisted in database)
+        4. Reloads graph cache from Neo4j
 
         Args:
             path: Directory path to load the index from
@@ -1643,7 +1706,13 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         else:
             logger.warning(f"Entity index not found: {entity_index_path}")
 
-        logger.info(f"Index loaded from {path}")
+        # 3. Reload graph cache from Neo4j (force reload)
+        self._load_graph_cache(force_reload=True)
+        
+        # 4. Increment cache version to notify retrievers
+        self._cache_version += 1
+
+        logger.info(f"Index loaded from {path} (cache_version={self._cache_version})")
         logger.info("Note: Neo4j data is loaded automatically from the database")
 
     def query(self, query: str, params: Optional[Dict[str, Any]] = None) -> Any:
@@ -1717,3 +1786,4 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         if self._driver:
             self._driver.close()
             logger.info("Neo4j driver closed")
+

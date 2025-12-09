@@ -53,6 +53,7 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
 
         # Cache for node mappings to avoid rebuilding on every query
         self._cached_owner_id = None
+        self._cached_store_version = None  # Track graph store cache version
         self.passage_node_keys = []
         self.passage_embeddings_array = None
 
@@ -71,24 +72,31 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
             logger.info(f"    Base max neighbors: {config.max_neighbors}")
             logger.info(f"    Query-aware multiplier: {config.query_aware_multiplier}")
             logger.info(f"    Min/Max neighbors: {config.query_aware_min_k}/{config.query_aware_max_k}")
+    
+    def invalidate_cache(self):
+        """Force invalidation of all cached data."""
+        self._cached_owner_id = None
+        self._cached_store_version = None
+        self.passage_node_keys = []
+        self.passage_embeddings_array = None
 
-    def _build_node_mappings(self, owner_id: Optional[uuid.UUID] = None):
-        """
-        Build mappings between passage nodes and their IDs from Neo4j.
-
-        This creates parallel lists:
-        - passage_node_keys: Chunk IDs
-        - passage_embeddings_array: Pre-computed embeddings array for fast retrieval
-
-        Uses caching to avoid rebuilding on every query when owner_id doesn't change.
-
-        Args:
-            owner_id: Optional owner ID to filter chunks by ownership
-        """
-        # Check if we can use cached mappings
-        if self._cached_owner_id == owner_id and self.passage_embeddings_array is not None:
-            logger.debug(f"Using cached node mappings for {len(self.passage_node_keys)} passage nodes")
+    def _build_node_mappings(self, owner_id: Optional[uuid.UUID] = None, force_rebuild: bool = False):
+        """Build mappings between passage nodes and their IDs from Neo4j."""
+        current_store_version = self.graph_store.get_cache_version()
+        
+        # Check cache validity
+        cache_valid = (
+            not force_rebuild and
+            self._cached_owner_id == owner_id and 
+            self._cached_store_version == current_store_version and
+            self.passage_embeddings_array is not None
+        )
+        
+        if cache_valid:
             return
+        
+        if self._cached_store_version != current_store_version:
+            logger.info(f"Cache version changed ({self._cached_store_version} -> {current_store_version}), rebuilding...")
 
         # Need to rebuild mappings
         self.passage_node_keys = []
@@ -129,8 +137,9 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
         else:
             self.passage_embeddings_array = np.array([], dtype=np.float32)
 
-        # Update cache
+        # Update cache metadata
         self._cached_owner_id = owner_id
+        self._cached_store_version = current_store_version
 
         logger.info(f"Built mappings for {len(self.passage_node_keys)} passage nodes")
 
@@ -830,18 +839,6 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
             logger.warning("No passage embeddings available")
             return np.zeros(len(self.passage_node_keys))
 
-        if self.passage_embeddings_array.shape[1] != query_embedding.shape[0]:
-            logger.error(
-                "Embedding dimension mismatch detected (passages=%s, query=%s). "
-                "Clearing cached chunk embeddings to avoid inconsistent state.",
-                self.passage_embeddings_array.shape[1],
-                query_embedding.shape[0],
-            )
-            if hasattr(self.graph_store, "clear_chunk_embeddings_cache"):
-                self.graph_store.clear_chunk_embeddings_cache()
-            self.passage_embeddings_array = np.array([], dtype=np.float32)
-            return np.zeros(len(self.passage_node_keys))
-
         # Fast dot product using numpy
         # If embeddings are float16, convert query to float16 for consistency
         if self.passage_embeddings_array.dtype == np.float16:
@@ -909,3 +906,4 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
                        f"avg={np.mean(list(entity_relevance_scores.values())):.3f}")
 
         return entity_relevance_scores
+
