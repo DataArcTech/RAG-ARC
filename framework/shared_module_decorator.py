@@ -32,6 +32,7 @@ def shared_module(class_):
     getinstance.__name__ = class_.__name__
     getinstance.__doc__ = class_.__doc__
     getinstance.__module__ = class_.__module__
+    getinstance.__wrapped__ = class_
     return getinstance
 
 # def make_hashable(obj):

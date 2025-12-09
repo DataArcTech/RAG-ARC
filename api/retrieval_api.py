@@ -116,6 +116,9 @@ class RetrievalAPI:
         if retriever_name not in self.retrievers:
             raise ValueError(f"Retriever '{retriever_name}' not found")
 
+        if owner_id is None or (isinstance(owner_id, str) and owner_id.strip() == ""):
+            raise ValueError("owner_id is required for retrieval operations")
+
         try:
             retriever = self.retrievers[retriever_name]
             # Pass owner_id to retriever for user isolation

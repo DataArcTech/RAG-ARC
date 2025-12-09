@@ -13,6 +13,7 @@ load_dotenv()
 
 from .base import FileDB
 from framework.singleton_decorator import singleton
+from core.utils.path_guard import ensure_writable_dir
 
 
 logger = logging.getLogger(__name__)
@@ -74,12 +75,19 @@ class LocalDB(FileDB):
         config: Configuration object (base_path no longer used)
     """
     
+    def __init__(self, config):
+        super().__init__(config)
+        self._resolved_base_path: Optional[Path] = None
+
     def _get_base_path(self) -> Path:
         """Get base storage directory path from environment variable"""
-        base_path_str = os.getenv('LOCAL_FILE_STORAGE_PATH', './data/files')
-        base_path = Path(base_path_str)
-        base_path.mkdir(parents=True, exist_ok=True)
-        return base_path
+        if self._resolved_base_path is None:
+            preferred = os.getenv('LOCAL_FILE_STORAGE_PATH', './data/files')
+            runtime_root = os.getenv('RAGARC_RUNTIME_DIR', './local/runtime')
+            fallback = os.path.join(runtime_root, 'files')
+            resolved = ensure_writable_dir(preferred, fallback)
+            self._resolved_base_path = Path(resolved)
+        return self._resolved_base_path
     
     def _get_full_path(self, key: str) -> Path:
         """Convert blob key to full filesystem path"""

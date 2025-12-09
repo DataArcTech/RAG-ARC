@@ -12,6 +12,7 @@ import neo4j
 from encapsulation.database.graph_db.base import GraphStore
 from encapsulation.data_model.schema import Chunk, GraphData
 from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id, text_processing
+from core.utils.path_guard import ensure_writable_dir
 from framework.shared_module_decorator import shared_module
 
 if TYPE_CHECKING:
@@ -57,6 +58,25 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
        - PageRank computed in-memory using igraph
     """
 
+    OWNER_GLOBAL_KEY = "__GLOBAL__"
+
+    @staticmethod
+    def _normalize_owner_id(owner_id: Optional[Any]) -> Optional[str]:
+        if owner_id is None:
+            return None
+        return str(owner_id)
+
+    @classmethod
+    def _owner_key(cls, owner_id: Optional[Any]) -> str:
+        normalized = cls._normalize_owner_id(owner_id)
+        return normalized if normalized else cls.OWNER_GLOBAL_KEY
+
+    @classmethod
+    def _restore_owner_id(cls, owner_id: Optional[str]) -> Optional[str]:
+        if not owner_id or owner_id == cls.OWNER_GLOBAL_KEY:
+            return None
+        return owner_id
+
     def __init__(self, config: "PrunedHippoRAGNeo4jConfig"):
         """
         Initialize the Pruned HippoRAG Graph Store with Neo4j backend.
@@ -88,6 +108,16 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         # (Neo4j doesn't use SQLite conn, but base class expects it)
         self.conn = None
 
+        # Ensure storage path is writable
+        storage_path = getattr(config, 'storage_path', './data/graph_index_neo4j')
+        fallback_storage = os.path.join(
+            os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime"),
+            "graph_index_neo4j"
+        )
+        resolved_storage = ensure_writable_dir(storage_path, fallback_storage)
+        self.storage_path = resolved_storage
+        setattr(self.config, 'storage_path', resolved_storage)
+
         # Initialize Neo4j schema (constraints and indices)
         self._init_neo4j_schema()
 
@@ -104,14 +134,15 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         self.normalize_chunk_embeddings = getattr(config, 'normalize_chunk_embeddings', True)
 
         # In-memory graph cache for fast neighbor lookups
-        self._graph_cache: Optional[Dict[str, List[Tuple[str, float]]]] = None
+        self._graph_cache: Optional[Dict[str, Dict[str, List[Tuple[str, float]]]]] = None
         self._cache_loaded = False
 
         # Entity chunk count cache (computed from graph cache)
-        self._entity_chunk_count_cache: Optional[Dict[str, int]] = None
+        self._entity_chunk_count_cache: Optional[Dict[str, Dict[str, int]]] = None
+        
+        # Cache version counter - incremented on any modification (add/delete)
+        self._cache_version: int = 0
 
-        # Storage configuration
-        self.storage_path = getattr(config, 'storage_path', './data/graph_index_neo4j')
         self.index_name = getattr(config, 'index_name', 'index')
 
         # Synonymy edge configuration
@@ -274,20 +305,26 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
 
         # Collect all data
         chunk_data = []
-        entity_data = {}  # entity_id -> (entity_name, entity_type) (deduplicated)
+        entity_data: Dict[str, Dict[str, Any]] = {}  # entity_id -> entity payload
         mention_data = []
         fact_data = []
         new_entity_ids = []
 
         for chunk in chunks:
             # Prepare chunk data
-            # Extract owner_id from metadata if available
-            owner_id = chunk.metadata.get('owner_id') if chunk.metadata else None
+            metadata = dict(chunk.metadata) if chunk.metadata else {}
+
+            owner_source = chunk.owner_id or metadata.get('owner_id')
+            owner_str = self._normalize_owner_id(owner_source)
+            if owner_str:
+                metadata['owner_id'] = owner_str
+            db_owner_id = self._owner_key(owner_str)
+
             chunk_data.append({
                 'chunk_id': chunk.id,
                 'content': chunk.content,
-                'metadata': json.dumps(chunk.metadata) if chunk.metadata else '{}',
-                'owner_id': owner_id
+                'metadata': json.dumps(metadata) if metadata else '{}',
+                'owner_id': db_owner_id
             })
 
             # Process graph data
@@ -323,24 +360,30 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
 
                 # Collect entity data (deduplicated across all chunks)
                 for entity_name in triple_entities:
-                    entity_id = compute_mdhash_id(entity_name, prefix='entity-')
+                    entity_id = compute_mdhash_id(entity_name, prefix='entity-', owner_id=owner_str)
                     if entity_id not in entity_data:
                         # Get entity type from mapping, default to 'Entity'
                         entity_type = entity_name_to_type.get(entity_name, 'Entity')
-                        entity_data[entity_id] = (entity_name, entity_type)
+                        entity_data[entity_id] = {
+                            'entity_id': entity_id,
+                            'entity_name': entity_name,
+                            'entity_type': entity_type,
+                            'owner_id': db_owner_id
+                        }
 
                     # Collect mention data
                     mention_data.append({
                         'chunk_id': chunk.id,
-                        'entity_id': entity_id
+                        'entity_id': entity_id,
+                        'owner_id': db_owner_id
                     })
 
                 # Collect fact data
                 for head_name, relation_type, tail_name in processed_triples:
                     fact_text = str((head_name, relation_type, tail_name))
-                    fact_id = compute_mdhash_id(fact_text, prefix='fact-')
-                    head_id = compute_mdhash_id(head_name, prefix='entity-')
-                    tail_id = compute_mdhash_id(tail_name, prefix='entity-')
+                    fact_id = compute_mdhash_id(fact_text, prefix='fact-', owner_id=owner_str)
+                    head_id = compute_mdhash_id(head_name, prefix='entity-', owner_id=owner_str)
+                    tail_id = compute_mdhash_id(tail_name, prefix='entity-', owner_id=owner_str)
 
                     fact_data.append({
                         'fact_id': fact_id,
@@ -349,14 +392,12 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
                         'head_name': head_name,
                         'relation_type': relation_type,
                         'tail_name': tail_name,
-                        'fact_text': fact_text
+                        'fact_text': fact_text,
+                        'owner_id': db_owner_id
                     })
 
         # Prepare entity list for batch insertion
-        entity_list = [
-            {'entity_id': eid, 'entity_name': name, 'entity_type': etype}
-            for eid, (name, etype) in entity_data.items()
-        ]
+        entity_list = list(entity_data.values())
 
         logger.info(f"Batch data prepared: {len(chunk_data)} chunks, {len(entity_list)} entities, "
                    f"{len(mention_data)} mentions, {len(fact_data)} facts")
@@ -388,12 +429,14 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
                                   e.entity_type = entity.entity_type,
                                   e.node_type = 'entity',
                                   e.attributes = '{}',
+                                  e.owner_id = entity.owner_id,
                                   e.created_at = datetime(),
                                   e.updated_at = datetime(),
                                   e.is_new = true
                     ON MATCH SET e.entity_name = entity.entity_name,
                                  e.entity_text = entity.entity_name,
                                  e.entity_type = entity.entity_type,
+                                 e.owner_id = entity.owner_id,
                                  e.updated_at = datetime(),
                                  e.is_new = false
                     RETURN e.entity_id AS entity_id, e.is_new AS is_new
@@ -408,10 +451,11 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
                 if mention_data:
                     mention_query = """
                     UNWIND $mentions AS m
-                    MATCH (c:Chunk {chunk_id: m.chunk_id})
-                    MATCH (e:Entity {entity_id: m.entity_id})
+                    MATCH (c:Chunk {chunk_id: m.chunk_id, owner_id: m.owner_id})
+                    MATCH (e:Entity {entity_id: m.entity_id, owner_id: m.owner_id})
                     MERGE (c)-[r:MENTIONS]->(e)
                     SET r.weight = COALESCE(r.weight, 0.0) + 1.0,
+                        r.owner_id = m.owner_id,
                         r.updated_at = datetime(),
                         r.created_at = COALESCE(r.created_at, datetime())
                     """
@@ -422,13 +466,14 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
                 if fact_data:
                     fact_query = """
                     UNWIND $facts AS f
-                    MATCH (e1:Entity {entity_id: f.head_id})
-                    MATCH (e2:Entity {entity_id: f.tail_id})
+                    MATCH (e1:Entity {entity_id: f.head_id, owner_id: f.owner_id})
+                    MATCH (e2:Entity {entity_id: f.tail_id, owner_id: f.owner_id})
                     MERGE (e1)-[r:RELATES_TO {fact_id: f.fact_id}]->(e2)
                     SET r.head = f.head_name,
                         r.predicate = f.relation_type,
                         r.tail = f.tail_name,
                         r.text = f.fact_text,
+                        r.owner_id = f.owner_id,
                         r.weight = COALESCE(r.weight, 0.0) + 1.0,
                         r.updated_at = datetime(),
                         r.created_at = COALESCE(r.created_at, datetime())
@@ -487,19 +532,24 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             logger.info(f"Chunk embeddings generated for {len(new_chunks)} chunks")
 
         # 2. Generate entity embeddings and add to FAISS HNSW
-        entity_query = "MATCH (e:Entity) RETURN e.entity_id AS entity_id, e.entity_name AS entity_name"
+        entity_query = "MATCH (e:Entity) RETURN e.entity_id AS entity_id, e.entity_name AS entity_name, e.owner_id AS owner_id"
         entities = self._execute_query(entity_query)
 
         new_entities = []
         for record in entities:
             entity_id = record['entity_id']
             entity_name = record['entity_name']
+            entity_owner = self._restore_owner_id(record.get('owner_id'))
             # Check if already in FAISS
             if entity_id not in self.entity_faiss_db.docstore:
+                metadata = {'type': 'entity'}
+                if entity_owner:
+                    metadata['owner_id'] = entity_owner
                 new_entities.append(Chunk(
                     id=entity_id,
                     content=entity_name,
-                    metadata={'type': 'entity'}
+                    owner_id=entity_owner,
+                    metadata=metadata
                 ))
 
         if new_entities:
@@ -522,18 +572,23 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
 
         # 3. Generate fact embeddings and add to FAISS Flat
         # Facts are stored as RELATES_TO relationships between entities
-        fact_query = "MATCH ()-[r:RELATES_TO]->() RETURN r.fact_id AS fact_id, r.text AS text"
+        fact_query = "MATCH ()-[r:RELATES_TO]->() RETURN r.fact_id AS fact_id, r.text AS text, r.owner_id AS owner_id"
         facts = self._execute_query(fact_query)
 
         new_facts = []
         for record in facts:
             fact_id = record['fact_id']
             fact_text = record['text']
+            fact_owner = self._restore_owner_id(record.get('owner_id'))
             if fact_id not in self.fact_faiss_db.docstore:
+                metadata = {'type': 'fact'}
+                if fact_owner:
+                    metadata['owner_id'] = fact_owner
                 new_facts.append(Chunk(
                     id=fact_id,
                     content=fact_text,
-                    metadata={'type': 'fact'}
+                    owner_id=fact_owner,
+                    metadata=metadata
                 ))
 
         if new_facts:
@@ -574,21 +629,27 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             entity_query = """
             MATCH (e:Entity)
             WHERE e.entity_id IN $entity_ids
-            RETURN e.entity_id AS entity_id, e.entity_name AS entity_name
+            RETURN e.entity_id AS entity_id, e.entity_name AS entity_name, e.owner_id AS owner_id
             """
             entities = self._execute_query(entity_query, {'entity_ids': new_entity_ids})
         else:
             logger.info("Computing synonymy edges for all entities (full rebuild)...")
             # Get all entities
-            entity_query = "MATCH (e:Entity) RETURN e.entity_id AS entity_id, e.entity_name AS entity_name"
+            entity_query = "MATCH (e:Entity) RETURN e.entity_id AS entity_id, e.entity_name AS entity_name, e.owner_id AS owner_id"
             entities = self._execute_query(entity_query)
 
         if not entities:
             logger.warning("No entities found, skipping synonymy edge addition")
             return
 
-        # Build entity ID to name mapping for fast lookup
-        entity_id_to_name = {record['entity_id']: record['entity_name'] for record in entities}
+        # Build entity metadata mapping for fast lookup
+        entity_id_to_info = {
+            record['entity_id']: {
+                'name': record['entity_name'],
+                'owner_id': self._restore_owner_id(record.get('owner_id'))
+            }
+            for record in entities
+        }
 
         # Build a set to track existing entity-entity edges (fact edges only)
         existing_entity_entity_edges = set()
@@ -619,6 +680,8 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         for record in entities:
             entity_id = record['entity_id']
             entity_name = record['entity_name']
+            entity_owner = entity_id_to_info.get(entity_id, {}).get('owner_id')
+            owner_key = self._owner_key(entity_owner)
 
             # Filter short entities (same as original)
             if len(re.sub('[^A-Za-z0-9]', '', entity_name)) <= 2:
@@ -639,7 +702,7 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             else:
                 embedding = embedding.astype(np.float32)
 
-            valid_entities.append((entity_id, entity_name))
+            valid_entities.append((entity_id, entity_name, entity_owner, owner_key))
             embeddings_list.append(embedding)
 
         if not valid_entities:
@@ -662,7 +725,7 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         # Process results
         logger.info("Processing search results...")
 
-        for i, ((entity_id, entity_name), distances, indices) in enumerate(tqdm(
+        for i, ((entity_id, entity_name, entity_owner, owner_key), distances, indices) in enumerate(tqdm(
             zip(valid_entities, distances_batch, indices_batch),
             total=len(valid_entities),
             desc="Computing synonymy edges"
@@ -691,9 +754,15 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
                     continue
 
                 # Get neighbor name for validation (from cache, not Neo4j)
-                neighbor_name = entity_id_to_name.get(neighbor_entity_id)
-                if not neighbor_name:
+                neighbor_info = entity_id_to_info.get(neighbor_entity_id)
+                if not neighbor_info:
                     continue
+
+                neighbor_owner = neighbor_info.get('owner_id')
+                if neighbor_owner != entity_owner:
+                    continue
+
+                neighbor_name = neighbor_info['name']
 
                 # FAISS with metric='cosine' returns NEGATIVE inner product
                 similarity = -float(distance)
@@ -707,7 +776,7 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
 
                 if edge_key not in existing_entity_entity_edges and reverse_edge_key not in existing_entity_entity_edges:
                     # Add UNIDIRECTIONAL edge (only one direction to avoid duplication)
-                    edges_to_add.append((entity_id, neighbor_entity_id, similarity))
+                    edges_to_add.append((entity_id, neighbor_entity_id, similarity, owner_key))
                     num_synonym_edges += 1
                     num_added += 1
 
@@ -729,6 +798,7 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             MATCH (e2:Entity {entity_id: edge.entity_id_2})
             MERGE (e1)-[r:SIMILAR_TO]-(e2)
             SET r.similarity = edge.similarity,
+                r.owner_id = edge.owner_id,
                 r.updated_at = datetime(),
                 r.created_at = COALESCE(r.created_at, datetime())
             """
@@ -738,9 +808,10 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
                 {
                     'entity_id_1': e1,
                     'entity_id_2': e2,
-                    'similarity': sim
+                    'similarity': sim,
+                    'owner_id': owner_id
                 }
-                for e1, e2, sim in edges_to_add
+                for e1, e2, sim, owner_id in edges_to_add
             ]
 
             self._execute_query(batch_query, {'edges': batch_data})
@@ -749,25 +820,55 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         else:
             logger.info("No synonymy edges to add")
 
-    def get_neighbors_with_weights(self, node_id: str) -> List[Tuple[str, float]]:
+    def get_neighbors_with_weights(self, node_id: str, owner_id: Optional[Any] = None) -> List[Tuple[str, float]]:
         """
         Get all neighbors of a node with their edge weights from Neo4j.
 
         Args:
             node_id: Node ID (chunk_id or entity_id)
+            owner_id: Owner scope for the query
 
         Returns:
             List of (neighbor_id, weight) tuples
         """
-        # Optimized query: use single MATCH with OR condition
-        query = """
-        MATCH (n)-[r]-(neighbor)
-        WHERE n.chunk_id = $node_id OR n.entity_id = $node_id
-        RETURN COALESCE(neighbor.chunk_id, neighbor.entity_id) AS neighbor_id,
-               COALESCE(r.weight, r.similarity, 1.0) AS weight
-        """
+        all_owners = owner_id is None
+        owner_key = None if all_owners else self._owner_key(owner_id)
 
-        results = self._execute_query(query, {'node_id': node_id})
+        if self._cache_loaded and self._graph_cache is not None:
+            if all_owners:
+                aggregated = []
+                for shard in self._graph_cache.values():
+                    aggregated.extend(shard.get(node_id, []))
+                return aggregated
+            owner_neighbors = self._graph_cache.get(owner_key, {})
+            return list(owner_neighbors.get(node_id, []))
+
+        # Optimized query: use single MATCH with OR condition
+        if all_owners:
+            query = """
+            MATCH (n)-[r]-(neighbor)
+            WHERE (n.chunk_id = $node_id OR n.entity_id = $node_id)
+            RETURN COALESCE(neighbor.chunk_id, neighbor.entity_id) AS neighbor_id,
+                   COALESCE(r.weight, r.similarity, 1.0) AS weight
+            """
+            params = {'node_id': node_id}
+        else:
+            query = """
+            MATCH (n)-[r]-(neighbor)
+            WHERE (n.chunk_id = $node_id OR n.entity_id = $node_id)
+              AND COALESCE(n.owner_id, $global_owner) = $owner_id
+              AND COALESCE(neighbor.owner_id, $global_owner) = $owner_id
+              AND COALESCE(r.owner_id, $global_owner) = $owner_id
+            RETURN COALESCE(neighbor.chunk_id, neighbor.entity_id) AS neighbor_id,
+                   COALESCE(r.weight, r.similarity, 1.0) AS weight
+            """
+            params = {
+                'node_id': node_id,
+                'owner_id': owner_key,
+                'global_owner': self.OWNER_GLOBAL_KEY
+            }
+
+        results = self._execute_query(query, params)
 
         neighbors = []
         for record in results:
@@ -795,19 +896,24 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
 
         self._entity_chunk_count_cache = {}
 
-        for entity_id, neighbors in self._graph_cache.items():
-            # Only process entity nodes
-            if not entity_id.startswith("entity-"):
-                continue
+        for owner_key, adjacency in self._graph_cache.items():
+            owner_counts: Dict[str, int] = {}
+            for entity_id, neighbors in adjacency.items():
+                # Only process entity nodes
+                if not entity_id.startswith("entity-"):
+                    continue
 
-            # Count unique chunk neighbors (chunks don't start with "entity-")
-            chunk_count = sum(1 for neighbor_id, _ in neighbors if not neighbor_id.startswith("entity-"))
-            self._entity_chunk_count_cache[entity_id] = chunk_count
+                # Count unique chunk neighbors (chunks don't start with "entity-")
+                chunk_count = sum(1 for neighbor_id, _ in neighbors if not neighbor_id.startswith("entity-"))
+                owner_counts[entity_id] = chunk_count
+
+            self._entity_chunk_count_cache[owner_key] = owner_counts
 
         elapsed = time.time() - start_time
-        logger.info(f"Entity chunk count cache built: {len(self._entity_chunk_count_cache)} entities in {elapsed:.2f}s")
+        total_entities = sum(len(counts) for counts in self._entity_chunk_count_cache.values())
+        logger.info(f"Entity chunk count cache built: {total_entities} entities in {elapsed:.2f}s")
 
-    def get_entity_chunk_count_from_cache(self, entity_id: str) -> int:
+    def get_entity_chunk_count_from_cache(self, entity_id: str, owner_id: Optional[Any] = None) -> int:
         """
         Get the number of chunks an entity appears in from cache.
 
@@ -821,9 +927,17 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             logger.warning("Entity chunk count cache not built, returning 0")
             return 0
 
-        return self._entity_chunk_count_cache.get(entity_id, 0)
+        if owner_id is None:
+            total = 0
+            for owner_counts in self._entity_chunk_count_cache.values():
+                total += owner_counts.get(entity_id, 0)
+            return total
 
-    def get_batch_entity_chunk_counts_from_cache(self, entity_ids: List[str]) -> Dict[str, int]:
+        owner_key = self._owner_key(owner_id)
+        owner_counts = self._entity_chunk_count_cache.get(owner_key, {})
+        return owner_counts.get(entity_id, 0)
+
+    def get_batch_entity_chunk_counts_from_cache(self, entity_ids: List[str], owner_id: Optional[Any] = None) -> Dict[str, int]:
         """
         Get chunk counts for multiple entities from cache.
 
@@ -837,7 +951,16 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             logger.warning("Entity chunk count cache not built, returning empty dict")
             return {}
 
-        return {eid: self._entity_chunk_count_cache.get(eid, 0) for eid in entity_ids}
+        if owner_id is None:
+            aggregated: Dict[str, int] = {eid: 0 for eid in entity_ids}
+            for owner_counts in self._entity_chunk_count_cache.values():
+                for eid in entity_ids:
+                    aggregated[eid] += owner_counts.get(eid, 0)
+            return aggregated
+
+        owner_key = self._owner_key(owner_id)
+        owner_counts = self._entity_chunk_count_cache.get(owner_key, {})
+        return {eid: owner_counts.get(eid, 0) for eid in entity_ids}
 
     def _load_graph_cache(self, force_reload: bool = False):
         """
@@ -859,10 +982,13 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         MATCH (n)-[r]-(neighbor)
         RETURN COALESCE(n.chunk_id, n.entity_id) AS node_id,
                COALESCE(neighbor.chunk_id, neighbor.entity_id) AS neighbor_id,
-               COALESCE(r.weight, r.similarity, 1.0) AS weight
+               COALESCE(r.weight, r.similarity, 1.0) AS weight,
+               COALESCE(n.owner_id, $global_owner) AS node_owner_id,
+               COALESCE(neighbor.owner_id, $global_owner) AS neighbor_owner_id,
+               COALESCE(r.owner_id, $global_owner) AS relation_owner_id
         """
 
-        results = self._execute_query(query)
+        results = self._execute_query(query, {'global_owner': self.OWNER_GLOBAL_KEY})
 
         # Build adjacency list
         self._graph_cache = {}
@@ -872,15 +998,19 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             neighbor_id = record['neighbor_id']
             weight = record['weight'] or 1.0
 
-            if node_id and neighbor_id:
-                if node_id not in self._graph_cache:
-                    self._graph_cache[node_id] = []
-                self._graph_cache[node_id].append((neighbor_id, float(weight)))
+            node_owner_id = record.get('node_owner_id') or self.OWNER_GLOBAL_KEY
+            neighbor_owner_id = record.get('neighbor_owner_id') or self.OWNER_GLOBAL_KEY
+            relation_owner_id = record.get('relation_owner_id') or self.OWNER_GLOBAL_KEY
+
+            if node_id and neighbor_id and node_owner_id == neighbor_owner_id == relation_owner_id:
+                owner_cache = self._graph_cache.setdefault(node_owner_id, {})
+                owner_cache.setdefault(node_id, []).append((neighbor_id, float(weight)))
                 edge_count += 1
 
         self._cache_loaded = True
         elapsed = time.time() - start_time
-        logger.info(f"Graph cache loaded: {len(self._graph_cache)} nodes, {edge_count} edges in {elapsed:.2f}s")
+        node_total = sum(len(nodes) for nodes in self._graph_cache.values())
+        logger.info(f"Graph cache loaded: {node_total} nodes, {edge_count} edges in {elapsed:.2f}s")
 
         # Build entity chunk count cache
         self._build_entity_chunk_count_cache()
@@ -912,9 +1042,12 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         WHERE n.chunk_id IN $node_ids OR n.entity_id IN $node_ids
         RETURN COALESCE(n.chunk_id, n.entity_id) AS node_id,
                COALESCE(neighbor.chunk_id, neighbor.entity_id) AS neighbor_id,
-               COALESCE(r.weight, r.similarity, 1.0) AS weight
+               COALESCE(r.weight, r.similarity, 1.0) AS weight,
+               COALESCE(n.owner_id, $global_owner) AS node_owner_id,
+               COALESCE(neighbor.owner_id, $global_owner) AS neighbor_owner_id,
+               COALESCE(r.owner_id, $global_owner) AS relation_owner_id
         """
-        results = self._execute_query(query, {'node_ids': all_new_node_ids})
+        results = self._execute_query(query, {'node_ids': all_new_node_ids, 'global_owner': self.OWNER_GLOBAL_KEY})
 
         # Update adjacency list
         edge_count = 0
@@ -923,25 +1056,25 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             neighbor_id = record['neighbor_id']
             weight = record['weight'] or 1.0
 
-            if node_id and neighbor_id:
-                # Add edge from node_id to neighbor_id
-                if node_id not in self._graph_cache:
-                    self._graph_cache[node_id] = []
-                # Check if edge already exists (avoid duplicates)
-                if not any(n == neighbor_id for n, _ in self._graph_cache[node_id]):
-                    self._graph_cache[node_id].append((neighbor_id, float(weight)))
+            node_owner_id = record.get('node_owner_id') or self.OWNER_GLOBAL_KEY
+            neighbor_owner_id = record.get('neighbor_owner_id') or self.OWNER_GLOBAL_KEY
+            relation_owner_id = record.get('relation_owner_id') or self.OWNER_GLOBAL_KEY
+
+            if node_id and neighbor_id and node_owner_id == neighbor_owner_id == relation_owner_id:
+                owner_cache = self._graph_cache.setdefault(node_owner_id, {})
+                node_neighbors = owner_cache.setdefault(node_id, [])
+                if not any(n == neighbor_id for n, _ in node_neighbors):
+                    node_neighbors.append((neighbor_id, float(weight)))
                     edge_count += 1
 
-                # Add reverse edge (since graph is undirected)
-                if neighbor_id not in self._graph_cache:
-                    self._graph_cache[neighbor_id] = []
-                if not any(n == node_id for n, _ in self._graph_cache[neighbor_id]):
-                    self._graph_cache[neighbor_id].append((node_id, float(weight)))
+                reverse_neighbors = owner_cache.setdefault(neighbor_id, [])
+                if not any(n == node_id for n, _ in reverse_neighbors):
+                    reverse_neighbors.append((node_id, float(weight)))
 
         elapsed = time.time() - start_time
         logger.info(f"Graph cache updated: added {edge_count} new edges in {elapsed:.2f}s")
 
-    def get_batch_neighbors_with_weights(self, node_ids: List[str]) -> Dict[str, List[Tuple[str, float]]]:
+    def get_batch_neighbors_with_weights(self, node_ids: List[str], owner_id: Optional[Any] = None) -> Dict[str, List[Tuple[str, float]]]:
         """
         Get neighbors for multiple nodes in a single query (batch operation).
         Uses in-memory cache if available, otherwise queries Neo4j.
@@ -955,24 +1088,53 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         if not node_ids:
             return {}
 
+        all_owners = owner_id is None
+        owner_key = None if all_owners else self._owner_key(owner_id)
+
         # Use cache if loaded
         if self._cache_loaded and self._graph_cache is not None:
-            neighbors_map = {}
-            for nid in node_ids:
-                neighbors_map[nid] = self._graph_cache.get(nid, [])
+            neighbors_map = {nid: [] for nid in node_ids}
+            if all_owners:
+                for shard in self._graph_cache.values():
+                    for nid in node_ids:
+                        if nid in shard:
+                            neighbors_map[nid].extend(shard.get(nid, []))
+            else:
+                owner_neighbors = self._graph_cache.get(owner_key, {})
+                for nid in node_ids:
+                    neighbors_map[nid] = owner_neighbors.get(nid, [])
             return neighbors_map
 
         # Fallback to Neo4j query
-        query = """
-        UNWIND $node_ids AS nid
-        MATCH (n)-[r]-(neighbor)
-        WHERE n.chunk_id = nid OR n.entity_id = nid
-        RETURN nid AS node_id,
-               COALESCE(neighbor.chunk_id, neighbor.entity_id) AS neighbor_id,
-               COALESCE(r.weight, r.similarity, 1.0) AS weight
-        """
+        if all_owners:
+            query = """
+            UNWIND $node_ids AS nid
+            MATCH (n)-[r]-(neighbor)
+            WHERE (n.chunk_id = nid OR n.entity_id = nid)
+            RETURN nid AS node_id,
+                   COALESCE(neighbor.chunk_id, neighbor.entity_id) AS neighbor_id,
+                   COALESCE(r.weight, r.similarity, 1.0) AS weight
+            """
+            params = {'node_ids': node_ids}
+        else:
+            query = """
+            UNWIND $node_ids AS nid
+            MATCH (n)-[r]-(neighbor)
+            WHERE (n.chunk_id = nid OR n.entity_id = nid)
+              AND COALESCE(n.owner_id, $global_owner) = $owner_id
+              AND COALESCE(neighbor.owner_id, $global_owner) = $owner_id
+              AND COALESCE(r.owner_id, $global_owner) = $owner_id
+            RETURN nid AS node_id,
+                   COALESCE(neighbor.chunk_id, neighbor.entity_id) AS neighbor_id,
+                   COALESCE(r.weight, r.similarity, 1.0) AS weight
+            """
+            params = {
+                'node_ids': node_ids,
+                'owner_id': owner_key,
+                'global_owner': self.OWNER_GLOBAL_KEY
+            }
 
-        results = self._execute_query(query, {'node_ids': node_ids})
+        results = self._execute_query(query, params)
 
         # Group by node_id
         neighbors_map = {nid: [] for nid in node_ids}
@@ -985,7 +1147,7 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
 
         return neighbors_map
 
-    def extract_subgraph_from_cache(self, subgraph_node_ids: Set[str]) -> Tuple[ig.Graph, Dict[str, int], Dict[int, str]]:
+    def extract_subgraph_from_cache(self, subgraph_node_ids: Set[str], owner_id: Optional[Any] = None) -> Tuple[ig.Graph, Dict[str, int], Dict[int, str]]:
         """
         Extract a subgraph from in-memory cache and convert to igraph for PageRank computation.
 
@@ -1006,6 +1168,15 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             logger.error("Graph cache not loaded, cannot extract subgraph")
             return ig.Graph(directed=False), {}, {}
 
+        if owner_id is None:
+            owner_cache: Dict[str, List[Tuple[str, float]]] = {}
+            for shard in self._graph_cache.values():
+                for node_id, neighbors in shard.items():
+                    owner_cache.setdefault(node_id, []).extend(neighbors)
+        else:
+            owner_key = self._owner_key(owner_id)
+            owner_cache = self._graph_cache.get(owner_key, {})
+
         logger.info(f"Extracting subgraph with {len(subgraph_node_ids)} nodes from cache...")
 
         # Build node mappings
@@ -1021,7 +1192,7 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         edge_weights = []
 
         for u in subgraph_node_ids:
-            neighbors = self._graph_cache.get(u, [])
+            neighbors = owner_cache.get(u, [])
             for v, w in neighbors:
                 if v in node_to_idx and node_to_idx[u] < node_to_idx[v]:
                     # Only add each edge once (undirected graph)
@@ -1043,7 +1214,8 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         subgraph_nodes: Set[str],
         reset: Dict[str, float],
         alpha: float = 0.5,
-        epsilon: float = 1e-6
+        epsilon: float = 1e-6,
+        owner_id: Optional[Any] = None
     ) -> Dict[str, float]:
         """
         Compute Personalized PageRank using push-based algorithm on cached graph.
@@ -1066,8 +1238,17 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
 
         from encapsulation.database.utils.ppr_push import extract_subgraph_adjacency, ppr_push
 
+        if owner_id is None:
+            owner_cache: Dict[str, List[Tuple[str, float]]] = {}
+            for shard in self._graph_cache.values():
+                for node_id, neighbors in shard.items():
+                    owner_cache.setdefault(node_id, []).extend(neighbors)
+        else:
+            owner_key = self._owner_key(owner_id)
+            owner_cache = self._graph_cache.get(owner_key, {})
+
         # Extract subgraph adjacency from cache
-        subgraph_adj = extract_subgraph_adjacency(self._graph_cache, subgraph_nodes)
+        subgraph_adj = extract_subgraph_adjacency(owner_cache, subgraph_nodes)
 
         # Run push-based PPR
         ppr_scores = ppr_push(
@@ -1153,20 +1334,6 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
                        f"memory: {self._chunk_embeddings_array.nbytes / 1024 / 1024:.2f} MB")
         else:
             logger.warning("No valid new chunk embeddings to append")
-
-    def clear_chunk_embeddings_cache(self) -> None:
-        """Remove cached chunk embeddings so they can be regenerated with the current embedding model."""
-        logger.warning("Clearing chunk embeddings cache")
-        self.chunk_embeddings = {}
-        self._chunk_embeddings_array = None
-        self._chunk_ids_list = None
-        embeddings_path = os.path.join(self.storage_path, f"{self.index_name}_chunk_embeddings.pkl")
-        try:
-            if os.path.exists(embeddings_path):
-                os.remove(embeddings_path)
-                logger.info("Removed cached chunk embeddings file: %s", embeddings_path)
-        except OSError as exc:
-            logger.warning("Failed to remove chunk embeddings file %s: %s", embeddings_path, exc)
 
     def _rebuild_chunk_embeddings_array(self):
         """
@@ -1336,7 +1503,10 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             self._append_chunk_embeddings(new_chunk_ids)
             logger.info("Step 5 completed: Chunk embeddings appended")
 
-            logger.info("✅ Index update completed successfully (incremental)")
+            # Step 6: Increment cache version to notify retrievers
+            self._cache_version += 1
+            
+            logger.info(f"✅ Index update completed successfully (incremental, cache_version={self._cache_version})")
             return True
 
         except Exception as e:
@@ -1365,7 +1535,23 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         return self.delete_chunks(ids)
 
     def delete_chunks(self, chunk_ids: List[str]) -> bool:
-        """Delete chunks and clean up orphan nodes"""
+        """Delete chunks and clean up orphan nodes.
+        
+        This method:
+        1. Finds entities that will become orphans after chunk deletion
+        2. Finds facts (RELATES_TO relationships) involving orphan entities
+        3. Deletes orphan facts from FAISS (soft-delete)
+        4. Deletes orphan entities from FAISS (soft-delete)
+        5. Deletes orphan entities and their relationships from Neo4j
+        6. Deletes chunks from Neo4j
+        7. Updates in-memory caches (chunk_embeddings, graph_cache)
+        
+        Args:
+            chunk_ids: List of chunk IDs to delete
+            
+        Returns:
+            True if deletion was successful, False otherwise
+        """
         logger.info(f"Deleting {len(chunk_ids)} chunks...")
 
         try:
@@ -1378,50 +1564,45 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             WITH e, deleted_chunks, collect(DISTINCT all_c.chunk_id) AS all_chunks
             WHERE size(all_chunks) = size(deleted_chunks)
               AND all(dc IN deleted_chunks WHERE dc IN all_chunks)
-            RETURN e.entity_id AS entity_id
+            RETURN e.entity_id AS entity_id, e.entity_name AS entity_name
             """
 
             orphan_results = self._execute_query(orphan_query, {'chunk_ids': chunk_ids})
             orphan_entities = [record['entity_id'] for record in orphan_results]
+            orphan_entity_names = [record['entity_name'] for record in orphan_results]
 
+            orphan_fact_ids = []
+            
             # 2. Delete orphan entities and their facts
             if orphan_entities:
-                # Find facts involving orphan entities
+                # Find facts (RELATES_TO relationships) involving orphan entities
+                # Facts are stored as RELATES_TO relationships with fact_id property
                 fact_query = """
                 UNWIND $entity_ids AS entity_id
-                MATCH (e:Entity {entity_id: entity_id})
-                MATCH (f:Fact)
-                WHERE f.head = e.entity_name OR f.tail = e.entity_name
-                RETURN DISTINCT f.fact_id AS fact_id
+                MATCH (e:Entity {entity_id: entity_id})-[r:RELATES_TO]-()
+                RETURN DISTINCT r.fact_id AS fact_id
                 """
 
                 fact_results = self._execute_query(fact_query, {'entity_ids': orphan_entities})
-                orphan_fact_ids = [record['fact_id'] for record in fact_results]
+                orphan_fact_ids = [record['fact_id'] for record in fact_results if record['fact_id']]
 
-                # Delete facts from FAISS
+                # Delete facts from FAISS (soft-delete)
                 if orphan_fact_ids:
                     self.fact_faiss_db.delete_index(orphan_fact_ids)
-                    logger.info(f"Deleted {len(orphan_fact_ids)} orphan facts from FAISS")
+                    logger.info(f"Soft-deleted {len(orphan_fact_ids)} orphan facts from FAISS")
 
-                # Delete entities from FAISS
+                # Delete entities from FAISS (soft-delete)
                 self.entity_faiss_db.delete_index(orphan_entities)
-                logger.info(f"Deleted {len(orphan_entities)} orphan entities from FAISS")
+                logger.info(f"Soft-deleted {len(orphan_entities)} orphan entities from FAISS")
 
-                # Delete facts from Neo4j
-                delete_facts_query = """
-                UNWIND $fact_ids AS fact_id
-                MATCH (f:Fact {fact_id: fact_id})
-                DELETE f
-                """
-                self._execute_query(delete_facts_query, {'fact_ids': orphan_fact_ids})
-
-                # Delete entities from Neo4j
+                # Delete entities from Neo4j (DETACH DELETE removes all relationships including RELATES_TO)
                 delete_entities_query = """
                 UNWIND $entity_ids AS entity_id
                 MATCH (e:Entity {entity_id: entity_id})
                 DETACH DELETE e
                 """
                 self._execute_query(delete_entities_query, {'entity_ids': orphan_entities})
+                logger.info(f"Deleted {len(orphan_entities)} orphan entities from Neo4j")
 
             # 3. Delete chunks from Neo4j (DETACH DELETE removes all relationships)
             delete_chunks_query = """
@@ -1430,24 +1611,72 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             DETACH DELETE c
             """
             self._execute_query(delete_chunks_query, {'chunk_ids': chunk_ids})
+            logger.info(f"Deleted {len(chunk_ids)} chunks from Neo4j")
 
-            # 4. Delete from chunk_embeddings (not FAISS)
+            # 4. Delete from chunk_embeddings
             for chunk_id in chunk_ids:
                 if chunk_id in self.chunk_embeddings:
                     del self.chunk_embeddings[chunk_id]
 
-            # Mark array needs rebuild
+            # 5. Invalidate chunk embeddings array (mark for rebuild)
             self._chunk_embeddings_array = None
+            self._chunk_ids_list = None
 
-            logger.info(f"Deleted {len(chunk_ids)} chunks, {len(orphan_entities)} orphan entities")
+            # 6. Update graph cache and entity count cache
+            self._invalidate_graph_cache_for_deleted_nodes(chunk_ids, orphan_entities)
+
+            # 7. Increment cache version to notify retrievers
+            self._cache_version += 1
+            
+            logger.info(f"✅ Deleted {len(chunk_ids)} chunks, {len(orphan_entities)} orphan entities, "
+                       f"{len(orphan_fact_ids)} orphan facts (cache_version={self._cache_version})")
             return True
 
         except Exception as e:
             logger.error(f"Failed to delete chunks: {e}", exc_info=True)
             return False
+    
+    def get_cache_version(self) -> int:
+        """Get current cache version (incremented on add/delete)."""
+        return self._cache_version
+    
+    def _invalidate_graph_cache_for_deleted_nodes(self, chunk_ids: List[str], entity_ids: List[str]):
+        """Remove deleted nodes and their edges from graph cache."""
+        if not self._cache_loaded or not self._graph_cache:
+            return
+        
+        deleted_nodes = set(chunk_ids) | set(entity_ids)
+        if not deleted_nodes:
+            return
+        
+        # Remove deleted nodes
+        for node_id in deleted_nodes:
+            self._graph_cache.pop(node_id, None)
+        
+        # Clean edges pointing to deleted nodes
+        for node_id in self._graph_cache:
+            self._graph_cache[node_id] = [
+                (n, w) for n, w in self._graph_cache[node_id] if n not in deleted_nodes
+            ]
+        
+        # Rebuild entity chunk count cache
+        self._entity_chunk_count_cache = None
+        self._build_entity_chunk_count_cache()
 
     def delete_all_index(self, confirm: bool = False) -> bool:
-        """Delete all chunks and their graphs"""
+        """Delete all chunks and their graphs.
+        
+        This method completely clears all data:
+        1. Deletes all nodes and relationships from Neo4j
+        2. Reinitializes FAISS indices (clears all vectors)
+        3. Clears all in-memory caches
+        
+        Args:
+            confirm: Must be True to confirm the operation
+            
+        Returns:
+            True if successful, False otherwise
+        """
         if not confirm:
             logger.warning("delete_all_index requires confirm=True")
             return False
@@ -1471,8 +1700,18 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             self.chunk_embeddings = {}
             self._chunk_embeddings_array = None
             self._chunk_ids_list = None
+            
+            # Clear graph cache
+            self._graph_cache = {}
+            self._cache_loaded = True  # Mark as loaded (empty cache is valid)
+            
+            # Clear entity chunk count cache
+            self._entity_chunk_count_cache = {}
+            
+            # Increment cache version
+            self._cache_version += 1
 
-            logger.info("All index data deleted")
+            logger.info(f"✅ All index data deleted (cache_version={self._cache_version})")
             return True
 
         except Exception as e:
@@ -1613,6 +1852,7 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         1. Chunk embeddings from pickle
         2. FAISS indices for facts and entities
         3. Neo4j data (already persisted in database)
+        4. Reloads graph cache from Neo4j
 
         Args:
             path: Directory path to load the index from
@@ -1643,7 +1883,13 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         else:
             logger.warning(f"Entity index not found: {entity_index_path}")
 
-        logger.info(f"Index loaded from {path}")
+        # 3. Reload graph cache from Neo4j (force reload)
+        self._load_graph_cache(force_reload=True)
+        
+        # 4. Increment cache version to notify retrievers
+        self._cache_version += 1
+
+        logger.info(f"Index loaded from {path} (cache_version={self._cache_version})")
         logger.info("Note: Neo4j data is loaded automatically from the database")
 
     def query(self, query: str, params: Optional[Dict[str, Any]] = None) -> Any:

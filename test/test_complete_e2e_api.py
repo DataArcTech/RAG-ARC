@@ -10,6 +10,7 @@ import time
 import tempfile
 from pathlib import Path
 from io import BytesIO
+import pytest
 
 # 设置 HuggingFace 镜像
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
@@ -17,11 +18,17 @@ os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+AUTH_TOKEN = os.getenv("RAGARC_E2E_TOKEN")
+pytestmark = pytest.mark.skipif(
+    AUTH_TOKEN is None,
+    reason="Set RAGARC_E2E_TOKEN with a valid bearer token to run this end-to-end test.",
+)
+
 from fastapi.testclient import TestClient
 from main import app
 
 # 创建测试客户端
-client = TestClient(app)
+client = TestClient(app, headers={"Authorization": f"Bearer {AUTH_TOKEN}"})
 
 
 def create_test_file(filename: str, content: str) -> BytesIO:
@@ -110,11 +117,10 @@ Python is widely used in web development, data science, machine learning, and au
 """
         filename = f"python_guide_{i+1}.txt"
         file_data = create_test_file(filename, content)
-        
         response = client.post(
             "/knowledge",
-            params={"owner_id": user1_id},
-            files={"file": (filename, file_data, "text/plain")}
+            params={"owner_id": str(user1_id)},
+            files={"file": (filename, file_data, "text/plain")},
         )
         
         assert response.status_code == 201, f"Upload failed: {response.text}"
@@ -157,8 +163,8 @@ Java is commonly used in enterprise applications, Android development, and backe
         
         response = client.post(
             "/knowledge",
-            params={"owner_id": user2_id},
-            files={"file": (filename, file_data, "text/plain")}
+            params={"owner_id": str(user2_id)},
+            files={"file": (filename, file_data, "text/plain")},
         )
         
         assert response.status_code == 201, f"Upload failed: {response.text}"
@@ -204,8 +210,8 @@ JavaScript powers modern web applications with frameworks like React, Vue, and A
         
         response = client.post(
             "/knowledge",
-            params={"owner_id": user3_id},
-            files={"file": (filename, file_data, "text/plain")}
+            params={"owner_id": str(user3_id)},
+            files={"file": (filename, file_data, "text/plain")},
         )
         
         assert response.status_code == 201, f"Upload failed: {response.text}"
@@ -420,7 +426,7 @@ JavaScript powers modern web applications with frameworks like React, Vue, and A
     # 测试跨用户删除（应该失败）
     user2_file_id = uploaded_files["user2_file1"]
     print(f"\n🚫 测试跨用户删除: User 1 尝试删除 User 2 的文件 (ID: {user2_file_id[:8]}...)...")
-    response = client.delete(f"/knowledge/{user2_file_id}?owner_id={user1_id}")
+    response = client.delete(f"/knowledge/{user2_file_id}?owner_id={str(user1_id)}")
     assert response.status_code == 403, f"Cross-user deletion should be forbidden, got: {response.status_code}"
     print(f"  ✓ 跨用户删除被正确拒绝 (403 Forbidden)")
 
@@ -433,7 +439,7 @@ JavaScript powers modern web applications with frameworks like React, Vue, and A
     # 删除 User 1 的第一个文件（应该成功）
     file_id = uploaded_files["user1_file1"]
     print(f"\n🗑️  User 1 删除自己的文件 (ID: {file_id[:8]}...)...")
-    response = client.delete(f"/knowledge/{file_id}?owner_id={user1_id}")
+    response = client.delete(f"/knowledge/{file_id}?owner_id={str(user1_id)}")
     assert response.status_code == 204, f"Delete failed: {response.text}"
     print(f"  ✓ 文件删除成功")
 
@@ -464,7 +470,7 @@ JavaScript powers modern web applications with frameworks like React, Vue, and A
         if key == "user1_file1":  # 已经删除过了
             continue
         try:
-            owner_id = file_owner_map[key]
+            owner_id = str(file_owner_map[key])
             response = client.delete(f"/knowledge/{file_id}?owner_id={owner_id}")
             if response.status_code == 204:
                 deleted_count += 1
@@ -502,4 +508,3 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
-

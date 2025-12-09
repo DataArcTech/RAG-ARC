@@ -11,7 +11,15 @@ Tests:
 
 import sys
 import uuid
+import os
+import pytest
+
 sys.path.insert(0, '.')
+
+pytestmark = pytest.mark.skipif(
+    os.getenv("RUN_RAGARC_CHAT_STORAGE_TESTS") != "1",
+    reason="Requires PostgreSQL services; set RUN_RAGARC_CHAT_STORAGE_TESTS=1 to run.",
+)
 
 from config.encapsulation.database.relational_db.postgresql_config import PostgreSQLConfig
 from config.core.file_management.storage.user_storage import UserStorageConfig
@@ -32,12 +40,11 @@ def hash_password(password: str) -> str:
 def get_db_config():
     """Get PostgreSQL configuration"""
     return PostgreSQLConfig(
-        type="postgresql",
-        host="localhost",
-        port=5555,
-        database="rag_test",
-        user="postgres",
-        password="123"
+        host=os.getenv("POSTGRES_HOST", "localhost"),
+        port=str(os.getenv("POSTGRES_PORT", "5432")),
+        database=os.getenv("POSTGRES_DB", "rag_test"),
+        user=os.getenv("POSTGRES_USER", "postgres"),
+        password=os.getenv("POSTGRES_PASSWORD", "123")
     )
 
 
@@ -311,4 +318,3 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
-

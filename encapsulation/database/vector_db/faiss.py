@@ -8,6 +8,7 @@ from typing import Any, Optional, List, Dict, TYPE_CHECKING
 from encapsulation.database.vector_db.base import VectorDB
 from encapsulation.data_model.schema import Chunk
 from framework.shared_module_decorator import shared_module
+from core.utils.path_guard import ensure_writable_dir
 
 if TYPE_CHECKING:
     from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBConfig
@@ -491,6 +492,9 @@ class FaissVectorDB(VectorDB):
                  Creates {name}.faiss and {name}.pkl
         """
         logger.info(f"Saving index to path: {path} with name: {name}")
+        runtime_root = os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime")
+        fallback_dir = os.path.join(runtime_root, os.path.basename(path) or "faiss_index")
+        path = ensure_writable_dir(path, fallback_dir)
         os.makedirs(path, exist_ok=True)
 
         # Save FAISS index

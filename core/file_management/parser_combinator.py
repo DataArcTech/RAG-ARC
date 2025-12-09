@@ -5,6 +5,7 @@ from pathlib import Path
 
 from core.file_management.parser.base import AbstractParser
 from framework.module import AbstractModule
+from core.utils.path_guard import ensure_writable_dir
 
 if TYPE_CHECKING:
     from config.core.file_management.parser_combinator_config import ParserCombinatorConfig
@@ -38,11 +39,15 @@ class ParserCombinator(AbstractModule):
 
         # Get base output directory from config
         base_output_dir = getattr(self.config, 'base_output_dir', './data/parsed_files')
-        base_output_dir = os.path.abspath(base_output_dir)
+        fallback_base = os.path.join(
+            os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime"),
+            "parsed_files"
+        )
+        base_output_dir = ensure_writable_dir(base_output_dir, fallback_base)
         logger.info(f"ParserCombinator base output directory: {base_output_dir}")
+        os.environ.setdefault("PARSER_OUTPUT_DIR", base_output_dir)
 
-        # Create base directory
-        os.makedirs(base_output_dir, exist_ok=True)
+        runtime_root = os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime")
 
         # Build OCR parser if configured
         ocr_parser_config = getattr(self.config, 'ocr_parser', None)
@@ -52,10 +57,18 @@ class ParserCombinator(AbstractModule):
             # Set output directory for OCR parser based on type
             if ocr_parser_config.type == "dots_ocr_parser":
                 ocr_output_dir = os.path.join(base_output_dir, "dots_ocr")
+                ocr_output_dir = ensure_writable_dir(
+                    ocr_output_dir,
+                    os.path.join(runtime_root, "dots_ocr")
+                )
                 os.environ['DOTSOCR_OUTPUT_DIR'] = ocr_output_dir
                 logger.info(f"DotsOCR output directory: {ocr_output_dir}")
             elif ocr_parser_config.type == "vlm_ocr_parser":
                 ocr_output_dir = os.path.join(base_output_dir, "vlm_ocr")
+                ocr_output_dir = ensure_writable_dir(
+                    ocr_output_dir,
+                    os.path.join(runtime_root, "vlm_ocr")
+                )
                 os.environ['VLMOCR_OUTPUT_DIR'] = ocr_output_dir
                 logger.info(f"VLM OCR output directory: {ocr_output_dir}")
 
@@ -71,6 +84,10 @@ class ParserCombinator(AbstractModule):
 
             # Set output directory for Native parser
             native_output_dir = os.path.join(base_output_dir, "native")
+            native_output_dir = ensure_writable_dir(
+                native_output_dir,
+                os.path.join(runtime_root, "native")
+            )
             os.environ['NATIVE_PARSER_OUTPUT_DIR'] = native_output_dir
             logger.info(f"Native parser output directory: {native_output_dir}")
 

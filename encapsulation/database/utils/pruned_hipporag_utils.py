@@ -1,5 +1,8 @@
 import re
 import hashlib
+from typing import Optional, Union
+
+OwnerIdType = Optional[Union[str, "uuid.UUID"]]
 
 
 # Regex pattern for text normalization (remove special characters, keep alphanumeric, Chinese characters, and spaces)
@@ -56,7 +59,14 @@ def text_processing(text: str) -> str:
     return TEXT_NORMALIZATION_PATTERN.sub(' ', text.lower()).strip()
 
 
-def compute_mdhash_id(content: str, prefix: str = "") -> str:
+def _owner_scoped_value(value: str, owner_id: OwnerIdType = None) -> str:
+    """Prefix value with owner scope when provided to keep IDs tenant-aware."""
+    if owner_id is None:
+        return value
+    return f"{owner_id}:{value}"
+
+
+def compute_mdhash_id(content: str, prefix: str = "", owner_id: OwnerIdType = None) -> str:
     """
     Compute MD5 hash ID for content with optional prefix.
     
@@ -73,10 +83,11 @@ def compute_mdhash_id(content: str, prefix: str = "") -> str:
         >>> compute_mdhash_id("some fact text", prefix="fact-")
         'fact-...'  # MD5 hash
     """
-    return prefix + hashlib.md5(content.encode()).hexdigest()
+    scoped_value = _owner_scoped_value(content, owner_id)
+    return prefix + hashlib.md5(scoped_value.encode()).hexdigest()
 
 
-def compute_entity_id(entity_name: str) -> str:
+def compute_entity_id(entity_name: str, owner_id: OwnerIdType = None) -> str:
     """
     Compute MD5 hash ID for an entity name.
     
@@ -93,5 +104,5 @@ def compute_entity_id(entity_name: str) -> str:
         >>> compute_entity_id("apple inc")
         'entity-...'  # MD5 hash with entity- prefix
     """
-    return "entity-" + hashlib.md5(entity_name.encode()).hexdigest()
-
+    scoped_value = _owner_scoped_value(entity_name, owner_id)
+    return "entity-" + hashlib.md5(scoped_value.encode()).hexdigest()

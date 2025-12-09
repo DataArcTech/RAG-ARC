@@ -13,11 +13,11 @@ class BM25IndexerConfig(AbstractConfig):
     # Batch processing configuration
     batch_size: int = Field(
         default=100,
-        description="Number of chunks to accumulate before triggering a flush"
+        description="Legacy knob kept for backward compatibility; current indexer always flushes synchronously"
     )
     flush_interval: float = Field(
         default=5.0,
-        description="Time interval (in seconds) to periodically flush pending chunks"
+        description="Legacy knob kept for backward compatibility; no periodic flush is performed in the current implementation"
     )
 
     def build(self):

@@ -5,6 +5,7 @@ from tantivy import Query, Occur, Order
 
 from core.retrieval.base import BaseRetriever
 from encapsulation.data_model.schema import Chunk
+from core.utils.owner_guard import normalize_owner_id
 
 if TYPE_CHECKING:
     from config.core.retrieval.tantivy_bm25_config import TantivyBM25RetrieverConfig
@@ -198,16 +199,25 @@ class TantivyBM25Retriever(BaseRetriever):
             List of Chunk objects
         """
         # Extract owner_id for user isolation
-        owner_id = kwargs.pop('owner_id', None)
+        owner_input = kwargs.pop('owner_id', None)
+
+        if owner_input is None:
+            logger.warning("BM25 retrieval requires an owner_id; returning no results")
+            return []
+
+        owner_id = normalize_owner_id(owner_input)
+        if owner_id is None:
+            logger.warning("owner_id '%s' could not be normalized; returning no results", owner_input)
+            return []
+        owner_id_str = owner_id
 
         # Use config defaults if parameters not provided
         k = k if k is not None else self.config.search_kwargs.get("k", 5)
         filters = filters or {}
 
-        # Add owner_id to filters if provided
-        if owner_id is not None:
-            filters['owner_id'] = str(owner_id)
-            logger.debug(f"Added owner_id filter: {owner_id}")
+        # Add owner_id to filters
+        filters['owner_id'] = owner_id_str
+        logger.debug(f"Added owner_id filter: {owner_id_str}")
 
         with_score = with_score if with_score is not None else self.config.search_kwargs.get("with_score", False)
         use_phrase_query = use_phrase_query if use_phrase_query is not None else self.config.search_kwargs.get("use_phrase_query", False)
@@ -268,6 +278,15 @@ class TantivyBM25Retriever(BaseRetriever):
                 tantivy_doc = self.searcher.doc(doc_address)
                 metadata = tantivy_doc.get_first("metadata") or {}
                 
+                # Enforce owner isolation even if index filter is bypassed unexpectedly
+                doc_owner_id = tantivy_doc.get_first("owner_id") or ""
+                if owner_id_str is not None and doc_owner_id != owner_id_str:
+                    logger.warning(
+                        f"Owner mismatch detected in BM25 results, skipping doc. "
+                        f"expected={owner_id_str}, got={doc_owner_id}"
+                    )
+                    continue
+                
                 # Add score to metadata if with_score is True
                 if with_score:
                     metadata = {**metadata, "score": float(score)}
@@ -278,7 +297,7 @@ class TantivyBM25Retriever(BaseRetriever):
                 chunk = Chunk(
                     id=tantivy_doc.get_first("id") or "",
                     content=tantivy_doc.get_first("content") or "",
-                    owner_id=tantivy_doc.get_first("owner_id") or "",
+                    owner_id=doc_owner_id,
                     metadata=metadata
                 )
 

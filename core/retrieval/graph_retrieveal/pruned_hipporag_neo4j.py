@@ -2,10 +2,11 @@ import logging
 import numpy as np
 import uuid
 import json
-from typing import List, Tuple, Set, Dict, TYPE_CHECKING, Optional
+from typing import List, Tuple, Set, Dict, TYPE_CHECKING, Optional, Union
 
 from encapsulation.data_model.schema import Chunk
 from core.retrieval.graph_retrieveal.pruned_hipporag import PrunedHippoRAGRetriever
+from core.utils.owner_guard import is_admin_owner, normalize_owner_id
 
 if TYPE_CHECKING:
     from config.core.retrieval.pruned_hipporag_neo4j_config import PrunedHippoRAGNeo4jRetrievalConfig
@@ -53,6 +54,7 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
 
         # Cache for node mappings to avoid rebuilding on every query
         self._cached_owner_id = None
+        self._cached_store_version = None  # Track graph store cache version
         self.passage_node_keys = []
         self.passage_embeddings_array = None
 
@@ -71,36 +73,50 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
             logger.info(f"    Base max neighbors: {config.max_neighbors}")
             logger.info(f"    Query-aware multiplier: {config.query_aware_multiplier}")
             logger.info(f"    Min/Max neighbors: {config.query_aware_min_k}/{config.query_aware_max_k}")
+    
+    def invalidate_cache(self):
+        """Force invalidation of all cached data."""
+        self._cached_owner_id = None
+        self._cached_store_version = None
+        self.passage_node_keys = []
+        self.passage_embeddings_array = None
 
-    def _build_node_mappings(self, owner_id: Optional[uuid.UUID] = None):
-        """
-        Build mappings between passage nodes and their IDs from Neo4j.
+    @staticmethod
+    def _owner_to_str(owner_id: Optional[uuid.UUID]) -> Optional[str]:
+        return str(owner_id) if owner_id is not None else None
 
-        This creates parallel lists:
-        - passage_node_keys: Chunk IDs
-        - passage_embeddings_array: Pre-computed embeddings array for fast retrieval
+    def _build_node_mappings(self, owner_id: Optional[uuid.UUID] = None, force_rebuild: bool = False):
+        """Build mappings between passage nodes and their IDs from Neo4j."""
+        current_store_version = self.graph_store.get_cache_version()
+        owner_str = self._owner_to_str(owner_id)
 
-        Uses caching to avoid rebuilding on every query when owner_id doesn't change.
+        cache_valid = (
+            not force_rebuild
+            and self._cached_owner_id == owner_str
+            and self._cached_store_version == current_store_version
+            and self.passage_embeddings_array is not None
+        )
 
-        Args:
-            owner_id: Optional owner ID to filter chunks by ownership
-        """
-        # Check if we can use cached mappings
-        if self._cached_owner_id == owner_id and self.passage_embeddings_array is not None:
-            logger.debug(f"Using cached node mappings for {len(self.passage_node_keys)} passage nodes")
+        if cache_valid:
+            logger.debug("Using cached node mappings for %d passage nodes", len(self.passage_node_keys))
             return
 
-        # Need to rebuild mappings
+        if self._cached_store_version != current_store_version:
+            logger.info(
+                "Cache version changed (%s -> %s), rebuilding...",
+                self._cached_store_version,
+                current_store_version,
+            )
+
         self.passage_node_keys = []
 
-        # Query chunks from Neo4j
-        if owner_id:
+        if owner_str:
             query = """
             MATCH (c:Chunk {owner_id: $owner_id})
             RETURN c.chunk_id AS chunk_id
             ORDER BY c.created_at
             """
-            results = self.graph_store._execute_query(query, {'owner_id': str(owner_id)})
+            results = self.graph_store._execute_query(query, {'owner_id': owner_str})
         else:
             query = """
             MATCH (c:Chunk)
@@ -111,17 +127,12 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
 
         self.passage_node_keys = [record['chunk_id'] for record in results]
 
-        # Pre-compute passage embeddings array for fast dense retrieval
         passage_embeddings_list = []
         for chunk_id in self.passage_node_keys:
             if chunk_id in self.graph_store.chunk_embeddings:
                 passage_embeddings_list.append(self.graph_store.chunk_embeddings[chunk_id])
             else:
-                # Use zero embedding for missing chunks
-                if passage_embeddings_list:
-                    embedding_dim = len(passage_embeddings_list[0])
-                else:
-                    embedding_dim = 384  # Default dimension for all-MiniLM-L6-v2
+                embedding_dim = len(passage_embeddings_list[0]) if passage_embeddings_list else 384
                 passage_embeddings_list.append(np.zeros(embedding_dim))
 
         if passage_embeddings_list:
@@ -129,15 +140,16 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
         else:
             self.passage_embeddings_array = np.array([], dtype=np.float32)
 
-        # Update cache
-        self._cached_owner_id = owner_id
+        self._cached_owner_id = owner_str
+        self._cached_store_version = current_store_version
 
-        logger.info(f"Built mappings for {len(self.passage_node_keys)} passage nodes")
+        logger.info("Built mappings for %d passage nodes", len(self.passage_node_keys))
 
     def _get_pruned_neighbors_by_weight(
         self,
         node_id: str,
-        entity_relevance_scores: dict = None
+        entity_relevance_scores: dict = None,
+        owner_id: Optional[uuid.UUID] = None
     ) -> List[str]:
         """
         Get pruned neighbors for a node using query-aware pruning from Neo4j.
@@ -155,7 +167,10 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
             List of neighbor IDs (pruned and sorted by weight)
         """
         # Get all neighbors with weights from Neo4j
-        neighbors_with_weights = self.graph_store.get_neighbors_with_weights(node_id)
+        neighbors_with_weights = self.graph_store.get_neighbors_with_weights(
+            node_id,
+            owner_id=self._owner_to_str(owner_id)
+        )
 
         if not neighbors_with_weights:
             return []
@@ -192,7 +207,8 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
     def _expand_subgraph(
         self,
         seed_entity_ids: Set[str],
-        entity_relevance_scores: dict = None
+        entity_relevance_scores: dict = None,
+        owner_id: Optional[uuid.UUID] = None
     ) -> Tuple[Set[str], Set[str]]:
         """
         Expand a subgraph around seed entities using multi-hop traversal in Neo4j.
@@ -216,12 +232,17 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
 
         chunks_set = set(self.passage_node_keys)
 
+        owner_str = self._owner_to_str(owner_id)
+
         # Start with seed entities
         subgraph_nodes.update(seed_entity_ids)
 
         # Add chunks directly connected to seed entities
         for entity_id in seed_entity_ids:
-            neighbors = self.graph_store.get_neighbors_with_weights(entity_id)
+            neighbors = self.graph_store.get_neighbors_with_weights(
+                entity_id,
+                owner_id=owner_str
+            )
             for neighbor_id, _ in neighbors:
                 if neighbor_id in chunks_set:
                     subgraph_nodes.add(neighbor_id)
@@ -240,7 +261,10 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
 
             # Batch query for all nodes in current layer
             current_layer_list = list(current_layer)
-            batch_neighbors = self.graph_store.get_batch_neighbors_with_weights(current_layer_list)
+            batch_neighbors = self.graph_store.get_batch_neighbors_with_weights(
+                current_layer_list,
+                owner_id=owner_str
+            )
 
             for node_id in current_layer:
                 # Get all neighbors from batch result
@@ -281,7 +305,10 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
             # Optionally add chunks connected to new entities (batch query)
             if include_chunks and next_layer:
                 next_layer_list = list(next_layer)
-                entity_batch_neighbors = self.graph_store.get_batch_neighbors_with_weights(next_layer_list)
+                entity_batch_neighbors = self.graph_store.get_batch_neighbors_with_weights(
+                    next_layer_list,
+                    owner_id=owner_str
+                )
 
                 for entity_id in next_layer:
                     entity_neighbors = entity_batch_neighbors.get(entity_id, [])
@@ -316,7 +343,8 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
         self,
         node_weights: dict,
         damping: float = 0.5,
-        subgraph_nodes: Set[str] = None
+        subgraph_nodes: Set[str] = None,
+        owner_id: Optional[uuid.UUID] = None
     ) -> Tuple[np.ndarray, np.ndarray, dict]:
         """
         Run Personalized PageRank with weighted reset probabilities.
@@ -347,9 +375,9 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
 
         # Choose PPR backend
         if self.ppr_backend == 'push':
-            pagerank_scores_dict = self._run_ppr_push(subgraph_nodes, normalized_reset, damping)
+            pagerank_scores_dict = self._run_ppr_push(subgraph_nodes, normalized_reset, damping, owner_id=owner_id)
         else:
-            pagerank_scores_dict = self._run_ppr_igraph(subgraph_nodes, normalized_reset, damping)
+            pagerank_scores_dict = self._run_ppr_igraph(subgraph_nodes, normalized_reset, damping, owner_id=owner_id)
 
         if not pagerank_scores_dict:
             logger.warning("PPR returned no scores")
@@ -376,7 +404,8 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
         self,
         subgraph_nodes: Set[str],
         reset: Dict[str, float],
-        damping: float
+        damping: float,
+        owner_id: Optional[uuid.UUID] = None
     ) -> Dict[str, float]:
         """
         Run PPR using push-based algorithm on cached graph.
@@ -394,19 +423,21 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
                 subgraph_nodes=subgraph_nodes,
                 reset=reset,
                 alpha=damping,
-                epsilon=1e-6
+                epsilon=1e-6,
+                owner_id=self._owner_to_str(owner_id)
             )
             logger.info(f"Push-based PPR completed: {len(ppr_scores)} nodes with non-zero scores")
             return ppr_scores
         except Exception as e:
             logger.error(f"Push-based PPR failed: {e}, falling back to igraph")
-            return self._run_ppr_igraph(subgraph_nodes, reset, damping)
+            return self._run_ppr_igraph(subgraph_nodes, reset, damping, owner_id=owner_id)
 
     def _run_ppr_igraph(
         self,
         subgraph_nodes: Set[str],
         reset: Dict[str, float],
-        damping: float
+        damping: float,
+        owner_id: Optional[uuid.UUID] = None
     ) -> Dict[str, float]:
         """
         Run PPR using igraph (fallback method).
@@ -420,7 +451,10 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
             Dictionary mapping node_id -> PageRank score
         """
         # Extract subgraph from cache (faster) or Neo4j (fallback)
-        graph, _, idx_to_node = self.graph_store.extract_subgraph_from_cache(subgraph_nodes)
+        graph, _, idx_to_node = self.graph_store.extract_subgraph_from_cache(
+            subgraph_nodes,
+            owner_id=self._owner_to_str(owner_id)
+        )
 
         if graph.vcount() == 0:
             logger.warning("Empty subgraph extracted")
@@ -459,7 +493,8 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
         query_fact_scores: np.ndarray,
         top_k_facts: List[Tuple],
         top_k_fact_indices: List[int],
-        subgraph_nodes: Set[str]
+        subgraph_nodes: Set[str],
+        owner_id: Optional[uuid.UUID] = None
     ) -> Tuple[List[str], List[float], dict]:
         """
         Perform graph search on the expanded subgraph using Personalized PageRank.
@@ -487,16 +522,19 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
 
         # Get entity-to-chunk counts from cache (optimized, no Neo4j query)
         # Collect all entity IDs that appear in facts
+        owner_str = self._owner_to_str(owner_id)
+
         entity_ids_in_facts = set()
         for f in top_k_facts:
             for entity_text in [f[0], f[2]]:  # head and tail
-                entity_id = compute_entity_id(normalize_entity_text(entity_text))
+                entity_id = compute_entity_id(normalize_entity_text(entity_text), owner_id=owner_str)
                 if entity_id in subgraph_nodes:
                     entity_ids_in_facts.add(entity_id)
 
         # Batch get chunk counts from cache
         entity_to_chunk_count = self.graph_store.get_batch_entity_chunk_counts_from_cache(
-            list(entity_ids_in_facts)
+            list(entity_ids_in_facts),
+            owner_id=owner_str
         )
 
         # Assign weights to entity nodes based on fact scores
@@ -504,7 +542,7 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
             fact_score = query_fact_scores[top_k_fact_indices[rank]] if query_fact_scores.ndim > 0 else query_fact_scores
 
             for entity_text in [f[0], f[2]]:  # head and tail
-                entity_id = compute_entity_id(normalize_entity_text(entity_text))
+                entity_id = compute_entity_id(normalize_entity_text(entity_text), owner_id=owner_str)
 
                 if entity_id in subgraph_nodes:
                     phrase_weights[entity_id] = fact_score
@@ -550,7 +588,8 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
         ppr_sorted_doc_ids, ppr_sorted_doc_scores, ppr_scores_dict = self._run_ppr_with_weights(
             node_weights=node_weights,
             damping=self.config.damping_factor,
-            subgraph_nodes=subgraph_nodes
+            subgraph_nodes=subgraph_nodes,
+            owner_id=owner_id
         )
 
         # Convert to chunk IDs
@@ -586,27 +625,47 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
         """
         logger.info(f"Retrieving for query: {query} (owner_id={owner_id})")
 
+        if owner_id is None:
+            logger.warning("Owner ID is required for graph retrieval; returning empty results")
+            return []
+
+        normalized_owner = normalize_owner_id(owner_id)
+        if normalized_owner is None:
+            logger.warning("Unable to normalize owner_id '%s'; returning empty results", owner_id)
+            return []
+
+        if is_admin_owner(owner_id):
+            logger.info("Admin owner detected, retrieving across all owners")
+            owner_filter = None
+        else:
+            owner_filter = owner_id
+
         # Rebuild node mappings for the current owner
-        self._build_node_mappings(owner_id=owner_id)
+        self._build_node_mappings(owner_id=owner_filter)
 
         # Step 1: Retrieve relevant facts
-        query_fact_scores, fact_ids = self._get_fact_scores_faiss(query)
+        query_fact_scores, fact_ids = self._get_fact_scores_faiss(query, owner_id=owner_filter)
 
         if query_fact_scores is None or len(query_fact_scores) == 0:
             logger.warning("No facts found, falling back to dense retrieval")
-            return self._dense_passage_retrieval(query, top_k, owner_id=owner_id)
+            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter)
 
         # Step 2: Rerank facts (optional)
         if self.config.enable_llm_reranking and self.llm_client:
-            top_k_facts, top_k_fact_indices = self._rerank_facts(query, query_fact_scores, fact_ids)
+            top_k_facts, top_k_fact_indices = self._rerank_facts(
+                query,
+                query_fact_scores,
+                fact_ids,
+                owner_id=owner_filter
+            )
         else:
             link_top_k = self.config.fact_retrieval_top_k
             top_k_fact_indices = np.argsort(query_fact_scores)[-link_top_k:][::-1].tolist()
-            top_k_facts = self._get_facts_by_indices(top_k_fact_indices, fact_ids)
+            top_k_facts = self._get_facts_by_indices(top_k_fact_indices, fact_ids, owner_id=owner_filter)
 
         if not top_k_facts:
             logger.warning("No facts after reranking, falling back to dense retrieval")
-            return self._dense_passage_retrieval(query, top_k, owner_id=owner_id)
+            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter)
 
         logger.info(f"Selected {len(top_k_facts)} facts after LLM filtering")
 
@@ -615,7 +674,7 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
 
         if not seed_entity_ids:
             logger.warning("No seed entities found, falling back to dense retrieval")
-            return self._dense_passage_retrieval(query, top_k, owner_id=owner_id)
+            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter)
 
         logger.info(f"Extracted {len(seed_entity_ids)} seed entities from {len(top_k_facts)} facts")
 
@@ -626,15 +685,17 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
                 seed_entity_ids,
                 top_k_facts,
                 query_fact_scores,
-                top_k_fact_indices
+                top_k_fact_indices,
+                owner_id=owner_filter
             )
             logger.info(f"[Query-Aware] Computed relevance scores for {len(entity_relevance_scores)} entities")
 
         # Step 5: Expand subgraph around seed entities (using Neo4j)
         subgraph_nodes, subgraph_chunk_ids = self._expand_subgraph(
             seed_entity_ids,
-            entity_relevance_scores=entity_relevance_scores
-        )
+            entity_relevance_scores=entity_relevance_scores,
+                owner_id=owner_filter
+            )
 
         logger.info(f"Subgraph: {len(subgraph_nodes)} nodes, {len(subgraph_chunk_ids)} chunks")
 
@@ -644,11 +705,12 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
             query_fact_scores,
             top_k_facts,
             top_k_fact_indices,
-            subgraph_nodes
+            subgraph_nodes,
+            owner_id=owner_filter
         )
 
         # Step 7: Convert to Chunk objects
-        chunks = self._convert_to_chunks(sorted_doc_ids[:top_k], sorted_doc_scores[:top_k], owner_id=owner_id)
+        chunks = self._convert_to_chunks(sorted_doc_ids[:top_k], sorted_doc_scores[:top_k], owner_id=owner_filter)
 
         # Optionally attach subgraph information for visualization
         if return_subgraph_info and chunks:
@@ -706,9 +768,10 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
         chunk_data_map = {}
         for record in results:
             chunk_id = record['chunk_id']
+            owner_value = self.graph_store._restore_owner_id(record.get('owner_id'))
             chunk_data_map[chunk_id] = {
                 'content': record['content'],
-                'owner_id': record['owner_id'],
+                'owner_id': owner_value,
                 'metadata': record['metadata']
             }
 
@@ -727,18 +790,66 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
                 # Add score to metadata
                 metadata['score'] = float(score)
 
-                # Create Chunk object
+                # Create Chunk object with restored owner type
+                owner_value = data.get('owner_id')
+                owner_field: Optional[Union[str, uuid.UUID]] = None
+                if owner_value:
+                    try:
+                        owner_field = uuid.UUID(owner_value)
+                    except (ValueError, TypeError):
+                        owner_field = owner_value
+
                 chunk = Chunk(
                     id=chunk_id,
                     content=data['content'],
-                    owner_id=uuid.UUID(data['owner_id']) if data['owner_id'] else None,
+                    owner_id=owner_field,
                     metadata=metadata
                 )
                 chunks.append(chunk)
 
         return chunks
 
-    def _get_facts_by_indices(self, indices: List[int], fact_ids: List[str]) -> List[Tuple]:
+    def _get_fact_scores_faiss(self, query: str, owner_id: Optional[uuid.UUID] = None) -> Tuple[np.ndarray, List[str]]:
+        scores, fact_ids = super()._get_fact_scores_faiss(query, owner_id=owner_id)
+
+        if owner_id is None or scores is None or len(scores) == 0:
+            return scores, fact_ids
+
+        owner_str = self._owner_to_str(owner_id)
+        docstore = self.graph_store.fact_faiss_db.docstore
+
+        filtered_scores = []
+        filtered_ids = []
+
+        for idx, fact_id in enumerate(fact_ids):
+            chunk = docstore.get(fact_id)
+            if not chunk:
+                continue
+
+            fact_owner = getattr(chunk, 'owner_id', None)
+            if fact_owner is None and chunk.metadata:
+                fact_owner = chunk.metadata.get('owner_id')
+
+            if fact_owner is None:
+                continue
+
+            if str(fact_owner) == owner_str:
+                score_value = scores[idx] if isinstance(scores, np.ndarray) else scores[idx]
+                filtered_scores.append(float(score_value))
+                filtered_ids.append(fact_id)
+
+        if not filtered_scores:
+            return np.array([]), []
+
+        dtype = scores.dtype if isinstance(scores, np.ndarray) else np.float32
+        return np.array(filtered_scores, dtype=dtype), filtered_ids
+
+    def _get_facts_by_indices(
+        self,
+        indices: List[int],
+        fact_ids: List[str],
+        owner_id: Optional[uuid.UUID] = None
+    ) -> List[Tuple[str, str, str, Optional[str]]]:
         """
         Retrieve fact triples from FAISS docstore (no database query needed).
 
@@ -750,7 +861,8 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
             List of fact triples (head, relation, tail)
         """
         import ast
-        facts = []
+        facts: List[Tuple[str, str, str, Optional[str]]] = []
+        owner_str = self._owner_to_str(owner_id)
 
         for idx in indices:
             if idx < len(fact_ids):
@@ -758,29 +870,42 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
                 # Retrieve fact from FAISS docstore (contains full Chunk with fact content)
                 if fact_id in self.graph_store.fact_faiss_db.docstore:
                     chunk = self.graph_store.fact_faiss_db.docstore[fact_id]
-                    fact_content = chunk.content
 
-                    # Handle different formats
+                    fact_owner = getattr(chunk, 'owner_id', None)
+                    if fact_owner is None and chunk.metadata:
+                        fact_owner = chunk.metadata.get('owner_id')
+
+                    if owner_str and str(fact_owner) != owner_str:
+                        continue
+
+                    fact_content = chunk.content
+                    parsed_fact: Optional[Tuple[str, str, str]] = None
+
                     if isinstance(fact_content, tuple) and len(fact_content) == 3:
-                        facts.append(fact_content)
+                        parsed_fact = (fact_content[0], fact_content[1], fact_content[2])
                     elif isinstance(fact_content, str):
                         # Try to parse as Python literal (tuple string representation)
                         try:
                             parsed = ast.literal_eval(fact_content)
                             if isinstance(parsed, tuple) and len(parsed) == 3:
-                                facts.append(parsed)
-                                continue
-                        except:
-                            pass
+                                parsed_fact = (parsed[0], parsed[1], parsed[2])
+                            else:
+                                parts = fact_content.split(' | ')
+                                if len(parts) == 3:
+                                    parsed_fact = (parts[0], parts[1], parts[2])
+                        except Exception:
+                            parts = fact_content.split(' | ')
+                            if len(parts) == 3:
+                                parsed_fact = (parts[0], parts[1], parts[2])
+                    elif isinstance(fact_content, (list, np.ndarray)) and len(fact_content) >= 3:
+                        parsed_fact = (fact_content[0], fact_content[1], fact_content[2])
 
-                        # Fallback: parse as "head | relation | tail"
-                        parts = fact_content.split(' | ')
-                        if len(parts) == 3:
-                            facts.append((parts[0], parts[1], parts[2]))
+                    if parsed_fact:
+                        facts.append((parsed_fact[0], parsed_fact[1], parsed_fact[2], fact_owner))
 
         return facts
 
-    def _extract_entity_ids_from_facts(self, facts: List[Tuple]) -> Set[str]:
+    def _extract_entity_ids_from_facts(self, facts: List[Tuple[str, str, str, Optional[str]]]) -> Set[str]:
         """
         Extract unique entity IDs from fact triples using Neo4j.
 
@@ -794,12 +919,12 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
 
         entity_ids = set()
 
-        # Directly compute entity IDs from names (same as during indexing)
-        for head_name, _, tail_name in facts:
+        for head_name, _, tail_name, fact_owner in facts:
+            owner_str = self._owner_to_str(fact_owner)
             head_normalized = text_processing(head_name)
             tail_normalized = text_processing(tail_name)
-            head_id = compute_mdhash_id(head_normalized, prefix='entity-')
-            tail_id = compute_mdhash_id(tail_normalized, prefix='entity-')
+            head_id = compute_mdhash_id(head_normalized, prefix='entity-', owner_id=owner_str)
+            tail_id = compute_mdhash_id(tail_normalized, prefix='entity-', owner_id=owner_str)
             entity_ids.add(head_id)
             entity_ids.add(tail_id)
 
@@ -830,18 +955,6 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
             logger.warning("No passage embeddings available")
             return np.zeros(len(self.passage_node_keys))
 
-        if self.passage_embeddings_array.shape[1] != query_embedding.shape[0]:
-            logger.error(
-                "Embedding dimension mismatch detected (passages=%s, query=%s). "
-                "Clearing cached chunk embeddings to avoid inconsistent state.",
-                self.passage_embeddings_array.shape[1],
-                query_embedding.shape[0],
-            )
-            if hasattr(self.graph_store, "clear_chunk_embeddings_cache"):
-                self.graph_store.clear_chunk_embeddings_cache()
-            self.passage_embeddings_array = np.array([], dtype=np.float32)
-            return np.zeros(len(self.passage_node_keys))
-
         # Fast dot product using numpy
         # If embeddings are float16, convert query to float16 for consistency
         if self.passage_embeddings_array.dtype == np.float16:
@@ -860,7 +973,8 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
         seed_entity_ids: Set[str],
         top_k_facts: List[Tuple],
         query_fact_scores: np.ndarray,
-        top_k_fact_indices: List[int]
+        top_k_fact_indices: List[int],
+        owner_id: Optional[uuid.UUID] = None
     ) -> dict:
         """
         Compute relevance scores for entities based on their associated fact scores.
@@ -884,10 +998,11 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
         entity_to_fact_scores = defaultdict(list)
 
         for fact_idx, fact in zip(top_k_fact_indices, top_k_facts):
+            fact_owner = self._owner_to_str(fact[3])
             head_name = text_processing(fact[0])
             tail_name = text_processing(fact[2])
-            head_id = compute_mdhash_id(head_name, prefix='entity-')
-            tail_id = compute_mdhash_id(tail_name, prefix='entity-')
+            head_id = compute_mdhash_id(head_name, prefix='entity-', owner_id=fact_owner)
+            tail_id = compute_mdhash_id(tail_name, prefix='entity-', owner_id=fact_owner)
 
             fact_score = float(query_fact_scores[fact_idx]) if query_fact_scores.ndim > 0 else float(query_fact_scores)
 

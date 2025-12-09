@@ -13,6 +13,7 @@ import faiss
 from encapsulation.database.graph_db.base import GraphStore
 from encapsulation.data_model.schema import Chunk, GraphData
 from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id, text_processing
+from core.utils.path_guard import ensure_writable_dir
 from framework.shared_module_decorator import shared_module
 
 if TYPE_CHECKING:
@@ -51,6 +52,25 @@ class PrunedHippoRAGIGraphStore(GraphStore):
        - Used for Personalized PageRank during retrieval
     """
 
+    OWNER_GLOBAL_KEY = "__GLOBAL__"
+
+    @staticmethod
+    def _normalize_owner_id(owner_id: Optional[Any]) -> Optional[str]:
+        if owner_id is None:
+            return None
+        return str(owner_id)
+
+    @classmethod
+    def _owner_key(cls, owner_id: Optional[Any]) -> str:
+        normalized = cls._normalize_owner_id(owner_id)
+        return normalized if normalized else cls.OWNER_GLOBAL_KEY
+
+    @classmethod
+    def _restore_owner_id(cls, owner_id: Optional[str]) -> Optional[str]:
+        if not owner_id or owner_id == cls.OWNER_GLOBAL_KEY:
+            return None
+        return owner_id
+
     def __init__(self, config: "PrunedHippoRAGIGraphConfig"):
         """
         Initialize the Pruned HippoRAG Graph Store.
@@ -83,7 +103,14 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         self.node_to_node_stats = defaultdict(float)  # (node_id, node_id) -> edge_weight
 
         # Storage configuration
-        self.storage_path = getattr(config, 'storage_path', './data/graph_index')
+        storage_path = getattr(config, 'storage_path', './data/graph_index')
+        fallback_storage = os.path.join(
+            os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime"),
+            "graph_index"
+        )
+        resolved_storage = ensure_writable_dir(storage_path, fallback_storage)
+        self.storage_path = resolved_storage
+        setattr(self.config, 'storage_path', resolved_storage)
         self.index_name = getattr(config, 'index_name', 'index')
 
         # Synonymy edge configuration
@@ -192,10 +219,15 @@ class PrunedHippoRAGIGraphStore(GraphStore):
                 entity_name TEXT NOT NULL,
                 entity_type TEXT DEFAULT "Entity",
                 attributes TEXT,
+                owner_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(entity_name)')
+        try:
+            cursor.execute('ALTER TABLE entities ADD COLUMN owner_id TEXT')
+        except sqlite3.OperationalError:
+            pass
 
         # Facts table (knowledge graph triples)
         cursor.execute('''
@@ -205,11 +237,16 @@ class PrunedHippoRAGIGraphStore(GraphStore):
                 relation TEXT NOT NULL,
                 tail TEXT NOT NULL,
                 text TEXT NOT NULL,
+                owner_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_facts_head ON facts(head)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_facts_tail ON facts(tail)')
+        try:
+            cursor.execute('ALTER TABLE facts ADD COLUMN owner_id TEXT')
+        except sqlite3.OperationalError:
+            pass
 
         # Chunk-entity relations table
         cursor.execute('''
@@ -217,6 +254,7 @@ class PrunedHippoRAGIGraphStore(GraphStore):
                 chunk_id TEXT NOT NULL,
                 entity_id TEXT NOT NULL,
                 weight REAL DEFAULT 1.0,
+                owner_id TEXT,
                 PRIMARY KEY (chunk_id, entity_id),
                 FOREIGN KEY (chunk_id) REFERENCES chunks(chunk_id) ON DELETE CASCADE,
                 FOREIGN KEY (entity_id) REFERENCES entities(entity_id) ON DELETE CASCADE
@@ -224,6 +262,10 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_ce_entity ON chunk_entity_relations(entity_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_ce_chunk ON chunk_entity_relations(chunk_id)')
+        try:
+            cursor.execute('ALTER TABLE chunk_entity_relations ADD COLUMN owner_id TEXT')
+        except sqlite3.OperationalError:
+            pass
 
         # Synonymy edges table (similarity-based entity connections)
         cursor.execute('''
@@ -231,6 +273,7 @@ class PrunedHippoRAGIGraphStore(GraphStore):
                 entity_id_1 TEXT NOT NULL,
                 entity_id_2 TEXT NOT NULL,
                 similarity REAL NOT NULL,
+                owner_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (entity_id_1, entity_id_2),
                 FOREIGN KEY (entity_id_1) REFERENCES entities(entity_id) ON DELETE CASCADE,
@@ -239,6 +282,10 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_syn_entity1 ON synonymy_edges(entity_id_1)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_syn_entity2 ON synonymy_edges(entity_id_2)')
+        try:
+            cursor.execute('ALTER TABLE synonymy_edges ADD COLUMN owner_id TEXT')
+        except sqlite3.OperationalError:
+            pass
 
         self.conn.commit()
         logger.info(f"SQLite database initialized at {self.db_path}")
@@ -252,6 +299,12 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         """
         chunk_id = chunk.id
 
+        metadata = dict(chunk.metadata) if chunk.metadata else {}
+        owner_value = chunk.owner_id or metadata.get('owner_id')
+        owner_str = self._normalize_owner_id(owner_value)
+        if owner_str:
+            metadata['owner_id'] = owner_str
+
         cursor = self.conn.cursor()
         cursor.execute('''
             INSERT OR REPLACE INTO chunks (chunk_id, content, owner_id, metadata)
@@ -259,8 +312,8 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         ''', (
             chunk_id,
             chunk.content,
-            chunk.owner_id,
-            json.dumps(chunk.metadata) if chunk.metadata else '{}'
+            owner_str,
+            json.dumps(metadata) if metadata else '{}'
         ))
 
         # Mark chunk embeddings array as dirty
@@ -286,7 +339,13 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         self._add_chunk_no_commit(chunk)
         self.conn.commit()
 
-    def _add_graph_data_no_commit(self, graph_data: GraphData, chunk_id: str) -> List[str]:
+    def _get_chunk_owner_id(self, chunk_id: str) -> Optional[str]:
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT owner_id FROM chunks WHERE chunk_id = ?', (chunk_id,))
+        row = cursor.fetchone()
+        return self._normalize_owner_id(row[0]) if row and row[0] else None
+
+    def _add_graph_data_no_commit(self, graph_data: GraphData, chunk_id: str, owner_id: Optional[Any] = None) -> List[str]:
         """
         Add graph data (entities and facts) for a chunk without committing.
 
@@ -304,6 +363,10 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         Returns:
             List of newly created entity IDs
         """
+        owner_str = self._normalize_owner_id(owner_id)
+        if owner_str is None:
+            owner_str = self._get_chunk_owner_id(chunk_id)
+
         # Build entity name to type mapping from graph.entities
         # IMPORTANT: Use text_processing() on entity names to match processed triple entities
         entity_name_to_type = {}
@@ -338,16 +401,16 @@ class PrunedHippoRAGIGraphStore(GraphStore):
 
         # Add entities to database and graph
         for entity_name in triple_entities:
-            entity_id = compute_mdhash_id(entity_name, prefix='entity-')
+            entity_id = compute_mdhash_id(entity_name, prefix='entity-', owner_id=owner_str)
             # Get entity type from mapping, default to 'Entity'
             entity_type = entity_name_to_type.get(entity_name, 'Entity')
 
             # Add entity node to graph if not exists
             if entity_id not in self.node_to_idx:
                 cursor.execute('''
-                    INSERT OR IGNORE INTO entities (entity_id, entity_name, entity_type, attributes)
-                    VALUES (?, ?, ?, ?)
-                ''', (entity_id, entity_name, entity_type, '{}'))
+                    INSERT OR IGNORE INTO entities (entity_id, entity_name, entity_type, attributes, owner_id)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (entity_id, entity_name, entity_type, '{}', owner_str))
 
                 vertex_idx = self.graph.vcount()
                 self.graph.add_vertex(name=entity_id, node_type='entity', entity_name=entity_name, entity_type=entity_type)
@@ -358,9 +421,9 @@ class PrunedHippoRAGIGraphStore(GraphStore):
 
             # Create chunk-entity relation
             cursor.execute('''
-                INSERT OR IGNORE INTO chunk_entity_relations (chunk_id, entity_id, weight)
-                VALUES (?, ?, ?)
-            ''', (chunk_id, entity_id, 2.0))
+                INSERT OR IGNORE INTO chunk_entity_relations (chunk_id, entity_id, weight, owner_id)
+                VALUES (?, ?, ?, ?)
+            ''', (chunk_id, entity_id, 2.0, owner_str))
 
         # Initialize fact cache if needed
         if not hasattr(self, '_fact_ids_cache'):
@@ -369,13 +432,13 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         # Add facts to database
         for head_name, relation_type, tail_name in processed_triples:
             fact_text = str((head_name, relation_type, tail_name))
-            fact_id = compute_mdhash_id(fact_text, prefix='fact-')
+            fact_id = compute_mdhash_id(fact_text, prefix='fact-', owner_id=owner_str)
 
             if fact_id not in self._fact_ids_cache:
                 cursor.execute('''
-                    INSERT OR IGNORE INTO facts (fact_id, head, relation, tail, text)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (fact_id, head_name, relation_type, tail_name, fact_text))
+                    INSERT OR IGNORE INTO facts (fact_id, head, relation, tail, text, owner_id)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (fact_id, head_name, relation_type, tail_name, fact_text, owner_str))
 
                 self._fact_ids_cache.add(fact_id)
 
@@ -383,7 +446,7 @@ class PrunedHippoRAGIGraphStore(GraphStore):
 
         return new_entity_ids
 
-    def add_graph_data(self, graph_data: GraphData, chunk_id: str) -> List[str]:
+    def add_graph_data(self, graph_data: GraphData, chunk_id: str, owner_id: Optional[Any] = None) -> List[str]:
         """
         Add graph data for a chunk and commit.
 
@@ -394,7 +457,8 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         Returns:
             List of newly created entity IDs
         """
-        result = self._add_graph_data_no_commit(graph_data, chunk_id)
+        owner_str = self._normalize_owner_id(owner_id) or self._get_chunk_owner_id(chunk_id)
+        result = self._add_graph_data_no_commit(graph_data, chunk_id, owner_id=owner_str)
         self.conn.commit()
         return result
 
@@ -483,17 +547,21 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             logger.info(f"Chunk embeddings generated for {len(new_chunks)} chunks")
 
         # Generate entity embeddings and add to FAISS HNSW
-        cursor.execute('SELECT entity_id, entity_name FROM entities')
+        cursor.execute('SELECT entity_id, entity_name, owner_id FROM entities')
         entities = cursor.fetchall()
 
         new_entities = []
-        for entity_id, entity_name in entities:
+        for entity_id, entity_name, entity_owner in entities:
             # Check if already in FAISS
             if entity_id not in self.entity_faiss_db.docstore:
+                metadata = {'type': 'entity'}
+                if entity_owner:
+                    metadata['owner_id'] = entity_owner
                 new_entities.append(Chunk(
                     id=entity_id,
                     content=entity_name,
-                    metadata={'type': 'entity'}
+                    owner_id=entity_owner,
+                    metadata=metadata
                 ))
 
         if new_entities:
@@ -515,16 +583,20 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             logger.info(f"Saved entity index to {entity_index_path}")
 
         # Generate fact embeddings and add to FAISS Flat
-        cursor.execute('SELECT fact_id, text FROM facts')
+        cursor.execute('SELECT fact_id, text, owner_id FROM facts')
         facts = cursor.fetchall()
 
         new_facts = []
-        for fact_id, fact_text in facts:
+        for fact_id, fact_text, fact_owner in facts:
             if fact_id not in self.fact_faiss_db.docstore:
+                metadata = {'type': 'fact'}
+                if fact_owner:
+                    metadata['owner_id'] = fact_owner
                 new_facts.append(Chunk(
                     id=fact_id,
                     content=fact_text,
-                    metadata={'type': 'fact'}
+                    owner_id=fact_owner,
+                    metadata=metadata
                 ))
 
         if new_facts:
@@ -594,15 +666,12 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             self.node_to_node_stats[(entity_id, chunk_id)] += 1.0
 
         # 2. Add entity-entity edges from facts (BIDIRECTIONAL: head <-> tail)
-        # Build entity name to ID mapping for fast lookup
-        cursor.execute('SELECT entity_id, entity_name FROM entities')
-        entity_name_to_id = {name: eid for eid, name in cursor.fetchall()}
-
-        cursor.execute('SELECT head, tail FROM facts')
+        cursor.execute('SELECT head, tail, owner_id FROM facts')
         facts = cursor.fetchall()
-        for head_name, tail_name in facts:
-            head_id = entity_name_to_id.get(head_name)
-            tail_id = entity_name_to_id.get(tail_name)
+        for head_name, tail_name, fact_owner in facts:
+            owner_str = self._normalize_owner_id(fact_owner)
+            head_id = compute_mdhash_id(text_processing(head_name), prefix='entity-', owner_id=owner_str)
+            tail_id = compute_mdhash_id(text_processing(tail_name), prefix='entity-', owner_id=owner_str)
             if head_id and tail_id and head_id != tail_id:
                 # Update statistics (BIDIRECTIONAL: both directions)
                 # Multiple facts between same entities will accumulate weight (co-occurrence count)
@@ -668,31 +737,31 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         self.conn.commit()
 
         # Get all entities
-        cursor.execute('SELECT entity_id, entity_name FROM entities')
+        cursor.execute('SELECT entity_id, entity_name, owner_id FROM entities')
         entities = cursor.fetchall()
 
         if not entities:
             logger.warning("No entities found, skipping synonymy edge addition")
             return
 
-        # Build entity ID to name mapping for fast lookup
-        entity_id_to_name = {eid: name for eid, name in entities}
+        # Build entity metadata mapping for fast lookup
+        entity_id_to_info = {
+            eid: {'name': name, 'owner_id': owner}
+            for eid, name, owner in entities
+        }
 
         # Build a set to track existing entity-entity edges (fact edges only)
         # We only check entity-entity edges to avoid duplicates, not chunk-entity edges
         existing_entity_entity_edges = set()
 
         # Add fact edges (entity-entity edges)
-        cursor.execute('SELECT entity_id, entity_name FROM entities')
-        entity_name_to_id = {name: eid for eid, name in cursor.fetchall()}
-
-        cursor.execute('SELECT head, tail FROM facts')
-        for head_name, tail_name in cursor.fetchall():
-            head_id = entity_name_to_id.get(head_name)
-            tail_id = entity_name_to_id.get(tail_name)
-            if head_id and tail_id:
-                existing_entity_entity_edges.add((head_id, tail_id))
-                existing_entity_entity_edges.add((tail_id, head_id))
+        cursor.execute('SELECT head, tail, owner_id FROM facts')
+        for head_name, tail_name, fact_owner in cursor.fetchall():
+            owner_str = self._normalize_owner_id(fact_owner)
+            head_id = compute_mdhash_id(text_processing(head_name), prefix='entity-', owner_id=owner_str)
+            tail_id = compute_mdhash_id(text_processing(tail_name), prefix='entity-', owner_id=owner_str)
+            existing_entity_entity_edges.add((head_id, tail_id))
+            existing_entity_entity_edges.add((tail_id, head_id))
 
         logger.info(f"Built existing entity-entity edge set with {len(existing_entity_entity_edges)} directional edges")
 
@@ -704,7 +773,7 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         valid_entities = []
         embeddings_list = []
 
-        for entity_id, entity_name in entities:
+        for entity_id, entity_name, entity_owner in entities:
             # Filter short entities (same as original)
             if len(re.sub('[^A-Za-z0-9]', '', entity_name)) <= 2:
                 continue
@@ -724,7 +793,7 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             else:
                 embedding = embedding.astype(np.float32)
 
-            valid_entities.append((entity_id, entity_name))
+            valid_entities.append((entity_id, entity_name, entity_owner))
             embeddings_list.append(embedding)
 
         if not valid_entities:
@@ -748,17 +817,17 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         logger.info("Processing search results...")
 
         if len(valid_entities) > 0:
-            _, first_entity_name = valid_entities[0]
+            _, first_entity_name, _ = valid_entities[0]
             first_distances = distances_batch[0]
             first_indices = indices_batch[0]
             logger.info(f"DEBUG: First entity '{first_entity_name}' top-5 neighbors:")
             for j in range(min(5, len(first_distances))):
                 if first_indices[j] != -1 and first_indices[j] in self.entity_faiss_db.index_to_docstore_id:
                     neighbor_id = self.entity_faiss_db.index_to_docstore_id[first_indices[j]]
-                    neighbor_name = entity_id_to_name.get(neighbor_id, "Unknown")
+                    neighbor_name = entity_id_to_info.get(neighbor_id, {}).get('name', "Unknown")
                     logger.info(f"  {j+1}. {neighbor_name}: distance={first_distances[j]:.4f}")
 
-        for i, ((entity_id, entity_name), distances, indices) in enumerate(tqdm(
+        for i, ((entity_id, entity_name, entity_owner), distances, indices) in enumerate(tqdm(
             zip(valid_entities, distances_batch, indices_batch),
             total=len(valid_entities),
             desc="Computing synonymy edges"
@@ -787,8 +856,12 @@ class PrunedHippoRAGIGraphStore(GraphStore):
                     continue
 
                 # Get neighbor name for validation (from cache, not SQLite)
-                neighbor_name = entity_id_to_name.get(neighbor_entity_id)
-                if not neighbor_name:
+                neighbor_info = entity_id_to_info.get(neighbor_entity_id)
+                if not neighbor_info:
+                    continue
+
+                neighbor_owner = neighbor_info.get('owner_id')
+                if neighbor_owner != entity_owner:
                     continue
 
                 # FAISS with metric='cosine' returns NEGATIVE inner product
@@ -803,7 +876,7 @@ class PrunedHippoRAGIGraphStore(GraphStore):
 
                 if edge_key not in existing_entity_entity_edges and reverse_edge_key not in existing_entity_entity_edges:
                     # Add UNIDIRECTIONAL edge (only one direction to avoid duplication)
-                    edges_to_add.append((entity_id, neighbor_entity_id, similarity))
+                    edges_to_add.append((entity_id, neighbor_entity_id, similarity, entity_owner))
                     num_synonym_edges += 1
                     num_added += 1
 
@@ -819,7 +892,7 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             logger.info(f"Saving {len(edges_to_add)} directional synonymy edges to SQLite and graph...")
             # edges_to_add already contains both directions, so we save all of them
             cursor.executemany(
-                'INSERT OR REPLACE INTO synonymy_edges (entity_id_1, entity_id_2, similarity) VALUES (?, ?, ?)',
+                'INSERT OR REPLACE INTO synonymy_edges (entity_id_1, entity_id_2, similarity, owner_id) VALUES (?, ?, ?, ?)',
                 edges_to_add
             )
             self.conn.commit()
@@ -830,7 +903,7 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             valid_edges = []
             edge_weights = []
 
-            for entity_id_1, entity_id_2, similarity in edges_to_add:
+            for entity_id_1, entity_id_2, similarity, _ in edges_to_add:
                 # Add edge to node_to_node_stats (unidirectional, as stored in SQLite)
                 self.node_to_node_stats[(entity_id_1, entity_id_2)] = similarity
 
@@ -912,7 +985,7 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             for chunk in batch:
                 self._add_chunk_no_commit(chunk)
                 if chunk.graph and not chunk.graph.is_empty():
-                    self._add_graph_data_no_commit(chunk.graph, chunk.id)
+                    self._add_graph_data_no_commit(chunk.graph, chunk.id, owner_id=chunk.owner_id)
 
             # Commit once per batch
             self.conn.commit()
@@ -961,7 +1034,7 @@ class PrunedHippoRAGIGraphStore(GraphStore):
                 self.add_chunk(chunk)
                 if chunk.graph and not chunk.graph.is_empty():
                     logger.info(f"    Adding graph data: {len(chunk.graph.entities)} entities, {len(chunk.graph.relations)} relations")
-                    self.add_graph_data(chunk.graph, chunk.id)
+                    self.add_graph_data(chunk.graph, chunk.id, owner_id=chunk.owner_id)
                 else:
                     logger.warning(f"    Chunk {chunk.id} has no graph data")
             logger.info("Step 1 completed: All chunks and graph data added")
@@ -1050,26 +1123,33 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         # 3. Delete orphan entities and their facts
         if orphan_entities:
             entity_placeholders = ','.join('?' * len(orphan_entities))
-
-            # Find facts involving orphan entities
             cursor.execute(f'''
-                SELECT fact_id FROM facts
-                WHERE head IN (SELECT entity_name FROM entities WHERE entity_id IN ({entity_placeholders}))
-                   OR tail IN (SELECT entity_name FROM entities WHERE entity_id IN ({entity_placeholders}))
-            ''', orphan_entities + orphan_entities)
-            orphan_fact_ids = [row[0] for row in cursor.fetchall()]
+                SELECT entity_id, entity_name, owner_id
+                FROM entities
+                WHERE entity_id IN ({entity_placeholders})
+            ''', orphan_entities)
+            orphan_entity_rows = cursor.fetchall()
+
+            orphan_fact_ids = []
+            for entity_id, entity_name, entity_owner in orphan_entity_rows:
+                cursor.execute('''
+                    SELECT fact_id FROM facts
+                    WHERE owner_id IS ?
+                      AND (head = ? OR tail = ?)
+                ''', (entity_owner, entity_name, entity_name))
+                orphan_fact_ids.extend(row[0] for row in cursor.fetchall())
+
+                cursor.execute('''
+                    DELETE FROM facts
+                    WHERE owner_id IS ?
+                      AND (head = ? OR tail = ?)
+                ''', (entity_owner, entity_name, entity_name))
 
             # Delete facts from FAISS
             if orphan_fact_ids:
-                self.fact_faiss_db.delete_index(orphan_fact_ids)
-                logger.info(f"Deleted {len(orphan_fact_ids)} orphan facts from FAISS")
-
-            # Delete facts from SQLite
-            cursor.execute(f'''
-                DELETE FROM facts
-                WHERE head IN (SELECT entity_name FROM entities WHERE entity_id IN ({entity_placeholders}))
-                   OR tail IN (SELECT entity_name FROM entities WHERE entity_id IN ({entity_placeholders}))
-            ''', orphan_entities + orphan_entities)
+                unique_fact_ids = list(dict.fromkeys(orphan_fact_ids))
+                self.fact_faiss_db.delete_index(unique_fact_ids)
+                logger.info(f"Deleted {len(unique_fact_ids)} orphan facts from FAISS")
 
             # Delete entities from FAISS
             self.entity_faiss_db.delete_index(orphan_entities)
@@ -1407,4 +1487,3 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             'chunk_index_size': len(self.chunk_embeddings),
             'synonymy_edges_enabled': self.add_synonymy_edges
         }
-
