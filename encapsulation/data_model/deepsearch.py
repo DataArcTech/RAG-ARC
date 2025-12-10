@@ -1,7 +1,9 @@
 """Pydantic models shared across DeepSearch services, API, and CLI layers."""
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
+
+from core.graph_adapter.base import GraphAccessScope
 
 
 class PlanSpec(BaseModel):
@@ -36,11 +38,29 @@ class DeepSearchResult(BaseModel):
 class GraphQueryContext(BaseModel):
     """Carries graph-specific metadata that needs to reach adapters or external tools."""
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     adapter_name: str = Field(..., description="Registered GraphAdapter name driving this request")
-    owner_id: Optional[str] = Field(None, description="User identifier for graph isolation")
+    owner_id: Optional[str] = Field(
+        None,
+        description="Deprecated owner identifier kept for backward compatibility; treated as opaque token.",
+    )
     question: Optional[str] = Field(None, description="Original natural language question")
     seed_entities: List[str] = Field(default_factory=list, description="Seed entities highlighted during traversal")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Extra context such as hop limits or filters")
+    access_scope: Optional[GraphAccessScope] = Field(
+        None,
+        description="Structured access metadata (tenant/user/cluster) consumed by adapters",
+    )
+
+    def resolve_scope(self) -> Optional[GraphAccessScope]:
+        """Return the explicit access scope when available, falling back to legacy owner tokens."""
+
+        if self.access_scope:
+            return self.access_scope
+        if self.owner_id:
+            return GraphAccessScope(scope_id=str(self.owner_id), scope_type="owner")
+        return None
 
 
 class ToolExecutionLog(BaseModel):
