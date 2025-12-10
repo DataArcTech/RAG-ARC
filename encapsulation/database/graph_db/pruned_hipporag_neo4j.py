@@ -1649,15 +1649,24 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         if not deleted_nodes:
             return
         
-        # Remove deleted nodes
-        for node_id in deleted_nodes:
-            self._graph_cache.pop(node_id, None)
-        
-        # Clean edges pointing to deleted nodes
-        for node_id in self._graph_cache:
-            self._graph_cache[node_id] = [
-                (n, w) for n, w in self._graph_cache[node_id] if n not in deleted_nodes
-            ]
+        # Remove nodes and edges referencing deleted nodes across owner shards
+        for owner_key in list(self._graph_cache.keys()):
+            owner_cache = self._graph_cache.get(owner_key, {})
+            
+            # Remove node entries that are deleted
+            for node_id in list(owner_cache.keys()):
+                if node_id in deleted_nodes:
+                    owner_cache.pop(node_id, None)
+            
+            # Clean neighbor lists for remaining nodes
+            for node_id, neighbors in owner_cache.items():
+                filtered_neighbors = [(n, w) for n, w in neighbors if n not in deleted_nodes]
+                if len(filtered_neighbors) != len(neighbors):
+                    owner_cache[node_id] = filtered_neighbors
+            
+            # Drop owner shard if it no longer contains nodes
+            if not owner_cache:
+                self._graph_cache.pop(owner_key, None)
         
         # Rebuild entity chunk count cache
         self._entity_chunk_count_cache = None
