@@ -330,6 +330,18 @@ The CLI still connects to the same PostgreSQL/Redis/Neo4j/MinIO services defined
 
 > ⚠️ Deletion note: `uv run rag-arc delete-file FILE_ID` **only marks the file status as `DELETED`** to support quick UI/retrieval isolation tests. It does not trigger any chunk/index/blob cleanup. For the full asynchronous deletion pipeline (indexes, vector stores, graph, blobs), call the HTTP API `DELETE /knowledge/{file_id}`; the CLI no longer schedules full cleanup jobs.
 
+#### DeepSearch MCP tool server
+
+- `uv run rag-arc tool-mcp-server --transport stdio` launches the FastMCP server that mirrors the built-in DeepSearch tools. The server reads `config/json_configs/deepsearch_tool_mcp_server.json` (override with `DEEPSEARCH_TOOL_MCP_CONFIG_PATH`) so it shares the same adapter/LLM configuration as the HTTP and CLI entry points.
+- Keep the JSON config in sync with your environment files to avoid drift. The `tool_manager` block accepts the same structure described in `config/application/deepsearch_config.py`.
+- Use `DEEPSEARCH_TOOL_MCP_TOOLS` (comma-separated list) when you need to expose a subset of tools. Leaving it empty keeps the full tool catalog enabled.
+
+#### Chat MCP server
+
+- `uv run rag-arc chat-mcp-server --transport stdio` exposes the authenticated chat workflow (session creation + chat streaming) as an MCP server. This server is implemented in `api/mcp/server.py`.
+- SSE/HTTP transports listen on `127.0.0.1:8785` with the default path `mcp/chat`, so they won't collide with the tool MCP server (`8765`).
+- Use this endpoint if you want an external agent to drive RAG-ARC's chat stack through MCP instead of the HTTP API.
+
 > 📚 See `cli/README.md` for the full command reference (ingest-file/folder, list/delete, trigger-index, export-graph, chat/pipeline/graph-qa).
 
 ### 🧪 Example Usage

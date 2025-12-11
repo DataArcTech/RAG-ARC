@@ -22,6 +22,8 @@ CLI 提供从“文档接入 → 索引/建图 → 检索问答”的完整算�
 | 检索问答 | `uv run rag-arc chat "什么是RAG-ARC？" --owner-id <UUID>` | 多路径检索 + 重排 + LLM 的完整对话。 |
 | 检索问答 | `uv run rag-arc pipeline "什么是RAG-ARC？" --skip-llm --subgraph --owner-id <UUID>` | 仅查看改写/检索/重排（可导出子图）。 |
 | 图问答 | `uv run rag-arc graph-qa "X和Y之间有什么关系?" --owner-id <UUID>` | 仅走图检索链路，并返回子图元数据。 |
+| MCP | `uv run rag-arc tool-mcp-server --transport stdio` | 启动 DeepSearch 工具 MCP 服务器（配置位于 `config/json_configs/deepsearch_tool_mcp_server.json`，SSE 默认端口 8765）。 |
+| MCP | `uv run rag-arc chat-mcp-server --transport stdio` | 启动聊天/鉴权 MCP 服务器（实现见 `api/mcp/server.py`，SSE/HTTP 默认 `127.0.0.1:8785/mcp/chat`）。 |
 
 > 注意：CLI 的 `delete-file` 命令定位为轻量测试，仅更新文件状态/元数据，不会执行耗时的索引、向量、图谱和 Blob 清理。如需完整的后台删除流程，请调用 HTTP API `DELETE /knowledge/{file_id}`。
 

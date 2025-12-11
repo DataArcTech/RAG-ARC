@@ -4,7 +4,7 @@ MCP Server implementation using FastMCP
 import datetime
 import uuid
 from fastmcp import Context, FastMCP
-from typing import Dict, Any, Optional
+from typing import Dict, Optional, List, Any
 from encapsulation.data_model.schema import Chunk, GraphData
 from framework.register import Register
 from api.routers.auth import SECRET_KEY, ALGORITHM
@@ -99,6 +99,41 @@ async def create_chat(auth_token: str) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Error in create_chat function: {str(e)}")
         return {"isError": True, "message": f"Internal server error: {str(e)}"}
+
+
+async def run_stdio_async() -> None:
+    """Run the MCP server via stdio transport."""
+
+    await mcp.run_stdio_async()
+
+
+async def run_sse_async(*, host: str = "127.0.0.1", port: int = 8785, path: str = "mcp/chat") -> None:
+    """Run the MCP server via SSE transport."""
+
+    await mcp.run_http_async(transport="sse", host=host, port=port, path=path)
+
+
+async def run_streamable_http_async(
+    *, host: str = "127.0.0.1", port: int = 8785, path: str = "mcp/chat"
+) -> None:
+    """Run the MCP server via streamable-http transport."""
+
+    await mcp.run_http_async(transport="streamable-http", host=host, port=port, path=path)
+
+
+def http_app(*, path: str = "/mcp/chat", transport: str = "sse"):
+    """Expose FastMCP ASGI application for embedding."""
+
+    return mcp.http_app(path=path, transport=transport)
+
+
+async def list_tools() -> List[str]:
+    """Return registered tool names for diagnostics."""
+
+    tools = await mcp.get_tools()
+    if isinstance(tools, dict):
+        return [tool.name for tool in tools.values()]
+    return [tool.name for tool in tools]
 
 
 @mcp.tool(name="chat", description="Streamable chat interface")
