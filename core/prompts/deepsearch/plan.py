@@ -10,6 +10,7 @@ GRAPH_PLANNER_USER_PROMPT = (
     "Mode: {mode}\n"
     "Available tools:\n{available_tools}\n"
     "Instructions: Decompose the problem into at most {max_steps} steps. "
-    "Return a JSON array where each item has 'description' and 'channel'. "
+    "Return a JSON array where each item has 'description', 'channel', and when using the graph channel also "
+    "a 'tool' (plus optional 'tool_profile'). The 'tool' value must match one of the catalog names exactly. "
     "Channel must be one of ['graph','text','web'] and defaults to 'graph'."
 )

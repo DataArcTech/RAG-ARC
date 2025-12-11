@@ -72,15 +72,25 @@ class PlanGenerator:
         for idx, step in enumerate(raw_steps[: self.settings.max_steps]):
             description = step.get("description") or step.get("step") or "Graph inspect"
             channel = self._normalize_channel(step.get("channel"))
+            metadata = {
+                "mode": self.settings.mode,
+                "source": step.get("source", "llm" if self.llm else "rule"),
+            }
+            selected_tool = (step.get("tool") or "").strip()
+            if selected_tool:
+                metadata["tool"] = selected_tool
+            tool_profile = (step.get("tool_profile") or step.get("profile") or "").strip()
+            if tool_profile:
+                metadata["tool_profile"] = tool_profile.upper()
+            determinism = (step.get("determinism") or "").strip()
+            if determinism:
+                metadata["tool_determinism"] = determinism
             plan_specs.append(
                 PlanSpec(
                     step_id=f"plan_{idx+1:02d}",
                     description=description.strip(),
                     channel=channel,
-                    metadata={
-                        "mode": self.settings.mode,
-                        "source": step.get("source", "llm" if self.llm else "rule"),
-                    },
+                    metadata=metadata,
                 )
             )
         return plan_specs

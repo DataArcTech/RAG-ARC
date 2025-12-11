@@ -13,7 +13,7 @@ from encapsulation.data_model.deepsearch import PlanSpec
 
 from .generator import PlanGenerator, PlannerSettings
 from core.prompts.deepsearch import GRAPH_PLANNER_SYSTEM_PROMPT, GRAPH_PLANNER_USER_PROMPT
-from core.deepsearch.tooling import describe_available_tools
+from core.deepsearch.tooling import describe_available_tools, get_tool_hint_revision
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +38,13 @@ class DeepSearchPlanner:
         # config: contains runtime knobs such as mode, max steps, output directories
         self.config = config
         self._config_dict = self._as_dict(config)
-        self.available_tools = describe_available_tools()
+        self._available_tools: List[Dict[str, str]] = []
+        self._tool_hint_revision: int = -1
+        self._refresh_available_tools(update_generator=False)
 
         settings = self._build_planner_settings()
         self.plan_generator = plan_generator or PlanGenerator(llm=self.llm_connector, settings=settings)
+        self.plan_generator.settings.available_tools_hint = self._tool_hint_text()
 
         self.persist_plan = self._bool_config(
             "persist_plan",
@@ -75,6 +78,7 @@ class DeepSearchPlanner:
         if not normalized_question:
             raise ValueError("question must be a non-empty string")
 
+        self._refresh_available_tools()
         plan_specs = await self._generate_plan_async(normalized_question)
         steps_payload = [
             self._build_step_payload(spec, owner_id=owner_id)
@@ -143,20 +147,43 @@ class DeepSearchPlanner:
             available_tools_hint=tool_hint,
         )
 
-    def _tool_hint_text(self) -> str:
-        if not self.available_tools:
+    def _tool_hint_text(self, hints: Optional[List[Dict[str, str]]] = None) -> str:
+        catalog = hints if hints is not None else self.available_tools
+        if not catalog:
             return "No registered tools."
-        lines = []
-        for spec in self.available_tools:
-            name = spec.get("name", "unknown")
-            channel = spec.get("channel", "")
-            description = spec.get("description", "")
-            label = f"- {name}"
-            if channel:
-                label += f" [{channel}]"
-            if description:
-                label += f": {description}"
-            lines.append(label)
+        profile_labels = {
+            "F": "F-tools (fast deterministic probes; run first for cheap coverage)",
+            "X": "X-tools (hybrid tools balancing deterministic + LLM summarisation)",
+            "H": "H-tools (heavy LLM planners/think modules; expensive, run only when needed)",
+        }
+        grouped: Dict[str, List[Dict[str, str]]] = {}
+        for spec in catalog:
+            profile = str(spec.get("profile") or "F").upper()
+            grouped.setdefault(profile, []).append(spec)
+        lines = [
+            "For each graph step choose exactly one tool from this catalog and include it "
+            "in the JSON output as `tool` (and `tool_profile` if applicable). "
+            "Prefer cheaper profiles before escalating.",
+            "Profile legend: F=fast deterministic, X=hybrid, H=heavy LLM.",
+        ]
+        for profile_code in ("F", "X", "H"):
+            specs = grouped.get(profile_code)
+            if not specs:
+                continue
+            lines.append(f"{profile_labels.get(profile_code, profile_code + ' tools')}:")
+            for spec in specs:
+                name = spec.get("name", "unknown")
+                channel = spec.get("channel", "")
+                description = spec.get("description", "")
+                determinism = spec.get("determinism")
+                label = f"  - {name}"
+                if channel:
+                    label += f" [{channel}]"
+                if determinism:
+                    label += f" ({determinism})"
+                if description:
+                    label += f": {description}"
+                lines.append(label)
         return "\n".join(lines)
 
     def _build_step_payload(self, spec: PlanSpec, *, owner_id: Optional[str]) -> Dict[str, Any]:
@@ -305,6 +332,23 @@ class DeepSearchPlanner:
             return asdict(config)
         except Exception:
             return {}
+
+    def _refresh_available_tools(self, update_generator: bool = True) -> None:
+        """Refresh cached tool descriptors so planner sees MCP/runtime additions."""
+
+        self._available_tools = describe_available_tools()
+        self._tool_hint_revision = get_tool_hint_revision()
+        if update_generator and getattr(self, "plan_generator", None):
+            self.plan_generator.settings.available_tools_hint = self._tool_hint_text(self._available_tools)
+
+    @property
+    def available_tools(self) -> List[Dict[str, str]]:
+        """Expose cached tool descriptors; refresh lazily when hints change."""
+
+        current_revision = get_tool_hint_revision()
+        if current_revision != self._tool_hint_revision:
+            self._refresh_available_tools()
+        return self._available_tools
 
 
 class PlanStep:
