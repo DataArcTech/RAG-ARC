@@ -333,6 +333,7 @@ The CLI still connects to the same PostgreSQL/Redis/Neo4j/MinIO services defined
 #### DeepSearch MCP tool server
 
 - `uv run rag-arc tool-mcp-server --transport stdio` launches the FastMCP server that mirrors the built-in DeepSearch tools. The server reads `config/json_configs/deepsearch_tool_mcp_server.json` (override with `DEEPSEARCH_TOOL_MCP_CONFIG_PATH`) so it shares the same adapter/LLM configuration as the HTTP and CLI entry points.
+- **DeepSearch's ToolManager only supports MCP-based tool invocations.** Always start the MCP tool server from the command line before running API/CLI/MCP workflows; otherwise no tools can be scheduled.
 - Keep the JSON config in sync with your environment files to avoid drift. The `tool_manager` block accepts the same structure described in `config/application/deepsearch_config.py`.
 - Use `DEEPSEARCH_TOOL_MCP_TOOLS` (comma-separated list) when you need to expose a subset of tools. Leaving it empty keeps the full tool catalog enabled.
 

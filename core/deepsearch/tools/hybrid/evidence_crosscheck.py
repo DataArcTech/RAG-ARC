@@ -13,8 +13,8 @@ class EvidenceCrosscheckTool(GraphTool):
 
     descriptor = ToolDescriptor(
         name="graph.evidence_crosscheck",
-        channel="graph",
-        description="Cross-validates chunk text and triples to detect inconsistencies before reporting.",
+        channel="text",
+        description="Cross-validates chunk/text-channel evidence against graph triples before reporting.",
         speed="medium",
         cost="medium",
         strategy_tags=("verification", "triple", "chunk"),

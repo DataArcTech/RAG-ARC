@@ -1,6 +1,11 @@
 """Tool manager that orchestrates local registries and MCP routing."""
+import json
+import logging
+import os
 import time
+import uuid
 from dataclasses import dataclass, asdict, is_dataclass
+from pathlib import Path
 from string import Template
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -17,6 +22,8 @@ from core.deepsearch.tools import (
 )
 
 from ._hints import register_tool_hints, set_disabled_tools
+
+logger = logging.getLogger(__name__)
 
 
 class LocalToolRegistry:
@@ -368,6 +375,8 @@ class DeepSearchToolManager:
         self.max_remote_evidences = int(self.tool_configs.get("max_remote_evidences", 32))
         self.max_remote_context_chars = int(self.tool_configs.get("max_remote_context_chars", 4096))
         self.llm_fingerprint = self._fingerprint_llm(self.tool_configs.get("llm_connector"))
+        artifact_dir = self.tool_configs.get("artifact_dir") or os.getenv("DEEPSEARCH_TOOL_ARTIFACT_DIR")
+        self.artifact_dir = Path(artifact_dir).expanduser() if artifact_dir else None
 
     async def invoke(self, tool_name: str, *, payload: Dict[str, Any]) -> ToolResultPayload:
         """Invoke a tool and return normalized results."""
@@ -383,12 +392,14 @@ class DeepSearchToolManager:
             if descriptor is None:
                 raise RuntimeError(f"Local tool '{tool_name}' does not expose a descriptor")
             payload_model = result.as_payload(descriptor)
+            self._attach_artifact_reference(tool_name, payload_model)
             self._record_local(tool_name, payload_model, request, latency_ms, descriptor)
             return payload_model
 
         if self._can_route_remote(tool_name, descriptor):
             remote_payload = self._prepare_remote_payload(tool_name, payload, request)
             payload_model, log = await self.mcp_router.invoke(descriptor, remote_payload)  # type: ignore[arg-type]
+            self._attach_artifact_reference(tool_name, payload_model)
             self._record_remote(tool_name, log, request)
             return payload_model
 
@@ -408,7 +419,7 @@ class DeepSearchToolManager:
         return self.local_registry.is_mcp_only(tool_name)
 
     def _can_route_remote(self, tool_name: str, descriptor: ToolDescriptor | None) -> bool:
-        if not descriptor or not self.mcp_router:
+        if not descriptor or not self.mcp_router or not getattr(self.mcp_router, "mcp_client", None):
             return False
         if descriptor.mcp_callable:
             return True
@@ -660,3 +671,29 @@ class DeepSearchToolManager:
         if hasattr(value, "__dict__"):
             return DeepSearchToolManager._json_safe(vars(value))
         return str(value)
+
+    def _attach_artifact_reference(self, tool_name: str, payload: ToolResultPayload) -> None:
+        artifact_path = self._persist_artifact(tool_name, payload)
+        if not artifact_path:
+            return
+        diagnostics = payload.diagnostics
+        artifacts = diagnostics.setdefault("artifacts", [])
+        artifacts.append({"type": "file", "path": artifact_path})
+
+    def _persist_artifact(self, tool_name: str, payload: ToolResultPayload) -> Optional[str]:
+        if not self.artifact_dir:
+            return None
+        try:
+            self.artifact_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning("Failed to create artifact directory %s: %s", self.artifact_dir, exc)
+            return None
+        file_name = f"{int(time.time() * 1000)}_{tool_name.replace('.', '_')}_{uuid.uuid4().hex}.json"
+        artifact_path = self.artifact_dir / file_name
+        try:
+            with artifact_path.open("w", encoding="utf-8") as handle:
+                json.dump(payload.model_dump(), handle, ensure_ascii=False, indent=2)
+        except OSError as exc:
+            logger.warning("Failed to persist tool artifact for %s: %s", tool_name, exc)
+            return None
+        return str(artifact_path)
