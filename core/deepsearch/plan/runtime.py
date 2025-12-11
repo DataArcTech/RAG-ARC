@@ -9,7 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
-from encapsulation.data_model.deepsearch import PlanSpec
+from encapsulation.data_model.deepsearch import GraphQueryContext, PlanSpec
+from core.graph_adapter.base import GraphAccessScope
+from core.graph_adapter.scope_provider import require_scope, scope_to_dict
 
 from .generator import PlanGenerator, PlannerSettings
 from core.prompts.deepsearch import GRAPH_PLANNER_SYSTEM_PROMPT, GRAPH_PLANNER_USER_PROMPT
@@ -62,34 +64,46 @@ class DeepSearchPlanner:
         )
 
         self.graph_channel_tool = self._config_value("graph_channel_tool", "graph_adapter.query")
-        self.text_channel_tool = self._config_value("text_channel_tool", "llm.summarize")
+        self.text_channel_tool = self._config_value("text_channel_tool", "graph.context_rollup")
         self.web_channel_tool = self._config_value("web_channel_tool", "web.search")
         self.default_web_provider = self._config_value("default_web_provider", os.getenv("DEEPSEARCH_WEB_PROVIDER"))
         self.graph_adapter_name = self._config_value(
             "graph_adapter_name", os.getenv("DEEPSEARCH_DEFAULT_ADAPTER") or "hipporag"
         )
-
         self.tool_arg_templates: Mapping[str, Mapping[str, str]] = self._config_value("tool_arg_templates", {})
 
-    async def build_plan(self, question: str, *, owner_id: Optional[str] = None) -> Dict[str, Any]:
+    async def build_plan(
+        self,
+        question: str,
+        *,
+        access_scope: GraphAccessScope | None = None,
+    ) -> Dict[str, Any]:
         """Produce a structured plan containing graph-first steps plus optional external channels."""
 
         normalized_question = (question or "").strip()
         if not normalized_question:
             raise ValueError("question must be a non-empty string")
+        scope = require_scope(access_scope)
 
         self._refresh_available_tools()
         plan_specs = await self._generate_plan_async(normalized_question)
         steps_payload = [
-            self._build_step_payload(spec, owner_id=owner_id)
+            self._build_step_payload(spec)
             for spec in plan_specs
         ]
 
         plan_id = uuid.uuid4().hex
+        graph_context_payload = self._build_graph_context_payload(
+            access_scope=scope,
+            question=normalized_question,
+            plan_id=plan_id,
+            steps=steps_payload,
+        )
+
         artifact = {
             "plan_id": plan_id,
             "question": normalized_question,
-            "owner_id": str(owner_id) if owner_id else None,
+            "owner_scope": scope_to_dict(scope),
             "mode": self.plan_generator.settings.mode,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "config": {
@@ -99,6 +113,7 @@ class DeepSearchPlanner:
             },
             "steps": steps_payload,
             "available_tools": self.available_tools,
+            "graph_context": graph_context_payload,
         }
 
         artifact_path = None
@@ -186,7 +201,7 @@ class DeepSearchPlanner:
                 lines.append(label)
         return "\n".join(lines)
 
-    def _build_step_payload(self, spec: PlanSpec, *, owner_id: Optional[str]) -> Dict[str, Any]:
+    def _build_step_payload(self, spec: PlanSpec) -> Dict[str, Any]:
         metadata = dict(spec.metadata or {})
         channel = (spec.channel or "graph").lower()
         channel = channel if channel in {"graph", "web", "text"} else "graph"
@@ -199,7 +214,6 @@ class DeepSearchPlanner:
         tool_args = self._build_tool_args(
             channel=channel,
             description=spec.description,
-            owner_id=owner_id,
             extra_metadata=metadata,
         )
 
@@ -233,12 +247,9 @@ class DeepSearchPlanner:
         *,
         channel: str,
         description: str,
-        owner_id: Optional[str],
         extra_metadata: Dict[str, Any],
     ) -> Dict[str, Any]:
         base_args = {"query": description.strip(), "channel": channel}
-        if owner_id:
-            base_args["owner_id"] = str(owner_id)
 
         if channel == "graph":
             base_args.setdefault("adapter_name", extra_metadata.get("adapter") or self.graph_adapter_name)
@@ -253,7 +264,6 @@ class DeepSearchPlanner:
             for key, template in template_args.items():
                 formatted[key] = template.format(
                     description=description,
-                    owner_id=str(owner_id) if owner_id else "",
                     channel=channel,
                 )
             base_args.update(formatted)
@@ -349,6 +359,58 @@ class DeepSearchPlanner:
         if current_revision != self._tool_hint_revision:
             self._refresh_available_tools()
         return self._available_tools
+
+    def _build_graph_context_payload(
+        self,
+        *,
+        access_scope: GraphAccessScope,
+        question: str,
+        plan_id: str,
+        steps: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        seed_entities = self._collect_seed_entities(steps)
+        metadata = {
+            "plan_id": plan_id,
+            "planner_mode": self.plan_generator.settings.mode,
+        }
+        context = GraphQueryContext(
+            adapter_name=self.graph_adapter_name,
+            question=question,
+            seed_entities=seed_entities,
+            metadata=metadata,
+            access_scope=access_scope,
+        )
+        return context.model_dump(exclude_none=True)
+
+    @staticmethod
+    def _collect_seed_entities(steps: List[Dict[str, Any]]) -> List[str]:
+        seen: set[str] = set()
+        ordered: List[str] = []
+
+        def _add(value: Any) -> None:
+            if value is None:
+                return
+            if isinstance(value, (list, tuple, set)):
+                for item in value:
+                    _add(item)
+                return
+            token = str(value).strip()
+            if not token or token in seen:
+                return
+            seen.add(token)
+            ordered.append(token)
+
+        for step in steps:
+            metadata = step.get("metadata") or {}
+            tool_args = step.get("tool_args") or {}
+            for candidate in (
+                metadata.get("seed_entities"),
+                tool_args.get("seed_entities"),
+                metadata.get("seed_nodes"),
+                tool_args.get("seed_nodes"),
+            ):
+                _add(candidate)
+        return ordered
 
 
 class PlanStep:

@@ -1,12 +1,13 @@
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from encapsulation.data_model.deepsearch import EvidenceChunk, GraphQueryContext, PlanSpec, ToolExecutionLog
 from encapsulation.mcp.client import MCPToolCallOutcome
-from core.graph_adapter.base import GraphAdapterCapability, GraphAdapterMetadata
+from core.graph_adapter.base import GraphAccessScope, GraphAdapterCapability, GraphAdapterMetadata
 from core.deepsearch.tools import (
     ContextRewriterTool,
     ContextRollupTool,
@@ -98,7 +99,12 @@ class _StubPlanGenerator:
 
     async def agenerate_plan(self, question: str, context=None):
         return [
-            PlanSpec(step_id="plan_01", description="Investigate question", channel="graph", metadata={})
+            PlanSpec(
+                step_id="plan_01",
+                description="Investigate question",
+                channel="graph",
+                metadata={"seed_entities": ["OpenAI"]},
+            )
         ]
 
 
@@ -161,6 +167,7 @@ async def test_hybrid_probe_combines_scans_and_chain(monkeypatch):
 
 def test_describe_available_tools_defaults(monkeypatch):
     monkeypatch.delenv("DEEPSEARCH_TOOL_HINTS", raising=False)
+    monkeypatch.setenv("DEEPSEARCH_ENABLE_LLM_TOOLS", "true")
     clear_tool_hints()
     hints = describe_available_tools()
     names = [hint["name"] for hint in hints]
@@ -248,9 +255,34 @@ async def test_planner_plan_reflects_registered_remote_tools(monkeypatch):
         ]
     )
 
-    artifact = await planner.build_plan("Investigate remote hint", owner_id=None)
-    tool_names = [spec["name"] for spec in artifact["plan"]["available_tools"]]
+    artifact = await planner.build_plan(
+        "Investigate remote hint",
+        access_scope=GraphAccessScope(scope_id="planner-test"),
+    )
+    plan = artifact["plan"]
+    tool_names = [spec["name"] for spec in plan["available_tools"]]
     assert "custom.remote_planner" in tool_names
+    graph_context = plan.get("graph_context")
+    assert graph_context
+    assert graph_context["adapter_name"] == planner.graph_adapter_name
+    assert "OpenAI" in graph_context.get("seed_entities", [])
+
+
+def test_describe_available_tools_respects_llm_toggle(monkeypatch):
+    monkeypatch.delenv("DEEPSEARCH_TOOL_HINTS", raising=False)
+    clear_tool_hints()
+    monkeypatch.setenv("DEEPSEARCH_DISABLE_LLM_TOOLS", "true")
+    hints = describe_available_tools()
+    names = {hint["name"] for hint in hints}
+    assert "graph.llm_chain_explorer" not in names
+    assert "graph.parallel_think" not in names
+
+    monkeypatch.delenv("DEEPSEARCH_DISABLE_LLM_TOOLS", raising=False)
+    monkeypatch.setenv("DEEPSEARCH_ENABLE_LLM_TOOLS", "true")
+    hints = describe_available_tools()
+    names = {hint["name"] for hint in hints}
+    assert "graph.llm_chain_explorer" in names
+    assert "graph.parallel_think" in names
 
 
 @pytest.mark.asyncio
@@ -287,6 +319,50 @@ async def test_tool_manager_invokes_local_tool():
     )
     assert result.summary == "echo::hello"
     assert telemetry.logs
+
+
+@pytest.mark.asyncio
+async def test_tool_manager_without_mcp_client_avoids_remote():
+    class _Telemetry:
+        def log_tool_invocation(self, **kwargs):
+            return None
+
+    manager = DeepSearchToolManager(
+        tool_configs={"enable_builtin_tools": True},
+        telemetry_client=_Telemetry(),
+        mcp_client=None,
+    )
+    with pytest.raises(KeyError):
+        await manager.invoke("graph.parallel_think", payload={"question": "fallback", "context_evidences": []})
+
+
+@pytest.mark.asyncio
+async def test_tool_manager_persists_artifacts(tmp_path):
+    class _LocalTool(GraphTool):
+        descriptor = ToolDescriptor(
+            name="custom.echo",
+            channel="graph",
+            description="echo",
+            profile="F",
+            determinism="deterministic",
+            namespace="rag-arc.deepsearch.tools.fast.custom_echo",
+        )
+
+        async def run(self, request: ToolRunRequest) -> ToolResult:
+            return ToolResult(summary=f"echo::{request.question}")
+
+    class _Telemetry:
+        def log_tool_invocation(self, **kwargs):  # pragma: no cover - noop
+            return None
+
+    manager = DeepSearchToolManager(
+        tool_configs={"artifact_dir": str(tmp_path)},
+        telemetry_client=_Telemetry(),
+        local_tools={"custom.echo": _LocalTool()},
+    )
+    result = await manager.invoke("custom.echo", payload={"question": "persist", "context_evidences": []})
+    artifacts = result.diagnostics.get("artifacts")
+    assert artifacts and Path(artifacts[0]["path"]).is_file()
 
 
 def test_bridge_lookup_schema_exposes_seed_entities():
@@ -339,7 +415,11 @@ async def test_evidence_crosscheck_detects_missing_and_confirmed():
 async def test_graph_think_includes_graph_context_metadata():
     llm = _StubLLM(json.dumps({"reasoning": "pause", "confidence_delta": 0.4, "coverage_delta": 0.3, "next_actions": ["rerun"]}))
     tool = GraphThinkTool(llm)
-    graph_context = GraphQueryContext(adapter_name="hipporag", question="Q1")
+    graph_context = GraphQueryContext(
+        adapter_name="hipporag",
+        question="Q1",
+        access_scope=GraphAccessScope(scope_id="tool-think-scope"),
+    )
     request = ToolRunRequest(
         question="Q1",
         plan_step="plan_01",

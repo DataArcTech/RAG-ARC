@@ -15,6 +15,7 @@ from config.encapsulation.llm.chat.openai import OpenAIChatConfig
 from core.deepsearch.tooling import DeepSearchToolManager
 from core.deepsearch.tools import ToolDescriptor, builtin_tool_descriptors
 from core.graph_adapter.base import GraphAccessScope
+from core.graph_adapter.scope_provider import current_scope_provider
 from encapsulation.data_model.deepsearch import GraphQueryContext
 
 logger = logging.getLogger(__name__)
@@ -77,41 +78,6 @@ def _load_adapter_from_env():
     return adapter_config.build()
 
 
-def _parse_labels(raw: Optional[str]) -> Sequence[str]:
-    if not raw:
-        return ()
-    try:
-        parsed = json.loads(raw)
-        if isinstance(parsed, list):
-            return tuple(str(item).strip() for item in parsed if str(item).strip())
-    except json.JSONDecodeError:
-        pass
-    return tuple(token.strip() for token in raw.split(",") if token.strip())
-
-
-def _parse_scope_attributes(raw: Optional[str]) -> Dict[str, Any] | None:
-    if not raw:
-        return None
-    try:
-        parsed = json.loads(raw)
-        return parsed if isinstance(parsed, dict) else None
-    except json.JSONDecodeError:
-        logger.warning("Invalid JSON for scope attributes, ignoring payload")
-        return None
-
-
-def _build_access_scope_from_env() -> GraphAccessScope | None:
-    scope_id = os.getenv("DEEPSEARCH_TOOL_MCP_SCOPE_ID") or os.getenv("DEVELOP_OWNER_ID") or os.getenv(
-        "ADMIN_OWNER_ID"
-    )
-    if not scope_id:
-        return None
-    scope_type = os.getenv("DEEPSEARCH_TOOL_MCP_SCOPE_TYPE") or "owner"
-    labels = _parse_labels(os.getenv("DEEPSEARCH_TOOL_MCP_SCOPE_LABELS"))
-    attributes = _parse_scope_attributes(os.getenv("DEEPSEARCH_TOOL_MCP_SCOPE_ATTRIBUTES"))
-    return GraphAccessScope(scope_id=str(scope_id), scope_type=scope_type, labels=labels, attributes=attributes)
-
-
 class LoggingTelemetryClient:
     """Minimal telemetry client that emits structured logs for tool usage."""
 
@@ -163,7 +129,11 @@ def build_tool_mcp_server(
     llm = llm_connector or _load_llm_from_env()
     text = instructions or os.getenv("DEEPSEARCH_TOOL_MCP_INSTRUCTIONS") or DEFAULT_INSTRUCTIONS
     adapter_instance = adapter or _load_adapter_from_env()
-    scope = default_scope or _build_access_scope_from_env()
+    scope = default_scope or current_scope_provider().default_scope
+    if scope is None:
+        raise ValueError(
+            "Graph access scope must be configured via ToolScopeConfig or DEEPSEARCH_SCOPE_* environment variables."
+        )
     telemetry = telemetry_client or LoggingTelemetryClient()
     return DeepSearchToolMCPServer(
         llm_connector=llm,
@@ -196,7 +166,9 @@ class DeepSearchToolMCPServer:
             raise ValueError("Graph adapter must be provided or configured for the MCP server")
         self.enabled_tools = self._resolve_enabled_set(enabled_tools, tool_manager_config)
         self.adapter = adapter
-        self.default_scope = default_scope
+        self.default_scope = default_scope or current_scope_provider().default_scope
+        if self.default_scope is None:
+            raise ValueError("Graph access scope is required for DeepSearch tool MCP server.")
         self.adapter_name = self._resolve_adapter_name(adapter)
         self.fastmcp = FastMCP("DeepSearch Tool MCP Server", instructions=instructions)
         tool_configs = self._build_tool_manager_config(

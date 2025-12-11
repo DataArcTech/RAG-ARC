@@ -40,6 +40,8 @@ __all__ = [
     "build_builtin_tools",
     "builtin_tool_descriptors",
     "get_tool_descriptor",
+    "llm_required_tool_names",
+    "llm_optional_tool_names",
 ]
 
 _BUILTIN_CLASSES = [
@@ -102,3 +104,15 @@ def get_tool_descriptor(tool_name: str) -> Optional[ToolDescriptor]:
     """Return the descriptor for built-in tools when available."""
 
     return _DESCRIPTOR_MAP.get(tool_name)
+
+
+def llm_required_tool_names() -> set[str]:
+    """Expose names of tools that require an LLM connector."""
+
+    return {cls.descriptor.name for cls in _LLM_REQUIRED}
+
+
+def llm_optional_tool_names() -> set[str]:
+    """Expose names of tools that can optionally consume an LLM connector."""
+
+    return {cls.descriptor.name for cls in _LLM_OPTIONAL}

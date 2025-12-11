@@ -14,6 +14,7 @@ load_dotenv()
 pytest.importorskip("mcp", reason="DeepSearch planner tests require MCP client dependencies")
 
 from config.core.deepsearch.plan_config import DeepSearchPlannerConfig
+from core.graph_adapter.base import GraphAccessScope
 from core.deepsearch.plan import DeepSearchPlanner
 
 
@@ -75,7 +76,7 @@ def test_planner_generates_real_plan():
         "plan_output_dir": str(plan_output_dir),
         "allow_external_channel": True,
         "graph_channel_tool": "graph_adapter.query",
-        "text_channel_tool": "llm.summarize",
+        "text_channel_tool": "graph.context_rollup",
         "web_channel_tool": "web.search",
         "default_web_provider": os.getenv("DEEPSEARCH_WEB_PROVIDER") or "serper",
         "graph_adapter_name": os.getenv("DEEPSEARCH_DEFAULT_ADAPTER") or "hipporag",
@@ -92,12 +93,16 @@ def test_planner_generates_real_plan():
     question = "RAG-ARC 是一个图谱优先的 Agent 框架，请输出发布计划调研步骤"
 
     try:
-        result = asyncio.run(planner.build_plan(question, owner_id="planner-test-owner"))
+        result = asyncio.run(planner.build_plan(question, access_scope=GraphAccessScope(scope_id="planner-test")))
 
         plan = result["plan"]
         assert plan["question"] == question
         assert plan["mode"] == plan_generator.settings.mode
         assert len(plan["steps"]) > 0
+        graph_context = plan.get("graph_context")
+        assert graph_context
+        assert graph_context["question"] == question
+        assert graph_context["adapter_name"] == runtime_config["graph_adapter_name"]
 
         artifact_path = result["artifact_path"]
         assert artifact_path is not None
@@ -107,6 +112,6 @@ def test_planner_generates_real_plan():
         saved_payload = json.loads(artifact_path.read_text())
         assert saved_payload["plan_id"] == result["plan_id"]
         assert saved_payload["question"] == question
-        assert saved_payload["owner_id"] == "planner-test-owner"
+        assert saved_payload["graph_context"]["adapter_name"] == runtime_config["graph_adapter_name"]
     finally:
         shutil.rmtree(plan_output_dir, ignore_errors=True)

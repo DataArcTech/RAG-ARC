@@ -84,6 +84,7 @@ async def test_tool_mcp_server_invokes_registered_tool_with_adapter_injection():
 @pytest.mark.asyncio
 async def test_tool_server_config_loader_builds_server(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_SCOPE_ID", "owner-xyz")
+    monkeypatch.delenv("DEEPSEARCH_DEFAULT_ADAPTER", raising=False)
     payload = {
         "type": "deepsearch_tool_mcp_server",
         "instructions": "Test scope ${TEST_SCOPE_ID}",
