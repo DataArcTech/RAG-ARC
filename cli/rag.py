@@ -2,8 +2,14 @@ import asyncio
 import json
 import logging
 import mimetypes
+import os
+import sys
 from pathlib import Path
 from typing import List, Optional
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
 
 import typer
 
@@ -13,13 +19,17 @@ from application.rag_inference.cli_module import (
     RAGInferenceCLIModule,
 )
 from application.rag_inference.module import RAGInference
+from config.application.deepsearch_tool_server_config import load_tool_server_config
 from cli import types
 from cli.bootstrap import CLIContext, initialize
 from encapsulation.data_model.orm_models import FileStatus
 from framework.register import Register
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 app = typer.Typer(help="Run RAG-ARC algorithms through CLI without HTTP layer.")
+_CHAT_MCP_MODULE = None
+_CHAT_MCP_MODULE = None
 
 
 def _get_rag_runner() -> RAGInferenceCLIModule:
@@ -36,6 +46,21 @@ def _get_knowledge_module() -> Knowledge:
     if not isinstance(knowledge_module, Knowledge):
         raise RuntimeError("Registered knowledge module is not of expected type")
     return knowledge_module
+
+
+def _get_chat_mcp_server():
+    """Lazy import chat MCP server after registry initialization."""
+
+    global _CHAT_MCP_MODULE
+    if _CHAT_MCP_MODULE is not None:
+        return _CHAT_MCP_MODULE
+    import app_registration
+
+    app_registration.initialize()
+    from api.mcp import server as chat_mcp_server
+
+    _CHAT_MCP_MODULE = chat_mcp_server
+    return chat_mcp_server
 
 
 def _print_summary(summary: types.PipelineSummary, output_json: bool) -> None:
@@ -99,6 +124,10 @@ def _guess_content_type(path: Path) -> str:
     return guessed or "application/octet-stream"
 
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_TOOL_SERVER_CONFIG = REPO_ROOT / "config/json_configs/deepsearch_tool_mcp_server.json"
+
+
 def _ingest_single_file(path: Path, knowledge: Knowledge, owner_id) -> bool:
     typer.echo(f"\n→ Ingesting {path}")
     try:
@@ -133,6 +162,112 @@ def _ingest_single_file(path: Path, knowledge: Knowledge, owner_id) -> bool:
     chunk_count = len(index_result.get("chunk_ids") or [])
     typer.echo(f"  • Indexed successfully with {chunk_count} chunk(s)")
     return True
+
+
+def _resolve_tool_server_config_path() -> Path:
+    raw_path = os.getenv("DEEPSEARCH_TOOL_MCP_CONFIG_PATH")
+    if raw_path:
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = (REPO_ROOT / candidate).resolve()
+        return candidate
+    return _DEFAULT_TOOL_SERVER_CONFIG
+
+
+def _build_tool_server_from_config():
+    config_path = _resolve_tool_server_config_path()
+    if not config_path.exists():
+        raise FileNotFoundError(f"Tool MCP server config not found: {config_path}")
+    config = load_tool_server_config(config_path)
+    return config.build()
+
+
+def _print_tool_catalog(server) -> None:
+    """Print currently registered MCP tools to console."""
+
+    try:
+        descriptors = list(server.list_registered_tools())
+    except AttributeError:
+        logger.warning("Tool server does not expose list_registered_tools")
+        return
+    descriptors.sort(key=lambda item: item.name)
+    typer.echo("Registered MCP tools:")
+    if not descriptors:
+        typer.echo("  (no tools enabled)")
+        return
+    for descriptor in descriptors:
+        typer.echo(f"  - {descriptor.name} [{descriptor.channel}] :: {descriptor.description}")
+
+
+def _print_chat_mcp_catalog(chat_mcp_server) -> None:
+    """Print tool names exposed by the chat MCP server."""
+
+    try:
+        tools = asyncio.run(chat_mcp_server.list_tools())
+    except RuntimeError:
+        # Fallback for rare cases when an event loop is already running
+        loop = asyncio.get_event_loop()
+        tools = loop.run_until_complete(chat_mcp_server.list_tools())
+    typer.echo("Chat MCP tools:")
+    if not tools:
+        typer.echo("  (no chat MCP tools registered)")
+        return
+    for name in sorted(tools):
+        typer.echo(f"  - {name}")
+
+
+@app.command("tool-mcp-server")
+def tool_mcp_server(
+    transport: str = typer.Option(
+        "stdio",
+        help="Transport to expose (stdio, sse, or streamable-http).",
+    ),
+    host: str = typer.Option("127.0.0.1", help="Host for HTTP/SSE transports."),
+    port: int = typer.Option(8765, help="Port for HTTP/SSE transports."),
+    path: str = typer.Option("mcp/tools", help="Path for HTTP/SSE transports."),
+) -> None:
+    """Launch the DeepSearch tool MCP server for external agents."""
+
+    load_dotenv()
+    server = _build_tool_server_from_config()
+    _print_tool_catalog(server)
+    if transport == "stdio":
+        asyncio.run(server.run_stdio_async())
+        return
+    if transport == "sse":
+        asyncio.run(server.run_sse_async(host=host, port=port, path=path))
+        return
+    if transport in {"streamable", "streamable-http"}:
+        asyncio.run(server.run_streamable_http_async(host=host, port=port, path=path))
+        return
+    raise typer.BadParameter("transport must be one of: stdio, sse, streamable-http")
+
+
+@app.command("chat-mcp-server")
+def chat_mcp_server_cmd(
+    transport: str = typer.Option(
+        "stdio",
+        help="Transport to expose (stdio, sse, or streamable-http).",
+    ),
+    host: str = typer.Option("127.0.0.1", help="Host for HTTP/SSE transports."),
+    port: int = typer.Option(8785, help="Port for HTTP/SSE transports."),
+    path: str = typer.Option("mcp/chat", help="Path for HTTP/SSE transports."),
+) -> None:
+    """Launch the account/chat MCP server for external agents."""
+
+    load_dotenv()
+    chat_server = _get_chat_mcp_server()
+    _print_chat_mcp_catalog(chat_server)
+    if transport == "stdio":
+        asyncio.run(chat_server.run_stdio_async())
+        return
+    if transport == "sse":
+        asyncio.run(chat_server.run_sse_async(host=host, port=port, path=path))
+        return
+    if transport in {"streamable", "streamable-http"}:
+        asyncio.run(chat_server.run_streamable_http_async(host=host, port=port, path=path))
+        return
+    raise typer.BadParameter("transport must be one of: stdio, sse, streamable-http")
 
 @app.command()
 def chat(

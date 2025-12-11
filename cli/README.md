@@ -22,6 +22,8 @@ The CLI lets you exercise the full RAG pipeline (ingestion → indexing/graph bu
 | Retrieval | `uv run rag-arc chat "What is RAG-ARC?" --owner-id <UUID>` | Full pipeline (multi-path retrieval + rerank + LLM). |
 | Retrieval | `uv run rag-arc pipeline "What is RAG-ARC?" --skip-llm --subgraph --owner-id <UUID>` | Inspect rewrite/retrieval/rerank without calling the LLM. |
 | Graph QA | `uv run rag-arc graph-qa "Explain relation between X and Y" --owner-id <UUID>` | Run graph-only question answering and return subgraph metadata. |
+| MCP | `uv run rag-arc tool-mcp-server --transport stdio` | Launch the DeepSearch tool MCP server (config at `config/json_configs/deepsearch_tool_mcp_server.json`, SSE port 8765). |
+| MCP | `uv run rag-arc chat-mcp-server --transport stdio` | Launch the chat/auth MCP server defined in `api/mcp/server.py` (SSE/HTTP default to `127.0.0.1:8785/mcp/chat`). |
 
 > The CLI's `delete-file` command is meant for lightweight testing and therefore only updates file metadata/status. For the real asynchronous cleanup pipeline (chunks, indexes, blobs, graph), call the REST API `DELETE /knowledge/{file_id}` instead.
 

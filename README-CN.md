@@ -346,6 +346,18 @@ CLI 仍会连接 `.env` 中配置的 PostgreSQL / Redis / Neo4j / MinIO 等基�
 
 > ⚠️ 删除提示：`uv run rag-arc delete-file FILE_ID` **仅会把文件状态标记为 `DELETED`**，方便本地快速验证检索隔离，不会执行索引、向量库、图谱或 Blob 的真正清理。若需完整的后台删除流程，请调用 HTTP API `DELETE /knowledge/{file_id}`；CLI 不再支持触发全量清理。
 
+#### DeepSearch MCP 工具服务器
+
+- 通过 `uv run rag-arc tool-mcp-server --transport stdio` 启动 FastMCP 服务器，向上游智能体暴露 DeepSearch 内置工具。服务默认读取 `config/json_configs/deepsearch_tool_mcp_server.json`（可用 `DEEPSEARCH_TOOL_MCP_CONFIG_PATH` 覆盖），从而与 HTTP/CLI 入口共用相同的 LLM 和图适配器配置。
+- JSON 配置中的 `tool_manager` 字段遵循 `config/application/deepsearch_config.py` 的同一结构，可在此关闭/调整单个工具或注入远程 MCP 描述符，避免重复粘贴环境变量。
+- 需要只暴露部分工具时设置 `DEEPSEARCH_TOOL_MCP_TOOLS`（逗号分隔）；留空则默认启用全部内建工具。
+
+#### Chat MCP 服务器
+
+- 通过 `uv run rag-arc chat-mcp-server --transport stdio` 将带鉴权的聊天流程（会话创建 + chat 调用）以 MCP 方式暴露，具体实现在 `api/mcp/server.py` 中。
+- 若切换到 SSE/HTTP 传输，默认监听 `127.0.0.1:8785`，URL 前缀为 `mcp/chat`，因此不会与工具 MCP 服务器（8765）占用同一端口。
+- 当需要让外部代理通过 MCP 直接驱动 RAG-ARC 聊天能力时，可使用该入口而无需额外的 HTTP/WS 适配层。
+
 > 📚 更详细的命令说明（单文件导入、文件管理、触发索引、图导出等）见 `cli/README-CN.md`。
 
 ### 🧪 使用示例

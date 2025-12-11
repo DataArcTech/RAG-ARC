@@ -1,0 +1,123 @@
+import json
+
+import pytest
+
+from application.deepsearch.tool_mcp_server import build_tool_mcp_server
+from config.application.deepsearch_tool_server_config import load_tool_server_config
+from core.graph_adapter.base import GraphAccessScope, GraphAdapterCapability, GraphAdapterMetadata
+from core.graph_adapter import registry
+
+
+class _StubLLM:
+    def chat(self, messages, **kwargs):
+        return json.dumps(
+            {
+                "reasoning": "stub reasoning",
+                "confidence_delta": 0.1,
+                "coverage_delta": 0.2,
+                "next_actions": [],
+            }
+        )
+
+
+class _StubAdapter:
+    def __init__(self):
+        capability = GraphAdapterCapability(name="stub_capability", modes=("bridge_lookup",))
+        self._metadata = GraphAdapterMetadata(
+            adapter_name="stub_adapter",
+            graph_type="stub_graph",
+            version="v1",
+            capabilities=(capability,),
+        )
+
+    async def prepare(self, question: str, *, access_scope=None):
+        return None
+
+    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None):
+        return {"nodes": [], "edges": [], "metadata": {}}
+
+    async def context_filter(self, data, *, filter_type: str = "semantic", access_scope=None):
+        return data
+
+    async def summarize(self, channel: str, data, *, access_scope=None):
+        return "summary"
+
+    async def chain_traverse(self, strategy, *, access_scope=None):
+        return {
+            "strategy": strategy.get("strategy", "bridge_lookup") if isinstance(strategy, dict) else "bridge_lookup",
+            "bridges": [
+                {"head": "OpenAI", "relation": "partners_with", "tail": "Anthropic", "id": "bridge-1"},
+                {"head": "Anthropic", "relation": "researches", "tail": "Alignment", "id": "bridge-2"},
+            ],
+        }
+
+    def metadata(self):
+        return self._metadata
+
+
+@pytest.mark.asyncio
+async def test_tool_mcp_server_invokes_registered_tool_with_adapter_injection():
+    server = build_tool_mcp_server(
+        llm_connector=_StubLLM(),
+        enabled_tools=["graph.bridge_lookup"],
+        instructions="test",
+        adapter=_StubAdapter(),
+        default_scope=GraphAccessScope(scope_id="stub-owner"),
+    )
+
+    tool = await server.fastmcp._tool_manager.get_tool("graph.bridge_lookup")
+    assert tool is not None
+
+    result = await tool.fn(
+        None,
+        question="Test MCP bridge lookup",
+        plan_step="plan_test",
+        extra={"seed_entities": ["OpenAI", "Anthropic"]},
+        context_evidences=[],
+    )
+
+    assert result["tool_name"] == "graph.bridge_lookup"
+    assert result["evidences"]
+    assert result["summary"]
+
+
+@pytest.mark.asyncio
+async def test_tool_server_config_loader_builds_server(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_SCOPE_ID", "owner-xyz")
+    payload = {
+        "type": "deepsearch_tool_mcp_server",
+        "instructions": "Test scope ${TEST_SCOPE_ID}",
+        "enabled_tools": ["graph.bridge_lookup"],
+        "llm_config": {
+            "type": "openai_chat",
+            "model_name": "gpt-4o-mini",
+            "openai_api_key": "test-key",
+            "openai_base_url": "https://example.com/v1"
+        },
+        "graph_adapter": {
+            "type": "graph_adapter",
+            "adapter_name": "config_stub_adapter",
+            "parameters": {}
+        },
+        "tool_manager": {
+            "enable_builtin_tools": True,
+            "enabled_tools": {},
+            "audit_label": "config-test"
+        },
+        "scope": {
+            "scope_id": "${TEST_SCOPE_ID}",
+            "scope_type": "owner",
+            "labels": [],
+            "attributes": {}
+        }
+    }
+    config_path = tmp_path / "tool_server.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    registry.override_adapter("config_stub_adapter", lambda **kwargs: _StubAdapter())
+
+    config = load_tool_server_config(config_path)
+    server = config.build()
+
+    assert server.default_scope is not None
+    assert server.default_scope.scope_id == "owner-xyz"
+    assert server.enabled_tools == {"graph.bridge_lookup"}
