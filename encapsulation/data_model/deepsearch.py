@@ -19,7 +19,7 @@ class EvidenceChunk(BaseModel):
     """Unified evidence representation shared across graph and external channels."""
 
     chunk_id: str = Field(..., description="Stable ID so reasoning steps can reference this chunk")
-    source: str = Field(..., description="Logical origin of the evidence such as hipporag/graphsearch/web")
+    source: str = Field(..., description="Logical origin of the evidence such as graph/web")
     content: str = Field(..., description="Evidence text or compressed summary")
     score: Optional[float] = Field(None, description="Confidence or relevance score assigned by retrievers")
     provenance: dict[str, Any] = Field(
@@ -126,3 +126,36 @@ class DeepSearchTrace(BaseModel):
     external_calls: List[ToolExecutionLog] = Field(default_factory=list, description="External tool invocations")
     final_answer: Optional[str] = Field(None, description="LLM answer before formatting")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Run-level telemetry such as config fingerprint")
+
+
+class ThinkNote(BaseModel):
+    """Structured reasoning note captured by think tools or think windows."""
+
+    plan_step_id: Optional[str] = Field(
+        None, description="Optional plan step identifier that triggered this reasoning pause"
+    )
+    reasoning: str = Field(..., description="Concise explanation of the decision or reflection outcome")
+    confidence_delta: Optional[float] = Field(
+        None, description="Relative change in the model's self-reported confidence after thinking"
+    )
+    coverage_delta: Optional[float] = Field(
+        None, description="Relative change in estimated coverage after the reasoning pause"
+    )
+    next_actions: List[str] = Field(
+        default_factory=list, description="Suggested follow-up actions for the planner or reasoning loop"
+    )
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Free-form diagnostics for telemetry")
+
+
+class ToolResultPayload(BaseModel):
+    """Normalized payload returned by tool invocations."""
+
+    tool_name: str = Field(..., description="Logical DeepSearch tool identifier")
+    namespace: str = Field(..., description="MCP-compatible namespace for remote routing")
+    channel: str = Field(..., description="Channel label such as graph/text/web")
+    profile: str = Field(..., description="Tool profile category (F/H/X) used by planners")
+    determinism: str = Field(..., description="Determinism label for cost/quality routing decisions")
+    summary: str = Field(..., description="Human-readable text describing the outcome")
+    evidences: List[EvidenceChunk] = Field(default_factory=list, description="Evidence objects produced by the tool")
+    diagnostics: Dict[str, Any] = Field(default_factory=dict, description="Structured telemetry emitted by the tool")
+    think_notes: List[ThinkNote] = Field(default_factory=list, description="Captured reasoning pauses if available")

@@ -1,18 +1,662 @@
-from typing import Any, Dict
+"""Tool manager that orchestrates local registries and MCP routing."""
+import time
+from dataclasses import dataclass, asdict, is_dataclass
+from string import Template
+from typing import Any, Dict, List, Optional, Tuple
 
+from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote, ToolExecutionLog, ToolResultPayload, GraphQueryContext
 from encapsulation.mcp.client import MCPToolClient
+
+from core.deepsearch.tools import (
+    GraphTool,
+    ToolDescriptor,
+    ToolRunRequest,
+    builtin_tool_descriptors,
+    build_builtin_tools,
+    get_tool_descriptor,
+)
+
+from ._hints import register_tool_hints, set_disabled_tools
+
+
+class LocalToolRegistry:
+    """Stores instantiated local tools and descriptor metadata."""
+
+    def __init__(
+        self,
+        *,
+        tool_configs: Optional[Dict[str, Any]] = None,
+        llm_connector=None,
+        injected_tools: Optional[Dict[str, GraphTool]] = None,
+    ):
+        self.tool_configs = tool_configs or {}
+        self.audit_label = self.tool_configs.get("audit_label")
+        self._enabled_tool_configs = self.tool_configs.get("enabled_tools") or {}
+        builtin_map = {desc.name: desc for desc in builtin_tool_descriptors()}
+        self._builtin_tool_names = set(builtin_map.keys())
+        self._descriptors = dict(builtin_map)
+        self._register_remote_descriptors()
+        self._tools: Dict[str, GraphTool] = {}
+        if self._is_enabled_globally():
+            overrides = self._build_overrides()
+            connector = self._coerce_llm_connector(llm_connector)
+            builtin = build_builtin_tools(llm_connector=connector, overrides=overrides)
+            for name, tool in builtin.items():
+                if self._tool_enabled(name):
+                    self._tools[name] = tool
+        if injected_tools:
+            for name, tool in injected_tools.items():
+                self._tools[name] = tool
+                self._register_custom_descriptor(name, tool)
+        self._update_disabled_hints()
+
+    def resolve(self, tool_name: str) -> GraphTool | None:
+        """Return the instantiated tool when available."""
+
+        return self._tools.get(tool_name)
+
+    def descriptor_for(self, tool_name: str) -> ToolDescriptor | None:
+        """Return the descriptor either from the tool instance or built-in map."""
+
+        tool = self._tools.get(tool_name)
+        if tool and getattr(tool, "descriptor", None):
+            return tool.descriptor  # type: ignore[attr-defined]
+        return self._descriptors.get(tool_name)
+
+    def should_route_remote(self, tool_name: str) -> bool:
+        """Return True when config requests MCP fallback."""
+
+        cfg = self._tool_config(tool_name)
+        return bool(cfg.get("mcp_fallback") or cfg.get("mcp_only"))
+
+    def _is_enabled_globally(self) -> bool:
+        flag = self.tool_configs.get("enable_builtin_tools", True)
+        return bool(flag) if isinstance(flag, bool) else True
+
+    def _tool_config(self, tool_name: str) -> Dict[str, Any]:
+        cfg = self._enabled_tool_configs.get(tool_name)
+        return cfg if isinstance(cfg, dict) else {}
+
+    def _tool_enabled(self, tool_name: str) -> bool:
+        cfg = self._tool_config(tool_name)
+        if not cfg:
+            return True
+        if cfg.get("mcp_only"):
+            return False
+        if "enabled" in cfg:
+            return bool(cfg["enabled"])
+        return True
+
+    def is_mcp_only(self, tool_name: str) -> bool:
+        cfg = self._tool_config(tool_name)
+        return bool(cfg.get("mcp_only"))
+
+    def _build_overrides(self) -> Dict[str, Dict[str, Any]]:
+        overrides: Dict[str, Dict[str, Any]] = {}
+        for name, cfg in self._enabled_tool_configs.items():
+            if not isinstance(cfg, dict):
+                continue
+            params = dict(cfg.get("params") or {})
+            if not params:
+                params = {
+                    key: value
+                    for key, value in cfg.items()
+                    if key not in {"enabled", "audit_label", "mcp_only", "mcp_fallback"}
+                }
+            if params:
+                overrides[name] = params
+        return overrides
+
+    def _register_remote_descriptors(self) -> None:
+        remote_tools = self.tool_configs.get("remote_tools") or {}
+        for name, raw in remote_tools.items():
+            spec = self._normalize_remote_descriptor(raw)
+            if not spec:
+                continue
+            extra_kwargs: Dict[str, Any] = {}
+            if spec.get("input_schema"):
+                extra_kwargs["input_schema"] = spec["input_schema"]
+            if spec.get("example_args"):
+                extra_kwargs["example_args"] = spec["example_args"]
+            descriptor = ToolDescriptor(
+                name=name,
+                channel=spec.get("channel", "graph"),
+                description=spec["description"],
+                speed=spec.get("speed", "medium"),
+                cost=spec.get("cost", "medium"),
+                strategy_tags=tuple(spec.get("strategy_tags", [])),
+                profile=spec.get("profile", "F"),
+                determinism=spec.get("determinism", "deterministic"),
+                namespace=spec.get("namespace", name),
+                mcp_callable=True,
+                **extra_kwargs,
+            )
+            self._descriptors[name] = descriptor
+            register_tool_hints([descriptor.as_hint()])
+
+    @staticmethod
+    def _normalize_remote_descriptor(raw: Any) -> Optional[Dict[str, Any]]:
+        if raw is None:
+            return None
+        if hasattr(raw, "model_dump"):
+            return raw.model_dump()
+        if isinstance(raw, dict):
+            return raw
+        return None
+
+    @staticmethod
+    def _coerce_llm_connector(candidate):
+        """Return connector only when it exposes chat/achat interfaces."""
+
+        if candidate is None:
+            return None
+        for attr in ("achat", "chat"):
+            handle = getattr(candidate, attr, None)
+            if callable(handle):
+                return candidate
+        return None
+
+    def _update_disabled_hints(self) -> None:
+        disabled: set[str] = set()
+        if not self._is_enabled_globally():
+            for name in self._builtin_tool_names:
+                cfg = self._tool_config(name)
+                if cfg.get("mcp_fallback") or cfg.get("mcp_only"):
+                    continue
+                disabled.add(name)
+        for name, cfg in self._enabled_tool_configs.items():
+            if not isinstance(cfg, dict):
+                continue
+            if cfg.get("enabled") is False and not (cfg.get("mcp_fallback") or cfg.get("mcp_only")):
+                disabled.add(name)
+        set_disabled_tools(disabled)
+
+    def _register_custom_descriptor(self, name: str, tool: GraphTool) -> None:
+        descriptor = getattr(tool, "descriptor", None)
+        if not descriptor:
+            return
+        self._descriptors[name] = descriptor
+        register_tool_hints([descriptor.as_hint()])
+
+
+@dataclass
+class MCPToolRouter:
+    """Routes tool calls to MCP servers."""
+
+    mcp_client: Optional[MCPToolClient]
+    default_server_name: Optional[str] = None
+
+    async def invoke(
+        self,
+        descriptor: ToolDescriptor,
+        payload: Dict[str, Any],
+    ) -> Tuple[ToolResultPayload, ToolExecutionLog]:
+        if not self.mcp_client:
+            raise RuntimeError("MCPToolRouter cannot invoke tools without an MCP client")
+        graph_context = payload.get("graph_context")
+        arguments = payload.get("arguments", {})
+        server_name = payload.get("server_name") or self.default_server_name
+        outcome = await self.mcp_client.call_tool(
+            descriptor.namespace or descriptor.name,
+            arguments=arguments,
+            graph_context=graph_context,
+            server_name=server_name,
+        )
+        payload_model = self._normalize_result(descriptor, outcome.result)
+        payload_model.diagnostics.setdefault("latency_ms", outcome.log.latency_ms)
+        payload_model.diagnostics.setdefault("transport", outcome.log.extra.get("transport"))
+        return payload_model, outcome.log
+
+    def _normalize_result(self, descriptor: ToolDescriptor, result: Any) -> ToolResultPayload:
+        content = getattr(result, "content", None) or []
+        structured = self._extract_structured_content(content)
+        if structured:
+            return self._payload_from_structured(descriptor, structured)
+        return self._payload_from_text(descriptor, content)
+
+    @staticmethod
+    def _extract_structured_content(content: List[Any]) -> Optional[Dict[str, Any]]:
+        import json
+
+        for block in content:
+            payload = getattr(block, "json", None) or getattr(block, "data", None)
+            if isinstance(payload, dict):
+                return payload
+            text = getattr(block, "text", None)
+            if text:
+                try:
+                    parsed = json.loads(text)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except json.JSONDecodeError:
+                    continue
+        return None
+
+    def _payload_from_structured(self, descriptor: ToolDescriptor, data: Dict[str, Any]) -> ToolResultPayload:
+        evidences = self._coerce_evidences(descriptor, data.get("evidences", []))
+        think_notes = self._coerce_think_notes(data.get("think_notes", []))
+        diagnostics = data.get("diagnostics") or {}
+        summary = data.get("summary") or data.get("text") or data.get("thought") or ""
+        if not think_notes and data.get("thought"):
+            next_actions = data.get("next_actions")
+            if isinstance(next_actions, list):
+                parsed_actions = [str(item) for item in next_actions if str(item).strip()]
+            else:
+                parsed_actions = []
+            plan_step_ref = data.get("plan_step") or data.get("plan_step_id") or data.get("plan_id")
+            if plan_step_ref is not None:
+                plan_step_ref = str(plan_step_ref)
+            think_notes = [
+                ThinkNote(
+                    plan_step_id=plan_step_ref,
+                    reasoning=str(data.get("thought")),
+                    confidence_delta=data.get("confidence_delta"),
+                    coverage_delta=data.get("coverage_delta"),
+                    next_actions=parsed_actions,
+                    metadata={"raw": data},
+                )
+            ]
+        return ToolResultPayload(
+            tool_name=descriptor.name,
+            namespace=descriptor.namespace,
+            channel=descriptor.channel,
+            profile=descriptor.profile,
+            determinism=descriptor.determinism,
+            summary=str(summary),
+            evidences=evidences,
+            diagnostics=diagnostics,
+            think_notes=think_notes,
+        )
+
+    def _payload_from_text(self, descriptor: ToolDescriptor, content: List[Any]) -> ToolResultPayload:
+        evidences: List[EvidenceChunk] = []
+        for idx, block in enumerate(content):
+            text = getattr(block, "text", None)
+            if not text:
+                continue
+            evidences.append(
+                EvidenceChunk(
+                    chunk_id=f"mcp-{descriptor.name}-{idx}",
+                    source=descriptor.namespace or descriptor.name,
+                    content=str(text).strip(),
+                    provenance={"content_type": getattr(block, "type", "text")},
+                )
+            )
+        summary = evidences[0].content if evidences else ""
+        return ToolResultPayload(
+            tool_name=descriptor.name,
+            namespace=descriptor.namespace,
+            channel=descriptor.channel,
+            profile=descriptor.profile,
+            determinism=descriptor.determinism,
+            summary=summary,
+            evidences=evidences,
+            diagnostics={},
+            think_notes=[],
+        )
+
+    @staticmethod
+    def _coerce_evidences(descriptor: ToolDescriptor, payload: Any) -> List[EvidenceChunk]:
+        evidences: List[EvidenceChunk] = []
+        if not isinstance(payload, list):
+            return evidences
+        for idx, item in enumerate(payload):
+            if isinstance(item, EvidenceChunk):
+                evidences.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            chunk_id = item.get("chunk_id") or f"mcp-{descriptor.name}-{idx}"
+            source = item.get("source") or descriptor.namespace or descriptor.name
+            content = item.get("content")
+            if not content:
+                continue
+            evidences.append(
+                EvidenceChunk(
+                    chunk_id=str(chunk_id),
+                    source=str(source),
+                    content=str(content),
+                    score=item.get("score"),
+                    provenance=item.get("provenance") or {},
+                )
+            )
+        return evidences
+
+    @staticmethod
+    def _coerce_think_notes(payload: Any) -> List[ThinkNote]:
+        notes: List[ThinkNote] = []
+        if not isinstance(payload, list):
+            return notes
+        for item in payload:
+            if isinstance(item, ThinkNote):
+                notes.append(item)
+                continue
+            if isinstance(item, dict):
+                try:
+                    notes.append(ThinkNote(**item))
+                except Exception:
+                    continue
+        return notes
 
 
 class DeepSearchToolManager:
-    """Handles tool registration, quota policies, and logging so DeepSearch runs remain auditable."""
+    """Handles local tool invocation, optional MCP calls, and telemetry."""
 
-    def __init__(self, tool_configs, telemetry_client, *, mcp_client: MCPToolClient | None = None):
-        self.tool_configs = tool_configs
+    def __init__(
+        self,
+        tool_configs: Optional[Dict[str, Any]],
+        telemetry_client,
+        *,
+        mcp_client: MCPToolClient | None = None,
+        local_tools: Optional[Dict[str, GraphTool]] = None,
+        local_registry: Optional[LocalToolRegistry] = None,
+        mcp_router: Optional[MCPToolRouter] = None,
+    ):
+        self.tool_configs = tool_configs or {}
         self.telemetry_client = telemetry_client
-        # mcp_client: optional bridge to the shared MCP session manager used across DeepSearch services
-        self.mcp_client = mcp_client
+        self.local_registry = local_registry or LocalToolRegistry(
+            tool_configs=self.tool_configs,
+            llm_connector=self.tool_configs.get("llm_connector"),
+            injected_tools=local_tools,
+        )
+        self.mcp_router = mcp_router or MCPToolRouter(
+            mcp_client=mcp_client,
+            default_server_name=self.tool_configs.get("default_mcp_server"),
+        )
+        self.remote_argument_templates = self.tool_configs.get("remote_argument_templates") or {}
+        self.audit_label = self.tool_configs.get("audit_label") or getattr(self.local_registry, "audit_label", None)
+        self.max_remote_evidences = int(self.tool_configs.get("max_remote_evidences", 32))
+        self.max_remote_context_chars = int(self.tool_configs.get("max_remote_context_chars", 4096))
+        self.llm_fingerprint = self._fingerprint_llm(self.tool_configs.get("llm_connector"))
 
-    async def invoke(self, tool_name: str, *, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Invoke a tool by name and record telemetry; concrete logic will reuse encapsulation layer clients."""
+    async def invoke(self, tool_name: str, *, payload: Dict[str, Any]) -> ToolResultPayload:
+        """Invoke a tool and return normalized results."""
 
-        raise NotImplementedError("DeepSearch Tool Manager logic will be implemented in a subsequent change")
+        descriptor = self._resolve_descriptor(tool_name)
+        request = self._build_request(payload)
+        local_tool = self.local_registry.resolve(tool_name) if self.local_registry else None
+        if local_tool and not self._prefer_remote_for(tool_name):
+            start = time.perf_counter()
+            result = await local_tool.run(request)
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            descriptor = descriptor or getattr(local_tool, "descriptor", None)
+            if descriptor is None:
+                raise RuntimeError(f"Local tool '{tool_name}' does not expose a descriptor")
+            payload_model = result.as_payload(descriptor)
+            self._record_local(tool_name, payload_model, request, latency_ms, descriptor)
+            return payload_model
+
+        if self._can_route_remote(tool_name, descriptor):
+            remote_payload = self._prepare_remote_payload(tool_name, payload, request)
+            payload_model, log = await self.mcp_router.invoke(descriptor, remote_payload)  # type: ignore[arg-type]
+            self._record_remote(tool_name, log, request)
+            return payload_model
+
+        raise KeyError(f"Tool '{tool_name}' is not registered locally and MCP routing is unavailable")
+
+    def _resolve_descriptor(self, tool_name: str) -> ToolDescriptor | None:
+        descriptor = None
+        if self.local_registry:
+            descriptor = self.local_registry.descriptor_for(tool_name)
+        if descriptor:
+            return descriptor
+        return get_tool_descriptor(tool_name)
+
+    def _prefer_remote_for(self, tool_name: str) -> bool:
+        if not self.local_registry:
+            return False
+        return self.local_registry.is_mcp_only(tool_name)
+
+    def _can_route_remote(self, tool_name: str, descriptor: ToolDescriptor | None) -> bool:
+        if not descriptor or not self.mcp_router:
+            return False
+        if descriptor.mcp_callable:
+            return True
+        return bool(self.local_registry and self.local_registry.should_route_remote(tool_name))
+
+    def _prepare_remote_payload(
+        self,
+        tool_name: str,
+        payload: Dict[str, Any],
+        request: ToolRunRequest,
+    ) -> Dict[str, Any]:
+        arguments = self._build_remote_arguments(tool_name, request, payload)
+        return {
+            "arguments": arguments,
+            "graph_context": request.graph_context,
+            "server_name": payload.get("server_name"),
+        }
+
+    def _build_remote_arguments(
+        self,
+        tool_name: str,
+        request: ToolRunRequest,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        arguments: Dict[str, Any] = {
+            "question": request.question,
+            "plan_step": request.plan_step,
+            "context_evidences": self._serialize_context_window(request),
+            "extra": self._json_safe(request.extra),
+            "adapter_metadata": self._json_safe(self._adapter_metadata(request.adapter)),
+            "access_scope": self._access_scope_payload(request.access_scope),
+        }
+        digest = self._context_digest(request)
+        if digest:
+            arguments["context_digest"] = digest
+        if request.graph_context:
+            arguments["graph_context"] = self._json_safe(
+                request.graph_context.model_dump(exclude_none=True)
+            )
+        if request.coverage_metrics:
+            arguments["coverage_metrics"] = self._json_safe(request.coverage_metrics)
+        template_args = self._render_argument_template(tool_name, request, payload)
+        if template_args:
+            arguments.update(template_args)
+        return arguments
+
+    def _render_argument_template(
+        self,
+        tool_name: str,
+        request: ToolRunRequest,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        template = self.remote_argument_templates.get(tool_name)
+        if not isinstance(template, dict):
+            return {}
+        context = self._build_template_context(request, payload)
+        rendered: Dict[str, Any] = {}
+        for key, value in template.items():
+            if isinstance(value, str):
+                rendered[key] = Template(value).safe_substitute(context)
+            else:
+                rendered[key] = value
+        return rendered
+
+    @staticmethod
+    def _build_template_context(request: ToolRunRequest, payload: Dict[str, Any]) -> Dict[str, Any]:
+        context = {
+            "question": request.question,
+            "plan_step": request.plan_step or "",
+            "extra": request.extra,
+            "payload": payload,
+        }
+        if request.graph_context:
+            context["graph_context"] = request.graph_context.model_dump(exclude_none=True)
+        if request.coverage_metrics:
+            context["coverage_metrics"] = request.coverage_metrics
+        return context
+
+    @staticmethod
+    def _adapter_metadata(adapter) -> Optional[Dict[str, Any]]:
+        if adapter is None:
+            return None
+        meta = getattr(adapter, "metadata", None)
+        if not callable(meta):
+            return None
+        metadata = meta()
+        try:
+            return asdict(metadata)
+        except Exception:
+            return metadata.__dict__
+
+    @staticmethod
+    def _access_scope_payload(access_scope) -> Optional[Dict[str, Any]]:
+        if access_scope is None:
+            return None
+        payload = {
+            "scope_id": getattr(access_scope, "scope_id", None),
+            "scope_type": getattr(access_scope, "scope_type", None),
+            "labels": list(getattr(access_scope, "labels", []) or []),
+            "attributes": getattr(access_scope, "attributes", None),
+        }
+        return {k: v for k, v in payload.items() if v is not None}
+
+    @staticmethod
+    def _build_request(payload: Dict[str, Any]) -> ToolRunRequest:
+        context_payload = payload.get("context_evidences") or []
+        context_evidences: List[EvidenceChunk] = []
+        for item in context_payload:
+            if isinstance(item, EvidenceChunk):
+                context_evidences.append(item)
+            elif isinstance(item, dict):
+                try:
+                    context_evidences.append(EvidenceChunk(**item))
+                except Exception:
+                    continue
+        adapter = payload.get("adapter")
+        access_scope = payload.get("access_scope")
+        if access_scope and not hasattr(access_scope, "as_token"):
+            from core.graph_adapter.base import GraphAccessScope
+
+            access_scope = GraphAccessScope(**access_scope)
+        graph_context = payload.get("graph_context")
+        if graph_context and isinstance(graph_context, dict):
+            graph_context = GraphQueryContext(**graph_context)
+        return ToolRunRequest(
+            question=payload.get("question", ""),
+            plan_step=payload.get("plan_step"),
+            context_evidences=context_evidences,
+            adapter=adapter,
+            access_scope=access_scope,
+            extra=payload.get("extra", {}),
+            graph_context=graph_context,
+            coverage_metrics=payload.get("coverage_metrics"),
+        )
+
+    def _record_local(
+        self,
+        tool_name: str,
+        result: ToolResultPayload,
+        request: ToolRunRequest,
+        latency_ms: int,
+        descriptor: ToolDescriptor | None,
+    ) -> None:
+        if not self.telemetry_client:
+            return
+        log_method = getattr(self.telemetry_client, "log_tool_invocation", None)
+        if not callable(log_method):
+            return
+        payload = {
+            "summary": result.summary,
+            "diagnostics": result.diagnostics,
+            "question": request.question,
+            "plan_step": request.plan_step,
+            "think_notes": [note.model_dump() for note in result.think_notes],
+            "latency_ms": latency_ms,
+            "adapter_metadata": self._adapter_metadata(request.adapter),
+            "tool_namespace": descriptor.namespace if descriptor else None,
+        }
+        if self.llm_fingerprint:
+            payload["llm_fingerprint"] = self.llm_fingerprint
+        if self.audit_label:
+            payload["audit_label"] = self.audit_label
+        log_method(
+            tool_name=tool_name,
+            payload=payload,
+        )
+
+    def _record_remote(self, tool_name: str, log: ToolExecutionLog, request: ToolRunRequest | None = None) -> None:
+        if not self.telemetry_client:
+            return
+        if self.audit_label:
+            log.extra.setdefault("audit_label", self.audit_label)
+        if request and log.graph_context is None and request.graph_context:
+            log.graph_context = request.graph_context
+        if request:
+            adapter_meta = self._adapter_metadata(request.adapter)
+            if adapter_meta:
+                log.extra.setdefault("adapter_metadata", adapter_meta)
+        if self.llm_fingerprint:
+            log.extra.setdefault("llm_fingerprint", self.llm_fingerprint)
+        log_method = getattr(self.telemetry_client, "log_remote_tool", None)
+        if callable(log_method):
+            log_method(tool_name=tool_name, log=log)
+
+    def _serialize_context_window(self, request: ToolRunRequest) -> List[Dict[str, Any]]:
+        if not request.context_evidences:
+            return []
+        window = request.context_evidences
+        limit = max(0, self.max_remote_evidences)
+        if limit:
+            window = window[-limit:]
+        return [evidence.model_dump() for evidence in window]
+
+    def _context_digest(self, request: ToolRunRequest) -> Optional[str]:
+        if not request.context_evidences or self.max_remote_context_chars <= 0:
+            return None
+        window = request.context_evidences
+        limit = max(0, self.max_remote_evidences)
+        if limit:
+            window = window[-limit:]
+        budget = self.max_remote_context_chars
+        snippets: List[str] = []
+        for evidence in reversed(window):
+            if budget <= 0:
+                break
+            text = (evidence.content or "").strip()
+            if not text:
+                continue
+            snippet = text[: min(len(text), budget)]
+            snippets.append(f"[{evidence.chunk_id}] {snippet}")
+            budget -= len(snippet)
+        snippets.reverse()
+        return "\n".join(snippets) if snippets else None
+
+    @staticmethod
+    def _fingerprint_llm(connector) -> Optional[str]:
+        if connector is None:
+            return None
+        if isinstance(connector, str):
+            return connector
+        for attr in ("model_name", "model_id", "model"):
+            value = getattr(connector, attr, None)
+            if isinstance(value, str) and value:
+                return value
+        return connector.__class__.__name__
+
+    @staticmethod
+    def _json_safe(value: Any) -> Any:
+        """Convert dataclasses/pydantic instances into JSON-friendly primitives."""
+
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, list):
+            return [DeepSearchToolManager._json_safe(item) for item in value]
+        if isinstance(value, tuple):
+            return [DeepSearchToolManager._json_safe(item) for item in value]
+        if isinstance(value, set):
+            return [DeepSearchToolManager._json_safe(item) for item in value]
+        if isinstance(value, dict):
+            return {str(key): DeepSearchToolManager._json_safe(val) for key, val in value.items()}
+        if hasattr(value, "model_dump"):
+            try:
+                dumped = value.model_dump()
+            except TypeError:
+                dumped = value.model_dump(exclude_none=True)
+            return DeepSearchToolManager._json_safe(dumped)
+        if is_dataclass(value):
+            return DeepSearchToolManager._json_safe(asdict(value))
+        if hasattr(value, "__dict__"):
+            return DeepSearchToolManager._json_safe(vars(value))
+        return str(value)

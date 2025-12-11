@@ -34,12 +34,7 @@ class MCPToolCallOutcome:
 
 
 class MCPToolClient:
-    """Manage MCP tool sessions with graph-aware payload injection.
-
-    This client mirrors the orchestration style in MiroFlow but injects graph
-    metadata so that downstream tools can adjust traversal or summarisation
-    strategies for knowledge-graph centric workloads.
-    """
+    """Manage MCP tool sessions with graph-aware payload injection so downstream tools can adjust traversal or summarisation strategies for knowledge-graph centric workloads."""
 
     def __init__(
         self,
