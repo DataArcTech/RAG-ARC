@@ -13,7 +13,8 @@ class MultiAdapterComparatorTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.multi_adapter_compare",
         channel="graph",
-        description="Compares adapter metadata and reports determinism ratios.",
+        description="Audits adapter metadata to report determinism ratios and governance cues before escalating "
+        "to expensive reasoning.",
         speed="medium",
         cost="medium",
         strategy_tags=("governance", "comparison", "adapter"),

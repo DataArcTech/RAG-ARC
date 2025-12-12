@@ -14,7 +14,8 @@ class CrossAdapterPlannerTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.cross_adapter_planner",
         channel="graph",
-        description="Summarises differences between adapters and recommends orchestration steps.",
+        description="Summarises adapter trade-offs and emits JSON `{summary, actions[]}` plans so downstream "
+        "steps know which graph adapter should handle each hop or validation task.",
         speed="slow",
         cost="high",
         strategy_tags=("planner", "meta_reasoning", "llm"),

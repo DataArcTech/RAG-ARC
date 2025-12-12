@@ -15,7 +15,8 @@ class BeamSearchTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.beam_search",
         channel="graph",
-        description="Think-on-Graph inspired beam search that expands KG paths before heavy reasoning.",
+        description="Think-on-Graph style beam search that enumerates candidate KG paths, scores them, and "
+        "returns ranked path summaries plus supporting chunks before committing to longer reasoning chains.",
         speed="slow",
         cost="high",
         strategy_tags=("beam_search", "tog", "graph_reasoning"),

@@ -13,7 +13,8 @@ class ParallelThinkTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.parallel_think",
         channel="graph",
-        description="Generates multiple reasoning branches before committing to expensive traversals.",
+        description="Spins up multiple `thought/action` branches to stress-test the current plan before running "
+        "expensive graph traversals.",
         speed="slow",
         cost="high",
         strategy_tags=("parallel", "reflection", "llm"),
