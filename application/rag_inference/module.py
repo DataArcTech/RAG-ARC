@@ -4,6 +4,7 @@ import logging
 import uuid
 import json
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from framework.module import AbstractModule
 from core.utils.owner_guard import normalize_owner_id, is_admin_owner, get_admin_owner_id
@@ -50,33 +51,45 @@ class RAGInference(AbstractModule):
         """Run a blocking function in a separate thread to avoid blocking the event loop."""
         return await get_thread_pool().run_blocking(func, *args, **kwargs)
 
-    def chat(self, query: str, owner_id: uuid.UUID, return_subgraph: bool = False) -> tuple[str, list[Chunk], Optional[Dict[str, Any]]]:
+    def chat(
+        self,
+        query: str,
+        owner_id: uuid.UUID,
+        return_subgraph: bool = False,
+    ) -> tuple[str, list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """
         Chat with RAG system (synchronous version, kept for backward compatibility).
         For async non-blocking version, use chat_async().
         """
-        # This is a synchronous wrapper that will be deprecated
-        # New code should use chat_async()
-        import asyncio
         try:
-            loop = asyncio.get_event_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        return loop.run_until_complete(self.chat_async(query, owner_id, return_subgraph))
+            return asyncio.run(self.chat_async(query, owner_id, return_subgraph))
 
-    async def chat_async(self, query: str, owner_id: uuid.UUID, return_subgraph: bool = False) -> tuple[str, list[Chunk], Optional[Dict[str, Any]]]:
+        def _run_in_thread():
+            return asyncio.run(self.chat_async(query, owner_id, return_subgraph))
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(_run_in_thread).result()
+
+    async def chat_async(
+        self,
+        query: str,
+        owner_id: uuid.UUID,
+        return_subgraph: bool = False,
+    ) -> tuple[str, list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """
         Chat with RAG system
 
         Args:
             query: User query
             owner_id: User ID for user-isolated retrieval
-            return_subgraph: If True, return subgraph visualization data
+        return_subgraph: If True, include serialized subgraph data in the response
 
         Returns:
-            Tuple of (LLM response, chunks, subgraph_data)
+            Tuple of (LLM response, chunks, subgraph_data, subgraph_info)
             - subgraph_data is None if return_subgraph=False or retriever doesn't support it
+            - subgraph_info mirrors the retriever diagnostics used for graph export when available
         """
         # Run query rewriting asynchronously to avoid blocking the event loop
         rewritten_query = await self._run_blocking(
@@ -107,13 +120,7 @@ class RAGInference(AbstractModule):
         chunks = self._filter_chunks_by_file_status(chunks)
 
         # Extract subgraph info BEFORE reranking (to avoid losing it after reordering)
-        subgraph_info = None
-        if return_subgraph and chunks:
-            for chunk in chunks:
-                if hasattr(chunk, 'metadata') and chunk.metadata and '_subgraph_info' in chunk.metadata:
-                    subgraph_info = chunk.metadata.pop('_subgraph_info')
-                    logger.info("Extracted subgraph info before reranking")
-                    break
+        subgraph_info = self._consume_subgraph_info(chunks)
 
         # Run reranking asynchronously to avoid blocking the event loop
         chunks = await self._run_blocking(
@@ -124,7 +131,7 @@ class RAGInference(AbstractModule):
 
         # Export subgraph data if subgraph_info is available
         subgraph_data = None
-        if subgraph_info:
+        if subgraph_info and return_subgraph:
             # Import GraphExporter here to avoid circular dependency
             try:
                 graph_store = self._locate_graph_store()
@@ -208,7 +215,7 @@ IMPORTANT:
                 chunks
             )
         
-        return (response, chunks, subgraph_data)
+        return (response, chunks, subgraph_data, subgraph_info)
 
     def _locate_graph_store(self):
         """Locate the configured graph store if one exists."""
@@ -263,6 +270,18 @@ IMPORTANT:
         if len(filtered_chunks) != len(chunks):
             logger.info(f"Filtered out {len(chunks) - len(filtered_chunks)} chunks from deleting files")
         return filtered_chunks
+
+    @staticmethod
+    def _consume_subgraph_info(chunks: List[Chunk]) -> Optional[Dict[str, Any]]:
+        """Pop and return embedded subgraph diagnostics when available."""
+
+        for chunk in chunks:
+            metadata = getattr(chunk, "metadata", None) or {}
+            if "_subgraph_info" in metadata:
+                info = metadata.pop("_subgraph_info")
+                logger.info("Extracted subgraph info before reranking")
+                return info
+        return None
 
     def export_graph_overview(
         self,

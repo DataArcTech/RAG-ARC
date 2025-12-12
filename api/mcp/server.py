@@ -5,60 +5,31 @@ import datetime
 import uuid
 from fastmcp import Context, FastMCP
 from typing import Dict, Optional, List, Any
+from fastapi import HTTPException
 from encapsulation.data_model.schema import Chunk, GraphData
 from framework.register import Register
-from api.routers.auth import SECRET_KEY, ALGORITHM
+from api.routers.auth import get_current_user_from_token, validate_user_session
 from encapsulation.data_model.orm_models import ChatMessage, User
+from core.utils.owner_guard import is_admin_owner
+from core.presentation.evidence import build_chat_evidence
+from core.presentation.deepsearch_payload import trim_deepsearch_payload
+from config.output_limits import CHAT_TOP_CHUNKS
 import logging
-import jwt
-from jwt.exceptions import InvalidTokenError
 
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP("RAG-ARC MCP Server")
 registrator = Register()
 
-def get_user_from_token(token: str) -> Optional[User]:
-    """
-    Get user from JWT token without raising HTTPException.
-    Returns None if authentication fails.
-    """
+def _safe_get_current_user_from_token(token: str) -> Optional[User]:
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username = payload.get("sub")
-        if username is None:
-            logger.error("No username found in token payload")
-            return None
-
-        logger.info(f"Decoded username from token: {username}")
-
-        # Get account handler and fetch user
-        account_handler = registrator.get_object("account")
-        user = account_handler.get_user_by_username(username)
-
-        logger.info(f"User fetched: type={type(user)}, user={user}")
-
-        if user:
-            logger.info(f"User attributes: id={getattr(user, 'id', 'NO_ID')}, user_name={getattr(user, 'user_name', 'NO_USERNAME')}")
-
-        return user
-    except InvalidTokenError as e:
-        logger.error(f"Invalid token: {e}")
+        return get_current_user_from_token(token)
+    except HTTPException as exc:
+        logger.warning("Authentication failed: %s", exc.detail)
         return None
-    except Exception as e:
-        logger.error(f"Error getting user from token: {e}", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Error getting user from token: %s", exc, exc_info=True)
         return None
-
-def validate_user_session(session, current_user: User) -> bool:
-    """Validate that session belongs to user."""
-    if session is None:
-        logger.warning(f"Session validation failed for user {current_user.id}")
-        return False
-    if session.user_id != current_user.id:
-        logger.warning(f"Session validation failed for session {session.id} and user {current_user.id}")
-        return False
-    logger.info(f"Validating session {session.id} for user {current_user.id}")
-    return True
 
 @mcp.tool(name="hello_world", description="test")
 async def hello_world_tool() -> Dict[str, Any]:
@@ -80,7 +51,7 @@ async def create_chat(auth_token: str) -> Dict[str, Any]:
     """
     try:
         # Authenticate user from token (use get_user_from_token to avoid HTTPException)
-        current_user = get_user_from_token(auth_token)
+        current_user = _safe_get_current_user_from_token(auth_token)
         if not current_user:
             return {"isError": True, "message": "Authentication failed"}
         
@@ -157,7 +128,7 @@ async def chat(
     """
     try:
         # Authenticate user from token
-        current_user = get_user_from_token(auth_token)
+        current_user = _safe_get_current_user_from_token(auth_token)
         if not current_user:
             return {"isError": True, "message": "Authentication failed"}
 
@@ -178,15 +149,20 @@ async def chat(
         if not session or not validate_user_session(session, current_user):
             return {"isError": True, "message": "Session not found or unauthorized access"}
 
-        await ctx.report_progress(0, 100, "generating")
+        if ctx is not None:
+            await ctx.report_progress(0, 100, "generating")
 
         # Get RAG inference and chat with user isolation
         # Use async version to avoid blocking the event loop
         rag_inference = registrator.get_object("rag_inference")
-        response: str = ""
+        response_text: str = ""
         chunks: list[Chunk] = []
         subgraph_data: GraphData = None
-        response_text, chunks, subgraph_data = await rag_inference.chat_async(query, owner_id=current_user.id)
+        response_text, chunks, subgraph_data, subgraph_info = await rag_inference.chat_async(
+            query,
+            owner_id=current_user.id,
+            return_subgraph=True,
+        )
 
         # Create message in the session (use thread pool to avoid blocking)
         message_handler = registrator.get_object("chat_message")
@@ -210,15 +186,64 @@ async def chat(
             )
         )
         
-        await ctx.report_progress(100, 100, "done")
+        if ctx is not None:
+            await ctx.report_progress(100, 100, "done")
         
+        evidence = build_chat_evidence(
+            chunks,
+            subgraph_data=subgraph_data,
+            subgraph_info=subgraph_info,
+            max_chunks=CHAT_TOP_CHUNKS,
+        )
         return {
             "session_id": session_id,
             "response": response_text,
-            "chunks": chunks,
+            "chunks": evidence["chunks"],
             "subgraph": subgraph_data,
+            "evidence": evidence,
         }
         
     except Exception as e:
         logger.error(f"Error in chat function: {str(e)}")
         return {"isError": True, "message": f"Internal server error: {str(e)}"}
+
+
+@mcp.tool(name="deepsearch_run", description="Execute DeepSearch pipeline with the authenticated user scope")
+async def deepsearch_run(
+    question: str,
+    auth_token: str,
+    owner_id: str | None = None,
+    metadata: Dict[str, Any] | None = None,
+) -> dict:
+    """Expose DeepSearchService via MCP for upstream orchestrators."""
+
+    current_user = _safe_get_current_user_from_token(auth_token)
+    if not current_user:
+        return {"isError": True, "message": "Authentication failed"}
+
+    try:
+        service = registrator.get_object("deepsearch_service")
+    except KeyError:
+        return {"isError": True, "message": "DeepSearch service not initialized"}
+
+    effective_owner = current_user.id
+    if owner_id:
+        try:
+            requested_owner = uuid.UUID(owner_id)
+        except ValueError:
+            return {"isError": True, "message": "owner_id must be a valid UUID string"}
+        if not is_admin_owner(current_user.id):
+            return {"isError": True, "message": "Only administrators may override owner scope"}
+        effective_owner = requested_owner
+
+    try:
+        result = await service.run(
+            question,
+            owner_id=str(effective_owner),
+            metadata=metadata,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("DeepSearch MCP run failed: %s", exc)
+        return {"isError": True, "message": f"DeepSearch run failed: {exc}"}
+
+    return trim_deepsearch_payload(result, include_evidence=True)

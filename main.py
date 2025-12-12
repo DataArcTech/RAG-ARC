@@ -3,9 +3,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from core.graph_adapter.scope_provider import configure_scope_provider
 
 # Load environment variables from .env file
 load_dotenv()
+configure_scope_provider()
 
 import app_registration
 
@@ -15,6 +17,7 @@ app_registration.initialize()
 from api.routers import mcp
 from api.routers import knowledge as knowledge_router
 from api.routers import rag_inference
+from api.routers import deepsearch as deepsearch_router
 from api.routers import session as session_router
 from api.routers import auth as auth_router
 from api.routers import user as user_router
@@ -91,6 +94,7 @@ async def health_check():
 app.mount("/mcp", mcp.mcp_app)
 app.include_router(knowledge_router.router)
 app.include_router(rag_inference.router)
+app.include_router(deepsearch_router.router)
 app.include_router(session_router.router)
 app.include_router(auth_router.router)
 app.include_router(user_router.router)

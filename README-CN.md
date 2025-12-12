@@ -210,6 +210,8 @@ cd RAG-ARC
 
 ### 💻 本地安装
 
+> 配置 `.env` 可参考 [env-en.md](env-en.md)（英文）或 [env-zh.md](env-zh.md)（中文）。
+
 ```bash
 # 1. 克隆仓库
 git clone https://github.com/DataArcTech/RAG-ARC.git
@@ -230,7 +232,7 @@ uv sync --extra dev
 
 # 4. 复制并配置环境变量
 cp .env.example .env
-# 编辑.env以配置您的设置
+# 根据 env-zh.md 填写模型/API Key，其余保持默认即可
 ```
 
 ### 🔐 可选：管理员视角
@@ -270,6 +272,7 @@ RAG-ARC使用模块化配置系统。关键配置文件位于`config/json_config
 - `knowledge.json`：知识管理配置
 - `account.json`：用户账户配置
 - `.env`：运行时参数（模型、账号、端口等）。当需要在本地直接访问容器中的 PostgreSQL / Redis / Neo4j 时，可设置 `DEVELOP_MODE=true`（等同于开启 `EXPOSE_*` 变量），上述服务会开放到 `localhost`；默认关闭以确保安全。
+- `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED`（位于 `.env`，默认 `false`）：保持关闭即可让 DeepSearch 只依赖图谱检索；若需要在 Gap Detection 判定覆盖不足时自动调用 Tavily Web 搜索，请设置为 `true` 并提供 `TAVILY_API_KEY`。
 
 ### 🌐 通过 `.env` 切换模型调用方式
 
@@ -349,9 +352,11 @@ CLI 仍会连接 `.env` 中配置的 PostgreSQL / Redis / Neo4j / MinIO 等基�
 #### DeepSearch MCP 工具服务器
 
 - 通过 `uv run rag-arc tool-mcp-server --transport stdio` 启动 FastMCP 服务器，向上游智能体暴露 DeepSearch 内置工具。服务默认读取 `config/json_configs/deepsearch_tool_mcp_server.json`（可用 `DEEPSEARCH_TOOL_MCP_CONFIG_PATH` 覆盖），从而与 HTTP/CLI 入口共用相同的 LLM 和图适配器配置。
-- **DeepSearch ToolManager 仅支持通过 MCP server 远程调用工具**。请先在命令行中手动启动上述 MCP server，再运行 API/CLI/MCP 协议入口，否则 DeepSearch 无法调度任何工具。
+- **ToolManager 默认直接在本地进程中执行所有内建工具**，只有当配置了 `mcp_client`、在某个工具上设置 `mcp_only/mcp_fallback`，或通过 `remote_tools` 注册外部描述符时，才会把调用通过 MCP server 转发出去。因此 MCP 服务器不是必需组件，仅在需要远程托管/复用工具时才需要提前启动。
 - JSON 配置中的 `tool_manager` 字段遵循 `config/application/deepsearch_config.py` 的同一结构，可在此关闭/调整单个工具或注入远程 MCP 描述符，避免重复粘贴环境变量。
 - 需要只暴露部分工具时设置 `DEEPSEARCH_TOOL_MCP_TOOLS`（逗号分隔）；留空则默认启用全部内建工具。
+- HTTP、CLI、MCP 的 DeepSearch/Chat 响应现在都会输出统一的 `evidence` 字段（chunk、三元组、种子实体、图统计）。HTTP 端通过 `include_evidence=true`（可配合 `return_subgraph=true`）启用，CLI 使用 `--with-evidence`，MCP 接口默认携带该信息。
+- 可通过 `ENABLE_ALL_EVIDENCE`、`CHAT_TOP_CHUNKS`、`CHAT_TOP_TRIPLES`、`CHAT_TOP_SEED_ENTITIES`、`DEEPSEARCH_TOP_CHUNKS`、`DEEPSEARCH_TOP_TRIPLES` 等环境变量限制证据负载大小；开启 `ENABLE_ALL_EVIDENCE=true` 时不再截断。
 
 #### Chat MCP 服务器
 
@@ -374,6 +379,18 @@ curl -X POST "http://localhost:8000/rag_inference/chat" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"query": "什么是RAG-ARC?"}'
+
+# 请求证据包（chunks/三元组/种子实体/子图）
+curl -X POST "http://localhost:8000/rag_inference/chat" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "什么是RAG-ARC?", "return_subgraph": true, "include_evidence": true}'
+
+# DeepSearch 报告 + 证据
+curl -X POST "http://localhost:8000/deepsearch/run" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "什么是RAG-ARC?", "include_evidence": true}'
 
 # 获取Token（登录）
 curl -X POST "http://localhost:8000/auth/token" \
@@ -408,6 +425,8 @@ async def chat():
 
 asyncio.run(chat())
 ```
+
+> 需要结构化证据信息时，请在 HTTP 请求体中设置 `include_evidence=true`（可搭配 `return_subgraph=true`），响应会新增 `evidence` 字段，包含命中的 chunk、图三元组、种子实体以及序列化子图。CLI 的 `chat` / `pipeline` / `graph-qa` 命令提供 `--with-evidence`，`/deepsearch/run` 也支持 `include_evidence`，MCP 接口默认携带该信息。
 
 ## 🛠️ 技术栈
 

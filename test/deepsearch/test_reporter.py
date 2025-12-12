@@ -47,7 +47,10 @@ def test_reporter_prefers_final_answer_and_merges_evidence():
 
     report = reporter.compose(trace, external)
 
-    assert report["answer"].startswith("Microsoft maintains the flagship partnership")
+    assert report["answer"].startswith("# Who partnered"), "Structured report should include Markdown heading"
+    assert report["structured_report"]["summary"].startswith(
+        "Microsoft maintains the flagship partnership"
+    ), "Structured summary should preserve final answer content."
     assert len(report["evidences"]) == 2
     assert report["metadata"]["plan"]["completed"] == 1
     assert report["metadata"]["graph_summary"]["unique_nodes"] == 2
@@ -60,6 +63,6 @@ def test_reporter_builds_highlights_when_final_answer_missing():
 
     report = reporter.compose(trace, external_evidence=[])
 
-    assert report["answer"].startswith("Graph findings:")
+    assert report["structured_report"]["summary"].startswith("Graph findings:")
     assert report["highlights"], "High-level summaries should be extracted from reasoning steps"
-    assert "Evidence collected" not in report["answer"], "Highlights should populate answer when summaries exist"
+    assert "Evidence collected" not in report["structured_report"]["summary"], "Highlights should populate summary"

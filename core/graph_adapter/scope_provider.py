@@ -64,9 +64,22 @@ def configure_scope_provider(*, default_scope: Optional[GraphAccessScope] = None
     _PROVIDER = AccessScopeProvider(default_scope=default_scope or _load_scope_from_env())
 
 
+def _refresh_scope_from_env_if_needed() -> None:
+    """Re-evaluate default scope from env variables when not explicitly configured."""
+
+    global _PROVIDER
+    if _PROVIDER.default_scope is not None:
+        return
+    env_scope = _load_scope_from_env()
+    if env_scope is None:
+        return
+    _PROVIDER = AccessScopeProvider(default_scope=env_scope)
+
+
 def current_scope_provider() -> AccessScopeProvider:
     """Return the active scope provider."""
 
+    _refresh_scope_from_env_if_needed()
     return _PROVIDER
 
 
@@ -80,6 +93,7 @@ def require_scope(
 ) -> GraphAccessScope:
     """Return a scope or raise if neither explicit nor default scope is available."""
 
+    _refresh_scope_from_env_if_needed()
     return _PROVIDER.ensure(
         scope,
         scope_id=scope_id,

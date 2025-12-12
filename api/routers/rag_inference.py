@@ -17,7 +17,6 @@ from api.routers.auth import validate_user_session
 from encapsulation.data_model.orm_models import ChatMessage, User
 from encapsulation.data_model.schema import Chunk, GraphData
 from framework.register import Register
-from encapsulation.data_model.orm_models import ChatMessage
 from application.rag_inference.module import RAGInference
 from application.account.chat_message import ChatMessageManager
 from application.account.chat_session import ChatSessionManager
@@ -26,6 +25,8 @@ from framework.thread_pool import get_thread_pool
 import uuid
 import logging
 from core.utils.owner_guard import is_admin_owner, get_admin_owner_id
+from core.presentation.evidence import build_chat_evidence
+from config.output_limits import CHAT_TOP_CHUNKS
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -58,6 +59,7 @@ class ChatRequest(BaseModel):
     return_subgraph: bool = False  # Optional parameter to request subgraph data
     target_owner_id: uuid.UUID | None = None  # Admin-only override
     include_all_owners: bool = False  # Admin-only flag for global retrieval
+    include_evidence: bool = False  # Whether to include chunk/seed/triple summary
 
 
 class ChatResponse(BaseModel):
@@ -65,6 +67,7 @@ class ChatResponse(BaseModel):
     response: str
     chunks: list | None = None
     subgraph: dict | None = None  # Subgraph visualization data (only if requested)
+    evidence: Dict[str, Any] | None = None
 
 
 class GraphOverviewResponse(BaseModel):
@@ -124,16 +127,25 @@ async def chat(
             )
         effective_owner_id = request.target_owner_id
 
-    response: str = ""
+    response_text: str = ""
     chunks: list[Chunk] = []
     subgraph_data: GraphData = None
-    # Use async version to avoid blocking the event loop
-    response, chunks, subgraph_data = await get_rag_inference_handler().chat_async(
+    needs_subgraph = request.return_subgraph or request.include_evidence
+    response_text, chunks, subgraph_data, subgraph_info = await get_rag_inference_handler().chat_async(
         request.query,
         owner_id=effective_owner_id,
-        return_subgraph=request.return_subgraph
+        return_subgraph=needs_subgraph
     )
-    return ChatResponse(response=response, chunks=chunks, subgraph=subgraph_data)
+    evidence = None
+    if request.include_evidence:
+        evidence = build_chat_evidence(
+            chunks,
+            subgraph_data=subgraph_data,
+            subgraph_info=subgraph_info,
+            max_chunks=CHAT_TOP_CHUNKS,
+        )
+    subgraph_payload = subgraph_data if request.return_subgraph else None
+    return ChatResponse(response=response_text, chunks=chunks, subgraph=subgraph_payload, evidence=evidence)
 
 
 @router.get("/graph_overview", response_model=GraphOverviewResponse, status_code=status.HTTP_200_OK)
@@ -298,10 +310,9 @@ async def websocket_endpoint(
                     await manager.disconnect(websocket, status.WS_1011_INTERNAL_ERROR)
                     return
 
-            # Use async version to avoid blocking the event loop
-            assistant_response, chunks, subgraph_data = await get_rag_inference_handler().chat_async(
+            assistant_response, chunks, subgraph_data, _ = await get_rag_inference_handler().chat_async(
                 history_text,
-                effective_owner,
+                owner_id=effective_owner,
                 return_subgraph=return_subgraph
             )
             logger.info(f"Assistant response generated: {assistant_response} (session_id={session_id})")

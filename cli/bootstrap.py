@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import app_registration
 from dotenv import load_dotenv
 from encapsulation.data_model.orm_models import User
+from core.graph_adapter.scope_provider import configure_scope_provider
 
 logger = logging.getLogger(__name__)
 DEFAULT_OWNER_FILE = Path(os.getenv("CLI_OWNER_ID_FILE", Path.home() / ".rag_arc_owner_id"))
@@ -35,6 +36,7 @@ def initialize(owner_id: Optional[str] = None) -> CLIContext:
     global _initialized
     if not _initialized:
         load_dotenv()
+        configure_scope_provider()  # ensure GraphAccessScope picks up freshly loaded .env values
         app_registration.initialize()
         _initialized = True
         logger.info("CLI bootstrap completed")
