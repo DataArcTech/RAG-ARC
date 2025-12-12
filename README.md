@@ -131,6 +131,8 @@ RAG-ARC/
 
 ## 🚀 Quick Start
 
+> Need help configuring `.env`? See [env-en.md](env-en.md) (English) or [env-zh.md](env-zh.md) for a complete reference.
+
 ### 🐳 Docker Deployment (Recommended)
 
 **Three-step deployment:**
@@ -214,7 +216,7 @@ uv sync --extra dev
 
 # 4. Copy and configure environment variables
 cp .env.example .env
-# Edit .env to configure your settings
+# Edit .env and fill in the model/API keys you need (see env-en.md for every option)
 ```
 
 ### 🔐 Optional: Admin Access
@@ -254,6 +256,7 @@ RAG-ARC uses a modular configuration system. Key configuration files are located
 - `knowledge.json`: Knowledge management configuration
 - `account.json`: User account configuration
 - `.env`: runtime knobs (providers, database credentials, etc.). Set `DEVELOP_MODE=true` when you want all Docker services (PostgreSQL/Redis/Neo4j) to expose their ports to `localhost` for debugging; it remains `false` by default for security.
+- `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` (in `.env`): keep this `false` to run DeepSearch strictly on the graph. Set it to `true` **and** provide `TAVILY_API_KEY` when you want the gap detector to trigger Tavily web search as a fallback.
 
 ### 🌐 LLM Profiles via `.env`
 
@@ -333,9 +336,11 @@ The CLI still connects to the same PostgreSQL/Redis/Neo4j/MinIO services defined
 #### DeepSearch MCP tool server
 
 - `uv run rag-arc tool-mcp-server --transport stdio` launches the FastMCP server that mirrors the built-in DeepSearch tools. The server reads `config/json_configs/deepsearch_tool_mcp_server.json` (override with `DEEPSEARCH_TOOL_MCP_CONFIG_PATH`) so it shares the same adapter/LLM configuration as the HTTP and CLI entry points.
-- **DeepSearch's ToolManager only supports MCP-based tool invocations.** Always start the MCP tool server from the command line before running API/CLI/MCP workflows; otherwise no tools can be scheduled.
+- **ToolManager executes all built-in tools locally by default.** MCP routing only kicks in when you configure an `mcp_client`, mark a tool as `mcp_only`/`mcp_fallback`, or register remote tool descriptors. Start the MCP tool server only if you need to proxy tools through FastMCP or expose them to other agents; otherwise DeepSearch runs entirely in-process.
 - Keep the JSON config in sync with your environment files to avoid drift. The `tool_manager` block accepts the same structure described in `config/application/deepsearch_config.py`.
 - Use `DEEPSEARCH_TOOL_MCP_TOOLS` (comma-separated list) when you need to expose a subset of tools. Leaving it empty keeps the full tool catalog enabled.
+- HTTP, CLI, and MCP responses expose a consistent `evidence` bundle (chunks, triples, seed entities, graph metadata). Pass `include_evidence=true` on the HTTP endpoints or `--with-evidence` on the CLI to opt in; MCP DeepSearch runs include the bundle automatically.
+- Tune payload size via environment variables: `ENABLE_ALL_EVIDENCE`, `CHAT_TOP_CHUNKS`, `CHAT_TOP_TRIPLES`, `CHAT_TOP_SEED_ENTITIES`, `DEEPSEARCH_TOP_CHUNKS`, and `DEEPSEARCH_TOP_TRIPLES` govern how much data is serialized; when `ENABLE_ALL_EVIDENCE=true` no trimming is applied.
 
 #### Chat MCP server
 
@@ -358,6 +363,18 @@ curl -X POST "http://localhost:8000/rag_inference/chat" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"query": "What is RAG-ARC?"}'
+
+# Chat + evidence bundle (top chunks, triples, seed entities, graph snapshot)
+curl -X POST "http://localhost:8000/rag_inference/chat" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is RAG-ARC?", "return_subgraph": true, "include_evidence": true}'
+
+# DeepSearch with structured evidence
+curl -X POST "http://localhost:8000/deepsearch/run" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is RAG-ARC?", "include_evidence": true}'
 
 # Get Token (Login)
 curl -X POST "http://localhost:8000/auth/token" \
@@ -392,6 +409,8 @@ async def chat():
 
 asyncio.run(chat())
 ```
+
+> Evidence payloads: When `include_evidence=true` (and optionally `return_subgraph=true`) the HTTP response includes an `evidence` object with the retrieved chunks, graph triples, seed entities, and a serialized subgraph. The CLI mirrors this behavior via the `--with-evidence` flag on `chat`, `pipeline`, and `graph-qa`, and `/deepsearch/run` accepts the same flag to attach evidence to the DeepSearch report.
 
 ## 🛠️ Technology Stack
 

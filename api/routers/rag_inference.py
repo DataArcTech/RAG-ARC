@@ -25,6 +25,8 @@ from application.account.user import Account
 import uuid
 import logging
 from core.utils.owner_guard import is_admin_owner, get_admin_owner_id
+from core.presentation.evidence import build_chat_evidence
+from config.output_limits import CHAT_TOP_CHUNKS
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -45,6 +47,7 @@ class ChatRequest(BaseModel):
     return_subgraph: bool = False  # Optional parameter to request subgraph data
     target_owner_id: uuid.UUID | None = None  # Admin-only override
     include_all_owners: bool = False  # Admin-only flag for global retrieval
+    include_evidence: bool = False  # Whether to include chunk/seed/triple summary
 
 
 class ChatResponse(BaseModel):
@@ -52,6 +55,7 @@ class ChatResponse(BaseModel):
     response: str
     chunks: list | None = None
     subgraph: dict | None = None  # Subgraph visualization data (only if requested)
+    evidence: Dict[str, Any] | None = None
 
 
 class GraphOverviewResponse(BaseModel):
@@ -111,15 +115,24 @@ def chat(
             )
         effective_owner_id = request.target_owner_id
 
-    response: str = ""
+    response_text: str = ""
     chunks: list[Chunk] = []
     subgraph_data: GraphData = None
-    response, chunks, subgraph_data = rag_inference_handler.chat(
+    needs_subgraph = request.return_subgraph or request.include_evidence
+    response_text, chunks, subgraph_data, subgraph_info = rag_inference_handler.chat(
         request.query,
         owner_id=effective_owner_id,
-        return_subgraph=request.return_subgraph
+        return_subgraph=needs_subgraph
     )
-    return ChatResponse(response=response, chunks=chunks, subgraph=subgraph_data)
+    evidence = None
+    if request.include_evidence:
+        evidence = build_chat_evidence(
+            chunks,
+            subgraph_data=subgraph_data,
+            subgraph_info=subgraph_info,
+            max_chunks=CHAT_TOP_CHUNKS,
+        )
+    return ChatResponse(response=response_text, chunks=chunks, subgraph=subgraph_data, evidence=evidence)
 
 
 @router.get("/graph_overview", response_model=GraphOverviewResponse, status_code=status.HTTP_200_OK)
@@ -273,7 +286,7 @@ async def websocket_endpoint(
                     await manager.disconnect(websocket, status.WS_1011_INTERNAL_ERROR)
                     return
 
-            assistant_response, chunks, subgraph_data = rag_inference_handler.chat(
+            assistant_response, chunks, subgraph_data, _ = rag_inference_handler.chat(
                 history_text,
                 effective_owner,
                 return_subgraph=return_subgraph

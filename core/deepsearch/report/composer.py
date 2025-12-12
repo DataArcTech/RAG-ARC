@@ -28,7 +28,8 @@ class DeepSearchReporter:
         adapter_metadata = trace.get("adapter_metadata") or {}
 
         evidences = self._merge_evidences(trace.get("evidences"), external_evidence)
-        highlights = self._build_highlights(trace.get("reasoning_steps") or [])
+        reasoning_steps = trace.get("reasoning_steps") or []
+        highlights = self._build_highlights(reasoning_steps)
         answer = self._render_answer(trace, highlights)
         cover_metrics = trace.get("gap_result") or trace.get("coverage_metrics") or {}
 
@@ -55,11 +56,24 @@ class DeepSearchReporter:
         if metadata["report_profile"]["include_graph_viz"]:
             metadata.setdefault("graph_visualization", trace.get("graph_traversals") or [])
 
+        structured = self._build_structured_report(
+            question=question,
+            summary_text=answer,
+            highlights=highlights,
+            evidences=evidences,
+            plan_steps=trace.get("plan_steps") or [],
+            reasoning_steps=reasoning_steps,
+            coverage=cover_metrics,
+        )
+        structured_meta = {key: structured[key] for key in structured if key != "text"}
+        metadata["structured_report"] = structured_meta
+
         return {
             "question": question,
-            "answer": answer,
+            "answer": structured["text"],
             "evidences": evidences,
             "highlights": highlights,
+            "structured_report": structured_meta,
             "metadata": metadata,
         }
 
@@ -179,3 +193,166 @@ class DeepSearchReporter:
             if value:
                 return str(value)
         return default
+
+    # ------------------------------------------------------------------
+    def _build_structured_report(
+        self,
+        *,
+        question: str,
+        summary_text: str,
+        highlights: List[Dict[str, Any]],
+        evidences: List[Dict[str, Any]],
+        plan_steps: List[Dict[str, Any]],
+        reasoning_steps: List[Dict[str, Any]],
+        coverage: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Assemble a Markdown report with sections, evidence, and reasoning context."""
+
+        title = question or "DeepSearch Analysis"
+        sanitized_summary = (summary_text or "").strip() or "No definitive conclusion was produced; review evidence and reasoning."
+        evidence_map = {item.get("chunk_id"): item for item in evidences if item.get("chunk_id")}
+
+        key_findings, highlight_ids = self._format_highlights(highlights, evidence_map)
+        evidence_lines, citations = self._format_evidence_section(evidences)
+        methodology_lines = self._format_methodology_section(plan_steps, reasoning_steps)
+        coverage_lines = self._format_coverage_section(coverage)
+
+        sections = [
+            {"title": "Summary", "body": sanitized_summary},
+            {"title": "Key Findings", "body": "\n".join(key_findings) if key_findings else "No prioritized findings were recorded."},
+            {
+                "title": "Supporting Evidence",
+                "body": "\n".join(evidence_lines) if evidence_lines else "No evidence snippets were captured.",
+            },
+            {
+                "title": "Methodology",
+                "body": "\n".join(methodology_lines) if methodology_lines else "Plan execution logs were unavailable.",
+            },
+            {
+                "title": "Coverage & Confidence",
+                "body": "\n".join(coverage_lines) if coverage_lines else "No coverage or confidence metrics reported.",
+            },
+        ]
+
+        text_blocks: List[str] = [f"# {title}"]
+        for section in sections:
+            text_blocks.extend(["", f"## {section['title']}", section["body"]])
+        full_text = "\n".join(text_blocks).strip()
+
+        return {
+            "title": title,
+            "summary": sanitized_summary,
+            "sections": sections,
+            "citations": citations,
+            "highlight_evidence_ids": highlight_ids,
+            "text": full_text,
+        }
+
+    def _format_highlights(
+        self,
+        highlights: List[Dict[str, Any]],
+        evidence_map: Dict[str, Dict[str, Any]],
+    ) -> tuple[List[str], List[str]]:
+        """Return ordered highlight strings and the evidence IDs they reference."""
+
+        lines: List[str] = []
+        referenced_ids: List[str] = []
+        for idx, block in enumerate(highlights, start=1):
+            summary = (block.get("summary") or "").strip()
+            if not summary:
+                continue
+            evidence_ids = [eid for eid in (block.get("evidence_ids") or []) if eid]
+            referenced_ids.extend(evidence_ids)
+            reference = self._format_evidence_refs(evidence_ids, evidence_map)
+            lines.append(f"{idx}. {summary}{reference}")
+        return lines, referenced_ids
+
+    def _format_evidence_refs(
+        self,
+        evidence_ids: List[str],
+        evidence_map: Dict[str, Dict[str, Any]],
+    ) -> str:
+        """Format citation labels referencing the evidence map."""
+
+        labels: List[str] = []
+        for eid in evidence_ids:
+            chunk = evidence_map.get(eid)
+            if not chunk:
+                continue
+            source = chunk.get("source") or "graph"
+            labels.append(f"{eid}@{source}")
+        if not labels:
+            return ""
+        return f" (Evidence: {', '.join(labels)})"
+
+    def _format_evidence_section(
+        self,
+        evidences: List[Dict[str, Any]],
+        *,
+        preview_chars: int = 220,
+    ) -> tuple[List[str], List[Dict[str, Any]]]:
+        """Summarize collected evidences for the report body and citation payload."""
+
+        lines: List[str] = []
+        citations: List[Dict[str, Any]] = []
+        for chunk in evidences:
+            chunk_id = chunk.get("chunk_id") or self._hash_content(chunk)
+            content = self._truncate_text(chunk.get("content") or "", preview_chars)
+            source = chunk.get("source") or "graph"
+            score = chunk.get("score")
+            lines.append(f"- [{chunk_id}] {source}: {content}")
+            citations.append(
+                {
+                    "evidence_id": chunk_id,
+                    "source": source,
+                    "excerpt": content,
+                    "score": score,
+                }
+            )
+        return lines, citations
+
+    def _format_methodology_section(
+        self,
+        plan_steps: List[Dict[str, Any]],
+        reasoning_steps: List[Dict[str, Any]],
+    ) -> List[str]:
+        """Link plan steps with executed reasoning summaries."""
+
+        lines: List[str] = []
+        reasoning_lookup = {step.get("step_id"): step for step in reasoning_steps if step.get("step_id")}
+        for step in plan_steps:
+            step_id = step.get("step_id")
+            description = step.get("description") or ""
+            channel = step.get("channel") or "graph"
+            execution = reasoning_lookup.get(step_id, {})
+            status = execution.get("status") or "pending"
+            output = (execution.get("output_summary") or "").strip() or "No summary captured."
+            tool = execution.get("tool") or (execution.get("metadata") or {}).get("tool")
+            if not tool:
+                diagnostics = execution.get("diagnostics") or {}
+                tool = diagnostics.get("tool")
+            tool_label = f"{tool}" if tool else channel
+            lines.append(f"- {step_id or '?'} | {description} ({tool_label}) -> {status}: {output}")
+        return lines
+
+    @staticmethod
+    def _format_coverage_section(coverage: Dict[str, Any]) -> List[str]:
+        """Format coverage/confidence metrics."""
+
+        lines: List[str] = []
+        for key, value in coverage.items():
+            if value is None:
+                continue
+            lines.append(f"- {key}: {value}")
+        return lines
+
+    @staticmethod
+    def _truncate_text(text: str, max_chars: int) -> str:
+        """Collapse whitespace and truncate evidence snippets for readability."""
+
+        collapsed = " ".join((text or "").split())
+        if not collapsed:
+            return ""
+        if len(collapsed) <= max_chars:
+            return collapsed
+        return f"{collapsed[:max_chars].rstrip()}..."

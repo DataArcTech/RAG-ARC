@@ -4,8 +4,12 @@ import logging
 import mimetypes
 import os
 import sys
+from copy import deepcopy
+from datetime import datetime, timezone
+from dataclasses import asdict
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
+from uuid import UUID
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -20,17 +24,23 @@ from application.rag_inference.cli_module import (
 )
 from application.rag_inference.module import RAGInference
 from config.application.deepsearch_tool_server_config import load_tool_server_config
-from cli import types
+from core.presentation.summary import PipelineSummary, DeepSearchReport
+from core.presentation.deepsearch_payload import trim_deepsearch_payload
 from cli.bootstrap import CLIContext, initialize
 from encapsulation.data_model.orm_models import FileStatus
 from framework.register import Register
 from dotenv import load_dotenv
+from core.graph_adapter.scope_provider import configure_scope_provider
+from config.output_limits import (
+    CHAT_TOP_CHUNKS,
+    DEEPSEARCH_TOP_CHUNKS,
+)
+from core.deepsearch.graph_chain import build_graph_chain
 
 logger = logging.getLogger(__name__)
 app = typer.Typer(help="Run RAG-ARC algorithms through CLI without HTTP layer.")
 _CHAT_MCP_MODULE = None
 _CHAT_MCP_MODULE = None
-
 
 def _get_rag_runner() -> RAGInferenceCLIModule:
     registrator = Register()
@@ -63,9 +73,59 @@ def _get_chat_mcp_server():
     return chat_mcp_server
 
 
-def _print_summary(summary: types.PipelineSummary, output_json: bool) -> None:
+def _ensure_cli_output_dir(owner_id: UUID | str) -> Path:
+    """Return the folder used for CLI JSON artifacts, creating it if needed."""
+
+    folder = Path("local") / "cli" / str(owner_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def _write_json_payload(payload: Dict[str, Any], owner_id: UUID | str, prefix: str) -> Path:
+    """Persist a JSON payload to the CLI output folder with a timestamped filename."""
+
+    destination = _ensure_cli_output_dir(owner_id)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    path = destination / f"{prefix}_{timestamp}.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def _emit_json_output(
+    payload: Dict[str, Any],
+    *,
+    owner_id: UUID | str | None,
+    prefix: str,
+    print_to_console: bool = False,
+    raw_payload: Optional[Dict[str, Any]] = None,
+) -> Optional[Path]:
+    """Persist JSON payload to disk and optionally emit it to stdout."""
+
+    if print_to_console or owner_id is None:
+        typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+    if owner_id is None:
+        return None
+    target = _write_json_payload(payload, owner_id, prefix)
+    typer.echo(f"JSON payload saved to {target}")
+    if raw_payload is not None:
+        raw_target = _write_json_payload(raw_payload, owner_id, f"{prefix}_raw")
+        typer.echo(f"Raw JSON saved to {raw_target}")
+    return target
+
+
+def _print_summary(
+    summary: PipelineSummary,
+    *,
+    output_json: bool,
+    owner_id: UUID | None,
+    prefix: str,
+) -> None:
     if output_json:
-        typer.echo(json.dumps(summary.__dict__, default=lambda o: o.__dict__, ensure_ascii=False, indent=2))
+        payload = asdict(summary)
+        raw_payload = deepcopy(payload)
+        payload.pop("raw_chunks", None)
+        payload.pop("subgraph", None)
+        _emit_json_output(payload, owner_id=owner_id, prefix=prefix, raw_payload=raw_payload)
         return
     typer.echo(f"Owner ID: {summary.owner_id}")
     typer.echo(f"Original Query: {summary.original_query}")
@@ -81,6 +141,17 @@ def _print_summary(summary: types.PipelineSummary, output_json: bool) -> None:
     if summary.subgraph:
         typer.echo("\nSubgraph:")
         typer.echo(json.dumps(summary.subgraph, ensure_ascii=False, indent=2))
+    if summary.evidence and not output_json:
+        seeds = summary.evidence.get("seed_entities") or []
+        if seeds:
+            typer.echo("\nSeed entities:")
+            for name in seeds:
+                typer.echo(f"- {name}")
+        triples = summary.evidence.get("triples") or []
+        if triples:
+            typer.echo("\nGraph triples:")
+            for triple in triples[:5]:
+                typer.echo(f"- {triple['head']} -[{triple['relation']}]-> {triple['tail']}")
 
 
 def _run_pipeline(
@@ -89,7 +160,9 @@ def _run_pipeline(
     return_subgraph: bool,
     skip_llm: bool,
     output_json: bool,
+    include_evidence: bool,
     mode: str = "multipath",
+    output_prefix: str = "pipeline",
 ) -> PipelineArtifacts:
     runner = _get_rag_runner()
     if mode == "graph":
@@ -106,11 +179,19 @@ def _run_pipeline(
             return_subgraph=return_subgraph,
             skip_llm=skip_llm,
         )
-    summary = types.PipelineSummary.from_artifacts(
+    summary = PipelineSummary.from_artifacts(
         owner_id=str(ctx.owner_id),
         artifacts=artifacts,
+        max_chunks=CHAT_TOP_CHUNKS,
+        max_chars=50,
+        include_evidence=include_evidence,
     )
-    _print_summary(summary, output_json=output_json)
+    _print_summary(
+        summary,
+        output_json=output_json,
+        owner_id=ctx.owner_id,
+        prefix=output_prefix,
+    )
     return artifacts
 
 
@@ -199,6 +280,76 @@ def _print_tool_catalog(server) -> None:
         typer.echo(f"  - {descriptor.name} [{descriptor.channel}] :: {descriptor.description}")
 
 
+def _print_deepsearch_result(
+    payload: Dict[str, Any],
+    *,
+    output_json: bool,
+    owner_id: UUID | None,
+    prefix: str = "deepsearch",
+    include_evidence: bool = False,
+    raw_payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Render DeepSearchService.run output."""
+
+    trimmed_payload = trim_deepsearch_payload(payload, include_evidence=include_evidence)
+
+    summary = DeepSearchReport.from_payload(
+        trimmed_payload,
+        top_chunk_limit=DEEPSEARCH_TOP_CHUNKS,
+        graph_chain_builder=build_graph_chain,
+    )
+    if output_json:
+        _emit_json_output(trimmed_payload, owner_id=owner_id, prefix=prefix, raw_payload=raw_payload)
+        return
+
+    typer.echo(f"Question: {summary.question}")
+    if summary.plan_steps:
+        typer.echo("\nPlan overview:")
+        for step in summary.plan_steps:
+            tool = f" ({step.tool})" if step.tool else ""
+            status = step.status or "pending"
+            typer.echo(f"- {step.step_id}{tool}: {status}")
+            if step.output_summary:
+                typer.echo(f"    {step.output_summary}")
+    if summary.highlights:
+        typer.echo("\nHighlights:")
+        for idx, text in enumerate(summary.highlights, start=1):
+            typer.echo(f"  {idx}. {text}")
+    if summary.final_answer:
+        typer.echo("\nAnswer:")
+        typer.echo(summary.final_answer)
+    if summary.graph_chain:
+        typer.echo("\nGraph chain:")
+        for idx, edge in enumerate(summary.graph_chain, start=1):
+            typer.echo(f"  {idx}. {edge}")
+    if include_evidence and summary.top_chunks:
+        typer.echo("\nEvidence previews:")
+        for idx, chunk in enumerate(summary.top_chunks, start=1):
+            source_tag = f"[{chunk.source}]" if chunk.source else ""
+            typer.echo(f"  {idx}. {source_tag} {chunk.preview}")
+    if summary.coverage:
+        typer.echo("\nCoverage metrics:")
+        for key, value in summary.coverage.items():
+            typer.echo(f"- {key}: {value}")
+    if summary.gap_decision:
+        typer.echo(f"\nGap detection: {summary.gap_decision}")
+    if summary.stage_timings:
+        typer.echo("\nStage timings (ms):")
+        for key, value in summary.stage_timings.items():
+            typer.echo(f"- {key}: {value}")
+    if include_evidence and summary.evidence and not output_json:
+        seeds = summary.evidence.get("seed_entities") or []
+        if seeds:
+            typer.echo("\nSeed entities:")
+            for name in seeds:
+                typer.echo(f"- {name}")
+        triples = summary.evidence.get("triples") or []
+        if triples:
+            typer.echo("\nGraph triples:")
+            for triple in triples[:5]:
+                typer.echo(f"- {triple['head']} -[{triple['relation']}]-> {triple['tail']}")
+
+
 def _print_chat_mcp_catalog(chat_mcp_server) -> None:
     """Print tool names exposed by the chat MCP server."""
 
@@ -229,6 +380,7 @@ def tool_mcp_server(
     """Launch the DeepSearch tool MCP server for external agents."""
 
     load_dotenv()
+    configure_scope_provider()
     server = _build_tool_server_from_config()
     _print_tool_catalog(server)
     if transport == "stdio":
@@ -256,6 +408,7 @@ def chat_mcp_server_cmd(
     """Launch the account/chat MCP server for external agents."""
 
     load_dotenv()
+    configure_scope_provider()
     chat_server = _get_chat_mcp_server()
     _print_chat_mcp_catalog(chat_server)
     if transport == "stdio":
@@ -269,21 +422,66 @@ def chat_mcp_server_cmd(
         return
     raise typer.BadParameter("transport must be one of: stdio, sse, streamable-http")
 
+
+@app.command("deepsearch")
+def deepsearch(
+    question: str = typer.Argument(..., help="Question to execute through DeepSearch"),
+    owner_id: Optional[str] = typer.Option(None, help="Optional owner UUID; defaults to CLI owner"),
+    output_json: bool = typer.Option(False, "--json/--no-json", help="Choose between JSON or concise output"),
+    include_evidence: bool = typer.Option(
+        False,
+        "--with-evidence/--no-evidence",
+        help="Attach chunk/graph evidence bundle (chunks/triples/seeds).",
+    ),
+) -> None:
+    """Run DeepSearchService over the configured graph adapter."""
+
+    ctx = initialize(owner_id=owner_id)
+    registrator = Register()
+    try:
+        service = registrator.get_object("deepsearch_service")
+    except KeyError:
+        typer.secho("DeepSearch service is not registered; check DEEPSEARCH_SERVICE_CONFIG_PATH.", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    typer.echo(f"Running DeepSearch for owner {ctx.owner_id} ...")
+    result = asyncio.run(
+        service.run(
+            question,
+            owner_id=str(ctx.owner_id),
+        )
+    )
+    _print_deepsearch_result(
+        result,
+        output_json=output_json,
+        owner_id=ctx.owner_id,
+        prefix="deepsearch",
+        include_evidence=include_evidence,
+        raw_payload=result,
+    )
+
 @app.command()
 def chat(
     query: str = typer.Argument(..., help="User question to run through RAG pipeline."),
     owner_id: str = typer.Option(None, help="Optional owner UUID to filter retrieval results."),
     return_subgraph: bool = typer.Option(False, "--subgraph", help="Export subgraph metadata."),
     output_json: bool = typer.Option(False, "--json", help="Print results as JSON."),
+    include_evidence: bool = typer.Option(
+        False,
+        "--with-evidence/--no-evidence",
+        help="Attach chunk/seeds/triple summaries (enables subgraph export internally).",
+    ),
 ) -> None:
     """Run the full RAG pipeline and stream answer to terminal."""
     ctx = initialize(owner_id=owner_id)
     _run_pipeline(
         ctx=ctx,
         query=query,
-        return_subgraph=return_subgraph,
+        return_subgraph=return_subgraph or include_evidence,
         skip_llm=False,
         output_json=output_json,
+        include_evidence=include_evidence,
+        output_prefix="chat",
     )
 
 
@@ -294,15 +492,22 @@ def pipeline(
     return_subgraph: bool = typer.Option(False, "--subgraph", help="Export subgraph metadata."),
     skip_llm: bool = typer.Option(True, "--skip-llm/--with-llm", help="Skip LLM call for faster debugging."),
     output_json: bool = typer.Option(False, "--json", help="Print results as JSON."),
+    include_evidence: bool = typer.Option(
+        False,
+        "--with-evidence/--no-evidence",
+        help="Attach chunk/seeds/triple summaries (enables subgraph export internally).",
+    ),
 ) -> None:
     """Run pipeline and inspect intermediate artifacts (defaults to skipping LLM)."""
     ctx = initialize(owner_id=owner_id)
     _run_pipeline(
         ctx=ctx,
         query=query,
-        return_subgraph=return_subgraph,
+        return_subgraph=return_subgraph or include_evidence,
         skip_llm=skip_llm,
         output_json=output_json,
+        include_evidence=include_evidence,
+        output_prefix="pipeline",
     )
 
 
@@ -313,16 +518,23 @@ def graph_qa(
     return_subgraph: bool = typer.Option(True, "--subgraph/--no-subgraph", help="Export subgraph metadata."),
     skip_llm: bool = typer.Option(False, "--skip-llm/--with-llm", help="Skip LLM call for debugging."),
     output_json: bool = typer.Option(False, "--json", help="Print results as JSON."),
+    include_evidence: bool = typer.Option(
+        False,
+        "--with-evidence/--no-evidence",
+        help="Attach chunk/seeds/triple summaries (enables subgraph export internally).",
+    ),
 ) -> None:
     """Query only the graph retriever and optionally export the subgraph."""
     ctx = initialize(owner_id=owner_id)
     _run_pipeline(
         ctx=ctx,
         query=query,
-        return_subgraph=return_subgraph,
+        return_subgraph=return_subgraph or include_evidence,
         skip_llm=skip_llm,
         output_json=output_json,
+        include_evidence=include_evidence,
         mode="graph",
+        output_prefix="graph_qa",
     )
 
 

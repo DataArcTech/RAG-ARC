@@ -10,6 +10,11 @@ from framework.register import Register
 from api.routers.auth import get_current_user_from_token
 from api.routers.session import validate_user_session
 from encapsulation.data_model.orm_models import ChatMessage
+from core.utils.owner_guard import is_admin_owner
+from core.deepsearch.graph_chain import build_graph_chain
+from core.presentation.evidence import build_chat_evidence
+from core.presentation.deepsearch_payload import trim_deepsearch_payload
+from config.output_limits import CHAT_TOP_CHUNKS
 import logging
 
 logger = logging.getLogger(__name__)
@@ -133,7 +138,10 @@ async def chat(
         response: str = ""
         chunks: list[Chunk] = []
         subgraph_data: GraphData = None
-        response_text, chunks, subgraph_data = rag_inference.chat(query, owner_id=current_user.id)
+        response_text, chunks, subgraph_data, subgraph_info = rag_inference.chat(
+            query,
+            owner_id=current_user.id,
+        )
 
         # Create message in the session
         message_handler = registrator.get_object("chat_message")
@@ -152,13 +160,61 @@ async def chat(
         
         await ctx.report_progress(100, 100, "done")
         
+        evidence = build_chat_evidence(
+            chunks,
+            subgraph_data=subgraph_data,
+            subgraph_info=subgraph_info,
+            max_chunks=CHAT_TOP_CHUNKS,
+        )
         return {
             "session_id": session_id,
             "response": response_text,
-            "chunks": chunks,
+            "chunks": evidence["chunks"],
             "subgraph": subgraph_data,
+            "evidence": evidence,
         }
         
     except Exception as e:
         logger.error(f"Error in chat function: {str(e)}")
         return {"isError": True, "message": f"Internal server error: {str(e)}"}
+
+
+@mcp.tool(name="deepsearch_run", description="Execute DeepSearch pipeline with the authenticated user scope")
+async def deepsearch_run(
+    question: str,
+    auth_token: str,
+    owner_id: str | None = None,
+    metadata: Dict[str, Any] | None = None,
+) -> dict:
+    """Expose DeepSearchService via MCP for upstream orchestrators."""
+
+    current_user = get_current_user_from_token(auth_token)
+    if not current_user:
+        return {"isError": True, "message": "Authentication failed"}
+
+    try:
+        service = registrator.get_object("deepsearch_service")
+    except KeyError:
+        return {"isError": True, "message": "DeepSearch service not initialized"}
+
+    effective_owner = current_user.id
+    if owner_id:
+        try:
+            requested_owner = uuid.UUID(owner_id)
+        except ValueError:
+            return {"isError": True, "message": "owner_id must be a valid UUID string"}
+        if not is_admin_owner(current_user.id):
+            return {"isError": True, "message": "Only administrators may override owner scope"}
+        effective_owner = requested_owner
+
+    try:
+        result = await service.run(
+            question,
+            owner_id=str(effective_owner),
+            metadata=metadata,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("DeepSearch MCP run failed: %s", exc)
+        return {"isError": True, "message": f"DeepSearch run failed: {exc}"}
+
+    return trim_deepsearch_payload(result, include_evidence=True)

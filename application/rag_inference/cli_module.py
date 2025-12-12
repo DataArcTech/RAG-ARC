@@ -20,6 +20,7 @@ class PipelineArtifacts:
     reranked_chunks: List[Chunk]
     messages: List[Dict[str, str]]
     subgraph_data: Optional[Dict[str, Any]]
+    subgraph_info: Optional[Dict[str, Any]]
     llm_response: Optional[str]
 
 
@@ -85,11 +86,11 @@ class RAGInferenceCLIModule:
         )
         logger.info("Retriever returned %d chunks", len(chunks))
 
-        subgraph_info = self._extract_subgraph_info(chunks) if return_subgraph else None
+        subgraph_info = self._extract_subgraph_info(chunks)
         reranked_chunks = self._rag.reranker.rerank(rewritten_query, chunks)
         logger.info("Reranker produced %d chunks", len(reranked_chunks))
 
-        subgraph_data = self._export_subgraph(subgraph_info) if subgraph_info else None
+        subgraph_data = self._export_subgraph(subgraph_info) if (subgraph_info and return_subgraph) else None
         messages = self._build_messages(reranked_chunks, rewritten_query)
         llm_response = None
         if not skip_llm:
@@ -105,6 +106,7 @@ class RAGInferenceCLIModule:
             reranked_chunks=reranked_chunks,
             messages=messages,
             subgraph_data=subgraph_data,
+            subgraph_info=subgraph_info,
             llm_response=llm_response,
         )
 
