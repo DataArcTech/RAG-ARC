@@ -13,7 +13,8 @@ class ContextRewriterTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.context_rewriter",
         channel="graph",
-        description="Rewrites existing evidences to emphasise unresolved entities and relations.",
+        description="Rewrites the active context window into an explicit checklist of unresolved entities, "
+        "relations, and follow-up questions so later tools focus on the remaining gaps.",
         speed="slow",
         cost="high",
         strategy_tags=("rewrite", "context", "llm"),
