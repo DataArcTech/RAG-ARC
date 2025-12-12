@@ -6,6 +6,14 @@ import re
 from typing import List, Dict, Any, Optional, Sequence, Set, Tuple, TYPE_CHECKING
 import numpy as np
 import igraph as ig
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message="builtin type SwigPy.* has no __module__ attribute",
+    category=DeprecationWarning,
+)
+
 import faiss
 import neo4j
 
