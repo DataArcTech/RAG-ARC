@@ -1,8 +1,8 @@
 """Plan runtime for DeepSearch: generate graph-centric task lists and emit JSON artifacts for execution."""
-import asyncio
 import json
 import logging
 import os
+import re
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -46,6 +46,7 @@ class DeepSearchPlanner:
 
         settings = self._build_planner_settings()
         self.plan_generator = plan_generator or PlanGenerator(llm=self.llm_connector, settings=settings)
+        self._base_max_steps = self.plan_generator.settings.max_steps
         self.plan_generator.settings.available_tools_hint = self._tool_hint_text()
 
         self.persist_plan = self._bool_config(
@@ -86,6 +87,9 @@ class DeepSearchPlanner:
         scope = require_scope(access_scope)
 
         self._refresh_available_tools()
+        dynamic_steps = self._adaptive_step_budget(normalized_question)
+        if dynamic_steps != self.plan_generator.settings.max_steps:
+            self.plan_generator.settings.max_steps = dynamic_steps
         plan_specs = await self._generate_plan_async(normalized_question)
         steps_payload = [
             self._build_step_payload(spec)
@@ -144,7 +148,7 @@ class DeepSearchPlanner:
         agen = getattr(self.plan_generator, "agenerate_plan", None)
         if callable(agen):
             return await agen(question, context=context)
-        return await asyncio.to_thread(self.plan_generator.generate_plan, question, context=context)
+        return self.plan_generator.generate_plan(question, context=context)
 
     def _build_planner_settings(self) -> PlannerSettings:
         mode = self._config_value("mode", "react")
@@ -381,6 +385,31 @@ class DeepSearchPlanner:
             access_scope=access_scope,
         )
         return context.model_dump(exclude_none=True)
+
+    def _adaptive_step_budget(self, question: str) -> int:
+        complexity = self._estimate_question_complexity(question)
+        if complexity == "low":
+            return max(3, min(self._base_max_steps - 2, self._base_max_steps))
+        if complexity == "high":
+            return min(self._base_max_steps + 2, 12)
+        return self._base_max_steps
+
+    @staticmethod
+    def _estimate_question_complexity(question: str) -> str:
+        text = (question or "").strip()
+        lower = text.lower()
+        length = len(text)
+        clause_breaks = len(re.findall(r"[。.!?;；]+", text))
+        commas = text.count(",") + text.count("、") + text.count("，")
+        keyword_high = ("compare", "比较", "timeline", "roadmap", "mitigation", "analysis", "strategy", "plan")
+        low_terms_en = ("what is", "who is", "define")
+        low_terms_local = ("定义", "概述")
+        low_hit = any(term in lower for term in low_terms_en) or any(term in text for term in low_terms_local)
+        if low_hit and length < 80 and clause_breaks <= 1:
+            return "low"
+        if length > 180 or clause_breaks >= 2 or commas >= 3 or any(term in lower for term in keyword_high):
+            return "high"
+        return "medium"
 
     @staticmethod
     def _collect_seed_entities(steps: List[Dict[str, Any]]) -> List[str]:

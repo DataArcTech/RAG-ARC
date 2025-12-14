@@ -1,6 +1,7 @@
 """Configuration entry point that wires planner, graph reasoning, gap detection, and external channels."""
 import hashlib
 import json
+import os
 from typing import Any, Dict, Literal, Optional, List
 
 from pydantic import BaseModel, Field
@@ -16,6 +17,7 @@ from core.deepsearch.gap import GapDetectionEngine
 from core.deepsearch.report import DeepSearchReporter
 from core.deepsearch.tooling import DeepSearchToolManager
 from core.deepsearch.external import ExternalSearchChannel
+from application.deepsearch.tool_mcp_server import LoggingTelemetryClient
 from framework.config import AbstractConfig
 
 
@@ -33,7 +35,7 @@ class PlannerRuntimeConfig(BaseModel):
     graph_channel_tool: str = Field("graph_adapter.query", description="Default tool name for graph channel steps.")
     text_channel_tool: str = Field(
         "graph.context_rollup",
-        description="Default text-channel summariser (GraphSearch-style chunk rollup).",
+        description="Default text-channel summariser (chunk rollup).",
     )
     web_channel_tool: str = Field("web.search", description="Default tool name for web channel steps.")
     default_web_provider: Optional[str] = Field(None, description="Fallback provider for web/search tools.")
@@ -58,11 +60,22 @@ class GraphReasoningStrategyConfig(BaseModel):
     allow_semantic_channel: bool = Field(True, description="Allow semantic-only channel as fallback.")
     chain_depth: int = Field(4, description="Maximum traversal chain depth.")
     enable_custom_hooks: bool = Field(False, description="Reserved flag for custom traversal hooks.")
+    max_parallel_branches: int = Field(
+        4,
+        description="Upper bound for auto parallel scheduling when parallel_branches <= 0.",
+    )
     think: GraphReasoningThinkConfig = Field(
         default_factory=GraphReasoningThinkConfig,
         description="Think window configuration consumed by GraphReasoningLoop.",
     )
-    parallel_branches: int = Field(1, description="Number of branches used for parallel thinking (reporter hint).")
+    parallel_branches: int = Field(
+        1,
+        description="Number of parallel branches; set <=0 to enable auto scheduling up to max_parallel_branches.",
+    )
+    tool_timeout_seconds: float = Field(
+        45.0,
+        description="Safety timeout applied to each tool/MCP invocation triggered by the reasoning loop.",
+    )
 
 
 class GapDetectionConfig(BaseModel):
@@ -100,6 +113,10 @@ class ToolManagerConfig(BaseModel):
     audit_label: Optional[str] = Field(None, description="Optional label propagated to telemetry.")
     remote_tools: Dict[str, "RemoteToolDescriptorConfig"] = Field(
         default_factory=dict, description="Descriptors for remote-only tools."
+    )
+    artifact_dir: Optional[str] = Field(
+        None,
+        description="Directory for persisted tool artifacts; defaults to ./local/deepsearch_artifacts when empty.",
     )
 
 
@@ -145,12 +162,21 @@ class DeepSearchServiceConfig(AbstractConfig):
         default=None,
         description="Optional LLM config shared across planner reasoning, graph tools, and external channels.",
     )
+    telemetry_enabled: bool = Field(
+        True,
+        description="Enable the built-in telemetry logger to surface tool/gap/external events.",
+    )
 
     def build(self) -> DeepSearchService:
         llm_connector = self._build_llm_connector()
         adapter = self.graph_adapter.build()
         mcp_client = self._build_mcp_client()
-        tool_manager = self._build_tool_manager(llm_connector=llm_connector, mcp_client=mcp_client)
+        telemetry_client = self._build_telemetry_client() if self._resolve_telemetry_flag() else None
+        tool_manager = self._build_tool_manager(
+            llm_connector=llm_connector,
+            mcp_client=mcp_client,
+            telemetry_client=telemetry_client,
+        )
         planner = DeepSearchPlanner(
             prompt_store=None,
             llm_connector=llm_connector,
@@ -162,7 +188,7 @@ class DeepSearchServiceConfig(AbstractConfig):
             strategy_config=self.graph_reasoning,
             tool_manager=tool_manager,
         )
-        gap_detector = self._build_gap_detector()
+        gap_detector = self._build_gap_detector(telemetry_client=telemetry_client)
         reporter = DeepSearchReporter(
             template_store=None,
             config=self.reporter.model_dump(),
@@ -170,6 +196,7 @@ class DeepSearchServiceConfig(AbstractConfig):
         external_channel = ExternalSearchChannel(
             tool_manager=tool_manager,
             config=self.external_channel,
+            telemetry_client=telemetry_client,
         )
         return DeepSearchService(
             planner=planner,
@@ -195,16 +222,18 @@ class DeepSearchServiceConfig(AbstractConfig):
             return None
         return self.mcp_client.build()
 
-    def _build_tool_manager(self, *, llm_connector, mcp_client):
+    def _build_tool_manager(self, *, llm_connector, mcp_client, telemetry_client):
         payload = self.tool_manager.model_dump()
         payload["llm_connector"] = payload.get("llm_connector") or llm_connector
+        if not payload.get("artifact_dir"):
+            payload["artifact_dir"] = "./local/deepsearch_artifacts"
         return DeepSearchToolManager(
             tool_configs=payload,
-            telemetry_client=None,
+            telemetry_client=telemetry_client,
             mcp_client=mcp_client,
         )
 
-    def _build_gap_detector(self) -> GapDetectionEngine:
+    def _build_gap_detector(self, *, telemetry_client) -> GapDetectionEngine:
         evaluator_config = GapDetectionEvaluatorConfig(
             coverage_threshold=self.gap_detection.coverage_threshold,
             confidence_threshold=self.gap_detection.confidence_threshold,
@@ -213,9 +242,24 @@ class DeepSearchServiceConfig(AbstractConfig):
         evaluator = evaluator_config.build()
         return GapDetectionEngine(
             evaluator,
-            telemetry_client=None,
+            telemetry_client=telemetry_client,
             config=self.gap_detection.model_dump(),
         )
+
+    @staticmethod
+    def _build_telemetry_client():
+        return LoggingTelemetryClient()
+
+    def _resolve_telemetry_flag(self) -> bool:
+        raw = os.getenv("DEEPSEARCH_TELEMETRY_ENABLED")
+        if raw is None:
+            return bool(self.telemetry_enabled)
+        normalized = raw.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        return bool(self.telemetry_enabled)
 
     def _fingerprint(self) -> str:
         payload = self.model_dump()

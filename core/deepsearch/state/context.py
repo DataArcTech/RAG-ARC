@@ -2,7 +2,7 @@
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 def _utc_now() -> str:
@@ -17,6 +17,9 @@ class DeepSearchState:
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     stage: str = field(default="created")
     stage_history: List[Dict[str, Any]] = field(default_factory=list)
+    stage_listener: Optional[Callable[[Dict[str, Any], "DeepSearchState"], None]] = field(
+        default=None, repr=False, compare=False
+    )
     plan_metadata: Dict[str, Any] = field(default_factory=dict)
     plan_steps: List[Dict[str, Any]] = field(default_factory=list)
     reasoning_trace: Dict[str, Any] = field(default_factory=dict)
@@ -25,9 +28,12 @@ class DeepSearchState:
     cost_telemetry: Dict[str, Any] = field(default_factory=dict)
     report_payload: Optional[Dict[str, Any]] = None
     errors: List[Dict[str, Any]] = field(default_factory=list)
+    request_metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.stage_history.append({"stage": self.stage, "timestamp": _utc_now()})
+        record = {"stage": self.stage, "timestamp": _utc_now()}
+        self.stage_history.append(record)
+        self._emit_stage(record)
 
     # ------------------------------------------------------------------
     def record_plan(self, plan_result: Dict[str, Any]) -> None:
@@ -114,6 +120,11 @@ class DeepSearchState:
             entry["stage"] = stage
         self.errors.append(entry)
 
+    def record_request_metadata(self, metadata: Optional[Dict[str, Any]]) -> None:
+        if not metadata:
+            return
+        self.request_metadata = dict(metadata)
+
     def transition_stage(self, stage: str, *, metadata: Optional[Dict[str, Any]] = None) -> None:
         normalized = (stage or "").strip().lower() or "unknown"
         self.stage = normalized
@@ -121,6 +132,17 @@ class DeepSearchState:
         if metadata:
             record["metadata"] = metadata
         self.stage_history.append(record)
+        self._emit_stage(record)
+
+    def _emit_stage(self, record: Dict[str, Any]) -> None:
+        listener = self.stage_listener
+        if not callable(listener):
+            return
+        try:
+            listener(record, self)
+        except Exception:
+            # Progress callbacks must never break the main pipeline
+            return
 
     def snapshot(self) -> Dict[str, Any]:
         return {
@@ -136,4 +158,5 @@ class DeepSearchState:
             "cost_telemetry": self.cost_telemetry,
             "report": self.report_payload,
             "errors": self.errors,
+            "request_metadata": self.request_metadata,
         }

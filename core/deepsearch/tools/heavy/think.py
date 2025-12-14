@@ -84,6 +84,13 @@ class GraphThinkTool(GraphTool):
         try:
             response = await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
             parsed = json.loads(response)
+            heuristic_metadata = heuristic_note.metadata or {}
+            gap_trigger = bool(parsed.get("gap_trigger")) or heuristic_metadata.get("gap_trigger", False)
+            missing_topics = self._merge_missing_topics(
+                parsed.get("missing_topics"),
+                heuristic_metadata.get("missing_topics"),
+                coverage_snapshot.get("missing_topics"),
+            )
             return ThinkNote(
                 plan_step_id=request.plan_step,
                 reasoning=str(parsed.get("reasoning") or heuristic_note.reasoning),
@@ -95,6 +102,8 @@ class GraphThinkTool(GraphTool):
                     "heuristic": heuristic_note.model_dump(),
                     "graph_context": context_snapshot,
                     "coverage_metrics": coverage_snapshot,
+                    "gap_trigger": gap_trigger,
+                    "missing_topics": missing_topics,
                 },
             )
         except Exception:
@@ -118,6 +127,7 @@ class GraphThinkTool(GraphTool):
             next_actions.append("Trigger fast graph probe to gather seed facts.")
         else:
             next_actions.append("Continue with heavy reasoning step using cached context.")
+        gap_trigger = self._should_gap_trigger(coverage_snapshot, context_size)
         return ThinkNote(
             plan_step_id=request.plan_step,
             reasoning="Think window executed heuristically based on available evidences.",
@@ -128,6 +138,8 @@ class GraphThinkTool(GraphTool):
                 "context_size": context_size,
                 "graph_context": context_snapshot,
                 "coverage_metrics": coverage_snapshot,
+                "gap_trigger": gap_trigger,
+                "missing_topics": coverage_snapshot.get("missing_topics") or [],
             },
         )
 
@@ -176,3 +188,31 @@ class GraphThinkTool(GraphTool):
             "latency_ms": coverage_snapshot.get("latency_ms", 0),
         }
         return entry
+
+    @staticmethod
+    def _merge_missing_topics(*payloads: Any) -> List[str]:
+        merged: List[str] = []
+        seen: set[str] = set()
+        for payload in payloads:
+            if isinstance(payload, list):
+                for item in payload:
+                    token = str(item).strip()
+                    if token and token not in seen:
+                        seen.add(token)
+                        merged.append(token)
+        return merged
+
+    @staticmethod
+    def _should_gap_trigger(coverage_snapshot: Dict[str, Any], context_size: int) -> bool:
+        coverage_score = coverage_snapshot.get("coverage_score")
+        coverage_ratio = coverage_snapshot.get("coverage_ratio")
+        missing_topics = coverage_snapshot.get("missing_topics") or []
+        if isinstance(coverage_score, (int, float)) and coverage_score < 0.6:
+            return True
+        if isinstance(coverage_ratio, (int, float)) and coverage_ratio < 0.5:
+            return True
+        if missing_topics:
+            return True
+        if context_size == 0:
+            return True
+        return False

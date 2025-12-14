@@ -5,7 +5,9 @@ Runs planner steps through GraphDeepSearchAdapter (prepare → query → filter 
 and returns traversal/evidence/reasoning records for downstream gap detection and reporting.
 Keeps the adapter abstraction swappable so semantic or relational strategies can be configured per run.
 """
+import asyncio
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -29,6 +31,7 @@ class GraphTraversalSettings:
     strategy_name: str = "ppr_chain"
     allow_semantic_channel: bool = True
     chain_depth: int = 4
+    parallel_branches: int = 1
 
 
 class GraphTraversalExecutor:
@@ -39,6 +42,7 @@ class GraphTraversalExecutor:
         self.settings = settings or GraphTraversalSettings()
         self._prepared: bool = False
         self._prepared_scope = None
+        self._adapter_lock = asyncio.Lock()
 
     async def prepare(self, context: GraphQueryContext) -> None:
         """Ensure the adapter is warmed up for the provided context."""
@@ -94,35 +98,40 @@ class GraphTraversalExecutor:
         )
         evidences: List[EvidenceChunk] = []
         traversal_record: Optional[GraphTraversalRecord] = None
+        start = time.perf_counter()
         try:
             merged_seed_entities = self._merge_seed_entities(context, tool_args)
             query = self._resolve_query(step.description, tool_args)
-            subgraph = await self.adapter.aquery_subgraph(
-                query,
-                channel=step.channel,
-                access_scope=scope,
-            )
-            filter_type = "semantic" if self.settings.allow_semantic_channel else "relation"
-            filtered = await self.adapter.context_filter(
-                subgraph,
-                filter_type=filter_type,
-                access_scope=scope,
-            )
-            summary = await self.adapter.summarize(step.channel, filtered, access_scope=scope)
-            chain_payload = {
-                "strategy": self.settings.strategy_name,
-                "max_depth": self.settings.chain_depth,
-                "plan_step": step.step_id,
-                "question": context.question,
-            }
-            if merged_seed_entities:
-                chain_payload["seed_entities"] = merged_seed_entities
-            if tool_args:
-                chain_payload["tool_args"] = tool_args
-            chain_result = await self.adapter.chain_traverse(chain_payload, access_scope=scope)
+            async with self._adapter_lock:
+                subgraph = await self.adapter.aquery_subgraph(
+                    query,
+                    channel=step.channel,
+                    access_scope=scope,
+                )
+                filter_type = "semantic" if self.settings.allow_semantic_channel else "relation"
+                filtered = await self.adapter.context_filter(
+                    subgraph,
+                    filter_type=filter_type,
+                    access_scope=scope,
+                )
+                summary = await self.adapter.summarize(step.channel, filtered, access_scope=scope)
+                chain_payload = {
+                    "strategy": self.settings.strategy_name,
+                    "max_depth": self.settings.chain_depth,
+                    "plan_step": step.step_id,
+                    "question": context.question,
+                }
+                if merged_seed_entities:
+                    chain_payload["seed_entities"] = merged_seed_entities
+                if tool_args:
+                    chain_payload["tool_args"] = tool_args
+                chain_result = await self.adapter.chain_traverse(chain_payload, access_scope=scope)
+
+            latency_ms = int((time.perf_counter() - start) * 1000)
 
             chunk_id = f"{step.step_id}-{uuid.uuid4().hex[:8]}"
             summary_text = summary if isinstance(summary, str) else str(summary)
+            subgraph_info = self._extract_subgraph_info(filtered, subgraph)
             evidence = EvidenceChunk(
                 chunk_id=chunk_id,
                 source=context.adapter_name,
@@ -130,9 +139,14 @@ class GraphTraversalExecutor:
                 score=1.0,
                 provenance={
                     "plan_step": step.step_id,
-                    "filtered": filtered,
-                    "chain_result": chain_result,
-                    "tool_args": tool_args or {},
+                    "query": query,
+                    "metadata": {
+                        "_subgraph_info": subgraph_info,
+                        "filter_type": filter_type,
+                        "chain_result": self._compact_chain_result(chain_result),
+                        "tool_args": tool_args or {},
+                        "latency_ms": latency_ms,
+                    },
                 },
             )
 
@@ -148,12 +162,14 @@ class GraphTraversalExecutor:
                     "channel": step.channel,
                     "filter_type": filter_type,
                     "tool_args": tool_args or {},
+                    "latency_ms": latency_ms,
                 },
             )
 
             reasoning_entry.status = "done"
             reasoning_entry.produced_evidence_ids.append(chunk_id)
             reasoning_entry.output_summary = summary_text
+            reasoning_entry.diagnostics.setdefault("latency_ms", latency_ms)
             evidences.append(evidence)
         except Exception as exc:  # pragma: no cover - defensive path
             logger.warning("Graph traversal failed for %s: %s", step.step_id, exc)
@@ -228,3 +244,33 @@ class GraphTraversalExecutor:
         if isinstance(edges, list):
             return min(len(edges), 10)
         return 0
+
+    @staticmethod
+    def _extract_subgraph_info(filtered: Any, subgraph: Any) -> Optional[Dict[str, Any]]:
+        """Extract a compact _subgraph_info payload for downstream evidence rendering."""
+
+        candidates: List[Any] = []
+        if isinstance(filtered, dict):
+            candidates.append((filtered.get("metadata") or {}).get("subgraph_info"))
+        if isinstance(subgraph, dict):
+            candidates.append((subgraph.get("metadata") or {}).get("subgraph_info"))
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                return {
+                    key: candidate.get(key)
+                    for key in (
+                        "subgraph_nodes",
+                        "seed_entity_ids",
+                        "retrieved_chunk_ids",
+                        "node_ppr_scores",
+                    )
+                    if candidate.get(key) is not None
+                }
+        return None
+
+    @staticmethod
+    def _compact_chain_result(chain_result: Any) -> Any:
+        if not isinstance(chain_result, dict):
+            return chain_result
+        allowed = {"strategy", "hops", "visited", "scope"}
+        return {key: chain_result.get(key) for key in allowed if chain_result.get(key) is not None}

@@ -60,9 +60,10 @@
     "chain_depth": 4,
     "enable_custom_hooks": false,
     "parallel_branches": 1,
+    "tool_timeout_seconds": 45.0,
     "think": {
       "tool_name": "graph.think",
-      "every_n_steps": 0,
+      "every_n_steps": 2,
       "min_coverage": 0.75
     }
   },
@@ -98,5 +99,6 @@
     "model_name": "${OPENAI_CHAT_MODEL}",
     "openai_api_key": "${OPENAI_API_KEY}",
     "openai_base_url": "${OPENAI_BASE_URL}"
-  }
+  },
+  "telemetry_enabled": true
 }

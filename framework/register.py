@@ -2,6 +2,7 @@ import json
 import os
 import re
 import logging
+from typing import Any
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -11,6 +12,9 @@ from framework.config import AbstractConfig
 from framework.module import AbstractModule
 from framework.singleton_decorator import singleton
 
+_UNRESOLVED_ENV_PLACEHOLDER = object()
+
+
 @singleton
 class Register:
     """
@@ -19,18 +23,42 @@ class Register:
     def __init__(self):
         self.registrations = {}
 
-    def _substitute_env_vars(self, obj):
+    def _substitute_env_vars(self, obj: Any):
         """Recursively substitute environment variables in config data"""
         if isinstance(obj, dict):
-            return {key: self._substitute_env_vars(value) for key, value in obj.items()}
+            resolved: dict[str, Any] = {}
+            for key, value in obj.items():
+                substituted = self._substitute_env_vars(value)
+                if substituted is _UNRESOLVED_ENV_PLACEHOLDER:
+                    continue
+                resolved[key] = substituted
+            return resolved
         elif isinstance(obj, list):
-            return [self._substitute_env_vars(item) for item in obj]
+            items = [self._substitute_env_vars(item) for item in obj]
+            return [None if item is _UNRESOLVED_ENV_PLACEHOLDER else item for item in items]
         elif isinstance(obj, str):
+            # If the whole value is a single placeholder, allow unresolved values to become None.
+            # This avoids accidentally treating "${VAR}" as a real filesystem path, while still
+            # letting Pydantic/default logic handle optional fields. When unresolved, omit the key
+            # from the final payload so Pydantic can apply defaults for required fields.
+            whole = re.fullmatch(r'\$\{([^}]+)\}', obj.strip())
+            if whole:
+                var_name = whole.group(1)
+                env_value = os.getenv(var_name)
+                if not env_value:
+                    logger.warning(
+                        "Environment variable '%s' is not set, omitting placeholder value %r",
+                        var_name,
+                        obj,
+                    )
+                    return _UNRESOLVED_ENV_PLACEHOLDER
+                return env_value
+
             # Replace ${VAR_NAME} with environment variable values
             def replace_env_var(match):
                 var_name = match.group(1)
                 env_value = os.getenv(var_name)
-                if env_value is None:
+                if not env_value:
                     # Environment variable not set - log warning and return original
                     logger.warning(f"Environment variable '{var_name}' is not set, using placeholder '{match.group(0)}'")
                     return match.group(0)  # Return original placeholder

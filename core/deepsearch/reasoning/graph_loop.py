@@ -1,5 +1,7 @@
 """Graph-first reasoning loop that orchestrates adapter traversals and tool calls."""
+import asyncio
 import logging
+import time
 from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, List, Optional, Sequence, Set
 
@@ -16,6 +18,8 @@ from core.deepsearch.tooling import DeepSearchToolManager
 from core.graph_adapter.base import GraphAccessScope, GraphDeepSearchAdapter
 from core.graph_adapter.scope_provider import require_scope
 
+from .parallel import ParallelExecutionManager
+from .subagent import PlanSubAgent, SubAgentOutcome
 from .traversal import GraphTraversalExecutor, GraphTraversalSettings
 
 logger = logging.getLogger(__name__)
@@ -32,7 +36,7 @@ class GraphReasoningLoop:
         *,
         tool_manager: DeepSearchToolManager | None = None,
     ):
-        # adapter: dynamically injected HippoRAG/GraphSearch implementation
+        # adapter: dynamically injected HippoRAG/other graphrag implementation
         self.adapter = adapter
         # llm_connector: reserved for prompts or LLM backed tools (kept for parity with tool configs)
         self.llm_connector = llm_connector
@@ -47,6 +51,14 @@ class GraphReasoningLoop:
         self._adapter_metadata = self._resolve_adapter_metadata()
         self._think_config = self._build_think_config(strategy_config)
         self._think_run_count = 0
+        self.parallel_branches = self._resolve_parallel_branches(strategy_config)
+        self.max_parallel_branches = self._resolve_max_parallel(strategy_config)
+        self._active_parallel_branches = max(1, self.parallel_branches or 1)
+        self._tool_timeout = self._resolve_tool_timeout(strategy_config)
+        self._active_run_total_steps: int = 0
+        self._active_question: str | None = None
+        self._evidence_lock = asyncio.Lock()
+        self._shared_evidences: List[EvidenceChunk] = []
 
     async def run(
         self,
@@ -66,153 +78,84 @@ class GraphReasoningLoop:
         context = self._prepare_graph_context(graph_context, question, normalized_steps)
         traversals: List[GraphTraversalRecord] = []
         evidences: List[EvidenceChunk] = []
+        self._shared_evidences = evidences
         tool_runs: List[Dict[str, Any]] = []
         think_notes: List[Dict[str, Any]] = []
         pending_external: List[Dict[str, Any]] = []
-        final_reasoning: List[ReasoningStepRecord] = []
+        reasoning_results: Dict[int, ReasoningStepRecord] = {}
+        aux_reasoning: List[ReasoningStepRecord] = []
         completed_internal_steps = 0
+        coverage_metrics: Dict[str, Any] = {}
+
         if any(entry["run_with_adapter"] for entry in normalized_steps):
             await self.traversal_executor.prepare(context)
 
-        for entry in normalized_steps:
-            spec = entry["spec"]
-            record = self._empty_record(spec)
+        self._active_run_total_steps = len(normalized_steps)
+        self._active_question = question
+        parallel_branches = self._determine_parallel_branches(normalized_steps)
+        self._active_parallel_branches = parallel_branches
+        sub_agents = [
+            PlanSubAgent(owner=self, step_index=idx, entry=entry, question=question, context=context)
+            for idx, entry in enumerate(normalized_steps)
+        ]
+        exec_manager = ParallelExecutionManager(max_concurrency=parallel_branches)
 
-            if not entry["enabled"]:
-                record.status = "skipped"
-                record.diagnostics.setdefault("reason", "disabled_by_planner")
-                final_reasoning.append(record)
-                continue
+        async def _sequential_iter():
+            for agent in sub_agents:
+                yield agent.step_index, await agent.run()
 
-            if entry["requires_external"]:
-                record.status = "pending_external"
-                record.diagnostics.setdefault("reason", "requires_external_channel")
-                pending_external.append(self._pending_external_payload(entry))
-                final_reasoning.append(record)
-                continue
+        try:
+            iterator = exec_manager.run(sub_agents) if parallel_branches > 1 else _sequential_iter()
+            async for idx, outcome in iterator:
+                reasoning_results[idx] = outcome.reasoning
+                if outcome.traversal:
+                    traversals.append(outcome.traversal)
+                if outcome.pending_external:
+                    pending_external.append(outcome.pending_external)
+                if outcome.evidences:
+                    await self._extend_shared_evidences(outcome.evidences)
+                if outcome.tool_runs:
+                    tool_runs.extend(outcome.tool_runs)
+                if outcome.think_notes:
+                    think_notes.extend(outcome.think_notes)
 
-            if entry["run_with_adapter"]:
-                traversal_record, reasoning_record, new_evidences = await self.traversal_executor.run_step(
-                    spec,
-                    context,
-                    tool_args=entry["tool_args"],
-                )
-                reasoning_record.diagnostics.setdefault("tool", entry["tool"] or "graph_adapter.query")
-                if traversal_record:
-                    traversals.append(traversal_record)
-                evidences.extend(new_evidences)
-                final_reasoning.append(reasoning_record)
-                if reasoning_record.status == "done":
+                if outcome.reasoning.status == "done" and not outcome.pending_external:
                     completed_internal_steps += 1
-                    coverage_metrics = self._coverage_snapshot(
-                        evidence_count=len(evidences),
-                        source_labels=[chunk.source for chunk in evidences],
-                        completed_steps=completed_internal_steps,
-                        total_steps=len(normalized_steps),
-                    )
-                    await self._maybe_run_periodic_think(
-                        question=question,
-                        context=context,
-                        evidences=evidences,
-                        reasoning_log=final_reasoning,
-                        tool_runs=tool_runs,
-                        think_notes=think_notes,
-                        coverage_metrics=coverage_metrics,
-                        completed_steps=completed_internal_steps,
-                        total_steps=len(normalized_steps),
-                    )
-                continue
 
-            if entry["should_invoke_tool"] and not self.tool_manager:
-                record.status = "skipped"
-                record.diagnostics.setdefault("reason", "tool_manager_disabled")
-                record.diagnostics.setdefault("tool", entry["tool"])
-                final_reasoning.append(record)
-                continue
-
-            if entry["should_invoke_tool"]:
-                coverage_hint = self._coverage_snapshot(
+                coverage_metrics = self._coverage_snapshot(
                     evidence_count=len(evidences),
                     source_labels=[chunk.source for chunk in evidences],
                     completed_steps=completed_internal_steps,
                     total_steps=len(normalized_steps),
                 )
-                try:
-                    result = await self._invoke_tool(
-                        tool_name=entry["tool"],
-                        step=entry,
-                        context=context,
-                        question=question,
-                        accumulated_evidence=evidences,
-                        coverage_hint=coverage_hint,
-                    )
-                except Exception as exc:  # pragma: no cover - defensive guardrails
-                    logger.warning("Tool %s failed for %s: %s", entry["tool"], spec.step_id, exc)
-                    record.status = "failed"
-                    record.diagnostics.setdefault("error", str(exc))
-                    final_reasoning.append(record)
-                    continue
-
-                evidences.extend(result.evidences)
-                record.status = "done"
-                record.output_summary = result.summary
-                record.produced_evidence_ids = [chunk.chunk_id for chunk in result.evidences]
-                record.diagnostics.setdefault("tool", entry["tool"])
-                log_entry = ToolExecutionLog(
-                    tool_name=result.tool_name,
-                    server_name=None,
-                    arguments_snapshot=entry["tool_args"],
-                    response_excerpt=result.summary[:200] if result.summary else None,
-                    latency_ms=None,
-                    graph_context=context,
-                    extra={
-                        "channel": spec.channel,
-                        "profile": result.profile,
-                        "determinism": result.determinism,
-                    },
-                )
-                record.tool_logs.append(log_entry)
-                tool_runs.append(
-                    {
-                        "plan_step_id": spec.step_id,
-                        "tool_name": result.tool_name,
-                        "channel": spec.channel,
-                        "result": result.model_dump(),
-                    }
-                )
-                for note in result.think_notes:
-                    think_notes.append(note.model_dump(exclude_none=True))
-                completed_internal_steps += 1
-                coverage_hint = self._coverage_snapshot(
-                    evidence_count=len(evidences),
-                    source_labels=[chunk.source for chunk in evidences],
-                    completed_steps=completed_internal_steps,
-                    total_steps=len(normalized_steps),
-                )
-                await self._maybe_run_periodic_think(
+                ordered_log = [reasoning_results[i] for i in sorted(reasoning_results)]
+                think_record = await self._maybe_run_periodic_think(
                     question=question,
                     context=context,
                     evidences=evidences,
-                    reasoning_log=final_reasoning,
+                    reasoning_log=ordered_log,
                     tool_runs=tool_runs,
                     think_notes=think_notes,
-                    coverage_metrics=coverage_hint,
+                    coverage_metrics=coverage_metrics,
                     completed_steps=completed_internal_steps,
                     total_steps=len(normalized_steps),
                 )
-                final_reasoning.append(record)
-                continue
+                if think_record:
+                    aux_reasoning.append(think_record)
+        finally:
+            self._active_run_total_steps = 0
+            self._active_question = None
 
-            record.status = "skipped"
-            record.diagnostics.setdefault("reason", "no_tool_available")
-            final_reasoning.append(record)
-
-        coverage_metrics = self._coverage_snapshot(
-            evidence_count=len(evidences),
-            source_labels=[chunk.source for chunk in evidences],
-            completed_steps=completed_internal_steps,
-            total_steps=len(normalized_steps),
-        )
+        ordered_reasoning: List[ReasoningStepRecord] = []
+        for idx, entry in enumerate(normalized_steps):
+            record = reasoning_results.get(idx)
+            if record is None:
+                placeholder = self._empty_record(entry["spec"])
+                placeholder.status = "skipped"
+                placeholder.diagnostics.setdefault("reason", "sub_agent_missing")
+                record = placeholder
+            ordered_reasoning.append(record)
+        combined_reasoning = ordered_reasoning + aux_reasoning
 
         return {
             "question": question,
@@ -220,7 +163,7 @@ class GraphReasoningLoop:
             "adapter_metadata": self._adapter_metadata,
             "plan_steps": [entry["spec"].model_dump() for entry in normalized_steps],
             "graph_traversals": [record.model_dump() for record in traversals],
-            "reasoning_steps": [record.model_dump() for record in final_reasoning],
+            "reasoning_steps": [record.model_dump() for record in combined_reasoning],
             "evidences": [chunk.model_dump() for chunk in evidences],
             "tool_results": tool_runs,
             "pending_external": pending_external,
@@ -229,6 +172,111 @@ class GraphReasoningLoop:
         }
 
     # ------------------------------------------------------------------
+    async def _execute_plan_entry(
+        self,
+        *,
+        step_index: int,
+        entry: Dict[str, Any],
+        question: str,
+        context: GraphQueryContext,
+    ) -> SubAgentOutcome:
+        spec = entry["spec"]
+        record = self._empty_record(spec)
+        traversal_record: GraphTraversalRecord | None = None
+        new_evidences: List[EvidenceChunk] = []
+        tool_runs: List[Dict[str, Any]] = []
+        think_notes: List[Dict[str, Any]] = []
+        pending_external_payload: Dict[str, Any] | None = None
+
+        record.diagnostics.setdefault("sub_agent", f"sub_agent_{step_index + 1:02d}")
+
+        if not entry["enabled"]:
+            record.status = "skipped"
+            record.diagnostics.setdefault("reason", "disabled_by_planner")
+            return SubAgentOutcome(step_index, record, None, [], [], [], None)
+
+        if entry["requires_external"]:
+            record.status = "pending_external"
+            record.diagnostics.setdefault("reason", "requires_external_channel")
+            pending_external_payload = self._pending_external_payload(entry)
+            return SubAgentOutcome(step_index, record, None, [], [], [], pending_external_payload)
+
+        if entry["run_with_adapter"]:
+            traversal_record, reasoning_record, new_evidences = await self.traversal_executor.run_step(
+                spec,
+                context,
+                tool_args=entry["tool_args"],
+            )
+            reasoning_record.diagnostics.setdefault("tool", entry["tool"] or "graph_adapter.query")
+            return SubAgentOutcome(step_index, reasoning_record, traversal_record, new_evidences, [], [], None)
+
+        if entry["should_invoke_tool"] and not self.tool_manager:
+            record.status = "skipped"
+            record.diagnostics.setdefault("reason", "tool_manager_disabled")
+            record.diagnostics.setdefault("tool", entry["tool"])
+            return SubAgentOutcome(step_index, record, None, [], [], [], None)
+
+        if entry["should_invoke_tool"]:
+            evidence_snapshot = await self._snapshot_evidences()
+            coverage_hint = self._coverage_hint_for_step(step_index, evidence_snapshot)
+            try:
+                result, latency_ms = await self._invoke_tool(
+                    tool_name=entry["tool"],
+                    step=entry,
+                    context=context,
+                    question=question,
+                    accumulated_evidence=evidence_snapshot,
+                    coverage_hint=coverage_hint,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Tool %s timed out for %s", entry["tool"], spec.step_id)
+                record.status = "failed"
+                record.diagnostics.setdefault("reason", "tool_timeout")
+                record.diagnostics.setdefault("latency_ms", int(self._tool_timeout * 1000) if self._tool_timeout else None)
+                return SubAgentOutcome(step_index, record, None, [], [], [], None)
+            except Exception as exc:  # pragma: no cover - defensive guardrails
+                logger.warning("Tool %s failed for %s: %s", entry["tool"], spec.step_id, exc)
+                record.status = "failed"
+                record.diagnostics.setdefault("error", str(exc))
+                record.diagnostics.setdefault("reason", "tool_failure")
+                return SubAgentOutcome(step_index, record, None, [], [], [], None)
+
+            new_evidences = list(result.evidences)
+            record.status = "done"
+            record.output_summary = result.summary
+            record.produced_evidence_ids = [chunk.chunk_id for chunk in result.evidences]
+            record.diagnostics.setdefault("tool", entry["tool"])
+            record.diagnostics.setdefault("latency_ms", latency_ms)
+            log_entry = ToolExecutionLog(
+                tool_name=result.tool_name,
+                server_name=None,
+                arguments_snapshot=entry["tool_args"],
+                response_excerpt=result.summary[:200] if result.summary else None,
+                latency_ms=latency_ms,
+                graph_context=context,
+                extra={
+                    "channel": spec.channel,
+                    "profile": result.profile,
+                    "determinism": result.determinism,
+                },
+            )
+            record.tool_logs.append(log_entry)
+            tool_runs.append(
+                {
+                    "plan_step_id": spec.step_id,
+                    "tool_name": result.tool_name,
+                    "channel": spec.channel,
+                    "result": result.model_dump(),
+                }
+            )
+            for note in result.think_notes:
+                think_notes.append(note.model_dump(exclude_none=True))
+            return SubAgentOutcome(step_index, record, None, new_evidences, tool_runs, think_notes, None)
+
+        record.status = "skipped"
+        record.diagnostics.setdefault("reason", "no_tool_available")
+        return SubAgentOutcome(step_index, record, None, [], [], [], None)
+
     def _build_traversal_settings(self, config) -> GraphTraversalSettings:
         if isinstance(config, GraphTraversalSettings):
             return config
@@ -240,7 +288,7 @@ class GraphReasoningLoop:
             payload = getattr(config, "__dict__", {})
         allowed = {
             key: payload.get(key)
-            for key in ("strategy_name", "allow_semantic_channel", "chain_depth")
+            for key in ("strategy_name", "allow_semantic_channel", "chain_depth", "parallel_branches")
             if key in payload and payload.get(key) is not None
         }
         return GraphTraversalSettings(**allowed)
@@ -409,7 +457,7 @@ class GraphReasoningLoop:
         question: str,
         accumulated_evidence: List[EvidenceChunk],
         coverage_hint: Dict[str, Any],
-    ) -> ToolResultPayload:
+    ) -> tuple[ToolResultPayload, int]:
         if not self.tool_manager:
             raise RuntimeError("GraphReasoningLoop cannot invoke tools without a tool manager")
         payload = self._build_tool_payload(
@@ -420,7 +468,14 @@ class GraphReasoningLoop:
             coverage_hint=coverage_hint,
             extra=step["tool_args"],
         )
-        return await self.tool_manager.invoke(tool_name, payload=payload)
+        start = time.perf_counter()
+        invoke_task = self.tool_manager.invoke(tool_name, payload=payload)
+        if self._tool_timeout and self._tool_timeout > 0:
+            result = await asyncio.wait_for(invoke_task, timeout=self._tool_timeout)
+        else:
+            result = await invoke_task
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        return result, latency_ms
 
     def _build_tool_payload(
         self,
@@ -494,11 +549,11 @@ class GraphReasoningLoop:
         coverage_metrics: Dict[str, Any],
         completed_steps: int,
         total_steps: int,
-    ) -> None:
+    ) -> Optional[ReasoningStepRecord]:
         if not self._should_run_think(completed_steps, coverage_metrics):
-            return
+            return None
         if not self.tool_manager or not self._think_config["tool_name"]:
-            return
+            return None
         self._think_run_count += 1
         think_step_id = f"think_auto_{self._think_run_count:02d}"
         record = ReasoningStepRecord(
@@ -521,24 +576,36 @@ class GraphReasoningLoop:
             },
         )
         try:
-            result = await self.tool_manager.invoke(self._think_config["tool_name"], payload=payload)
+            start = time.perf_counter()
+            invocation = self.tool_manager.invoke(self._think_config["tool_name"], payload=payload)
+            if self._tool_timeout and self._tool_timeout > 0:
+                result = await asyncio.wait_for(invocation, timeout=self._tool_timeout)
+            else:
+                result = await invocation
+            latency_ms = int((time.perf_counter() - start) * 1000)
+        except asyncio.TimeoutError:
+            record.status = "failed"
+            record.diagnostics.setdefault("reason", "tool_timeout")
+            record.diagnostics.setdefault("trigger", "periodic_think")
+            return record
         except Exception as exc:  # pragma: no cover - defensive guardrail
             record.status = "failed"
             record.diagnostics.setdefault("error", str(exc))
             record.diagnostics.setdefault("reason", "periodic_think")
-            return
+            return record
 
-        evidences.extend(result.evidences)
+        await self._extend_shared_evidences(result.evidences)
         record.status = "done"
         record.output_summary = result.summary
         record.produced_evidence_ids = [chunk.chunk_id for chunk in result.evidences]
         record.diagnostics.setdefault("reason", "periodic_think")
+        record.diagnostics.setdefault("latency_ms", latency_ms)
         log_entry = ToolExecutionLog(
             tool_name=result.tool_name,
             server_name=None,
             arguments_snapshot={"trigger": "periodic_think"},
             response_excerpt=result.summary[:200] if result.summary else None,
-            latency_ms=None,
+            latency_ms=latency_ms,
             graph_context=context,
             extra={
                 "channel": "graph",
@@ -558,6 +625,7 @@ class GraphReasoningLoop:
         )
         for note in result.think_notes:
             think_notes.append(note.model_dump(exclude_none=True))
+        return record
 
     def _should_run_think(self, completed_steps: int, coverage_metrics: Dict[str, Any]) -> bool:
         cadence = self._think_config["cadence"]
@@ -618,3 +686,105 @@ class GraphReasoningLoop:
             if collected:
                 hints[spec.step_id] = collected
         return hints
+
+    async def _extend_shared_evidences(self, additions: Sequence[EvidenceChunk]) -> None:
+        if not additions:
+            return
+        async with self._evidence_lock:
+            self._shared_evidences.extend(additions)
+
+    async def _snapshot_evidences(self) -> List[EvidenceChunk]:
+        async with self._evidence_lock:
+            return list(self._shared_evidences)
+
+    def _coverage_hint_for_step(self, step_index: int, snapshot: Optional[List[EvidenceChunk]] = None) -> Dict[str, Any]:
+        total = self._active_run_total_steps or 1
+        snapshot = snapshot or []
+        return self._coverage_snapshot(
+            evidence_count=len(snapshot),
+            source_labels=[chunk.source for chunk in snapshot],
+            completed_steps=min(step_index, total),
+            total_steps=total,
+        )
+
+    def _resolve_parallel_branches(self, config) -> int:
+        if not config:
+            return 1
+        if hasattr(config, "parallel_branches"):
+            value = getattr(config, "parallel_branches")
+        elif isinstance(config, dict):
+            value = config.get("parallel_branches")
+        else:
+            value = getattr(config, "parallel_branches", 1)
+        try:
+            numeric = int(value)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return 1
+        return numeric if numeric >= 0 else 0
+
+    def _resolve_max_parallel(self, config) -> int:
+        if not config:
+            return 4
+        if hasattr(config, "max_parallel_branches"):
+            value = getattr(config, "max_parallel_branches")
+        elif isinstance(config, dict):
+            value = config.get("max_parallel_branches")
+        else:
+            value = getattr(config, "max_parallel_branches", 4)
+        try:
+            numeric = int(value)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return 4
+        return max(1, numeric)
+
+    def _resolve_tool_timeout(self, config) -> float:
+        if not config:
+            return 45.0
+        if isinstance(config, dict):
+            value = config.get("tool_timeout_seconds")
+        else:
+            value = getattr(config, "tool_timeout_seconds", None)
+        try:
+            numeric = float(value) if value is not None else 45.0
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return 45.0
+        return max(0.0, numeric)
+
+    def _determine_parallel_branches(self, steps: Sequence[Dict[str, Any]]) -> int:
+        configured = self.parallel_branches
+        if configured > 0:
+            return configured
+        step_count = len(steps)
+        if step_count <= 1:
+            return 1
+        if not self._auto_parallel_allowed(steps):
+            return 1
+        target = min(self.max_parallel_branches, step_count)
+        return max(1, target)
+
+    @staticmethod
+    def _auto_parallel_allowed(steps: Sequence[Dict[str, Any]]) -> bool:
+        """Return True only when planner marks steps as safe to run concurrently.
+
+        Defaults to serial execution unless the plan explicitly opts in.
+        """
+
+        saw_parallel_hint = False
+        for entry in steps:
+            spec: PlanSpec = entry["spec"]
+            metadata = spec.metadata or {}
+            tool_args = entry.get("tool_args") or {}
+            raw_hint = (
+                metadata.get("scheduler")
+                or metadata.get("scheduler_hint")
+                or tool_args.get("scheduler")
+                or tool_args.get("scheduler_hint")
+            )
+            hint = str(raw_hint or "").strip().lower()
+            if hint in {"serial", "sequential"}:
+                return False
+            if hint in {"parallel", "concurrent", "auto_parallel"}:
+                saw_parallel_hint = True
+            if metadata.get("parallelizable") is True or tool_args.get("parallelizable") is True:
+                saw_parallel_hint = True
+        return saw_parallel_hint

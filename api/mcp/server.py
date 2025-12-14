@@ -4,7 +4,7 @@ MCP Server implementation using FastMCP
 import datetime
 import uuid
 from fastmcp import Context, FastMCP
-from typing import Dict, Optional, List, Any
+from typing import Any, Dict, List, Literal, Optional
 from fastapi import HTTPException
 from encapsulation.data_model.schema import Chunk, GraphData
 from framework.register import Register
@@ -14,6 +14,7 @@ from core.utils.owner_guard import is_admin_owner
 from core.presentation.evidence import build_chat_evidence
 from core.presentation.deepsearch_payload import trim_deepsearch_payload
 from config.output_limits import CHAT_TOP_CHUNKS
+from application.rag_inference.module import RAGInference
 import logging
 
 logger = logging.getLogger(__name__)
@@ -188,12 +189,20 @@ async def chat(
         
         if ctx is not None:
             await ctx.report_progress(100, 100, "done")
+
+        graph_store = None
+        try:
+            if isinstance(rag_inference, RAGInference):
+                graph_store = rag_inference.get_graph_store()
+        except Exception:  # noqa: BLE001
+            graph_store = None
         
         evidence = build_chat_evidence(
             chunks,
             subgraph_data=subgraph_data,
             subgraph_info=subgraph_info,
             max_chunks=CHAT_TOP_CHUNKS,
+            graph_store=graph_store,
         )
         return {
             "session_id": session_id,
@@ -208,12 +217,13 @@ async def chat(
         return {"isError": True, "message": f"Internal server error: {str(e)}"}
 
 
-@mcp.tool(name="deepsearch_run", description="Execute DeepSearch pipeline with the authenticated user scope")
+@mcp.tool(name="rag-arc.deepsearch.run", description="Execute DeepSearch pipeline with the authenticated user scope")
 async def deepsearch_run(
     question: str,
     auth_token: str,
     owner_id: str | None = None,
     metadata: Dict[str, Any] | None = None,
+    response_format: Literal["concise", "detailed"] = "detailed",
 ) -> dict:
     """Expose DeepSearchService via MCP for upstream orchestrators."""
 
@@ -246,4 +256,23 @@ async def deepsearch_run(
         logger.error("DeepSearch MCP run failed: %s", exc)
         return {"isError": True, "message": f"DeepSearch run failed: {exc}"}
 
-    return trim_deepsearch_payload(result, include_evidence=True)
+    include_evidence = response_format != "concise"
+    graph_store = None
+    try:
+        rag = registrator.get_object("rag_inference")
+        if isinstance(rag, RAGInference):
+            graph_store = rag.get_graph_store()
+    except Exception:  # noqa: BLE001
+        graph_store = None
+
+    payload = trim_deepsearch_payload(result, include_evidence=include_evidence, graph_store=graph_store)
+    if response_format == "concise":
+        report_block = payload.get("report") or {}
+        reasoning_block = payload.get("reasoning") or {}
+        return {
+            "question": payload.get("question"),
+            "answer": report_block.get("answer"),
+            "highlights": report_block.get("highlights"),
+            "coverage_metrics": reasoning_block.get("coverage_metrics"),
+        }
+    return payload

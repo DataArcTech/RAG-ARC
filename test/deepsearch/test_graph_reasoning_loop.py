@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from encapsulation.data_model.deepsearch import EvidenceChunk, GraphQueryContext, ToolResultPayload
@@ -57,6 +59,26 @@ class _StubToolManager:
             profile="F",
             determinism="deterministic",
             summary=f"{tool_name} summary",
+            evidences=[chunk],
+            diagnostics={},
+            think_notes=[],
+        )
+
+
+class _HangingToolManager:
+    def __init__(self, delay: float = 0.2):
+        self.delay = delay
+
+    async def invoke(self, tool_name: str, *, payload):
+        await asyncio.sleep(self.delay)
+        chunk = EvidenceChunk(chunk_id="slow-tool", source="tool", content="slow output")
+        return ToolResultPayload(
+            tool_name=tool_name,
+            namespace="stub::slow",
+            channel="text",
+            profile="F",
+            determinism="deterministic",
+            summary="slow result",
             evidences=[chunk],
             diagnostics={},
             think_notes=[],
@@ -190,3 +212,178 @@ async def test_graph_traversal_executor_propagates_seed_entities():
     assert adapter.chain_payloads, "chain traversal should run"
     payload = adapter.chain_payloads[0]
     assert payload["seed_entities"] == ["NodeA", "NodeB"]
+
+
+class _SlowAdapter(_StubAdapter):
+    def __init__(self):
+        super().__init__()
+        self.concurrent_calls = 0
+        self.max_concurrency = 0
+
+    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None):
+        self.concurrent_calls += 1
+        self.max_concurrency = max(self.max_concurrency, self.concurrent_calls)
+        try:
+            await asyncio.sleep(0.05)
+            return await super().aquery_subgraph(query, channel=channel, access_scope=access_scope)
+        finally:
+            self.concurrent_calls -= 1
+
+
+@pytest.mark.asyncio
+async def test_graph_reasoning_parallelises_tool_steps_when_configured():
+    class _SlowToolManager(_StubToolManager):
+        def __init__(self):
+            super().__init__()
+            self.concurrent_calls = 0
+            self.max_concurrency = 0
+
+        async def invoke(self, tool_name: str, *, payload):
+            self.concurrent_calls += 1
+            self.max_concurrency = max(self.max_concurrency, self.concurrent_calls)
+            try:
+                await asyncio.sleep(0.05)
+                return await super().invoke(tool_name, payload=payload)
+            finally:
+                self.concurrent_calls -= 1
+
+    tool_manager = _SlowToolManager()
+    loop = GraphReasoningLoop(
+        adapter=_StubAdapter(),
+        llm_connector=None,
+        strategy_config={"parallel_branches": 3},
+        tool_manager=tool_manager,
+    )
+
+    plan_steps = [
+        {"step_id": f"plan_{idx:02d}", "description": f"Rollup {idx}", "channel": "text", "tool": "graph.context_rollup"}
+        for idx in range(1, 4)
+    ]
+    context = GraphQueryContext(adapter_name="hipporag", question="Parallel tools?", access_scope=GraphAccessScope(scope_id="scope-parallel"))
+    await loop.run("Parallel tools?", plan_steps, graph_context=context)
+
+    assert tool_manager.max_concurrency >= 2, "tool steps should overlap when parallel_branches > 1"
+
+
+@pytest.mark.asyncio
+async def test_graph_reasoning_auto_parallel_requires_scheduler_hint():
+    class _SlowToolManager(_StubToolManager):
+        def __init__(self):
+            super().__init__()
+            self.concurrent_calls = 0
+            self.max_concurrency = 0
+
+        async def invoke(self, tool_name: str, *, payload):
+            self.concurrent_calls += 1
+            self.max_concurrency = max(self.max_concurrency, self.concurrent_calls)
+            try:
+                await asyncio.sleep(0.05)
+                return await super().invoke(tool_name, payload=payload)
+            finally:
+                self.concurrent_calls -= 1
+
+    tool_manager = _SlowToolManager()
+    loop = GraphReasoningLoop(
+        adapter=_StubAdapter(),
+        llm_connector=None,
+        strategy_config={"parallel_branches": 0, "max_parallel_branches": 3},
+        tool_manager=tool_manager,
+    )
+
+    plan_steps = [
+        {"step_id": f"plan_{idx:02d}", "description": f"Rollup {idx}", "channel": "text", "tool": "graph.context_rollup"}
+        for idx in range(1, 5)
+    ]
+
+    context = GraphQueryContext(adapter_name="hipporag", question="Auto parallel?", access_scope=GraphAccessScope(scope_id="scope-auto"))
+    await loop.run("Auto parallel?", plan_steps, graph_context=context)
+
+    assert tool_manager.max_concurrency == 1, "auto parallel stays serial unless plan opts in"
+    assert getattr(loop, "_active_parallel_branches") == 1
+
+
+@pytest.mark.asyncio
+async def test_graph_reasoning_auto_parallel_with_scheduler_hint():
+    class _SlowToolManager(_StubToolManager):
+        def __init__(self):
+            super().__init__()
+            self.concurrent_calls = 0
+            self.max_concurrency = 0
+
+        async def invoke(self, tool_name: str, *, payload):
+            self.concurrent_calls += 1
+            self.max_concurrency = max(self.max_concurrency, self.concurrent_calls)
+            try:
+                await asyncio.sleep(0.05)
+                return await super().invoke(tool_name, payload=payload)
+            finally:
+                self.concurrent_calls -= 1
+
+    tool_manager = _SlowToolManager()
+    loop = GraphReasoningLoop(
+        adapter=_StubAdapter(),
+        llm_connector=None,
+        strategy_config={"parallel_branches": 0, "max_parallel_branches": 3},
+        tool_manager=tool_manager,
+    )
+
+    plan_steps = [
+        {
+            "step_id": f"plan_{idx:02d}",
+            "description": f"Rollup {idx}",
+            "channel": "text",
+            "tool": "graph.context_rollup",
+            "metadata": {"scheduler": "parallel"},
+        }
+        for idx in range(1, 5)
+    ]
+
+    context = GraphQueryContext(adapter_name="hipporag", question="Auto parallel?", access_scope=GraphAccessScope(scope_id="scope-auto"))
+    await loop.run("Auto parallel?", plan_steps, graph_context=context)
+
+    assert tool_manager.max_concurrency >= 2
+    assert getattr(loop, "_active_parallel_branches") == 3
+
+
+@pytest.mark.asyncio
+async def test_graph_reasoning_serializes_adapter_calls_even_when_parallel_enabled():
+    adapter = _SlowAdapter()
+    loop = GraphReasoningLoop(
+        adapter=adapter,
+        llm_connector=None,
+        strategy_config={"parallel_branches": 3},
+        tool_manager=_StubToolManager(),
+    )
+
+    plan_steps = [
+        {"step_id": f"plan_{idx:02d}", "description": f"Probe {idx}", "channel": "graph", "tool": "graph_adapter.query"}
+        for idx in range(1, 4)
+    ]
+
+    context = GraphQueryContext(adapter_name="hipporag", question="Parallel adapter?", access_scope=GraphAccessScope(scope_id="scope-parallel-adapter"))
+    await loop.run("Parallel adapter?", plan_steps, graph_context=context)
+
+    assert adapter.max_concurrency == 1, "adapter calls are serialized to avoid shared-state corruption"
+
+
+@pytest.mark.asyncio
+async def test_graph_reasoning_marks_tool_timeout():
+    adapter = _StubAdapter()
+    tool_manager = _HangingToolManager(delay=0.2)
+    loop = GraphReasoningLoop(
+        adapter=adapter,
+        llm_connector=None,
+        strategy_config={"tool_timeout_seconds": 0.05},
+        tool_manager=tool_manager,
+    )
+
+    plan_steps = [
+        {"step_id": "plan_timeout", "description": "Rollup", "channel": "text", "tool": "graph.context_rollup"},
+    ]
+
+    context = GraphQueryContext(adapter_name="hipporag", question="Timeout?", access_scope=GraphAccessScope(scope_id="scope-timeout"))
+    result = await loop.run("Timeout?", plan_steps, graph_context=context)
+
+    entry = result["reasoning_steps"][0]
+    assert entry["status"] == "failed"
+    assert entry["diagnostics"]["reason"] == "tool_timeout"

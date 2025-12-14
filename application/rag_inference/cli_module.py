@@ -1,27 +1,13 @@
 import logging
 import uuid
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from encapsulation.data_model.schema import Chunk
 from core.retrieval.graph_retrieveal.base import BaseGraphRetriever
+from encapsulation.data_model.pipeline import PipelineArtifacts
 from .module import RAGInference
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class PipelineArtifacts:
-    """Intermediate outputs captured from the RAG pipeline."""
-
-    original_query: str
-    rewritten_query: str
-    retrieved_chunks: List[Chunk]
-    reranked_chunks: List[Chunk]
-    messages: List[Dict[str, str]]
-    subgraph_data: Optional[Dict[str, Any]]
-    subgraph_info: Optional[Dict[str, Any]]
-    llm_response: Optional[str]
 
 
 class RAGInferenceCLIModule:

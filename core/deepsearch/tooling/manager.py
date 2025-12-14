@@ -379,31 +379,70 @@ class DeepSearchToolManager:
         self.artifact_dir = Path(artifact_dir).expanduser() if artifact_dir else None
 
     async def invoke(self, tool_name: str, *, payload: Dict[str, Any]) -> ToolResultPayload:
-        """Invoke a tool and return normalized results."""
+        """Invoke a tool through MCP first, falling back to local registries on failure."""
 
         descriptor = self._resolve_descriptor(tool_name)
         request = self._build_request(payload)
         local_tool = self.local_registry.resolve(tool_name) if self.local_registry else None
-        if local_tool and not self._prefer_remote_for(tool_name):
-            start = time.perf_counter()
-            result = await local_tool.run(request)
-            latency_ms = int((time.perf_counter() - start) * 1000)
-            descriptor = descriptor or getattr(local_tool, "descriptor", None)
-            if descriptor is None:
-                raise RuntimeError(f"Local tool '{tool_name}' does not expose a descriptor")
-            payload_model = result.as_payload(descriptor)
-            self._attach_artifact_reference(tool_name, payload_model)
-            self._record_local(tool_name, payload_model, request, latency_ms, descriptor)
-            return payload_model
+        local_disabled = self._prefer_remote_for(tool_name)
+        if local_disabled:
+            local_tool = None
 
+        remote_error: Exception | None = None
         if self._can_route_remote(tool_name, descriptor):
-            remote_payload = self._prepare_remote_payload(tool_name, payload, request)
-            payload_model, log = await self.mcp_router.invoke(descriptor, remote_payload)  # type: ignore[arg-type]
-            self._attach_artifact_reference(tool_name, payload_model)
-            self._record_remote(tool_name, log, request)
-            return payload_model
+            try:
+                return await self._invoke_remote(tool_name, descriptor, payload, request)
+            except Exception as exc:  # noqa: BLE001
+                remote_error = exc
+                logger.warning(
+                    "Remote tool %s failed via MCP (%s); attempting local fallback",
+                    tool_name,
+                    exc,
+                )
+
+        if local_tool:
+            result = await self._invoke_local(tool_name, local_tool, descriptor, request)
+            if remote_error:
+                result.diagnostics.setdefault("remote_fallback_reason", str(remote_error))
+            return result
+
+        if remote_error:
+            raise remote_error
 
         raise KeyError(f"Tool '{tool_name}' is not registered locally and MCP routing is unavailable")
+
+    async def _invoke_remote(
+        self,
+        tool_name: str,
+        descriptor: ToolDescriptor,
+        payload: Dict[str, Any],
+        request: ToolRunRequest,
+    ) -> ToolResultPayload:
+        remote_payload = self._prepare_remote_payload(tool_name, payload, request)
+        payload_model, log = await self.mcp_router.invoke(descriptor, remote_payload)  # type: ignore[arg-type]
+        self._attach_artifact_reference(tool_name, payload_model)
+        self._record_remote(tool_name, log, request, payload_model, descriptor)
+        return payload_model
+
+    async def _invoke_local(
+        self,
+        tool_name: str,
+        tool: GraphTool,
+        descriptor: ToolDescriptor | None,
+        request: ToolRunRequest,
+    ) -> ToolResultPayload:
+        start = time.perf_counter()
+        result = await tool.run(request)
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        descriptor = descriptor or getattr(tool, "descriptor", None)
+        if descriptor is None:
+            raise RuntimeError(f"Local tool '{tool_name}' does not expose a descriptor")
+        payload_model = result.as_payload(descriptor)
+        payload_model.diagnostics.setdefault("latency_ms", latency_ms)
+        payload_model.diagnostics.setdefault("evidence_count", len(payload_model.evidences or []))
+        self._attach_artifact_reference(tool_name, payload_model)
+        self._record_local(tool_name, payload_model, request, latency_ms, descriptor)
+        return payload_model
 
     def _resolve_descriptor(self, tool_name: str) -> ToolDescriptor | None:
         descriptor = None
@@ -444,15 +483,17 @@ class DeepSearchToolManager:
         request: ToolRunRequest,
         payload: Dict[str, Any],
     ) -> Dict[str, Any]:
+        context_window = self._serialize_context_window(request)
         arguments: Dict[str, Any] = {
             "question": request.question,
             "plan_step": request.plan_step,
-            "context_evidences": self._serialize_context_window(request),
+            "context_evidences": context_window,
             "extra": self._json_safe(request.extra),
             "adapter_metadata": self._json_safe(self._adapter_metadata(request.adapter)),
             "access_scope": self._access_scope_payload(request.access_scope),
         }
-        digest = self._context_digest(request)
+        arguments = {key: value for key, value in arguments.items() if value is not None}
+        digest = self._context_digest(context_window)
         if digest:
             arguments["context_digest"] = digest
         if request.graph_context:
@@ -569,14 +610,17 @@ class DeepSearchToolManager:
         if not callable(log_method):
             return
         payload = {
+            "run_id": self._extract_run_id(request),
             "summary": result.summary,
             "diagnostics": result.diagnostics,
             "question": request.question,
             "plan_step": request.plan_step,
             "think_notes": [note.model_dump() for note in result.think_notes],
             "latency_ms": latency_ms,
+            "evidence_count": len(result.evidences or []),
             "adapter_metadata": self._adapter_metadata(request.adapter),
             "tool_namespace": descriptor.namespace if descriptor else None,
+            "external_allowed": self._extract_external_allowed(request),
         }
         if self.llm_fingerprint:
             payload["llm_fingerprint"] = self.llm_fingerprint
@@ -587,22 +631,55 @@ class DeepSearchToolManager:
             payload=payload,
         )
 
-    def _record_remote(self, tool_name: str, log: ToolExecutionLog, request: ToolRunRequest | None = None) -> None:
+    def _record_remote(
+        self,
+        tool_name: str,
+        log: ToolExecutionLog,
+        request: ToolRunRequest | None = None,
+        result: ToolResultPayload | None = None,
+        descriptor: ToolDescriptor | None = None,
+    ) -> None:
         if not self.telemetry_client:
             return
         if self.audit_label:
             log.extra.setdefault("audit_label", self.audit_label)
+        log.extra.setdefault("run_id", self._extract_run_id(request) if request else None)
         if request and log.graph_context is None and request.graph_context:
             log.graph_context = request.graph_context
         if request:
             adapter_meta = self._adapter_metadata(request.adapter)
             if adapter_meta:
                 log.extra.setdefault("adapter_metadata", adapter_meta)
+            log.extra.setdefault("external_allowed", self._extract_external_allowed(request))
         if self.llm_fingerprint:
             log.extra.setdefault("llm_fingerprint", self.llm_fingerprint)
+        if descriptor:
+            log.extra.setdefault("tool_namespace", descriptor.namespace)
+        if result is not None:
+            log.extra.setdefault("evidence_count", len(result.evidences or []))
         log_method = getattr(self.telemetry_client, "log_remote_tool", None)
         if callable(log_method):
             log_method(tool_name=tool_name, log=log)
+
+    @staticmethod
+    def _extract_run_id(request: ToolRunRequest | None) -> Optional[str]:
+        if not request or not request.graph_context:
+            return None
+        metadata = request.graph_context.metadata or {}
+        if not isinstance(metadata, dict):
+            return None
+        value = metadata.get("run_id") or (metadata.get("request_metadata") or {}).get("run_id")
+        return str(value) if value else None
+
+    @staticmethod
+    def _extract_external_allowed(request: ToolRunRequest | None) -> Optional[bool]:
+        if not request or not request.graph_context:
+            return None
+        metadata = request.graph_context.metadata or {}
+        if not isinstance(metadata, dict):
+            return None
+        value = metadata.get("external_allowed")
+        return bool(value) if isinstance(value, bool) else None
 
     def _serialize_context_window(self, request: ToolRunRequest) -> List[Dict[str, Any]]:
         if not request.context_evidences:
@@ -611,27 +688,37 @@ class DeepSearchToolManager:
         limit = max(0, self.max_remote_evidences)
         if limit:
             window = window[-limit:]
-        return [evidence.model_dump() for evidence in window]
+        char_budget = self.max_remote_context_chars if self.max_remote_context_chars > 0 else None
+        serialized: List[Dict[str, Any]] = []
+        for evidence in window:
+            snippet = (evidence.content or "").strip()
+            if char_budget is not None:
+                take = min(len(snippet), char_budget)
+                snippet = snippet[:take]
+                char_budget -= take
+                if char_budget <= 0:
+                    char_budget = 0
+            serialized.append(
+                {
+                    "chunk_id": evidence.chunk_id,
+                    "source": evidence.source,
+                    "score": evidence.score,
+                    "content": snippet,
+                }
+            )
+        return serialized
 
-    def _context_digest(self, request: ToolRunRequest) -> Optional[str]:
-        if not request.context_evidences or self.max_remote_context_chars <= 0:
+    @staticmethod
+    def _context_digest(serialized_window: List[Dict[str, Any]]) -> Optional[str]:
+        if not serialized_window:
             return None
-        window = request.context_evidences
-        limit = max(0, self.max_remote_evidences)
-        if limit:
-            window = window[-limit:]
-        budget = self.max_remote_context_chars
         snippets: List[str] = []
-        for evidence in reversed(window):
-            if budget <= 0:
-                break
-            text = (evidence.content or "").strip()
-            if not text:
+        for entry in serialized_window:
+            snippet = (entry.get("content") or "").strip()
+            if not snippet:
                 continue
-            snippet = text[: min(len(text), budget)]
-            snippets.append(f"[{evidence.chunk_id}] {snippet}")
-            budget -= len(snippet)
-        snippets.reverse()
+            chunk_id = entry.get("chunk_id") or "chunk"
+            snippets.append(f"[{chunk_id}] {snippet}")
         return "\n".join(snippets) if snippets else None
 
     @staticmethod

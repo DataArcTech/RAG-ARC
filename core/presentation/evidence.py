@@ -176,11 +176,12 @@ def _ensure_subgraph(
     *,
     node_limit: Optional[int],
     edge_limit: Optional[int],
+    graph_store: Any | None = None,
 ) -> Optional[Dict[str, Any]]:
     if subgraph_data:
         return _trim_graph_snapshot(subgraph_data, node_limit, edge_limit)
     if subgraph_info:
-        exported = export_subgraph_snapshot(subgraph_info)
+        exported = export_subgraph_snapshot(subgraph_info, graph_store=graph_store)
         return _trim_graph_snapshot(exported, node_limit, edge_limit)
     return None
 
@@ -191,6 +192,7 @@ def build_chat_evidence(
     subgraph_data: Optional[Dict[str, Any]] = None,
     subgraph_info: Optional[Dict[str, Any]] = None,
     max_chunks: Optional[int] = CHAT_TOP_CHUNKS,
+    graph_store: Any | None = None,
 ) -> Dict[str, Any]:
     """Assemble chunk/seed/triple information for chat responses."""
 
@@ -199,6 +201,7 @@ def build_chat_evidence(
         subgraph_info,
         node_limit=CHAT_GRAPH_NODE_LIMIT,
         edge_limit=CHAT_GRAPH_EDGE_LIMIT,
+        graph_store=graph_store,
     )
     evidence = {
         "chunks": _serialize_chunks(chunks, max_chunks),
@@ -213,10 +216,22 @@ def build_chat_evidence(
 def _first_subgraph_info_from_reasoning(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     reasoning = payload.get("reasoning") or {}
     for evidence in reasoning.get("evidences") or []:
-        metadata = (evidence.get("provenance") or {}).get("metadata") or {}
-        subgraph = metadata.get("_subgraph_info")
-        if subgraph:
+        provenance = evidence.get("provenance") or {}
+        metadata = provenance.get("metadata") or {}
+        if isinstance(metadata, dict):
+            subgraph = metadata.get("_subgraph_info") or metadata.get("subgraph_info")
+            if isinstance(subgraph, dict) and subgraph:
+                return subgraph
+        subgraph = provenance.get("_subgraph_info") or provenance.get("subgraph_info")
+        if isinstance(subgraph, dict) and subgraph:
             return subgraph
+        filtered = provenance.get("filtered")
+        if isinstance(filtered, dict):
+            filtered_meta = filtered.get("metadata") or {}
+            if isinstance(filtered_meta, dict):
+                subgraph = filtered_meta.get("_subgraph_info") or filtered_meta.get("subgraph_info")
+                if isinstance(subgraph, dict) and subgraph:
+                    return subgraph
     return None
 
 
@@ -243,6 +258,7 @@ def build_deepsearch_evidence(
     payload: Dict[str, Any],
     *,
     chunk_limit: Optional[int] = DEEPSEARCH_TOP_CHUNKS,
+    graph_store: Any | None = None,
 ) -> Dict[str, Any]:
     """Construct evidence payload from DeepSearch service output."""
 
@@ -256,9 +272,10 @@ def build_deepsearch_evidence(
         subgraph_info,
         node_limit=DEEPSEARCH_GRAPH_NODE_LIMIT,
         edge_limit=DEEPSEARCH_GRAPH_EDGE_LIMIT,
+        graph_store=graph_store,
     )
     graph_chain = (
-        build_graph_chain(subgraph_info, snapshot=graph_snapshot) if subgraph_info else []
+        build_graph_chain(subgraph_info, snapshot=graph_snapshot, graph_store=graph_store) if subgraph_info else []
     )
 
     evidence = {

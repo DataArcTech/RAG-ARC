@@ -138,11 +138,17 @@ async def chat(
     )
     evidence = None
     if request.include_evidence:
+        graph_store = None
+        try:
+            graph_store = rag_inference_handler.get_graph_store()
+        except Exception:  # noqa: BLE001
+            graph_store = None
         evidence = build_chat_evidence(
             chunks,
             subgraph_data=subgraph_data,
             subgraph_info=subgraph_info,
             max_chunks=CHAT_TOP_CHUNKS,
+            graph_store=graph_store,
         )
     subgraph_payload = subgraph_data if request.return_subgraph else None
     return ChatResponse(response=response_text, chunks=chunks, subgraph=subgraph_payload, evidence=evidence)

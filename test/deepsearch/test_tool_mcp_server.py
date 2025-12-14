@@ -4,6 +4,7 @@ import pytest
 
 from application.deepsearch.tool_mcp_server import build_tool_mcp_server
 from config.application.deepsearch_tool_server_config import load_tool_server_config
+from core.deepsearch.tools import get_tool_descriptor
 from core.graph_adapter.base import GraphAccessScope, GraphAdapterCapability, GraphAdapterMetadata
 from core.graph_adapter import registry
 
@@ -65,7 +66,9 @@ async def test_tool_mcp_server_invokes_registered_tool_with_adapter_injection():
         default_scope=GraphAccessScope(scope_id="stub-owner"),
     )
 
-    tool = await server.fastmcp._tool_manager.get_tool("graph.bridge_lookup")
+    descriptor = get_tool_descriptor("graph.bridge_lookup")
+    assert descriptor is not None
+    tool = await server.fastmcp._tool_manager.get_tool(descriptor.namespace)
     assert tool is not None
 
     result = await tool.fn(

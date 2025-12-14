@@ -2,7 +2,6 @@
 import logging
 from typing import Any, Dict, List, Optional, Set
 
-from application.rag_inference.graph_store_provider import get_graph_store
 from config.output_limits import (
     DEEPSEARCH_GRAPH_NODE_LIMIT,
     DEEPSEARCH_GRAPH_EDGE_LIMIT,
@@ -11,14 +10,17 @@ from config.output_limits import (
 logger = logging.getLogger(__name__)
 
 
-def export_subgraph_snapshot(subgraph_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def export_subgraph_snapshot(
+    subgraph_info: Dict[str, Any],
+    *,
+    graph_store: Any | None = None,
+) -> Optional[Dict[str, Any]]:
     """Return the exported subgraph (nodes/edges) for downstream rendering."""
 
     if not subgraph_info:
         return None
-    graph_store = get_graph_store()
     if graph_store is None:
-        logger.warning("Graph store unavailable; skipping graph chain generation")
+        logger.warning("Graph store unavailable; skipping graph snapshot export")
         return None
 
     node_ids: Set[str] = set(subgraph_info.get("subgraph_nodes") or [])
@@ -61,13 +63,18 @@ def export_subgraph_snapshot(subgraph_info: Dict[str, Any]) -> Optional[Dict[str
         return None
 
 
-def build_graph_chain(subgraph_info: Dict[str, Any], snapshot: Optional[Dict[str, Any]] = None) -> List[str]:
+def build_graph_chain(
+    subgraph_info: Dict[str, Any],
+    snapshot: Optional[Dict[str, Any]] = None,
+    *,
+    graph_store: Any | None = None,
+) -> List[str]:
     """Export a compact graph chain from subgraph diagnostics."""
 
     if not subgraph_info:
         return []
 
-    subgraph = snapshot or export_subgraph_snapshot(subgraph_info)
+    subgraph = snapshot or export_subgraph_snapshot(subgraph_info, graph_store=graph_store)
     if not subgraph:
         return []
 
