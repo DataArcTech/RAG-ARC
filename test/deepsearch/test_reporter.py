@@ -34,6 +34,16 @@ def _build_trace(include_final_answer: bool = True):
         ],
         "adapter_metadata": {"adapter_name": "hipporag"},
         "coverage_metrics": {"coverage_ratio": 0.75},
+        "graph_context": {
+            "adapter_name": "hipporag",
+            "question": "Who partnered with OpenAI?",
+            "metadata": {
+                "request_metadata": {
+                    "conversation_id": "conv-123",
+                    "locale": "en-US",
+                }
+            },
+        },
     }
     if include_final_answer:
         trace["final_answer"] = "Microsoft maintains the flagship partnership with OpenAI, enabling Azure-hosted deployments."
@@ -47,14 +57,14 @@ def test_reporter_prefers_final_answer_and_merges_evidence():
 
     report = reporter.compose(trace, external)
 
-    assert report["answer"].startswith("# Who partnered"), "Structured report should include Markdown heading"
-    assert report["structured_report"]["summary"].startswith(
-        "Microsoft maintains the flagship partnership"
-    ), "Structured summary should preserve final answer content."
+    assert report["answer"].startswith("## Final Answer"), "answer should include contextual heading"
+    assert "Microsoft maintains the flagship partnership" in report["answer"], "Final answer content should persist"
+    assert "Microsoft maintains the flagship partnership" in report["structured_report"]["summary"]
     assert len(report["evidences"]) == 2
     assert report["metadata"]["plan"]["completed"] == 1
     assert report["metadata"]["graph_summary"]["unique_nodes"] == 2
     assert report["metadata"]["parallel_thinking_runs"] == 2
+    assert report["metadata"]["request_context"]["conversation_id"] == "conv-123"
 
 
 def test_reporter_builds_highlights_when_final_answer_missing():
@@ -63,6 +73,6 @@ def test_reporter_builds_highlights_when_final_answer_missing():
 
     report = reporter.compose(trace, external_evidence=[])
 
-    assert report["structured_report"]["summary"].startswith("Graph findings:")
+    assert report["structured_report"]["summary"].startswith("Graph findings:"), "Template override should apply"
     assert report["highlights"], "High-level summaries should be extracted from reasoning steps"
     assert "Evidence collected" not in report["structured_report"]["summary"], "Highlights should populate summary"

@@ -1,5 +1,4 @@
 """Common primitives shared by DeepSearch tools."""
-import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Protocol
@@ -170,10 +169,7 @@ async def call_llm_async(llm, messages: List[Dict[str, str]], **kwargs) -> str:
     if callable(async_chat):
         return await async_chat(messages, **kwargs)
 
-    def _chat() -> str:
-        chat = getattr(llm, "chat", None)
-        if not callable(chat):
-            raise RuntimeError("LLM connector does not expose chat/achat methods")
-        return chat(messages, **kwargs)
-
-    return await asyncio.to_thread(_chat)
+    chat = getattr(llm, "chat", None)
+    if not callable(chat):
+        raise RuntimeError("LLM connector does not expose chat/achat methods")
+    return chat(messages, **kwargs)

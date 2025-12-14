@@ -25,6 +25,8 @@ def get_deepsearch_config() -> Dict[str, DeepSearchPlannerConfig]:
 
 
 def _ensure_chat_credentials() -> None:
+    if os.getenv("DEEPSEARCH_RUN_LLM_INTEGRATION_TESTS", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        pytest.skip("Set DEEPSEARCH_RUN_LLM_INTEGRATION_TESTS=true to run planner LLM integration tests.")
     if not (
         os.getenv("CHAT_API_KEY")
         or os.getenv("OPENAI_API_KEY")
@@ -115,3 +117,37 @@ def test_planner_generates_real_plan():
         assert saved_payload["graph_context"]["adapter_name"] == runtime_config["graph_adapter_name"]
     finally:
         shutil.rmtree(plan_output_dir, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_planner_adapts_step_budget(tmp_path):
+    runtime_config = {
+        "mode": "react",
+        "max_steps": 6,
+        "enable_sub_question": True,
+        "persist_plan": False,
+        "plan_output_dir": str(tmp_path),
+        "allow_external_channel": False,
+        "graph_channel_tool": "graph_adapter.query",
+        "text_channel_tool": "graph.context_rollup",
+        "web_channel_tool": "web.search",
+    }
+    planner = DeepSearchPlanner(
+        prompt_store=None,
+        llm_connector=None,
+        config=runtime_config,
+    )
+    scope = GraphAccessScope(scope_id="dynamic-test")
+
+    short = await planner.build_plan("定义 RAG-ARC", access_scope=scope)
+    complex_question = (
+        "Compare RAG-ARC adoption plans across APAC, EMEA, and AMER, "
+        "highlight blockers, timelines, and propose mitigation roadmap."
+    )
+    complex_plan = await planner.build_plan(complex_question, access_scope=scope)
+
+    short_steps = short["plan"]["config"]["max_steps"]
+    complex_steps = complex_plan["plan"]["config"]["max_steps"]
+
+    assert short_steps < planner._base_max_steps
+    assert complex_steps > short_steps

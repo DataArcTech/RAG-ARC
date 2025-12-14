@@ -101,15 +101,22 @@ def _emit_json_output(
 ) -> Optional[Path]:
     """Persist JSON payload to disk and optionally emit it to stdout."""
 
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+    payload_size = len(serialized.encode("utf-8"))
+    typer.echo(f"[debug] trimmed payload size: {payload_size} bytes")
     if print_to_console or owner_id is None:
-        typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+        typer.echo(serialized)
+        typer.echo("[debug] payload printed to console")
     if owner_id is None:
         return None
     target = _write_json_payload(payload, owner_id, prefix)
-    typer.echo(f"JSON payload saved to {target}")
+    typer.echo(f"JSON payload saved to {target} ({target.stat().st_size} bytes)")
     if raw_payload is not None:
+        raw_serialized = json.dumps(raw_payload, ensure_ascii=False, indent=2)
         raw_target = _write_json_payload(raw_payload, owner_id, f"{prefix}_raw")
-        typer.echo(f"Raw JSON saved to {raw_target}")
+        typer.echo(
+            f"Raw JSON saved to {raw_target} ({raw_target.stat().st_size} bytes; in-memory size {len(raw_serialized.encode('utf-8'))} bytes)"
+        )
     return target
 
 
@@ -288,10 +295,15 @@ def _print_deepsearch_result(
     prefix: str = "deepsearch",
     include_evidence: bool = False,
     raw_payload: Optional[Dict[str, Any]] = None,
+    graph_store: Any | None = None,
 ) -> None:
     """Render DeepSearchService.run output."""
 
-    trimmed_payload = trim_deepsearch_payload(payload, include_evidence=include_evidence)
+    trimmed_payload = trim_deepsearch_payload(
+        payload,
+        include_evidence=include_evidence,
+        graph_store=graph_store,
+    )
 
     summary = DeepSearchReport.from_payload(
         trimmed_payload,
@@ -433,6 +445,11 @@ def deepsearch(
         "--with-evidence/--no-evidence",
         help="Attach chunk/graph evidence bundle (chunks/triples/seeds).",
     ),
+    save_raw: bool = typer.Option(
+        False,
+        "--save-raw/--no-save-raw",
+        help="Persist the full raw payload alongside the trimmed JSON output.",
+    ),
 ) -> None:
     """Run DeepSearchService over the configured graph adapter."""
 
@@ -451,13 +468,21 @@ def deepsearch(
             owner_id=str(ctx.owner_id),
         )
     )
+    graph_store = None
+    try:
+        rag = registrator.get_object("rag_inference")
+        if isinstance(rag, RAGInference):
+            graph_store = rag.get_graph_store()
+    except Exception:  # noqa: BLE001
+        graph_store = None
     _print_deepsearch_result(
         result,
         output_json=output_json,
         owner_id=ctx.owner_id,
         prefix="deepsearch",
         include_evidence=include_evidence,
-        raw_payload=result,
+        raw_payload=result if save_raw else None,
+        graph_store=graph_store,
     )
 
 @app.command()

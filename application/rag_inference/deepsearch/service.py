@@ -1,8 +1,11 @@
 """Service façade wiring DeepSearch planner, reasoning loop, and reporting."""
 import inspect
+import json
 import logging
+import os
 import time
-from typing import Any, Dict, Optional, Sequence, Type
+from pathlib import Path
+from typing import Any, Callable, Dict, Optional, Sequence, Type
 
 from encapsulation.data_model.deepsearch import GraphQueryContext
 from core.graph_adapter.base import GraphAccessScope
@@ -49,7 +52,8 @@ class DeepSearchService:
         # state_cls: Allows swapping in richer state trackers when needed
         self.state_cls = state_cls
         # config: Injected via config/application/deepsearch_config.py to keep construction data-driven
-        self.config = config or {}
+        self.config = self._coerce_config(config)
+        self.experiment_output_dir = self._resolve_experiment_dir()
 
     async def run(
         self,
@@ -59,6 +63,8 @@ class DeepSearchService:
         access_scope: Optional[GraphAccessScope] = None,
         graph_context: Optional[GraphQueryContext] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        run_id: Optional[str] = None,
+        stage_listener: Optional[Callable[[Dict[str, Any], DeepSearchState], None]] = None,
     ) -> Dict[str, Any]:
         """Plan → Graph reasoning → (optional) Gap/External → Report."""
 
@@ -67,7 +73,8 @@ class DeepSearchService:
             raise ValueError("question must be a non-empty string")
 
         scope = self._resolve_scope(owner_id=owner_id, access_scope=access_scope, graph_context=graph_context)
-        state = self.state_cls(config_fingerprint=self._config_fingerprint())
+        state = self._build_state(run_id=run_id, stage_listener=stage_listener)
+        state.record_request_metadata(metadata)
         state.record_cost(
             "request_context",
             self._json_safe(
@@ -94,6 +101,12 @@ class DeepSearchService:
         plan_steps: Sequence[Dict[str, Any]] = plan_payload.get("steps") or []
         graph_context_payload = plan_payload.get("graph_context") or {}
         reasoning_context = GraphQueryContext(**graph_context_payload)
+        reasoning_context = self._attach_run_metadata(
+            reasoning_context,
+            run_id=state.run_id,
+            metadata=metadata,
+            external_allowed=self._external_allowed_flag(),
+        )
 
         reasoning_trace = await self._execute_stage(
             "graph_reasoning",
@@ -117,16 +130,21 @@ class DeepSearchService:
             state.record_gap_result(gap_result)
             reasoning_trace["gap_result"] = gap_result
 
-        external_logs = await self._execute_stage(
+        external_payload = await self._execute_stage(
             "external_channel",
             self._run_external_if_needed,
             state=state,
             stage_timings=stage_timings,
             gap_result=gap_result,
             reasoning_trace=reasoning_trace,
-        )
+            )
+        external_logs: Sequence[Dict[str, Any]] = []
+        external_evidences: Sequence[Dict[str, Any]] = []
+        if external_payload:
+            external_logs = external_payload.get("logs") or []
+            external_evidences = external_payload.get("evidences") or []
         if external_logs:
-            state.extend_external_calls(external_logs)
+            state.extend_external_calls(list(external_logs))
 
         report = await self._execute_stage(
             "report",
@@ -134,7 +152,7 @@ class DeepSearchService:
             state=state,
             stage_timings=stage_timings,
             reasoning_trace=reasoning_trace,
-            external_logs=external_logs,
+            external_logs=external_evidences,
         )
         state.record_report(report)
 
@@ -142,6 +160,14 @@ class DeepSearchService:
         snapshot.setdefault("plan_metadata", plan_result.get("plan"))
         if stage_timings:
             state.record_cost("stage_timings", stage_timings)
+        self._persist_experiment_snapshot(
+            question=normalized_question,
+            plan=plan_result,
+            reasoning=reasoning_trace,
+            report=report,
+            snapshot=snapshot,
+            stage_timings=stage_timings,
+        )
         logger.info(
             "DeepSearch run %s completed (owner=%s, timings=%s)",
             snapshot.get("run_id"),
@@ -154,6 +180,34 @@ class DeepSearchService:
             "report": report,
             "state": snapshot,
         }
+
+    def _build_state(
+        self,
+        *,
+        run_id: Optional[str],
+        stage_listener: Optional[Callable[[Dict[str, Any], DeepSearchState], None]],
+    ) -> DeepSearchState:
+        kwargs: Dict[str, Any] = {"config_fingerprint": self._config_fingerprint()}
+        if run_id:
+            kwargs["run_id"] = run_id
+        if stage_listener:
+            kwargs["stage_listener"] = stage_listener
+        try:
+            return self.state_cls(**kwargs)
+        except TypeError:
+            # Backward-compatible fallback if custom state_cls does not accept stage_listener/run_id.
+            state = self.state_cls(config_fingerprint=self._config_fingerprint())
+            if run_id:
+                try:
+                    state.run_id = run_id  # type: ignore[misc]
+                except Exception:
+                    pass
+            if stage_listener:
+                try:
+                    state.stage_listener = stage_listener  # type: ignore[misc]
+                except Exception:
+                    pass
+            return state
 
     def _resolve_scope(
         self,
@@ -182,12 +236,21 @@ class DeepSearchService:
         self,
         gap_result: Optional[Dict[str, Any]],
         reasoning_trace: Dict[str, Any],
-    ) -> Optional[Sequence[Dict[str, Any]]]:
+    ) -> Optional[Dict[str, Sequence[Dict[str, Any]]]]:
         if not gap_result or not gap_result.get("should_trigger_external"):
             return None
         if not self.external_channel:
             return None
-        tasks = reasoning_trace.get("pending_external") or []
+        tasks = list(reasoning_trace.get("pending_external") or [])
+        if not tasks:
+            synthesized = self._synthesize_external_tasks(
+                question=reasoning_trace.get("question", ""),
+                gap_result=gap_result,
+                reasoning_trace=reasoning_trace,
+            )
+            if synthesized:
+                tasks.extend(synthesized)
+                reasoning_trace.setdefault("pending_external", []).extend(synthesized)
         if not tasks:
             return None
         try:
@@ -254,6 +317,42 @@ class DeepSearchService:
         return result
 
     @staticmethod
+    def _attach_run_metadata(
+        context: GraphQueryContext,
+        *,
+        run_id: str,
+        metadata: Optional[Dict[str, Any]],
+        external_allowed: Optional[bool] = None,
+    ) -> GraphQueryContext:
+        base = dict(context.metadata or {})
+        base["run_id"] = run_id
+        if external_allowed is not None:
+            base["external_allowed"] = bool(external_allowed)
+        if metadata:
+            request_bucket = base.setdefault("request_metadata", {})
+            if isinstance(request_bucket, dict):
+                request_bucket.update(metadata)
+        try:
+            return context.model_copy(update={"metadata": base})
+        except AttributeError:
+            payload = context.model_dump(exclude_none=True)
+            payload["metadata"] = base
+            return GraphQueryContext(**payload)
+
+    def _external_allowed_flag(self) -> bool:
+        channel = self.external_channel
+        if channel is None:
+            return False
+        checker = getattr(channel, "_is_enabled", None)
+        if callable(checker):
+            try:
+                return bool(checker())
+            except Exception:
+                return False
+        enabled = getattr(channel, "enabled", None)
+        return bool(enabled)
+
+    @staticmethod
     def _json_safe(value: Any) -> Any:
         if value is None or isinstance(value, (str, int, float, bool)):
             return value
@@ -272,3 +371,110 @@ class DeepSearchService:
         if hasattr(value, "__dict__"):
             return DeepSearchService._json_safe(vars(value))
         return str(value)
+
+    @staticmethod
+    def _coerce_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if config is None:
+            return {}
+        if isinstance(config, dict):
+            return dict(config)
+        if hasattr(config, "model_dump"):
+            try:
+                return config.model_dump()
+            except TypeError:
+                return config.model_dump(exclude_none=True)
+        if hasattr(config, "__dict__"):
+            return {
+                key: value
+                for key, value in vars(config).items()
+                if not key.startswith("_")
+            }
+        return {"value": config}
+
+    def _synthesize_external_tasks(
+        self,
+        *,
+        question: str,
+        gap_result: Dict[str, Any],
+        reasoning_trace: Dict[str, Any],
+    ) -> Sequence[Dict[str, Any]]:
+        description = gap_result.get("reason") or "External search for missing coverage"
+        normalized_question = (question or reasoning_trace.get("question") or "").strip()
+        if not normalized_question:
+            normalized_question = description
+        metadata = {
+            "provider": getattr(self.external_channel, "default_provider", None),
+            "query": normalized_question,
+            "source": "gap_detection",
+            "gap_reason": gap_result.get("reason"),
+            "missing_topics": gap_result.get("missing_topics") or [],
+        }
+        step_id = f"gap_web_{int(time.time() * 1000)}"
+        return [
+            {
+                "step_id": step_id,
+                "description": description,
+                "channel": "web",
+                "tool": "web.search",
+                "metadata": metadata,
+                "tool_args": {"query": normalized_question, "gap_reason": gap_result.get("reason")},
+                "requires_external": True,
+            }
+        ]
+
+    def _resolve_experiment_dir(self) -> Optional[Path]:
+        candidate = None
+        if isinstance(self.config, dict):
+            candidate = self.config.get("experiment_output_dir")
+        override = os.getenv("DEEPSEARCH_EXPERIMENT_OUTPUT_DIR")
+        directory = override or candidate
+        if not directory:
+            return None
+        return Path(str(directory)).expanduser()
+
+    def _persist_experiment_snapshot(
+        self,
+        *,
+        question: str,
+        plan: Dict[str, Any],
+        reasoning: Dict[str, Any],
+        report: Dict[str, Any],
+        snapshot: Dict[str, Any],
+        stage_timings: Dict[str, Any],
+    ) -> None:
+        if not self.experiment_output_dir:
+            return
+        try:
+            self.experiment_output_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:  # pragma: no cover - filesystem guard
+            logger.warning("Failed to prepare experiment directory %s: %s", self.experiment_output_dir, exc)
+            return
+
+        plan_payload = plan.get("plan") or {}
+        plan_id = plan.get("plan_id") or plan_payload.get("plan_id") or snapshot.get("plan_metadata", {}).get("plan_id")
+        reasoning_steps = reasoning.get("reasoning_steps") or []
+        experiment_record = {
+            "question": question,
+            "plan_id": plan_id,
+            "config_fingerprint": snapshot.get("config_fingerprint"),
+            "stage_timings": stage_timings,
+            "coverage_metrics": reasoning.get("coverage_metrics"),
+            "gap_result": reasoning.get("gap_result") or snapshot.get("gap_result"),
+            "plan_steps": plan_payload.get("steps") or [],
+            "reasoning_steps": reasoning_steps,
+            "think_notes": reasoning.get("think_notes") or [],
+            "tool_results": reasoning.get("tool_results") or [],
+            "answer": report.get("answer"),
+            "highlights": report.get("highlights"),
+            "evidence_ids": [chunk.get("chunk_id") for chunk in report.get("evidences") or []],
+            "request_metadata": snapshot.get("request_metadata"),
+        }
+        filename = plan_id or snapshot.get("run_id") or f"run_{int(time.time() * 1000)}"
+        path = self.experiment_output_dir / f"{filename}.json"
+        try:
+            path.write_text(
+                json.dumps(self._json_safe(experiment_record), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:  # pragma: no cover - filesystem guard
+            logger.warning("Failed to persist DeepSearch experiment snapshot: %s", exc)

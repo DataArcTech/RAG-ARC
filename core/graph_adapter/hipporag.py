@@ -1,5 +1,4 @@
 """HippoRAG-backed GraphDeepSearchAdapter implementation."""
-import asyncio
 import json
 import logging
 from pathlib import Path
@@ -172,14 +171,18 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         )
 
     async def _retrieve_chunks(self, query: str, owner_token: str) -> List[Chunk]:
-        """Execute synchronous HippoRAG retrieval in a worker thread."""
+        """Execute synchronous HippoRAG retrieval.
+
+        Note: Avoid background thread executors in the DeepSearch hot path to keep behavior
+        deterministic across constrained runtime environments.
+        """
 
         kwargs = {
             "k": self.default_top_k,
             "owner_id": owner_token,
             "return_subgraph_info": True,
         }
-        return await asyncio.to_thread(self.retriever.invoke, query, **kwargs)
+        return self.retriever.invoke(query, **kwargs)
 
     def _build_graph_payload(
         self,

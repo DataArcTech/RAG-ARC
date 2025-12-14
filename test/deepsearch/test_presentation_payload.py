@@ -20,7 +20,20 @@ def _sample_result():
                 }
             ],
             "evidences": [{"chunk_id": f"reason-{idx}", "content": f"reasoning {idx}"} for idx in range(4)],
+            "think_notes": [{"plan_step_id": "plan_01", "reasoning": "pause"}],
             "coverage_metrics": {},
+            "tool_results": [
+                {
+                    "plan_step_id": "plan_01",
+                    "tool_name": "graph.pattern_scan",
+                    "channel": "graph",
+                    "result": {
+                        "summary": "Plan step completed.",
+                        "diagnostics": {"latency_ms": 120},
+                        "think_notes": [],
+                    },
+                }
+            ],
         },
         "report": {
             "question": "Who runs RAG-ARC?",
@@ -35,7 +48,7 @@ def _sample_result():
                 "citations": [],
             },
         },
-        "state": {},
+        "state": {"request_metadata": {"priority": "high"}},
     }
 
 
@@ -61,6 +74,12 @@ def test_trim_payload_attaches_evidence(monkeypatch):
     assert payload["graph_chain"] == ["A -[related_to]-> B"]
     assert len(payload["report"]["evidences"]) == 2
     assert payload["reasoning"]["reasoning_steps"]
+    assert payload["reasoning"]["think_notes"]
+    assert payload["question"] == "Who runs RAG-ARC?"
+    assert payload["tool_runs"]
+    assert payload["tool_runs"][0]["tool_name"] == "graph.pattern_scan"
+    assert payload["request_metadata"] == {"priority": "high"}
+    assert payload["overview"]["has_think_notes"] is True
     assert calls and calls[0][1] == 2
 
 
@@ -79,7 +98,8 @@ def test_trim_payload_skips_evidence_when_disabled(monkeypatch):
 
     payload = trim_deepsearch_payload(_sample_result(), include_evidence=False, chunk_limit=3)
 
-    assert "evidence" not in payload
+    assert payload["evidence"]["chunks"] == []
+    assert payload["evidence"]["seed_entities"] == []
     assert payload["graph_chain"] == ["chain-item"]
     assert len(payload["report"]["evidences"]) == 3
 
@@ -99,8 +119,8 @@ def test_trim_payload_includes_reasoning_summaries(monkeypatch):
 
     payload = trim_deepsearch_payload(_sample_result(), include_evidence=False, chunk_limit=1)
 
-    assert payload["reasoning_steps"]
-    step = payload["reasoning_steps"][0]
+    assert payload["reasoning"]["reasoning_steps"]
+    step = payload["reasoning"]["reasoning_steps"][0]
     assert step["tool"] == "graph.pattern_scan"
     assert step["output_summary"] == "Plan step completed."
     assert step["diagnostics"] == {"confidence": 0.72, "latency_ms": 120, "tool": "graph.pattern_scan"}

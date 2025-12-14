@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
@@ -13,7 +14,7 @@ from mcp.types import ToolAnnotations
 from config.core.deepsearch.graph_adapter_config import GraphAdapterConfig
 from config.encapsulation.llm.chat.openai import OpenAIChatConfig
 from core.deepsearch.tooling import DeepSearchToolManager
-from core.deepsearch.tools import ToolDescriptor, builtin_tool_descriptors
+from core.deepsearch.tools import GraphTool, ToolDescriptor, builtin_tool_descriptors
 from core.graph_adapter.base import GraphAccessScope
 from core.graph_adapter.scope_provider import current_scope_provider
 from encapsulation.data_model.deepsearch import GraphQueryContext
@@ -82,24 +83,70 @@ class LoggingTelemetryClient:
     """Minimal telemetry client that emits structured logs for tool usage."""
 
     def log_tool_invocation(self, *, tool_name: str, payload: Dict[str, Any]) -> None:
+        evidence_count = payload.get("evidence_count")
         logger.info(
-            "DeepSearch MCP tool executed locally",
+            "deepsearch.tool",
             extra={
+                "event": "tool",
+                "run_id": payload.get("run_id"),
                 "tool_name": tool_name,
+                "tool_namespace": payload.get("tool_namespace"),
                 "plan_step": payload.get("plan_step"),
-                "summary": payload.get("summary"),
-                "diagnostics": payload.get("diagnostics"),
+                "latency_ms": payload.get("latency_ms"),
+                "evidence_count": evidence_count if evidence_count is not None else payload.get("evidences_count"),
+                "external_allowed": payload.get("external_allowed"),
+                "scope_override_allowed": payload.get("scope_override_allowed"),
+                "scope_override_policy": payload.get("scope_override_policy"),
+                "mcp_server": payload.get("mcp_server"),
             },
         )
 
     def log_remote_tool(self, *, tool_name: str, log) -> None:
         logger.info(
-            "DeepSearch MCP forwarded tool invocation",
+            "deepsearch.tool_remote",
             extra={
+                "event": "tool_remote",
+                "run_id": (log.extra or {}).get("run_id"),
                 "tool_name": tool_name,
+                "tool_namespace": (log.extra or {}).get("tool_namespace"),
                 "server_name": log.server_name,
                 "latency_ms": log.latency_ms,
-                "excerpt": log.response_excerpt,
+                "evidence_count": (log.extra or {}).get("evidence_count"),
+                "external_allowed": (log.extra or {}).get("external_allowed"),
+                "scope_override_allowed": (log.extra or {}).get("scope_override_allowed"),
+                "scope_override_policy": (log.extra or {}).get("scope_override_policy"),
+                "transport": (log.extra or {}).get("transport"),
+            },
+        )
+
+    def log_gap_detection(self, *, result: Dict[str, Any], context: Dict[str, Any] | None = None) -> None:
+        diagnostics = (result or {}).get("diagnostics") or {}
+        logger.info(
+            "deepsearch.gap",
+            extra={
+                "event": "gap",
+                "run_id": (context or {}).get("run_id"),
+                "question": (context or {}).get("question"),
+                "external_allowed": diagnostics.get("external_allowed"),
+                "should_trigger_external": result.get("should_trigger_external"),
+                "evidence_count": diagnostics.get("evidence_count"),
+                "coverage_score": result.get("coverage_score"),
+                "confidence_score": result.get("confidence_score"),
+                "missing_topics_count": len(result.get("missing_topics") or []),
+            },
+        )
+
+    def log_external_channel(self, *, payload: Dict[str, Any]) -> None:
+        logger.info(
+            "deepsearch.external",
+            extra={
+                "event": "external",
+                "run_id": payload.get("run_id"),
+                "provider": payload.get("provider"),
+                "step_id": payload.get("step_id"),
+                "status": payload.get("status"),
+                "latency_ms": payload.get("latency_ms"),
+                "evidence_count": payload.get("evidence_count"),
             },
         )
 
@@ -120,6 +167,9 @@ def build_tool_mcp_server(
     default_scope: GraphAccessScope | None = None,
     telemetry_client: Any | None = None,
     tool_manager_config: Optional[Dict[str, Any]] = None,
+    local_tools: Optional[Dict[str, GraphTool]] = None,
+    scope_override_policy: Optional[str] = None,
+    scope_override_token: Optional[str] = None,
 ) -> "DeepSearchToolMCPServer":
     """Factory that builds the server using env defaults."""
 
@@ -143,6 +193,9 @@ def build_tool_mcp_server(
         default_scope=scope,
         telemetry_client=telemetry,
         tool_manager_config=tool_manager_config,
+        local_tools=local_tools,
+        scope_override_policy=scope_override_policy,
+        scope_override_token=scope_override_token,
     )
 
 
@@ -159,6 +212,9 @@ class DeepSearchToolMCPServer:
         default_scope: GraphAccessScope | None = None,
         telemetry_client=None,
         tool_manager_config: Optional[Dict[str, Any]] = None,
+        local_tools: Optional[Dict[str, GraphTool]] = None,
+        scope_override_policy: Optional[str] = None,
+        scope_override_token: Optional[str] = None,
     ) -> None:
         if llm_connector is None:
             raise ValueError("llm_connector must be provided for tool MCP server")
@@ -170,6 +226,14 @@ class DeepSearchToolMCPServer:
         if self.default_scope is None:
             raise ValueError("Graph access scope is required for DeepSearch tool MCP server.")
         self.adapter_name = self._resolve_adapter_name(adapter)
+        self._scope_override_policy = self._normalize_scope_override_policy(
+            scope_override_policy or os.getenv("DEEPSEARCH_TOOL_MCP_SCOPE_OVERRIDE_POLICY")
+        )
+        self._scope_override_token = (
+            scope_override_token
+            if scope_override_token is not None
+            else os.getenv("DEEPSEARCH_TOOL_MCP_SCOPE_OVERRIDE_TOKEN")
+        )
         self.fastmcp = FastMCP("DeepSearch Tool MCP Server", instructions=instructions)
         tool_configs = self._build_tool_manager_config(
             llm_connector=llm_connector,
@@ -178,8 +242,17 @@ class DeepSearchToolMCPServer:
         self.tool_manager = DeepSearchToolManager(
             tool_configs=tool_configs,
             telemetry_client=telemetry_client or LoggingTelemetryClient(),
+            local_tools=local_tools,
         )
         self._register_tools()
+
+    @staticmethod
+    def _normalize_scope_override_policy(raw: Optional[str]) -> str:
+        policy = (raw or "ignore").strip().lower()
+        if policy in {"ignore", "allow_trusted", "allow_all"}:
+            return policy
+        logger.warning("Unknown scope override policy %r; defaulting to ignore", raw)
+        return "ignore"
 
     def _resolve_enabled_set(
         self,
@@ -239,8 +312,9 @@ class DeepSearchToolMCPServer:
             if descriptor.name not in self.enabled_tools:
                 continue
             tool_callable = self._build_callable(descriptor)
+            mcp_tool_name = descriptor.namespace or descriptor.name
             function_tool = FunctionTool(
-                name=descriptor.name,
+                name=mcp_tool_name,
                 description=descriptor.description,
                 parameters=descriptor.input_schema,
                 annotations=self._build_annotations(descriptor),
@@ -249,24 +323,31 @@ class DeepSearchToolMCPServer:
                 fn=tool_callable,
             )
             self.fastmcp.add_tool(function_tool)
-            logger.info("Registered MCP tool %s (%s)", descriptor.name, descriptor.channel)
+            logger.info("Registered MCP tool %s (logical=%s)", mcp_tool_name, descriptor.name)
 
     def _build_callable(self, descriptor: ToolDescriptor):
         async def _tool_callable(ctx: Context | None = None, **payload: Any):
-            invocation_payload = self._inject_defaults(payload)
+            start = time.perf_counter()
+            invocation_payload, audit = self._inject_defaults(payload)
             result = await self.tool_manager.invoke(descriptor.name, payload=invocation_payload)
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            self._log_invocation(
+                descriptor=descriptor,
+                graph_context=invocation_payload.get("graph_context"),
+                latency_ms=latency_ms,
+                evidence_count=len(result.evidences or []),
+                audit=audit,
+            )
             return result.model_dump()
 
         return _tool_callable
 
-    def _inject_defaults(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _inject_defaults(self, payload: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
         invocation_payload = dict(payload or {})
         adapter = invocation_payload.get("adapter")
         if adapter is None:
             invocation_payload["adapter"] = self.adapter
-        scope = invocation_payload.get("access_scope")
-        if scope is None and self.default_scope is not None:
-            invocation_payload["access_scope"] = self.default_scope
+        audit = self._apply_scope_override_policy(invocation_payload)
         graph_context = invocation_payload.get("graph_context")
         if graph_context is None and self.adapter_name:
             invocation_payload["graph_context"] = GraphQueryContext(
@@ -274,23 +355,99 @@ class DeepSearchToolMCPServer:
                 question=invocation_payload.get("question"),
                 access_scope=self.default_scope,
             )
+        elif isinstance(graph_context, GraphQueryContext):
+            updates: Dict[str, Any] = {}
+            if self.adapter_name and not graph_context.adapter_name:
+                updates["adapter_name"] = self.adapter_name
+            if self.default_scope and (audit.get("enforced_scope") or graph_context.access_scope is None):
+                updates["access_scope"] = self.default_scope
+            if updates:
+                invocation_payload["graph_context"] = graph_context.model_copy(update=updates)
         elif isinstance(graph_context, dict):
             normalized = dict(graph_context)
             normalized.setdefault("adapter_name", self.adapter_name)
-            if self.default_scope and not normalized.get("access_scope"):
-                normalized["access_scope"] = {
-                    "scope_id": self.default_scope.scope_id,
-                    "scope_type": self.default_scope.scope_type,
-                    "labels": list(self.default_scope.labels),
-                    "attributes": self.default_scope.attributes,
-                }
+            if self.default_scope and (audit.get("enforced_scope") or not normalized.get("access_scope")):
+                normalized["access_scope"] = self._scope_payload(self.default_scope)
             invocation_payload["graph_context"] = normalized
-        return invocation_payload
+        return invocation_payload, audit
+
+    def _apply_scope_override_policy(self, invocation_payload: Dict[str, Any]) -> Dict[str, Any]:
+        requested_scope = invocation_payload.get("access_scope")
+        requested_scope_present = requested_scope is not None
+        token = self._extract_scope_override_token(invocation_payload)
+        allow_override = False
+        if self._scope_override_policy == "allow_all":
+            allow_override = True
+        elif self._scope_override_policy == "allow_trusted":
+            allow_override = bool(self._scope_override_token and token and token == self._scope_override_token)
+
+        enforced = False
+        if self.default_scope is not None and (self._scope_override_policy == "ignore" or not allow_override):
+            invocation_payload["access_scope"] = self.default_scope
+            enforced = True
+        elif requested_scope is None and self.default_scope is not None:
+            invocation_payload["access_scope"] = self.default_scope
+
+        return {
+            "scope_override_policy": self._scope_override_policy,
+            "scope_override_allowed": allow_override,
+            "scope_override_requested": requested_scope_present,
+            "enforced_scope": enforced,
+        }
+
+    def _extract_scope_override_token(self, invocation_payload: Dict[str, Any]) -> Optional[str]:
+        token = invocation_payload.pop("scope_override_token", None)
+        extra = invocation_payload.get("extra")
+        if isinstance(extra, dict):
+            token = token or extra.pop("scope_override_token", None)
+        token = token or None
+        if token is None:
+            return None
+        return str(token)
+
+    @staticmethod
+    def _scope_payload(scope: GraphAccessScope) -> Dict[str, Any]:
+        return {
+            "scope_id": scope.scope_id,
+            "scope_type": scope.scope_type,
+            "labels": list(scope.labels),
+            "attributes": scope.attributes,
+        }
+
+    def _log_invocation(
+        self,
+        *,
+        descriptor: ToolDescriptor,
+        graph_context: Any,
+        latency_ms: int,
+        evidence_count: int,
+        audit: Dict[str, Any],
+    ) -> None:
+        run_id = None
+        if isinstance(graph_context, dict):
+            run_id = ((graph_context.get("metadata") or {}).get("run_id")) or None
+        elif hasattr(graph_context, "metadata"):
+            metadata = getattr(graph_context, "metadata") or {}
+            if isinstance(metadata, dict):
+                run_id = metadata.get("run_id")
+        logger.info(
+            "deepsearch.tool_mcp",
+            extra={
+                "event": "tool_mcp",
+                "run_id": run_id,
+                "tool_name": descriptor.name,
+                "tool_namespace": descriptor.namespace,
+                "latency_ms": latency_ms,
+                "evidence_count": evidence_count,
+                "scope_override_allowed": audit.get("scope_override_allowed"),
+                "scope_override_policy": audit.get("scope_override_policy"),
+            },
+        )
 
     @staticmethod
     def _build_annotations(descriptor: ToolDescriptor) -> ToolAnnotations:
         return ToolAnnotations(
-            title=descriptor.name,
+            title=descriptor.namespace or descriptor.name,
             readOnlyHint=True,
             idempotentHint=True,
         )

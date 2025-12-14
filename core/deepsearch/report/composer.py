@@ -30,8 +30,10 @@ class DeepSearchReporter:
         evidences = self._merge_evidences(trace.get("evidences"), external_evidence)
         reasoning_steps = trace.get("reasoning_steps") or []
         highlights = self._build_highlights(reasoning_steps)
-        answer = self._render_answer(trace, highlights)
-        cover_metrics = trace.get("gap_result") or trace.get("coverage_metrics") or {}
+        coverage_metrics = trace.get("gap_result") or trace.get("coverage_metrics") or {}
+        request_context = self._extract_request_context(trace)
+        answer = self._render_answer(trace, highlights, request_context, coverage_metrics)
+        cover_metrics = coverage_metrics
 
         metadata = {
             "question": question,
@@ -52,6 +54,8 @@ class DeepSearchReporter:
                 "enable_custom_summary": bool(self.config.get("enable_custom_summary", False)),
             },
         }
+        if request_context:
+            metadata["request_context"] = request_context
 
         if metadata["report_profile"]["include_graph_viz"]:
             metadata.setdefault("graph_visualization", trace.get("graph_traversals") or [])
@@ -64,13 +68,14 @@ class DeepSearchReporter:
             plan_steps=trace.get("plan_steps") or [],
             reasoning_steps=reasoning_steps,
             coverage=cover_metrics,
+            request_context=request_context,
         )
         structured_meta = {key: structured[key] for key in structured if key != "text"}
         metadata["structured_report"] = structured_meta
 
         return {
             "question": question,
-            "answer": structured["text"],
+            "answer": answer,
             "evidences": evidences,
             "highlights": highlights,
             "structured_report": structured_meta,
@@ -110,6 +115,22 @@ class DeepSearchReporter:
             if normalized:
                 yield normalized
 
+    def _extract_request_context(self, trace: Dict[str, Any]) -> Dict[str, Any]:
+        graph_context = trace.get("graph_context") or {}
+        metadata = graph_context.get("metadata") or {}
+        request_metadata = metadata.get("request_metadata")
+        context: Dict[str, Any] = {}
+        if isinstance(request_metadata, dict):
+            for key, value in request_metadata.items():
+                if value is None:
+                    continue
+                context[str(key)] = str(value)
+        access_scope = graph_context.get("access_scope") or {}
+        scope_id = access_scope.get("scope_id")
+        if scope_id and "scope_id" not in context:
+            context["scope_id"] = str(scope_id)
+        return context
+
     @staticmethod
     def _normalize_evidence(payload: Dict[str, Any] | EvidenceChunk | None) -> Optional[Dict[str, Any]]:
         if payload is None:
@@ -126,6 +147,20 @@ class DeepSearchReporter:
     def _hash_content(chunk: Dict[str, Any]) -> str:
         digest = hashlib.sha256((chunk.get("source", "") + "::" + chunk.get("content", "")).encode("utf-8"))
         return f"anon-{digest.hexdigest()[:12]}"
+
+    def _format_request_context_lines(self, request_context: Dict[str, Any]) -> List[str]:
+        lines: List[str] = []
+        for key, value in request_context.items():
+            if value is None:
+                continue
+            lines.append(f"- {key}: {value}")
+        return lines
+
+    def _format_request_context_section(self, request_context: Dict[str, Any]) -> str:
+        lines = self._format_request_context_lines(request_context)
+        if not lines:
+            return ""
+        return "## Request Context\n" + "\n".join(lines)
 
     def _build_highlights(self, reasoning_steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         highlights: List[Dict[str, Any]] = []
@@ -147,22 +182,46 @@ class DeepSearchReporter:
                 break
         return highlights
 
-    def _render_answer(self, trace: Dict[str, Any], highlights: List[Dict[str, Any]]) -> str:
+    def _render_answer(
+        self,
+        trace: Dict[str, Any],
+        highlights: List[Dict[str, Any]],
+        request_context: Dict[str, Any],
+        coverage: Dict[str, Any],
+    ) -> str:
         final_answer = (trace.get("final_answer") or "").strip()
+        blocks: List[str] = []
         if final_answer:
-            return final_answer
+            blocks.append(f"## Final Answer\n{final_answer}")
+        else:
+            header = self._template(self.ANSWER_TEMPLATE_KEY, "Key findings from graph reasoning:")
+            if not highlights:
+                blocks.append(header + "\n- Evidence collected but no stable reasoning summary was produced.")
+            else:
+                lines = [header]
+                for idx, highlight in enumerate(highlights, start=1):
+                    summary = (highlight.get("summary") or "").strip()
+                    if summary:
+                        lines.append(f"{idx}. {summary}")
+                blocks.append("\n".join(lines))
 
-        header = self._template(self.ANSWER_TEMPLATE_KEY, "Key findings from graph reasoning:")
-        if not highlights:
-            return header + "\n- Evidence collected but no stable reasoning summary was produced."
+        context_block = self._format_request_context_section(request_context)
+        if context_block:
+            blocks.append(context_block)
 
-        lines = [header]
+        key_lines = []
         for idx, highlight in enumerate(highlights, start=1):
-            summary = highlight.get("summary", "").strip()
-            if not summary:
-                continue
-            lines.append(f"{idx}. {summary}")
-        return "\n".join(lines)
+            summary = (highlight.get("summary") or "").strip()
+            if summary:
+                key_lines.append(f"{idx}. {summary}")
+        if key_lines:
+            blocks.append("## Key Findings\n" + "\n".join(key_lines))
+
+        confidence_block = self._confidence_narrative(coverage)
+        if confidence_block:
+            blocks.append("## Confidence & Next Steps\n" + confidence_block)
+
+        return "\n\n".join(block for block in blocks if block).strip()
 
     def _graph_summary(self, traversals: List[Dict[str, Any]]) -> Dict[str, Any]:
         node_ids: set[str] = set()
@@ -205,6 +264,7 @@ class DeepSearchReporter:
         plan_steps: List[Dict[str, Any]],
         reasoning_steps: List[Dict[str, Any]],
         coverage: Dict[str, Any],
+        request_context: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Assemble a Markdown report with sections, evidence, and reasoning context."""
 
@@ -216,10 +276,12 @@ class DeepSearchReporter:
         evidence_lines, citations = self._format_evidence_section(evidences)
         methodology_lines = self._format_methodology_section(plan_steps, reasoning_steps)
         coverage_lines = self._format_coverage_section(coverage)
+        context_lines = self._format_request_context_lines(request_context)
+        confidence_blurb = self._confidence_narrative(coverage)
 
         sections = [
             {"title": "Summary", "body": sanitized_summary},
-            {"title": "Key Findings", "body": "\n".join(key_findings) if key_findings else "No prioritized findings were recorded."},
+        {"title": "Key Findings", "body": "\n".join(key_findings) if key_findings else "No prioritized findings were recorded."},
             {
                 "title": "Supporting Evidence",
                 "body": "\n".join(evidence_lines) if evidence_lines else "No evidence snippets were captured.",
@@ -230,9 +292,13 @@ class DeepSearchReporter:
             },
             {
                 "title": "Coverage & Confidence",
-                "body": "\n".join(coverage_lines) if coverage_lines else "No coverage or confidence metrics reported.",
+                "body": (confidence_blurb + ("\n" if confidence_blurb and coverage_lines else "") + "\n".join(coverage_lines)).strip()
+                if (confidence_blurb or coverage_lines)
+                else "No coverage or confidence metrics reported.",
             },
         ]
+        if context_lines:
+            sections.insert(1, {"title": "Research Context", "body": "\n".join(context_lines)})
 
         text_blocks: List[str] = [f"# {title}"]
         for section in sections:
@@ -246,6 +312,7 @@ class DeepSearchReporter:
             "citations": citations,
             "highlight_evidence_ids": highlight_ids,
             "text": full_text,
+            "context": request_context or {},
         }
 
     def _format_highlights(
@@ -345,6 +412,24 @@ class DeepSearchReporter:
                 continue
             lines.append(f"- {key}: {value}")
         return lines
+
+    @staticmethod
+    def _confidence_narrative(coverage: Dict[str, Any]) -> str:
+        if not coverage:
+            return ""
+        ratio = coverage.get("coverage_ratio") or coverage.get("coverage_score")
+        confidence = coverage.get("confidence") or coverage.get("confidence_score")
+        missing = coverage.get("missing_topics") or []
+        parts: List[str] = []
+        if confidence is not None:
+            parts.append(f"Self-reported confidence: {confidence}")
+        if ratio is not None:
+            parts.append(f"Estimated coverage ratio: {ratio}")
+        if missing:
+            parts.append("Outstanding topics: " + ", ".join(str(topic) for topic in missing))
+        if not parts:
+            return ""
+        return "\n".join(f"- {line}" for line in parts)
 
     @staticmethod
     def _truncate_text(text: str, max_chars: int) -> str:

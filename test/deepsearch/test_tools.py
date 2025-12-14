@@ -578,6 +578,7 @@ async def test_tool_manager_serializes_complex_payloads_for_remote():
                     "strategy_tags": ["think"],
                 }
             },
+            "max_remote_context_chars": 16,
         },
         telemetry_client=None,
         mcp_client=_StubMCPClient(),
@@ -597,8 +598,11 @@ async def test_tool_manager_serializes_complex_payloads_for_remote():
     )
 
     arguments = manager.mcp_router.mcp_client.calls[0]["arguments"]
-    assert arguments["context_evidences"][0]["chunk_id"] == "local-1"
-    assert arguments["context_evidences"][1]["chunk_id"] == "dict-2"
+    context_window = arguments["context_evidences"]
+    assert context_window[0]["chunk_id"] == "local-1"
+    assert context_window[1]["chunk_id"] == "dict-2"
+    assert set(context_window[0].keys()) == {"chunk_id", "source", "score", "content"}
+    assert len(context_window[0]["content"]) <= 16
     alt_adapters = arguments["extra"]["alternate_adapters"]
     assert isinstance(alt_adapters[0], dict)
 
@@ -653,6 +657,50 @@ async def test_tool_manager_routes_remote_only_descriptor():
     )
     assert result.summary == "remote-only summary"
     assert mcp_client.calls
+
+
+@pytest.mark.asyncio
+async def test_tool_manager_falls_back_to_local_when_remote_errors():
+    class _LocalTool(GraphTool):
+        descriptor = ToolDescriptor(
+            name="custom.echo",
+            channel="graph",
+            description="echo",
+            profile="F",
+            determinism="deterministic",
+            namespace="rag-arc.deepsearch.tools.fast.custom_echo",
+        )
+
+        async def run(self, request: ToolRunRequest) -> ToolResult:
+            return ToolResult(summary=f"local::{request.question}")
+
+    class _FailingMCPClient:
+        async def call_tool(self, *args, **kwargs):
+            raise RuntimeError("mcp-down")
+
+    class _Telemetry:
+        def __init__(self):
+            self.remote_logs = []
+
+        def log_tool_invocation(self, **kwargs):
+            return None
+
+        def log_remote_tool(self, *, tool_name, log):
+            self.remote_logs.append(tool_name)
+
+    telemetry = _Telemetry()
+    manager = DeepSearchToolManager(
+        tool_configs={
+            "enabled_tools": {"custom.echo": {"mcp_fallback": True}},
+        },
+        telemetry_client=telemetry,
+        mcp_client=_FailingMCPClient(),
+        local_tools={"custom.echo": _LocalTool()},
+    )
+
+    result = await manager.invoke("custom.echo", payload={"question": "fallback", "context_evidences": []})
+    assert result.summary == "local::fallback"
+    assert "remote_fallback_reason" in result.diagnostics
 
 
 @pytest.mark.asyncio
@@ -750,3 +798,35 @@ def test_llm_required_tools_not_created_when_connector_missing_attrs():
         telemetry_client=None,
     )
     assert manager.local_registry.resolve("graph.llm_chain_explorer") is None
+
+
+@pytest.mark.asyncio
+async def test_tool_manager_records_local_latency_in_diagnostics():
+    class _EchoTool:
+        descriptor = ToolDescriptor(
+            name="graph.echo",
+            channel="graph",
+            description="Echo tool for telemetry tests.",
+            profile="F",
+            determinism="deterministic",
+            namespace="rag-arc.deepsearch.tools.fast.custom_echo",
+            mcp_callable=False,
+        )
+
+        async def run(self, request: ToolRunRequest) -> ToolResult:
+            await asyncio.sleep(0.01)
+            chunk = EvidenceChunk(chunk_id="echo-1", source="echo", content="ok")
+            return ToolResult(summary="ok", evidences=[chunk], diagnostics={})
+
+    manager = DeepSearchToolManager(
+        tool_configs={"enable_builtin_tools": False},
+        telemetry_client=None,
+        local_tools={"graph.echo": _EchoTool()},
+    )
+    graph_context = GraphQueryContext(adapter_name="hipporag", question="hello")
+    result = await manager.invoke(
+        "graph.echo",
+        payload={"question": "hello", "context_evidences": [], "graph_context": graph_context},
+    )
+    assert isinstance(result.diagnostics.get("latency_ms"), int)
+    assert result.diagnostics.get("evidence_count") == 1

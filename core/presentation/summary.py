@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Callable
 
 from encapsulation.data_model.schema import Chunk
-from application.rag_inference.cli_module import PipelineArtifacts
+from encapsulation.data_model.pipeline import PipelineArtifacts
 
 
 @dataclass
@@ -174,9 +174,14 @@ class DeepSearchReport:
             chunk_id = item.get("chunk_id")
             if not chunk_id:
                 continue
-            meta = ((item.get("provenance") or {}).get("metadata")) or {}
-            subgraph = meta.get("_subgraph_info")
-            if subgraph:
+            provenance = item.get("provenance") or {}
+            meta = provenance.get("metadata") or {}
+            subgraph = None
+            if isinstance(meta, dict):
+                subgraph = meta.get("_subgraph_info") or meta.get("subgraph_info")
+            if subgraph is None:
+                subgraph = provenance.get("_subgraph_info") or provenance.get("subgraph_info")
+            if isinstance(subgraph, dict) and subgraph:
                 metadata_lookup[chunk_id] = subgraph
 
         report_block = payload.get("report") or {}

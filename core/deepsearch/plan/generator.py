@@ -1,5 +1,4 @@
 """Plan generation utilities for DeepSearch pipelines."""
-import asyncio
 import json
 import logging
 import re
@@ -152,7 +151,8 @@ class PlanGenerator:
                 logger.warning("Async LLM planning failed: %s", exc)
                 return []
 
-        return await asyncio.to_thread(self._call_llm, question, context=context)
+        # Fall back to sync connector when async entry point is unavailable.
+        return self._call_llm(question, context=context)
 
     def _parse_llm_response(self, response: str) -> List[dict]:
         response = self._extract_json_payload(response)

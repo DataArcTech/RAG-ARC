@@ -34,11 +34,16 @@ class GapDetectionEngine:
         pending_external = reasoning_trace.get("pending_external") or []
         answer_confidence = self._extract_confidence(coverage_metrics, reasoning_trace)
         missing_topics = self._extract_missing_topics(coverage_metrics, reasoning_trace)
+        think_trigger, think_missing = self._think_requests_external(reasoning_trace.get("think_notes") or [])
+        if think_missing:
+            merged = list({*missing_topics, *think_missing})
+        else:
+            merged = missing_topics
 
         result_model = self.evaluator.evaluate(
             evidences,
             answer_confidence=answer_confidence,
-            missing_topics=missing_topics,
+            missing_topics=merged,
         )
         payload = result_model.model_dump()
         external_allowed = self._external_enabled()
@@ -48,10 +53,18 @@ class GapDetectionEngine:
         diagnostics.setdefault("pending_external_steps", len(pending_external))
         diagnostics["external_allowed"] = external_allowed
         diagnostics.setdefault("coverage_metrics", coverage_metrics)
+        diagnostics.setdefault("think_gap_trigger", think_trigger)
 
         if payload["should_trigger_external"] and not external_allowed:
             payload["should_trigger_external"] = False
             payload["reason"] = "external_disabled"
+        elif think_trigger:
+            payload["should_trigger_external"] = True
+            payload["reason"] = "think_gap"
+            if think_missing:
+                existing = set(payload.get("missing_topics") or [])
+                existing.update(think_missing)
+                payload["missing_topics"] = list(existing)
 
         self._log(payload, reasoning_trace)
         return payload
@@ -106,6 +119,30 @@ class GapDetectionEngine:
                 return float(value)
         return None
 
+    @staticmethod
+    def _think_requests_external(think_notes: List[Any]) -> tuple[bool, List[str]]:
+        triggered = False
+        missing: List[str] = []
+        seen: set[str] = set()
+        for note in think_notes:
+            metadata = None
+            if hasattr(note, "metadata"):
+                metadata = getattr(note, "metadata")
+            elif isinstance(note, dict):
+                metadata = note.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            if metadata.get("gap_trigger") is True:
+                triggered = True
+            topics = metadata.get("missing_topics")
+            if isinstance(topics, list):
+                for item in topics:
+                    token = str(item).strip()
+                    if token and token not in seen:
+                        seen.add(token)
+                        missing.append(token)
+        return triggered, missing
+
     def _external_enabled(self) -> bool:
         env_flag = self._read_env_bool("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED")
         if env_flag is None:
@@ -137,8 +174,14 @@ class GapDetectionEngine:
         )
         if not callable(log_method):
             return
+        run_id = None
+        graph_context = reasoning_trace.get("graph_context")
+        if isinstance(graph_context, dict):
+            metadata = graph_context.get("metadata") or {}
+            if isinstance(metadata, dict):
+                run_id = metadata.get("run_id")
         try:
-            log_method(result=payload, context={"question": reasoning_trace.get("question")})
+            log_method(result=payload, context={"question": reasoning_trace.get("question"), "run_id": run_id})
         except Exception:
             # Telemetry must never break the main pipeline
             return

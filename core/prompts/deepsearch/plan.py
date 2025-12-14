@@ -11,6 +11,8 @@ GRAPH_PLANNER_USER_PROMPT = (
     "Available tools:\n{available_tools}\n"
     "Instructions: Decompose the problem into several steps (usually 3-6 for simple questions) "
     "and never exceed {max_steps}. Prefer merging trivial lookups into a single step instead of emitting fillers. "
+    "By default steps execute sequentially. Only mark a step as parallel-safe when you are confident it is "
+    "independent: set `scheduler` to 'parallel' (or `parallelizable`: true) inside the step metadata. "
     "Return a JSON array where each item has 'description', 'channel', and when using the graph channel also "
     "a 'tool' (plus optional 'tool_profile'). The 'tool' value must match one of the catalog names exactly. "
     "Channel must be one of ['graph','text','web'] and defaults to 'graph'."

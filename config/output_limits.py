@@ -56,6 +56,10 @@ CHAT_TOP_SEED_ENTITIES = _limit_or_none(_env_int("CHAT_TOP_SEED_ENTITIES", 5))
 DEEPSEARCH_TOP_CHUNKS = _limit_or_none(_env_int("DEEPSEARCH_TOP_CHUNKS", 10))
 DEEPSEARCH_TOP_TRIPLES = _limit_or_none(_env_int("DEEPSEARCH_TOP_TRIPLES", 30))
 DEEPSEARCH_TOP_SEED_ENTITIES = _limit_or_none(_env_int("DEEPSEARCH_TOP_SEED_ENTITIES", 15))
+DEEPSEARCH_MAX_REASONING_STEPS = _limit_or_none(_env_int("DEEPSEARCH_MAX_REASONING_STEPS", 32))
+DEEPSEARCH_MAX_STAGE_HISTORY = _limit_or_none(_env_int("DEEPSEARCH_MAX_STAGE_HISTORY", 10))
+DEEPSEARCH_MAX_EXTERNAL_CALLS = _limit_or_none(_env_int("DEEPSEARCH_MAX_EXTERNAL_CALLS", 5))
+DEEPSEARCH_MAX_TOOL_METADATA = _limit_or_none(_env_int("DEEPSEARCH_MAX_TOOL_METADATA", 5))
 
 
 def _graph_budget(chunk_limit: int | None, triple_limit: int | None, seed_limit: int | None, minimum: int) -> int | None:

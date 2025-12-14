@@ -79,6 +79,27 @@ def test_gap_detection_respects_env_disable(monkeypatch):
     monkeypatch.delenv("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED", raising=False)
 
 
+def test_gap_detection_triggered_by_think_note(monkeypatch):
+    telemetry = _Telemetry()
+    engine = _gap_engine(telemetry=telemetry, config={"enable_external_on_gap": True})
+    trace = _reasoning_trace()
+    trace["coverage_metrics"] = {"answer_confidence": 0.95, "coverage_ratio": 0.9}
+    trace["think_notes"] = [
+        {
+            "plan_step_id": "think_auto_01",
+            "reasoning": "Need external research",
+            "metadata": {"gap_trigger": True, "missing_topics": ["financials"]},
+        }
+    ]
+
+    result = engine.evaluate(trace)
+
+    assert result["should_trigger_external"] is True
+    assert result["reason"] == "think_gap"
+    assert "financials" in result["missing_topics"]
+    assert telemetry.events and telemetry.events[-1][0] == "gap"
+
+
 @pytest.mark.asyncio
 async def test_external_channel_calls_tool_manager(monkeypatch):
     telemetry = _Telemetry()
@@ -91,11 +112,13 @@ async def test_external_channel_calls_tool_manager(monkeypatch):
     trace = _reasoning_trace()
     monkeypatch.setenv("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED", "true")
 
-    evidences = await channel.run(trace["pending_external"], reasoning_trace=trace, gap_result={"reason": "coverage"})
-
+    payload = await channel.run(trace["pending_external"], reasoning_trace=trace, gap_result={"reason": "coverage"})
+    evidences = payload["evidences"]
+    logs = payload["logs"]
     assert evidences and evidences[0]["source"] == "web.search"
     assert tool_manager.calls and tool_manager.calls[0][0] == "web.search"
     assert telemetry.events and telemetry.events[-1][0] == "external"
+    assert logs and logs[0]["status"] == "ok"
     monkeypatch.delenv("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED", raising=False)
 
 
@@ -106,9 +129,10 @@ async def test_external_channel_respects_env_off(monkeypatch):
     trace = _reasoning_trace()
     monkeypatch.setenv("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED", "false")
 
-    evidences = await channel.run(trace["pending_external"], reasoning_trace=trace, gap_result=None)
+    payload = await channel.run(trace["pending_external"], reasoning_trace=trace, gap_result=None)
 
-    assert evidences == []
+    assert payload["evidences"] == []
+    assert payload["logs"] == []
     assert not tool_manager.calls
     monkeypatch.delenv("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED", raising=False)
 
@@ -120,18 +144,21 @@ async def test_external_channel_falls_back_to_provider(monkeypatch):
     monkeypatch.setenv("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED", "true")
 
     async def _fake_tavily(self, task, *, question):
-        return [
-            {
-                "chunk_id": "tavily-plan_ext-0",
-                "source": "web.tavily",
-                "content": "Result snippet",
-                "provenance": {"provider": "tavily"},
-            }
-        ]
+        return (
+            [
+                {
+                    "chunk_id": "tavily-plan_ext-0",
+                    "source": "web.tavily",
+                    "content": "Result snippet",
+                    "provenance": {"provider": "tavily"},
+                }
+            ],
+            {"result_count": 1},
+        )
 
     monkeypatch.setattr(ExternalSearchChannel, "_execute_with_tavily", _fake_tavily, raising=False)
 
-    evidences = await channel.run(trace["pending_external"], reasoning_trace=trace, gap_result=None)
+    payload = await channel.run(trace["pending_external"], reasoning_trace=trace, gap_result=None)
 
-    assert evidences and evidences[0]["source"] == "web.tavily"
+    assert payload["evidences"] and payload["evidences"][0]["source"] == "web.tavily"
     monkeypatch.delenv("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED", raising=False)
