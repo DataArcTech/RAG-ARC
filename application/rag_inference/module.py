@@ -185,7 +185,7 @@ IMPORTANT:
         for i, chunk in enumerate(chunks):
             chunk_content = f"Chunk {i+1}:\n{chunk.content}"
             messages.append({"role": "user", "content": chunk_content})
-        messages.append({"role": "user", "content": f"Based on the above chunks, please answer question: {rewritten_query}"})
+        messages.append({"role": "user", "content": f"{prompt}\nBased on the above chunks, please answer question: {query}"})
         logger.info(f"Invoked chat with query: {query} (owner_id={owner_id})")
         logger.info(f"Query rewritten to: {rewritten_query}")
         logger.info(f"Retrieved chunks: {[getattr(chunk, 'content', str(chunk)) for chunk in chunks]}")
