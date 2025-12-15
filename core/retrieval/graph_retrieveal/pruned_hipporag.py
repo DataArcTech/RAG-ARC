@@ -1020,7 +1020,7 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         # Format facts for LLM prompt
         facts_text = "\n".join([
             f"{i+1}. {head} - {relation} - {tail}"
-            for i, (head, relation, tail) in enumerate(candidate_facts)
+            for i, (head, relation, tail, *_) in enumerate(candidate_facts)
         ])
 
         prompt = f"""Given the query: "{query}"
