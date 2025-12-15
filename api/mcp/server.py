@@ -11,6 +11,7 @@ from framework.register import Register
 from api.routers.auth import get_current_user_from_token, validate_user_session
 from encapsulation.data_model.orm_models import ChatMessage, User
 from core.utils.owner_guard import is_admin_owner
+from core.presentation.graph_chain import build_graph_chain
 from core.presentation.evidence import build_chat_evidence
 from core.presentation.deepsearch_payload import trim_deepsearch_payload
 from config.output_limits import CHAT_TOP_CHUNKS

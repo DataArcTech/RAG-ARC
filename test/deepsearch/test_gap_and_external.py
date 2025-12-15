@@ -2,7 +2,7 @@ import pytest
 
 from encapsulation.data_model.deepsearch import EvidenceChunk, GraphQueryContext, ToolResultPayload
 from core.deepsearch.gap import GapDetectionEngine, GapDetectionEvaluator, GapDetectionSettings
-from core.deepsearch.external import ExternalSearchChannel
+from encapsulation.deepsearch.external import ExternalSearchChannel
 
 
 class _Telemetry:
@@ -98,6 +98,30 @@ def test_gap_detection_triggered_by_think_note(monkeypatch):
     assert result["reason"] == "think_gap"
     assert "financials" in result["missing_topics"]
     assert telemetry.events and telemetry.events[-1][0] == "gap"
+
+
+def test_gap_detection_think_gap_respects_env_disable(monkeypatch):
+    engine = _gap_engine(telemetry=None, config={"enable_external_on_gap": True})
+    trace = _reasoning_trace()
+    trace["coverage_metrics"] = {"answer_confidence": 0.95, "coverage_ratio": 0.9}
+    trace["think_notes"] = [
+        {
+            "plan_step_id": "think_auto_01",
+            "reasoning": "Need external research",
+            "metadata": {"gap_trigger": True, "missing_topics": ["financials"]},
+        }
+    ]
+    monkeypatch.setenv("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED", "false")
+
+    result = engine.evaluate(trace)
+
+    assert result["should_trigger_external"] is False
+    assert result["reason"] == "external_disabled"
+    diagnostics = result.get("diagnostics") or {}
+    assert diagnostics.get("external_allowed") is False
+    assert diagnostics.get("think_gap_trigger") is True
+    assert diagnostics.get("think_gap_blocked") is True
+    monkeypatch.delenv("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED", raising=False)
 
 
 @pytest.mark.asyncio

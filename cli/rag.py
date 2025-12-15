@@ -35,7 +35,7 @@ from config.output_limits import (
     CHAT_TOP_CHUNKS,
     DEEPSEARCH_TOP_CHUNKS,
 )
-from core.deepsearch.graph_chain import build_graph_chain
+from core.presentation.graph_chain import build_graph_chain
 
 logger = logging.getLogger(__name__)
 app = typer.Typer(help="Run RAG-ARC algorithms through CLI without HTTP layer.")
@@ -305,61 +305,25 @@ def _print_deepsearch_result(
         graph_store=graph_store,
     )
 
+    if output_json:
+        _emit_json_output(trimmed_payload, owner_id=owner_id, prefix=prefix, raw_payload=raw_payload)
+        return
+
+    structured = (trimmed_payload.get("report") or {}).get("structured_report") or {}
+    text = structured.get("text")
+    if isinstance(text, str) and text.strip():
+        typer.echo(text.strip())
+        return
+
     summary = DeepSearchReport.from_payload(
         trimmed_payload,
         top_chunk_limit=DEEPSEARCH_TOP_CHUNKS,
         graph_chain_builder=build_graph_chain,
     )
-    if output_json:
-        _emit_json_output(trimmed_payload, owner_id=owner_id, prefix=prefix, raw_payload=raw_payload)
-        return
-
     typer.echo(f"Question: {summary.question}")
-    if summary.plan_steps:
-        typer.echo("\nPlan overview:")
-        for step in summary.plan_steps:
-            tool = f" ({step.tool})" if step.tool else ""
-            status = step.status or "pending"
-            typer.echo(f"- {step.step_id}{tool}: {status}")
-            if step.output_summary:
-                typer.echo(f"    {step.output_summary}")
-    if summary.highlights:
-        typer.echo("\nHighlights:")
-        for idx, text in enumerate(summary.highlights, start=1):
-            typer.echo(f"  {idx}. {text}")
     if summary.final_answer:
         typer.echo("\nAnswer:")
         typer.echo(summary.final_answer)
-    if summary.graph_chain:
-        typer.echo("\nGraph chain:")
-        for idx, edge in enumerate(summary.graph_chain, start=1):
-            typer.echo(f"  {idx}. {edge}")
-    if include_evidence and summary.top_chunks:
-        typer.echo("\nEvidence previews:")
-        for idx, chunk in enumerate(summary.top_chunks, start=1):
-            source_tag = f"[{chunk.source}]" if chunk.source else ""
-            typer.echo(f"  {idx}. {source_tag} {chunk.preview}")
-    if summary.coverage:
-        typer.echo("\nCoverage metrics:")
-        for key, value in summary.coverage.items():
-            typer.echo(f"- {key}: {value}")
-    if summary.gap_decision:
-        typer.echo(f"\nGap detection: {summary.gap_decision}")
-    if summary.stage_timings:
-        typer.echo("\nStage timings (ms):")
-        for key, value in summary.stage_timings.items():
-            typer.echo(f"- {key}: {value}")
-    if include_evidence and summary.evidence and not output_json:
-        seeds = summary.evidence.get("seed_entities") or []
-        if seeds:
-            typer.echo("\nSeed entities:")
-            for name in seeds:
-                typer.echo(f"- {name}")
-        triples = summary.evidence.get("triples") or []
-        if triples:
-            typer.echo("\nGraph triples:")
-            for triple in triples[:5]:
-                typer.echo(f"- {triple['head']} -[{triple['relation']}]-> {triple['tail']}")
 
 
 def _print_chat_mcp_catalog(chat_mcp_server) -> None:
@@ -443,7 +407,7 @@ def deepsearch(
     include_evidence: bool = typer.Option(
         False,
         "--with-evidence/--no-evidence",
-        help="Attach chunk/graph evidence bundle (chunks/triples/seeds).",
+        help="Attach chunk/graph evidence bundle (chunks/seeds/graph_chain).",
     ),
     save_raw: bool = typer.Option(
         False,

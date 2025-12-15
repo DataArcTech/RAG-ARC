@@ -12,11 +12,11 @@ from config.output_limits import (
     DEEPSEARCH_GRAPH_EDGE_LIMIT,
     DEEPSEARCH_GRAPH_NODE_LIMIT,
     DEEPSEARCH_TOP_CHUNKS,
-    DEEPSEARCH_TOP_TRIPLES,
     DEEPSEARCH_TOP_SEED_ENTITIES,
     ENABLE_ALL_EVIDENCE,
 )
-from core.deepsearch.graph_chain import build_graph_chain, export_subgraph_snapshot
+from core.presentation.graph_chain import build_graph_chain
+from encapsulation.graph_export import export_subgraph_snapshot
 
 
 ChunkEntry = Dict[str, Any]
@@ -274,14 +274,11 @@ def build_deepsearch_evidence(
         edge_limit=DEEPSEARCH_GRAPH_EDGE_LIMIT,
         graph_store=graph_store,
     )
-    graph_chain = (
-        build_graph_chain(subgraph_info, snapshot=graph_snapshot, graph_store=graph_store) if subgraph_info else []
-    )
+    graph_chain = build_graph_chain(graph_snapshot)
 
     evidence = {
         "chunks": chunk_entries,
         "seed_entities": _seed_entities_from_subgraph(graph_snapshot, DEEPSEARCH_TOP_SEED_ENTITIES),
-        "triples": _triples_from_subgraph(graph_snapshot, DEEPSEARCH_TOP_TRIPLES),
         "graph": graph_snapshot or {},
         "graph_stats": _graph_stats(graph_snapshot),
         "graph_chain": graph_chain,

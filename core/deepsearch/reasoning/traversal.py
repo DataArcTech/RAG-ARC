@@ -23,6 +23,16 @@ from core.graph_adapter.base import GraphDeepSearchAdapter
 
 logger = logging.getLogger(__name__)
 
+_GLOBAL_ADAPTER_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+def _global_adapter_lock(adapter: GraphDeepSearchAdapter) -> asyncio.Lock:
+    lock = _GLOBAL_ADAPTER_LOCKS.get(id(adapter))
+    if lock is None:
+        lock = asyncio.Lock()
+        _GLOBAL_ADAPTER_LOCKS[id(adapter)] = lock
+    return lock
+
 
 @dataclass
 class GraphTraversalSettings:
@@ -40,17 +50,14 @@ class GraphTraversalExecutor:
     def __init__(self, adapter: GraphDeepSearchAdapter, settings: GraphTraversalSettings | None = None):
         self.adapter = adapter
         self.settings = settings or GraphTraversalSettings()
-        self._prepared: bool = False
-        self._prepared_scope = None
-        self._adapter_lock = asyncio.Lock()
+        self._adapter_lock = _global_adapter_lock(adapter)
 
     async def prepare(self, context: GraphQueryContext) -> None:
         """Ensure the adapter is warmed up for the provided context."""
 
         scope = context.resolve_scope()
-        await self.adapter.prepare(context.question or "", access_scope=scope)
-        self._prepared = True
-        self._prepared_scope = scope
+        async with self._adapter_lock:
+            await self.adapter.prepare(context.question or "", access_scope=scope)
 
     async def run(
         self,
@@ -88,8 +95,7 @@ class GraphTraversalExecutor:
     ) -> Tuple[Optional[GraphTraversalRecord], ReasoningStepRecord, List[EvidenceChunk]]:
         """Execute a single plan step so reasoning can interleave with other channels."""
 
-        await self._ensure_prepared(context)
-        scope = self._prepared_scope
+        scope = context.resolve_scope()
         reasoning_entry = ReasoningStepRecord(
             step_id=step.step_id,
             description=step.description,
@@ -108,7 +114,7 @@ class GraphTraversalExecutor:
                     channel=step.channel,
                     access_scope=scope,
                 )
-                filter_type = "semantic" if self.settings.allow_semantic_channel else "relation"
+                filter_type = "semantic" if self.settings.allow_semantic_channel else "relational"
                 filtered = await self.adapter.context_filter(
                     subgraph,
                     filter_type=filter_type,
@@ -176,10 +182,6 @@ class GraphTraversalExecutor:
             reasoning_entry.status = "failed"
             reasoning_entry.diagnostics["error"] = str(exc)
         return traversal_record, reasoning_entry, evidences
-
-    async def _ensure_prepared(self, context: GraphQueryContext) -> None:
-        if not self._prepared:
-            await self.prepare(context)
 
     @staticmethod
     def _resolve_query(description: str, tool_args: Optional[Dict[str, Any]]) -> str:

@@ -67,6 +67,16 @@
       "min_coverage": 0.75
     }
   },
+  "multi_agent": {
+    "enabled": true,
+    "max_subagents": 4,
+    "subagent_concurrency": 4,
+    "enable_parallel_tool_probes": true,
+    "probe_tool_names": ["graph.chunk_scan", "graph.pattern_scan"],
+    "probe_concurrency": 4,
+    "lead_tool_names": ["graph.context_rollup", "graph.evidence_crosscheck"],
+    "lead_tool_concurrency": 2
+  },
   "gap_detection": {
     "coverage_threshold": 0.7,
     "confidence_threshold": 0.6,

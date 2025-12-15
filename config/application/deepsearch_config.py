@@ -13,10 +13,11 @@ from config.encapsulation.mcp.client_config import MCPClientConfig
 from config.encapsulation.llm.chat.openai import OpenAIChatConfig
 from core.deepsearch.plan import DeepSearchPlanner
 from core.deepsearch.reasoning import GraphReasoningLoop
+from core.deepsearch.reasoning import MultiAgentGraphReasoningLoop
 from core.deepsearch.gap import GapDetectionEngine
 from core.deepsearch.report import DeepSearchReporter
-from core.deepsearch.tooling import DeepSearchToolManager
-from core.deepsearch.external import ExternalSearchChannel
+from encapsulation.deepsearch.tooling import DeepSearchToolManager
+from encapsulation.deepsearch.external import ExternalSearchChannel
 from application.deepsearch.tool_mcp_server import LoggingTelemetryClient
 from framework.config import AbstractConfig
 
@@ -78,6 +79,25 @@ class GraphReasoningStrategyConfig(BaseModel):
     )
 
 
+class MultiAgentConfig(BaseModel):
+    """Lead/worker orchestration knobs for DeepSearch reasoning."""
+
+    enabled: bool = Field(True, description="Enable the lead/worker orchestrator for graph reasoning.")
+    max_subagents: int = Field(4, description="Maximum number of worker agents spawned per request.")
+    subagent_concurrency: int = Field(4, description="Max concurrent worker agents.")
+    enable_parallel_tool_probes: bool = Field(True, description="Run fast probe tools in parallel inside each worker.")
+    probe_tool_names: List[str] = Field(
+        default_factory=lambda: ["graph.chunk_scan", "graph.pattern_scan"],
+        description="Fast probe tools executed by each worker (invoked concurrently).",
+    )
+    probe_concurrency: int = Field(4, description="Max concurrent probe tool invocations per worker.")
+    lead_tool_names: List[str] = Field(
+        default_factory=lambda: ["graph.context_rollup", "graph.evidence_crosscheck"],
+        description="Optional tools invoked by the lead agent after merging worker evidence.",
+    )
+    lead_tool_concurrency: int = Field(2, description="Max concurrent tool invocations for lead post-processing.")
+
+
 class GapDetectionConfig(BaseModel):
     """Threshold tuning for the gap evaluator."""
 
@@ -93,6 +113,23 @@ class ReporterConfig(BaseModel):
     include_graph_viz: bool = Field(True, description="Include traversal metadata in the report payload.")
     enable_custom_summary: bool = Field(False, description="Enable custom domain summaries.")
     parallel_thinking_runs: int = Field(1, description="Number of combined parallel-thinking passes.")
+    enable_llm_report: bool = Field(True, description="Generate the final report via the LLM.")
+    report_temperature: float = Field(0.2, description="Sampling temperature for the report writer.")
+    report_max_evidence_chars: int = Field(900, description="Maximum characters per evidence snippet forwarded to the report writer.")
+    enable_consistency_check: bool = Field(
+        True, description="Run a consistency check against the evidence after report generation. Override via DEEPSEARCH_CONSISTENCY_CHECK env var."
+    )
+    consistency_temperature: float = Field(0.0, description="Sampling temperature for the consistency checker.")
+    consistency_max_retries: int = Field(2, description="Max retry attempts for the consistency checker LLM call.")
+    enable_citation_agent: bool = Field(
+        True, description="Post-process inline citations and build a structured evidence index."
+    )
+    parallel_sections: bool = Field(
+        False, description="Generate report sections in parallel for faster report generation. Enable via DEEPSEARCH_PARALLEL_SECTIONS env var."
+    )
+    max_parallel_sections: int = Field(
+        4, description="Maximum number of sections to generate concurrently when parallel_sections is enabled."
+    )
 
 
 class ToolManagerConfig(BaseModel):
@@ -151,6 +188,7 @@ class DeepSearchServiceConfig(AbstractConfig):
     planner: PlannerRuntimeConfig
     graph_adapter: GraphAdapterConfig
     graph_reasoning: GraphReasoningStrategyConfig
+    multi_agent: MultiAgentConfig = Field(default_factory=MultiAgentConfig)
     gap_detection: GapDetectionConfig
     reporter: ReporterConfig
     tool_manager: ToolManagerConfig
@@ -182,16 +220,21 @@ class DeepSearchServiceConfig(AbstractConfig):
             llm_connector=llm_connector,
             config=self.planner,
         )
-        graph_loop = GraphReasoningLoop(
+        
+        graph_loop = MultiAgentGraphReasoningLoop(
             adapter=adapter,
             llm_connector=llm_connector,
             strategy_config=self.graph_reasoning,
             tool_manager=tool_manager,
+            settings=self.multi_agent.model_dump(),
         )
         gap_detector = self._build_gap_detector(telemetry_client=telemetry_client)
+        graph_store = self._resolve_graph_store(adapter)
         reporter = DeepSearchReporter(
             template_store=None,
             config=self.reporter.model_dump(),
+            llm_connector=llm_connector,
+            graph_store=graph_store,
         )
         external_channel = ExternalSearchChannel(
             tool_manager=tool_manager,
@@ -209,6 +252,13 @@ class DeepSearchServiceConfig(AbstractConfig):
         )
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _resolve_graph_store(adapter) -> Any | None:
+        retriever = getattr(adapter, "retriever", None)
+        if retriever is None:
+            return None
+        return getattr(retriever, "graph_store", None)
+
     def _build_llm_connector(self):
         if self.llm:
             return self.llm.build()

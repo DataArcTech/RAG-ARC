@@ -387,3 +387,67 @@ async def test_graph_reasoning_marks_tool_timeout():
     entry = result["reasoning_steps"][0]
     assert entry["status"] == "failed"
     assert entry["diagnostics"]["reason"] == "tool_timeout"
+
+
+class _ScopeRecordingAdapter:
+    def __init__(self):
+        self.calls: list[tuple[str, str | None]] = []
+
+    async def prepare(self, question: str, *, access_scope=None) -> None:
+        await asyncio.sleep(0.02)
+        self.calls.append(("prepare", getattr(access_scope, "scope_id", None)))
+
+    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None):
+        await asyncio.sleep(0.01)
+        self.calls.append(("query", getattr(access_scope, "scope_id", None)))
+        return {"chunks": [], "nodes": [], "edges": [], "metadata": {}}
+
+    async def context_filter(self, data, *, filter_type: str = "semantic", access_scope=None):
+        self.calls.append(("filter", getattr(access_scope, "scope_id", None)))
+        return data
+
+    async def summarize(self, channel: str, data, *, access_scope=None):
+        scope_id = getattr(access_scope, "scope_id", None)
+        self.calls.append(("summarize", scope_id))
+        return f"sum:{scope_id}"
+
+    async def chain_traverse(self, strategy, *, access_scope=None):
+        self.calls.append(("chain", getattr(access_scope, "scope_id", None)))
+        return {"hops": 1}
+
+    def metadata(self):
+        return type(
+            "_Meta",
+            (),
+            {
+                "adapter_name": "hipporag",
+                "graph_type": "hipporag",
+                "version": "test",
+                "capabilities": (),
+                "domain_tags": (),
+                "config_fingerprint": None,
+            },
+        )()
+
+
+@pytest.mark.asyncio
+async def test_graph_reasoning_concurrent_runs_do_not_mix_scopes_or_evidence():
+    adapter = _ScopeRecordingAdapter()
+    loop = GraphReasoningLoop(adapter=adapter, llm_connector=None, strategy_config={"parallel_branches": 2})
+    plan_steps = [{"step_id": "plan_01", "description": "Inspect graph", "channel": "graph", "tool": "graph_adapter.query"}]
+
+    async def _run(scope_id: str):
+        context = GraphQueryContext(
+            adapter_name="hipporag",
+            question=f"Q:{scope_id}",
+            access_scope=GraphAccessScope(scope_id=scope_id),
+        )
+        result = await loop.run(f"Q:{scope_id}", plan_steps, graph_context=context)
+        return [ev["content"] for ev in result.get("evidences") or []]
+
+    evid_a, evid_b = await asyncio.gather(_run("scope-a"), _run("scope-b"))
+    assert evid_a == ["sum:scope-a"]
+    assert evid_b == ["sum:scope-b"]
+
+    prepared_scopes = [scope for action, scope in adapter.calls if action == "prepare"]
+    assert set(prepared_scopes) == {"scope-a", "scope-b"}

@@ -26,13 +26,8 @@ from core.deepsearch.tools import (
     get_tool_descriptor,
 )
 from core.deepsearch.plan.runtime import DeepSearchPlanner
-from core.deepsearch.tooling import (
-    DeepSearchToolManager,
-    LocalToolRegistry,
-    describe_available_tools,
-    clear_tool_hints,
-    register_tool_hints,
-)
+from encapsulation.deepsearch.tooling import DeepSearchToolManager, LocalToolRegistry
+from core.deepsearch.tooling import describe_available_tools, clear_tool_hints, register_tool_hints
 
 
 class _StubAdapter:

@@ -40,14 +40,12 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         self.semantic_score_threshold = max(0.0, min(1.0, semantic_score_threshold))
         self.adapter_version = adapter_version
         self.extra_metadata = extra_metadata or {}
-        self._last_payload: Optional[Dict[str, Any]] = None
-        self._last_scope_token: Optional[str] = None
 
     async def prepare(self, question: str, *, access_scope: Optional[GraphAccessScope] = None) -> None:
-        """HippoRAG adapters do not require heavy warmup but we record scope telemetry."""
+        """HippoRAG adapters do not require heavy warmup."""
 
-        self._last_scope_token = self._scope_token(access_scope)
-        logger.debug("HippoRAG adapter prepared for scope=%s question=%s", self._last_scope_token, question)
+        scope = self._scope_token(access_scope)
+        logger.debug("HippoRAG adapter prepared for scope=%s question=%s", scope, question)
 
     async def aquery_subgraph(
         self,
@@ -61,13 +59,10 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         scope_token = self._scope_token(access_scope)
         if scope_token is None:
             logger.warning("HippoRAG adapter requires an access scope; returning empty payload for query %s", query)
-            self._last_payload = self._empty_payload(query)
-            return self._last_payload
+            return self._empty_payload(query)
 
         chunks = await self._retrieve_chunks(query, scope_token)
         payload = self._build_graph_payload(query, channel, chunks, scope_token)
-        self._last_payload = payload
-        self._last_scope_token = scope_token
         return payload
 
     async def context_filter(
@@ -135,16 +130,20 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
     ) -> Mapping[str, Any]:
         """Expose lightweight traversal metadata for telemetry and downstream heuristics."""
 
-        payload = self._last_payload or {}
-        nodes = payload.get("nodes", [])
+        seeds = []
+        if isinstance(strategy, Mapping):
+            seed_entities = strategy.get("seed_entities") or []
+            if isinstance(seed_entities, list):
+                seeds = [str(item) for item in seed_entities if str(item).strip()]
         hops = int(strategy.get("max_depth", 1)) if isinstance(strategy, Mapping) else 1
-        hops = max(1, min(hops, len(nodes)))
-        visited = [str(node.get("id")) for node in nodes[:hops]]
+        hops = max(1, min(hops, max(1, len(seeds))))
+        visited = seeds[:hops] if seeds else []
+        scope_token = self._scope_token(access_scope)
         return {
             "strategy": strategy.get("strategy", "ppr_chain") if isinstance(strategy, Mapping) else "ppr_chain",
             "hops": hops,
             "visited": visited,
-            "scope": self._last_scope_token,
+            "scope": scope_token,
         }
 
     def metadata(self) -> GraphAdapterMetadata:

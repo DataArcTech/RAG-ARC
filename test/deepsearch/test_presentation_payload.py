@@ -60,7 +60,6 @@ def test_trim_payload_attaches_evidence(monkeypatch):
         return {
             "chunks": [{"chunk_id": "trimmed"}],
             "seed_entities": ["Entity"],
-            "triples": [{"head": "A", "relation": "related_to", "tail": "B"}],
             "graph": {"nodes": []},
             "graph_stats": {},
             "graph_chain": ["A -[related_to]-> B"],
@@ -88,7 +87,6 @@ def test_trim_payload_skips_evidence_when_disabled(monkeypatch):
         return {
             "chunks": [],
             "seed_entities": [],
-            "triples": [],
             "graph": {},
             "graph_stats": {},
             "graph_chain": ["chain-item"],
@@ -109,7 +107,6 @@ def test_trim_payload_includes_reasoning_summaries(monkeypatch):
         return {
             "chunks": [],
             "seed_entities": [],
-            "triples": [],
             "graph": {},
             "graph_stats": {},
             "graph_chain": [],
@@ -128,7 +125,7 @@ def test_trim_payload_includes_reasoning_summaries(monkeypatch):
 
 def test_trim_payload_preserves_structured_report(monkeypatch):
     def _fake_builder(payload, chunk_limit=None):
-        return {"chunks": [], "seed_entities": [], "triples": [], "graph": {}, "graph_stats": {}, "graph_chain": []}
+        return {"chunks": [], "seed_entities": [], "graph": {}, "graph_stats": {}, "graph_chain": []}
 
     monkeypatch.setattr("core.presentation.deepsearch_payload.build_deepsearch_evidence", _fake_builder)
 
