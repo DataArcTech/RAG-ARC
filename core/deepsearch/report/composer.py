@@ -1,52 +1,130 @@
-"""Reporter that fuses graph reasoning traces and evidence into API-facing payloads."""
+"""Report composer for DeepSearch.
+
+This reporter converts DeepSearch execution traces into a readable, end-user report by
+prompting an LLM with the collected evidence, highlights, and execution metadata.
+"""
 import hashlib
+import os
 from typing import Any, Dict, Iterable, List, Optional
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
 
+from config.output_limits import (
+    DEEPSEARCH_GRAPH_EDGE_LIMIT,
+    DEEPSEARCH_TOP_CHUNKS,
+    DEEPSEARCH_TOP_SEED_ENTITIES,
+)
+from core.deepsearch.report.consistency_checker import ConsistencyChecker
+from core.deepsearch.report.citation_agent import CitationAgent
+from core.deepsearch.report.llm_writer import DeepSearchLLMReportWriter, render_markdown_from_structured
+from core.presentation.evidence import build_deepsearch_evidence
+
+
+def _resolve_consistency_check_flag(config_value: bool) -> bool:
+    """Resolve consistency check flag with environment variable override.
+
+    Environment variable DEEPSEARCH_CONSISTENCY_CHECK takes precedence.
+    Valid truthy values: 1, true, yes, on
+    Valid falsy values: 0, false, no, off
+    """
+    env_value = os.getenv("DEEPSEARCH_CONSISTENCY_CHECK")
+    if env_value is None:
+        return config_value
+    normalized = env_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return config_value
+
+
+def _resolve_parallel_sections_flag(config_value: bool) -> bool:
+    """Resolve parallel sections flag with environment variable override.
+
+    Environment variable DEEPSEARCH_PARALLEL_SECTIONS takes precedence.
+    Valid truthy values: 1, true, yes, on
+    Valid falsy values: 0, false, no, off
+    """
+    env_value = os.getenv("DEEPSEARCH_PARALLEL_SECTIONS")
+    if env_value is None:
+        return config_value
+    normalized = env_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return config_value
+
 
 class DeepSearchReporter:
-    """Aggregate reasoning traces, evidences, and metrics into a structured report."""
+    """Generate a structured report from DeepSearch traces."""
 
-    ANSWER_TEMPLATE_KEY = "deepsearch.report.answer_header"
+    STRUCTURED_REPORT_VERSION = "2.0"
 
-    def __init__(self, template_store, config):
+    def __init__(
+        self,
+        template_store,
+        config,
+        *,
+        llm_connector: Any | None = None,
+        graph_store: Any | None = None,
+    ):
         self.template_store = template_store
         self.config = config or {}
-        self.max_highlights = int(self.config.get("max_highlights", 4))
-        self.max_evidence_items = int(self.config.get("max_evidence_items", 24))
+        self.llm_connector = llm_connector
+        self.graph_store = graph_store
 
-    def compose(
+        self.max_highlights = int(self.config.get("max_highlights", 6))
+        self.max_evidence_items = DEEPSEARCH_TOP_CHUNKS
+        self.report_temperature = float(self.config.get("report_temperature", 0.2))
+        self.report_max_evidence_chars = int(self.config.get("report_max_evidence_chars", 900))
+        self.report_max_graph_chain_items = DEEPSEARCH_GRAPH_EDGE_LIMIT
+        self.enable_llm_report = bool(self.config.get("enable_llm_report", True))
+        self.enable_consistency_check = _resolve_consistency_check_flag(
+            bool(self.config.get("enable_consistency_check", True))
+        )
+        self.consistency_temperature = float(self.config.get("consistency_temperature", 0.0))
+        self.enable_citation_agent = bool(self.config.get("enable_citation_agent", True))
+        self.parallel_sections = _resolve_parallel_sections_flag(
+            bool(self.config.get("parallel_sections", False))
+        )
+        self.max_parallel_sections = int(self.config.get("max_parallel_sections", 4))
+
+    async def compose(
         self,
         reasoning_trace: Dict[str, Any],
         external_evidence: Optional[Iterable[Dict[str, Any] | EvidenceChunk]] = None,
     ) -> Dict[str, Any]:
-        """Return DeepSearch report dict combining graph reasoning with external context."""
+        """Compose a report payload for downstream clients (API/CLI/MCP)."""
+
+        if self.enable_llm_report and self.llm_connector is None:
+            raise RuntimeError("LLM connector is required for LLM report generation")
 
         trace = reasoning_trace or {}
-        question = trace.get("question", "").strip()
-        adapter_metadata = trace.get("adapter_metadata") or {}
+        question = (trace.get("question") or "").strip()
+        if not question:
+            raise ValueError("DeepSearch reasoning trace is missing 'question'")
 
         evidences = self._merge_evidences(trace.get("evidences"), external_evidence)
         reasoning_steps = trace.get("reasoning_steps") or []
         highlights = self._build_highlights(reasoning_steps)
-        coverage_metrics = trace.get("gap_result") or trace.get("coverage_metrics") or {}
+        coverage_metrics = trace.get("coverage_metrics") or {}
+        gap_result = trace.get("gap_result") or {}
         request_context = self._extract_request_context(trace)
-        answer = self._render_answer(trace, highlights, request_context, coverage_metrics)
-        cover_metrics = coverage_metrics
 
-        metadata = {
+        metadata: Dict[str, Any] = {
             "question": question,
-            "adapter_metadata": adapter_metadata,
+            "adapter_metadata": trace.get("adapter_metadata") or {},
             "graph_summary": self._graph_summary(trace.get("graph_traversals") or []),
             "plan": {
                 "steps": trace.get("plan_steps") or [],
-                "completed": sum(1 for step in (trace.get("reasoning_steps") or []) if step.get("status") == "done"),
+                "completed": sum(1 for step in (reasoning_steps or []) if step.get("status") == "done"),
             },
-            "reasoning_steps": trace.get("reasoning_steps") or [],
+            "reasoning_steps": reasoning_steps,
             "think_notes": trace.get("think_notes") or [],
             "tool_results": trace.get("tool_results") or [],
-            "coverage_metrics": cover_metrics,
+            "coverage_metrics": coverage_metrics,
+            "gap_result": gap_result,
             "pending_external": trace.get("pending_external") or [],
             "parallel_thinking_runs": int(self.config.get("parallel_thinking_runs", 1)),
             "report_profile": {
@@ -56,33 +134,202 @@ class DeepSearchReporter:
         }
         if request_context:
             metadata["request_context"] = request_context
-
         if metadata["report_profile"]["include_graph_viz"]:
-            metadata.setdefault("graph_visualization", trace.get("graph_traversals") or [])
+            metadata["graph_visualization"] = trace.get("graph_traversals") or []
 
-        structured = self._build_structured_report(
-            question=question,
-            summary_text=answer,
+        context = self._build_llm_context(
+            trace=trace,
             highlights=highlights,
             evidences=evidences,
-            plan_steps=trace.get("plan_steps") or [],
-            reasoning_steps=reasoning_steps,
-            coverage=cover_metrics,
+            coverage=coverage_metrics,
+            gap_result=gap_result,
             request_context=request_context,
         )
-        structured_meta = {key: structured[key] for key in structured if key != "text"}
-        metadata["structured_report"] = structured_meta
+        if not self.enable_llm_report:
+            markdown_text = _render_fallback_markdown(
+                question=question,
+                final_answer=str(trace.get("final_answer") or "").strip(),
+                highlights=highlights,
+                evidences=evidences,
+            )
+            markdown_text = _append_chunk_evidence(
+                markdown_text,
+                evidences=evidences,
+                max_items=self.max_evidence_items,
+            )
+            markdown_text = _append_graph_appendix(
+                markdown_text,
+                graph_evidence=context.get("graph_evidence") or {},
+            )
+            structured_report = {
+                "format_version": self.STRUCTURED_REPORT_VERSION,
+                "title": question,
+                "summary": str(trace.get("final_answer") or "").strip(),
+                "sections": [],
+                "limitations": [],
+                "next_steps": [],
+                "citations": [],
+                "graph_evidence": context.get("graph_evidence") or {},
+                "text": markdown_text,
+                "context": request_context or {},
+                "generation": {"mode": "fallback"},
+            }
+            if self.enable_citation_agent:
+                structured_report, audit = CitationAgent().process(
+                    structured_report=structured_report,
+                    evidences=evidences,
+                    graph_evidence=context.get("graph_evidence") or {},
+                    max_chunk_index_items=self.max_evidence_items,
+                )
+                metadata["citation_audit"] = audit
+            metadata["structured_report"] = {key: structured_report[key] for key in structured_report if key != "text"}
+            return {
+                "question": question,
+                "answer": markdown_text,
+                "evidences": evidences,
+                "highlights": highlights,
+                "structured_report": structured_report,
+                "metadata": metadata,
+            }
+
+        writer = DeepSearchLLMReportWriter(
+            self.llm_connector,
+            temperature=self.report_temperature,
+            max_evidence_items=self.max_evidence_items,
+            max_evidence_chars=self.report_max_evidence_chars,
+            max_graph_chain_items=self.report_max_graph_chain_items,
+            parallel_sections=self.parallel_sections,
+            max_parallel_sections=self.max_parallel_sections,
+        )
+        outline = await writer.build_outline(question=question, context=context)
+        if self.parallel_sections and len(outline) > 2:
+            structured_llm = await writer.write_report_parallel(question=question, outline=outline, context=context)
+        else:
+            structured_llm = await writer.write_report(question=question, outline=outline, context=context)
+        if self.enable_citation_agent:
+            structured_llm, audit = CitationAgent().process(
+                structured_report=structured_llm,
+                evidences=evidences,
+                graph_evidence=context.get("graph_evidence") or {},
+                max_chunk_index_items=self.max_evidence_items,
+            )
+            metadata["citation_audit"] = audit
+        markdown_text = render_markdown_from_structured(structured_llm)
+        markdown_text = _append_chunk_evidence(
+            markdown_text,
+            evidences=evidences,
+            max_items=self.max_evidence_items,
+        )
+        markdown_text = _append_graph_appendix(
+            markdown_text,
+            graph_evidence=context.get("graph_evidence") or {},
+        )
+
+        structured_report = {
+            "format_version": self.STRUCTURED_REPORT_VERSION,
+            "title": structured_llm.get("title") or question,
+            "summary": structured_llm.get("summary") or "",
+            "sections": structured_llm.get("sections") or [],
+            "limitations": structured_llm.get("limitations") or [],
+            "next_steps": structured_llm.get("next_steps") or [],
+            "citations": structured_llm.get("citations") or [],
+            "evidence_index": structured_llm.get("evidence_index") or [],
+            "graph_evidence": context.get("graph_evidence") or {},
+            "text": markdown_text,
+            "context": request_context or {},
+            "generation": {"mode": "llm"},
+        }
+
+        if self.enable_consistency_check and evidences:
+            checker = ConsistencyChecker(
+                self.llm_connector,
+                temperature=self.consistency_temperature,
+                max_retries=int(self.config.get("consistency_max_retries", 2)),
+            )
+            result = await checker.check(
+                report_markdown=markdown_text,
+                evidences=evidences,
+                structured_report=structured_report,
+                max_evidence_items=self.max_evidence_items,
+                max_evidence_chars=self.report_max_evidence_chars,
+            )
+            structured_report["consistency_check"] = result.model_dump()
+            if not result.is_consistent:
+                metadata["quality_warnings"] = [issue.model_dump() for issue in result.issues]
+
+        metadata["structured_report"] = {key: structured_report[key] for key in structured_report if key != "text"}
 
         return {
             "question": question,
-            "answer": answer,
+            "answer": markdown_text,
             "evidences": evidences,
             "highlights": highlights,
-            "structured_report": structured_meta,
+            "structured_report": structured_report,
             "metadata": metadata,
         }
 
-    # ------------------------------------------------------------------
+    def _build_llm_context(
+        self,
+        *,
+        trace: Dict[str, Any],
+        highlights: List[Dict[str, Any]],
+        evidences: List[Dict[str, Any]],
+        coverage: Dict[str, Any],
+        gap_result: Dict[str, Any],
+        request_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        plan_steps = trace.get("plan_steps") or []
+        reasoning_steps = trace.get("reasoning_steps") or []
+        tool_results = trace.get("tool_results") or []
+        pending_external = trace.get("pending_external") or []
+
+        methodology = {
+            "plan_steps": plan_steps,
+            "reasoning_steps": [
+                {
+                    "step_id": step.get("step_id"),
+                    "description": step.get("description"),
+                    "channel": step.get("channel"),
+                    "status": step.get("status"),
+                    "output_summary": step.get("output_summary"),
+                    "tool": step.get("tool")
+                    or (step.get("metadata") or {}).get("tool")
+                    or (step.get("diagnostics") or {}).get("tool"),
+                }
+                for step in reasoning_steps
+                if isinstance(step, dict)
+            ],
+            "tool_results": [
+                {
+                    "plan_step_id": entry.get("plan_step_id"),
+                    "tool_name": entry.get("tool_name"),
+                    "channel": entry.get("channel"),
+                    "summary": (entry.get("result") or {}).get("summary") if isinstance(entry.get("result"), dict) else None,
+                    "diagnostics": (entry.get("result") or {}).get("diagnostics") if isinstance(entry.get("result"), dict) else None,
+                }
+                for entry in tool_results
+                if isinstance(entry, dict)
+            ],
+        }
+
+        coverage_bundle = {
+            "coverage_metrics": coverage,
+            "gap_result": gap_result,
+            "pending_external": pending_external,
+        }
+
+        return {
+            "question": trace.get("question") or "",
+            "final_answer": trace.get("final_answer") or "",
+            "highlights": highlights,
+            "evidences": evidences,
+            "graph_chain": (trace.get("graph_chain") or [])[: self.report_max_graph_chain_items],
+            "graph_evidence": self._build_graph_evidence(trace, evidences),
+            "methodology": methodology,
+            "coverage": coverage_bundle,
+            "request_context": request_context,
+        }
+
     def _merge_evidences(
         self,
         internal: Optional[Iterable[Dict[str, Any] | EvidenceChunk]],
@@ -97,7 +344,7 @@ class DeepSearchReporter:
             seen.add(chunk_id)
             chunk.setdefault("chunk_id", chunk_id)
             merged.append(chunk)
-            if self.max_evidence_items > 0 and len(merged) >= self.max_evidence_items:
+            if self.max_evidence_items is not None and self.max_evidence_items > 0 and len(merged) >= self.max_evidence_items:
                 break
         return merged
 
@@ -115,6 +362,21 @@ class DeepSearchReporter:
             if normalized:
                 yield normalized
 
+    @staticmethod
+    def _normalize_evidence(payload: Dict[str, Any] | EvidenceChunk | None) -> Optional[Dict[str, Any]]:
+        if payload is None:
+            return None
+        if isinstance(payload, EvidenceChunk):
+            return payload.model_dump()
+        if isinstance(payload, dict) and payload.get("content"):
+            return dict(payload)
+        return None
+
+    @staticmethod
+    def _hash_content(chunk: Dict[str, Any]) -> str:
+        digest = hashlib.sha256((chunk.get("source", "") + "::" + chunk.get("content", "")).encode("utf-8"))
+        return f"anon-{digest.hexdigest()[:12]}"
+
     def _extract_request_context(self, trace: Dict[str, Any]) -> Dict[str, Any]:
         graph_context = trace.get("graph_context") or {}
         metadata = graph_context.get("metadata") or {}
@@ -130,37 +392,6 @@ class DeepSearchReporter:
         if scope_id and "scope_id" not in context:
             context["scope_id"] = str(scope_id)
         return context
-
-    @staticmethod
-    def _normalize_evidence(payload: Dict[str, Any] | EvidenceChunk | None) -> Optional[Dict[str, Any]]:
-        if payload is None:
-            return None
-        if isinstance(payload, EvidenceChunk):
-            return payload.model_dump()
-        if isinstance(payload, dict):
-            content = payload.get("content")
-            if content:
-                return dict(payload)
-        return None
-
-    @staticmethod
-    def _hash_content(chunk: Dict[str, Any]) -> str:
-        digest = hashlib.sha256((chunk.get("source", "") + "::" + chunk.get("content", "")).encode("utf-8"))
-        return f"anon-{digest.hexdigest()[:12]}"
-
-    def _format_request_context_lines(self, request_context: Dict[str, Any]) -> List[str]:
-        lines: List[str] = []
-        for key, value in request_context.items():
-            if value is None:
-                continue
-            lines.append(f"- {key}: {value}")
-        return lines
-
-    def _format_request_context_section(self, request_context: Dict[str, Any]) -> str:
-        lines = self._format_request_context_lines(request_context)
-        if not lines:
-            return ""
-        return "## Request Context\n" + "\n".join(lines)
 
     def _build_highlights(self, reasoning_steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         highlights: List[Dict[str, Any]] = []
@@ -182,48 +413,8 @@ class DeepSearchReporter:
                 break
         return highlights
 
-    def _render_answer(
-        self,
-        trace: Dict[str, Any],
-        highlights: List[Dict[str, Any]],
-        request_context: Dict[str, Any],
-        coverage: Dict[str, Any],
-    ) -> str:
-        final_answer = (trace.get("final_answer") or "").strip()
-        blocks: List[str] = []
-        if final_answer:
-            blocks.append(f"## Final Answer\n{final_answer}")
-        else:
-            header = self._template(self.ANSWER_TEMPLATE_KEY, "Key findings from graph reasoning:")
-            if not highlights:
-                blocks.append(header + "\n- Evidence collected but no stable reasoning summary was produced.")
-            else:
-                lines = [header]
-                for idx, highlight in enumerate(highlights, start=1):
-                    summary = (highlight.get("summary") or "").strip()
-                    if summary:
-                        lines.append(f"{idx}. {summary}")
-                blocks.append("\n".join(lines))
-
-        context_block = self._format_request_context_section(request_context)
-        if context_block:
-            blocks.append(context_block)
-
-        key_lines = []
-        for idx, highlight in enumerate(highlights, start=1):
-            summary = (highlight.get("summary") or "").strip()
-            if summary:
-                key_lines.append(f"{idx}. {summary}")
-        if key_lines:
-            blocks.append("## Key Findings\n" + "\n".join(key_lines))
-
-        confidence_block = self._confidence_narrative(coverage)
-        if confidence_block:
-            blocks.append("## Confidence & Next Steps\n" + confidence_block)
-
-        return "\n\n".join(block for block in blocks if block).strip()
-
-    def _graph_summary(self, traversals: List[Dict[str, Any]]) -> Dict[str, Any]:
+    @staticmethod
+    def _graph_summary(traversals: List[Dict[str, Any]]) -> Dict[str, Any]:
         node_ids: set[str] = set()
         edge_ids: set[str] = set()
         for record in traversals:
@@ -239,205 +430,116 @@ class DeepSearchReporter:
             "unique_edges": len(edge_ids),
         }
 
-    def _template(self, key: str, default: str) -> str:
-        if not self.template_store:
-            return default
-        getter = getattr(self.template_store, "get", None)
-        if callable(getter):
-            value = getter(key)
-            if value:
-                return str(value)
-        if isinstance(self.template_store, dict):
-            value = self.template_store.get(key)
-            if value:
-                return str(value)
-        return default
+    def _build_graph_evidence(self, trace: Dict[str, Any], evidences: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Build a graph evidence bundle (seeds/chain) when possible."""
 
-    # ------------------------------------------------------------------
-    def _build_structured_report(
-        self,
-        *,
-        question: str,
-        summary_text: str,
-        highlights: List[Dict[str, Any]],
-        evidences: List[Dict[str, Any]],
-        plan_steps: List[Dict[str, Any]],
-        reasoning_steps: List[Dict[str, Any]],
-        coverage: Dict[str, Any],
-        request_context: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Assemble a Markdown report with sections, evidence, and reasoning context."""
-
-        title = question or "DeepSearch Analysis"
-        sanitized_summary = (summary_text or "").strip() or "No definitive conclusion was produced; review evidence and reasoning."
-        evidence_map = {item.get("chunk_id"): item for item in evidences if item.get("chunk_id")}
-
-        key_findings, highlight_ids = self._format_highlights(highlights, evidence_map)
-        evidence_lines, citations = self._format_evidence_section(evidences)
-        methodology_lines = self._format_methodology_section(plan_steps, reasoning_steps)
-        coverage_lines = self._format_coverage_section(coverage)
-        context_lines = self._format_request_context_lines(request_context)
-        confidence_blurb = self._confidence_narrative(coverage)
-
-        sections = [
-            {"title": "Summary", "body": sanitized_summary},
-        {"title": "Key Findings", "body": "\n".join(key_findings) if key_findings else "No prioritized findings were recorded."},
-            {
-                "title": "Supporting Evidence",
-                "body": "\n".join(evidence_lines) if evidence_lines else "No evidence snippets were captured.",
-            },
-            {
-                "title": "Methodology",
-                "body": "\n".join(methodology_lines) if methodology_lines else "Plan execution logs were unavailable.",
-            },
-            {
-                "title": "Coverage & Confidence",
-                "body": (confidence_blurb + ("\n" if confidence_blurb and coverage_lines else "") + "\n".join(coverage_lines)).strip()
-                if (confidence_blurb or coverage_lines)
-                else "No coverage or confidence metrics reported.",
-            },
-        ]
-        if context_lines:
-            sections.insert(1, {"title": "Research Context", "body": "\n".join(context_lines)})
-
-        text_blocks: List[str] = [f"# {title}"]
-        for section in sections:
-            text_blocks.extend(["", f"## {section['title']}", section["body"]])
-        full_text = "\n".join(text_blocks).strip()
-
-        return {
-            "title": title,
-            "summary": sanitized_summary,
-            "sections": sections,
-            "citations": citations,
-            "highlight_evidence_ids": highlight_ids,
-            "text": full_text,
-            "context": request_context or {},
+        payload = {
+            "reasoning": {"evidences": evidences},
+            "report": {"evidences": evidences},
+            "graph_chain": trace.get("graph_chain") or [],
         }
+        return build_deepsearch_evidence(payload, chunk_limit=self.max_evidence_items, graph_store=self.graph_store)
 
-    def _format_highlights(
-        self,
-        highlights: List[Dict[str, Any]],
-        evidence_map: Dict[str, Dict[str, Any]],
-    ) -> tuple[List[str], List[str]]:
-        """Return ordered highlight strings and the evidence IDs they reference."""
 
-        lines: List[str] = []
-        referenced_ids: List[str] = []
-        for idx, block in enumerate(highlights, start=1):
-            summary = (block.get("summary") or "").strip()
-            if not summary:
+def _append_chunk_evidence(
+    markdown_text: str,
+    *,
+    evidences: List[Dict[str, Any]],
+    max_items: int | None = None,
+    preview_length: int = 100,
+) -> str:
+    """Append a compact section listing chunk evidence with content preview."""
+
+    if not evidences:
+        return markdown_text
+
+    capped = evidences[:max_items] if max_items is not None and max_items > 0 else evidences
+    if not capped:
+        return markdown_text
+
+    blocks: List[str] = ["", "## Appendix: Chunk Evidence"]
+    for entry in capped:
+        if not isinstance(entry, dict):
+            continue
+        chunk_id = str(entry.get("chunk_id") or "").strip()
+        source = str(entry.get("source") or "").strip()
+        content = str(entry.get("content") or "").strip()
+        if not chunk_id:
+            continue
+        preview = content[:preview_length].replace("\n", " ").strip()
+        if len(content) > preview_length:
+            preview += "..."
+        source_tag = f" ({source})" if source else ""
+        blocks.append(f"- [{chunk_id}]{source_tag}: {preview}")
+
+    return (markdown_text or "").rstrip() + "\n" + "\n".join(blocks).rstrip() + "\n"
+
+
+def _append_graph_appendix(markdown_text: str, *, graph_evidence: Dict[str, Any], max_items: int = 40) -> str:
+    """Append a compact appendix listing graph evidence artifacts."""
+
+    if not isinstance(graph_evidence, dict):
+        return markdown_text
+
+    seeds = list(graph_evidence.get("seed_entities") or [])
+    chain = list(graph_evidence.get("graph_chain") or [])
+    stats = graph_evidence.get("graph_stats") or {}
+
+    if not any((seeds, chain, stats)):
+        return markdown_text
+
+    blocks: List[str] = ["", "## Appendix: Graph Evidence"]
+    if stats:
+        node_count = stats.get("nodes")
+        edge_count = stats.get("edges")
+        category_count = len(stats.get("categories") or []) if isinstance(stats.get("categories"), list) else None
+        blocks.append(
+            f"- Graph stats: nodes={node_count}, edges={edge_count}, categories={category_count}"
+        )
+    if seeds:
+        blocks.append("")
+        blocks.append("### Seed Entities")
+        if DEEPSEARCH_TOP_SEED_ENTITIES is not None:
+            seeds = seeds[: max(DEEPSEARCH_TOP_SEED_ENTITIES, 0)]
+        blocks.extend(f"- {item}" for item in seeds)
+    if chain:
+        blocks.append("")
+        blocks.append("### Graph Chain")
+        if DEEPSEARCH_GRAPH_EDGE_LIMIT is not None:
+            chain = chain[: max(DEEPSEARCH_GRAPH_EDGE_LIMIT, 0)]
+        blocks.extend(f"{idx}. {edge}" for idx, edge in enumerate(chain, start=1))
+
+    return (markdown_text or "").rstrip() + "\n" + "\n".join(blocks).rstrip() + "\n"
+
+
+def _render_fallback_markdown(
+    *,
+    question: str,
+    final_answer: str,
+    highlights: List[Dict[str, Any]],
+    evidences: List[Dict[str, Any]],
+) -> str:
+    blocks: List[str] = [f"# {question}"]
+    answer = final_answer or ""
+    if answer:
+        blocks.extend(["", "## Answer", answer])
+    if highlights:
+        blocks.append("")
+        blocks.append("## Highlights")
+        for item in highlights:
+            summary = str(item.get("summary") or "").strip()
+            if summary:
+                blocks.append(f"- {summary}")
+    if evidences:
+        blocks.append("")
+        blocks.append("## Evidence Index")
+        for entry in evidences:
+            if not isinstance(entry, dict):
                 continue
-            evidence_ids = [eid for eid in (block.get("evidence_ids") or []) if eid]
-            referenced_ids.extend(evidence_ids)
-            reference = self._format_evidence_refs(evidence_ids, evidence_map)
-            lines.append(f"{idx}. {summary}{reference}")
-        return lines, referenced_ids
-
-    def _format_evidence_refs(
-        self,
-        evidence_ids: List[str],
-        evidence_map: Dict[str, Dict[str, Any]],
-    ) -> str:
-        """Format citation labels referencing the evidence map."""
-
-        labels: List[str] = []
-        for eid in evidence_ids:
-            chunk = evidence_map.get(eid)
-            if not chunk:
-                continue
-            source = chunk.get("source") or "graph"
-            labels.append(f"{eid}@{source}")
-        if not labels:
-            return ""
-        return f" (Evidence: {', '.join(labels)})"
-
-    def _format_evidence_section(
-        self,
-        evidences: List[Dict[str, Any]],
-        *,
-        preview_chars: int = 220,
-    ) -> tuple[List[str], List[Dict[str, Any]]]:
-        """Summarize collected evidences for the report body and citation payload."""
-
-        lines: List[str] = []
-        citations: List[Dict[str, Any]] = []
-        for chunk in evidences:
-            chunk_id = chunk.get("chunk_id") or self._hash_content(chunk)
-            content = self._truncate_text(chunk.get("content") or "", preview_chars)
-            source = chunk.get("source") or "graph"
-            score = chunk.get("score")
-            lines.append(f"- [{chunk_id}] {source}: {content}")
-            citations.append(
-                {
-                    "evidence_id": chunk_id,
-                    "source": source,
-                    "excerpt": content,
-                    "score": score,
-                }
-            )
-        return lines, citations
-
-    def _format_methodology_section(
-        self,
-        plan_steps: List[Dict[str, Any]],
-        reasoning_steps: List[Dict[str, Any]],
-    ) -> List[str]:
-        """Link plan steps with executed reasoning summaries."""
-
-        lines: List[str] = []
-        reasoning_lookup = {step.get("step_id"): step for step in reasoning_steps if step.get("step_id")}
-        for step in plan_steps:
-            step_id = step.get("step_id")
-            description = step.get("description") or ""
-            channel = step.get("channel") or "graph"
-            execution = reasoning_lookup.get(step_id, {})
-            status = execution.get("status") or "pending"
-            output = (execution.get("output_summary") or "").strip() or "No summary captured."
-            tool = execution.get("tool") or (execution.get("metadata") or {}).get("tool")
-            if not tool:
-                diagnostics = execution.get("diagnostics") or {}
-                tool = diagnostics.get("tool")
-            tool_label = f"{tool}" if tool else channel
-            lines.append(f"- {step_id or '?'} | {description} ({tool_label}) -> {status}: {output}")
-        return lines
-
-    @staticmethod
-    def _format_coverage_section(coverage: Dict[str, Any]) -> List[str]:
-        """Format coverage/confidence metrics."""
-
-        lines: List[str] = []
-        for key, value in coverage.items():
-            if value is None:
-                continue
-            lines.append(f"- {key}: {value}")
-        return lines
-
-    @staticmethod
-    def _confidence_narrative(coverage: Dict[str, Any]) -> str:
-        if not coverage:
-            return ""
-        ratio = coverage.get("coverage_ratio") or coverage.get("coverage_score")
-        confidence = coverage.get("confidence") or coverage.get("confidence_score")
-        missing = coverage.get("missing_topics") or []
-        parts: List[str] = []
-        if confidence is not None:
-            parts.append(f"Self-reported confidence: {confidence}")
-        if ratio is not None:
-            parts.append(f"Estimated coverage ratio: {ratio}")
-        if missing:
-            parts.append("Outstanding topics: " + ", ".join(str(topic) for topic in missing))
-        if not parts:
-            return ""
-        return "\n".join(f"- {line}" for line in parts)
-
-    @staticmethod
-    def _truncate_text(text: str, max_chars: int) -> str:
-        """Collapse whitespace and truncate evidence snippets for readability."""
-
-        collapsed = " ".join((text or "").split())
-        if not collapsed:
-            return ""
-        if len(collapsed) <= max_chars:
-            return collapsed
-        return f"{collapsed[:max_chars].rstrip()}..."
+            chunk_id = str(entry.get("chunk_id") or "").strip()
+            source = str(entry.get("source") or "").strip()
+            content = str(entry.get("content") or "").strip()
+            if chunk_id and content:
+                source_tag = f" ({source})" if source else ""
+                blocks.append(f"- [{chunk_id}]{source_tag}: {content}")
+    return "\n".join(blocks).strip()

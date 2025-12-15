@@ -14,7 +14,6 @@ from framework.singleton_decorator import singleton
 
 _UNRESOLVED_ENV_PLACEHOLDER = object()
 
-
 @singleton
 class Register:
     """
@@ -37,10 +36,8 @@ class Register:
             items = [self._substitute_env_vars(item) for item in obj]
             return [None if item is _UNRESOLVED_ENV_PLACEHOLDER else item for item in items]
         elif isinstance(obj, str):
-            # If the whole value is a single placeholder, allow unresolved values to become None.
-            # This avoids accidentally treating "${VAR}" as a real filesystem path, while still
-            # letting Pydantic/default logic handle optional fields. When unresolved, omit the key
-            # from the final payload so Pydantic can apply defaults for required fields.
+            # If the whole value is a single placeholder, allow unresolved values to be omitted so
+            # downstream config defaults can take over (see test/framework/test_register_env_substitution.py).
             whole = re.fullmatch(r'\$\{([^}]+)\}', obj.strip())
             if whole:
                 var_name = whole.group(1)
@@ -54,7 +51,7 @@ class Register:
                     return _UNRESOLVED_ENV_PLACEHOLDER
                 return env_value
 
-            # Replace ${VAR_NAME} with environment variable values
+            # Replace ${VAR_NAME} with environment variable values (leave embedded placeholders intact when missing).
             def replace_env_var(match):
                 var_name = match.group(1)
                 env_value = os.getenv(var_name)

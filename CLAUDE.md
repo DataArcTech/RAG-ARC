@@ -76,7 +76,7 @@ Component initialization flow:
 **DeepSearch** (`core/deepsearch/`, `application/rag_inference/deepsearch/`):
 - Multi-step reasoning over knowledge graphs
 - Tools in `core/deepsearch/tools/` (fast/hybrid/heavy categories)
-- Tool orchestration via MCP (`core/deepsearch/tooling/manager.py`)
+- Tool orchestration via MCP (`encapsulation/deepsearch/tooling/manager.py`)
 
 **Document Pipeline** (`core/file_management/`):
 - Parsers: native, dots_ocr, vlm_ocr

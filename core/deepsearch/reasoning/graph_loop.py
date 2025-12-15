@@ -1,5 +1,6 @@
 """Graph-first reasoning loop that orchestrates adapter traversals and tool calls."""
 import asyncio
+import contextvars
 import logging
 import time
 from dataclasses import asdict, is_dataclass
@@ -14,7 +15,7 @@ from encapsulation.data_model.deepsearch import (
     ToolExecutionLog,
     ToolResultPayload,
 )
-from core.deepsearch.tooling import DeepSearchToolManager
+from core.deepsearch.tooling.protocols import ToolInvoker
 from core.graph_adapter.base import GraphAccessScope, GraphDeepSearchAdapter
 from core.graph_adapter.scope_provider import require_scope
 
@@ -23,6 +24,18 @@ from .subagent import PlanSubAgent, SubAgentOutcome
 from .traversal import GraphTraversalExecutor, GraphTraversalSettings
 
 logger = logging.getLogger(__name__)
+
+
+_RUN_EVIDENCES: contextvars.ContextVar[List[EvidenceChunk] | None] = contextvars.ContextVar(
+    "deepsearch_run_evidences",
+    default=None,
+)
+_RUN_EVIDENCE_LOCK: contextvars.ContextVar[asyncio.Lock | None] = contextvars.ContextVar(
+    "deepsearch_run_evidence_lock",
+    default=None,
+)
+_RUN_TOTAL_STEPS: contextvars.ContextVar[int] = contextvars.ContextVar("deepsearch_run_total_steps", default=0)
+_RUN_THINK_COUNT: contextvars.ContextVar[int] = contextvars.ContextVar("deepsearch_run_think_count", default=0)
 
 
 class GraphReasoningLoop:
@@ -34,7 +47,7 @@ class GraphReasoningLoop:
         llm_connector,
         strategy_config,
         *,
-        tool_manager: DeepSearchToolManager | None = None,
+        tool_manager: ToolInvoker | None = None,
     ):
         # adapter: dynamically injected HippoRAG/other graphrag implementation
         self.adapter = adapter
@@ -50,15 +63,10 @@ class GraphReasoningLoop:
         )
         self._adapter_metadata = self._resolve_adapter_metadata()
         self._think_config = self._build_think_config(strategy_config)
-        self._think_run_count = 0
         self.parallel_branches = self._resolve_parallel_branches(strategy_config)
         self.max_parallel_branches = self._resolve_max_parallel(strategy_config)
         self._active_parallel_branches = max(1, self.parallel_branches or 1)
         self._tool_timeout = self._resolve_tool_timeout(strategy_config)
-        self._active_run_total_steps: int = 0
-        self._active_question: str | None = None
-        self._evidence_lock = asyncio.Lock()
-        self._shared_evidences: List[EvidenceChunk] = []
 
     async def run(
         self,
@@ -78,7 +86,7 @@ class GraphReasoningLoop:
         context = self._prepare_graph_context(graph_context, question, normalized_steps)
         traversals: List[GraphTraversalRecord] = []
         evidences: List[EvidenceChunk] = []
-        self._shared_evidences = evidences
+        evidence_lock = asyncio.Lock()
         tool_runs: List[Dict[str, Any]] = []
         think_notes: List[Dict[str, Any]] = []
         pending_external: List[Dict[str, Any]] = []
@@ -90,8 +98,10 @@ class GraphReasoningLoop:
         if any(entry["run_with_adapter"] for entry in normalized_steps):
             await self.traversal_executor.prepare(context)
 
-        self._active_run_total_steps = len(normalized_steps)
-        self._active_question = question
+        evidences_token = _RUN_EVIDENCES.set(evidences)
+        lock_token = _RUN_EVIDENCE_LOCK.set(evidence_lock)
+        total_steps_token = _RUN_TOTAL_STEPS.set(len(normalized_steps))
+        think_count_token = _RUN_THINK_COUNT.set(0)
         parallel_branches = self._determine_parallel_branches(normalized_steps)
         self._active_parallel_branches = parallel_branches
         sub_agents = [
@@ -143,8 +153,10 @@ class GraphReasoningLoop:
                 if think_record:
                     aux_reasoning.append(think_record)
         finally:
-            self._active_run_total_steps = 0
-            self._active_question = None
+            _RUN_EVIDENCES.reset(evidences_token)
+            _RUN_EVIDENCE_LOCK.reset(lock_token)
+            _RUN_TOTAL_STEPS.reset(total_steps_token)
+            _RUN_THINK_COUNT.reset(think_count_token)
 
         ordered_reasoning: List[ReasoningStepRecord] = []
         for idx, entry in enumerate(normalized_steps):
@@ -554,8 +566,9 @@ class GraphReasoningLoop:
             return None
         if not self.tool_manager or not self._think_config["tool_name"]:
             return None
-        self._think_run_count += 1
-        think_step_id = f"think_auto_{self._think_run_count:02d}"
+        next_count = _RUN_THINK_COUNT.get() + 1
+        _RUN_THINK_COUNT.set(next_count)
+        think_step_id = f"think_auto_{next_count:02d}"
         record = ReasoningStepRecord(
             step_id=think_step_id,
             description="Periodic think checkpoint",
@@ -690,15 +703,17 @@ class GraphReasoningLoop:
     async def _extend_shared_evidences(self, additions: Sequence[EvidenceChunk]) -> None:
         if not additions:
             return
-        async with self._evidence_lock:
-            self._shared_evidences.extend(additions)
+        evidences, lock = self._run_evidence_state()
+        async with lock:
+            evidences.extend(additions)
 
     async def _snapshot_evidences(self) -> List[EvidenceChunk]:
-        async with self._evidence_lock:
-            return list(self._shared_evidences)
+        evidences, lock = self._run_evidence_state()
+        async with lock:
+            return list(evidences)
 
     def _coverage_hint_for_step(self, step_index: int, snapshot: Optional[List[EvidenceChunk]] = None) -> Dict[str, Any]:
-        total = self._active_run_total_steps or 1
+        total = _RUN_TOTAL_STEPS.get() or 1
         snapshot = snapshot or []
         return self._coverage_snapshot(
             evidence_count=len(snapshot),
@@ -706,6 +721,14 @@ class GraphReasoningLoop:
             completed_steps=min(step_index, total),
             total_steps=total,
         )
+
+    @staticmethod
+    def _run_evidence_state() -> tuple[List[EvidenceChunk], asyncio.Lock]:
+        evidences = _RUN_EVIDENCES.get()
+        lock = _RUN_EVIDENCE_LOCK.get()
+        if evidences is None or lock is None:
+            raise RuntimeError("GraphReasoningLoop evidence state is not initialised; call run() first")
+        return evidences, lock
 
     def _resolve_parallel_branches(self, config) -> int:
         if not config:

@@ -256,7 +256,6 @@ def _slim_evidence_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "chunks": payload.get("chunks") or [],
         "seed_entities": payload.get("seed_entities") or [],
-        "triples": payload.get("triples") or [],
     }
 
 

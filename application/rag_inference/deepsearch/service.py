@@ -14,8 +14,8 @@ from core.deepsearch.plan import DeepSearchPlanner
 from core.deepsearch.reasoning import GraphReasoningLoop
 from core.deepsearch.gap import GapDetectionEngine
 from core.deepsearch.report import DeepSearchReporter
-from core.deepsearch.tooling import DeepSearchToolManager
-from core.deepsearch.external import ExternalSearchChannel
+from core.deepsearch.tooling.protocols import ToolInvoker
+from encapsulation.deepsearch.external import ExternalSearchChannel
 from core.deepsearch.state import DeepSearchState
 
 
@@ -31,7 +31,7 @@ class DeepSearchService:
         graph_loop: GraphReasoningLoop,
         gap_detector: GapDetectionEngine,
         reporter: DeepSearchReporter,
-        tool_manager: DeepSearchToolManager,
+        tool_manager: ToolInvoker,
         *,
         external_channel: ExternalSearchChannel | None = None,
         state_cls: Type[DeepSearchState] = DeepSearchState,

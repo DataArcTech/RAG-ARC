@@ -1,4 +1,8 @@
-"""Tool management utilities (MCP, telemetry, etc.)."""
+"""Tool hint/catalog utilities consumed by the DeepSearch planner.
+
+Note: Infrastructure implementations (local tool registry, MCP routing, tool manager) live under
+`encapsulation/deepsearch/tooling` to keep `core/` focused on algorithms and contracts.
+"""
 import json
 import os
 from typing import Dict, Iterable, List
@@ -13,12 +17,7 @@ from ._hints import (
     register_tool_hints,
     set_disabled_tools,
 )
-from .manager import DeepSearchToolManager, LocalToolRegistry, MCPToolRouter
-
 __all__ = [
-    "DeepSearchToolManager",
-    "LocalToolRegistry",
-    "MCPToolRouter",
     "describe_available_tools",
     "register_tool_hints",
     "set_disabled_tools",

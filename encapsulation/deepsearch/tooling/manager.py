@@ -1,4 +1,4 @@
-"""Tool manager that orchestrates local registries and MCP routing."""
+"""Tool manager that orchestrates local registries and MCP routing (infrastructure layer)."""
 import json
 import logging
 import os
@@ -21,7 +21,7 @@ from core.deepsearch.tools import (
     get_tool_descriptor,
 )
 
-from ._hints import register_tool_hints, set_disabled_tools
+from core.deepsearch.tooling._hints import register_tool_hints, set_disabled_tools
 
 logger = logging.getLogger(__name__)
 

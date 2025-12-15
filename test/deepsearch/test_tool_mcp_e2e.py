@@ -6,7 +6,7 @@ import pytest
 import uvicorn
 
 from application.deepsearch.tool_mcp_server import build_tool_mcp_server
-from core.deepsearch.tooling import DeepSearchToolManager
+from encapsulation.deepsearch.tooling import DeepSearchToolManager
 from core.deepsearch.tools import ToolResult, ToolRunRequest, get_tool_descriptor
 from core.graph_adapter.base import GraphAccessScope, GraphAdapterCapability, GraphAdapterMetadata
 from encapsulation.mcp.client import MCPToolClient

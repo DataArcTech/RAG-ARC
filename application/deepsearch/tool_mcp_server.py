@@ -13,7 +13,7 @@ from mcp.types import ToolAnnotations
 
 from config.core.deepsearch.graph_adapter_config import GraphAdapterConfig
 from config.encapsulation.llm.chat.openai import OpenAIChatConfig
-from core.deepsearch.tooling import DeepSearchToolManager
+from encapsulation.deepsearch.tooling import DeepSearchToolManager
 from core.deepsearch.tools import GraphTool, ToolDescriptor, builtin_tool_descriptors
 from core.graph_adapter.base import GraphAccessScope
 from core.graph_adapter.scope_provider import current_scope_provider

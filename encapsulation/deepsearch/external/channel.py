@@ -126,34 +126,94 @@ class ExternalSearchChannel:
         coverage_metrics: Dict[str, Any],
         gap_result: Optional[Dict[str, Any]],
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], str]:
-        tool_name = task.get("tool") or "web.search"
-        final_provider = provider or self.default_provider
-
-        if self.tool_manager:
-            try:
-                chunks, diagnostics = await self._execute_with_tool_manager(
-                    task,
-                    tool_name=tool_name,
-                    provider=final_provider,
-                    question=question,
-                    graph_context=graph_context,
-                    context_evidences=context_evidences,
-                    coverage_metrics=coverage_metrics,
-                    gap_result=gap_result,
-                )
-            except KeyError:
-                # fall back to native providers when the tool is not available locally
-                pass
-            else:
-                return chunks, diagnostics, "tool_manager"
-
-        if final_provider == "tavily":
-            chunks, diagnostics = await self._execute_with_tavily(
+        tool = task.get("tool") or "web.search"
+        provider = (provider or self.default_provider).strip().lower()
+        if provider in {"tavily", "serper"}:
+            chunks, diagnostics = await self._execute_with_provider(task, provider=provider, question=question)
+            return chunks, diagnostics, provider
+        if provider in {"mcp", "tool"}:
+            chunks, diagnostics = await self._execute_with_tool_manager(
                 task,
-                question=question or self._task_query(task, default=question),
+                tool_name=tool,
+                provider=provider,
+                question=question,
+                graph_context=graph_context,
+                context_evidences=context_evidences,
+                coverage_metrics=coverage_metrics,
+                gap_result=gap_result,
             )
+            return chunks, diagnostics, tool
+        # Default: attempt tool manager first; fall back to Tavily HTTP provider.
+        try:
+            chunks, diagnostics = await self._execute_with_tool_manager(
+                task,
+                tool_name=tool,
+                provider=provider,
+                question=question,
+                graph_context=graph_context,
+                context_evidences=context_evidences,
+                coverage_metrics=coverage_metrics,
+                gap_result=gap_result,
+            )
+            return chunks, diagnostics, tool
+        except Exception:
+            chunks, diagnostics = await self._execute_with_provider(task, provider="tavily", question=question)
             return chunks, diagnostics, "tavily"
-        raise RuntimeError(f"No supported external provider for tool '{tool_name}' (provider={final_provider})")
+
+    async def _execute_with_provider(
+        self,
+        task: Dict[str, Any],
+        *,
+        provider: str,
+        question: str,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        if provider == "tavily":
+            return await self._execute_with_tavily(task, question=question)
+        raise RuntimeError(f"Unsupported provider: {provider}")
+
+    def _decorate_chunk(
+        self,
+        chunk: Dict[str, Any],
+        task: Dict[str, Any],
+        provider: str,
+        tool_name: str,
+        *,
+        diagnostics: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        provenance = dict(chunk.get("provenance") or {})
+        provenance.setdefault("provider", provider)
+        provenance.setdefault("tool", tool_name)
+        provenance.setdefault("step_id", task.get("step_id"))
+        provenance.setdefault("query", self._task_query(task, default=""))
+        if diagnostics:
+            provenance.setdefault("diagnostics", diagnostics)
+        chunk["provenance"] = provenance
+        return chunk
+
+    def _build_tool_payload(
+        self,
+        task: Dict[str, Any],
+        *,
+        question: str,
+        graph_context: Optional[GraphQueryContext],
+        context_evidences: List[EvidenceChunk],
+        coverage_metrics: Dict[str, Any],
+        gap_result: Optional[Dict[str, Any]],
+        provider: str,
+    ) -> Dict[str, Any]:
+        return {
+            "question": question,
+            "plan_step": task.get("step_id") or task.get("step") or "external",
+            "context_evidences": self._context_window(context_evidences),
+            "extra": {
+                "provider": provider,
+                "gap_result": gap_result or {},
+                "coverage_metrics": coverage_metrics or {},
+                "task": task,
+            },
+            "graph_context": graph_context.model_dump(exclude_none=True) if graph_context else None,
+            "coverage_metrics": coverage_metrics or {},
+        }
 
     async def _execute_with_tool_manager(
         self,
@@ -200,7 +260,9 @@ class ExternalSearchChannel:
             )
         return evidences, result.diagnostics or {}
 
-    async def _execute_with_tavily(self, task: Dict[str, Any], *, question: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    async def _execute_with_tavily(
+        self, task: Dict[str, Any], *, question: str
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         api_key = self._resolve_tavily_key()
         if not api_key:
             raise RuntimeError("TAVILY_API_KEY is not configured; external search remains disabled.")
@@ -265,65 +327,12 @@ class ExternalSearchChannel:
             )
         return evidences
 
-    # ------------------------------------------------------------------
-    def _build_tool_payload(
-        self,
-        task: Dict[str, Any],
-        *,
-        question: str,
-        graph_context: Optional[GraphQueryContext],
-        context_evidences: List[EvidenceChunk],
-        coverage_metrics: Dict[str, Any],
-        gap_result: Optional[Dict[str, Any]],
-        provider: str,
-    ) -> Dict[str, Any]:
-        window = self._context_window(context_evidences)
-        payload = {
-            "question": question or self._task_query(task, default=question),
-            "plan_step": task.get("step_id"),
-            "context_evidences": window,
-            "extra": {
-                "trigger": "gap_external",
-                "provider": provider,
-                "task_metadata": task.get("metadata") or {},
-            },
-            "coverage_metrics": coverage_metrics,
-        }
-        if graph_context:
-            payload["graph_context"] = graph_context.model_dump(exclude_none=True)
-            access_scope = graph_context.resolve_scope()
-            if access_scope:
-                payload["access_scope"] = access_scope
-        if gap_result:
-            payload["extra"]["gap_result"] = gap_result
-        tool_args = task.get("tool_args")
-        if isinstance(tool_args, dict):
-            payload["extra"].setdefault("tool_args", tool_args)
-        provider_overrides = task.get("metadata") or {}
-        payload["extra"]["query"] = provider_overrides.get("query") or payload["question"]
-        return payload
-
     @staticmethod
-    def _decorate_chunk(
-        chunk: Dict[str, Any],
-        task: Dict[str, Any],
-        provider: str,
-        tool_name: str,
-        *,
-        diagnostics: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        chunk.setdefault("chunk_id", chunk.get("chunk_id") or f"external-{uuid.uuid4().hex[:8]}")
-        chunk.setdefault("source", chunk.get("source") or tool_name)
-        provenance = chunk.setdefault("provenance", {})
-        provenance.setdefault("provider", provider)
-        provenance.setdefault("step_id", task.get("step_id"))
-        if diagnostics:
-            provenance.setdefault("diagnostics", diagnostics)
-        return chunk
-
-    def _resolve_graph_context(self, payload: Dict[str, Any]) -> Optional[GraphQueryContext]:
+    def _resolve_graph_context(payload: Dict[str, Any]) -> Optional[GraphQueryContext]:
         if not payload:
             return None
+        if isinstance(payload, GraphQueryContext):
+            return payload
         try:
             return GraphQueryContext.model_validate(payload)
         except Exception:
@@ -465,3 +474,4 @@ class ExternalSearchChannel:
             except TypeError:
                 return config.model_dump(exclude_none=True)
         return dict(getattr(config, "__dict__", {}))
+

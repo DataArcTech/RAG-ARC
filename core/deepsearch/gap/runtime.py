@@ -55,10 +55,14 @@ class GapDetectionEngine:
         diagnostics.setdefault("coverage_metrics", coverage_metrics)
         diagnostics.setdefault("think_gap_trigger", think_trigger)
 
-        if payload["should_trigger_external"] and not external_allowed:
+        requested_trigger = bool(payload.get("should_trigger_external")) or think_trigger
+        if requested_trigger and not external_allowed:
             payload["should_trigger_external"] = False
             payload["reason"] = "external_disabled"
-        elif think_trigger:
+            diagnostics["external_blocked"] = True
+            if think_trigger:
+                diagnostics["think_gap_blocked"] = True
+        elif think_trigger and external_allowed:
             payload["should_trigger_external"] = True
             payload["reason"] = "think_gap"
             if think_missing:
