@@ -15,8 +15,8 @@ class DotsOCRParserConfig(AbstractConfig):
     # Parsing configuration
     dpi: int = 200  # DPI for PDF page conversion
     min_pixels: Optional[int] = None  # Minimum image pixels
-    max_pixels: Optional[int] = None  # Maximum image pixels
-    num_threads: int = 1  # Thread count for PDF processing
+    max_pixels: Optional[int] = 4000000  # Maximum image pixels (default: 4000000 ≈ 2000x2000, recommended to avoid GPU OOM)
+    num_threads: int = 1 # Thread count for PDF processing
 
     # Default parsing parameters
     default_prompt_mode: str = "prompt_layout_all_en"  # Default prompt mode

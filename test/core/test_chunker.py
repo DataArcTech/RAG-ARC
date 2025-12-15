@@ -149,7 +149,7 @@ The history of natural language processing generally started in the 1950s, altho
         # Test TokenChunker with different parameters
         override_chunks = token_chunker.chunk_text(
             simple_text,
-            chunk_size=200,
+            chunk_size=1024,
             chunk_overlap=20
         )
         print(f"  TokenChunker with override: {len(override_chunks)} chunks")

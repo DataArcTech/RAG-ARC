@@ -224,9 +224,18 @@ class DotsOCRParser(AbstractParser):
         min_pixels = getattr(self.config, 'min_pixels', None)
         max_pixels = getattr(self.config, 'max_pixels', None)
 
+        # Read max_pixels from config file (default value in config class is 4000000)
+        # If still None, use MAX_PIXELS as fallback
+        if max_pixels is None:
+            max_pixels = MAX_PIXELS
+            logger.warning(
+                f"max_pixels not configured, using MAX_PIXELS ({MAX_PIXELS}) as fallback. "
+                f"To avoid GPU OOM, set max_pixels=4000000 in config file."
+            )
+
         if prompt_mode == "prompt_grounding_ocr":
             min_pixels = min_pixels or MIN_PIXELS
-            max_pixels = max_pixels or MAX_PIXELS
+        
         if min_pixels is not None:
             assert min_pixels >= MIN_PIXELS
         if max_pixels is not None:
@@ -238,7 +247,41 @@ class DotsOCRParser(AbstractParser):
         else:
             image = fetch_image(origin_image, min_pixels=min_pixels, max_pixels=max_pixels)
 
-        input_height, input_width = smart_resize(image.height, image.width)
+        current_pixels = image.width * image.height
+        if max_pixels and current_pixels > max_pixels:
+            logger.warning(
+                f"Image size ({image.width}x{image.height}, {current_pixels} pixels) exceeds max_pixels ({max_pixels}), "
+                f"resizing to fit limit"
+            )
+            # Calculate new dimensions
+            scale_factor = (max_pixels / current_pixels) ** 0.5
+            new_width = int(image.width * scale_factor)
+            new_height = int(image.height * scale_factor)
+            from .dots_ocr_utils.consts import IMAGE_FACTOR
+            new_width = (new_width // IMAGE_FACTOR) * IMAGE_FACTOR
+            new_height = (new_height // IMAGE_FACTOR) * IMAGE_FACTOR
+            if new_width < IMAGE_FACTOR:
+                new_width = IMAGE_FACTOR
+            if new_height < IMAGE_FACTOR:
+                new_height = IMAGE_FACTOR
+            image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            logger.info(f"Resized image to {new_width}x{new_height} ({new_width * new_height} pixels)")
+
+        input_height, input_width = smart_resize(
+            image.height, 
+            image.width,
+            min_pixels=min_pixels or MIN_PIXELS,
+            max_pixels=max_pixels
+        )
+        
+        # Log image dimension information
+        logger.debug(
+            f"Processing image: original={origin_image.width}x{origin_image.height}, "
+            f"resized={image.width}x{image.height}, "
+            f"input_dimensions={input_width}x{input_height}, "
+            f"max_pixels={max_pixels}"
+        )
+        
         prompt = self._get_prompt(prompt_mode, bbox, origin_image, image, min_pixels=min_pixels, max_pixels=max_pixels)
 
         # Use LLM service for inference

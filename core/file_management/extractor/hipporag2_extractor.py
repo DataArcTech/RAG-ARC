@@ -25,7 +25,9 @@ from core.prompts.hipporag2_extractor_prompt import (
     HIPPORAG2_NER_ONE_SHOT_INPUT_ZH, HIPPORAG2_NER_ONE_SHOT_OUTPUT_ZH,
     HIPPORAG2_NER_ONE_SHOT_INPUT_WITH_TYPES_ZH, HIPPORAG2_NER_ONE_SHOT_OUTPUT_WITH_TYPES_ZH,
     HIPPORAG2_NER_PROMPT_ZH, HIPPORAG2_NER_PROMPT_WITH_TYPES_ZH,
-    HIPPORAG2_TRIPLE_SYSTEM_ZH, HIPPORAG2_TRIPLE_ONE_SHOT_INPUT_ZH, HIPPORAG2_TRIPLE_ONE_SHOT_OUTPUT_ZH, HIPPORAG2_TRIPLE_PROMPT_ZH
+    HIPPORAG2_TRIPLE_SYSTEM_ZH, HIPPORAG2_TRIPLE_ONE_SHOT_INPUT_ZH, HIPPORAG2_TRIPLE_ONE_SHOT_OUTPUT_ZH, HIPPORAG2_TRIPLE_PROMPT_ZH,
+    HIPPORAG2_MINDMAP_SYSTEM, HIPPORAG2_MINDMAP_ONE_SHOT_INPUT, HIPPORAG2_MINDMAP_ONE_SHOT_OUTPUT, HIPPORAG2_MINDMAP_PROMPT,
+    HIPPORAG2_MINDMAP_SYSTEM_ZH, HIPPORAG2_MINDMAP_ONE_SHOT_INPUT_ZH, HIPPORAG2_MINDMAP_ONE_SHOT_OUTPUT_ZH, HIPPORAG2_MINDMAP_PROMPT_ZH
 )
 from encapsulation.data_model.schema import Chunk, GraphData
 
@@ -96,17 +98,28 @@ class HippoRAG2Extractor(ExtractorBase):
         """
         Two-stage extraction: NER first, then Triple Extraction
         More accurate and follows HippoRAG2's original approach
+        Also extracts mind map and saves to chunk.metadata
         """
         try:
             # Stage 1: Named Entity Recognition
             entities = await self.extract_entities(chunk.content)
             
-            if not entities:
-                self.logger.warning("No entities extracted, skipping triple extraction")
-                return GraphData()
-            print(entities)
             # Stage 2: Triple Extraction using extracted entities
-            triples = await self.extract_triples(chunk.content, entities)
+            triples = []
+            if entities:
+                print(entities)
+                triples = await self.extract_triples(chunk.content, entities)
+            else:
+                self.logger.warning("No entities extracted, skipping triple extraction")
+            
+            # Stage 3: Mind Map Extraction
+            mindmap = await self.extract_mindmap(chunk.content)
+            
+            # Save mind map to chunk metadata
+            if mindmap:
+                if chunk.metadata is None:
+                    chunk.metadata = {}
+                chunk.metadata['mindmap'] = mindmap
             
             # Convert to GraphData format
             graph_data = self.build_graph_data(entities, triples)
@@ -367,4 +380,101 @@ class HippoRAG2Extractor(ExtractorBase):
             relation_list.append([subject, predicate, obj])
 
         return GraphData(entities=entity_list, relations=relation_list, metadata={})
+
+    async def extract_mindmap(self, text: str) -> dict:
+        """
+        Stage 3: Extract mind map structure from text
+        
+        Args:
+            text: Original text
+            
+        Returns:
+            Dictionary with mind map structure (hierarchical TSV format)
+        """
+        try:
+            prompt = self.build_mindmap_prompt(text)
+            response = await self.llm.achat([{"role": "user", "content": prompt}])
+            
+            mindmap_data = self.parse_mindmap_response(response)
+            
+            node_count = len(mindmap_data.get('nodes', []))
+            self.logger.info(f"Extracted mind map with {node_count} nodes")
+            return mindmap_data
+            
+        except Exception as e:
+            self.logger.error(f"Error in mind map extraction: {e}")
+            return {}
+
+    def build_mindmap_prompt(self, text: str) -> str:
+        """
+        Build mind map extraction prompt
+        Supports both Chinese and English
+        """
+        # Detect language
+        language = self.detect_language(text)
+        
+        if language == 'zh':
+            return HIPPORAG2_MINDMAP_PROMPT_ZH.format(
+                system=HIPPORAG2_MINDMAP_SYSTEM_ZH,
+                example_input=HIPPORAG2_MINDMAP_ONE_SHOT_INPUT_ZH,
+                example_output=HIPPORAG2_MINDMAP_ONE_SHOT_OUTPUT_ZH,
+                passage=text
+            )
+        else:
+            return HIPPORAG2_MINDMAP_PROMPT.format(
+                system=HIPPORAG2_MINDMAP_SYSTEM,
+                example_input=HIPPORAG2_MINDMAP_ONE_SHOT_INPUT,
+                example_output=HIPPORAG2_MINDMAP_ONE_SHOT_OUTPUT,
+                passage=text
+            )
+
+    def parse_mindmap_response(self, response: str) -> dict:
+        """
+        Parse mind map response in TSV format
+        
+        Expected format:
+        ### MINDMAP
+        1\tcontent1
+        1.1\tcontent2
+        1.1.1\tcontent3
+        ...
+        
+        Args:
+            response: LLM response string
+            
+        Returns:
+            Dictionary with mind map structure:
+            {
+                'nodes': [
+                    {'level': '1', 'content': 'content1'},
+                    {'level': '1.1', 'content': 'content2'},
+                    ...
+                ]
+            }
+        """
+        nodes = []
+        in_mindmap_section = False
+        
+        for line in response.strip().split('\n'):
+            line = line.strip()
+            
+            if not line:
+                continue
+                
+            if line.startswith('### MINDMAP'):
+                in_mindmap_section = True
+                continue
+            
+            if line.startswith('###'):
+                in_mindmap_section = False
+                continue
+            
+            if in_mindmap_section and '\t' in line:
+                parts = line.split('\t', 1)  # Split only on first tab
+                if len(parts) >= 2:
+                    level = parts[0].strip()
+                    content = parts[1].strip()
+                    nodes.append({'level': level, 'content': content})
+        
+        return {'nodes': nodes}
 

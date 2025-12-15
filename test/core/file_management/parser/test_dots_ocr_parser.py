@@ -26,7 +26,8 @@ def get_test_files():
     ]
 
     sample_pdf_paths = [
-        "./test/test_pdf.pdf",
+        # "./test/test_pdf.pdf",
+        "/home/dataarc/chenmingzhen/RAG-ARC-backend/RAG-ARC_old/RAG-ARC/GB_T 20975.24-2008 铝及铝合金化学分析方法 第24部分：稀土总含量的测定.pdf"
     ]
 
     return sample_image_paths, sample_pdf_paths
@@ -182,10 +183,11 @@ def test_huggingface_loading_method():
             use_china_mirror=True,
             cache_folder="./models/dots_ocr",
             use_snapshot_download=True,
-            device="cuda:1"
+            device="cuda:2"
         )
 
         hf_parser_config = DotsOCRParserConfig(
+            max_pixels=400000,
             dots_ocr=hf_service_config
         )
 

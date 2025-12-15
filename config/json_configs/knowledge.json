@@ -1,5 +1,5 @@
 {
-    "max_concurrent_indexing": 20,
+    "max_concurrent_indexing": 5,
     "file_storage_config": {
         "type": "file_storage",
         "file_db_config": {
@@ -67,21 +67,23 @@
             "base_output_dir": "./data/parsed_files",
             "ocr_parser": {
                 "type": "vlm_ocr_parser",
-                    "vlm_ocr": {
-                        "type": "vlm_ocr",
-                        "loading_method": "openai",
-                        "model_name": "${OPENAI_OCR_MODEL}",
-                        "max_tokens": 4096,
-                        "temperature": 0.0
-                    },
-                    "num_threads": 4
+                "vlm_ocr": {
+                    "type": "vlm_ocr",
+                    "loading_method": "openai",
+                    "model_name": "${OPENAI_OCR_MODEL}",
+                    "max_tokens": 4096,
+                    "temperature": 0.0
+                },
+                "num_threads": 4
             },
             "native_parser": {
                 "type": "native_parser"
             }
         },
         "chunker_config": {
-            "type": "token_chunker"
+            "type": "token_chunker",
+            "chunk_size": 2048,
+            "chunk_overlap": 100
         },
         "indexer_configs": [
             {
