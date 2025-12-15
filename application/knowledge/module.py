@@ -584,7 +584,8 @@ class Knowledge(AbstractModule):
             if not parsed_content or not getattr(parsed_content, "parsed_content_id", None):
                 continue
 
-            chunk_metadata_list = self.file_index.chunk_storage.metadata_store.list_chunk_metadata(
+            chunk_metadata_list = await self._run_blocking(
+                self.file_index.chunk_storage.metadata_store.list_chunk_metadata,
                 source_parsed_content_id=parsed_content.parsed_content_id
             )
 
@@ -609,7 +610,7 @@ class Knowledge(AbstractModule):
             raise HTTPException(status_code=500, detail="Graph store is not configured for mind map export")
 
         try:
-            chunk_objects = graph_store.get_by_ids(chunk_id_order)
+            chunk_objects = await self._run_blocking(graph_store.get_by_ids, chunk_id_order)
         except Exception as e:
             logger.error(f"Failed to retrieve chunks from graph store for file {file_id}: {e}")
             raise HTTPException(status_code=500, detail="Failed to retrieve chunk data from graph store")
