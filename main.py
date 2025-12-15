@@ -34,6 +34,14 @@ async def shutdown_knowledge_module():
             await knowledge.shutdown()
     except Exception as e:
         logger.error(f"Error during shutdown: {e}")
+    
+    # Shutdown global thread pool
+    try:
+        from framework.thread_pool import get_thread_pool
+        thread_pool = get_thread_pool()
+        thread_pool.shutdown(wait=True)
+    except Exception as e:
+        logger.error(f"Error shutting down thread pool: {e}")
 
 
 @asynccontextmanager

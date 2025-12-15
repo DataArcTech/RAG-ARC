@@ -8,6 +8,7 @@ from encapsulation.data_model.orm_models import ChunkIndexStatus
 
 from framework.module import AbstractModule
 from encapsulation.data_model.schema import Chunk
+from framework.thread_pool import get_thread_pool
 
 
 if TYPE_CHECKING:
@@ -119,14 +120,20 @@ class IndexManager(AbstractModule):
         try:
             logger.info(f"Starting indexing pipeline for file_id: {file_id}")
 
-            # Step 1: Get file content from FileStorage
+            # Step 1: Get file content from FileStorage (use thread pool to avoid blocking)
             logger.info(f"Step 1: Retrieving file content for {file_id}")
-            file_content = self.file_storage.get_file_content(file_id)
+            file_content = await get_thread_pool().run_blocking(
+                self.file_storage.get_file_content,
+                file_id
+            )
             if file_content is None:
                 raise ValueError(f"File content not found for file_id: {file_id}")
 
-            # Get file metadata for filename
-            file_metadata = self.file_storage.get_file_metadata(file_id)
+            # Get file metadata for filename (use thread pool to avoid blocking)
+            file_metadata = await get_thread_pool().run_blocking(
+                self.file_storage.get_file_metadata,
+                file_id
+            )
             if file_metadata is None:
                 raise ValueError(f"File metadata not found for file_id: {file_id}")
 
@@ -190,7 +197,7 @@ class IndexManager(AbstractModule):
 
             logger.info(f"Extracted {len(parsed_text)} characters of text content")
 
-            # Step 3: Store parsed content
+            # Step 3: Store parsed content (use thread pool to avoid blocking)
             logger.info(f"Step 3: Storing parsed content")
             parser_type = getattr(self.parser, 'parser', None)
             if parser_type is not None:
@@ -203,7 +210,8 @@ class IndexManager(AbstractModule):
             # Convert parsed text to bytes for storage
             parsed_data = parsed_text.encode('utf-8')
 
-            parsed_content_id = self.parsed_content_storage.store_parsed_content(
+            parsed_content_id = await get_thread_pool().run_blocking(
+                self.parsed_content_storage.store_parsed_content,
                 source_file_id=file_id,
                 parser_type=parser_type_name,
                 parsed_data=parsed_data,
@@ -245,7 +253,7 @@ class IndexManager(AbstractModule):
             logger.info(f"Created {len(chunks)} chunks")
             result["metadata"]["num_chunks"] = len(chunks)
 
-            # Step 5: Store chunks
+            # Step 5: Store chunks (use thread pool for each chunk to avoid blocking)
             logger.info(f"Step 5: Storing chunks")
             chunk_ids = []
 
@@ -254,10 +262,11 @@ class IndexManager(AbstractModule):
                     logger.warning(f"Chunk {i+1}/{len(chunks)} is None, skipping")
                     continue
 
-                # Convert chunk to JSON bytes for storage
+                # Convert chunk to JSON bytes for storage (use thread pool to avoid blocking)
                 try:
                     chunk_data = json.dumps(chunk, ensure_ascii=False).encode('utf-8')
-                    chunk_id = self.chunk_storage.store_chunk(
+                    chunk_id = await get_thread_pool().run_blocking(
+                        self.chunk_storage.store_chunk,
                         source_parsed_content_id=parsed_content_id,
                         chunker_type=chunker_strategy,
                         chunk_data=chunk_data,
@@ -280,8 +289,12 @@ class IndexManager(AbstractModule):
             result["chunk_ids"] = chunk_ids
             logger.info(f"Stored {len(chunk_ids)}/{len(chunks)} chunks successfully")
 
-            # Update parsed content status to CHUNKED
-            self._update_parsed_content_status_to_chunked(parsed_content_id, **kwargs)
+            # Update parsed content status to CHUNKED (use thread pool to avoid blocking)
+            await get_thread_pool().run_blocking(
+                self._update_parsed_content_status_to_chunked,
+                parsed_content_id,
+                **kwargs
+            )
 
             # Step 6: Index the chunks (if indexers are configured)
             if self.indexers:
@@ -290,12 +303,21 @@ class IndexManager(AbstractModule):
                 result["indexing_results"] = indexing_results
                 result["metadata"]["indexers_used"] = list(indexing_results.keys())
 
-                # Step 7: Update chunk metadata status for successfully indexed chunks
-                chunks_updated = self._update_indexed_chunks_status(chunk_ids, indexing_results, **kwargs)
+                # Step 7: Update chunk metadata status for successfully indexed chunks (use thread pool to avoid blocking)
+                chunks_updated = await get_thread_pool().run_blocking(
+                    self._update_indexed_chunks_status,
+                    chunk_ids,
+                    indexing_results,
+                    **kwargs
+                )
 
-                # Step 8: Update file metadata status if indexing succeeded
+                # Step 8: Update file metadata status if indexing succeeded (use thread pool to avoid blocking)
                 if chunks_updated:
-                    self._update_file_status_to_indexed(file_id, **kwargs)
+                    await get_thread_pool().run_blocking(
+                        self._update_file_status_to_indexed,
+                        file_id,
+                        **kwargs
+                    )
             else:
                 logger.info("Step 6: No indexers configured, skipping indexing")
 
@@ -308,10 +330,11 @@ class IndexManager(AbstractModule):
             logger.error(error_msg, exc_info=True)
             result["error_message"] = error_msg
 
-            # Update file status to FAILED
+            # Update file status to FAILED (use thread pool to avoid blocking)
             try:
                 from encapsulation.data_model.orm_models import FileStatus
-                self.file_storage.metadata_store.update_file_status(
+                await get_thread_pool().run_blocking(
+                    self.file_storage.metadata_store.update_file_status,
                     file_id,
                     FileStatus.FAILED,
                     **kwargs

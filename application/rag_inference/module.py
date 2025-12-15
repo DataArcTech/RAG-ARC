@@ -2,9 +2,12 @@ from encapsulation.data_model.schema import Chunk
 from typing import TYPE_CHECKING, Optional, Dict, Any, List
 import logging
 import uuid
+import asyncio
+from functools import partial
 from framework.module import AbstractModule
 from core.utils.owner_guard import normalize_owner_id, is_admin_owner, get_admin_owner_id
 from framework.register import Register
+from framework.thread_pool import get_thread_pool
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -42,7 +45,26 @@ class RAGInference(AbstractModule):
         logger.info("LLM built successfully")
         self._knowledge_module: Optional["Knowledge"] = None
 
+    async def _run_blocking(self, func, *args, **kwargs):
+        """Run a blocking function in a separate thread to avoid blocking the event loop."""
+        return await get_thread_pool().run_blocking(func, *args, **kwargs)
+
     def chat(self, query: str, owner_id: uuid.UUID, return_subgraph: bool = False) -> tuple[str, list[Chunk], Optional[Dict[str, Any]]]:
+        """
+        Chat with RAG system (synchronous version, kept for backward compatibility).
+        For async non-blocking version, use chat_async().
+        """
+        # This is a synchronous wrapper that will be deprecated
+        # New code should use chat_async()
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        return loop.run_until_complete(self.chat_async(query, owner_id, return_subgraph))
+
+    async def chat_async(self, query: str, owner_id: uuid.UUID, return_subgraph: bool = False) -> tuple[str, list[Chunk], Optional[Dict[str, Any]]]:
         """
         Chat with RAG system
 
@@ -55,10 +77,15 @@ class RAGInference(AbstractModule):
             Tuple of (LLM response, chunks, subgraph_data)
             - subgraph_data is None if return_subgraph=False or retriever doesn't support it
         """
-        rewritten_query = self.query_rewriter.rewrite_query(query)
+        # Run query rewriting asynchronously to avoid blocking the event loop
+        rewritten_query = await self._run_blocking(
+            self.query_rewriter.rewrite_query,
+            query
+        )
 
-        # Pass owner_id and return_subgraph_info to the configured retriever.
-        chunks: list[Chunk] = self.retriever.invoke(
+        # Run retrieval asynchronously to avoid blocking the event loop
+        chunks: list[Chunk] = await self._run_blocking(
+            self.retriever.invoke,
             rewritten_query,
             owner_id=owner_id,
             return_subgraph_info=return_subgraph
@@ -67,7 +94,8 @@ class RAGInference(AbstractModule):
         # Admin/global mode: if multipath returns nothing, fall back to the graph retriever.
         if owner_id is not None and is_admin_owner(owner_id) and not chunks and self.graph_retriever is not None:
             logger.info("Admin/global mode: multipath returned 0 results, falling back to graph retriever")
-            graph_chunks = self.graph_retriever.invoke(
+            graph_chunks = await self._run_blocking(
+                self.graph_retriever.invoke,
                 rewritten_query,
                 owner_id=owner_id,
                 return_subgraph_info=return_subgraph
@@ -86,7 +114,12 @@ class RAGInference(AbstractModule):
                     logger.info("Extracted subgraph info before reranking")
                     break
 
-        chunks = self.reranker.rerank(rewritten_query, chunks)
+        # Run reranking asynchronously to avoid blocking the event loop
+        chunks = await self._run_blocking(
+            self.reranker.rerank,
+            rewritten_query,
+            chunks
+        )
 
         # Export subgraph data if subgraph_info is available
         subgraph_data = None
@@ -103,7 +136,9 @@ class RAGInference(AbstractModule):
                     if graph_store_class_name == 'PrunedHippoRAGNeo4jStore':
                         from encapsulation.database.utils.graph_export_utils_neo4j import GraphExporterNeo4j as GraphExporter
                         # Neo4j version uses node IDs (strings)
-                        subgraph_data = GraphExporter.export_subgraph(
+                        # Run graph export asynchronously to avoid blocking
+                        subgraph_data = await self._run_blocking(
+                            GraphExporter.export_subgraph,
                             graph_store=graph_store,
                             subgraph_node_ids=set(subgraph_info['subgraph_nodes']),
                             seed_entity_ids=set(subgraph_info['seed_entity_ids']),
@@ -113,7 +148,9 @@ class RAGInference(AbstractModule):
                     else:
                         from encapsulation.database.utils.graph_export_utils import GraphExporter
                         # igraph version uses node indices (integers)
-                        subgraph_data = GraphExporter.export_subgraph(
+                        # Run graph export asynchronously to avoid blocking
+                        subgraph_data = await self._run_blocking(
+                            GraphExporter.export_subgraph,
                             graph_store=graph_store,
                             subgraph_node_indices=set(subgraph_info['subgraph_nodes']),
                             seed_entity_ids=set(subgraph_info['seed_entity_ids']),
@@ -139,7 +176,12 @@ class RAGInference(AbstractModule):
         logger.info(f"Retrieved chunks: {[getattr(chunk, 'content', str(chunk)) for chunk in chunks]}")
         logger.info(f"Reranked chunks: {[getattr(chunk, 'content', str(chunk)) for chunk in chunks]}")
         logger.info(f"Prepared messages for LLM: {messages}")
-        response = self.llm.chat(messages)
+        
+        # Run LLM chat asynchronously to avoid blocking the event loop
+        response = await self._run_blocking(
+            self.llm.chat,
+            messages
+        )
         return (response, chunks, subgraph_data)
 
     def _locate_graph_store(self):

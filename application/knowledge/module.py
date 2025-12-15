@@ -20,6 +20,7 @@ from encapsulation.data_model.orm_models import (
     FileMetadata, FileStatus,
     FilePermission, PermissionReceiverType, PermissionType
 )
+from framework.thread_pool import get_thread_pool
 
 class Knowledge(AbstractModule):
     def __init__(self, config: 'KnowledgeConfig'):
@@ -108,9 +109,7 @@ class Knowledge(AbstractModule):
 
     async def _run_blocking(self, func, *args, **kwargs):
         """Run a blocking function in a separate thread to avoid blocking the event loop."""
-        loop = asyncio.get_running_loop()
-        bound = partial(func, *args, **kwargs)
-        return await loop.run_in_executor(None, bound)
+        return await get_thread_pool().run_blocking(func, *args, **kwargs)
     
     def _track_deletion_task(self, doc_id: str, task: asyncio.Task) -> None:
         """Register a background deletion task so we don't schedule duplicates."""
@@ -140,9 +139,14 @@ class Knowledge(AbstractModule):
     
     async def upload_file(self, file: UploadFile, user_id: uuid.UUID) -> str:
         try:
-            doc_id = self.file_storage.upload_file(
+            # Read file data asynchronously to avoid blocking the event loop
+            file_data = await self._run_blocking(file.file.read)
+            
+            # Upload file asynchronously to avoid blocking the event loop
+            doc_id = await self._run_blocking(
+                self.file_storage.upload_file,
                 filename=file.filename,
-                file_data=file.file.read(),
+                file_data=file_data,
                 owner_id=user_id,
                 content_type=file.content_type
             )
@@ -189,8 +193,12 @@ class Knowledge(AbstractModule):
             finally:
                 logger.debug(f"Background indexing semaphore released for file_id: {doc_id}")
 
-    def get_file(self, doc_id: str, user_id: uuid.UUID) -> Response:
-        metadata = self.file_storage.get_file_metadata(doc_id)
+    async def get_file(self, doc_id: str, user_id: uuid.UUID) -> Response:
+        # Run database queries asynchronously to avoid blocking the event loop
+        metadata = await self._run_blocking(
+            self.file_storage.get_file_metadata,
+            doc_id
+        )
 
         if metadata is None:
             raise HTTPException(status_code=404, detail="File not found")
@@ -198,11 +206,18 @@ class Knowledge(AbstractModule):
             raise HTTPException(status_code=404, detail="File not found")
 
         # Check if user has access (owner or has VIEW/EDIT permission)
-        permission_type = self.check_file_access(doc_id, user_id)
+        permission_type = await self._run_blocking(
+            self.check_file_access,
+            doc_id,
+            user_id
+        )
         if permission_type is None:
             raise HTTPException(status_code=403, detail="You are not allowed to access this file")
 
-        content = self.file_storage.get_file_content(doc_id)
+        content = await self._run_blocking(
+            self.file_storage.get_file_content,
+            doc_id
+        )
         if content is None:
             raise HTTPException(status_code=404, detail="File content not found")
 
@@ -325,7 +340,7 @@ class Knowledge(AbstractModule):
                 self._deletion_failures.pop(doc_id, None)
                 self._unmark_file_for_deletion(doc_id)
 
-    def list_user_files(
+    async def list_user_files(
         self,
         user_id: uuid.UUID,
         status: Optional[FileStatus] = None,
@@ -345,7 +360,9 @@ class Knowledge(AbstractModule):
             List of FileMetadata objects accessible to the user
         """
         try:
-            files = self.file_storage.list_accessible_files(
+            # Run database query asynchronously to avoid blocking the event loop
+            files = await self._run_blocking(
+                self.file_storage.list_accessible_files,
                 user_id=user_id,
                 status=status,
                 limit=limit,
@@ -362,7 +379,7 @@ class Knowledge(AbstractModule):
             logger.error(f"Failed to list accessible files for user {user_id}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to retrieve files: {str(e)}")
     
-    def count_user_files(
+    async def count_user_files(
         self,
         user_id: uuid.UUID,
         status: FileStatus | None = None
@@ -379,12 +396,21 @@ class Knowledge(AbstractModule):
         """
         try:
             if status is None:
-                total = self.file_storage.count_accessible_files(user_id=user_id)
-                deleted = self.file_storage.count_accessible_files(user_id=user_id, status=FileStatus.DELETED)
+                # Run database queries asynchronously to avoid blocking the event loop
+                total = await self._run_blocking(
+                    self.file_storage.count_accessible_files,
+                    user_id=user_id
+                )
+                deleted = await self._run_blocking(
+                    self.file_storage.count_accessible_files,
+                    user_id=user_id,
+                    status=FileStatus.DELETED
+                )
                 mark_only = len(self._files_marked_for_deletion_by_owner.get(user_id, set()))
                 count = max(total - deleted - mark_only, 0)
             else:
-                count = self.file_storage.count_accessible_files(
+                count = await self._run_blocking(
+                    self.file_storage.count_accessible_files,
                     user_id=user_id,
                     status=status
                 )

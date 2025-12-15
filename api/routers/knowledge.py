@@ -99,7 +99,7 @@ async def download_file(file_id: str, user: Annotated[User | None, Depends(get_c
             detail="Authentication required"
         )
     try:
-        return knowledge_handler.get_file(file_id, user.id)
+        return await knowledge_handler.get_file(file_id, user.id)
     except HTTPException:
         # re-raise 404s from underlying module
         raise
@@ -170,15 +170,15 @@ async def list_files(
             detail="Authentication required"
         )
     try:
-        # Get files for current page
-        files = knowledge_handler.list_user_files(
+        # Get files for current page (async, non-blocking)
+        files = await knowledge_handler.list_user_files(
             user_id=user.id,
             limit=limit,
             offset=offset
         )
         
-        # Get total count of files for the user
-        total_count = knowledge_handler.count_user_files(user.id)
+        # Get total count of files for the user (async, non-blocking)
+        total_count = await knowledge_handler.count_user_files(user.id)
         
         # Convert FileMetadata objects to FileInfo response models
         file_infos = [
@@ -272,7 +272,7 @@ async def trigger_indexing(
 
 
 @router.post("/graph/export", status_code=status.HTTP_200_OK)
-def export_knowledge_graph(
+async def export_knowledge_graph(
     request: GraphExportRequest,
     user: Annotated[User | None, Depends(get_current_user)],
 ):
@@ -325,16 +325,32 @@ def export_knowledge_graph(
         else:
             from encapsulation.database.utils.graph_export_utils import GraphExporter
 
-        # Export full graph
+        # Export full graph asynchronously to avoid blocking the event loop
         scope = str(user.id)
-        graph_data = GraphExporter.export_full_graph(
-            graph_store=graph_store,
-            max_nodes=request.max_nodes,
-            max_edges=request.max_edges,
-            include_node_types=request.include_node_types,
-            owner_id=scope,
-            owner_scope_label=scope,
-        )
+        
+        # Use knowledge_handler's _run_blocking method if available, otherwise use global thread pool
+        if hasattr(knowledge_handler, '_run_blocking'):
+            graph_data = await knowledge_handler._run_blocking(
+                GraphExporter.export_full_graph,
+                graph_store=graph_store,
+                max_nodes=request.max_nodes,
+                max_edges=request.max_edges,
+                include_node_types=request.include_node_types,
+                owner_id=scope,
+                owner_scope_label=scope,
+            )
+        else:
+            # Fallback: use global thread pool
+            from framework.thread_pool import get_thread_pool
+            graph_data = await get_thread_pool().run_blocking(
+                GraphExporter.export_full_graph,
+                graph_store=graph_store,
+                max_nodes=request.max_nodes,
+                max_edges=request.max_edges,
+                include_node_types=request.include_node_types,
+                owner_id=scope,
+                owner_scope_label=scope,
+            )
 
         return graph_data
 

@@ -65,11 +65,28 @@ def get_password_hash(password):
 
 
 def get_user(username: str):
+    """Synchronous version - deprecated, use get_user_async instead"""
     user = account_handler.get_user_by_username(username=username)
     return user
 
 
+async def get_user_async(username: str):
+    """Async version that uses thread pool to avoid blocking"""
+    return await account_handler.get_user_by_username_async(username=username)
+
+
+async def authenticate_user_async(username: str, password: str):
+    """Async version that uses thread pool"""
+    user = await get_user_async(username)
+    if not user:
+        return False
+    if not verify_password(password, user.hashed_password):
+        return False
+    return user
+
+
 def authenticate_user(username: str, password: str):
+    """Synchronous version - deprecated, use authenticate_user_async instead"""
     user = get_user(username)
     if not user:
         return False
@@ -88,8 +105,29 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
+async def get_current_user_from_token_async(token: str):
+    """Get current user from JWT token (async version)."""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+        token_data = TokenData(username=username)
+    except InvalidTokenError:
+        raise credentials_exception
+    user = await get_user_async(username=token_data.username)
+    if user is None:
+        raise credentials_exception
+    return user
+
+
 def get_current_user_from_token(token: str):
-    """Get current user from JWT token."""
+    """Get current user from JWT token (synchronous version - deprecated)."""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -155,6 +193,7 @@ def login_for_access_token(username: str, password: str) -> Token:
 
 async def get_current_user(
     token: Annotated[str, Depends(oauth2_scheme)]):
+    """Get current user from JWT token - uses thread pool to avoid blocking"""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -168,7 +207,8 @@ async def get_current_user(
         token_data = TokenData(username=username)
     except InvalidTokenError:
         raise credentials_exception
-    user = get_user(username=token_data.username)
+    # Use async version to avoid blocking the event loop
+    user = await get_user_async(username=token_data.username)
     if user is None:
         raise credentials_exception
     return user
@@ -190,7 +230,8 @@ async def ws_get_current_user(
         await manager.disconnect(websocket, status.WS_1008_POLICY_VIOLATION)
         return None
 
-    user = get_user(token_data.username)
+    # Use async method to avoid blocking the event loop
+    user = await account_handler.get_user_by_username_async(username=token_data.username)
     if user is None:
         await manager.disconnect(websocket, status.WS_1008_POLICY_VIOLATION)
         return None
@@ -201,7 +242,8 @@ async def ws_get_current_user(
 async def login_for_access_token_endpoint(
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
 ) -> Token:
-    user = authenticate_user(form_data.username, form_data.password)
+    # Use async authentication to avoid blocking the event loop
+    user = await account_handler.authenticate_user_async(form_data.username, form_data.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -218,7 +260,8 @@ async def login_for_access_token_endpoint(
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register(user: UserCreate):
     try:
-        new_user = account_handler.register_user(user)
+        # Use async registration to avoid blocking the event loop
+        new_user = await account_handler.register_user_async(user)
         return new_user
     except IntegrityError:
         raise HTTPException(status_code=400, detail="Username already exists")

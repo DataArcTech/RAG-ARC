@@ -14,6 +14,7 @@ load_dotenv()
 from .base import AbstractParser
 from framework.singleton_decorator import singleton
 from core.utils.path_guard import ensure_writable_dir
+from framework.thread_pool import get_thread_pool
 
 # Import only necessary utilities
 from .dots_ocr_utils.consts import image_extensions
@@ -82,10 +83,24 @@ class VLMOcrParser(AbstractParser):
         save_dir = os.path.join(output_dir, base_filename)
         os.makedirs(save_dir, exist_ok=True)
 
+        # Run parsing in thread pool to avoid blocking the event loop
+        # PDF parsing involves heavy I/O (LLM API calls) that can take a long time
         if file_ext == '.pdf':
-            results = self._parse_pdf(file_data, base_filename, save_dir, **kwargs)
+            results = await get_thread_pool().run_blocking(
+                self._parse_pdf,
+                file_data,
+                base_filename,
+                save_dir,
+                **kwargs
+            )
         elif file_ext in image_extensions:
-            results = self._parse_image(file_data, base_filename, save_dir, **kwargs)
+            results = await get_thread_pool().run_blocking(
+                self._parse_image,
+                file_data,
+                base_filename,
+                save_dir,
+                **kwargs
+            )
 
         logger.info(f"Parsing finished, results saved to {save_dir}")
 

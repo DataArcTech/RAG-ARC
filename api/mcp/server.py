@@ -36,15 +36,21 @@ async def create_chat(auth_token: str) -> Dict[str, Any]:
         dict: Response containing session_id
     """
     try:
-        # Authenticate user from token
-        current_user = get_current_user_from_token(auth_token)
+        # Authenticate user from token (use async version to avoid blocking)
+        from api.routers.auth import get_current_user_from_token_async
+        current_user = await get_current_user_from_token_async(auth_token)
         if not current_user:
             return {"isError": True, "message": "Authentication failed"}
         
-        # Create session using session handler
+        # Create session using session handler (use thread pool to avoid blocking)
+        from framework.thread_pool import get_thread_pool
         session_handler = registrator.get_object("chat_session")
         chat_name = f"Chat {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        session_id = session_handler.create_session(current_user.id, chat_name)
+        session_id = await get_thread_pool().run_blocking(
+            session_handler.create_session,
+            current_user.id,
+            chat_name
+        )
         
         return {"session_id": str(session_id)}
         
@@ -84,9 +90,13 @@ async def chat(
         except ValueError:
             return {"isError": True, "message": "Invalid session_id format"}
         
-        # Get session handler and validate session ownership
+        # Get session handler and validate session ownership (use thread pool to avoid blocking)
+        from framework.thread_pool import get_thread_pool
         session_handler = registrator.get_object("chat_session")
-        session = session_handler.get_session(session_uuid)
+        session = await get_thread_pool().run_blocking(
+            session_handler.get_session,
+            session_uuid
+        )
         
         if not session or not validate_user_session(session, current_user):
             return {"isError": True, "message": "Session not found or unauthorized access"}
@@ -94,26 +104,33 @@ async def chat(
         await ctx.report_progress(0, 100, "generating")
         
         # Get RAG inference and chat with user isolation
+        # Use async version to avoid blocking the event loop
         rag_inference = registrator.get_object("rag_inference")
         response: str = ""
         chunks: list[Chunk] = []
         subgraph_data: GraphData = None
-        response_text, chunks, subgraph_data = rag_inference.chat(query, owner_id=current_user.id)
+        response_text, chunks, subgraph_data = await rag_inference.chat_async(query, owner_id=current_user.id)
 
-        # Create message in the session
+        # Create message in the session (use thread pool to avoid blocking)
         message_handler = registrator.get_object("chat_message")
-        message_handler.create_message(ChatMessage(
-            session_id=session_uuid, 
-            source_file_ids=[chunk.id for chunk in chunks],
-            content={"role": "user", "content": query}, 
-            created_at=datetime.datetime.now()
-        ))
-        message_handler.create_message(ChatMessage(
-            session_id=session_uuid,
-            source_file_ids=[chunk.id for chunk in chunks],
-            content={"role": "assistant", "content": response_text}, 
-            created_at=datetime.datetime.now()
-        ))
+        await get_thread_pool().run_blocking(
+            message_handler.create_message,
+            ChatMessage(
+                session_id=session_uuid, 
+                source_file_ids=[chunk.id for chunk in chunks],
+                content={"role": "user", "content": query}, 
+                created_at=datetime.datetime.now()
+            )
+        )
+        await get_thread_pool().run_blocking(
+            message_handler.create_message,
+            ChatMessage(
+                session_id=session_uuid,
+                source_file_ids=[chunk.id for chunk in chunks],
+                content={"role": "assistant", "content": response_text}, 
+                created_at=datetime.datetime.now()
+            )
+        )
         
         await ctx.report_progress(100, 100, "done")
         

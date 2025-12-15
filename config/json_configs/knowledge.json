@@ -73,7 +73,8 @@
                         "model_name": "${OPENAI_OCR_MODEL}",
                         "max_tokens": 4096,
                         "temperature": 0.0
-                    }
+                    },
+                    "num_threads": 4
             },
             "native_parser": {
                 "type": "native_parser"

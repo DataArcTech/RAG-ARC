@@ -74,7 +74,8 @@
                     "cache_folder": "./models/dots_ocr",
                     "use_snapshot_download": true,
                     "device": "${DEVICE}"
-                }
+                },
+                "num_threads": 4
             },
             "native_parser": {
                 "type": "native_parser"

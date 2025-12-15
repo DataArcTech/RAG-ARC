@@ -22,6 +22,7 @@ from application.rag_inference.module import RAGInference
 from application.account.chat_message import ChatMessageManager
 from application.account.chat_session import ChatSessionManager
 from application.account.user import Account
+from framework.thread_pool import get_thread_pool
 import uuid
 import logging
 from core.utils.owner_guard import is_admin_owner, get_admin_owner_id
@@ -64,7 +65,7 @@ class GraphOverviewResponse(BaseModel):
 
 # This currently only supports one round of chat, will support multiple rounds once user login is supported.
 @router.post("/chat", response_model=ChatResponse, status_code=status.HTTP_200_OK)
-def chat(
+async def chat(
     request: ChatRequest,
     current_user: Annotated[User | None, Depends(get_current_user)],
 ):
@@ -114,7 +115,8 @@ def chat(
     response: str = ""
     chunks: list[Chunk] = []
     subgraph_data: GraphData = None
-    response, chunks, subgraph_data = rag_inference_handler.chat(
+    # Use async version to avoid blocking the event loop
+    response, chunks, subgraph_data = await rag_inference_handler.chat_async(
         request.query,
         owner_id=effective_owner_id,
         return_subgraph=request.return_subgraph
@@ -123,7 +125,7 @@ def chat(
 
 
 @router.get("/graph_overview", response_model=GraphOverviewResponse, status_code=status.HTTP_200_OK)
-def graph_overview(
+async def graph_overview(
     current_user: Annotated[User | None, Depends(get_current_user)],
     include_all_owners: bool = Query(
         default=True,
@@ -159,7 +161,9 @@ def graph_overview(
             )
         owner_scope = target_owner_id
 
-    overview = rag_inference_handler.export_graph_overview(
+    # Use thread pool to avoid blocking the event loop
+    overview = await get_thread_pool().run_blocking(
+        rag_inference_handler.export_graph_overview,
         owner_id=owner_scope,
         max_nodes=max_nodes,
         max_edges=max_edges,
@@ -184,8 +188,11 @@ async def websocket_endpoint(
         
     logger.info(f"WebSocket connection attempt for session_id {session_id} by user {current_user.id}")
 
-    # Validate session ownership at the start
-    session = session_handler.get_session(session_id)
+    # Validate session ownership at the start (use thread pool to avoid blocking)
+    session = await get_thread_pool().run_blocking(
+        session_handler.get_session,
+        session_id
+    )
 
     if session is None or not validate_user_session(session, current_user):
         logger.warning(f"Session validation failed for session {session_id} and user {current_user.id}")
@@ -244,11 +251,17 @@ async def websocket_endpoint(
                 created_at=datetime.now()
             )
 
-            # Handle user message creation
-            user_message = message_handler.create_message(user_message)
+            # Handle user message creation (use thread pool to avoid blocking)
+            user_message = await get_thread_pool().run_blocking(
+                message_handler.create_message,
+                user_message
+            )
 
-            # Fetch complete conversation history for multi-round chat
-            history_messages = message_handler.list_messages_by_session(session_id)
+            # Fetch complete conversation history for multi-round chat (use thread pool to avoid blocking)
+            history_messages = await get_thread_pool().run_blocking(
+                message_handler.list_messages_by_session,
+                session_id
+            )
             logger.info(f"Conversation history fetched ({len(history_messages)} messages) for session {session_id}")
 
             # Run RAG inference and create assistant message
@@ -273,14 +286,19 @@ async def websocket_endpoint(
                     await manager.disconnect(websocket, status.WS_1011_INTERNAL_ERROR)
                     return
 
-            assistant_response, chunks, subgraph_data = rag_inference_handler.chat(
+            # Use async version to avoid blocking the event loop
+            assistant_response, chunks, subgraph_data = await rag_inference_handler.chat_async(
                 history_text,
                 effective_owner,
                 return_subgraph=return_subgraph
             )
             logger.info(f"Assistant response generated: {assistant_response} (session_id={session_id})")
             assistant_message = ChatMessage(session_id=session_id, content={"role": "assistant", "content": assistant_response}, created_at=datetime.now())
-            assistant_message = message_handler.create_message(assistant_message)
+            # Use thread pool to avoid blocking
+            assistant_message = await get_thread_pool().run_blocking(
+                message_handler.create_message,
+                assistant_message
+            )
             logger.info(f"Assistant message created: {assistant_message.id}")
             # Send the assistant response back to the client
             await manager.send_response(assistant_message, chunks, websocket, subgraph=subgraph_data)
