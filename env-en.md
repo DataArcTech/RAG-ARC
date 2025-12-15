@@ -35,7 +35,7 @@ All runtime behavior is controlled through `.env`. By default, `.env.example` al
 | `CHAT_TOP_CHUNKS` | `5` | Maximum chunks returned in chat evidence. |
 | `CHAT_TOP_TRIPLES` | `5` | Maximum graph triples returned in chat evidence. |
 | `CHAT_TOP_SEED_ENTITIES` | `5` | Maximum seed entities surfaced in chat evidence. |
-| `DEEPSEARCH_TOP_CHUNKS` | `10` | Maximum chunks returned in DeepSearch evidence. |
+| `DEEPSEARCH_TOP_CHUNKS` | `10` | Maximum chunks returned in DeepSearch evidence and displayed in report appendix (first 100 chars preview). |
 | `DEEPSEARCH_TOP_TRIPLES` | `30` | Maximum graph triples returned in DeepSearch evidence. |
 | `DEEPSEARCH_TOP_SEED_ENTITIES` | `15` | Maximum seed entities surfaced in DeepSearch evidence. |
 | `DEEPSEARCH_GRAPH_NODE_LIMIT` | `75` | Cap for DeepSearch graph snapshots (entity + chunk nodes). |
@@ -125,6 +125,8 @@ Planner/graph defaults. Leave as-is unless customizing behavior.
 | `DEEPSEARCH_GAP_COVERAGE_THRESHOLD` | `0.7` | Coverage threshold for gap detection. |
 | `DEEPSEARCH_GAP_CONFIDENCE_THRESHOLD` | `0.6` | Confidence threshold for gap detection. |
 | `DEEPSEARCH_GAP_EXPECTED_MIN_CHUNKS` | `3` | Minimum expected chunk count before triggering external search. |
+| `DEEPSEARCH_CONSISTENCY_CHECK` | `true` | Enable LLM-based consistency check to validate report claims against evidence. |
+| `DEEPSEARCH_PARALLEL_SECTIONS` | `false` | Generate report sections in parallel (faster but uses more API calls). |
 
 ### Example: enabling MCP routing for remote tools
 
