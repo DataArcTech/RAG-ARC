@@ -936,65 +936,6 @@ async def update_file_permission(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update permission: {str(e)}",
         )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to gather chunk mind maps: {str(e)}",
-        )
-
-    chunks = file_mindmaps.get("chunks", []) if isinstance(file_mindmaps, dict) else []
-    if not chunks:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No mind map data found for this file"
-        )
-
-    filename = file_mindmaps.get("filename") or request.file_id
-    prompt = _build_mindmap_merge_prompt(filename, chunks)
-
-    rag_inference = registrator.get_object("rag_inference")
-    llm = getattr(rag_inference, "llm", None)
-    if llm is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="LLM service is not configured"
-        )
-
-    messages = [
-        {
-            "role": "system",
-            "content": "你是一位资深的知识工程专家，擅长将多个思维导图整合为结构化的全局思维导图。"
-        },
-        {
-            "role": "user",
-            "content": prompt
-        }
-    ]
-
-    try:
-        llm_response = llm.chat(messages)
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to generate merged mind map: {str(e)}"
-        )
-
-    merged_tsv = _extract_tsv_from_response(llm_response)
-    if not merged_tsv.strip():
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="LLM did not return valid TSV content"
-        )
-
-    nodes, edges = _convert_tsv_to_graph(merged_tsv)
-
-    return MindmapExportResponse(
-        tsv=merged_tsv,
-        nodes=[MindmapNode(**node) for node in nodes],
-        edges=[MindmapEdge(**edge) for edge in edges],
-    )
 
 
 def _build_mindmap_merge_prompt(filename: str, chunks: List[Dict[str, Any]]) -> str:
