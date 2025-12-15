@@ -35,7 +35,7 @@
 | `CHAT_TOP_CHUNKS` | `5` | Chat 证据中最多保留的 chunk 数量。 |
 | `CHAT_TOP_TRIPLES` | `5` | Chat 证据中最多保留的图三元组数量。 |
 | `CHAT_TOP_SEED_ENTITIES` | `5` | Chat 证据中最多保留的种子实体数量。 |
-| `DEEPSEARCH_TOP_CHUNKS` | `10` | DeepSearch 证据中最多保留的 chunk 数量。 |
+| `DEEPSEARCH_TOP_CHUNKS` | `10` | DeepSearch 证据中最多保留的 chunk 数量，同时也是报告附录中显示原文预览（前100字符）的数量。 |
 | `DEEPSEARCH_TOP_TRIPLES` | `30` | DeepSearch 证据中最多保留的图三元组数量。 |
 | `DEEPSEARCH_TOP_SEED_ENTITIES` | `15` | DeepSearch 证据中最多保留的种子实体数量。 |
 | `DEEPSEARCH_GRAPH_NODE_LIMIT` | `75` | DeepSearch 图快照（实体 + chunk）的节点上限。 |
@@ -125,6 +125,8 @@
 | `DEEPSEARCH_GAP_COVERAGE_THRESHOLD` | `0.7` | 覆盖率阈值，用于触发外部搜索。 |
 | `DEEPSEARCH_GAP_CONFIDENCE_THRESHOLD` | `0.6` | 置信度阈值。 |
 | `DEEPSEARCH_GAP_EXPECTED_MIN_CHUNKS` | `3` | 期望的最少证据数量。 |
+| `DEEPSEARCH_CONSISTENCY_CHECK` | `true` | 启用 LLM 一致性检查，验证报告内容与证据是否一致。 |
+| `DEEPSEARCH_PARALLEL_SECTIONS` | `false` | 并行生成报告章节（更快但消耗更多 API 调用）。 |
 
 ### MCP 配置示例
 
