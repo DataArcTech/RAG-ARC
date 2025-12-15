@@ -268,3 +268,105 @@ HIPPORAG2_TRIPLE_PROMPT_ZH = """
 
 输出：
 """
+
+
+# ============================================================================
+# Mind Map Extraction Prompts
+# ============================================================================
+
+# English Mind Map Prompts
+HIPPORAG2_MINDMAP_SYSTEM = """Your task is to extract a hierarchical mind map structure from the given paragraph.
+Organize the information into a tree-like structure using numbered hierarchical levels (1, 1.1, 1.1.1, etc.).
+Respond with TSV (Tab-Separated Values) format: level_number\tcontent
+The root node should be numbered as "1", and sub-nodes should use dot notation (1.1, 1.2, 1.1.1, etc.).
+Minimize token usage by using concise output.
+"""
+
+HIPPORAG2_MINDMAP_ONE_SHOT_INPUT = """Radio City
+Radio City is India's first private FM radio station and was started on 3 July 2001.
+It plays Hindi, English and regional songs.
+Radio City recently forayed into New Media in May 2008 with the launch of a music portal - PlanetRadiocity.com that offers music related news, videos, songs, and other music-related features."""
+
+HIPPORAG2_MINDMAP_ONE_SHOT_OUTPUT = """### MINDMAP
+1	Radio City
+1.1	Basic Information
+1.1.1	India's first private FM radio station
+1.1.2	Started on 3 July 2001
+1.2	Services
+1.2.1	Plays songs
+1.2.2	Languages
+1.2.2.1	Hindi
+1.2.2.2	English
+1.2.2.3	Regional songs
+1.3	New Media Platform
+1.3.1	PlanetRadiocity.com
+1.3.2	Launched in May 2008
+1.3.3	Features
+1.3.3.1	Music related news
+1.3.3.2	Videos
+1.3.3.3	Songs
+1.3.3.4	Other music-related features"""
+
+HIPPORAG2_MINDMAP_PROMPT = """
+{system}
+
+Example:
+{example_input}
+
+Output:
+{example_output}
+
+Now extract mind map from:
+{passage}
+
+Output:
+"""
+
+
+# Chinese Mind Map Prompts
+HIPPORAG2_MINDMAP_SYSTEM_ZH = """你的任务是从给定的段落中提取层次化的思维导图结构。
+使用数字编号的层次结构（1, 1.1, 1.1.1等）将信息组织成树状结构。
+使用TSV格式响应：编号\t内容
+根节点应编号为"1"，子节点使用点号表示（1.1, 1.2, 1.1.1等）。
+通过使用简洁的输出来最小化token的使用量。
+"""
+
+HIPPORAG2_MINDMAP_ONE_SHOT_INPUT_ZH = """新华社
+新华社是中国国家通讯社，成立于1931年。
+它提供中文、英文和其他语言的新闻。
+新华社最近在2023年5月推出了新媒体平台 - XinhuaNews.com，提供新闻、视频、评论和其他新闻相关功能。"""
+
+HIPPORAG2_MINDMAP_ONE_SHOT_OUTPUT_ZH = """### MINDMAP
+1	新华社
+1.1	基本信息
+1.1.1	中国国家通讯社
+1.1.2	成立于1931年
+1.2	主要服务
+1.2.1	提供新闻
+1.2.2	提供多语言版本
+1.2.2.1	中文
+1.2.2.2	英文
+1.2.2.3	其他语言
+1.3	新媒体平台
+1.3.1	XinhuaNews.com
+1.3.2	推出时间：2023年5月
+1.3.3	主要功能
+1.3.3.1	新闻
+1.3.3.2	视频
+1.3.3.3	评论
+1.3.3.4	其他新闻相关功能"""
+
+HIPPORAG2_MINDMAP_PROMPT_ZH = """
+{system}
+
+示例：
+{example_input}
+
+输出：
+{example_output}
+
+现在从以下内容中提取思维导图：
+{passage}
+
+输出：
+"""

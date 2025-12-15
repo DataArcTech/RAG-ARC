@@ -1,5 +1,5 @@
 {
-    "max_concurrent_indexing": 20,
+    "max_concurrent_indexing": 5,
     "file_storage_config": {
         "type": "file_storage",
         "file_db_config": {
@@ -67,6 +67,7 @@
             "base_output_dir": "./data/parsed_files",
             "ocr_parser": {
                 "type": "dots_ocr_parser",
+                "max_pixels": 500000,
                 "dots_ocr": {
                     "type": "dots_ocr",
                     "loading_method": "huggingface",
@@ -81,7 +82,9 @@
             }
         },
         "chunker_config": {
-            "type": "token_chunker"
+            "type": "token_chunker",
+            "chunk_size": 2048,
+            "chunk_overlap": 100
         },
         "indexer_configs": [
             {

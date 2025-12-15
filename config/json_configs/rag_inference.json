@@ -83,7 +83,7 @@
         "rerank_llm_config": {
             "type": "qwen_rerank",
             "model_name": "Qwen/Qwen3-Reranker-0.6B",
-            "device": "cuda:1",
+            "device": "cuda:0",
             "use_china_mirror": true,
             "cache_folder": "./models/Qwen"
         }

@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-API_BASE="http://localhost:8000"
+API_BASE="http://localhost:8005"
 KNOWLEDGE_ENDPOINT="$API_BASE/knowledge"
 AUTH_ENDPOINT="$API_BASE/auth"
 
@@ -602,6 +602,82 @@ if 'subgraph' in data:
 "
 echo "✅ Subgraph exported to: $SUBGRAPH_FILE"
 
+# 7.3) Test mind map export functionality
+echo -e "\n7.3) Test mind map export functionality"
+echo "Endpoint: $KNOWLEDGE_ENDPOINT/mindmap/export"
+
+MINDMAP_RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST "$KNOWLEDGE_ENDPOINT/mindmap/export" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -d "{\"file_id\": \"$FILE_ID_3\"}")
+
+MINDMAP_BODY=$(echo "$MINDMAP_RESPONSE" | sed '$d')
+MINDMAP_STATUS=$(echo "$MINDMAP_RESPONSE" | tail -n1)
+
+echo "Mind map Status: $MINDMAP_STATUS"
+
+if [ "$MINDMAP_STATUS" != "200" ]; then
+  echo "Response Body: $MINDMAP_BODY"
+  echo "❌ Mind map export failed (expected 200)"
+  exit 1
+fi
+
+echo "Validating mind map export response..."
+echo "$MINDMAP_BODY" | python3 -c "
+import sys
+import json
+
+try:
+    data = json.load(sys.stdin)
+
+    assert 'tsv' in data, 'Missing tsv field'
+    assert isinstance(data['tsv'], str) and data['tsv'].strip(), 'tsv should be a non-empty string'
+
+    assert 'nodes' in data, 'Missing nodes field'
+    assert isinstance(data['nodes'], list) and data['nodes'], 'nodes should be a non-empty list'
+
+    assert 'edges' in data, 'Missing edges field'
+    assert isinstance(data['edges'], list), 'edges should be a list'
+
+    # Validate first node structure
+    node = data['nodes'][0]
+    for field in ('id', 'name', 'category', 'weight'):
+        assert field in node, f"Node missing field: {field}"
+
+    # Validate edge structure if present
+    if data['edges']:
+        edge = data['edges'][0]
+        for field in ('id', 'source', 'target', 'relation', 'weight'):
+            assert field in edge, f"Edge missing field: {field}"
+
+    print('✅ Mind map export response structure is valid')
+    print(f"✅ TSV preview:\n{data['tsv'].splitlines()[0] if data['tsv'].splitlines() else ''}")
+    print(f"✅ Nodes count: {len(data['nodes'])}")
+    print(f"✅ Edges count: {len(data['edges'])}")
+
+except AssertionError as e:
+    print(f'❌ Validation failed: {e}')
+    sys.exit(1)
+except Exception as e:
+    print(f'❌ Error: {e}')
+    sys.exit(1)
+"
+
+if [ $? -ne 0 ]; then
+  echo "❌ Mind map export validation failed"
+  exit 1
+fi
+
+MINDMAP_TSV_FILE="/tmp/mindmap_export.tsv"
+echo "$MINDMAP_BODY" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+with open('$MINDMAP_TSV_FILE', 'w') as f:
+    f.write(data.get('tsv', ''))
+"
+
+echo "✅ Mind map TSV exported to: $MINDMAP_TSV_FILE"
+
 # 8) Delete the file
 echo -e "\n8) Delete file: $FILE_ID"
 DELETE_CODE=$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
@@ -695,5 +771,6 @@ rm -f "$DOWNLOAD_HEADERS" "$DOWNLOAD_FILE"
 echo -e "\n📊 Graph export files saved for inspection:"
 echo "   - Full graph: $FULL_GRAPH_FILE"
 echo "   - Subgraph: $SUBGRAPH_FILE"
+echo "   - Mind map TSV: $MINDMAP_TSV_FILE"
 
 echo -e "\n🎉 All Knowledge API comprehensive tests passed!"

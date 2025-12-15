@@ -32,7 +32,11 @@ async def lifespan(app: FastAPI):
     """
     # Startup
     logger.info("Application starting up...")
-    yield
+
+    # Start MCP app lifespan
+    async with mcp.mcp_app.router.lifespan_context(mcp.mcp_app):
+        yield
+
     # Shutdown
     logger.info("Application shutting down...")
     try:

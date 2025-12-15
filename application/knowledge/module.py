@@ -267,6 +267,85 @@ class Knowledge(AbstractModule):
             "active_tasks": active_tasks
         }
 
+    async def get_file_chunk_mindmaps(self, file_id: str, user_id: uuid.UUID) -> Dict[str, Any]:
+        """Retrieve chunk mind map data for a file owned by the user."""
+        metadata = self.file_storage.get_file_metadata(file_id)
+
+        if metadata is None:
+            raise HTTPException(status_code=404, detail="File not found")
+
+        if metadata.owner_id != user_id:
+            raise HTTPException(status_code=403, detail="You are not allowed to access this file")
+
+        parsed_content_list = self.file_index.parsed_content_storage.metadata_store.list_parsed_content_metadata(
+            source_file_id=file_id
+        )
+
+        if not parsed_content_list:
+            return {"file_id": file_id, "filename": metadata.filename, "chunks": []}
+
+        chunk_id_order: List[str] = []
+        chunk_index_map: Dict[str, int] = {}
+
+        for parsed_content in parsed_content_list:
+            if not parsed_content or not getattr(parsed_content, "parsed_content_id", None):
+                continue
+
+            chunk_metadata_list = self.file_index.chunk_storage.metadata_store.list_chunk_metadata(
+                source_parsed_content_id=parsed_content.parsed_content_id
+            )
+
+            for chunk_meta in chunk_metadata_list or []:
+                chunk_id = getattr(chunk_meta, "chunk_id", None)
+                if not chunk_id:
+                    continue
+                if chunk_id not in chunk_index_map:
+                    chunk_id_order.append(chunk_id)
+                chunk_index_map[chunk_id] = getattr(chunk_meta, "chunk_index", None)
+
+        if not chunk_id_order:
+            return {"file_id": file_id, "filename": metadata.filename, "chunks": []}
+
+        graph_store = None
+        for indexer in getattr(self.file_index, "indexers", []):
+            if hasattr(indexer, "graph_store"):
+                graph_store = indexer.graph_store
+                break
+
+        if graph_store is None:
+            raise HTTPException(status_code=500, detail="Graph store is not configured for mind map export")
+
+        try:
+            chunk_objects = graph_store.get_by_ids(chunk_id_order)
+        except Exception as e:
+            logger.error(f"Failed to retrieve chunks from graph store for file {file_id}: {e}")
+            raise HTTPException(status_code=500, detail="Failed to retrieve chunk data from graph store")
+
+        chunk_map = {chunk.id: chunk for chunk in chunk_objects if getattr(chunk, "id", None)}
+
+        mindmap_chunks: List[Dict[str, Any]] = []
+        for chunk_id in chunk_id_order:
+            chunk = chunk_map.get(chunk_id)
+            if not chunk:
+                continue
+
+            metadata_dict = chunk.metadata or {}
+            mindmap = metadata_dict.get("mindmap") if isinstance(metadata_dict, dict) else None
+
+            if mindmap and isinstance(mindmap, dict) and mindmap.get("nodes"):
+                mindmap_chunks.append({
+                    "chunk_id": chunk_id,
+                    "chunk_index": chunk_index_map.get(chunk_id),
+                    "content": chunk.content,
+                    "mindmap": mindmap
+                })
+
+        return {
+            "file_id": file_id,
+            "filename": metadata.filename,
+            "chunks": mindmap_chunks
+        }
+
     async def shutdown(self):
         """
         Shutdown the Knowledge module and flush all pending indexer data.
