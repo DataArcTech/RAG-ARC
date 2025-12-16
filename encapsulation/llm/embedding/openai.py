@@ -66,6 +66,20 @@ class OpenAIEmbeddingLLM(EmbeddingLLMBase):
             if not self._validate_input(text):
                 raise ValueError(f"Text validation failed: {text}")
 
+        if self.loading_method == "huggingface":
+            try:
+                cleaned_texts = [text.replace("\n", " ") for text in text_list]
+                encode_kwargs = getattr(self.config, "encode_kwargs", {}) or {}
+                embeddings = self.client.encode(cleaned_texts, **encode_kwargs)
+                embed_list = embeddings.tolist()
+                if is_single:
+                    row = embed_list[0] if embed_list else []
+                    return [float(x) for x in row]
+                return [[float(x) for x in row] for row in embed_list]
+            except Exception as e:
+                logger.error(f"Embedding failed: {str(e)}")
+                raise RuntimeError(f"Embedding failed: {str(e)}")
+
         try:
             # Clean texts - remove newlines
             cleaned_texts = [text.replace("\n", " ") for text in text_list]
@@ -106,6 +120,25 @@ class OpenAIEmbeddingLLM(EmbeddingLLMBase):
         for text in text_list:
             if not self._validate_input(text):
                 raise ValueError(f"Invalid text: {text}")
+
+        if self.loading_method == "huggingface":
+            import asyncio
+
+            def _encode_sync():
+                cleaned = [text.replace("\n", " ") for text in text_list]
+                encode_kwargs = getattr(self.config, "encode_kwargs", {}) or {}
+                return self.client.encode(cleaned, **encode_kwargs)
+
+            try:
+                embeddings = await asyncio.to_thread(_encode_sync)
+                embed_list = embeddings.tolist()
+                if is_single:
+                    row = embed_list[0] if embed_list else []
+                    return [float(x) for x in row]
+                return [[float(x) for x in row] for row in embed_list]
+            except Exception as e:
+                logger.error(f"Embedding failed: {str(e)}")
+                raise RuntimeError(f"Embedding failed: {str(e)}")
 
         try:
             # Create embedding request

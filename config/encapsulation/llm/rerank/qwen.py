@@ -1,6 +1,7 @@
 """Configuration for Qwen Rerank LLM"""
 
 import os
+from pydantic import Field
 from framework.config import AbstractConfig
 from encapsulation.llm.rerank.qwen import QwenRerankLLM
 from typing import Literal, Optional
@@ -15,9 +16,9 @@ class QwenRerankConfig(AbstractConfig):
     loading_method: Literal["huggingface"] = "huggingface"
 
     # Model configuration
-    model_name: str = os.getenv("RERANKER_MODEL_NAME", "Qwen/Qwen3-Reranker-0.6B")
-    device: str = os.getenv("RERANKER_DEVICE", os.getenv("DEVICE", "cuda:0"))
-    cache_folder: Optional[str] = os.getenv("RERANKER_CACHE_FOLDER", "./models/Qwen")
+    model_name: str = Field(default_factory=lambda: os.getenv("RERANKER_MODEL_NAME", "Qwen/Qwen3-Reranker-0.6B"))
+    device: str = Field(default_factory=lambda: os.getenv("RERANKER_DEVICE", os.getenv("DEVICE", "cpu")))
+    cache_folder: Optional[str] = Field(default_factory=lambda: os.getenv("RERANKER_CACHE_FOLDER", "./models/Qwen"))
 
     use_china_mirror: bool = False  # Whether to use domestic mirror source
 

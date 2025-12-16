@@ -13,8 +13,8 @@ class PostgreSQLConfig(AbstractConfig):
 
     # Database connection configuration (read from environment variables)
     host: str = "localhost"  # PostgreSQL server host
-    port: str = "5432"  # PostgreSQL server port
-    database: str = "rag_archive"  # Database name
+    port: str = "5555"  # PostgreSQL server port (matches local Docker default when exposed)
+    database: str = "rag_arc"  # Database name
     user: str = "postgres"  # Database username
     password: str = "123"  # Database password
 

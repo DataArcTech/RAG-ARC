@@ -1,7 +1,7 @@
 """Configuration for OpenAI Chat LLM"""
 
 import os
-from typing import Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
 from pydantic import Field
 
@@ -37,6 +37,12 @@ class OpenAIChatConfig(AbstractConfig):
     model_name: str = Field(default_factory=_default_model_name)
     max_tokens: int = 2000
     temperature: float = 0.7
+
+    # HuggingFace-only knobs (used when loading_method="huggingface")
+    device: str = Field(default_factory=lambda: os.getenv("CHAT_MODEL_DEVICE", os.getenv("DEVICE", "cpu")))
+    cache_folder: Optional[str] = Field(default_factory=lambda: os.getenv("CHAT_MODEL_CACHE_FOLDER"))
+    model_kwargs: Dict[str, Any] = Field(default_factory=dict)
+
     openai_api_key: str = Field(default_factory=_default_api_key)
     openai_base_url: str = Field(default_factory=_default_base_url)
     organization: Optional[str] = None

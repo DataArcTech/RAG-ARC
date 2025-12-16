@@ -1,4 +1,5 @@
-from typing import Union, Annotated, Literal
+import os
+from typing import Annotated, Literal, Union
 from pydantic import Field
 
 from framework.config import AbstractConfig
@@ -27,17 +28,20 @@ class PrunedHippoRAGNeo4jConfig(AbstractConfig):
 
     # Neo4j connection configuration
     url: str = Field(
-        description="Neo4j database connection URL, e.g.: bolt://localhost:7687"
+        default_factory=lambda: os.getenv("NEO4J_URL", "bolt://localhost:7687"),
+        description="Neo4j database connection URL, e.g.: bolt://localhost:7687",
     )
     username: str = Field(
-        description="Database username"
+        default_factory=lambda: os.getenv("NEO4J_USERNAME", "neo4j"),
+        description="Database username",
     )
     password: str = Field(
-        description="Database password"
+        default_factory=lambda: os.getenv("NEO4J_PASSWORD", "12345678"),
+        description="Database password",
     )
     database: str = Field(
-        default="neo4j",
-        description="Database name"
+        default_factory=lambda: os.getenv("NEO4J_DATABASE", "neo4j"),
+        description="Database name",
     )
 
     # Storage configuration for FAISS indices
@@ -97,4 +101,3 @@ class PrunedHippoRAGNeo4jConfig(AbstractConfig):
     def build(self):
         """Build and return a PrunedHippoRAGNeo4jStore instance."""
         return PrunedHippoRAGNeo4jStore(config=self)
-

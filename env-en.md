@@ -6,25 +6,32 @@ All runtime behavior is controlled through `.env`. By default, `.env.example` al
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `CHAT_MODEL_PROVIDER` | `openai` | Provider identifier for chat/LangChain-compatible models (`openai`, `huggingface`, etc.). |
-| `CHAT_API_KEY` | _(empty)_ | API key for the chat provider (required when using hosted models). |
-| `CHAT_API_BASE_URL` | _(empty)_ | Base URL for OpenAI-compatible chat endpoints. |
-| `OPENAI_CHAT_MODEL` | `gpt-4o-mini` | Default chat model name. |
-| `EMBEDDING_MODEL_PROVIDER` | `openai` | Provider used for dense embeddings. |
-| `EMBEDDING_API_KEY` | _(empty)_ | API key for the embedding provider. |
-| `EMBEDDING_API_BASE_URL` | _(empty)_ | Base URL for embedding endpoints. |
+| `CHAT_MODEL_PROVIDER` | `openai` | Chat provider (`openai` = OpenAI-compatible API, `huggingface` = local Transformers). |
+| `CHAT_MODEL_NAME` | _(empty)_ | Optional preferred chat model name (overrides `OPENAI_CHAT_MODEL` when set). |
+| `CHAT_MODEL_DEVICE` | `cpu` | HuggingFace chat runtime device (used when `CHAT_MODEL_PROVIDER=huggingface`). |
+| `CHAT_MODEL_CACHE_FOLDER` | _(empty)_ | Optional HuggingFace cache folder for chat weights/tokenizers. |
+| `CHAT_API_KEY` | _(empty)_ | API key for chat provider (required for hosted APIs). |
+| `CHAT_API_BASE_URL` | _(empty)_ | Base URL for OpenAI-compatible chat endpoints (e.g. `https://api.openai.com/v1`). |
+| `OPENAI_CHAT_MODEL` | `gpt-4o-mini` | Legacy/default chat model name used when `CHAT_MODEL_NAME` is empty. |
+| `OPENAI_API_BASE` | _(empty)_ | Optional legacy alias for OpenAI-compatible base URL. |
+| `EMBEDDING_MODEL_PROVIDER` | `openai` | Embedding provider (`openai` = OpenAI-compatible API, `huggingface` = local SentenceTransformers). |
+| `EMBEDDING_API_KEY` | _(empty)_ | API key for embedding provider (required for hosted APIs). |
+| `EMBEDDING_API_BASE_URL` | _(empty)_ | Base URL for OpenAI-compatible embedding endpoints. |
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Default embedding model name. |
-| `OCR_MODEL_PROVIDER` | `openai` | Provider for OCR/VLM parsing (`openai`, `vllm`, `dots_ocr`). |
-| `OCR_API_KEY` | _(empty)_ | API key for OCR provider. |
+| `EMBEDDING_DEVICE` | `cpu` | HuggingFace embedding runtime device (used when `EMBEDDING_MODEL_PROVIDER=huggingface`). |
+| `EMBEDDING_CACHE_FOLDER` | _(empty)_ | Optional HuggingFace cache folder for embedding weights. |
+| `OCR_MODEL_PROVIDER` | `openai` | OCR/VLM provider (`openai`, `vllm`, `dots_ocr`). |
+| `OCR_API_KEY` | _(empty)_ | API key for OCR provider (required for hosted APIs). |
 | `OCR_API_BASE_URL` | _(empty)_ | Base URL for OCR provider. |
 | `OPENAI_OCR_MODEL` | `gpt-4o-mini` | OCR/VLM model name. |
 | `DOTS_OCR_CACHE_FOLDER` | `./models/dots_ocr` | Local cache for dots_ocr weights. |
-| `RERANKER_MODEL_NAME` | `Qwen/Qwen3-Reranker-0.6B` | Default reranker (chat mode uses listwise reranker if hosted). |
+| `RERANKER_MODEL_NAME` | `Qwen/Qwen3-Reranker-0.6B` | Default local reranker model name (used when `MODEL_PROFILE=local`). |
 | `RERANKER_CACHE_FOLDER` | `./models/Qwen` | Cache path for reranker checkpoints. |
-| `OPENAI_API_KEY` | _(empty)_ | Fallback key reused across OpenAI-compatible modules. |
-| `OPENAI_BASE_URL` | _(empty)_ | Fallback base URL reused across modules. |
-| `DEVICE` | `xxx` | Torch device (e.g. `cpu`, `cuda:0`). Set to `cpu` when GPU is not available. |
-| `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | Local huggingface embedding model when `*_PROVIDER=huggingface`. |
+| `RERANKER_DEVICE` | `cpu` | Reranker runtime device. |
+| `OPENAI_API_KEY` | _(empty)_ | Optional shared key reused across OpenAI-compatible modules when component-specific keys are empty. |
+| `OPENAI_BASE_URL` | _(empty)_ | Optional shared base URL reused across OpenAI-compatible modules. |
+| `DEVICE` | `cpu` | Optional shared default device used when component-specific device vars are empty. |
+| `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | Local HuggingFace embedding model name when `EMBEDDING_MODEL_PROVIDER=huggingface`. |
 | `MODEL_PROFILE` | `api` | Chooses config profile (`api` or `local`). Impacts default JSON configs. |
 
 ## 2. Evidence Output Controls
@@ -90,12 +97,21 @@ Planner/graph defaults. Leave as-is unless customizing behavior.
 | `DEEPSEARCH_PLANNER_MAX_STEPS` | `6` | Max reasoning steps per plan. |
 | `DEEPSEARCH_PLANNER_ENABLE_SUBQUESTION` | `true` | Allow planner to spawn sub-questions. |
 | `DEEPSEARCH_PLANNER_DISABLE_LLM` | `false` | Force planner to run without LLM (for tests). |
-| `DEEPSEARCH_PLANNER_LLM_PROVIDER` ... `DEEPSEARCH_PLANNER_MAX_RETRIES` | _(empty)_ | Optional overrides for planner-specific LLM. Fill only when using a dedicated provider. |
+| `DEEPSEARCH_PLANNER_LLM_PROVIDER` | _(empty)_ | Optional: planner-specific LLM provider (leave empty to reuse global chat config). |
+| `DEEPSEARCH_PLANNER_MODEL_NAME` | _(empty)_ | Optional: planner-specific model name. |
+| `DEEPSEARCH_PLANNER_MAX_TOKENS` | _(empty)_ | Optional: planner-specific max tokens override. |
+| `DEEPSEARCH_PLANNER_TEMPERATURE` | _(empty)_ | Optional: planner-specific temperature override. |
+| `DEEPSEARCH_PLANNER_API_KEY` | _(empty)_ | Optional: planner-specific API key override. |
+| `DEEPSEARCH_PLANNER_BASE_URL` | _(empty)_ | Optional: planner-specific base URL override. |
+| `DEEPSEARCH_PLANNER_ORGANIZATION` | _(empty)_ | Optional: planner-specific organization override. |
+| `DEEPSEARCH_PLANNER_TIMEOUT` | _(empty)_ | Optional: planner-specific request timeout. |
+| `DEEPSEARCH_PLANNER_MAX_RETRIES` | _(empty)_ | Optional: planner-specific retry count. |
 | `DEEPSEARCH_PERSIST_PLAN` | `true` | Persist plan JSON to disk. |
 | `DEEPSEARCH_PLAN_OUTPUT_DIR` | `./local/deepsearch_runs` | Folder for persisted plans. |
 | `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `./local/deepsearch_artifacts` | Output directory for tool telemetry. |
 | `DEEPSEARCH_ALLOW_EXTERNAL_CHANNEL` | `false` | Enable web/external channels. |
 | `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` | `false` | Toggle invocation of configured external search provider. |
+| `DEEPSEARCH_TELEMETRY_ENABLED` | `true` | Enable telemetry capture for tool runs (local artifacts). |
 | `TAVILY_API_KEY` | _(empty)_ | API key for Tavily (when external search enabled). |
 | `DEEPSEARCH_WEB_PROVIDER` | _(empty)_ | MCP server name used for web search fallbacks. |
 | `DEEPSEARCH_TOOL_HINTS` | _(empty)_ | JSON list to override planner tool hints. |
@@ -149,13 +165,18 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | --- | --- | --- |
 | `JWT_SECRET_KEY` | `your-secret-key-change-this-in-production` | Secret used to sign JWT tokens. Replace in production. |
 | `HF_TOKEN` | _(empty)_ | HuggingFace token for downloading gated models (optional). |
+| `HF_ENDPOINT` | _(empty)_ | Optional HuggingFace endpoint override (e.g. `https://hf-mirror.com`). |
 | `LOG_LEVEL` | `INFO` | Python logging level (`DEBUG`, `INFO`, etc.). |
 
 ## 8. File Storage & Parser Paths
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `PARSER_OUTPUT_DIR` | `./data/parsed_files` | Base directory for parser outputs. |
+| `PARSER_OUTPUT_DIR` | `./data/parsed_files` | Unified base directory for parser outputs (native/dots_ocr/vlm_ocr subfolders). |
+| `NATIVE_PARSER_OUTPUT_DIR` | _(empty)_ | Optional override for native parser output directory. |
+| `DOTSOCR_OUTPUT_DIR` | _(empty)_ | Optional override for dots_ocr output directory. |
+| `VLMOCR_OUTPUT_DIR` | _(empty)_ | Optional override for VLM OCR output directory. |
+| `OCR_MODEL_NAME` | _(empty)_ | Optional backward-compatible OCR model name alias. |
 | `RAGARC_RUNTIME_DIR` | `./local/runtime` | Fallback runtime directory when parser output dir is not writable. |
 | `LOCAL_FILE_STORAGE_PATH` | `./local/files` | Root directory for locally stored uploads. |
 
@@ -171,14 +192,103 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `NEO4J_HTTP_PORT` | `7474` | Host HTTP port when `EXPOSE_NEO4J=true`. |
 | `NEO4J_BOLT_PORT` | `7687` | Host bolt port when `EXPOSE_NEO4J=true`. |
 
-## 10. Optional MinIO (Commented Section)
+## 10. Optional MinIO Object Storage
 
-The `.env.example` includes commented placeholders for:
-- `MINIO_ENDPOINT`, `MINIO_USERNAME`, `MINIO_PASSWORD`
-- `MINIO_BUCKET`, `MINIO_SECURE`
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MINIO_USERNAME` | `ROOTNAME` | MinIO access key / username (used only when MinIO integration is enabled). |
+| `MINIO_PASSWORD` | `CHANGEME123` | MinIO secret key / password. |
 
-Uncomment and configure them when integrating object storage for parsed files.
+The `.env.example` also includes commented placeholders for:
+- `MINIO_ENDPOINT`
+- `MINIO_BUCKET`
+- `MINIO_SECURE`
+
+Uncomment and configure them only when integrating object storage for parsed files.
+
+## 11. Build / Advanced Runtime
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `CUDA_VISIBLE_DEVICES` | _(empty)_ | Optional: constrain GPU visibility when running local models. |
+| `PYTHONPATH` | _(empty)_ | Optional: extra Python import roots for subprocesses (e.g. vLLM launcher). |
+| `UV_INSTALL_URL` | `https://astral.sh/uv/install.sh` | Optional: override `uv` installer URL used by `build.sh`. |
+| `UV_INDEX_URL` | `https://pypi.org/simple` | Optional: override Python package index used by `build.sh`. |
+| `PYTORCH_INDEX_URL` | _(empty)_ | Optional: override PyTorch wheel index (primarily for GPU builds). |
+
+## 12. CLI Defaults
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `CLI_OWNER_ID` | _(empty)_ | Optional: pinned owner id used by CLI commands when present. |
+| `CLI_OWNER_ID_FILE` | _(empty)_ | Optional: where to persist generated CLI owner id (default: `~/.rag_arc_owner_id`). |
+| `DEFAULT_OWNER_ID` | _(empty)_ | Optional legacy alias checked by CLI owner resolution. |
+| `RAG_ARC_OWNER_ID` | _(empty)_ | Optional legacy alias checked by CLI owner resolution. |
+
+## 13. Quick Start / Test Hooks
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `QUICK_START_OWNER_ID` | _(empty)_ | Optional: owner id used by quick-start scripts/examples. |
+| `RAG_OUTPUT_DIR` | _(empty)_ | Optional: output directory for RAG pipeline artifacts. |
+| `DEEPSEARCH_EXPERIMENT_OUTPUT_DIR` | _(empty)_ | Optional: output directory for DeepSearch experiment artifacts. |
+| `DEEPSEARCH_CITATION_ALIASES` | _(empty)_ | Optional: JSON mapping for citation aliases. |
+| `DEEPSEARCH_TOOL_AUDIT_LABEL` | _(empty)_ | Optional: label attached to tool audit records. |
+| `DEEPSEARCH_TOOL_MCP_AUDIT_LABEL` | _(empty)_ | Optional: label attached to MCP tool audit records. |
+| `DEEPSEARCH_TOOL_MCP_INSTRUCTIONS` | _(empty)_ | Optional: extra planner instructions for MCP tool usage. |
+| `DEEPSEARCH_TOOL_MCP_SCOPE_OVERRIDE_POLICY` | _(empty)_ | Optional: policy controlling when MCP scope is overridden. |
+| `DEEPSEARCH_TOOL_MCP_SCOPE_OVERRIDE_TOKEN` | _(empty)_ | Optional: token used to authorize MCP scope overrides. |
+| `DEEPSEARCH_RUN_LLM_INTEGRATION_TESTS` | `0` | Optional: run DeepSearch LLM integration tests when set to `1`. |
+
+### Optional local-model smoke tests (pytest)
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `RUN_RAGARC_GPT2_CHAT_TESTS` | `0` | Opt-in: run local chat smoke tests using `models/gpt2` when set to `1`. |
+| `RAGARC_GPT2_MODEL_DIR` | `./models/gpt2` | Path to local tiny-gpt2 directory for chat tests. |
+| `RUN_RAGARC_LOCAL_EMBEDDING_TESTS` | `0` | Opt-in: run local embedding smoke tests when set to `1`. |
+| `RAGARC_ST_MODEL_SNAPSHOTS` | `./models/all-MiniLM-L6-v2/models--sentence-transformers--all-MiniLM-L6-v2/snapshots` | Path to local SentenceTransformer snapshots. |
+| `RUN_RAGARC_LOCAL_RERANK_TESTS` | `0` | Opt-in: run local reranker smoke tests when set to `1`. |
+| `RAGARC_RERANKER_SNAPSHOTS` | `./models/Qwen/models--Qwen--Qwen3-Reranker-0.6B/snapshots` | Path to local reranker snapshots. |
+| `RAGARC_ALLOW_LARGE_MODELS` | `0` | Safety gate: must be `1` for large local model tests. |
+
+## 14. Azure OpenAI (Optional)
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `API_VERSION` | _(empty)_ | Azure OpenAI API version (when using Azure provider). |
+| `AZURE_OPENAI_API_KEY` | _(empty)_ | Azure OpenAI API key. |
+
+## 15. Test-only placeholders (env substitution)
+
+These are used by internal env-substitution tests and can be left empty.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `APP_NAME` | _(empty)_ | Test placeholder. |
+| `APP_VALUE` | _(empty)_ | Test placeholder. |
+| `BASE_URL` | _(empty)_ | Test placeholder. |
+| `EXISTING_VAR` | _(empty)_ | Test placeholder. |
+| `LIST_VAR` | _(empty)_ | Test placeholder. |
+| `MIXED_VAR` | _(empty)_ | Test placeholder. |
+| `NESTED_VAR` | _(empty)_ | Test placeholder. |
+| `STRING_VAR` | _(empty)_ | Test placeholder. |
+| `TEST_VAR` | _(empty)_ | Test placeholder. |
+| `VAR1` | _(empty)_ | Test placeholder. |
+| `VAR2` | _(empty)_ | Test placeholder. |
+
+## 16. Integration / Test Flags
+
+Set to `1` (or any non-empty value) to opt-in when the required services/models are available; leave empty to skip.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `RUN_RAGARC_INTEGRATION_TESTS` | _(empty)_ | Run integration test suites. |
+| `RUN_RAGARC_POSTGRES_TESTS` | _(empty)_ | Run Postgres-dependent test suites. |
+| `RUN_RAGARC_CHAT_STORAGE_TESTS` | _(empty)_ | Run chat-storage test suites. |
+| `RUN_RAGARC_VECTOR_TESTS` | _(empty)_ | Run vector-store test suites. |
+| `RAGARC_E2E_TOKEN` | _(empty)_ | Token used by `test/test_complete_e2e_api.py` to authenticate API requests. |
 
 ---
 
-**Tip:** Copy `.env.example` to `.env`, fill in the API keys for the LLM provider you use, and everything else should function with Docker defaults. Adjust the remaining variables only when you need custom deployments or scopes. test.
+**Tip:** Copy `.env.example` to `.env`, fill in the API keys for the LLM provider you use, and everything else should function with Docker defaults. Adjust the remaining variables only when you need custom deployments or scopes.

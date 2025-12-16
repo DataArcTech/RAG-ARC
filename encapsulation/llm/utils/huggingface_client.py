@@ -230,13 +230,23 @@ def create_transformers_client(config) -> Tuple[Any, Any]:
         from transformers import AutoTokenizer, AutoModelForCausalLM
         import torch
 
+        device = getattr(config, "device", "cpu")
+        model_kwargs: dict[str, Any] = {}
+        config_model_kwargs = getattr(config, "model_kwargs", {}) or {}
+        if (
+            isinstance(device, str)
+            and device.lower() != "cpu"
+            and "torch_dtype" not in config_model_kwargs
+        ):
+            model_kwargs["torch_dtype"] = torch.float16
+
         logger.info(f"Transformers client initialized: {getattr(config, 'model_name', 'unknown')}")
         return _create_transformers_base(
             config,
             AutoTokenizer,
             AutoModelForCausalLM,
-            tokenizer_kwargs={'padding_side': 'left'},
-            model_kwargs={'torch_dtype': torch.float16}
+            tokenizer_kwargs={"padding_side": "left"},
+            model_kwargs=model_kwargs,
         )
 
     except ImportError:
