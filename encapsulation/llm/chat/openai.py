@@ -1,5 +1,5 @@
 from .base import ChatLLMBase
-from typing import Dict, Any, List, Optional, Union, Tuple, AsyncGenerator, TYPE_CHECKING
+from typing import Any, AsyncGenerator, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from config.encapsulation.llm.chat.openai import OpenAIChatConfig
@@ -50,6 +50,7 @@ class OpenAIChatLLM(ChatLLMBase):
         if self.loading_method == 'openai':
             self.client = create_openai_sync_client(self.config)
             self.async_client = create_openai_async_client(self.config)
+            self.tokenizer = None
         elif self.loading_method == 'huggingface':
             # For HuggingFace transformers, we get (model, tokenizer) tuple
             self.client, self.tokenizer = create_transformers_client(self.config)
@@ -59,6 +60,85 @@ class OpenAIChatLLM(ChatLLMBase):
 
     # ==================== CHAT IMPLEMENTATION ====================
 
+    def _build_hf_prompt(self, messages: List[Dict[str, str]]) -> str:
+        """Convert OpenAI-style chat messages into a single prompt for HF generation."""
+        tokenizer = getattr(self, "tokenizer", None)
+        if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
+            try:
+                return tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        lines: List[str] = []
+        for message in messages:
+            role = (message.get("role") or "user").strip()
+            content = (message.get("content") or "").strip()
+            if not content:
+                continue
+            lines.append(f"{role}: {content}")
+        lines.append("assistant:")
+        return "\n".join(lines).strip()
+
+    def _hf_generate(
+        self,
+        prompt: str,
+        *,
+        max_new_tokens: int,
+        temperature: float,
+        **kwargs,
+    ) -> str:
+        """Generate a completion using a locally loaded Transformers model."""
+        import torch
+
+        tokenizer = getattr(self, "tokenizer", None)
+        if tokenizer is None:
+            raise RuntimeError("HuggingFace tokenizer is not initialized")
+
+        model = getattr(self, "client", None)
+        if model is None or not hasattr(model, "generate"):
+            raise RuntimeError("HuggingFace model is not initialized")
+
+        inputs = tokenizer(prompt, return_tensors="pt")
+        device = getattr(model, "device", None)
+        if device is not None:
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+
+        do_sample = temperature is not None and float(temperature) > 0.0
+
+        supported_kwargs = {
+            "top_p",
+            "top_k",
+            "repetition_penalty",
+            "no_repeat_ngram_size",
+            "num_beams",
+            "eos_token_id",
+            "pad_token_id",
+        }
+        gen_kwargs = {k: v for k, v in kwargs.items() if k in supported_kwargs}
+
+        gen_kwargs.setdefault("pad_token_id", getattr(tokenizer, "pad_token_id", None) or getattr(tokenizer, "eos_token_id", None))
+        gen_kwargs.setdefault("eos_token_id", getattr(tokenizer, "eos_token_id", None))
+
+        with torch.no_grad():
+            generation_params: Dict[str, Any] = {
+                **inputs,
+                "max_new_tokens": max_new_tokens,
+                "do_sample": do_sample,
+                **gen_kwargs,
+            }
+            if do_sample:
+                generation_params["temperature"] = float(temperature)
+            output_ids = model.generate(**generation_params)
+
+        input_len = int(inputs["input_ids"].shape[-1])
+        generated = output_ids[0][input_len:]
+        text = tokenizer.decode(generated, skip_special_tokens=True)
+        return text.strip()
+
     def chat(
         self,
         messages: List[Dict[str, str]],
@@ -66,6 +146,17 @@ class OpenAIChatLLM(ChatLLMBase):
     ) -> str:
         """Internal chat implementation"""
         self._validate_messages(messages)
+
+        if self.loading_method == "huggingface":
+            prompt = self._build_hf_prompt(messages)
+            temperature = float(kwargs.pop("temperature", self.temperature))
+            max_tokens = int(kwargs.pop("max_tokens", self.max_tokens))
+            return self._hf_generate(
+                prompt,
+                max_new_tokens=max_tokens,
+                temperature=temperature,
+                **kwargs,
+            )
 
         try:
             temperature = kwargs.pop("temperature", self.temperature)
@@ -93,6 +184,85 @@ class OpenAIChatLLM(ChatLLMBase):
         Internal streaming chat implementation
         """
         self._validate_messages(messages)
+
+        if self.loading_method == "huggingface":
+            prompt = self._build_hf_prompt(messages)
+            temperature = float(kwargs.pop("temperature", self.temperature))
+            max_tokens = int(kwargs.pop("max_tokens", self.max_tokens))
+            try:
+                from transformers import TextIteratorStreamer
+                import threading
+                import inspect
+
+                tokenizer = getattr(self, "tokenizer", None)
+                model = getattr(self, "client", None)
+                if tokenizer is None or model is None:
+                    raise RuntimeError("HuggingFace model/tokenizer is not initialized")
+
+                if "streamer" not in inspect.signature(model.generate).parameters:
+                    yield self._hf_generate(
+                        prompt,
+                        max_new_tokens=max_tokens,
+                        temperature=temperature,
+                        **kwargs,
+                    )
+                    return
+
+                streamer = TextIteratorStreamer(
+                    tokenizer,
+                    skip_prompt=True,
+                    skip_special_tokens=True,
+                )
+                import torch
+
+                inputs = tokenizer(prompt, return_tensors="pt")
+                device = getattr(model, "device", None)
+                if device is not None:
+                    inputs = {k: v.to(device) for k, v in inputs.items()}
+
+                do_sample = temperature is not None and float(temperature) > 0.0
+                supported_kwargs = {
+                    "top_p",
+                    "top_k",
+                    "repetition_penalty",
+                    "no_repeat_ngram_size",
+                    "num_beams",
+                    "eos_token_id",
+                    "pad_token_id",
+                }
+                gen_kwargs = {k: v for k, v in kwargs.items() if k in supported_kwargs}
+                gen_kwargs.setdefault("pad_token_id", getattr(tokenizer, "pad_token_id", None) or getattr(tokenizer, "eos_token_id", None))
+                gen_kwargs.setdefault("eos_token_id", getattr(tokenizer, "eos_token_id", None))
+
+                def _run_generation():
+                    with torch.no_grad():
+                        generation_params: Dict[str, Any] = {
+                            **inputs,
+                            "max_new_tokens": max_tokens,
+                            "do_sample": do_sample,
+                            "streamer": streamer,
+                            **gen_kwargs,
+                        }
+                        if do_sample:
+                            generation_params["temperature"] = float(temperature)
+                        model.generate(**generation_params)
+
+                thread = threading.Thread(target=_run_generation, daemon=True)
+                thread.start()
+                for text in streamer:
+                    if text:
+                        yield text
+                thread.join(timeout=0.1)
+                return
+            except Exception as e:
+                logger.warning("HuggingFace streaming unavailable, falling back to non-streaming: %s", e)
+                yield self._hf_generate(
+                    prompt,
+                    max_new_tokens=max_tokens,
+                    temperature=temperature,
+                    **kwargs,
+                )
+                return
 
         try:
             temperature = kwargs.pop("temperature", self.temperature)
@@ -127,6 +297,10 @@ class OpenAIChatLLM(ChatLLMBase):
         """
         self._validate_messages(messages)
 
+        if self.loading_method == "huggingface":
+            import asyncio
+            return await asyncio.to_thread(self.chat, messages, **kwargs)
+
         try:
             temperature = kwargs.pop("temperature", self.temperature)
             response = await self.async_client.chat.completions.create(
@@ -152,6 +326,30 @@ class OpenAIChatLLM(ChatLLMBase):
         Async function of stream chat
         """
         self._validate_messages(messages)
+
+        if self.loading_method == "huggingface":
+            import asyncio
+            import threading
+
+            loop = asyncio.get_running_loop()
+            queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
+
+            def _runner():
+                try:
+                    for chunk in self.stream_chat(messages, **kwargs):
+                        asyncio.run_coroutine_threadsafe(queue.put(chunk), loop)
+                finally:
+                    asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+
+            thread = threading.Thread(target=_runner, daemon=True)
+            thread.start()
+
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield item
+            return
 
         try:
             temperature = kwargs.pop("temperature", self.temperature)
@@ -189,7 +387,7 @@ class OpenAIChatLLM(ChatLLMBase):
             "timeout": getattr(client, 'timeout', None) if client else None,
             "default_max_tokens": self.max_tokens,
             "default_temperature": self.temperature,
-            "provider": "openai",
+            "provider": "huggingface" if self.loading_method == "huggingface" else "openai",
             "class_name": self.__class__.__name__,
             "config_type": getattr(self.config, 'type', 'unknown')
         }

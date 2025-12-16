@@ -39,7 +39,7 @@ class ParserCombinatorConfig(AbstractConfig):
 
     # Unified base output directory for all parsers
     # Can be overridden by environment variable PARSER_OUTPUT_DIR
-    base_output_dir: str = os.getenv("PARSER_OUTPUT_DIR", "./data/parsed_files")
+    base_output_dir: str = Field(default_factory=lambda: os.getenv("PARSER_OUTPUT_DIR", "./data/parsed_files"))
 
     # OCR parser for PDF and images (optional)
     ocr_parser: Optional[Annotated[

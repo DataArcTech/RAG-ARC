@@ -6,25 +6,32 @@
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `CHAT_MODEL_PROVIDER` | `openai` | 对话模型提供方（`openai` / `huggingface` 等）。 |
-| `CHAT_API_KEY` | _(空)_ | 对话模型的 API Key（使用云端模型时必填）。 |
-| `CHAT_API_BASE_URL` | _(空)_ | OpenAI 兼容 API 的 Base URL。 |
-| `OPENAI_CHAT_MODEL` | `gpt-4o-mini` | 默认聊天模型名称。 |
-| `EMBEDDING_MODEL_PROVIDER` | `openai` | 嵌入模型提供方。 |
-| `EMBEDDING_API_KEY` | _(空)_ | 嵌入模型的 API Key。 |
+| `CHAT_MODEL_PROVIDER` | `openai` | 对话模型提供方（`openai`=OpenAI 兼容 API，`huggingface`=本地 Transformers）。 |
+| `CHAT_MODEL_NAME` | _(空)_ | 可选：优先使用的对话模型名（填写后会覆盖 `OPENAI_CHAT_MODEL`）。 |
+| `CHAT_MODEL_DEVICE` | `cpu` | HuggingFace 对话模型运行设备（仅当 `CHAT_MODEL_PROVIDER=huggingface` 时使用）。 |
+| `CHAT_MODEL_CACHE_FOLDER` | _(空)_ | 可选：HuggingFace 对话模型权重/Tokenizer 缓存目录。 |
+| `CHAT_API_KEY` | _(空)_ | 对话模型的 API Key（使用云端 API 时必填）。 |
+| `CHAT_API_BASE_URL` | _(空)_ | OpenAI 兼容 API 的 Base URL（例如 `https://api.openai.com/v1`）。 |
+| `OPENAI_CHAT_MODEL` | `gpt-4o-mini` | 兼容/默认的对话模型名（当 `CHAT_MODEL_NAME` 为空时使用）。 |
+| `OPENAI_API_BASE` | _(空)_ | 可选：历史兼容的 OpenAI Base URL 别名。 |
+| `EMBEDDING_MODEL_PROVIDER` | `openai` | 嵌入模型提供方（`openai`=OpenAI 兼容 API，`huggingface`=本地 SentenceTransformers）。 |
+| `EMBEDDING_API_KEY` | _(空)_ | 嵌入模型的 API Key（使用云端 API 时必填）。 |
 | `EMBEDDING_API_BASE_URL` | _(空)_ | 嵌入模型的 Base URL。 |
-| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | 默认嵌入模型。 |
-| `OCR_MODEL_PROVIDER` | `openai` | OCR/VLM 模型提供方（`openai`、`vllm`、`dots_ocr` 等）。 |
-| `OCR_API_KEY` | _(空)_ | OCR/VLM 模型的 API Key。 |
+| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | 默认嵌入模型名称。 |
+| `EMBEDDING_DEVICE` | `cpu` | HuggingFace 嵌入模型运行设备（仅当 `EMBEDDING_MODEL_PROVIDER=huggingface` 时使用）。 |
+| `EMBEDDING_CACHE_FOLDER` | _(空)_ | 可选：HuggingFace 嵌入模型缓存目录。 |
+| `OCR_MODEL_PROVIDER` | `openai` | OCR/VLM 提供方（`openai`、`vllm`、`dots_ocr` 等）。 |
+| `OCR_API_KEY` | _(空)_ | OCR/VLM 的 API Key（使用云端 API 时必填）。 |
 | `OCR_API_BASE_URL` | _(空)_ | OCR/VLM 的 Base URL。 |
 | `OPENAI_OCR_MODEL` | `gpt-4o-mini` | 默认 OCR/VLM 模型名称。 |
 | `DOTS_OCR_CACHE_FOLDER` | `./models/dots_ocr` | dots_ocr 模型缓存路径。 |
-| `RERANKER_MODEL_NAME` | `Qwen/Qwen3-Reranker-0.6B` | 默认 reranker 模型。 |
+| `RERANKER_MODEL_NAME` | `Qwen/Qwen3-Reranker-0.6B` | 默认本地 reranker 模型名（`MODEL_PROFILE=local` 时使用）。 |
 | `RERANKER_CACHE_FOLDER` | `./models/Qwen` | reranker 缓存目录。 |
-| `OPENAI_API_KEY` | _(空)_ | 全局备用 OpenAI Key。 |
-| `OPENAI_BASE_URL` | _(空)_ | 全局备用 OpenAI Base URL。 |
-| `DEVICE` | `xxx` | Torch 设备（如 `cpu`、`cuda:0`）。无 GPU 则填 `cpu`。 |
-| `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | 使用本地 HuggingFace 嵌入时的模型。 |
+| `RERANKER_DEVICE` | `cpu` | reranker 运行设备。 |
+| `OPENAI_API_KEY` | _(空)_ | 可选：全局备用 OpenAI Key（组件 Key 为空时复用）。 |
+| `OPENAI_BASE_URL` | _(空)_ | 可选：全局备用 OpenAI Base URL。 |
+| `DEVICE` | `cpu` | 可选：共享默认设备（当各组件设备变量为空时使用）。 |
+| `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | 使用本地 HuggingFace 嵌入时的模型名（`EMBEDDING_MODEL_PROVIDER=huggingface`）。 |
 | `MODEL_PROFILE` | `api` | 选择配置档（`api` 或 `local`），影响默认 JSON 配置。 |
 
 ## 2. 证据输出控制
@@ -90,12 +97,21 @@
 | `DEEPSEARCH_PLANNER_MAX_STEPS` | `6` | 规划器最大步数。 |
 | `DEEPSEARCH_PLANNER_ENABLE_SUBQUESTION` | `true` | 是否允许拆分子问题。 |
 | `DEEPSEARCH_PLANNER_DISABLE_LLM` | `false` | 禁用规划器 LLM（调试用）。 |
-| `DEEPSEARCH_PLANNER_LLM_PROVIDER` ~ `DEEPSEARCH_PLANNER_MAX_RETRIES` | _(空)_ | 当需要为规划器单独配置 LLM 时填入（提供方/模型/重试等）。 |
+| `DEEPSEARCH_PLANNER_LLM_PROVIDER` | _(空)_ | 可选：规划器专用 LLM Provider（留空则复用全局对话配置）。 |
+| `DEEPSEARCH_PLANNER_MODEL_NAME` | _(空)_ | 可选：规划器专用模型名。 |
+| `DEEPSEARCH_PLANNER_MAX_TOKENS` | _(空)_ | 可选：规划器专用 max tokens。 |
+| `DEEPSEARCH_PLANNER_TEMPERATURE` | _(空)_ | 可选：规划器专用 temperature。 |
+| `DEEPSEARCH_PLANNER_API_KEY` | _(空)_ | 可选：规划器专用 API Key。 |
+| `DEEPSEARCH_PLANNER_BASE_URL` | _(空)_ | 可选：规划器专用 Base URL。 |
+| `DEEPSEARCH_PLANNER_ORGANIZATION` | _(空)_ | 可选：规划器专用 organization。 |
+| `DEEPSEARCH_PLANNER_TIMEOUT` | _(空)_ | 可选：规划器专用请求超时。 |
+| `DEEPSEARCH_PLANNER_MAX_RETRIES` | _(空)_ | 可选：规划器专用重试次数。 |
 | `DEEPSEARCH_PERSIST_PLAN` | `true` | 是否落盘保存规划。 |
 | `DEEPSEARCH_PLAN_OUTPUT_DIR` | `./local/deepsearch_runs` | 规划输出目录。 |
 | `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `./local/deepsearch_artifacts` | 工具执行日志目录。 |
 | `DEEPSEARCH_ALLOW_EXTERNAL_CHANNEL` | `false` | 是否允许外部搜索。 |
 | `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` | `false` | 启用外部搜索时需同时提供 API Key。 |
+| `DEEPSEARCH_TELEMETRY_ENABLED` | `true` | 是否启用工具运行遥测（本地 artifacts）。 |
 | `TAVILY_API_KEY` | _(空)_ | Tavily 搜索的 Key（启用外部搜索时必填）。 |
 | `DEEPSEARCH_WEB_PROVIDER` | _(空)_ | 默认 web 搜索 MCP 名称。 |
 | `DEEPSEARCH_TOOL_HINTS` | _(空)_ | JSON 字符串，覆盖规划器的工具提示。 |
@@ -149,13 +165,18 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | --- | --- | --- |
 | `JWT_SECRET_KEY` | `your-secret-key-change-this-in-production` | JWT 签名秘钥，生产环境务必替换。 |
 | `HF_TOKEN` | _(空)_ | HuggingFace Token（下载受限模型时使用）。 |
+| `HF_ENDPOINT` | _(空)_ | 可选：HuggingFace Endpoint 覆盖（例如 `https://hf-mirror.com`）。 |
 | `LOG_LEVEL` | `INFO` | 日志等级。 |
 
 ## 8. 文件/解析路径
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `PARSER_OUTPUT_DIR` | `./data/parsed_files` | 解析输出目录。 |
+| `PARSER_OUTPUT_DIR` | `./data/parsed_files` | 统一解析输出目录（native/dots_ocr/vlm_ocr 会落到子目录）。 |
+| `NATIVE_PARSER_OUTPUT_DIR` | _(空)_ | 可选：原生解析器输出目录覆盖。 |
+| `DOTSOCR_OUTPUT_DIR` | _(空)_ | 可选：dots_ocr 输出目录覆盖。 |
+| `VLMOCR_OUTPUT_DIR` | _(空)_ | 可选：VLM OCR 输出目录覆盖。 |
+| `OCR_MODEL_NAME` | _(空)_ | 可选：历史兼容的 OCR 模型名别名。 |
 | `RAGARC_RUNTIME_DIR` | `./local/runtime` | 当解析目录不可写时的备用路径。 |
 | `LOCAL_FILE_STORAGE_PATH` | `./local/files` | 本地文件存储根目录。 |
 
@@ -171,9 +192,102 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `NEO4J_HTTP_PORT` | `7474` | 当 `EXPOSE_NEO4J=true` 时映射到宿主机的 HTTP 端口。 |
 | `NEO4J_BOLT_PORT` | `7687` | 当 `EXPOSE_NEO4J=true` 时映射到宿主机的 Bolt 端口。 |
 
-## 10. 可选的 MinIO
+## 10. 可选的 MinIO 对象存储
 
-`.env.example` 末尾提供了 MinIO 相关变量（默认注释）。需要使用对象存储时，取消注释并填写 `MINIO_ENDPOINT`、`MINIO_USERNAME`、`MINIO_PASSWORD`、`MINIO_BUCKET`、`MINIO_SECURE` 等。
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `MINIO_USERNAME` | `ROOTNAME` | MinIO 用户名/Access Key（仅在启用 MinIO 集成时使用）。 |
+| `MINIO_PASSWORD` | `CHANGEME123` | MinIO 密码/Secret Key。 |
+
+`.env.example` 里还提供了以下（默认注释）的占位项：
+- `MINIO_ENDPOINT`
+- `MINIO_BUCKET`
+- `MINIO_SECURE`
+
+仅当需要接入对象存储时才取消注释并填写。
+
+## 11. 构建 / 高级运行参数
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `CUDA_VISIBLE_DEVICES` | _(空)_ | 可选：限制本地模型可见的 GPU。 |
+| `PYTHONPATH` | _(空)_ | 可选：为子进程附加 Python 导入路径（例如 vLLM 启动器）。 |
+| `UV_INSTALL_URL` | `https://astral.sh/uv/install.sh` | 可选：`build.sh` 使用的 `uv` 安装脚本地址。 |
+| `UV_INDEX_URL` | `https://pypi.org/simple` | 可选：`build.sh` 使用的 Python 包索引。 |
+| `PYTORCH_INDEX_URL` | _(空)_ | 可选：PyTorch wheel 索引覆盖（主要用于 GPU 构建）。 |
+
+## 12. CLI 默认值
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `CLI_OWNER_ID` | _(空)_ | 可选：CLI 命令固定使用的 owner id。 |
+| `CLI_OWNER_ID_FILE` | _(空)_ | 可选：生成的 owner id 持久化路径（默认：`~/.rag_arc_owner_id`）。 |
+| `DEFAULT_OWNER_ID` | _(空)_ | 可选：历史兼容的 owner id 别名。 |
+| `RAG_ARC_OWNER_ID` | _(空)_ | 可选：历史兼容的 owner id 别名。 |
+
+## 13. Quick Start / 测试钩子
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `QUICK_START_OWNER_ID` | _(空)_ | 可选：quick-start 示例使用的 owner id。 |
+| `RAG_OUTPUT_DIR` | _(空)_ | 可选：RAG pipeline 输出目录。 |
+| `DEEPSEARCH_EXPERIMENT_OUTPUT_DIR` | _(空)_ | 可选：DeepSearch 实验输出目录。 |
+| `DEEPSEARCH_CITATION_ALIASES` | _(空)_ | 可选：引用别名映射（JSON）。 |
+| `DEEPSEARCH_TOOL_AUDIT_LABEL` | _(空)_ | 可选：工具审计记录标签。 |
+| `DEEPSEARCH_TOOL_MCP_AUDIT_LABEL` | _(空)_ | 可选：MCP 工具审计记录标签。 |
+| `DEEPSEARCH_TOOL_MCP_INSTRUCTIONS` | _(空)_ | 可选：Planner 的 MCP 工具额外指令。 |
+| `DEEPSEARCH_TOOL_MCP_SCOPE_OVERRIDE_POLICY` | _(空)_ | 可选：控制 MCP scope 覆盖时机的策略。 |
+| `DEEPSEARCH_TOOL_MCP_SCOPE_OVERRIDE_TOKEN` | _(空)_ | 可选：授权 MCP scope 覆盖的 token。 |
+| `DEEPSEARCH_RUN_LLM_INTEGRATION_TESTS` | `0` | 可选：设为 `1` 时运行 DeepSearch LLM 集成测试。 |
+
+### 可选：本地模型 smoke tests（pytest）
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `RUN_RAGARC_GPT2_CHAT_TESTS` | `0` | 选择性开启：设为 `1` 时使用 `models/gpt2` 跑本地对话 smoke test。 |
+| `RAGARC_GPT2_MODEL_DIR` | `./models/gpt2` | tiny-gpt2 本地目录。 |
+| `RUN_RAGARC_LOCAL_EMBEDDING_TESTS` | `0` | 选择性开启：设为 `1` 时跑本地 embedding smoke test。 |
+| `RAGARC_ST_MODEL_SNAPSHOTS` | `./models/all-MiniLM-L6-v2/models--sentence-transformers--all-MiniLM-L6-v2/snapshots` | SentenceTransformer 本地 snapshots 路径。 |
+| `RUN_RAGARC_LOCAL_RERANK_TESTS` | `0` | 选择性开启：设为 `1` 时跑本地 rerank smoke test。 |
+| `RAGARC_RERANKER_SNAPSHOTS` | `./models/Qwen/models--Qwen--Qwen3-Reranker-0.6B/snapshots` | reranker 本地 snapshots 路径。 |
+| `RAGARC_ALLOW_LARGE_MODELS` | `0` | 安全开关：大模型 smoke test 需设为 `1`。 |
+
+## 14. Azure OpenAI（可选）
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `API_VERSION` | _(空)_ | Azure OpenAI API Version（使用 Azure provider 时填写）。 |
+| `AZURE_OPENAI_API_KEY` | _(空)_ | Azure OpenAI API Key。 |
+
+## 15. 仅测试用占位变量（env substitution）
+
+这些变量仅用于内部 env-substitution 测试，可保持为空。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `APP_NAME` | _(空)_ | 测试占位。 |
+| `APP_VALUE` | _(空)_ | 测试占位。 |
+| `BASE_URL` | _(空)_ | 测试占位。 |
+| `EXISTING_VAR` | _(空)_ | 测试占位。 |
+| `LIST_VAR` | _(空)_ | 测试占位。 |
+| `MIXED_VAR` | _(空)_ | 测试占位。 |
+| `NESTED_VAR` | _(空)_ | 测试占位。 |
+| `STRING_VAR` | _(空)_ | 测试占位。 |
+| `TEST_VAR` | _(空)_ | 测试占位。 |
+| `VAR1` | _(空)_ | 测试占位。 |
+| `VAR2` | _(空)_ | 测试占位。 |
+
+## 16. 集成 / 测试开关
+
+当所需服务/模型都可用时，可将其设为 `1`（或任意非空值）以选择性开启；留空则跳过对应套件。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `RUN_RAGARC_INTEGRATION_TESTS` | _(空)_ | 运行集成测试套件。 |
+| `RUN_RAGARC_POSTGRES_TESTS` | _(空)_ | 运行依赖 Postgres 的测试套件。 |
+| `RUN_RAGARC_CHAT_STORAGE_TESTS` | _(空)_ | 运行 chat storage 测试套件。 |
+| `RUN_RAGARC_VECTOR_TESTS` | _(空)_ | 运行向量库相关测试套件。 |
+| `RAGARC_E2E_TOKEN` | _(空)_ | `test/test_complete_e2e_api.py` 用于 API 鉴权的 token。 |
 
 ---
 

@@ -1,6 +1,7 @@
 """Configuration for MinIO S3-compatible blob storage"""
 
 import os
+from pydantic import Field
 from framework.config import AbstractConfig
 from encapsulation.database.file_db.minio import MinIODB
 from typing import Literal
@@ -15,12 +16,11 @@ class MinIOConfig(AbstractConfig):
     type: Literal["minio_blob_store"] = "minio_blob_store"
 
     endpoint: str = "localhost:9000"
-    username: str = os.getenv("MINIO_USERNAME", "ROOTNAME")
-    password: str = os.getenv("MINIO_PASSWORD", "CHANGEME123")
+    username: str = Field(default_factory=lambda: os.getenv("MINIO_USERNAME", "ROOTNAME"))
+    password: str = Field(default_factory=lambda: os.getenv("MINIO_PASSWORD", "CHANGEME123"))
     bucket_name: str = "test-bucket"
     secure: bool = False
     region: str = "us-east-1"
 
     def build(self) -> MinIODB:
         return MinIODB(self)
-
