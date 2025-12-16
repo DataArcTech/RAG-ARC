@@ -186,6 +186,39 @@ async def test_graph_reasoning_inserts_periodic_think():
     assert think_steps, "Think checkpoint should be inserted after cadence is met"
     assert any(call[0] == "graph.think" for call in tool_manager.calls)
     assert any(run["tool_name"] == "graph.think" for run in result["tool_results"])
+
+
+@pytest.mark.asyncio
+async def test_graph_reasoning_think_timeout_falls_back_to_heuristic_note():
+    adapter = _StubAdapter()
+    tool_manager = _HangingToolManager(delay=0.2)
+    loop = GraphReasoningLoop(
+        adapter=adapter,
+        llm_connector=None,
+        strategy_config={
+            "think_every_n_steps": 1,
+            "think_min_coverage": 1.1,
+            "tool_timeout_seconds": 0.01,
+        },
+        tool_manager=tool_manager,
+    )
+
+    plan_steps = [
+        {"step_id": "plan_01", "description": "Inspect graph", "channel": "graph", "tool": "graph_adapter.query"},
+    ]
+
+    context = GraphQueryContext(
+        adapter_name="hipporag",
+        question="Need more thinking",
+        access_scope=GraphAccessScope(scope_id="scope-think-timeout"),
+    )
+    result = await loop.run("Need more thinking", plan_steps, graph_context=context)
+
+    think_steps = [step for step in result["reasoning_steps"] if step["step_id"].startswith("think_auto_")]
+    assert think_steps
+    assert think_steps[0]["status"] == "done"
+    assert think_steps[0]["diagnostics"]["reason"] == "tool_timeout_fallback"
+    assert result["think_notes"], "Timeout fallback should still record a ThinkNote"
 class _SeedAwareAdapter(_StubAdapter):
     def __init__(self):
         super().__init__()

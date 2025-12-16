@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from encapsulation.data_model.deepsearch import ThinkNote
 
-from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async
+from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, safe_json_loads
 
 
 class ParallelThinkTool(GraphTool):
@@ -70,7 +70,7 @@ class ParallelThinkTool(GraphTool):
         ]
         try:
             response = await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
-            data = json.loads(response)
+            data = safe_json_loads(response, expected="list")
             if isinstance(data, list):
                 return [self._coerce_branch(item) for item in data if isinstance(item, dict)]
         except Exception:

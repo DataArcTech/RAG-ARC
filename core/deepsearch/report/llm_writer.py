@@ -13,6 +13,8 @@ from core.prompts.deepsearch.report import (
     REPORT_OUTLINE_USER_PROMPT,
     REPORT_WRITE_SYSTEM_PROMPT,
     REPORT_WRITE_USER_PROMPT,
+    PARALLEL_SYNTHESIS_SYSTEM_PROMPT,
+    PARALLEL_SYNTHESIS_USER_PROMPT,
     SECTION_WRITE_SYSTEM_PROMPT,
     SECTION_WRITE_USER_PROMPT,
 )
@@ -238,14 +240,90 @@ class DeepSearchLLMReportWriter:
                         all_citations.append(cit)
 
         title = question[:80] + ("..." if len(question) > 80 else "")
+        synthesis = await self._synthesize_parallel_fields(
+            question=question,
+            outline=outline,
+            sections=sections,
+            evidences=evidences,
+            coverage=context.get("coverage") or {},
+        )
+        if synthesis:
+            title = synthesis.get("title") or title
+            summary = synthesis.get("summary") or ""
+            limitations = synthesis.get("limitations") or []
+            next_steps = synthesis.get("next_steps") or []
+        else:
+            summary = self._heuristic_summary(question=question, sections=sections)
+            limitations = []
+            next_steps = []
+        if not isinstance(limitations, list):
+            limitations = []
+        if not isinstance(next_steps, list):
+            next_steps = []
+        summary_text = str(summary or "").strip() or self._heuristic_summary(question=question, sections=sections)
         return {
             "title": title,
-            "summary": "",
+            "summary": summary_text,
             "sections": sections,
-            "limitations": [],
-            "next_steps": [],
+            "limitations": [str(item) for item in limitations if str(item).strip()],
+            "next_steps": [str(item) for item in next_steps if str(item).strip()],
             "citations": all_citations,
         }
+
+    async def _synthesize_parallel_fields(
+        self,
+        *,
+        question: str,
+        outline: List[Dict[str, str]],
+        sections: List[Dict[str, Any]],
+        evidences: List[Dict[str, Any]],
+        coverage: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Synthesize title/summary/limitations/next_steps after parallel section drafting."""
+
+        outline_json = json.dumps(outline, ensure_ascii=False, indent=2)
+        sections_json = json.dumps(self._compact_sections_for_synthesis(sections), ensure_ascii=False, indent=2)
+        evidence_json = json.dumps(evidences, ensure_ascii=False, indent=2)
+        coverage_json = json.dumps(coverage or {}, ensure_ascii=False, indent=2)
+
+        user_prompt = PARALLEL_SYNTHESIS_USER_PROMPT.format(
+            question=question,
+            outline_json=outline_json,
+            sections_json=sections_json,
+            evidence_json=evidence_json,
+            coverage_json=coverage_json,
+        )
+        messages = [
+            {"role": "system", "content": PARALLEL_SYNTHESIS_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+        raw = await self._call(messages, phase="parallel_synthesis")
+        parsed = _safe_parse_json(raw, expected="dict")
+        return parsed if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _compact_sections_for_synthesis(sections: List[Dict[str, Any]], *, max_chars: int = 1200) -> List[Dict[str, str]]:
+        payload: List[Dict[str, str]] = []
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            title = str(section.get("title") or "").strip()
+            body = str(section.get("body_markdown") or "").strip()
+            if max_chars > 0 and len(body) > max_chars:
+                body = body[:max_chars].rstrip() + "..."
+            if title or body:
+                payload.append({"title": title, "body_markdown": body})
+        return payload
+
+    @staticmethod
+    def _heuristic_summary(*, question: str, sections: List[Dict[str, Any]]) -> str:
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            body = str(section.get("body_markdown") or "").strip()
+            if body:
+                return body.splitlines()[0].strip()
+        return str(question or "").strip()
 
     async def _write_single_section(
         self,

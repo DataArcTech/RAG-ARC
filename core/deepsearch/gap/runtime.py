@@ -148,15 +148,13 @@ class GapDetectionEngine:
         return triggered, missing
 
     def _external_enabled(self) -> bool:
-        env_flag = self._read_env_bool("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED")
-        if env_flag is None:
-            env_flag = self._read_env_bool("DEEPSEARCH_ALLOW_EXTERNAL_CHANNEL")
-        if env_flag is not None:
-            return env_flag
-        config_flag = self.config.get("enable_external_on_gap")
-        if config_flag is not None:
-            return bool(config_flag)
-        return False
+        """Return True only when the user explicitly enables external search via env.
+
+        External/web search is treated as a user-controlled capability. If the env is not set,
+        we default to disabled (pipeline still records gap/pending steps, but won't execute).
+        """
+
+        return bool(self._read_env_bool("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED"))
 
     @staticmethod
     def _read_env_bool(name: str) -> Optional[bool]:

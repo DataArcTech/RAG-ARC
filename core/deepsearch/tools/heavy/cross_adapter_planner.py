@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Mapping, Sequence
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
 
-from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, build_input_schema
+from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, build_input_schema, safe_json_loads
 
 
 class CrossAdapterPlannerTool(GraphTool):
@@ -104,7 +104,7 @@ class CrossAdapterPlannerTool(GraphTool):
         ]
         try:
             response = await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
-            data = json.loads(response)
+            data = safe_json_loads(response, expected="dict") or {}
             if isinstance(data, dict):
                 summary = str(data.get("summary") or "Adapter comparison completed.")
                 actions = [str(item) for item in data.get("actions", []) if str(item).strip()]

@@ -9,8 +9,6 @@ from typing import Dict
 import pytest
 from dotenv import load_dotenv
 
-load_dotenv()
-
 pytest.importorskip("mcp", reason="DeepSearch planner tests require MCP client dependencies")
 
 from config.core.deepsearch.plan_config import DeepSearchPlannerConfig
@@ -25,6 +23,7 @@ def get_deepsearch_config() -> Dict[str, DeepSearchPlannerConfig]:
 
 
 def _ensure_chat_credentials() -> None:
+    load_dotenv()
     if os.getenv("DEEPSEARCH_RUN_LLM_INTEGRATION_TESTS", "").strip().lower() not in {"1", "true", "yes", "on"}:
         pytest.skip("Set DEEPSEARCH_RUN_LLM_INTEGRATION_TESTS=true to run planner LLM integration tests.")
     if not (

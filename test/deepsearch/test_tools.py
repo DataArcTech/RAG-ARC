@@ -435,6 +435,31 @@ async def test_graph_think_includes_graph_context_metadata():
     assert thought_log[0]["reasoning_tags"]
 
 
+class _RaisingLLM:
+    def chat(self, messages, **kwargs):  # noqa: ANN001
+        raise RuntimeError("network failure")
+
+
+@pytest.mark.asyncio
+async def test_graph_think_llm_failure_falls_back_to_heuristic_note():
+    tool = GraphThinkTool(_RaisingLLM())
+    request = ToolRunRequest(
+        question="Q1",
+        plan_step="plan_01",
+        context_evidences=[],
+        adapter=None,
+        access_scope=None,
+        extra={},
+        graph_context=None,
+        coverage_metrics={"coverage_score": 0.2, "confidence_score": 0.3},
+    )
+    result = await tool.run(request)
+    assert result.think_notes, "LLM failures should still yield a heuristic ThinkNote"
+    note = result.think_notes[0]
+    assert "heuristic" in note.reasoning.lower()
+    assert note.metadata.get("context_size") == 0
+
+
 @pytest.mark.asyncio
 async def test_llm_chain_explorer_generates_plan_and_evidence():
     llm = _StubLLM(json.dumps([{"query": "hop one", "channel": "graph", "rationale": "test"}]))

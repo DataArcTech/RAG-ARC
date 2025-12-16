@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 from encapsulation.data_model.deepsearch import ThinkNote, GraphQueryContext
 from core.prompts.deepsearch import THINK_TOOL_SYSTEM_PROMPT
 
-from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async
+from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, safe_json_loads
 
 
 class GraphThinkTool(GraphTool):
@@ -83,7 +83,7 @@ class GraphThinkTool(GraphTool):
         ]
         try:
             response = await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
-            parsed = json.loads(response)
+            parsed = safe_json_loads(response, expected="dict") or {}
             heuristic_metadata = heuristic_note.metadata or {}
             gap_trigger = bool(parsed.get("gap_trigger")) or heuristic_metadata.get("gap_trigger", False)
             missing_topics = self._merge_missing_topics(

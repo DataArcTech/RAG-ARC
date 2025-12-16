@@ -103,10 +103,17 @@ class MultiAgentGraphReasoningLoop:
         merged.setdefault("coverage_metrics", {})
         merged["coverage_metrics"].setdefault("orchestration_latency_ms", latency_ms)
         merged["coverage_metrics"].setdefault("worker_count", len(worker_outcomes))
+        merged["coverage_metrics"].setdefault("worker_error_count", 0)
+        merged["coverage_metrics"].setdefault("worker_errors", [])
         merged["coverage_metrics"].setdefault(
             "worker_sessions",
             [outcome["agent_session"] for outcome in worker_outcomes],
         )
+
+        worker_errors = self._summarize_worker_errors(worker_outcomes)
+        if worker_errors:
+            merged["coverage_metrics"]["worker_error_count"] = len(worker_errors)
+            merged["coverage_metrics"]["worker_errors"] = worker_errors
 
         if self.tool_manager and self.settings.lead_tool_names:
             lead_tools = await self._run_lead_tools(
@@ -353,6 +360,27 @@ class MultiAgentGraphReasoningLoop:
         if self.settings.fail_fast:
             raise RuntimeError(last_error or "worker_failed")
         return {"question": worker_question, "graph_context": worker_context.model_dump(exclude_none=True)}, 0, last_error
+
+    @staticmethod
+    def _summarize_worker_errors(worker_outcomes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        errors: List[Dict[str, Any]] = []
+        for outcome in worker_outcomes:
+            agent_session = outcome.get("agent_session") or {}
+            error = agent_session.get("error")
+            if not error:
+                continue
+            errors.append(
+                {
+                    "agent_id": agent_session.get("agent_id"),
+                    "session_id": agent_session.get("session_id"),
+                    "primary_step_id": agent_session.get("primary_step_id"),
+                    "assigned_step_ids": agent_session.get("assigned_step_ids") or [],
+                    "focus": agent_session.get("focus"),
+                    "error": error,
+                    "latency_ms": agent_session.get("latency_ms"),
+                }
+            )
+        return errors
 
     @staticmethod
     def _build_worker_debrief(

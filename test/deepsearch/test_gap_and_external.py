@@ -82,6 +82,7 @@ def test_gap_detection_respects_env_disable(monkeypatch):
 def test_gap_detection_triggered_by_think_note(monkeypatch):
     telemetry = _Telemetry()
     engine = _gap_engine(telemetry=telemetry, config={"enable_external_on_gap": True})
+    monkeypatch.setenv("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED", "true")
     trace = _reasoning_trace()
     trace["coverage_metrics"] = {"answer_confidence": 0.95, "coverage_ratio": 0.9}
     trace["think_notes"] = [
@@ -98,6 +99,7 @@ def test_gap_detection_triggered_by_think_note(monkeypatch):
     assert result["reason"] == "think_gap"
     assert "financials" in result["missing_topics"]
     assert telemetry.events and telemetry.events[-1][0] == "gap"
+    monkeypatch.delenv("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED", raising=False)
 
 
 def test_gap_detection_think_gap_respects_env_disable(monkeypatch):

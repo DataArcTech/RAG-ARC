@@ -92,6 +92,32 @@ class _ConcurrentToolManager:
             self.concurrent_calls -= 1
 
 
+class _SelectiveSlowToolManager:
+    def __init__(self, *, slow_plan_step: str, slow_delay: float, fast_delay: float = 0.0):
+        self.slow_plan_step = slow_plan_step
+        self.slow_delay = slow_delay
+        self.fast_delay = fast_delay
+
+    async def invoke(self, tool_name: str, *, payload):
+        plan_step = str(payload.get("plan_step") or "")
+        if plan_step == self.slow_plan_step:
+            await asyncio.sleep(self.slow_delay)
+        elif self.fast_delay:
+            await asyncio.sleep(self.fast_delay)
+        chunk = EvidenceChunk(chunk_id=f"{plan_step}::ev", source=tool_name, content=f"ev::{plan_step}")
+        return ToolResultPayload(
+            tool_name=tool_name,
+            namespace=f"stub::{tool_name}",
+            channel="graph",
+            profile="F",
+            determinism="deterministic",
+            summary=f"{tool_name} ok",
+            evidences=[chunk],
+            diagnostics={},
+            think_notes=[],
+        )
+
+
 @pytest.mark.asyncio
 async def test_multi_agent_runs_workers_and_invokes_tools_concurrently():
     tool_manager = _ConcurrentToolManager(delay=0.05)
@@ -167,3 +193,42 @@ async def test_multi_agent_serializes_shared_adapter_access():
     assert adapter.max_in_flight == 1
     assert result["reasoning_steps"], "multi-agent loop should include reasoning steps"
     assert all(step.get("status") == "done" for step in result["reasoning_steps"])
+
+
+@pytest.mark.asyncio
+async def test_multi_agent_surfaces_worker_failures_in_coverage_metrics():
+    tool_manager = _SelectiveSlowToolManager(slow_plan_step="plan_slow", slow_delay=0.15)
+    loop = MultiAgentGraphReasoningLoop(
+        adapter=_StubAdapter(),
+        llm_connector=None,
+        strategy_config={"parallel_branches": 1},
+        tool_manager=tool_manager,
+        settings={
+            "enabled": True,
+            "max_subagents": 2,
+            "subagent_concurrency": 2,
+            "enable_parallel_tool_probes": False,
+            "probe_tool_names": [],
+            "lead_tool_names": [],
+            "worker_timeout_seconds": 0.05,
+            "worker_retry_attempts": 0,
+            "fail_fast": False,
+        },
+    )
+
+    plan_steps = [
+        {"step_id": "plan_slow", "description": "Slow step", "channel": "graph", "tool": "graph.context_rollup"},
+        {"step_id": "plan_fast", "description": "Fast step", "channel": "graph", "tool": "graph.context_rollup"},
+    ]
+    context = GraphQueryContext(
+        adapter_name="hipporag",
+        question="Q",
+        access_scope=GraphAccessScope(scope_id="scope-multi-agent"),
+    )
+    result = await loop.run("Q", plan_steps, graph_context=context)
+
+    coverage = result.get("coverage_metrics") or {}
+    assert coverage.get("worker_error_count") == 1
+    errors = coverage.get("worker_errors") or []
+    assert isinstance(errors, list) and errors
+    assert any(entry.get("error") == "worker_timeout" for entry in errors if isinstance(entry, dict))

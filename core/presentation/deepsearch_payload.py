@@ -7,6 +7,7 @@ from config.output_limits import (
     DEEPSEARCH_MAX_REASONING_STEPS,
     DEEPSEARCH_MAX_STAGE_HISTORY,
     DEEPSEARCH_MAX_TOOL_METADATA,
+    DEEPSEARCH_TOP_SEED_ENTITIES,
     DEEPSEARCH_TOP_CHUNKS,
 )
 from core.presentation.evidence import build_deepsearch_evidence
@@ -48,15 +49,17 @@ def trim_deepsearch_payload(
     _truncate_evidence_list(source.get("report"), "evidences", cap)
     _truncate_evidence_list(source.get("reasoning"), "evidences", cap)
 
-    evidence_payload = (
-        build_deepsearch_evidence(source, chunk_limit=cap, graph_store=graph_store)
-        if graph_store is not None
-        else build_deepsearch_evidence(source, chunk_limit=cap)
-    )
-    graph_chain = evidence_payload.get("graph_chain") or source.get("graph_chain") or []
-    evidence_block = (
-        evidence_payload if include_evidence else _slim_evidence_payload(evidence_payload)
-    )
+    if include_evidence:
+        evidence_payload = (
+            build_deepsearch_evidence(source, chunk_limit=cap, graph_store=graph_store)
+            if graph_store is not None
+            else build_deepsearch_evidence(source, chunk_limit=cap)
+        )
+        graph_chain = evidence_payload.get("graph_chain") or source.get("graph_chain") or []
+        evidence_block = evidence_payload
+    else:
+        evidence_block = _build_light_evidence_payload(source, cap)
+        graph_chain = source.get("graph_chain") or []
 
     trimmed_plan = _trim_plan_block(source.get("plan"))
     trimmed_reasoning = _trim_reasoning_block(source.get("reasoning"))
@@ -257,6 +260,50 @@ def _slim_evidence_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "chunks": payload.get("chunks") or [],
         "seed_entities": payload.get("seed_entities") or [],
     }
+
+
+def _build_light_evidence_payload(payload: Dict[str, Any], chunk_limit: Optional[int]) -> Dict[str, Any]:
+    """Build minimal evidence payload without exporting subgraphs.
+
+    This avoids expensive graph snapshot exports when callers did not request full evidence.
+    """
+
+    report_block = payload.get("report") or {}
+    report_evidences = report_block.get("evidences") or []
+    chunks: List[Dict[str, Any]] = []
+    for idx, evidence in enumerate(report_evidences):
+        if chunk_limit is not None and idx >= chunk_limit:
+            break
+        if not isinstance(evidence, dict):
+            continue
+        provenance = evidence.get("provenance") or {}
+        meta = provenance.get("metadata") if isinstance(provenance, dict) else None
+        chunks.append(
+            {
+                "chunk_id": evidence.get("chunk_id"),
+                "source": evidence.get("source"),
+                "content": evidence.get("content"),
+                "score": evidence.get("score"),
+                "metadata": meta if isinstance(meta, dict) else {},
+            }
+        )
+
+    seed_entities: List[str] = []
+    reasoning_block = payload.get("reasoning") or {}
+    traversals = reasoning_block.get("graph_traversals") or []
+    for traversal in traversals:
+        if not isinstance(traversal, dict):
+            continue
+        for token in traversal.get("seed_entities") or []:
+            name = str(token).strip()
+            if not name:
+                continue
+            if name not in seed_entities:
+                seed_entities.append(name)
+            if DEEPSEARCH_TOP_SEED_ENTITIES is not None and len(seed_entities) >= DEEPSEARCH_TOP_SEED_ENTITIES:
+                return {"chunks": chunks, "seed_entities": seed_entities}
+
+    return {"chunks": chunks, "seed_entities": seed_entities}
 
 
 def _build_overview(plan_block: Dict[str, Any], reasoning_block: Dict[str, Any], report_block: Dict[str, Any]) -> Dict[str, Any]:

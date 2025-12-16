@@ -4,7 +4,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote
 
-from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, build_input_schema
+from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, build_input_schema, safe_json_loads
 from core.prompts.deepsearch import EVIDENCE_CROSSCHECK_PROMPT
 
 
@@ -187,7 +187,7 @@ class EvidenceCrosscheckTool(GraphTool):
         ]
         try:
             response = await call_llm_async(self.llm_connector, messages, temperature=0.0)
-            parsed = json.loads(response)
+            parsed = safe_json_loads(response, expected="dict") or {}
             return {
                 "supported": self._coerce_entries(parsed.get("supported")),
                 "unsupported": self._coerce_entries(parsed.get("unsupported")),
