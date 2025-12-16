@@ -20,14 +20,15 @@ class CitationAgent:
         evidences: Sequence[Dict[str, Any]],
         graph_evidence: Mapping[str, Any] | None = None,
         max_chunk_index_items: int | None = None,
+        citation_aliases: Mapping[str, str] | None = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         evidence_lookup = _build_chunk_lookup(evidences)
         known_chunk_ids = set(evidence_lookup)
 
         citation_hints = structured_report.get("citations") or []
-        used_for_lookup, source_lookup = _coerce_citation_hints(citation_hints)
+        used_for_lookup, source_lookup = _coerce_citation_hints(citation_hints, citation_aliases=citation_aliases, known_ids=known_chunk_ids)
 
-        ordered_ids, locations = _extract_inline_citations(structured_report, known_chunk_ids)
+        ordered_ids, locations = _extract_inline_citations(structured_report, known_chunk_ids, citation_aliases=citation_aliases)
         for ev_id in known_chunk_ids:
             if ev_id in used_for_lookup and ev_id not in locations:
                 locations[ev_id] = ["evidence_index"]
@@ -80,15 +81,25 @@ def _build_chunk_lookup(evidences: Sequence[Dict[str, Any]]) -> Dict[str, Dict[s
     return lookup
 
 
-def _coerce_citation_hints(citations: Iterable[Any]) -> Tuple[Dict[str, str], Dict[str, str]]:
+def _coerce_citation_hints(
+    citations: Iterable[Any],
+    *,
+    citation_aliases: Mapping[str, str] | None,
+    known_ids: set[str],
+) -> Tuple[Dict[str, str], Dict[str, str]]:
     used_for: Dict[str, str] = {}
     source: Dict[str, str] = {}
+    alias_map = {(str(key).strip().lower()): str(value) for key, value in (citation_aliases or {}).items() if str(key).strip()}
     for entry in citations:
         if not isinstance(entry, dict):
             continue
         ev_id = str(entry.get("evidence_id") or "").strip()
         if not ev_id:
             continue
+        if ev_id not in known_ids and alias_map:
+            mapped = alias_map.get(ev_id.lower())
+            if mapped and mapped in known_ids:
+                ev_id = mapped
         used = str(entry.get("used_for") or "").strip()
         if used:
             used_for[ev_id] = used
@@ -98,17 +109,35 @@ def _coerce_citation_hints(citations: Iterable[Any]) -> Tuple[Dict[str, str], Di
     return used_for, source
 
 
-def _extract_inline_citations(structured_report: Mapping[str, Any], known_ids: set[str]) -> Tuple[List[str], Dict[str, List[str]]]:
+def _extract_inline_citations(
+    structured_report: Mapping[str, Any],
+    known_ids: set[str],
+    *,
+    citation_aliases: Mapping[str, str] | None,
+) -> Tuple[List[str], Dict[str, List[str]]]:
     ordered: List[str] = []
     seen: set[str] = set()
     locations: Dict[str, List[str]] = {}
+    alias_map = {(str(key).strip().lower()): str(value) for key, value in (citation_aliases or {}).items() if str(key).strip()}
+
+    def _resolve(token: str) -> str | None:
+        candidate = token.strip()
+        if not candidate:
+            return None
+        if candidate in known_ids:
+            return candidate
+        if alias_map:
+            mapped = alias_map.get(candidate.lower())
+            if mapped and mapped in known_ids:
+                return mapped
+        return None
 
     def _scan(text: str, location: str) -> None:
         for raw in CitationAgent._BRACKET_RE.findall(text or ""):
             candidates = re.split(r"[,\s]+", raw.strip())
             for candidate in candidates:
-                token = candidate.strip()
-                if not token or token not in known_ids:
+                token = _resolve(candidate)
+                if not token:
                     continue
                 locations.setdefault(token, []).append(location)
                 if token in seen:

@@ -392,16 +392,8 @@ class ExternalSearchChannel:
         return None
 
     def _is_enabled(self) -> bool:
-        env_flag = self._read_env_bool("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED")
-        if env_flag is not None:
-            return env_flag
-        env_flag = self._read_env_bool("DEEPSEARCH_ALLOW_EXTERNAL_CHANNEL")
-        if env_flag is not None:
-            return env_flag
-        cfg_flag = self.config.get("enabled")
-        if cfg_flag is not None:
-            return bool(cfg_flag)
-        return False
+        """Return True only when the user explicitly enables external search via env."""
+        return bool(self._read_env_bool("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED"))
 
     @staticmethod
     def _read_env_bool(name: str) -> Optional[bool]:
@@ -474,4 +466,3 @@ class ExternalSearchChannel:
             except TypeError:
                 return config.model_dump(exclude_none=True)
         return dict(getattr(config, "__dict__", {}))
-

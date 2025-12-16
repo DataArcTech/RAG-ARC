@@ -59,6 +59,16 @@ class _StubGraphLoop:
         }
 
 
+class _StubGraphLoopWithWorkerError(_StubGraphLoop):
+    async def run(self, question: str, plan_steps: Sequence[Dict[str, Any]], *, graph_context: GraphQueryContext):
+        trace = await super().run(question, plan_steps, graph_context=graph_context)
+        trace["coverage_metrics"] = {
+            "worker_error_count": 1,
+            "worker_errors": [{"agent_id": "worker_01", "error": "worker_timeout"}],
+        }
+        return trace
+
+
 class _StubGapDetector:
     def evaluate(self, reasoning_trace: Dict[str, Any]):
         return {
@@ -191,3 +201,23 @@ async def test_service_creates_external_task_when_gap_detected():
     assert result["report"]["evidences"], "external evidences should feed into report output"
     snapshot = result["state"]
     assert snapshot["external_calls"], "state snapshot should contain external call logs"
+
+
+@pytest.mark.asyncio
+async def test_service_surfaces_worker_failures_into_state_errors():
+    planner = _StubPlanner()
+    graph_loop = _StubGraphLoopWithWorkerError()
+    service = DeepSearchService(
+        planner=planner,
+        graph_loop=graph_loop,
+        gap_detector=_StubGapDetector(),
+        reporter=_StubReporter(),
+        tool_manager=_StubToolManager(),
+        config={"fingerprint": "service-worker-errors"},
+    )
+
+    result = await service.run("Explain HippoRAG impact", owner_id="tenant-123")
+
+    errors = result["state"].get("errors") or []
+    assert errors, "worker errors should be surfaced into state.errors"
+    assert any(entry.get("stage") == "graph_reasoning" for entry in errors if isinstance(entry, dict))

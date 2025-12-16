@@ -29,14 +29,16 @@ class GapDetectionEvaluator:
     ) -> GapDetectionResult:
         evidence_list = list(evidences)
         coverage_score = self._coverage_score(evidence_list)
-        confidence_score = answer_confidence if answer_confidence is not None else 0.5
+        # If the pipeline does not provide an explicit confidence estimate, avoid
+        # triggering external search purely due to a missing value.
+        confidence_score = answer_confidence if answer_confidence is not None else 1.0
         missing = missing_topics or []
         should_trigger = (
             coverage_score < self.settings.coverage_threshold
-            or confidence_score < self.settings.confidence_threshold
+            or (answer_confidence is not None and confidence_score < self.settings.confidence_threshold)
         )
         reason = "coverage"
-        if confidence_score < self.settings.confidence_threshold:
+        if answer_confidence is not None and confidence_score < self.settings.confidence_threshold:
             reason = "confidence"
         if missing:
             reason = "missing_topics"

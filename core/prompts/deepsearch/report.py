@@ -165,3 +165,36 @@ SECTION_WRITE_USER_PROMPT = (
     "- Use only the evidence provided; do not introduce facts not supported by evidence.\n"
     "- Add inline citations for any concrete claim.\n"
 )
+
+PARALLEL_SYNTHESIS_SYSTEM_PROMPT = """You are a report synthesizer.
+
+## Goal
+Given a user question, a report outline, and draft section bodies (already written), produce:
+- a concise report title,
+- a 3-6 sentence summary,
+- limitations,
+- next steps.
+
+## Constraints
+- Write in the same language as the user question.
+- Do not invent facts: only rely on the provided evidence snippets and section drafts.
+- When making a concrete factual claim, keep it supported by evidence and use inline citations ONLY in [chunk_id] format.
+- Do NOT rewrite the full sections; they are already drafted.
+
+## Output Requirements
+Return ONLY valid JSON matching the schema described in the user prompt.
+"""
+
+PARALLEL_SYNTHESIS_USER_PROMPT = (
+    "User question:\n{question}\n\n"
+    "Report outline (JSON):\n{outline_json}\n\n"
+    "Draft section bodies (JSON):\n{sections_json}\n\n"
+    "Evidence snippets (authoritative):\n{evidence_json}\n\n"
+    "Coverage and gap signals:\n{coverage_json}\n\n"
+    "Task:\n"
+    "Return a single JSON object with:\n"
+    "- title: string\n"
+    "- summary: string (3-6 sentences)\n"
+    "- limitations: array of strings\n"
+    "- next_steps: array of strings\n"
+)

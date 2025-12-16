@@ -12,6 +12,7 @@ from encapsulation.data_model.deepsearch import (
     GraphTraversalRecord,
     PlanSpec,
     ReasoningStepRecord,
+    ThinkNote,
     ToolExecutionLog,
     ToolResultPayload,
 )
@@ -576,16 +577,18 @@ class GraphReasoningLoop:
             status="running",
         )
         reasoning_log.append(record)
+        think_evidences = list(evidences[-6:]) if evidences else []
         payload = self._build_tool_payload(
             plan_step_id=think_step_id,
             question=question,
             context=context,
-            evidences=evidences,
+            evidences=think_evidences,
             coverage_hint=coverage_metrics,
             extra={
                 "trigger": "periodic_think",
                 "completed_steps": completed_steps,
                 "total_steps": total_steps,
+                "context_window": {"evidence_items": len(think_evidences)},
             },
         )
         try:
@@ -597,9 +600,25 @@ class GraphReasoningLoop:
                 result = await invocation
             latency_ms = int((time.perf_counter() - start) * 1000)
         except asyncio.TimeoutError:
-            record.status = "failed"
-            record.diagnostics.setdefault("reason", "tool_timeout")
+            record.status = "done"
+            record.output_summary = "Think tool timed out; proceeding with a heuristic checkpoint."
+            record.diagnostics.setdefault("reason", "tool_timeout_fallback")
             record.diagnostics.setdefault("trigger", "periodic_think")
+            note = ThinkNote(
+                plan_step_id=think_step_id,
+                reasoning="Periodic think checkpoint fell back due to tool timeout.",
+                confidence_delta=None,
+                coverage_delta=None,
+                next_actions=["Continue execution; consider rerunning think with a smaller context if needed."],
+                metadata={
+                    "trigger": "periodic_think",
+                    "fallback": True,
+                    "timeout_seconds": self._tool_timeout,
+                    "coverage_metrics": coverage_metrics,
+                    "context_window": {"evidence_items": len(think_evidences)},
+                },
+            )
+            think_notes.append(note.model_dump(exclude_none=True))
             return record
         except Exception as exc:  # pragma: no cover - defensive guardrail
             record.status = "failed"

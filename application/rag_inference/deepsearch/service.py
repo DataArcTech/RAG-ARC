@@ -118,6 +118,7 @@ class DeepSearchService:
             reasoning_context=reasoning_context,
         )
         state.record_reasoning(reasoning_trace)
+        self._surface_worker_failures(state, reasoning_trace)
 
         gap_result = await self._execute_stage(
             "gap_detection",
@@ -283,6 +284,36 @@ class DeepSearchService:
 
     def _gap_stage(self, *, reasoning_trace: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return self._evaluate_gap(reasoning_trace)
+
+    @staticmethod
+    def _surface_worker_failures(state: DeepSearchState, reasoning_trace: Dict[str, Any]) -> None:
+        """Copy non-fatal multi-agent failures into state.errors for observability."""
+
+        if not isinstance(reasoning_trace, dict):
+            return
+        coverage = reasoning_trace.get("coverage_metrics") or {}
+        if not isinstance(coverage, dict):
+            return
+        errors = coverage.get("worker_errors") or []
+        if not isinstance(errors, list) or not errors:
+            return
+        count = coverage.get("worker_error_count")
+        try:
+            count_int = int(count) if count is not None else len(errors)
+        except (TypeError, ValueError):
+            count_int = len(errors)
+        previews: list[str] = []
+        for entry in errors[:3]:
+            if not isinstance(entry, dict):
+                continue
+            agent_id = entry.get("agent_id") or "worker"
+            code = entry.get("error") or "error"
+            previews.append(f"{agent_id}={code}")
+        preview = ", ".join(previews)
+        message = f"{count_int} worker agent(s) failed"
+        if preview:
+            message = f"{message}: {preview}"
+        state.append_error(message, stage="graph_reasoning")
 
     def _report_stage(
         self,

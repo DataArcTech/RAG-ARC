@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote
 from core.prompts.deepsearch import LLM_CHAIN_EXPLORER_SYSTEM_PROMPT
 
-from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async
+from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, safe_json_loads
 
 
 class LLMChainExplorerTool(GraphTool):
@@ -124,16 +124,13 @@ class LLMChainExplorerTool(GraphTool):
 
     @staticmethod
     def _parse_response(response: str) -> List[Dict[str, Any]]:
-        try:
-            data = json.loads(response)
-            if isinstance(data, list):
-                return [item for item in data if isinstance(item, dict)]
-            if isinstance(data, dict) and "steps" in data:
-                steps = data["steps"]
-                if isinstance(steps, list):
-                    return [item for item in steps if isinstance(item, dict)]
-        except json.JSONDecodeError:
-            pass
+        data = safe_json_loads(response)
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+        if isinstance(data, dict) and "steps" in data:
+            steps = data["steps"]
+            if isinstance(steps, list):
+                return [item for item in steps if isinstance(item, dict)]
         return []
 
     def _build_think_note(

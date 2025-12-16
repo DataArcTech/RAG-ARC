@@ -1,4 +1,5 @@
 import asyncio
+import re
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
 
@@ -13,6 +14,96 @@ class _FakeLLM:
         if not self._responses:
             raise RuntimeError("No more fake responses configured")
         return self._responses.pop(0)
+
+
+class _PromptAwareLLM:
+    def chat(self, messages, **kwargs):  # noqa: ANN001
+        user_prompt = ""
+        for message in reversed(messages):
+            if message.get("role") == "user":
+                user_prompt = str(message.get("content") or "")
+                break
+
+        if "Return a JSON array of sections" in user_prompt:
+            return """
+[
+  {"title": "Executive Summary", "purpose": "State the answer succinctly."},
+  {"title": "Evidence-Based Findings", "purpose": "Explain what the evidence supports."},
+  {"title": "Next Steps", "purpose": "Suggest how to improve coverage."}
+]
+""".strip()
+
+        if "Section to write:" in user_prompt:
+            match = re.search(r"- Title:\\s*(.+)", user_prompt)
+            title = match.group(1).strip() if match else "Section"
+            return (
+                "{\n"
+                f'  "title": "{title}",\n'
+                f'  "body_markdown": "Draft for {title}. [ev1]",\n'
+                '  "citations": [{"evidence_id": "ev1", "used_for": "supporting detail"}]\n'
+                "}\n"
+            )
+
+        if "Draft section bodies (JSON):" in user_prompt:
+            return """
+{
+  "title": "Who partnered with OpenAI?",
+  "summary": "Microsoft partnered with OpenAI. [ev1]",
+  "limitations": ["Draft synthesized from limited evidence."],
+  "next_steps": ["Collect additional sources and verify timeline details."]
+}
+""".strip()
+
+        raise RuntimeError(f"Unrecognized prompt for fake LLM: {user_prompt[:120]}")
+
+
+class _AliasCitingLLM:
+    def __init__(self):
+        self.calls = 0
+
+    def chat(self, messages, **kwargs):  # noqa: ANN001
+        self.calls += 1
+        user_prompt = ""
+        for message in reversed(messages):
+            if message.get("role") == "user":
+                user_prompt = str(message.get("content") or "")
+                break
+        if "Return a JSON array of sections" in user_prompt:
+            return """\n[\n  {\"title\": \"Findings\", \"purpose\": \"Summarize evidence.\"}\n]\n""".strip()
+        if "Return a single JSON object with:" in user_prompt and "Evidence snippets" in user_prompt:
+            return """\n{\n  \"title\": \"Report\",\n  \"summary\": \"Claim supported by evidence. [chunk_001]\",\n  \"sections\": [\n    {\"title\": \"Findings\", \"body_markdown\": \"Detail. [chunk_001]\"}\n  ],\n  \"limitations\": [],\n  \"next_steps\": [],\n  \"citations\": []\n}\n""".strip()
+        if "Return the JSON result now." in user_prompt:
+            return """\n{\"is_consistent\": true, \"confidence\": 0.9, \"issues\": []}\n""".strip()
+        raise RuntimeError(f"Unexpected prompt: {user_prompt[:80]}")
+
+
+class _AliasVariantCitingLLM:
+    def __init__(self):
+        self.calls = 0
+
+    def chat(self, messages, **kwargs):  # noqa: ANN001
+        self.calls += 1
+        user_prompt = ""
+        for message in reversed(messages):
+            if message.get("role") == "user":
+                user_prompt = str(message.get("content") or "")
+                break
+        if "Return a JSON array of sections" in user_prompt:
+            return """\n[\n  {\"title\": \"Findings\", \"purpose\": \"Summarize evidence.\"}\n]\n""".strip()
+        if "Return a single JSON object with:" in user_prompt and "Evidence snippets" in user_prompt:
+            return (
+                "{\n"
+                '  "title": "Report",\n'
+                '  "summary": "Claim supported by evidence. [chunk 1] [chunk_1] [chunk_001, chunk 1]",\n'
+                '  "sections": [\n'
+                '    {"title": "Findings", "body_markdown": "Detail. [CHUNK_001]"}\n'
+                "  ],\n"
+                '  "limitations": [],\n'
+                '  "next_steps": [],\n'
+                '  "citations": [{"evidence_id": "chunk 1", "used_for": "support"}]\n'
+                "}\n"
+            )
+        raise RuntimeError(f"Unexpected prompt: {user_prompt[:80]}")
 
 
 def _build_trace(include_final_answer: bool = True):
@@ -242,3 +333,86 @@ def test_reporter_includes_chunk_evidence_preview():
     assert "..." in answer
     assert "[chunk_def456]" in answer
     assert "Short content." in answer
+
+
+def test_reporter_parallel_sections_synthesizes_summary(monkeypatch):
+    monkeypatch.setenv("DEEPSEARCH_PARALLEL_SECTIONS", "true")
+    reporter = DeepSearchReporter(
+        template_store=None,
+        config={"parallel_sections": True, "max_parallel_sections": 1, "enable_consistency_check": False},
+        llm_connector=_PromptAwareLLM(),
+    )
+    trace = _build_trace(include_final_answer=False)
+
+    report = asyncio.run(reporter.compose(trace, external_evidence=[]))
+
+    structured = report["structured_report"]
+    assert structured["summary"], "Parallel writer should synthesize a non-empty summary"
+    assert structured["limitations"], "Parallel writer should synthesize limitations"
+    assert structured["next_steps"], "Parallel writer should synthesize next steps"
+
+
+def test_reporter_rewrites_alias_citations_to_original_ids(monkeypatch):
+    monkeypatch.setenv("DEEPSEARCH_CITATION_ALIASES", "true")
+    reporter = DeepSearchReporter(
+        template_store=None,
+        config={"enable_consistency_check": True, "enable_citation_agent": False},
+        llm_connector=_AliasCitingLLM(),
+    )
+    trace = _build_trace(include_final_answer=False)
+
+    report = asyncio.run(reporter.compose(trace, external_evidence=[]))
+
+    answer = report["answer"]
+    assert "[chunk_001]" not in answer, "Alias citations should be rewritten before returning markdown"
+    assert "[ev1]" in answer, "Alias should be rewritten back to original chunk IDs"
+
+
+def test_reporter_rewrites_alias_citation_variants(monkeypatch):
+    monkeypatch.setenv("DEEPSEARCH_CITATION_ALIASES", "true")
+    reporter = DeepSearchReporter(
+        template_store=None,
+        config={"enable_consistency_check": False},
+        llm_connector=_AliasVariantCitingLLM(),
+    )
+    trace = _build_trace(include_final_answer=False)
+
+    report = asyncio.run(reporter.compose(trace, external_evidence=[]))
+
+    answer = report["answer"]
+    assert "chunk_001" not in answer.lower()
+    assert "chunk 1" not in answer.lower()
+    assert "[ev1]" in answer
+
+
+def test_reporter_includes_external_evidence_even_when_internal_is_full():
+    reporter = DeepSearchReporter(
+        template_store=None,
+        config={"enable_llm_report": False, "enable_consistency_check": False},
+        llm_connector=None,
+    )
+    trace = {
+        "question": "Q",
+        "final_answer": "A",
+        "plan_steps": [],
+        "reasoning_steps": [],
+        "graph_traversals": [],
+        "adapter_metadata": {"adapter_name": "hipporag"},
+        "coverage_metrics": {},
+        "graph_context": {"adapter_name": "hipporag", "question": "Q", "metadata": {}},
+        "evidences": [
+            {"chunk_id": f"ev{i:02d}", "source": "hipporag", "content": f"internal {i}"}
+            for i in range(12)
+        ],
+    }
+    external = [
+        {"chunk_id": "tavily-1", "source": "web.tavily", "content": "external 1"},
+        {"chunk_id": "tavily-2", "source": "web.tavily", "content": "external 2"},
+        {"chunk_id": "tavily-3", "source": "web.tavily", "content": "external 3"},
+    ]
+
+    report = asyncio.run(reporter.compose(trace, external_evidence=external))
+
+    assert len(report["evidences"]) == 10
+    sources = {ev.get("source") for ev in report["evidences"]}
+    assert "web.tavily" in sources

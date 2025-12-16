@@ -83,36 +83,24 @@ def test_trim_payload_attaches_evidence(monkeypatch):
 
 
 def test_trim_payload_skips_evidence_when_disabled(monkeypatch):
-    def _fake_builder(payload, chunk_limit=None):
-        return {
-            "chunks": [],
-            "seed_entities": [],
-            "graph": {},
-            "graph_stats": {},
-            "graph_chain": ["chain-item"],
-        }
+    def _unexpected_call(*args, **kwargs):
+        raise AssertionError("build_deepsearch_evidence should not run when include_evidence=false")
 
-    monkeypatch.setattr("core.presentation.deepsearch_payload.build_deepsearch_evidence", _fake_builder)
+    monkeypatch.setattr("core.presentation.deepsearch_payload.build_deepsearch_evidence", _unexpected_call)
 
     payload = trim_deepsearch_payload(_sample_result(), include_evidence=False, chunk_limit=3)
 
-    assert payload["evidence"]["chunks"] == []
+    assert len(payload["evidence"]["chunks"]) == 3
     assert payload["evidence"]["seed_entities"] == []
-    assert payload["graph_chain"] == ["chain-item"]
+    assert payload["graph_chain"] == []
     assert len(payload["report"]["evidences"]) == 3
 
 
 def test_trim_payload_includes_reasoning_summaries(monkeypatch):
-    def _fake_builder(payload, chunk_limit=None):
-        return {
-            "chunks": [],
-            "seed_entities": [],
-            "graph": {},
-            "graph_stats": {},
-            "graph_chain": [],
-        }
+    def _unexpected_call(*args, **kwargs):
+        raise AssertionError("build_deepsearch_evidence should not run when include_evidence=false")
 
-    monkeypatch.setattr("core.presentation.deepsearch_payload.build_deepsearch_evidence", _fake_builder)
+    monkeypatch.setattr("core.presentation.deepsearch_payload.build_deepsearch_evidence", _unexpected_call)
 
     payload = trim_deepsearch_payload(_sample_result(), include_evidence=False, chunk_limit=1)
 
@@ -124,10 +112,10 @@ def test_trim_payload_includes_reasoning_summaries(monkeypatch):
 
 
 def test_trim_payload_preserves_structured_report(monkeypatch):
-    def _fake_builder(payload, chunk_limit=None):
-        return {"chunks": [], "seed_entities": [], "graph": {}, "graph_stats": {}, "graph_chain": []}
+    def _unexpected_call(*args, **kwargs):
+        raise AssertionError("build_deepsearch_evidence should not run when include_evidence=false")
 
-    monkeypatch.setattr("core.presentation.deepsearch_payload.build_deepsearch_evidence", _fake_builder)
+    monkeypatch.setattr("core.presentation.deepsearch_payload.build_deepsearch_evidence", _unexpected_call)
 
     payload = trim_deepsearch_payload(_sample_result(), include_evidence=False, chunk_limit=2)
 

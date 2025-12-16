@@ -5,7 +5,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote
 
-from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema, call_llm_async
+from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema, call_llm_async, safe_json_loads
 from ..fast.pattern_probe import PatternProbeTool
 
 
@@ -180,7 +180,7 @@ class BeamSearchTool(GraphTool):
             messages,
             temperature=self.temperature,
         )
-        data = json.loads(response)
+        data = safe_json_loads(response, expected="list") or []
         scores: Dict[str, float] = {}
         if isinstance(data, list):
             for item in data:
