@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Optional, List
 from fastapi import APIRouter, Depends, WebSocket, status, HTTPException
 from pydantic import BaseModel
 from api.routers.auth import get_current_user
@@ -17,6 +17,18 @@ from framework.thread_pool import get_thread_pool
 
 class MessageContent(BaseModel):
     content: str
+
+
+class ChatMessageResponse(BaseModel):
+    """Response model for chat messages"""
+    id: uuid.UUID
+    session_id: uuid.UUID
+    content: dict
+    source_file_ids: Optional[List[uuid.UUID]] = None
+    subgraph_data: Optional[dict] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
 router = APIRouter(prefix="/session", tags=["session"])
 
 registry = Register()
@@ -37,10 +49,12 @@ async def list_session_messages(
     session_id: uuid.UUID,
 ):
     """List session messages asynchronously using thread pool."""
-    return await get_thread_pool().run_blocking(
+    messages = await get_thread_pool().run_blocking(
         get_message_handler().list_messages_by_session,
         session_id
     )
+    # Convert SQLAlchemy models to Pydantic models to ensure proper serialization
+    return [ChatMessageResponse.model_validate(msg) for msg in messages]
 
 @router.post("")
 async def create_session(
@@ -88,7 +102,7 @@ async def create_message(
     return messages
 
 
-@router.get("/{session_id}/messages")
+@router.get("/{session_id}/messages", response_model=List[ChatMessageResponse])
 async def list_messages(
     session_id: uuid.UUID,
     current_user: Annotated[User | None, Depends(get_current_user)],

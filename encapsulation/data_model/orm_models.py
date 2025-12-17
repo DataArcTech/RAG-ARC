@@ -236,6 +236,9 @@ class ChatMessage(Base):
     # Source tracking for RAG
     source_file_ids: Mapped[Optional[list]] = mapped_column(JSON)
 
+    # Subgraph data
+    subgraph_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
     # Timestamp
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
 

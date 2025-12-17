@@ -305,7 +305,15 @@ async def websocket_endpoint(
                 return_subgraph=return_subgraph
             )
             logger.info(f"Assistant response generated: {assistant_response} (session_id={session_id})")
-            assistant_message = ChatMessage(session_id=session_id, content={"role": "assistant", "content": assistant_response}, created_at=datetime.now())
+            
+            assistant_message = ChatMessage(
+                session_id=session_id, 
+                content={"role": "assistant", "content": assistant_response},
+                source_file_ids=[chunk.id for chunk in chunks] if chunks else None,
+                subgraph_data=subgraph_data if subgraph_data else None,
+                created_at=datetime.now()
+            )
+
             # Use thread pool to avoid blocking
             assistant_message = await get_thread_pool().run_blocking(
                 get_message_handler().create_message,
