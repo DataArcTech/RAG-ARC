@@ -24,7 +24,10 @@ from application.account.user import Account
 
 router = APIRouter(prefix="/user", tags=["user"])
 registrator = Register()
-account_handler: Account = registrator.get_object("account")
+
+def get_account_handler() -> Account:
+    """Lazy loading function to get account handler after initialization."""
+    return registrator.get_object("account")
 
 
 @router.get("/me")

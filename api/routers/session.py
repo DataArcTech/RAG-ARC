@@ -20,16 +20,25 @@ class MessageContent(BaseModel):
 router = APIRouter(prefix="/session", tags=["session"])
 
 registry = Register()
-session_handler: ChatSessionManager = registry.get_object("chat_session")
-message_handler: ChatMessageManager = registry.get_object("chat_message")
-account_handler: Account = registry.get_object("account")
+
+def get_session_handler() -> ChatSessionManager:
+    """Lazy loading function to get session handler after initialization."""
+    return registry.get_object("chat_session")
+
+def get_message_handler() -> ChatMessageManager:
+    """Lazy loading function to get message handler after initialization."""
+    return registry.get_object("chat_message")
+
+def get_account_handler() -> Account:
+    """Lazy loading function to get account handler after initialization."""
+    return registry.get_object("account")
 
 async def list_session_messages(
     session_id: uuid.UUID,
 ):
     """List session messages asynchronously using thread pool."""
     return await get_thread_pool().run_blocking(
-        message_handler.list_messages_by_session,
+        get_message_handler().list_messages_by_session,
         session_id
     )
 
@@ -40,7 +49,7 @@ async def create_session(
     """Create a new chat session asynchronously using thread pool."""
     chat_name = f"Chat {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     return await get_thread_pool().run_blocking(
-        session_handler.create_session,
+        get_session_handler().create_session,
         current_user.id,
         chat_name
     )
@@ -52,7 +61,7 @@ async def list_sessions(
 ):
     """List user sessions asynchronously using thread pool."""
     return await get_thread_pool().run_blocking(
-        session_handler.list_sessions_by_user,
+        get_session_handler().list_sessions_by_user,
         current_user.id
     )
 
@@ -66,14 +75,14 @@ async def create_message(
     """Create a message asynchronously using thread pool."""
     # Validate user has access to the session
     session = await get_thread_pool().run_blocking(
-        session_handler.get_session,
+        get_session_handler().get_session,
         session_id
     )
     if session is None or not validate_user_session(session, current_user):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
     
     messages = await get_thread_pool().run_blocking(
-        message_handler.create_message,
+        get_message_handler().create_message,
         ChatMessage(session_id=session_id, content={"role": "user", "content": message_content.content}, created_at=datetime.now())
     )
     return messages
@@ -86,7 +95,7 @@ async def list_messages(
 ):
     """List messages asynchronously using thread pool."""
     session = await get_thread_pool().run_blocking(
-        session_handler.get_session,
+        get_session_handler().get_session,
         session_id
     )
     if session is None or not validate_user_session(session, current_user):

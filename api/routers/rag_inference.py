@@ -34,10 +34,22 @@ logger.setLevel(logging.INFO)
 router = APIRouter(prefix="/rag_inference", tags=["rag_inference"])
 
 registrator = Register()
-session_handler: ChatSessionManager = registrator.get_object("chat_session")
-message_handler: ChatMessageManager = registrator.get_object("chat_message")
-rag_inference_handler: RAGInference = registrator.get_object("rag_inference")
-account_handler: Account = registrator.get_object("account")
+
+def get_session_handler() -> ChatSessionManager:
+    """Lazy loading function to get session handler after initialization."""
+    return registrator.get_object("chat_session")
+
+def get_message_handler() -> ChatMessageManager:
+    """Lazy loading function to get message handler after initialization."""
+    return registrator.get_object("chat_message")
+
+def get_rag_inference_handler() -> RAGInference:
+    """Lazy loading function to get rag inference handler after initialization."""
+    return registrator.get_object("rag_inference")
+
+def get_account_handler() -> Account:
+    """Lazy loading function to get account handler after initialization."""
+    return registrator.get_object("account")
 
 manager = ConnectionManager()
 
@@ -116,7 +128,7 @@ async def chat(
     chunks: list[Chunk] = []
     subgraph_data: GraphData = None
     # Use async version to avoid blocking the event loop
-    response, chunks, subgraph_data = await rag_inference_handler.chat_async(
+    response, chunks, subgraph_data = await get_rag_inference_handler().chat_async(
         request.query,
         owner_id=effective_owner_id,
         return_subgraph=request.return_subgraph
@@ -163,7 +175,7 @@ async def graph_overview(
 
     # Use thread pool to avoid blocking the event loop
     overview = await get_thread_pool().run_blocking(
-        rag_inference_handler.export_graph_overview,
+        get_rag_inference_handler().export_graph_overview,
         owner_id=owner_scope,
         max_nodes=max_nodes,
         max_edges=max_edges,
@@ -190,7 +202,7 @@ async def websocket_endpoint(
 
     # Validate session ownership at the start (use thread pool to avoid blocking)
     session = await get_thread_pool().run_blocking(
-        session_handler.get_session,
+        get_session_handler().get_session,
         session_id
     )
 
@@ -253,13 +265,13 @@ async def websocket_endpoint(
 
             # Handle user message creation (use thread pool to avoid blocking)
             user_message = await get_thread_pool().run_blocking(
-                message_handler.create_message,
+                get_message_handler().create_message,
                 user_message
             )
 
             # Fetch complete conversation history for multi-round chat (use thread pool to avoid blocking)
             history_messages = await get_thread_pool().run_blocking(
-                message_handler.list_messages_by_session,
+                get_message_handler().list_messages_by_session,
                 session_id
             )
             logger.info(f"Conversation history fetched ({len(history_messages)} messages) for session {session_id}")
@@ -287,7 +299,7 @@ async def websocket_endpoint(
                     return
 
             # Use async version to avoid blocking the event loop
-            assistant_response, chunks, subgraph_data = await rag_inference_handler.chat_async(
+            assistant_response, chunks, subgraph_data = await get_rag_inference_handler().chat_async(
                 history_text,
                 effective_owner,
                 return_subgraph=return_subgraph
@@ -296,7 +308,7 @@ async def websocket_endpoint(
             assistant_message = ChatMessage(session_id=session_id, content={"role": "assistant", "content": assistant_response}, created_at=datetime.now())
             # Use thread pool to avoid blocking
             assistant_message = await get_thread_pool().run_blocking(
-                message_handler.create_message,
+                get_message_handler().create_message,
                 assistant_message
             )
             logger.info(f"Assistant message created: {assistant_message.id}")

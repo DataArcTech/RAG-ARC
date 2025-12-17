@@ -26,8 +26,14 @@ from application.account.user import Account
 router = APIRouter(prefix="/knowledge", tags=["files"])
 
 registrator = Register()
-account_handler: Account = registrator.get_object("account")
-knowledge_handler: Knowledge = registrator.get_object("knowledge")
+
+def get_account_handler() -> Account:
+    """Lazy loading function to get account handler after initialization."""
+    return registrator.get_object("account")
+
+def get_knowledge_handler() -> Knowledge:
+    """Lazy loading function to get knowledge handler after initialization."""
+    return registrator.get_object("knowledge")
 
 
 # Response models
@@ -77,7 +83,7 @@ async def upload_file(
     try:
         print(f"Uploading file: {file.filename} for owner_id: {user.id}")
         # Convert string UUID to UUID object
-        doc_id = await knowledge_handler.upload_file(file, user.id)
+        doc_id = await get_knowledge_handler().upload_file(file, user.id)
         return doc_id
     except ValueError as e:
         raise HTTPException(
@@ -99,7 +105,7 @@ async def download_file(file_id: str, user: Annotated[User | None, Depends(get_c
             detail="Authentication required"
         )
     try:
-        return await knowledge_handler.get_file(file_id, user.id)
+        return await get_knowledge_handler().get_file(file_id, user.id)
     except HTTPException:
         # re-raise 404s from underlying module
         raise
@@ -118,7 +124,7 @@ async def delete_file(file_id: str, user: Annotated[User | None, Depends(get_cur
             detail="Authentication required"
         )
     try:
-        result = await knowledge_handler.delete_file(file_id, user.id)
+        result = await get_knowledge_handler().delete_file(file_id, user.id)
         return result
     except HTTPException:
         # surface 404s and 403s if thrown by storage layer
@@ -171,14 +177,14 @@ async def list_files(
         )
     try:
         # Get files for current page (async, non-blocking)
-        files = await knowledge_handler.list_user_files(
+        files = await get_knowledge_handler().list_user_files(
             user_id=user.id,
             limit=limit,
             offset=offset
         )
         
         # Get total count of files for the user (async, non-blocking)
-        total_count = await knowledge_handler.count_user_files(user.id)
+        total_count = await get_knowledge_handler().count_user_files(user.id)
         
         # Convert FileMetadata objects to FileInfo response models
         file_infos = [
@@ -284,7 +290,7 @@ async def trigger_indexing(
         )
 
     try:
-        result = await knowledge_handler.trigger_indexing(request.file_ids, user.id)
+        result = await get_knowledge_handler().trigger_indexing(request.file_ids, user.id)
         
         return IndexTriggerResponse(
             message=result
@@ -359,7 +365,7 @@ async def export_knowledge_graph(
         
         # Use knowledge_handler's _run_blocking method if available, otherwise use global thread pool
         if hasattr(knowledge_handler, '_run_blocking'):
-            graph_data = await knowledge_handler._run_blocking(
+            graph_data = await get_knowledge_handler()._run_blocking(
                 GraphExporter.export_full_graph,
                 graph_store=graph_store,
                 max_nodes=request.max_nodes,
@@ -509,7 +515,7 @@ async def export_file_mindmap(
         )
 
     try:
-        file_mindmaps = await knowledge_handler.get_file_chunk_mindmaps(request.file_id, user.id)
+        file_mindmaps = await get_knowledge_handler().get_file_chunk_mindmaps(request.file_id, user.id)
     except HTTPException:
         raise
     except Exception as e:
@@ -600,7 +606,7 @@ async def grant_file_permission(
             detail="Authentication required"
         )
 
-    if knowledge_handler.check_file_access(file_id, user.id) != PermissionType.EDIT:
+    if get_knowledge_handler().check_file_access(file_id, user.id) != PermissionType.EDIT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You are not allowed to grant permissions for this file"
@@ -643,7 +649,7 @@ async def grant_file_permission(
     # For ALL receiver_type, both user_id and department_id should be None
 
     try:
-        permission_id = knowledge_handler.grant_file_permission(
+        permission_id = get_knowledge_handler().grant_file_permission(
             file_id=file_id,
             receiver_type=receiver_type,
             permission_type=permission_type,
@@ -704,7 +710,7 @@ async def revoke_file_permission(
             detail=f"Invalid permission_id format: {permission_id}"
         )
 
-    file_id = knowledge_handler.get_file_id_by_permission_id(perm_id)
+    file_id = get_knowledge_handler().get_file_id_by_permission_id(perm_id)
     if not file_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -712,12 +718,12 @@ async def revoke_file_permission(
         )
 
     # Only users with EDIT permission can revoke permissions
-    permission_type = knowledge_handler.check_file_access(file_id, user.id)
+    permission_type = get_knowledge_handler().check_file_access(file_id, user.id)
     if permission_type != PermissionType.EDIT:
         raise HTTPException(status_code=403, detail="Only users with EDIT permission can revoke permissions")
 
     try:
-        knowledge_handler.revoke_file_permission(perm_id, user.id)
+        get_knowledge_handler().revoke_file_permission(perm_id, user.id)
         return {"message": "Permission revoked successfully"}
     except HTTPException:
         raise
@@ -755,14 +761,14 @@ async def list_file_permissions(
         )
 
     # Check if user has VIEW permission to list permissions
-    permission_type = knowledge_handler.check_file_access(file_id, user.id)
+    permission_type = get_knowledge_handler().check_file_access(file_id, user.id)
     if permission_type is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You are not allowed to list permissions for this file"
         )
     try:
-        permissions = knowledge_handler.list_file_permissions(file_id, user.id)
+        permissions = get_knowledge_handler().list_file_permissions(file_id, user.id)
         
         permission_infos = []
         for perm in permissions:
@@ -848,7 +854,7 @@ async def check_file_access(
         )
 
     try:
-        permission_type = knowledge_handler.check_file_access(file_id, user.id)
+        permission_type = get_knowledge_handler().check_file_access(file_id, user.id)
         
         return CheckAccessResponse(
             has_access=permission_type is not None,
@@ -900,7 +906,7 @@ async def update_file_permission(
         )
 
     # Get file_id first to check ownership
-    file_id = knowledge_handler.get_file_id_by_permission_id(perm_id)
+    file_id = get_knowledge_handler().get_file_id_by_permission_id(perm_id)
     if not file_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -908,7 +914,7 @@ async def update_file_permission(
         )
 
     # Only file editor can update permissions
-    if knowledge_handler.check_file_access(file_id, user.id) != PermissionType.EDIT:
+    if get_knowledge_handler().check_file_access(file_id, user.id) != PermissionType.EDIT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You are not allowed to update permissions for this file"
@@ -916,7 +922,7 @@ async def update_file_permission(
 
     # Pydantic automatically validates and converts enum types
     try:
-        result = knowledge_handler.update_file_permission(
+        result = get_knowledge_handler().update_file_permission(
             permission_id=perm_id,
             permission_type=permission_type,
             user_id=user.id
