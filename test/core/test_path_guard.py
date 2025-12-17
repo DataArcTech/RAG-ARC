@@ -24,3 +24,18 @@ def test_ensure_writable_dir_falls_back_when_preferred_blocked(tmp_path):
 
     # cleanup permissions so tmp_path can be removed on Windows/Linux
     preferred.chmod(stat.S_IRWXU)
+
+
+def test_ensure_writable_dir_falls_back_when_preferred_contains_non_writable_child(tmp_path):
+    preferred = tmp_path / "preferred"
+    bad_child = preferred / "files" / "04"
+    bad_child.mkdir(parents=True)
+    bad_child.chmod(stat.S_IREAD | stat.S_IEXEC)
+
+    fallback = tmp_path / "fallback_dir"
+    resolved = ensure_writable_dir(str(preferred), str(fallback))
+
+    assert resolved == os.path.abspath(fallback)
+    assert os.path.isdir(resolved)
+
+    bad_child.chmod(stat.S_IRWXU)
