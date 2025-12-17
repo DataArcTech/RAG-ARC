@@ -108,13 +108,17 @@ def initialize():
     if not knowledge_ready:
         logger.error("Knowledge module failed to initialize; CLI ingestion operations will be unavailable.")
 
-    deepsearch_config_path = _resolve_config_path(
-        "DEEPSEARCH_SERVICE_CONFIG_PATH",
-        "config/json_configs/deepsearch_service.json",
-    )
-    deepsearch_ready = _register_app("deepsearch_service", deepsearch_config_path, DeepSearchServiceConfig)
-    if not deepsearch_ready:
-        logger.warning("DeepSearch service failed to initialize; HTTP/CLI deepsearch endpoints will be unavailable.")
+    enable_deepsearch = os.getenv("ENABLE_DEEPSEARCH", "0").lower() in {"1", "true", "yes"}
+    if enable_deepsearch:
+        deepsearch_config_path = _resolve_config_path(
+            "DEEPSEARCH_SERVICE_CONFIG_PATH",
+            "config/json_configs/deepsearch_service.json",
+        )
+        deepsearch_ready = _register_app("deepsearch_service", deepsearch_config_path, DeepSearchServiceConfig)
+        if not deepsearch_ready:
+            logger.warning("DeepSearch service failed to initialize; HTTP/CLI deepsearch endpoints will be unavailable.")
+    else:
+        logger.info("DeepSearch disabled (ENABLE_DEEPSEARCH=0); skipping deepsearch_service registration.")
 
     _register_app(
         "account",

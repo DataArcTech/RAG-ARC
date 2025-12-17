@@ -21,6 +21,7 @@ from api.routers import deepsearch as deepsearch_router
 from api.routers import session as session_router
 from api.routers import auth as auth_router
 from api.routers import user as user_router
+from api.routers import chatbot as chatbot_router
 
 
 # Configure logging
@@ -86,7 +87,8 @@ async def health_check():
 app.mount("/mcp", mcp.mcp_app)
 app.include_router(knowledge_router.router)
 app.include_router(rag_inference.router)
-app.include_router(deepsearch_router.router)
+# app.include_router(deepsearch_router.router)  # DeepSearch disabled for Chatbot MVP
 app.include_router(session_router.router)
 app.include_router(auth_router.router)
 app.include_router(user_router.router)
+app.include_router(chatbot_router.router)

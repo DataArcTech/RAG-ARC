@@ -42,14 +42,14 @@ class RAGInference(AbstractModule):
         logger.info("LLM built successfully")
         self._knowledge_module: Optional["Knowledge"] = None
 
-    def chat(
+    def prepare_chat(
         self,
         query: str,
         owner_id: uuid.UUID,
         return_subgraph: bool = False,
-    ) -> tuple[str, list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    ) -> tuple[str, list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]], list[Dict[str, str]]]:
         """
-        Chat with RAG system
+        Prepare chat context (retrieve/rerank + build LLM messages).
 
         Args:
             query: User query
@@ -57,7 +57,7 @@ class RAGInference(AbstractModule):
         return_subgraph: If True, include serialized subgraph data in the response
 
         Returns:
-            Tuple of (LLM response, chunks, subgraph_data, subgraph_info)
+            Tuple of (rewritten_query, chunks, subgraph_data, subgraph_info, messages)
             - subgraph_data is None if return_subgraph=False or retriever doesn't support it
             - subgraph_info mirrors the retriever diagnostics used for graph export when available
         """
@@ -136,11 +136,50 @@ class RAGInference(AbstractModule):
         messages.append({"role": "user", "content": f"Based on the above chunks, please answer question: {rewritten_query}"})
         logger.info(f"Invoked chat with query: {query} (owner_id={owner_id})")
         logger.info(f"Query rewritten to: {rewritten_query}")
-        logger.info(f"Retrieved chunks: {[getattr(chunk, 'content', str(chunk)) for chunk in chunks]}")
-        logger.info(f"Reranked chunks: {[getattr(chunk, 'content', str(chunk)) for chunk in chunks]}")
-        logger.info(f"Prepared messages for LLM: {messages}")
+        logger.debug("Retrieved chunks: %s", [getattr(chunk, "content", str(chunk)) for chunk in chunks])
+        logger.debug("Reranked chunks: %s", [getattr(chunk, "content", str(chunk)) for chunk in chunks])
+        logger.debug("Prepared messages for LLM: %s", messages)
+        return (rewritten_query, chunks, subgraph_data, subgraph_info, messages)
+
+    def chat(
+        self,
+        query: str,
+        owner_id: uuid.UUID,
+        return_subgraph: bool = False,
+    ) -> tuple[str, list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """
+        Chat with RAG system.
+
+        Returns:
+            Tuple of (LLM response, chunks, subgraph_data, subgraph_info)
+        """
+        _, chunks, subgraph_data, subgraph_info, messages = self.prepare_chat(
+            query,
+            owner_id=owner_id,
+            return_subgraph=return_subgraph,
+        )
         response = self.llm.chat(messages)
         return (response, chunks, subgraph_data, subgraph_info)
+
+    def stream_chat(
+        self,
+        query: str,
+        owner_id: uuid.UUID,
+        return_subgraph: bool = False,
+    ) -> tuple[Any, list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """
+        Streaming chat with RAG system.
+
+        Returns:
+            Tuple of (stream_iterator, chunks, subgraph_data, subgraph_info)
+        """
+        _, chunks, subgraph_data, subgraph_info, messages = self.prepare_chat(
+            query,
+            owner_id=owner_id,
+            return_subgraph=return_subgraph,
+        )
+        stream = self.llm.stream_chat(messages)
+        return (stream, chunks, subgraph_data, subgraph_info)
 
     def _locate_graph_store(self):
         """Locate the configured graph store if one exists."""

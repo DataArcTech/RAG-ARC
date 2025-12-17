@@ -137,11 +137,17 @@ class TantivyBM25Retriever(BaseRetriever):
         if not filtered_tokens:
             return Query.all_query()
 
+        # Match the BM25 index analyzer: content_tokens is indexed with a lowercasing analyzer.
+        normalized_tokens = [t.lower() for t in filtered_tokens]
+
         if use_phrase_query and len(filtered_tokens) > 1:
             # Use phrase query (order-sensitive, more precise)
             try:
                 # Convert to the exact type required by phrase_query
-                phrase_tokens: List[Union[str, Tuple[int, str]]] = cast(List[Union[str, Tuple[int, str]]], filtered_tokens)
+                phrase_tokens: List[Union[str, Tuple[int, str]]] = cast(
+                    List[Union[str, Tuple[int, str]]],
+                    normalized_tokens,
+                )
                 phrase_q = Query.phrase_query(index_instance.index.schema, "content_tokens", phrase_tokens)
                 return phrase_q
             except Exception as e:
@@ -153,7 +159,7 @@ class TantivyBM25Retriever(BaseRetriever):
         # Use consistent term query approach for both single and multi-token queries
         # This ensures consistent behavior regardless of token count
         term_queries = []
-        for token in filtered_tokens:
+        for token in normalized_tokens:
             try:
                 term_q = Query.term_query(index_instance.index.schema, "content_tokens", token)
                 term_queries.append((Occur.Should, term_q))
