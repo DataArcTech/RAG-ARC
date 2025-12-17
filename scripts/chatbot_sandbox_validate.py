@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import sys
@@ -28,6 +29,8 @@ def _set_env_for_chatbot_validation() -> None:
     os.environ.setdefault("CHATBOT_MAX_CONCURRENCY", "16")
     os.environ.setdefault("CHATBOT_MAX_CONTEXT_TOKENS", "512")
     os.environ.setdefault("CHATBOT_CONTEXT_TURNS", "5")
+    os.environ.setdefault("CHATBOT_MAX_CONTEXT_FRACTION", "0.9")
+    os.environ.setdefault("CHATBOT_TOP_SOURCES", "5")
 
     # Make deepsearch registration fail fast (not part of this MVP validation).
     os.environ.setdefault("DEEPSEARCH_WEB_PROVIDER", "")
@@ -90,6 +93,44 @@ def _ingest_doc_for_owner(owner_id: uuid.UUID, filename: str, content: str) -> s
     return file_id
 
 
+async def _collect_sse_events(resp: httpx.Response) -> list[dict]:
+    events: list[dict] = []
+    async for line in resp.aiter_lines():
+        if not line.startswith("data: "):
+            continue
+        payload = line[len("data: ") :].strip()
+        if payload == "[DONE]":
+            break
+        events.append(json.loads(payload))
+    return events
+
+
+async def _post_sse(
+    client: httpx.AsyncClient,
+    *,
+    owner_id: uuid.UUID,
+    conversation_id: str,
+    content: str,
+    messages: list[dict],
+) -> list[dict]:
+    async with client.stream(
+        "POST",
+        "/api/messages",
+        headers={"Accept": "text/event-stream", "X-Owner-Id": str(owner_id)},
+        json={"id": conversation_id, "content": content, "messages": messages, "stream": True},
+    ) as resp:
+        if resp.status_code != 200:
+            raise RuntimeError(f"sse request failed: {resp.status_code}")
+        return await _collect_sse_events(resp)
+
+
+def _events_to_answer_and_sources(events: list[dict]) -> tuple[str, list[dict]]:
+    answer = "".join(e.get("content", "") for e in events if e.get("type") == "chunk")
+    sources_events = [e for e in events if e.get("type") == "sources"]
+    sources = (sources_events[0].get("sources") or []) if sources_events else []
+    return answer, sources
+
+
 async def _async_concurrency_checks(app) -> None:
     transport1 = httpx.ASGITransport(app=app)
     transport2 = httpx.ASGITransport(app=app)
@@ -122,63 +163,30 @@ async def _async_concurrency_checks(app) -> None:
         )
 
         started = time.monotonic()
-        r1, r2 = await asyncio.gather(
-            c1.post(
-                "/chatbot/chat",
-                headers={"X-Owner-Id": str(u1)},
-                json={
-                    "conversation_id": str(uuid.uuid4()),
-                    "message": {"role": "user", "content": "alpha"},
-                    "memory": {"version": 0, "summary": "", "recent_messages": []},
-                    "options": {"include_evidence": False, "top_k": 1, "return_subgraph": False, "max_context_fraction": 0.9},
-                },
-            ),
-            c2.post(
-                "/chatbot/chat",
-                headers={"X-Owner-Id": str(u2)},
-                json={
-                    "conversation_id": str(uuid.uuid4()),
-                    "message": {"role": "user", "content": "beta"},
-                    "memory": {"version": 0, "summary": "", "recent_messages": []},
-                    "options": {"include_evidence": False, "top_k": 1, "return_subgraph": False, "max_context_fraction": 0.9},
-                },
-            ),
+        e1, e2 = await asyncio.gather(
+            _post_sse(c1, owner_id=u1, conversation_id=str(uuid.uuid4()), content="alpha", messages=[]),
+            _post_sse(c2, owner_id=u2, conversation_id=str(uuid.uuid4()), content="beta", messages=[]),
         )
         elapsed = time.monotonic() - started
-        if r1.status_code != 200 or r2.status_code != 200:
-            raise RuntimeError(f"concurrency chat failed: {r1.status_code} {r2.status_code}")
+        if not any(e.get("type") == "done" and e.get("status") == "success" for e in e1):
+            raise RuntimeError("concurrency chat failed: u1")
+        if not any(e.get("type") == "done" and e.get("status") == "success" for e in e2):
+            raise RuntimeError("concurrency chat failed: u2")
         if elapsed > 0.7:
             raise RuntimeError(f"expected concurrency, took {elapsed:.2f}s")
 
-        os.environ["CHATBOT_MAX_CONTEXT_TOKENS"] = "64"
         huge = "x" * 2000
-        big_memory = {"version": 0, "summary": "", "recent_messages": [{"role": "user", "content": huge} for _ in range(200)]}
         started = time.monotonic()
-        r_slow, r_fast = await asyncio.gather(
-            c1.post(
-                "/chatbot/chat",
-                headers={"X-Owner-Id": str(u1)},
-                json={
-                    "conversation_id": str(uuid.uuid4()),
-                    "message": {"role": "user", "content": "alpha"},
-                    "memory": big_memory,
-                    "options": {"include_evidence": False, "top_k": 1, "return_subgraph": False, "max_context_fraction": 0.9},
-                },
-            ),
-            c2.post(
-                "/chatbot/chat",
-                headers={"X-Owner-Id": str(u2)},
-                json={
-                    "conversation_id": str(uuid.uuid4()),
-                    "message": {"role": "user", "content": "beta"},
-                    "memory": {"version": 0, "summary": "", "recent_messages": []},
-                    "options": {"include_evidence": False, "top_k": 1, "return_subgraph": False, "max_context_fraction": 0.9},
-                },
-            ),
+        too_long_messages = [{"role": "user", "content": huge} for _ in range(10)]
+        e_slow, e_fast = await asyncio.gather(
+            _post_sse(c1, owner_id=u1, conversation_id=str(uuid.uuid4()), content="alpha", messages=too_long_messages),
+            _post_sse(c2, owner_id=u2, conversation_id=str(uuid.uuid4()), content="beta", messages=[]),
         )
         elapsed = time.monotonic() - started
-        if r_slow.status_code not in (200, 413) or r_fast.status_code != 200:
-            raise RuntimeError(f"large-history test failed: {r_slow.status_code} {r_fast.status_code}")
+        if not any(e.get("type") == "error" and e.get("code") == 413 for e in e_slow):
+            raise RuntimeError("large-history test failed: expected 413 error event")
+        if not any(e.get("type") == "done" and e.get("status") == "success" for e in e_fast):
+            raise RuntimeError("large-history test failed: expected fast success")
         if elapsed > 0.7:
             raise RuntimeError(f"large history should not serialize requests, took {elapsed:.2f}s")
 
@@ -196,7 +204,6 @@ def main() -> int:
     client_a = TestClient(app)
     client_b = TestClient(app)
     client_c = TestClient(app)
-    client_anon = TestClient(app)
 
     a_boot = client_a.get("/chatbot/bootstrap")
     b_boot = client_b.get("/chatbot/bootstrap")
@@ -218,119 +225,55 @@ def main() -> int:
     file_c = _ingest_doc_for_owner(admin_id, "doc_c.txt", "alphaA and betaB together.\n")
     assert file_a and file_b and file_c
 
-    conversation_id = str(uuid.uuid4())
-    mem = {"version": 0, "summary": "", "recent_messages": []}
-    r1 = client_a.post(
-        "/chatbot/chat",
-        headers={"X-Owner-Id": str(owner_a)},
-        json={
-            "conversation_id": conversation_id,
-            "message": {"role": "user", "content": "alphaA"},
-            "memory": mem,
-            "options": {"include_evidence": True, "top_k": 3, "return_subgraph": False, "max_context_fraction": 0.5},
-        },
-    )
-    assert r1.status_code == 200, r1.text
-    data1 = r1.json()
-    assert data1["citations"], "expected citations"
-    assert "Sources: [1]" in data1["assistant"]["content"]
-    assert data1["citations"][0]["file_id"] in {file_a, file_b, file_c}
-    cite = data1["citations"][0]
-    assert client_a.get(cite["chunk_url"], headers={"X-Owner-Id": str(owner_a)}).status_code == 200
-    assert client_a.get(cite["file_url"], headers={"X-Owner-Id": str(owner_a)}).status_code == 200
-    assert client_b.get(cite["chunk_url"], headers={"X-Owner-Id": str(owner_b)}).status_code == 200
-    assert client_b.get(cite["file_url"], headers={"X-Owner-Id": str(owner_b)}).status_code == 200
-    assert client_anon.get(cite["chunk_url"]).status_code == 401
-    assert client_anon.get(cite["file_url"]).status_code == 401
+    async def _run_sse_validation() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            conversation_id = str(uuid.uuid4())
+            e1 = await _post_sse(client, owner_id=owner_a, conversation_id=conversation_id, content="alphaA", messages=[])
+            answer1, sources1 = _events_to_answer_and_sources(e1)
+            assert sources1, "expected sources"
+            assert "<sup>1</sup>" in answer1, "expected sup markers"
+            assert any(e.get("type") == "title" and e.get("title") for e in e1), "expected title event"
 
-    mem = data1["memory"]
-    r2 = client_a.post(
-        "/chatbot/chat",
-        headers={"X-Owner-Id": str(owner_a)},
-        json={
-            "conversation_id": conversation_id,
-            "message": {"role": "user", "content": "Say it again."},
-            "memory": mem,
-            "options": {"include_evidence": False, "top_k": 1, "return_subgraph": False, "max_context_fraction": 0.9},
-        },
-    )
-    assert r2.status_code == 200, r2.text
-    assert r2.json()["memory"]["version"] > mem["version"]
+            messages = [{"role": "user", "content": "alphaA"}, {"role": "assistant", "content": answer1}]
+            e2 = await _post_sse(
+                client,
+                owner_id=owner_a,
+                conversation_id=conversation_id,
+                content="Say it again.",
+                messages=messages,
+            )
+            assert any(e.get("type") == "done" and e.get("status") == "success" for e in e2)
 
-    title_resp = client_a.post(
-        "/chatbot/title",
-        headers={"X-Owner-Id": str(owner_a)},
-        json={
-            "conversation_id": conversation_id,
-            "user": data1["memory"]["recent_messages"][-2]["content"] if data1["memory"]["recent_messages"] else "alphaA",
-            "assistant": data1["assistant"]["content"],
-        },
-    )
-    assert title_resp.status_code == 200, title_resp.text
-    assert title_resp.json()["title"]
+            c_conv = str(uuid.uuid4())
+            e3 = await _post_sse(client, owner_id=owner_c, conversation_id=c_conv, content="betaB", messages=[])
+            answer3, sources3 = _events_to_answer_and_sources(e3)
+            assert sources3, "expected sources"
+            assert "<sup>1</sup>" in answer3
 
-    c_conv = str(uuid.uuid4())
-    r3 = client_c.post(
-        "/chatbot/chat",
-        headers={"X-Owner-Id": str(owner_c)},
-        json={
-            "conversation_id": c_conv,
-            "message": {"role": "user", "content": "betaB"},
-            "memory": {"version": 0, "summary": "", "recent_messages": []},
-            "options": {"include_evidence": True, "top_k": 3, "return_subgraph": False, "max_context_fraction": 0.9},
-        },
-    )
-    assert r3.status_code == 200, r3.text
-    assert r3.json()["citations"][0]["file_id"] in {file_a, file_b, file_c}
-    assert "Sources: [1]" in r3.json()["assistant"]["content"]
+    asyncio.run(_run_sse_validation())
 
-    ws_conv = str(uuid.uuid4())
-    with client_a.websocket_connect(f"/chatbot/ws?conversation_id={ws_conv}&owner_id={owner_a}") as ws:
-        ws.send_json(
-            {
-                "message": {"role": "user", "content": "Stream this"},
-                "memory": {"version": 0, "summary": "", "recent_messages": []},
-                "options": {"include_evidence": False, "top_k": 1, "return_subgraph": False, "max_context_fraction": 0.9},
-            }
-        )
-        start = ws.receive_json()
-        assert start["type"] == "start"
-        request_id = start["request_id"]
-        saw_delta = False
-        final = None
-        for _ in range(200):
-            frame = ws.receive_json()
-            if frame["type"] == "delta":
-                assert frame["request_id"] == request_id
-                saw_delta = True
-                continue
-            if frame["type"] == "final":
-                final = frame
-                break
-        assert saw_delta
-        assert final is not None
-        assert final["assistant"]["content"]
+    # Long conversation should be supported when the frontend keeps full history
+    # while the backend only uses the last 5 turns.
+    async def _run_long_conversation() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            long_conv = str(uuid.uuid4())
+            history: list[dict] = []
+            for i in range(1, 16):
+                e = await _post_sse(
+                    client,
+                    owner_id=owner_a,
+                    conversation_id=long_conv,
+                    content=f"{i}:" + ("m" * 80),
+                    messages=history,
+                )
+                answer, _sources = _events_to_answer_and_sources(e)
+                history.append({"role": "user", "content": f"{i}:" + ("m" * 80)})
+                history.append({"role": "assistant", "content": answer})
+                assert any(ev.get("type") == "done" and ev.get("status") == "success" for ev in e)
 
-    # Long conversation should be supported under a single conversation_id with a fixed context window.
-    os.environ["CHATBOT_MAX_CONTEXT_TOKENS"] = "512"
-    os.environ["CHATBOT_CONTEXT_TURNS"] = "5"
-    long_conv = str(uuid.uuid4())
-    memory = {"version": 0, "summary": "", "recent_messages": []}
-    for i in range(1, 16):
-        r = client_a.post(
-            "/chatbot/chat",
-            headers={"X-Owner-Id": str(owner_a)},
-            json={
-                "conversation_id": long_conv,
-                "message": {"role": "user", "content": f"{i}:" + ("m" * 80)},
-                "memory": memory,
-                "options": {"include_evidence": False, "top_k": 1, "return_subgraph": False, "max_context_fraction": 0.9},
-            },
-        )
-        assert r.status_code == 200, r.text
-        data = r.json()
-        memory = data["memory"]
-        assert len(memory.get("recent_messages") or []) <= 10
+    asyncio.run(_run_long_conversation())
 
     asyncio.run(_async_concurrency_checks(app))
     print("chatbot_sandbox_validate: OK")

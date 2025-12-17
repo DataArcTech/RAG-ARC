@@ -1,4 +1,5 @@
 import os
+import json
 import shutil
 import sys
 import uuid
@@ -6,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
+import httpx
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
@@ -20,6 +21,8 @@ def _ensure_env_for_chatbot_tests() -> None:
     os.environ["CHATBOT_MAX_CONTEXT_TOKENS"] = "64"
     os.environ["LOCAL_FILE_STORAGE_PATH"] = "./test_output/chatbot_local_files"
     os.environ["ENABLE_DEEPSEARCH"] = "0"
+    os.environ["CHATBOT_CONTEXT_TURNS"] = "5"
+    os.environ["CHATBOT_MAX_CONTEXT_FRACTION"] = "0.9"
 
 
 def _cleanup_test_output() -> None:
@@ -60,8 +63,20 @@ def _ensure_user_in_db(user_id: uuid.UUID) -> None:
             session.commit()
 
 
-@pytest.fixture(scope="module")
-def app_client():
+async def _collect_sse_events(resp: httpx.Response) -> list[dict]:
+    events: list[dict] = []
+    async for line in resp.aiter_lines():
+        if not line.startswith("data: "):
+            continue
+        payload = line[len("data: ") :].strip()
+        if payload == "[DONE]":
+            break
+        events.append(json.loads(payload))
+    return events
+
+
+@pytest.mark.anyio
+async def test_chatbot_context_too_long_returns_sse_error():
     _ensure_env_for_chatbot_tests()
     _cleanup_test_output()
 
@@ -71,28 +86,32 @@ def app_client():
 
     from main import app
 
-    return TestClient(app)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        boot = await client.get("/chatbot/bootstrap")
+        assert boot.status_code == 200
 
+        # Only required for admin ingestion; cookie user doesn't need to exist for stateless chat.
+        admin_id = uuid.UUID(os.getenv("CHATBOT_SHARED_DOCUMENT_OWNER_ID", "00000000-0000-0000-0000-000000000001"))
+        _ensure_user_in_db(admin_id)
 
-def test_chatbot_context_too_long_returns_413(app_client: TestClient):
-    boot = app_client.get("/chatbot/bootstrap")
-    assert boot.status_code == 200
-    user_id = uuid.UUID(boot.json()["browser_user_id"])
-    _ensure_user_in_db(user_id)
+        conversation_id = str(uuid.uuid4())
+        huge = "x" * 2000
 
-    conversation_id = str(uuid.uuid4())
-    huge = "x" * 2000
-    memory = {"version": 0, "summary": "", "recent_messages": [{"role": "user", "content": huge}]}
+        async with client.stream(
+            "POST",
+            "/api/messages",
+            headers={"Accept": "text/event-stream"},
+            json={
+                "id": conversation_id,
+                "content": "hi",
+                "messages": [{"role": "user", "content": huge} for _ in range(10)],
+                "stream": True,
+            },
+        ) as resp:
+            assert resp.status_code == 200
+            events = await _collect_sse_events(resp)
 
-    resp = app_client.post(
-        "/chatbot/chat",
-        json={
-            "conversation_id": conversation_id,
-            "message": {"role": "user", "content": "hi"},
-            "memory": memory,
-            "options": {"include_evidence": False, "top_k": 1, "return_subgraph": False, "max_context_fraction": 0.9},
-        },
-    )
-    assert resp.status_code == 413
-    detail = resp.json().get("detail") or {}
-    assert detail.get("code") == "context_too_long"
+        assert events
+        assert events[0]["type"] == "error"
+        assert events[0]["code"] == 413

@@ -3,8 +3,10 @@
 from framework.config import AbstractConfig
 from core.file_management.storage.file import FileStorage
 from config.encapsulation.database.file_db.local_config import LocalDBConfig
+from config.encapsulation.database.file_db.minio_config import MinIOConfig
 from config.encapsulation.database.relational_db.postgresql_config import PostgreSQLConfig
-from typing import Literal
+from pydantic import Field
+from typing import Annotated, Literal
 
 
 class FileStorageConfig(AbstractConfig):
@@ -12,7 +14,7 @@ class FileStorageConfig(AbstractConfig):
     type: Literal["file_storage"] = "file_storage"
 
     # Direct sub-configurations (no intermediate file_store layer)
-    file_db_config: LocalDBConfig  # Blob storage configuration (LocalDB or MinIODB)
+    file_db_config: Annotated[LocalDBConfig | MinIOConfig, Field(discriminator="type")]
     relational_db_config: PostgreSQLConfig  # Metadata database configuration
 
     def build(self) -> FileStorage:

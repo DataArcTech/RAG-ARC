@@ -5,22 +5,25 @@ import os
 import time
 import uuid
 import threading
+import mimetypes
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
+from urllib.parse import quote
 
 import anyio
-from fastapi import APIRouter, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect, status
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from framework.register import Register
 from core.presentation.evidence import build_chat_evidence
 from config.output_limits import CHAT_TOP_CHUNKS
+from core.utils.path_guard import ensure_writable_dir
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/chatbot", tags=["chatbot"])
+router = APIRouter(tags=["chatbot"])
 
 _COOKIE_NAME = "rag_arc_uid"
 _registrator = Register()
@@ -30,77 +33,16 @@ _conversation_last_used: Dict[str, float] = {}
 _locks_guard = asyncio.Lock()
 _global_semaphore = asyncio.Semaphore(int(os.getenv("CHATBOT_MAX_CONCURRENCY", "8")))
 
-_CHATBOT_SYSTEM_PROMPT = (
+_CHATBOT_SYSTEM_PROMPT_V2 = (
     "You are a helpful RAG assistant.\n"
-    "You may be given a list of numbered Sources.\n"
+    "You may be given a list of numbered Sources (key=1..N).\n"
     "- Use Sources to answer. Do not fabricate citations.\n"
-    "- When a sentence is supported by a source, add citation markers like [1] or [2] at the end of that sentence.\n"
-    "- Always end your answer with a single line in the exact format: Sources: [1][2]...\n"
-    "- If no sources are applicable, end with: Sources: []\n"
+    "- When a sentence is supported by one or more Sources, append citation markers using HTML <sup> tags.\n"
+    "  Example: This is supported.<sup>1</sup> or Multiple sources.<sup>1</sup><sup>3</sup>\n"
+    "- Do NOT use bracket citations like [1].\n"
+    "- Do NOT add a trailing 'Sources:' section.\n"
+    "- Output in Markdown. The only HTML allowed is <sup>...</sup>.\n"
 )
-
-_CHATBOT_SYSTEM_PROMPT_NO_EVIDENCE = "You are a helpful assistant."
-
-
-class ChatbotMessage(BaseModel):
-    role: Literal["user", "assistant", "system"] = "user"
-    content: str = Field(min_length=1)
-
-
-class ChatbotMemory(BaseModel):
-    version: int = 0
-    summary: str = ""
-    recent_messages: List[ChatbotMessage] = Field(default_factory=list)
-
-
-class ChatbotOptions(BaseModel):
-    include_evidence: bool = True
-    top_k: int = Field(default=5, ge=1, le=5)
-    return_subgraph: bool = False
-    max_context_fraction: float = 0.9
-
-
-class ChatbotChatRequest(BaseModel):
-    conversation_id: str
-    message: ChatbotMessage
-    memory: Optional[ChatbotMemory] = None
-    options: Optional[ChatbotOptions] = None
-
-
-class ChatbotCitation(BaseModel):
-    rank: int
-    chunk_id: str
-    score: Optional[float] = None
-    filename: Optional[str] = None
-    file_id: Optional[str] = None
-    preview: Optional[str] = None
-    chunk_url: str
-    file_url: Optional[str] = None
-    start_idx: Optional[int] = None
-    end_idx: Optional[int] = None
-
-
-class ChatbotDebugContext(BaseModel):
-    max_context_tokens: int
-    threshold_fraction: float
-    estimated_context_tokens: int
-    compressed: bool
-    token_estimator: str
-
-
-class ChatbotDebug(BaseModel):
-    context: ChatbotDebugContext
-    timing_ms: Dict[str, int]
-
-
-class ChatbotChatResponse(BaseModel):
-    request_id: str
-    browser_user_id: str
-    conversation_id: str
-    memory: ChatbotMemory
-    assistant: ChatbotMessage
-    citations: List[ChatbotCitation]
-    debug: ChatbotDebug
 
 
 class ChatbotBootstrapCapabilities(BaseModel):
@@ -115,25 +57,25 @@ class ChatbotBootstrapResponse(BaseModel):
     capabilities: ChatbotBootstrapCapabilities
 
 
-class ChatbotChunkResponse(BaseModel):
-    chunk_id: str
+class ChatbotApiMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1)
+
+
+class ChatbotApiMessagesRequest(BaseModel):
+    id: str = Field(min_length=1, description="conversation_id (uuid)")
+    content: str = Field(min_length=1, description="current user message")
+    messages: List[ChatbotApiMessage] = Field(default_factory=list, description="full conversation history")
+    stream: bool = True
+
+
+class ChatbotSourceItem(BaseModel):
+    key: int
+    chunk_id: Optional[str] = None
     file_id: Optional[str] = None
-    filename: Optional[str] = None
-    content: str
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-
-
-class ChatbotTitleRequest(BaseModel):
-    conversation_id: str
-    user: str = Field(min_length=1)
-    assistant: Optional[str] = None
-
-
-class ChatbotTitleResponse(BaseModel):
-    request_id: str
-    browser_user_id: str
-    conversation_id: str
     title: str
+    file: Optional[str] = None
+    description: str
 
 
 def _parse_uuid(value: str, field_name: str) -> uuid.UUID:
@@ -177,40 +119,6 @@ def _apply_browser_cookie(response: Response, browser_user_id: uuid.UUID) -> Non
         httponly=os.getenv("CHATBOT_COOKIE_HTTPONLY", "0") == "1",
         samesite="lax",
     )
-
-
-def _ensure_cookie_user_exists(user_id: uuid.UUID) -> None:
-    """Create a placeholder DB user so ingestion can store FK owner_id metadata."""
-    try:
-        from config.encapsulation.database.relational_db.postgresql_config import PostgreSQLConfig
-        from encapsulation.data_model.orm_models import User
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="user store unavailable") from exc
-
-    db = PostgreSQLConfig().build()
-    now = datetime.now(tz=datetime.now().astimezone().tzinfo)
-    username = f"chatbot_cookie_{str(user_id)[:8]}"
-
-    with db.SessionMaker() as session:
-        existing = session.query(User).filter_by(id=user_id).first()
-        if existing is not None:
-            return
-        session.add(
-            User(
-                id=user_id,
-                user_name=username,
-                hashed_password="chatbot-cookie-placeholder",
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        try:
-            session.commit()
-        except Exception:
-            session.rollback()
-            existing = session.query(User).filter_by(id=user_id).first()
-            if existing is None:
-                raise
 
 
 def _get_shared_document_owner_id() -> uuid.UUID:
@@ -291,32 +199,6 @@ def _conversation_key(browser_user_id: uuid.UUID, conversation_id: uuid.UUID) ->
     return f"{browser_user_id}:{conversation_id}"
 
 
-def _format_context(memory: ChatbotMemory, user_message: ChatbotMessage) -> str:
-    lines: List[str] = []
-    if memory.summary.strip():
-        lines.append(f"[summary]\n{memory.summary.strip()}")
-    for msg in memory.recent_messages:
-        role = msg.role.strip()
-        content = msg.content.strip()
-        if content:
-            lines.append(f"{role}: {content}")
-    lines.append(f"{user_message.role}: {user_message.content.strip()}")
-    return "\n".join(lines).strip()
-
-
-def _format_context_for_estimate(memory: ChatbotMemory, user_message: Optional[ChatbotMessage]) -> str:
-    lines: List[str] = []
-    if memory.summary.strip():
-        lines.append(memory.summary.strip())
-    for msg in memory.recent_messages:
-        content = msg.content.strip()
-        if content:
-            lines.append(content)
-    if user_message is not None and user_message.content.strip():
-        lines.append(user_message.content.strip())
-    return "\n".join(lines).strip()
-
-
 def _estimate_tokens(text: str) -> tuple[int, str]:
     if not text:
         return 0, "heuristic"
@@ -338,15 +220,14 @@ def _estimate_tokens_for_messages(messages: List[Dict[str, str]]) -> tuple[int, 
 
 def _build_llm_messages(
     system_message: Dict[str, str],
-    memory: ChatbotMemory,
     sources: List[Dict[str, str]],
-    user_message: ChatbotMessage,
+    history: List[Dict[str, str]],
+    user_message: str,
 ) -> List[Dict[str, str]]:
     msgs: List[Dict[str, str]] = [system_message]
-    for m in memory.recent_messages:
-        msgs.append({"role": m.role, "content": m.content})
+    msgs.extend(history or [])
     msgs.extend(sources or [])
-    msgs.append({"role": "user", "content": user_message.content})
+    msgs.append({"role": "user", "content": user_message})
     return msgs
 
 
@@ -356,7 +237,7 @@ def _ensure_context_within_limit(
     max_context_tokens: int,
     threshold_fraction: float,
     token_estimator_suffix: str = "window_disabled",
-) -> ChatbotDebugContext:
+) -> Dict[str, Any]:
     estimated, estimator = _estimate_tokens_for_messages(messages)
     allowed = int(max_context_tokens * threshold_fraction)
     if estimated > allowed:
@@ -370,27 +251,12 @@ def _ensure_context_within_limit(
                 "suggestion": "start_new_conversation",
             },
         )
-    return ChatbotDebugContext(
-        max_context_tokens=max_context_tokens,
-        threshold_fraction=threshold_fraction,
-        estimated_context_tokens=estimated,
-        compressed=False,
-        token_estimator=f"{estimator}|{token_estimator_suffix}",
-    )
-
-
-def _last_n_turns_messages(memory: ChatbotMemory, *, turns: int) -> List[ChatbotMessage]:
-    turns = max(int(turns or 0), 0)
-    if turns <= 0:
-        return []
-    limit = turns * 2
-    msgs = list(memory.recent_messages or [])
-    return msgs[-limit:] if len(msgs) > limit else msgs
-
-
-def _trim_memory_to_last_n_turns(memory: ChatbotMemory, *, turns: int) -> ChatbotMemory:
-    memory.recent_messages = _last_n_turns_messages(memory, turns=turns)
-    return memory
+    return {
+        "max_context_tokens": max_context_tokens,
+        "threshold_fraction": threshold_fraction,
+        "estimated_context_tokens": estimated,
+        "token_estimator": f"{estimator}|{token_estimator_suffix}",
+    }
 
 
 def _sanitize_title(value: str) -> str:
@@ -450,116 +316,208 @@ async def _generate_title_via_llm(
     return title or _fallback_title(user_text)
 
 
-async def _maybe_send_ws_title(
-    websocket: WebSocket,
-    *,
-    request_id: str,
-    browser_user_id: uuid.UUID,
-    conversation_id: uuid.UUID,
-    user_text: str,
-    assistant_text: str,
-) -> None:
-    try:
-        title = await _generate_title_via_llm(user_text, assistant_text)
-        await websocket.send_json(
-            {
-                "type": "title",
-                "request_id": request_id,
-                "browser_user_id": str(browser_user_id),
-                "conversation_id": str(conversation_id),
-                "title": title,
-            }
-        )
-    except Exception:  # noqa: BLE001
-        return
-
-
-def _citations_from_chunks(chunks: List[Any], *, max_chunks: int) -> List[ChatbotCitation]:
-    citations: List[ChatbotCitation] = []
-    seen_chunk_ids: set[str] = set()
-    seen_file_ids: set[str] = set()
-    for chunk in chunks:
-        if len(citations) >= max_chunks:
-            break
-        metadata = getattr(chunk, "metadata", {}) or {}
-        chunk_id = str(getattr(chunk, "id", "") or "").strip()
-        file_id = metadata.get("source_file_id")
-        filename = metadata.get("filename")
-        preview = (getattr(chunk, "content", "") or "").strip()
-        preview = preview[:240] if preview else None
-
-        if not chunk_id or chunk_id in seen_chunk_ids:
-            continue
-        if file_id and str(file_id) in seen_file_ids:
-            continue
-
-        seen_chunk_ids.add(chunk_id)
-        if file_id:
-            seen_file_ids.add(str(file_id))
-
-        file_url = None
-        if file_id:
-            file_url = f"/chatbot/files/{file_id}?disposition=inline"
-
-        start_idx = metadata.get("start_idx") or metadata.get("start") or metadata.get("chunk_start")
-        end_idx = metadata.get("end_idx") or metadata.get("end") or metadata.get("chunk_end")
-
-        citations.append(
-            ChatbotCitation(
-                rank=len(citations) + 1,
-                chunk_id=chunk_id,
-                score=metadata.get("score"),
-                filename=filename,
-                file_id=file_id,
-                preview=preview,
-                chunk_url=f"/chatbot/chunks/{chunk_id}",
-                file_url=file_url,
-                start_idx=start_idx if isinstance(start_idx, int) else None,
-                end_idx=end_idx if isinstance(end_idx, int) else None,
-            )
-        )
-    return citations
-
-
-def _strip_trailing_sources_line(text: str) -> str:
-    cleaned = (text or "").rstrip()
-    lines = cleaned.splitlines()
-    while lines and lines[-1].strip() == "":
-        lines.pop()
-    if lines and lines[-1].lstrip().startswith("Sources: "):
-        lines.pop()
-        while lines and lines[-1].strip() == "":
-            lines.pop()
-    result = "\n".join(lines).strip()
-    return result or "(empty)"
-
-
-def _append_sources_markers(text: str, citations: List[ChatbotCitation]) -> str:
-    base = _strip_trailing_sources_line(text)
-    markers = "".join(f"[{c.rank}]" for c in citations) if citations else "[]"
-    return f"{base}\n\nSources: {markers}"
-
-
-def _build_source_messages(citations: List[ChatbotCitation], chunk_lookup: Dict[str, Dict[str, Any]]) -> List[Dict[str, str]]:
-    if not citations:
+def _normalize_history(messages: List[ChatbotApiMessage], *, turns: int) -> List[Dict[str, str]]:
+    turns = max(int(turns or 0), 0)
+    if turns <= 0:
         return []
-    max_chars = int(os.getenv("CHATBOT_SOURCE_MAX_CHARS", "1600"))
+    max_messages = turns * 2
+    tail = list(messages or [])[-max_messages:] if len(messages or []) > max_messages else list(messages or [])
+    return [{"role": m.role, "content": m.content} for m in tail]
+
+
+def _build_source_messages_v2(sources: List[ChatbotSourceItem]) -> List[Dict[str, str]]:
+    if not sources:
+        return []
     messages: List[Dict[str, str]] = []
-    for cite in citations:
-        entry = chunk_lookup.get(cite.chunk_id) or {}
-        content = (entry.get("content") or "").strip()
-        if max_chars > 0 and len(content) > max_chars:
-            content = f"{content[:max_chars].rstrip()}..."
-        filename = cite.filename or (entry.get("metadata") or {}).get("filename")
-        header = f"Source [{cite.rank}]"
-        if filename:
-            header += f" filename={filename}"
-        header += f" chunk_id={cite.chunk_id}"
-        messages.append({"role": "user", "content": f"{header}\n{content}"})
+    for item in sources:
+        header = f"Source key={item.key} title={item.title}"
+        if item.file:
+            header += f" file={item.file}"
+        messages.append({"role": "user", "content": f"{header}\n{item.description}"})
     return messages
 
 
-@router.get("/bootstrap", response_model=ChatbotBootstrapResponse)
+def _sse_json(data: Dict[str, Any]) -> str:
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _sse_done() -> str:
+    return "data: [DONE]\n\n"
+
+
+def _needs_sup_fallback(text: str) -> bool:
+    return "<sup>" not in (text or "")
+
+
+def _sup_markers_for_sources(sources: List[ChatbotSourceItem]) -> str:
+    return "".join(f"<sup>{item.key}</sup>" for item in sources or [])
+
+def _guess_media_type(filename: str | None, fallback: str = "application/octet-stream") -> str:
+    if filename:
+        guessed, _ = mimetypes.guess_type(filename)
+        if guessed:
+            return guessed
+    return fallback
+
+
+def _content_disposition_inline(filename: str) -> str:
+    safe = (Path(filename).name or "file").replace('"', "")
+    return f'inline; filename="{safe}"'
+
+
+def _resolve_local_file_path(blob_key: str) -> Path:
+    preferred = os.getenv("LOCAL_FILE_STORAGE_PATH", "./data/files")
+    runtime_root = os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime")
+    fallback = os.path.join(runtime_root, "files")
+    base_dir = Path(ensure_writable_dir(preferred, fallback))
+    safe_key = (blob_key or "").replace("..", "").lstrip("/")
+    return base_dir / safe_key
+
+
+def _localdb_path_from_instance(local_db: Any, blob_key: str) -> Path | None:
+    get_full_path = getattr(local_db, "_get_full_path", None)
+    if callable(get_full_path):
+        try:
+            return Path(get_full_path(blob_key))
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
+async def _stream_minio_object(minio_db: Any, blob_key: str, chunk_size: int = 1024 * 256):
+    response = None
+    try:
+        client = getattr(minio_db, "client", None)
+        config = getattr(minio_db, "config", None)
+        bucket = getattr(config, "bucket_name", None) if config is not None else None
+        if client is None or not bucket:
+            raise RuntimeError("minio client or bucket not configured")
+        response = client.get_object(bucket, blob_key)
+        while True:
+            data = response.read(chunk_size)
+            if not data:
+                break
+            yield data
+    finally:
+        if response is not None:
+            try:
+                response.close()
+                response.release_conn()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _build_sources_for_frontend(entries: List[Dict[str, Any]], max_sources: int) -> List[ChatbotSourceItem]:
+    max_chars = int(os.getenv("CHATBOT_SOURCE_MAX_CHARS", "1600"))
+    sources: List[ChatbotSourceItem] = []
+    seen_chunk_ids: set[str] = set()
+
+    knowledge = _get_chatbot_knowledge()
+    file_storage = getattr(knowledge, "file_storage", None)
+
+    for entry in entries or []:
+        if len(sources) >= max_sources:
+            break
+        chunk_id = str(entry.get("id") or "").strip()
+        if not chunk_id or chunk_id in seen_chunk_ids:
+            continue
+        seen_chunk_ids.add(chunk_id)
+
+        metadata = dict(entry.get("metadata") or {})
+        file_id = str(metadata.get("source_file_id") or "").strip() or None
+        filename = str(metadata.get("filename") or "").strip() or "source"
+
+        content = str(entry.get("content") or "").strip()
+        if max_chars > 0 and len(content) > max_chars:
+            content = f"{content[:max_chars].rstrip()}..."
+
+        file_url = None
+        if file_id and file_storage is not None:
+            try:
+                meta = file_storage.get_file_metadata(file_id)
+                meta_filename = getattr(meta, "filename", None) if meta is not None else None
+                safe_name = Path((meta_filename or filename or "source")).name
+                file_url = f"/static/files/{file_id}/{quote(safe_name)}"
+            except Exception:  # noqa: BLE001
+                file_url = None
+
+        sources.append(
+            ChatbotSourceItem(
+                key=len(sources) + 1,
+                chunk_id=chunk_id,
+                file_id=file_id,
+                title=filename,
+                file=file_url,
+                description=content,
+            )
+        )
+    return sources
+
+
+@router.get("/static/files/{file_id}")
+async def get_static_file_redirect(file_id: str):
+    knowledge = _get_chatbot_knowledge()
+    file_storage = getattr(knowledge, "file_storage", None)
+    if file_storage is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="file storage not configured")
+
+    meta = await anyio.to_thread.run_sync(file_storage.get_file_metadata, file_id)
+    if meta is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
+    shared_owner_id = _get_shared_document_owner_id()
+    if getattr(meta, "owner_id", None) != shared_owner_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
+
+    filename = getattr(meta, "filename", None) or "file"
+    safe_name = Path(filename).name
+    return RedirectResponse(url=f"/static/files/{file_id}/{quote(safe_name)}", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+
+@router.get("/static/files/{file_id}/{_filename:path}")
+async def get_static_file(file_id: str, _filename: str):
+    knowledge = _get_chatbot_knowledge()
+    file_storage = getattr(knowledge, "file_storage", None)
+    if file_storage is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="file storage not configured")
+
+    meta = await anyio.to_thread.run_sync(file_storage.get_file_metadata, file_id)
+    if meta is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
+    shared_owner_id = _get_shared_document_owner_id()
+    if getattr(meta, "owner_id", None) != shared_owner_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
+
+    blob_key = getattr(meta, "blob_key", None)
+    if not blob_key:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
+
+    filename = getattr(meta, "filename", None) or "file"
+    content_type = getattr(meta, "content_type", None) or _guess_media_type(filename)
+    headers = {"Content-Disposition": _content_disposition_inline(filename)}
+
+    blob_store = getattr(file_storage, "blob_store", None)
+    if blob_store is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="blob store not configured")
+
+    try:
+        if blob_store.__class__.__name__ == "LocalDB":
+            path = _localdb_path_from_instance(blob_store, str(blob_key)) or _resolve_local_file_path(str(blob_key))
+            if not path.exists():
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
+            return FileResponse(path, media_type=content_type, headers=headers)
+
+        if blob_store.__class__.__name__ == "MinIODB":
+            return StreamingResponse(_stream_minio_object(blob_store, str(blob_key)), media_type=content_type, headers=headers)
+
+        data = await anyio.to_thread.run_sync(blob_store.retrieve, str(blob_key))
+        return Response(content=data, media_type=content_type, headers=headers)
+    except HTTPException:
+        raise
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found") from exc
+
+
+@router.get("/chatbot/bootstrap", response_model=ChatbotBootstrapResponse)
 async def bootstrap(request: Request):
     user_id, should_set = _ensure_browser_user_id(request)
     payload = ChatbotBootstrapResponse(
@@ -574,463 +532,183 @@ async def bootstrap(request: Request):
     return response
 
 
-@router.post("/title", response_model=ChatbotTitleResponse)
-async def generate_title(request: Request, payload: ChatbotTitleRequest):
+@router.post("/api/messages")
+async def messages(request: Request, payload: ChatbotApiMessagesRequest):
     started = time.monotonic()
     request_id = str(uuid.uuid4())
 
     browser_user_id, should_set = _ensure_browser_user_id(request)
-    conversation_uuid = _parse_uuid(payload.conversation_id, "conversation_id")
+    conversation_uuid = _parse_uuid(payload.id, "id")
 
-    title = await _generate_title_via_llm(payload.user, payload.assistant or "")
-
-    result = ChatbotTitleResponse(
-        request_id=request_id,
-        browser_user_id=str(browser_user_id),
-        conversation_id=str(conversation_uuid),
-        title=title,
-    )
-    response = JSONResponse(content=result.model_dump())
-    if should_set:
-        _apply_browser_cookie(response, browser_user_id)
-
-    elapsed_ms = int((time.monotonic() - started) * 1000)
-    logger.info(
-        "chatbot.title request_id=%s browser_user_id=%s conversation_id=%s total_ms=%d",
-        request_id,
-        str(browser_user_id),
-        str(conversation_uuid),
-        elapsed_ms,
-    )
-    return response
-
-
-@router.post("/chat", response_model=ChatbotChatResponse)
-async def chat(request: Request, payload: ChatbotChatRequest):
-    started = time.monotonic()
-    request_id = str(uuid.uuid4())
-
-    browser_user_id, should_set = _ensure_browser_user_id(request)
-    conversation_uuid = _parse_uuid(payload.conversation_id, "conversation_id")
-
-    incoming_memory = payload.memory or ChatbotMemory()
-    options = payload.options or ChatbotOptions()
-
-    if payload.message.role != "user":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="message.role must be 'user'")
-
-    lock = await _get_conversation_lock(_conversation_key(browser_user_id, conversation_uuid))
     lock_timeout_s = float(os.getenv("CHATBOT_CONVERSATION_LOCK_TIMEOUT_S", "30"))
     semaphore_timeout_s = float(os.getenv("CHATBOT_GLOBAL_SEMAPHORE_TIMEOUT_S", "30"))
+    max_context_tokens = int(os.getenv("CHATBOT_MAX_CONTEXT_TOKENS", "8192"))
+    threshold_fraction = float(os.getenv("CHATBOT_MAX_CONTEXT_FRACTION", "0.9"))
+    context_turns = int(os.getenv("CHATBOT_CONTEXT_TURNS", "5"))
+    max_sources = int(os.getenv("CHATBOT_TOP_SOURCES", "5"))
 
-    acquired_lock = False
-    try:
-        await asyncio.wait_for(lock.acquire(), timeout=lock_timeout_s)
-        acquired_lock = True
-    except TimeoutError as exc:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="conversation is busy") from exc
+    shared_owner_id = _get_shared_document_owner_id()
+    lock = await _get_conversation_lock(_conversation_key(browser_user_id, conversation_uuid))
 
-    acquired_global = False
-    try:
-        await asyncio.wait_for(_global_semaphore.acquire(), timeout=semaphore_timeout_s)
-        acquired_global = True
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
 
-        max_context_tokens = int(os.getenv("CHATBOT_MAX_CONTEXT_TOKENS", "8192"))
-        threshold_fraction = float(options.max_context_fraction or 0.9)
-        context_turns = int(os.getenv("CHATBOT_CONTEXT_TURNS", "5"))
+    async def _event_stream():
+        acquired_lock = False
+        acquired_global = False
+        stop_event = threading.Event()
+        queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
+        parts: List[str] = []
+        sources_for_frontend: List[ChatbotSourceItem] = []
+        first_turn = len(payload.messages or []) == 0
 
-        memory = ChatbotMemory(**incoming_memory.model_dump())
-        rag_inference_handler = _get_chatbot_rag_inference()
+        def _emit_error(code: int, message: str):
+            return [
+                _sse_json({"type": "error", "message": message, "code": code, "id": payload.id}),
+                _sse_json({"type": "done", "status": "error", "id": payload.id}),
+                _sse_done(),
+            ]
 
-        needs_subgraph = bool(options.return_subgraph or options.include_evidence)
-        retrieval_query = payload.message.content.strip()
-
-        shared_owner_id = _get_shared_document_owner_id()
-
-        def _prepare():
-            return rag_inference_handler.prepare_chat(
-                retrieval_query,
-                owner_id=shared_owner_id,
-                return_subgraph=needs_subgraph,
-            )
-
-        _, chunks, subgraph_data, subgraph_info, _prepared = await anyio.to_thread.run_sync(_prepare)
-
-        citations: List[ChatbotCitation] = []
-        chunk_lookup: Dict[str, Dict[str, Any]] = {}
-        if options.include_evidence:
-            graph_store = None
+        try:
             try:
-                graph_store = rag_inference_handler.get_graph_store()
-            except Exception:  # noqa: BLE001
-                graph_store = None
+                await asyncio.wait_for(lock.acquire(), timeout=lock_timeout_s)
+                acquired_lock = True
+            except TimeoutError:
+                for line in _emit_error(429, "conversation_busy"):
+                    yield line
+                return
+
+            try:
+                await asyncio.wait_for(_global_semaphore.acquire(), timeout=semaphore_timeout_s)
+                acquired_global = True
+            except TimeoutError:
+                for line in _emit_error(429, "server_busy"):
+                    yield line
+                return
+
+            rag_inference_handler = _get_chatbot_rag_inference()
+            needs_subgraph = True
+            retrieval_query = payload.content.strip()
+
+            def _prepare():
+                return rag_inference_handler.prepare_chat(
+                    retrieval_query,
+                    owner_id=shared_owner_id,
+                    return_subgraph=needs_subgraph,
+                )
+
+            _, chunks, subgraph_data, subgraph_info, _prepared = await anyio.to_thread.run_sync(_prepare)
+
             evidence = build_chat_evidence(
                 chunks or [],
                 subgraph_data=subgraph_data,
                 subgraph_info=subgraph_info,
-                max_chunks=min(options.top_k, CHAT_TOP_CHUNKS),
-                graph_store=graph_store,
+                max_chunks=min(max_sources, CHAT_TOP_CHUNKS),
+                graph_store=None,
             )
             evidence_chunks = evidence.get("chunks") or []
-            chunk_objs = []
-            for entry in evidence_chunks:
-                chunk_id = str(entry.get("id") or "").strip()
-                if chunk_id:
-                    chunk_lookup[chunk_id] = entry
-                md = dict(entry.get("metadata") or {})
-                score = entry.get("score")
-                if score is not None and "score" not in md:
-                    md["score"] = score
-                chunk_objs.append(type("ChunkView", (), {"id": entry.get("id"), "content": entry.get("content"), "metadata": md}))
-            citations = _citations_from_chunks(chunk_objs, max_chunks=min(options.top_k, CHAT_TOP_CHUNKS))
 
-        sources = _build_source_messages(citations, chunk_lookup)
-        system_prompt = _CHATBOT_SYSTEM_PROMPT if options.include_evidence else _CHATBOT_SYSTEM_PROMPT_NO_EVIDENCE
-        memory_for_llm = ChatbotMemory(
-            version=memory.version,
-            summary="",
-            recent_messages=_last_n_turns_messages(memory, turns=context_turns),
-        )
-        llm_messages = _build_llm_messages({"role": "system", "content": system_prompt}, memory_for_llm, sources, payload.message)
-        debug_ctx = _ensure_context_within_limit(
-            llm_messages,
-            max_context_tokens=max_context_tokens,
-            threshold_fraction=threshold_fraction,
-            token_estimator_suffix=f"window(last_turns={context_turns})",
-        )
+            sources_for_frontend = await anyio.to_thread.run_sync(
+                _build_sources_for_frontend,
+                evidence_chunks,
+                min(max_sources, CHAT_TOP_CHUNKS),
+            )
+            source_messages = _build_source_messages_v2(sources_for_frontend)
+            history = _normalize_history(payload.messages, turns=context_turns)
 
-        response_text = await anyio.to_thread.run_sync(rag_inference_handler.llm.chat, llm_messages)
-
-        assistant_message = ChatbotMessage(role="assistant", content=str(response_text or "").strip() or "(empty)")
-        if options.include_evidence:
-            assistant_message.content = _append_sources_markers(assistant_message.content, citations)
-
-        memory.recent_messages = list(memory.recent_messages) + [payload.message, assistant_message]
-        memory = _trim_memory_to_last_n_turns(memory, turns=context_turns)
-        memory.version = int(memory.version or 0) + 1
-
-        elapsed_ms = int((time.monotonic() - started) * 1000)
-        debug = ChatbotDebug(context=debug_ctx, timing_ms={"total": elapsed_ms})
-
-        result = ChatbotChatResponse(
-            request_id=request_id,
-            browser_user_id=str(browser_user_id),
-            conversation_id=str(conversation_uuid),
-            memory=memory,
-            assistant=assistant_message,
-            citations=citations,
-            debug=debug,
-        )
-        response = JSONResponse(content=result.model_dump())
-        if should_set:
-            _apply_browser_cookie(response, browser_user_id)
-        logger.info(
-            "chatbot.chat request_id=%s browser_user_id=%s conversation_id=%s total_ms=%d compressed=%s citations=%d",
-            request_id,
-            str(browser_user_id),
-            str(conversation_uuid),
-            elapsed_ms,
-            debug_ctx.compressed,
-            len(citations),
-        )
-        return response
-    finally:
-        if acquired_global:
-            _global_semaphore.release()
-        if acquired_lock:
-            lock.release()
-
-
-@router.get("/chunks/{chunk_id}", response_model=ChatbotChunkResponse)
-async def get_chunk(request: Request, chunk_id: str):
-    _require_browser_user_id(request)
-
-    knowledge = _get_chatbot_knowledge()
-    chunk_storage = getattr(getattr(knowledge, "file_index", None), "chunk_storage", None)
-    if chunk_storage is None:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="chunk storage unavailable")
-
-    chunk_metadata = await anyio.to_thread.run_sync(chunk_storage.get_chunk_metadata, chunk_id)
-    if chunk_metadata is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="chunk not found")
-
-    content_bytes = await anyio.to_thread.run_sync(chunk_storage.get_chunk_content, chunk_id)
-    if not content_bytes:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="chunk not found")
-
-    try:
-        raw = json.loads(content_bytes.decode("utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="chunk decode failed") from exc
-
-    metadata = raw.get("metadata") if isinstance(raw, dict) else {}
-    if not isinstance(metadata, dict):
-        metadata = {}
-    source_metadata = raw.get("source_metadata") if isinstance(raw, dict) else None
-    if isinstance(source_metadata, dict) and source_metadata:
-        merged = dict(source_metadata)
-        merged.update(metadata)
-        metadata = merged
-    file_id = metadata.get("source_file_id")
-    filename = metadata.get("filename")
-    content = raw.get("content") if isinstance(raw, dict) else None
-    if content is None:
-        content = content_bytes.decode("utf-8", errors="replace")
-
-    result = ChatbotChunkResponse(
-        chunk_id=chunk_id,
-        file_id=file_id,
-        filename=filename,
-        content=str(content),
-        metadata=metadata,
-    )
-    return JSONResponse(content=result.model_dump())
-
-
-@router.get("/files/{file_id}")
-async def get_file(
-    request: Request,
-    file_id: str,
-    disposition: Literal["inline", "attachment"] = Query(default="inline"),
-):
-    _require_browser_user_id(request)
-
-    knowledge = _get_chatbot_knowledge()
-    file_storage = getattr(knowledge, "file_storage", None)
-    if file_storage is None:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="file storage unavailable")
-
-    metadata = await anyio.to_thread.run_sync(file_storage.get_file_metadata, file_id)
-    if metadata is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
-
-    content = await anyio.to_thread.run_sync(file_storage.get_file_content, file_id)
-    if content is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file content not found")
-
-    filename = getattr(metadata, "filename", None) or file_id
-    media_type = getattr(metadata, "content_type", None) or "application/octet-stream"
-    response = Response(content=content, media_type=media_type)
-    response.headers["Content-Disposition"] = f'{disposition}; filename="{filename}"'
-    return response
-
-
-@router.websocket("/ws")
-async def websocket_chat(websocket: WebSocket, conversation_id: str):
-    await websocket.accept()
-    raw_identity = (
-        websocket.headers.get("x-owner-id")
-        or websocket.headers.get("x-browser-user-id")
-        or websocket.query_params.get("owner_id")
-        or websocket.cookies.get(_COOKIE_NAME)
-    )
-    if not raw_identity:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
-
-    browser_user_id = _parse_uuid(raw_identity, _COOKIE_NAME)
-    conversation_uuid = _parse_uuid(conversation_id, "conversation_id")
-    shared_owner_id = _get_shared_document_owner_id()
-    context_turns = int(os.getenv("CHATBOT_CONTEXT_TURNS", "5"))
-
-    try:
-        while True:
-            raw = await websocket.receive_text()
-            try:
-                incoming = json.loads(raw)
-            except Exception:
-                await websocket.send_json({"type": "error", "detail": "invalid_json"})
-                continue
-
-            message = incoming.get("message") or {}
-            memory_raw = incoming.get("memory")
-            options_raw = incoming.get("options")
+            llm_messages = _build_llm_messages(
+                {"role": "system", "content": _CHATBOT_SYSTEM_PROMPT_V2},
+                source_messages,
+                history,
+                payload.content.strip(),
+            )
 
             try:
-                msg = ChatbotMessage(**message)
-            except Exception:
-                await websocket.send_json({"type": "error", "detail": "invalid_message"})
-                continue
-            if msg.role != "user":
-                await websocket.send_json({"type": "error", "detail": "message.role must be 'user'"})
-                continue
+                _ensure_context_within_limit(
+                    llm_messages,
+                    max_context_tokens=max_context_tokens,
+                    threshold_fraction=threshold_fraction,
+                    token_estimator_suffix=f"window(last_turns={context_turns})",
+                )
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, dict) else {"code": "error", "message": str(exc.detail)}
+                msg = detail.get("code") or "context_too_long"
+                for line in _emit_error(413, str(msg)):
+                    yield line
+                return
 
-            memory = ChatbotMemory(**memory_raw) if isinstance(memory_raw, dict) else ChatbotMemory()
-            options = ChatbotOptions(**options_raw) if isinstance(options_raw, dict) else ChatbotOptions()
-            is_first_turn = len(memory.recent_messages or []) == 0
+            loop = asyncio.get_running_loop()
 
-            request_id = str(uuid.uuid4())
-            await websocket.send_json({"type": "start", "request_id": request_id})
-
-            lock = await _get_conversation_lock(_conversation_key(browser_user_id, conversation_uuid))
-            acquired_lock = False
-            try:
-                await asyncio.wait_for(lock.acquire(), timeout=float(os.getenv("CHATBOT_CONVERSATION_LOCK_TIMEOUT_S", "30")))
-                acquired_lock = True
-            except TimeoutError:
-                await websocket.send_json({"type": "error", "request_id": request_id, "detail": "conversation_busy"})
-                continue
-
-            acquired_global = False
-            started = time.monotonic()
-            disconnected = False
-            try:
-                await asyncio.wait_for(_global_semaphore.acquire(), timeout=float(os.getenv("CHATBOT_GLOBAL_SEMAPHORE_TIMEOUT_S", "30")))
-                acquired_global = True
-
-                max_context_tokens = int(os.getenv("CHATBOT_MAX_CONTEXT_TOKENS", "8192"))
-                threshold_fraction = float(options.max_context_fraction or 0.9)
-                memory = ChatbotMemory(**memory.model_dump())
-                rag_inference_handler = _get_chatbot_rag_inference()
-                needs_subgraph = bool(options.return_subgraph or options.include_evidence)
-                retrieval_query = msg.content.strip()
-
-                def _prepare():
-                    return rag_inference_handler.prepare_chat(
-                        retrieval_query,
-                        owner_id=shared_owner_id,
-                        return_subgraph=needs_subgraph,
-                    )
-
-                _, chunks, subgraph_data, subgraph_info, _messages = await anyio.to_thread.run_sync(_prepare)
-
-                citations: List[ChatbotCitation] = []
-                chunk_lookup: Dict[str, Dict[str, Any]] = {}
-                if options.include_evidence:
-                    graph_store = None
-                    try:
-                        graph_store = rag_inference_handler.get_graph_store()
-                    except Exception:  # noqa: BLE001
-                        graph_store = None
-                    evidence = build_chat_evidence(
-                        chunks or [],
-                        subgraph_data=subgraph_data,
-                        subgraph_info=subgraph_info,
-                        max_chunks=min(options.top_k, CHAT_TOP_CHUNKS),
-                        graph_store=graph_store,
-                    )
-                    evidence_chunks = evidence.get("chunks") or []
-                    chunk_objs = []
-                    for entry in evidence_chunks:
-                        chunk_id = str(entry.get("id") or "").strip()
-                        if chunk_id:
-                            chunk_lookup[chunk_id] = entry
-                        md = dict(entry.get("metadata") or {})
-                        score = entry.get("score")
-                        if score is not None and "score" not in md:
-                            md["score"] = score
-                        chunk_objs.append(type("ChunkView", (), {"id": entry.get("id"), "content": entry.get("content"), "metadata": md}))
-                    citations = _citations_from_chunks(chunk_objs, max_chunks=min(options.top_k, CHAT_TOP_CHUNKS))
-
-                sources = _build_source_messages(citations, chunk_lookup)
-                system_prompt = _CHATBOT_SYSTEM_PROMPT if options.include_evidence else _CHATBOT_SYSTEM_PROMPT_NO_EVIDENCE
+            def _producer():
                 try:
-                    memory_for_llm = ChatbotMemory(
-                        version=memory.version,
-                        summary="",
-                        recent_messages=_last_n_turns_messages(memory, turns=context_turns),
-                    )
-                    llm_messages = _build_llm_messages(
-                        {"role": "system", "content": system_prompt},
-                        memory_for_llm,
-                        sources,
-                        msg,
-                    )
-                    debug_ctx = _ensure_context_within_limit(
-                        llm_messages,
-                        max_context_tokens=max_context_tokens,
-                        threshold_fraction=threshold_fraction,
-                        token_estimator_suffix=f"window(last_turns={context_turns})",
-                    )
-                except HTTPException as exc:
-                    await websocket.send_json({"type": "error", "request_id": request_id, "detail": exc.detail})
-                    continue
+                    for piece in rag_inference_handler.llm.stream_chat(llm_messages):
+                        if stop_event.is_set():
+                            break
+                        loop.call_soon_threadsafe(queue.put_nowait, str(piece))
+                finally:
+                    loop.call_soon_threadsafe(queue.put_nowait, None)
 
-                loop = asyncio.get_running_loop()
-                queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
-                stop_event = threading.Event()
+            asyncio.create_task(asyncio.to_thread(_producer))
 
-                def _producer():
-                    try:
-                        for piece in rag_inference_handler.llm.stream_chat(llm_messages):
-                            if stop_event.is_set():
-                                break
-                            loop.call_soon_threadsafe(queue.put_nowait, piece)
-                    finally:
-                        loop.call_soon_threadsafe(queue.put_nowait, None)
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                parts.append(item)
+                yield _sse_json({"type": "chunk", "content": item, "id": payload.id})
 
-                thread = asyncio.to_thread(_producer)
-                asyncio.create_task(thread)
+            full = "".join(parts).strip()
+            if sources_for_frontend and _needs_sup_fallback(full):
+                markers = _sup_markers_for_sources(sources_for_frontend)
+                if markers:
+                    yield _sse_json({"type": "chunk", "content": markers, "id": payload.id})
+                    full = f"{full}{markers}"
 
-                parts: List[str] = []
-                while True:
-                    item = await queue.get()
-                    if item is None:
-                        break
-                    parts.append(item)
-                    try:
-                        await websocket.send_json({"type": "delta", "request_id": request_id, "content": item})
-                    except WebSocketDisconnect:
-                        stop_event.set()
-                        disconnected = True
-                        break
-                    except Exception:  # noqa: BLE001
-                        stop_event.set()
-                        disconnected = True
-                        break
+            yield _sse_json(
+                {"type": "sources", "sources": [s.model_dump() for s in sources_for_frontend], "id": payload.id}
+            )
 
-                if disconnected:
-                    continue
+            if first_turn:
+                title = await _generate_title_via_llm(payload.content.strip(), full)
+                yield _sse_json({"type": "title", "title": title, "id": payload.id})
 
-                full = "".join(parts).strip() or "(empty)"
+            yield _sse_json({"type": "done", "status": "success", "id": payload.id})
+            yield _sse_done()
 
-                assistant_message = ChatbotMessage(role="assistant", content=full)
-                if options.include_evidence:
-                    assistant_message.content = _append_sources_markers(assistant_message.content, citations)
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            logger.info(
+                "chatbot.sse_done request_id=%s browser_user_id=%s conversation_id=%s total_ms=%d sources=%d",
+                request_id,
+                str(browser_user_id),
+                str(conversation_uuid),
+                elapsed_ms,
+                len(sources_for_frontend),
+            )
+        except asyncio.CancelledError:
+            stop_event.set()
+            raise
+        except Exception as exc:  # noqa: BLE001
+            stop_event.set()
+            for line in _emit_error(500, "internal_error"):
+                yield line
+            logger.exception(
+                "chatbot.sse_error request_id=%s browser_user_id=%s conversation_id=%s error=%s",
+                request_id,
+                str(browser_user_id),
+                str(conversation_uuid),
+                repr(exc),
+            )
+        finally:
+            stop_event.set()
+            if acquired_global:
+                _global_semaphore.release()
+            if acquired_lock:
+                lock.release()
 
-                memory.recent_messages = list(memory.recent_messages) + [msg, assistant_message]
-                memory = _trim_memory_to_last_n_turns(memory, turns=context_turns)
-                memory.version = int(memory.version or 0) + 1
-
-                elapsed_ms = int((time.monotonic() - started) * 1000)
-                debug = ChatbotDebug(context=debug_ctx, timing_ms={"total": elapsed_ms})
-
-                await websocket.send_json(
-                    {
-                        "type": "final",
-                        "request_id": request_id,
-                        "browser_user_id": str(browser_user_id),
-                        "conversation_id": str(conversation_uuid),
-                        "memory": memory.model_dump(),
-                        "assistant": assistant_message.model_dump(),
-                        "citations": [c.model_dump() for c in citations],
-                        "debug": debug.model_dump(),
-                    }
-                )
-                if is_first_turn:
-                    asyncio.create_task(
-                        _maybe_send_ws_title(
-                            websocket,
-                            request_id=request_id,
-                            browser_user_id=browser_user_id,
-                            conversation_id=conversation_uuid,
-                            user_text=msg.content,
-                            assistant_text=assistant_message.content,
-                        )
-                    )
-                logger.info(
-                    "chatbot.ws_final request_id=%s browser_user_id=%s conversation_id=%s total_ms=%d compressed=%s citations=%d",
-                    request_id,
-                    str(browser_user_id),
-                    str(conversation_uuid),
-                    elapsed_ms,
-                    debug_ctx.compressed,
-                    len(citations),
-                )
-            finally:
-                if acquired_global:
-                    _global_semaphore.release()
-                if acquired_lock:
-                    lock.release()
-    except WebSocketDisconnect:
-        return
+    response = StreamingResponse(_event_stream(), media_type="text/event-stream", headers=headers)
+    if should_set:
+        _apply_browser_cookie(response, browser_user_id)
+    return response

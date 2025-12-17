@@ -12,7 +12,9 @@ export CHATBOT_KNOWLEDGE_CONFIG_PATH="config/json_configs/chatbot_test/knowledge
 export LOCAL_FILE_STORAGE_PATH="./test_output/chatbot_local_files"
 export CHATBOT_MAX_CONCURRENCY="${CHATBOT_MAX_CONCURRENCY:-16}"
 export CHATBOT_MAX_CONTEXT_TOKENS="${CHATBOT_MAX_CONTEXT_TOKENS:-512}"
+export CHATBOT_MAX_CONTEXT_FRACTION="${CHATBOT_MAX_CONTEXT_FRACTION:-0.9}"
 export CHATBOT_CONTEXT_TURNS="${CHATBOT_CONTEXT_TURNS:-5}"
+export CHATBOT_TOP_SOURCES="${CHATBOT_TOP_SOURCES:-5}"
 
 # Make deepsearch registration fail fast (not part of this MVP e2e).
 export DEEPSEARCH_WEB_PROVIDER=""
@@ -101,107 +103,148 @@ done
 echo "[curl-e2e] server up: http://127.0.0.1:$PORT"
 
 REQ_DIR="$(mktemp -d)"
-RESP_A1="$REQ_DIR/a1.json"
-RESP_A2="$REQ_DIR/a2.json"
-RESP_B1="$REQ_DIR/b1.json"
-REQ_A2="$REQ_DIR/a2.req.json"
+_post_sse() {
+  local owner="$1"
+  local conv="$2"
+  local content="$3"
+  local messages_json="$4"
+  local out="$5"
 
-curl -sS -X POST "http://127.0.0.1:$PORT/chatbot/chat" \
-  -H 'Content-Type: application/json' \
-  -H "X-Owner-Id: $OWNER_A" \
-  -d "{\"conversation_id\":\"$(python -c 'import uuid; print(uuid.uuid4())')\",\"message\":{\"role\":\"user\",\"content\":\"alphaA\"},\"memory\":{\"version\":0,\"summary\":\"\",\"recent_messages\":[]},\"options\":{\"include_evidence\":true,\"top_k\":3,\"return_subgraph\":false,\"max_context_fraction\":0.9}}" \
-  > "$RESP_A1"
-
-python - "$RESP_A1" >/dev/null <<'PY'
+  python - "$conv" "$content" "$messages_json" > "$REQ_DIR/request.json" <<'PY'
 import json,sys
-d=json.load(open(sys.argv[1]))
-assert "Sources: [1]" in d["assistant"]["content"]
-PY
-
-python - "$RESP_A1" > "$REQ_DIR/a_chunk_url.txt" <<'PY'
-import json,sys
-d=json.load(open(sys.argv[1]))
-assert d["citations"], "expected citations"
-print(d["citations"][0]["chunk_url"])
-PY
-
-python - "$RESP_A1" > "$REQ_DIR/a_file_url.txt" <<'PY'
-import json,sys
-d=json.load(open(sys.argv[1]))
-print(d["citations"][0]["file_url"])
-PY
-
-CHUNK_URL="$(cat "$REQ_DIR/a_chunk_url.txt")"
-FILE_URL="$(cat "$REQ_DIR/a_file_url.txt")"
-
-curl -sS -o /dev/null -w "%{http_code}" -H "X-Owner-Id: $OWNER_A" "http://127.0.0.1:$PORT$CHUNK_URL" | rg -q "^200$"
-curl -sS -o /dev/null -w "%{http_code}" -H "X-Owner-Id: $OWNER_A" "http://127.0.0.1:$PORT$FILE_URL" | rg -q "^200$"
-curl -sS -o /dev/null -w "%{http_code}" -H "X-Owner-Id: $OWNER_B" "http://127.0.0.1:$PORT$CHUNK_URL" | rg -q "^200$"
-curl -sS -o /dev/null -w "%{http_code}" -H "X-Owner-Id: $OWNER_B" "http://127.0.0.1:$PORT$FILE_URL" | rg -q "^200$"
-curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT$CHUNK_URL" | rg -q "^401$"
-
-python - <<'PY' "$RESP_A1" > "$REQ_DIR/title.req.json"
-import json,sys
-d=json.load(open(sys.argv[1]))
-req = {
-  "conversation_id": d["conversation_id"],
-  "user": "alphaA",
-  "assistant": d["assistant"]["content"],
-}
+conv=sys.argv[1]
+content=sys.argv[2]
+messages=json.loads(sys.argv[3])
+req={"id":conv,"content":content,"messages":messages,"stream":True}
 print(json.dumps(req, ensure_ascii=False))
 PY
 
-curl -sS -X POST "http://127.0.0.1:$PORT/chatbot/title" \
-  -H 'Content-Type: application/json' \
-  -H "X-Owner-Id: $OWNER_A" \
-  -d @"$REQ_DIR/title.req.json" \
-  | python -c 'import json,sys; d=json.load(sys.stdin); assert d.get("title")'
-
-python - <<'PY' "$RESP_A1" "$REQ_A2"
-import json,sys
-d=json.load(open(sys.argv[1]))
-req = {
-  "conversation_id": d["conversation_id"],
-  "message": {"role": "user", "content": "Answer again in one sentence."},
-  "memory": d["memory"],
-  "options": {"include_evidence": False, "top_k": 1, "return_subgraph": False, "max_context_fraction": 0.9},
+  curl -sS -N -X POST "http://127.0.0.1:$PORT/api/messages" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: text/event-stream' \
+    -H "X-Owner-Id: $owner" \
+    -d @"$REQ_DIR/request.json" \
+    > "$out"
 }
-open(sys.argv[2],"w",encoding="utf-8").write(json.dumps(req,ensure_ascii=False))
-PY
 
-curl -sS -X POST "http://127.0.0.1:$PORT/chatbot/chat" \
-  -H 'Content-Type: application/json' \
-  -H "X-Owner-Id: $OWNER_A" \
-  -d @"$REQ_A2" \
-  > "$RESP_A2"
-
-python - <<'PY' "$RESP_A1" "$RESP_A2"
+_assert_sse_success() {
+  local resp="$1"
+  python - "$resp" >/dev/null <<'PY'
 import json,sys
-d1=json.load(open(sys.argv[1])); d2=json.load(open(sys.argv[2]))
-assert d2["memory"]["version"] > d1["memory"]["version"]
+events=[]
+for raw in open(sys.argv[1],encoding="utf-8",errors="replace"):
+    raw=raw.strip()
+    if not raw.startswith("data: "):
+        continue
+    payload=raw[len("data: "):].strip()
+    if payload=="[DONE]":
+        break
+    events.append(json.loads(payload))
+assert any(e.get("type")=="chunk" for e in events), "missing chunk"
+assert any(e.get("type")=="sources" for e in events), "missing sources"
+done=[e for e in events if e.get("type")=="done"]
+assert done and done[-1].get("status")=="success", f"done={done[-1] if done else None}"
 PY
+}
 
-curl -sS -X POST "http://127.0.0.1:$PORT/chatbot/chat" \
-  -H 'Content-Type: application/json' \
-  -H "X-Owner-Id: $OWNER_B" \
-  -d "{\"conversation_id\":\"$(python -c 'import uuid; print(uuid.uuid4())')\",\"message\":{\"role\":\"user\",\"content\":\"betaB\"},\"memory\":{\"version\":0,\"summary\":\"\",\"recent_messages\":[]},\"options\":{\"include_evidence\":true,\"top_k\":3,\"return_subgraph\":false,\"max_context_fraction\":0.9}}" \
-  > "$RESP_B1"
-
-python - "$RESP_B1" >/dev/null <<'PY'
+_extract_sse_answer_and_sources() {
+  local resp="$1"
+  local out_answer="$2"
+  local out_sources="$3"
+  python - "$resp" "$out_answer" "$out_sources" <<'PY'
 import json,sys
-d=json.load(open(sys.argv[1]))
-assert d["citations"], "expected citations"
-print("ok")
+events=[]
+for raw in open(sys.argv[1],encoding="utf-8",errors="replace"):
+    raw=raw.strip()
+    if not raw.startswith("data: "):
+        continue
+    payload=raw[len("data: "):].strip()
+    if payload=="[DONE]":
+        break
+    events.append(json.loads(payload))
+chunks=[e.get("content","") for e in events if e.get("type")=="chunk"]
+answer="".join(chunks)
+sources=[e for e in events if e.get("type")=="sources"]
+src = sources[0]["sources"] if sources else []
+open(sys.argv[2],"w",encoding="utf-8").write(answer)
+open(sys.argv[3],"w",encoding="utf-8").write(json.dumps(src,ensure_ascii=False))
 PY
+}
+
+RESP_A1="$REQ_DIR/a1.sse.txt"
+RESP_A2="$REQ_DIR/a2.sse.txt"
+RESP_B1="$REQ_DIR/b1.sse.txt"
+ANSWER_A1="$REQ_DIR/a1.answer.txt"
+SOURCES_A1="$REQ_DIR/a1.sources.json"
+
+CONV_A="$(python -c 'import uuid; print(uuid.uuid4())')"
+_post_sse "$OWNER_A" "$CONV_A" "alphaA" "[]" "$RESP_A1"
+_assert_sse_success "$RESP_A1"
+_extract_sse_answer_and_sources "$RESP_A1" "$ANSWER_A1" "$SOURCES_A1"
+
+python - "$ANSWER_A1" "$SOURCES_A1" >/dev/null <<'PY'
+import json,sys
+answer=open(sys.argv[1],encoding="utf-8").read()
+sources=json.load(open(sys.argv[2],encoding="utf-8"))
+assert sources and sources[0].get("key")==1
+assert "<sup>1</sup>" in answer, "expected <sup> marker"
+assert sources[0].get("description"), "expected chunk text"
+PY
+
+python - "$SOURCES_A1" > "$REQ_DIR/a1.file_url.txt" <<'PY'
+import json,sys
+sources=json.load(open(sys.argv[1],encoding="utf-8"))
+print(sources[0].get("file") or "")
+PY
+
+FILE_URL="$(cat "$REQ_DIR/a1.file_url.txt")"
+if [[ -n "$FILE_URL" ]]; then
+  if [[ "$FILE_URL" == /* ]]; then
+    curl -sS "http://127.0.0.1:$PORT$FILE_URL" >/dev/null
+  elif [[ "$FILE_URL" == file://* ]]; then
+    FILE_PATH="${FILE_URL#file://}"
+    test -f "$FILE_PATH"
+    test -s "$FILE_PATH"
+  else
+    curl -sS "$FILE_URL" >/dev/null
+  fi
+fi
+
+python - "$RESP_A1" >/dev/null <<'PY'
+import json,sys
+events=[]
+for raw in open(sys.argv[1],encoding="utf-8",errors="replace"):
+    raw=raw.strip()
+    if not raw.startswith("data: "):
+        continue
+    payload=raw[len("data: "):].strip()
+    if payload=="[DONE]":
+        break
+    events.append(json.loads(payload))
+assert any(e.get("type")=="title" and e.get("title") for e in events), "expected title on first turn"
+PY
+
+python - "$ANSWER_A1" > "$REQ_DIR/a1.messages.json" <<'PY'
+import json,sys
+ans=open(sys.argv[1],encoding="utf-8").read()
+msgs=[{"role":"user","content":"alphaA"},{"role":"assistant","content":ans}]
+print(json.dumps(msgs,ensure_ascii=False))
+PY
+
+RESP_A2_ANSWER="$REQ_DIR/a2.answer.txt"
+RESP_A2_SOURCES="$REQ_DIR/a2.sources.json"
+_post_sse "$OWNER_A" "$CONV_A" "Answer again in one sentence." "$(cat "$REQ_DIR/a1.messages.json")" "$RESP_A2"
+_assert_sse_success "$RESP_A2"
+_extract_sse_answer_and_sources "$RESP_A2" "$RESP_A2_ANSWER" "$RESP_A2_SOURCES"
+
+CONV_B="$(python -c 'import uuid; print(uuid.uuid4())')"
+_post_sse "$OWNER_B" "$CONV_B" "betaB" "[]" "$RESP_B1"
+_assert_sse_success "$RESP_B1"
 
 START_MS="$(python -c 'import time; print(int(time.time()*1000))')"
-curl -sS -X POST "http://127.0.0.1:$PORT/chatbot/chat" -H 'Content-Type: application/json' -H "X-Owner-Id: $OWNER_A" \
-  -d "{\"conversation_id\":\"$(python -c 'import uuid; print(uuid.uuid4())')\",\"message\":{\"role\":\"user\",\"content\":\"alphaA\"},\"memory\":{\"version\":0,\"summary\":\"\",\"recent_messages\":[]},\"options\":{\"include_evidence\":false,\"top_k\":1,\"return_subgraph\":false,\"max_context_fraction\":0.9}}" \
-  >/dev/null &
+_post_sse "$OWNER_A" "$(python -c 'import uuid; print(uuid.uuid4())')" "alphaA" "[]" "$REQ_DIR/p1.sse.txt" &
 P1=$!
-curl -sS -X POST "http://127.0.0.1:$PORT/chatbot/chat" -H 'Content-Type: application/json' -H "X-Owner-Id: $OWNER_B" \
-  -d "{\"conversation_id\":\"$(python -c 'import uuid; print(uuid.uuid4())')\",\"message\":{\"role\":\"user\",\"content\":\"betaB\"},\"memory\":{\"version\":0,\"summary\":\"\",\"recent_messages\":[]},\"options\":{\"include_evidence\":false,\"top_k\":1,\"return_subgraph\":false,\"max_context_fraction\":0.9}}" \
-  >/dev/null &
+_post_sse "$OWNER_B" "$(python -c 'import uuid; print(uuid.uuid4())')" "betaB" "[]" "$REQ_DIR/p2.sse.txt" &
 P2=$!
 wait "$P1" "$P2"
 END_MS="$(python -c 'import time; print(int(time.time()*1000))')"
@@ -211,74 +254,63 @@ if [[ "$ELAPSED_MS" -gt 700 ]]; then
   exit 1
 fi
 
-# Long conversation under one conversation_id should keep working via last-5-turn window.
+# Long conversation under one conversation_id should keep working with front-end full history
+# while backend only uses the last 5 turns.
 LONG_CONV="$(python -c 'import uuid; print(uuid.uuid4())')"
-MEM_FILE="$REQ_DIR/long.mem.json"
-echo '{"version":0,"summary":"","recent_messages":[]}' > "$MEM_FILE"
+HIST="$REQ_DIR/long.messages.json"
+echo '[]' > "$HIST"
 for i in $(seq 1 16); do
-  python - "$MEM_FILE" "$LONG_CONV" "$i" > "$REQ_DIR/long.req.json" <<'PY'
+  MSG="${i}:$(python -c 'print("m"*60)')"
+  RESP="$REQ_DIR/long.$i.sse.txt"
+  _post_sse "$OWNER_A" "$LONG_CONV" "$MSG" "$(cat "$HIST")" "$RESP"
+  _assert_sse_success "$RESP"
+  python - "$HIST" "$MSG" "$RESP" > "$REQ_DIR/long.messages.next.json" <<'PY'
 import json,sys
-mem=json.load(open(sys.argv[1]))
-conv=sys.argv[2]
-i=int(sys.argv[3])
-msg=str(i)+":" + ("m"*60)
-req={"conversation_id":conv,"message":{"role":"user","content":msg},"memory":mem,"options":{"include_evidence":False,"top_k":1,"return_subgraph":False,"max_context_fraction":0.9}}
-print(json.dumps(req))
+hist=json.load(open(sys.argv[1],encoding="utf-8"))
+user=sys.argv[2]
+events=[]
+for raw in open(sys.argv[3],encoding="utf-8",errors="replace"):
+    raw=raw.strip()
+    if not raw.startswith("data: "):
+        continue
+    payload=raw[len("data: "):].strip()
+    if payload=="[DONE]":
+        break
+    events.append(json.loads(payload))
+chunks=[e.get("content","") for e in events if e.get("type")=="chunk"]
+assistant="".join(chunks)
+hist.append({"role":"user","content":user})
+hist.append({"role":"assistant","content":assistant})
+print(json.dumps(hist,ensure_ascii=False))
 PY
-  HTTP_CODE="$(curl -sS -o "$REQ_DIR/long.resp.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/chatbot/chat" -H 'Content-Type: application/json' -H "X-Owner-Id: $OWNER_A" -d @"$REQ_DIR/long.req.json")"
-  if [[ "$HTTP_CODE" != "200" ]]; then
-    echo "long conversation failed at turn $i (http=$HTTP_CODE):"
-    cat "$REQ_DIR/long.resp.json" || true
-    exit 1
-  fi
-  python - "$REQ_DIR/long.resp.json" "$MEM_FILE" <<'PY'
-import json,sys
-resp=json.load(open(sys.argv[1]))
-open(sys.argv[2],'w',encoding='utf-8').write(json.dumps(resp['memory'], ensure_ascii=False))
-PY
+  mv "$REQ_DIR/long.messages.next.json" "$HIST"
 done
-python - <<'PY' "$MEM_FILE" >/dev/null
+
+# Context-too-long should return SSE error without killing the server.
+TOO_LONG_CONV="$(python -c 'import uuid; print(uuid.uuid4())')"
+python - <<'PY' > "$REQ_DIR/too_long.messages.json"
+import json
+huge="x"*2000
+messages=[{"role":"user","content":huge} for _ in range(10)]
+print(json.dumps(messages))
+PY
+_post_sse "$OWNER_A" "$TOO_LONG_CONV" "hi" "$(cat "$REQ_DIR/too_long.messages.json")" "$REQ_DIR/too_long.sse.txt" || true
+python - "$REQ_DIR/too_long.sse.txt" >/dev/null <<'PY'
 import json,sys
-mem=json.load(open(sys.argv[1]))
-assert len(mem.get("recent_messages") or []) <= 10
+events=[]
+for raw in open(sys.argv[1],encoding="utf-8",errors="replace"):
+    raw=raw.strip()
+    if not raw.startswith("data: "):
+        continue
+    payload=raw[len("data: "):].strip()
+    if payload=="[DONE]":
+        break
+    events.append(json.loads(payload))
+err=[e for e in events if e.get("type")=="error"]
+assert err, f"expected error, got {events[:3]}"
+assert err[0].get("code")==413, err[0]
 PY
 
-python - <<PY
-import asyncio, json, websockets, uuid
-
-async def main():
-    conv = str(uuid.uuid4())
-    uri = f"ws://127.0.0.1:$PORT/chatbot/ws?conversation_id={conv}&owner_id=$OWNER_C"
-    async with websockets.connect(uri, additional_headers=[("X-Owner-Id", "$OWNER_C")]) as ws:
-        await ws.send(json.dumps({
-          "message": {"role": "user", "content": "stream betaB"},
-          "memory": {"version": 0, "summary": "", "recent_messages": []},
-          "options": {"include_evidence": False, "top_k": 1, "return_subgraph": False, "max_context_fraction": 0.9}
-        }))
-        start = json.loads(await ws.recv())
-        assert start["type"] == "start"
-        saw_delta = False
-        saw_title = False
-        for _ in range(200):
-            frame = json.loads(await ws.recv())
-            if frame["type"] == "delta":
-                saw_delta = True
-            if frame["type"] == "final":
-                assert saw_delta
-                assert frame["assistant"]["content"]
-                break
-        for _ in range(200):
-            frame = json.loads(await ws.recv())
-            if frame["type"] == "title":
-                assert frame["title"]
-                saw_title = True
-                break
-        assert saw_title, "expected title frame after first final"
-        return
-    raise RuntimeError("no final frame")
-
-asyncio.run(main())
-print("[curl-e2e] ws streaming OK")
-PY
+echo "[curl-e2e] SSE streaming OK"
 
 echo "[curl-e2e] OK (owners: a=$OWNER_A b=$OWNER_B c=$OWNER_C admin=$ADMIN_OWNER)"
