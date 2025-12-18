@@ -16,10 +16,12 @@ from encapsulation.data_model.orm_models import (
     Department,
     FilePermission,
     PermissionReceiverType,
-    PermissionType
+    PermissionType,
+    FileMindmapCache
 )
 from framework.register import Register
 import uuid
+import hashlib
 from application.knowledge.module import Knowledge
 from application.account.user import Account
 
@@ -362,6 +364,7 @@ async def export_knowledge_graph(
 
         # Export full graph asynchronously to avoid blocking the event loop
         scope = str(user.id)
+        knowledge_handler = get_knowledge_handler()
         
         # Use knowledge_handler's _run_blocking method if available, otherwise use global thread pool
         if hasattr(knowledge_handler, '_run_blocking'):
@@ -531,6 +534,29 @@ async def export_file_mindmap(
             detail="No mind map data found for this file"
         )
 
+    # 计算chunk的hash来判断是否需要重新生成
+    chunk_ids = sorted([chunk.get("chunk_id", "") for chunk in chunks])
+    chunk_hash = hashlib.sha256("|".join(chunk_ids).encode()).hexdigest()
+
+    # PostgreSQL缓存：检查缓存
+    knowledge_handler = get_knowledge_handler()
+    metadata_store = knowledge_handler.file_storage.metadata_store
+    
+    if hasattr(metadata_store, 'SessionMaker'):
+        try:
+            with metadata_store.SessionMaker() as session:
+                cache = session.query(FileMindmapCache).filter_by(file_id=request.file_id).first()
+                if cache and cache.chunk_hash == chunk_hash:
+                    # 缓存有效，直接返回
+                    return MindmapExportResponse(
+                        tsv=cache.tsv,
+                        nodes=[MindmapNode(**node) for node in cache.nodes],
+                        edges=[MindmapEdge(**edge) for edge in cache.edges],
+                    )
+        except Exception:
+            pass  # 查询缓存失败，继续生成新的
+
+    # 缓存不存在或已过期，重新生成
     filename = file_mindmaps.get("filename") or request.file_id
     prompt = _build_mindmap_merge_prompt(filename, chunks)
 
@@ -569,6 +595,39 @@ async def export_file_mindmap(
         )
 
     nodes, edges = _convert_tsv_to_graph(merged_tsv)
+
+    # 保存到PostgreSQL缓存
+    if hasattr(metadata_store, 'SessionMaker'):
+        try:
+            with metadata_store.SessionMaker() as session:
+                now = datetime.now()
+                nodes_data = [{"id": n["id"], "name": n["name"], "category": n["category"], "weight": n.get("weight", 1)} for n in nodes]
+                edges_data = [{"id": e["id"], "source": e["source"], "target": e["target"], "relation": e.get("relation", "包含"), "weight": e.get("weight", 1.0)} for e in edges]
+                
+                cache = session.query(FileMindmapCache).filter_by(file_id=request.file_id).first()
+                if cache:
+                    # 更新现有缓存
+                    cache.tsv = merged_tsv
+                    cache.nodes = nodes_data
+                    cache.edges = edges_data
+                    cache.chunk_hash = chunk_hash
+                    cache.updated_at = now
+                else:
+                    # 创建新缓存
+                    cache = FileMindmapCache(
+                        file_id=request.file_id,
+                        tsv=merged_tsv,
+                        nodes=nodes_data,
+                        edges=edges_data,
+                        chunk_hash=chunk_hash,
+                        created_at=now,
+                        updated_at=now
+                    )
+                    session.add(cache)
+                
+                session.commit()
+        except Exception:
+            pass  # 保存缓存失败不影响主流程
 
     return MindmapExportResponse(
         tsv=merged_tsv,

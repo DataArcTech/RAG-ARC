@@ -10,7 +10,7 @@ import uuid
 import enum
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Mapped, mapped_column, relationship, DeclarativeBase
 from sqlalchemy.dialects.postgresql import UUID, JSON
 from sqlalchemy import String, DateTime, BigInteger, Integer, Boolean, Text, Enum as SQLEnum, ForeignKey
@@ -475,3 +475,32 @@ class ChunkMetadata(Base):
     # Relationships
     source_parsed_content: Mapped["ParsedContentMetadata"] = relationship(back_populates="chunks")
     owner: Mapped["User"] = relationship()
+
+
+# ==================== FILE MINDMAP CACHE ====================
+
+@dataclass
+class FileMindmapCache(Base):
+    """
+    Cache for merged mindmap data for files.
+    Stores the merged mindmap to avoid regenerating it every time.
+    """
+    __tablename__ = 'file_mindmap_cache'
+
+    # Primary identifier
+    file_id: Mapped[str] = mapped_column(String(255), ForeignKey("file_metadata.file_id"), primary_key=True)
+
+    # Cached mindmap data
+    tsv: Mapped[str] = mapped_column(Text, nullable=False)
+    nodes: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    edges: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    
+    # Hash of chunk IDs to detect changes
+    chunk_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+    # Relationship
+    file: Mapped["FileMetadata"] = relationship()
