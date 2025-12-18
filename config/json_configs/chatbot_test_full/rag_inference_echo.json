@@ -1,0 +1,79 @@
+{
+  "type": "rag_inference",
+  "query_rewrite_config": {
+    "type": "noop_query_rewriter"
+  },
+  "retrieval_config": {
+    "type": "multipath",
+    "retrievers": [
+      {
+        "type": "dense",
+        "index_config": {
+          "index_path": "./test_output/chatbot_unified_faiss_index",
+          "metric": "cosine",
+          "index_type": "flat",
+          "normalize_L2": true,
+          "embedding_config": {
+            "type": "openai_embedding",
+            "model_name": "${OPENAI_EMBEDDING_MODEL}"
+          }
+        }
+      },
+      {
+        "type": "tantivy_bm25",
+        "index_config": {
+          "type": "bm25_builder",
+          "index_path": "./test_output/chatbot_unified_bm25_index"
+        },
+        "search_kwargs": {
+          "k": 5,
+          "with_score": true,
+          "use_phrase_query": false
+        }
+      },
+      {
+        "type": "pruned_hipporag_neo4j_retrieval",
+        "graph_config": {
+          "type": "pruned_hipporag_neo4j",
+          "url": "${NEO4J_URL}",
+          "username": "${NEO4J_USERNAME}",
+          "password": "${NEO4J_PASSWORD}",
+          "database": "${NEO4J_DATABASE}",
+          "storage_path": "./test_output/chatbot_graph_index_neo4j",
+          "index_name": "index",
+          "embedding": {
+            "type": "openai_embedding",
+            "model_name": "${OPENAI_EMBEDDING_MODEL}"
+          },
+          "add_synonymy_edges": true,
+          "synonymy_edge_topk": 100,
+          "synonymy_edge_sim_threshold": 0.8,
+          "use_float16_embeddings": true,
+          "normalize_chunk_embeddings": true
+        },
+        "llm_config": null,
+        "fact_retrieval_top_k": 10,
+        "max_facts_after_reranking": 5,
+        "enable_llm_reranking": false,
+        "damping_factor": 0.5,
+        "ppr_backend": "push"
+      }
+    ],
+    "fusion_method": "rrf",
+    "rrf_k": 60,
+    "weights": null,
+    "search_kwargs": {
+      "k": 5,
+      "with_score": true
+    }
+  },
+  "reranker_config": {
+    "type": "noop_reranker"
+  },
+  "llm_config": {
+    "type": "echo_chat",
+    "prefix": "ECHO:",
+    "chunk_chars": 24,
+    "delay_s": 0.2
+  }
+}

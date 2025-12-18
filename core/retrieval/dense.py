@@ -1,5 +1,6 @@
 from typing import Any, List, Dict, ClassVar, Collection, TYPE_CHECKING, Optional
 import logging
+import os
 
 from core.retrieval.base import BaseRetriever
 from encapsulation.data_model.schema import Chunk
@@ -117,7 +118,7 @@ class DenseRetriever(BaseRetriever):
             return []
 
 
-        query_embedding = self.embedding.embed(query)
+        query_embedding = self._embed_query_aligned(query)
         return self.similarity_search_by_vector(query_embedding, include_score=include_score, **kwargs)
 
     def similarity_search_by_vector(self, embedding: List[float], include_score: bool = False, **kwargs: Any) -> List[Chunk]:
@@ -209,7 +210,7 @@ class DenseRetriever(BaseRetriever):
             return []
 
 
-        query_embedding = self.embedding.embed(query)
+        query_embedding = self._embed_query_aligned(query)
 
         # Extract owner_id for filtering
         owner_id = kwargs.pop('owner_id', None)
@@ -272,6 +273,72 @@ class DenseRetriever(BaseRetriever):
         return RetrievalHelper.mmr_search(
             query_embedding, chunks_and_scores, self.embedding, search_kwargs
         )
+
+    def _embed_query_aligned(self, query: str) -> List[float]:
+        """
+        Embed query text while keeping vector dimensionality aligned with the loaded FAISS index.
+
+        If an index exists and embedding dimensionality mismatches, try to auto-align by setting
+        OpenAI `dimensions` (text-embedding-3-* only) when embedding_dimensions is not explicitly configured.
+        """
+        query_embedding = self.embedding.embed(query)
+        if not isinstance(query_embedding, list):
+            return query_embedding
+
+        override_supported = False
+        if hasattr(self.embedding, "supports_dimension_override"):
+            try:
+                override_supported = bool(self.embedding.supports_dimension_override())
+            except Exception:  # noqa: BLE001
+                override_supported = False
+
+        expected_dim = None
+        try:
+            if self._index is not None and getattr(self._index, "index", None) is not None:
+                expected_dim = int(getattr(self._index.index, "d", 0) or 0)
+        except Exception:  # noqa: BLE001
+            expected_dim = None
+
+        if not expected_dim or len(query_embedding) == expected_dim:
+            return query_embedding
+
+        allow_auto = os.getenv("AUTO_ALIGN_EMBEDDING_DIM", "1") == "1"
+        if not allow_auto:
+            raise RuntimeError(f"Embedding dimension mismatch: got={len(query_embedding)} expected={expected_dim}")
+
+        # Only align when embedding config didn't explicitly set embedding_dimensions.
+        try:
+            cfg = getattr(self.config.index_config, "embedding_config", None)
+            configured = getattr(cfg, "embedding_dimensions", None) if cfg is not None else None
+        except Exception:  # noqa: BLE001
+            configured = None
+
+        if configured is not None and override_supported:
+            raise RuntimeError(
+                f"Embedding dimension mismatch: got={len(query_embedding)} expected={expected_dim} "
+                f"(explicit embedding_dimensions={configured} is set)"
+            )
+
+        if configured is not None and not override_supported:
+            raise RuntimeError(
+                f"Embedding dimension mismatch: got={len(query_embedding)} expected={expected_dim}. "
+                f"Your embedding provider does not support forcing dimensions at runtime "
+                f"(EMBEDDING_DIMENSIONS={configured} is treated as a hint). Rebuild the index or switch embedding model."
+            )
+
+        if hasattr(self.embedding, "set_embedding_dimensions"):
+            try:
+                if self.embedding.set_embedding_dimensions(expected_dim):
+                    query_embedding = self.embedding.embed(query)
+            except Exception:  # noqa: BLE001
+                pass
+
+        if not isinstance(query_embedding, list) or len(query_embedding) != expected_dim:
+            raise RuntimeError(
+                f"Embedding dimension mismatch: got={len(query_embedding) if isinstance(query_embedding, list) else 'unknown'} "
+                f"expected={expected_dim}. Rebuild the FAISS index or use a compatible embedding model."
+            )
+        return query_embedding
     
     def _get_relevant_chunks(
         self,

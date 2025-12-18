@@ -51,6 +51,39 @@ class OpenAIEmbeddingLLM(EmbeddingLLMBase):
         else:
             raise ValueError(f"Unsupported loading method: {self.loading_method}")
 
+    def supports_dimension_override(self) -> bool:
+        """
+        Return True when this embedding model likely supports a server-side dimension override.
+
+        OpenAI's `dimensions` parameter is supported for text-embedding-3-* models.
+        For other models/providers we avoid forcing dimensions to prevent API errors.
+        """
+        if self.loading_method != "openai":
+            return False
+        model = str(self.model_name or "")
+        return model.startswith("text-embedding-3-")
+
+    def set_embedding_dimensions(self, dimensions: int) -> bool:
+        """
+        Set embedding dimensions on-the-fly (best-effort).
+
+        Returns True if the value was applied, False otherwise.
+        """
+        try:
+            dim = int(dimensions)
+        except Exception:  # noqa: BLE001
+            return False
+        if dim <= 0:
+            return False
+        if not self.supports_dimension_override():
+            return False
+        self.embedding_dimensions = dim
+        try:
+            setattr(self.config, "embedding_dimensions", dim)
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
     # ==================== EMBEDDING IMPLEMENTATION ====================
 
     def embed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:

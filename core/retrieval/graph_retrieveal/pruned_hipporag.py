@@ -1,4 +1,5 @@
 import logging
+import os
 import numpy as np
 import uuid
 import os
@@ -325,11 +326,53 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
             logger.error(f"FAISS fact retrieval failed: {e}")
             return np.array([]), []
 
-    def _get_query_embedding(self, query: str) -> np.ndarray:
-        """Generate embedding for query string."""
+    def _get_query_embedding(self, query: str, *, expected_dim: int | None = None) -> np.ndarray:
+        """Generate embedding for query string (optionally aligned to expected_dim)."""
         embedding = self.embedding_model.embed(query)
+
+        if expected_dim and isinstance(embedding, list) and len(embedding) != expected_dim:
+            allow_auto = os.getenv("AUTO_ALIGN_EMBEDDING_DIM", "1") == "1"
+            if allow_auto:
+                try:
+                    cfg = getattr(getattr(self, "config", None), "graph_config", None)
+                    cfg = getattr(cfg, "embedding", None) if cfg is not None else None
+                    configured = getattr(cfg, "embedding_dimensions", None) if cfg is not None else None
+                except Exception:  # noqa: BLE001
+                    configured = None
+
+                override_supported = False
+                if hasattr(self.embedding_model, "supports_dimension_override"):
+                    try:
+                        override_supported = bool(self.embedding_model.supports_dimension_override())
+                    except Exception:  # noqa: BLE001
+                        override_supported = False
+
+                if configured is not None and not override_supported:
+                    raise RuntimeError(
+                        f"Embedding dimension mismatch: got={len(embedding)} expected={expected_dim}. "
+                        f"Your embedding provider does not support forcing dimensions at runtime "
+                        f"(EMBEDDING_DIMENSIONS={configured} is treated as a hint). Rebuild graph indices or switch embedding model."
+                    )
+
+                if configured is None and hasattr(self.embedding_model, "set_embedding_dimensions"):
+                    try:
+                        if self.embedding_model.set_embedding_dimensions(int(expected_dim)):
+                            embedding = self.embedding_model.embed(query)
+                    except Exception:  # noqa: BLE001
+                        pass
+
         if isinstance(embedding, list):
             embedding = np.array(embedding)
+        if expected_dim and embedding is not None:
+            try:
+                if int(getattr(embedding, "shape", [0])[0]) != int(expected_dim):
+                    raise RuntimeError(
+                        f"Embedding dimension mismatch: got={int(getattr(embedding, 'shape', [0])[0])} expected={expected_dim}. "
+                        "Rebuild graph embeddings or use a compatible embedding model."
+                    )
+            except Exception as exc:  # noqa: BLE001
+                if isinstance(exc, RuntimeError):
+                    raise
         return embedding
 
     def _min_max_normalize(self, scores: np.ndarray) -> np.ndarray:

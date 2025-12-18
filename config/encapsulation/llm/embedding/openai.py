@@ -28,6 +28,16 @@ def _default_embedding_api_key() -> str:
 def _default_embedding_base_url() -> str:
     return os.getenv("EMBEDDING_API_BASE_URL", os.getenv("OPENAI_BASE_URL", ""))
 
+def _default_embedding_dimensions() -> Optional[int]:
+    raw = os.getenv("EMBEDDING_DIMENSIONS", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
 
 class OpenAIEmbeddingConfig(AbstractConfig):
     """Configuration for OpenAI Embedding LLM"""
@@ -39,7 +49,9 @@ class OpenAIEmbeddingConfig(AbstractConfig):
 
     # Model configuration
     model_name: str = Field(default_factory=_default_embedding_model_name)
-    embedding_dimensions: Optional[int] = None  # Custom embedding dimensions (only for supported models like text-embedding-3-*)
+    embedding_dimensions: Optional[int] = Field(
+        default_factory=_default_embedding_dimensions
+    )  # Custom embedding dimensions (OpenAI text-embedding-3-* supports `dimensions`; other providers may ignore)
 
     # HuggingFace-only knobs (used when loading_method="huggingface")
     device: str = Field(default_factory=lambda: os.getenv("EMBEDDING_DEVICE", os.getenv("DEVICE", "cpu")))

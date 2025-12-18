@@ -11,6 +11,14 @@ import httpx
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
+try:
+    import socket
+
+    _s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    _s.close()
+except PermissionError:
+    pytest.skip("Socket operations are not permitted in this environment.", allow_module_level=True)
+
 
 def _ensure_env_for_chatbot_tests() -> None:
     os.environ["RAG_INFERENCE_CONFIG_PATH"] = "config/json_configs/chatbot_test/rag_inference.json"

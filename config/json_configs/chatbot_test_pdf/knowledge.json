@@ -1,0 +1,97 @@
+{
+  "type": "knowledge",
+  "max_concurrent_indexing": 2,
+  "file_storage_config": {
+    "type": "file_storage",
+    "file_db_config": {
+      "type": "local_blob_store",
+      "base_path": "./test_output/chatbot_file_store"
+    },
+    "relational_db_config": {
+      "type": "postgresql",
+      "host": "${POSTGRES_HOST}",
+      "port": "${POSTGRES_PORT}",
+      "database": "${POSTGRES_DB}",
+      "user": "${POSTGRES_USER}",
+      "password": "${POSTGRES_PASSWORD}"
+    }
+  },
+  "index_manager_config": {
+    "type": "index_manager",
+    "file_storage_config": {
+      "type": "file_storage",
+      "file_db_config": {
+        "type": "local_blob_store",
+        "base_path": "./test_output/chatbot_file_store"
+      },
+      "relational_db_config": {
+        "type": "postgresql",
+        "host": "${POSTGRES_HOST}",
+        "port": "${POSTGRES_PORT}",
+        "database": "${POSTGRES_DB}",
+        "user": "${POSTGRES_USER}",
+        "password": "${POSTGRES_PASSWORD}"
+      }
+    },
+    "parsed_content_storage_config": {
+      "type": "parsed_content_storage",
+      "file_db_config": {
+        "type": "local_blob_store",
+        "base_path": "./test_output/chatbot_parsed_content_store"
+      },
+      "relational_db_config": {
+        "type": "postgresql",
+        "host": "${POSTGRES_HOST}",
+        "port": "${POSTGRES_PORT}",
+        "database": "${POSTGRES_DB}",
+        "user": "${POSTGRES_USER}",
+        "password": "${POSTGRES_PASSWORD}"
+      }
+    },
+    "chunk_storage_config": {
+      "type": "chunk_storage",
+      "file_db_config": {
+        "type": "local_blob_store",
+        "base_path": "./test_output/chatbot_chunk_store"
+      },
+      "relational_db_config": {
+        "type": "postgresql",
+        "host": "${POSTGRES_HOST}",
+        "port": "${POSTGRES_PORT}",
+        "database": "${POSTGRES_DB}",
+        "user": "${POSTGRES_USER}",
+        "password": "${POSTGRES_PASSWORD}"
+      }
+    },
+    "parser_config": {
+      "type": "parser_combinator",
+      "base_output_dir": "./test_output/chatbot_parsed_files",
+      "ocr_parser": {
+        "type": "vlm_ocr_parser",
+        "vlm_ocr": {
+          "type": "vlm_ocr",
+          "loading_method": "openai",
+          "model_name": "${OPENAI_OCR_MODEL}",
+          "max_tokens": 4096,
+          "temperature": 0.0
+        }
+      },
+      "native_parser": {
+        "type": "native_parser"
+      }
+    },
+    "chunker_config": {
+      "type": "token_chunker"
+    },
+    "indexer_configs": [
+      {
+        "type": "bm25_indexer",
+        "index_config": {
+          "type": "bm25_builder",
+          "index_path": "./test_output/chatbot_bm25_index"
+        }
+      }
+    ]
+  }
+}
+

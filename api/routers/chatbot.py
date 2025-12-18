@@ -6,6 +6,7 @@ import time
 import uuid
 import threading
 import mimetypes
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
@@ -36,12 +37,17 @@ _global_semaphore = asyncio.Semaphore(int(os.getenv("CHATBOT_MAX_CONCURRENCY", "
 _CHATBOT_SYSTEM_PROMPT_V2 = (
     "You are a helpful RAG assistant.\n"
     "You may be given a list of numbered Sources (key=1..N).\n"
-    "- Use Sources to answer. Do not fabricate citations.\n"
-    "- When a sentence is supported by one or more Sources, append citation markers using HTML <sup> tags.\n"
-    "  Example: This is supported.<sup>1</sup> or Multiple sources.<sup>1</sup><sup>3</sup>\n"
-    "- Do NOT use bracket citations like [1].\n"
-    "- Do NOT add a trailing 'Sources:' section.\n"
-    "- Output in Markdown. The only HTML allowed is <sup>...</sup>.\n"
+    "Rules:\n"
+    "1) If the user message is just a greeting / test / acknowledgement (e.g. '测试', 'test', 'hello', 'hi', '你好'),\n"
+    "   answer briefly and DO NOT use any Sources and DO NOT include any <sup> tags.\n"
+    "2) Otherwise, if Sources are provided, ground your answer in Sources and add inline citations using HTML <sup> tags.\n"
+    "   - Every sentence that contains factual information supported by Sources MUST end with one or more <sup>key</sup>.\n"
+    "   - Cite only the minimal number of sources needed; do NOT cite all sources by default.\n"
+    "   - Do NOT output a bare block/list of citations (e.g. '<sup>1</sup><sup>2</sup>...') without nearby supporting text.\n"
+    "   - Do NOT cite a source you did not use.\n"
+    "3) If Sources are provided but none are relevant, say you don't know based on the provided Sources and ask a clarifying question.\n"
+    "4) Do NOT use bracket citations like [1] and do NOT add a trailing 'Sources:' section.\n"
+    "5) Output in Markdown. The only HTML allowed is <sup>...</sup>.\n"
 )
 
 
@@ -345,12 +351,40 @@ def _sse_done() -> str:
     return "data: [DONE]\n\n"
 
 
-def _needs_sup_fallback(text: str) -> bool:
-    return "<sup>" not in (text or "")
+_SUP_KEY_RE = re.compile(r"<sup>\s*(?P<key>\d{1,4})\s*</sup>")
 
 
-def _sup_markers_for_sources(sources: List[ChatbotSourceItem]) -> str:
-    return "".join(f"<sup>{item.key}</sup>" for item in sources or [])
+def _extract_sup_keys(text: str) -> List[int]:
+    """Extract referenced source keys in the order they appear."""
+    if not text:
+        return []
+    seen: set[int] = set()
+    keys: List[int] = []
+    for match in _SUP_KEY_RE.finditer(text):
+        try:
+            key = int(match.group("key"))
+        except Exception:  # noqa: BLE001
+            continue
+        if key <= 0:
+            continue
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    return keys
+
+
+def _filter_sources_by_sup_keys(sources: List[ChatbotSourceItem], answer_text: str) -> List[ChatbotSourceItem]:
+    """
+    Source payload should be citation-driven:
+    - If LLM didn't output any <sup>key</sup>, return no sources.
+    - Otherwise return only the referenced sources (by key).
+    """
+    if not sources:
+        return []
+    used_keys = set(_extract_sup_keys(answer_text))
+    if not used_keys:
+        return []
+    return [s for s in sources if s.key in used_keys]
 
 def _guess_media_type(filename: str | None, fallback: str = "application/octet-stream") -> str:
     if filename:
@@ -661,12 +695,7 @@ async def messages(request: Request, payload: ChatbotApiMessagesRequest):
                 yield _sse_json({"type": "chunk", "content": item, "id": payload.id})
 
             full = "".join(parts).strip()
-            if sources_for_frontend and _needs_sup_fallback(full):
-                markers = _sup_markers_for_sources(sources_for_frontend)
-                if markers:
-                    yield _sse_json({"type": "chunk", "content": markers, "id": payload.id})
-                    full = f"{full}{markers}"
-
+            sources_for_frontend = _filter_sources_by_sup_keys(sources_for_frontend, full)
             yield _sse_json(
                 {"type": "sources", "sources": [s.model_dump() for s in sources_for_frontend], "id": payload.id}
             )

@@ -943,7 +943,15 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
         Returns:
             Array of similarity scores for all passages
         """
-        query_embedding = self._get_query_embedding(query)
+        expected_dim = None
+        try:
+            if self.passage_embeddings_array is not None and getattr(self.passage_embeddings_array, "shape", None):
+                if len(self.passage_embeddings_array.shape) == 2:
+                    expected_dim = int(self.passage_embeddings_array.shape[1])
+        except Exception:  # noqa: BLE001
+            expected_dim = None
+
+        query_embedding = self._get_query_embedding(query, expected_dim=expected_dim)
 
         # Normalize query embedding if chunk embeddings are normalized
         if self.graph_store.normalize_chunk_embeddings:

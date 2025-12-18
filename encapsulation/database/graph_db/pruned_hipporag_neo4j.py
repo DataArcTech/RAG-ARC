@@ -273,10 +273,100 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
                 logger.info(f"Loaded {len(self.chunk_embeddings)} chunk embeddings from {embeddings_path}")
                 # Mark array for rebuild on first use
                 self._chunk_embeddings_array = None
+                self._auto_align_embedding_dimensions()
             except Exception as e:
                 logger.warning(f"Failed to load chunk embeddings: {e}")
         else:
             logger.info(f"No existing chunk embeddings found at {embeddings_path}")
+
+    def _infer_embedding_dim_from_vectors(self, vectors: Any) -> Optional[int]:
+        try:
+            if isinstance(vectors, dict):
+                for value in vectors.values():
+                    if value is None:
+                        continue
+                    if hasattr(value, "shape") and getattr(value, "shape", None):
+                        shape = value.shape
+                        if len(shape) == 1 and int(shape[0]) > 0:
+                            return int(shape[0])
+                    if isinstance(value, (list, tuple)) and len(value) > 0:
+                        return int(len(value))
+                return None
+            if hasattr(vectors, "shape") and getattr(vectors, "shape", None):
+                shape = vectors.shape
+                if len(shape) == 2 and int(shape[1]) > 0:
+                    return int(shape[1])
+            if isinstance(vectors, (list, tuple)) and vectors and isinstance(vectors[0], (list, tuple)):
+                return int(len(vectors[0]))
+        except Exception:  # noqa: BLE001
+            return None
+        return None
+
+    def _infer_existing_embedding_dim(self) -> Optional[int]:
+        dim = self._infer_embedding_dim_from_vectors(self.chunk_embeddings)
+        if dim:
+            return dim
+        try:
+            if getattr(self, "fact_faiss_db", None) is not None and getattr(self.fact_faiss_db, "index", None) is not None:
+                d = getattr(self.fact_faiss_db.index, "d", None)
+                if d:
+                    return int(d)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if getattr(self, "entity_faiss_db", None) is not None and getattr(self.entity_faiss_db, "index", None) is not None:
+                d = getattr(self.entity_faiss_db.index, "d", None)
+                if d:
+                    return int(d)
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    def _auto_align_embedding_dimensions(self) -> None:
+        """
+        Best-effort: keep embedding dimensions consistent with existing on-disk indices.
+
+        This prevents runtime shape-mismatch errors when users change embedding models or
+        dimension settings after indexes were built.
+        """
+        existing_dim = self._infer_existing_embedding_dim()
+        if not existing_dim:
+            return
+
+        embedding_model = getattr(self, "embedding_model", None)
+        if embedding_model is None:
+            return
+
+        # Respect explicit config if present.
+        configured_dim = getattr(getattr(self, "config", None), "embedding", None)
+        configured_dim = getattr(configured_dim, "embedding_dimensions", None) if configured_dim is not None else None
+        if configured_dim is not None:
+            try:
+                if int(configured_dim) != int(existing_dim):
+                    logger.warning(
+                        "Embedding dimension mismatch: configured=%s existing_index=%s (will not override explicit config)",
+                        str(configured_dim),
+                        str(existing_dim),
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+            return
+
+        applied = False
+        if hasattr(embedding_model, "set_embedding_dimensions"):
+            try:
+                applied = bool(embedding_model.set_embedding_dimensions(existing_dim))
+            except Exception:  # noqa: BLE001
+                applied = False
+
+        if applied:
+            logger.info("Aligned embedding dimensions to existing index: %d", existing_dim)
+        else:
+            logger.warning(
+                "Detected existing index embeddings dimension=%d but embedding model cannot be aligned automatically; "
+                "if you hit shape errors, rebuild indexes or use a compatible embedding model.",
+                existing_dim,
+            )
 
     def _execute_query(self, query: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
