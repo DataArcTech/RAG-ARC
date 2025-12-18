@@ -8,6 +8,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import logging
 import uuid
+import hashlib
+import re
 
 from encapsulation.data_model.orm_models import FileMetadata
 from encapsulation.data_model.orm_models import FileStatus
@@ -71,6 +73,49 @@ class FileStorage(AbstractModule):
         # Create hierarchical key: files/{first-2-chars-of-id}/{file-id}/{filename}
         prefix = file_id[:2]
         return f"files/{prefix}/{file_id}/{filename}"
+
+    def _normalize_content_hash(self, file_data: bytes, filename: str) -> str:
+        """
+        Calculate content hash after removing punctuation and whitespace.
+        
+        Args:
+            file_data: Binary file data
+            filename: Filename for extension detection
+            
+        Returns:
+            SHA256 hash string
+        """
+        try:
+            # Try to extract text content for text-based files
+            file_ext = filename.lower().split('.')[-1] if '.' in filename else ''
+            text_content = None
+            
+            # For text files, decode and normalize
+            if file_ext in ['txt', 'md', 'html', 'htm']:
+                try:
+                    text_content = file_data.decode('utf-8')
+                except UnicodeDecodeError:
+                    pass
+            
+            # For other files, use raw bytes (will normalize later)
+            if text_content is None:
+                text_content = file_data.decode('utf-8', errors='ignore')
+            
+            # Remove punctuation and normalize whitespace
+            # Remove all punctuation except spaces
+            normalized = re.sub(r'[^\w\s]', '', text_content)
+            # Normalize whitespace to single spaces
+            normalized = re.sub(r'\s+', ' ', normalized)
+            # Remove leading/trailing whitespace and convert to lowercase
+            normalized = normalized.strip().lower()
+            
+            # Calculate hash
+            return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+            
+        except Exception as e:
+            logger.warning(f"Failed to calculate normalized hash, using raw hash: {e}")
+            # Fallback: use raw file hash
+            return hashlib.sha256(file_data).hexdigest()
 
     def _validate_file_upload(
         self,
@@ -193,6 +238,35 @@ class FileStorage(AbstractModule):
             self._validate_file_upload(filename, file_data)
             logger.info(f"Validated file upload request: {filename}")
 
+            # Check for duplicate content
+            content_hash = self._normalize_content_hash(file_data, filename)
+            
+            # Query database for duplicates
+            if hasattr(self.metadata_store, 'SessionMaker'):
+                try:
+                    with self.metadata_store.SessionMaker() as session:
+                        # Check by filename first
+                        same_name_file = session.query(FileMetadata).filter_by(
+                            filename=filename,
+                            owner_id=owner_id
+                        ).first()
+                        
+                        if same_name_file and same_name_file.content_hash == content_hash:
+                            logger.info(f"Duplicate file detected (same filename and content): {same_name_file.file_id}")
+                            return same_name_file.file_id
+                        
+                        # Check by content hash (different filename but same content)
+                        same_content_file = session.query(FileMetadata).filter_by(
+                            content_hash=content_hash,
+                            owner_id=owner_id
+                        ).first()
+                        
+                        if same_content_file and same_content_file.filename != filename:
+                            logger.info(f"Duplicate content detected (different filename): {same_content_file.file_id}")
+                            return same_content_file.file_id
+                except Exception as e:
+                    logger.warning(f"Failed to check duplicates, proceeding with upload: {e}")
+
             # Generate IDs and keys
             file_id = self._generate_file_id()
             blob_key = self._generate_blob_key(file_id, filename)
@@ -211,6 +285,7 @@ class FileStorage(AbstractModule):
                 status=FileStatus.STORED,
                 file_size=file_size,
                 content_type=content_type,
+                content_hash=content_hash,
                 created_at=now,
                 updated_at=now
             )

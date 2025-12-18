@@ -283,6 +283,7 @@ class FileMetadata(Base):
     # File properties
     file_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
     content_type: Mapped[str] = mapped_column(String(100))
+    content_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
