@@ -9,6 +9,7 @@ import asyncio
 import logging
 import time
 import uuid
+import weakref
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -23,14 +24,14 @@ from core.graph_adapter.base import GraphDeepSearchAdapter
 
 logger = logging.getLogger(__name__)
 
-_GLOBAL_ADAPTER_LOCKS: dict[int, asyncio.Lock] = {}
+_GLOBAL_ADAPTER_LOCKS: "weakref.WeakKeyDictionary[GraphDeepSearchAdapter, asyncio.Lock]" = weakref.WeakKeyDictionary()
 
 
 def _global_adapter_lock(adapter: GraphDeepSearchAdapter) -> asyncio.Lock:
-    lock = _GLOBAL_ADAPTER_LOCKS.get(id(adapter))
+    lock = _GLOBAL_ADAPTER_LOCKS.get(adapter)
     if lock is None:
         lock = asyncio.Lock()
-        _GLOBAL_ADAPTER_LOCKS[id(adapter)] = lock
+        _GLOBAL_ADAPTER_LOCKS[adapter] = lock
     return lock
 
 

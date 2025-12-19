@@ -40,8 +40,8 @@ class VLMOcrConfig(AbstractConfig):
     max_retries: int = 3
 
     # VLLM configuration (when loading_method="vllm")
-    base_url: str = "http://localhost:8000/v1"
-    api_key: str = "sk-xxx"
+    base_url: str = Field(default_factory=lambda: os.getenv("OCR_API_BASE_URL", os.getenv("OPENAI_BASE_URL", "http://localhost:8000/v1")))
+    api_key: str = Field(default_factory=_default_ocr_api_key)
 
     # Inference parameters
     max_tokens: int = 4096

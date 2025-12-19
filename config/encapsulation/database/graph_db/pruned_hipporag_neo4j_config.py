@@ -46,11 +46,11 @@ class PrunedHippoRAGNeo4jConfig(AbstractConfig):
 
     # Storage configuration for FAISS indices
     storage_path: str = Field(
-        default="./data/graph_index_neo4j",
+        default_factory=lambda: os.getenv("GRAPH_STORAGE_PATH", "./data/graph_index_neo4j"),
         description="Directory path for storing FAISS index files"
     )
     index_name: str = Field(
-        default="index",
+        default_factory=lambda: os.getenv("GRAPH_INDEX_NAME", "index"),
         description="Name prefix for index files"
     )
 

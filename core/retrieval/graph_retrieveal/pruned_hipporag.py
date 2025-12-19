@@ -870,15 +870,17 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
 
         # Collect passage embeddings
         passage_embeddings_list = []
+        embedding_dim: int | None = None
         for chunk_id in self.passage_node_keys:
             if chunk_id in self.graph_store.chunk_embeddings:
                 passage_embeddings_list.append(self.graph_store.chunk_embeddings[chunk_id])
             else:
                 # Use zero embedding for missing chunks
-                if passage_embeddings_list:
-                    embedding_dim = len(passage_embeddings_list[0])
-                else:
-                    embedding_dim = 1024
+                if embedding_dim is None:
+                    if passage_embeddings_list:
+                        embedding_dim = len(passage_embeddings_list[0])
+                    else:
+                        embedding_dim = self.graph_store.embedding_model.get_embedding_dimension()
                 passage_embeddings_list.append(np.zeros(embedding_dim))
 
         if not passage_embeddings_list:

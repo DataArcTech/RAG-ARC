@@ -259,19 +259,54 @@ class TokenChunker(AbstractChunker):
             disallowed_special=disallowed_special,
         )
 
+        def _decode_utf8_without_replacement(
+            token_ids: List[int],
+        ) -> str:
+            chunk_bytes = tokenizer.decode_bytes(token_ids)
+            try:
+                return chunk_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                # If the token slice cuts through a multi-byte UTF-8 sequence, decoding the
+                # raw bytes fails. Fall back to ignoring invalid edge bytes to avoid U+FFFD.
+                return chunk_bytes.decode("utf-8", errors="ignore")
+
+        def _decode_token_window(start: int, end: int) -> tuple[str, int, int]:
+            # Try to expand/shrink token boundaries slightly so the decoded bytes form valid UTF-8.
+            # This avoids introducing U+FFFD (replacement chars) that can appear when using
+            # tokenizer.decode() on token slices cutting through multi-byte sequences.
+            max_adjust = 4
+            n = len(input_ids)
+            for start_shift in range(0, max_adjust + 1):
+                s = max(0, start - start_shift)
+                for end_shift in range(0, max_adjust + 1):
+                    e = min(n, end + end_shift)
+                    if s >= e:
+                        continue
+                    chunk_bytes = tokenizer.decode_bytes(input_ids[s:e])
+                    try:
+                        return chunk_bytes.decode("utf-8"), s, e
+                    except UnicodeDecodeError:
+                        continue
+
+            # Last resort: decode with invalid bytes ignored (still guarantees no U+FFFD).
+            return _decode_utf8_without_replacement(input_ids[start:end]), start, end
+
         # Split tokens into chunks with overlap
         splits = []
         start_idx = 0
 
         while start_idx < len(input_ids):
             end_idx = min(start_idx + chunk_size, len(input_ids))
-            chunk_ids = input_ids[start_idx:end_idx]
-            chunk_text = tokenizer.decode(chunk_ids)
+            chunk_text, _, actual_end = _decode_token_window(start_idx, end_idx)
             splits.append(chunk_text)
 
-            if end_idx == len(input_ids):
+            if actual_end >= len(input_ids):
                 break
 
-            start_idx += chunk_size - chunk_overlap
+            next_start = max(0, actual_end - chunk_overlap)
+            if next_start <= start_idx:
+                # Safety valve to ensure forward progress even if adjustment behaved unexpectedly.
+                next_start = start_idx + max(1, chunk_size - chunk_overlap)
+            start_idx = next_start
 
         return splits

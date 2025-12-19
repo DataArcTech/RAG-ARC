@@ -20,7 +20,9 @@ class QwenRerankConfig(AbstractConfig):
     device: str = Field(default_factory=lambda: os.getenv("RERANKER_DEVICE", os.getenv("DEVICE", "cpu")))
     cache_folder: Optional[str] = Field(default_factory=lambda: os.getenv("RERANKER_CACHE_FOLDER", "./models/Qwen"))
 
-    use_china_mirror: bool = False  # Whether to use domestic mirror source
+    use_china_mirror: bool = Field(
+        default_factory=lambda: os.getenv("USE_CHINA_MIRROR", "").strip().lower() in {"1", "true", "yes", "y", "on"}
+    )
 
     # Template configuration for Qwen conversation format
     prefix: str = "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n"  # System prompt template

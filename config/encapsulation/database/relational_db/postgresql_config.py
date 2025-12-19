@@ -1,6 +1,7 @@
 """Configuration for PostgreSQL relational database"""
 
 import os
+from pydantic import Field
 from framework.config import AbstractConfig
 from encapsulation.database.relational_db.postgresql import PostgreSQLDB
 from typing import Literal
@@ -12,11 +13,11 @@ class PostgreSQLConfig(AbstractConfig):
     type: Literal["postgresql"] = "postgresql"
 
     # Database connection configuration (read from environment variables)
-    host: str = "localhost"  # PostgreSQL server host
-    port: str = "5555"  # PostgreSQL server port (matches local Docker default when exposed)
-    database: str = "rag_arc"  # Database name
-    user: str = "postgres"  # Database username
-    password: str = "123"  # Database password
+    host: str = Field(default_factory=lambda: os.getenv("POSTGRES_HOST", "localhost"))
+    port: str = Field(default_factory=lambda: os.getenv("POSTGRES_PORT", "5555"))
+    database: str = Field(default_factory=lambda: os.getenv("POSTGRES_DB", "rag_arc"))
+    user: str = Field(default_factory=lambda: os.getenv("POSTGRES_USER", "postgres"))
+    password: str = Field(default_factory=lambda: os.getenv("POSTGRES_PASSWORD", "123"))
 
     def build(self) -> PostgreSQLDB:
         return PostgreSQLDB(self)

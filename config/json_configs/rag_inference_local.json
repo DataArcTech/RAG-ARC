@@ -13,16 +13,17 @@
             {
                 "type": "dense",
                 "index_config": {
-                    "index_path": "./data/unified_faiss_index",
+                    "index_path": "${FAISS_INDEX_PATH}",
                     "metric": "cosine",
                     "index_type": "flat",
                     "normalize_L2": true,
                     "embedding_config": {
                         "type": "qwen_embedding",
                         "model_name": "${EMBEDDING_MODEL_NAME}",
-                        "device": "${DEVICE}",
+                        "device": "${EMBEDDING_DEVICE}",
                         "use_china_mirror": true,
-                        "cache_folder": "./models/Qwen"
+                        "cache_folder": "${EMBEDDING_CACHE_FOLDER}",
+                        "embedding_dimensions": "${EMBEDDING_DIMENSIONS}"
                     }
                 }
             },
@@ -30,7 +31,7 @@
                 "type": "tantivy_bm25",
                 "index_config": {
                     "type": "bm25_builder",
-                    "index_path": "./data/unified_bm25_index"
+                    "index_path": "${BM25_INDEX_PATH}"
                 }
             },
             {
@@ -41,14 +42,15 @@
                     "username": "${NEO4J_USERNAME}",
                     "password": "${NEO4J_PASSWORD}",
                     "database": "${NEO4J_DATABASE}",
-                    "storage_path": "./data/graph_index_neo4j",
-                    "index_name": "index",
+                    "storage_path": "${GRAPH_STORAGE_PATH}",
+                    "index_name": "${GRAPH_INDEX_NAME}",
                     "embedding": {
                         "type": "qwen_embedding",
                         "model_name": "${EMBEDDING_MODEL_NAME}",
-                        "device": "${DEVICE}",
+                        "device": "${EMBEDDING_DEVICE}",
                         "use_china_mirror": true,
-                        "cache_folder": "./models/Qwen"
+                        "cache_folder": "${EMBEDDING_CACHE_FOLDER}",
+                        "embedding_dimensions": "${EMBEDDING_DIMENSIONS}"
                     },
                     "add_synonymy_edges": true,
                     "synonymy_edge_topk": 100,

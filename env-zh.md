@@ -20,11 +20,13 @@
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | 默认嵌入模型名称。 |
 | `EMBEDDING_DEVICE` | `cpu` | HuggingFace 嵌入模型运行设备（仅当 `EMBEDDING_MODEL_PROVIDER=huggingface` 时使用）。 |
 | `EMBEDDING_CACHE_FOLDER` | _(空)_ | 可选：HuggingFace 嵌入模型缓存目录。 |
+| `EMBEDDING_DIMENSIONS` | _(空)_ | 本地 HuggingFace embedding 必填：嵌入向量维度；使用 OpenAI 兼容 API 时可留空，系统会自动探测维度（也可填入作为覆盖）。 |
 | `OCR_MODEL_PROVIDER` | `openai` | OCR/VLM 提供方（`openai`、`vllm`、`dots_ocr` 等）。 |
 | `OCR_API_KEY` | _(空)_ | OCR/VLM 的 API Key（使用云端 API 时必填）。 |
 | `OCR_API_BASE_URL` | _(空)_ | OCR/VLM 的 Base URL。 |
 | `OPENAI_OCR_MODEL` | `gpt-4o-mini` | 默认 OCR/VLM 模型名称。 |
 | `DOTS_OCR_CACHE_FOLDER` | `./models/dots_ocr` | dots_ocr 模型缓存路径。 |
+| `USE_CHINA_MIRROR` | `false` | 是否启用 HuggingFace 国内镜像（影响本地 embedding/reranker 等）。 |
 | `RERANKER_MODEL_NAME` | `Qwen/Qwen3-Reranker-0.6B` | 默认本地 reranker 模型名（`MODEL_PROFILE=local` 时使用）。 |
 | `RERANKER_CACHE_FOLDER` | `./models/Qwen` | reranker 缓存目录。 |
 | `RERANKER_DEVICE` | `cpu` | reranker 运行设备。 |
@@ -33,6 +35,18 @@
 | `DEVICE` | `cpu` | 可选：共享默认设备（当各组件设备变量为空时使用）。 |
 | `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | 使用本地 HuggingFace 嵌入时的模型名（`EMBEDDING_MODEL_PROVIDER=huggingface`）。 |
 | `MODEL_PROFILE` | `api` | 选择配置档（`api` 或 `local`），影响默认 JSON 配置。 |
+
+## 1.1 索引与存储路径
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `FILE_STORE_BASE_PATH` | `./data/file_store` | 文件原始内容存储目录（本地 blob store）。 |
+| `PARSED_CONTENT_STORE_BASE_PATH` | `./data/parsed_content_store` | 解析结果存储目录。 |
+| `CHUNK_STORE_BASE_PATH` | `./data/chunk_store` | Chunk 存储目录。 |
+| `FAISS_INDEX_PATH` | `./data/unified_faiss_index` | 统一 FAISS 索引目录。 |
+| `BM25_INDEX_PATH` | `./data/unified_bm25_index` | 统一 BM25 索引目录。 |
+| `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | 图索引/向量缓存落盘目录（Neo4j HippoRAG）。 |
+| `GRAPH_INDEX_NAME` | `index` | 图索引文件前缀名。 |
 
 ## 2. 证据输出控制
 

@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 AUTH_TOKEN = os.getenv("RAGARC_E2E_TOKEN")
 pytestmark = pytest.mark.skipif(
-    AUTH_TOKEN is None,
+    not AUTH_TOKEN,
     reason="Set RAGARC_E2E_TOKEN with a valid bearer token to run this end-to-end test.",
 )
 

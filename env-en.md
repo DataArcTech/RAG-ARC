@@ -20,11 +20,13 @@ All runtime behavior is controlled through `.env`. By default, `.env.example` al
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Default embedding model name. |
 | `EMBEDDING_DEVICE` | `cpu` | HuggingFace embedding runtime device (used when `EMBEDDING_MODEL_PROVIDER=huggingface`). |
 | `EMBEDDING_CACHE_FOLDER` | _(empty)_ | Optional HuggingFace cache folder for embedding weights. |
+| `EMBEDDING_DIMENSIONS` | _(empty)_ | Required for local HuggingFace embeddings: embedding vector dimension. For OpenAI-compatible APIs you can leave it empty (auto-detected) or set it to override. |
 | `OCR_MODEL_PROVIDER` | `openai` | OCR/VLM provider (`openai`, `vllm`, `dots_ocr`). |
 | `OCR_API_KEY` | _(empty)_ | API key for OCR provider (required for hosted APIs). |
 | `OCR_API_BASE_URL` | _(empty)_ | Base URL for OCR provider. |
 | `OPENAI_OCR_MODEL` | `gpt-4o-mini` | OCR/VLM model name. |
 | `DOTS_OCR_CACHE_FOLDER` | `./models/dots_ocr` | Local cache for dots_ocr weights. |
+| `USE_CHINA_MIRROR` | `false` | Enable a HuggingFace mirror for local models (embedding/reranker, etc.). |
 | `RERANKER_MODEL_NAME` | `Qwen/Qwen3-Reranker-0.6B` | Default local reranker model name (used when `MODEL_PROFILE=local`). |
 | `RERANKER_CACHE_FOLDER` | `./models/Qwen` | Cache path for reranker checkpoints. |
 | `RERANKER_DEVICE` | `cpu` | Reranker runtime device. |
@@ -33,6 +35,18 @@ All runtime behavior is controlled through `.env`. By default, `.env.example` al
 | `DEVICE` | `cpu` | Optional shared default device used when component-specific device vars are empty. |
 | `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | Local HuggingFace embedding model name when `EMBEDDING_MODEL_PROVIDER=huggingface`. |
 | `MODEL_PROFILE` | `api` | Chooses config profile (`api` or `local`). Impacts default JSON configs. |
+
+## 1.1 Index & Storage Paths
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `FILE_STORE_BASE_PATH` | `./data/file_store` | Local blob store base path for original files. |
+| `PARSED_CONTENT_STORE_BASE_PATH` | `./data/parsed_content_store` | Parsed content store path. |
+| `CHUNK_STORE_BASE_PATH` | `./data/chunk_store` | Chunk store path. |
+| `FAISS_INDEX_PATH` | `./data/unified_faiss_index` | Unified FAISS index directory. |
+| `BM25_INDEX_PATH` | `./data/unified_bm25_index` | Unified BM25 index directory. |
+| `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | Graph index / embedding cache directory (Neo4j HippoRAG). |
+| `GRAPH_INDEX_NAME` | `index` | Graph index file name prefix. |
 
 ## 2. Evidence Output Controls
 

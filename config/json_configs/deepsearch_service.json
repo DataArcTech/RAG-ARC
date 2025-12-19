@@ -5,7 +5,7 @@
     "max_steps": 8,
     "enable_sub_question": true,
     "persist_plan": true,
-    "plan_output_dir": "./local/deepsearch_runs",
+    "plan_output_dir": "${DEEPSEARCH_PLAN_OUTPUT_DIR}",
     "allow_external_channel": false,
     "graph_channel_tool": "graph_adapter.query",
     "text_channel_tool": "graph.context_rollup",
@@ -25,11 +25,12 @@
           "username": "${NEO4J_USERNAME}",
           "password": "${NEO4J_PASSWORD}",
           "database": "${NEO4J_DATABASE}",
-          "storage_path": "./data/graph_index_neo4j",
-          "index_name": "index",
+          "storage_path": "${GRAPH_STORAGE_PATH}",
+          "index_name": "${GRAPH_INDEX_NAME}",
           "embedding": {
             "type": "openai_embedding",
             "model_name": "${OPENAI_EMBEDDING_MODEL}",
+            "embedding_dimensions": "${EMBEDDING_DIMENSIONS}",
             "openai_api_key": "${OPENAI_API_KEY}",
             "openai_base_url": "${OPENAI_BASE_URL}"
           },

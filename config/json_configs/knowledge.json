@@ -4,7 +4,7 @@
         "type": "file_storage",
         "file_db_config": {
             "type": "local_blob_store",
-            "base_path": "./data/file_store"
+            "base_path": "${FILE_STORE_BASE_PATH}"
         },
         "relational_db_config": {
             "type": "postgresql",
@@ -21,7 +21,7 @@
             "type": "file_storage",
             "file_db_config": {
                 "type": "local_blob_store",
-                "base_path": "./data/file_store"
+                "base_path": "${FILE_STORE_BASE_PATH}"
             },
             "relational_db_config": {
                 "type": "postgresql",
@@ -36,7 +36,7 @@
             "type": "parsed_content_storage",
             "file_db_config": {
                 "type": "local_blob_store",
-                "base_path": "./data/parsed_content_store"
+                "base_path": "${PARSED_CONTENT_STORE_BASE_PATH}"
             },
             "relational_db_config": {
                 "type": "postgresql",
@@ -51,7 +51,7 @@
             "type": "chunk_storage",
             "file_db_config": {
                 "type": "local_blob_store",
-                "base_path": "./data/chunk_store"
+                "base_path": "${CHUNK_STORE_BASE_PATH}"
             },
             "relational_db_config": {
                 "type": "postgresql",
@@ -106,11 +106,12 @@
                     "username": "${NEO4J_USERNAME}",
                     "password": "${NEO4J_PASSWORD}",
                     "database": "${NEO4J_DATABASE}",
-                    "storage_path": "./data/graph_index_neo4j",
-                    "index_name": "index",
+                    "storage_path": "${GRAPH_STORAGE_PATH}",
+                    "index_name": "${GRAPH_INDEX_NAME}",
                     "embedding": {
                         "type": "openai_embedding",
-                        "model_name": "${OPENAI_EMBEDDING_MODEL}"
+                        "model_name": "${OPENAI_EMBEDDING_MODEL}",
+                        "embedding_dimensions": "${EMBEDDING_DIMENSIONS}"
                     },
                     "add_synonymy_edges": true,
                     "synonymy_edge_topk": 100,
@@ -123,13 +124,14 @@
                 "type": "faiss_indexer",
                 "index_config": {
                     "type": "faiss",
-                    "index_path": "./data/unified_faiss_index",
+                    "index_path": "${FAISS_INDEX_PATH}",
                     "metric": "cosine",
                     "index_type": "flat",
                     "normalize_L2": true,
                     "embedding_config": {
                         "type": "openai_embedding",
-                        "model_name": "${OPENAI_EMBEDDING_MODEL}"
+                        "model_name": "${OPENAI_EMBEDDING_MODEL}",
+                        "embedding_dimensions": "${EMBEDDING_DIMENSIONS}"
                     }
                 }
             },
@@ -137,7 +139,7 @@
                 "type": "bm25_indexer",
                 "index_config": {
                     "type": "bm25_builder",
-                    "index_path": "./data/unified_bm25_index"
+                    "index_path": "${BM25_INDEX_PATH}"
                 }
             }
         ]

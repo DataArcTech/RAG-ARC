@@ -411,19 +411,33 @@ curl -X GET "http://localhost:8000/session/YOUR_SESSION_ID/messages" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
 ```
 
-### WebSocket流式对话（Python示例，需先安装websockets库）：
+### SSE 流式对话（Python 示例）：
 
 ```python
-import asyncio
-import websockets
+import json
+import httpx
 
-async def chat():
-    uri = 'ws://localhost:8000/rag_inference/stream_chat/YOUR_SESSION_ID'
-    async with websockets.connect(uri, additional_headers=[('Cookie', 'auth_token=YOUR_ACCESS_TOKEN')]) as ws:
-        await ws.send('你好，RAG-ARC!')
-        print(await ws.recv())
+def chat_sse(session_id: str, access_token: str):
+    url = f"http://localhost:8000/rag_inference/stream_chat/{session_id}"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    params = {"query": "你好，RAG-ARC!", "include_evidence": "true"}
 
-asyncio.run(chat())
+    current_event = None
+    with httpx.stream("GET", url, headers=headers, params=params, timeout=120.0) as r:
+        r.raise_for_status()
+        for line in r.iter_lines():
+            if not line:
+                continue
+            if line.startswith("event:"):
+                current_event = line.split(":", 1)[1].strip()
+                continue
+            if line.startswith("data:") and current_event == "message":
+                payload = json.loads(line.split(":", 1)[1].strip())
+                print(payload["message"]["content"]["content"])
+            if line.startswith("data:") and current_event == "done":
+                break
+
+chat_sse("YOUR_SESSION_ID", "YOUR_ACCESS_TOKEN")
 ```
 
 > 需要结构化证据信息时，请在 HTTP 请求体中设置 `include_evidence=true`（可搭配 `return_subgraph=true`），响应会新增 `evidence` 字段，包含命中的 chunk、图三元组、种子实体以及序列化子图。CLI 的 `chat` / `pipeline` / `graph-qa` 命令提供 `--with-evidence`，`/deepsearch/run` 也支持 `include_evidence`，MCP 接口默认携带该信息。
@@ -493,7 +507,7 @@ RAG-ARC 提供了全面的 REST API，包含以下关键端点：
 
 ### RAG 推理
 - `POST /rag_inference/chat`：与 RAG 系统对话
-- `WebSocket /rag_inference/stream_chat/{session_id}`：基于 WebSocket 的流式对话
+- `GET /rag_inference/stream_chat/{session_id}`：基于 SSE 的流式对话
 
 ### 用户管理
 - `POST /auth/register`：用户注册

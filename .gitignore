@@ -216,3 +216,4 @@ models/
 benchmark/
 docs-proj/
 sql/
+test_output/

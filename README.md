@@ -395,19 +395,33 @@ curl -X GET "http://localhost:8000/session/YOUR_SESSION_ID/messages" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
 ```
 
-### WebSocket streaming chat (Python example, requires websockets library):
+### SSE streaming chat (Python example):
 
 ```python
-import asyncio
-import websockets
+import json
+import httpx
 
-async def chat():
-    uri = 'ws://localhost:8000/rag_inference/stream_chat/YOUR_SESSION_ID'
-    async with websockets.connect(uri, additional_headers=[('Cookie', 'auth_token=YOUR_ACCESS_TOKEN')]) as ws:
-        await ws.send('Hello, RAG-ARC!')
-        print(await ws.recv())
+def chat_sse(session_id: str, access_token: str):
+    url = f"http://localhost:8000/rag_inference/stream_chat/{session_id}"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    params = {"query": "Hello, RAG-ARC!", "include_evidence": "true"}
 
-asyncio.run(chat())
+    current_event = None
+    with httpx.stream("GET", url, headers=headers, params=params, timeout=120.0) as r:
+        r.raise_for_status()
+        for line in r.iter_lines():
+            if not line:
+                continue
+            if line.startswith("event:"):
+                current_event = line.split(":", 1)[1].strip()
+                continue
+            if line.startswith("data:") and current_event == "message":
+                payload = json.loads(line.split(":", 1)[1].strip())
+                print(payload["message"]["content"]["content"])
+            if line.startswith("data:") and current_event == "done":
+                break
+
+chat_sse("YOUR_SESSION_ID", "YOUR_ACCESS_TOKEN")
 ```
 
 > Evidence payloads: When `include_evidence=true` (and optionally `return_subgraph=true`) the HTTP response includes an `evidence` object with the retrieved chunks, graph triples, seed entities, and a serialized subgraph. The CLI mirrors this behavior via the `--with-evidence` flag on `chat`, `pipeline`, and `graph-qa`, and `/deepsearch/run` accepts the same flag to attach evidence to the DeepSearch report.
@@ -477,7 +491,7 @@ RAG-ARC provides a comprehensive REST API with the following key endpoints:
 
 ### RAG Inference
 - `POST /rag_inference/chat`: Chat with the RAG system
-- `WebSocket /rag_inference/stream_chat/{session_id}`: WebSocket-based streaming chat
+- `GET /rag_inference/stream_chat/{session_id}`: SSE-based streaming chat
 
 ### User Management
 - `POST /auth/register`: User registration

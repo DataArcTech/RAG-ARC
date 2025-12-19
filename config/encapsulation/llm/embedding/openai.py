@@ -4,6 +4,7 @@ import os
 from typing import Any, Dict, Literal, Optional
 
 from pydantic import Field
+from pydantic import model_validator
 
 from framework.config import AbstractConfig
 from encapsulation.llm.embedding.openai import OpenAIEmbeddingLLM
@@ -28,6 +29,12 @@ def _default_embedding_api_key() -> str:
 def _default_embedding_base_url() -> str:
     return os.getenv("EMBEDDING_API_BASE_URL", os.getenv("OPENAI_BASE_URL", ""))
 
+def _env_int(name: str) -> Optional[int]:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return None
+    return int(raw)
+
 
 class OpenAIEmbeddingConfig(AbstractConfig):
     """Configuration for OpenAI Embedding LLM"""
@@ -39,7 +46,9 @@ class OpenAIEmbeddingConfig(AbstractConfig):
 
     # Model configuration
     model_name: str = Field(default_factory=_default_embedding_model_name)
-    embedding_dimensions: Optional[int] = None  # Custom embedding dimensions (only for supported models like text-embedding-3-*)
+    embedding_dimensions: Optional[int] = Field(
+        default_factory=lambda: _env_int("EMBEDDING_DIMENSIONS")
+    )  # Optional override (and required when loading_method="huggingface")
 
     # HuggingFace-only knobs (used when loading_method="huggingface")
     device: str = Field(default_factory=lambda: os.getenv("EMBEDDING_DEVICE", os.getenv("DEVICE", "cpu")))
@@ -54,6 +63,15 @@ class OpenAIEmbeddingConfig(AbstractConfig):
     # Connection configuration
     timeout: float = 60.0  # Request timeout in seconds
     max_retries: int = 3  # Number of retry attempts on failure
+
+    @model_validator(mode="after")
+    def _validate_embedding_dimensions(self):
+        if self.loading_method == "huggingface" and self.embedding_dimensions is None:
+            raise ValueError(
+                "embedding_dimensions is required when loading_method='huggingface'. "
+                "Set EMBEDDING_DIMENSIONS (or provide embedding_dimensions in config JSON)."
+            )
+        return self
 
     def build(self) -> OpenAIEmbeddingLLM:
         return OpenAIEmbeddingLLM(self)

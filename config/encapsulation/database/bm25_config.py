@@ -1,3 +1,4 @@
+import os
 from typing import Literal, Optional, Dict, Any
 from pydantic import Field, field_validator
 from framework.config import AbstractConfig
@@ -8,7 +9,10 @@ class BM25BuilderConfig(AbstractConfig):
     """bm25 index builder configuration"""
     type: Literal["bm25_builder"] = "bm25_builder"
 
-    index_path: str = Field(description="index storage path")
+    index_path: str = Field(
+        default_factory=lambda: os.getenv("BM25_INDEX_PATH", "./data/unified_bm25_index"),
+        description="index storage path",
+    )
     bm25_k1: float = Field(default=1.2, description="bm25 k1 parameter")
     bm25_b: float = Field(default=0.75, description="bm25 b parameter")
 
