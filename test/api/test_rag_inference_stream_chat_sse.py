@@ -62,21 +62,31 @@ def test_rag_inference_stream_chat_sse_emits_message_event(monkeypatch, client):
         app.dependency_overrides.pop(rag_router.get_current_user, None)
 
     assert resp.status_code == 200
-    assert "event: message" in resp.text
+    assert '"object":"chat.completion.chunk"' in resp.text
+    assert "data: [DONE]" in resp.text
 
-    payload = None
-    current_event = None
+    parts: list[str] = []
+    first_chunk = None
     for raw_line in resp.text.splitlines():
         line = raw_line.strip("\r")
-        if line.startswith("event:"):
-            current_event = line.split(":", 1)[1].strip()
+        if not line.startswith("data:"):
             continue
-        if line.startswith("data:") and current_event == "message":
-            payload = json.loads(line.split(":", 1)[1].strip())
+        data = line.split(":", 1)[1].strip()
+        if data == "[DONE]":
             break
+        chunk = json.loads(data)
+        if first_chunk is None:
+            first_chunk = chunk
+        choices = chunk.get("choices") or []
+        if not choices:
+            continue
+        delta = (choices[0] or {}).get("delta") or {}
+        parts.append(delta.get("content") or "")
 
-    assert payload is not None
-    assert payload["message"]["content"]["content"] == "assistant ok"
+    assert first_chunk is not None
+    first_delta = (first_chunk.get("choices") or [{}])[0].get("delta") or {}
+    assert first_delta.get("role") == "assistant"
+    assert "".join(parts) == "assistant ok"
 
 
 def test_rag_inference_stream_chat_sse_requires_auth(monkeypatch, client):

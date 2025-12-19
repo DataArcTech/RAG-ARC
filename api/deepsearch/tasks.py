@@ -5,6 +5,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from api.sse import sse_json
 
 def new_run_id() -> str:
     return uuid.uuid4().hex
@@ -15,19 +16,10 @@ def _now_ms() -> int:
 
 
 def format_sse(*, event: str, data: Dict[str, Any], event_id: int | None = None) -> str:
-    payload = {
-        "event": event,
-        "data": data,
-    }
-    lines: List[str] = []
+    payload: Dict[str, Any] = {"event": event, "data": data}
     if event_id is not None:
-        lines.append(f"id: {event_id}")
-    lines.append(f"event: {event}")
-    # Keep data as compact JSON to avoid newlines inside 'data:'.
-    import json
-
-    lines.append(f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}")
-    return "\n".join(lines) + "\n\n"
+        payload["id"] = event_id
+    return sse_json(payload)
 
 
 @dataclass
@@ -104,4 +96,3 @@ class DeepSearchTaskRegistry:
 
 
 TASKS = DeepSearchTaskRegistry()
-

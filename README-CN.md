@@ -422,25 +422,33 @@ def chat_sse(session_id: str, access_token: str):
     headers = {"Authorization": f"Bearer {access_token}"}
     params = {"query": "你好，RAG-ARC!", "include_evidence": "true"}
 
-    current_event = None
     with httpx.stream("GET", url, headers=headers, params=params, timeout=120.0) as r:
         r.raise_for_status()
         for line in r.iter_lines():
             if not line:
                 continue
-            if line.startswith("event:"):
-                current_event = line.split(":", 1)[1].strip()
+            if not line.startswith("data:"):
                 continue
-            if line.startswith("data:") and current_event == "message":
-                payload = json.loads(line.split(":", 1)[1].strip())
-                print(payload["message"]["content"]["content"])
-            if line.startswith("data:") and current_event == "done":
+            data = line.split(":", 1)[1].strip()
+            if data == "[DONE]":
                 break
+            chunk = json.loads(data)
+            delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+            if delta.get("content"):
+                print(delta["content"], end="", flush=True)
+            # Optional: evidence/subgraph is sent via OpenAI-compatible tool_calls.
+            tool_calls = delta.get("tool_calls") or []
+            for tool_call in tool_calls:
+                fn = (tool_call or {}).get("function") or {}
+                if fn.get("name") == "rag_arc_payload":
+                    payload = json.loads(fn.get("arguments") or "{}")
+                    # payload includes message/chunks/subgraph/evidence (same as non-stream)
+        print()
 
 chat_sse("YOUR_SESSION_ID", "YOUR_ACCESS_TOKEN")
 ```
 
-> 需要结构化证据信息时，请在 HTTP 请求体中设置 `include_evidence=true`（可搭配 `return_subgraph=true`），响应会新增 `evidence` 字段，包含命中的 chunk、图三元组、种子实体以及序列化子图。CLI 的 `chat` / `pipeline` / `graph-qa` 命令提供 `--with-evidence`，`/deepsearch/run` 也支持 `include_evidence`，MCP 接口默认携带该信息。
+> 证据包：`POST /rag_inference/chat` 会直接返回完整的 `evidence`。对 SSE 流式而言，当 `include_evidence=true`（和/或 `return_subgraph=true`）时，服务端会在结束前发送一条 OpenAI 兼容的 chunk，其 `delta.tool_calls[].function.name == "rag_arc_payload"`，并在 `function.arguments`（JSON 字符串）中携带同样的 payload。
 
 ## 🛠️ 技术栈
 

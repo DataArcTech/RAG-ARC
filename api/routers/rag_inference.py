@@ -1,6 +1,7 @@
 from datetime import datetime
 import json
 import asyncio
+import os
 from typing import Annotated, Any, Dict, List, Optional
 from fastapi import (
     APIRouter,
@@ -11,11 +12,20 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sse_starlette.sse import EventSourceResponse
 
 from api.routers.auth import get_current_user, ws_get_current_user
 from api.routers.auth import validate_user_session
+from api.sse import (
+    delta_envelope,
+    iter_text_deltas,
+    new_chatcmpl_id,
+    now_epoch_seconds,
+    openai_chat_completion_chunk,
+    sse_done,
+    sse_json,
+)
 from encapsulation.data_model.orm_models import ChatMessage, User
 from encapsulation.data_model.schema import Chunk, GraphData
 from framework.register import Register
@@ -274,8 +284,21 @@ async def stream_chat_sse(
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admin users can override owner scope")
         effective_owner = target_owner_id
 
+    model_name = os.getenv("CHAT_MODEL_NAME") or os.getenv("OPENAI_CHAT_MODEL") or "rag-arc"
+
     async def event_generator():
-        yield {"event": "status", "data": "processing"}
+        chunk_id = new_chatcmpl_id()
+        created = now_epoch_seconds()
+
+        # Qwen/OpenAI-compatible streams typically start with a chunk that sets role=assistant.
+        yield sse_json(
+            openai_chat_completion_chunk(
+                chunk_id=chunk_id,
+                model=model_name,
+                created=created,
+                delta=delta_envelope(role="assistant", content=""),
+            )
+        )
 
         user_message = ChatMessage(
             session_id=session_id,
@@ -284,51 +307,107 @@ async def stream_chat_sse(
         )
         await get_thread_pool().run_blocking(message_handler.create_message, user_message)
 
-        history_messages = await get_thread_pool().run_blocking(
-            message_handler.list_messages_by_session, session_id
-        )
-        history_text = "\n".join(
-            f"{msg.content['role']}: {msg.content['content']}" for msg in history_messages
-        )
-
-        assistant_response, chunks, subgraph_data, subgraph_info = await rag_inference_handler.chat_async(
-            history_text,
-            owner_id=effective_owner,
-            return_subgraph=(return_subgraph or include_evidence),
-        )
+        try:
+            history_messages = await get_thread_pool().run_blocking(
+                message_handler.list_messages_by_session,
+                session_id,
+            )
+            history_text = "\n".join(
+                f"{msg.content['role']}: {msg.content['content']}" for msg in history_messages
+            )
+            assistant_response, chunks, subgraph_data, subgraph_info = await rag_inference_handler.chat_async(
+                history_text,
+                owner_id=effective_owner,
+                return_subgraph=(return_subgraph or include_evidence),
+            )
+        except Exception as exc:  # noqa: BLE001
+            yield sse_json({"error": {"message": str(exc)}})
+            yield sse_done()
+            return
         assistant_message = ChatMessage(
             session_id=session_id,
             content={"role": "assistant", "content": assistant_response},
+            source_file_ids=[chunk.id for chunk in chunks] if chunks else None,
+            subgraph_data=subgraph_data if return_subgraph else None,
             created_at=datetime.now(),
         )
         assistant_message = await get_thread_pool().run_blocking(
             message_handler.create_message, assistant_message
         )
 
-        evidence = None
-        if include_evidence:
-            graph_store = None
-            try:
-                graph_store = rag_inference_handler.get_graph_store()
-            except Exception:  # noqa: BLE001
-                graph_store = None
-            evidence = build_chat_evidence(
-                chunks,
-                subgraph_data=subgraph_data,
-                subgraph_info=subgraph_info,
-                max_chunks=CHAT_TOP_CHUNKS,
-                graph_store=graph_store,
+        for piece in iter_text_deltas(assistant_response):
+            yield sse_json(
+                openai_chat_completion_chunk(
+                    chunk_id=chunk_id,
+                    model=model_name,
+                    created=created,
+                    delta=delta_envelope(role=None, content=piece),
+                )
             )
-        payload = _build_stream_chat_payload(
-            assistant_message,
-            chunks,
-            subgraph=subgraph_data if return_subgraph else None,
-            evidence=evidence,
-        )
-        yield {"event": "message", "data": json.dumps(payload, ensure_ascii=False)}
-        yield {"event": "done", "data": "[DONE]"}
+            await asyncio.sleep(0)
 
-    return EventSourceResponse(event_generator())
+        # Keep legacy "include_evidence/return_subgraph" capability but transmit it via
+        # OpenAI-compatible tool_calls so clients consuming only delta.content are unaffected.
+        if include_evidence or return_subgraph:
+            evidence = None
+            if include_evidence:
+                graph_store = None
+                try:
+                    graph_store = rag_inference_handler.get_graph_store()
+                except Exception:  # noqa: BLE001
+                    graph_store = None
+                evidence = build_chat_evidence(
+                    chunks,
+                    subgraph_data=subgraph_data,
+                    subgraph_info=subgraph_info,
+                    max_chunks=CHAT_TOP_CHUNKS,
+                    graph_store=graph_store,
+                )
+
+            payload = _build_stream_chat_payload(
+                assistant_message,
+                chunks,
+                subgraph=subgraph_data if return_subgraph else None,
+                evidence=evidence,
+            )
+
+            tool_calls = [
+                {
+                    "index": 0,
+                    "id": f"call_{assistant_message.id}",
+                    "type": "function",
+                    "function": {
+                        "name": "rag_arc_payload",
+                        "arguments": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                    },
+                }
+            ]
+            yield sse_json(
+                openai_chat_completion_chunk(
+                    chunk_id=chunk_id,
+                    model=model_name,
+                    created=created,
+                    delta=delta_envelope(role=None, content="", tool_calls=tool_calls),
+                )
+            )
+
+        yield sse_json(
+            openai_chat_completion_chunk(
+                chunk_id=chunk_id,
+                model=model_name,
+                created=created,
+                delta=delta_envelope(role=None, content=""),
+                finish_reason="stop",
+            )
+        )
+        yield sse_done()
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(event_generator(), media_type="text/event-stream", headers=headers)
 
 
 @router.websocket("/stream_chat/{session_id}")

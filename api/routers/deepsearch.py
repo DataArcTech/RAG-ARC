@@ -14,6 +14,7 @@ from core.utils.owner_guard import is_admin_owner
 from core.presentation.deepsearch_payload import trim_deepsearch_payload
 from application.rag_inference.module import RAGInference
 from api.deepsearch.tasks import TASKS, format_sse, new_run_id
+from api.sse import sse_done
 
 router = APIRouter(prefix="/deepsearch", tags=["deepsearch"])
 registrator = Register()
@@ -82,6 +83,7 @@ async def _stream_events(run_id: str, *, last_event_id: int = -1):
     info = await TASKS.get(run_id)
     if not info:
         yield format_sse(event="error", data={"run_id": run_id, "message": "run_id not found"})
+        yield sse_done()
         return
 
     cursor = max(-1, last_event_id)
@@ -112,6 +114,7 @@ async def _stream_events(run_id: str, *, last_event_id: int = -1):
                 "progress": info.last_progress.get("progress") if isinstance(info.last_progress, dict) else None,
             }
             yield format_sse(event="done", data=done_payload, event_id=cursor + 1)
+            yield sse_done()
             return
 
 

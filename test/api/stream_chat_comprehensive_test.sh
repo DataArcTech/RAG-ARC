@@ -105,25 +105,30 @@ import json
 import sys
 import httpx
 
-def read_first_message(url: str, token: str | None):
+def read_stream_text(url: str, token: str | None):
     headers = {}
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    current_event = None
+    parts: list[str] = []
     with httpx.stream("GET", url, headers=headers, timeout=120.0) as r:
         if r.status_code != 200:
             return {"http_status": r.status_code, "body": r.text}
         for line in r.iter_lines():
             if not line:
                 continue
-            if line.startswith("event:"):
-                current_event = line.split(":", 1)[1].strip()
+            if not line.startswith("data:"):
                 continue
-            if line.startswith("data:") and current_event == "message":
-                payload = json.loads(line.split(":", 1)[1].strip())
-                return {"http_status": 200, "payload": payload}
-    return {"http_status": 200, "payload": None}
+            data = line.split(":", 1)[1].strip()
+            if data == "[DONE]":
+                break
+            chunk = json.loads(data)
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            delta = (choices[0] or {}).get("delta") or {}
+            parts.append(delta.get("content") or "")
+    return {"http_status": 200, "text": "".join(parts)}
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
@@ -131,7 +136,7 @@ if __name__ == "__main__":
         sys.exit(1)
     url = sys.argv[1]
     token = sys.argv[2] if len(sys.argv) >= 3 else None
-    result = read_first_message(url, token)
+    result = read_stream_text(url, token)
     print(json.dumps(result, ensure_ascii=False))
 EOF
 
@@ -153,4 +158,3 @@ echo "$UNAUTH_OUT" | grep -q '"http_status": 401' && echo "✅ Unauthorized SSE 
 rm -f /tmp/test_sse_stream_chat.py
 
 echo -e "\n🎉 All Stream Chat SSE API comprehensive tests passed!"
-

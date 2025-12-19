@@ -406,25 +406,33 @@ def chat_sse(session_id: str, access_token: str):
     headers = {"Authorization": f"Bearer {access_token}"}
     params = {"query": "Hello, RAG-ARC!", "include_evidence": "true"}
 
-    current_event = None
     with httpx.stream("GET", url, headers=headers, params=params, timeout=120.0) as r:
         r.raise_for_status()
         for line in r.iter_lines():
             if not line:
                 continue
-            if line.startswith("event:"):
-                current_event = line.split(":", 1)[1].strip()
+            if not line.startswith("data:"):
                 continue
-            if line.startswith("data:") and current_event == "message":
-                payload = json.loads(line.split(":", 1)[1].strip())
-                print(payload["message"]["content"]["content"])
-            if line.startswith("data:") and current_event == "done":
+            data = line.split(":", 1)[1].strip()
+            if data == "[DONE]":
                 break
+            chunk = json.loads(data)
+            delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+            if delta.get("content"):
+                print(delta["content"], end="", flush=True)
+            # Optional: evidence/subgraph is sent via OpenAI-compatible tool_calls.
+            tool_calls = delta.get("tool_calls") or []
+            for tool_call in tool_calls:
+                fn = (tool_call or {}).get("function") or {}
+                if fn.get("name") == "rag_arc_payload":
+                    payload = json.loads(fn.get("arguments") or "{}")
+                    # payload contains message/chunks/subgraph/evidence (same as non-stream endpoint)
+        print()
 
 chat_sse("YOUR_SESSION_ID", "YOUR_ACCESS_TOKEN")
 ```
 
-> Evidence payloads: When `include_evidence=true` (and optionally `return_subgraph=true`) the HTTP response includes an `evidence` object with the retrieved chunks, graph triples, seed entities, and a serialized subgraph. The CLI mirrors this behavior via the `--with-evidence` flag on `chat`, `pipeline`, and `graph-qa`, and `/deepsearch/run` accepts the same flag to attach evidence to the DeepSearch report.
+> Evidence payloads: `POST /rag_inference/chat` returns the full `evidence` object. For SSE streaming, when `include_evidence=true` (and/or `return_subgraph=true`) the server sends a final OpenAI-compatible chunk with `delta.tool_calls[].function.name == "rag_arc_payload"` containing the same payload (JSON string in `function.arguments`).
 
 ## 🛠️ Technology Stack
 
