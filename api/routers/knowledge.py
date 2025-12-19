@@ -534,11 +534,7 @@ async def export_file_mindmap(
             detail="No mind map data found for this file"
         )
 
-    # 计算chunk的hash来判断是否需要重新生成
-    chunk_ids = sorted([chunk.get("chunk_id", "") for chunk in chunks])
-    chunk_hash = hashlib.sha256("|".join(chunk_ids).encode()).hexdigest()
-
-    # PostgreSQL缓存：检查缓存
+    # PostgreSQL缓存：检查缓存（仅按file_id判断）
     knowledge_handler = get_knowledge_handler()
     metadata_store = knowledge_handler.file_storage.metadata_store
     
@@ -546,8 +542,8 @@ async def export_file_mindmap(
         try:
             with metadata_store.SessionMaker() as session:
                 cache = session.query(FileMindmapCache).filter_by(file_id=request.file_id).first()
-                if cache and cache.chunk_hash == chunk_hash:
-                    # 缓存有效，直接返回
+                if cache:
+                    # 缓存存在，直接返回
                     return MindmapExportResponse(
                         tsv=cache.tsv,
                         nodes=[MindmapNode(**node) for node in cache.nodes],
@@ -603,6 +599,10 @@ async def export_file_mindmap(
                 now = datetime.now()
                 nodes_data = [{"id": n["id"], "name": n["name"], "category": n["category"], "weight": n.get("weight", 1)} for n in nodes]
                 edges_data = [{"id": e["id"], "source": e["source"], "target": e["target"], "relation": e.get("relation", "包含"), "weight": e.get("weight", 1.0)} for e in edges]
+                
+                # 计算chunk的hash用于存储
+                chunk_ids = sorted([chunk.get("chunk_id", "") for chunk in chunks])
+                chunk_hash = hashlib.sha256("|".join(chunk_ids).encode()).hexdigest()
                 
                 cache = session.query(FileMindmapCache).filter_by(file_id=request.file_id).first()
                 if cache:
