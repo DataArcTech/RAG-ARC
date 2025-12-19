@@ -1,4 +1,5 @@
 import logging
+import threading
 from typing import Any, List, Optional, Union, Tuple, cast, TYPE_CHECKING, Dict
 
 from tantivy import Query, Occur, Order
@@ -56,14 +57,22 @@ class TantivyBM25Retriever(BaseRetriever):
     def __init__(self, config: "TantivyBM25RetrieverConfig"):
         logger.info("TantivyBM25Retriever: Initializing...")
         self.config = config
+        self._tls = threading.local()
         logger.info("TantivyBM25Retriever: Building index...")
         self._index = self.config.index_config.build()
         logger.info("TantivyBM25Retriever: Index built, loading existing index...")
         self._load_existing_index()
         logger.info("TantivyBM25Retriever: Index loaded successfully")
 
-        # Runtime instance variables
         self.searcher = None
+
+    @property
+    def searcher(self):
+        return getattr(self._tls, "searcher", None)
+
+    @searcher.setter
+    def searcher(self, value) -> None:
+        setattr(self._tls, "searcher", value)
 
     def _load_existing_index(self) -> None:
         """Try to load an existing index"""
@@ -259,9 +268,9 @@ class TantivyBM25Retriever(BaseRetriever):
         try:
             # Always create a fresh searcher to ensure we see the latest index state
             # This is critical after deletions to avoid serving stale results
-            self.searcher = index_instance.index.searcher()
+            searcher = index_instance.index.searcher()
             order = Order.Desc if order_desc else Order.Asc
-            search_result = self.searcher.search(
+            search_result = searcher.search(
                 final_query,
                 limit=search_k,
                 order_by_field=order_by_field,
@@ -275,7 +284,7 @@ class TantivyBM25Retriever(BaseRetriever):
         results = []
         for score, doc_address in search_result.hits[:k]:  # Truncate to k
             try:
-                tantivy_doc = self.searcher.doc(doc_address)
+                tantivy_doc = searcher.doc(doc_address)
                 metadata = tantivy_doc.get_first("metadata") or {}
                 
                 # Enforce owner isolation even if index filter is bypassed unexpectedly

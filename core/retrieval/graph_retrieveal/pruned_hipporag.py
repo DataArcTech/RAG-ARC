@@ -3,6 +3,7 @@ import numpy as np
 import uuid
 import os
 import json
+import threading
 from typing import List, Tuple, Set, TYPE_CHECKING, Optional
 from collections import defaultdict
 
@@ -39,6 +40,7 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         Args:
             config: Configuration object containing all retrieval parameters
         """
+        self._tls = threading.local()
         super().__init__(config)
 
         # Build and load graph store
@@ -74,6 +76,37 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
             logger.info(f"    Base max neighbors: {config.max_neighbors}")
             logger.info(f"    Query-aware multiplier: {config.query_aware_multiplier}")
             logger.info(f"    Min/Max neighbors: {config.query_aware_min_k}/{config.query_aware_max_k}")
+
+    def _get_tls(self) -> threading.local:
+        tls = getattr(self, "_tls", None)
+        if tls is None:
+            tls = threading.local()
+            setattr(self, "_tls", tls)
+        return tls
+
+    def _tls_get_list(self, key: str) -> list:
+        tls = self._get_tls()
+        value = getattr(tls, key, None)
+        if value is None:
+            value = []
+            setattr(tls, key, value)
+        return value
+
+    @property
+    def passage_node_idxs(self) -> list[int]:
+        return self._tls_get_list("passage_node_idxs")
+
+    @passage_node_idxs.setter
+    def passage_node_idxs(self, value: list[int]) -> None:
+        setattr(self._get_tls(), "passage_node_idxs", value)
+
+    @property
+    def passage_node_keys(self) -> list[str]:
+        return self._tls_get_list("passage_node_keys")
+
+    @passage_node_keys.setter
+    def passage_node_keys(self, value: list[str]) -> None:
+        setattr(self._get_tls(), "passage_node_keys", value)
 
     def _build_node_mappings(self, owner_id: Optional[uuid.UUID] = None):
         """

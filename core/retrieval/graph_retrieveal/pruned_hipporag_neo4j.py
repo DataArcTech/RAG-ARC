@@ -2,6 +2,7 @@ import logging
 import numpy as np
 import uuid
 import json
+import threading
 from typing import List, Tuple, Set, Dict, TYPE_CHECKING, Optional, Union
 
 from encapsulation.data_model.schema import Chunk
@@ -35,6 +36,7 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
         Args:
             config: Configuration object containing all retrieval parameters
         """
+        self._tls = threading.local()
         # Call parent __init__ but skip some igraph-specific initialization
         self.config = config
 
@@ -72,7 +74,38 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
         if config.enable_pruning:
             logger.info(f"    Base max neighbors: {config.max_neighbors}")
             logger.info(f"    Query-aware multiplier: {config.query_aware_multiplier}")
-            logger.info(f"    Min/Max neighbors: {config.query_aware_min_k}/{config.query_aware_max_k}")
+        logger.info(f"    Min/Max neighbors: {config.query_aware_min_k}/{config.query_aware_max_k}")
+
+    def _get_tls(self) -> threading.local:
+        tls = getattr(self, "_tls", None)
+        if tls is None:
+            tls = threading.local()
+            setattr(self, "_tls", tls)
+        return tls
+
+    @property
+    def _cached_owner_id(self) -> Optional[str]:
+        return getattr(self._get_tls(), "cached_owner_id", None)
+
+    @_cached_owner_id.setter
+    def _cached_owner_id(self, value: Optional[str]) -> None:
+        setattr(self._get_tls(), "cached_owner_id", value)
+
+    @property
+    def _cached_store_version(self) -> Optional[Union[int, str]]:
+        return getattr(self._get_tls(), "cached_store_version", None)
+
+    @_cached_store_version.setter
+    def _cached_store_version(self, value: Optional[Union[int, str]]) -> None:
+        setattr(self._get_tls(), "cached_store_version", value)
+
+    @property
+    def passage_embeddings_array(self) -> Optional[np.ndarray]:
+        return getattr(self._get_tls(), "passage_embeddings_array", None)
+
+    @passage_embeddings_array.setter
+    def passage_embeddings_array(self, value: Optional[np.ndarray]) -> None:
+        setattr(self._get_tls(), "passage_embeddings_array", value)
     
     def invalidate_cache(self):
         """Force invalidation of all cached data."""
@@ -129,16 +162,31 @@ class PrunedHippoRAGNeo4jRetriever(PrunedHippoRAGRetriever):
 
         passage_embeddings_list = []
         embedding_dim: int | None = None
-        for chunk_id in self.passage_node_keys:
-            if chunk_id in self.graph_store.chunk_embeddings:
-                passage_embeddings_list.append(self.graph_store.chunk_embeddings[chunk_id])
-            else:
-                if embedding_dim is None:
-                    if passage_embeddings_list:
-                        embedding_dim = len(passage_embeddings_list[0])
+
+        read_lock = getattr(self.graph_store, "read_lock", None)
+        if callable(read_lock):
+            with self.graph_store.read_lock():
+                for chunk_id in self.passage_node_keys:
+                    if chunk_id in self.graph_store.chunk_embeddings:
+                        passage_embeddings_list.append(self.graph_store.chunk_embeddings[chunk_id])
                     else:
-                        embedding_dim = self.graph_store.embedding_model.get_embedding_dimension()
-                passage_embeddings_list.append(np.zeros(embedding_dim))
+                        if embedding_dim is None:
+                            if passage_embeddings_list:
+                                embedding_dim = len(passage_embeddings_list[0])
+                            else:
+                                embedding_dim = self.graph_store.embedding_model.get_embedding_dimension()
+                        passage_embeddings_list.append(np.zeros(embedding_dim))
+        else:
+            for chunk_id in self.passage_node_keys:
+                if chunk_id in self.graph_store.chunk_embeddings:
+                    passage_embeddings_list.append(self.graph_store.chunk_embeddings[chunk_id])
+                else:
+                    if embedding_dim is None:
+                        if passage_embeddings_list:
+                            embedding_dim = len(passage_embeddings_list[0])
+                        else:
+                            embedding_dim = self.graph_store.embedding_model.get_embedding_dimension()
+                    passage_embeddings_list.append(np.zeros(embedding_dim))
 
         if passage_embeddings_list:
             self.passage_embeddings_array = np.array(passage_embeddings_list, dtype=np.float32)

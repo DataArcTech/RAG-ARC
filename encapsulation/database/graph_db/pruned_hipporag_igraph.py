@@ -197,6 +197,11 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         os.makedirs(storage_path, exist_ok=True)
 
         self.db_path = os.path.join(storage_path, 'metadata.db')
+        # NOTE(thread-safety):
+        # - `check_same_thread=False` allows SQLite objects to be used across threads, but it does NOT make
+        #   the underlying data structures (SQLite connection, igraph graph, in-memory caches) magically safe.
+        # - Treat this igraph backend as single-thread unless you add your own external locking or process isolation
+        #   between indexing and retrieval.
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         cursor = self.conn.cursor()
 
@@ -427,6 +432,8 @@ class PrunedHippoRAGIGraphStore(GraphStore):
 
         # Initialize fact cache if needed
         if not hasattr(self, '_fact_ids_cache'):
+            # A simple in-memory dedup cache for fact IDs.
+            # This is process-local and not synchronized; safe for the intended single-thread usage.
             self._fact_ids_cache = set()
 
         # Add facts to database

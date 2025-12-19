@@ -389,6 +389,12 @@ class RetrievalHelper:
         """
         import numpy as np
         import faiss
+        import copy
+
+        try:
+            from encapsulation.data_model.schema import Chunk
+        except Exception:  # pragma: no cover
+            Chunk = None  # type: ignore[assignment]
 
         if not hasattr(index, 'index') or index.index is None or index.index.ntotal == 0:
             return []
@@ -429,6 +435,15 @@ class RetrievalHelper:
                 continue
 
             doc = index.docstore[doc_id]
+            if Chunk is not None and isinstance(doc, Chunk):
+                doc = Chunk(
+                    id=doc.id,
+                    content=doc.content,
+                    owner_id=doc.owner_id,
+                    domain=getattr(doc, "domain", None),
+                    metadata=copy.deepcopy(doc.metadata) if getattr(doc, "metadata", None) else {},
+                    graph=copy.deepcopy(doc.graph) if getattr(doc, "graph", None) else None,
+                )
 
             # For cosine metric, FAISS returns similarity score instead of distance
             if metric == "cosine":
