@@ -7,19 +7,13 @@ from typing import (
 )
 import logging
 from pathlib import Path
-from dotenv import load_dotenv
-
-load_dotenv()
 
 from .base import FileDB
-from framework.singleton_decorator import singleton
 from core.utils.path_guard import ensure_writable_dir
 
 
 logger = logging.getLogger(__name__)
 
-
-@singleton
 class LocalDB(FileDB):
     """
     Local filesystem blob storage implementation for high-performance file operations.
@@ -38,10 +32,10 @@ class LocalDB(FileDB):
     - Comprehensive error handling and logging
 
     Storage organization:
-    - Base directory: Configured via RAG_FILE_STORAGE_PATH environment variable
-    - Hierarchical structure: Mirrors blob key structure in directories
-    - Version naming: file_v2.ext, file_v3.ext for versioned keys
-    - Path safety: Removes '..' and leading '/' from keys
+    - Base directory: Prefer config.base_path when provided; otherwise fall back to
+      LOCAL_FILE_STORAGE_PATH/LOCAL_BLOB_STORE_BASE_PATH/./data/files.
+    - Hierarchical structure: Mirrors blob key structure in directories.
+    - Path safety: Removes '..' and leading '/' from keys.
 
     Collision handling modes:
         - "overwrite": Replace existing file (default)
@@ -56,10 +50,12 @@ class LocalDB(FileDB):
     - Large file operations are memory efficient with streaming
 
     Environment variables:
-        RAG_FILE_STORAGE_PATH (str): Root directory for blob storage (default: ./data/files)
+        LOCAL_FILE_STORAGE_PATH (str): Default root directory when config.base_path is unset.
+        LOCAL_BLOB_STORE_BASE_PATH (str): Legacy alias for LOCAL_FILE_STORAGE_PATH.
+        RAGARC_RUNTIME_DIR (str): Runtime fallback root when preferred path is not writable.
 
     Typical usage:
-        >>> config = LocalConfig()  # No base_path needed
+        >>> config = LocalConfig(base_path="./data/file_store")
         >>> storage = LocalDB(config)
         >>> key, overwritten = storage.store("path/file.txt", data)
         >>> content = storage.retrieve("path/file.txt")
@@ -72,7 +68,7 @@ class LocalDB(FileDB):
     - Direct filesystem access bypasses application-level permissions
 
     Attributes:
-        config: Configuration object (base_path no longer used)
+        config: Configuration object (base_path respected when set)
     """
     
     def __init__(self, config):
@@ -80,12 +76,16 @@ class LocalDB(FileDB):
         self._resolved_base_path: Optional[Path] = None
 
     def _get_base_path(self) -> Path:
-        """Get base storage directory path from environment variable"""
+        """Resolve a writable base directory for this blob store."""
         if self._resolved_base_path is None:
-            preferred = os.getenv('LOCAL_FILE_STORAGE_PATH', './data/files')
-            runtime_root = os.getenv('RAGARC_RUNTIME_DIR', './local/runtime')
-            fallback = os.path.join(runtime_root, 'files')
-            resolved = ensure_writable_dir(preferred, fallback)
+            configured = str(getattr(self.config, "base_path", "") or "").strip()
+            preferred = (
+                configured
+                or os.getenv("LOCAL_FILE_STORAGE_PATH")
+                or os.getenv("LOCAL_BLOB_STORE_BASE_PATH")
+                or "./data/files"
+            )
+            resolved = ensure_writable_dir(preferred)
             self._resolved_base_path = Path(resolved)
         return self._resolved_base_path
     

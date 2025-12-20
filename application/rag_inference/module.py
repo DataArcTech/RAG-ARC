@@ -194,13 +194,12 @@ class RAGInference(AbstractModule):
 
         messages: List[Dict[str, str]] = []
         for i, chunk in enumerate(chunks):
-            messages.append({"role": "user", "content": f"Chunk {i+1}:\n{chunk.content}"})
-        messages.append(
-            {
-                "role": "user",
-                "content": f"Based on the above chunks, please answer question: {rewritten_query}",
-            }
-        )
+            metadata = getattr(chunk, "metadata", None) or {}
+            chunk_text = metadata.get("prompt_text") or metadata.get("index_text")
+            if not isinstance(chunk_text, str) or not chunk_text.strip():
+                chunk_text = chunk.content
+            messages.append({"role": "user", "content": f"Chunk {i+1}:\n{chunk_text}"})
+        messages.append({"role": "user", "content": f"Based on the above chunks, please answer question: {rewritten_query}"})
         logger.info("Invoked chat with query: %s (owner_id=%s)", query, owner_id)
         logger.info("Query rewritten to: %s", rewritten_query)
         logger.info("Prepared %d messages for LLM", len(messages))

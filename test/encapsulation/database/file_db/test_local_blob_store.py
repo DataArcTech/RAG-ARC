@@ -5,10 +5,10 @@ Simple test to verify LocalBlobStore implementation matches BlobStore interface
 from config.encapsulation.database.file_db.local_config import LocalDBConfig
 
 
-def test_local_blob_store():
+def test_local_blob_store(tmp_path):
     """Test LocalBlobStore implementation"""
     # Create config and instance using proper framework pattern
-    config = LocalDBConfig()
+    config = LocalDBConfig(base_path=str(tmp_path))
     store = config.build()
 
     # Test data
@@ -73,6 +73,20 @@ def test_local_blob_store():
         print("generate_presigned_url() raises KeyError for missing key")
 
     print("\nAll tests passed!")
+
+
+def test_local_blob_store_respects_base_path_and_is_not_singleton(tmp_path):
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+
+    first = LocalDBConfig(base_path=str(first_root)).build()
+    second = LocalDBConfig(base_path=str(second_root)).build()
+
+    key = "scoped/file.txt"
+    first.store(key, b"one", "text/plain")
+
+    assert first.exists(key)
+    assert not second.exists(key)
 
 
 if __name__ == "__main__":

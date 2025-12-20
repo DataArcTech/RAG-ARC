@@ -50,6 +50,8 @@ def test_semantic_unit_chunker_emits_table_anchor_and_slice():
     slice_chunk = table_slices[0]
     assert anchor["metadata"]["semantic_unit_id"] == slice_chunk["metadata"]["semantic_unit_id"]
     assert slice_chunk["metadata"]["anchor_chunk_id"] is None
+    assert "| 1 | 2 |" in (anchor.get("content") or "")
+    assert "| 1 | 2 |" not in str((anchor.get("metadata") or {}).get("index_text") or "")
 
 
 def test_index_manager_backfills_anchor_chunk_id():
@@ -77,12 +79,50 @@ def test_index_manager_backfills_anchor_chunk_id():
     assert chunks[1]["metadata"]["anchor_chunk_id"] == "ANCHOR_ID"
 
 
+def test_index_manager_persists_backfilled_anchor_chunk_id_to_storage():
+    chunks = [
+        {
+            "content": "anchor",
+            "metadata": {
+                "chunk_role": "anchor",
+                "semantic_unit_id": "file-1:table:1",
+            },
+        },
+        {
+            "content": "slice",
+            "metadata": {
+                "chunk_role": "slice",
+                "semantic_unit_id": "file-1:table:1",
+                "anchor_chunk_id": None,
+            },
+        },
+    ]
+    chunk_ids = ["ANCHOR_ID", "SLICE_ID"]
+
+    IndexManager._backfill_anchor_chunk_ids(chunks, chunk_ids)
+
+    class FakeChunkStorage:
+        def __init__(self):
+            self.writes = {}
+
+        def overwrite_chunk_json(self, chunk_id, chunk_dict):  # noqa: ANN001
+            self.writes[chunk_id] = chunk_dict
+            return True
+
+    fake = FakeChunkStorage()
+    updated = IndexManager._persist_backfilled_anchor_chunk_ids(fake, chunks, chunk_ids)
+
+    assert updated == 1
+    assert fake.writes["SLICE_ID"]["metadata"]["anchor_chunk_id"] == "ANCHOR_ID"
+
+
 def test_semantic_unit_chunker_standard_emits_code_anchor_and_slice():
     chunker = SemanticUnitChunkerConfig(
         level="standard",
         code_small_max_tokens=1,  # force slicing path deterministically
         code_slice_max_tokens=10_000,
         code_slice_overlap_lines=0,
+        code_anchor_preview_lines=0,
         fallback_chunker_config=TokenChunkerConfig(chunk_size=200, chunk_overlap=0),
     ).build()
 
@@ -119,6 +159,8 @@ def test_semantic_unit_chunker_standard_emits_code_anchor_and_slice():
     assert code_slices, "expected at least one code slice"
     assert code_slices[0]["metadata"]["anchor_chunk_id"] is None
     assert code_anchors[0]["metadata"]["code_language"] == "python"
+    assert "def add(a, b)" in (code_anchors[0].get("content") or "")
+    assert "def add(a, b)" not in str((code_anchors[0].get("metadata") or {}).get("index_text") or "")
 
 
 def test_semantic_unit_chunker_parses_fenced_code_with_extra_info_string():
@@ -169,6 +211,7 @@ def test_semantic_unit_chunker_standard_emits_list_anchor_and_slice():
         list_small_max_tokens=1,  # force slicing path deterministically
         list_slice_max_tokens=10_000,
         list_slice_overlap_items=0,
+        list_anchor_preview_items=0,
         fallback_chunker_config=TokenChunkerConfig(chunk_size=200, chunk_overlap=0),
     ).build()
 
@@ -203,6 +246,8 @@ def test_semantic_unit_chunker_standard_emits_list_anchor_and_slice():
     assert list_anchors, "expected at least one list anchor"
     assert list_slices, "expected at least one list slice"
     assert list_slices[0]["metadata"]["anchor_chunk_id"] is None
+    assert "- item 3" in (list_anchors[0].get("content") or "")
+    assert "- item 3" not in str((list_anchors[0].get("metadata") or {}).get("index_text") or "")
 
 
 def test_semantic_unit_chunker_standard_emits_math_anchor():

@@ -941,7 +941,18 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
     def _compute_entity_chunk_count_cache(
         graph_cache: Dict[str, Dict[str, List[Tuple[str, float]]]]
     ) -> Dict[str, Dict[str, int]]:
-        entity_chunk_count_cache = self._compute_entity_chunk_count_cache(graph_cache)
+        entity_chunk_count_cache: Dict[str, Dict[str, int]] = {}
+        if not graph_cache:
+            return entity_chunk_count_cache
+
+        for owner_key, adjacency in graph_cache.items():
+            owner_counts: Dict[str, int] = {}
+            for entity_id, neighbors in adjacency.items():
+                if not str(entity_id).startswith("entity-"):
+                    continue
+                chunk_count = sum(1 for neighbor_id, _ in (neighbors or []) if not str(neighbor_id).startswith("entity-"))
+                owner_counts[str(entity_id)] = int(chunk_count)
+            entity_chunk_count_cache[str(owner_key)] = owner_counts
         return entity_chunk_count_cache
 
     def get_entity_chunk_count_from_cache(self, entity_id: str, owner_id: Optional[Any] = None) -> int:

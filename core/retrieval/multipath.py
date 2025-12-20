@@ -123,12 +123,24 @@ class MultiPathRetriever(BaseRetriever):
     @staticmethod
     def _as_matched_slice(chunk: Chunk) -> dict:
         metadata = getattr(chunk, "metadata", None) or {}
+        index_text = metadata.get("index_text")
+        matched_content = chunk.content
+        if isinstance(index_text, str) and index_text.strip():
+            matched_content = index_text
         return {
             "id": getattr(chunk, "id", None),
-            "content": chunk.content,
+            "content": matched_content,
             "score": metadata.get("score"),
             "metadata": copy.deepcopy(metadata),
         }
+
+    @staticmethod
+    def _slice_index_text(chunk: Chunk) -> str:
+        metadata = getattr(chunk, "metadata", None) or {}
+        index_text = metadata.get("index_text")
+        if isinstance(index_text, str) and index_text.strip():
+            return index_text
+        return chunk.content or ""
 
     @staticmethod
     def _clone_chunk(chunk: Chunk) -> Chunk:
@@ -223,6 +235,7 @@ class MultiPathRetriever(BaseRetriever):
                     fallback.metadata = {}
                 fallback.metadata["anchor_missing"] = True
                 fallback.metadata["matched_slices"] = [self._as_matched_slice(s) for s in selected_slices]
+                fallback.metadata.setdefault("prompt_text", fallback.content)
                 return fallback
 
             if slice_owner and getattr(anchor_chunk, "owner_id", None) and str(anchor_chunk.owner_id) != str(slice_owner):
@@ -232,6 +245,7 @@ class MultiPathRetriever(BaseRetriever):
                     fallback.metadata = {}
                 fallback.metadata["anchor_owner_mismatch"] = True
                 fallback.metadata["matched_slices"] = [self._as_matched_slice(s) for s in selected_slices]
+                fallback.metadata.setdefault("prompt_text", fallback.content)
                 return fallback
 
             anchor_out = self._clone_chunk(anchor_chunk)
@@ -249,10 +263,12 @@ class MultiPathRetriever(BaseRetriever):
             anchor_is_summary = bool(anchor_out.metadata.get("anchor_is_summary"))
             semantic_unit_type = str(anchor_out.metadata.get("semantic_unit_type") or "")
 
-            if anchor_is_summary and semantic_unit_type == "table":
+            base_prompt = str(anchor_out.metadata.get("index_text") or anchor_out.content or "")
+
+            if semantic_unit_type == "table":
                 row_lines: list[str] = []
                 for slice_chunk in selected_slices:
-                    row_lines.extend(self._table_rows_from_slice_content(slice_chunk.content))
+                    row_lines.extend(self._table_rows_from_slice_content(self._slice_index_text(slice_chunk)))
                 deduped: list[str] = []
                 for line in row_lines:
                     if line not in deduped:
@@ -260,16 +276,21 @@ class MultiPathRetriever(BaseRetriever):
                     if TABLE_MAX_MERGED_ROWS is not None and len(deduped) >= TABLE_MAX_MERGED_ROWS:
                         break
                 if deduped:
-                    anchor_out.content = (anchor_out.content or "").rstrip() + "\n" + "\n".join(deduped)
+                    prompt = base_prompt.rstrip() + "\n" + "\n".join(deduped)
+                    anchor_out.metadata["prompt_text"] = prompt
+                    if anchor_is_summary:
+                        anchor_out.content = (anchor_out.content or "").rstrip() + "\n" + "\n".join(deduped)
+                else:
+                    anchor_out.metadata["prompt_text"] = base_prompt
 
-            if anchor_is_summary and semantic_unit_type in {"code", "list"}:
+            if semantic_unit_type in {"code", "list"}:
                 total_budget = SEMANTIC_UNIT_MAX_MERGED_TOTAL_CHARS
                 slice_budget = SEMANTIC_UNIT_MAX_MERGED_SLICE_CHARS
 
                 merged: list[str] = []
                 total_used = 0
                 for slice_chunk in selected_slices:
-                    snippet = self._truncate_text(slice_chunk.content or "", slice_budget)
+                    snippet = self._truncate_text(self._slice_index_text(slice_chunk), slice_budget)
                     if not snippet.strip():
                         continue
 
@@ -285,7 +306,15 @@ class MultiPathRetriever(BaseRetriever):
                     total_used += len(snippet)
 
                 if merged:
-                    anchor_out.content = (anchor_out.content or "").rstrip() + "\n\nMatched slices:\n" + "\n\n".join(merged)
+                    prompt = base_prompt.rstrip() + "\n\nMatched slices:\n" + "\n\n".join(merged)
+                    anchor_out.metadata["prompt_text"] = prompt
+                    if anchor_is_summary:
+                        anchor_out.content = (anchor_out.content or "").rstrip() + "\n\nMatched slices:\n" + "\n\n".join(merged)
+                else:
+                    anchor_out.metadata["prompt_text"] = base_prompt
+
+            if semantic_unit_type not in {"table", "code", "list"}:
+                anchor_out.metadata.setdefault("prompt_text", base_prompt)
 
             return anchor_out
 

@@ -500,7 +500,12 @@ class BM25IndexBuilder():
         
         try:
             for chunk in chunks:
-                content_tokens = self.tokenizer_manager.get_current_tokenizer()(chunk.content or "")
+                metadata = getattr(chunk, "metadata", None) or {}
+                index_text = metadata.get("index_text")
+                token_source = chunk.content or ""
+                if isinstance(index_text, str) and index_text.strip():
+                    token_source = index_text
+                content_tokens = self.tokenizer_manager.get_current_tokenizer()(token_source)
                 chunk_id = str(chunk.id) if chunk.id else str(uuid.uuid4())
 
                 tantivy_doc = TantivyDocument()

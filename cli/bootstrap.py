@@ -105,9 +105,26 @@ def _ensure_develop_owner_user(owner_id: uuid.UUID) -> None:
     except Exception as exc:  # pragma: no cover
         logger.warning("Unable to query develop-mode user: %s", exc)
 
-    username = os.getenv("DEVELOP_OWNER_USERNAME", "dev_cli_user")
+    base_username = os.getenv("DEVELOP_OWNER_USERNAME", "dev_cli_user")
     password = os.getenv("DEVELOP_OWNER_PASSWORD", "dev-cli-password")
     hashed_password = account.get_password_hash(password)
+
+    username_candidates = [
+        base_username,
+        f"{base_username}_{owner_id.hex[:8]}",
+        f"{base_username}_{owner_id.hex}",
+    ]
+    username = None
+    for candidate in username_candidates:
+        try:
+            if not account.get_user_by_username(candidate):
+                username = candidate
+                break
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Unable to query develop-mode username %s: %s", candidate, exc)
+
+    if username is None:
+        username = f"{base_username}_{uuid.uuid4().hex[:8]}"
 
     user = User(
         id=owner_id,

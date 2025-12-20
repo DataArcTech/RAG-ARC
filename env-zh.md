@@ -56,7 +56,7 @@
 | `FILE_STORE_BASE_PATH` | `./data/file_store` | 文件原始内容存储目录（本地 blob store）。 |
 | `PARSED_CONTENT_STORE_BASE_PATH` | `./data/parsed_content_store` | 解析结果存储目录。 |
 | `CHUNK_STORE_BASE_PATH` | `./data/chunk_store` | Chunk 存储目录。 |
-| `LOCAL_BLOB_STORE_BASE_PATH` | `./test_output` | `local_blob_store` 适配器的 base path（主要用于测试/本地）。 |
+| `LOCAL_BLOB_STORE_BASE_PATH` | `./data/files` | `LOCAL_FILE_STORAGE_PATH` 的历史别名（仅在 JSON 未提供 `base_path` 时才会使用）。 |
 | `FAISS_INDEX_PATH` | `./data/unified_faiss_index` | 统一 FAISS 索引目录。 |
 | `BM25_INDEX_PATH` | `./data/unified_bm25_index` | 统一 BM25 索引目录。 |
 | `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | 图索引/向量缓存落盘目录（Neo4j HippoRAG）。 |
@@ -83,6 +83,23 @@
 | `TABLE_MAX_MERGED_ROWS` | `30` | 表格归并回 anchor 时最多拼接的数据行数。 |
 | `SEMANTIC_UNIT_MAX_MERGED_SLICE_CHARS` | `1200` | code/list 归并时每个 slice 追加到 `anchor.content` 的最大字符数。 |
 | `SEMANTIC_UNIT_MAX_MERGED_TOTAL_CHARS` | `3000` | 归并追加到 `anchor.content` 的总字符预算。 |
+
+## 2.1 语义单元分块控制项
+
+当 knowledge 配置选择 `semantic_unit_chunker`（例如 `config/json_configs/knowledge_semantic_unit.json`）时，这些参数用于控制父子分块策略。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `SEMANTIC_CHUNKING_LEVEL` | `basic` | 分块级别：`disabled`/`basic`/`standard`/`advanced`。 |
+| `TABLE_SMALL_MAX_TOKENS` | _(空)_ | 表格大小阈值覆盖（留空则使用代码默认值）。 |
+| `TABLE_SLICE_MAX_TOKENS` | _(空)_ | 表格 slice 目标 token 上限覆盖。 |
+| `TABLE_SLICE_OVERLAP_ROWS` | _(空)_ | 表格 slice 行 overlap 覆盖。 |
+| `CODE_SMALL_MAX_TOKENS` | _(空)_ | 代码块大小阈值覆盖。 |
+| `CODE_SLICE_MAX_TOKENS` | _(空)_ | 代码 slice 目标 token 上限覆盖。 |
+| `CODE_SLICE_OVERLAP_LINES` | _(空)_ | 代码 slice 行 overlap 覆盖。 |
+| `LIST_SMALL_MAX_TOKENS` | _(空)_ | 列表大小阈值覆盖。 |
+| `LIST_SLICE_MAX_TOKENS` | _(空)_ | 列表 slice 目标 token 上限覆盖。 |
+| `LIST_SLICE_OVERLAP_ITEMS` | _(空)_ | 列表 slice item overlap 覆盖。 |
 
 ## 3. 开发模式与租户
 
@@ -209,8 +226,8 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `DOTSOCR_OUTPUT_DIR` | _(空)_ | 可选：dots_ocr 输出目录覆盖。 |
 | `VLMOCR_OUTPUT_DIR` | _(空)_ | 可选：VLM OCR 输出目录覆盖。 |
 | `OCR_MODEL_NAME` | _(空)_ | 可选：历史兼容的 OCR 模型名别名。 |
-| `RAGARC_RUNTIME_DIR` | `./local/runtime` | 当解析目录不可写时的备用路径。 |
-| `LOCAL_FILE_STORAGE_PATH` | `./local/files` | 本地文件存储根目录。 |
+| `RAGARC_RUNTIME_DIR` | `./local/runtime` | 当首选目录不可写时的运行时兜底根目录。 |
+| `LOCAL_FILE_STORAGE_PATH` | `./data/files` | 当 JSON 未提供 `base_path` 时，`local_blob_store` 的默认根目录。 |
 
 ## 9. Neo4j 图数据库
 

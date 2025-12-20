@@ -6,6 +6,7 @@ from typing import (
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import json
 import uuid
 from encapsulation.data_model.orm_models import ChunkMetadata
 from encapsulation.data_model.orm_models import ChunkIndexStatus
@@ -283,6 +284,42 @@ class ChunkStorage(AbstractModule):
         except Exception as e:
             logger.error(f"Failed to get chunk content for {chunk_id}: {e}")
             raise StorageOperationError(f"Failed to retrieve chunk content: {e}")
+
+    def overwrite_chunk_json(self, chunk_id: str, chunk: dict, **kwargs: Any) -> bool:
+        """
+        Overwrite the stored chunk JSON blob for an existing chunk_id.
+
+        Indexers see the in-memory chunk dict, but later "fetch chunk JSON by id" flows
+        rely on blob storage. This method is used to persist post-store metadata fixes
+        (e.g., backfilled `anchor_chunk_id`) back into the stored chunk blob.
+        """
+        if not chunk_id or not str(chunk_id).strip():
+            raise ValueError("chunk_id must be a non-empty string")
+        if not isinstance(chunk, dict):
+            raise ValueError("chunk must be a dict")
+
+        metadata = self.metadata_store.get_chunk_metadata(chunk_id, **kwargs)
+        if not metadata:
+            logger.warning("Chunk metadata not found for overwrite: %s", chunk_id)
+            return False
+
+        try:
+            payload = json.dumps(chunk, ensure_ascii=False).encode("utf-8")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to serialize chunk %s: %s", chunk_id, exc)
+            return False
+
+        try:
+            self.blob_store.store(
+                metadata.blob_key,
+                payload,
+                content_type="application/json",
+                **kwargs,
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to overwrite chunk blob for %s: %s", chunk_id, exc)
+            return False
 
     def update_chunk_metadata(self, chunk_id: str, **kwargs: Any) -> bool:
         """Update chunk metadata by ID"""

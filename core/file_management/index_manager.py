@@ -301,6 +301,7 @@ class IndexManager(AbstractModule):
             # Backfill anchor_chunk_id for hierarchical chunking strategies (e.g., semantic_unit).
             try:
                 self._backfill_anchor_chunk_ids(stored_chunks, chunk_ids)
+                self._persist_backfilled_anchor_chunk_ids(self.chunk_storage, stored_chunks, chunk_ids)
             except Exception as backfill_error:
                 logger.warning(f"Failed to backfill anchor_chunk_id metadata: {backfill_error}")
 
@@ -531,6 +532,32 @@ class IndexManager(AbstractModule):
             if anchor_id:
                 meta["anchor_chunk_id"] = anchor_id
                 chunk["metadata"] = meta
+
+    @staticmethod
+    def _persist_backfilled_anchor_chunk_ids(chunk_storage: Any, chunks: List[Dict[str, Any]], chunk_ids: List[str]) -> int:
+        """
+        Persist backfilled `anchor_chunk_id` into blob storage for slice chunks.
+
+        Indexers operate on the in-memory dicts, but later retrieval-by-id flows
+        can depend on the stored chunk JSON blobs. Without rewriting slice blobs
+        after backfill, their metadata remains stale (anchor_chunk_id=null).
+        """
+        if not chunk_storage or not hasattr(chunk_storage, "overwrite_chunk_json"):
+            return 0
+        if not chunks or not chunk_ids or len(chunks) != len(chunk_ids):
+            return 0
+
+        updated = 0
+        for chunk, chunk_id in zip(chunks, chunk_ids):
+            meta = chunk.get("metadata") or {}
+            if meta.get("chunk_role") != "slice":
+                continue
+            anchor_id = str(meta.get("anchor_chunk_id") or "").strip()
+            if not anchor_id:
+                continue
+            if chunk_storage.overwrite_chunk_json(chunk_id, chunk):
+                updated += 1
+        return updated
 
     async def _index_chunks(self, chunks: List[Dict[str, Any]], chunk_ids: List[str]) -> Dict[str, Any]:
         """

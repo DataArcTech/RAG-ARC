@@ -5,15 +5,35 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from main import app
+def _seed_registry() -> None:
+    """Ensure router imports do not require real DB-backed registrations."""
+
+    from framework.register import Register
+
+    reg = Register()
+    reg.registrations.setdefault("account", object())
+    reg.registrations.setdefault("chat_session", object())
+    reg.registrations.setdefault("chat_message", object())
+    reg.registrations.setdefault("rag_inference", object())
 
 
 @pytest.fixture
-def client():
+def app():
+    _seed_registry()
+    import api.routers.rag_inference as rag_router
+
+    app = FastAPI()
+    app.include_router(rag_router.router)
+    return app
+
+
+@pytest.fixture
+def client(app):
     return TestClient(app)
 
 
@@ -55,14 +75,14 @@ def test_rag_inference_stream_chat_sse_emits_message_event(monkeypatch, client):
     monkeypatch.setattr(rag_router, "rag_inference_handler", FakeRAG())
     monkeypatch.setattr(rag_router, "validate_user_session", lambda _session, _user: True)
 
-    app.dependency_overrides[rag_router.get_current_user] = lambda: user
+    client.app.dependency_overrides[rag_router.get_current_user] = lambda: user
     try:
         resp = client.get(
             f"/rag_inference/stream_chat/{session_id}",
             params={"query": "hello"},
         )
     finally:
-        app.dependency_overrides.pop(rag_router.get_current_user, None)
+        client.app.dependency_overrides.pop(rag_router.get_current_user, None)
 
     assert resp.status_code == 200
     assert '"object":"chat.completion.chunk"' in resp.text
@@ -97,13 +117,13 @@ def test_rag_inference_stream_chat_sse_requires_auth(monkeypatch, client):
 
     session_id = uuid.uuid4()
 
-    app.dependency_overrides[rag_router.get_current_user] = lambda: None
+    client.app.dependency_overrides[rag_router.get_current_user] = lambda: None
     try:
         resp = client.get(
             f"/rag_inference/stream_chat/{session_id}",
             params={"query": "hello"},
         )
     finally:
-        app.dependency_overrides.pop(rag_router.get_current_user, None)
+        client.app.dependency_overrides.pop(rag_router.get_current_user, None)
 
     assert resp.status_code == 401

@@ -323,16 +323,9 @@ async def stream_chat_sse(
         await get_thread_pool().run_blocking(message_handler.create_message, user_message)
 
         try:
-            history_messages = await get_thread_pool().run_blocking(
-                message_handler.list_messages_by_session,
-                session_id,
-            )
-            history_text = "\n".join(
-                f"{msg.content['role']}: {msg.content['content']}" for msg in history_messages
-            )
             token_stream, chunks, subgraph_data, subgraph_info = await asyncio.to_thread(
                 rag_inference_handler.stream_chat,
-                history_text,
+                query,
                 effective_owner,
                 return_subgraph=(return_subgraph or include_evidence),
             )
@@ -431,7 +424,7 @@ async def stream_chat_sse(
                     chunk_id=chunk_id,
                     model=model_name,
                     created=created,
-                    delta=delta_envelope(role=None, content="", tool_calls=tool_calls),
+                    delta=delta_envelope(role=None, tool_calls=tool_calls),
                 )
             )
 
@@ -440,7 +433,7 @@ async def stream_chat_sse(
                 chunk_id=chunk_id,
                 model=model_name,
                 created=created,
-                delta=delta_envelope(role=None, content=""),
+                delta=delta_envelope(),
                 finish_reason="stop",
             )
         )

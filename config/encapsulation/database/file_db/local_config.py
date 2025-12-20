@@ -13,7 +13,10 @@ class LocalDBConfig(AbstractConfig):
     type: Literal["local_blob_store"] = "local_blob_store"
 
     # Local storage configuration
-    base_path: str = Field(default_factory=lambda: os.getenv("LOCAL_BLOB_STORE_BASE_PATH", "./test_output"))
+    base_path: str = Field(
+        default_factory=lambda: os.getenv("LOCAL_FILE_STORAGE_PATH")
+        or os.getenv("LOCAL_BLOB_STORE_BASE_PATH", "./data/files")
+    )
     cleanup_empty_dirs: bool = False  # Whether to remove empty directories on cleanup
 
     def build(self) -> LocalDB:

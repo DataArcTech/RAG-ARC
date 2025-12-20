@@ -159,15 +159,18 @@ class SemanticUnitChunker(AbstractChunker):
                                 "parent_unit_id": semantic_unit_id,
                                 "table_caption": caption,
                                 "table_header": table_header,
+                                "index_text": content,
                                 "token_count": self._estimate_tokens(content),
                                 "anchor_is_summary": False,
                                 "is_atomic": True,
+                                "is_full_content": True,
                             },
                         )
                     )
                     continue
 
-                anchor_content = self._compose_with_caption(caption, table_header)
+                index_text = self._compose_with_caption(caption, table_header)
+                anchor_content = self._compose_with_caption(caption, full_table)
                 output.append(
                     self._make_chunk_dict(
                         content=anchor_content,
@@ -180,8 +183,10 @@ class SemanticUnitChunker(AbstractChunker):
                             "parent_unit_id": semantic_unit_id,
                             "table_caption": caption,
                             "table_header": table_header,
+                            "index_text": index_text,
                             "token_count": self._estimate_tokens(anchor_content),
-                            "anchor_is_summary": True,
+                            "anchor_is_summary": False,
+                            "is_full_content": True,
                         },
                     )
                 )
@@ -198,10 +203,12 @@ class SemanticUnitChunker(AbstractChunker):
                     overlap_rows=table_slice_overlap_rows,
                 )
                 for slice_index, (row_start, row_end, slice_body) in enumerate(row_groups, start=1):
-                    slice_content = self._compose_with_caption(
+                    slice_index_text = self._compose_with_caption(
                         caption,
                         "\n".join([line for line in (header, separator, slice_body) if line]).strip(),
                     )
+                    # Store the full semantic unit for provenance/evidence, but index on the smaller slice text.
+                    slice_content = anchor_content
                     output.append(
                         self._make_chunk_dict(
                             content=slice_content,
@@ -217,7 +224,9 @@ class SemanticUnitChunker(AbstractChunker):
                                 "row_range": {"start": row_start, "end": row_end},
                                 "table_caption": caption,
                                 "table_header": table_header,
-                                "token_count": self._estimate_tokens(slice_content),
+                                "index_text": slice_index_text,
+                                "token_count": self._estimate_tokens(slice_index_text),
+                                "is_full_content": True,
                             },
                         )
                     )
@@ -243,9 +252,11 @@ class SemanticUnitChunker(AbstractChunker):
                                 "semantic_unit_id": semantic_unit_id,
                                 "parent_unit_id": semantic_unit_id,
                                 "code_language": language,
+                                "index_text": content,
                                 "token_count": self._estimate_tokens(content),
                                 "anchor_is_summary": False,
                                 "is_atomic": True,
+                                "is_full_content": True,
                             },
                         )
                     )
@@ -256,7 +267,8 @@ class SemanticUnitChunker(AbstractChunker):
                     language=language,
                     body_lines=body_lines[: max(int(code_anchor_preview_lines), 0)],
                 )
-                anchor_content = self._compose_with_caption(caption, anchor_body)
+                index_text = self._compose_with_caption(caption, anchor_body)
+                anchor_content = self._compose_with_caption(caption, full_code)
                 output.append(
                     self._make_chunk_dict(
                         content=anchor_content,
@@ -268,8 +280,10 @@ class SemanticUnitChunker(AbstractChunker):
                             "semantic_unit_id": semantic_unit_id,
                             "parent_unit_id": semantic_unit_id,
                             "code_language": language,
+                            "index_text": index_text,
                             "token_count": self._estimate_tokens(anchor_content),
-                            "anchor_is_summary": True,
+                            "anchor_is_summary": False,
+                            "is_full_content": True,
                         },
                     )
                 )
@@ -283,10 +297,11 @@ class SemanticUnitChunker(AbstractChunker):
                     language=language,
                 )
                 for slice_index, (line_start, line_end, slice_body) in enumerate(slice_groups, start=1):
-                    slice_content = self._compose_with_caption(
+                    slice_index_text = self._compose_with_caption(
                         caption,
                         self._fence_wrap(fence=fence, language=language, body_lines=slice_body.splitlines()),
                     )
+                    slice_content = anchor_content
                     output.append(
                         self._make_chunk_dict(
                             content=slice_content,
@@ -301,7 +316,9 @@ class SemanticUnitChunker(AbstractChunker):
                                 "slice_index": slice_index,
                                 "line_range": {"start": line_start, "end": line_end},
                                 "code_language": language,
-                                "token_count": self._estimate_tokens(slice_content),
+                                "index_text": slice_index_text,
+                                "token_count": self._estimate_tokens(slice_index_text),
+                                "is_full_content": True,
                             },
                         )
                     )
@@ -327,9 +344,11 @@ class SemanticUnitChunker(AbstractChunker):
                                 "semantic_unit_id": semantic_unit_id,
                                 "parent_unit_id": semantic_unit_id,
                                 "list_type": list_type,
+                                "index_text": content,
                                 "token_count": self._estimate_tokens(content),
                                 "anchor_is_summary": False,
                                 "is_atomic": True,
+                                "is_full_content": True,
                             },
                         )
                     )
@@ -337,7 +356,8 @@ class SemanticUnitChunker(AbstractChunker):
 
                 preview_items = items[: max(int(list_anchor_preview_items), 0)]
                 anchor_body = "\n".join(preview_items).strip()
-                anchor_content = self._compose_with_caption(caption, anchor_body)
+                index_text = self._compose_with_caption(caption, anchor_body)
+                anchor_content = self._compose_with_caption(caption, full_list)
                 output.append(
                     self._make_chunk_dict(
                         content=anchor_content,
@@ -349,8 +369,10 @@ class SemanticUnitChunker(AbstractChunker):
                             "semantic_unit_id": semantic_unit_id,
                             "parent_unit_id": semantic_unit_id,
                             "list_type": list_type,
+                            "index_text": index_text,
                             "token_count": self._estimate_tokens(anchor_content),
-                            "anchor_is_summary": True,
+                            "anchor_is_summary": False,
+                            "is_full_content": True,
                         },
                     )
                 )
@@ -362,7 +384,8 @@ class SemanticUnitChunker(AbstractChunker):
                     overlap_items=list_slice_overlap_items,
                 )
                 for slice_index, (item_start, item_end, slice_body) in enumerate(item_groups, start=1):
-                    slice_content = self._compose_with_caption(caption, slice_body)
+                    slice_index_text = self._compose_with_caption(caption, slice_body)
+                    slice_content = anchor_content
                     output.append(
                         self._make_chunk_dict(
                             content=slice_content,
@@ -377,7 +400,9 @@ class SemanticUnitChunker(AbstractChunker):
                                 "slice_index": slice_index,
                                 "list_type": list_type,
                                 "list_item_range": {"start": item_start, "end": item_end},
-                                "token_count": self._estimate_tokens(slice_content),
+                                "index_text": slice_index_text,
+                                "token_count": self._estimate_tokens(slice_index_text),
+                                "is_full_content": True,
                             },
                         )
                     )
@@ -399,9 +424,11 @@ class SemanticUnitChunker(AbstractChunker):
                             "semantic_unit_type": "math",
                             "semantic_unit_id": semantic_unit_id,
                             "parent_unit_id": semantic_unit_id,
+                            "index_text": content,
                             "token_count": self._estimate_tokens(content),
                             "anchor_is_summary": False,
                             "is_atomic": is_atomic,
+                            "is_full_content": True,
                         },
                     )
                 )
@@ -423,9 +450,11 @@ class SemanticUnitChunker(AbstractChunker):
                             "semantic_unit_type": "blockquote",
                             "semantic_unit_id": semantic_unit_id,
                             "parent_unit_id": semantic_unit_id,
+                            "index_text": content,
                             "token_count": self._estimate_tokens(content),
                             "anchor_is_summary": False,
                             "is_atomic": is_atomic,
+                            "is_full_content": True,
                         },
                     )
                 )

@@ -79,7 +79,7 @@ def iter_text_deltas(text: str, *, chunk_chars: int | None = None) -> Iterator[s
         return
 
     if chunk_chars is None:
-        chunk_chars = 3 if _has_cjk(text) else 12
+        chunk_chars = 1 if _has_cjk(text) else 6
     chunk_chars = max(1, int(chunk_chars))
 
     start = 0
@@ -95,12 +95,20 @@ def delta_envelope(
     role: str | None = None,
     tool_calls: Any | None = None,
 ) -> Dict[str, Any]:
-    """Build a delta object aligned to DashScope/Qwen examples."""
+    """Build an OpenAI/Qwen-compatible delta object.
 
-    return {
-        "content": content if content is not None else "",
-        "function_call": None,
-        "refusal": None,
-        "role": role,
-        "tool_calls": tool_calls,
-    }
+    Mirrors common OpenAI-compatible streaming behavior:
+    - first chunk: {"role":"assistant","content":"","refusal":null}
+    - content chunks: {"content":"..."}
+    - final chunk: {}
+    """
+
+    delta: Dict[str, Any] = {}
+    if role is not None:
+        delta["role"] = role
+        delta["refusal"] = None
+    if content is not None:
+        delta["content"] = content
+    if tool_calls is not None:
+        delta["tool_calls"] = tool_calls
+    return delta

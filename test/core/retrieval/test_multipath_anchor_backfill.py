@@ -71,6 +71,7 @@ def test_multipath_backfills_anchor_and_attaches_slices():
     assert "| 1 | 2 |" in results[0].content
     assert "matched_slices" in (results[0].metadata or {})
     assert results[0].metadata["matched_slices"][0]["id"] == "SLICE_1"
+    assert "| 1 | 2 |" in str((results[0].metadata or {}).get("prompt_text") or "")
 
 
 def test_multipath_does_not_mutate_index_backed_anchor():

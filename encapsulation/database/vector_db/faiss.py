@@ -247,7 +247,13 @@ class FaissVectorDB(VectorDB):
             return []
 
         # Extract texts for embedding
-        texts = [chunk.content for chunk in chunks]
+        texts: list[str] = []
+        for chunk in chunks:
+            metadata = getattr(chunk, "metadata", None) or {}
+            index_text = metadata.get("index_text")
+            if not isinstance(index_text, str) or not index_text.strip():
+                index_text = chunk.content
+            texts.append(index_text)
 
         # Compute embeddings
         embeddings = self.embedding_model.embed(texts)

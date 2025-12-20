@@ -56,7 +56,7 @@ All runtime behavior is controlled through `.env`. By default, `.env.example` al
 | `FILE_STORE_BASE_PATH` | `./data/file_store` | Local blob store base path for original files. |
 | `PARSED_CONTENT_STORE_BASE_PATH` | `./data/parsed_content_store` | Parsed content store path. |
 | `CHUNK_STORE_BASE_PATH` | `./data/chunk_store` | Chunk store path. |
-| `LOCAL_BLOB_STORE_BASE_PATH` | `./test_output` | Base path for the `local_blob_store` adapter (mostly used in tests). |
+| `LOCAL_BLOB_STORE_BASE_PATH` | `./data/files` | Legacy alias for `LOCAL_FILE_STORAGE_PATH` (only used when a JSON `base_path` is not provided). |
 | `FAISS_INDEX_PATH` | `./data/unified_faiss_index` | Unified FAISS index directory. |
 | `BM25_INDEX_PATH` | `./data/unified_bm25_index` | Unified BM25 index directory. |
 | `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | Graph index / embedding cache directory (Neo4j HippoRAG). |
@@ -83,6 +83,23 @@ All runtime behavior is controlled through `.env`. By default, `.env.example` al
 | `TABLE_MAX_MERGED_ROWS` | `30` | Maximum table data rows merged into a table anchor after retrieval. |
 | `SEMANTIC_UNIT_MAX_MERGED_SLICE_CHARS` | `1200` | Maximum characters appended per matched slice when merging into `anchor.content`. |
 | `SEMANTIC_UNIT_MAX_MERGED_TOTAL_CHARS` | `3000` | Total character budget for merged slice snippets appended to an anchor. |
+
+## 2.1 Semantic-Unit Chunking Controls
+
+These knobs apply when the knowledge config selects `semantic_unit_chunker` (for example `config/json_configs/knowledge_semantic_unit.json`).
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `SEMANTIC_CHUNKING_LEVEL` | `basic` | Semantic unit chunking level: `disabled`/`basic`/`standard`/`advanced`. |
+| `TABLE_SMALL_MAX_TOKENS` | _(empty)_ | Override table small/large threshold (leave empty to use code defaults). |
+| `TABLE_SLICE_MAX_TOKENS` | _(empty)_ | Override target token budget for table slices. |
+| `TABLE_SLICE_OVERLAP_ROWS` | _(empty)_ | Override overlap rows for table slices. |
+| `CODE_SMALL_MAX_TOKENS` | _(empty)_ | Override code small/large threshold. |
+| `CODE_SLICE_MAX_TOKENS` | _(empty)_ | Override target token budget for code slices. |
+| `CODE_SLICE_OVERLAP_LINES` | _(empty)_ | Override overlap lines for code slices. |
+| `LIST_SMALL_MAX_TOKENS` | _(empty)_ | Override list small/large threshold. |
+| `LIST_SLICE_MAX_TOKENS` | _(empty)_ | Override target token budget for list slices. |
+| `LIST_SLICE_OVERLAP_ITEMS` | _(empty)_ | Override overlap items for list slices. |
 
 ## 3. Development / Owner Scope
 
@@ -209,8 +226,8 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `DOTSOCR_OUTPUT_DIR` | _(empty)_ | Optional override for dots_ocr output directory. |
 | `VLMOCR_OUTPUT_DIR` | _(empty)_ | Optional override for VLM OCR output directory. |
 | `OCR_MODEL_NAME` | _(empty)_ | Optional backward-compatible OCR model name alias. |
-| `RAGARC_RUNTIME_DIR` | `./local/runtime` | Fallback runtime directory when parser output dir is not writable. |
-| `LOCAL_FILE_STORAGE_PATH` | `./local/files` | Root directory for locally stored uploads. |
+| `RAGARC_RUNTIME_DIR` | `./local/runtime` | Fallback runtime root when preferred local directories are not writable. |
+| `LOCAL_FILE_STORAGE_PATH` | `./data/files` | Default root for `local_blob_store` when JSON `base_path` is not provided. |
 
 ## 9. Neo4j Graph Database
 
