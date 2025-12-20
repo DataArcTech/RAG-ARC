@@ -4,6 +4,7 @@ import logging
 import mimetypes
 import os
 import sys
+import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 from dataclasses import asdict
@@ -722,6 +723,201 @@ def export_graph(
         typer.echo(
             f"Graph summary: {len(graph_data.get('nodes', []))} nodes, {len(graph_data.get('edges', []))} edges"
         )
+
+
+@app.command("semantic-unit-eval")
+def semantic_unit_eval(
+    path: Path = typer.Argument(
+        ...,
+        exists=True,
+        readable=True,
+        file_okay=True,
+        dir_okay=False,
+        resolve_path=True,
+        help="Markdown/text file to chunk and retrieve against (no DB required).",
+    ),
+    level: str = typer.Option(
+        "standard",
+        help="Semantic unit chunking level: disabled/basic/standard/advanced.",
+    ),
+    query: List[str] = typer.Option(
+        None,
+        "--query",
+        help="Query to run against the temporary BM25 index (repeatable).",
+    ),
+    k: int = typer.Option(5, min=1, max=50, help="Top-k retrieval results."),
+    force_slices: bool = typer.Option(
+        False,
+        "--force-slices",
+        help="Force table/code/list to take anchor+slice path (sets *_small_max_tokens=1).",
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        help="Output directory (default: test_output/semantic_unit_eval/<stem>_<timestamp>).",
+    ),
+    owner_id: Optional[str] = typer.Option(
+        None,
+        help="Owner UUID for retrieval filtering (default: random UUID).",
+    ),
+) -> None:
+    """
+    Manual evaluation runner for semantic-unit chunking + anchor backfill + retrieval merge.
+
+    This command avoids external services and databases by:
+    - chunking input markdown/text with SemanticUnitChunker
+    - assigning synthetic chunk IDs + backfilling anchor_chunk_id
+    - building a temporary Tantivy BM25 index on disk
+    - running MultiPath retrieval (BM25 only) to exercise anchor backfill + evidence sync
+    """
+
+    from config.core.file_management.chunker.chunker_config import (
+        SemanticUnitChunkerConfig,
+        TokenChunkerConfig,
+    )
+    from config.encapsulation.database.bm25_config import BM25BuilderConfig
+    from config.core.retrieval.tantivy_bm25_config import TantivyBM25RetrieverConfig
+    from config.core.retrieval.multipath_config import MultiPathRetrieverConfig
+    from core.file_management.index_manager import IndexManager
+    from core.presentation.evidence import serialize_chunks
+    from encapsulation.data_model.schema import Chunk
+
+    if not query:
+        query = []
+
+    resolved_owner = str(uuid.UUID(owner_id)) if owner_id else str(uuid.uuid4())
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    if output_dir is None:
+        output_dir = Path("test_output") / "semantic_unit_eval" / f"{path.stem}_{timestamp}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if not text.strip():
+        typer.secho("Input file is empty.", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    chunker_config = SemanticUnitChunkerConfig(
+        level=level,
+        fallback_chunker_config=TokenChunkerConfig(chunk_size=800, chunk_overlap=80),
+    )
+    if force_slices:
+        chunker_config.table_small_max_tokens = 1
+        chunker_config.code_small_max_tokens = 1
+        chunker_config.list_small_max_tokens = 1
+
+    chunker = chunker_config.build()
+    raw_chunks = chunker.chunk_text(
+        text=text,
+        metadata={
+            "source_file_id": str(path),
+            "filename": path.name,
+            "owner_id": resolved_owner,
+        },
+        level=level,
+    )
+
+    if not raw_chunks:
+        typer.secho("Chunker produced no chunks.", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    chunk_ids = [str(uuid.uuid4()) for _ in raw_chunks]
+    IndexManager._backfill_anchor_chunk_ids(raw_chunks, chunk_ids)
+
+    role_counts: Dict[str, int] = {}
+    unit_counts: Dict[str, int] = {}
+    for chunk in raw_chunks:
+        meta = chunk.get("metadata") or {}
+        role = str(meta.get("chunk_role") or "unknown")
+        unit_type = str(meta.get("semantic_unit_type") or "unknown")
+        role_counts[role] = role_counts.get(role, 0) + 1
+        unit_counts[unit_type] = unit_counts.get(unit_type, 0) + 1
+
+    output_chunks_path = output_dir / "chunks.jsonl"
+    with output_chunks_path.open("w", encoding="utf-8") as handle:
+        for chunk_id, chunk in zip(chunk_ids, raw_chunks):
+            meta = (chunk.get("metadata") or {}).copy()
+            src = chunk.get("source_metadata") or {}
+            if src:
+                meta.update(src)
+            record = {
+                "id": chunk_id,
+                "content": chunk.get("content", ""),
+                "metadata": meta,
+            }
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    bm25_dir = output_dir / "bm25_index"
+    bm25_dir.mkdir(parents=True, exist_ok=True)
+    bm25_builder = BM25BuilderConfig(index_path=str(bm25_dir)).build()
+
+    chunk_objects: List[Chunk] = []
+    for chunk_id, chunk in zip(chunk_ids, raw_chunks):
+        meta = (chunk.get("metadata") or {}).copy()
+        src = chunk.get("source_metadata") or {}
+        if src:
+            meta.update(src)
+        owner = str(meta.get("owner_id") or resolved_owner)
+        chunk_objects.append(
+            Chunk(
+                id=chunk_id,
+                owner_id=owner,
+                content=str(chunk.get("content") or ""),
+                metadata=meta,
+            )
+        )
+
+    ok = bm25_builder.update_index(chunk_objects)
+    if not ok:
+        typer.secho("BM25 indexing failed.", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    multipath = MultiPathRetrieverConfig(
+        retrievers=[
+            TantivyBM25RetrieverConfig(
+                index_config=BM25BuilderConfig(index_path=str(bm25_dir)),
+                search_kwargs={"k": k, "with_score": True, "use_phrase_query": False},
+            )
+        ],
+        fusion_method="rrf",
+        rrf_k=60,
+        search_kwargs={"k": k, "with_score": True},
+    ).build()
+
+    query_results: List[Dict[str, Any]] = []
+    for q in query:
+        hits = multipath.invoke(q, k=k, owner_id=resolved_owner)
+        payload = {
+            "query": q,
+            "owner_id": resolved_owner,
+            "k": k,
+            "hits": len(hits),
+            "chunks": serialize_chunks(hits),
+        }
+        query_results.append(payload)
+        (output_dir / f"query_{len(query_results)}.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    summary = {
+        "input": str(path),
+        "output_dir": str(output_dir),
+        "owner_id": resolved_owner,
+        "level": level,
+        "force_slices": force_slices,
+        "chunker": chunker.get_chunker_info(),
+        "chunks_total": len(raw_chunks),
+        "role_counts": role_counts,
+        "unit_type_counts": unit_counts,
+        "queries": [entry["query"] for entry in query_results],
+    }
+    (output_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    typer.echo(f"Output: {output_dir}")
+    typer.echo(f"- chunks: {output_chunks_path}")
+    typer.echo(f"- summary: {output_dir / 'summary.json'}")
+    if query:
+        typer.echo(f"- queries: {len(query)} (see {output_dir}/query_*.json)")
 
 
 if __name__ == "__main__":

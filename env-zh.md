@@ -26,6 +26,17 @@
 | `OCR_API_BASE_URL` | _(空)_ | OCR/VLM 的 Base URL。 |
 | `OPENAI_OCR_MODEL` | `gpt-4o-mini` | 默认 OCR/VLM 模型名称。 |
 | `DOTS_OCR_CACHE_FOLDER` | `./models/dots_ocr` | dots_ocr 模型缓存路径。 |
+| `DOTS_OCR_LOADING_METHOD` | `huggingface` | DotsOCR 加载方式（`huggingface` 本地 Transformers，`vllm` 为 OpenAI 兼容服务）。 |
+| `DOTS_OCR_USE_CHINA_MIRROR` | `false` | 下载 dots_ocr 权重时是否使用 HuggingFace 镜像。 |
+| `DOTS_OCR_USE_SNAPSHOT_DOWNLOAD` | `false` | 是否使用 HuggingFace `snapshot_download` 目录结构（可避免动态模块问题）。 |
+| `DOTS_OCR_DEVICE` | `cpu` | DotsOCR 运行设备（默认回退到 `DEVICE`）。 |
+| `DOTS_OCR_MODEL_PATH` | `rednote-hilab/dots.ocr` | dots_ocr 的 HuggingFace repo id（当 `DOTS_OCR_LOADING_METHOD=huggingface`）。 |
+| `DOTS_OCR_BASE_URL` | `http://localhost:8000/v1` | vLLM/OpenAI 兼容 dots_ocr 服务 base URL（当 `DOTS_OCR_LOADING_METHOD=vllm`）。 |
+| `DOTS_OCR_API_KEY` | _(空)_ | vLLM/OpenAI 兼容 dots_ocr 服务 API key（当 `DOTS_OCR_LOADING_METHOD=vllm`）。 |
+| `DOTS_OCR_VLLM_MODEL_NAME` | `model` | vLLM/OpenAI 兼容服务暴露的模型名。 |
+| `DOTS_OCR_MAX_COMPLETION_TOKENS` | `16384` | OCR 生成的最大 completion tokens。 |
+| `DOTS_OCR_TEMPERATURE` | `0.1` | OCR 生成温度。 |
+| `DOTS_OCR_TOP_P` | `1.0` | OCR 生成 top-p。 |
 | `USE_CHINA_MIRROR` | `false` | 是否启用 HuggingFace 国内镜像（影响本地 embedding/reranker 等）。 |
 | `RERANKER_MODEL_NAME` | `Qwen/Qwen3-Reranker-0.6B` | 默认本地 reranker 模型名（`MODEL_PROFILE=local` 时使用）。 |
 | `RERANKER_CACHE_FOLDER` | `./models/Qwen` | reranker 缓存目录。 |
@@ -35,6 +46,8 @@
 | `DEVICE` | `cpu` | 可选：共享默认设备（当各组件设备变量为空时使用）。 |
 | `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | 使用本地 HuggingFace 嵌入时的模型名（`EMBEDDING_MODEL_PROVIDER=huggingface`）。 |
 | `MODEL_PROFILE` | `api` | 选择配置档（`api` 或 `local`），影响默认 JSON 配置。 |
+| `MINILM_MODEL_NAME` | `sentence-transformers/all-MiniLM-L6-v2` | `download_models.py` 下载 MiniLM 时使用的默认 repo id。 |
+| `MINILM_CACHE_FOLDER` | `./models/all-MiniLM-L6-v2` | `download_models.py` 下载 MiniLM 的缓存目录。 |
 
 ## 1.1 索引与存储路径
 
@@ -43,6 +56,7 @@
 | `FILE_STORE_BASE_PATH` | `./data/file_store` | 文件原始内容存储目录（本地 blob store）。 |
 | `PARSED_CONTENT_STORE_BASE_PATH` | `./data/parsed_content_store` | 解析结果存储目录。 |
 | `CHUNK_STORE_BASE_PATH` | `./data/chunk_store` | Chunk 存储目录。 |
+| `LOCAL_BLOB_STORE_BASE_PATH` | `./test_output` | `local_blob_store` 适配器的 base path（主要用于测试/本地）。 |
 | `FAISS_INDEX_PATH` | `./data/unified_faiss_index` | 统一 FAISS 索引目录。 |
 | `BM25_INDEX_PATH` | `./data/unified_bm25_index` | 统一 BM25 索引目录。 |
 | `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | 图索引/向量缓存落盘目录（Neo4j HippoRAG）。 |
@@ -65,6 +79,10 @@
 | `DEEPSEARCH_MAX_STAGE_HISTORY` | `10` | DeepSearch payload 中最多保留的 stage_history 条数。 |
 | `DEEPSEARCH_MAX_EXTERNAL_CALLS` | `5` | DeepSearch payload 中最多保留的 external_calls 条数。 |
 | `DEEPSEARCH_MAX_TOOL_METADATA` | `5` | DeepSearch payload 中最多保留的 tool_results 条数。 |
+| `SEMANTIC_UNIT_MAX_MATCHED_SLICES` | `3` | 语义单元归并时最多附带的命中 slice 数。 |
+| `TABLE_MAX_MERGED_ROWS` | `30` | 表格归并回 anchor 时最多拼接的数据行数。 |
+| `SEMANTIC_UNIT_MAX_MERGED_SLICE_CHARS` | `1200` | code/list 归并时每个 slice 追加到 `anchor.content` 的最大字符数。 |
+| `SEMANTIC_UNIT_MAX_MERGED_TOTAL_CHARS` | `3000` | 归并追加到 `anchor.content` 的总字符预算。 |
 
 ## 3. 开发模式与租户
 

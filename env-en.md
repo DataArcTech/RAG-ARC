@@ -26,6 +26,17 @@ All runtime behavior is controlled through `.env`. By default, `.env.example` al
 | `OCR_API_BASE_URL` | _(empty)_ | Base URL for OCR provider. |
 | `OPENAI_OCR_MODEL` | `gpt-4o-mini` | OCR/VLM model name. |
 | `DOTS_OCR_CACHE_FOLDER` | `./models/dots_ocr` | Local cache for dots_ocr weights. |
+| `DOTS_OCR_LOADING_METHOD` | `huggingface` | DotsOCR loading method (`huggingface` for local Transformers, `vllm` for OpenAI-compatible server). |
+| `DOTS_OCR_USE_CHINA_MIRROR` | `false` | Enable a HuggingFace mirror when downloading dots_ocr weights. |
+| `DOTS_OCR_USE_SNAPSHOT_DOWNLOAD` | `false` | Use HuggingFace `snapshot_download` layout (helps avoid dynamic module issues). |
+| `DOTS_OCR_DEVICE` | `cpu` | DotsOCR runtime device (falls back to `DEVICE`). |
+| `DOTS_OCR_MODEL_PATH` | `rednote-hilab/dots.ocr` | HuggingFace repo id for the dots_ocr model (when `DOTS_OCR_LOADING_METHOD=huggingface`). |
+| `DOTS_OCR_BASE_URL` | `http://localhost:8000/v1` | Base URL for vLLM/OpenAI-compatible dots_ocr server (when `DOTS_OCR_LOADING_METHOD=vllm`). |
+| `DOTS_OCR_API_KEY` | _(empty)_ | API key for the vLLM/OpenAI-compatible dots_ocr server (when `DOTS_OCR_LOADING_METHOD=vllm`). |
+| `DOTS_OCR_VLLM_MODEL_NAME` | `model` | Model name exposed by the vLLM/OpenAI-compatible server. |
+| `DOTS_OCR_MAX_COMPLETION_TOKENS` | `16384` | Max completion tokens for OCR generations. |
+| `DOTS_OCR_TEMPERATURE` | `0.1` | OCR generation temperature. |
+| `DOTS_OCR_TOP_P` | `1.0` | OCR generation top-p. |
 | `USE_CHINA_MIRROR` | `false` | Enable a HuggingFace mirror for local models (embedding/reranker, etc.). |
 | `RERANKER_MODEL_NAME` | `Qwen/Qwen3-Reranker-0.6B` | Default local reranker model name (used when `MODEL_PROFILE=local`). |
 | `RERANKER_CACHE_FOLDER` | `./models/Qwen` | Cache path for reranker checkpoints. |
@@ -35,6 +46,8 @@ All runtime behavior is controlled through `.env`. By default, `.env.example` al
 | `DEVICE` | `cpu` | Optional shared default device used when component-specific device vars are empty. |
 | `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | Local HuggingFace embedding model name when `EMBEDDING_MODEL_PROVIDER=huggingface`. |
 | `MODEL_PROFILE` | `api` | Chooses config profile (`api` or `local`). Impacts default JSON configs. |
+| `MINILM_MODEL_NAME` | `sentence-transformers/all-MiniLM-L6-v2` | Default MiniLM model repo id used by `download_models.py`. |
+| `MINILM_CACHE_FOLDER` | `./models/all-MiniLM-L6-v2` | Cache folder used by `download_models.py` when downloading MiniLM. |
 
 ## 1.1 Index & Storage Paths
 
@@ -43,6 +56,7 @@ All runtime behavior is controlled through `.env`. By default, `.env.example` al
 | `FILE_STORE_BASE_PATH` | `./data/file_store` | Local blob store base path for original files. |
 | `PARSED_CONTENT_STORE_BASE_PATH` | `./data/parsed_content_store` | Parsed content store path. |
 | `CHUNK_STORE_BASE_PATH` | `./data/chunk_store` | Chunk store path. |
+| `LOCAL_BLOB_STORE_BASE_PATH` | `./test_output` | Base path for the `local_blob_store` adapter (mostly used in tests). |
 | `FAISS_INDEX_PATH` | `./data/unified_faiss_index` | Unified FAISS index directory. |
 | `BM25_INDEX_PATH` | `./data/unified_bm25_index` | Unified BM25 index directory. |
 | `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | Graph index / embedding cache directory (Neo4j HippoRAG). |
@@ -65,6 +79,10 @@ All runtime behavior is controlled through `.env`. By default, `.env.example` al
 | `DEEPSEARCH_MAX_STAGE_HISTORY` | `10` | Maximum stage history entries returned in DeepSearch payloads. |
 | `DEEPSEARCH_MAX_EXTERNAL_CALLS` | `5` | Maximum external call entries returned in DeepSearch payloads. |
 | `DEEPSEARCH_MAX_TOOL_METADATA` | `5` | Maximum tool metadata entries returned in DeepSearch payloads. |
+| `SEMANTIC_UNIT_MAX_MATCHED_SLICES` | `3` | Maximum slice snippets attached to a semantic-unit anchor (post-retrieval merge). |
+| `TABLE_MAX_MERGED_ROWS` | `30` | Maximum table data rows merged into a table anchor after retrieval. |
+| `SEMANTIC_UNIT_MAX_MERGED_SLICE_CHARS` | `1200` | Maximum characters appended per matched slice when merging into `anchor.content`. |
+| `SEMANTIC_UNIT_MAX_MERGED_TOTAL_CHARS` | `3000` | Total character budget for merged slice snippets appended to an anchor. |
 
 ## 3. Development / Owner Scope
 

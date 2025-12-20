@@ -15,7 +15,7 @@ from huggingface_hub import snapshot_download
 
 DEFAULT_EMBEDDING = os.getenv("EMBEDDING_MODEL_NAME", "Qwen/Qwen3-Embedding-0.6B")
 DEFAULT_RERANKER = os.getenv("RERANKER_MODEL_NAME", "Qwen/Qwen3-Reranker-0.6B")
-DEFAULT_OCR = os.getenv("DOTS_OCR_MODEL_NAME", "rednote-hilab/dots.ocr")
+DEFAULT_OCR = os.getenv("DOTS_OCR_MODEL_PATH") or os.getenv("DOTS_OCR_MODEL_NAME") or "rednote-hilab/dots.ocr"
 DEFAULT_MINILM = os.getenv("MINILM_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
 DEFAULT_QWEN_CACHE = os.getenv("RERANKER_CACHE_FOLDER", "./models/Qwen")
 DEFAULT_DOTS_CACHE = os.getenv("DOTS_OCR_CACHE_FOLDER", "./models/dots_ocr")

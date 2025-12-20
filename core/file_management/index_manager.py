@@ -256,6 +256,7 @@ class IndexManager(AbstractModule):
             # Step 5: Store chunks (use thread pool for each chunk to avoid blocking)
             logger.info(f"Step 5: Storing chunks")
             chunk_ids = []
+            stored_chunks: List[Dict[str, Any]] = []
 
             for i, chunk in enumerate(chunks):
                 if chunk is None:
@@ -276,6 +277,7 @@ class IndexManager(AbstractModule):
 
                     if chunk_id:
                         chunk_ids.append(chunk_id)
+                        stored_chunks.append(chunk)
                         logger.debug(f"Stored chunk {i+1}/{len(chunks)} with ID: {chunk_id}")
                     else:
                         logger.warning(f"Failed to store chunk {i+1}/{len(chunks)}")
@@ -296,10 +298,16 @@ class IndexManager(AbstractModule):
                 **kwargs
             )
 
+            # Backfill anchor_chunk_id for hierarchical chunking strategies (e.g., semantic_unit).
+            try:
+                self._backfill_anchor_chunk_ids(stored_chunks, chunk_ids)
+            except Exception as backfill_error:
+                logger.warning(f"Failed to backfill anchor_chunk_id metadata: {backfill_error}")
+
             # Step 6: Index the chunks (if indexers are configured)
             if self.indexers:
                 logger.info(f"Step 6: Indexing chunks with {len(self.indexers)} indexers")
-                indexing_results = await self._index_chunks(chunks, chunk_ids)
+                indexing_results = await self._index_chunks(stored_chunks, chunk_ids)
                 result["indexing_results"] = indexing_results
                 result["metadata"]["indexers_used"] = list(indexing_results.keys())
 
@@ -480,6 +488,49 @@ class IndexManager(AbstractModule):
         # Fallback: convert the entire result to string
         logger.warning("Could not find text content in standard keys, using string representation")
         return str(parse_result)
+
+    @staticmethod
+    def _backfill_anchor_chunk_ids(chunks: List[Dict[str, Any]], chunk_ids: List[str]) -> None:
+        """
+        Backfill per-slice `anchor_chunk_id` once ChunkStorage has allocated real Chunk IDs.
+
+        Chunkers that produce parent/child relationships should emit:
+        - metadata.semantic_unit_id
+        - metadata.chunk_role in {"anchor", "slice"}
+        - slices may set anchor_chunk_id=None as a placeholder
+
+        This method mutates `chunks` in-place (metadata only) to ensure indexers persist
+        `anchor_chunk_id` in the searchable metadata.
+        """
+        if not chunks or not chunk_ids:
+            return
+        if len(chunks) != len(chunk_ids):
+            return
+
+        unit_to_anchor_id: Dict[str, str] = {}
+        for chunk, chunk_id in zip(chunks, chunk_ids):
+            meta = chunk.get("metadata") or {}
+            if meta.get("chunk_role") != "anchor":
+                continue
+            semantic_unit_id = str(meta.get("semantic_unit_id") or "").strip()
+            if not semantic_unit_id:
+                continue
+            unit_to_anchor_id[semantic_unit_id] = chunk_id
+
+        if not unit_to_anchor_id:
+            return
+
+        for chunk in chunks:
+            meta = chunk.get("metadata") or {}
+            if meta.get("chunk_role") != "slice":
+                continue
+            semantic_unit_id = str(meta.get("semantic_unit_id") or "").strip()
+            if not semantic_unit_id:
+                continue
+            anchor_id = unit_to_anchor_id.get(semantic_unit_id)
+            if anchor_id:
+                meta["anchor_chunk_id"] = anchor_id
+                chunk["metadata"] = meta
 
     async def _index_chunks(self, chunks: List[Dict[str, Any]], chunk_ids: List[str]) -> Dict[str, Any]:
         """

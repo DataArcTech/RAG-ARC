@@ -1,0 +1,899 @@
+import logging
+import re
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+from core.file_management.chunker.base import AbstractChunker
+
+if TYPE_CHECKING:
+    from config.core.file_management.chunker.chunker_config import SemanticUnitChunkerConfig
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _Segment:
+    kind: str  # "text" | "table" | "code" | "list" | "math" | "blockquote"
+    content: str
+    caption: str = ""
+    info: Dict[str, Any] = field(default_factory=dict)
+
+
+class SemanticUnitChunker(AbstractChunker):
+    """
+    SemanticUnitChunker implements a hierarchical (anchor/slice) chunking strategy.
+
+    Phase A (basic) focuses on Markdown tables:
+    - Small tables become a single anchor chunk.
+    - Large tables become an anchor (caption + header) plus multiple slices (header + row windows).
+
+    Phase B (standard/advanced) adds:
+    - fenced code blocks (anchor + slices by line windows)
+    - markdown lists (anchor + slices by item windows)
+    - display math blocks (atomic anchors)
+    - blockquotes (atomic anchors; advanced only)
+
+    Any non-recognized text falls back to a configured fallback chunker.
+    """
+
+    _FENCE_RE = re.compile(r"^\s*(```|~~~)")
+    _FENCE_START_RE = re.compile(r"^\s*(```|~~~)\s*(\S+)?(?:\s+.*)?\s*$")
+    _BLOCKQUOTE_RE = re.compile(r"^\s*>\s?.*")
+    _TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
+    _LIST_ITEM_RE = re.compile(r"^(\s*)([-*+])\s+(.*)$")
+    _ORDERED_ITEM_RE = re.compile(r"^(\s*)(\d+)[.)]\s+(.*)$")
+    _TASK_ITEM_RE = re.compile(r"^(\s*)([-*+])\s+\[( |x|X)\]\s+(.*)$")
+    _MATH_BLOCK_START_RE = re.compile(r"^\s*(\$\$|\\\[)\s*$")
+    _MATH_BLOCK_END_RE = re.compile(r"^\s*(\$\$|\\\])\s*$")
+
+    def __init__(self, config: "SemanticUnitChunkerConfig"):
+        super().__init__(config)
+        self._fallback = self.config.fallback_chunker_config.build()
+
+    def chunk_text(
+        self,
+        text: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> List[Dict[str, Any]]:
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("text must be a non-empty string")
+
+        level = kwargs.get("level", getattr(self.config, "level", "basic"))
+        if level == "disabled":
+            chunks = self._fallback.chunk_text(text=text, metadata=metadata, **kwargs)
+            for chunk in chunks:
+                chunk_meta = chunk.get("metadata") or {}
+                chunk_meta.setdefault("chunk_role", "text")
+                chunk_meta.setdefault("semantic_unit_type", "text")
+                chunk["metadata"] = chunk_meta
+            return chunks
+
+        enabled_units = self._enabled_units(level)
+        segments = self._split_markdown(
+            text,
+            enable_tables=enabled_units["table"],
+            enable_code=enabled_units["code"],
+            enable_lists=enabled_units["list"],
+            enable_math=enabled_units["math"],
+            enable_blockquotes=enabled_units["blockquote"],
+        )
+        source_file_id = ""
+        if metadata:
+            source_file_id = str(metadata.get("source_file_id") or "").strip()
+
+        table_small_max_tokens = kwargs.get(
+            "table_small_max_tokens", getattr(self.config, "table_small_max_tokens", 400)
+        )
+        table_slice_max_tokens = kwargs.get(
+            "table_slice_max_tokens", getattr(self.config, "table_slice_max_tokens", 300)
+        )
+        table_slice_overlap_rows = kwargs.get(
+            "table_slice_overlap_rows", getattr(self.config, "table_slice_overlap_rows", 2)
+        )
+
+        code_small_max_tokens = kwargs.get("code_small_max_tokens", getattr(self.config, "code_small_max_tokens", 400))
+        code_slice_max_tokens = kwargs.get("code_slice_max_tokens", getattr(self.config, "code_slice_max_tokens", 300))
+        code_slice_overlap_lines = kwargs.get(
+            "code_slice_overlap_lines", getattr(self.config, "code_slice_overlap_lines", 3)
+        )
+        code_anchor_preview_lines = kwargs.get(
+            "code_anchor_preview_lines", getattr(self.config, "code_anchor_preview_lines", 8)
+        )
+
+        list_small_max_tokens = kwargs.get("list_small_max_tokens", getattr(self.config, "list_small_max_tokens", 400))
+        list_slice_max_tokens = kwargs.get("list_slice_max_tokens", getattr(self.config, "list_slice_max_tokens", 300))
+        list_slice_overlap_items = kwargs.get(
+            "list_slice_overlap_items", getattr(self.config, "list_slice_overlap_items", 1)
+        )
+        list_anchor_preview_items = kwargs.get(
+            "list_anchor_preview_items", getattr(self.config, "list_anchor_preview_items", 8)
+        )
+
+        math_small_max_tokens = kwargs.get("math_small_max_tokens", getattr(self.config, "math_small_max_tokens", 2000))
+        blockquote_small_max_tokens = kwargs.get(
+            "blockquote_small_max_tokens", getattr(self.config, "blockquote_small_max_tokens", 600)
+        )
+
+        output: List[Dict[str, Any]] = []
+        table_counter = 0
+        code_counter = 0
+        list_counter = 0
+        math_counter = 0
+        blockquote_counter = 0
+
+        for segment in segments:
+            if segment.kind == "text":
+                produced = self._fallback.chunk_text(text=segment.content, metadata=metadata, **kwargs)
+                for chunk in produced:
+                    chunk_meta = chunk.get("metadata") or {}
+                    chunk_meta.setdefault("chunk_role", "text")
+                    chunk_meta.setdefault("semantic_unit_type", "text")
+                    chunk["metadata"] = chunk_meta
+                output.extend(produced)
+                continue
+
+            caption = segment.caption.strip()
+
+            if segment.kind == "table":
+                table_counter += 1
+                semantic_unit_id = f"{source_file_id}:table:{table_counter}"
+
+                header, separator, rows = self._parse_markdown_table(segment.content)
+                table_header = "\n".join([line for line in (header, separator) if line]).strip()
+
+                full_table = segment.content.strip()
+                full_token_count = self._estimate_tokens(full_table)
+
+                if full_token_count <= table_small_max_tokens:
+                    content = self._compose_with_caption(caption, full_table)
+                    output.append(
+                        self._make_chunk_dict(
+                            content=content,
+                            source_metadata=metadata,
+                            metadata={
+                                "strategy": "semantic_unit",
+                                "chunk_role": "anchor",
+                                "semantic_unit_type": "table",
+                                "semantic_unit_id": semantic_unit_id,
+                                "parent_unit_id": semantic_unit_id,
+                                "table_caption": caption,
+                                "table_header": table_header,
+                                "token_count": self._estimate_tokens(content),
+                                "anchor_is_summary": False,
+                                "is_atomic": True,
+                            },
+                        )
+                    )
+                    continue
+
+                anchor_content = self._compose_with_caption(caption, table_header)
+                output.append(
+                    self._make_chunk_dict(
+                        content=anchor_content,
+                        source_metadata=metadata,
+                        metadata={
+                            "strategy": "semantic_unit",
+                            "chunk_role": "anchor",
+                            "semantic_unit_type": "table",
+                            "semantic_unit_id": semantic_unit_id,
+                            "parent_unit_id": semantic_unit_id,
+                            "table_caption": caption,
+                            "table_header": table_header,
+                            "token_count": self._estimate_tokens(anchor_content),
+                            "anchor_is_summary": True,
+                        },
+                    )
+                )
+
+                if not rows:
+                    continue
+
+                row_groups = self._slice_table_rows(
+                    caption=caption,
+                    header=header,
+                    separator=separator,
+                    rows=rows,
+                    slice_max_tokens=table_slice_max_tokens,
+                    overlap_rows=table_slice_overlap_rows,
+                )
+                for slice_index, (row_start, row_end, slice_body) in enumerate(row_groups, start=1):
+                    slice_content = self._compose_with_caption(
+                        caption,
+                        "\n".join([line for line in (header, separator, slice_body) if line]).strip(),
+                    )
+                    output.append(
+                        self._make_chunk_dict(
+                            content=slice_content,
+                            source_metadata=metadata,
+                            metadata={
+                                "strategy": "semantic_unit",
+                                "chunk_role": "slice",
+                                "semantic_unit_type": "table",
+                                "semantic_unit_id": semantic_unit_id,
+                                "parent_unit_id": semantic_unit_id,
+                                "anchor_chunk_id": None,
+                                "slice_index": slice_index,
+                                "row_range": {"start": row_start, "end": row_end},
+                                "table_caption": caption,
+                                "table_header": table_header,
+                                "token_count": self._estimate_tokens(slice_content),
+                            },
+                        )
+                    )
+                continue
+
+            if segment.kind == "code":
+                code_counter += 1
+                semantic_unit_id = f"{source_file_id}:code:{code_counter}"
+                fence, language, body_lines = self._split_fenced_code(segment.content)
+                full_code = segment.content.strip()
+                full_token_count = self._estimate_tokens(self._compose_with_caption(caption, full_code))
+
+                if full_token_count <= code_small_max_tokens:
+                    content = self._compose_with_caption(caption, full_code)
+                    output.append(
+                        self._make_chunk_dict(
+                            content=content,
+                            source_metadata=metadata,
+                            metadata={
+                                "strategy": "semantic_unit",
+                                "chunk_role": "anchor",
+                                "semantic_unit_type": "code",
+                                "semantic_unit_id": semantic_unit_id,
+                                "parent_unit_id": semantic_unit_id,
+                                "code_language": language,
+                                "token_count": self._estimate_tokens(content),
+                                "anchor_is_summary": False,
+                                "is_atomic": True,
+                            },
+                        )
+                    )
+                    continue
+
+                anchor_body = self._fence_wrap(
+                    fence=fence,
+                    language=language,
+                    body_lines=body_lines[: max(int(code_anchor_preview_lines), 0)],
+                )
+                anchor_content = self._compose_with_caption(caption, anchor_body)
+                output.append(
+                    self._make_chunk_dict(
+                        content=anchor_content,
+                        source_metadata=metadata,
+                        metadata={
+                            "strategy": "semantic_unit",
+                            "chunk_role": "anchor",
+                            "semantic_unit_type": "code",
+                            "semantic_unit_id": semantic_unit_id,
+                            "parent_unit_id": semantic_unit_id,
+                            "code_language": language,
+                            "token_count": self._estimate_tokens(anchor_content),
+                            "anchor_is_summary": True,
+                        },
+                    )
+                )
+
+                slice_groups = self._slice_lines(
+                    body_lines,
+                    slice_max_tokens=code_slice_max_tokens,
+                    overlap_lines=code_slice_overlap_lines,
+                    prefix_caption=caption,
+                    fence=fence,
+                    language=language,
+                )
+                for slice_index, (line_start, line_end, slice_body) in enumerate(slice_groups, start=1):
+                    slice_content = self._compose_with_caption(
+                        caption,
+                        self._fence_wrap(fence=fence, language=language, body_lines=slice_body.splitlines()),
+                    )
+                    output.append(
+                        self._make_chunk_dict(
+                            content=slice_content,
+                            source_metadata=metadata,
+                            metadata={
+                                "strategy": "semantic_unit",
+                                "chunk_role": "slice",
+                                "semantic_unit_type": "code",
+                                "semantic_unit_id": semantic_unit_id,
+                                "parent_unit_id": semantic_unit_id,
+                                "anchor_chunk_id": None,
+                                "slice_index": slice_index,
+                                "line_range": {"start": line_start, "end": line_end},
+                                "code_language": language,
+                                "token_count": self._estimate_tokens(slice_content),
+                            },
+                        )
+                    )
+                continue
+
+            if segment.kind == "list":
+                list_counter += 1
+                semantic_unit_id = f"{source_file_id}:list:{list_counter}"
+                items, list_type = self._parse_markdown_list_items(segment.content)
+                full_list = segment.content.strip()
+                full_token_count = self._estimate_tokens(self._compose_with_caption(caption, full_list))
+
+                if full_token_count <= list_small_max_tokens or len(items) <= 1:
+                    content = self._compose_with_caption(caption, full_list)
+                    output.append(
+                        self._make_chunk_dict(
+                            content=content,
+                            source_metadata=metadata,
+                            metadata={
+                                "strategy": "semantic_unit",
+                                "chunk_role": "anchor",
+                                "semantic_unit_type": "list",
+                                "semantic_unit_id": semantic_unit_id,
+                                "parent_unit_id": semantic_unit_id,
+                                "list_type": list_type,
+                                "token_count": self._estimate_tokens(content),
+                                "anchor_is_summary": False,
+                                "is_atomic": True,
+                            },
+                        )
+                    )
+                    continue
+
+                preview_items = items[: max(int(list_anchor_preview_items), 0)]
+                anchor_body = "\n".join(preview_items).strip()
+                anchor_content = self._compose_with_caption(caption, anchor_body)
+                output.append(
+                    self._make_chunk_dict(
+                        content=anchor_content,
+                        source_metadata=metadata,
+                        metadata={
+                            "strategy": "semantic_unit",
+                            "chunk_role": "anchor",
+                            "semantic_unit_type": "list",
+                            "semantic_unit_id": semantic_unit_id,
+                            "parent_unit_id": semantic_unit_id,
+                            "list_type": list_type,
+                            "token_count": self._estimate_tokens(anchor_content),
+                            "anchor_is_summary": True,
+                        },
+                    )
+                )
+
+                item_groups = self._slice_list_items(
+                    caption=caption,
+                    items=items,
+                    slice_max_tokens=list_slice_max_tokens,
+                    overlap_items=list_slice_overlap_items,
+                )
+                for slice_index, (item_start, item_end, slice_body) in enumerate(item_groups, start=1):
+                    slice_content = self._compose_with_caption(caption, slice_body)
+                    output.append(
+                        self._make_chunk_dict(
+                            content=slice_content,
+                            source_metadata=metadata,
+                            metadata={
+                                "strategy": "semantic_unit",
+                                "chunk_role": "slice",
+                                "semantic_unit_type": "list",
+                                "semantic_unit_id": semantic_unit_id,
+                                "parent_unit_id": semantic_unit_id,
+                                "anchor_chunk_id": None,
+                                "slice_index": slice_index,
+                                "list_type": list_type,
+                                "list_item_range": {"start": item_start, "end": item_end},
+                                "token_count": self._estimate_tokens(slice_content),
+                            },
+                        )
+                    )
+                continue
+
+            if segment.kind == "math":
+                math_counter += 1
+                semantic_unit_id = f"{source_file_id}:math:{math_counter}"
+                full_math = segment.content.strip()
+                content = self._compose_with_caption(caption, full_math)
+                is_atomic = self._estimate_tokens(content) <= math_small_max_tokens
+                output.append(
+                    self._make_chunk_dict(
+                        content=content,
+                        source_metadata=metadata,
+                        metadata={
+                            "strategy": "semantic_unit",
+                            "chunk_role": "anchor",
+                            "semantic_unit_type": "math",
+                            "semantic_unit_id": semantic_unit_id,
+                            "parent_unit_id": semantic_unit_id,
+                            "token_count": self._estimate_tokens(content),
+                            "anchor_is_summary": False,
+                            "is_atomic": is_atomic,
+                        },
+                    )
+                )
+                continue
+
+            if segment.kind == "blockquote":
+                blockquote_counter += 1
+                semantic_unit_id = f"{source_file_id}:blockquote:{blockquote_counter}"
+                full_quote = segment.content.strip()
+                content = self._compose_with_caption(caption, full_quote)
+                is_atomic = self._estimate_tokens(content) <= blockquote_small_max_tokens
+                output.append(
+                    self._make_chunk_dict(
+                        content=content,
+                        source_metadata=metadata,
+                        metadata={
+                            "strategy": "semantic_unit",
+                            "chunk_role": "anchor",
+                            "semantic_unit_type": "blockquote",
+                            "semantic_unit_id": semantic_unit_id,
+                            "parent_unit_id": semantic_unit_id,
+                            "token_count": self._estimate_tokens(content),
+                            "anchor_is_summary": False,
+                            "is_atomic": is_atomic,
+                        },
+                    )
+                )
+                continue
+
+        logger.info(
+            "SemanticUnitChunker produced %d chunks (tables=%d code=%d lists=%d math=%d quotes=%d)",
+            len(output),
+            table_counter,
+            code_counter,
+            list_counter,
+            math_counter,
+            blockquote_counter,
+        )
+        return output
+
+    def get_chunker_info(self) -> Dict[str, Any]:
+        return {
+            "strategy": "semantic_unit",
+            "supported_features": [
+                "table_anchor_slice",
+                "code_anchor_slice",
+                "list_anchor_slice",
+                "math_blocks",
+                "blockquotes",
+                "fallback_chunker",
+            ],
+            "parameters": {
+                "level": getattr(self.config, "level", "basic"),
+                "table_small_max_tokens": getattr(self.config, "table_small_max_tokens", 400),
+                "table_slice_max_tokens": getattr(self.config, "table_slice_max_tokens", 300),
+                "table_slice_overlap_rows": getattr(self.config, "table_slice_overlap_rows", 2),
+                "code_small_max_tokens": getattr(self.config, "code_small_max_tokens", 400),
+                "code_slice_max_tokens": getattr(self.config, "code_slice_max_tokens", 300),
+                "code_slice_overlap_lines": getattr(self.config, "code_slice_overlap_lines", 3),
+                "code_anchor_preview_lines": getattr(self.config, "code_anchor_preview_lines", 8),
+                "list_small_max_tokens": getattr(self.config, "list_small_max_tokens", 400),
+                "list_slice_max_tokens": getattr(self.config, "list_slice_max_tokens", 300),
+                "list_slice_overlap_items": getattr(self.config, "list_slice_overlap_items", 1),
+                "list_anchor_preview_items": getattr(self.config, "list_anchor_preview_items", 8),
+                "math_small_max_tokens": getattr(self.config, "math_small_max_tokens", 2000),
+                "blockquote_small_max_tokens": getattr(self.config, "blockquote_small_max_tokens", 600),
+                "fallback_chunker": getattr(getattr(self.config, "fallback_chunker_config", None), "type", None),
+            },
+        }
+
+    @staticmethod
+    def _make_chunk_dict(
+        *,
+        content: str,
+        metadata: Dict[str, Any],
+        source_metadata: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        chunk_dict: Dict[str, Any] = {
+            "content": content,
+            "metadata": metadata,
+        }
+        if source_metadata:
+            chunk_dict["source_metadata"] = dict(source_metadata)
+        return chunk_dict
+
+    @staticmethod
+    def _compose_with_caption(caption: str, body: str) -> str:
+        caption = (caption or "").strip()
+        body = (body or "").strip()
+        if caption and body:
+            return f"{caption}\n{body}"
+        return caption or body
+
+    def _estimate_tokens(self, text: str) -> int:
+        text = text or ""
+        if not text:
+            return 0
+        try:
+            import tiktoken
+
+            model_name = getattr(self.config, "encoding_model_name", None) or getattr(
+                getattr(self.config, "fallback_chunker_config", None), "model_name", None
+            )
+            encoding_name = getattr(
+                getattr(self.config, "fallback_chunker_config", None), "encoding_name", "gpt2"
+            )
+            if model_name:
+                enc = tiktoken.encoding_for_model(model_name)
+            else:
+                enc = tiktoken.get_encoding(encoding_name)
+            return len(enc.encode(text))
+        except Exception:
+            cjk_chars = len(re.findall(r"[\u4e00-\u9fff]", text))
+            word_tokens = len(re.findall(r"[A-Za-z0-9_]+", text))
+            punct_tokens = len(re.findall(r"[^\sA-Za-z0-9_\u4e00-\u9fff]", text))
+            return cjk_chars + word_tokens + punct_tokens
+
+    @staticmethod
+    def _enabled_units(level: str) -> dict[str, bool]:
+        level = str(level or "").strip().lower()
+        if level == "advanced":
+            return {"table": True, "code": True, "list": True, "math": True, "blockquote": True}
+        if level == "standard":
+            return {"table": True, "code": True, "list": True, "math": True, "blockquote": False}
+        if level == "basic":
+            return {"table": True, "code": False, "list": False, "math": False, "blockquote": False}
+        return {"table": False, "code": False, "list": False, "math": False, "blockquote": False}
+
+    def _split_markdown(
+        self,
+        text: str,
+        *,
+        enable_tables: bool,
+        enable_code: bool,
+        enable_lists: bool,
+        enable_math: bool,
+        enable_blockquotes: bool,
+    ) -> List[_Segment]:
+        lines = text.splitlines()
+        segments: List[_Segment] = []
+        buffer: List[str] = []
+        in_fence = False
+        i = 0
+
+        def flush_text() -> None:
+            if not buffer:
+                return
+            content = "\n".join(buffer).strip("\n")
+            if content.strip():
+                segments.append(_Segment(kind="text", content=content))
+            buffer.clear()
+
+        while i < len(lines):
+            line = lines[i]
+
+            if enable_code:
+                match = self._FENCE_START_RE.match(line)
+                if match:
+                    flush_text()
+                    fence = match.group(1)
+                    start = i
+                    i += 1
+                    while i < len(lines):
+                        if re.match(rf"^\s*{re.escape(fence)}\s*$", lines[i]):
+                            i += 1
+                            break
+                        i += 1
+                    code_content = "\n".join(lines[start:i]).strip("\n")
+                    caption = self._infer_block_caption(lines, start)
+                    segments.append(_Segment(kind="code", content=code_content, caption=caption))
+                    continue
+
+            if not enable_code and self._FENCE_RE.match(line):
+                in_fence = not in_fence
+                buffer.append(line)
+                i += 1
+                continue
+
+            if not in_fence and enable_math and self._is_math_block_start(line):
+                flush_text()
+                start = i
+                i += 1
+                while i < len(lines) and not self._is_math_block_end(lines[i]):
+                    i += 1
+                if i < len(lines):
+                    i += 1
+                math_content = "\n".join(lines[start:i]).strip("\n")
+                caption = self._infer_block_caption(lines, start)
+                segments.append(_Segment(kind="math", content=math_content, caption=caption))
+                continue
+
+            if not in_fence and enable_tables and self._is_table_start(lines, i):
+                flush_text()
+
+                start = i
+                i += 2
+                while i < len(lines) and lines[i].strip() and ("|" in lines[i]):
+                    i += 1
+                table_lines = lines[start:i]
+                table_content = "\n".join(table_lines).strip("\n")
+                caption = self._infer_block_caption(lines, start)
+                segments.append(_Segment(kind="table", content=table_content, caption=caption))
+                continue
+
+            if not in_fence and enable_lists and self._is_list_start(line):
+                flush_text()
+                start = i
+                i += 1
+                while i < len(lines) and lines[i].strip():
+                    if self._is_list_line(lines[i]):
+                        i += 1
+                        continue
+                    break
+                list_content = "\n".join(lines[start:i]).strip("\n")
+                caption = self._infer_block_caption(lines, start)
+                segments.append(_Segment(kind="list", content=list_content, caption=caption))
+                continue
+
+            if not in_fence and enable_blockquotes and self._BLOCKQUOTE_RE.match(line or ""):
+                flush_text()
+                start = i
+                i += 1
+                while i < len(lines) and self._BLOCKQUOTE_RE.match(lines[i] or ""):
+                    i += 1
+                quote_content = "\n".join(lines[start:i]).strip("\n")
+                caption = self._infer_block_caption(lines, start)
+                segments.append(_Segment(kind="blockquote", content=quote_content, caption=caption))
+                continue
+
+            buffer.append(line)
+            i += 1
+
+        flush_text()
+        return segments
+
+    def _is_table_start(self, lines: List[str], i: int) -> bool:
+        if i + 1 >= len(lines):
+            return False
+        header = lines[i]
+        separator = lines[i + 1]
+        if "|" not in header:
+            return False
+        return bool(self._TABLE_SEPARATOR_RE.match(separator))
+
+    @staticmethod
+    def _infer_block_caption(lines: List[str], block_start_index: int) -> str:
+        j = block_start_index - 1
+        while j >= 0:
+            candidate = (lines[j] or "").strip()
+            if not candidate:
+                j -= 1
+                continue
+            if "|" in candidate:
+                return ""
+            if SemanticUnitChunker._FENCE_RE.match(candidate):
+                return ""
+            if SemanticUnitChunker._BLOCKQUOTE_RE.match(candidate):
+                return ""
+            if SemanticUnitChunker._is_list_start(candidate):
+                return ""
+            if SemanticUnitChunker._is_math_block_start(candidate) or SemanticUnitChunker._is_math_block_end(candidate):
+                return ""
+            return candidate
+        return ""
+
+    @staticmethod
+    def _is_math_block_start(line: str) -> bool:
+        return bool(SemanticUnitChunker._MATH_BLOCK_START_RE.match(line or ""))
+
+    @staticmethod
+    def _is_math_block_end(line: str) -> bool:
+        return bool(SemanticUnitChunker._MATH_BLOCK_END_RE.match(line or ""))
+
+    @staticmethod
+    def _is_list_start(line: str) -> bool:
+        if not isinstance(line, str):
+            return False
+        stripped = line.strip()
+        if not stripped:
+            return False
+        return bool(
+            SemanticUnitChunker._TASK_ITEM_RE.match(line)
+            or SemanticUnitChunker._LIST_ITEM_RE.match(line)
+            or SemanticUnitChunker._ORDERED_ITEM_RE.match(line)
+        )
+
+    @staticmethod
+    def _is_list_line(line: str) -> bool:
+        if not isinstance(line, str) or not line.strip():
+            return False
+        if SemanticUnitChunker._is_list_start(line):
+            return True
+        return bool(re.match(r"^\s+\S+", line))
+
+    @staticmethod
+    def _parse_markdown_table(table: str) -> tuple[str, str, List[str]]:
+        lines = [line.rstrip() for line in (table or "").splitlines() if line.strip()]
+        if len(lines) < 2:
+            return "", "", []
+        header = lines[0]
+        separator = lines[1]
+        rows = lines[2:] if len(lines) > 2 else []
+        return header, separator, rows
+
+    def _split_fenced_code(self, content: str) -> tuple[str, str, List[str]]:
+        lines = (content or "").splitlines()
+        if not lines:
+            return "```", "", []
+        match = self._FENCE_START_RE.match(lines[0])
+        fence = match.group(1) if match else "```"
+        language = (match.group(2) or "").strip() if match else ""
+
+        body_lines: List[str] = []
+        for line in lines[1:]:
+            if re.match(rf"^\s*{re.escape(fence)}\s*$", line):
+                break
+            body_lines.append(line)
+        return fence, language, body_lines
+
+    @staticmethod
+    def _fence_wrap(*, fence: str, language: str, body_lines: List[str]) -> str:
+        fence = (fence or "```").strip()
+        language = (language or "").strip()
+        header = f"{fence}{language}".rstrip()
+        footer = fence
+        body = "\n".join(body_lines or []).rstrip("\n")
+        if body:
+            return "\n".join([header, body, footer])
+        return "\n".join([header, footer])
+
+    def _slice_lines(
+        self,
+        body_lines: List[str],
+        *,
+        slice_max_tokens: int,
+        overlap_lines: int,
+        prefix_caption: str,
+        fence: str,
+        language: str,
+    ) -> List[tuple[int, int, str]]:
+        overlap_lines = max(int(overlap_lines), 0)
+        slice_max_tokens = max(int(slice_max_tokens), 1)
+
+        slices: List[tuple[int, int, str]] = []
+        start = 0
+        while start < len(body_lines):
+            end = start
+            chosen: List[str] = []
+            while end < len(body_lines):
+                candidate_lines = chosen + [body_lines[end]]
+                candidate_body = "\n".join(candidate_lines)
+                candidate_fenced = self._fence_wrap(fence=fence, language=language, body_lines=candidate_body.splitlines())
+                candidate = self._compose_with_caption(prefix_caption, candidate_fenced)
+                if chosen and self._estimate_tokens(candidate) > slice_max_tokens:
+                    break
+                chosen.append(body_lines[end])
+                end += 1
+
+                if self._estimate_tokens(candidate) >= slice_max_tokens:
+                    break
+
+            if not chosen:
+                chosen.append(body_lines[start])
+                end = start + 1
+
+            line_start = start + 1
+            line_end = end
+            slices.append((line_start, line_end, "\n".join(chosen)))
+
+            if end >= len(body_lines):
+                break
+            start = max(end - overlap_lines, start + 1)
+
+        return slices
+
+    def _parse_markdown_list_items(self, content: str) -> tuple[List[str], str]:
+        lines = [line.rstrip() for line in (content or "").splitlines() if line.strip()]
+        if not lines:
+            return [], "unknown"
+
+        first = lines[0]
+        if self._TASK_ITEM_RE.match(first):
+            list_type = "task"
+        elif self._ORDERED_ITEM_RE.match(first):
+            list_type = "ordered"
+        else:
+            list_type = "unordered"
+
+        items: List[List[str]] = []
+        current: List[str] = []
+        for line in lines:
+            if self._is_list_start(line):
+                if current:
+                    items.append(current)
+                current = [line]
+                continue
+            if current and re.match(r"^\s+\S+", line):
+                current.append(line)
+                continue
+            if current:
+                current.append(line)
+        if current:
+            items.append(current)
+
+        rendered = ["\n".join(item).strip() for item in items if "\n".join(item).strip()]
+        return rendered, list_type
+
+    def _slice_list_items(
+        self,
+        *,
+        caption: str,
+        items: List[str],
+        slice_max_tokens: int,
+        overlap_items: int,
+    ) -> List[tuple[int, int, str]]:
+        overlap_items = max(int(overlap_items), 0)
+        slice_max_tokens = max(int(slice_max_tokens), 1)
+
+        slices: List[tuple[int, int, str]] = []
+        start = 0
+        while start < len(items):
+            end = start
+            chosen: List[str] = []
+            while end < len(items):
+                candidate_items = chosen + [items[end]]
+                candidate_body = "\n".join(candidate_items).strip()
+                candidate = self._compose_with_caption(caption, candidate_body)
+                if chosen and self._estimate_tokens(candidate) > slice_max_tokens:
+                    break
+                chosen.append(items[end])
+                end += 1
+
+                if self._estimate_tokens(candidate) >= slice_max_tokens:
+                    break
+
+            if not chosen:
+                chosen.append(items[start])
+                end = start + 1
+
+            item_start = start + 1
+            item_end = end
+            slices.append((item_start, item_end, "\n".join(chosen).strip()))
+
+            if end >= len(items):
+                break
+            start = max(end - overlap_items, start + 1)
+
+        return slices
+
+    def _slice_table_rows(
+        self,
+        *,
+        caption: str,
+        header: str,
+        separator: str,
+        rows: List[str],
+        slice_max_tokens: int,
+        overlap_rows: int,
+    ) -> List[tuple[int, int, str]]:
+        overlap_rows = max(int(overlap_rows), 0)
+        slice_max_tokens = max(int(slice_max_tokens), 1)
+
+        slices: List[tuple[int, int, str]] = []
+        start = 0
+        while start < len(rows):
+            end = start
+            chosen: List[str] = []
+            while end < len(rows):
+                candidate_rows = chosen + [rows[end]]
+                candidate_body = "\n".join(candidate_rows)
+                candidate_table = self._compose_with_caption(
+                    caption,
+                    "\n".join([line for line in (header, separator, candidate_body) if line]).strip(),
+                )
+                if chosen and self._estimate_tokens(candidate_table) > slice_max_tokens:
+                    break
+                chosen.append(rows[end])
+                end += 1
+
+                if self._estimate_tokens(candidate_table) >= slice_max_tokens:
+                    break
+
+            if not chosen:
+                chosen.append(rows[start])
+                end = start + 1
+
+            row_start = start + 1
+            row_end = end
+            slices.append((row_start, row_end, "\n".join(chosen)))
+
+            if end >= len(rows):
+                break
+            start = max(end - overlap_rows, start + 1)
+
+        return slices

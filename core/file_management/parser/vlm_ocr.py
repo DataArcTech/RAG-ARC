@@ -196,7 +196,13 @@ class VLMOcrParser(AbstractParser):
     ) -> Dict[str, Any]:
         """Parse a single image and return OCR text result - simplified version"""
 
-        prompt = "Extract all text content from this image. Output the text in markdown format, preserving the structure and formatting as much as possible."
+        prompt = (
+            "Extract all text content from this image. Output the text in GitHub Flavored Markdown.\n"
+            "- Preserve headings, lists, and emphasis when visible.\n"
+            "- If the image contains any table/tabular content, convert it into a Markdown table using `|` pipes and a header separator row like `|---|---|`.\n"
+            "- Keep numbers, currencies, and units exactly as shown.\n"
+            "- Do not wrap the output in triple backticks.\n"
+        )
 
         # Use LLM service for inference
         response = self.llm_service.infer(origin_image, prompt)
@@ -241,5 +247,4 @@ class VLMOcrParser(AbstractParser):
             cleaned = cleaned[:-3].rstrip('\n')
 
         return cleaned
-
 

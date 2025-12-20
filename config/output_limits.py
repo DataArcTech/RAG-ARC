@@ -61,6 +61,11 @@ DEEPSEARCH_MAX_STAGE_HISTORY = _limit_or_none(_env_int("DEEPSEARCH_MAX_STAGE_HIS
 DEEPSEARCH_MAX_EXTERNAL_CALLS = _limit_or_none(_env_int("DEEPSEARCH_MAX_EXTERNAL_CALLS", 5))
 DEEPSEARCH_MAX_TOOL_METADATA = _limit_or_none(_env_int("DEEPSEARCH_MAX_TOOL_METADATA", 5))
 
+SEMANTIC_UNIT_MAX_MATCHED_SLICES = _limit_or_none(_env_int("SEMANTIC_UNIT_MAX_MATCHED_SLICES", 3))
+TABLE_MAX_MERGED_ROWS = _limit_or_none(_env_int("TABLE_MAX_MERGED_ROWS", 30))
+SEMANTIC_UNIT_MAX_MERGED_SLICE_CHARS = _limit_or_none(_env_int("SEMANTIC_UNIT_MAX_MERGED_SLICE_CHARS", 1200))
+SEMANTIC_UNIT_MAX_MERGED_TOTAL_CHARS = _limit_or_none(_env_int("SEMANTIC_UNIT_MAX_MERGED_TOTAL_CHARS", 3000))
+
 
 def _graph_budget(chunk_limit: int | None, triple_limit: int | None, seed_limit: int | None, minimum: int) -> int | None:
     if ENABLE_ALL_EVIDENCE:

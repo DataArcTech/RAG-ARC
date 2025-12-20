@@ -5,8 +5,10 @@ from core.file_management.chunker.token import TokenChunker
 from core.file_management.chunker.recursive import RecursiveChunker
 from core.file_management.chunker.markdown_header import MarkdownHeaderChunker
 from core.file_management.chunker.semantic import SemanticChunker
+from core.file_management.chunker.semantic_unit import SemanticUnitChunker
 from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
 from typing import Literal, Optional, List, Union
+from pydantic import Field
 
 
 class TokenChunkerConfig(AbstractConfig):
@@ -81,3 +83,39 @@ class SemanticChunkerConfig(AbstractConfig):
 
     def build(self) -> SemanticChunker:
         return SemanticChunker(self)
+
+
+class SemanticUnitChunkerConfig(AbstractConfig):
+    """Configuration for Semantic Unit Chunker - anchor/slice strategy for markdown semantic units."""
+    type: Literal["semantic_unit_chunker"] = "semantic_unit_chunker"
+
+    level: Literal["disabled", "basic", "standard", "advanced"] = "basic"
+
+    # Fallback for non-semantic-unit text.
+    fallback_chunker_config: TokenChunkerConfig = Field(default_factory=TokenChunkerConfig)
+
+    # Phase A: Markdown tables.
+    table_small_max_tokens: int = 400
+    table_slice_max_tokens: int = 300
+    table_slice_overlap_rows: int = 2
+
+    # Phase B: Fenced code blocks.
+    code_small_max_tokens: int = 400
+    code_slice_max_tokens: int = 300
+    code_slice_overlap_lines: int = 3
+    code_anchor_preview_lines: int = 8
+
+    # Phase B: Markdown lists.
+    list_small_max_tokens: int = 400
+    list_slice_max_tokens: int = 300
+    list_slice_overlap_items: int = 1
+    list_anchor_preview_items: int = 8
+
+    # Phase B: Display math blocks ($$...$$ or \\[...\\]).
+    math_small_max_tokens: int = 2000
+
+    # Advanced: blockquotes.
+    blockquote_small_max_tokens: int = 600
+
+    def build(self) -> SemanticUnitChunker:
+        return SemanticUnitChunker(self)

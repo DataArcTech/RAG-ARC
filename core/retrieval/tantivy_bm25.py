@@ -247,6 +247,7 @@ class TantivyBM25Retriever(BaseRetriever):
         # 1. Preprocess query
         try:
             query_tokens = index_instance.tokenizer_manager.get_current_tokenizer()(query)
+            query_tokens = [str(token).casefold() for token in query_tokens]
             logger.debug(f"Query tokens: {query_tokens}")
         except Exception as e:
             logger.error(f"Error during query preprocessing: {e}")
