@@ -41,11 +41,14 @@ def test_rag_inference_stream_chat_sse_emits_message_event(monkeypatch, client):
             return list(self._messages)
 
     class FakeRAG:
-        def chat(self, _history_text, _owner_id, return_subgraph=False):
+        def stream_chat(self, _history_text, _owner_id, return_subgraph=False):  # noqa: ARG002
+            def _gen():
+                yield "assistant ok"
+
             chunks = []
             subgraph_data = None
             subgraph_info = None
-            return ("assistant ok", chunks, subgraph_data, subgraph_info)
+            return (_gen(), chunks, subgraph_data, subgraph_info)
 
     monkeypatch.setattr(rag_router, "session_handler", FakeSessionHandler())
     monkeypatch.setattr(rag_router, "message_handler", FakeMessageHandler())

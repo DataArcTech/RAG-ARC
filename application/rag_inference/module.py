@@ -1,5 +1,5 @@
 from encapsulation.data_model.schema import Chunk
-from typing import TYPE_CHECKING, Optional, Dict, Any, List
+from typing import TYPE_CHECKING, Optional, Dict, Any, List, Iterator
 import logging
 import uuid
 import json
@@ -91,131 +91,120 @@ class RAGInference(AbstractModule):
             - subgraph_data is None if return_subgraph=False or retriever doesn't support it
             - subgraph_info mirrors the retriever diagnostics used for graph export when available
         """
-        # Run query rewriting asynchronously to avoid blocking the event loop
-        rewritten_query = await self._run_blocking(
-            self.query_rewriter.rewrite_query,
-            query
-        )
-
-        # Run retrieval asynchronously to avoid blocking the event loop
-        chunks: list[Chunk] = await self._run_blocking(
-            self.retriever.invoke,
-            rewritten_query,
+        messages, chunks, subgraph_data, subgraph_info = await self._run_blocking(
+            self._build_messages_and_context,
+            query=query,
             owner_id=owner_id,
-            return_subgraph_info=return_subgraph
+            return_subgraph=return_subgraph,
         )
+        response = await self._run_blocking(self.llm.chat, messages)
 
-        # Admin/global mode: if multipath returns nothing, fall back to the graph retriever.
-        if owner_id is not None and is_admin_owner(owner_id) and not chunks and self.graph_retriever is not None:
-            logger.info("Admin/global mode: multipath returned 0 results, falling back to graph retriever")
-            graph_chunks = await self._run_blocking(
-                self.graph_retriever.invoke,
-                rewritten_query,
-                owner_id=owner_id,
-                return_subgraph_info=return_subgraph
-            )
-            if graph_chunks:
-                chunks = graph_chunks
-
-        chunks = self._filter_chunks_by_file_status(chunks)
-
-        # Extract subgraph info BEFORE reranking (to avoid losing it after reordering)
-        subgraph_info = self._consume_subgraph_info(chunks)
-
-        # Run reranking asynchronously to avoid blocking the event loop
-        chunks = await self._run_blocking(
-            self.reranker.rerank,
-            rewritten_query,
-            chunks
-        )
-
-        # Export subgraph data if subgraph_info is available
-        subgraph_data = None
-        if subgraph_info and return_subgraph:
-            # Import GraphExporter here to avoid circular dependency
-            try:
-                graph_store = self._locate_graph_store()
-                if graph_store:
-                    # Import appropriate GraphExporter based on graph_store type
-                    # Check by class name to avoid import issues
-                    graph_store_class_name = graph_store.__class__.__name__
-
-                    if graph_store_class_name == 'PrunedHippoRAGNeo4jStore':
-                        from encapsulation.database.utils.graph_export_utils_neo4j import GraphExporterNeo4j as GraphExporter
-                        # Neo4j version uses node IDs (strings)
-                        # Run graph export asynchronously to avoid blocking
-                        subgraph_data = await self._run_blocking(
-                            GraphExporter.export_subgraph,
-                            graph_store=graph_store,
-                            subgraph_node_ids=set(subgraph_info['subgraph_nodes']),
-                            seed_entity_ids=set(subgraph_info['seed_entity_ids']),
-                            retrieved_chunk_ids=subgraph_info['retrieved_chunk_ids'],
-                            node_ppr_scores=subgraph_info.get('node_ppr_scores', {})
-                        )
-                    else:
-                        from encapsulation.database.utils.graph_export_utils import GraphExporter
-                        # igraph version uses node indices (integers)
-                        # Run graph export asynchronously to avoid blocking
-                        subgraph_data = await self._run_blocking(
-                            GraphExporter.export_subgraph,
-                            graph_store=graph_store,
-                            subgraph_node_indices=set(subgraph_info['subgraph_nodes']),
-                            seed_entity_ids=set(subgraph_info['seed_entity_ids']),
-                            retrieved_chunk_ids=subgraph_info['retrieved_chunk_ids'],
-                            node_ppr_scores=subgraph_info.get('node_ppr_scores', {})
-                        )
-                    logger.info(f"Exported subgraph: {len(subgraph_data.get('nodes', []))} nodes, {len(subgraph_data.get('edges', []))} edges")
-                else:
-                    logger.warning("Graph store not found in retriever")
-            except Exception as e:
-                logger.warning(f"Failed to export subgraph: {e}")
-                import traceback
-                logger.debug(f"Traceback: {traceback.format_exc()}")
-
-        # Format chunks and query as messages
-        messages = []
-        prompt = """Please write your response in the following strict format.
-
-<Write your detailed answer here.>
-Do not include any concluding or summarizing phrases such as "in summary", "in conclusion", "to sum up", etc., in this section.
-All summary or conclusion content must appear after the divider below.
-
----summary---
-<Write a concise summary of the above content here.>
-
-IMPORTANT:
-- The line '---summary---' must appear exactly as shown (with three dashes before and after the word 'summary').
-- Do not change, remove, or translate this divider.
-- Do not include any extra text outside this format.
-"""
-
-        for i, chunk in enumerate(chunks):
-            chunk_content = f"Chunk {i+1}:\n{chunk.content}"
-            messages.append({"role": "user", "content": chunk_content})
-        messages.append({"role": "user", "content": f"{prompt}\nBased on the above chunks, please answer question: {query}"})
-        logger.info(f"Invoked chat with query: {query} (owner_id={owner_id})")
-        logger.info(f"Query rewritten to: {rewritten_query}")
-        logger.info(f"Retrieved chunks: {[getattr(chunk, 'content', str(chunk)) for chunk in chunks]}")
-        logger.info(f"Reranked chunks: {[getattr(chunk, 'content', str(chunk)) for chunk in chunks]}")
-        logger.info(f"Prepared messages for LLM: {messages}")
-        
-        # Run LLM chat asynchronously to avoid blocking the event loop
-        response = await self._run_blocking(
-            self.llm.chat,
-            messages
-        )
-        
-        # Generate mind map data if return_subgraph is True and subgraph_data is None
-        # (fallback to mindmap generation if graph export failed or wasn't available)
         if return_subgraph and subgraph_data is None:
             subgraph_data = await self._run_blocking(
                 self._generate_mindmap,
                 query,
                 response,
-                chunks
+                chunks,
             )
-        
         return (response, chunks, subgraph_data, subgraph_info)
+
+    def stream_chat(
+        self,
+        query: str,
+        owner_id: uuid.UUID,
+        return_subgraph: bool = False,
+    ) -> tuple[Iterator[str], list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Stream chat completion from the configured LLM."""
+
+        messages, chunks, subgraph_data, subgraph_info = self._build_messages_and_context(
+            query=query,
+            owner_id=owner_id,
+            return_subgraph=return_subgraph,
+        )
+        return (self.llm.stream_chat(messages), chunks, subgraph_data, subgraph_info)
+
+    def _build_messages_and_context(
+        self,
+        *,
+        query: str,
+        owner_id: uuid.UUID,
+        return_subgraph: bool,
+    ) -> tuple[List[Dict[str, str]], list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        rewritten_query = self.query_rewriter.rewrite_query(query)
+        chunks: list[Chunk] = self.retriever.invoke(
+            rewritten_query,
+            owner_id=owner_id,
+            return_subgraph_info=return_subgraph,
+        )
+
+        if owner_id is not None and is_admin_owner(owner_id) and not chunks and self.graph_retriever is not None:
+            logger.info("Admin/global mode: multipath returned 0 results, falling back to graph retriever")
+            graph_chunks = self.graph_retriever.invoke(
+                rewritten_query,
+                owner_id=owner_id,
+                return_subgraph_info=return_subgraph,
+            )
+            if graph_chunks:
+                chunks = graph_chunks
+
+        chunks = self._filter_chunks_by_file_status(chunks)
+        subgraph_info = self._consume_subgraph_info(chunks)
+        chunks = self.reranker.rerank(rewritten_query, chunks)
+
+        subgraph_data = None
+        if subgraph_info and return_subgraph:
+            try:
+                graph_store = self._locate_graph_store()
+                if graph_store:
+                    graph_store_class_name = graph_store.__class__.__name__
+                    if graph_store_class_name == "PrunedHippoRAGNeo4jStore":
+                        from encapsulation.database.utils.graph_export_utils_neo4j import (
+                            GraphExporterNeo4j as GraphExporter,
+                        )
+
+                        subgraph_data = GraphExporter.export_subgraph(
+                            graph_store=graph_store,
+                            subgraph_node_ids=set(subgraph_info["subgraph_nodes"]),
+                            seed_entity_ids=set(subgraph_info["seed_entity_ids"]),
+                            retrieved_chunk_ids=subgraph_info["retrieved_chunk_ids"],
+                            node_ppr_scores=subgraph_info.get("node_ppr_scores", {}),
+                        )
+                    else:
+                        from encapsulation.database.utils.graph_export_utils import GraphExporter
+
+                        subgraph_data = GraphExporter.export_subgraph(
+                            graph_store=graph_store,
+                            subgraph_node_indices=set(subgraph_info["subgraph_nodes"]),
+                            seed_entity_ids=set(subgraph_info["seed_entity_ids"]),
+                            retrieved_chunk_ids=subgraph_info["retrieved_chunk_ids"],
+                            node_ppr_scores=subgraph_info.get("node_ppr_scores", {}),
+                        )
+                    if subgraph_data is not None:
+                        logger.info(
+                            "Exported subgraph: %d nodes, %d edges",
+                            len(subgraph_data.get("nodes", [])),
+                            len(subgraph_data.get("edges", [])),
+                        )
+                else:
+                    logger.warning("Graph store not found in retriever")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to export subgraph: %s", exc)
+                import traceback
+                logger.debug("Traceback: %s", traceback.format_exc())
+
+        messages: List[Dict[str, str]] = []
+        for i, chunk in enumerate(chunks):
+            messages.append({"role": "user", "content": f"Chunk {i+1}:\n{chunk.content}"})
+        messages.append(
+            {
+                "role": "user",
+                "content": f"Based on the above chunks, please answer question: {rewritten_query}",
+            }
+        )
+        logger.info("Invoked chat with query: %s (owner_id=%s)", query, owner_id)
+        logger.info("Query rewritten to: %s", rewritten_query)
+        logger.info("Prepared %d messages for LLM", len(messages))
+        return (messages, chunks, subgraph_data, subgraph_info)
 
     def _locate_graph_store(self):
         """Locate the configured graph store if one exists."""

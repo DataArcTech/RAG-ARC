@@ -2,6 +2,7 @@ from datetime import datetime
 import json
 import asyncio
 import os
+import threading
 from typing import Annotated, Any, Dict, List, Optional
 from fastapi import (
     APIRouter,
@@ -48,17 +49,31 @@ router = APIRouter(prefix="/rag_inference", tags=["rag_inference"])
 
 registrator = Register()
 
+session_handler: ChatSessionManager | None = None
+message_handler: ChatMessageManager | None = None
+rag_inference_handler: RAGInference | None = None
+
+
 def get_session_handler() -> ChatSessionManager:
     """Lazy loading function to get session handler after initialization."""
-    return registrator.get_object("chat_session")
+    global session_handler
+    if session_handler is None:
+        session_handler = registrator.get_object("chat_session")
+    return session_handler
 
 def get_message_handler() -> ChatMessageManager:
     """Lazy loading function to get message handler after initialization."""
-    return registrator.get_object("chat_message")
+    global message_handler
+    if message_handler is None:
+        message_handler = registrator.get_object("chat_message")
+    return message_handler
 
 def get_rag_inference_handler() -> RAGInference:
     """Lazy loading function to get rag inference handler after initialization."""
-    return registrator.get_object("rag_inference")
+    global rag_inference_handler
+    if rag_inference_handler is None:
+        rag_inference_handler = registrator.get_object("rag_inference")
+    return rag_inference_handler
 
 def get_account_handler() -> Account:
     """Lazy loading function to get account handler after initialization."""
@@ -315,15 +330,55 @@ async def stream_chat_sse(
             history_text = "\n".join(
                 f"{msg.content['role']}: {msg.content['content']}" for msg in history_messages
             )
-            assistant_response, chunks, subgraph_data, subgraph_info = await rag_inference_handler.chat_async(
+            token_stream, chunks, subgraph_data, subgraph_info = await asyncio.to_thread(
+                rag_inference_handler.stream_chat,
                 history_text,
-                owner_id=effective_owner,
+                effective_owner,
                 return_subgraph=(return_subgraph or include_evidence),
             )
         except Exception as exc:  # noqa: BLE001
             yield sse_json({"error": {"message": str(exc)}})
             yield sse_done()
             return
+
+        response_parts: list[str] = []
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        stream_error: list[Exception | None] = [None]
+
+        def _run_stream() -> None:
+            try:
+                for chunk in token_stream:
+                    asyncio.run_coroutine_threadsafe(queue.put(chunk), loop)
+            except Exception as exc:  # noqa: BLE001
+                stream_error[0] = exc
+            finally:
+                asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+
+        threading.Thread(target=_run_stream, daemon=True).start()
+
+        while True:
+            piece = await queue.get()
+            if piece is None:
+                break
+            for delta_piece in iter_text_deltas(piece):
+                response_parts.append(delta_piece)
+                yield sse_json(
+                    openai_chat_completion_chunk(
+                        chunk_id=chunk_id,
+                        model=model_name,
+                        created=created,
+                        delta=delta_envelope(role=None, content=delta_piece),
+                    )
+                )
+                await asyncio.sleep(0)
+
+        if stream_error[0] is not None:
+            yield sse_json({"error": {"message": str(stream_error[0])}})
+            yield sse_done()
+            return
+
+        assistant_response = "".join(response_parts)
         assistant_message = ChatMessage(
             session_id=session_id,
             content={"role": "assistant", "content": assistant_response},
@@ -334,17 +389,6 @@ async def stream_chat_sse(
         assistant_message = await get_thread_pool().run_blocking(
             message_handler.create_message, assistant_message
         )
-
-        for piece in iter_text_deltas(assistant_response):
-            yield sse_json(
-                openai_chat_completion_chunk(
-                    chunk_id=chunk_id,
-                    model=model_name,
-                    created=created,
-                    delta=delta_envelope(role=None, content=piece),
-                )
-            )
-            await asyncio.sleep(0)
 
         # Keep legacy "include_evidence/return_subgraph" capability but transmit it via
         # OpenAI-compatible tool_calls so clients consuming only delta.content are unaffected.
