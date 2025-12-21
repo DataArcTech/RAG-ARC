@@ -13,6 +13,7 @@ import re
 
 from encapsulation.data_model.orm_models import FileMetadata
 from encapsulation.data_model.orm_models import FileStatus
+from core.utils.filename_guard import normalize_project_filename
 
 from framework.module import AbstractModule
 
@@ -234,6 +235,7 @@ class FileStorage(AbstractModule):
             StorageOperationError: If storage operation fails
         """
         try:
+            filename = normalize_project_filename(filename)
             # Validate parameters
             self._validate_file_upload(filename, file_data)
             logger.info(f"Validated file upload request: {filename}")

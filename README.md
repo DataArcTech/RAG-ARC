@@ -432,7 +432,7 @@ def chat_sse(session_id: str, access_token: str):
 chat_sse("YOUR_SESSION_ID", "YOUR_ACCESS_TOKEN")
 ```
 
-> Evidence payloads: `POST /rag_inference/chat` returns the full `evidence` object. For SSE streaming, when `include_evidence=true` (and/or `return_subgraph=true`) the server sends a final OpenAI-compatible chunk with `delta.tool_calls[].function.name == "rag_arc_payload"` containing the same payload (JSON string in `function.arguments`).
+> Evidence payloads: `POST /rag_inference/chat` returns the full `evidence` object. For SSE streaming, when `include_evidence=true` (and/or `return_subgraph=true`) the server sends a final OpenAI-compatible chunk with `delta.tool_calls[].function.name == "rag_arc_payload"` containing the same payload (JSON string in `function.arguments`). For better UX, the stream also emits progress tool-calls during rewrite/retrieve/rerank with `delta.tool_calls[].function.name == "rag_arc_progress"` (JSON string in `function.arguments`, forward-compatible envelope with `v=1`, `type="progress"`, plus `request_id`/`seq` for ordering).
 
 ## 🛠️ Technology Stack
 

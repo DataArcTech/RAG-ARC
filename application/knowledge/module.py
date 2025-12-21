@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 import uuid
 import asyncio
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 from functools import partial
 from fastapi.responses import Response
@@ -137,7 +138,7 @@ class Knowledge(AbstractModule):
         except asyncio.CancelledError:
             logger.info(f"Cancelled deletion task awaited for file_id: {doc_id}")
     
-    async def upload_file(self, file: UploadFile, user_id: uuid.UUID) -> str:
+    async def upload_file(self, file: UploadFile, user_id: uuid.UUID, *, relative_path: str | None = None) -> str:
         try:
             # Read file data asynchronously to avoid blocking the event loop
             file_data = await self._run_blocking(file.file.read)
@@ -145,7 +146,7 @@ class Knowledge(AbstractModule):
             # Upload file asynchronously to avoid blocking the event loop
             doc_id = await self._run_blocking(
                 self.file_storage.upload_file,
-                filename=file.filename,
+                filename=(relative_path or file.filename),
                 file_data=file_data,
                 owner_id=user_id,
                 content_type=file.content_type
@@ -221,7 +222,8 @@ class Knowledge(AbstractModule):
         if content is None:
             raise HTTPException(status_code=404, detail="File content not found")
 
-        headers = {"Content-Disposition": f"attachment; filename=\"{metadata.filename}\""}
+        download_name = Path(str(metadata.filename or "")).name or "download"
+        headers = {"Content-Disposition": f"attachment; filename=\"{download_name}\""}
         return Response(content=content, media_type=metadata.content_type, headers=headers)
 
     async def mark_file_deleted_cli(self, doc_id: str, user_id: uuid.UUID) -> Dict[str, Any]:

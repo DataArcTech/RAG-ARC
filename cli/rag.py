@@ -9,6 +9,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from dataclasses import asdict
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import List, Optional, Dict, Any
 from uuid import UUID
 
@@ -212,12 +213,41 @@ def _guess_content_type(path: Path) -> str:
     guessed, _ = mimetypes.guess_type(str(path))
     return guessed or "application/octet-stream"
 
+def _safe_relative_filename(root: Path, path: Path) -> str:
+    """Return a stable, safe relative path name suitable for storage metadata."""
+
+    try:
+        rel = path.resolve().relative_to(root.resolve())
+        rel_str = rel.as_posix()
+    except Exception:  # noqa: BLE001
+        rel_str = path.name
+
+    rel_str = rel_str.lstrip("/").replace("\\", "/").strip()
+    if not rel_str:
+        return path.name
+
+    parts = [part for part in PurePosixPath(rel_str).parts if part not in {"", ".", ".."}]
+    if not parts:
+        return path.name
+    return str(PurePosixPath(*parts))
+
+def _project_relative_filename(path: Path) -> str:
+    resolved = path.resolve()
+    try:
+        rel = resolved.relative_to(PROJECT_ROOT.resolve())
+    except Exception as exc:  # noqa: BLE001
+        raise typer.BadParameter(
+            f"path must be under project root: {PROJECT_ROOT.resolve()}"
+        ) from exc
+    rel_str = rel.as_posix().lstrip("/")
+    return f"{PROJECT_ROOT.name}/{rel_str}" if rel_str else f"{PROJECT_ROOT.name}/"
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_TOOL_SERVER_CONFIG = REPO_ROOT / "config/json_configs/deepsearch_tool_mcp_server.json"
 
 
-def _ingest_single_file(path: Path, knowledge: Knowledge, owner_id) -> bool:
+def _ingest_single_file(path: Path, knowledge: Knowledge, owner_id, *, logical_filename: Optional[str] = None) -> bool:
     typer.echo(f"\n→ Ingesting {path}")
     try:
         file_bytes = path.read_bytes()
@@ -228,7 +258,7 @@ def _ingest_single_file(path: Path, knowledge: Knowledge, owner_id) -> bool:
     content_type = _guess_content_type(path)
     try:
         file_id = knowledge.file_storage.upload_file(
-            filename=path.name,
+            filename=(str(logical_filename or "").strip() or path.name),
             file_data=file_bytes,
             owner_id=owner_id,
             content_type=content_type,
@@ -544,7 +574,7 @@ def ingest_file(
     """Upload and index a single file."""
     ctx = initialize(owner_id=owner_id)
     knowledge = _get_knowledge_module()
-    success = _ingest_single_file(path, knowledge, ctx.owner_id)
+    success = _ingest_single_file(path, knowledge, ctx.owner_id, logical_filename=_project_relative_filename(path))
     if not success:
         raise typer.Exit(code=1)
 
@@ -568,6 +598,7 @@ def ingest_folder(
     """Upload, index, and build graph data for all files inside a folder."""
     ctx = initialize(owner_id=owner_id)
     knowledge = _get_knowledge_module()
+    _project_relative_filename(folder)
     files = _gather_files(folder, pattern, recursive)
     if limit is not None and limit > 0:
         files = files[:limit]
@@ -579,7 +610,7 @@ def ingest_folder(
     typer.echo(f"Found {len(files)} file(s) in {folder}")
     succeeded = 0
     for path in files:
-        if _ingest_single_file(path, knowledge, ctx.owner_id):
+        if _ingest_single_file(path, knowledge, ctx.owner_id, logical_filename=_project_relative_filename(path)):
             succeeded += 1
 
     typer.echo(f"\nCompleted ingestion: {succeeded}/{len(files)} file(s) indexed successfully.")
@@ -809,8 +840,8 @@ def semantic_unit_eval(
     raw_chunks = chunker.chunk_text(
         text=text,
         metadata={
-            "source_file_id": str(path),
-            "filename": path.name,
+            "source_file_id": _project_relative_filename(path),
+            "filename": _project_relative_filename(path),
             "owner_id": resolved_owner,
         },
         level=level,

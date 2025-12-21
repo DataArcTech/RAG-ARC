@@ -87,9 +87,11 @@ def test_rag_inference_stream_chat_sse_emits_message_event(monkeypatch, client):
     assert resp.status_code == 200
     assert '"object":"chat.completion.chunk"' in resp.text
     assert "data: [DONE]" in resp.text
+    assert '"name":"rag_arc_progress"' in resp.text
 
     parts: list[str] = []
     first_chunk = None
+    progress_payload = None
     for raw_line in resp.text.splitlines():
         line = raw_line.strip("\r")
         if not line.startswith("data:"):
@@ -104,11 +106,21 @@ def test_rag_inference_stream_chat_sse_emits_message_event(monkeypatch, client):
         if not choices:
             continue
         delta = (choices[0] or {}).get("delta") or {}
+        for tool_call in delta.get("tool_calls") or []:
+            fn = (tool_call or {}).get("function") or {}
+            if fn.get("name") == "rag_arc_progress" and progress_payload is None:
+                progress_payload = json.loads(fn.get("arguments") or "{}")
         parts.append(delta.get("content") or "")
 
     assert first_chunk is not None
     first_delta = (first_chunk.get("choices") or [{}])[0].get("delta") or {}
     assert first_delta.get("role") == "assistant"
+    assert progress_payload is not None
+    assert progress_payload.get("v") == 1
+    assert progress_payload.get("type") == "progress"
+    assert progress_payload.get("stage") == "prepare"
+    assert isinstance(progress_payload.get("request_id"), str) and progress_payload.get("request_id")
+    assert isinstance(progress_payload.get("seq"), int) and progress_payload.get("seq") >= 1
     assert "".join(parts) == "assistant ok"
 
 

@@ -3,6 +3,7 @@ from fastapi import (
     Depends,
     HTTPException,
     UploadFile,
+    Form,
     status,
     Query,
     Body,
@@ -66,6 +67,10 @@ class FileListResponse(BaseModel):
 async def upload_file(
     file: UploadFile,
     user: Annotated[User | None, Depends(get_current_user)],
+    relative_path: Optional[str] = Form(
+        default=None,
+        description="Optional repo-relative path (e.g. RAG-ARC/docs/a.pdf).",
+    ),
 ):
     """
     Upload a file to the knowledge base
@@ -86,7 +91,7 @@ async def upload_file(
     try:
         print(f"Uploading file: {file.filename} for owner_id: {user.id}")
         # Convert string UUID to UUID object
-        doc_id = await get_knowledge_handler().upload_file(file, user.id)
+        doc_id = await get_knowledge_handler().upload_file(file, user.id, relative_path=relative_path)
         return doc_id
     except ValueError as e:
         raise HTTPException(

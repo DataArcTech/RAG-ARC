@@ -2,6 +2,7 @@ from datetime import datetime
 import json
 import asyncio
 import os
+import time
 import threading
 from typing import Annotated, Any, Dict, List, Optional
 from fastapi import (
@@ -304,6 +305,8 @@ async def stream_chat_sse(
     async def event_generator():
         chunk_id = new_chatcmpl_id()
         created = now_epoch_seconds()
+        request_id = uuid.uuid4().hex
+        progress_seq = 0
 
         # Qwen/OpenAI-compatible streams typically start with a chunk that sets role=assistant.
         yield sse_json(
@@ -322,27 +325,47 @@ async def stream_chat_sse(
         )
         await get_thread_pool().run_blocking(message_handler.create_message, user_message)
 
-        try:
-            token_stream, chunks, subgraph_data, subgraph_info = await asyncio.to_thread(
-                rag_inference_handler.stream_chat,
-                query,
-                effective_owner,
-                return_subgraph=(return_subgraph or include_evidence),
-            )
-        except Exception as exc:  # noqa: BLE001
-            yield sse_json({"error": {"message": str(exc)}})
-            yield sse_done()
-            return
-
         response_parts: list[str] = []
-        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        queue: asyncio.Queue[object | None] = asyncio.Queue()
         loop = asyncio.get_running_loop()
         stream_error: list[Exception | None] = [None]
+        prepared: dict[str, Any] = {}
+
+        def _emit_progress(payload: dict[str, Any]) -> None:
+            nonlocal progress_seq
+            progress_seq += 1
+            envelope = dict(payload or {})
+            envelope.setdefault("v", 1)
+            envelope.setdefault("type", "progress")
+            envelope.setdefault("ts_ms", int(time.time() * 1000))
+            envelope.setdefault("request_id", request_id)
+            envelope.setdefault("seq", progress_seq)
+            asyncio.run_coroutine_threadsafe(queue.put({"kind": "progress", "payload": envelope}), loop)
 
         def _run_stream() -> None:
             try:
+                _emit_progress({"stage": "prepare", "status": "start"})
+                try:
+                    token_stream, chunks, subgraph_data, subgraph_info = rag_inference_handler.stream_chat(
+                        query,
+                        effective_owner,
+                        return_subgraph=(return_subgraph or include_evidence),
+                        progress_callback=_emit_progress,
+                    )
+                except TypeError:
+                    token_stream, chunks, subgraph_data, subgraph_info = rag_inference_handler.stream_chat(
+                        query,
+                        effective_owner,
+                        return_subgraph=(return_subgraph or include_evidence),
+                    )
+                prepared["chunks"] = chunks
+                prepared["subgraph_data"] = subgraph_data
+                prepared["subgraph_info"] = subgraph_info
+                _emit_progress({"stage": "prepare", "status": "end"})
+                _emit_progress({"stage": "generate", "status": "start"})
                 for chunk in token_stream:
-                    asyncio.run_coroutine_threadsafe(queue.put(chunk), loop)
+                    asyncio.run_coroutine_threadsafe(queue.put({"kind": "token", "text": chunk}), loop)
+                _emit_progress({"stage": "generate", "status": "end"})
             except Exception as exc:  # noqa: BLE001
                 stream_error[0] = exc
             finally:
@@ -351,20 +374,52 @@ async def stream_chat_sse(
         threading.Thread(target=_run_stream, daemon=True).start()
 
         while True:
-            piece = await queue.get()
-            if piece is None:
+            item = await queue.get()
+            if item is None:
                 break
-            for delta_piece in iter_text_deltas(piece):
-                response_parts.append(delta_piece)
+
+            if isinstance(item, dict) and item.get("kind") == "progress":
+                tool_calls = [
+                    {
+                        "index": 0,
+                        "id": f"call_progress_{uuid.uuid4().hex}",
+                        "type": "function",
+                        "function": {
+                            "name": "rag_arc_progress",
+                            "arguments": json.dumps(
+                                item.get("payload") or {},
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        },
+                    }
+                ]
                 yield sse_json(
                     openai_chat_completion_chunk(
                         chunk_id=chunk_id,
                         model=model_name,
                         created=created,
-                        delta=delta_envelope(role=None, content=delta_piece),
+                        delta=delta_envelope(role=None, tool_calls=tool_calls),
                     )
                 )
-                await asyncio.sleep(0)
+                continue
+
+            if isinstance(item, dict) and item.get("kind") == "token":
+                piece = str(item.get("text") or "")
+                if not piece:
+                    continue
+                for delta_piece in iter_text_deltas(piece):
+                    response_parts.append(delta_piece)
+                    yield sse_json(
+                        openai_chat_completion_chunk(
+                            chunk_id=chunk_id,
+                            model=model_name,
+                            created=created,
+                            delta=delta_envelope(role=None, content=delta_piece),
+                        )
+                    )
+                    await asyncio.sleep(0)
+                continue
 
         if stream_error[0] is not None:
             yield sse_json({"error": {"message": str(stream_error[0])}})
@@ -372,6 +427,10 @@ async def stream_chat_sse(
             return
 
         assistant_response = "".join(response_parts)
+        chunks = prepared.get("chunks") or []
+        subgraph_data = prepared.get("subgraph_data")
+        subgraph_info = prepared.get("subgraph_info")
+
         assistant_message = ChatMessage(
             session_id=session_id,
             content={"role": "assistant", "content": assistant_response},

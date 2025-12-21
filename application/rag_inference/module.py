@@ -1,6 +1,7 @@
 from encapsulation.data_model.schema import Chunk
-from typing import TYPE_CHECKING, Optional, Dict, Any, List, Iterator
+from typing import TYPE_CHECKING, Optional, Dict, Any, List, Iterator, Callable
 import logging
+import time
 import uuid
 import json
 import asyncio
@@ -113,6 +114,7 @@ class RAGInference(AbstractModule):
         query: str,
         owner_id: uuid.UUID,
         return_subgraph: bool = False,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> tuple[Iterator[str], list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """Stream chat completion from the configured LLM."""
 
@@ -120,8 +122,25 @@ class RAGInference(AbstractModule):
             query=query,
             owner_id=owner_id,
             return_subgraph=return_subgraph,
+            progress_callback=progress_callback,
         )
         return (self.llm.stream_chat(messages), chunks, subgraph_data, subgraph_info)
+
+    @staticmethod
+    def _emit_progress(
+        callback: Optional[Callable[[Dict[str, Any]], None]],
+        payload: Dict[str, Any],
+    ) -> None:
+        if callback is None:
+            return
+        try:
+            enriched = dict(payload or {})
+            enriched.setdefault("v", 1)
+            enriched.setdefault("type", "progress")
+            enriched.setdefault("ts_ms", int(time.time() * 1000))
+            callback(enriched)
+        except Exception:  # noqa: BLE001
+            return
 
     def _build_messages_and_context(
         self,
@@ -129,12 +148,36 @@ class RAGInference(AbstractModule):
         query: str,
         owner_id: uuid.UUID,
         return_subgraph: bool,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> tuple[List[Dict[str, str]], list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        self._emit_progress(progress_callback, {"stage": "rewrite", "status": "start"})
+        rewrite_start = time.perf_counter()
         rewritten_query = self.query_rewriter.rewrite_query(query)
+        self._emit_progress(
+            progress_callback,
+            {
+                "stage": "rewrite",
+                "status": "end",
+                "duration_ms": int((time.perf_counter() - rewrite_start) * 1000),
+                "rewritten_query": rewritten_query,
+            },
+        )
+
+        self._emit_progress(progress_callback, {"stage": "retrieve", "status": "start"})
+        retrieve_start = time.perf_counter()
         chunks: list[Chunk] = self.retriever.invoke(
             rewritten_query,
             owner_id=owner_id,
             return_subgraph_info=return_subgraph,
+        )
+        self._emit_progress(
+            progress_callback,
+            {
+                "stage": "retrieve",
+                "status": "end",
+                "duration_ms": int((time.perf_counter() - retrieve_start) * 1000),
+                "chunks": len(chunks),
+            },
         )
 
         if owner_id is not None and is_admin_owner(owner_id) and not chunks and self.graph_retriever is not None:
@@ -149,10 +192,26 @@ class RAGInference(AbstractModule):
 
         chunks = self._filter_chunks_by_file_status(chunks)
         subgraph_info = self._consume_subgraph_info(chunks)
+        self._emit_progress(
+            progress_callback,
+            {"stage": "rerank", "status": "start", "chunks_in": len(chunks)},
+        )
+        rerank_start = time.perf_counter()
         chunks = self.reranker.rerank(rewritten_query, chunks)
+        self._emit_progress(
+            progress_callback,
+            {
+                "stage": "rerank",
+                "status": "end",
+                "duration_ms": int((time.perf_counter() - rerank_start) * 1000),
+                "chunks_out": len(chunks),
+            },
+        )
 
         subgraph_data = None
         if subgraph_info and return_subgraph:
+            self._emit_progress(progress_callback, {"stage": "subgraph_export", "status": "start"})
+            export_start = time.perf_counter()
             try:
                 graph_store = self._locate_graph_store()
                 if graph_store:
@@ -191,6 +250,16 @@ class RAGInference(AbstractModule):
                 logger.warning("Failed to export subgraph: %s", exc)
                 import traceback
                 logger.debug("Traceback: %s", traceback.format_exc())
+            self._emit_progress(
+                progress_callback,
+                {
+                    "stage": "subgraph_export",
+                    "status": "end",
+                    "duration_ms": int((time.perf_counter() - export_start) * 1000),
+                    "nodes": len((subgraph_data or {}).get("nodes", []) or []),
+                    "edges": len((subgraph_data or {}).get("edges", []) or []),
+                },
+            )
 
         messages: List[Dict[str, str]] = []
         for i, chunk in enumerate(chunks):
