@@ -156,3 +156,60 @@ def test_deepsearch_stream_emits_done_marker():
                 assert any(event.get("event") == "done" for event in events)
 
     asyncio.run(_run())
+
+
+def test_deepsearch_stream_openai_format_emits_tool_calls():
+    class _StubAccount:
+        def get_user_by_username(self, username: str):
+            return None
+
+    registrator = Register()
+    registrator.registrations["account"] = _StubAccount()
+    registrator.registrations["deepsearch_service"] = _StubDeepSearchService()
+    registrator.registrations["rag_inference"] = _StubRagInference()
+
+    from api.routers import deepsearch as deepsearch_router
+    from api.routers.auth import get_current_user
+
+    app = FastAPI()
+    app.include_router(deepsearch_router.router)
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=uuid.uuid4())
+
+    async def _run():
+        async with _serve_app(app) as (host, port):
+            base = f"http://{host}:{port}"
+            async with httpx.AsyncClient(base_url=base, timeout=5.0) as client:
+                resp = await client.post("/deepsearch/run_async", json={"question": "hello"})
+                assert resp.status_code == 202
+                run_id = resp.json()["run_id"]
+
+                saw_done_marker = False
+                saw_progress_tool_call = False
+
+                async with client.stream("GET", f"/deepsearch/stream/{run_id}", params={"format": "openai"}) as stream:
+                    assert stream.status_code == 200
+                    async for line in stream.aiter_lines():
+                        if not line:
+                            continue
+                        if not line.startswith("data:"):
+                            continue
+                        data = line.split(":", 1)[1].strip()
+                        if data == "[DONE]":
+                            saw_done_marker = True
+                            break
+                        payload = json.loads(data)
+                        assert payload.get("object") == "chat.completion.chunk"
+                        choices = payload.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta") or {}
+                        tool_calls = delta.get("tool_calls") or []
+                        if tool_calls:
+                            fn = tool_calls[0].get("function") or {}
+                            if fn.get("name") == "rag_arc_progress":
+                                saw_progress_tool_call = True
+
+                assert saw_done_marker is True
+                assert saw_progress_tool_call is True
+
+    asyncio.run(_run())

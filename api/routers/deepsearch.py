@@ -1,6 +1,9 @@
 import uuid
 import asyncio
-from typing import Annotated, Any, Dict, Optional
+import json
+import os
+import time
+from typing import Annotated, Any, Dict, Optional, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -14,7 +17,14 @@ from core.utils.owner_guard import is_admin_owner
 from core.presentation.deepsearch_payload import trim_deepsearch_payload
 from application.rag_inference.module import RAGInference
 from api.deepsearch.tasks import TASKS, format_sse, new_run_id
-from api.sse import sse_done
+from api.sse import (
+    delta_envelope,
+    new_chatcmpl_id,
+    now_epoch_seconds,
+    openai_chat_completion_chunk,
+    sse_done,
+    sse_json,
+)
 
 router = APIRouter(prefix="/deepsearch", tags=["deepsearch"])
 registrator = Register()
@@ -114,6 +124,241 @@ async def _stream_events(run_id: str, *, last_event_id: int = -1):
                 "progress": info.last_progress.get("progress") if isinstance(info.last_progress, dict) else None,
             }
             yield format_sse(event="done", data=done_payload, event_id=cursor + 1)
+            yield sse_done()
+            return
+
+
+async def _stream_events_openai(
+    run_id: str,
+    *,
+    last_event_id: int = -1,
+    model_name: str,
+):
+    """Stream DeepSearch progress as Qwen(OpenAI-compatible) chat.completion.chunk SSE events."""
+
+    chunk_id = new_chatcmpl_id()
+    created = now_epoch_seconds()
+
+    yield sse_json(
+        openai_chat_completion_chunk(
+            chunk_id=chunk_id,
+            model=model_name,
+            created=created,
+            delta=delta_envelope(role="assistant", content=""),
+        )
+    )
+
+    info = await TASKS.get(run_id)
+    if not info:
+        tool_calls = [
+            {
+                "index": 0,
+                "id": f"call_progress_{uuid.uuid4().hex}",
+                "type": "function",
+                "function": {
+                    "name": "rag_arc_progress",
+                    "arguments": json.dumps(
+                        {"flow": "deepsearch", "event": "error", "data": {"run_id": run_id, "message": "run_id not found"}},
+                        ensure_ascii=False,
+                        default=str,
+                        separators=(",", ":"),
+                    ),
+                },
+            }
+        ]
+        yield sse_json(
+            openai_chat_completion_chunk(
+                chunk_id=chunk_id,
+                model=model_name,
+                created=created,
+                delta=delta_envelope(tool_calls=tool_calls),
+            )
+        )
+        yield sse_json(
+            openai_chat_completion_chunk(
+                chunk_id=chunk_id,
+                model=model_name,
+                created=created,
+                delta=delta_envelope(),
+                finish_reason="stop",
+            )
+        )
+        yield sse_done()
+        return
+
+    cursor = max(-1, last_event_id)
+    sent_result = False
+
+    while True:
+        await asyncio.sleep(0)
+        async with info.cond:
+            while cursor + 1 >= len(info.events) and not info.done:
+                try:
+                    await asyncio.wait_for(info.cond.wait(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    heartbeat = {"flow": "deepsearch", "event": "heartbeat", "data": {"run_id": run_id}}
+                    tool_calls = [
+                        {
+                            "index": 0,
+                            "id": f"call_progress_{uuid.uuid4().hex}",
+                            "type": "function",
+                            "function": {
+                                "name": "rag_arc_progress",
+                                "arguments": json.dumps(
+                                    heartbeat,
+                                    ensure_ascii=False,
+                                    default=str,
+                                    separators=(",", ":"),
+                                ),
+                            },
+                        }
+                    ]
+                    yield sse_json(
+                        openai_chat_completion_chunk(
+                            chunk_id=chunk_id,
+                            model=model_name,
+                            created=created,
+                            delta=delta_envelope(tool_calls=tool_calls),
+                        )
+                    )
+            pending = info.events[cursor + 1 :]
+
+        for event in pending:
+            cursor = int(event.get("id", cursor + 1))
+            payload = event.get("payload") or {}
+            envelope = {
+                "flow": "deepsearch",
+                "event": event.get("type") or "message",
+                "id": cursor,
+                "timestamp_ms": event.get("timestamp_ms") or int(time.time() * 1000),
+                "data": {"run_id": run_id, **payload},
+            }
+            tool_calls = [
+                {
+                    "index": 0,
+                    "id": f"call_progress_{uuid.uuid4().hex}",
+                    "type": "function",
+                    "function": {
+                        "name": "rag_arc_progress",
+                        "arguments": json.dumps(
+                            envelope,
+                            ensure_ascii=False,
+                            default=str,
+                            separators=(",", ":"),
+                        ),
+                    },
+                }
+            ]
+            yield sse_json(
+                openai_chat_completion_chunk(
+                    chunk_id=chunk_id,
+                    model=model_name,
+                    created=created,
+                    delta=delta_envelope(tool_calls=tool_calls),
+                )
+            )
+            await asyncio.sleep(0)
+
+            if not sent_result and (event.get("type") == "result" or info.done) and info.result:
+                sent_result = True
+                tool_calls = [
+                    {
+                        "index": 0,
+                        "id": f"call_payload_{uuid.uuid4().hex}",
+                        "type": "function",
+                        "function": {
+                            "name": "rag_arc_payload",
+                            "arguments": json.dumps(
+                                {"flow": "deepsearch", "run_id": run_id, "result": info.result},
+                                ensure_ascii=False,
+                                default=str,
+                                separators=(",", ":"),
+                            ),
+                        },
+                    }
+                ]
+                yield sse_json(
+                    openai_chat_completion_chunk(
+                        chunk_id=chunk_id,
+                        model=model_name,
+                        created=created,
+                        delta=delta_envelope(tool_calls=tool_calls),
+                    )
+                )
+                await asyncio.sleep(0)
+
+        if info.done and cursor + 1 >= len(info.events):
+            if not sent_result and info.result:
+                sent_result = True
+                tool_calls = [
+                    {
+                        "index": 0,
+                        "id": f"call_payload_{uuid.uuid4().hex}",
+                        "type": "function",
+                        "function": {
+                            "name": "rag_arc_payload",
+                            "arguments": json.dumps(
+                                {"flow": "deepsearch", "run_id": run_id, "result": info.result},
+                                ensure_ascii=False,
+                                default=str,
+                                separators=(",", ":"),
+                            ),
+                        },
+                    }
+                ]
+                yield sse_json(
+                    openai_chat_completion_chunk(
+                        chunk_id=chunk_id,
+                        model=model_name,
+                        created=created,
+                        delta=delta_envelope(tool_calls=tool_calls),
+                    )
+                )
+                await asyncio.sleep(0)
+
+            done_payload = {
+                "flow": "deepsearch",
+                "event": "done",
+                "data": {
+                    "run_id": run_id,
+                    "done": True,
+                    "error": info.error,
+                    "progress": info.last_progress.get("progress") if isinstance(info.last_progress, dict) else None,
+                },
+            }
+            tool_calls = [
+                {
+                    "index": 0,
+                    "id": f"call_progress_{uuid.uuid4().hex}",
+                    "type": "function",
+                    "function": {
+                        "name": "rag_arc_progress",
+                        "arguments": json.dumps(
+                            done_payload,
+                            ensure_ascii=False,
+                            default=str,
+                            separators=(",", ":"),
+                        ),
+                    },
+                }
+            ]
+            yield sse_json(
+                openai_chat_completion_chunk(
+                    chunk_id=chunk_id,
+                    model=model_name,
+                    created=created,
+                    delta=delta_envelope(tool_calls=tool_calls),
+                )
+            )
+            yield sse_json(
+                openai_chat_completion_chunk(
+                    chunk_id=chunk_id,
+                    model=model_name,
+                    created=created,
+                    delta=delta_envelope(),
+                    finish_reason="stop",
+                )
+            )
             yield sse_done()
             return
 
@@ -318,6 +563,7 @@ async def stream_progress(
     run_id: str,
     current_user: Annotated[User | None, Depends(get_current_user)],
     last_event_id: int = -1,
+    format: Literal["legacy", "openai"] = "legacy",
 ):
     if current_user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
@@ -326,6 +572,13 @@ async def stream_progress(
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
     }
+    if format == "openai":
+        model_name = os.getenv("CHAT_MODEL_NAME") or os.getenv("OPENAI_CHAT_MODEL") or "rag-arc-deepsearch"
+        return StreamingResponse(
+            _stream_events_openai(run_id, last_event_id=last_event_id, model_name=model_name),
+            media_type="text/event-stream",
+            headers=headers,
+        )
     return StreamingResponse(
         _stream_events(run_id, last_event_id=last_event_id),
         media_type="text/event-stream",

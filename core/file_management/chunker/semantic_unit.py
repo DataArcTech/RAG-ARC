@@ -170,7 +170,7 @@ class SemanticUnitChunker(AbstractChunker):
                     continue
 
                 index_text = self._compose_with_caption(caption, table_header)
-                anchor_content = self._compose_with_caption(caption, full_table)
+                anchor_content = index_text
                 output.append(
                     self._make_chunk_dict(
                         content=anchor_content,
@@ -185,7 +185,7 @@ class SemanticUnitChunker(AbstractChunker):
                             "table_header": table_header,
                             "index_text": index_text,
                             "token_count": self._estimate_tokens(anchor_content),
-                            "anchor_is_summary": False,
+                            "anchor_is_summary": True,
                             "is_full_content": True,
                         },
                     )
@@ -207,8 +207,8 @@ class SemanticUnitChunker(AbstractChunker):
                         caption,
                         "\n".join([line for line in (header, separator, slice_body) if line]).strip(),
                     )
-                    # Store the full semantic unit for provenance/evidence, but index on the smaller slice text.
-                    slice_content = anchor_content
+                    # Store each slice as an intact sub-table (header + row window).
+                    slice_content = slice_index_text
                     output.append(
                         self._make_chunk_dict(
                             content=slice_content,
@@ -225,7 +225,7 @@ class SemanticUnitChunker(AbstractChunker):
                                 "table_caption": caption,
                                 "table_header": table_header,
                                 "index_text": slice_index_text,
-                                "token_count": self._estimate_tokens(slice_index_text),
+                                "token_count": self._estimate_tokens(slice_content),
                                 "is_full_content": True,
                             },
                         )
@@ -268,7 +268,7 @@ class SemanticUnitChunker(AbstractChunker):
                     body_lines=body_lines[: max(int(code_anchor_preview_lines), 0)],
                 )
                 index_text = self._compose_with_caption(caption, anchor_body)
-                anchor_content = self._compose_with_caption(caption, full_code)
+                anchor_content = index_text
                 output.append(
                     self._make_chunk_dict(
                         content=anchor_content,
@@ -282,7 +282,7 @@ class SemanticUnitChunker(AbstractChunker):
                             "code_language": language,
                             "index_text": index_text,
                             "token_count": self._estimate_tokens(anchor_content),
-                            "anchor_is_summary": False,
+                            "anchor_is_summary": True,
                             "is_full_content": True,
                         },
                     )
@@ -301,7 +301,7 @@ class SemanticUnitChunker(AbstractChunker):
                         caption,
                         self._fence_wrap(fence=fence, language=language, body_lines=slice_body.splitlines()),
                     )
-                    slice_content = anchor_content
+                    slice_content = slice_index_text
                     output.append(
                         self._make_chunk_dict(
                             content=slice_content,
@@ -317,7 +317,7 @@ class SemanticUnitChunker(AbstractChunker):
                                 "line_range": {"start": line_start, "end": line_end},
                                 "code_language": language,
                                 "index_text": slice_index_text,
-                                "token_count": self._estimate_tokens(slice_index_text),
+                                "token_count": self._estimate_tokens(slice_content),
                                 "is_full_content": True,
                             },
                         )
@@ -357,7 +357,7 @@ class SemanticUnitChunker(AbstractChunker):
                 preview_items = items[: max(int(list_anchor_preview_items), 0)]
                 anchor_body = "\n".join(preview_items).strip()
                 index_text = self._compose_with_caption(caption, anchor_body)
-                anchor_content = self._compose_with_caption(caption, full_list)
+                anchor_content = index_text
                 output.append(
                     self._make_chunk_dict(
                         content=anchor_content,
@@ -371,7 +371,7 @@ class SemanticUnitChunker(AbstractChunker):
                             "list_type": list_type,
                             "index_text": index_text,
                             "token_count": self._estimate_tokens(anchor_content),
-                            "anchor_is_summary": False,
+                            "anchor_is_summary": True,
                             "is_full_content": True,
                         },
                     )
@@ -385,7 +385,7 @@ class SemanticUnitChunker(AbstractChunker):
                 )
                 for slice_index, (item_start, item_end, slice_body) in enumerate(item_groups, start=1):
                     slice_index_text = self._compose_with_caption(caption, slice_body)
-                    slice_content = anchor_content
+                    slice_content = slice_index_text
                     output.append(
                         self._make_chunk_dict(
                             content=slice_content,
@@ -401,7 +401,7 @@ class SemanticUnitChunker(AbstractChunker):
                                 "list_type": list_type,
                                 "list_item_range": {"start": item_start, "end": item_end},
                                 "index_text": slice_index_text,
-                                "token_count": self._estimate_tokens(slice_index_text),
+                                "token_count": self._estimate_tokens(slice_content),
                                 "is_full_content": True,
                             },
                         )

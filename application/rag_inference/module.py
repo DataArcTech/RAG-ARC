@@ -57,6 +57,7 @@ class RAGInference(AbstractModule):
         query: str,
         owner_id: uuid.UUID,
         return_subgraph: bool = False,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> tuple[str, list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """
         Chat with RAG system (synchronous version, kept for backward compatibility).
@@ -65,10 +66,24 @@ class RAGInference(AbstractModule):
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(self.chat_async(query, owner_id, return_subgraph))
+            return asyncio.run(
+                self.chat_async(
+                    query,
+                    owner_id,
+                    return_subgraph,
+                    progress_callback=progress_callback,
+                )
+            )
 
         def _run_in_thread():
-            return asyncio.run(self.chat_async(query, owner_id, return_subgraph))
+            return asyncio.run(
+                self.chat_async(
+                    query,
+                    owner_id,
+                    return_subgraph,
+                    progress_callback=progress_callback,
+                )
+            )
 
         with ThreadPoolExecutor(max_workers=1) as executor:
             return executor.submit(_run_in_thread).result()
@@ -78,6 +93,7 @@ class RAGInference(AbstractModule):
         query: str,
         owner_id: uuid.UUID,
         return_subgraph: bool = False,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> tuple[str, list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """
         Chat with RAG system
@@ -97,6 +113,7 @@ class RAGInference(AbstractModule):
             query=query,
             owner_id=owner_id,
             return_subgraph=return_subgraph,
+            progress_callback=progress_callback,
         )
         response = await self._run_blocking(self.llm.chat, messages)
 
@@ -150,6 +167,41 @@ class RAGInference(AbstractModule):
         return_subgraph: bool,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> tuple[List[Dict[str, str]], list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        def _chunk_preview(chunk: Chunk, *, max_chars: int = 160) -> str:
+            metadata = getattr(chunk, "metadata", None) or {}
+            text = metadata.get("prompt_text") or metadata.get("index_text") or getattr(chunk, "content", None) or ""
+            text = str(text)
+            text = " ".join(text.split())
+            if max_chars <= 0:
+                return ""
+            if len(text) <= max_chars:
+                return text
+            return text[:max_chars].rstrip() + "…"
+
+        def _chunk_brief(chunk: Chunk) -> Dict[str, Any]:
+            metadata = getattr(chunk, "metadata", None) or {}
+            def _num(value: Any) -> float | None:
+                if value is None:
+                    return None
+                if isinstance(value, bool):
+                    return float(value)
+                if isinstance(value, (int, float)):
+                    return float(value)
+                try:
+                    return float(value)
+                except Exception:  # noqa: BLE001
+                    return None
+
+            return {
+                "id": str(getattr(chunk, "id", "") or ""),
+                "score": _num(metadata.get("score")),
+                "rerank_score": _num(metadata.get("rerank_score")),
+                "chunk_role": metadata.get("chunk_role"),
+                "semantic_unit_type": metadata.get("semantic_unit_type"),
+                "filename": metadata.get("filename") or metadata.get("source_file_id"),
+                "preview": _chunk_preview(chunk),
+            }
+
         self._emit_progress(progress_callback, {"stage": "rewrite", "status": "start"})
         rewrite_start = time.perf_counter()
         rewritten_query = self.query_rewriter.rewrite_query(query)
@@ -170,6 +222,12 @@ class RAGInference(AbstractModule):
             owner_id=owner_id,
             return_subgraph_info=return_subgraph,
         )
+        retriever_info = None
+        try:
+            if hasattr(self.retriever, "get_multipath_info"):
+                retriever_info = self.retriever.get_multipath_info()
+        except Exception:  # noqa: BLE001
+            retriever_info = None
         self._emit_progress(
             progress_callback,
             {
@@ -177,6 +235,8 @@ class RAGInference(AbstractModule):
                 "status": "end",
                 "duration_ms": int((time.perf_counter() - retrieve_start) * 1000),
                 "chunks": len(chunks),
+                "retriever": retriever_info,
+                "top_chunks": [_chunk_brief(chunk) for chunk in chunks[: min(len(chunks), 10)]],
             },
         )
 
@@ -198,6 +258,11 @@ class RAGInference(AbstractModule):
         )
         rerank_start = time.perf_counter()
         chunks = self.reranker.rerank(rewritten_query, chunks)
+        reranker_info = None
+        try:
+            reranker_info = self.reranker.get_reranker_info()
+        except Exception:  # noqa: BLE001
+            reranker_info = None
         self._emit_progress(
             progress_callback,
             {
@@ -205,6 +270,8 @@ class RAGInference(AbstractModule):
                 "status": "end",
                 "duration_ms": int((time.perf_counter() - rerank_start) * 1000),
                 "chunks_out": len(chunks),
+                "reranker": reranker_info,
+                "top_chunks": [_chunk_brief(chunk) for chunk in chunks[: min(len(chunks), 10)]],
             },
         )
 

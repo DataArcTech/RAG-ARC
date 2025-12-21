@@ -265,42 +265,25 @@ class MultiPathRetriever(BaseRetriever):
 
             base_prompt = str(anchor_out.metadata.get("index_text") or anchor_out.content or "")
 
-            if semantic_unit_type == "table":
-                row_lines: list[str] = []
-                for slice_chunk in selected_slices:
-                    row_lines.extend(self._table_rows_from_slice_content(self._slice_index_text(slice_chunk)))
-                deduped: list[str] = []
-                for line in row_lines:
-                    if line not in deduped:
-                        deduped.append(line)
-                    if TABLE_MAX_MERGED_ROWS is not None and len(deduped) >= TABLE_MAX_MERGED_ROWS:
-                        break
-                if deduped:
-                    prompt = base_prompt.rstrip() + "\n" + "\n".join(deduped)
-                    anchor_out.metadata["prompt_text"] = prompt
-                    if anchor_is_summary:
-                        anchor_out.content = (anchor_out.content or "").rstrip() + "\n" + "\n".join(deduped)
-                else:
-                    anchor_out.metadata["prompt_text"] = base_prompt
-
-            if semantic_unit_type in {"code", "list"}:
+            if semantic_unit_type in {"table", "code", "list"}:
                 total_budget = SEMANTIC_UNIT_MAX_MERGED_TOTAL_CHARS
                 slice_budget = SEMANTIC_UNIT_MAX_MERGED_SLICE_CHARS
 
                 merged: list[str] = []
                 total_used = 0
                 for slice_chunk in selected_slices:
-                    snippet = self._truncate_text(self._slice_index_text(slice_chunk), slice_budget)
+                    snippet = self._slice_index_text(slice_chunk)
                     if not snippet.strip():
                         continue
 
-                    if total_budget is not None:
-                        remaining = max(int(total_budget) - total_used, 0)
-                        if remaining <= 0:
-                            break
-                        snippet = self._truncate_text(snippet, remaining)
-                        if not snippet.strip():
-                            break
+                    # Do not split semantic-unit slices. Enforce budgets by selection only.
+                    if slice_budget is not None and len(snippet) > int(slice_budget):
+                        # Keep at least one intact slice when it's the only way to provide evidence.
+                        if merged:
+                            continue
+
+                    if total_budget is not None and (total_used + len(snippet)) > int(total_budget):
+                        break
 
                     merged.append(snippet)
                     total_used += len(snippet)
@@ -309,9 +292,9 @@ class MultiPathRetriever(BaseRetriever):
                     prompt = base_prompt.rstrip() + "\n\nMatched slices:\n" + "\n\n".join(merged)
                     anchor_out.metadata["prompt_text"] = prompt
                     if anchor_is_summary:
-                        anchor_out.content = (anchor_out.content or "").rstrip() + "\n\nMatched slices:\n" + "\n\n".join(merged)
+                        anchor_out.content = base_prompt.rstrip() + "\n\nMatched slices:\n" + "\n\n".join(merged)
                 else:
-                    anchor_out.metadata["prompt_text"] = base_prompt
+                    anchor_out.metadata.setdefault("prompt_text", base_prompt)
 
             if semantic_unit_type not in {"table", "code", "list"}:
                 anchor_out.metadata.setdefault("prompt_text", base_prompt)

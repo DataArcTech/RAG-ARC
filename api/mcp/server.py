@@ -2,6 +2,7 @@
 MCP Server implementation using FastMCP
 """
 import datetime
+import json
 import uuid
 from fastmcp import Context, FastMCP
 from typing import Any, Dict, List, Literal, Optional
@@ -129,6 +130,12 @@ async def chat(
         dict: Response containing session_id and reply
     """
     try:
+        def _json_safe(value: Any) -> Any:
+            try:
+                return json.loads(json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":")))
+            except Exception:  # noqa: BLE001
+                return {"unserializable": str(value)}
+
         # Authenticate user from token
         current_user = _safe_get_current_user_from_token(auth_token)
         if not current_user:
@@ -151,6 +158,32 @@ async def chat(
         if not session or not validate_user_session(session, current_user):
             return {"isError": True, "message": "Session not found or unauthorized access"}
 
+        progress_events: list[dict[str, Any]] = []
+
+        def _on_progress(payload: dict[str, Any]) -> None:
+            progress_events.append(_json_safe(dict(payload or {})))
+            if ctx is None:
+                return
+            stage = str(payload.get("stage") or "")
+            status = str(payload.get("status") or "")
+            percent_map = {
+                "rewrite": 10,
+                "retrieve": 40,
+                "rerank": 60,
+                "subgraph_export": 80,
+                "generate": 90,
+            }
+            pct = percent_map.get(stage, 0)
+            if status == "end" and stage in percent_map:
+                pct = min(percent_map[stage] + 5, 95)
+            try:
+                import asyncio
+
+                loop = asyncio.get_running_loop()
+                loop.create_task(ctx.report_progress(pct, 100, f"{stage}:{status}"))
+            except Exception:  # noqa: BLE001
+                return
+
         if ctx is not None:
             await ctx.report_progress(0, 100, "generating")
 
@@ -164,6 +197,9 @@ async def chat(
             query,
             owner_id=current_user.id,
             return_subgraph=True,
+            progress_callback=_on_progress,
+            return_subgraph=True,
+            progress_callback=_on_progress,
         )
 
         # Create message in the session (use thread pool to avoid blocking)
@@ -208,9 +244,10 @@ async def chat(
         return {
             "session_id": session_id,
             "response": response_text,
-            "chunks": evidence["chunks"],
-            "subgraph": subgraph_data,
-            "evidence": evidence,
+            "chunks": _json_safe(evidence.get("chunks")),
+            "subgraph": _json_safe(subgraph_data),
+            "evidence": _json_safe(evidence),
+            "progress": progress_events,
         }
         
     except Exception as e:

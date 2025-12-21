@@ -389,6 +389,7 @@ async def stream_chat_sse(
                             "arguments": json.dumps(
                                 item.get("payload") or {},
                                 ensure_ascii=False,
+                                default=str,
                                 separators=(",", ":"),
                             ),
                         },
@@ -474,7 +475,7 @@ async def stream_chat_sse(
                     "type": "function",
                     "function": {
                         "name": "rag_arc_payload",
-                        "arguments": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                        "arguments": json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":")),
                     },
                 }
             ]

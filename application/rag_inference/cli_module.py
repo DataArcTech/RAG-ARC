@@ -135,7 +135,11 @@ class RAGInferenceCLIModule:
     def _build_messages(self, chunks: List[Chunk], query: str) -> List[Dict[str, str]]:
         messages: List[Dict[str, str]] = []
         for idx, chunk in enumerate(chunks):
-            chunk_content = f"Chunk {idx + 1}:\n{chunk.content}"
+            metadata = getattr(chunk, "metadata", None) or {}
+            chunk_text = metadata.get("prompt_text") or metadata.get("index_text")
+            if not isinstance(chunk_text, str) or not chunk_text.strip():
+                chunk_text = chunk.content
+            chunk_content = f"Chunk {idx + 1}:\n{chunk_text}"
             messages.append({"role": "user", "content": chunk_content})
         messages.append(
             {

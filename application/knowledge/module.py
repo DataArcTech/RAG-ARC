@@ -111,6 +111,14 @@ class Knowledge(AbstractModule):
     async def _run_blocking(self, func, *args, **kwargs):
         """Run a blocking function in a separate thread to avoid blocking the event loop."""
         return await get_thread_pool().run_blocking(func, *args, **kwargs)
+
+    async def _run_coroutine_in_thread(self, coro_func, *args, **kwargs):  # noqa: ANN001
+        """Run an async callable in a dedicated thread to keep FastAPI event loop responsive."""
+
+        def _runner():
+            return asyncio.run(coro_func(*args, **kwargs))
+
+        return await asyncio.to_thread(_runner)
     
     def _track_deletion_task(self, doc_id: str, task: asyncio.Task) -> None:
         """Register a background deletion task so we don't schedule duplicates."""
@@ -179,7 +187,8 @@ class Knowledge(AbstractModule):
                     return {"success": False, "file_id": doc_id, "error_message": "file scheduled for deletion"}
 
                 logger.info(f"Starting background indexing for file_id: {doc_id} (semaphore acquired)")
-                result = await self.file_index.index_file(doc_id)
+                # IndexManager is async but performs heavy blocking work; run it off the main event loop.
+                result = await self._run_coroutine_in_thread(self.file_index.index_file, doc_id)
                 if result.get("success"):
                     logger.info(f"Background indexing completed successfully for file_id: {doc_id}")
                 else:

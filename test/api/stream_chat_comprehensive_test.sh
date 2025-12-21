@@ -113,7 +113,9 @@ def read_stream_text(url: str, token: str | None):
     parts: list[str] = []
     with httpx.stream("GET", url, headers=headers, timeout=120.0) as r:
         if r.status_code != 200:
-            return {"http_status": r.status_code, "body": r.text}
+            body_bytes = r.read()
+            body_text = body_bytes.decode("utf-8", errors="replace")
+            return {"http_status": r.status_code, "body": body_text}
         for line in r.iter_lines():
             if not line:
                 continue

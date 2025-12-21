@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from encapsulation.data_model.schema import Chunk
 from core.retrieval.multipath import MultiPathRetriever
-from config.output_limits import SEMANTIC_UNIT_MAX_MATCHED_SLICES, TABLE_MAX_MERGED_ROWS
+from config.output_limits import SEMANTIC_UNIT_MAX_MATCHED_SLICES
 
 
 class _DummyIndex:
@@ -214,7 +214,7 @@ def test_multipath_limits_matched_slices_to_top_scores():
     assert "| 5 | value_5 |" not in out.content
 
 
-def test_multipath_limits_merged_table_rows():
+def test_multipath_does_not_truncate_table_slices_when_merging():
     owner_id = "12345678-1234-5678-1234-567812345678"
     anchor_id = "ANCHOR_1"
 
@@ -225,28 +225,23 @@ def test_multipath_limits_merged_table_rows():
         metadata={"chunk_role": "anchor", "semantic_unit_type": "table", "anchor_is_summary": True},
     )
 
-    slices: list[Chunk] = []
-    # 3 slices, each with 15 unique rows => 45 total rows before limiting/dedup.
-    for slice_idx in range(1, 4):
-        rows = [f"| {slice_idx}-{row_idx} | v_{slice_idx}_{row_idx} |" for row_idx in range(1, 16)]
-        content = "\n".join(["Table: Example", "| A | B |", "|---|---|", *rows])
-        slices.append(
-            Chunk(
-                id=f"SLICE_{slice_idx}",
-                owner_id=owner_id,
-                content=content,
-                metadata={
-                    "chunk_role": "slice",
-                    "semantic_unit_type": "table",
-                    "anchor_chunk_id": anchor_id,
-                    "score": 1.0,
-                    "slice_index": slice_idx,
-                },
-            )
-        )
+    rows = [f"| {row_idx} | value_{row_idx} |" for row_idx in range(1, 60)]
+    slice_content = "\n".join(["Table: Example", "| A | B |", "|---|---|", *rows])
+    slice_chunk = Chunk(
+        id="SLICE_1",
+        owner_id=owner_id,
+        content=slice_content,
+        metadata={
+            "chunk_role": "slice",
+            "semantic_unit_type": "table",
+            "anchor_chunk_id": anchor_id,
+            "score": 1.0,
+            "slice_index": 1,
+        },
+    )
 
     dummy_index = _DummyIndex([anchor])
-    dummy_retriever = _DummyRetriever(results=slices, index=dummy_index)
+    dummy_retriever = _DummyRetriever(results=[slice_chunk], index=dummy_index)
 
     config = _DummyConfig(
         retrievers=[object()],
@@ -256,19 +251,10 @@ def test_multipath_limits_merged_table_rows():
     multipath = MultiPathRetriever(config)  # type: ignore[arg-type]
 
     out = multipath._get_relevant_chunks("example", k=10, owner_id=owner_id)[0]
-
-    merged_rows = [
-        line
-        for line in out.content.splitlines()
-        if line.strip().startswith("|") and not line.strip().startswith("|---")
-    ]
-    # Drop header row ("| A | B |") from the count.
-    merged_data_rows = [line for line in merged_rows if line.strip() != "| A | B |"]
-
-    if TABLE_MAX_MERGED_ROWS is not None:
-        assert len(merged_data_rows) <= TABLE_MAX_MERGED_ROWS
-    else:
-        assert len(merged_data_rows) == 45
+    assert "Matched slices:" in out.content
+    # Must keep slices intact (no truncation markers inside merged content).
+    assert "| 59 | value_59 |" in out.content
+    assert "\n…" not in out.content
 
 
 def test_multipath_merges_code_slice_into_anchor_content():
