@@ -6,6 +6,7 @@ from typing import Any, List, TYPE_CHECKING
 
 from core.retrieval.base import BaseRetriever
 from encapsulation.data_model.schema import Chunk
+from core.file_management.atomic_units.markdown_table import extract_markdown_table_rows
 from config.output_limits import (
     SEMANTIC_UNIT_MAX_MATCHED_SLICES,
     SEMANTIC_UNIT_MAX_MERGED_SLICE_CHARS,
@@ -156,19 +157,7 @@ class MultiPathRetriever(BaseRetriever):
 
     @staticmethod
     def _table_rows_from_slice_content(content: str) -> list[str]:
-        lines = [line.rstrip() for line in (content or "").splitlines() if line.strip()]
-        if len(lines) < 2:
-            return []
-
-        sep_re = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
-
-        for idx in range(len(lines) - 1):
-            if "|" not in lines[idx]:
-                continue
-            if sep_re.match(lines[idx + 1]):
-                return [line for line in lines[idx + 2 :] if "|" in line]
-
-        return [line for line in lines if "|" in line]
+        return extract_markdown_table_rows(content)
 
     @staticmethod
     def _truncate_text(text: str, max_chars: int | None) -> str:

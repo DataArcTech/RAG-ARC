@@ -95,8 +95,8 @@
 | `TABLE_SLICE_MAX_TOKENS` | _(空)_ | 表格 slice 目标 token 上限覆盖。 |
 | `TABLE_SLICE_OVERLAP_ROWS` | _(空)_ | 表格 slice 行 overlap 覆盖。 |
 | `CODE_SMALL_MAX_TOKENS` | _(空)_ | 代码块大小阈值覆盖。 |
-| `CODE_SLICE_MAX_TOKENS` | _(空)_ | 代码 slice 目标 token 上限覆盖。 |
-| `CODE_SLICE_OVERLAP_LINES` | _(空)_ | 代码 slice 行 overlap 覆盖。 |
+| `CODE_SLICE_MAX_TOKENS` | _(空)_ | 🔶 预留：目前不产出 code slice（fenced code block 不拆分），该参数仅用于后续按函数/类边界切分时的目标 token 预算。 |
+| `CODE_SLICE_OVERLAP_LINES` | _(空)_ | 🔶 预留：目前不产出 code slice（fenced code block 不拆分），该参数仅用于后续切分时的行 overlap。 |
 | `LIST_SMALL_MAX_TOKENS` | _(空)_ | 列表大小阈值覆盖。 |
 | `LIST_SLICE_MAX_TOKENS` | _(空)_ | 列表 slice 目标 token 上限覆盖。 |
 | `LIST_SLICE_OVERLAP_ITEMS` | _(空)_ | 列表 slice item overlap 覆盖。 |

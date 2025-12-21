@@ -2,6 +2,7 @@ from typing import List, Optional, Dict, Any, TYPE_CHECKING
 import logging
 
 from .base import AbstractChunker
+from core.file_management.atomic_units.fenced_code import split_fenced_code_blocks
 
 if TYPE_CHECKING:
     from config.core.file_management.chunker.chunker_config import TokenChunkerConfig
@@ -104,13 +105,20 @@ class TokenChunker(AbstractChunker):
         chunk_overlap = kwargs.get('chunk_overlap', chunk_overlap)
 
         try:
-            chunks = self._split_on_tokens(text, chunk_size, chunk_overlap)
+            chunk_units: List[tuple[str, str]] = []
+            for kind, segment in split_fenced_code_blocks(text):
+                if kind == "code":
+                    chunk_units.append((kind, segment))
+                    continue
+                for piece in self._split_on_tokens(segment, chunk_size, chunk_overlap):
+                    if piece:
+                        chunk_units.append((kind, piece))
 
             # Convert to standardized format
             result = []
             current_pos = 0
 
-            for i, chunk_content in enumerate(chunks):
+            for i, (segment_type, chunk_content) in enumerate(chunk_units):
                 start_idx = text.find(chunk_content, current_pos)
                 if start_idx == -1:
                     start_idx = current_pos
@@ -126,7 +134,9 @@ class TokenChunker(AbstractChunker):
                         'start_idx': start_idx,
                         'end_idx': end_idx,
                         'token_count': len(self._encode(chunk_content)),
-                        'strategy': 'token'
+                        'strategy': 'token',
+                        'segment_type': segment_type,
+                        'is_fenced_code_block': segment_type == "code",
                     }
                 }
 
@@ -168,7 +178,12 @@ class TokenChunker(AbstractChunker):
             'chunk_overlap': chunk_overlap,
             'encoding_name': encoding_name,
             'model_name': model_name,
-            'supported_features': ['token_awareness', 'overlap_control', 'model_compatibility'],
+            'supported_features': [
+                'token_awareness',
+                'overlap_control',
+                'model_compatibility',
+                'fenced_code_atomic',
+            ],
             'parameters': {
                 'chunk_size': chunk_size,
                 'chunk_overlap': chunk_overlap,

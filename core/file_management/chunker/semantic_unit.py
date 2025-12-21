@@ -4,6 +4,12 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from core.file_management.chunker.base import AbstractChunker
+from core.file_management.atomic_units.fenced_code import (
+    is_fence_line,
+    parse_fenced_code_block,
+    split_fenced_code_blocks_with_line_spans,
+)
+from core.file_management.atomic_units.markdown_table import is_markdown_table_start, parse_markdown_table
 
 if TYPE_CHECKING:
     from config.core.file_management.chunker.chunker_config import SemanticUnitChunkerConfig
@@ -28,7 +34,7 @@ class SemanticUnitChunker(AbstractChunker):
     - Large tables become an anchor (caption + header) plus multiple slices (header + row windows).
 
     Phase B (standard/advanced) adds:
-    - fenced code blocks (anchor + slices by line windows)
+    - fenced code blocks (atomic anchors; no slicing)
     - markdown lists (anchor + slices by item windows)
     - display math blocks (atomic anchors)
     - blockquotes (atomic anchors; advanced only)
@@ -36,10 +42,7 @@ class SemanticUnitChunker(AbstractChunker):
     Any non-recognized text falls back to a configured fallback chunker.
     """
 
-    _FENCE_RE = re.compile(r"^\s*(```|~~~)")
-    _FENCE_START_RE = re.compile(r"^\s*(```|~~~)\s*(\S+)?(?:\s+.*)?\s*$")
     _BLOCKQUOTE_RE = re.compile(r"^\s*>\s?.*")
-    _TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
     _LIST_ITEM_RE = re.compile(r"^(\s*)([-*+])\s+(.*)$")
     _ORDERED_ITEM_RE = re.compile(r"^(\s*)(\d+)[.)]\s+(.*)$")
     _TASK_ITEM_RE = re.compile(r"^(\s*)([-*+])\s+\[( |x|X)\]\s+(.*)$")
@@ -139,7 +142,7 @@ class SemanticUnitChunker(AbstractChunker):
                 table_counter += 1
                 semantic_unit_id = f"{source_file_id}:table:{table_counter}"
 
-                header, separator, rows = self._parse_markdown_table(segment.content)
+                header, separator, rows = parse_markdown_table(segment.content)
                 table_header = "\n".join([line for line in (header, separator) if line]).strip()
 
                 full_table = segment.content.strip()
@@ -237,41 +240,30 @@ class SemanticUnitChunker(AbstractChunker):
                 semantic_unit_id = f"{source_file_id}:code:{code_counter}"
                 fence, language, body_lines = self._split_fenced_code(segment.content)
                 full_code = segment.content.strip()
-                full_token_count = self._estimate_tokens(self._compose_with_caption(caption, full_code))
 
-                if full_token_count <= code_small_max_tokens:
-                    content = self._compose_with_caption(caption, full_code)
-                    output.append(
-                        self._make_chunk_dict(
-                            content=content,
-                            source_metadata=metadata,
-                            metadata={
-                                "strategy": "semantic_unit",
-                                "chunk_role": "anchor",
-                                "semantic_unit_type": "code",
-                                "semantic_unit_id": semantic_unit_id,
-                                "parent_unit_id": semantic_unit_id,
-                                "code_language": language,
-                                "index_text": content,
-                                "token_count": self._estimate_tokens(content),
-                                "anchor_is_summary": False,
-                                "is_atomic": True,
-                                "is_full_content": True,
-                            },
-                        )
-                    )
-                    continue
+                # Code blocks are low-priority in the current plan: keep each fenced block as a
+                # single, atomic chunk so evidence/prompt never sees a broken fence.
+                content = self._compose_with_caption(caption, full_code)
 
-                anchor_body = self._fence_wrap(
-                    fence=fence,
-                    language=language,
-                    body_lines=body_lines[: max(int(code_anchor_preview_lines), 0)],
-                )
-                index_text = self._compose_with_caption(caption, anchor_body)
-                anchor_content = index_text
+                # Keep indexing text reasonably bounded for embedding/graph extraction safety.
+                # Note: we keep the stored content intact; only index_text may be summarized.
+                index_text = content
+                code_index_max_tokens = max(int(code_small_max_tokens), 2000)
+                full_token_count = self._estimate_tokens(content)
+                anchor_is_summary = False
+                if full_token_count > code_index_max_tokens:
+                    head_n = max(int(code_anchor_preview_lines), 0)
+                    head_lines = body_lines[:head_n]
+                    tail_lines = body_lines[-head_n:] if head_n and len(body_lines) > head_n else []
+                    bridge = ["…"] if tail_lines else []
+                    preview_lines = head_lines + bridge + tail_lines
+                    preview = self._fence_wrap(fence=fence, language=language, body_lines=preview_lines)
+                    index_text = self._compose_with_caption(caption, preview)
+                    anchor_is_summary = True
+
                 output.append(
                     self._make_chunk_dict(
-                        content=anchor_content,
+                        content=content,
                         source_metadata=metadata,
                         metadata={
                             "strategy": "semantic_unit",
@@ -281,47 +273,13 @@ class SemanticUnitChunker(AbstractChunker):
                             "parent_unit_id": semantic_unit_id,
                             "code_language": language,
                             "index_text": index_text,
-                            "token_count": self._estimate_tokens(anchor_content),
-                            "anchor_is_summary": True,
+                            "token_count": self._estimate_tokens(index_text),
+                            "anchor_is_summary": anchor_is_summary,
+                            "is_atomic": True,
                             "is_full_content": True,
                         },
                     )
                 )
-
-                slice_groups = self._slice_lines(
-                    body_lines,
-                    slice_max_tokens=code_slice_max_tokens,
-                    overlap_lines=code_slice_overlap_lines,
-                    prefix_caption=caption,
-                    fence=fence,
-                    language=language,
-                )
-                for slice_index, (line_start, line_end, slice_body) in enumerate(slice_groups, start=1):
-                    slice_index_text = self._compose_with_caption(
-                        caption,
-                        self._fence_wrap(fence=fence, language=language, body_lines=slice_body.splitlines()),
-                    )
-                    slice_content = slice_index_text
-                    output.append(
-                        self._make_chunk_dict(
-                            content=slice_content,
-                            source_metadata=metadata,
-                            metadata={
-                                "strategy": "semantic_unit",
-                                "chunk_role": "slice",
-                                "semantic_unit_type": "code",
-                                "semantic_unit_id": semantic_unit_id,
-                                "parent_unit_id": semantic_unit_id,
-                                "anchor_chunk_id": None,
-                                "slice_index": slice_index,
-                                "line_range": {"start": line_start, "end": line_end},
-                                "code_language": language,
-                                "index_text": slice_index_text,
-                                "token_count": self._estimate_tokens(slice_content),
-                                "is_full_content": True,
-                            },
-                        )
-                    )
                 continue
 
             if segment.kind == "list":
@@ -476,7 +434,7 @@ class SemanticUnitChunker(AbstractChunker):
             "strategy": "semantic_unit",
             "supported_features": [
                 "table_anchor_slice",
-                "code_anchor_slice",
+                "code_fence_atomic",
                 "list_anchor_slice",
                 "math_blocks",
                 "blockquotes",
@@ -572,8 +530,6 @@ class SemanticUnitChunker(AbstractChunker):
         lines = text.splitlines()
         segments: List[_Segment] = []
         buffer: List[str] = []
-        in_fence = False
-        i = 0
 
         def flush_text() -> None:
             if not buffer:
@@ -583,97 +539,75 @@ class SemanticUnitChunker(AbstractChunker):
                 segments.append(_Segment(kind="text", content=content))
             buffer.clear()
 
-        while i < len(lines):
-            line = lines[i]
-
-            if enable_code:
-                match = self._FENCE_START_RE.match(line)
-                if match:
+        for kind, span_start, span_end in split_fenced_code_blocks_with_line_spans(text):
+            if kind == "code":
+                if enable_code:
                     flush_text()
-                    fence = match.group(1)
+                    code_content = "\n".join(lines[span_start:span_end]).strip("\n")
+                    caption = self._infer_block_caption(lines, span_start)
+                    segments.append(_Segment(kind="code", content=code_content, caption=caption))
+                else:
+                    buffer.extend(lines[span_start:span_end])
+                continue
+
+            i = span_start
+            while i < span_end:
+                line = lines[i]
+
+                if enable_math and self._is_math_block_start(line):
+                    flush_text()
                     start = i
                     i += 1
-                    while i < len(lines):
-                        if re.match(rf"^\s*{re.escape(fence)}\s*$", lines[i]):
-                            i += 1
-                            break
+                    while i < span_end and not self._is_math_block_end(lines[i]):
                         i += 1
-                    code_content = "\n".join(lines[start:i]).strip("\n")
+                    if i < span_end:
+                        i += 1
+                    math_content = "\n".join(lines[start:i]).strip("\n")
                     caption = self._infer_block_caption(lines, start)
-                    segments.append(_Segment(kind="code", content=code_content, caption=caption))
+                    segments.append(_Segment(kind="math", content=math_content, caption=caption))
                     continue
 
-            if not enable_code and self._FENCE_RE.match(line):
-                in_fence = not in_fence
+                if enable_tables and i + 1 < span_end and is_markdown_table_start(lines, i):
+                    flush_text()
+                    start = i
+                    i += 2
+                    while i < span_end and lines[i].strip() and ("|" in lines[i]):
+                        i += 1
+                    table_content = "\n".join(lines[start:i]).strip("\n")
+                    caption = self._infer_block_caption(lines, start)
+                    segments.append(_Segment(kind="table", content=table_content, caption=caption))
+                    continue
+
+                if enable_lists and self._is_list_start(line):
+                    flush_text()
+                    start = i
+                    i += 1
+                    while i < span_end and lines[i].strip():
+                        if self._is_list_line(lines[i]):
+                            i += 1
+                            continue
+                        break
+                    list_content = "\n".join(lines[start:i]).strip("\n")
+                    caption = self._infer_block_caption(lines, start)
+                    segments.append(_Segment(kind="list", content=list_content, caption=caption))
+                    continue
+
+                if enable_blockquotes and self._BLOCKQUOTE_RE.match(line or ""):
+                    flush_text()
+                    start = i
+                    i += 1
+                    while i < span_end and self._BLOCKQUOTE_RE.match(lines[i] or ""):
+                        i += 1
+                    quote_content = "\n".join(lines[start:i]).strip("\n")
+                    caption = self._infer_block_caption(lines, start)
+                    segments.append(_Segment(kind="blockquote", content=quote_content, caption=caption))
+                    continue
+
                 buffer.append(line)
                 i += 1
-                continue
-
-            if not in_fence and enable_math and self._is_math_block_start(line):
-                flush_text()
-                start = i
-                i += 1
-                while i < len(lines) and not self._is_math_block_end(lines[i]):
-                    i += 1
-                if i < len(lines):
-                    i += 1
-                math_content = "\n".join(lines[start:i]).strip("\n")
-                caption = self._infer_block_caption(lines, start)
-                segments.append(_Segment(kind="math", content=math_content, caption=caption))
-                continue
-
-            if not in_fence and enable_tables and self._is_table_start(lines, i):
-                flush_text()
-
-                start = i
-                i += 2
-                while i < len(lines) and lines[i].strip() and ("|" in lines[i]):
-                    i += 1
-                table_lines = lines[start:i]
-                table_content = "\n".join(table_lines).strip("\n")
-                caption = self._infer_block_caption(lines, start)
-                segments.append(_Segment(kind="table", content=table_content, caption=caption))
-                continue
-
-            if not in_fence and enable_lists and self._is_list_start(line):
-                flush_text()
-                start = i
-                i += 1
-                while i < len(lines) and lines[i].strip():
-                    if self._is_list_line(lines[i]):
-                        i += 1
-                        continue
-                    break
-                list_content = "\n".join(lines[start:i]).strip("\n")
-                caption = self._infer_block_caption(lines, start)
-                segments.append(_Segment(kind="list", content=list_content, caption=caption))
-                continue
-
-            if not in_fence and enable_blockquotes and self._BLOCKQUOTE_RE.match(line or ""):
-                flush_text()
-                start = i
-                i += 1
-                while i < len(lines) and self._BLOCKQUOTE_RE.match(lines[i] or ""):
-                    i += 1
-                quote_content = "\n".join(lines[start:i]).strip("\n")
-                caption = self._infer_block_caption(lines, start)
-                segments.append(_Segment(kind="blockquote", content=quote_content, caption=caption))
-                continue
-
-            buffer.append(line)
-            i += 1
 
         flush_text()
         return segments
-
-    def _is_table_start(self, lines: List[str], i: int) -> bool:
-        if i + 1 >= len(lines):
-            return False
-        header = lines[i]
-        separator = lines[i + 1]
-        if "|" not in header:
-            return False
-        return bool(self._TABLE_SEPARATOR_RE.match(separator))
 
     @staticmethod
     def _infer_block_caption(lines: List[str], block_start_index: int) -> str:
@@ -685,7 +619,7 @@ class SemanticUnitChunker(AbstractChunker):
                 continue
             if "|" in candidate:
                 return ""
-            if SemanticUnitChunker._FENCE_RE.match(candidate):
+            if is_fence_line(candidate):
                 return ""
             if SemanticUnitChunker._BLOCKQUOTE_RE.match(candidate):
                 return ""
@@ -725,30 +659,8 @@ class SemanticUnitChunker(AbstractChunker):
             return True
         return bool(re.match(r"^\s+\S+", line))
 
-    @staticmethod
-    def _parse_markdown_table(table: str) -> tuple[str, str, List[str]]:
-        lines = [line.rstrip() for line in (table or "").splitlines() if line.strip()]
-        if len(lines) < 2:
-            return "", "", []
-        header = lines[0]
-        separator = lines[1]
-        rows = lines[2:] if len(lines) > 2 else []
-        return header, separator, rows
-
     def _split_fenced_code(self, content: str) -> tuple[str, str, List[str]]:
-        lines = (content or "").splitlines()
-        if not lines:
-            return "```", "", []
-        match = self._FENCE_START_RE.match(lines[0])
-        fence = match.group(1) if match else "```"
-        language = (match.group(2) or "").strip() if match else ""
-
-        body_lines: List[str] = []
-        for line in lines[1:]:
-            if re.match(rf"^\s*{re.escape(fence)}\s*$", line):
-                break
-            body_lines.append(line)
-        return fence, language, body_lines
+        return parse_fenced_code_block(content)
 
     @staticmethod
     def _fence_wrap(*, fence: str, language: str, body_lines: List[str]) -> str:

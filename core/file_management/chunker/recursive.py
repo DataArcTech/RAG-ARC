@@ -3,6 +3,7 @@ import re
 import logging
 
 from .base import AbstractChunker
+from core.file_management.atomic_units.fenced_code import split_fenced_code_blocks
 
 if TYPE_CHECKING:
     from config.core.file_management.chunker.chunker_config import RecursiveChunkerConfig
@@ -124,13 +125,22 @@ class RecursiveChunker(AbstractChunker):
             )
 
         try:
-            chunks = self._split_recursive(text, separators, chunk_size, chunk_overlap, keep_separator, is_separator_regex)
+            chunk_units: List[tuple[str, str]] = []
+            for kind, segment in split_fenced_code_blocks(text):
+                if kind == "code":
+                    chunk_units.append((kind, segment))
+                    continue
+                for piece in self._split_recursive(
+                    segment, separators, chunk_size, chunk_overlap, keep_separator, is_separator_regex
+                ):
+                    if piece:
+                        chunk_units.append((kind, piece))
 
             # Convert to standardized format
             result = []
             current_pos = 0
 
-            for i, chunk_content in enumerate(chunks):
+            for i, (segment_type, chunk_content) in enumerate(chunk_units):
                 start_idx = text.find(chunk_content, current_pos)
                 if start_idx == -1:
                     start_idx = current_pos
@@ -146,7 +156,9 @@ class RecursiveChunker(AbstractChunker):
                         'start_idx': start_idx,
                         'end_idx': end_idx,
                         'character_count': len(chunk_content),
-                        'strategy': 'recursive'
+                        'strategy': 'recursive',
+                        'segment_type': segment_type,
+                        'is_fenced_code_block': segment_type == "code",
                     }
                 }
 
@@ -191,7 +203,12 @@ class RecursiveChunker(AbstractChunker):
             'separators': separators,
             'keep_separator': keep_separator,
             'is_separator_regex': is_separator_regex,
-            'supported_features': ['hierarchical_splitting', 'natural_boundaries', 'overlap_control'],
+            'supported_features': [
+                'hierarchical_splitting',
+                'natural_boundaries',
+                'overlap_control',
+                'fenced_code_atomic',
+            ],
             'parameters': {
                 'chunk_size': chunk_size,
                 'chunk_overlap': chunk_overlap,

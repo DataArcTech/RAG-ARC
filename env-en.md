@@ -95,8 +95,8 @@ These knobs apply when the knowledge config selects `semantic_unit_chunker` (for
 | `TABLE_SLICE_MAX_TOKENS` | _(empty)_ | Override target token budget for table slices. |
 | `TABLE_SLICE_OVERLAP_ROWS` | _(empty)_ | Override overlap rows for table slices. |
 | `CODE_SMALL_MAX_TOKENS` | _(empty)_ | Override code small/large threshold. |
-| `CODE_SLICE_MAX_TOKENS` | _(empty)_ | Override target token budget for code slices. |
-| `CODE_SLICE_OVERLAP_LINES` | _(empty)_ | Override overlap lines for code slices. |
+| `CODE_SLICE_MAX_TOKENS` | _(empty)_ | 🔶 Reserved: does not emit code slices (fenced code blocks are kept intact); used only for future function/class-level splitting token budgets. |
+| `CODE_SLICE_OVERLAP_LINES` | _(empty)_ | 🔶 Reserved: does not emit code slices (fenced code blocks are kept intact); used only for future splitting overlap lines. |
 | `LIST_SMALL_MAX_TOKENS` | _(empty)_ | Override list small/large threshold. |
 | `LIST_SLICE_MAX_TOKENS` | _(empty)_ | Override target token budget for list slices. |
 | `LIST_SLICE_OVERLAP_ITEMS` | _(empty)_ | Override overlap items for list slices. |

@@ -12,9 +12,12 @@ from encapsulation.data_model.schema import Chunk
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
+def _fixture_doc() -> Path:
+    return _repo_root() / "test" / "core" / "file_management" / "fixtures" / "semantic_unit_eval_complex.md"
+
 
 def test_semantic_unit_chunker_recognizes_task_list_in_real_doc():
-    doc_path = _repo_root() / "docs-proj" / "semantic_unit_eval_complex.md"
+    doc_path = _fixture_doc()
     text = doc_path.read_text(encoding="utf-8", errors="replace")
 
     chunker = SemanticUnitChunkerConfig(
@@ -41,7 +44,7 @@ def test_semantic_unit_chunker_recognizes_task_list_in_real_doc():
 
 
 def test_semantic_unit_e2e_real_doc_bm25_anchor_backfill(tmp_path: Path):
-    doc_path = _repo_root() / "docs-proj" / "semantic_unit_eval_complex.md"
+    doc_path = _fixture_doc()
     text = doc_path.read_text(encoding="utf-8", errors="replace")
     owner_id = str(uuid.uuid4())
 
@@ -50,7 +53,6 @@ def test_semantic_unit_e2e_real_doc_bm25_anchor_backfill(tmp_path: Path):
         fallback_chunker_config=TokenChunkerConfig(chunk_size=800, chunk_overlap=80),
     )
     chunker_config.table_small_max_tokens = 1
-    chunker_config.code_small_max_tokens = 1
     chunker_config.list_small_max_tokens = 1
     chunker_config.list_anchor_preview_items = 1
     chunker = chunker_config.build()
@@ -132,8 +134,6 @@ def test_semantic_unit_e2e_real_doc_bm25_anchor_backfill(tmp_path: Path):
     )
     assert code_top is not None, "expected at least one code result"
     assert (code_top.metadata or {}).get("chunk_role") == "anchor"
-    matched_code = (code_top.metadata or {}).get("matched_slices") or []
-    assert any("get_user_name" in (entry.get("content") or "") for entry in matched_code)
     assert "def get_user_name" in (code_top.content or "")
 
     # List hit should preserve matched slice content even when returning the anchor.

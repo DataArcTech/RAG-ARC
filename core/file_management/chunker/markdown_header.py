@@ -2,6 +2,7 @@ from typing import List, Optional, Dict, Any, TYPE_CHECKING
 import logging
 
 from .base import AbstractChunker
+from core.file_management.atomic_units.fenced_code import split_fenced_code_blocks
 
 if TYPE_CHECKING:
     from config.core.file_management.chunker.chunker_config import MarkdownHeaderChunkerConfig
@@ -184,7 +185,45 @@ class MarkdownHeaderChunker(AbstractChunker):
         """
         if chunk_size <= 0:
             return [content]
-        return [content[i:i+chunk_size] for i in range(0, len(content), chunk_size)]
+
+        chunks: List[str] = []
+        current = ""
+
+        for kind, segment in split_fenced_code_blocks(content):
+            if not segment:
+                continue
+
+            if kind == "code":
+                if current and (len(current) + len(segment) > chunk_size):
+                    chunks.append(current)
+                    current = ""
+
+                if len(segment) > chunk_size:
+                    chunks.append(segment)
+                    continue
+
+                current += segment
+                continue
+
+            remaining = segment
+            while remaining:
+                space = chunk_size - len(current)
+                if space <= 0:
+                    chunks.append(current)
+                    current = ""
+                    space = chunk_size
+
+                current += remaining[:space]
+                remaining = remaining[space:]
+
+                if len(current) >= chunk_size:
+                    chunks.append(current)
+                    current = ""
+
+        if current:
+            chunks.append(current)
+
+        return chunks
 
     def _split_markdown_text(
         self,
@@ -208,68 +247,54 @@ class MarkdownHeaderChunker(AbstractChunker):
         Returns:
             List of dictionaries containing chunk content and header metadata
         """
-        lines = text.split("\n")
         results = []
 
         current_content = []
         current_header = {"level": 0, "name": ""}
         header_stack = []
-        in_code_block = False
-        opening_fence = ""
-
-        for line in lines:
-            stripped_line = line.strip()
-            stripped_line = "".join(filter(str.isprintable, stripped_line))
-
-            # Code block detection
-            if not in_code_block:
-                if stripped_line.startswith("```") and stripped_line.count("```") == 1:
-                    in_code_block = True
-                    opening_fence = "```"
-                elif stripped_line.startswith("~~~"):
-                    in_code_block = True
-                    opening_fence = "~~~"
-            else:
-                if stripped_line.startswith(opening_fence):
-                    in_code_block = False
-                    opening_fence = ""
-
-            if in_code_block:
-                current_content.append(line)
+        for kind, segment in split_fenced_code_blocks(text, keepends=False):
+            if kind == "code":
+                current_content.extend(segment.split("\n"))
                 continue
 
-            matched_header = None
-            for sep in headers_to_split_on:
-                if stripped_line.startswith(sep) and (
-                    len(stripped_line) == len(sep) or stripped_line[len(sep)] == " "
-                ):
-                    matched_header = sep
-                    break
+            for line in segment.split("\n"):
+                stripped_line = line.strip()
+                stripped_line = "".join(filter(str.isprintable, stripped_line))
 
-            if matched_header:
-                # Save current content
-                if current_content:
-                    section_text = "\n".join(current_content).strip()
-                    for chunk in self._chunk_content(section_text, chunk_size):
-                        results.append({
-                            "content": chunk,
-                            "Header": current_header.copy()
-                        })
-                    current_content = []
+                matched_header = None
+                for sep in headers_to_split_on:
+                    if stripped_line.startswith(sep) and (
+                        len(stripped_line) == len(sep) or stripped_line[len(sep)] == " "
+                    ):
+                        matched_header = sep
+                        break
 
-                # Update header stack
-                current_level = matched_header.count("#")
-                while header_stack and header_stack[-1]["level"] >= current_level:
-                    header_stack.pop()
+                if matched_header:
+                    # Save current content
+                    if current_content:
+                        section_text = "\n".join(current_content).strip()
+                        for chunk in self._chunk_content(section_text, chunk_size):
+                            results.append(
+                                {
+                                    "content": chunk,
+                                    "Header": current_header.copy(),
+                                }
+                            )
+                        current_content = []
 
-                header_name = stripped_line[len(matched_header):].strip()
-                current_header = {"level": current_level, "name": header_name}
-                header_stack.append(current_header)
+                    # Update header stack
+                    current_level = matched_header.count("#")
+                    while header_stack and header_stack[-1]["level"] >= current_level:
+                        header_stack.pop()
 
-                if not strip_headers:
-                    current_content.append(stripped_line + "\n")
-            else:
-                current_content.append(line)
+                    header_name = stripped_line[len(matched_header) :].strip()
+                    current_header = {"level": current_level, "name": header_name}
+                    header_stack.append(current_header)
+
+                    if not strip_headers:
+                        current_content.append(stripped_line + "\n")
+                else:
+                    current_content.append(line)
 
         # Handle remaining content
         if current_content:

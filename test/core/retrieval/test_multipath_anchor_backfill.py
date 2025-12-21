@@ -257,25 +257,19 @@ def test_multipath_does_not_truncate_table_slices_when_merging():
     assert "\n…" not in out.content
 
 
-def test_multipath_merges_code_slice_into_anchor_content():
+def test_multipath_returns_code_anchor_unchanged_when_no_slices_present():
     owner_id = "12345678-1234-5678-1234-567812345678"
     anchor_id = "ANCHOR_CODE"
 
     anchor = Chunk(
         id=anchor_id,
         owner_id=owner_id,
-        content="```python\n# preview only\n```",
-        metadata={"chunk_role": "anchor", "semantic_unit_type": "code", "anchor_is_summary": True},
-    )
-    slice_chunk = Chunk(
-        id="SLICE_CODE",
-        owner_id=owner_id,
         content="```python\ndef foo():\n    return 1\n```",
-        metadata={"chunk_role": "slice", "semantic_unit_type": "code", "anchor_chunk_id": anchor_id, "score": 0.9},
+        metadata={"chunk_role": "anchor", "semantic_unit_type": "code", "anchor_is_summary": False},
     )
 
     dummy_index = _DummyIndex([anchor])
-    dummy_retriever = _DummyRetriever(results=[slice_chunk], index=dummy_index)
+    dummy_retriever = _DummyRetriever(results=[anchor], index=dummy_index)
 
     config = _DummyConfig(
         retrievers=[object()],
@@ -287,7 +281,7 @@ def test_multipath_merges_code_slice_into_anchor_content():
     out = multipath._get_relevant_chunks("foo", k=1, owner_id=owner_id)[0]
     assert out.id == anchor_id
     assert out.metadata["chunk_role"] == "anchor"
-    assert "matched_slices" in (out.metadata or {})
+    assert "matched_slices" not in (out.metadata or {})
     assert "def foo" in out.content
 
 

@@ -117,12 +117,10 @@ def test_index_manager_persists_backfilled_anchor_chunk_id_to_storage():
     assert fake.writes["SLICE_ID"]["metadata"]["anchor_chunk_id"] == "ANCHOR_ID"
 
 
-def test_semantic_unit_chunker_standard_emits_code_anchor_and_slice():
+def test_semantic_unit_chunker_standard_emits_code_chunk_as_single_anchor():
     chunker = SemanticUnitChunkerConfig(
         level="standard",
-        code_small_max_tokens=1,  # force slicing path deterministically
-        code_slice_max_tokens=10_000,
-        code_slice_overlap_lines=0,
+        code_small_max_tokens=1,
         code_anchor_preview_lines=1,
         fallback_chunker_config=TokenChunkerConfig(chunk_size=200, chunk_overlap=0),
     ).build()
@@ -149,30 +147,18 @@ def test_semantic_unit_chunker_standard_emits_code_anchor_and_slice():
         if c.get("metadata", {}).get("chunk_role") == "anchor"
         and c.get("metadata", {}).get("semantic_unit_type") == "code"
     ]
-    code_slices = [
-        c
-        for c in chunks
-        if c.get("metadata", {}).get("chunk_role") == "slice"
-        and c.get("metadata", {}).get("semantic_unit_type") == "code"
-    ]
 
     assert code_anchors, "expected at least one code anchor"
-    assert code_slices, "expected at least one code slice"
-    assert code_slices[0]["metadata"]["anchor_chunk_id"] is None
     assert code_anchors[0]["metadata"]["code_language"] == "python"
     anchor_content = code_anchors[0].get("content") or ""
-    slice_content = code_slices[0].get("content") or ""
     assert "def add(a, b)" in anchor_content
-    assert "return a + b" not in anchor_content
-    assert "return a + b" in slice_content
+    assert "return a + b" in anchor_content
 
 
 def test_semantic_unit_chunker_parses_fenced_code_with_extra_info_string():
     chunker = SemanticUnitChunkerConfig(
         level="standard",
-        code_small_max_tokens=1,  # force slicing path deterministically
-        code_slice_max_tokens=10_000,
-        code_slice_overlap_lines=0,
+        code_small_max_tokens=1,
         fallback_chunker_config=TokenChunkerConfig(chunk_size=200, chunk_overlap=0),
     ).build()
 
@@ -197,15 +183,8 @@ def test_semantic_unit_chunker_parses_fenced_code_with_extra_info_string():
         if c.get("metadata", {}).get("chunk_role") == "anchor"
         and c.get("metadata", {}).get("semantic_unit_type") == "code"
     ]
-    code_slices = [
-        c
-        for c in chunks
-        if c.get("metadata", {}).get("chunk_role") == "slice"
-        and c.get("metadata", {}).get("semantic_unit_type") == "code"
-    ]
 
     assert code_anchors, "expected at least one code anchor"
-    assert code_slices, "expected at least one code slice"
     assert code_anchors[0]["metadata"]["code_language"] == "python"
 
 
