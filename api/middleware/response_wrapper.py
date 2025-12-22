@@ -40,9 +40,17 @@ class RequestIdResponseWrapper(BaseHTTPMiddleware):
                     }
                 else:
                     # 包装为标准格式
+                    # 对于错误响应，尝试从 data.detail 提取 message
+                    message = "success" if response.status_code < 400 else "error"
+                    if response.status_code >= 400 and isinstance(original_data, dict):
+                        # 优先使用 detail 字段作为 message
+                        detail = original_data.get("detail") or original_data.get("message")
+                        if detail:
+                            message = detail
+                    
                     wrapped_data = {
                         "code": response.status_code,
-                        "message": "success" if response.status_code < 400 else "error",
+                        "message": message,
                         "data": original_data,
                         "request_id": request_id
                     }

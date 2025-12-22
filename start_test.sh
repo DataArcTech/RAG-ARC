@@ -48,7 +48,7 @@ NEO4J_IMAGE=${NEO4J_IMAGE:-neo4j:latest}
 # 5. 应用配置（对齐.env的路径）
 APP_DIR=${APP_DIR:-/opt/dlami/nvme/rag-arc}        # 应用根目录
 APP_PORT=${APP_PORT:-8000}                         # 应用端口
-APP_LOG_FILE=${APP_LOG_FILE:-${APP_DIR}/app.log}   # 日志路径
+APP_LOG_FILE=${APP_LOG_FILE:-${APP_DIR}/log/app.log}   # 日志路径（统一到log目录）
 # 从.env读取文件存储路径
 PARSER_OUTPUT_DIR=${PARSER_OUTPUT_DIR:-/opt/dlami/nvme/rag-arc/data/parsed_files}
 LOCAL_FILE_STORAGE_PATH=${LOCAL_FILE_STORAGE_PATH:-/opt/dlami/nvme/rag-arc/local/files}
@@ -188,7 +188,7 @@ PARSER_OUTPUT_DIR=${PARSER_OUTPUT_DIR} \
 LOCAL_FILE_STORAGE_PATH=${LOCAL_FILE_STORAGE_PATH} \
 LOG_LEVEL=${LOG_LEVEL:-INFO} \
 JWT_SECRET_KEY=${JWT_SECRET_KEY:-} \
-nohup uv run uvicorn main:app --host 0.0.0.0 --port ${APP_PORT} > ${APP_LOG_FILE} 2>&1 &
+nohup uv run uvicorn main:app --host 0.0.0.0 --port ${APP_PORT} >> ${APP_LOG_FILE} 2>&1 &
 
 echo "  ✅ 应用已启动（后台运行，加载最新.env配置）"
 echo ""

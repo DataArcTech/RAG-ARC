@@ -216,3 +216,5 @@ models/
 benchmark/
 docs-proj/
 sql/
+log/
+*.log

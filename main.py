@@ -1,5 +1,7 @@
 import logging
 import uuid
+import os
+from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,27 +25,52 @@ from asgi_correlation_id import CorrelationIdMiddleware
 from asgi_correlation_id.middleware import is_valid_uuid4
 from asgi_correlation_id.log_filters import CorrelationIdFilter
 from api.middleware.response_wrapper import RequestIdResponseWrapper
+from api.utils.logging_handler import DailySizeRotatingHandler
 
 
 # Configure logging with correlation ID
 # 先创建filter（UUID 格式：xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx，共36字符）
 correlation_filter = CorrelationIdFilter(uuid_length=36, default_value='NO-ID')
 
-# 配置logging，然后为所有handler添加filter
+# 配置日志文件路径（按天轮转，同时限制单文件大小）
+log_dir = Path(__file__).parent / "log"
+log_dir.mkdir(exist_ok=True)  # 确保 log 目录存在
+log_file = log_dir / "app.log"
+
+# 创建自定义Handler（按天轮转 + 单文件最大100MB，保留30天）
+file_handler = DailySizeRotatingHandler(
+    filename=str(log_file),
+    when='midnight',  # 每天午夜轮转
+    interval=1,  # 每1天
+    backupCount=30,  # 保留30天的日志
+    maxBytes=100*1024*1024,  # 单文件最大100MB，超过则提前轮转
+    encoding='utf-8',
+    delay=False
+)
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(logging.Formatter(
+    '%(asctime)s - [request_id: %(correlation_id)s] - %(name)s - %(levelname)s - %(message)s'
+))
+file_handler.addFilter(correlation_filter)
+
+# 配置logging（移除默认handler，使用自定义handler）
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - [request_id: %(correlation_id)s] - %(name)s - %(levelname)s - %(message)s',
+    handlers=[file_handler],  # 使用文件handler
     force=True  # 强制重新配置
 )
 
 # 为所有现有和未来的handler添加correlation_id过滤器
 for handler in logging.root.handlers:
-    handler.addFilter(correlation_filter)
+    if not handler.filters:  # 避免重复添加
+        handler.addFilter(correlation_filter)
 
 # 确保新创建的handler也添加filter
 original_addHandler = logging.Logger.addHandler
 def addHandler_with_filter(self, handler):
-    handler.addFilter(correlation_filter)
+    if correlation_filter not in handler.filters:
+        handler.addFilter(correlation_filter)
     return original_addHandler(self, handler)
 logging.Logger.addHandler = addHandler_with_filter
 
