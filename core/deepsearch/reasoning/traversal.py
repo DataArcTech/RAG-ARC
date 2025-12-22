@@ -18,7 +18,7 @@ from encapsulation.data_model.deepsearch import (
     ReasoningStepRecord,
 )
 from core.graph_adapter.base import GraphDeepSearchAdapter
-from core.graph_adapter.concurrency import adapter_lock
+from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 
 logger = logging.getLogger(__name__)
@@ -40,13 +40,12 @@ class GraphTraversalExecutor:
     def __init__(self, adapter: GraphDeepSearchAdapter, settings: GraphTraversalSettings | None = None):
         self.adapter = adapter
         self.settings = settings or GraphTraversalSettings()
-        self._adapter_lock = adapter_lock(adapter)
 
     async def prepare(self, context: GraphQueryContext) -> None:
         """Ensure the adapter is warmed up for the provided context."""
 
         scope = context.resolve_scope()
-        async with self._adapter_lock:
+        async with adapter_locked(self.adapter):
             await self.adapter.prepare(context.question or "", access_scope=scope)
 
     async def run(
@@ -98,7 +97,7 @@ class GraphTraversalExecutor:
         try:
             merged_seed_entities = self._merge_seed_entities(context, tool_args)
             query = self._resolve_query(step.description, tool_args)
-            async with self._adapter_lock:
+            async with adapter_locked(self.adapter):
                 subgraph = await self.adapter.aquery_subgraph(
                     query,
                     channel=step.channel,

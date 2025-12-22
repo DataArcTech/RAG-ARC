@@ -14,6 +14,7 @@ from core.deepsearch.tools import (
     CrossAdapterPlannerTool,
     EvidenceCrosscheckTool,
     BeamSearchTool,
+    ChunkScanTool,
     GraphThinkTool,
     GraphTool,
     HybridNeighborhoodProbeTool,
@@ -104,6 +105,71 @@ class _StubPlanGenerator:
                 metadata={"seed_entities": ["OpenAI"]},
             )
         ]
+
+
+@pytest.mark.asyncio
+async def test_adapter_locked_allows_concurrent_calls_when_adapter_opted_in():
+    class _BarrierAdapter:
+        def __init__(self):
+            capability = GraphAdapterCapability(
+                name="concurrency",
+                metrics={"concurrency_safe": True},
+            )
+            self._metadata = GraphAdapterMetadata(
+                adapter_name="probe",
+                graph_type="probe",
+                version="test",
+                capabilities=(capability,),
+            )
+            self.first_started = asyncio.Event()
+            self.second_started = asyncio.Event()
+
+        async def prepare(self, question: str, *, access_scope=None) -> None:
+            return None
+
+        async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None):
+            if not self.first_started.is_set():
+                self.first_started.set()
+                await asyncio.wait_for(self.second_started.wait(), timeout=0.5)
+            else:
+                self.second_started.set()
+                await asyncio.sleep(0)
+            return {
+                "chunks": [{"content": f"{query} chunk A", "metadata": {"id": 1}}],
+                "metadata": {"adapter": "probe"},
+            }
+
+        async def context_filter(self, data, *, filter_type: str = "semantic", access_scope=None):
+            return data
+
+        async def summarize(self, channel: str, data, *, access_scope=None):
+            return "ok"
+
+        async def chain_traverse(self, strategy, *, access_scope=None):
+            return {"strategy": "noop", "hops": 0, "visited": []}
+
+        def metadata(self):
+            return self._metadata
+
+    adapter = _BarrierAdapter()
+    tool = ChunkScanTool(max_chunks=1)
+    request = ToolRunRequest(
+        question="probe?",
+        plan_step="plan_01",
+        context_evidences=[],
+        adapter=adapter,
+        access_scope=GraphAccessScope(scope_id="owner_1"),
+        extra={},
+    )
+
+    async def call_once() -> str:
+        result = await tool.run(request)
+        return result.summary
+
+    summaries = await asyncio.gather(call_once(), call_once())
+    assert summaries
+    assert adapter.first_started.is_set()
+    assert adapter.second_started.is_set()
 
 
 @pytest.mark.asyncio

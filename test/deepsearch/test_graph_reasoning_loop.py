@@ -114,6 +114,50 @@ async def test_graph_reasoning_combines_traversal_and_tools():
     assert "coverage_score" in coverage
 
 
+class _HighCoverageAdapter(_StubAdapter):
+    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None):
+        return {
+            "chunks": [
+                {"content": f"chunk::{query}::{idx}", "metadata": {"chunk_id": f"c{idx}"}}
+                for idx in range(10)
+            ],
+            "nodes": [{"id": "n1"}],
+            "edges": [{"id": "e1"}],
+            "metadata": {"adapter": "hipporag"},
+        }
+
+
+@pytest.mark.asyncio
+async def test_graph_reasoning_skips_periodic_think_when_coverage_is_sufficient():
+    adapter = _HighCoverageAdapter()
+    tool_manager = _StubToolManager()
+    loop = GraphReasoningLoop(
+        adapter=adapter,
+        llm_connector=None,
+        strategy_config={
+            "think_every_n_steps": 1,
+            "think_min_coverage": 0.75,
+        },
+        tool_manager=tool_manager,
+    )
+
+    plan_steps = [
+        {"step_id": f"plan_{idx:02d}", "description": f"Step {idx}", "channel": "graph", "tool": "graph_adapter.query"}
+        for idx in range(1, 5)
+    ]
+
+    context = GraphQueryContext(
+        adapter_name="hipporag",
+        question="High coverage should not trigger think",
+        access_scope=GraphAccessScope(scope_id="scope-think-gate"),
+    )
+    result = await loop.run("High coverage should not trigger think", plan_steps, graph_context=context)
+
+    think_steps = [step for step in result["reasoning_steps"] if step["step_id"].startswith("think_auto_")]
+    assert not think_steps
+    assert not any(call[0] == "graph.think" for call in tool_manager.calls)
+
+
 @pytest.mark.asyncio
 async def test_graph_reasoning_marks_missing_tool_manager_skips_step():
     adapter = _StubAdapter()

@@ -541,7 +541,7 @@ class GraphReasoningLoop:
         total_steps: int,
     ) -> Dict[str, Any]:
         unique_sources = len({label for label in source_labels or [] if label})
-        coverage_ratio = (completed_steps / total_steps) if total_steps else 0.0
+        plan_progress_ratio = (completed_steps / total_steps) if total_steps else 0.0
         expected_min_chunks = 3
         try:
             # Optional override used for heuristic think windows (gap detector remains authoritative).
@@ -552,14 +552,16 @@ class GraphReasoningLoop:
                 expected_min_chunks = max(1, int(raw))
         except Exception:
             expected_min_chunks = 3
-        coverage_score = min(1.0, evidence_count / max(1, expected_min_chunks))
+        evidence_ratio = evidence_count / max(1, expected_min_chunks)
+        coverage_score = min(1.0, evidence_ratio)
+        coverage_ratio = coverage_score
         return {
             "evidence_count": evidence_count,
             "unique_source_count": unique_sources,
             "completed_steps": completed_steps,
             "total_steps": total_steps,
             "coverage_ratio": round(coverage_ratio, 3),
-            "plan_progress_ratio": round(coverage_ratio, 3),
+            "plan_progress_ratio": round(plan_progress_ratio, 3),
             "expected_min_chunks": expected_min_chunks,
             "coverage_score": round(coverage_score, 3),
             "confidence_score": None,

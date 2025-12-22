@@ -339,7 +339,12 @@ class DeepSearchPlanner:
         value = os.getenv(env_var)
         if value is None:
             return None
-        return value.strip().lower() in {"1", "true", "yes", "on"}
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        return None
 
     def _config_value(self, key: str, default: Any = None) -> Any:
         if isinstance(self._config_dict, Mapping):

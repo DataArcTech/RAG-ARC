@@ -1,7 +1,9 @@
 """HippoRAG-backed GraphDeepSearchAdapter implementation."""
+import asyncio
 import json
 import logging
 from collections import deque
+from contextlib import nullcontext
 from itertools import combinations
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
@@ -24,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
     """Graph adapter that wraps the Pruned HippoRAG retriever implementations."""
+
+    supports_concurrent_calls = True
 
     def __init__(
         self,
@@ -64,9 +68,7 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             logger.warning("HippoRAG adapter requires an access scope; returning empty payload for query %s", query)
             return self._empty_payload(query)
 
-        chunks = await self._retrieve_chunks(query, scope_token)
-        payload = self._build_graph_payload(query, channel, chunks, scope_token)
-        return payload
+        return await asyncio.to_thread(self._aquery_subgraph_sync, query, channel, scope_token)
 
     async def context_filter(
         self,
@@ -211,12 +213,17 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             modes=("ppr_chain", "ppr_prefetch", "bridge_lookup"),
             metrics={"chain_depth": self.summary_max_chunks},
         )
+        concurrency_capability = GraphAdapterCapability(
+            name="concurrency",
+            modes=("thread",),
+            metrics={"concurrency_safe": True, "model": "threadpool+rwlock"},
+        )
         return GraphAdapterMetadata(
             adapter_name="hipporag",
             graph_type=self.extra_metadata.get("graph_type", "hipporag"),
             version=self.adapter_version,
             owner=self.extra_metadata.get("owner"),
-            capabilities=(retrieval_capability, chain_capability),
+            capabilities=(retrieval_capability, chain_capability, concurrency_capability),
             domain_tags=tuple(self.extra_metadata.get("domain_tags", [])),
             config_fingerprint=self.extra_metadata.get("config_fingerprint"),
         )
@@ -309,12 +316,12 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
                 queue.append((nxt, next_path))
         return []
 
-    async def _retrieve_chunks(self, query: str, owner_token: str) -> List[Chunk]:
-        """Execute synchronous HippoRAG retrieval.
+    def _aquery_subgraph_sync(self, query: str, channel: str, scope_token: str) -> Dict[str, Any]:
+        chunks = self._retrieve_chunks_sync(query, scope_token)
+        return self._build_graph_payload(query, channel, chunks, scope_token)
 
-        Note: Avoid background thread executors in the DeepSearch hot path to keep behavior
-        deterministic across constrained runtime environments.
-        """
+    def _retrieve_chunks_sync(self, query: str, owner_token: str) -> List[Chunk]:
+        """Execute synchronous HippoRAG retrieval (invoked in a worker thread)."""
 
         kwargs = {
             "k": self.default_top_k,
@@ -390,21 +397,24 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         node_scores = subgraph_info.get("node_ppr_scores") or {}
 
         try:
-            if graph_store.__class__.__name__ == "PrunedHippoRAGNeo4jStore":
-                return GraphExporterNeo4j.export_subgraph(
+            read_lock = getattr(graph_store, "read_lock", None)
+            lock_ctx = graph_store.read_lock() if callable(read_lock) else nullcontext()
+            with lock_ctx:
+                if graph_store.__class__.__name__ == "PrunedHippoRAGNeo4jStore":
+                    return GraphExporterNeo4j.export_subgraph(
+                        graph_store=graph_store,
+                        subgraph_node_ids=set(str(node) for node in node_ids),
+                        seed_entity_ids=set(str(entity) for entity in seed_entities),
+                        retrieved_chunk_ids=retrieved_chunk_ids,
+                        node_ppr_scores=node_scores,
+                    )
+                return GraphExporter.export_subgraph(
                     graph_store=graph_store,
-                    subgraph_node_ids=set(str(node) for node in node_ids),
+                    subgraph_node_indices=set(node_ids),
                     seed_entity_ids=set(str(entity) for entity in seed_entities),
                     retrieved_chunk_ids=retrieved_chunk_ids,
                     node_ppr_scores=node_scores,
                 )
-            return GraphExporter.export_subgraph(
-                graph_store=graph_store,
-                subgraph_node_indices=set(node_ids),
-                seed_entity_ids=set(str(entity) for entity in seed_entities),
-                retrieved_chunk_ids=retrieved_chunk_ids,
-                node_ppr_scores=node_scores,
-            )
         except Exception as exc:  # pragma: no cover - defensive path
             logger.warning("Failed to export HippoRAG subgraph: %s", exc)
             return {"nodes": [], "edges": [], "chunks": [], "metadata": {}}
