@@ -27,7 +27,7 @@ from pathlib import Path
 # Get secret key from environment variable, fallback to default for development
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "f33efd136032819f6017e92272c14afc941eca4fbb94ca266b1d8fa5d8d91107")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 24 * 60  # 24小时，方便调试
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/token")
 
