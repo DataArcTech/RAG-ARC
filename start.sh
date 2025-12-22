@@ -185,8 +185,8 @@ create_network() {
 # Start PostgreSQL container
 start_postgres() {
     print_message "$BLUE" "🗄️  Starting PostgreSQL..."
-    EXPOSE_POSTGRES=${EXPOSE_POSTGRES:-false}
-    POSTGRES_HOST_PORT=${POSTGRES_HOST_PORT:-${POSTGRES_PORT:-5555}}
+    EXPOSE_POSTGRES=${EXPOSE_POSTGRES:-true}
+    POSTGRES_HOST_PORT=${POSTGRES_HOST_PORT:-${POSTGRES_PORT:-5432}}
     POSTGRES_PORTS=""
     if [[ "$EXPOSE_POSTGRES" == "true" ]]; then
         POSTGRES_PORTS="-p ${POSTGRES_HOST_PORT}:5432"

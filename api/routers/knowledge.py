@@ -24,6 +24,7 @@ import uuid
 import hashlib
 from application.knowledge.module import Knowledge
 from application.account.user import Account
+from core.file_management.storage.file import FileValidationError
 
 router = APIRouter(prefix="/knowledge", tags=["files"])
 
@@ -91,6 +92,11 @@ async def upload_file(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid user.id format: {str(e)}",
+        )
+    except FileValidationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
         )
     except Exception as e:
         raise HTTPException(

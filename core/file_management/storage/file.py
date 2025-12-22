@@ -238,10 +238,10 @@ class FileStorage(AbstractModule):
             self._validate_file_upload(filename, file_data)
             logger.info(f"Validated file upload request: {filename}")
 
-            # Check for duplicate content
+            # Calculate content hash for duplicate detection
             content_hash = self._normalize_content_hash(file_data, filename)
             
-            # Query database for duplicates
+            # Check for duplicates
             if hasattr(self.metadata_store, 'SessionMaker'):
                 try:
                     with self.metadata_store.SessionMaker() as session:
@@ -251,19 +251,19 @@ class FileStorage(AbstractModule):
                             owner_id=owner_id
                         ).first()
                         
-                        if same_name_file and same_name_file.content_hash == content_hash:
-                            logger.info(f"Duplicate file detected (same filename and content): {same_name_file.file_id}")
-                            return same_name_file.file_id
+                        if same_name_file:
+                            raise FileValidationError(f"File with name '{filename}' already exists")
                         
-                        # Check by content hash (different filename but same content)
+                        # Check by content hash (same content, different filename)
                         same_content_file = session.query(FileMetadata).filter_by(
                             content_hash=content_hash,
                             owner_id=owner_id
                         ).first()
                         
-                        if same_content_file and same_content_file.filename != filename:
-                            logger.info(f"Duplicate content detected (different filename): {same_content_file.file_id}")
-                            return same_content_file.file_id
+                        if same_content_file:
+                            raise FileValidationError(f"File with same content already exists: '{same_content_file.filename}'")
+                except FileValidationError:
+                    raise
                 except Exception as e:
                     logger.warning(f"Failed to check duplicates, proceeding with upload: {e}")
 
