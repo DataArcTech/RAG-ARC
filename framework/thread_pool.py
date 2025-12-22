@@ -3,8 +3,10 @@
 
 提供统一的线程池来执行阻塞操作，避免阻塞事件循环。
 确保不同功能（用户登录、上传文件、问答、图谱关系）可以并发执行，不会互相阻塞。
+支持透传 correlation_id 等 contextvars 到线程池中。
 """
 import asyncio
+import contextvars
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -51,7 +53,7 @@ class GlobalThreadPool:
     
     async def run_blocking(self, func, *args, **kwargs):
         """
-        在线程池中运行阻塞函数
+        在线程池中运行阻塞函数，自动透传 contextvars（如 correlation_id）
         
         Args:
             func: 要执行的阻塞函数
@@ -61,9 +63,15 @@ class GlobalThreadPool:
         Returns:
             函数的返回值
         """
+        # 捕获当前 context（包含 correlation_id 等）
+        ctx = contextvars.copy_context()
+        
+        # 在线程中运行函数时使用捕获的 context
+        def run_with_context():
+            return ctx.run(partial(func, *args, **kwargs))
+        
         loop = asyncio.get_running_loop()
-        bound = partial(func, *args, **kwargs)
-        return await loop.run_in_executor(self.executor, bound)
+        return await loop.run_in_executor(self.executor, run_with_context)
     
     def shutdown(self, wait: bool = True):
         """

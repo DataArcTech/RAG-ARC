@@ -1,4 +1,5 @@
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,10 +19,34 @@ from api.routers import rag_inference
 from api.routers import session as session_router
 from api.routers import auth as auth_router
 from api.routers import user as user_router
+from asgi_correlation_id import CorrelationIdMiddleware
+from asgi_correlation_id.middleware import is_valid_uuid4
+from asgi_correlation_id.log_filters import CorrelationIdFilter
+from api.middleware.response_wrapper import RequestIdResponseWrapper
 
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging with correlation ID
+# 先创建filter
+correlation_filter = CorrelationIdFilter(uuid_length=32, default_value='NO-ID')
+
+# 配置logging，然后为所有handler添加filter
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - [request_id: %(correlation_id)s] - %(name)s - %(levelname)s - %(message)s',
+    force=True  # 强制重新配置
+)
+
+# 为所有现有和未来的handler添加correlation_id过滤器
+for handler in logging.root.handlers:
+    handler.addFilter(correlation_filter)
+
+# 确保新创建的handler也添加filter
+original_addHandler = logging.Logger.addHandler
+def addHandler_with_filter(self, handler):
+    handler.addFilter(correlation_filter)
+    return original_addHandler(self, handler)
+logging.Logger.addHandler = addHandler_with_filter
+
 logger = logging.getLogger(__name__)
 
 
@@ -73,6 +98,18 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="RAG-ARC HTTP Server", lifespan=lifespan)
 
+# Add Correlation ID middleware (must be first to capture all requests)
+app.add_middleware(
+    CorrelationIdMiddleware,
+    header_name='X-Request-ID',
+    update_request_header=False,
+    generator=lambda: str(uuid.uuid4()),
+    validator=is_valid_uuid4,
+)
+
+# Add Response Wrapper middleware (after CorrelationIdMiddleware to access correlation_id)
+app.add_middleware(RequestIdResponseWrapper)
+
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
@@ -80,6 +117,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
+    expose_headers=["X-Request-ID"],  # 暴露 request_id 给前端
 )
 
 

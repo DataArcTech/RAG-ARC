@@ -15,6 +15,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "dill",
     "python-dotenv",
+    "asgi-correlation-id>=3.0.0",
 
     # Vector database
     "faiss-gpu-cu12; platform_system == 'Linux' and platform_machine == 'x86_64'",
