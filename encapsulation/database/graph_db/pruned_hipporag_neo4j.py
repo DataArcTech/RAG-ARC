@@ -731,14 +731,18 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         # Batch normalize embeddings
         embeddings_array = np.array(embeddings_list).astype(np.float32)
         if self.entity_faiss_db.config.normalize_L2 or self.entity_faiss_db.config.metric == "cosine":
-            faiss.normalize_L2(embeddings_array)
+            from core.utils.faiss_lock import FAISS_LOCK
+            with FAISS_LOCK:
+                faiss.normalize_L2(embeddings_array)
 
         logger.info(f"Prepared {len(valid_entities)} valid entities for synonymy edge computation")
 
         # Batch FAISS search
         logger.info("Performing batch FAISS search...")
         k = min(self.synonymy_edge_topk, self.entity_faiss_db.index.ntotal)
-        distances_batch, indices_batch = self.entity_faiss_db.index.search(embeddings_array, k)
+        from core.utils.faiss_lock import FAISS_LOCK
+        with FAISS_LOCK:
+            distances_batch, indices_batch = self.entity_faiss_db.index.search(embeddings_array, k)
         logger.info("Batch FAISS search completed")
 
         # Process results

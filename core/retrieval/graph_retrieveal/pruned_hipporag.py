@@ -301,12 +301,16 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
             # Normalize query vector for cosine similarity
             if self.graph_store.fact_faiss_db.config.metric == 'cosine' or \
                self.graph_store.fact_faiss_db.config.normalize_L2:
+                from core.utils.faiss_lock import FAISS_LOCK
                 import faiss
-                faiss.normalize_L2(query_vector)
+                with FAISS_LOCK:
+                    faiss.normalize_L2(query_vector)
 
             # Retrieve top-k facts (with buffer for filtering)
             k = min(total_facts, self.config.fact_retrieval_top_k * 10)
-            scores, indices = self.graph_store.fact_faiss_db.index.search(query_vector, k)
+            from core.utils.faiss_lock import FAISS_LOCK
+            with FAISS_LOCK:
+                scores, indices = self.graph_store.fact_faiss_db.index.search(query_vector, k)
 
             scores = scores[0]
             indices = indices[0]

@@ -17,6 +17,7 @@ from encapsulation.database.vector_db.base import VectorDB
 from encapsulation.data_model.schema import Chunk
 from framework.shared_module_decorator import shared_module
 from core.utils.path_guard import ensure_writable_dir
+from core.utils.faiss_lock import FAISS_LOCK
 
 if TYPE_CHECKING:
     from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBConfig
@@ -102,6 +103,7 @@ class FaissVectorDB(VectorDB):
         self.docstore = {}  # Dictionary to store chunks by ID
         self.index_to_docstore_id = {}  # Mapping from index position to chunk ID
         self.deleted_ids = set()  # Set to track soft-deleted chunk IDs
+        self._lock = FAISS_LOCK
 
     
     def load_index(self, path: str):
@@ -139,7 +141,8 @@ class FaissVectorDB(VectorDB):
         if faiss_files:
             faiss_path = os.path.join(path, faiss_files[0])
             logger.info(f"Loading FAISS index from: {faiss_path}")
-            self.index = faiss.read_index(faiss_path)
+            with self._lock:
+                self.index = faiss.read_index(faiss_path)
             logger.info(f"FAISS index loaded: {self.index.ntotal} vectors, dimension {self.index.d}")
 
         # Find .pkl file
@@ -226,7 +229,8 @@ class FaissVectorDB(VectorDB):
         metric = getattr(self, 'saved_metric', getattr(self.config, 'metric', 'cosine'))
         
         if normalize_L2 or metric == "cosine":
-            faiss.normalize_L2(vectors)
+            with self._lock:
+                faiss.normalize_L2(vectors)
         return vectors
     
     def _add_chunks(
@@ -261,35 +265,38 @@ class FaissVectorDB(VectorDB):
         embeddings_np = np.array(embeddings).astype(np.float32)
         embeddings_np = self._normalize_vectors(embeddings_np)
 
-        # Create index if it doesn't exist
-        if self.index is None:
-            dimension = embeddings_np.shape[1]
-            self.index = self._create_index(dimension)
-            logger.info(f"Created new FAISS index with dimension {dimension}")
+        with self._lock:
+            # Create index if it doesn't exist
+            if self.index is None:
+                dimension = embeddings_np.shape[1]
+                self.index = self._create_index(dimension)
+                logger.info(f"Created new FAISS index with dimension {dimension}")
 
-        # Train IVF index if not trained and we have enough data
-        if (hasattr(self.index, 'is_trained') and
-            not self.index.is_trained and
-            len(embeddings) >= 100):
-            self.index.train(embeddings_np)
+            # Train IVF index if not trained and we have enough data
+            if (
+                hasattr(self.index, "is_trained")
+                and not self.index.is_trained
+                and len(embeddings) >= 100
+            ):
+                self.index.train(embeddings_np)
 
-        # Get current index size
-        start_index = self.index.ntotal
+            # Get current index size
+            start_index = self.index.ntotal
 
-        # Add vectors to index
-        self.index.add(embeddings_np)
-        logger.info(f"Added {len(embeddings_np)} vectors to index (total: {self.index.ntotal})")
+            # Add vectors to index
+            self.index.add(embeddings_np)
+            logger.info(f"Added {len(embeddings_np)} vectors to index (total: {self.index.ntotal})")
 
-        # Store chunks directly
-        doc_ids = []
-        for i, chunk in enumerate(chunks):
-            # Generate ID if not provided
-            chunk_id = chunk.id if chunk.id is not None else str(uuid.uuid4())
-            chunk.id = chunk_id  # Ensure chunk has an ID
-            doc_ids.append(chunk_id)
+            # Store chunks directly
+            doc_ids = []
+            for i, chunk in enumerate(chunks):
+                # Generate ID if not provided
+                chunk_id = chunk.id if chunk.id is not None else str(uuid.uuid4())
+                chunk.id = chunk_id  # Ensure chunk has an ID
+                doc_ids.append(chunk_id)
 
-            self.docstore[chunk_id] = chunk
-            self.index_to_docstore_id[start_index + i] = chunk_id
+                self.docstore[chunk_id] = chunk
+                self.index_to_docstore_id[start_index + i] = chunk_id
 
         logger.info(f"Stored {len(doc_ids)} chunks in docstore")
         return doc_ids
@@ -322,11 +329,12 @@ class FaissVectorDB(VectorDB):
             logger.warning(f"IDs not found: {missing_ids}")
             return False
 
-        # Mark chunks as deleted (soft-delete)
-        for doc_id in ids:
-            if doc_id not in self.deleted_ids:
-                self.deleted_ids.add(doc_id)
-                logger.debug(f"Soft-deleted chunk: {doc_id}")
+        with self._lock:
+            # Mark chunks as deleted (soft-delete)
+            for doc_id in ids:
+                if doc_id not in self.deleted_ids:
+                    self.deleted_ids.add(doc_id)
+                    logger.debug(f"Soft-deleted chunk: {doc_id}")
 
         logger.info(f"Soft-deleted {len(ids)} chunks (total deleted: {len(self.deleted_ids)})")
         return True
@@ -511,28 +519,29 @@ class FaissVectorDB(VectorDB):
         path = ensure_writable_dir(path, fallback_dir)
         os.makedirs(path, exist_ok=True)
 
-        # Save FAISS index
-        if self.index is not None:
-            faiss_path = os.path.join(path, f"{name}.faiss")
-            faiss.write_index(self.index, faiss_path)
-            logger.info(f"FAISS index saved: {faiss_path} ({self.index.ntotal} vectors)")
-        else:
-            logger.warning("No FAISS index to save")
+        with self._lock:
+            # Save FAISS index
+            if self.index is not None:
+                faiss_path = os.path.join(path, f"{name}.faiss")
+                faiss.write_index(self.index, faiss_path)
+                logger.info(f"FAISS index saved: {faiss_path} ({self.index.ntotal} vectors)")
+            else:
+                logger.warning("No FAISS index to save")
 
-        # Save other data
-        data = {
-            "docstore": self.docstore,
-            "index_to_docstore_id": self.index_to_docstore_id,
-            "deleted_ids": list(self.deleted_ids),  # Convert set to list for serialization
-            "index_type": getattr(self, 'saved_index_type', getattr(self.config, 'index_type', 'flat')),
-            "metric": getattr(self, 'saved_metric', getattr(self.config, 'metric', 'cosine')),
-            "normalize_L2": getattr(self, 'saved_normalize_L2', getattr(self.config, 'normalize_L2', False)),
-        }
+            # Save other data
+            data = {
+                "docstore": self.docstore,
+                "index_to_docstore_id": self.index_to_docstore_id,
+                "deleted_ids": list(self.deleted_ids),  # Convert set to list for serialization
+                "index_type": getattr(self, 'saved_index_type', getattr(self.config, 'index_type', 'flat')),
+                "metric": getattr(self, 'saved_metric', getattr(self.config, 'metric', 'cosine')),
+                "normalize_L2": getattr(self, 'saved_normalize_L2', getattr(self.config, 'normalize_L2', False)),
+            }
 
-        pkl_path = os.path.join(path, f"{name}.pkl")
-        with open(pkl_path, "wb") as f:
-            pickle.dump(data, f)
-        logger.info(f"Metadata saved: {pkl_path} ({len(self.docstore)} chunks)")
+            pkl_path = os.path.join(path, f"{name}.pkl")
+            with open(pkl_path, "wb") as f:
+                pickle.dump(data, f)
+            logger.info(f"Metadata saved: {pkl_path} ({len(self.docstore)} chunks)")
     
     
     def get_vector_db_info(self) -> Dict[str, Any]:

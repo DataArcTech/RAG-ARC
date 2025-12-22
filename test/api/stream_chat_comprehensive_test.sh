@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-API_BASE="http://localhost:8000"
+API_BASE="${API_BASE:-http://localhost:8000}"
 SESSION_ENDPOINT="$API_BASE/session"
 AUTH_ENDPOINT="$API_BASE/auth"
 KNOWLEDGE_ENDPOINT="$API_BASE/knowledge"
@@ -99,64 +99,33 @@ echo "✅ Upload PASS"
 echo -e "\n⏳ Waiting for indexing to complete (10 seconds)..."
 sleep 10
 
-cat > /tmp/test_sse_stream_chat.py << 'EOF'
-#!/usr/bin/env python3
-import json
-import sys
-import httpx
-
-def read_stream_text(url: str, token: str | None):
-    headers = {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    parts: list[str] = []
-    with httpx.stream("GET", url, headers=headers, timeout=120.0) as r:
-        if r.status_code != 200:
-            body_bytes = r.read()
-            body_text = body_bytes.decode("utf-8", errors="replace")
-            return {"http_status": r.status_code, "body": body_text}
-        for line in r.iter_lines():
-            if not line:
-                continue
-            if not line.startswith("data:"):
-                continue
-            data = line.split(":", 1)[1].strip()
-            if data == "[DONE]":
-                break
-            chunk = json.loads(data)
-            choices = chunk.get("choices") or []
-            if not choices:
-                continue
-            delta = (choices[0] or {}).get("delta") or {}
-            parts.append(delta.get("content") or "")
-    return {"http_status": 200, "text": "".join(parts)}
-
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python3 test_sse_stream_chat.py <url> [token]")
-        sys.exit(1)
-    url = sys.argv[1]
-    token = sys.argv[2] if len(sys.argv) >= 3 else None
-    result = read_stream_text(url, token)
-    print(json.dumps(result, ensure_ascii=False))
-EOF
-
-chmod +x /tmp/test_sse_stream_chat.py
-
 # 5) Test SSE stream chat (single message)
 echo -e "\n5) Test SSE stream chat:"
 ENC_QUERY=$(python3 -c 'import urllib.parse; print(urllib.parse.quote("Hello, this is a test message for stream chat"))')
 SSE_URL="$STREAM_CHAT_ENDPOINT/$SESSION_ID?query=$ENC_QUERY"
-SSE_RESULT=$(python3 /tmp/test_sse_stream_chat.py "$SSE_URL" "$ACCESS_TOKEN")
+SSE_RESULT=$(uv run python test/api/stream_chat_sse_comprehensive_test.py "$SSE_URL" "$ACCESS_TOKEN")
 echo "$SSE_RESULT" | grep -q '"http_status": 200' && echo "✅ SSE stream chat test PASS" || { echo "❌ SSE stream chat test FAILED"; echo "$SSE_RESULT"; exit 1; }
+
+# 5.1) Test SSE evidence/subgraph payload tool-call
+echo -e "\n5.1) Test SSE stream chat with evidence + subgraph payload:"
+SSE_URL_EVID="$STREAM_CHAT_ENDPOINT/$SESSION_ID?query=$ENC_QUERY&include_evidence=true&return_subgraph=true"
+SSE_RESULT_EVID=$(uv run python test/api/stream_chat_sse_comprehensive_test.py "$SSE_URL_EVID" "$ACCESS_TOKEN")
+echo "$SSE_RESULT_EVID" | grep -q '"http_status": 200' || { echo "❌ SSE (evidence) request FAILED"; echo "$SSE_RESULT_EVID"; exit 1; }
+echo "$SSE_RESULT_EVID" | python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+assert data.get('payload_calls', 0) >= 1, 'Expected at least one rag_arc_payload tool-call'
+assert data.get('payload_has_evidence') is True, 'Expected evidence field in rag_arc_payload arguments'
+if data.get('payload_has_subgraph') is True:
+    print('✅ SSE rag_arc_payload includes evidence + subgraph')
+else:
+    print('⚠️  SSE rag_arc_payload missing subgraph (graph generation may be unavailable); evidence is present')
+"
 
 # 6) Unauthorized SSE request should be rejected
 echo -e "\n6) Test unauthorized SSE request:"
 UNAUTH_URL="$STREAM_CHAT_ENDPOINT/$SESSION_ID?query=test"
-UNAUTH_OUT=$(python3 /tmp/test_sse_stream_chat.py "$UNAUTH_URL")
+UNAUTH_OUT=$(uv run python test/api/stream_chat_sse_comprehensive_test.py "$UNAUTH_URL")
 echo "$UNAUTH_OUT" | grep -q '"http_status": 401' && echo "✅ Unauthorized SSE request PASS" || { echo "❌ Unauthorized SSE request FAILED"; echo "$UNAUTH_OUT"; exit 1; }
-
-rm -f /tmp/test_sse_stream_chat.py
 
 echo -e "\n🎉 All Stream Chat SSE API comprehensive tests passed!"

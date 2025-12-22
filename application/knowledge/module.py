@@ -488,6 +488,11 @@ class Knowledge(AbstractModule):
                     invalid_files.append(f"You are not authorized to operate on this file: {file_id}")
                     continue
 
+                active_task = self._active_index_tasks.get(file_id)
+                if active_task is not None and not active_task.done():
+                    skipped_files.append(file_id)
+                    continue
+
                 # Only allow indexing for STORED or FAILED files
                 # Skip files that are already indexed or in intermediate processing states
                 if metadata.status == FileStatus.STORED or metadata.status == FileStatus.FAILED:
@@ -513,8 +518,10 @@ class Knowledge(AbstractModule):
             f"Triggering indexing for files: {'; '.join(valid_files)}"
         )
 
-        # Start background indexing task for files not indexed yet only
-        await self._index_multiple_files_background(valid_files, user_id)
+        # Start background indexing tasks (fire-and-forget) for files not indexed yet only.
+        for file_id in valid_files:
+            task = asyncio.create_task(self._index_file_background(file_id))
+            self._track_background_task(file_id, task)
 
         # Return immediately with basic info
         message_parts = [

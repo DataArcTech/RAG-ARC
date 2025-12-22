@@ -390,6 +390,7 @@ class RetrievalHelper:
         import numpy as np
         import faiss
         import copy
+        from core.utils.faiss_lock import FAISS_LOCK
 
         try:
             from encapsulation.data_model.schema import Chunk
@@ -409,9 +410,11 @@ class RetrievalHelper:
 
         # Check if normalization is needed
         if hasattr(index.config, 'normalize_L2') and index.config.normalize_L2:
-            faiss.normalize_L2(query_vector)
+            with FAISS_LOCK:
+                faiss.normalize_L2(query_vector)
         elif hasattr(index.config, 'metric') and index.config.metric == "cosine":
-            faiss.normalize_L2(query_vector)
+            with FAISS_LOCK:
+                faiss.normalize_L2(query_vector)
 
         # Calculate fetch_k to account for soft-deleted documents
         # Fetch more results than needed to compensate for deleted documents
@@ -419,7 +422,8 @@ class RetrievalHelper:
         fetch_k = min(k + deleted_count, index.index.ntotal)
 
         # Execute search
-        distances, indices = index.index.search(query_vector, fetch_k)
+        with FAISS_LOCK:
+            distances, indices = index.index.search(query_vector, fetch_k)
 
         results = []
         skipped_count = 0

@@ -482,31 +482,6 @@ class CheckAccessResponse(BaseModel):
 
 
 @router.post(
-    "/{file_id}/permissions/grant",
-    response_model=GrantPermissionResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-async def grant_file_permission(
-    file_id: str,
-    request: GrantPermissionRequest,
-    user: Annotated[User | None, Depends(get_current_user)],
-):
-    """
-    Grant file permission to a user, department, or all users.
-    
-    Only users with EDIT permission can grant permissions.
-    
-    Args:
-        file_id: File ID to grant permission for
-        request: GrantPermissionRequest with permission details
-        user: Current authenticated user (must have EDIT permission)
-    
-    Returns:
-        GrantPermissionResponse with permission ID and message
-    """
-
-
-@router.post(
     "/mindmap/export",
     response_model=MindmapExportResponse,
     status_code=status.HTTP_200_OK,
