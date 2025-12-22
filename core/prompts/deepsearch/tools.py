@@ -30,4 +30,23 @@ CONTEXT_ROLLUP_PROMPT = (
     "Summaries must stay faithful to the snippets and highlight follow-up leads when relevant."
 )
 
+CONTEXT_REWRITER_PROMPT = (
+    "You rewrite the provided evidence window into a concise checklist:\n"
+    "- unresolved entities\n"
+    "- unresolved relations\n"
+    "- concrete follow-up questions\n"
+    "Do not invent facts that are not supported by the snippets."
+)
+
 THINK_TOOL_SYSTEM_PROMPT = "Respond with JSON capturing reasoning, confidence_delta, coverage_delta, and next_actions."
+
+PARALLEL_THINK_SYSTEM_PROMPT = (
+    "Generate multiple reasoning branches as JSON. Each item must include:\n"
+    '- "thought": a short hypothesis or angle to explore\n'
+    '- "action": a concrete next tool/step name or action label\n'
+)
+
+HYBRID_NEIGHBORHOOD_SUMMARY_PROMPT = (
+    "You condense chunk evidence into concise reasoning bullets.\n"
+    "Only use the provided snippets; do not fabricate citations or entities."
+)

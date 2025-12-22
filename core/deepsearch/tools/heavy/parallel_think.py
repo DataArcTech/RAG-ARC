@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from encapsulation.data_model.deepsearch import ThinkNote
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, safe_json_loads
+from core.prompts.deepsearch import PARALLEL_THINK_SYSTEM_PROMPT
 
 
 class ParallelThinkTool(GraphTool):
@@ -64,7 +65,7 @@ class ParallelThinkTool(GraphTool):
         messages = [
             {
                 "role": "system",
-                "content": "Generate multiple reasoning branches as JSON with thought and action fields.",
+                "content": PARALLEL_THINK_SYSTEM_PROMPT,
             },
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]

@@ -23,7 +23,7 @@ class _StubLLM:
 
 class _StubAdapter:
     def __init__(self):
-        capability = GraphAdapterCapability(name="stub_capability", modes=("bridge_lookup",))
+        capability = GraphAdapterCapability(name="chain_of_exploration", modes=("bridge_lookup",))
         self._metadata = GraphAdapterMetadata(
             adapter_name="stub_adapter",
             graph_type="stub_graph",

@@ -109,6 +109,9 @@ async def test_graph_reasoning_combines_traversal_and_tools():
     assert statuses["plan_01"] == "done"
     assert statuses["plan_02"] == "done"
     assert statuses["plan_03"] == "pending_external"
+    coverage = result.get("coverage_metrics") or {}
+    assert "coverage_ratio" in coverage
+    assert "coverage_score" in coverage
 
 
 @pytest.mark.asyncio
@@ -432,8 +435,14 @@ class _ScopeRecordingAdapter:
 
     async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None):
         await asyncio.sleep(0.01)
-        self.calls.append(("query", getattr(access_scope, "scope_id", None)))
-        return {"chunks": [], "nodes": [], "edges": [], "metadata": {}}
+        scope_id = getattr(access_scope, "scope_id", None)
+        self.calls.append(("query", scope_id))
+        return {
+            "chunks": [{"id": f"chunk:{scope_id}", "content": f"chunk:{scope_id}", "metadata": {}}],
+            "nodes": [],
+            "edges": [],
+            "metadata": {},
+        }
 
     async def context_filter(self, data, *, filter_type: str = "semantic", access_scope=None):
         self.calls.append(("filter", getattr(access_scope, "scope_id", None)))
@@ -479,8 +488,8 @@ async def test_graph_reasoning_concurrent_runs_do_not_mix_scopes_or_evidence():
         return [ev["content"] for ev in result.get("evidences") or []]
 
     evid_a, evid_b = await asyncio.gather(_run("scope-a"), _run("scope-b"))
-    assert evid_a == ["sum:scope-a"]
-    assert evid_b == ["sum:scope-b"]
+    assert evid_a == ["chunk:scope-a"]
+    assert evid_b == ["chunk:scope-b"]
 
     prepared_scopes = [scope for action, scope in adapter.calls if action == "prepare"]
     assert set(prepared_scopes) == {"scope-a", "scope-b"}

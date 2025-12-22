@@ -11,12 +11,10 @@ from core.deepsearch.tools import builtin_tool_descriptors, llm_required_tool_na
 
 from ._hints import (
     clear_tool_hints,
-    get_disabled_tool_names,
-    get_hint_revision,
-    get_registered_hints,
     register_tool_hints,
     set_disabled_tools,
 )
+from .registry import DEFAULT_TOOL_HINT_REGISTRY, ToolHintRegistry
 __all__ = [
     "describe_available_tools",
     "register_tool_hints",
@@ -26,11 +24,16 @@ __all__ = [
 ]
 
 
-def describe_available_tools(extra_hints: Iterable[Dict[str, str]] | None = None) -> List[Dict[str, str]]:
+def describe_available_tools(
+    extra_hints: Iterable[Dict[str, str]] | None = None,
+    *,
+    registry: ToolHintRegistry | None = None,
+) -> List[Dict[str, str]]:
     """Return tool descriptors exposed to planner prompts (override via env/config)."""
 
+    active_registry = registry or DEFAULT_TOOL_HINT_REGISTRY
     base_hints: List[Dict[str, str]] = [desc.as_hint() for desc in builtin_tool_descriptors()]
-    base_hints.extend(get_registered_hints())
+    base_hints.extend(active_registry.get_registered_hints())
     if extra_hints:
         base_hints.extend(list(extra_hints))
 
@@ -43,7 +46,7 @@ def describe_available_tools(extra_hints: Iterable[Dict[str, str]] | None = None
         llm_only = llm_required_tool_names()
         base_hints = [hint for hint in base_hints if hint.get("name") not in llm_only]
 
-    disabled = get_disabled_tool_names()
+    disabled = active_registry.get_disabled_tool_names()
     if disabled:
         base_hints = [hint for hint in base_hints if hint.get("name") not in disabled]
     return base_hints
@@ -80,7 +83,7 @@ def _parse_env_hints(raw: str | None) -> List[Dict[str, str]] | None:
 def get_tool_hint_revision() -> int:
     """Expose hint revision timestamp for planner cache invalidation."""
 
-    return get_hint_revision()
+    return DEFAULT_TOOL_HINT_REGISTRY.get_revision()
 
 
 def _llm_tools_enabled() -> bool:

@@ -5,6 +5,7 @@ from encapsulation.data_model.deepsearch import EvidenceChunk
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from core.graph_adapter.concurrency import adapter_locked
+from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 
 class PathCacheTool(GraphTool):
@@ -42,6 +43,14 @@ class PathCacheTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
+        if not self._supports_chain_mode(adapter, "ppr_prefetch"):
+            return ToolResult(
+                summary="Path cache skipped because the adapter does not advertise ppr_prefetch support.",
+                diagnostics={
+                    "requested_strategy": "ppr_prefetch",
+                    "adapter": getattr(adapter.metadata(), "adapter_name", None),
+                },
+            )
         async with adapter_locked(adapter):
             traversal = await adapter.chain_traverse(
                 {
@@ -53,7 +62,12 @@ class PathCacheTool(GraphTool):
                 access_scope=request.access_scope,
             )
         paths = self._normalize_paths(traversal.get("paths"))
-        evidences = self._paths_to_evidence(paths[: self.max_paths], adapter.metadata().adapter_name)
+        evidences = self._paths_to_evidence(
+            paths[: self.max_paths],
+            source=adapter.metadata().adapter_name,
+            tool_name=self.descriptor.name,
+            plan_step=request.plan_step,
+        )
         diagnostics = {
             "prefetch_strategy": traversal.get("strategy"),
             "prefetched_paths": len(paths),
@@ -79,16 +93,23 @@ class PathCacheTool(GraphTool):
             return [path for path in paths if isinstance(path, dict)]
         return []
 
-    def _paths_to_evidence(self, paths: Iterable[Dict[str, Any]], source: str) -> List[EvidenceChunk]:
+    def _paths_to_evidence(
+        self,
+        paths: Iterable[Dict[str, Any]],
+        *,
+        source: str,
+        tool_name: str,
+        plan_step: str | None,
+    ) -> List[EvidenceChunk]:
         evidences: List[EvidenceChunk] = []
         for idx, path in enumerate(paths):
             visited_nodes = path.get("nodes") or path.get("visited_nodes") or []
             content = " -> ".join(str(node) for node in visited_nodes) or str(path)
-            chunk_id = str(
-                path.get("path_id")
-                or path.get("id")
-                or path.get("metadata", {}).get("id")
-                or f"path-cache-{idx}"
+            raw_id = str(path.get("path_id") or path.get("id") or path.get("metadata", {}).get("id") or "").strip()
+            chunk_id = (
+                f"{raw_id}"
+                if raw_id
+                else derived_chunk_id(tool_name=tool_name, plan_step=plan_step, label=f"path_{idx}", content=content)
             )
             evidences.append(
                 EvidenceChunk(
@@ -100,3 +121,20 @@ class PathCacheTool(GraphTool):
                 )
             )
         return evidences
+
+    @staticmethod
+    def _supports_chain_mode(adapter, mode: str) -> bool:
+        try:
+            metadata = adapter.metadata()
+        except Exception:
+            return False
+        capabilities = getattr(metadata, "capabilities", None)
+        if not isinstance(capabilities, (list, tuple)):
+            return False
+        for cap in capabilities:
+            if getattr(cap, "name", None) != "chain_of_exploration":
+                continue
+            modes = getattr(cap, "modes", None)
+            if isinstance(modes, (list, tuple, set)) and mode in modes:
+                return True
+        return False

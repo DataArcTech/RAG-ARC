@@ -145,7 +145,7 @@ class DeepSearchState:
             return
 
     def snapshot(self) -> Dict[str, Any]:
-        return {
+        snapshot = {
             "run_id": self.run_id,
             "config_fingerprint": self.config_fingerprint,
             "stage": self.stage,
@@ -159,4 +159,83 @@ class DeepSearchState:
             "report": self.report_payload,
             "errors": self.errors,
             "request_metadata": self.request_metadata,
+        }
+        snapshot["kpis"] = self._aggregate_kpis()
+        snapshot["error_summary"] = self._aggregate_error_summary()
+        return snapshot
+
+    # ------------------------------------------------------------------
+    def _aggregate_kpis(self) -> Dict[str, Any]:
+        trace = self.reasoning_trace or {}
+        evidences = trace.get("evidences") or []
+        if not isinstance(evidences, list):
+            evidences = []
+        sources = []
+        for item in evidences:
+            if isinstance(item, dict) and item.get("source"):
+                sources.append(str(item.get("source")))
+        tool_invocations = 0
+        tool_failures = 0
+        tool_timeouts = 0
+        reasoning_steps = trace.get("reasoning_steps") or []
+        if isinstance(reasoning_steps, list):
+            for step in reasoning_steps:
+                if not isinstance(step, dict):
+                    continue
+                logs = step.get("tool_logs") or []
+                if isinstance(logs, list):
+                    tool_invocations += len(logs)
+                if step.get("status") == "failed":
+                    tool_failures += 1
+                diagnostics = step.get("diagnostics") or {}
+                if isinstance(diagnostics, dict) and diagnostics.get("reason") == "tool_timeout":
+                    tool_timeouts += 1
+
+        remote_fallbacks = 0
+        tool_results = trace.get("tool_results") or []
+        if isinstance(tool_results, list):
+            for entry in tool_results:
+                if not isinstance(entry, dict):
+                    continue
+                result = entry.get("result") or {}
+                diagnostics = result.get("diagnostics") if isinstance(result, dict) else None
+                if isinstance(diagnostics, dict) and diagnostics.get("remote_fallback_reason"):
+                    remote_fallbacks += 1
+
+        coverage = trace.get("coverage_metrics") or {}
+        worker_errors = 0
+        if isinstance(coverage, dict) and isinstance(coverage.get("worker_error_count"), int):
+            worker_errors = int(coverage.get("worker_error_count") or 0)
+
+        return {
+            "evidence_count": len(evidences),
+            "unique_source_count": len({s for s in sources if s}),
+            "tool_invocation_count": tool_invocations,
+            "tool_failure_steps": tool_failures,
+            "tool_timeout_steps": tool_timeouts,
+            "remote_fallback_count": remote_fallbacks,
+            "external_call_count": len(self.external_calls or []),
+            "worker_error_count": worker_errors,
+        }
+
+    def _aggregate_error_summary(self) -> Dict[str, Any]:
+        reasons: Dict[str, int] = {}
+        for entry in self.errors or []:
+            if not isinstance(entry, dict):
+                continue
+            reason = entry.get("reason") or entry.get("message") or "unknown"
+            token = str(reason).strip() or "unknown"
+            reasons[token] = reasons.get(token, 0) + 1
+
+        trace = self.reasoning_trace or {}
+        coverage = trace.get("coverage_metrics") or {}
+        worker_errors = coverage.get("worker_errors") if isinstance(coverage, dict) else None
+        worker_error_count = 0
+        if isinstance(worker_errors, list):
+            worker_error_count = len([e for e in worker_errors if isinstance(e, dict) and e.get("error")])
+
+        return {
+            "error_count": len(self.errors or []),
+            "error_reasons": reasons,
+            "worker_error_count": worker_error_count,
         }

@@ -16,6 +16,7 @@ from core.deepsearch.reasoning import GraphReasoningLoop
 from core.deepsearch.reasoning import MultiAgentGraphReasoningLoop
 from core.deepsearch.gap import GapDetectionEngine
 from core.deepsearch.report import DeepSearchReporter
+from core.deepsearch.tooling.registry import ToolHintRegistry
 from encapsulation.deepsearch.tooling import DeepSearchToolManager
 from encapsulation.deepsearch.external import ExternalSearchChannel
 from application.deepsearch.tool_mcp_server import LoggingTelemetryClient
@@ -210,15 +211,18 @@ class DeepSearchServiceConfig(AbstractConfig):
         adapter = self.graph_adapter.build()
         mcp_client = self._build_mcp_client()
         telemetry_client = self._build_telemetry_client() if self._resolve_telemetry_flag() else None
+        tool_hint_registry = ToolHintRegistry()
         tool_manager = self._build_tool_manager(
             llm_connector=llm_connector,
             mcp_client=mcp_client,
             telemetry_client=telemetry_client,
+            tool_hint_registry=tool_hint_registry,
         )
         planner = DeepSearchPlanner(
             prompt_store=None,
             llm_connector=llm_connector,
             config=self.planner,
+            tool_hint_registry=tool_hint_registry,
         )
         
         graph_loop = MultiAgentGraphReasoningLoop(
@@ -272,7 +276,7 @@ class DeepSearchServiceConfig(AbstractConfig):
             return None
         return self.mcp_client.build()
 
-    def _build_tool_manager(self, *, llm_connector, mcp_client, telemetry_client):
+    def _build_tool_manager(self, *, llm_connector, mcp_client, telemetry_client, tool_hint_registry: ToolHintRegistry):
         payload = self.tool_manager.model_dump()
         payload["llm_connector"] = payload.get("llm_connector") or llm_connector
         if not payload.get("artifact_dir"):
@@ -281,6 +285,7 @@ class DeepSearchServiceConfig(AbstractConfig):
             tool_configs=payload,
             telemetry_client=telemetry_client,
             mcp_client=mcp_client,
+            tool_hint_registry=tool_hint_registry,
         )
 
     def _build_gap_detector(self, *, telemetry_client) -> GapDetectionEngine:

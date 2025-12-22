@@ -3,12 +3,12 @@
 This reporter converts DeepSearch execution traces into a readable, end-user report by
 prompting an LLM with the collected evidence, highlights, and execution metadata.
 """
-import hashlib
 import os
 import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 
 from config.output_limits import (
     DEEPSEARCH_GRAPH_EDGE_LIMIT,
@@ -559,10 +559,12 @@ class DeepSearchReporter:
         def _add(items: List[Dict[str, Any]], limit: int | None) -> None:
             nonlocal merged
             for chunk in items:
+                source = str(chunk.get("source") or "").strip()
                 chunk_id = chunk.get("chunk_id") or self._hash_content(chunk)
-                if chunk_id in seen:
+                key = f"{source}::{chunk_id}"
+                if key in seen:
                     continue
-                seen.add(chunk_id)
+                seen.add(key)
                 chunk.setdefault("chunk_id", chunk_id)
                 merged.append(chunk)
                 if limit is not None and len(merged) >= limit:
@@ -610,8 +612,7 @@ class DeepSearchReporter:
 
     @staticmethod
     def _hash_content(chunk: Dict[str, Any]) -> str:
-        digest = hashlib.sha256((chunk.get("source", "") + "::" + chunk.get("content", "")).encode("utf-8"))
-        return f"anon-{digest.hexdigest()[:12]}"
+        return hashed_chunk_id(source=str(chunk.get("source") or ""), content=str(chunk.get("content") or ""))
 
     def _extract_request_context(self, trace: Dict[str, Any]) -> Dict[str, Any]:
         graph_context = trace.get("graph_context") or {}

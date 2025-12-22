@@ -81,7 +81,17 @@ class GraphDeepSearchAdapter(Protocol):
         *,
         access_scope: Optional[GraphAccessScope] = None,
     ) -> Mapping[str, Any]:
-        """Run a chain-of-exploration strategy using adapter-specific primitives."""
+        """Run a chain-of-exploration strategy using adapter-specific primitives.
+
+        Implementations should return a mapping that is safe to JSON-serialize.
+        Minimum recommended keys for observability and tool contracts:
+        - strategy: str
+        - hops: int
+        - visited: list[str] (best-effort)
+        Optional keys depending on strategy:
+        - paths: list[dict] (e.g. for "ppr_prefetch")
+        - bridges: list[dict] (e.g. for "bridge_lookup")
+        """
 
     def metadata(self) -> GraphAdapterMetadata:
         """Return adapter metadata for telemetry and feature gating."""

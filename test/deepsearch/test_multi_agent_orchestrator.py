@@ -139,7 +139,13 @@ async def test_multi_agent_runs_workers_and_invokes_tools_concurrently():
     )
 
     plan_steps = [
-        {"step_id": f"plan_{idx:02d}", "description": f"Probe {idx}", "channel": "graph", "tool": "graph_adapter.query"}
+        {
+            "step_id": f"plan_{idx:02d}",
+            "description": f"Probe {idx}",
+            "channel": "graph",
+            "tool": "graph_adapter.query",
+            "metadata": {"scheduler": "parallel"},
+        }
         for idx in range(1, 4)
     ]
     context = GraphQueryContext(
@@ -180,8 +186,20 @@ async def test_multi_agent_serializes_shared_adapter_access():
     )
 
     plan_steps = [
-        {"step_id": "plan_01", "description": "Probe 1", "channel": "graph", "tool": "graph_adapter.query"},
-        {"step_id": "plan_02", "description": "Probe 2", "channel": "graph", "tool": "graph_adapter.query"},
+        {
+            "step_id": "plan_01",
+            "description": "Probe 1",
+            "channel": "graph",
+            "tool": "graph_adapter.query",
+            "metadata": {"scheduler": "parallel"},
+        },
+        {
+            "step_id": "plan_02",
+            "description": "Probe 2",
+            "channel": "graph",
+            "tool": "graph_adapter.query",
+            "metadata": {"scheduler": "parallel"},
+        },
     ]
     context = GraphQueryContext(
         adapter_name="hipporag",
@@ -217,8 +235,20 @@ async def test_multi_agent_surfaces_worker_failures_in_coverage_metrics():
     )
 
     plan_steps = [
-        {"step_id": "plan_slow", "description": "Slow step", "channel": "graph", "tool": "graph.context_rollup"},
-        {"step_id": "plan_fast", "description": "Fast step", "channel": "graph", "tool": "graph.context_rollup"},
+        {
+            "step_id": "plan_slow",
+            "description": "Slow step",
+            "channel": "graph",
+            "tool": "graph.context_rollup",
+            "metadata": {"scheduler": "parallel"},
+        },
+        {
+            "step_id": "plan_fast",
+            "description": "Fast step",
+            "channel": "graph",
+            "tool": "graph.context_rollup",
+            "metadata": {"scheduler": "parallel"},
+        },
     ]
     context = GraphQueryContext(
         adapter_name="hipporag",
@@ -232,3 +262,35 @@ async def test_multi_agent_surfaces_worker_failures_in_coverage_metrics():
     errors = coverage.get("worker_errors") or []
     assert isinstance(errors, list) and errors
     assert any(entry.get("error") == "worker_timeout" for entry in errors if isinstance(entry, dict))
+
+
+@pytest.mark.asyncio
+async def test_multi_agent_respects_serial_scheduler_and_runs_single_worker():
+    loop = MultiAgentGraphReasoningLoop(
+        adapter=_StubAdapter(),
+        llm_connector=None,
+        strategy_config={"parallel_branches": 1},
+        tool_manager=None,
+        settings={
+            "enabled": True,
+            "max_subagents": 4,
+            "subagent_concurrency": 4,
+            "enable_parallel_tool_probes": False,
+            "probe_tool_names": [],
+            "lead_tool_names": [],
+        },
+    )
+
+    plan_steps = [
+        {"step_id": "s1", "description": "First", "channel": "graph", "tool": "graph_adapter.query", "metadata": {"scheduler": "serial"}},
+        {"step_id": "s2", "description": "Second", "channel": "graph", "tool": "graph_adapter.query", "metadata": {"scheduler": "serial"}},
+    ]
+    context = GraphQueryContext(
+        adapter_name="hipporag",
+        question="Q",
+        access_scope=GraphAccessScope(scope_id="scope-multi-agent"),
+    )
+    result = await loop.run("Q", plan_steps, graph_context=context)
+    assert len(result.get("agent_sessions") or []) == 1
+    session = (result.get("agent_sessions") or [None])[0] or {}
+    assert session.get("assigned_step_ids") == ["s1", "s2"]

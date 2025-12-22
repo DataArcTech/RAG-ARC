@@ -3,6 +3,7 @@ from typing import Dict, List
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.prompts.deepsearch import CONTEXT_ROLLUP_PROMPT
+from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async
 
@@ -53,7 +54,12 @@ class ContextRollupTool(GraphTool):
             )
         summary_text = await self._summarize(request, evidences)
         rollup_chunk = EvidenceChunk(
-            chunk_id="context-rollup-0",
+            chunk_id=derived_chunk_id(
+                tool_name=self.descriptor.name,
+                plan_step=request.plan_step,
+                label="rollup",
+                content=summary_text,
+            ),
             source="context_rollup",
             content=summary_text,
             score=1.0,

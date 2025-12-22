@@ -6,6 +6,7 @@ from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, build_input_schema, safe_json_loads
 from core.prompts.deepsearch import EVIDENCE_CROSSCHECK_PROMPT
+from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 
 class EvidenceCrosscheckTool(GraphTool):
@@ -95,7 +96,12 @@ class EvidenceCrosscheckTool(GraphTool):
             "coverage_ratio": coverage_ratio,
         }
         diagnostics["token_breakdown"] = self._token_breakdown(chunk_payload, bool(self.llm_connector))
-        evidences = self._build_evidence_payload(confirmed, missing)
+        evidences = self._build_evidence_payload(
+            confirmed,
+            missing,
+            tool_name=self.descriptor.name,
+            plan_step=request.plan_step,
+        )
         summary = llm_report.get("summary") or self._default_summary(diagnostics)
         think_notes = self._maybe_build_think_note(request, coverage_ratio, len(missing))
 
@@ -237,13 +243,21 @@ class EvidenceCrosscheckTool(GraphTool):
         self,
         confirmed: List[Dict[str, Any]],
         missing: List[Dict[str, Any]],
+        *,
+        tool_name: str,
+        plan_step: str | None,
     ) -> List[EvidenceChunk]:
         evidences: List[EvidenceChunk] = []
         if confirmed:
             content = self._format_entries("Supported triples", confirmed)
             evidences.append(
                 EvidenceChunk(
-                    chunk_id="crosscheck-confirmed",
+                    chunk_id=derived_chunk_id(
+                        tool_name=tool_name,
+                        plan_step=plan_step,
+                        label="confirmed",
+                        content=content,
+                    ),
                     source="crosscheck",
                     content=content,
                     score=1.0,
@@ -254,7 +268,12 @@ class EvidenceCrosscheckTool(GraphTool):
             content = self._format_entries("Unsupported triples", missing)
             evidences.append(
                 EvidenceChunk(
-                    chunk_id="crosscheck-missing",
+                    chunk_id=derived_chunk_id(
+                        tool_name=tool_name,
+                        plan_step=plan_step,
+                        label="missing",
+                        content=content,
+                    ),
                     source="crosscheck",
                     content=content,
                     score=0.2,

@@ -21,8 +21,9 @@ from core.deepsearch.tools import (
     get_tool_descriptor,
 )
 
-from core.deepsearch.tooling._hints import register_tool_hints, set_disabled_tools
+from core.deepsearch.tooling.registry import DEFAULT_TOOL_HINT_REGISTRY, ToolHintRegistry
 from core.utils.json_safe import json_safe
+from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +37,10 @@ class LocalToolRegistry:
         tool_configs: Optional[Dict[str, Any]] = None,
         llm_connector=None,
         injected_tools: Optional[Dict[str, GraphTool]] = None,
+        tool_hint_registry: ToolHintRegistry | None = None,
     ):
         self.tool_configs = tool_configs or {}
+        self.tool_hint_registry = tool_hint_registry or DEFAULT_TOOL_HINT_REGISTRY
         self.audit_label = self.tool_configs.get("audit_label")
         self._enabled_tool_configs = self.tool_configs.get("enabled_tools") or {}
         builtin_map = {desc.name: desc for desc in builtin_tool_descriptors()}
@@ -140,7 +143,7 @@ class LocalToolRegistry:
                 **extra_kwargs,
             )
             self._descriptors[name] = descriptor
-            register_tool_hints([descriptor.as_hint()])
+            self.tool_hint_registry.register_tool_hints([descriptor.as_hint()])
 
     @staticmethod
     def _normalize_remote_descriptor(raw: Any) -> Optional[Dict[str, Any]]:
@@ -177,14 +180,14 @@ class LocalToolRegistry:
                 continue
             if cfg.get("enabled") is False and not (cfg.get("mcp_fallback") or cfg.get("mcp_only")):
                 disabled.add(name)
-        set_disabled_tools(disabled)
+        self.tool_hint_registry.set_disabled_tools(disabled)
 
     def _register_custom_descriptor(self, name: str, tool: GraphTool) -> None:
         descriptor = getattr(tool, "descriptor", None)
         if not descriptor:
             return
         self._descriptors[name] = descriptor
-        register_tool_hints([descriptor.as_hint()])
+        self.tool_hint_registry.register_tool_hints([descriptor.as_hint()])
 
 
 @dataclass
@@ -282,11 +285,12 @@ class MCPToolRouter:
             text = getattr(block, "text", None)
             if not text:
                 continue
+            normalized = str(text).strip()
             evidences.append(
                 EvidenceChunk(
-                    chunk_id=f"mcp-{descriptor.name}-{idx}",
+                    chunk_id=hashed_chunk_id(source=descriptor.namespace or descriptor.name, content=normalized, prefix="mcp"),
                     source=descriptor.namespace or descriptor.name,
-                    content=str(text).strip(),
+                    content=normalized,
                     provenance={"content_type": getattr(block, "type", "text")},
                 )
             )
@@ -314,7 +318,11 @@ class MCPToolRouter:
                 continue
             if not isinstance(item, dict):
                 continue
-            chunk_id = item.get("chunk_id") or f"mcp-{descriptor.name}-{idx}"
+            chunk_id = item.get("chunk_id") or hashed_chunk_id(
+                source=str(item.get("source") or descriptor.namespace or descriptor.name),
+                content=str(item.get("content") or ""),
+                prefix="mcp",
+            )
             source = item.get("source") or descriptor.namespace or descriptor.name
             content = item.get("content")
             if not content:
@@ -359,6 +367,7 @@ class DeepSearchToolManager:
         local_tools: Optional[Dict[str, GraphTool]] = None,
         local_registry: Optional[LocalToolRegistry] = None,
         mcp_router: Optional[MCPToolRouter] = None,
+        tool_hint_registry: ToolHintRegistry | None = None,
     ):
         self.tool_configs = tool_configs or {}
         self.telemetry_client = telemetry_client
@@ -366,6 +375,7 @@ class DeepSearchToolManager:
             tool_configs=self.tool_configs,
             llm_connector=self.tool_configs.get("llm_connector"),
             injected_tools=local_tools,
+            tool_hint_registry=tool_hint_registry,
         )
         self.mcp_router = mcp_router or MCPToolRouter(
             mcp_client=mcp_client,

@@ -1,6 +1,8 @@
 """HippoRAG-backed GraphDeepSearchAdapter implementation."""
 import json
 import logging
+from collections import deque
+from itertools import combinations
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -15,6 +17,7 @@ from core.graph_adapter.base import (
     GraphDeepSearchAdapter,
 )
 from core.graph_adapter.registry import register_adapter
+from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 
 logger = logging.getLogger(__name__)
 
@@ -128,23 +131,72 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         *,
         access_scope: Optional[GraphAccessScope] = None,
     ) -> Mapping[str, Any]:
-        """Expose lightweight traversal metadata for telemetry and downstream heuristics."""
+        """Run lightweight traversal routines for DeepSearch fast tools.
 
-        seeds = []
-        if isinstance(strategy, Mapping):
-            seed_entities = strategy.get("seed_entities") or []
-            if isinstance(seed_entities, list):
-                seeds = [str(item) for item in seed_entities if str(item).strip()]
-        hops = int(strategy.get("max_depth", 1)) if isinstance(strategy, Mapping) else 1
-        hops = max(1, min(hops, max(1, len(seeds))))
-        visited = seeds[:hops] if seeds else []
+        Contract:
+        - Always returns at least {strategy, hops, visited, scope}
+        - For strategy == "ppr_prefetch": may include "paths": [{path_id, nodes, score}]
+        - For strategy == "bridge_lookup": may include "bridges": [{head, relation, tail, score}]
+        """
+
+        if not isinstance(strategy, Mapping):
+            scope_token = self._scope_token(access_scope)
+            return {"strategy": "ppr_chain", "hops": 0, "visited": [], "scope": scope_token}
+
         scope_token = self._scope_token(access_scope)
-        return {
-            "strategy": strategy.get("strategy", "ppr_chain") if isinstance(strategy, Mapping) else "ppr_chain",
-            "hops": hops,
-            "visited": visited,
-            "scope": scope_token,
-        }
+        if scope_token is None:
+            return {"strategy": str(strategy.get("strategy") or "ppr_chain"), "hops": 0, "visited": [], "scope": None}
+
+        strategy_name = str(strategy.get("strategy") or "ppr_chain").strip() or "ppr_chain"
+        seeds: List[str] = []
+        seed_entities = strategy.get("seed_entities") or []
+        if isinstance(seed_entities, list):
+            seeds = [str(item).strip() for item in seed_entities if str(item).strip()]
+
+        max_depth = strategy.get("max_depth")
+        try:
+            max_depth_int = int(max_depth) if max_depth is not None else 1
+        except (TypeError, ValueError):
+            max_depth_int = 1
+        max_depth_int = max(1, max_depth_int)
+
+        visited = seeds[: max_depth_int] if seeds else []
+        base = {"strategy": strategy_name, "hops": max_depth_int, "visited": visited, "scope": scope_token}
+
+        if strategy_name not in {"ppr_prefetch", "bridge_lookup"}:
+            return base
+
+        question = str(strategy.get("question") or "").strip()
+        query = question or (" ; ".join(seeds) if seeds else "")
+        if not query:
+            return base
+
+        payload = await self.aquery_subgraph(query, channel="graph", access_scope=access_scope)
+        edges = payload.get("edges") if isinstance(payload, dict) else None
+        if not isinstance(edges, list) or not edges:
+            return base
+
+        entity_edges = self._entity_relation_edges(edges)
+        if not entity_edges:
+            return base
+
+        if strategy_name == "bridge_lookup":
+            bridges = self._extract_bridges(entity_edges, seeds=seeds)
+            merged = dict(base)
+            merged["bridges"] = bridges
+            merged["hops"] = min(max_depth_int, 3) if max_depth_int else 1
+            return merged
+
+        max_paths = strategy.get("max_paths")
+        try:
+            max_paths_int = int(max_paths) if max_paths is not None else 3
+        except (TypeError, ValueError):
+            max_paths_int = 3
+        max_paths_int = max(1, min(max_paths_int, 6))
+        paths = self._prefetch_paths(entity_edges, seeds=seeds, max_depth=max_depth_int, max_paths=max_paths_int)
+        merged = dict(base)
+        merged["paths"] = paths
+        return merged
 
     def metadata(self) -> GraphAdapterMetadata:
         """Publish capability metadata for observability dashboards."""
@@ -156,7 +208,7 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         )
         chain_capability = GraphAdapterCapability(
             name="chain_of_exploration",
-            modes=("ppr_chain",),
+            modes=("ppr_chain", "ppr_prefetch", "bridge_lookup"),
             metrics={"chain_depth": self.summary_max_chunks},
         )
         return GraphAdapterMetadata(
@@ -168,6 +220,94 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             domain_tags=tuple(self.extra_metadata.get("domain_tags", [])),
             config_fingerprint=self.extra_metadata.get("config_fingerprint"),
         )
+
+    @staticmethod
+    def _entity_relation_edges(edges: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+        relations: List[Dict[str, str]] = []
+        for edge in edges:
+            if not isinstance(edge, dict):
+                continue
+            relation = str(edge.get("relation") or "").strip()
+            if not relation or relation == "mentions":
+                continue
+            head = str(edge.get("source") or "").strip()
+            tail = str(edge.get("target") or "").strip()
+            if not head or not tail:
+                continue
+            relations.append({"head": head, "relation": relation, "tail": tail})
+        return relations
+
+    @staticmethod
+    def _extract_bridges(relations: List[Dict[str, str]], *, seeds: List[str]) -> List[Dict[str, Any]]:
+        if not seeds:
+            return []
+        seed_set = {seed for seed in seeds if seed}
+        seed_lower = {seed.lower() for seed in seed_set}
+        bridges: List[Dict[str, Any]] = []
+        for rel in relations:
+            head = rel["head"]
+            tail = rel["tail"]
+            if head in seed_set or tail in seed_set or head.lower() in seed_lower or tail.lower() in seed_lower:
+                bridges.append({"head": head, "relation": rel["relation"], "tail": tail, "score": 1.0})
+                if len(bridges) >= 12:
+                    break
+        return bridges
+
+    @staticmethod
+    def _prefetch_paths(
+        relations: List[Dict[str, str]],
+        *,
+        seeds: List[str],
+        max_depth: int,
+        max_paths: int,
+    ) -> List[Dict[str, Any]]:
+        if len(seeds) < 2:
+            return []
+
+        adjacency: Dict[str, List[str]] = {}
+        for rel in relations:
+            head = rel["head"]
+            tail = rel["tail"]
+            adjacency.setdefault(head, []).append(tail)
+            adjacency.setdefault(tail, []).append(head)
+
+        paths: List[Dict[str, Any]] = []
+        for source, target in combinations(seeds[:6], 2):
+            candidate = HippoRAGGraphAdapter._shortest_path(adjacency, source, target, max_depth=max_depth)
+            if not candidate:
+                continue
+            content = " -> ".join(candidate)
+            path_id = hashed_chunk_id(source=f"{source}->{target}", content=content, prefix="path")
+            score = 1.0 / max(1, (len(candidate) - 1))
+            paths.append({"path_id": path_id, "nodes": candidate, "score": score})
+            if len(paths) >= max_paths:
+                break
+        return paths
+
+    @staticmethod
+    def _shortest_path(adjacency: Dict[str, List[str]], source: str, target: str, *, max_depth: int) -> List[str]:
+        if source == target:
+            return [source]
+        if source not in adjacency or target not in adjacency:
+            return []
+
+        seen: set[str] = {source}
+        queue: deque[tuple[str, List[str]]] = deque([(source, [source])])
+        max_hops = max(1, int(max_depth))
+
+        while queue:
+            node, path = queue.popleft()
+            if len(path) - 1 >= max_hops:
+                continue
+            for nxt in adjacency.get(node, []):
+                if nxt in seen:
+                    continue
+                next_path = path + [nxt]
+                if nxt == target:
+                    return next_path
+                seen.add(nxt)
+                queue.append((nxt, next_path))
+        return []
 
     async def _retrieve_chunks(self, query: str, owner_token: str) -> List[Chunk]:
         """Execute synchronous HippoRAG retrieval.

@@ -19,6 +19,7 @@ from core.deepsearch.tools import (
     HybridNeighborhoodProbeTool,
     LLMChainExplorerTool,
     ParallelThinkTool,
+    PathCacheTool,
     PatternProbeTool,
     ToolDescriptor,
     ToolResult,
@@ -29,6 +30,7 @@ from core.deepsearch.plan.runtime import DeepSearchPlanner
 from core.deepsearch.reasoning.traversal import GraphTraversalExecutor, GraphTraversalSettings
 from encapsulation.deepsearch.tooling import DeepSearchToolManager, LocalToolRegistry
 from core.deepsearch.tooling import describe_available_tools, clear_tool_hints, register_tool_hints
+from core.deepsearch.tooling.registry import ToolHintRegistry
 
 
 class _StubAdapter:
@@ -455,6 +457,118 @@ async def test_evidence_crosscheck_consumes_triples_from_traversal_evidence():
     assert result.diagnostics["triple_count"] == 1
     assert result.diagnostics["confirmed"] == 1
     assert result.diagnostics["missing"] == 0
+
+
+@pytest.mark.asyncio
+async def test_traversal_executor_emits_raw_chunks_not_summary():
+    class _Adapter:
+        async def prepare(self, question: str, *, access_scope=None):
+            return None
+
+        async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None):
+            return {
+                "chunks": [{"id": "kb_chunk_1", "content": "RAW_CHUNK", "metadata": {}}],
+                "nodes": [],
+                "edges": [],
+                "metadata": {"adapter": "dummy"},
+            }
+
+        async def context_filter(self, data, *, filter_type: str = "semantic", access_scope=None):
+            return data
+
+        async def summarize(self, channel: str, data, *, access_scope=None) -> str:
+            return "SUMMARY_ONLY"
+
+        async def chain_traverse(self, strategy, *, access_scope=None):
+            return {"strategy": strategy.get("strategy", "ppr_chain"), "hops": 1, "visited": []}
+
+        def metadata(self):
+            return GraphAdapterMetadata(adapter_name="dummy", graph_type="dummy", version="0")
+
+    executor = GraphTraversalExecutor(_Adapter(), settings=GraphTraversalSettings(chain_depth=1))
+    ctx = GraphQueryContext(adapter_name="dummy", question="Q")
+    step = PlanSpec(step_id="plan_01", description="desc", channel="graph", metadata={})
+
+    _, reasoning, evidences = await executor.run_step(step, ctx)
+    assert reasoning.output_summary == "SUMMARY_ONLY"
+    assert evidences and evidences[0].content == "RAW_CHUNK"
+    assert evidences[0].chunk_id == "kb_chunk_1"
+
+
+@pytest.mark.asyncio
+async def test_context_rollup_chunk_ids_do_not_collide():
+    llm = _StubLLM("first rollup")
+    tool = ContextRollupTool(llm, window_size=1)
+    base_request = ToolRunRequest(
+        question="Q",
+        plan_step="plan_01",
+        context_evidences=[EvidenceChunk(chunk_id="c1", source="test", content="a")],
+        adapter=None,
+        access_scope=None,
+        extra={},
+    )
+    out1 = await tool.run(base_request)
+    assert out1.evidences
+    first_id = out1.evidences[0].chunk_id
+
+    tool.llm_connector = _StubLLM("second rollup")
+    out2 = await tool.run(base_request)
+    assert out2.evidences
+    assert out2.evidences[0].chunk_id != first_id
+
+
+@pytest.mark.asyncio
+async def test_path_cache_returns_evidence_when_adapter_supports_strategy():
+    class _Adapter:
+        def metadata(self):
+            return GraphAdapterMetadata(
+                adapter_name="dummy",
+                graph_type="dummy",
+                version="0",
+                capabilities=(GraphAdapterCapability(name="chain_of_exploration", modes=("ppr_prefetch",)),),
+            )
+
+        async def chain_traverse(self, strategy, *, access_scope=None):
+            return {
+                "strategy": strategy.get("strategy"),
+                "hops": 2,
+                "paths": [{"path_id": "p1", "nodes": ["A", "B", "C"], "score": 0.9}],
+            }
+
+    tool = PathCacheTool()
+    req = ToolRunRequest(
+        question="q",
+        plan_step="plan_01",
+        context_evidences=[],
+        adapter=_Adapter(),
+        access_scope=None,
+        extra={"seed_entities": ["A", "C"]},
+    )
+    out = await tool.run(req)
+    assert out.evidences and out.evidences[0].chunk_id == "p1"
+
+
+def test_tool_hint_registry_isolated_from_global_hints(monkeypatch):
+    monkeypatch.delenv("DEEPSEARCH_TOOL_HINTS", raising=False)
+    clear_tool_hints()
+    registry = ToolHintRegistry()
+
+    class _CustomTool(GraphTool):
+        descriptor = ToolDescriptor(
+            name="custom.isolated",
+            channel="graph",
+            description="isolated",
+            profile="F",
+            determinism="deterministic",
+            namespace="rag-arc.deepsearch.tools.fast.custom_isolated",
+        )
+
+        async def run(self, request: ToolRunRequest) -> ToolResult:
+            return ToolResult(summary="ok")
+
+    LocalToolRegistry(tool_configs={}, injected_tools={"custom.isolated": _CustomTool()}, tool_hint_registry=registry)
+    assert any(hint["name"] == "custom.isolated" for hint in describe_available_tools(registry=registry))
+    assert not any(hint["name"] == "custom.isolated" for hint in describe_available_tools())
 
 
 @pytest.mark.asyncio

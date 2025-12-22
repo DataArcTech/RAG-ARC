@@ -2,7 +2,8 @@
 from typing import Any, List
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
-from core.prompts.deepsearch import CONTEXT_ROLLUP_PROMPT
+from core.prompts.deepsearch import CONTEXT_REWRITER_PROMPT
+from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async
 
@@ -43,7 +44,12 @@ class ContextRewriterTool(GraphTool):
             return ToolResult(summary="Context rewriter skipped because no evidences are available.")
         rewritten = await self._rewrite(request, evidences)
         evidence_chunk = EvidenceChunk(
-            chunk_id="context-rewriter-0",
+            chunk_id=derived_chunk_id(
+                tool_name=self.descriptor.name,
+                plan_step=request.plan_step,
+                label="rewrite",
+                content=rewritten,
+            ),
             source="context_rewriter",
             content=rewritten,
             provenance={"window_size": len(evidences)},
@@ -58,7 +64,7 @@ class ContextRewriterTool(GraphTool):
     async def _rewrite(self, request: ToolRunRequest, evidences: List[EvidenceChunk]) -> str:
         snippets = "\n\n".join(ev.content[:400] for ev in evidences)
         messages = [
-            {"role": "system", "content": CONTEXT_ROLLUP_PROMPT},
+            {"role": "system", "content": CONTEXT_REWRITER_PROMPT},
             {
                 "role": "user",
                 "content": f"Question: {request.question}\n\nContext to rewrite:\n{snippets}\n"

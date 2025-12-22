@@ -6,6 +6,7 @@ from encapsulation.data_model.deepsearch import EvidenceChunk
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async
 from ..fast.pattern_probe import PatternProbeTool
 from core.graph_adapter.concurrency import adapter_locked
+from core.prompts.deepsearch import HYBRID_NEIGHBORHOOD_SUMMARY_PROMPT
 
 
 class HybridNeighborhoodProbeTool(GraphTool):
@@ -88,7 +89,7 @@ class HybridNeighborhoodProbeTool(GraphTool):
         messages = [
             {
                 "role": "system",
-                "content": "You condense chunks on graph into concise reasoning bullets.",
+                "content": HYBRID_NEIGHBORHOOD_SUMMARY_PROMPT,
             },
             {
                 "role": "user",

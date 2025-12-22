@@ -5,6 +5,7 @@ from encapsulation.data_model.deepsearch import EvidenceChunk
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from core.graph_adapter.concurrency import adapter_locked
+from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 
 class BridgeLookupTool(GraphTool):
@@ -42,6 +43,14 @@ class BridgeLookupTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
+        if not self._supports_chain_mode(adapter, "bridge_lookup"):
+            return ToolResult(
+                summary="Bridge lookup skipped because the adapter does not advertise bridge_lookup support.",
+                diagnostics={
+                    "requested_strategy": "bridge_lookup",
+                    "adapter": getattr(adapter.metadata(), "adapter_name", None),
+                },
+            )
         async with adapter_locked(adapter):
             traversal = await adapter.chain_traverse(
                 {
@@ -57,7 +66,12 @@ class BridgeLookupTool(GraphTool):
                 summary="Bridge lookup completed but no connective triples were reported.",
                 diagnostics={"strategy": traversal.get("strategy")},
             )
-        evidences = self._build_evidences(bridges[: self.max_results], adapter.metadata().adapter_name)
+        evidences = self._build_evidences(
+            bridges[: self.max_results],
+            source=adapter.metadata().adapter_name,
+            tool_name=self.descriptor.name,
+            plan_step=request.plan_step,
+        )
         summary = f"Bridge lookup highlighted {len(evidences)} connective triples."
         diagnostics = {
             "available_bridges": len(bridges),
@@ -83,18 +97,25 @@ class BridgeLookupTool(GraphTool):
             return [traversal]
         return []
 
-    def _build_evidences(self, bridges: Iterable[Dict[str, Any]], source: str) -> List[EvidenceChunk]:
+    def _build_evidences(
+        self,
+        bridges: Iterable[Dict[str, Any]],
+        *,
+        source: str,
+        tool_name: str,
+        plan_step: str | None,
+    ) -> List[EvidenceChunk]:
         evidences: List[EvidenceChunk] = []
         for idx, bridge in enumerate(bridges):
             head = bridge.get("head") or bridge.get("entity") or "unknown_head"
             relation = bridge.get("relation") or bridge.get("predicate") or "related_to"
             tail = bridge.get("tail") or bridge.get("target") or "unknown_tail"
             content = f"{head} -[{relation}]-> {tail}"
-            chunk_id = str(
-                bridge.get("id")
-                or bridge.get("bridge_id")
-                or bridge.get("metadata", {}).get("id")
-                or f"bridge-{idx}"
+            raw_id = str(bridge.get("id") or bridge.get("bridge_id") or bridge.get("metadata", {}).get("id") or "").strip()
+            chunk_id = (
+                raw_id
+                if raw_id
+                else derived_chunk_id(tool_name=tool_name, plan_step=plan_step, label=f"bridge_{idx}", content=content)
             )
             evidences.append(
                 EvidenceChunk(
@@ -109,3 +130,20 @@ class BridgeLookupTool(GraphTool):
                 )
             )
         return evidences
+
+    @staticmethod
+    def _supports_chain_mode(adapter, mode: str) -> bool:
+        try:
+            metadata = adapter.metadata()
+        except Exception:
+            return False
+        capabilities = getattr(metadata, "capabilities", None)
+        if not isinstance(capabilities, (list, tuple)):
+            return False
+        for cap in capabilities:
+            if getattr(cap, "name", None) != "chain_of_exploration":
+                continue
+            modes = getattr(cap, "modes", None)
+            if isinstance(modes, (list, tuple, set)) and mode in modes:
+                return True
+        return False

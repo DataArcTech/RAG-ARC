@@ -203,6 +203,32 @@ class MultiAgentGraphReasoningLoop:
         return ordered
 
     def _build_worker_specs(self, plan_steps: List[Dict[str, Any]]) -> List[_WorkerSpec]:
+        # Planner prompt semantics: steps are serial by default; only parallelize when explicitly marked.
+        parallel_flags = [self._is_parallel_safe(step) for step in plan_steps]
+        if not any(parallel_flags):
+            return [
+                _WorkerSpec(
+                    agent_id="worker_01",
+                    session_id=uuid.uuid4().hex,
+                    focus=(str(plan_steps[0].get("description") or "") if plan_steps else "plan") or "plan",
+                    primary_step_id=str(plan_steps[0].get("step_id") or "plan_01"),
+                    plan_steps=list(plan_steps),
+                )
+            ]
+
+        # Mixed serial+parallel plans are ambiguous without explicit dependencies; run serially to preserve
+        # step ordering + evidence accumulation (chunk-first) rather than guessing.
+        if not all(parallel_flags):
+            return [
+                _WorkerSpec(
+                    agent_id="worker_01",
+                    session_id=uuid.uuid4().hex,
+                    focus=(str(plan_steps[0].get("description") or "") if plan_steps else "plan") or "plan",
+                    primary_step_id=str(plan_steps[0].get("step_id") or "plan_01"),
+                    plan_steps=list(plan_steps),
+                )
+            ]
+
         max_agents = max(1, int(self.settings.max_subagents))
         desired_workers = min(max_agents, max(1, len(plan_steps)))
         buckets: List[List[Dict[str, Any]]] = [[] for _ in range(desired_workers)]
@@ -225,6 +251,20 @@ class MultiAgentGraphReasoningLoop:
                 )
             )
         return specs
+
+    @staticmethod
+    def _is_parallel_safe(step: Dict[str, Any]) -> bool:
+        metadata = step.get("metadata") if isinstance(step, dict) else None
+        if not isinstance(metadata, dict):
+            metadata = {}
+        tool_args = step.get("tool_args") if isinstance(step, dict) else None
+        if not isinstance(tool_args, dict):
+            tool_args = {}
+
+        if metadata.get("parallelizable") is True or tool_args.get("parallelizable") is True:
+            return True
+        scheduler = str(metadata.get("scheduler") or tool_args.get("scheduler") or "").strip().lower()
+        return scheduler in {"parallel", "concurrent"}
 
     async def _run_workers(
         self,

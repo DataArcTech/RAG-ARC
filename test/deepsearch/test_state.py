@@ -64,3 +64,5 @@ def test_state_handles_external_calls_and_errors():
     snapshot = state.snapshot()
     assert snapshot["external_calls"][0]["latency_ms"] == 1200
     assert snapshot["errors"][-1]["reason"] == "gap timeout"
+    assert "kpis" in snapshot
+    assert "error_summary" in snapshot

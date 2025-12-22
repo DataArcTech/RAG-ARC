@@ -7,7 +7,6 @@ Keeps the adapter abstraction swappable so semantic or relational strategies can
 """
 import logging
 import time
-import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -20,6 +19,7 @@ from encapsulation.data_model.deepsearch import (
 )
 from core.graph_adapter.base import GraphDeepSearchAdapter
 from core.graph_adapter.concurrency import adapter_lock
+from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 
 logger = logging.getLogger(__name__)
 
@@ -125,27 +125,23 @@ class GraphTraversalExecutor:
 
             latency_ms = int((time.perf_counter() - start) * 1000)
 
-            chunk_id = f"{step.step_id}-{uuid.uuid4().hex[:8]}"
             summary_text = summary if isinstance(summary, str) else str(summary)
             subgraph_info = self._extract_subgraph_info(filtered, subgraph)
             triples = self._extract_triples(filtered, subgraph, limit=80)
-            evidence = EvidenceChunk(
-                chunk_id=chunk_id,
-                source=context.adapter_name,
-                content=summary_text,
-                score=1.0,
-                provenance={
-                    "plan_step": step.step_id,
-                    "query": query,
-                    "triples": triples,
-                    "metadata": {
-                        "_subgraph_info": subgraph_info,
-                        "filter_type": filter_type,
-                        "chain_result": self._compact_chain_result(chain_result),
-                        "tool_args": tool_args or {},
-                        "latency_ms": latency_ms,
-                    },
-                },
+            adapter_source = getattr(getattr(self.adapter, "metadata", lambda: None)(), "adapter_name", None)  # type: ignore[misc]
+            source = str(adapter_source or context.adapter_name or "graph").strip() or "graph"
+            chunks = self._extract_chunks(filtered, subgraph)
+            evidences = self._chunks_to_evidences(
+                chunks,
+                source=source,
+                plan_step=step.step_id,
+                query=query,
+                triples=triples,
+                subgraph_info=subgraph_info,
+                filter_type=filter_type,
+                chain_result=chain_result,
+                tool_args=tool_args,
+                latency_ms=latency_ms,
             )
 
             traversal_record = GraphTraversalRecord(
@@ -155,7 +151,7 @@ class GraphTraversalExecutor:
                 visited_nodes=self._collect_nodes(filtered),
                 visited_edges=self._collect_edges(filtered),
                 seed_entities=merged_seed_entities,
-                retrieved_chunks=[chunk_id],
+                retrieved_chunks=[ev.chunk_id for ev in evidences],
                 metadata={
                     "channel": step.channel,
                     "filter_type": filter_type,
@@ -165,10 +161,10 @@ class GraphTraversalExecutor:
             )
 
             reasoning_entry.status = "done"
-            reasoning_entry.produced_evidence_ids.append(chunk_id)
             reasoning_entry.output_summary = summary_text
             reasoning_entry.diagnostics.setdefault("latency_ms", latency_ms)
-            evidences.append(evidence)
+            if evidences:
+                reasoning_entry.produced_evidence_ids.extend([ev.chunk_id for ev in evidences])
         except Exception as exc:  # pragma: no cover - defensive path
             logger.warning("Graph traversal failed for %s: %s", step.step_id, exc)
             reasoning_entry.status = "failed"
@@ -261,6 +257,85 @@ class GraphTraversalExecutor:
                     if candidate.get(key) is not None
                 }
         return None
+
+    @staticmethod
+    def _extract_chunks(filtered: Any, subgraph: Any) -> List[Dict[str, Any]]:
+        """Prefer filtered chunks (post filter) and fall back to raw subgraph chunks."""
+
+        for payload in (filtered, subgraph):
+            if isinstance(payload, dict):
+                chunks = payload.get("chunks")
+                if isinstance(chunks, list):
+                    return [chunk for chunk in chunks if isinstance(chunk, dict)]
+        return []
+
+    @staticmethod
+    def _chunks_to_evidences(
+        chunks: List[Dict[str, Any]],
+        *,
+        source: str,
+        plan_step: str,
+        query: str,
+        triples: List[Dict[str, str]],
+        subgraph_info: Optional[Dict[str, Any]],
+        filter_type: str,
+        chain_result: Any,
+        tool_args: Optional[Dict[str, Any]],
+        latency_ms: int,
+    ) -> List[EvidenceChunk]:
+        """Convert adapter-returned chunks into EvidenceChunk objects (chunk-first evidence)."""
+
+        evidences: List[EvidenceChunk] = []
+        seen: set[str] = set()
+
+        for chunk in chunks:
+            content = str(chunk.get("content") or "").strip()
+            if not content:
+                continue
+            chunk_id = GraphTraversalExecutor._extract_chunk_id(chunk, source=source, content=content)
+            if chunk_id in seen:
+                continue
+            seen.add(chunk_id)
+            score = chunk.get("score")
+            if score is None and isinstance(chunk.get("metadata"), dict):
+                score = chunk["metadata"].get("score")
+            evidences.append(
+                EvidenceChunk(
+                    chunk_id=chunk_id,
+                    source=source,
+                    content=content,
+                    score=score,
+                    provenance={
+                        "plan_step": plan_step,
+                        "query": query,
+                        "triples": triples,
+                        "metadata": {
+                            "_subgraph_info": subgraph_info,
+                            "filter_type": filter_type,
+                            "chain_result": GraphTraversalExecutor._compact_chain_result(chain_result),
+                            "tool_args": tool_args or {},
+                            "latency_ms": latency_ms,
+                            "chunk_metadata": (chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}),
+                        },
+                    },
+                )
+            )
+        return evidences
+
+    @staticmethod
+    def _extract_chunk_id(chunk: Dict[str, Any], *, source: str, content: str) -> str:
+        candidates: List[Any] = []
+        for key in ("id", "chunk_id", "chunkId"):
+            candidates.append(chunk.get(key))
+        metadata = chunk.get("metadata")
+        if isinstance(metadata, dict):
+            for key in ("chunk_id", "chunkId", "id"):
+                candidates.append(metadata.get(key))
+        for candidate in candidates:
+            token = str(candidate or "").strip()
+            if token:
+                return token
+        return hashed_chunk_id(source=source, content=content)
 
     @staticmethod
     def _extract_triples(filtered: Any, subgraph: Any, *, limit: int = 80) -> List[Dict[str, str]]:

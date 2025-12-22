@@ -542,12 +542,28 @@ class GraphReasoningLoop:
     ) -> Dict[str, Any]:
         unique_sources = len({label for label in source_labels or [] if label})
         coverage_ratio = (completed_steps / total_steps) if total_steps else 0.0
+        expected_min_chunks = 3
+        try:
+            # Optional override used for heuristic think windows (gap detector remains authoritative).
+            import os
+
+            raw = os.getenv("DEEPSEARCH_GAP_EXPECTED_MIN_CHUNKS")
+            if raw is not None:
+                expected_min_chunks = max(1, int(raw))
+        except Exception:
+            expected_min_chunks = 3
+        coverage_score = min(1.0, evidence_count / max(1, expected_min_chunks))
         return {
             "evidence_count": evidence_count,
             "unique_source_count": unique_sources,
             "completed_steps": completed_steps,
             "total_steps": total_steps,
             "coverage_ratio": round(coverage_ratio, 3),
+            "plan_progress_ratio": round(coverage_ratio, 3),
+            "expected_min_chunks": expected_min_chunks,
+            "coverage_score": round(coverage_score, 3),
+            "confidence_score": None,
+            "missing_topics": [],
         }
 
     async def _maybe_run_periodic_think(

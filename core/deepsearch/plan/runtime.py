@@ -15,7 +15,8 @@ from core.graph_adapter.scope_provider import require_scope, scope_to_dict
 
 from .generator import PlanGenerator, PlannerSettings
 from core.prompts.deepsearch import GRAPH_PLANNER_SYSTEM_PROMPT, GRAPH_PLANNER_USER_PROMPT
-from core.deepsearch.tooling import describe_available_tools, get_tool_hint_revision
+from core.deepsearch.tooling import describe_available_tools
+from core.deepsearch.tooling.registry import DEFAULT_TOOL_HINT_REGISTRY, ToolHintRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,15 @@ class DeepSearchPlanner:
     PLAN_SYSTEM_PROMPT_KEY = "deepsearch.plan.system"
     PLAN_USER_PROMPT_KEY = "deepsearch.plan.user"
 
-    def __init__(self, prompt_store, llm_connector, config, *, plan_generator: PlanGenerator | None = None):
+    def __init__(
+        self,
+        prompt_store,
+        llm_connector,
+        config,
+        *,
+        plan_generator: PlanGenerator | None = None,
+        tool_hint_registry: ToolHintRegistry | None = None,
+    ):
         # prompt_store: repository for plan/question-decomposition/query-expansion templates
         self.prompt_store = prompt_store
         # llm_connector: encapsulation.llm-compatible client reused across core modules
@@ -40,6 +49,7 @@ class DeepSearchPlanner:
         # config: contains runtime knobs such as mode, max steps, output directories
         self.config = config
         self._config_dict = self._as_dict(config)
+        self._tool_hint_registry = tool_hint_registry or DEFAULT_TOOL_HINT_REGISTRY
         self._available_tools: List[Dict[str, str]] = []
         self._tool_hint_revision: int = -1
         self._refresh_available_tools(update_generator=False)
@@ -354,8 +364,8 @@ class DeepSearchPlanner:
     def _refresh_available_tools(self, update_generator: bool = True) -> None:
         """Refresh cached tool descriptors so planner sees MCP/runtime additions."""
 
-        self._available_tools = describe_available_tools()
-        self._tool_hint_revision = get_tool_hint_revision()
+        self._available_tools = describe_available_tools(registry=self._tool_hint_registry)
+        self._tool_hint_revision = self._tool_hint_registry.get_revision()
         if update_generator and getattr(self, "plan_generator", None):
             self.plan_generator.settings.available_tools_hint = self._tool_hint_text(self._available_tools)
 
@@ -363,7 +373,7 @@ class DeepSearchPlanner:
     def available_tools(self) -> List[Dict[str, str]]:
         """Expose cached tool descriptors; refresh lazily when hints change."""
 
-        current_revision = get_tool_hint_revision()
+        current_revision = self._tool_hint_registry.get_revision()
         if current_revision != self._tool_hint_revision:
             self._refresh_available_tools()
         return self._available_tools
