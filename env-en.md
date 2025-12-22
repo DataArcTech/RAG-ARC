@@ -192,6 +192,16 @@ Planner/graph defaults. Leave as-is unless customizing behavior.
 | `DEEPSEARCH_GAP_EXPECTED_MIN_CHUNKS` | `3` | Minimum expected chunk count before triggering external search. |
 | `DEEPSEARCH_CONSISTENCY_CHECK` | `true` | Enable LLM-based consistency check to validate report claims against evidence. |
 | `DEEPSEARCH_PARALLEL_SECTIONS` | `false` | Generate report sections in parallel (faster but uses more API calls). |
+| `DEEPSEARCH_QUALITY_LOOP_ENABLED` | `false` | Enable iterative quality gating (research → verify → iterate). |
+| `DEEPSEARCH_QUALITY_LOOP_MAX_ROUNDS` | `2` | Maximum rounds (initial + follow-ups) for the quality loop. |
+| `DEEPSEARCH_QUALITY_LOOP_MIN_CITATION_SENTENCE_COVERAGE` | `0.6` | Minimum fraction of report sentences that must include at least one valid citation. |
+| `DEEPSEARCH_QUALITY_LOOP_REQUIRE_CONSISTENCY` | `true` | Fail the quality gate when consistency checking reports issues. |
+| `DEEPSEARCH_QUALITY_LOOP_MAX_UNCITED_SENTENCES` | `6` | Maximum uncited sentences surfaced as repair targets (used to drive follow-up retrieval/rewrite). |
+| `DEEPSEARCH_QUALITY_LOOP_MAX_ACTIONS` | `6` | Maximum follow-up actions produced by the quality gate. |
+| `DEEPSEARCH_QUALITY_LOOP_ENABLE_LLM_JUDGE` | `true` | Enable the rubric-based LLM judge (called only when deterministic checks fail or gaps exist). |
+| `DEEPSEARCH_QUALITY_LOOP_JUDGE_TEMPERATURE` | `0.0` | Temperature for the quality judge. |
+| `DEEPSEARCH_QUALITY_LOOP_JUDGE_MAX_RETRIES` | `1` | Retry attempts for the quality judge call. |
+| `DEEPSEARCH_QUALITY_LOOP_TRIGGER_EXTERNAL_ON_FAILURE` | `true` | Allow the quality gate to request external search actions (still requires external search to be enabled). |
 
 ### Example: enabling MCP routing for remote tools
 

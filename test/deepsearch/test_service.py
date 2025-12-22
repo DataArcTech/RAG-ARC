@@ -93,6 +93,49 @@ class _StubReporter:
         }
 
 
+class _QualityLoopReporter:
+    def __init__(self):
+        self.calls = 0
+
+    def compose(self, reasoning_trace: Dict[str, Any], external_evidence=None):
+        self.calls += 1
+        evidences = list(reasoning_trace.get("evidences", []))
+        if external_evidence:
+            evidences.extend(external_evidence)
+
+        if self.calls == 1:
+            structured_report = {
+                "title": "stub",
+                "summary": "This sentence makes a concrete factual claim without citations. "
+                "This second sentence also lacks citations and should trigger the quality gate.",
+                "sections": [
+                    {
+                        "title": "Findings",
+                        "body_markdown": "A long, uncited factual claim appears here and should be repaired by follow-up retrieval.",
+                    }
+                ],
+            }
+        else:
+            structured_report = {
+                "title": "stub",
+                "summary": "This sentence is supported by evidence [ev2]. "
+                "This second sentence is also supported [ev1].",
+                "sections": [
+                    {
+                        "title": "Findings",
+                        "body_markdown": "Now the claim is properly cited. [ev2]",
+                    }
+                ],
+            }
+
+        return {
+            "answer": "stub",
+            "evidences": evidences,
+            "structured_report": structured_report,
+            "metadata": {},
+        }
+
+
 class _StubToolManager:
     pass
 
@@ -221,3 +264,64 @@ async def test_service_surfaces_worker_failures_into_state_errors():
     errors = result["state"].get("errors") or []
     assert errors, "worker errors should be surfaced into state.errors"
     assert any(entry.get("stage") == "graph_reasoning" for entry in errors if isinstance(entry, dict))
+
+
+class _GraphLoopTwoPasses:
+    def __init__(self):
+        self.calls: List[Sequence[Dict[str, Any]]] = []
+
+    async def run(
+        self,
+        question: str,
+        plan_steps: Sequence[Dict[str, Any]],
+        *,
+        graph_context: GraphQueryContext,
+    ):
+        self.calls.append(list(plan_steps))
+        if len(self.calls) == 1:
+            evidences = [{"chunk_id": "ev1", "source": "hipporag", "content": "evidence one"}]
+        else:
+            evidences = [
+                {"chunk_id": "ev1", "source": "hipporag", "content": "evidence one"},
+                {"chunk_id": "ev2", "source": "hipporag", "content": "evidence two"},
+            ]
+        return {
+            "question": question,
+            "graph_context": graph_context.model_dump(exclude_none=True),
+            "adapter_metadata": {},
+            "plan_steps": list(plan_steps),
+            "graph_traversals": [],
+            "reasoning_steps": [],
+            "evidences": evidences,
+            "tool_results": [],
+            "pending_external": [],
+            "think_notes": [],
+            "coverage_metrics": {},
+        }
+
+
+@pytest.mark.asyncio
+async def test_service_quality_loop_triggers_followup_round(monkeypatch):
+    monkeypatch.setenv("DEEPSEARCH_QUALITY_LOOP_ENABLED", "true")
+    monkeypatch.setenv("DEEPSEARCH_QUALITY_LOOP_MAX_ROUNDS", "2")
+    monkeypatch.setenv("DEEPSEARCH_QUALITY_LOOP_MIN_CITATION_SENTENCE_COVERAGE", "0.8")
+
+    planner = _StubPlanner()
+    graph_loop = _GraphLoopTwoPasses()
+    reporter = _QualityLoopReporter()
+    service = DeepSearchService(
+        planner=planner,
+        graph_loop=graph_loop,
+        gap_detector=_StubGapDetector(),
+        reporter=reporter,
+        tool_manager=_StubToolManager(),
+        config={"fingerprint": "service-quality-loop"},
+    )
+
+    result = await service.run("Need citations", owner_id="tenant-ql")
+
+    assert len(graph_loop.calls) == 2, "quality loop should trigger a follow-up reasoning round"
+    gates = result["state"].get("quality_gates") or []
+    assert len(gates) == 2
+    assert gates[0].get("passed") is False
+    assert gates[1].get("passed") is True

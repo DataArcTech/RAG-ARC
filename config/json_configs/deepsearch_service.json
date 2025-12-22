@@ -104,6 +104,9 @@
     "http_timeout": 20.0,
     "max_results": 5
   },
+  "quality_loop": {
+    "enabled": "${DEEPSEARCH_QUALITY_LOOP_ENABLED}"
+  },
   "mcp_client": null,
   "llm": {
     "type": "openai_chat",

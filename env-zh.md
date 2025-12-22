@@ -192,6 +192,16 @@
 | `DEEPSEARCH_GAP_EXPECTED_MIN_CHUNKS` | `3` | 期望的最少证据数量。 |
 | `DEEPSEARCH_CONSISTENCY_CHECK` | `true` | 启用 LLM 一致性检查，验证报告内容与证据是否一致。 |
 | `DEEPSEARCH_PARALLEL_SECTIONS` | `false` | 并行生成报告章节（更快但消耗更多 API 调用）。 |
+| `DEEPSEARCH_QUALITY_LOOP_ENABLED` | `false` | 启用“研究 → 质量门槛 → 迭代”闭环（会在报告后进行质量评估并触发补证据/重写）。 |
+| `DEEPSEARCH_QUALITY_LOOP_MAX_ROUNDS` | `2` | 质量闭环最多迭代轮数（包含首次）。 |
+| `DEEPSEARCH_QUALITY_LOOP_MIN_CITATION_SENTENCE_COVERAGE` | `0.6` | 报告句子中必须包含有效引用的最低比例。 |
+| `DEEPSEARCH_QUALITY_LOOP_REQUIRE_CONSISTENCY` | `true` | 当一致性检查出现问题时是否直接判定未通过。 |
+| `DEEPSEARCH_QUALITY_LOOP_MAX_UNCITED_SENTENCES` | `6` | 最多输出多少条“缺引用句子”作为修复目标（用于驱动补检索/重写）。 |
+| `DEEPSEARCH_QUALITY_LOOP_MAX_ACTIONS` | `6` | 质量门槛最多产出的后续动作数量。 |
+| `DEEPSEARCH_QUALITY_LOOP_ENABLE_LLM_JUDGE` | `true` | 启用基于 Rubric 的 LLM Judge（仅在确定性检查失败或存在缺口时调用）。 |
+| `DEEPSEARCH_QUALITY_LOOP_JUDGE_TEMPERATURE` | `0.0` | Judge 的 temperature。 |
+| `DEEPSEARCH_QUALITY_LOOP_JUDGE_MAX_RETRIES` | `1` | Judge 调用的重试次数。 |
+| `DEEPSEARCH_QUALITY_LOOP_TRIGGER_EXTERNAL_ON_FAILURE` | `true` | 允许质量门槛在失败时请求外部搜索动作（仍需外部搜索开关开启）。 |
 
 ### MCP 配置示例
 

@@ -182,6 +182,35 @@ class ExternalChannelConfig(BaseModel):
     max_results: int = Field(5, description="Maximum documents returned by HTTP providers.")
 
 
+class QualityLoopConfig(BaseModel):
+    """Quality gate settings powering research→verify→iterate loops."""
+
+    enabled: bool = Field(
+        False,
+        description="Enable report quality gate and allow iterative follow-up retrieval when gates fail.",
+    )
+    max_rounds: int = Field(2, description="Maximum total rounds (initial + follow-ups).")
+    min_citation_sentence_coverage: float = Field(
+        0.6, description="Minimum fraction of report sentences that include valid citations."
+    )
+    require_consistency: bool = Field(
+        True,
+        description="Fail the quality gate when the consistency checker reports issues.",
+    )
+    max_uncited_sentences: int = Field(
+        6,
+        description="Maximum uncited sentences to surface as repair targets.",
+    )
+    max_actions: int = Field(6, description="Maximum follow-up actions returned by the quality gate.")
+    enable_llm_judge: bool = Field(True, description="Use an LLM rubric judge for gate scoring + actions.")
+    judge_temperature: float = Field(0.0, description="Sampling temperature for the quality judge.")
+    judge_max_retries: int = Field(1, description="Retry attempts for the quality judge call.")
+    trigger_external_on_quality_failure: bool = Field(
+        True,
+        description="Allow the quality gate to request external search when enabled.",
+    )
+
+
 class DeepSearchServiceConfig(AbstractConfig):
     """Application-layer builder that assembles all DeepSearch components."""
 
@@ -194,6 +223,7 @@ class DeepSearchServiceConfig(AbstractConfig):
     reporter: ReporterConfig
     tool_manager: ToolManagerConfig
     external_channel: ExternalChannelConfig
+    quality_loop: QualityLoopConfig = Field(default_factory=QualityLoopConfig)
     mcp_client: Optional[MCPClientConfig] = Field(
         default=None, description="Optional MCP client config used for remote tools."
     )
@@ -252,7 +282,11 @@ class DeepSearchServiceConfig(AbstractConfig):
             reporter=reporter,
             tool_manager=tool_manager,
             external_channel=external_channel,
-            config={"name": "deepsearch-service", "fingerprint": self._fingerprint()},
+            config={
+                "name": "deepsearch-service",
+                "fingerprint": self._fingerprint(),
+                "quality_loop": self.quality_loop.model_dump(),
+            },
         )
 
     # ------------------------------------------------------------------

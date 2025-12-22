@@ -27,6 +27,7 @@ class DeepSearchState:
     external_calls: List[Dict[str, Any]] = field(default_factory=list)
     cost_telemetry: Dict[str, Any] = field(default_factory=dict)
     report_payload: Optional[Dict[str, Any]] = None
+    quality_gates: List[Dict[str, Any]] = field(default_factory=list)
     errors: List[Dict[str, Any]] = field(default_factory=list)
     request_metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -107,6 +108,20 @@ class DeepSearchState:
             },
         )
 
+    def record_quality_gate(self, payload: Dict[str, Any]) -> None:
+        if not payload:
+            return
+        self.quality_gates.append(payload)
+        record = {"stage": "quality_gated", "timestamp": _utc_now()}
+        record["metadata"] = {
+            "round": payload.get("round"),
+            "passed": payload.get("passed"),
+            "should_iterate": payload.get("should_iterate"),
+            "enabled": payload.get("enabled"),
+        }
+        self.stage_history.append(record)
+        self._emit_stage(record)
+
     def mark_failed(self, reason: str, *, details: Optional[Dict[str, Any]] = None) -> None:
         entry = {"reason": reason, "timestamp": _utc_now()}
         if details:
@@ -157,6 +172,7 @@ class DeepSearchState:
             "external_calls": self.external_calls,
             "cost_telemetry": self.cost_telemetry,
             "report": self.report_payload,
+            "quality_gates": list(self.quality_gates),
             "errors": self.errors,
             "request_metadata": self.request_metadata,
         }
