@@ -193,8 +193,6 @@ async def chat(
             owner_id=current_user.id,
             return_subgraph=True,
             progress_callback=_on_progress,
-            return_subgraph=True,
-            progress_callback=_on_progress,
         )
 
         # Create message in the session (use thread pool to avoid blocking)

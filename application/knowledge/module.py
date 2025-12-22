@@ -346,7 +346,7 @@ class Knowledge(AbstractModule):
                 self._deletion_failures.pop(doc_id, None)
                 self._unmark_file_for_deletion(doc_id)
 
-    async def list_user_files(
+    def list_user_files(
         self,
         user_id: uuid.UUID,
         status: Optional[FileStatus] = None,
@@ -366,13 +366,11 @@ class Knowledge(AbstractModule):
             List of FileMetadata objects accessible to the user
         """
         try:
-            # Run database query asynchronously to avoid blocking the event loop
-            files = await self._run_blocking(
-                self.file_storage.list_accessible_files,
+            files = self.file_storage.list_accessible_files(
                 user_id=user_id,
                 status=status,
                 limit=limit,
-                offset=offset
+                offset=offset,
             )
             if status is None:
                 files = [
@@ -384,8 +382,24 @@ class Knowledge(AbstractModule):
         except Exception as e:
             logger.error(f"Failed to list accessible files for user {user_id}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to retrieve files: {str(e)}")
-    
-    async def count_user_files(
+
+    async def list_user_files_async(
+        self,
+        user_id: uuid.UUID,
+        status: Optional[FileStatus] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> List[FileMetadata]:
+        """Async wrapper for list_user_files() for FastAPI handlers."""
+        return await self._run_blocking(
+            self.list_user_files,
+            user_id=user_id,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+
+    def count_user_files(
         self,
         user_id: uuid.UUID,
         status: FileStatus | None = None
@@ -402,29 +416,25 @@ class Knowledge(AbstractModule):
         """
         try:
             if status is None:
-                # Run database queries asynchronously to avoid blocking the event loop
-                total = await self._run_blocking(
-                    self.file_storage.count_accessible_files,
-                    user_id=user_id
-                )
-                deleted = await self._run_blocking(
-                    self.file_storage.count_accessible_files,
-                    user_id=user_id,
-                    status=FileStatus.DELETED
-                )
+                total = self.file_storage.count_accessible_files(user_id=user_id)
+                deleted = self.file_storage.count_accessible_files(user_id=user_id, status=FileStatus.DELETED)
                 mark_only = len(self._files_marked_for_deletion_by_owner.get(user_id, set()))
                 count = max(total - deleted - mark_only, 0)
             else:
-                count = await self._run_blocking(
-                    self.file_storage.count_accessible_files,
-                    user_id=user_id,
-                    status=status
-                )
+                count = self.file_storage.count_accessible_files(user_id=user_id, status=status)
             logger.info(f"Counted {count} accessible files for user {user_id}")
             return count
         except Exception as e:
             logger.error(f"Failed to count accessible files for user {user_id}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to count files: {str(e)}")
+
+    async def count_user_files_async(
+        self,
+        user_id: uuid.UUID,
+        status: FileStatus | None = None,
+    ) -> int:
+        """Async wrapper for count_user_files() for FastAPI handlers."""
+        return await self._run_blocking(self.count_user_files, user_id, status=status)
 
     def _is_active_status(self, status: FileStatus) -> bool:
         return status != FileStatus.DELETED

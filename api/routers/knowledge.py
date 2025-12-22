@@ -190,14 +190,14 @@ async def list_files(
         )
     try:
         # Get files for current page (async, non-blocking)
-        files = await get_knowledge_handler().list_user_files(
+        files = await get_knowledge_handler().list_user_files_async(
             user_id=user.id,
             limit=limit,
             offset=offset
         )
         
         # Get total count of files for the user (async, non-blocking)
-        total_count = await get_knowledge_handler().count_user_files(user.id)
+        total_count = await get_knowledge_handler().count_user_files_async(user.id)
         
         # Convert FileMetadata objects to FileInfo response models
         file_infos = [
