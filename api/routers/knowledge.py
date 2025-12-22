@@ -60,7 +60,6 @@ class FileListResponse(BaseModel):
 
 @router.post(
     "",
-    response_model=str,
     status_code=status.HTTP_201_CREATED,
 )
 async def upload_file(
@@ -87,7 +86,7 @@ async def upload_file(
         print(f"Uploading file: {file.filename} for owner_id: {user.id}")
         # Convert string UUID to UUID object
         doc_id = await get_knowledge_handler().upload_file(file, user.id)
-        return doc_id
+        return {"file_id": doc_id}
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

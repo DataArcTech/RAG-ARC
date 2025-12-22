@@ -1,5 +1,5 @@
 """
-响应包装器中间件：在所有 JSON 响应体最外层添加 request_id 字段
+响应包装器中间件：统一包装所有响应为 StandardResponse 格式
 """
 import json
 from typing import Callable
@@ -30,24 +30,21 @@ class RequestIdResponseWrapper(BaseHTTPMiddleware):
                 # 解析原始 JSON
                 original_data = json.loads(body.decode('utf-8'))
                 
-                # 包装响应：在最外层添加 request_id
-                if isinstance(original_data, dict):
-                    # 字典：直接展开（保持原有结构）
+                # 统一包装为标准响应格式
+                # 如果已经是标准格式（有code/message/data），直接使用
+                if isinstance(original_data, dict) and "code" in original_data and "message" in original_data:
+                    # 已经是标准格式，只添加 request_id
                     wrapped_data = {
-                        "request_id": request_id,
-                        **original_data
-                    }
-                elif isinstance(original_data, list):
-                    # 列表：包装成 {"request_id": ..., "data": [...]}
-                    wrapped_data = {
-                        "request_id": request_id,
-                        "data": original_data
+                        **original_data,
+                        "request_id": request_id
                     }
                 else:
-                    # 其他类型（str, int等）：包装在 data 字段中
+                    # 包装为标准格式
                     wrapped_data = {
-                        "request_id": request_id,
-                        "data": original_data
+                        "code": response.status_code,
+                        "message": "success" if response.status_code < 400 else "error",
+                        "data": original_data,
+                        "request_id": request_id
                     }
                 
                 # 创建新的 JSON 响应（JSONResponse 会自动计算 Content-Length）

@@ -2,6 +2,7 @@ from encapsulation.data_model.schema import Chunk
 from fastapi import WebSocket, status
 from encapsulation.data_model.orm_models import ChatMessage
 from framework.singleton_decorator import singleton
+import uuid
 
 @singleton
 class ConnectionManager:
@@ -24,7 +25,7 @@ class ConnectionManager:
                 pass
 
 
-    async def send_response(self, message: ChatMessage, chunks: list[Chunk], websocket: WebSocket, subgraph: dict | None = None):
+    async def send_response(self, message: ChatMessage, chunks: list[Chunk], websocket: WebSocket, subgraph: dict | None = None, request_id: str | None = None):
         message_dict = {
             "id": str(message.id),
             "session_id": str(message.session_id),
@@ -39,11 +40,19 @@ class ConnectionManager:
             "metadata": chunk.metadata,
             "graph": chunk.graph.to_dict(),
         } for chunk in chunks]
-        response_dict = {
+        data_dict = {
             "message": message_dict,
             "chunks": chunks_dict,
         }
         # Add subgraph data if provided
         if subgraph is not None:
-            response_dict["subgraph"] = subgraph
+            data_dict["subgraph"] = subgraph
+        
+        # 统一格式包装
+        response_dict = {
+            "code": 200,
+            "message": "success",
+            "data": data_dict,
+            "request_id": request_id or str(uuid.uuid4())
+        }
         await websocket.send_json(response_dict)

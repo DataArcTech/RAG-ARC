@@ -424,10 +424,13 @@ class GraphExporter:
                     # Use 'category' for entity_type
                     entity_obj['category'] = entity_type or 'Entity'
                     categories_set.add(entity_type or 'Entity')
-
-                    # Mark seed entities
+                    
+                    # Add weight field (default to 2 for entity nodes, 1 for seed entities)
                     if node_id in seed_entity_ids:
+                        entity_obj['weight'] = 1
                         entity_obj['is_seed'] = True
+                    else:
+                        entity_obj['weight'] = 2
 
                     # Add PPR score if available
                     if node_id in node_ppr_scores:

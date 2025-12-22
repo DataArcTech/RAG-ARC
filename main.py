@@ -26,8 +26,8 @@ from api.middleware.response_wrapper import RequestIdResponseWrapper
 
 
 # Configure logging with correlation ID
-# 先创建filter
-correlation_filter = CorrelationIdFilter(uuid_length=32, default_value='NO-ID')
+# 先创建filter（UUID 格式：xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx，共36字符）
+correlation_filter = CorrelationIdFilter(uuid_length=36, default_value='NO-ID')
 
 # 配置logging，然后为所有handler添加filter
 logging.basicConfig(

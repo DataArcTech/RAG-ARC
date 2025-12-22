@@ -192,6 +192,9 @@ async def websocket_endpoint(
 ):
     # Accept the connection first - we need to do this before we can close it properly
     await manager.connect(websocket)
+    
+    # 获取或生成 request_id（从 WebSocket headers 获取，如果没有则生成）
+    request_id = websocket.headers.get("X-Request-ID") or str(uuid.uuid4())
 
     if current_user is None:
         logger.warning(f"WebSocket denied for unauthenticated user on session {session_id}")
@@ -320,8 +323,8 @@ async def websocket_endpoint(
                 assistant_message
             )
             logger.info(f"Assistant message created: {assistant_message.id}")
-            # Send the assistant response back to the client
-            await manager.send_response(assistant_message, chunks, websocket, subgraph=subgraph_data)
+            # Send the assistant response back to the client (统一格式包装)
+            await manager.send_response(assistant_message, chunks, websocket, subgraph=subgraph_data, request_id=request_id)
 
     except WebSocketDisconnect:
         logger.info(f"WebSocketDisconnect for session {session_id} and user {getattr(current_user, 'id', None)}")
