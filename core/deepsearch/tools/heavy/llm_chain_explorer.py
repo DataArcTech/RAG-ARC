@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 
 from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote
 from core.prompts.deepsearch import LLM_CHAIN_EXPLORER_SYSTEM_PROMPT
+from core.graph_adapter.concurrency import adapter_locked
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, safe_json_loads
 
@@ -59,12 +60,13 @@ class LLMChainExplorerTool(GraphTool):
         for idx, spec in enumerate(plan[: self.max_queries]):
             sub_query = spec.get("query") or spec.get("description") or request.question
             channel = spec.get("channel") or "graph"
-            payload = await adapter.aquery_subgraph(
-                sub_query,
-                channel=channel,
-                access_scope=request.access_scope,
-            )
-            summary = await adapter.summarize(channel, payload, access_scope=request.access_scope)
+            async with adapter_locked(adapter):
+                payload = await adapter.aquery_subgraph(
+                    sub_query,
+                    channel=channel,
+                    access_scope=request.access_scope,
+                )
+                summary = await adapter.summarize(channel, payload, access_scope=request.access_scope)
             evidence = EvidenceChunk(
                 chunk_id=f"llm-chain-{idx}",
                 source=adapter.metadata().adapter_name,

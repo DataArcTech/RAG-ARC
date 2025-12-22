@@ -17,6 +17,7 @@ from core.deepsearch.report import DeepSearchReporter
 from core.deepsearch.tooling.protocols import ToolInvoker
 from encapsulation.deepsearch.external import ExternalSearchChannel
 from core.deepsearch.state import DeepSearchState
+from core.utils.json_safe import json_safe
 
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ class DeepSearchService:
         self.reporter = reporter
         # tool_manager: Schedules local and MCP tools
         self.tool_manager = tool_manager
-        # external_channel: Optional Serper/Tavily orchestration triggered by gap detection
+        # external_channel: Optional Tavily orchestration triggered by gap detection
         self.external_channel = external_channel
         # state_cls: Allows swapping in richer state trackers when needed
         self.state_cls = state_cls
@@ -77,7 +78,7 @@ class DeepSearchService:
         state.record_request_metadata(metadata)
         state.record_cost(
             "request_context",
-            self._json_safe(
+            json_safe(
                 {
                     "owner_id": owner_id,
                     "access_scope": getattr(scope, "scope_id", None),
@@ -384,26 +385,6 @@ class DeepSearchService:
         return bool(enabled)
 
     @staticmethod
-    def _json_safe(value: Any) -> Any:
-        if value is None or isinstance(value, (str, int, float, bool)):
-            return value
-        if isinstance(value, list):
-            return [DeepSearchService._json_safe(item) for item in value]
-        if isinstance(value, tuple):
-            return [DeepSearchService._json_safe(item) for item in value]
-        if isinstance(value, dict):
-            return {str(key): DeepSearchService._json_safe(val) for key, val in value.items()}
-        if hasattr(value, "model_dump"):
-            try:
-                dumped = value.model_dump()
-            except TypeError:
-                dumped = value.model_dump(exclude_none=True)
-            return DeepSearchService._json_safe(dumped)
-        if hasattr(value, "__dict__"):
-            return DeepSearchService._json_safe(vars(value))
-        return str(value)
-
-    @staticmethod
     def _coerce_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         if config is None:
             return {}
@@ -504,7 +485,7 @@ class DeepSearchService:
         path = self.experiment_output_dir / f"{filename}.json"
         try:
             path.write_text(
-                json.dumps(self._json_safe(experiment_record), ensure_ascii=False, indent=2),
+                json.dumps(json_safe(experiment_record), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
         except OSError as exc:  # pragma: no cover - filesystem guard

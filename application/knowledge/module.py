@@ -14,14 +14,13 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from functools import partial
 from fastapi.responses import Response
 from fastapi import UploadFile, HTTPException
 from encapsulation.data_model.orm_models import (
     FileMetadata, FileStatus,
     FilePermission, PermissionReceiverType, PermissionType
 )
-from framework.thread_pool import get_thread_pool
+from core.utils.thread_pool import run_blocking, run_coroutine_in_thread
 
 class Knowledge(AbstractModule):
     def __init__(self, config: 'KnowledgeConfig'):
@@ -110,15 +109,11 @@ class Knowledge(AbstractModule):
 
     async def _run_blocking(self, func, *args, **kwargs):
         """Run a blocking function in a separate thread to avoid blocking the event loop."""
-        return await get_thread_pool().run_blocking(func, *args, **kwargs)
+        return await run_blocking(func, *args, **kwargs)
 
     async def _run_coroutine_in_thread(self, coro_func, *args, **kwargs):  # noqa: ANN001
         """Run an async callable in a dedicated thread to keep FastAPI event loop responsive."""
-
-        def _runner():
-            return asyncio.run(coro_func(*args, **kwargs))
-
-        return await asyncio.to_thread(_runner)
+        return await run_coroutine_in_thread(coro_func, *args, **kwargs)
     
     def _track_deletion_task(self, doc_id: str, task: asyncio.Task) -> None:
         """Register a background deletion task so we don't schedule duplicates."""

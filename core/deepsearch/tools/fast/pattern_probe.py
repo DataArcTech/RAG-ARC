@@ -4,6 +4,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.graph_adapter.base import GraphDeepSearchAdapter
+from core.graph_adapter.concurrency import adapter_locked
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 
@@ -59,14 +60,15 @@ class PatternProbeTool(GraphTool):
 
         matches: List[EvidenceChunk] = []
         diagnostics: Dict[str, Any] = {"keywords": keywords}
-        for keyword in keywords[: self.max_terms]:
-            payload = await adapter.aquery_subgraph(
-                keyword,
-                channel="graph",
-                access_scope=request.access_scope,
-            )
-            keyword_hits = self._filter_chunks(payload, keyword)
-            matches.extend(keyword_hits)
+        async with adapter_locked(adapter):
+            for keyword in keywords[: self.max_terms]:
+                payload = await adapter.aquery_subgraph(
+                    keyword,
+                    channel="graph",
+                    access_scope=request.access_scope,
+                )
+                keyword_hits = self._filter_chunks(payload, keyword)
+                matches.extend(keyword_hits)
 
         if not matches:
             return ToolResult(

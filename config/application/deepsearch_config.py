@@ -290,10 +290,12 @@ class DeepSearchServiceConfig(AbstractConfig):
             expected_min_chunks=self.gap_detection.expected_min_chunks,
         )
         evaluator = evaluator_config.build()
+        gap_config = self.gap_detection.model_dump()
+        gap_config["external_channel_enabled"] = bool(self.external_channel.enabled)
         return GapDetectionEngine(
             evaluator,
             telemetry_client=telemetry_client,
-            config=self.gap_detection.model_dump(),
+            config=gap_config,
         )
 
     @staticmethod

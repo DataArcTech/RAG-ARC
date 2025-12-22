@@ -256,7 +256,7 @@ RAG-ARC uses a modular configuration system. Key configuration files are located
 - `knowledge.json`: Knowledge management configuration
 - `account.json`: User account configuration
 - `.env`: runtime knobs (providers, database credentials, etc.). Set `DEVELOP_MODE=true` when you want all Docker services (PostgreSQL/Redis/Neo4j) to expose their ports to `localhost` for debugging; it remains `false` by default for security.
-- `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` (in `.env`): keep this `false` to run DeepSearch strictly on the graph. Set it to `true` **and** provide `TAVILY_API_KEY` when you want the gap detector to trigger Tavily web search as a fallback.
+- DeepSearch external search: enable via `config/json_configs/deepsearch_service.json` (`external_channel.enabled=true`, `gap_detection.enable_external_on_gap=true`) and provide `TAVILY_API_KEY`; `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` can override enablement at runtime.
 
 ### 🌐 LLM Profiles via `.env`
 

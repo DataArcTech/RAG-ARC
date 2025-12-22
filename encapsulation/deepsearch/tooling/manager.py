@@ -22,6 +22,7 @@ from core.deepsearch.tools import (
 )
 
 from core.deepsearch.tooling._hints import register_tool_hints, set_disabled_tools
+from core.utils.json_safe import json_safe
 
 logger = logging.getLogger(__name__)
 
@@ -735,29 +736,7 @@ class DeepSearchToolManager:
 
     @staticmethod
     def _json_safe(value: Any) -> Any:
-        """Convert dataclasses/pydantic instances into JSON-friendly primitives."""
-
-        if value is None or isinstance(value, (str, int, float, bool)):
-            return value
-        if isinstance(value, list):
-            return [DeepSearchToolManager._json_safe(item) for item in value]
-        if isinstance(value, tuple):
-            return [DeepSearchToolManager._json_safe(item) for item in value]
-        if isinstance(value, set):
-            return [DeepSearchToolManager._json_safe(item) for item in value]
-        if isinstance(value, dict):
-            return {str(key): DeepSearchToolManager._json_safe(val) for key, val in value.items()}
-        if hasattr(value, "model_dump"):
-            try:
-                dumped = value.model_dump()
-            except TypeError:
-                dumped = value.model_dump(exclude_none=True)
-            return DeepSearchToolManager._json_safe(dumped)
-        if is_dataclass(value):
-            return DeepSearchToolManager._json_safe(asdict(value))
-        if hasattr(value, "__dict__"):
-            return DeepSearchToolManager._json_safe(vars(value))
-        return str(value)
+        return json_safe(value)
 
     def _attach_artifact_reference(self, tool_name: str, payload: ToolResultPayload) -> None:
         artifact_path = self._persist_artifact(tool_name, payload)

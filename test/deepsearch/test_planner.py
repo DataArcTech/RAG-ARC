@@ -79,7 +79,7 @@ def test_planner_generates_real_plan():
         "graph_channel_tool": "graph_adapter.query",
         "text_channel_tool": "graph.context_rollup",
         "web_channel_tool": "web.search",
-        "default_web_provider": os.getenv("DEEPSEARCH_WEB_PROVIDER") or "serper",
+        "default_web_provider": os.getenv("DEEPSEARCH_WEB_PROVIDER") or "tavily",
         "graph_adapter_name": os.getenv("DEEPSEARCH_DEFAULT_ADAPTER") or "hipporag",
         "tool_arg_templates": {},
     }

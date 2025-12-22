@@ -26,6 +26,7 @@ from core.deepsearch.tools import (
     get_tool_descriptor,
 )
 from core.deepsearch.plan.runtime import DeepSearchPlanner
+from core.deepsearch.reasoning.traversal import GraphTraversalExecutor, GraphTraversalSettings
 from encapsulation.deepsearch.tooling import DeepSearchToolManager, LocalToolRegistry
 from core.deepsearch.tooling import describe_available_tools, clear_tool_hints, register_tool_hints
 
@@ -404,6 +405,56 @@ async def test_evidence_crosscheck_detects_missing_and_confirmed():
     breakdown = result.diagnostics.get("token_breakdown")
     assert breakdown and "deterministic_tokens" in breakdown and "llm_tokens" in breakdown
     assert result.think_notes  # gap should trigger a think note
+
+
+@pytest.mark.asyncio
+async def test_evidence_crosscheck_consumes_triples_from_traversal_evidence():
+    class _Adapter:
+        async def prepare(self, question: str, *, access_scope=None):
+            return None
+
+        async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None):
+            return {
+                "chunks": [{"id": "kb_chunk_1", "content": "OpenAI was founded by Sam Altman.", "metadata": {}}],
+                "nodes": [{"id": "OpenAI"}, {"id": "Sam Altman"}],
+                "edges": [{"source": "OpenAI", "relation": "founded_by", "target": "Sam Altman"}],
+                "metadata": {"adapter": "dummy"},
+            }
+
+        async def context_filter(self, data, *, filter_type: str = "semantic", access_scope=None):
+            return data
+
+        async def summarize(self, channel: str, data, *, access_scope=None) -> str:
+            return "OpenAI was founded by Sam Altman."
+
+        async def chain_traverse(self, strategy, *, access_scope=None):
+            return {"strategy": strategy.get("strategy", "ppr_chain"), "hops": 1, "visited": ["OpenAI", "Sam Altman"]}
+
+        def metadata(self):
+            return GraphAdapterMetadata(adapter_name="dummy", graph_type="dummy", version="0")
+
+    executor = GraphTraversalExecutor(_Adapter(), settings=GraphTraversalSettings(chain_depth=1))
+    ctx = GraphQueryContext(adapter_name="dummy", question="Who founded OpenAI?")
+    step = PlanSpec(step_id="plan_01", description="OpenAI founders", channel="graph", metadata={})
+
+    _, _, evidences = await executor.run_step(step, ctx)
+    assert evidences
+    triples = (evidences[0].provenance or {}).get("triples") or []
+    assert triples and triples[0]["head"] == "OpenAI" and triples[0]["tail"] == "Sam Altman"
+
+    tool = EvidenceCrosscheckTool(llm_connector=None)
+    request = ToolRunRequest(
+        question="Who founded OpenAI?",
+        plan_step="plan_verify",
+        context_evidences=evidences,
+        adapter=None,
+        access_scope=None,
+        extra={},
+    )
+    result = await tool.run(request)
+    assert result.diagnostics["triple_count"] == 1
+    assert result.diagnostics["confirmed"] == 1
+    assert result.diagnostics["missing"] == 0
 
 
 @pytest.mark.asyncio

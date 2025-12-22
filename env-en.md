@@ -158,11 +158,11 @@ Planner/graph defaults. Leave as-is unless customizing behavior.
 | `DEEPSEARCH_PERSIST_PLAN` | `true` | Persist plan JSON to disk. |
 | `DEEPSEARCH_PLAN_OUTPUT_DIR` | `./local/deepsearch_runs` | Folder for persisted plans. |
 | `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `./local/deepsearch_artifacts` | Output directory for tool telemetry. |
-| `DEEPSEARCH_ALLOW_EXTERNAL_CHANNEL` | `false` | Enable web/external channels. |
-| `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` | `false` | Toggle invocation of configured external search provider. |
+| `DEEPSEARCH_ALLOW_EXTERNAL_CHANNEL` | `false` | Planner-only flag for emitting `web` steps (used when `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` is not set). |
+| `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` | `false` | Runtime override for external search enablement (config SoT: `external_channel.enabled` + `gap_detection.enable_external_on_gap`). |
 | `DEEPSEARCH_TELEMETRY_ENABLED` | `true` | Enable telemetry capture for tool runs (local artifacts). |
 | `TAVILY_API_KEY` | _(empty)_ | API key for Tavily (when external search enabled). |
-| `DEEPSEARCH_WEB_PROVIDER` | _(empty)_ | MCP server name used for web search fallbacks. |
+| `DEEPSEARCH_WEB_PROVIDER` | _(empty)_ | External search routing hint (`tavily` / `tool` / `mcp`; unknown values fall back to `tavily`). |
 | `DEEPSEARCH_TOOL_HINTS` | _(empty)_ | JSON list to override planner tool hints. |
 | `DEEPSEARCH_TOOL_MCP_CONFIG_PATH` | _(empty)_ | Custom JSON config for tool MCP server. |
 | `DEEPSEARCH_TOOL_MCP_ADAPTER_CONFIG` | _(empty)_ | JSON file describing adapter overrides. |

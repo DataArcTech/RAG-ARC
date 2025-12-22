@@ -46,12 +46,13 @@ class GapDetectionEngine:
             missing_topics=merged,
         )
         payload = result_model.model_dump()
-        external_allowed = self._external_enabled()
+        external_allowed, external_decision = self._external_enabled()
 
         diagnostics = payload.setdefault("diagnostics", {})
         diagnostics.setdefault("evidence_count", len(evidences))
         diagnostics.setdefault("pending_external_steps", len(pending_external))
         diagnostics["external_allowed"] = external_allowed
+        diagnostics["external_decision"] = external_decision
         diagnostics.setdefault("coverage_metrics", coverage_metrics)
         diagnostics.setdefault("think_gap_trigger", think_trigger)
 
@@ -147,14 +148,16 @@ class GapDetectionEngine:
                         missing.append(token)
         return triggered, missing
 
-    def _external_enabled(self) -> bool:
-        """Return True only when the user explicitly enables external search via env.
+    def _external_enabled(self) -> tuple[bool, Dict[str, Any]]:
+        """Resolve whether external search is allowed (config SoT; env overrides)."""
 
-        External/web search is treated as a user-controlled capability. If the env is not set,
-        we default to disabled (pipeline still records gap/pending steps, but won't execute).
-        """
-
-        return bool(self._read_env_bool("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED"))
+        env = self._read_env_bool("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED")
+        config_flag = self.config.get("enable_external_on_gap")
+        channel_flag = self.config.get("external_channel_enabled")
+        config_enabled = bool(config_flag) and bool(channel_flag)
+        if env is not None:
+            return bool(env), {"source": "env", "env_value": env, "config_value": config_enabled}
+        return config_enabled, {"source": "config", "env_value": None, "config_value": config_enabled}
 
     @staticmethod
     def _read_env_bool(name: str) -> Optional[bool]:

@@ -4,6 +4,7 @@ from typing import Any, Dict, List
 from encapsulation.data_model.deepsearch import EvidenceChunk
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+from core.graph_adapter.concurrency import adapter_locked
 
 
 class ChunkScanTool(GraphTool):
@@ -41,11 +42,12 @@ class ChunkScanTool(GraphTool):
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
         query = self._resolve_query(request)
-        payload = await adapter.aquery_subgraph(
-            query,
-            channel="graph",
-            access_scope=request.access_scope,
-        )
+        async with adapter_locked(adapter):
+            payload = await adapter.aquery_subgraph(
+                query,
+                channel="graph",
+                access_scope=request.access_scope,
+            )
         chunks = self._normalize_chunks(payload.get("chunks"))
         evidences = self._to_evidences(chunks[: self.max_chunks], adapter.metadata().adapter_name)
         if not evidences:

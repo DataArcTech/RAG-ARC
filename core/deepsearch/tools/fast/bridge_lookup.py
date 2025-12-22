@@ -4,6 +4,7 @@ from typing import Any, Dict, Iterable, List
 from encapsulation.data_model.deepsearch import EvidenceChunk
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+from core.graph_adapter.concurrency import adapter_locked
 
 
 class BridgeLookupTool(GraphTool):
@@ -41,14 +42,15 @@ class BridgeLookupTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
-        traversal = await adapter.chain_traverse(
-            {
-                "strategy": "bridge_lookup",
-                "question": request.question,
-                "seed_entities": request.extra.get("seed_entities") or [],
-            },
-            access_scope=request.access_scope,
-        )
+        async with adapter_locked(adapter):
+            traversal = await adapter.chain_traverse(
+                {
+                    "strategy": "bridge_lookup",
+                    "question": request.question,
+                    "seed_entities": request.extra.get("seed_entities") or [],
+                },
+                access_scope=request.access_scope,
+            )
         bridges = self._extract_bridges(traversal)
         if not bridges:
             return ToolResult(

@@ -5,6 +5,7 @@ from encapsulation.data_model.deepsearch import EvidenceChunk
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async
 from ..fast.pattern_probe import PatternProbeTool
+from core.graph_adapter.concurrency import adapter_locked
 
 
 class HybridNeighborhoodProbeTool(GraphTool):
@@ -48,27 +49,28 @@ class HybridNeighborhoodProbeTool(GraphTool):
             raise RuntimeError("HybridNeighborhoodProbeTool requires a GraphDeepSearchAdapter")
 
         enriched: List[EvidenceChunk] = []
-        for ev in pattern_result.evidences[: self.max_chunks]:
-            subgraph = await adapter.chain_traverse(
-                {
-                    "strategy": "ppr_chain",
-                    "seed_chunk": ev.chunk_id,
-                    "max_depth": 2,
-                },
-                access_scope=request.access_scope,
-            )
-            enriched.append(
-                EvidenceChunk(
-                    chunk_id=f"{ev.chunk_id}-hybrid",
-                    source=adapter.metadata().adapter_name,
-                    content=ev.content,
-                    score=ev.score,
-                    provenance={
-                        "pattern_match": ev.provenance,
-                        "chain_traverse": subgraph,
+        async with adapter_locked(adapter):
+            for ev in pattern_result.evidences[: self.max_chunks]:
+                subgraph = await adapter.chain_traverse(
+                    {
+                        "strategy": "ppr_chain",
+                        "seed_chunk": ev.chunk_id,
+                        "max_depth": 2,
                     },
+                    access_scope=request.access_scope,
                 )
-            )
+                enriched.append(
+                    EvidenceChunk(
+                        chunk_id=f"{ev.chunk_id}-hybrid",
+                        source=adapter.metadata().adapter_name,
+                        content=ev.content,
+                        score=ev.score,
+                        provenance={
+                            "pattern_match": ev.provenance,
+                            "chain_traverse": subgraph,
+                        },
+                    )
+                )
 
         # Step 3: summarise with LLM for explainability.
         summary = await self._summarize(request, enriched)

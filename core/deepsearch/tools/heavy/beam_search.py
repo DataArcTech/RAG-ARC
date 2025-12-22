@@ -7,6 +7,7 @@ from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema, call_llm_async, safe_json_loads
 from ..fast.pattern_probe import PatternProbeTool
+from core.graph_adapter.concurrency import adapter_locked
 
 
 class BeamSearchTool(GraphTool):
@@ -63,23 +64,25 @@ class BeamSearchTool(GraphTool):
         max_depth = int(request.extra.get("max_depth") or self.max_depth)
         seeds = self._seed_entities(request)
 
-        traversal = await adapter.chain_traverse(
-            {
-                "strategy": "beam_search",
-                "question": request.question,
-                "beam_size": beam_size,
-                "max_depth": max_depth,
-                "seed_entities": seeds,
-            },
-            access_scope=request.access_scope,
-        )
-        paths = self._normalize_paths(traversal.get("paths"), fallback_prefix="beam")
-        if not paths:
-            fallback = await adapter.aquery_subgraph(
-                request.question,
-                channel="graph",
+        async with adapter_locked(adapter):
+            traversal = await adapter.chain_traverse(
+                {
+                    "strategy": "beam_search",
+                    "question": request.question,
+                    "beam_size": beam_size,
+                    "max_depth": max_depth,
+                    "seed_entities": seeds,
+                },
                 access_scope=request.access_scope,
             )
+        paths = self._normalize_paths(traversal.get("paths"), fallback_prefix="beam")
+        if not paths:
+            async with adapter_locked(adapter):
+                fallback = await adapter.aquery_subgraph(
+                    request.question,
+                    channel="graph",
+                    access_scope=request.access_scope,
+                )
             paths = self._paths_from_chunks(fallback, seeds)
 
         ranked_paths = await self._rank_paths(request, paths, beam_size)

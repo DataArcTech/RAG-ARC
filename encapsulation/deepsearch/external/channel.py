@@ -1,4 +1,4 @@
-"""External channel orchestrator for Tavily/Serper providers or MCP tools."""
+"""External channel orchestrator for Tavily provider or MCP tools."""
 import asyncio
 import os
 import time
@@ -23,7 +23,7 @@ class ExternalSearchChannel:
         self.telemetry_client = telemetry_client
         self.max_rounds = max(1, int(self.config.get("max_rounds", 2)))
         provider = self.config.get("default_provider") or os.getenv("DEEPSEARCH_WEB_PROVIDER")
-        self.default_provider = (provider or "tavily").strip().lower()
+        self.default_provider = self._normalize_provider(provider)
         self._context_limit = int(self.config.get("context_window_limit", 12))
         self._tavily_timeout = float(self.config.get("http_timeout", 20))
         self._tavily_max_results = int(self.config.get("max_results", 5))
@@ -127,8 +127,8 @@ class ExternalSearchChannel:
         gap_result: Optional[Dict[str, Any]],
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], str]:
         tool = task.get("tool") or "web.search"
-        provider = (provider or self.default_provider).strip().lower()
-        if provider in {"tavily", "serper"}:
+        provider = self._normalize_provider(provider or self.default_provider)
+        if provider == "tavily":
             chunks, diagnostics = await self._execute_with_provider(task, provider=provider, question=question)
             return chunks, diagnostics, provider
         if provider in {"mcp", "tool"}:
@@ -366,8 +366,15 @@ class ExternalSearchChannel:
         metadata = task.get("metadata") or {}
         provider = metadata.get("provider") or metadata.get("external_provider")
         if isinstance(provider, str) and provider.strip():
-            return provider.strip().lower()
-        return self.default_provider
+            return self._normalize_provider(provider)
+        return self._normalize_provider(self.default_provider)
+
+    @staticmethod
+    def _normalize_provider(provider: Any) -> str:
+        token = str(provider or "").strip().lower()
+        if token in {"mcp", "tool"}:
+            return token
+        return "tavily"
 
     def _task_query(self, task: Dict[str, Any], *, default: str) -> str:
         metadata = task.get("metadata") or {}
@@ -392,8 +399,13 @@ class ExternalSearchChannel:
         return None
 
     def _is_enabled(self) -> bool:
-        """Return True only when the user explicitly enables external search via env."""
-        return bool(self._read_env_bool("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED"))
+        """Resolve enablement (config SoT; env overrides)."""
+
+        env = self._read_env_bool("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED")
+        config_enabled = bool(self.config.get("enabled"))
+        if env is not None:
+            return bool(env)
+        return config_enabled
 
     @staticmethod
     def _read_env_bool(name: str) -> Optional[bool]:

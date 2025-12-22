@@ -60,7 +60,7 @@ def _reasoning_trace():
                 "description": "Query web",
                 "channel": "web",
                 "tool": "web.search",
-                "metadata": {"query": "Who founded OpenAI?"},
+                "metadata": {"query": "Who founded OpenAI?", "provider": "tool"},
             }
         ],
     }
@@ -68,7 +68,7 @@ def _reasoning_trace():
 
 def test_gap_detection_respects_env_disable(monkeypatch):
     telemetry = _Telemetry()
-    engine = _gap_engine(telemetry=telemetry, config={"enable_external_on_gap": True})
+    engine = _gap_engine(telemetry=telemetry, config={"enable_external_on_gap": True, "external_channel_enabled": True})
     monkeypatch.setenv("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED", "false")
 
     result = engine.evaluate(_reasoning_trace())
@@ -81,7 +81,7 @@ def test_gap_detection_respects_env_disable(monkeypatch):
 
 def test_gap_detection_triggered_by_think_note(monkeypatch):
     telemetry = _Telemetry()
-    engine = _gap_engine(telemetry=telemetry, config={"enable_external_on_gap": True})
+    engine = _gap_engine(telemetry=telemetry, config={"enable_external_on_gap": True, "external_channel_enabled": True})
     monkeypatch.setenv("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED", "true")
     trace = _reasoning_trace()
     trace["coverage_metrics"] = {"answer_confidence": 0.95, "coverage_ratio": 0.9}
@@ -103,7 +103,7 @@ def test_gap_detection_triggered_by_think_note(monkeypatch):
 
 
 def test_gap_detection_think_gap_respects_env_disable(monkeypatch):
-    engine = _gap_engine(telemetry=None, config={"enable_external_on_gap": True})
+    engine = _gap_engine(telemetry=None, config={"enable_external_on_gap": True, "external_channel_enabled": True})
     trace = _reasoning_trace()
     trace["coverage_metrics"] = {"answer_confidence": 0.95, "coverage_ratio": 0.9}
     trace["think_notes"] = [
@@ -132,11 +132,11 @@ async def test_external_channel_calls_tool_manager(monkeypatch):
     tool_manager = _StubToolManager()
     channel = ExternalSearchChannel(
         tool_manager=tool_manager,
-        config={"enabled": True, "default_provider": "stub"},
+        config={"enabled": True, "default_provider": "tool"},
         telemetry_client=telemetry,
     )
     trace = _reasoning_trace()
-    monkeypatch.setenv("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED", "true")
+    monkeypatch.delenv("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED", raising=False)
 
     payload = await channel.run(trace["pending_external"], reasoning_trace=trace, gap_result={"reason": "coverage"})
     evidences = payload["evidences"]
@@ -167,7 +167,8 @@ async def test_external_channel_respects_env_off(monkeypatch):
 async def test_external_channel_falls_back_to_provider(monkeypatch):
     channel = ExternalSearchChannel(tool_manager=None, config={"enabled": True, "default_provider": "tavily"})
     trace = _reasoning_trace()
-    monkeypatch.setenv("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED", "true")
+    trace["pending_external"][0]["metadata"].pop("provider", None)
+    monkeypatch.delenv("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED", raising=False)
 
     async def _fake_tavily(self, task, *, question):
         return (

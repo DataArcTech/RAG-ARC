@@ -58,11 +58,15 @@ class DeepSearchPlanner:
         self.plan_output_dir = Path(
             self._config_value("plan_output_dir", os.getenv("DEEPSEARCH_PLAN_OUTPUT_DIR") or default_output_dir)
         )
-        self.allow_external = self._bool_config(
-            "allow_external_channel",
-            default=False,
-            env_var="DEEPSEARCH_ALLOW_EXTERNAL_CHANNEL",
-        )
+        global_external = self._resolve_env_bool("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED")
+        if global_external is not None:
+            self.allow_external = global_external
+        else:
+            self.allow_external = self._bool_config(
+                "allow_external_channel",
+                default=False,
+                env_var="DEEPSEARCH_ALLOW_EXTERNAL_CHANNEL",
+            )
 
         self.graph_channel_tool = self._config_value("graph_channel_tool", "graph_adapter.query")
         self.text_channel_tool = self._config_value("text_channel_tool", "graph.context_rollup")

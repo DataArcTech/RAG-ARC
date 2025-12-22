@@ -158,11 +158,11 @@
 | `DEEPSEARCH_PERSIST_PLAN` | `true` | 是否落盘保存规划。 |
 | `DEEPSEARCH_PLAN_OUTPUT_DIR` | `./local/deepsearch_runs` | 规划输出目录。 |
 | `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `./local/deepsearch_artifacts` | 工具执行日志目录。 |
-| `DEEPSEARCH_ALLOW_EXTERNAL_CHANNEL` | `false` | 是否允许外部搜索。 |
-| `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` | `false` | 启用外部搜索时需同时提供 API Key。 |
+| `DEEPSEARCH_ALLOW_EXTERNAL_CHANNEL` | `false` | 规划器是否允许生成 `web` 步骤（当未设置 `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` 时生效）。 |
+| `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` | `false` | 运行时覆盖外部搜索开关（默认由配置 `external_channel.enabled` + `gap_detection.enable_external_on_gap` 决定）。 |
 | `DEEPSEARCH_TELEMETRY_ENABLED` | `true` | 是否启用工具运行遥测（本地 artifacts）。 |
 | `TAVILY_API_KEY` | _(空)_ | Tavily 搜索的 Key（启用外部搜索时必填）。 |
-| `DEEPSEARCH_WEB_PROVIDER` | _(空)_ | 默认 web 搜索 MCP 名称。 |
+| `DEEPSEARCH_WEB_PROVIDER` | _(空)_ | 外部搜索路由提示（`tavily` / `tool` / `mcp`；其他值会回退到 `tavily`）。 |
 | `DEEPSEARCH_TOOL_HINTS` | _(空)_ | JSON 字符串，覆盖规划器的工具提示。 |
 | `DEEPSEARCH_TOOL_MCP_CONFIG_PATH` | _(空)_ | MCP 服务器 JSON 配置路径。 |
 | `DEEPSEARCH_TOOL_MCP_ADAPTER_CONFIG` | _(空)_ | 适配器配置 JSON。 |

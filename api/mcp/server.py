@@ -15,6 +15,7 @@ from core.utils.owner_guard import is_admin_owner
 from core.presentation.graph_chain import build_graph_chain
 from core.presentation.evidence import build_chat_evidence
 from core.presentation.deepsearch_payload import trim_deepsearch_payload
+from core.utils.json_safe import json_safe
 from config.output_limits import CHAT_TOP_CHUNKS
 from application.rag_inference.module import RAGInference
 import logging
@@ -130,12 +131,6 @@ async def chat(
         dict: Response containing session_id and reply
     """
     try:
-        def _json_safe(value: Any) -> Any:
-            try:
-                return json.loads(json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":")))
-            except Exception:  # noqa: BLE001
-                return {"unserializable": str(value)}
-
         # Authenticate user from token
         current_user = _safe_get_current_user_from_token(auth_token)
         if not current_user:
@@ -161,7 +156,7 @@ async def chat(
         progress_events: list[dict[str, Any]] = []
 
         def _on_progress(payload: dict[str, Any]) -> None:
-            progress_events.append(_json_safe(dict(payload or {})))
+            progress_events.append(json_safe(dict(payload or {})))
             if ctx is None:
                 return
             stage = str(payload.get("stage") or "")
@@ -244,9 +239,9 @@ async def chat(
         return {
             "session_id": session_id,
             "response": response_text,
-            "chunks": _json_safe(evidence.get("chunks")),
-            "subgraph": _json_safe(subgraph_data),
-            "evidence": _json_safe(evidence),
+            "chunks": json_safe(evidence.get("chunks")),
+            "subgraph": json_safe(subgraph_data),
+            "evidence": json_safe(evidence),
             "progress": progress_events,
         }
         

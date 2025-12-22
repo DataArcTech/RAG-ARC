@@ -272,7 +272,7 @@ RAG-ARC使用模块化配置系统。关键配置文件位于`config/json_config
 - `knowledge.json`：知识管理配置
 - `account.json`：用户账户配置
 - `.env`：运行时参数（模型、账号、端口等）。当需要在本地直接访问容器中的 PostgreSQL / Redis / Neo4j 时，可设置 `DEVELOP_MODE=true`（等同于开启 `EXPOSE_*` 变量），上述服务会开放到 `localhost`；默认关闭以确保安全。
-- `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED`（位于 `.env`，默认 `false`）：保持关闭即可让 DeepSearch 只依赖图谱检索；若需要在 Gap Detection 判定覆盖不足时自动调用 Tavily Web 搜索，请设置为 `true` 并提供 `TAVILY_API_KEY`。
+- DeepSearch 外部搜索：在 `config/json_configs/deepsearch_service.json` 开启（`external_channel.enabled=true` 且 `gap_detection.enable_external_on_gap=true`），并提供 `TAVILY_API_KEY`；运行时可用 `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` 覆盖开关。
 
 ### 🌐 通过 `.env` 切换模型调用方式
 

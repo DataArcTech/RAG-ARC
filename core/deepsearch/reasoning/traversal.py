@@ -5,11 +5,9 @@ Runs planner steps through GraphDeepSearchAdapter (prepare → query → filter 
 and returns traversal/evidence/reasoning records for downstream gap detection and reporting.
 Keeps the adapter abstraction swappable so semantic or relational strategies can be configured per run.
 """
-import asyncio
 import logging
 import time
 import uuid
-import weakref
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -21,18 +19,9 @@ from encapsulation.data_model.deepsearch import (
     ReasoningStepRecord,
 )
 from core.graph_adapter.base import GraphDeepSearchAdapter
+from core.graph_adapter.concurrency import adapter_lock
 
 logger = logging.getLogger(__name__)
-
-_GLOBAL_ADAPTER_LOCKS: "weakref.WeakKeyDictionary[GraphDeepSearchAdapter, asyncio.Lock]" = weakref.WeakKeyDictionary()
-
-
-def _global_adapter_lock(adapter: GraphDeepSearchAdapter) -> asyncio.Lock:
-    lock = _GLOBAL_ADAPTER_LOCKS.get(adapter)
-    if lock is None:
-        lock = asyncio.Lock()
-        _GLOBAL_ADAPTER_LOCKS[adapter] = lock
-    return lock
 
 
 @dataclass
@@ -51,7 +40,7 @@ class GraphTraversalExecutor:
     def __init__(self, adapter: GraphDeepSearchAdapter, settings: GraphTraversalSettings | None = None):
         self.adapter = adapter
         self.settings = settings or GraphTraversalSettings()
-        self._adapter_lock = _global_adapter_lock(adapter)
+        self._adapter_lock = adapter_lock(adapter)
 
     async def prepare(self, context: GraphQueryContext) -> None:
         """Ensure the adapter is warmed up for the provided context."""
@@ -139,6 +128,7 @@ class GraphTraversalExecutor:
             chunk_id = f"{step.step_id}-{uuid.uuid4().hex[:8]}"
             summary_text = summary if isinstance(summary, str) else str(summary)
             subgraph_info = self._extract_subgraph_info(filtered, subgraph)
+            triples = self._extract_triples(filtered, subgraph, limit=80)
             evidence = EvidenceChunk(
                 chunk_id=chunk_id,
                 source=context.adapter_name,
@@ -147,6 +137,7 @@ class GraphTraversalExecutor:
                 provenance={
                     "plan_step": step.step_id,
                     "query": query,
+                    "triples": triples,
                     "metadata": {
                         "_subgraph_info": subgraph_info,
                         "filter_type": filter_type,
@@ -270,6 +261,41 @@ class GraphTraversalExecutor:
                     if candidate.get(key) is not None
                 }
         return None
+
+    @staticmethod
+    def _extract_triples(filtered: Any, subgraph: Any, *, limit: int = 80) -> List[Dict[str, str]]:
+        """Normalize adapter edge exports into head/relation/tail triples."""
+
+        candidates: List[Any] = []
+        if isinstance(filtered, dict):
+            candidates.append(filtered)
+        if isinstance(subgraph, dict):
+            candidates.append(subgraph)
+
+        triples: List[Dict[str, str]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for payload in candidates:
+            edges = payload.get("edges") if isinstance(payload, dict) else None
+            if not isinstance(edges, list):
+                continue
+            for edge in edges:
+                if not isinstance(edge, dict):
+                    continue
+                relation = str(edge.get("relation") or "").strip()
+                if not relation or relation == "mentions":
+                    continue
+                head = str(edge.get("source") or "").strip()
+                tail = str(edge.get("target") or "").strip()
+                if not head or not tail:
+                    continue
+                key = (head, relation, tail)
+                if key in seen:
+                    continue
+                seen.add(key)
+                triples.append({"head": head, "relation": relation, "tail": tail})
+                if limit and len(triples) >= limit:
+                    return triples
+        return triples
 
     @staticmethod
     def _compact_chain_result(chain_result: Any) -> Any:

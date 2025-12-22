@@ -4,6 +4,7 @@ from typing import Any, Dict, Iterable, List
 from encapsulation.data_model.deepsearch import EvidenceChunk
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+from core.graph_adapter.concurrency import adapter_locked
 
 
 class PathCacheTool(GraphTool):
@@ -41,15 +42,16 @@ class PathCacheTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
-        traversal = await adapter.chain_traverse(
-            {
-                "strategy": "ppr_prefetch",
-                "question": request.question,
-                "seed_entities": request.extra.get("seed_entities") or [],
-                "max_paths": self.max_paths,
-            },
-            access_scope=request.access_scope,
-        )
+        async with adapter_locked(adapter):
+            traversal = await adapter.chain_traverse(
+                {
+                    "strategy": "ppr_prefetch",
+                    "question": request.question,
+                    "seed_entities": request.extra.get("seed_entities") or [],
+                    "max_paths": self.max_paths,
+                },
+                access_scope=request.access_scope,
+            )
         paths = self._normalize_paths(traversal.get("paths"))
         evidences = self._paths_to_evidence(paths[: self.max_paths], adapter.metadata().adapter_name)
         diagnostics = {
