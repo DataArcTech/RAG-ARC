@@ -18,6 +18,7 @@ from framework.thread_pool import get_thread_pool
 
 # Import only necessary utilities
 from .dots_ocr_utils.consts import image_extensions
+from core.prompts.ocr_prompts import VLM_OCR_MARKDOWN_PROMPT
 
 if TYPE_CHECKING:
     from config.core.file_management.parser.vlm_ocr import VLMOcrParserConfig
@@ -105,7 +106,9 @@ class VLMOcrParser(AbstractParser):
 
         logger.info(f"Parsing finished, results saved to {save_dir}")
 
-        with open(os.path.join(output_dir, f"{base_filename}.jsonl"), 'w', encoding="utf-8") as w:
+        jsonl_path = os.path.join(output_dir, f"{base_filename}.jsonl")
+        os.makedirs(os.path.dirname(jsonl_path), exist_ok=True)
+        with open(jsonl_path, 'w', encoding="utf-8") as w:
             for result in results:
                 w.write(json.dumps(result, ensure_ascii=False) + '\n')
 
@@ -197,16 +200,8 @@ class VLMOcrParser(AbstractParser):
     ) -> Dict[str, Any]:
         """Parse a single image and return OCR text result - simplified version"""
 
-        prompt = (
-            "Extract all text content from this image. Output the text in GitHub Flavored Markdown.\n"
-            "- Preserve headings, lists, and emphasis when visible.\n"
-            "- If the image contains any table/tabular content, convert it into a Markdown table using `|` pipes and a header separator row like `|---|---|`.\n"
-            "- Keep numbers, currencies, and units exactly as shown.\n"
-            "- Do not wrap the output in triple backticks.\n"
-        )
-
         # Use LLM service for inference
-        response = self.llm_service.infer(origin_image, prompt)
+        response = self.llm_service.infer(origin_image, VLM_OCR_MARKDOWN_PROMPT)
 
         # Clean up markdown code blocks from response
         cleaned_response = self._clean_markdown_blocks(response)
@@ -220,6 +215,7 @@ class VLMOcrParser(AbstractParser):
 
         # Save markdown content
         md_file_path = os.path.join(save_dir, f"{save_name}.md")
+        os.makedirs(os.path.dirname(md_file_path), exist_ok=True)
         with open(md_file_path, "w", encoding="utf-8") as md_file:
             md_file.write(cleaned_response)
 
@@ -248,4 +244,3 @@ class VLMOcrParser(AbstractParser):
             cleaned = cleaned[:-3].rstrip('\n')
 
         return cleaned
-
