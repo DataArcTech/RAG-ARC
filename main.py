@@ -47,20 +47,16 @@ class BeijingFormatter(logging.Formatter):
 # 先创建filter（UUID 格式：xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx，共36字符）
 correlation_filter = CorrelationIdFilter(uuid_length=36, default_value='NO-ID')
 
-# 配置日志文件路径（按天轮转，同时限制单文件大小）
-log_dir = Path(__file__).parent / "log"
-log_dir.mkdir(exist_ok=True)  # 确保 log 目录存在
-log_file = log_dir / "app.log"
+# 配置日志文件路径（按天文件夹 + 按大小轮转）
+log_base_dir = Path(__file__).parent / "log"
+log_base_dir.mkdir(exist_ok=True)  # 确保基础 log 目录存在
 
-# 创建自定义Handler（按天轮转 + 单文件最大100MB，保留30天）
+# 创建自定义Handler（按天文件夹 + 单文件最大100MB，保留30天）
 file_handler = DailySizeRotatingHandler(
-    filename=str(log_file),
-    when='midnight',  # 每天午夜轮转
-    interval=1,  # 每1天
+    base_dir=str(log_base_dir),
+    maxBytes=100*1024*1024,  # 单文件最大100MB
     backupCount=30,  # 保留30天的日志
-    maxBytes=100*1024*1024,  # 单文件最大100MB，超过则提前轮转
-    encoding='utf-8',
-    delay=False
+    encoding='utf-8'
 )
 file_handler.setLevel(logging.INFO)
 file_handler.setFormatter(logging.Formatter(
