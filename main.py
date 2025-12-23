@@ -32,6 +32,17 @@ from api.middleware.response_wrapper import RequestIdResponseWrapper
 from api.utils.logging_handler import DailySizeRotatingHandler
 
 
+class AutoUUIDCorrelationFilter(CorrelationIdFilter):
+    """自动生成 UUID 的 CorrelationIdFilter（当 correlation_id 不存在时）"""
+    def filter(self, record):
+        # 先调用父类方法
+        result = super().filter(record)
+        # 如果 correlation_id 是 'NO-ID'，生成一个新的 UUID
+        if hasattr(record, 'correlation_id') and record.correlation_id == 'NO-ID':
+            record.correlation_id = str(uuid.uuid4())
+        return result
+
+
 # 自定义Formatter，使用北京时间（UTC+8）
 class BeijingFormatter(logging.Formatter):
     """使用北京时间的日志格式化器"""
@@ -45,7 +56,8 @@ class BeijingFormatter(logging.Formatter):
 
 # Configure logging with correlation ID
 # 先创建filter（UUID 格式：xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx，共36字符）
-correlation_filter = CorrelationIdFilter(uuid_length=36, default_value='NO-ID')
+# 当 correlation_id 不存在时，自动生成 UUID
+correlation_filter = AutoUUIDCorrelationFilter(uuid_length=36, default_value='NO-ID')
 
 # 配置日志文件路径（按天文件夹 + 按大小轮转）
 log_base_dir = Path(__file__).parent / "log"
