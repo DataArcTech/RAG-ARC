@@ -94,7 +94,7 @@ class RAGInference(AbstractModule):
         owner_id: uuid.UUID,
         return_subgraph: bool = False,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-    ) -> tuple[str, list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    ) -> tuple[str, list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]], str | None]:
         """
         Chat with RAG system
 
@@ -104,9 +104,10 @@ class RAGInference(AbstractModule):
         return_subgraph: If True, include serialized subgraph data in the response
 
         Returns:
-            Tuple of (LLM response, chunks, subgraph_data, subgraph_info)
+            Tuple of (LLM response, chunks, subgraph_data, subgraph_info, raw_llm_response)
             - subgraph_data is None if return_subgraph=False or retriever doesn't support it
             - subgraph_info mirrors the retriever diagnostics used for graph export when available
+            - raw_llm_response is the raw LLM API response (None for non-OpenAI LLMs)
         """
         messages, chunks, subgraph_data, subgraph_info = await self._run_blocking(
             self._build_messages_and_context,
@@ -115,16 +116,51 @@ class RAGInference(AbstractModule):
             return_subgraph=return_subgraph,
             progress_callback=progress_callback,
         )
-        response = await self._run_blocking(self.llm.chat, messages)
+        
+        # 获取原始 LLM response（用于调试）
+        def _chat_with_raw():
+            if hasattr(self.llm, 'client') and hasattr(self.llm.client, 'chat'):
+                # OpenAI 客户端
+                raw_response = self.llm.client.chat.completions.create(
+                    model=self.llm.model_name,
+                    messages=messages,
+                    max_tokens=self.llm.max_tokens,
+                    temperature=self.llm.temperature,
+                )
+                response_text = raw_response.choices[0].message.content.strip()
+                # 转换为可序列化的 dict
+                raw_dict = {
+                    'id': raw_response.id,
+                    'model': raw_response.model,
+                    'choices': [{
+                        'index': c.index,
+                        'message': {'role': c.message.role, 'content': c.message.content},
+                        'finish_reason': c.finish_reason
+                    } for c in raw_response.choices],
+                    'usage': {
+                        'prompt_tokens': raw_response.usage.prompt_tokens if raw_response.usage else None,
+                        'completion_tokens': raw_response.usage.completion_tokens if raw_response.usage else None,
+                        'total_tokens': raw_response.usage.total_tokens if raw_response.usage else None,
+                    } if raw_response.usage else None,
+                }
+                return response_text, raw_dict
+            else:
+                # 其他 LLM（HuggingFace 等），只返回文本
+                response_text = self.llm.chat(messages)
+                return response_text, None
+        
+        response_text, raw_response = await self._run_blocking(_chat_with_raw)
 
-        if return_subgraph and subgraph_data is None:
-            subgraph_data = await self._run_blocking(
+        raw_mindmap_response = None
+        # 总是用 mindmap prompt 生成图，确保图和 chat 回答相关
+        if return_subgraph:
+            subgraph_data, raw_mindmap_response = await self._run_blocking(
                 self._generate_mindmap,
                 query,
-                response,
+                response_text,
                 chunks,
             )
-        return (response, chunks, subgraph_data, subgraph_info)
+        return (response_text, chunks, subgraph_data, subgraph_info, raw_response, raw_mindmap_response)
 
     def stream_chat(
         self,
@@ -457,7 +493,7 @@ class RAGInference(AbstractModule):
         )
         return overview
 
-    def _generate_mindmap(self, query: str, response: str, chunks: list[Chunk]) -> Dict[str, Any]:
+    def _generate_mindmap(self, query: str, response: str, chunks: list[Chunk]) -> tuple[Dict[str, Any], str | None]:
         """
         Generate mind map data based on query, response and chunks
 
@@ -467,7 +503,7 @@ class RAGInference(AbstractModule):
             chunks: Retrieved chunks
 
         Returns:
-            Dictionary containing chunks, nodes and edges for mind map visualization
+            Tuple of (subgraph_data, raw_mindmap_response)
         """
         try:
             # Prepare prompt for LLM to generate mind map structure
@@ -480,8 +516,12 @@ class RAGInference(AbstractModule):
             ]
 
             logger.info("Generating mind map structure with LLM...")
+            logger.debug("Mindmap prompt: %s", mindmap_prompt)
             # Note: This is called from _run_blocking, so it's already in a thread
             mindmap_response = self.llm.chat(mindmap_messages)
+
+            # Log raw mindmap response
+            logger.info("Raw mindmap response: %s", mindmap_response)
 
             # Parse LLM response to extract JSON
             mindmap_json = self._extract_json_from_response(mindmap_response)
@@ -490,7 +530,7 @@ class RAGInference(AbstractModule):
             subgraph_data = self._build_subgraph_data(chunks, mindmap_json)
 
             logger.info(f"Generated mind map: {len(subgraph_data.get('nodes', []))} nodes, {len(subgraph_data.get('edges', []))} edges")
-            return subgraph_data
+            return subgraph_data, mindmap_response
 
         except Exception as e:
             logger.error(f"Failed to generate mind map: {e}")

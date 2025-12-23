@@ -186,11 +186,25 @@ async def chat(
     chunks: list[Chunk] = []
     subgraph_data: GraphData = None
     needs_subgraph = request.return_subgraph or request.include_evidence
-    response_text, chunks, subgraph_data, subgraph_info = await rag_inference_handler.chat_async(
+    response_text, chunks, subgraph_data, subgraph_info, raw_llm_response, raw_mindmap_response = await rag_inference_handler.chat_async(
         request.query,
         owner_id=effective_owner_id,
         return_subgraph=needs_subgraph
     )
+    
+    # 记录完整的 response 信息（包括图数据）到日志
+    logger.info(
+        "Chat response: text_length=%d, chunks_count=%d, subgraph_nodes=%d, subgraph_edges=%d, raw_response=%s, raw_mindmap_response=%s",
+        len(response_text) if response_text else 0,
+        len(chunks) if chunks else 0,
+        len(subgraph_data.get("nodes", [])) if subgraph_data else 0,
+        len(subgraph_data.get("edges", [])) if subgraph_data else 0,
+        json.dumps(raw_llm_response, ensure_ascii=False, default=str) if raw_llm_response else None,
+        raw_mindmap_response if raw_mindmap_response else None
+    )
+    if subgraph_data:
+        logger.debug("Subgraph data: %s", json.dumps(subgraph_data, ensure_ascii=False, default=str))
+    
     evidence = None
     if request.include_evidence:
         graph_store = None
@@ -361,6 +375,7 @@ async def stream_chat_sse(
                 prepared["chunks"] = chunks
                 prepared["subgraph_data"] = subgraph_data
                 prepared["subgraph_info"] = subgraph_info
+                prepared["raw_llm_response"] = None  # 流式响应无法获取完整原始 response
                 _emit_progress({"stage": "prepare", "status": "end"})
                 _emit_progress({"stage": "generate", "status": "start"})
                 for chunk in token_stream:
@@ -431,12 +446,27 @@ async def stream_chat_sse(
         chunks = prepared.get("chunks") or []
         subgraph_data = prepared.get("subgraph_data")
         subgraph_info = prepared.get("subgraph_info")
+        raw_llm_response = prepared.get("raw_llm_response")
+
+        # 记录完整的 response 信息（包括图数据）到日志
+        logger.info(
+            "SSE chat response: text_length=%d, chunks_count=%d, subgraph_nodes=%d, subgraph_edges=%d, raw_response=%s",
+            len(assistant_response) if assistant_response else 0,
+            len(chunks) if chunks else 0,
+            len(subgraph_data.get("nodes", [])) if subgraph_data else 0,
+            len(subgraph_data.get("edges", [])) if subgraph_data else 0,
+            json.dumps(raw_llm_response, ensure_ascii=False, default=str) if raw_llm_response else None
+        )
+        if subgraph_data:
+            logger.debug("SSE subgraph data: %s", json.dumps(subgraph_data, ensure_ascii=False, default=str))
 
         assistant_message = ChatMessage(
             session_id=session_id,
             content={"role": "assistant", "content": assistant_response},
             source_file_ids=[chunk.id for chunk in chunks] if chunks else None,
             subgraph_data=subgraph_data if return_subgraph else None,
+            raw_llm_response=prepared.get("raw_llm_response"),
+            raw_mindmap_response=prepared.get("raw_mindmap_response"),
             created_at=datetime.now(),
         )
         assistant_message = await get_thread_pool().run_blocking(
@@ -577,16 +607,32 @@ async def stream_chat_ws(
                 f"{msg.content['role']}: {msg.content['content']}" for msg in history_messages
             )
 
-            assistant_response, chunks, subgraph_data, subgraph_info = await rag_inference_handler.chat_async(
+            assistant_response, chunks, subgraph_data, subgraph_info, raw_llm_response, raw_mindmap_response = await rag_inference_handler.chat_async(
                 history_text,
                 owner_id=effective_owner,
                 return_subgraph=(return_subgraph or include_evidence),
             )
+            
+            # 记录完整的 response 信息（包括图数据）到日志
+            logger.info(
+                "WebSocket chat response: text_length=%d, chunks_count=%d, subgraph_nodes=%d, subgraph_edges=%d, raw_response=%s, raw_mindmap_response=%s",
+                len(assistant_response) if assistant_response else 0,
+                len(chunks) if chunks else 0,
+                len(subgraph_data.get("nodes", [])) if subgraph_data else 0,
+                len(subgraph_data.get("edges", [])) if subgraph_data else 0,
+                json.dumps(raw_llm_response, ensure_ascii=False, default=str) if raw_llm_response else None,
+                raw_mindmap_response if raw_mindmap_response else None
+            )
+            if subgraph_data:
+                logger.debug("WebSocket subgraph data: %s", json.dumps(subgraph_data, ensure_ascii=False, default=str))
+            
             assistant_message = ChatMessage(
                 session_id=session_id,
                 content={"role": "assistant", "content": assistant_response},
                 source_file_ids=[chunk.id for chunk in chunks] if chunks else None,
                 subgraph_data=subgraph_data if return_subgraph else None,
+                raw_llm_response=raw_llm_response,
+                raw_mindmap_response={"response": raw_mindmap_response} if raw_mindmap_response else None,
                 created_at=datetime.now(),
             )
             assistant_message = await get_thread_pool().run_blocking(

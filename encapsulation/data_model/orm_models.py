@@ -239,6 +239,12 @@ class ChatMessage(Base):
     # Subgraph data
     subgraph_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
+    # Raw LLM response for debugging
+    raw_llm_response: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    # Raw mindmap LLM response for debugging
+    raw_mindmap_response: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
     # Timestamp
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
 

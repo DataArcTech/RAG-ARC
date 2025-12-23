@@ -188,7 +188,7 @@ async def chat(
         response_text: str = ""
         chunks: list[Chunk] = []
         subgraph_data: GraphData = None
-        response_text, chunks, subgraph_data, subgraph_info = await rag_inference.chat_async(
+        response_text, chunks, subgraph_data, subgraph_info, raw_llm_response, raw_mindmap_response = await rag_inference.chat_async(
             query,
             owner_id=current_user.id,
             return_subgraph=True,
@@ -213,6 +213,7 @@ async def chat(
                 source_file_ids=[chunk.id for chunk in chunks] if chunks else None,
                 content={"role": "assistant", "content": response_text},
                 subgraph_data=subgraph_data if subgraph_data else None,
+                raw_mindmap_response={"response": raw_mindmap_response} if raw_mindmap_response else None,
                 created_at=datetime.datetime.now()
             )
         )
