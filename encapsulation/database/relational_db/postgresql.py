@@ -16,6 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from sqlalchemy.dialects.postgresql import JSON
 
 from .base import RelationalDB
+from .schema_patches import apply_postgres_schema_patches
 from ...data_model.orm_models import (
     Base,
     User, UserStatus,
@@ -139,6 +140,7 @@ class PostgreSQLDB(RelationalDB):
 
         # Create tables using SQLAlchemy
         Base.metadata.create_all(engine)
+        apply_postgres_schema_patches(engine)
         logger.info("PostgreSQL engine initialized and tables created")
         
         # Auto-migrate: Add missing columns to existing tables

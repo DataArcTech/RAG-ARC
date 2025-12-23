@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 import uuid
 import asyncio
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -21,12 +22,14 @@ from encapsulation.data_model.orm_models import (
     FilePermission, PermissionReceiverType, PermissionType
 )
 from core.utils.thread_pool import run_blocking, run_coroutine_in_thread
+from encapsulation.message_queue.redis_task_queue import RedisTaskQueue, TaskState
 
 class Knowledge(AbstractModule):
     def __init__(self, config: 'KnowledgeConfig'):
         super().__init__(config=config)
         self.file_storage = config.file_storage_config.build()
         self.file_index = config.index_manager_config.build()
+        self.task_queue = RedisTaskQueue.from_env()
         
         # Semaphore to control concurrent indexing operations
         self.indexing_semaphore = asyncio.Semaphore(config.max_concurrent_indexing)
@@ -36,6 +39,9 @@ class Knowledge(AbstractModule):
         self._file_owner_cache: Dict[str, uuid.UUID] = {}
         self._active_deletion_tasks: Dict[str, asyncio.Task] = {}
         self._deletion_failures: Dict[str, str] = {}
+
+    def _use_celery(self) -> bool:
+        return os.getenv("TASK_QUEUE_MODE", "inprocess").lower() == "celery"
 
     def _track_background_task(self, doc_id: str, task: asyncio.Task) -> None:
         """Register a background indexing task so it can be cancelled or awaited later."""
@@ -154,18 +160,35 @@ class Knowledge(AbstractModule):
                 owner_id=user_id,
                 content_type=file.content_type
             )
-            # Start indexing in background (fire-and-forget)
-            # execute file indexing without waiting for it to complete
-            task = asyncio.create_task(self._index_file_background(doc_id))
-            self._track_background_task(doc_id, task)
-            logger.info(f"File {file.filename} uploaded with ID {doc_id}, indexing started in background")
+
+            task_run_id = self.task_queue.create_task_run(
+                task_type="index_file",
+                owner_id=user_id,
+                resource_id=doc_id,
+                metadata={"filename": relative_path or file.filename, "content_type": file.content_type},
+            )
+            if self._use_celery():
+                from application.knowledge.celery_tasks import index_file as index_file_task
+
+                queue = os.getenv("CELERY_QUEUE_INDEXING", "indexing")
+                index_file_task.apply_async(
+                    kwargs={"file_id": doc_id, "owner_id": str(user_id)},
+                    task_id=task_run_id,
+                    queue=queue,
+                )
+                logger.info("File %s uploaded with ID %s, indexing enqueued (task_run_id=%s)", file.filename, doc_id, task_run_id)
+            else:
+                # Start indexing in background (fire-and-forget)
+                task = asyncio.create_task(self._index_file_background(doc_id, task_run_id=task_run_id))
+                self._track_background_task(doc_id, task)
+                logger.info(f"File {file.filename} uploaded with ID {doc_id}, indexing started in background")
             return doc_id
 
         except Exception as e:
             logger.error(e)
             raise
 
-    async def _index_file_background(self, doc_id: str) -> Dict[str, Any]:
+    async def _index_file_background(self, doc_id: str, *, task_run_id: str | None = None) -> Dict[str, Any]:
         """Background task for indexing files with semaphore control
         
         Returns:
@@ -173,27 +196,105 @@ class Knowledge(AbstractModule):
         """
         if self._is_file_marked_for_deletion(doc_id):
             logger.info(f"Skipping indexing for file_id {doc_id} because it is marked for deletion")
+            if task_run_id:
+                self.task_queue.update_task_run(
+                    task_run_id,
+                    state=TaskState.CANCELED,
+                    error_message="file scheduled for deletion",
+                    finished=True,
+                )
             return {"success": False, "file_id": doc_id, "error_message": "file scheduled for deletion"}
 
         async with self.indexing_semaphore:
             try:
                 if self._is_file_marked_for_deletion(doc_id):
                     logger.info(f"Aborting indexing for file_id {doc_id}; deletion scheduled")
+                    if task_run_id:
+                        self.task_queue.update_task_run(
+                            task_run_id,
+                            state=TaskState.CANCELED,
+                            error_message="file scheduled for deletion",
+                            finished=True,
+                        )
                     return {"success": False, "file_id": doc_id, "error_message": "file scheduled for deletion"}
 
                 logger.info(f"Starting background indexing for file_id: {doc_id} (semaphore acquired)")
+                if task_run_id:
+                    self.task_queue.update_task_run(task_run_id, state=TaskState.RUNNING, progress_percent=1)
+                    self.task_queue.append_progress_event(
+                        flow="indexing",
+                        task_run_id=task_run_id,
+                        stage="index",
+                        status="start",
+                        percent=1,
+                        resource_id=doc_id,
+                        payload={"file_id": doc_id},
+                    )
                 # IndexManager is async but performs heavy blocking work; run it off the main event loop.
                 result = await self._run_coroutine_in_thread(self.file_index.index_file, doc_id)
                 if result.get("success"):
                     logger.info(f"Background indexing completed successfully for file_id: {doc_id}")
+                    if task_run_id:
+                        self.task_queue.update_task_run(task_run_id, state=TaskState.SUCCESS, progress_percent=100, finished=True)
+                        self.task_queue.append_progress_event(
+                            flow="indexing",
+                            task_run_id=task_run_id,
+                            stage="index",
+                            status="end",
+                            percent=100,
+                            resource_id=doc_id,
+                            payload={"file_id": doc_id, "success": True},
+                        )
                 else:
                     logger.error(f"Background indexing failed for file_id: {doc_id}, error: {result.get('error_message')}")
+                    if task_run_id:
+                        err = str(result.get("error_message") or "indexing failed")
+                        self.task_queue.update_task_run(
+                            task_run_id,
+                            state=TaskState.FAILURE,
+                            progress_percent=100,
+                            error_message=err,
+                            finished=True,
+                        )
+                        self.task_queue.append_progress_event(
+                            flow="indexing",
+                            task_run_id=task_run_id,
+                            stage="index",
+                            status="error",
+                            percent=100,
+                            resource_id=doc_id,
+                            payload={"file_id": doc_id, "success": False, "error_message": err},
+                        )
                 return result
             except asyncio.CancelledError:
                 logger.info(f"Background indexing task cancelled for file_id: {doc_id}")
+                if task_run_id:
+                    self.task_queue.update_task_run(
+                        task_run_id,
+                        state=TaskState.CANCELED,
+                        error_message="cancelled",
+                        finished=True,
+                    )
                 raise
             except Exception as e:
                 logger.error(f"Background indexing failed for file_id: {doc_id}, exception: {str(e)}")
+                if task_run_id:
+                    self.task_queue.update_task_run(
+                        task_run_id,
+                        state=TaskState.FAILURE,
+                        progress_percent=100,
+                        error_message=str(e),
+                        finished=True,
+                    )
+                    self.task_queue.append_progress_event(
+                        flow="indexing",
+                        task_run_id=task_run_id,
+                        stage="index",
+                        status="error",
+                        percent=100,
+                        resource_id=doc_id,
+                        payload={"file_id": doc_id, "success": False, "error_message": str(e)},
+                    )
                 return {"success": False, "file_id": doc_id, "error_message": str(e)}
             finally:
                 logger.debug(f"Background indexing semaphore released for file_id: {doc_id}")
@@ -296,10 +397,27 @@ class Knowledge(AbstractModule):
             FileStatus.DELETED
         )
 
-        # Schedule deletion in background
-        delete_task = asyncio.create_task(self._delete_file_background(doc_id))
-        self._track_deletion_task(doc_id, delete_task)
-        logger.info(f"Deletion scheduled for file_id: {doc_id}")
+        if self._use_celery():
+            from application.knowledge.celery_tasks import delete_file as delete_file_task
+
+            task_run_id = self.task_queue.create_task_run(
+                task_type="delete_file",
+                owner_id=user_id,
+                resource_id=doc_id,
+                metadata={"trigger": "api_delete"},
+            )
+            queue = os.getenv("CELERY_QUEUE_INDEXING", "indexing")
+            delete_file_task.apply_async(
+                kwargs={"file_id": doc_id, "owner_id": str(user_id), "delete_file_metadata": True},
+                task_id=task_run_id,
+                queue=queue,
+            )
+            logger.info("Deletion enqueued for file_id=%s (task_run_id=%s)", doc_id, task_run_id)
+        else:
+            # Schedule deletion in background
+            delete_task = asyncio.create_task(self._delete_file_background(doc_id))
+            self._track_deletion_task(doc_id, delete_task)
+            logger.info(f"Deletion scheduled for file_id: {doc_id}")
 
         response = {"status": "deleting", "file_id": doc_id}
         if failure_reason:
@@ -488,10 +606,23 @@ class Knowledge(AbstractModule):
                     invalid_files.append(f"You are not authorized to operate on this file: {file_id}")
                     continue
 
-                active_task = self._active_index_tasks.get(file_id)
-                if active_task is not None and not active_task.done():
-                    skipped_files.append(file_id)
-                    continue
+                if self._use_celery():
+                    # Cross-process de-duplication: skip when an active TaskRun exists.
+                    latest_run_id = self.task_queue.get_latest_task_run_id_for_resource(
+                        task_type="index_file",
+                        resource_id=file_id,
+                    )
+                    if latest_run_id:
+                        latest_run = self.task_queue.get_task_run(latest_run_id) or {}
+                        latest_state = str(latest_run.get("state") or "")
+                        if latest_state in {TaskState.PENDING.value, TaskState.RUNNING.value}:
+                            skipped_files.append(file_id)
+                            continue
+                else:
+                    active_task = self._active_index_tasks.get(file_id)
+                    if active_task is not None and not active_task.done():
+                        skipped_files.append(file_id)
+                        continue
 
                 # Only allow indexing for STORED or FAILED files
                 # Skip files that are already indexed or in intermediate processing states
@@ -520,8 +651,24 @@ class Knowledge(AbstractModule):
 
         # Start background indexing tasks (fire-and-forget) for files not indexed yet only.
         for file_id in valid_files:
-            task = asyncio.create_task(self._index_file_background(file_id))
-            self._track_background_task(file_id, task)
+            task_run_id = self.task_queue.create_task_run(
+                task_type="index_file",
+                owner_id=user_id,
+                resource_id=file_id,
+                metadata={"trigger": "manual"},
+            )
+            if self._use_celery():
+                from application.knowledge.celery_tasks import index_file as index_file_task
+
+                queue = os.getenv("CELERY_QUEUE_INDEXING", "indexing")
+                index_file_task.apply_async(
+                    kwargs={"file_id": file_id, "owner_id": str(user_id)},
+                    task_id=task_run_id,
+                    queue=queue,
+                )
+            else:
+                task = asyncio.create_task(self._index_file_background(file_id, task_run_id=task_run_id))
+                self._track_background_task(file_id, task)
 
         # Return immediately with basic info
         message_parts = [
@@ -533,6 +680,36 @@ class Knowledge(AbstractModule):
             message_parts.append(f"Invalid files: {'; '.join(invalid_files)}")
 
         return "\n".join(message_parts)
+
+    async def get_file_task_status(self, file_id: str, user_id: uuid.UUID) -> Dict[str, Any]:
+        metadata = await self._run_blocking(self.file_storage.get_file_metadata, file_id)
+        if not metadata:
+            raise HTTPException(status_code=404, detail="File not found")
+        if metadata.status == FileStatus.DELETED or self._is_file_marked_for_deletion(file_id):
+            raise HTTPException(status_code=404, detail="File not found")
+
+        permission_type = await self._run_blocking(self.check_file_access, file_id, user_id)
+        if permission_type is None:
+            raise HTTPException(status_code=403, detail="You are not allowed to access this file")
+
+        task_run_id = await self._run_blocking(
+            self.task_queue.get_latest_task_run_id_for_resource,
+            task_type="index_file",
+            resource_id=file_id,
+        )
+        task_run = None
+        if task_run_id:
+            task_run = await self._run_blocking(self.task_queue.get_task_run, task_run_id)
+
+        return {
+            "file_id": file_id,
+            "file_status": metadata.status.value if metadata.status else None,
+            "task_run_id": task_run_id,
+            "task_state": (task_run or {}).get("state"),
+            "progress_percent": (task_run or {}).get("progress_percent"),
+            "error_message": (task_run or {}).get("error_message"),
+            "updated_at_ms": (task_run or {}).get("updated_at_ms"),
+        }
 
     async def _index_multiple_files_background(self, file_ids: List[str], user_id: uuid.UUID):
         """Background task for indexing multiple files with semaphore control

@@ -30,6 +30,7 @@ from encapsulation.data_model.orm_models import (
     UserStatus
 )
 from config.encapsulation.database.relational_db.postgresql_config import PostgreSQLConfig
+from encapsulation.database.relational_db.schema_patches import apply_postgres_schema_patches
 
 logging.basicConfig(
     level=logging.INFO,
@@ -194,6 +195,7 @@ def main():
         # Create tables if they don't exist
         logger.info("Creating database schema...")
         Base.metadata.create_all(db.engine)
+        apply_postgres_schema_patches(db.engine)
         logger.info("Database schema ready")
         
         # Start transaction
@@ -254,4 +256,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

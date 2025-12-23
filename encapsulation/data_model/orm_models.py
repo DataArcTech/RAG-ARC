@@ -520,3 +520,73 @@ class FileMindmapCache(Base):
 
     # Relationship
     file: Mapped["FileMetadata"] = relationship()
+
+
+# ==================== TASK RUNS & PROGRESS EVENTS ====================
+
+class TaskRunState(enum.Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    SUCCESS = "SUCCESS"
+    FAILURE = "FAILURE"
+    CANCELED = "CANCELED"
+
+
+class TaskRun(Base):
+    """
+    Persistent task run record for long-running background tasks.
+
+    Redis is used as the short-term store; this table receives periodic syncs.
+    """
+
+    __tablename__ = "task_run"
+
+    task_run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    task_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    owner_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), index=True)
+    resource_id: Mapped[Optional[str]] = mapped_column(String(255), index=True)
+
+    state: Mapped[TaskRunState] = mapped_column(SQLEnum(TaskRunState), default=TaskRunState.PENDING, nullable=False)
+    progress_percent: Mapped[Optional[int]] = mapped_column(Integer)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+    result_ref: Mapped[Optional[str]] = mapped_column(String(500))
+    task_metadata: Mapped[dict] = mapped_column("task_metadata", JSON, nullable=False, default=dict)
+
+
+class TaskProgressEvent(Base):
+    """Append-only progress events for a task run (synced from Redis Streams)."""
+
+    __tablename__ = "task_progress_event"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+
+    # Redis stream entry id used for idempotent sync
+    stream_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+
+    task_run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("task_run.task_run_id"), index=True)
+    flow: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    resource_id: Mapped[Optional[str]] = mapped_column(String(255), index=True)
+
+    seq: Mapped[Optional[int]] = mapped_column(Integer)
+    ts_ms: Mapped[Optional[int]] = mapped_column(BigInteger)
+    stage: Mapped[Optional[str]] = mapped_column(String(100))
+    status: Mapped[Optional[str]] = mapped_column(String(50))
+    percent: Mapped[Optional[int]] = mapped_column(Integer)
+
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+
+
+class TaskSyncOffset(Base):
+    """Checkpoint table for Redis->Postgres sync scripts."""
+
+    __tablename__ = "task_sync_offset"
+
+    stream: Mapped[str] = mapped_column(String(200), primary_key=True)
+    last_id: Mapped[str] = mapped_column(String(64), nullable=False, default="0-0")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)

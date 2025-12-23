@@ -59,6 +59,16 @@ class FileListResponse(BaseModel):
     files: List[FileInfo]
     total: int
 
+
+class FileTaskStatusResponse(BaseModel):
+    file_id: str
+    file_status: Optional[str] = None
+    task_run_id: Optional[str] = None
+    task_state: Optional[str] = None
+    progress_percent: Optional[int] = None
+    error_message: Optional[str] = None
+    updated_at_ms: Optional[int] = None
+
 @router.post(
     "",
     status_code=status.HTTP_201_CREATED,
@@ -106,6 +116,28 @@ async def upload_file(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to upload file: {str(e)}",
+        )
+
+
+@router.get("/{file_id}/task", response_model=FileTaskStatusResponse, status_code=status.HTTP_200_OK)
+async def get_file_task_status(
+    file_id: str,
+    user: Annotated[User | None, Depends(get_current_user)],
+):
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+        )
+    try:
+        status_payload = await get_knowledge_handler().get_file_task_status(file_id, user.id)
+        return FileTaskStatusResponse(**status_payload)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get task status: {str(e)}",
         )
 
 

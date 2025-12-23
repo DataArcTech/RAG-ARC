@@ -18,9 +18,6 @@ Example usage:
         --upload-file test/test.json \
         --retries 10 --wait-seconds 6
 """
-
-from __future__ import annotations
-
 import argparse
 import json
 import sys

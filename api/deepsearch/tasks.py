@@ -1,11 +1,13 @@
 """Async DeepSearch task registry for SSE progress streaming."""
 import asyncio
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from api.sse import sse_json
+from encapsulation.message_queue.redis_task_queue import RedisTaskQueue
 
 def new_run_id() -> str:
     return uuid.uuid4().hex
@@ -80,6 +82,25 @@ class DeepSearchTaskRegistry:
         }
         info.last_progress = payload
         info.append_event(event)
+        try:
+            progress = payload.get("progress") if isinstance(payload, dict) else None
+            percent = None
+            if isinstance(progress, dict) and "percent" in progress:
+                try:
+                    percent = int(progress.get("percent"))
+                except Exception:
+                    percent = None
+            _get_redis_task_queue().append_progress_event(
+                flow="deepsearch",
+                task_run_id=run_id,
+                stage=str(payload.get("stage") or event_type),
+                status=str(event_type),
+                percent=percent,
+                resource_id=run_id,
+                payload=payload if isinstance(payload, dict) else {"payload": payload},
+            )
+        except Exception:
+            pass
         async with info.cond:
             info.cond.notify_all()
 
@@ -96,3 +117,21 @@ class DeepSearchTaskRegistry:
 
 
 TASKS = DeepSearchTaskRegistry()
+
+_TASK_QUEUE_FINGERPRINT: tuple[str, str, str, str, str] | None = None
+_TASK_QUEUE: RedisTaskQueue | None = None
+
+
+def _get_redis_task_queue() -> RedisTaskQueue:
+    global _TASK_QUEUE, _TASK_QUEUE_FINGERPRINT
+    fingerprint = (
+        os.getenv("MQ_NAMESPACE", "rag-arc:mq"),
+        os.getenv("MQ_TASK_RUN_TTL_SECONDS", str(24 * 3600)),
+        os.getenv("MQ_PROGRESS_TTL_SECONDS", str(24 * 3600)),
+        os.getenv("MQ_RESULT_TTL_SECONDS", str(24 * 3600)),
+        os.getenv("MQ_STREAM_MAXLEN", "20000"),
+    )
+    if _TASK_QUEUE is None or fingerprint != _TASK_QUEUE_FINGERPRINT:
+        _TASK_QUEUE = RedisTaskQueue.from_env()
+        _TASK_QUEUE_FINGERPRINT = fingerprint
+    return _TASK_QUEUE
