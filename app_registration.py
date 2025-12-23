@@ -4,6 +4,7 @@ from pathlib import Path
 from config.application.account_config import AccountConfig
 from config.application.knowledge_config import KnowledgeConfig
 from config.application.rag_inference_config import RAGInferenceConfig
+from config.application.deepsearch_config import DeepSearchServiceConfig
 from config.application.session_config import ChatSessionConfig
 from config.application.chat_message_config import ChatMessageManagerConfig
 from framework.register import Register
@@ -106,6 +107,14 @@ def initialize():
 
     if not knowledge_ready:
         logger.error("Knowledge module failed to initialize; CLI ingestion operations will be unavailable.")
+
+    deepsearch_config_path = _resolve_config_path(
+        "DEEPSEARCH_SERVICE_CONFIG_PATH",
+        "config/json_configs/deepsearch_service.json",
+    )
+    deepsearch_ready = _register_app("deepsearch_service", deepsearch_config_path, DeepSearchServiceConfig)
+    if not deepsearch_ready:
+        logger.warning("DeepSearch service failed to initialize; HTTP/CLI deepsearch endpoints will be unavailable.")
 
     _register_app(
         "account",

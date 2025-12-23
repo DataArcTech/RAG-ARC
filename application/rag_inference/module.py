@@ -1,9 +1,11 @@
 from encapsulation.data_model.schema import Chunk
-from typing import TYPE_CHECKING, Optional, Dict, Any, List
+from typing import TYPE_CHECKING, Optional, Dict, Any, List, Iterator, Callable
 import logging
+import time
 import uuid
 import json
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from framework.module import AbstractModule
 from core.utils.owner_guard import normalize_owner_id, is_admin_owner, get_admin_owner_id
@@ -50,165 +52,294 @@ class RAGInference(AbstractModule):
         """Run a blocking function in a separate thread to avoid blocking the event loop."""
         return await get_thread_pool().run_blocking(func, *args, **kwargs)
 
-    def chat(self, query: str, owner_id: uuid.UUID, return_subgraph: bool = False) -> tuple[str, list[Chunk], Optional[Dict[str, Any]]]:
+    def chat(
+        self,
+        query: str,
+        owner_id: uuid.UUID,
+        return_subgraph: bool = False,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> tuple[str, list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """
         Chat with RAG system (synchronous version, kept for backward compatibility).
         For async non-blocking version, use chat_async().
         """
-        # This is a synchronous wrapper that will be deprecated
-        # New code should use chat_async()
-        import asyncio
         try:
-            loop = asyncio.get_event_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        return loop.run_until_complete(self.chat_async(query, owner_id, return_subgraph))
+            return asyncio.run(
+                self.chat_async(
+                    query,
+                    owner_id,
+                    return_subgraph,
+                    progress_callback=progress_callback,
+                )
+            )
 
-    async def chat_async(self, query: str, owner_id: uuid.UUID, return_subgraph: bool = False) -> tuple[str, list[Chunk], Optional[Dict[str, Any]]]:
+        def _run_in_thread():
+            return asyncio.run(
+                self.chat_async(
+                    query,
+                    owner_id,
+                    return_subgraph,
+                    progress_callback=progress_callback,
+                )
+            )
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(_run_in_thread).result()
+
+    async def chat_async(
+        self,
+        query: str,
+        owner_id: uuid.UUID,
+        return_subgraph: bool = False,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> tuple[str, list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """
         Chat with RAG system
 
         Args:
             query: User query
             owner_id: User ID for user-isolated retrieval
-            return_subgraph: If True, return subgraph visualization data
+        return_subgraph: If True, include serialized subgraph data in the response
 
         Returns:
-            Tuple of (LLM response, chunks, subgraph_data)
+            Tuple of (LLM response, chunks, subgraph_data, subgraph_info)
             - subgraph_data is None if return_subgraph=False or retriever doesn't support it
+            - subgraph_info mirrors the retriever diagnostics used for graph export when available
         """
-        # Run query rewriting asynchronously to avoid blocking the event loop
-        rewritten_query = await self._run_blocking(
-            self.query_rewriter.rewrite_query,
-            query
-        )
-
-        # Run retrieval asynchronously to avoid blocking the event loop
-        chunks: list[Chunk] = await self._run_blocking(
-            self.retriever.invoke,
-            rewritten_query,
+        messages, chunks, subgraph_data, subgraph_info = await self._run_blocking(
+            self._build_messages_and_context,
+            query=query,
             owner_id=owner_id,
-            return_subgraph_info=return_subgraph
+            return_subgraph=return_subgraph,
+            progress_callback=progress_callback,
         )
+        response = await self._run_blocking(self.llm.chat, messages)
 
-        # Admin/global mode: if multipath returns nothing, fall back to the graph retriever.
-        if owner_id is not None and is_admin_owner(owner_id) and not chunks and self.graph_retriever is not None:
-            logger.info("Admin/global mode: multipath returned 0 results, falling back to graph retriever")
-            graph_chunks = await self._run_blocking(
-                self.graph_retriever.invoke,
-                rewritten_query,
-                owner_id=owner_id,
-                return_subgraph_info=return_subgraph
-            )
-            if graph_chunks:
-                chunks = graph_chunks
-
-        chunks = self._filter_chunks_by_file_status(chunks)
-
-        # Extract subgraph info BEFORE reranking (to avoid losing it after reordering)
-        subgraph_info = None
-        if return_subgraph and chunks:
-            for chunk in chunks:
-                if hasattr(chunk, 'metadata') and chunk.metadata and '_subgraph_info' in chunk.metadata:
-                    subgraph_info = chunk.metadata.pop('_subgraph_info')
-                    logger.info("Extracted subgraph info before reranking")
-                    break
-
-        # Run reranking asynchronously to avoid blocking the event loop
-        chunks = await self._run_blocking(
-            self.reranker.rerank,
-            rewritten_query,
-            chunks
-        )
-
-        # Export subgraph data if subgraph_info is available
-        subgraph_data = None
-        if subgraph_info:
-            # Import GraphExporter here to avoid circular dependency
-            try:
-                graph_store = self._locate_graph_store()
-                if graph_store:
-                    # Import appropriate GraphExporter based on graph_store type
-                    # Check by class name to avoid import issues
-                    graph_store_class_name = graph_store.__class__.__name__
-
-                    if graph_store_class_name == 'PrunedHippoRAGNeo4jStore':
-                        from encapsulation.database.utils.graph_export_utils_neo4j import GraphExporterNeo4j as GraphExporter
-                        # Neo4j version uses node IDs (strings)
-                        # Run graph export asynchronously to avoid blocking
-                        subgraph_data = await self._run_blocking(
-                            GraphExporter.export_subgraph,
-                            graph_store=graph_store,
-                            subgraph_node_ids=set(subgraph_info['subgraph_nodes']),
-                            seed_entity_ids=set(subgraph_info['seed_entity_ids']),
-                            retrieved_chunk_ids=subgraph_info['retrieved_chunk_ids'],
-                            node_ppr_scores=subgraph_info.get('node_ppr_scores', {})
-                        )
-                    else:
-                        from encapsulation.database.utils.graph_export_utils import GraphExporter
-                        # igraph version uses node indices (integers)
-                        # Run graph export asynchronously to avoid blocking
-                        subgraph_data = await self._run_blocking(
-                            GraphExporter.export_subgraph,
-                            graph_store=graph_store,
-                            subgraph_node_indices=set(subgraph_info['subgraph_nodes']),
-                            seed_entity_ids=set(subgraph_info['seed_entity_ids']),
-                            retrieved_chunk_ids=subgraph_info['retrieved_chunk_ids'],
-                            node_ppr_scores=subgraph_info.get('node_ppr_scores', {})
-                        )
-                    logger.info(f"Exported subgraph: {len(subgraph_data.get('nodes', []))} nodes, {len(subgraph_data.get('edges', []))} edges")
-                else:
-                    logger.warning("Graph store not found in retriever")
-            except Exception as e:
-                logger.warning(f"Failed to export subgraph: {e}")
-                import traceback
-                logger.debug(f"Traceback: {traceback.format_exc()}")
-
-        # Format chunks and query as messages
-        messages = []
-        prompt = """Please write your response in the following strict format.
-
-<Write your detailed answer here.>
-Do not include any concluding or summarizing phrases such as "in summary", "in conclusion", "to sum up", etc., in this section.
-All summary or conclusion content must appear after the divider below.
-
----summary---
-<Write a concise summary of the above content here.>
-
-IMPORTANT:
-- The line '---summary---' must appear exactly as shown (with three dashes before and after the word 'summary').
-- Do not change, remove, or translate this divider.
-- Do not include any extra text outside this format.
-"""
-
-        for i, chunk in enumerate(chunks):
-            chunk_content = f"Chunk {i+1}:\n{chunk.content}"
-            messages.append({"role": "user", "content": chunk_content})
-        messages.append({"role": "user", "content": f"{prompt}\nBased on the above chunks, please answer question: {query}"})
-        logger.info(f"Invoked chat with query: {query} (owner_id={owner_id})")
-        logger.info(f"Query rewritten to: {rewritten_query}")
-        logger.info(f"Retrieved chunks: {[getattr(chunk, 'content', str(chunk)) for chunk in chunks]}")
-        logger.info(f"Reranked chunks: {[getattr(chunk, 'content', str(chunk)) for chunk in chunks]}")
-        logger.info(f"Prepared messages for LLM: {messages}")
-        
-        # Run LLM chat asynchronously to avoid blocking the event loop
-        response = await self._run_blocking(
-            self.llm.chat,
-            messages
-        )
-        
-        # Generate mind map data if return_subgraph is True and subgraph_data is None
-        # (fallback to mindmap generation if graph export failed or wasn't available)
         if return_subgraph and subgraph_data is None:
             subgraph_data = await self._run_blocking(
                 self._generate_mindmap,
                 query,
                 response,
-                chunks
+                chunks,
             )
-        
-        return (response, chunks, subgraph_data)
+        return (response, chunks, subgraph_data, subgraph_info)
+
+    def stream_chat(
+        self,
+        query: str,
+        owner_id: uuid.UUID,
+        return_subgraph: bool = False,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> tuple[Iterator[str], list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Stream chat completion from the configured LLM."""
+
+        messages, chunks, subgraph_data, subgraph_info = self._build_messages_and_context(
+            query=query,
+            owner_id=owner_id,
+            return_subgraph=return_subgraph,
+            progress_callback=progress_callback,
+        )
+        return (self.llm.stream_chat(messages), chunks, subgraph_data, subgraph_info)
+
+    @staticmethod
+    def _emit_progress(
+        callback: Optional[Callable[[Dict[str, Any]], None]],
+        payload: Dict[str, Any],
+    ) -> None:
+        if callback is None:
+            return
+        try:
+            enriched = dict(payload or {})
+            enriched.setdefault("v", 1)
+            enriched.setdefault("type", "progress")
+            enriched.setdefault("ts_ms", int(time.time() * 1000))
+            callback(enriched)
+        except Exception:  # noqa: BLE001
+            return
+
+    def _build_messages_and_context(
+        self,
+        *,
+        query: str,
+        owner_id: uuid.UUID,
+        return_subgraph: bool,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> tuple[List[Dict[str, str]], list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        def _chunk_preview(chunk: Chunk, *, max_chars: int = 160) -> str:
+            metadata = getattr(chunk, "metadata", None) or {}
+            text = metadata.get("prompt_text") or metadata.get("index_text") or getattr(chunk, "content", None) or ""
+            text = str(text)
+            text = " ".join(text.split())
+            if max_chars <= 0:
+                return ""
+            if len(text) <= max_chars:
+                return text
+            return text[:max_chars].rstrip() + "…"
+
+        def _chunk_brief(chunk: Chunk) -> Dict[str, Any]:
+            metadata = getattr(chunk, "metadata", None) or {}
+            def _num(value: Any) -> float | None:
+                if value is None:
+                    return None
+                if isinstance(value, bool):
+                    return float(value)
+                if isinstance(value, (int, float)):
+                    return float(value)
+                try:
+                    return float(value)
+                except Exception:  # noqa: BLE001
+                    return None
+
+            return {
+                "id": str(getattr(chunk, "id", "") or ""),
+                "score": _num(metadata.get("score")),
+                "rerank_score": _num(metadata.get("rerank_score")),
+                "chunk_role": metadata.get("chunk_role"),
+                "semantic_unit_type": metadata.get("semantic_unit_type"),
+                "filename": metadata.get("filename") or metadata.get("source_file_id"),
+                "preview": _chunk_preview(chunk),
+            }
+
+        self._emit_progress(progress_callback, {"stage": "rewrite", "status": "start"})
+        rewrite_start = time.perf_counter()
+        rewritten_query = self.query_rewriter.rewrite_query(query)
+        self._emit_progress(
+            progress_callback,
+            {
+                "stage": "rewrite",
+                "status": "end",
+                "duration_ms": int((time.perf_counter() - rewrite_start) * 1000),
+                "rewritten_query": rewritten_query,
+            },
+        )
+
+        self._emit_progress(progress_callback, {"stage": "retrieve", "status": "start"})
+        retrieve_start = time.perf_counter()
+        chunks: list[Chunk] = self.retriever.invoke(
+            rewritten_query,
+            owner_id=owner_id,
+            return_subgraph_info=return_subgraph,
+        )
+        retriever_info = None
+        try:
+            if hasattr(self.retriever, "get_multipath_info"):
+                retriever_info = self.retriever.get_multipath_info()
+        except Exception:  # noqa: BLE001
+            retriever_info = None
+        self._emit_progress(
+            progress_callback,
+            {
+                "stage": "retrieve",
+                "status": "end",
+                "duration_ms": int((time.perf_counter() - retrieve_start) * 1000),
+                "chunks": len(chunks),
+                "retriever": retriever_info,
+                "top_chunks": [_chunk_brief(chunk) for chunk in chunks[: min(len(chunks), 10)]],
+            },
+        )
+
+        if owner_id is not None and is_admin_owner(owner_id) and not chunks and self.graph_retriever is not None:
+            logger.info("Admin/global mode: multipath returned 0 results, falling back to graph retriever")
+            graph_chunks = self.graph_retriever.invoke(
+                rewritten_query,
+                owner_id=owner_id,
+                return_subgraph_info=return_subgraph,
+            )
+            if graph_chunks:
+                chunks = graph_chunks
+
+        chunks = self._filter_chunks_by_file_status(chunks)
+        subgraph_info = self._consume_subgraph_info(chunks)
+        self._emit_progress(
+            progress_callback,
+            {"stage": "rerank", "status": "start", "chunks_in": len(chunks)},
+        )
+        rerank_start = time.perf_counter()
+        chunks = self.reranker.rerank(rewritten_query, chunks)
+        reranker_info = None
+        try:
+            reranker_info = self.reranker.get_reranker_info()
+        except Exception:  # noqa: BLE001
+            reranker_info = None
+        self._emit_progress(
+            progress_callback,
+            {
+                "stage": "rerank",
+                "status": "end",
+                "duration_ms": int((time.perf_counter() - rerank_start) * 1000),
+                "chunks_out": len(chunks),
+                "reranker": reranker_info,
+                "top_chunks": [_chunk_brief(chunk) for chunk in chunks[: min(len(chunks), 10)]],
+            },
+        )
+
+        subgraph_data = None
+        if subgraph_info and return_subgraph:
+            self._emit_progress(progress_callback, {"stage": "subgraph_export", "status": "start"})
+            export_start = time.perf_counter()
+            try:
+                graph_store = self._locate_graph_store()
+                if graph_store:
+                    graph_store_class_name = graph_store.__class__.__name__
+                    if graph_store_class_name == "PrunedHippoRAGNeo4jStore":
+                        from encapsulation.database.utils.graph_export_utils_neo4j import (
+                            GraphExporterNeo4j as GraphExporter,
+                        )
+
+                        subgraph_data = GraphExporter.export_subgraph(
+                            graph_store=graph_store,
+                            subgraph_node_ids=set(subgraph_info["subgraph_nodes"]),
+                            seed_entity_ids=set(subgraph_info["seed_entity_ids"]),
+                            retrieved_chunk_ids=subgraph_info["retrieved_chunk_ids"],
+                            node_ppr_scores=subgraph_info.get("node_ppr_scores", {}),
+                        )
+                    else:
+                        from encapsulation.database.utils.graph_export_utils import GraphExporter
+
+                        subgraph_data = GraphExporter.export_subgraph(
+                            graph_store=graph_store,
+                            subgraph_node_indices=set(subgraph_info["subgraph_nodes"]),
+                            seed_entity_ids=set(subgraph_info["seed_entity_ids"]),
+                            retrieved_chunk_ids=subgraph_info["retrieved_chunk_ids"],
+                            node_ppr_scores=subgraph_info.get("node_ppr_scores", {}),
+                        )
+                    if subgraph_data is not None:
+                        logger.info(
+                            "Exported subgraph: %d nodes, %d edges",
+                            len(subgraph_data.get("nodes", [])),
+                            len(subgraph_data.get("edges", [])),
+                        )
+                else:
+                    logger.warning("Graph store not found in retriever")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to export subgraph: %s", exc)
+                import traceback
+                logger.debug("Traceback: %s", traceback.format_exc())
+            self._emit_progress(
+                progress_callback,
+                {
+                    "stage": "subgraph_export",
+                    "status": "end",
+                    "duration_ms": int((time.perf_counter() - export_start) * 1000),
+                    "nodes": len((subgraph_data or {}).get("nodes", []) or []),
+                    "edges": len((subgraph_data or {}).get("edges", []) or []),
+                },
+            )
+
+        messages: List[Dict[str, str]] = []
+        for i, chunk in enumerate(chunks):
+            metadata = getattr(chunk, "metadata", None) or {}
+            chunk_text = metadata.get("prompt_text") or metadata.get("index_text")
+            if not isinstance(chunk_text, str) or not chunk_text.strip():
+                chunk_text = chunk.content
+            messages.append({"role": "user", "content": f"Chunk {i+1}:\n{chunk_text}"})
+        messages.append({"role": "user", "content": f"Based on the above chunks, please answer question: {rewritten_query}"})
+        logger.info("Invoked chat with query: %s (owner_id=%s)", query, owner_id)
+        logger.info("Query rewritten to: %s", rewritten_query)
+        logger.info("Prepared %d messages for LLM", len(messages))
+        return (messages, chunks, subgraph_data, subgraph_info)
 
     def _locate_graph_store(self):
         """Locate the configured graph store if one exists."""
@@ -263,6 +394,18 @@ IMPORTANT:
         if len(filtered_chunks) != len(chunks):
             logger.info(f"Filtered out {len(chunks) - len(filtered_chunks)} chunks from deleting files")
         return filtered_chunks
+
+    @staticmethod
+    def _consume_subgraph_info(chunks: List[Chunk]) -> Optional[Dict[str, Any]]:
+        """Pop and return embedded subgraph diagnostics when available."""
+
+        for chunk in chunks:
+            metadata = getattr(chunk, "metadata", None) or {}
+            if "_subgraph_info" in metadata:
+                info = metadata.pop("_subgraph_info")
+                logger.info("Extracted subgraph info before reranking")
+                return info
+        return None
 
     def export_graph_overview(
         self,

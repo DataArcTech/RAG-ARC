@@ -210,6 +210,8 @@ cd RAG-ARC
 
 ### 💻 本地安装
 
+> 配置 `.env` 可参考 [env-en.md](env-en.md)（英文）或 [env-zh.md](env-zh.md)（中文）。
+
 ```bash
 # 1. 克隆仓库
 git clone https://github.com/DataArcTech/RAG-ARC.git
@@ -225,9 +227,12 @@ curl -LsSf https://astral.ac.cn/uv/install.sh | sh
 # 3. 安装依赖（uv会自动创建虚拟环境）
 uv sync
 
+# 可选：安装开发依赖（用于运行测试）
+uv sync --extra dev
+
 # 4. 复制并配置环境变量
 cp .env.example .env
-# 编辑.env以配置您的设置
+# 根据 env-zh.md 填写模型/API Key，其余保持默认即可
 ```
 
 ### 🔐 可选：管理员视角
@@ -267,6 +272,7 @@ RAG-ARC使用模块化配置系统。关键配置文件位于`config/json_config
 - `knowledge.json`：知识管理配置
 - `account.json`：用户账户配置
 - `.env`：运行时参数（模型、账号、端口等）。当需要在本地直接访问容器中的 PostgreSQL / Redis / Neo4j 时，可设置 `DEVELOP_MODE=true`（等同于开启 `EXPOSE_*` 变量），上述服务会开放到 `localhost`；默认关闭以确保安全。
+- DeepSearch 外部搜索：在 `config/json_configs/deepsearch_service.json` 开启（`external_channel.enabled=true` 且 `gap_detection.enable_external_on_gap=true`），并提供 `TAVILY_API_KEY`；运行时可用 `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` 覆盖开关。
 
 ### 🌐 通过 `.env` 切换模型调用方式
 
@@ -343,6 +349,21 @@ CLI 仍会连接 `.env` 中配置的 PostgreSQL / Redis / Neo4j / MinIO 等基�
 
 > ⚠️ 删除提示：`uv run rag-arc delete-file FILE_ID` **仅会把文件状态标记为 `DELETED`**，方便本地快速验证检索隔离，不会执行索引、向量库、图谱或 Blob 的真正清理。若需完整的后台删除流程，请调用 HTTP API `DELETE /knowledge/{file_id}`；CLI 不再支持触发全量清理。
 
+#### DeepSearch MCP 工具服务器
+
+- 通过 `uv run rag-arc tool-mcp-server --transport stdio` 启动 FastMCP 服务器，向上游智能体暴露 DeepSearch 内置工具。服务默认读取 `config/json_configs/deepsearch_tool_mcp_server.json`（可用 `DEEPSEARCH_TOOL_MCP_CONFIG_PATH` 覆盖），从而与 HTTP/CLI 入口共用相同的 LLM 和图适配器配置。
+- **ToolManager 默认直接在本地进程中执行所有内建工具**，只有当配置了 `mcp_client`、在某个工具上设置 `mcp_only/mcp_fallback`，或通过 `remote_tools` 注册外部描述符时，才会把调用通过 MCP server 转发出去。因此 MCP 服务器不是必需组件，仅在需要远程托管/复用工具时才需要提前启动。
+- JSON 配置中的 `tool_manager` 字段遵循 `config/application/deepsearch_config.py` 的同一结构，可在此关闭/调整单个工具或注入远程 MCP 描述符，避免重复粘贴环境变量。
+- 需要只暴露部分工具时设置 `DEEPSEARCH_TOOL_MCP_TOOLS`（逗号分隔）；留空则默认启用全部内建工具。
+- HTTP、CLI、MCP 的 DeepSearch/Chat 响应现在都会输出统一的 `evidence` 字段（chunk、三元组、种子实体、图统计）。HTTP 端通过 `include_evidence=true`（可配合 `return_subgraph=true`）启用，CLI 使用 `--with-evidence`，MCP 接口默认携带该信息。
+- 可通过 `ENABLE_ALL_EVIDENCE`、`CHAT_TOP_CHUNKS`、`CHAT_TOP_TRIPLES`、`CHAT_TOP_SEED_ENTITIES`、`DEEPSEARCH_TOP_CHUNKS`、`DEEPSEARCH_TOP_TRIPLES` 等环境变量限制证据负载大小；开启 `ENABLE_ALL_EVIDENCE=true` 时不再截断。
+
+#### Chat MCP 服务器
+
+- 通过 `uv run rag-arc chat-mcp-server --transport stdio` 将带鉴权的聊天流程（会话创建 + chat 调用）以 MCP 方式暴露，具体实现在 `api/mcp/server.py` 中。
+- 若切换到 SSE/HTTP 传输，默认监听 `127.0.0.1:8785`，URL 前缀为 `mcp/chat`，因此不会与工具 MCP 服务器（8765）占用同一端口。
+- 当需要让外部代理通过 MCP 直接驱动 RAG-ARC 聊天能力时，可使用该入口而无需额外的 HTTP/WS 适配层。
+
 > 📚 更详细的命令说明（单文件导入、文件管理、触发索引、图导出等）见 `cli/README-CN.md`。
 
 ### 🧪 使用示例
@@ -358,6 +379,18 @@ curl -X POST "http://localhost:8000/rag_inference/chat" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"query": "什么是RAG-ARC?"}'
+
+# 请求证据包（chunks/三元组/种子实体/子图）
+curl -X POST "http://localhost:8000/rag_inference/chat" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "什么是RAG-ARC?", "return_subgraph": true, "include_evidence": true}'
+
+# DeepSearch 报告 + 证据
+curl -X POST "http://localhost:8000/deepsearch/run" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "什么是RAG-ARC?", "include_evidence": true}'
 
 # 获取Token（登录）
 curl -X POST "http://localhost:8000/auth/token" \
@@ -378,20 +411,44 @@ curl -X GET "http://localhost:8000/session/YOUR_SESSION_ID/messages" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
 ```
 
-### WebSocket流式对话（Python示例，需先安装websockets库）：
+### SSE 流式对话（Python 示例）：
 
 ```python
-import asyncio
-import websockets
+import json
+import httpx
 
-async def chat():
-    uri = 'ws://localhost:8000/rag_inference/stream_chat/YOUR_SESSION_ID'
-    async with websockets.connect(uri, additional_headers=[('Cookie', 'auth_token=YOUR_ACCESS_TOKEN')]) as ws:
-        await ws.send('你好，RAG-ARC!')
-        print(await ws.recv())
+def chat_sse(session_id: str, access_token: str):
+    url = f"http://localhost:8000/rag_inference/stream_chat/{session_id}"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    params = {"query": "你好，RAG-ARC!", "include_evidence": "true"}
 
-asyncio.run(chat())
+    with httpx.stream("GET", url, headers=headers, params=params, timeout=120.0) as r:
+        r.raise_for_status()
+        for line in r.iter_lines():
+            if not line:
+                continue
+            if not line.startswith("data:"):
+                continue
+            data = line.split(":", 1)[1].strip()
+            if data == "[DONE]":
+                break
+            chunk = json.loads(data)
+            delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+            if delta.get("content"):
+                print(delta["content"], end="", flush=True)
+            # Optional: evidence/subgraph is sent via OpenAI-compatible tool_calls.
+            tool_calls = delta.get("tool_calls") or []
+            for tool_call in tool_calls:
+                fn = (tool_call or {}).get("function") or {}
+                if fn.get("name") == "rag_arc_payload":
+                    payload = json.loads(fn.get("arguments") or "{}")
+                    # payload includes message/chunks/subgraph/evidence (same as non-stream)
+        print()
+
+chat_sse("YOUR_SESSION_ID", "YOUR_ACCESS_TOKEN")
 ```
+
+> 证据包：`POST /rag_inference/chat` 会直接返回完整的 `evidence`。对 SSE 流式而言，当 `include_evidence=true`（和/或 `return_subgraph=true`）时，服务端会在结束前发送一条 OpenAI 兼容的 chunk，其 `delta.tool_calls[].function.name == "rag_arc_payload"`，并在 `function.arguments`（JSON 字符串）中携带同样的 payload。为了改善前端体验，流中还会在改写/检索/重排阶段额外发送进度 tool-call：`delta.tool_calls[].function.name == "rag_arc_progress"`（同样通过 `function.arguments` 传 JSON 字符串，采用可扩展 envelope：`v=1`、`type=\"progress\"`，并带 `request_id`/`seq` 便于排序与聚合）。
 
 ## 🛠️ 技术栈
 
@@ -458,7 +515,7 @@ RAG-ARC 提供了全面的 REST API，包含以下关键端点：
 
 ### RAG 推理
 - `POST /rag_inference/chat`：与 RAG 系统对话
-- `WebSocket /rag_inference/stream_chat/{session_id}`：基于 WebSocket 的流式对话
+- `GET /rag_inference/stream_chat/{session_id}`：基于 SSE 的流式对话
 
 ### 用户管理
 - `POST /auth/register`：用户注册
@@ -500,6 +557,29 @@ RAG-ARC 包含内置的监控功能：
 3. 💾 提交更改（`git commit -m 'Add some AmazingFeature'`）
 4. 📤 推送到分支（`git push origin feature/AmazingFeature`）
 5. 🔄 打开Pull Request
+
+### 🧪 运行测试
+
+要运行测试套件，首先需要安装开发依赖：
+
+```bash
+# 安装开发依赖（包含 pytest 和 pytest-asyncio）
+uv sync --extra dev
+
+# 运行所有测试
+uv run pytest
+
+# 运行特定测试文件
+uv run pytest test/deepsearch/test_planner.py
+
+# 运行测试并显示详细输出
+uv run pytest -v
+
+# 运行测试并显示简短的错误信息
+uv run pytest --tb=short
+```
+
+**注意**：测试需要在 `.env` 文件中配置环境变量，特别是 LLM 提供商的 API 密钥。
 
 ### 🔧 开发指南
 

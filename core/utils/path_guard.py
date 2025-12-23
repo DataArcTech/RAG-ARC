@@ -1,5 +1,6 @@
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -8,14 +9,47 @@ logger = logging.getLogger(__name__)
 
 def _test_write_access(target: Path) -> bool:
     """
-    Return True if the current process can create and delete a file in target.
+    Return True if the current process can create and delete a file in target,
+    including creating nested subdirectories.
     """
     try:
         target.mkdir(parents=True, exist_ok=True)
-        probe = target / ".perm_probe"
+        probe_dir = target / ".perm_probe_dir" / "nested"
+        probe_dir.mkdir(parents=True, exist_ok=True)
+        probe = probe_dir / ".perm_probe"
         with open(probe, "w", encoding="utf-8") as handle:
             handle.write("ok")
-        probe.unlink()
+        shutil.rmtree(probe_dir.parent, ignore_errors=True)
+        return True
+    except OSError:
+        return False
+
+
+def _tree_is_writable(root: Path, *, max_dirs: int = 5000) -> bool:
+    """
+    Return True if every existing directory under root is writable/executable.
+
+    This is a defensive guard for cases where root itself is writable but contains
+    child directories owned by another user (e.g., created by Docker as root).
+    """
+    if not root.exists():
+        return True
+
+    checked = 0
+
+    def _onerror(_: OSError) -> None:
+        raise
+
+    try:
+        for dirpath, dirnames, _ in os.walk(root, onerror=_onerror):
+            checked += 1
+            if checked > max_dirs:
+                logger.warning("Path tree under %s is large; checked first %d directories", root, max_dirs)
+                return True
+            if not os.access(dirpath, os.W_OK | os.X_OK):
+                return False
+            # Avoid descending into dot directories created by probes or tooling
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
         return True
     except OSError:
         return False
@@ -32,7 +66,7 @@ def ensure_writable_dir(
     ./local/runtime/<preferred_name>) and return the resolved location.
     """
     preferred = Path(preferred_path).expanduser().resolve()
-    if _test_write_access(preferred):
+    if _test_write_access(preferred) and _tree_is_writable(preferred):
         return str(preferred)
 
     runtime_root = Path(
@@ -44,7 +78,7 @@ def ensure_writable_dir(
     if fallback_path is None:
         fallback = runtime_root / preferred.name
 
-    if _test_write_access(fallback):
+    if _test_write_access(fallback) and _tree_is_writable(fallback):
         logger.warning(
             "Directory %s is not writable; falling back to %s",
             preferred,

@@ -7,7 +7,8 @@ from config.core.file_management.chunker.chunker_config import (
     TokenChunkerConfig,
     RecursiveChunkerConfig,
     MarkdownHeaderChunkerConfig,
-    SemanticChunkerConfig
+    SemanticChunkerConfig,
+    SemanticUnitChunkerConfig,
 )
 from config.core.file_management.indexing.faiss_indexing_config import FaissIndexerConfig
 from config.core.file_management.indexing.bm25_indexing_config import BM25IndexerConfig
@@ -37,7 +38,13 @@ class IndexManagerConfig(AbstractConfig):
 
     # Chunker configuration
     chunker_config: Annotated[
-        Union[TokenChunkerConfig, RecursiveChunkerConfig, MarkdownHeaderChunkerConfig, SemanticChunkerConfig],
+        Union[
+            TokenChunkerConfig,
+            RecursiveChunkerConfig,
+            MarkdownHeaderChunkerConfig,
+            SemanticChunkerConfig,
+            SemanticUnitChunkerConfig,
+        ],
         Field(discriminator="type")
     ] = Field(
         default_factory=lambda: TokenChunkerConfig(),

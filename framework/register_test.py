@@ -373,7 +373,9 @@ class TestRegister(unittest.TestCase):
     def test_substitute_env_vars_missing_variable(self):
         """Test environment variable substitution when variable is missing."""
         result = self.register._substitute_env_vars('${MISSING_VAR}')
-        self.assertEqual(result, '${MISSING_VAR}')  # Should return original string
+        from framework.register import _UNRESOLVED_ENV_PLACEHOLDER
+
+        self.assertIs(result, _UNRESOLVED_ENV_PLACEHOLDER)
 
     def test_substitute_env_vars_no_substitution(self):
         """Test string without environment variable syntax."""
@@ -482,7 +484,6 @@ class TestRegister(unittest.TestCase):
             
             expected = {
                 'existing': 'existing_value',
-                'missing': '${MISSING_VAR}',
                 'mixed': 'existing_value_${MISSING_VAR}'
             }
             self.assertEqual(result, expected)

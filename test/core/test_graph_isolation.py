@@ -10,6 +10,7 @@ from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id
 from core.retrieval.graph_retrieveal.pruned_hipporag import PrunedHippoRAGRetriever
 from core.retrieval.graph_retrieveal.pruned_hipporag_neo4j import PrunedHippoRAGNeo4jRetriever
 from core.utils.owner_guard import is_admin_owner
+from core.utils.rwlock import RWLock
 
 RAW_STORE_CLASS = getattr(PrunedHippoRAGNeo4jStore, "__wrapped__", PrunedHippoRAGNeo4jStore)
 
@@ -84,6 +85,10 @@ def _make_store():
     store._cache_loaded = False
     store._graph_cache = {}
     store._entity_chunk_count_cache = {}
+    store._rwlock = RWLock()
+    store.chunk_embeddings = {}
+    store._chunk_embeddings_array = None
+    store._chunk_ids_list = None
     return store
 
 

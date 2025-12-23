@@ -4,6 +4,7 @@ import numpy as np
 import logging
 
 from .base import AbstractChunker
+from core.file_management.atomic_units.fenced_code import split_fenced_code_blocks
 
 if TYPE_CHECKING:
     from config.core.file_management.chunker.chunker_config import SemanticChunkerConfig
@@ -151,16 +152,29 @@ class SemanticChunker(AbstractChunker):
         try:
             embeddings = self.embeddings
 
-            chunks = self._split_text_semantically(
-                text, embeddings, buffer_size, breakpoint_threshold_type,
-                breakpoint_threshold_amount, number_of_chunks, sentence_split_regex, min_chunk_size
-            )
+            chunk_units: List[tuple[str, str]] = []
+            for kind, segment in split_fenced_code_blocks(text):
+                if kind == "code":
+                    chunk_units.append((kind, segment))
+                    continue
+                for piece in self._split_text_semantically(
+                    segment,
+                    embeddings,
+                    buffer_size,
+                    breakpoint_threshold_type,
+                    breakpoint_threshold_amount,
+                    number_of_chunks,
+                    sentence_split_regex,
+                    min_chunk_size,
+                ):
+                    if piece:
+                        chunk_units.append((kind, piece))
 
             # Convert to standardized format
             result = []
             current_pos = 0
 
-            for i, chunk_content in enumerate(chunks):
+            for i, (segment_type, chunk_content) in enumerate(chunk_units):
                 start_idx = text.find(chunk_content, current_pos) if not add_start_index else current_pos
                 if start_idx == -1:
                     start_idx = current_pos
@@ -176,7 +190,9 @@ class SemanticChunker(AbstractChunker):
                         'start_idx': start_idx,
                         'end_idx': end_idx,
                         'character_count': len(chunk_content),
-                        'strategy': 'semantic'
+                        'strategy': 'semantic',
+                        'segment_type': segment_type,
+                        'is_fenced_code_block': segment_type == "code",
                     }
                 }
 
@@ -227,7 +243,12 @@ class SemanticChunker(AbstractChunker):
             'sentence_split_regex': sentence_split_regex,
             'min_chunk_size': min_chunk_size,
             'add_start_index': add_start_index,
-            'supported_features': ['semantic_boundaries', 'embedding_based', 'adaptive_chunking'],
+            'supported_features': [
+                'semantic_boundaries',
+                'embedding_based',
+                'adaptive_chunking',
+                'fenced_code_atomic',
+            ],
             'parameters': {
                 'buffer_size': buffer_size,
                 'breakpoint_threshold_type': breakpoint_threshold_type,

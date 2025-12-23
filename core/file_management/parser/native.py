@@ -3,6 +3,7 @@ import json
 import logging
 from typing import List, Optional, Dict, Any, TYPE_CHECKING
 from urllib.parse import urlparse
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -93,6 +94,7 @@ class NativeParser(AbstractParser):
             from docx import Document
 
             base_filename = os.path.splitext(filename)[0]
+            stem = Path(filename).stem or "document"
             save_dir = os.path.join(output_dir, base_filename)
             os.makedirs(save_dir, exist_ok=True)
 
@@ -129,13 +131,13 @@ class NativeParser(AbstractParser):
             }
 
             # Save as JSON
-            json_path = os.path.join(save_dir, f"{base_filename}.json")
+            json_path = os.path.join(save_dir, f"{stem}.json")
             with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(content, f, ensure_ascii=False, indent=2)
 
             # Save as Markdown
             md_content = self._convert_docx_to_markdown(content)
-            md_path = os.path.join(save_dir, f"{base_filename}.md")
+            md_path = os.path.join(save_dir, f"{stem}.md")
             with open(md_path, 'w', encoding='utf-8') as f:
                 f.write(md_content)
 
@@ -164,6 +166,7 @@ class NativeParser(AbstractParser):
             import chardet
 
             base_filename = os.path.splitext(filename)[0]
+            stem = Path(filename).stem or "document"
             file_ext = os.path.splitext(filename)[1].lower()
             save_dir = os.path.join(output_dir, base_filename)
             os.makedirs(save_dir, exist_ok=True)
@@ -227,11 +230,11 @@ class NativeParser(AbstractParser):
                 all_content.append(sheet_content)
 
                 # Save individual sheet as CSV
-                csv_path = os.path.join(save_dir, f"{base_filename}_{sheet_name}.csv")
+                csv_path = os.path.join(save_dir, f"{stem}_{sheet_name}.csv")
                 df.to_csv(csv_path, index=False, encoding='utf-8')
 
                 # Save as JSON
-                json_path = os.path.join(save_dir, f"{base_filename}_{sheet_name}.json")
+                json_path = os.path.join(save_dir, f"{stem}_{sheet_name}.json")
                 with open(json_path, 'w', encoding='utf-8') as f:
                     json.dump(sheet_content, f, ensure_ascii=False, indent=2)
 
@@ -248,7 +251,7 @@ class NativeParser(AbstractParser):
                 })
 
             # Save combined results
-            combined_json = os.path.join(save_dir, f"{base_filename}_combined.json")
+            combined_json = os.path.join(save_dir, f"{stem}_combined.json")
             with open(combined_json, 'w', encoding='utf-8') as f:
                 json.dump(all_content, f, ensure_ascii=False, indent=2)
 
@@ -265,6 +268,7 @@ class NativeParser(AbstractParser):
             from pptx import Presentation
 
             base_filename = os.path.splitext(filename)[0]
+            stem = Path(filename).stem or "document"
             save_dir = os.path.join(output_dir, base_filename)
             os.makedirs(save_dir, exist_ok=True)
 
@@ -297,13 +301,13 @@ class NativeParser(AbstractParser):
                 slides_data.append(slide_content)
 
                 # Save individual slide
-                slide_json = os.path.join(save_dir, f"{base_filename}_slide_{i+1}.json")
+                slide_json = os.path.join(save_dir, f"{stem}_slide_{i+1}.json")
                 with open(slide_json, 'w', encoding='utf-8') as f:
                     json.dump(slide_content, f, ensure_ascii=False, indent=2)
 
                 # Convert to markdown
                 md_content = self._convert_slide_to_markdown(slide_content)
-                slide_md = os.path.join(save_dir, f"{base_filename}_slide_{i+1}.md")
+                slide_md = os.path.join(save_dir, f"{stem}_slide_{i+1}.md")
                 with open(slide_md, 'w', encoding='utf-8') as f:
                     f.write(md_content)
 
@@ -324,7 +328,7 @@ class NativeParser(AbstractParser):
                 })
 
             # Save combined presentation
-            combined_json = os.path.join(save_dir, f"{base_filename}_combined.json")
+            combined_json = os.path.join(save_dir, f"{stem}_combined.json")
             with open(combined_json, 'w', encoding='utf-8') as f:
                 json.dump(slides_data, f, ensure_ascii=False, indent=2)
 
@@ -339,6 +343,7 @@ class NativeParser(AbstractParser):
         try:
             from bs4 import BeautifulSoup
 
+            stem = Path(filename).stem or "document"
             save_dir = os.path.join(output_dir, base_filename)
             os.makedirs(save_dir, exist_ok=True)
 
@@ -401,13 +406,13 @@ class NativeParser(AbstractParser):
                     content['tables'].append(table_data)
 
             # Save results
-            json_path = os.path.join(save_dir, f"{base_filename}.json")
+            json_path = os.path.join(save_dir, f"{stem}.json")
             with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(content, f, ensure_ascii=False, indent=2)
 
             # Convert to markdown
             md_content = self._convert_html_to_markdown(content)
-            md_path = os.path.join(save_dir, f"{base_filename}.md")
+            md_path = os.path.join(save_dir, f"{stem}.md")
             with open(md_path, 'w', encoding='utf-8') as f:
                 f.write(md_content)
 
@@ -532,11 +537,12 @@ class NativeParser(AbstractParser):
 
             # Create output directory
             base_filename = os.path.splitext(filename)[0]
+            stem = Path(filename).stem or "document"
             save_dir = os.path.join(output_dir, base_filename)
             os.makedirs(save_dir, exist_ok=True)
 
             # Save as markdown (plain text is valid markdown)
-            md_filename = f"{base_filename}.md"
+            md_filename = f"{stem}.md"
             md_path = os.path.join(save_dir, md_filename)
 
             with open(md_path, 'w', encoding='utf-8') as f:
@@ -571,11 +577,12 @@ class NativeParser(AbstractParser):
 
             # Create output directory
             base_filename = os.path.splitext(filename)[0]
+            stem = Path(filename).stem or "document"
             save_dir = os.path.join(output_dir, base_filename)
             os.makedirs(save_dir, exist_ok=True)
 
             # Save markdown file directly (no conversion needed)
-            md_filename = f"{base_filename}.md"
+            md_filename = f"{stem}.md"
             md_path = os.path.join(save_dir, md_filename)
 
             with open(md_path, 'w', encoding='utf-8') as f:

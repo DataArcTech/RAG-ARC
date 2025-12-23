@@ -3,9 +3,18 @@ import json
 import logging
 import pickle
 import re
+import threading
 from typing import List, Dict, Any, Optional, Sequence, Set, Tuple, TYPE_CHECKING
 import numpy as np
 import igraph as ig
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message="builtin type SwigPy.* has no __module__ attribute",
+    category=DeprecationWarning,
+)
+
 import faiss
 import neo4j
 
@@ -13,6 +22,7 @@ from encapsulation.database.graph_db.base import GraphStore
 from encapsulation.data_model.schema import Chunk, GraphData
 from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id, text_processing
 from core.utils.path_guard import ensure_writable_dir
+from core.utils.rwlock import RWLock
 from framework.shared_module_decorator import shared_module
 
 if TYPE_CHECKING:
@@ -85,6 +95,7 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             config: Configuration object containing all storage parameters
         """
         super().__init__(config)
+        self._rwlock = RWLock()
 
         # Initialize embedding model
         self.embedding_model = config.embedding.build()
@@ -162,6 +173,12 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         logger.info(f"  - Chunk index: numpy array (brute-force search)")
         logger.info(f"  - Metadata & Graph: Neo4j (cached in memory)")
         logger.info(f"  - PageRank: igraph (extracted subgraph)")
+
+    def read_lock(self):
+        return self._rwlock.read_lock()
+
+    def write_lock(self):
+        return self._rwlock.write_lock()
 
     def _init_neo4j_schema(self):
         """
@@ -261,10 +278,12 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         if os.path.exists(embeddings_path):
             try:
                 with open(embeddings_path, 'rb') as f:
-                    self.chunk_embeddings = pickle.load(f)
+                    loaded = pickle.load(f)
+                with self.write_lock():
+                    self.chunk_embeddings = loaded
+                    # Mark array for rebuild on first use
+                    self._chunk_embeddings_array = None
                 logger.info(f"Loaded {len(self.chunk_embeddings)} chunk embeddings from {embeddings_path}")
-                # Mark array for rebuild on first use
-                self._chunk_embeddings_array = None
             except Exception as e:
                 logger.warning(f"Failed to load chunk embeddings: {e}")
         else:
@@ -712,14 +731,18 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         # Batch normalize embeddings
         embeddings_array = np.array(embeddings_list).astype(np.float32)
         if self.entity_faiss_db.config.normalize_L2 or self.entity_faiss_db.config.metric == "cosine":
-            faiss.normalize_L2(embeddings_array)
+            from core.utils.faiss_lock import FAISS_LOCK
+            with FAISS_LOCK:
+                faiss.normalize_L2(embeddings_array)
 
         logger.info(f"Prepared {len(valid_entities)} valid entities for synonymy edge computation")
 
         # Batch FAISS search
         logger.info("Performing batch FAISS search...")
         k = min(self.synonymy_edge_topk, self.entity_faiss_db.index.ntotal)
-        distances_batch, indices_batch = self.entity_faiss_db.index.search(embeddings_array, k)
+        from core.utils.faiss_lock import FAISS_LOCK
+        with FAISS_LOCK:
+            distances_batch, indices_batch = self.entity_faiss_db.index.search(embeddings_array, k)
         logger.info("Batch FAISS search completed")
 
         # Process results
@@ -834,14 +857,15 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         all_owners = owner_id is None
         owner_key = None if all_owners else self._owner_key(owner_id)
 
-        if self._cache_loaded and self._graph_cache is not None:
-            if all_owners:
-                aggregated = []
-                for shard in self._graph_cache.values():
-                    aggregated.extend(shard.get(node_id, []))
-                return aggregated
-            owner_neighbors = self._graph_cache.get(owner_key, {})
-            return list(owner_neighbors.get(node_id, []))
+        with self.read_lock():
+            if self._cache_loaded and self._graph_cache is not None:
+                if all_owners:
+                    aggregated: list[tuple[str, float]] = []
+                    for shard in self._graph_cache.values():
+                        aggregated.extend(shard.get(node_id, ()))
+                    return list(aggregated)
+                owner_neighbors = self._graph_cache.get(owner_key, {})
+                return list(owner_neighbors.get(node_id, ()))
 
         # Optimized query: use single MATCH with OR condition
         if all_owners:
@@ -886,32 +910,54 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         This computes how many chunks each entity appears in, which is used
         for normalizing entity weights during PPR.
         """
-        if not self._graph_cache:
-            logger.warning("Graph cache not loaded, cannot build entity chunk count cache")
-            return
-
         logger.info("Building entity chunk count cache from graph cache...")
         import time
         start_time = time.time()
 
-        self._entity_chunk_count_cache = {}
+        entity_chunk_count_cache: Dict[str, Dict[str, int]] = {}
 
-        for owner_key, adjacency in self._graph_cache.items():
-            owner_counts: Dict[str, int] = {}
-            for entity_id, neighbors in adjacency.items():
-                # Only process entity nodes
-                if not entity_id.startswith("entity-"):
-                    continue
+        with self.read_lock():
+            if not self._graph_cache:
+                logger.warning("Graph cache not loaded, cannot build entity chunk count cache")
+                return
 
-                # Count unique chunk neighbors (chunks don't start with "entity-")
-                chunk_count = sum(1 for neighbor_id, _ in neighbors if not neighbor_id.startswith("entity-"))
-                owner_counts[entity_id] = chunk_count
+            for owner_key, adjacency in self._graph_cache.items():
+                owner_counts: Dict[str, int] = {}
+                for entity_id, neighbors in adjacency.items():
+                    # Only process entity nodes
+                    if not entity_id.startswith("entity-"):
+                        continue
 
-            self._entity_chunk_count_cache[owner_key] = owner_counts
+                    # Count unique chunk neighbors (chunks don't start with "entity-")
+                    chunk_count = sum(1 for neighbor_id, _ in neighbors if not neighbor_id.startswith("entity-"))
+                    owner_counts[entity_id] = chunk_count
+
+                entity_chunk_count_cache[owner_key] = owner_counts
+
+        with self.write_lock():
+            self._entity_chunk_count_cache = entity_chunk_count_cache
 
         elapsed = time.time() - start_time
-        total_entities = sum(len(counts) for counts in self._entity_chunk_count_cache.values())
+        total_entities = sum(len(counts) for counts in entity_chunk_count_cache.values())
         logger.info(f"Entity chunk count cache built: {total_entities} entities in {elapsed:.2f}s")
+
+    @staticmethod
+    def _compute_entity_chunk_count_cache(
+        graph_cache: Dict[str, Dict[str, List[Tuple[str, float]]]]
+    ) -> Dict[str, Dict[str, int]]:
+        entity_chunk_count_cache: Dict[str, Dict[str, int]] = {}
+        if not graph_cache:
+            return entity_chunk_count_cache
+
+        for owner_key, adjacency in graph_cache.items():
+            owner_counts: Dict[str, int] = {}
+            for entity_id, neighbors in adjacency.items():
+                if not str(entity_id).startswith("entity-"):
+                    continue
+                chunk_count = sum(1 for neighbor_id, _ in (neighbors or []) if not str(neighbor_id).startswith("entity-"))
+                owner_counts[str(entity_id)] = int(chunk_count)
+            entity_chunk_count_cache[str(owner_key)] = owner_counts
+        return entity_chunk_count_cache
 
     def get_entity_chunk_count_from_cache(self, entity_id: str, owner_id: Optional[Any] = None) -> int:
         """
@@ -923,19 +969,20 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         Returns:
             Number of chunks the entity appears in (0 if not found)
         """
-        if self._entity_chunk_count_cache is None:
-            logger.warning("Entity chunk count cache not built, returning 0")
-            return 0
+        with self.read_lock():
+            if self._entity_chunk_count_cache is None:
+                logger.warning("Entity chunk count cache not built, returning 0")
+                return 0
 
-        if owner_id is None:
-            total = 0
-            for owner_counts in self._entity_chunk_count_cache.values():
-                total += owner_counts.get(entity_id, 0)
-            return total
+            if owner_id is None:
+                total = 0
+                for owner_counts in self._entity_chunk_count_cache.values():
+                    total += owner_counts.get(entity_id, 0)
+                return total
 
-        owner_key = self._owner_key(owner_id)
-        owner_counts = self._entity_chunk_count_cache.get(owner_key, {})
-        return owner_counts.get(entity_id, 0)
+            owner_key = self._owner_key(owner_id)
+            owner_counts = self._entity_chunk_count_cache.get(owner_key, {})
+            return owner_counts.get(entity_id, 0)
 
     def get_batch_entity_chunk_counts_from_cache(self, entity_ids: List[str], owner_id: Optional[Any] = None) -> Dict[str, int]:
         """
@@ -947,20 +994,21 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         Returns:
             Dictionary mapping entity IDs to chunk counts
         """
-        if self._entity_chunk_count_cache is None:
-            logger.warning("Entity chunk count cache not built, returning empty dict")
-            return {}
+        with self.read_lock():
+            if self._entity_chunk_count_cache is None:
+                logger.warning("Entity chunk count cache not built, returning empty dict")
+                return {}
 
-        if owner_id is None:
-            aggregated: Dict[str, int] = {eid: 0 for eid in entity_ids}
-            for owner_counts in self._entity_chunk_count_cache.values():
-                for eid in entity_ids:
-                    aggregated[eid] += owner_counts.get(eid, 0)
-            return aggregated
+            if owner_id is None:
+                aggregated: Dict[str, int] = {eid: 0 for eid in entity_ids}
+                for owner_counts in self._entity_chunk_count_cache.values():
+                    for eid in entity_ids:
+                        aggregated[eid] += owner_counts.get(eid, 0)
+                return aggregated
 
-        owner_key = self._owner_key(owner_id)
-        owner_counts = self._entity_chunk_count_cache.get(owner_key, {})
-        return {eid: owner_counts.get(eid, 0) for eid in entity_ids}
+            owner_key = self._owner_key(owner_id)
+            owner_counts = self._entity_chunk_count_cache.get(owner_key, {})
+            return {eid: owner_counts.get(eid, 0) for eid in entity_ids}
 
     def _load_graph_cache(self, force_reload: bool = False):
         """
@@ -970,8 +1018,9 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         Args:
             force_reload: If True, force reload even if cache is already loaded
         """
-        if self._cache_loaded and not force_reload:
-            return
+        with self.read_lock():
+            if self._cache_loaded and not force_reload:
+                return
 
         logger.info("Loading graph structure into memory cache...")
         import time
@@ -991,7 +1040,7 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         results = self._execute_query(query, {'global_owner': self.OWNER_GLOBAL_KEY})
 
         # Build adjacency list
-        self._graph_cache = {}
+        graph_cache: Dict[str, Dict[str, List[Tuple[str, float]]]] = {}
         edge_count = 0
         for record in results:
             node_id = record['node_id']
@@ -1003,17 +1052,28 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             relation_owner_id = record.get('relation_owner_id') or self.OWNER_GLOBAL_KEY
 
             if node_id and neighbor_id and node_owner_id == neighbor_owner_id == relation_owner_id:
-                owner_cache = self._graph_cache.setdefault(node_owner_id, {})
+                owner_cache = graph_cache.setdefault(node_owner_id, {})
                 owner_cache.setdefault(node_id, []).append((neighbor_id, float(weight)))
                 edge_count += 1
 
-        self._cache_loaded = True
-        elapsed = time.time() - start_time
-        node_total = sum(len(nodes) for nodes in self._graph_cache.values())
-        logger.info(f"Graph cache loaded: {node_total} nodes, {edge_count} edges in {elapsed:.2f}s")
+        entity_chunk_count_cache: Dict[str, Dict[str, int]] = {}
+        for owner_key, adjacency in graph_cache.items():
+            owner_counts: Dict[str, int] = {}
+            for entity_id, neighbors in adjacency.items():
+                if not entity_id.startswith("entity-"):
+                    continue
+                owner_counts[entity_id] = sum(
+                    1 for neighbor_id, _ in neighbors if not neighbor_id.startswith("entity-")
+                )
+            entity_chunk_count_cache[owner_key] = owner_counts
 
-        # Build entity chunk count cache
-        self._build_entity_chunk_count_cache()
+        with self.write_lock():
+            self._graph_cache = graph_cache
+            self._entity_chunk_count_cache = entity_chunk_count_cache
+            self._cache_loaded = True
+        elapsed = time.time() - start_time
+        node_total = sum(len(nodes) for nodes in graph_cache.values())
+        logger.info(f"Graph cache loaded: {node_total} nodes, {edge_count} edges in {elapsed:.2f}s")
 
     def _update_graph_cache_incremental(self, new_chunk_ids: List[str], new_entity_ids: List[str]):
         """
@@ -1023,8 +1083,9 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             new_chunk_ids: List of newly added chunk IDs
             new_entity_ids: List of newly added entity IDs
         """
-        if not self._cache_loaded or self._graph_cache is None:
-            # Cache not loaded yet, do full load
+        with self.read_lock():
+            cache_ready = bool(self._cache_loaded and self._graph_cache is not None)
+        if not cache_ready:
             self._load_graph_cache()
             return
 
@@ -1051,25 +1112,30 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
 
         # Update adjacency list
         edge_count = 0
-        for record in results:
-            node_id = record['node_id']
-            neighbor_id = record['neighbor_id']
-            weight = record['weight'] or 1.0
+        with self.write_lock():
+            if self._graph_cache is None:
+                self._graph_cache = {}
+            for record in results:
+                node_id = record['node_id']
+                neighbor_id = record['neighbor_id']
+                weight = record['weight'] or 1.0
 
-            node_owner_id = record.get('node_owner_id') or self.OWNER_GLOBAL_KEY
-            neighbor_owner_id = record.get('neighbor_owner_id') or self.OWNER_GLOBAL_KEY
-            relation_owner_id = record.get('relation_owner_id') or self.OWNER_GLOBAL_KEY
+                node_owner_id = record.get('node_owner_id') or self.OWNER_GLOBAL_KEY
+                neighbor_owner_id = record.get('neighbor_owner_id') or self.OWNER_GLOBAL_KEY
+                relation_owner_id = record.get('relation_owner_id') or self.OWNER_GLOBAL_KEY
 
-            if node_id and neighbor_id and node_owner_id == neighbor_owner_id == relation_owner_id:
-                owner_cache = self._graph_cache.setdefault(node_owner_id, {})
-                node_neighbors = owner_cache.setdefault(node_id, [])
-                if not any(n == neighbor_id for n, _ in node_neighbors):
-                    node_neighbors.append((neighbor_id, float(weight)))
-                    edge_count += 1
+                if node_id and neighbor_id and node_owner_id == neighbor_owner_id == relation_owner_id:
+                    owner_cache = self._graph_cache.setdefault(node_owner_id, {})
+                    node_neighbors = owner_cache.setdefault(node_id, [])
+                    if not any(n == neighbor_id for n, _ in node_neighbors):
+                        node_neighbors.append((neighbor_id, float(weight)))
+                        edge_count += 1
 
-                reverse_neighbors = owner_cache.setdefault(neighbor_id, [])
-                if not any(n == node_id for n, _ in reverse_neighbors):
-                    reverse_neighbors.append((node_id, float(weight)))
+                    reverse_neighbors = owner_cache.setdefault(neighbor_id, [])
+                    if not any(n == node_id for n, _ in reverse_neighbors):
+                        reverse_neighbors.append((node_id, float(weight)))
+
+            self._entity_chunk_count_cache = self._compute_entity_chunk_count_cache(self._graph_cache)
 
         elapsed = time.time() - start_time
         logger.info(f"Graph cache updated: added {edge_count} new edges in {elapsed:.2f}s")
@@ -1092,18 +1158,19 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         owner_key = None if all_owners else self._owner_key(owner_id)
 
         # Use cache if loaded
-        if self._cache_loaded and self._graph_cache is not None:
-            neighbors_map = {nid: [] for nid in node_ids}
-            if all_owners:
-                for shard in self._graph_cache.values():
+        with self.read_lock():
+            if self._cache_loaded and self._graph_cache is not None:
+                neighbors_map = {nid: [] for nid in node_ids}
+                if all_owners:
+                    for shard in self._graph_cache.values():
+                        for nid in node_ids:
+                            if nid in shard:
+                                neighbors_map[nid].extend(shard.get(nid, ()))
+                else:
+                    owner_neighbors = self._graph_cache.get(owner_key, {})
                     for nid in node_ids:
-                        if nid in shard:
-                            neighbors_map[nid].extend(shard.get(nid, []))
-            else:
-                owner_neighbors = self._graph_cache.get(owner_key, {})
-                for nid in node_ids:
-                    neighbors_map[nid] = owner_neighbors.get(nid, [])
-            return neighbors_map
+                        neighbors_map[nid] = list(owner_neighbors.get(nid, ()))
+                return neighbors_map
 
         # Fallback to Neo4j query
         if all_owners:
@@ -1163,19 +1230,20 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             logger.warning("Empty subgraph node set")
             return ig.Graph(directed=False), {}, {}
 
-        # Require cache to be loaded
-        if not (self._cache_loaded and self._graph_cache):
-            logger.error("Graph cache not loaded, cannot extract subgraph")
-            return ig.Graph(directed=False), {}, {}
+        with self.read_lock():
+            # Require cache to be loaded
+            if not (self._cache_loaded and self._graph_cache):
+                logger.error("Graph cache not loaded, cannot extract subgraph")
+                return ig.Graph(directed=False), {}, {}
 
-        if owner_id is None:
-            owner_cache: Dict[str, List[Tuple[str, float]]] = {}
-            for shard in self._graph_cache.values():
-                for node_id, neighbors in shard.items():
-                    owner_cache.setdefault(node_id, []).extend(neighbors)
-        else:
-            owner_key = self._owner_key(owner_id)
-            owner_cache = self._graph_cache.get(owner_key, {})
+            if owner_id is None:
+                owner_cache: Dict[str, List[Tuple[str, float]]] = {}
+                for shard in self._graph_cache.values():
+                    for node_id, neighbors in shard.items():
+                        owner_cache.setdefault(node_id, []).extend(neighbors)
+            else:
+                owner_key = self._owner_key(owner_id)
+                owner_cache = self._graph_cache.get(owner_key, {})
 
         logger.info(f"Extracting subgraph with {len(subgraph_node_ids)} nodes from cache...")
 
@@ -1191,13 +1259,14 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         edge_list = []
         edge_weights = []
 
-        for u in subgraph_node_ids:
-            neighbors = owner_cache.get(u, [])
-            for v, w in neighbors:
-                if v in node_to_idx and node_to_idx[u] < node_to_idx[v]:
-                    # Only add each edge once (undirected graph)
-                    edge_list.append((node_to_idx[u], node_to_idx[v]))
-                    edge_weights.append(float(w))
+        with self.read_lock():
+            for u in subgraph_node_ids:
+                neighbors = owner_cache.get(u, [])
+                for v, w in neighbors:
+                    if v in node_to_idx and node_to_idx[u] < node_to_idx[v]:
+                        # Only add each edge once (undirected graph)
+                        edge_list.append((node_to_idx[u], node_to_idx[v]))
+                        edge_weights.append(float(w))
 
         if edge_list:
             graph.add_edges(edge_list)
@@ -1232,23 +1301,25 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         Returns:
             Dictionary mapping node_id -> PageRank score
         """
-        if not (self._cache_loaded and self._graph_cache):
-            logger.warning("Graph cache not loaded, cannot use push-based PPR")
-            return {}
+        with self.read_lock():
+            if not (self._cache_loaded and self._graph_cache):
+                logger.warning("Graph cache not loaded, cannot use push-based PPR")
+                return {}
 
         from encapsulation.database.utils.ppr_push import extract_subgraph_adjacency, ppr_push
 
-        if owner_id is None:
-            owner_cache: Dict[str, List[Tuple[str, float]]] = {}
-            for shard in self._graph_cache.values():
-                for node_id, neighbors in shard.items():
-                    owner_cache.setdefault(node_id, []).extend(neighbors)
-        else:
-            owner_key = self._owner_key(owner_id)
-            owner_cache = self._graph_cache.get(owner_key, {})
+        with self.read_lock():
+            if owner_id is None:
+                owner_cache: Dict[str, List[Tuple[str, float]]] = {}
+                for shard in self._graph_cache.values():
+                    for node_id, neighbors in shard.items():
+                        owner_cache.setdefault(node_id, []).extend(neighbors)
+            else:
+                owner_key = self._owner_key(owner_id)
+                owner_cache = self._graph_cache.get(owner_key, {})
 
-        # Extract subgraph adjacency from cache
-        subgraph_adj = extract_subgraph_adjacency(owner_cache, subgraph_nodes)
+            # Extract subgraph adjacency from cache
+            subgraph_adj = extract_subgraph_adjacency(owner_cache, subgraph_nodes)
 
         # Run push-based PPR
         ppr_scores = ppr_push(
@@ -1282,35 +1353,36 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         new_embeddings_list = []
         new_chunk_ids_ordered = []
 
-        for cid in sorted(new_chunk_ids):  # Sort for consistency
-            if cid not in self.chunk_embeddings:
-                logger.warning(f"Chunk {cid} not found in chunk_embeddings, skipping")
-                continue
-
-            emb = self.chunk_embeddings[cid]
-
-            # Ensure it's a numpy array
-            if isinstance(emb, list):
-                emb = np.array(emb)
-            elif not isinstance(emb, np.ndarray):
-                logger.warning(f"Chunk {cid} has invalid embedding type: {type(emb)}, skipping")
-                continue
-
-            # Check shape consistency with existing array
-            if self._chunk_embeddings_array is not None and len(self._chunk_embeddings_array) > 0:
-                expected_shape = (self._chunk_embeddings_array.shape[1],)
-                if emb.shape != expected_shape:
-                    logger.warning(f"Chunk {cid} has shape {emb.shape}, expected {expected_shape}, skipping")
+        with self.read_lock():
+            for cid in sorted(new_chunk_ids):  # Sort for consistency
+                if cid not in self.chunk_embeddings:
+                    logger.warning(f"Chunk {cid} not found in chunk_embeddings, skipping")
                     continue
 
-            # Normalize if enabled (for cosine similarity)
-            if self.normalize_chunk_embeddings:
-                norm = np.linalg.norm(emb)
-                if norm > 0:
-                    emb = emb / norm
+                emb = self.chunk_embeddings[cid]
 
-            new_embeddings_list.append(emb)
-            new_chunk_ids_ordered.append(cid)
+                # Ensure it's a numpy array
+                if isinstance(emb, list):
+                    emb = np.array(emb)
+                elif not isinstance(emb, np.ndarray):
+                    logger.warning(f"Chunk {cid} has invalid embedding type: {type(emb)}, skipping")
+                    continue
+
+                # Check shape consistency with existing array
+                if self._chunk_embeddings_array is not None and len(self._chunk_embeddings_array) > 0:
+                    expected_shape = (self._chunk_embeddings_array.shape[1],)
+                    if emb.shape != expected_shape:
+                        logger.warning(f"Chunk {cid} has shape {emb.shape}, expected {expected_shape}, skipping")
+                        continue
+
+                # Normalize if enabled (for cosine similarity)
+                if self.normalize_chunk_embeddings:
+                    norm = np.linalg.norm(emb)
+                    if norm > 0:
+                        emb = emb / norm
+
+                new_embeddings_list.append(emb)
+                new_chunk_ids_ordered.append(cid)
 
         if new_embeddings_list:
             # Convert to array with optional float16
@@ -1320,12 +1392,15 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
                 new_array = np.array(new_embeddings_list, dtype=np.float32)
 
             # Append to existing array or create new one
-            if self._chunk_embeddings_array is not None and len(self._chunk_embeddings_array) > 0:
-                self._chunk_embeddings_array = np.vstack([self._chunk_embeddings_array, new_array])
-                self._chunk_ids_list.extend(new_chunk_ids_ordered)
-            else:
-                self._chunk_embeddings_array = new_array
-                self._chunk_ids_list = new_chunk_ids_ordered
+            with self.write_lock():
+                if self._chunk_embeddings_array is not None and len(self._chunk_embeddings_array) > 0:
+                    self._chunk_embeddings_array = np.vstack([self._chunk_embeddings_array, new_array])
+                    if self._chunk_ids_list is None:
+                        self._chunk_ids_list = []
+                    self._chunk_ids_list.extend(new_chunk_ids_ordered)
+                else:
+                    self._chunk_embeddings_array = new_array
+                    self._chunk_ids_list = new_chunk_ids_ordered
 
             elapsed = time.time() - start_time
             dtype_str = "float16" if self.use_float16_embeddings else "float32"
@@ -1347,60 +1422,71 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         - Uses float16 to reduce memory usage (if enabled)
         - Normalizes embeddings for cosine similarity (if enabled)
         """
-        if self._chunk_embeddings_array is not None:
-            return  # Already built
+        with self.read_lock():
+            if self._chunk_embeddings_array is not None:
+                return  # Already built
+            chunk_ids = list(self.chunk_embeddings.keys())
 
         logger.info("Rebuilding chunk embeddings array...")
 
-        self._chunk_ids_list = list(self.chunk_embeddings.keys())
-        embeddings_list = []
+        kept_chunk_ids: list[str] = []
+        embeddings_list: list[np.ndarray] = []
 
-        for i, cid in enumerate(self._chunk_ids_list):
-            emb = self.chunk_embeddings[cid]
-            # Ensure it's a numpy array
-            if isinstance(emb, list):
-                emb = np.array(emb)
-            elif not isinstance(emb, np.ndarray):
-                logger.warning(f"Chunk {cid} has invalid embedding type: {type(emb)}")
-                continue
+        with self.read_lock():
+            for i, cid in enumerate(chunk_ids):
+                emb = self.chunk_embeddings.get(cid)
+                if emb is None:
+                    continue
+                if isinstance(emb, list):
+                    emb = np.array(emb)
+                elif not isinstance(emb, np.ndarray):
+                    logger.warning(f"Chunk {cid} has invalid embedding type: {type(emb)}")
+                    continue
 
-            # Check shape
-            if len(embeddings_list) > 0 and emb.shape != embeddings_list[0].shape:
-                logger.error(f"Chunk {cid} (index {i}) has shape {emb.shape}, expected {embeddings_list[0].shape}")
-                logger.error(f"  First chunk ID: {self._chunk_ids_list[0]}, shape: {embeddings_list[0].shape}")
-                logger.error(f"  Current chunk ID: {cid}, shape: {emb.shape}")
-                continue
+                if embeddings_list and emb.shape != embeddings_list[0].shape:
+                    logger.error(f"Chunk {cid} (index {i}) has shape {emb.shape}, expected {embeddings_list[0].shape}")
+                    logger.error(f"  First chunk ID: {kept_chunk_ids[0] if kept_chunk_ids else 'N/A'}, shape: {embeddings_list[0].shape}")
+                    logger.error(f"  Current chunk ID: {cid}, shape: {emb.shape}")
+                    continue
 
-            # Normalize if enabled (for cosine similarity)
-            if self.normalize_chunk_embeddings:
-                norm = np.linalg.norm(emb)
-                if norm > 0:
-                    emb = emb / norm
+                if self.normalize_chunk_embeddings:
+                    norm = np.linalg.norm(emb)
+                    if norm > 0:
+                        emb = emb / norm
 
-            embeddings_list.append(emb)
+                kept_chunk_ids.append(cid)
+                embeddings_list.append(emb)
 
-        if embeddings_list:
+        if not embeddings_list:
+            new_array = np.array([])
+            logger.warning("No chunk embeddings found")
+        else:
             try:
-                # Build array with optional float16 conversion
                 if self.use_float16_embeddings:
-                    self._chunk_embeddings_array = np.array(embeddings_list, dtype=np.float16)
-                    logger.info(f"Chunk embeddings array built (float16): {len(self._chunk_ids_list)} chunks, "
-                               f"memory: {self._chunk_embeddings_array.nbytes / 1024 / 1024:.2f} MB")
+                    new_array = np.array(embeddings_list, dtype=np.float16)
                 else:
-                    self._chunk_embeddings_array = np.array(embeddings_list)
-                    logger.info(f"Chunk embeddings array built (float32): {len(self._chunk_ids_list)} chunks, "
-                               f"memory: {self._chunk_embeddings_array.nbytes / 1024 / 1024:.2f} MB")
+                    new_array = np.array(embeddings_list, dtype=np.float32)
             except ValueError as e:
                 logger.error(f"Failed to build chunk embeddings array: {e}")
-                logger.error(f"  Total chunks: {len(self._chunk_ids_list)}")
+                logger.error(f"  Total chunks: {len(chunk_ids)}")
                 logger.error(f"  Valid embeddings: {len(embeddings_list)}")
                 if embeddings_list:
                     logger.error(f"  First embedding shape: {embeddings_list[0].shape}")
                     logger.error(f"  Last embedding shape: {embeddings_list[-1].shape}")
                 raise
-        else:
-            self._chunk_embeddings_array = np.array([])
-            logger.warning("No chunk embeddings found")
+
+        with self.write_lock():
+            if self._chunk_embeddings_array is not None:
+                return
+            self._chunk_ids_list = kept_chunk_ids
+            self._chunk_embeddings_array = new_array
+
+        if len(new_array) > 0 and isinstance(new_array, np.ndarray):
+            dtype_str = "float16" if self.use_float16_embeddings else "float32"
+            logger.info(
+                f"Chunk embeddings array built ({dtype_str}): {len(kept_chunk_ids)} chunks, "
+                f"memory: {new_array.nbytes / 1024 / 1024:.2f} MB"
+            )
 
     # ========== GraphStore Interface Implementation ==========
 
@@ -1504,9 +1590,11 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             logger.info("Step 5 completed: Chunk embeddings appended")
 
             # Step 6: Increment cache version to notify retrievers
-            self._cache_version += 1
+            with self.write_lock():
+                self._cache_version += 1
+                cache_version = self._cache_version
             
-            logger.info(f"✅ Index update completed successfully (incremental, cache_version={self._cache_version})")
+            logger.info(f"✅ Index update completed successfully (incremental, cache_version={cache_version})")
             return True
 
         except Exception as e:
@@ -1614,22 +1702,26 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             logger.info(f"Deleted {len(chunk_ids)} chunks from Neo4j")
 
             # 4. Delete from chunk_embeddings
-            for chunk_id in chunk_ids:
-                if chunk_id in self.chunk_embeddings:
-                    del self.chunk_embeddings[chunk_id]
+            with self.write_lock():
+                for chunk_id in chunk_ids:
+                    if chunk_id in self.chunk_embeddings:
+                        del self.chunk_embeddings[chunk_id]
 
             # 5. Invalidate chunk embeddings array (mark for rebuild)
-            self._chunk_embeddings_array = None
-            self._chunk_ids_list = None
+            with self.write_lock():
+                self._chunk_embeddings_array = None
+                self._chunk_ids_list = None
 
             # 6. Update graph cache and entity count cache
             self._invalidate_graph_cache_for_deleted_nodes(chunk_ids, orphan_entities)
 
             # 7. Increment cache version to notify retrievers
-            self._cache_version += 1
+            with self.write_lock():
+                self._cache_version += 1
+                cache_version = self._cache_version
             
             logger.info(f"✅ Deleted {len(chunk_ids)} chunks, {len(orphan_entities)} orphan entities, "
-                       f"{len(orphan_fact_ids)} orphan facts (cache_version={self._cache_version})")
+                       f"{len(orphan_fact_ids)} orphan facts (cache_version={cache_version})")
             return True
 
         except Exception as e:
@@ -1638,30 +1730,36 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
     
     def get_cache_version(self) -> int:
         """Get current cache version (incremented on add/delete)."""
-        return self._cache_version
+        with self.read_lock():
+            return self._cache_version
     
     def _invalidate_graph_cache_for_deleted_nodes(self, chunk_ids: List[str], entity_ids: List[str]):
         """Remove deleted nodes and their edges from graph cache."""
-        if not self._cache_loaded or not self._graph_cache:
-            return
-        
         deleted_nodes = set(chunk_ids) | set(entity_ids)
         if not deleted_nodes:
             return
-        
-        # Remove deleted nodes
-        for node_id in deleted_nodes:
-            self._graph_cache.pop(node_id, None)
-        
-        # Clean edges pointing to deleted nodes
-        for node_id in self._graph_cache:
-            self._graph_cache[node_id] = [
-                (n, w) for n, w in self._graph_cache[node_id] if n not in deleted_nodes
-            ]
-        
-        # Rebuild entity chunk count cache
-        self._entity_chunk_count_cache = None
-        self._build_entity_chunk_count_cache()
+
+        with self.write_lock():
+            if not self._cache_loaded or not self._graph_cache:
+                return
+
+            # Remove nodes and edges referencing deleted nodes across owner shards
+            for owner_key in list(self._graph_cache.keys()):
+                owner_cache = self._graph_cache.get(owner_key, {})
+
+                for node_id in list(owner_cache.keys()):
+                    if node_id in deleted_nodes:
+                        owner_cache.pop(node_id, None)
+
+                for node_id, neighbors in owner_cache.items():
+                    filtered_neighbors = [(n, w) for n, w in neighbors if n not in deleted_nodes]
+                    if len(filtered_neighbors) != len(neighbors):
+                        owner_cache[node_id] = filtered_neighbors
+
+                if not owner_cache:
+                    self._graph_cache.pop(owner_key, None)
+
+            self._entity_chunk_count_cache = self._compute_entity_chunk_count_cache(self._graph_cache)
 
     def delete_all_index(self, confirm: bool = False) -> bool:
         """Delete all chunks and their graphs.
@@ -1696,22 +1794,24 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             # Note: FAISS doesn't have a clear method, so we recreate the indices
             self._init_faiss_indices()
 
-            # Clear chunk embeddings
-            self.chunk_embeddings = {}
-            self._chunk_embeddings_array = None
-            self._chunk_ids_list = None
-            
-            # Clear graph cache
-            self._graph_cache = {}
-            self._cache_loaded = True  # Mark as loaded (empty cache is valid)
-            
-            # Clear entity chunk count cache
-            self._entity_chunk_count_cache = {}
-            
-            # Increment cache version
-            self._cache_version += 1
+            with self.write_lock():
+                # Clear chunk embeddings
+                self.chunk_embeddings = {}
+                self._chunk_embeddings_array = None
+                self._chunk_ids_list = None
 
-            logger.info(f"✅ All index data deleted (cache_version={self._cache_version})")
+                # Clear graph cache
+                self._graph_cache = {}
+                self._cache_loaded = True  # Mark as loaded (empty cache is valid)
+
+                # Clear entity chunk count cache
+                self._entity_chunk_count_cache = {}
+
+                # Increment cache version
+                self._cache_version += 1
+                cache_version = self._cache_version
+
+            logger.info(f"✅ All index data deleted (cache_version={cache_version})")
             return True
 
         except Exception as e:
@@ -1862,9 +1962,11 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         embeddings_path = os.path.join(path, f"{name}_chunk_embeddings.pkl")
         if os.path.exists(embeddings_path):
             with open(embeddings_path, 'rb') as f:
-                self.chunk_embeddings = pickle.load(f)
+                loaded = pickle.load(f)
+            with self.write_lock():
+                self.chunk_embeddings = loaded
+                self._chunk_embeddings_array = None  # Mark for rebuild
             logger.info(f"Loaded chunk embeddings from {embeddings_path}")
-            self._chunk_embeddings_array = None  # Mark for rebuild
         else:
             logger.warning(f"Chunk embeddings file not found: {embeddings_path}")
 
@@ -1887,9 +1989,11 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         self._load_graph_cache(force_reload=True)
         
         # 4. Increment cache version to notify retrievers
-        self._cache_version += 1
+        with self.write_lock():
+            self._cache_version += 1
+            cache_version = self._cache_version
 
-        logger.info(f"Index loaded from {path} (cache_version={self._cache_version})")
+        logger.info(f"Index loaded from {path} (cache_version={cache_version})")
         logger.info("Note: Neo4j data is loaded automatically from the database")
 
     def query(self, query: str, params: Optional[Dict[str, Any]] = None) -> Any:
@@ -1960,6 +2064,7 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
 
     def __del__(self):
         """Close Neo4j driver on cleanup"""
-        if self._driver:
-            self._driver.close()
+        driver = getattr(self, "_driver", None)
+        if driver:
+            driver.close()
             logger.info("Neo4j driver closed")

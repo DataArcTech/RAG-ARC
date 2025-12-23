@@ -3,6 +3,7 @@ from fastapi import (
     Depends,
     HTTPException,
     UploadFile,
+    Form,
     status,
     Query,
     Body,
@@ -65,6 +66,10 @@ class FileListResponse(BaseModel):
 async def upload_file(
     file: UploadFile,
     user: Annotated[User | None, Depends(get_current_user)],
+    relative_path: Optional[str] = Form(
+        default=None,
+        description="Optional repo-relative path (e.g. RAG-ARC/docs/a.pdf).",
+    ),
 ):
     """
     Upload a file to the knowledge base
@@ -85,7 +90,7 @@ async def upload_file(
     try:
         print(f"Uploading file: {file.filename} for owner_id: {user.id}")
         # Convert string UUID to UUID object
-        doc_id = await get_knowledge_handler().upload_file(file, user.id)
+        doc_id = await get_knowledge_handler().upload_file(file, user.id, relative_path=relative_path)
         return {"file_id": doc_id}
     except ValueError as e:
         raise HTTPException(
@@ -184,14 +189,14 @@ async def list_files(
         )
     try:
         # Get files for current page (async, non-blocking)
-        files = await get_knowledge_handler().list_user_files(
+        files = await get_knowledge_handler().list_user_files_async(
             user_id=user.id,
             limit=limit,
             offset=offset
         )
         
         # Get total count of files for the user (async, non-blocking)
-        total_count = await get_knowledge_handler().count_user_files(user.id)
+        total_count = await get_knowledge_handler().count_user_files_async(user.id)
         
         # Convert FileMetadata objects to FileInfo response models
         file_infos = [
@@ -473,31 +478,6 @@ class CheckAccessResponse(BaseModel):
     """Response model for access check"""
     has_access: bool
     permission_type: Optional[str] = None
-
-
-@router.post(
-    "/{file_id}/permissions/grant",
-    response_model=GrantPermissionResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-async def grant_file_permission(
-    file_id: str,
-    request: GrantPermissionRequest,
-    user: Annotated[User | None, Depends(get_current_user)],
-):
-    """
-    Grant file permission to a user, department, or all users.
-    
-    Only users with EDIT permission can grant permissions.
-    
-    Args:
-        file_id: File ID to grant permission for
-        request: GrantPermissionRequest with permission details
-        user: Current authenticated user (must have EDIT permission)
-    
-    Returns:
-        GrantPermissionResponse with permission ID and message
-    """
 
 
 @router.post(

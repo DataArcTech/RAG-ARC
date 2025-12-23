@@ -389,6 +389,13 @@ class RetrievalHelper:
         """
         import numpy as np
         import faiss
+        import copy
+        from core.utils.faiss_lock import FAISS_LOCK
+
+        try:
+            from encapsulation.data_model.schema import Chunk
+        except Exception:  # pragma: no cover
+            Chunk = None  # type: ignore[assignment]
 
         if not hasattr(index, 'index') or index.index is None or index.index.ntotal == 0:
             return []
@@ -403,9 +410,11 @@ class RetrievalHelper:
 
         # Check if normalization is needed
         if hasattr(index.config, 'normalize_L2') and index.config.normalize_L2:
-            faiss.normalize_L2(query_vector)
+            with FAISS_LOCK:
+                faiss.normalize_L2(query_vector)
         elif hasattr(index.config, 'metric') and index.config.metric == "cosine":
-            faiss.normalize_L2(query_vector)
+            with FAISS_LOCK:
+                faiss.normalize_L2(query_vector)
 
         # Calculate fetch_k to account for soft-deleted documents
         # Fetch more results than needed to compensate for deleted documents
@@ -413,7 +422,8 @@ class RetrievalHelper:
         fetch_k = min(k + deleted_count, index.index.ntotal)
 
         # Execute search
-        distances, indices = index.index.search(query_vector, fetch_k)
+        with FAISS_LOCK:
+            distances, indices = index.index.search(query_vector, fetch_k)
 
         results = []
         skipped_count = 0
@@ -429,6 +439,15 @@ class RetrievalHelper:
                 continue
 
             doc = index.docstore[doc_id]
+            if Chunk is not None and isinstance(doc, Chunk):
+                doc = Chunk(
+                    id=doc.id,
+                    content=doc.content,
+                    owner_id=doc.owner_id,
+                    domain=getattr(doc, "domain", None),
+                    metadata=copy.deepcopy(doc.metadata) if getattr(doc, "metadata", None) else {},
+                    graph=copy.deepcopy(doc.graph) if getattr(doc, "graph", None) else None,
+                )
 
             # For cosine metric, FAISS returns similarity score instead of distance
             if metric == "cosine":

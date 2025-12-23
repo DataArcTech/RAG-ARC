@@ -12,15 +12,15 @@ logger = logging.getLogger(__name__)
 import uuid
 import asyncio
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
-from functools import partial
 from fastapi.responses import Response
 from fastapi import UploadFile, HTTPException
 from encapsulation.data_model.orm_models import (
     FileMetadata, FileStatus,
     FilePermission, PermissionReceiverType, PermissionType
 )
-from framework.thread_pool import get_thread_pool
+from core.utils.thread_pool import run_blocking, run_coroutine_in_thread
 
 class Knowledge(AbstractModule):
     def __init__(self, config: 'KnowledgeConfig'):
@@ -109,7 +109,11 @@ class Knowledge(AbstractModule):
 
     async def _run_blocking(self, func, *args, **kwargs):
         """Run a blocking function in a separate thread to avoid blocking the event loop."""
-        return await get_thread_pool().run_blocking(func, *args, **kwargs)
+        return await run_blocking(func, *args, **kwargs)
+
+    async def _run_coroutine_in_thread(self, coro_func, *args, **kwargs):  # noqa: ANN001
+        """Run an async callable in a dedicated thread to keep FastAPI event loop responsive."""
+        return await run_coroutine_in_thread(coro_func, *args, **kwargs)
     
     def _track_deletion_task(self, doc_id: str, task: asyncio.Task) -> None:
         """Register a background deletion task so we don't schedule duplicates."""
@@ -137,7 +141,7 @@ class Knowledge(AbstractModule):
         except asyncio.CancelledError:
             logger.info(f"Cancelled deletion task awaited for file_id: {doc_id}")
     
-    async def upload_file(self, file: UploadFile, user_id: uuid.UUID) -> str:
+    async def upload_file(self, file: UploadFile, user_id: uuid.UUID, *, relative_path: str | None = None) -> str:
         try:
             # Read file data asynchronously to avoid blocking the event loop
             file_data = await self._run_blocking(file.file.read)
@@ -145,7 +149,7 @@ class Knowledge(AbstractModule):
             # Upload file asynchronously to avoid blocking the event loop
             doc_id = await self._run_blocking(
                 self.file_storage.upload_file,
-                filename=file.filename,
+                filename=(relative_path or file.filename),
                 file_data=file_data,
                 owner_id=user_id,
                 content_type=file.content_type
@@ -178,7 +182,8 @@ class Knowledge(AbstractModule):
                     return {"success": False, "file_id": doc_id, "error_message": "file scheduled for deletion"}
 
                 logger.info(f"Starting background indexing for file_id: {doc_id} (semaphore acquired)")
-                result = await self.file_index.index_file(doc_id)
+                # IndexManager is async but performs heavy blocking work; run it off the main event loop.
+                result = await self._run_coroutine_in_thread(self.file_index.index_file, doc_id)
                 if result.get("success"):
                     logger.info(f"Background indexing completed successfully for file_id: {doc_id}")
                 else:
@@ -221,7 +226,8 @@ class Knowledge(AbstractModule):
         if content is None:
             raise HTTPException(status_code=404, detail="File content not found")
 
-        headers = {"Content-Disposition": f"attachment; filename=\"{metadata.filename}\""}
+        download_name = Path(str(metadata.filename or "")).name or "download"
+        headers = {"Content-Disposition": f"attachment; filename=\"{download_name}\""}
         return Response(content=content, media_type=metadata.content_type, headers=headers)
 
     async def mark_file_deleted_cli(self, doc_id: str, user_id: uuid.UUID) -> Dict[str, Any]:
@@ -340,7 +346,7 @@ class Knowledge(AbstractModule):
                 self._deletion_failures.pop(doc_id, None)
                 self._unmark_file_for_deletion(doc_id)
 
-    async def list_user_files(
+    def list_user_files(
         self,
         user_id: uuid.UUID,
         status: Optional[FileStatus] = None,
@@ -360,13 +366,11 @@ class Knowledge(AbstractModule):
             List of FileMetadata objects accessible to the user
         """
         try:
-            # Run database query asynchronously to avoid blocking the event loop
-            files = await self._run_blocking(
-                self.file_storage.list_accessible_files,
+            files = self.file_storage.list_accessible_files(
                 user_id=user_id,
                 status=status,
                 limit=limit,
-                offset=offset
+                offset=offset,
             )
             if status is None:
                 files = [
@@ -378,8 +382,24 @@ class Knowledge(AbstractModule):
         except Exception as e:
             logger.error(f"Failed to list accessible files for user {user_id}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to retrieve files: {str(e)}")
-    
-    async def count_user_files(
+
+    async def list_user_files_async(
+        self,
+        user_id: uuid.UUID,
+        status: Optional[FileStatus] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> List[FileMetadata]:
+        """Async wrapper for list_user_files() for FastAPI handlers."""
+        return await self._run_blocking(
+            self.list_user_files,
+            user_id=user_id,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+
+    def count_user_files(
         self,
         user_id: uuid.UUID,
         status: FileStatus | None = None
@@ -396,29 +416,25 @@ class Knowledge(AbstractModule):
         """
         try:
             if status is None:
-                # Run database queries asynchronously to avoid blocking the event loop
-                total = await self._run_blocking(
-                    self.file_storage.count_accessible_files,
-                    user_id=user_id
-                )
-                deleted = await self._run_blocking(
-                    self.file_storage.count_accessible_files,
-                    user_id=user_id,
-                    status=FileStatus.DELETED
-                )
+                total = self.file_storage.count_accessible_files(user_id=user_id)
+                deleted = self.file_storage.count_accessible_files(user_id=user_id, status=FileStatus.DELETED)
                 mark_only = len(self._files_marked_for_deletion_by_owner.get(user_id, set()))
                 count = max(total - deleted - mark_only, 0)
             else:
-                count = await self._run_blocking(
-                    self.file_storage.count_accessible_files,
-                    user_id=user_id,
-                    status=status
-                )
+                count = self.file_storage.count_accessible_files(user_id=user_id, status=status)
             logger.info(f"Counted {count} accessible files for user {user_id}")
             return count
         except Exception as e:
             logger.error(f"Failed to count accessible files for user {user_id}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to count files: {str(e)}")
+
+    async def count_user_files_async(
+        self,
+        user_id: uuid.UUID,
+        status: FileStatus | None = None,
+    ) -> int:
+        """Async wrapper for count_user_files() for FastAPI handlers."""
+        return await self._run_blocking(self.count_user_files, user_id, status=status)
 
     def _is_active_status(self, status: FileStatus) -> bool:
         return status != FileStatus.DELETED
@@ -472,6 +488,11 @@ class Knowledge(AbstractModule):
                     invalid_files.append(f"You are not authorized to operate on this file: {file_id}")
                     continue
 
+                active_task = self._active_index_tasks.get(file_id)
+                if active_task is not None and not active_task.done():
+                    skipped_files.append(file_id)
+                    continue
+
                 # Only allow indexing for STORED or FAILED files
                 # Skip files that are already indexed or in intermediate processing states
                 if metadata.status == FileStatus.STORED or metadata.status == FileStatus.FAILED:
@@ -497,8 +518,10 @@ class Knowledge(AbstractModule):
             f"Triggering indexing for files: {'; '.join(valid_files)}"
         )
 
-        # Start background indexing task for files not indexed yet only
-        await self._index_multiple_files_background(valid_files, user_id)
+        # Start background indexing tasks (fire-and-forget) for files not indexed yet only.
+        for file_id in valid_files:
+            task = asyncio.create_task(self._index_file_background(file_id))
+            self._track_background_task(file_id, task)
 
         # Return immediately with basic info
         message_parts = [

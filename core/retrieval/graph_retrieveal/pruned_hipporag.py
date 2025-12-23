@@ -3,6 +3,8 @@ import numpy as np
 import uuid
 import os
 import json
+import threading
+from contextlib import nullcontext
 from typing import List, Tuple, Set, TYPE_CHECKING, Optional
 from collections import defaultdict
 
@@ -39,6 +41,7 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         Args:
             config: Configuration object containing all retrieval parameters
         """
+        self._tls = threading.local()
         super().__init__(config)
 
         # Build and load graph store
@@ -74,6 +77,37 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
             logger.info(f"    Base max neighbors: {config.max_neighbors}")
             logger.info(f"    Query-aware multiplier: {config.query_aware_multiplier}")
             logger.info(f"    Min/Max neighbors: {config.query_aware_min_k}/{config.query_aware_max_k}")
+
+    def _get_tls(self) -> threading.local:
+        tls = getattr(self, "_tls", None)
+        if tls is None:
+            tls = threading.local()
+            setattr(self, "_tls", tls)
+        return tls
+
+    def _tls_get_list(self, key: str) -> list:
+        tls = self._get_tls()
+        value = getattr(tls, key, None)
+        if value is None:
+            value = []
+            setattr(tls, key, value)
+        return value
+
+    @property
+    def passage_node_idxs(self) -> list[int]:
+        return self._tls_get_list("passage_node_idxs")
+
+    @passage_node_idxs.setter
+    def passage_node_idxs(self, value: list[int]) -> None:
+        setattr(self._get_tls(), "passage_node_idxs", value)
+
+    @property
+    def passage_node_keys(self) -> list[str]:
+        return self._tls_get_list("passage_node_keys")
+
+    @passage_node_keys.setter
+    def passage_node_keys(self, value: list[str]) -> None:
+        setattr(self._get_tls(), "passage_node_keys", value)
 
     def _build_node_mappings(self, owner_id: Optional[uuid.UUID] = None):
         """
@@ -267,12 +301,16 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
             # Normalize query vector for cosine similarity
             if self.graph_store.fact_faiss_db.config.metric == 'cosine' or \
                self.graph_store.fact_faiss_db.config.normalize_L2:
+                from core.utils.faiss_lock import FAISS_LOCK
                 import faiss
-                faiss.normalize_L2(query_vector)
+                with FAISS_LOCK:
+                    faiss.normalize_L2(query_vector)
 
             # Retrieve top-k facts (with buffer for filtering)
             k = min(total_facts, self.config.fact_retrieval_top_k * 10)
-            scores, indices = self.graph_store.fact_faiss_db.index.search(query_vector, k)
+            from core.utils.faiss_lock import FAISS_LOCK
+            with FAISS_LOCK:
+                scores, indices = self.graph_store.fact_faiss_db.index.search(query_vector, k)
 
             scores = scores[0]
             indices = indices[0]
@@ -473,11 +511,14 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         Returns:
             List of neighbor indices (pruned and sorted by weight)
         """
-        graph = self.graph_store.graph
-        idx_to_node = self.graph_store.idx_to_node
-        node_to_node_stats = self.graph_store.node_to_node_stats
+        read_lock = getattr(self.graph_store, "read_lock", None)
+        lock_ctx = self.graph_store.read_lock() if callable(read_lock) else nullcontext()
+        with lock_ctx:
+            graph = self.graph_store.graph
+            idx_to_node = self.graph_store.idx_to_node
+            node_to_node_stats = self.graph_store.node_to_node_stats
 
-        all_neighbors = graph.neighbors(node_idx, mode="all")
+            all_neighbors = graph.neighbors(node_idx, mode="all")
 
         if not all_neighbors:
             return []
@@ -556,83 +597,88 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         Returns:
             Tuple of (subgraph_node_indices, subgraph_chunk_ids)
         """
-        graph = self.graph_store.graph
-        subgraph_nodes = set()
-        subgraph_chunk_ids = set()
+        read_lock = getattr(self.graph_store, "read_lock", None)
+        lock_ctx = self.graph_store.read_lock() if callable(read_lock) else nullcontext()
+        with lock_ctx:
+            graph = self.graph_store.graph
+            subgraph_nodes = set()
+            subgraph_chunk_ids = set()
 
-        node_to_idx = self.graph_store.node_to_idx
-        idx_to_node = self.graph_store.idx_to_node
+            node_to_idx = self.graph_store.node_to_idx
+            idx_to_node = self.graph_store.idx_to_node
 
-        chunks_set = set(self.passage_node_keys)
+            chunks_set = set(self.passage_node_keys)
 
-        # Convert seed entity IDs to graph indices
-        seed_entity_indices = set()
-        for entity_id in seed_entity_ids:
-            if entity_id in node_to_idx:
-                seed_entity_indices.add(node_to_idx[entity_id])
+            # Convert seed entity IDs to graph indices
+            seed_entity_indices = set()
+            for entity_id in seed_entity_ids:
+                if entity_id in node_to_idx:
+                    seed_entity_indices.add(node_to_idx[entity_id])
 
-        subgraph_nodes.update(seed_entity_indices)
+            subgraph_nodes.update(seed_entity_indices)
 
-        # Add chunks directly connected to seed entities
-        for entity_idx in seed_entity_indices:
-            neighbors = graph.neighbors(entity_idx, mode="all")
-            for neighbor_idx in neighbors:
-                neighbor_id = idx_to_node.get(neighbor_idx)
-                if neighbor_id and neighbor_id in chunks_set:
-                    subgraph_nodes.add(neighbor_idx)
-                    subgraph_chunk_ids.add(neighbor_id)
+            # Add chunks directly connected to seed entities
+            for entity_idx in seed_entity_indices:
+                neighbors = graph.neighbors(entity_idx, mode="all")
+                for neighbor_idx in neighbors:
+                    neighbor_id = idx_to_node.get(neighbor_idx)
+                    if neighbor_id and neighbor_id in chunks_set:
+                        subgraph_nodes.add(neighbor_idx)
+                        subgraph_chunk_ids.add(neighbor_id)
 
-        logger.info(f"Added {len(subgraph_chunk_ids)} chunks from seed entities")
+            logger.info(f"Added {len(subgraph_chunk_ids)} chunks from seed entities")
 
-        include_chunks = self.config.include_chunk_neighbors
+            include_chunks = self.config.include_chunk_neighbors
 
-        # Multi-hop expansion with query-aware pruning
-        current_layer = seed_entity_indices
-        for hop in range(self.config.expansion_hops):
-            next_layer = set()
-            total_neighbors_before_pruning = 0
-            total_neighbors_after_pruning = 0
+            # Multi-hop expansion with query-aware pruning
+            current_layer = seed_entity_indices
+            for hop in range(self.config.expansion_hops):
+                next_layer = set()
+                total_neighbors_before_pruning = 0
+                total_neighbors_after_pruning = 0
 
-            for node_idx in current_layer:
-                # Get neighbors with query-aware pruning
-                all_neighbors_count = len(graph.neighbors(node_idx, mode="all"))
-                neighbor_indices = self._get_pruned_neighbors_by_weight(
-                    node_idx,
-                    entity_relevance_scores=entity_relevance_scores
+                for node_idx in current_layer:
+                    # Get neighbors with query-aware pruning
+                    all_neighbors_count = len(graph.neighbors(node_idx, mode="all"))
+                    neighbor_indices = self._get_pruned_neighbors_by_weight(
+                        node_idx,
+                        entity_relevance_scores=entity_relevance_scores
+                    )
+                    total_neighbors_before_pruning += all_neighbors_count
+                    total_neighbors_after_pruning += len(neighbor_indices)
+
+                    # Process neighbors
+                    for neighbor_idx in neighbor_indices:
+                        if neighbor_idx not in subgraph_nodes:
+                            neighbor_id = idx_to_node.get(neighbor_idx)
+
+                            # Only expand to entity nodes
+                            if neighbor_id and neighbor_id.startswith("entity-"):
+                                next_layer.add(neighbor_idx)
+                                subgraph_nodes.add(neighbor_idx)
+
+                                # Optionally add chunks connected to this entity
+                                if include_chunks:
+                                    entity_neighbor_indices = self._get_pruned_neighbors_by_weight(
+                                        neighbor_idx,
+                                        entity_relevance_scores=entity_relevance_scores
+                                    )
+
+                                    for en_idx in entity_neighbor_indices:
+                                        en_id = idx_to_node.get(en_idx)
+                                        if en_id and en_id in chunks_set:
+                                            subgraph_nodes.add(en_idx)
+                                            subgraph_chunk_ids.add(en_id)
+
+                logger.info(
+                    f"Hop {hop}: {len(current_layer)} nodes, pruned {total_neighbors_before_pruning} → {total_neighbors_after_pruning} neighbors"
                 )
-                total_neighbors_before_pruning += all_neighbors_count
-                total_neighbors_after_pruning += len(neighbor_indices)
 
-                # Process neighbors
-                for neighbor_idx in neighbor_indices:
-                    if neighbor_idx not in subgraph_nodes:
-                        neighbor_id = idx_to_node.get(neighbor_idx)
+                current_layer = next_layer
+                if not current_layer:
+                    break
 
-                        # Only expand to entity nodes
-                        if neighbor_id and neighbor_id.startswith("entity-"):
-                            next_layer.add(neighbor_idx)
-                            subgraph_nodes.add(neighbor_idx)
-
-                            # Optionally add chunks connected to this entity
-                            if include_chunks:
-                                entity_neighbor_indices = self._get_pruned_neighbors_by_weight(
-                                    neighbor_idx,
-                                    entity_relevance_scores=entity_relevance_scores
-                                )
-
-                                for en_idx in entity_neighbor_indices:
-                                    en_id = idx_to_node.get(en_idx)
-                                    if en_id and en_id in chunks_set:
-                                        subgraph_nodes.add(en_idx)
-                                        subgraph_chunk_ids.add(en_id)
-
-            logger.info(f"Hop {hop}: {len(current_layer)} nodes, pruned {total_neighbors_before_pruning} → {total_neighbors_after_pruning} neighbors")
-
-            current_layer = next_layer
-            if not current_layer:
-                break
-
-        return subgraph_nodes, subgraph_chunk_ids
+            return subgraph_nodes, subgraph_chunk_ids
 
     def _graph_search_on_subgraph(
         self,
@@ -662,7 +708,10 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         Returns:
             Tuple of (chunk_ids, chunk_scores, ppr_scores)
         """
-        num_nodes = len(self.graph_store.graph.vs)
+        read_lock = getattr(self.graph_store, "read_lock", None)
+        lock_ctx = self.graph_store.read_lock() if callable(read_lock) else nullcontext()
+        with lock_ctx:
+            num_nodes = len(self.graph_store.graph.vs)
         phrase_weights = np.zeros(num_nodes, dtype=np.float32)
         passage_weights = np.zeros(num_nodes, dtype=np.float32)
 
@@ -784,68 +833,73 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         # Clean up weights (remove NaN and negative values)
         node_weights = np.where(np.isnan(node_weights) | (node_weights < 0), 0, node_weights)
 
-        if subgraph_nodes is not None and len(subgraph_nodes) > 0:
-            # Use induced subgraph
-            subgraph_size = len(subgraph_nodes)
-            total_size = len(self.graph_store.node_to_idx)
-            logger.info(f"Using induced subgraph PPR: {subgraph_size}/{total_size} nodes ({100*subgraph_size/total_size:.1f}%)")
-
-            subgraph = self.graph_store.graph.induced_subgraph(subgraph_nodes)
-
-            # Extract reset probabilities for subgraph nodes
-            subgraph_reset = [node_weights[node_idx] for node_idx in subgraph_nodes]
-
-            # Normalize reset probabilities
-            reset_sum = sum(subgraph_reset)
-            if reset_sum > 0:
-                subgraph_reset = [r / reset_sum for r in subgraph_reset]
-            else:
-                logger.warning("All reset probabilities are zero")
-                return np.array([]), np.array([]), np.array([])
-
-            try:
-                # Run PPR on subgraph
-                subgraph_pagerank = subgraph.personalized_pagerank(
-                    damping=damping,
-                    directed=False,
-                    weights='weight',
-                    reset=subgraph_reset,
-                    implementation='prpack'
+        read_lock = getattr(self.graph_store, "read_lock", None)
+        lock_ctx = self.graph_store.read_lock() if callable(read_lock) else nullcontext()
+        with lock_ctx:
+            if subgraph_nodes is not None and len(subgraph_nodes) > 0:
+                # Use induced subgraph
+                subgraph_size = len(subgraph_nodes)
+                total_size = len(self.graph_store.node_to_idx)
+                logger.info(
+                    f"Using induced subgraph PPR: {subgraph_size}/{total_size} nodes ({100*subgraph_size/total_size:.1f}%)"
                 )
 
-                # Map subgraph scores back to full graph
-                pagerank_scores = [0.0] * len(self.graph_store.node_to_idx)
-                for i, node_idx in enumerate(subgraph_nodes):
-                    pagerank_scores[node_idx] = subgraph_pagerank[i]
+                subgraph = self.graph_store.graph.induced_subgraph(subgraph_nodes)
 
-            except Exception as e:
-                logger.error(f"Subgraph PPR failed: {e}")
-                return np.array([]), np.array([]), np.array([])
-        else:
-            # No subgraph specified, use full graph
-            logger.info(f"Using full graph PPR: {len(self.graph_store.node_to_idx)} nodes")
+                # Extract reset probabilities for subgraph nodes
+                subgraph_reset = [node_weights[node_idx] for node_idx in subgraph_nodes]
 
-            # Normalize reset probabilities
-            reset_sum = node_weights.sum()
-            if reset_sum > 0:
-                reset_prob = node_weights / reset_sum
+                # Normalize reset probabilities
+                reset_sum = sum(subgraph_reset)
+                if reset_sum > 0:
+                    subgraph_reset = [r / reset_sum for r in subgraph_reset]
+                else:
+                    logger.warning("All reset probabilities are zero")
+                    return np.array([]), np.array([]), np.array([])
+
+                try:
+                    # Run PPR on subgraph
+                    subgraph_pagerank = subgraph.personalized_pagerank(
+                        damping=damping,
+                        directed=False,
+                        weights='weight',
+                        reset=subgraph_reset,
+                        implementation='prpack'
+                    )
+
+                    # Map subgraph scores back to full graph
+                    pagerank_scores = [0.0] * len(self.graph_store.node_to_idx)
+                    for i, node_idx in enumerate(subgraph_nodes):
+                        pagerank_scores[node_idx] = subgraph_pagerank[i]
+
+                except Exception as e:
+                    logger.error(f"Subgraph PPR failed: {e}")
+                    return np.array([]), np.array([]), np.array([])
             else:
-                logger.warning("All reset probabilities are zero")
-                return np.array([]), np.array([]), np.array([])
+                # No subgraph specified, use full graph
+                logger.info(f"Using full graph PPR: {len(self.graph_store.node_to_idx)} nodes")
 
-            try:
-                # Run PPR on full graph
-                pagerank_scores = self.graph_store.graph.personalized_pagerank(
-                    damping=damping,
-                    directed=False,
-                    weights='weight',
-                    reset=reset_prob.tolist(),
-                    implementation='prpack'
-                )
+                # Normalize reset probabilities
+                reset_sum = node_weights.sum()
+                if reset_sum > 0:
+                    reset_prob = node_weights / reset_sum
+                else:
+                    logger.warning("All reset probabilities are zero")
+                    return np.array([]), np.array([]), np.array([])
 
-            except Exception as e:
-                logger.error(f"Full graph PPR failed: {e}")
-                return np.array([]), np.array([]), np.array([])
+                try:
+                    # Run PPR on full graph
+                    pagerank_scores = self.graph_store.graph.personalized_pagerank(
+                        damping=damping,
+                        directed=False,
+                        weights='weight',
+                        reset=reset_prob.tolist(),
+                        implementation='prpack'
+                    )
+
+                except Exception as e:
+                    logger.error(f"Full graph PPR failed: {e}")
+                    return np.array([]), np.array([]), np.array([])
 
         # Extract and sort passage scores
         pagerank_array = np.array(pagerank_scores)
@@ -870,15 +924,17 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
 
         # Collect passage embeddings
         passage_embeddings_list = []
+        embedding_dim: int | None = None
         for chunk_id in self.passage_node_keys:
             if chunk_id in self.graph_store.chunk_embeddings:
                 passage_embeddings_list.append(self.graph_store.chunk_embeddings[chunk_id])
             else:
                 # Use zero embedding for missing chunks
-                if passage_embeddings_list:
-                    embedding_dim = len(passage_embeddings_list[0])
-                else:
-                    embedding_dim = 1024
+                if embedding_dim is None:
+                    if passage_embeddings_list:
+                        embedding_dim = len(passage_embeddings_list[0])
+                    else:
+                        embedding_dim = self.graph_store.embedding_model.get_embedding_dimension()
                 passage_embeddings_list.append(np.zeros(embedding_dim))
 
         if not passage_embeddings_list:
@@ -1020,7 +1076,7 @@ class PrunedHippoRAGRetriever(BaseGraphRetriever):
         # Format facts for LLM prompt
         facts_text = "\n".join([
             f"{i+1}. {head} - {relation} - {tail}"
-            for i, (head, relation, tail) in enumerate(candidate_facts)
+            for i, (head, relation, tail, *_) in enumerate(candidate_facts)
         ])
 
         prompt = f"""Given the query: "{query}"

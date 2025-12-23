@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-API_BASE="http://localhost:8000"
+API_BASE="${API_BASE:-http://localhost:8000}"
 SESSION_ENDPOINT="$API_BASE/session"
 AUTH_ENDPOINT="$API_BASE/auth"
 

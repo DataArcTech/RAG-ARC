@@ -69,11 +69,27 @@ class LLMReranker(AbstractReranker):
             return []
 
         try:
+            rerank_inputs: List[Chunk] = []
+            for chunk in chunks:
+                metadata = getattr(chunk, "metadata", None) or {}
+                rerank_text = metadata.get("prompt_text") or metadata.get("index_text")
+                if not isinstance(rerank_text, str) or not rerank_text.strip():
+                    rerank_text = chunk.content
+                rerank_inputs.append(
+                    Chunk(
+                        id=getattr(chunk, "id", None),
+                        owner_id=getattr(chunk, "owner_id", None),
+                        content=rerank_text,
+                        metadata=metadata,
+                        graph=getattr(chunk, "graph", None),
+                    )
+                )
+
             # Pass all parameters to encapsulation layer
             # Encapsulation layer handles all configuration (top_k, batch_size, instruction)
             ranked_results = self.rerank_llm.rerank(
                 query=query,
-                chunks=chunks,
+                chunks=rerank_inputs,
                 **kwargs  # Pass through all parameters to encapsulation layer
             )
 
@@ -83,7 +99,7 @@ class LLMReranker(AbstractReranker):
             for chunk_idx, score in ranked_results:
                 chunk = chunks[chunk_idx]
                 # Preserve original metadata and add rerank score
-                new_metadata = chunk.metadata.copy()
+                new_metadata = (getattr(chunk, "metadata", None) or {}).copy()
                 new_metadata["rerank_score"] = score
                 new_metadata["rerank_method"] = self.rerank_llm.get_model_info().get("provider", "llm")
 

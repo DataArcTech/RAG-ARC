@@ -131,6 +131,8 @@ RAG-ARC/
 
 ## 🚀 Quick Start
 
+> Need help configuring `.env`? See [env-en.md](env-en.md) (English) or [env-zh.md](env-zh.md) for a complete reference.
+
 ### 🐳 Docker Deployment (Recommended)
 
 **Three-step deployment:**
@@ -209,9 +211,12 @@ curl -LsSf https://astral.ac.cn/uv/install.sh | sh
 # Tsinghua mirror is configured in pyproject.toml
 uv sync
 
+# Optional: Install development dependencies (for running tests)
+uv sync --extra dev
+
 # 4. Copy and configure environment variables
 cp .env.example .env
-# Edit .env to configure your settings
+# Edit .env and fill in the model/API keys you need (see env-en.md for every option)
 ```
 
 ### 🔐 Optional: Admin Access
@@ -251,6 +256,7 @@ RAG-ARC uses a modular configuration system. Key configuration files are located
 - `knowledge.json`: Knowledge management configuration
 - `account.json`: User account configuration
 - `.env`: runtime knobs (providers, database credentials, etc.). Set `DEVELOP_MODE=true` when you want all Docker services (PostgreSQL/Redis/Neo4j) to expose their ports to `localhost` for debugging; it remains `false` by default for security.
+- DeepSearch external search: enable via `config/json_configs/deepsearch_service.json` (`external_channel.enabled=true`, `gap_detection.enable_external_on_gap=true`) and provide `TAVILY_API_KEY`; `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` can override enablement at runtime.
 
 ### 🌐 LLM Profiles via `.env`
 
@@ -327,6 +333,21 @@ The CLI still connects to the same PostgreSQL/Redis/Neo4j/MinIO services defined
 
 > ⚠️ Deletion note: `uv run rag-arc delete-file FILE_ID` **only marks the file status as `DELETED`** to support quick UI/retrieval isolation tests. It does not trigger any chunk/index/blob cleanup. For the full asynchronous deletion pipeline (indexes, vector stores, graph, blobs), call the HTTP API `DELETE /knowledge/{file_id}`; the CLI no longer schedules full cleanup jobs.
 
+#### DeepSearch MCP tool server
+
+- `uv run rag-arc tool-mcp-server --transport stdio` launches the FastMCP server that mirrors the built-in DeepSearch tools. The server reads `config/json_configs/deepsearch_tool_mcp_server.json` (override with `DEEPSEARCH_TOOL_MCP_CONFIG_PATH`) so it shares the same adapter/LLM configuration as the HTTP and CLI entry points.
+- **ToolManager executes all built-in tools locally by default.** MCP routing only kicks in when you configure an `mcp_client`, mark a tool as `mcp_only`/`mcp_fallback`, or register remote tool descriptors. Start the MCP tool server only if you need to proxy tools through FastMCP or expose them to other agents; otherwise DeepSearch runs entirely in-process.
+- Keep the JSON config in sync with your environment files to avoid drift. The `tool_manager` block accepts the same structure described in `config/application/deepsearch_config.py`.
+- Use `DEEPSEARCH_TOOL_MCP_TOOLS` (comma-separated list) when you need to expose a subset of tools. Leaving it empty keeps the full tool catalog enabled.
+- HTTP, CLI, and MCP responses expose a consistent `evidence` bundle (chunks, triples, seed entities, graph metadata). Pass `include_evidence=true` on the HTTP endpoints or `--with-evidence` on the CLI to opt in; MCP DeepSearch runs include the bundle automatically.
+- Tune payload size via environment variables: `ENABLE_ALL_EVIDENCE`, `CHAT_TOP_CHUNKS`, `CHAT_TOP_TRIPLES`, `CHAT_TOP_SEED_ENTITIES`, `DEEPSEARCH_TOP_CHUNKS`, and `DEEPSEARCH_TOP_TRIPLES` govern how much data is serialized; when `ENABLE_ALL_EVIDENCE=true` no trimming is applied.
+
+#### Chat MCP server
+
+- `uv run rag-arc chat-mcp-server --transport stdio` exposes the authenticated chat workflow (session creation + chat streaming) as an MCP server. This server is implemented in `api/mcp/server.py`.
+- SSE/HTTP transports listen on `127.0.0.1:8785` with the default path `mcp/chat`, so they won't collide with the tool MCP server (`8765`).
+- Use this endpoint if you want an external agent to drive RAG-ARC's chat stack through MCP instead of the HTTP API.
+
 > 📚 See `cli/README.md` for the full command reference (ingest-file/folder, list/delete, trigger-index, export-graph, chat/pipeline/graph-qa).
 
 ### 🧪 Example Usage
@@ -342,6 +363,18 @@ curl -X POST "http://localhost:8000/rag_inference/chat" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"query": "What is RAG-ARC?"}'
+
+# Chat + evidence bundle (top chunks, triples, seed entities, graph snapshot)
+curl -X POST "http://localhost:8000/rag_inference/chat" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is RAG-ARC?", "return_subgraph": true, "include_evidence": true}'
+
+# DeepSearch with structured evidence
+curl -X POST "http://localhost:8000/deepsearch/run" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is RAG-ARC?", "include_evidence": true}'
 
 # Get Token (Login)
 curl -X POST "http://localhost:8000/auth/token" \
@@ -362,20 +395,44 @@ curl -X GET "http://localhost:8000/session/YOUR_SESSION_ID/messages" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
 ```
 
-### WebSocket streaming chat (Python example, requires websockets library):
+### SSE streaming chat (Python example):
 
 ```python
-import asyncio
-import websockets
+import json
+import httpx
 
-async def chat():
-    uri = 'ws://localhost:8000/rag_inference/stream_chat/YOUR_SESSION_ID'
-    async with websockets.connect(uri, additional_headers=[('Cookie', 'auth_token=YOUR_ACCESS_TOKEN')]) as ws:
-        await ws.send('Hello, RAG-ARC!')
-        print(await ws.recv())
+def chat_sse(session_id: str, access_token: str):
+    url = f"http://localhost:8000/rag_inference/stream_chat/{session_id}"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    params = {"query": "Hello, RAG-ARC!", "include_evidence": "true"}
 
-asyncio.run(chat())
+    with httpx.stream("GET", url, headers=headers, params=params, timeout=120.0) as r:
+        r.raise_for_status()
+        for line in r.iter_lines():
+            if not line:
+                continue
+            if not line.startswith("data:"):
+                continue
+            data = line.split(":", 1)[1].strip()
+            if data == "[DONE]":
+                break
+            chunk = json.loads(data)
+            delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+            if delta.get("content"):
+                print(delta["content"], end="", flush=True)
+            # Optional: evidence/subgraph is sent via OpenAI-compatible tool_calls.
+            tool_calls = delta.get("tool_calls") or []
+            for tool_call in tool_calls:
+                fn = (tool_call or {}).get("function") or {}
+                if fn.get("name") == "rag_arc_payload":
+                    payload = json.loads(fn.get("arguments") or "{}")
+                    # payload contains message/chunks/subgraph/evidence (same as non-stream endpoint)
+        print()
+
+chat_sse("YOUR_SESSION_ID", "YOUR_ACCESS_TOKEN")
 ```
+
+> Evidence payloads: `POST /rag_inference/chat` returns the full `evidence` object. For SSE streaming, when `include_evidence=true` (and/or `return_subgraph=true`) the server sends a final OpenAI-compatible chunk with `delta.tool_calls[].function.name == "rag_arc_payload"` containing the same payload (JSON string in `function.arguments`). For better UX, the stream also emits progress tool-calls during rewrite/retrieve/rerank with `delta.tool_calls[].function.name == "rag_arc_progress"` (JSON string in `function.arguments`, forward-compatible envelope with `v=1`, `type="progress"`, plus `request_id`/`seq` for ordering).
 
 ## 🛠️ Technology Stack
 
@@ -442,7 +499,7 @@ RAG-ARC provides a comprehensive REST API with the following key endpoints:
 
 ### RAG Inference
 - `POST /rag_inference/chat`: Chat with the RAG system
-- `WebSocket /rag_inference/stream_chat/{session_id}`: WebSocket-based streaming chat
+- `GET /rag_inference/stream_chat/{session_id}`: SSE-based streaming chat
 
 ### User Management
 - `POST /auth/register`: User registration
@@ -484,6 +541,29 @@ We welcome contributions from the community! Here's how you can help:
 3. 💾 Commit your changes (`git commit -m 'Add some AmazingFeature'`)
 4. 📤 Push to the branch (`git push origin feature/AmazingFeature`)
 5. 🔄 Open a Pull Request
+
+### 🧪 Running Tests
+
+To run the test suite, first install development dependencies:
+
+```bash
+# Install development dependencies (includes pytest and pytest-asyncio)
+uv sync --extra dev
+
+# Run all tests
+uv run pytest
+
+# Run specific test file
+uv run pytest test/deepsearch/test_planner.py
+
+# Run tests with verbose output
+uv run pytest -v
+
+# Run tests with short traceback
+uv run pytest --tb=short
+```
+
+**Note**: Tests require environment variables to be configured in `.env` file, especially API keys for LLM providers.
 
 ### 🔧 Development Guidelines
 

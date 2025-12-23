@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 from typing import Annotated, Any, Optional, List
-from fastapi import APIRouter, Depends, WebSocket, status, HTTPException
+from fastapi import APIRouter, Depends, status, HTTPException
 from pydantic import BaseModel
 from api.routers.auth import get_current_user
 from encapsulation.data_model.orm_models import ChatMessage, ChatSession
@@ -29,6 +29,7 @@ class ChatMessageResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
 router = APIRouter(prefix="/session", tags=["session"])
 
 registry = Register()

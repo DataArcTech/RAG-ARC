@@ -1,3 +1,4 @@
+import os
 from framework.config import AbstractConfig
 from typing import Literal, List, Annotated, Union
 from encapsulation.database.vector_db.faiss import FaissVectorDB
@@ -8,7 +9,7 @@ from pydantic import Field
 class FaissVectorDBConfig(AbstractConfig):
     type: Literal["faiss"] = "faiss"
 
-    index_path: str = "./data/faiss_index"
+    index_path: str = Field(default_factory=lambda: os.getenv("FAISS_INDEX_PATH", "./data/unified_faiss_index"))
     index_name: str = "index"
 
     metric: Literal["cosine", "l2", "ip"] = Field(default="cosine", description="Distance metric")

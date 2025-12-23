@@ -1,6 +1,7 @@
 """Configuration for Redis cache database"""
 
 import os
+from pydantic import Field
 from framework.config import AbstractConfig
 from encapsulation.database.cache_db.redis_db import RedisDB
 from typing import Literal, Optional
@@ -34,10 +35,10 @@ class RedisConfig(AbstractConfig):
     type: Literal["redis"] = "redis"
 
     # Redis connection configuration (read from environment variables)
-    host: str = "localhost" 
-    port: str = "6379"
-    db: str = "0"
-    password: Optional[str] = None
+    host: str = Field(default_factory=lambda: os.getenv("REDIS_HOST", "localhost"))
+    port: str = Field(default_factory=lambda: os.getenv("REDIS_PORT", "6379"))
+    db: str = Field(default_factory=lambda: os.getenv("REDIS_DB", "0"))
+    password: Optional[str] = Field(default_factory=lambda: os.getenv("REDIS_PASSWORD"))
 
     # Connection pool configuration
     max_connections: int = 50  # Maximum connections in pool
@@ -45,4 +46,3 @@ class RedisConfig(AbstractConfig):
 
     def build(self) -> RedisDB:
         return RedisDB(self)
-

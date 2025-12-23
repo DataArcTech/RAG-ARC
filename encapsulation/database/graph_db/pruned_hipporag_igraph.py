@@ -4,6 +4,7 @@ import logging
 import pickle
 import sqlite3
 import re
+import threading
 from typing import List, Dict, Any, Optional, Sequence, TYPE_CHECKING
 from collections import defaultdict
 import numpy as np
@@ -13,7 +14,9 @@ import faiss
 from encapsulation.database.graph_db.base import GraphStore
 from encapsulation.data_model.schema import Chunk, GraphData
 from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id, text_processing
+from encapsulation.database.utils.sqlite_threadlocal import ThreadLocalSQLiteConnection
 from core.utils.path_guard import ensure_writable_dir
+from core.utils.rwlock import RWLock
 from framework.shared_module_decorator import shared_module
 
 if TYPE_CHECKING:
@@ -79,6 +82,8 @@ class PrunedHippoRAGIGraphStore(GraphStore):
             config: Configuration object containing all storage parameters
         """
         super().__init__(config)
+        self._rwlock = RWLock()
+        self._chunk_embeddings_lock = threading.Lock()
 
         # Initialize embedding model
         self.embedding_model = config.embedding.build()
@@ -124,6 +129,12 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         logger.info(f"  - Chunk index: numpy array (brute-force search)")
         logger.info(f"  - Metadata: SQLite")
         logger.info(f"  - Graph: igraph")
+
+    def read_lock(self):
+        return self._rwlock.read_lock()
+
+    def write_lock(self):
+        return self._rwlock.write_lock()
 
     def _init_faiss_indices(self):
         """
@@ -197,7 +208,19 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         os.makedirs(storage_path, exist_ok=True)
 
         self.db_path = os.path.join(storage_path, 'metadata.db')
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        # NOTE(thread-safety):
+        # - DeepSearch may execute concurrent retrievals in a threadpool.
+        # - Use one SQLite connection per thread to avoid cross-thread usage hazards.
+        # - Guard in-memory graph state via the store RWLock (read_lock/write_lock).
+        self.conn = ThreadLocalSQLiteConnection(
+            self.db_path,
+            timeout=30.0,
+            pragmas={
+                "journal_mode": "WAL",
+                "synchronous": "NORMAL",
+                "busy_timeout": 5000,
+            },
+        )
         cursor = self.conn.cursor()
 
         # Chunks table
@@ -427,6 +450,8 @@ class PrunedHippoRAGIGraphStore(GraphStore):
 
         # Initialize fact cache if needed
         if not hasattr(self, '_fact_ids_cache'):
+            # A simple in-memory dedup cache for fact IDs.
+            # This is process-local and not synchronized; safe for the intended single-thread usage.
             self._fact_ids_cache = set()
 
         # Add facts to database
@@ -803,14 +828,18 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         # Batch normalize embeddings
         embeddings_array = np.array(embeddings_list).astype(np.float32)
         if self.entity_faiss_db.config.normalize_L2 or self.entity_faiss_db.config.metric == "cosine":
-            faiss.normalize_L2(embeddings_array)
+            from core.utils.faiss_lock import FAISS_LOCK
+            with FAISS_LOCK:
+                faiss.normalize_L2(embeddings_array)
 
         logger.info(f"Prepared {len(valid_entities)} valid entities for synonymy edge computation")
 
         # Batch FAISS search
         logger.info("Performing batch FAISS search...")
         k = min(self.synonymy_edge_topk, self.entity_faiss_db.index.ntotal)
-        distances_batch, indices_batch = self.entity_faiss_db.index.search(embeddings_array, k)
+        from core.utils.faiss_lock import FAISS_LOCK
+        with FAISS_LOCK:
+            distances_batch, indices_batch = self.entity_faiss_db.index.search(embeddings_array, k)
         logger.info("Batch FAISS search completed")
 
         # Process results
@@ -937,20 +966,21 @@ class PrunedHippoRAGIGraphStore(GraphStore):
         enabling efficient brute-force similarity search during retrieval.
         The array is cached and only rebuilt when marked as dirty.
         """
-        if self._chunk_embeddings_array is not None:
-            return  # Already built
+        with self._chunk_embeddings_lock:
+            if self._chunk_embeddings_array is not None:
+                return  # Already built
 
-        logger.info("Rebuilding chunk embeddings array...")
+            logger.info("Rebuilding chunk embeddings array...")
 
-        self._chunk_ids_list = list(self.chunk_embeddings.keys())
-        embeddings_list = [self.chunk_embeddings[cid] for cid in self._chunk_ids_list]
+            self._chunk_ids_list = list(self.chunk_embeddings.keys())
+            embeddings_list = [self.chunk_embeddings[cid] for cid in self._chunk_ids_list]
 
-        if embeddings_list:
-            self._chunk_embeddings_array = np.array(embeddings_list)
-            logger.info(f"Chunk embeddings array built: {len(self._chunk_ids_list)} chunks")
-        else:
-            self._chunk_embeddings_array = np.array([])
-            logger.warning("No chunk embeddings found")
+            if embeddings_list:
+                self._chunk_embeddings_array = np.array(embeddings_list)
+                logger.info(f"Chunk embeddings array built: {len(self._chunk_ids_list)} chunks")
+            else:
+                self._chunk_embeddings_array = np.array([])
+                logger.warning("No chunk embeddings found")
 
     # ========== GraphStore Interface Implementation ==========
 

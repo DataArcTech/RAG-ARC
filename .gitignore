@@ -218,3 +218,4 @@ docs-proj/
 sql/
 log/
 *.log
+test_output/

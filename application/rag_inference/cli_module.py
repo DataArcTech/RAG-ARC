@@ -1,26 +1,13 @@
 import logging
 import uuid
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from encapsulation.data_model.schema import Chunk
 from core.retrieval.graph_retrieveal.base import BaseGraphRetriever
+from encapsulation.data_model.pipeline import PipelineArtifacts
 from .module import RAGInference
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class PipelineArtifacts:
-    """Intermediate outputs captured from the RAG pipeline."""
-
-    original_query: str
-    rewritten_query: str
-    retrieved_chunks: List[Chunk]
-    reranked_chunks: List[Chunk]
-    messages: List[Dict[str, str]]
-    subgraph_data: Optional[Dict[str, Any]]
-    llm_response: Optional[str]
 
 
 class RAGInferenceCLIModule:
@@ -85,11 +72,11 @@ class RAGInferenceCLIModule:
         )
         logger.info("Retriever returned %d chunks", len(chunks))
 
-        subgraph_info = self._extract_subgraph_info(chunks) if return_subgraph else None
+        subgraph_info = self._extract_subgraph_info(chunks)
         reranked_chunks = self._rag.reranker.rerank(rewritten_query, chunks)
         logger.info("Reranker produced %d chunks", len(reranked_chunks))
 
-        subgraph_data = self._export_subgraph(subgraph_info) if subgraph_info else None
+        subgraph_data = self._export_subgraph(subgraph_info) if (subgraph_info and return_subgraph) else None
         messages = self._build_messages(reranked_chunks, rewritten_query)
         llm_response = None
         if not skip_llm:
@@ -105,6 +92,7 @@ class RAGInferenceCLIModule:
             reranked_chunks=reranked_chunks,
             messages=messages,
             subgraph_data=subgraph_data,
+            subgraph_info=subgraph_info,
             llm_response=llm_response,
         )
 
@@ -147,7 +135,11 @@ class RAGInferenceCLIModule:
     def _build_messages(self, chunks: List[Chunk], query: str) -> List[Dict[str, str]]:
         messages: List[Dict[str, str]] = []
         for idx, chunk in enumerate(chunks):
-            chunk_content = f"Chunk {idx + 1}:\n{chunk.content}"
+            metadata = getattr(chunk, "metadata", None) or {}
+            chunk_text = metadata.get("prompt_text") or metadata.get("index_text")
+            if not isinstance(chunk_text, str) or not chunk_text.strip():
+                chunk_text = chunk.content
+            chunk_content = f"Chunk {idx + 1}:\n{chunk_text}"
             messages.append({"role": "user", "content": chunk_content})
         messages.append(
             {

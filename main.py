@@ -3,12 +3,15 @@ import uuid
 import os
 from pathlib import Path
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from core.graph_adapter.scope_provider import configure_scope_provider
 
 # Load environment variables from .env file
 load_dotenv()
+configure_scope_provider()
 
 import app_registration
 
@@ -18,6 +21,7 @@ app_registration.initialize()
 from api.routers import mcp
 from api.routers import knowledge as knowledge_router
 from api.routers import rag_inference
+from api.routers import deepsearch as deepsearch_router
 from api.routers import session as session_router
 from api.routers import auth as auth_router
 from api.routers import user as user_router
@@ -26,6 +30,17 @@ from asgi_correlation_id.middleware import is_valid_uuid4
 from asgi_correlation_id.log_filters import CorrelationIdFilter
 from api.middleware.response_wrapper import RequestIdResponseWrapper
 from api.utils.logging_handler import DailySizeRotatingHandler
+
+
+# 自定义Formatter，使用北京时间（UTC+8）
+class BeijingFormatter(logging.Formatter):
+    """使用北京时间的日志格式化器"""
+    def formatTime(self, record, datefmt=None):
+        beijing_tz = timezone(timedelta(hours=8))
+        ct = datetime.fromtimestamp(record.created, tz=beijing_tz)
+        if datefmt:
+            return ct.strftime(datefmt)
+        return ct.strftime('%Y-%m-%d %H:%M:%S')
 
 
 # Configure logging with correlation ID
@@ -60,6 +75,12 @@ logging.basicConfig(
     handlers=[file_handler],  # 使用文件handler
     force=True  # 强制重新配置
 )
+# 为 root logger 设置自定义 formatter（确保所有日志都使用北京时间）
+for handler in logging.root.handlers:
+    if isinstance(handler, logging.StreamHandler) and not isinstance(handler.formatter, BeijingFormatter):
+        handler.setFormatter(BeijingFormatter(
+            '%(asctime)s - [request_id: %(correlation_id)s] - %(name)s - %(levelname)s - %(message)s'
+        ))
 
 # 为所有现有和未来的handler添加correlation_id过滤器
 for handler in logging.root.handlers:
@@ -156,6 +177,7 @@ async def health_check():
 app.mount("/mcp", mcp.mcp_app)
 app.include_router(knowledge_router.router)
 app.include_router(rag_inference.router)
+app.include_router(deepsearch_router.router)
 app.include_router(session_router.router)
 app.include_router(auth_router.router)
 app.include_router(user_router.router)

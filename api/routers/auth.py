@@ -3,7 +3,6 @@ import logging
 import os
 from typing import Annotated, Optional
 
-from api.routers.connection_manager import ConnectionManager
 import jwt
 from fastapi import (
     APIRouter,
@@ -82,8 +81,6 @@ logger.setLevel(logging.INFO)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-
-manager = ConnectionManager()
 
 class Token(BaseModel):
     access_token: str
@@ -257,27 +254,26 @@ async def get_current_user(
         raise credentials_exception
     return user
 
-
 async def ws_get_current_user(
     websocket: WebSocket
 ):
     auth_token = websocket.cookies.get("auth_token")
     if not auth_token:
-        await manager.disconnect(websocket, status.WS_1008_POLICY_VIOLATION)
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return None
 
     try:
         payload = jwt.decode(auth_token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
         token_data = TokenData(username=username)
-    except jwt.InvalidTokenError:
-        await manager.disconnect(websocket, status.WS_1008_POLICY_VIOLATION)
+    except InvalidTokenError:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return None
 
     # Use async method to avoid blocking the event loop
-    user = await get_account_handler().get_user_by_username_async(username=token_data.username)
+    user = await get_user_async(username=token_data.username)
     if user is None:
-        await manager.disconnect(websocket, status.WS_1008_POLICY_VIOLATION)
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return None
 
     return user
@@ -319,6 +315,4 @@ def validate_user_session(session: ChatSession, current_user: User):
         return False
     logger.info(f"Validating session {session.id} for user {current_user.id}")
     return True
-
-
 

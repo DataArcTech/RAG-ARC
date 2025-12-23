@@ -1,0 +1,159 @@
+{
+  "max_concurrent_indexing": 20,
+  "file_storage_config": {
+    "type": "file_storage",
+    "file_db_config": {
+      "type": "local_blob_store",
+      "base_path": "${FILE_STORE_BASE_PATH}"
+    },
+    "relational_db_config": {
+      "type": "postgresql",
+      "host": "${POSTGRES_HOST}",
+      "port": "${POSTGRES_PORT}",
+      "database": "${POSTGRES_DB}",
+      "user": "${POSTGRES_USER}",
+      "password": "${POSTGRES_PASSWORD}"
+    }
+  },
+  "index_manager_config": {
+    "type": "index_manager",
+    "file_storage_config": {
+      "type": "file_storage",
+      "file_db_config": {
+        "type": "local_blob_store",
+        "base_path": "${FILE_STORE_BASE_PATH}"
+      },
+      "relational_db_config": {
+        "type": "postgresql",
+        "host": "${POSTGRES_HOST}",
+        "port": "${POSTGRES_PORT}",
+        "database": "${POSTGRES_DB}",
+        "user": "${POSTGRES_USER}",
+        "password": "${POSTGRES_PASSWORD}"
+      }
+    },
+    "parsed_content_storage_config": {
+      "type": "parsed_content_storage",
+      "file_db_config": {
+        "type": "local_blob_store",
+        "base_path": "${PARSED_CONTENT_STORE_BASE_PATH}"
+      },
+      "relational_db_config": {
+        "type": "postgresql",
+        "host": "${POSTGRES_HOST}",
+        "port": "${POSTGRES_PORT}",
+        "database": "${POSTGRES_DB}",
+        "user": "${POSTGRES_USER}",
+        "password": "${POSTGRES_PASSWORD}"
+      }
+    },
+    "chunk_storage_config": {
+      "type": "chunk_storage",
+      "file_db_config": {
+        "type": "local_blob_store",
+        "base_path": "${CHUNK_STORE_BASE_PATH}"
+      },
+      "relational_db_config": {
+        "type": "postgresql",
+        "host": "${POSTGRES_HOST}",
+        "port": "${POSTGRES_PORT}",
+        "database": "${POSTGRES_DB}",
+        "user": "${POSTGRES_USER}",
+        "password": "${POSTGRES_PASSWORD}"
+      }
+    },
+    "parser_config": {
+      "type": "parser_combinator",
+      "base_output_dir": "./data/parsed_files",
+      "ocr_parser": {
+        "type": "vlm_ocr_parser",
+        "vlm_ocr": {
+          "type": "vlm_ocr",
+          "loading_method": "openai",
+          "model_name": "${OPENAI_OCR_MODEL}",
+          "max_tokens": 4096,
+          "temperature": 0.0
+        }
+      },
+      "native_parser": {
+        "type": "native_parser"
+      }
+    },
+    "chunker_config": {
+      "type": "semantic_unit_chunker",
+      "level": "${SEMANTIC_CHUNKING_LEVEL}",
+      "table_small_max_tokens": "${TABLE_SMALL_MAX_TOKENS}",
+      "table_slice_max_tokens": "${TABLE_SLICE_MAX_TOKENS}",
+      "table_slice_overlap_rows": "${TABLE_SLICE_OVERLAP_ROWS}",
+      "code_small_max_tokens": "${CODE_SMALL_MAX_TOKENS}",
+      "code_slice_max_tokens": "${CODE_SLICE_MAX_TOKENS}",
+      "code_slice_overlap_lines": "${CODE_SLICE_OVERLAP_LINES}",
+      "list_small_max_tokens": "${LIST_SMALL_MAX_TOKENS}",
+      "list_slice_max_tokens": "${LIST_SLICE_MAX_TOKENS}",
+      "list_slice_overlap_items": "${LIST_SLICE_OVERLAP_ITEMS}",
+      "fallback_chunker_config": {
+        "type": "token_chunker",
+        "chunk_size": 1000,
+        "chunk_overlap": 100
+      }
+    },
+    "indexer_configs": [
+      {
+        "type": "pruned_hipporag_neo4j_indexer",
+        "extractor_config": {
+          "type": "hipporag2_extractor",
+          "llm_config": {
+            "type": "openai_chat",
+            "model_name": "${OPENAI_CHAT_MODEL}",
+            "temperature": 0.0
+          },
+          "max_concurrent": 10,
+          "batch_size": 5,
+          "retry_attempts": 3,
+          "timeout": 60
+        },
+        "graph_store_config": {
+          "type": "pruned_hipporag_neo4j",
+          "url": "${NEO4J_URL}",
+          "username": "${NEO4J_USERNAME}",
+          "password": "${NEO4J_PASSWORD}",
+          "database": "${NEO4J_DATABASE}",
+          "storage_path": "${GRAPH_STORAGE_PATH}",
+          "index_name": "${GRAPH_INDEX_NAME}",
+          "embedding": {
+            "type": "openai_embedding",
+            "model_name": "${OPENAI_EMBEDDING_MODEL}",
+            "embedding_dimensions": "${EMBEDDING_DIMENSIONS}"
+          },
+          "add_synonymy_edges": true,
+          "synonymy_edge_topk": 100,
+          "synonymy_edge_sim_threshold": 0.8,
+          "use_float16_embeddings": true,
+          "normalize_chunk_embeddings": true
+        }
+      },
+      {
+        "type": "faiss_indexer",
+        "index_config": {
+          "type": "faiss",
+          "index_path": "${FAISS_INDEX_PATH}",
+          "metric": "cosine",
+          "index_type": "flat",
+          "normalize_L2": true,
+          "embedding_config": {
+            "type": "openai_embedding",
+            "model_name": "${OPENAI_EMBEDDING_MODEL}",
+            "embedding_dimensions": "${EMBEDDING_DIMENSIONS}"
+          }
+        }
+      },
+      {
+        "type": "bm25_indexer",
+        "index_config": {
+          "type": "bm25_builder",
+          "index_path": "${BM25_INDEX_PATH}"
+        }
+      }
+    ]
+  }
+}
