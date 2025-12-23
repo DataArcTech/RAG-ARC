@@ -189,7 +189,8 @@ async def chat(
     response_text, chunks, subgraph_data, subgraph_info, raw_llm_response, raw_mindmap_response = await rag_inference_handler.chat_async(
         request.query,
         owner_id=effective_owner_id,
-        return_subgraph=needs_subgraph
+        return_subgraph=needs_subgraph,
+        current_user_query=request.query,
     )
     
     # 记录完整的 response 信息（包括图数据）到日志
@@ -611,6 +612,7 @@ async def stream_chat_ws(
                 history_text,
                 owner_id=effective_owner,
                 return_subgraph=(return_subgraph or include_evidence),
+                current_user_query=query,
             )
             
             # 记录完整的 response 信息（包括图数据）到日志

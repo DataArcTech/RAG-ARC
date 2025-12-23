@@ -94,6 +94,7 @@ class RAGInference(AbstractModule):
         owner_id: uuid.UUID,
         return_subgraph: bool = False,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        current_user_query: Optional[str] = None,
     ) -> tuple[str, list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]], str | None]:
         """
         Chat with RAG system
@@ -154,9 +155,11 @@ class RAGInference(AbstractModule):
         raw_mindmap_response = None
         # 总是用 mindmap prompt 生成图，确保图和 chat 回答相关
         if return_subgraph:
+            # 使用当前用户问题而不是整个对话历史
+            mindmap_query = current_user_query if current_user_query else query
             subgraph_data, raw_mindmap_response = await self._run_blocking(
                 self._generate_mindmap,
-                query,
+                mindmap_query,
                 response_text,
                 chunks,
             )
@@ -516,7 +519,7 @@ class RAGInference(AbstractModule):
             ]
 
             logger.info("Generating mind map structure with LLM...")
-            logger.debug("Mindmap prompt: %s", mindmap_prompt)
+            logger.info("Mindmap prompt: %s", mindmap_prompt)
             # Note: This is called from _run_blocking, so it's already in a thread
             mindmap_response = self.llm.chat(mindmap_messages)
 
