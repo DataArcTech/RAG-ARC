@@ -134,6 +134,40 @@
 | `REDIS_HOST_PORT` | `6379` | `EXPOSE_REDIS=true` 时映射到宿主机的端口。 |
 | `EXPOSE_REDIS` | `false` | 是否对宿主机暴露 Redis。 |
 
+## 5.1 Celery / 长任务队列（Celery + Redis）
+
+当 `TASK_QUEUE_MODE=celery` 时，以下长任务会由 Celery worker 执行并可跨进程扩展：
+- knowledge 文件索引 / 删除
+- DeepSearch `run_async`（进度 SSE 支持 `last_event_id` 重放）
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `TASK_QUEUE_MODE` | `inprocess` | 切换后台任务模式：`inprocess`（进程内）或 `celery`（分布式 worker）。 |
+| `CELERY_BROKER_URL` | _(空)_ | Broker URL（留空则使用 `redis://REDIS_HOST:REDIS_PORT/REDIS_DB`）。 |
+| `CELERY_RESULT_BACKEND` | _(空)_ | Result backend（默认同 broker；建议主要用 RedisTaskQueue 的 result key）。 |
+| `CELERY_QUEUE_INDEXING` | `indexing` | 索引/删除任务的队列名。 |
+| `CELERY_QUEUE_DEEPSEARCH` | `deepsearch` | DeepSearch 队列名。 |
+| `CELERY_TASK_IGNORE_RESULT` | `true` | 是否忽略 Celery 原生 result backend 写入（长任务建议 `true`）。 |
+| `CELERY_RESULT_EXPIRES_SECONDS` | `3600` | Celery result backend 的过期时间（秒）。 |
+| `CELERY_TASK_ACKS_LATE` | `true` | 任务结束后再 ack（提高可靠性，但需结合幂等/锁）。 |
+| `CELERY_ACKS_ON_FAILURE_OR_TIMEOUT` | `true` | 失败/超时时是否 ack（与 acks_late 配合）。 |
+| `CELERY_REJECT_ON_WORKER_LOST` | `true` | worker 丢失时是否让任务重入队。 |
+| `CELERY_WORKER_PREFETCH_MULTIPLIER` | `1` | 每 worker 预取任务倍数（长任务建议 `1`）。 |
+| `CELERY_TASK_SOFT_TIME_LIMIT_SECONDS` | `0` | Soft time limit（秒，`0` 表示不启用）。 |
+| `CELERY_TASK_TIME_LIMIT_SECONDS` | `0` | Hard time limit（秒，`0` 表示不启用）。 |
+| `CELERY_VISIBILITY_TIMEOUT_SECONDS` | `86400` | Redis broker visibility timeout（秒；需大于最长任务耗时）。 |
+| `MQ_NAMESPACE` | `rag-arc:mq` | RedisTaskQueue 命名空间前缀。 |
+| `MQ_TASK_RUN_TTL_SECONDS` | `86400` | TaskRun KV 的 TTL（秒）。 |
+| `MQ_PROGRESS_TTL_SECONDS` | `86400` | 进度流（per-run stream/seq_map 等）的 TTL（秒）。 |
+| `MQ_RESULT_TTL_SECONDS` | `86400` | 结果 key 的 TTL（秒）。 |
+| `MQ_STREAM_MAXLEN` | `20000` | Redis Streams 最大长度（近似裁剪）。 |
+| `MQ_FAILFAST_ON_REDIS_DOWN` | _(空)_ | Redis 不可用时是否 fail-fast：为空则 `celery` 模式默认 fail-fast，`inprocess` 模式默认 best-effort。 |
+| `FILE_OP_LOCK_TTL_SECONDS` | `21600` | 文件操作分布式锁 TTL（秒，索引/删除共用）。 |
+| `CELERY_TASK_MAX_RETRIES` | `3` | 任务异常时最大重试次数。 |
+| `CELERY_TASK_RETRY_COUNTDOWN_SECONDS` | `5` | 任务异常重试的等待秒数。 |
+| `CELERY_TASK_LOCK_MAX_RETRIES` | `30` | 获取 file lock 失败时的最大重试次数。 |
+| `CELERY_TASK_LOCK_RETRY_COUNTDOWN_SECONDS` | `2` | 获取 file lock 失败时的重试等待秒数。 |
+
 ## 6. DeepSearch 配置
 
 若无特殊需求，请保留默认值；只有在需要自定义规划器或工具链时才修改。

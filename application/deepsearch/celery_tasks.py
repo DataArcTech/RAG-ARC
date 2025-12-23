@@ -4,6 +4,8 @@ import os
 import uuid
 from typing import Any, Dict, Optional
 
+from celery.exceptions import Retry
+
 from encapsulation.message_queue.celery_app import app as celery_app
 from encapsulation.message_queue.redis_task_queue import RedisTaskQueue, TaskState
 from core.presentation.deepsearch_payload import trim_deepsearch_payload
@@ -125,8 +127,34 @@ def run_deepsearch(
                 stage_listener=_listener,
             )
         )
+    except Retry:
+        raise
     except Exception as exc:  # noqa: BLE001
         err = str(exc)
+        max_retries = int(os.getenv("CELERY_TASK_MAX_RETRIES", "3"))
+        countdown = int(os.getenv("CELERY_TASK_RETRY_COUNTDOWN_SECONDS", "5"))
+        if int(getattr(self.request, "retries", 0) or 0) < max_retries:
+            try:
+                task_queue.append_progress_event(
+                    flow="deepsearch",
+                    task_run_id=run_id,
+                    stage=str(getattr(getattr(self, "request", None), "retries", 0) or 0),
+                    status="retry",
+                    percent=0,
+                    resource_id=run_id,
+                    payload={"stage": "retry", "error": err, "retry_in_seconds": countdown},
+                )
+                task_queue.update_task_run(
+                    run_id,
+                    state=TaskState.PENDING,
+                    progress_percent=0,
+                    error_message=f"retrying: {err}",
+                    metadata_patch={"retries": int(getattr(self.request, "retries", 0) or 0)},
+                )
+            except Exception:
+                pass
+            raise self.retry(exc=exc, countdown=countdown, max_retries=max_retries)
+
         logger.exception("DeepSearch failed (run_id=%s): %s", run_id, err)
         task_queue.append_progress_event(
             flow="deepsearch",

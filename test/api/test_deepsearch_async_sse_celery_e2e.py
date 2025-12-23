@@ -190,9 +190,11 @@ def test_deepsearch_run_async_celery_mode_e2e(monkeypatch: pytest.MonkeyPatch):
     # Force it to use the fake redis-backed queue for this test.
     deepsearch_router.TASK_QUEUE = redis_task_queue_module.RedisTaskQueue.from_env()
 
+    user_id = uuid.uuid4()
     app = FastAPI()
     app.include_router(deepsearch_router.router)
-    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=uuid.uuid4())
+    # Must be stable across requests to satisfy owner-based authorization checks.
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=user_id)
 
     with start_worker(
         celery_app,

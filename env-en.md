@@ -134,6 +134,40 @@ These knobs apply when the knowledge config selects `semantic_unit_chunker` (for
 | `REDIS_HOST_PORT` | `6379` | Host port exposed when `EXPOSE_REDIS=true`. |
 | `EXPOSE_REDIS` | `false` | Whether to expose Redis outside Docker. |
 
+## 5.1 Celery / Long-Task Queue (Celery + Redis)
+
+When `TASK_QUEUE_MODE=celery`, these long-running operations are executed by Celery workers and can scale across processes:
+- knowledge file indexing / deletion
+- DeepSearch `run_async` (SSE progress supports `last_event_id` replay)
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `TASK_QUEUE_MODE` | `inprocess` | Background task mode: `inprocess` (in-API) or `celery` (distributed workers). |
+| `CELERY_BROKER_URL` | _(empty)_ | Broker URL (defaults to `redis://REDIS_HOST:REDIS_PORT/REDIS_DB` when empty). |
+| `CELERY_RESULT_BACKEND` | _(empty)_ | Result backend (defaults to broker; for long tasks prefer RedisTaskQueue result keys). |
+| `CELERY_QUEUE_INDEXING` | `indexing` | Queue name for indexing/deletion tasks. |
+| `CELERY_QUEUE_DEEPSEARCH` | `deepsearch` | Queue name for DeepSearch tasks. |
+| `CELERY_TASK_IGNORE_RESULT` | `true` | Disable Celery result-backend writes by default (recommended for long tasks). |
+| `CELERY_RESULT_EXPIRES_SECONDS` | `3600` | Expiration (seconds) for Celery result backend records. |
+| `CELERY_TASK_ACKS_LATE` | `true` | Acknowledge tasks only after completion (requires idempotency/locking). |
+| `CELERY_ACKS_ON_FAILURE_OR_TIMEOUT` | `true` | Acknowledge on failure/timeout (used with acks_late). |
+| `CELERY_REJECT_ON_WORKER_LOST` | `true` | Re-queue tasks when a worker is lost. |
+| `CELERY_WORKER_PREFETCH_MULTIPLIER` | `1` | Prefetch multiplier (long tasks usually want `1`). |
+| `CELERY_TASK_SOFT_TIME_LIMIT_SECONDS` | `0` | Soft time limit in seconds (`0` disables). |
+| `CELERY_TASK_TIME_LIMIT_SECONDS` | `0` | Hard time limit in seconds (`0` disables). |
+| `CELERY_VISIBILITY_TIMEOUT_SECONDS` | `86400` | Redis broker visibility timeout (seconds; must exceed max task runtime). |
+| `MQ_NAMESPACE` | `rag-arc:mq` | RedisTaskQueue namespace prefix. |
+| `MQ_TASK_RUN_TTL_SECONDS` | `86400` | TTL (seconds) for TaskRun KV records. |
+| `MQ_PROGRESS_TTL_SECONDS` | `86400` | TTL (seconds) for per-run progress streams / seq maps. |
+| `MQ_RESULT_TTL_SECONDS` | `86400` | TTL (seconds) for result keys. |
+| `MQ_STREAM_MAXLEN` | `20000` | Max length for Redis Streams (approximate trimming). |
+| `MQ_FAILFAST_ON_REDIS_DOWN` | _(empty)_ | Whether to fail-fast when Redis is unavailable: default is fail-fast in `celery` mode and best-effort in `inprocess` mode. |
+| `FILE_OP_LOCK_TTL_SECONDS` | `21600` | Distributed file-operation lock TTL (seconds; shared by index/delete). |
+| `CELERY_TASK_MAX_RETRIES` | `3` | Maximum retry attempts for task exceptions. |
+| `CELERY_TASK_RETRY_COUNTDOWN_SECONDS` | `5` | Countdown (seconds) before retrying on exceptions. |
+| `CELERY_TASK_LOCK_MAX_RETRIES` | `30` | Maximum retry attempts when file lock is busy. |
+| `CELERY_TASK_LOCK_RETRY_COUNTDOWN_SECONDS` | `2` | Countdown (seconds) before retrying when file lock is busy. |
+
 ## 6. DeepSearch Defaults
 
 Planner/graph defaults. Leave as-is unless customizing behavior.

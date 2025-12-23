@@ -38,6 +38,19 @@ def _get_task_queue() -> RedisTaskQueue:
 def _use_celery() -> bool:
     return os.getenv("TASK_QUEUE_MODE", "inprocess").lower() == "celery"
 
+def _assert_task_owner(task_run: Dict[str, Any], *, user_id: uuid.UUID) -> None:
+    if is_admin_owner(user_id):
+        return
+    raw = task_run.get("owner_id")
+    if not raw:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to access this run_id")
+    try:
+        owner_uuid = uuid.UUID(str(raw))
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to access this run_id") from None
+    if owner_uuid != user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to access this run_id")
+
 
 class DeepSearchRequest(BaseModel):
     question: str = Field(..., description="User question, must be a non-empty string")
@@ -767,6 +780,7 @@ async def get_progress(
         task_run = task_queue.get_task_run(run_id)
         if not task_run:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run_id not found")
+        _assert_task_owner(task_run, user_id=current_user.id)
         latest = task_queue.get_latest_progress_event(run_id) or {}
         payload = dict((latest.get("payload") or {}) if isinstance(latest.get("payload"), dict) else {})
         state = str(task_run.get("state") or "")
@@ -799,6 +813,7 @@ async def get_result(
         task_run = task_queue.get_task_run(run_id)
         if not task_run:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run_id not found")
+        _assert_task_owner(task_run, user_id=current_user.id)
         state = str(task_run.get("state") or "")
         if state not in {TaskState.SUCCESS.value, TaskState.FAILURE.value, TaskState.CANCELED.value}:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run not finished")
@@ -833,6 +848,11 @@ async def stream_progress(
     if format == "openai":
         model_name = os.getenv("CHAT_MODEL_NAME") or os.getenv("OPENAI_CHAT_MODEL") or "rag-arc-deepsearch"
         if _use_celery():
+            task_queue = _get_task_queue()
+            task_run = task_queue.get_task_run(run_id)
+            if not task_run:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run_id not found")
+            _assert_task_owner(task_run, user_id=current_user.id)
             return StreamingResponse(
                 _stream_events_openai_redis(run_id, last_event_id=last_event_id, model_name=model_name),
                 media_type="text/event-stream",
@@ -844,6 +864,11 @@ async def stream_progress(
             headers=headers,
         )
     if _use_celery():
+        task_queue = _get_task_queue()
+        task_run = task_queue.get_task_run(run_id)
+        if not task_run:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run_id not found")
+        _assert_task_owner(task_run, user_id=current_user.id)
         return StreamingResponse(
             _stream_events_redis(run_id, last_event_id=last_event_id),
             media_type="text/event-stream",

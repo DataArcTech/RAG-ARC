@@ -757,6 +757,16 @@ class IndexManager(AbstractModule):
         from encapsulation.data_model.orm_models import FileStatus
 
         try:
+            # Deletion can race with indexing (file hidden first, physical cleanup later).
+            # Never resurrect a DELETED file back to INDEXED.
+            try:
+                metadata = self.file_storage.get_file_metadata(file_id)
+            except Exception:
+                metadata = None
+            if metadata is not None and getattr(metadata, "status", None) == FileStatus.DELETED:
+                logger.info("Skip updating file %s to INDEXED because status is DELETED", file_id)
+                return
+
             success = self.file_storage.metadata_store.update_file_metadata(
                 file_id,
                 {"status": FileStatus.INDEXED},

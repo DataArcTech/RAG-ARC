@@ -4,6 +4,8 @@ import os
 import uuid
 from typing import Any, Dict, Optional
 
+from celery.exceptions import Retry
+
 from encapsulation.database.cache_db.redis_db import RedisDB
 from encapsulation.message_queue.celery_app import app as celery_app
 from encapsulation.message_queue.redis_task_queue import RedisTaskQueue, TaskState
@@ -37,6 +39,11 @@ def _release_lock(client, key: str, token: str) -> None:
         return
 
 
+def _file_lock_key(*, namespace: str, file_id: str) -> str:
+    file_id = (file_id or "").strip()
+    return f"{namespace}:lock:file:{file_id}"
+
+
 def _parse_uuid(value: str) -> uuid.UUID:
     value = (value or "").strip()
     if len(value) == 32:
@@ -67,17 +74,33 @@ def index_file(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
             metadata={"executor": "celery"},
         )
 
-    lock_ttl = int(os.getenv("INDEXING_LOCK_TTL_SECONDS", str(6 * 3600)))
-    lock_key = f"{task_queue.settings.namespace}:lock:indexing:{file_id}"
+    lock_ttl = int(os.getenv("FILE_OP_LOCK_TTL_SECONDS", str(6 * 3600)))
+    lock_key = _file_lock_key(namespace=task_queue.settings.namespace, file_id=file_id)
     redis_client = RedisDB(RedisConfig()).client
     if not _acquire_lock(redis_client, lock_key, run_id, lock_ttl):
-        task_queue.update_task_run(
-            run_id,
-            state=TaskState.CANCELED,
-            error_message="indexing already in progress",
-            finished=True,
-        )
-        return {"success": False, "file_id": file_id, "error_message": "indexing already in progress"}
+        max_retries = int(os.getenv("CELERY_TASK_LOCK_MAX_RETRIES", "30"))
+        countdown = int(os.getenv("CELERY_TASK_LOCK_RETRY_COUNTDOWN_SECONDS", "2"))
+        try:
+            task_queue.update_task_run(
+                run_id,
+                state=TaskState.PENDING,
+                progress_percent=0,
+                error_message="waiting for file lock",
+                metadata_patch={"retries": int(getattr(self.request, "retries", 0) or 0)},
+            )
+        except Exception:
+            pass
+        try:
+            raise self.retry(exc=RuntimeError("file op lock busy"), countdown=countdown, max_retries=max_retries)
+        except Exception as exc:  # noqa: BLE001
+            task_queue.update_task_run(
+                run_id,
+                state=TaskState.FAILURE,
+                progress_percent=100,
+                error_message=f"failed to acquire file lock: {exc}",
+                finished=True,
+            )
+            return {"success": False, "file_id": file_id, "error_message": "failed to acquire file lock"}
 
     try:
         knowledge = _get_knowledge()
@@ -110,6 +133,28 @@ def index_file(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
                 finished=True,
             )
             return {"success": False, "file_id": file_id, "error_message": "owner mismatch"}
+
+        # Ensure idempotency under at-least-once semantics by cleaning previous derived artifacts/index entries.
+        cleanup = knowledge.file_index.delete_file_data(file_id)
+        if not cleanup.get("success", False):
+            err = str(cleanup.get("error_message") or "pre-index cleanup failed")
+            task_queue.update_task_run(
+                run_id,
+                state=TaskState.FAILURE,
+                progress_percent=100,
+                error_message=err,
+                finished=True,
+            )
+            task_queue.append_progress_event(
+                flow="indexing",
+                task_run_id=run_id,
+                stage="cleanup",
+                status="error",
+                percent=100,
+                resource_id=file_id,
+                payload={"file_id": file_id, "success": False, "error_message": err},
+            )
+            return {"success": False, "file_id": file_id, "error_message": err}
 
         task_queue.update_task_run(run_id, state=TaskState.RUNNING, progress_percent=1)
         task_queue.append_progress_event(
@@ -154,8 +199,34 @@ def index_file(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
             payload={"file_id": file_id, "success": False, "error_message": err},
         )
         return {"success": False, "file_id": file_id, "error_message": err}
+    except Retry:
+        raise
     except Exception as exc:  # noqa: BLE001
         err = str(exc)
+        max_retries = int(os.getenv("CELERY_TASK_MAX_RETRIES", "3"))
+        countdown = int(os.getenv("CELERY_TASK_RETRY_COUNTDOWN_SECONDS", "5"))
+        if int(getattr(self.request, "retries", 0) or 0) < max_retries:
+            try:
+                task_queue.update_task_run(
+                    run_id,
+                    state=TaskState.PENDING,
+                    progress_percent=0,
+                    error_message=f"retrying: {err}",
+                    metadata_patch={"retries": int(getattr(self.request, "retries", 0) or 0)},
+                )
+                task_queue.append_progress_event(
+                    flow="indexing",
+                    task_run_id=run_id,
+                    stage="retry",
+                    status="retry",
+                    percent=0,
+                    resource_id=file_id,
+                    payload={"file_id": file_id, "error_message": err, "retry_in_seconds": countdown},
+                )
+            except Exception:
+                pass
+            raise self.retry(exc=exc, countdown=countdown, max_retries=max_retries)
+
         logger.exception("Indexing failed (file_id=%s run_id=%s): %s", file_id, run_id, err)
         task_queue.update_task_run(
             run_id,
@@ -195,17 +266,33 @@ def delete_file(self, *, file_id: str, owner_id: str, delete_file_metadata: bool
             metadata={"executor": "celery"},
         )
 
-    lock_ttl = int(os.getenv("DELETION_LOCK_TTL_SECONDS", str(6 * 3600)))
-    lock_key = f"{task_queue.settings.namespace}:lock:deletion:{file_id}"
+    lock_ttl = int(os.getenv("FILE_OP_LOCK_TTL_SECONDS", str(6 * 3600)))
+    lock_key = _file_lock_key(namespace=task_queue.settings.namespace, file_id=file_id)
     redis_client = RedisDB(RedisConfig()).client
     if not _acquire_lock(redis_client, lock_key, run_id, lock_ttl):
-        task_queue.update_task_run(
-            run_id,
-            state=TaskState.CANCELED,
-            error_message="deletion already in progress",
-            finished=True,
-        )
-        return {"success": False, "file_id": file_id, "error_message": "deletion already in progress"}
+        max_retries = int(os.getenv("CELERY_TASK_LOCK_MAX_RETRIES", "30"))
+        countdown = int(os.getenv("CELERY_TASK_LOCK_RETRY_COUNTDOWN_SECONDS", "2"))
+        try:
+            task_queue.update_task_run(
+                run_id,
+                state=TaskState.PENDING,
+                progress_percent=0,
+                error_message="waiting for file lock",
+                metadata_patch={"retries": int(getattr(self.request, "retries", 0) or 0)},
+            )
+        except Exception:
+            pass
+        try:
+            raise self.retry(exc=RuntimeError("file op lock busy"), countdown=countdown, max_retries=max_retries)
+        except Exception as exc:  # noqa: BLE001
+            task_queue.update_task_run(
+                run_id,
+                state=TaskState.FAILURE,
+                progress_percent=100,
+                error_message=f"failed to acquire file lock: {exc}",
+                finished=True,
+            )
+            return {"success": False, "file_id": file_id, "error_message": "failed to acquire file lock"}
 
     try:
         knowledge = _get_knowledge()
@@ -256,8 +343,34 @@ def delete_file(self, *, file_id: str, owner_id: str, delete_file_metadata: bool
             payload={"file_id": file_id, "success": True},
         )
         return {"success": True, "file_id": file_id, "deleted": True}
+    except Retry:
+        raise
     except Exception as exc:  # noqa: BLE001
         err = str(exc)
+        max_retries = int(os.getenv("CELERY_TASK_MAX_RETRIES", "3"))
+        countdown = int(os.getenv("CELERY_TASK_RETRY_COUNTDOWN_SECONDS", "5"))
+        if int(getattr(self.request, "retries", 0) or 0) < max_retries:
+            try:
+                task_queue.update_task_run(
+                    run_id,
+                    state=TaskState.PENDING,
+                    progress_percent=0,
+                    error_message=f"retrying: {err}",
+                    metadata_patch={"retries": int(getattr(self.request, "retries", 0) or 0)},
+                )
+                task_queue.append_progress_event(
+                    flow="deletion",
+                    task_run_id=run_id,
+                    stage="retry",
+                    status="retry",
+                    percent=0,
+                    resource_id=file_id,
+                    payload={"file_id": file_id, "error_message": err, "retry_in_seconds": countdown},
+                )
+            except Exception:
+                pass
+            raise self.retry(exc=exc, countdown=countdown, max_retries=max_retries)
+
         logger.exception("Deletion failed (file_id=%s run_id=%s): %s", file_id, run_id, err)
         task_queue.update_task_run(
             run_id,

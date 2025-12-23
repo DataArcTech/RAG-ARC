@@ -82,6 +82,16 @@ class RedisTaskQueue:
         self._settings = settings
         self._redis_db: RedisDB | None = None
 
+    @staticmethod
+    def _fail_fast_on_unavailable_redis() -> bool:
+        explicit = os.getenv("MQ_FAILFAST_ON_REDIS_DOWN", "").strip().lower()
+        if explicit in {"1", "true", "yes"}:
+            return True
+        if explicit in {"0", "false", "no"}:
+            return False
+        # Default: fail-fast in celery mode so tasks/status don't silently disappear.
+        return os.getenv("TASK_QUEUE_MODE", "inprocess").strip().lower() == "celery"
+
     @classmethod
     def from_env(cls) -> "RedisTaskQueue":
         settings = RedisTaskQueueSettings(
@@ -104,6 +114,8 @@ class RedisTaskQueue:
             self._redis_db = RedisDB(self._redis_config)
             return self._redis_db.client
         except Exception as exc:
+            if self._fail_fast_on_unavailable_redis():
+                raise RuntimeError(f"RedisTaskQueue unavailable: {exc}") from exc
             logger.warning("RedisTaskQueue disabled (Redis not available): %s", exc)
             self._redis_db = None
             return None

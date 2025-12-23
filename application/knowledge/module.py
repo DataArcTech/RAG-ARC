@@ -230,6 +230,29 @@ class Knowledge(AbstractModule):
                         resource_id=doc_id,
                         payload={"file_id": doc_id},
                     )
+                # Idempotency under at-least-once semantics: remove old derived artifacts/index entries first.
+                cleanup = await self._run_blocking(self.file_index.delete_file_data, doc_id)
+                if not cleanup.get("success", False):
+                    err = str(cleanup.get("error_message") or "pre-index cleanup failed")
+                    logger.error("Pre-index cleanup failed for file_id=%s: %s", doc_id, err)
+                    if task_run_id:
+                        self.task_queue.update_task_run(
+                            task_run_id,
+                            state=TaskState.FAILURE,
+                            progress_percent=100,
+                            error_message=err,
+                            finished=True,
+                        )
+                        self.task_queue.append_progress_event(
+                            flow="indexing",
+                            task_run_id=task_run_id,
+                            stage="cleanup",
+                            status="error",
+                            percent=100,
+                            resource_id=doc_id,
+                            payload={"file_id": doc_id, "success": False, "error_message": err},
+                        )
+                    return {"success": False, "file_id": doc_id, "error_message": err}
                 # IndexManager is async but performs heavy blocking work; run it off the main event loop.
                 result = await self._run_coroutine_in_thread(self.file_index.index_file, doc_id)
                 if result.get("success"):
