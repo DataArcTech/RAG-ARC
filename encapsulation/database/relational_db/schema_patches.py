@@ -21,6 +21,8 @@ def apply_postgres_schema_patches(engine: Engine) -> None:
         # Added in ORM (`FileMetadata.content_hash`) but may be missing in older DBs.
         "ALTER TABLE public.file_metadata ADD COLUMN IF NOT EXISTS content_hash varchar(64);",
         "CREATE INDEX IF NOT EXISTS ix_file_metadata_content_hash ON public.file_metadata (content_hash);",
+        # TaskRun should not depend on user table rows existing; historical Redis task runs may reference deleted users.
+        "ALTER TABLE public.task_run DROP CONSTRAINT IF EXISTS task_run_owner_id_fkey;",
     ]
 
     for stmt in statements:
@@ -29,4 +31,3 @@ def apply_postgres_schema_patches(engine: Engine) -> None:
                 conn.execute(text(stmt))
         except SQLAlchemyError as exc:
             logger.warning("Schema patch failed: %s (%s)", stmt, exc)
-

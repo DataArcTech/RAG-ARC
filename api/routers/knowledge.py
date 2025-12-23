@@ -101,7 +101,7 @@ async def upload_file(
         print(f"Uploading file: {file.filename} for owner_id: {user.id}")
         # Convert string UUID to UUID object
         doc_id = await get_knowledge_handler().upload_file(file, user.id, relative_path=relative_path)
-        return {"file_id": doc_id}
+        return doc_id
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

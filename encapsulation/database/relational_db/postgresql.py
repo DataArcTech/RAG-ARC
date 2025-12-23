@@ -28,7 +28,10 @@ from ...data_model.orm_models import (
     FilePermission, PermissionReceiverType, PermissionType,
     AuditLog, AuditAction,
     ParsedContentMetadata, ParsedContentStatus,
-    ChunkMetadata, ChunkIndexStatus
+    ChunkMetadata, ChunkIndexStatus,
+    TaskRun, TaskRunState,
+    TaskProgressEvent,
+    TaskSyncOffset,
 )
 from framework.singleton_decorator import singleton
 
