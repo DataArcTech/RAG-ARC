@@ -139,6 +139,7 @@ These knobs apply when the knowledge config selects `semantic_unit_chunker` (for
 When `TASK_QUEUE_MODE=celery`, these long-running operations are executed by Celery workers and can scale across processes:
 - knowledge file indexing / deletion
 - DeepSearch `run_async` (SSE progress supports `last_event_id` replay)
+- knowledge export tasks: `/knowledge/graph/export_async`, `/knowledge/mindmap/export_async`
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -147,6 +148,7 @@ When `TASK_QUEUE_MODE=celery`, these long-running operations are executed by Cel
 | `CELERY_RESULT_BACKEND` | _(empty)_ | Result backend (defaults to broker; for long tasks prefer RedisTaskQueue result keys). |
 | `CELERY_QUEUE_INDEXING` | `indexing` | Queue name for indexing/deletion tasks. |
 | `CELERY_QUEUE_DEEPSEARCH` | `deepsearch` | Queue name for DeepSearch tasks. |
+| `CELERY_QUEUE_EXPORT` | _(empty)_ | Queue name for export tasks (graph/mindmap). When empty, falls back to `CELERY_QUEUE_INDEXING`. |
 | `CELERY_TASK_IGNORE_RESULT` | `true` | Disable Celery result-backend writes by default (recommended for long tasks). |
 | `CELERY_RESULT_EXPIRES_SECONDS` | `3600` | Expiration (seconds) for Celery result backend records. |
 | `CELERY_TASK_ACKS_LATE` | `true` | Acknowledge tasks only after completion (requires idempotency/locking). |
@@ -167,6 +169,12 @@ When `TASK_QUEUE_MODE=celery`, these long-running operations are executed by Cel
 | `CELERY_TASK_RETRY_COUNTDOWN_SECONDS` | `5` | Countdown (seconds) before retrying on exceptions. |
 | `CELERY_TASK_LOCK_MAX_RETRIES` | `30` | Maximum retry attempts when file lock is busy. |
 | `CELERY_TASK_LOCK_RETRY_COUNTDOWN_SECONDS` | `2` | Countdown (seconds) before retrying when file lock is busy. |
+
+### 5.1.1 Running locally / in tests
+
+- Start Celery workers: `bash local/tmp/start_mq_workers.sh` (loads `.env`).
+- Stop Celery workers: `bash local/tmp/stop_mq_workers.sh`.
+- Optional: archive Redis Streams into Postgres: `uv run python scripts/message_queue_sync.py --daemon` (or `--once`).
 
 ## 6. DeepSearch Defaults
 

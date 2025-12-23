@@ -234,7 +234,13 @@ class RedisTaskQueue:
             "metadata": {},
         }
         now_ms = _utc_now_ms()
-        record["state"] = state.value
+        # Never downgrade a terminal state (e.g. SUCCESS -> RUNNING) due to late progress updates.
+        previous_state = str(record.get("state") or "")
+        is_terminal = previous_state in {TaskState.SUCCESS.value, TaskState.FAILURE.value, TaskState.CANCELED.value}
+        if is_terminal and state.value != previous_state:
+            record["state"] = previous_state
+        else:
+            record["state"] = state.value
         record["updated_at_ms"] = now_ms
         if progress_percent is not None:
             record["progress_percent"] = max(0, min(100, int(progress_percent)))

@@ -139,6 +139,7 @@
 当 `TASK_QUEUE_MODE=celery` 时，以下长任务会由 Celery worker 执行并可跨进程扩展：
 - knowledge 文件索引 / 删除
 - DeepSearch `run_async`（进度 SSE 支持 `last_event_id` 重放）
+- knowledge 导出任务：`/knowledge/graph/export_async`、`/knowledge/mindmap/export_async`
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -147,6 +148,7 @@
 | `CELERY_RESULT_BACKEND` | _(空)_ | Result backend（默认同 broker；建议主要用 RedisTaskQueue 的 result key）。 |
 | `CELERY_QUEUE_INDEXING` | `indexing` | 索引/删除任务的队列名。 |
 | `CELERY_QUEUE_DEEPSEARCH` | `deepsearch` | DeepSearch 队列名。 |
+| `CELERY_QUEUE_EXPORT` | _(空)_ | 导出任务队列名（图谱/思维导图）。留空则复用 `CELERY_QUEUE_INDEXING`。 |
 | `CELERY_TASK_IGNORE_RESULT` | `true` | 是否忽略 Celery 原生 result backend 写入（长任务建议 `true`）。 |
 | `CELERY_RESULT_EXPIRES_SECONDS` | `3600` | Celery result backend 的过期时间（秒）。 |
 | `CELERY_TASK_ACKS_LATE` | `true` | 任务结束后再 ack（提高可靠性，但需结合幂等/锁）。 |
@@ -167,6 +169,12 @@
 | `CELERY_TASK_RETRY_COUNTDOWN_SECONDS` | `5` | 任务异常重试的等待秒数。 |
 | `CELERY_TASK_LOCK_MAX_RETRIES` | `30` | 获取 file lock 失败时的最大重试次数。 |
 | `CELERY_TASK_LOCK_RETRY_COUNTDOWN_SECONDS` | `2` | 获取 file lock 失败时的重试等待秒数。 |
+
+### 5.1.1 运行方式（本地/测试）
+
+- 启动 Celery worker：`bash local/tmp/start_mq_workers.sh`（读取 `.env`）。
+- 停止 Celery worker：`bash local/tmp/stop_mq_workers.sh`。
+- 可选：将 Redis Streams 归档到 Postgres：`uv run python scripts/message_queue_sync.py --daemon`（或 `--once` 单次同步）。
 
 ## 6. DeepSearch 配置
 
