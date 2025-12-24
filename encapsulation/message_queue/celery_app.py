@@ -60,6 +60,8 @@ app.conf.update(
 app.conf.broker_transport_options = {
     # Redis broker "visibility timeout" (in seconds) should exceed the longest task runtime when acks_late=True.
     "visibility_timeout": int(os.getenv("CELERY_VISIBILITY_TIMEOUT_SECONDS", str(24 * 3600))),
+    # How long the consumer blocks between polls (seconds; Redis BRPOP requires an integer).
+    "polling_interval": max(1, int(os.getenv("CELERY_REDIS_POLLING_INTERVAL_SECONDS", "1") or "1")),
 }
 
 # Back-compat alias for documentation and imports.

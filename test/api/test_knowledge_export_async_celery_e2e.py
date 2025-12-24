@@ -28,6 +28,7 @@ class _FakeRedis:
     def __init__(self) -> None:
         self._strings: dict[str, str] = {}
         self._hashes: dict[str, dict[str, str]] = {}
+        self._zsets: dict[str, dict[str, float]] = {}
         self._streams: dict[str, list[tuple[str, dict[str, str]]]] = {}
         self._counters: dict[str, int] = {}
         self._tick = 0
@@ -63,6 +64,46 @@ class _FakeRedis:
     def hget(self, name: str, key: str):
         with self._lock:
             return self._hashes.get(name, {}).get(key)
+
+    def zadd(self, name: str, mapping: dict[str, float | int]):
+        with self._lock:
+            z = self._zsets.setdefault(name, {})
+            for member, score in mapping.items():
+                z[str(member)] = float(score)
+            return len(mapping)
+
+    def zrangebyscore(self, name: str, min: float | int, max: float | int):  # noqa: A002
+        with self._lock:
+            z = self._zsets.get(name, {})
+            lo = float(min)
+            hi = float(max)
+            items = [(m, s) for m, s in z.items() if lo <= float(s) <= hi]
+            items.sort(key=lambda t: (t[1], t[0]))
+            return [m for m, _ in items]
+
+    def zcard(self, name: str):
+        with self._lock:
+            return len(self._zsets.get(name, {}))
+
+    def zremrangebyrank(self, name: str, start: int, stop: int):
+        with self._lock:
+            z = self._zsets.get(name, {})
+            items = sorted(z.items(), key=lambda t: (t[1], t[0]))
+            n = len(items)
+            if n == 0:
+                return 0
+            if start < 0:
+                start = n + start
+            if stop < 0:
+                stop = n + stop
+            start = max(0, start)
+            stop = min(n - 1, stop)
+            if start > stop:
+                return 0
+            to_delete = items[start : stop + 1]
+            for member, _ in to_delete:
+                z.pop(member, None)
+            return len(to_delete)
 
     def xadd(self, stream: str, fields: dict[str, str], maxlen: int | None = None, approximate: bool = True):  # noqa: ARG002
         with self._lock:

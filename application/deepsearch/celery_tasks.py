@@ -89,6 +89,27 @@ def run_deepsearch(
             metadata={"include_evidence": include_evidence, "metadata": metadata or {}, "executor": "celery"},
         )
 
+    existing = task_queue.get_task_result(run_id)
+    if existing is not None:
+        task_queue.append_progress_event(
+            flow="deepsearch",
+            task_run_id=run_id,
+            stage="reported",
+            status="dedup",
+            percent=100,
+            resource_id=run_id,
+            payload={"stage": "reported", "dedup": True},
+        )
+        task_queue.update_task_run(
+            run_id,
+            state=TaskState.SUCCESS,
+            progress_percent=100,
+            finished=True,
+            result_ref=task_queue.settings.key_task_result(run_id),
+            metadata_patch={"dedup": True},
+        )
+        return {"run_id": run_id, "done": True, "dedup": True}
+
     service = _get_deepsearch_service()
 
     def _listener(record: Dict[str, Any], state) -> None:  # noqa: ANN001
@@ -181,7 +202,13 @@ def run_deepsearch(
         graph_store=graph_store,
     )
 
-    task_queue.set_task_result(run_id, trimmed)
+    task_queue.set_task_result_and_finalize_run(
+        run_id,
+        result=trimmed if isinstance(trimmed, dict) else {"result": trimmed},
+        state=TaskState.SUCCESS,
+        progress_percent=100,
+        finished=True,
+    )
     task_queue.append_progress_event(
         flow="deepsearch",
         task_run_id=run_id,
@@ -190,12 +217,5 @@ def run_deepsearch(
         percent=100,
         resource_id=run_id,
         payload={"stage": trimmed.get("state", {}).get("stage"), "progress": _stage_progress(trimmed.get("state", {}).get("stage", ""))},
-    )
-    task_queue.update_task_run(
-        run_id,
-        state=TaskState.SUCCESS,
-        progress_percent=100,
-        finished=True,
-        result_ref=task_queue.settings.key_task_result(run_id),
     )
     return {"run_id": run_id, "done": True}

@@ -53,13 +53,15 @@ class IndexManager(AbstractModule):
         logger.info(f"IndexManager initialized with {len(self.indexers)} indexers")
 
 
-    async def index_file(self, file_id: str) -> Dict[str, Any]:
+    async def index_file(self, file_id: str, **kwargs: Any) -> Dict[str, Any]:
         """
         Async method for indexing a file by file_id.
         This is the main entry point for external usage.
 
         Args:
             file_id: The ID of the file to index
+            **kwargs: Additional arguments passed to parser, chunker, and indexers.
+                     Reserved: `progress` callable for stage updates.
 
         Returns:
             Dict containing indexing results
@@ -75,7 +77,7 @@ class IndexManager(AbstractModule):
             }
 
 
-        return await self.process_file(file_id)
+        return await self.process_file(file_id, **kwargs)
 
     async def process_file(
         self,
@@ -117,8 +119,19 @@ class IndexManager(AbstractModule):
             }
         }
 
+        progress_cb = kwargs.pop("progress", None)
+
+        def _emit(stage: str, percent: int | None = None, payload: Dict[str, Any] | None = None) -> None:
+            if progress_cb is None or not callable(progress_cb):
+                return
+            try:
+                progress_cb(str(stage), percent, payload or {})
+            except Exception:
+                return
+
         try:
             logger.info(f"Starting indexing pipeline for file_id: {file_id}")
+            _emit("start", 1, {"file_id": file_id})
 
             # Step 1: Get file content from FileStorage (use thread pool to avoid blocking)
             logger.info(f"Step 1: Retrieving file content for {file_id}")
@@ -143,6 +156,7 @@ class IndexManager(AbstractModule):
                 filename = f"unknown_file_{file_id}"
 
             logger.info(f"Retrieved file: {filename} ({len(file_content)} bytes)")
+            _emit("retrieved", 5, {"file_id": file_id, "filename": filename, "bytes": len(file_content)})
 
             # Step 2: Parse the file
             logger.info(f"Step 2: Parsing file {filename}")
@@ -196,6 +210,7 @@ class IndexManager(AbstractModule):
                 raise ValueError("No text content extracted from parsed result")
 
             logger.info(f"Extracted {len(parsed_text)} characters of text content")
+            _emit("parsed", 25, {"file_id": file_id, "filename": filename, "chars": len(parsed_text)})
 
             # Step 3: Store parsed content (use thread pool to avoid blocking)
             logger.info(f"Step 3: Storing parsed content")
@@ -224,6 +239,14 @@ class IndexManager(AbstractModule):
 
             result["parsed_content_id"] = parsed_content_id
             logger.info(f"Stored parsed content with ID: {parsed_content_id}")
+            _emit("parsed_stored", 35, {"file_id": file_id, "parsed_content_id": parsed_content_id})
+
+            # Update file status to PARSED after successfully persisting parsed content.
+            await get_thread_pool().run_blocking(
+                self._update_file_status_to_parsed,
+                file_id,
+                **kwargs,
+            )
 
             # Step 4: Chunk the parsed text
             logger.info(f"Step 4: Chunking parsed text")
@@ -251,6 +274,7 @@ class IndexManager(AbstractModule):
                 raise ValueError("Chunker returned no chunks")
 
             logger.info(f"Created {len(chunks)} chunks")
+            _emit("chunked", 55, {"file_id": file_id, "num_chunks": len(chunks)})
             result["metadata"]["num_chunks"] = len(chunks)
 
             # Step 5: Store chunks (use thread pool for each chunk to avoid blocking)
@@ -290,12 +314,20 @@ class IndexManager(AbstractModule):
 
             result["chunk_ids"] = chunk_ids
             logger.info(f"Stored {len(chunk_ids)}/{len(chunks)} chunks successfully")
+            _emit("chunks_stored", 65, {"file_id": file_id, "num_chunks": len(chunk_ids)})
 
             # Update parsed content status to CHUNKED (use thread pool to avoid blocking)
             await get_thread_pool().run_blocking(
                 self._update_parsed_content_status_to_chunked,
                 parsed_content_id,
                 **kwargs
+            )
+
+            # Update file status to CHUNKED after successfully persisting chunks.
+            await get_thread_pool().run_blocking(
+                self._update_file_status_to_chunked,
+                file_id,
+                **kwargs,
             )
 
             # Backfill anchor_chunk_id for hierarchical chunking strategies (e.g., semantic_unit).
@@ -308,6 +340,7 @@ class IndexManager(AbstractModule):
             # Step 6: Index the chunks (if indexers are configured)
             if self.indexers:
                 logger.info(f"Step 6: Indexing chunks with {len(self.indexers)} indexers")
+                _emit("indexing", 75, {"file_id": file_id, "indexers": len(self.indexers)})
                 indexing_results = await self._index_chunks(stored_chunks, chunk_ids)
                 result["indexing_results"] = indexing_results
                 result["metadata"]["indexers_used"] = list(indexing_results.keys())
@@ -333,22 +366,33 @@ class IndexManager(AbstractModule):
             # Success!
             result["success"] = True
             logger.info(f"Successfully completed indexing pipeline for file_id: {file_id}")
+            _emit("done", 100, {"file_id": file_id, "success": True})
 
         except Exception as e:
             error_msg = f"Indexing pipeline failed for file_id {file_id}: {str(e)}"
             logger.error(error_msg, exc_info=True)
             result["error_message"] = error_msg
+            _emit("failed", 100, {"file_id": file_id, "success": False, "error_message": str(e)})
 
             # Update file status to FAILED (use thread pool to avoid blocking)
             try:
                 from encapsulation.data_model.orm_models import FileStatus
-                await get_thread_pool().run_blocking(
-                    self.file_storage.metadata_store.update_file_status,
-                    file_id,
-                    FileStatus.FAILED,
-                    **kwargs
-                )
-                logger.info(f"Updated file {file_id} status to FAILED due to indexing error")
+                # Deletion can race with indexing; never override DELETED with FAILED.
+                metadata = None
+                try:
+                    metadata = self.file_storage.get_file_metadata(file_id)
+                except Exception:
+                    metadata = None
+                if metadata is not None and getattr(metadata, "status", None) == FileStatus.DELETED:
+                    logger.info("Skip updating file %s to FAILED because status is DELETED", file_id)
+                else:
+                    await get_thread_pool().run_blocking(
+                        self.file_storage.metadata_store.update_file_status,
+                        file_id,
+                        FileStatus.FAILED,
+                        **kwargs
+                    )
+                    logger.info(f"Updated file {file_id} status to FAILED due to indexing error")
             except Exception as status_error:
                 logger.error(f"Failed to update file status to FAILED for {file_id}: {status_error}")
 
@@ -778,6 +822,60 @@ class IndexManager(AbstractModule):
                 logger.warning(f"Failed to update file {file_id} status to INDEXED")
         except Exception as e:
             logger.error(f"Error updating file {file_id} status: {e}")
+
+    def _update_file_status_to_parsed(
+        self,
+        file_id: str,
+        **kwargs: Any,
+    ) -> None:
+        from encapsulation.data_model.orm_models import FileStatus
+
+        try:
+            try:
+                metadata = self.file_storage.get_file_metadata(file_id)
+            except Exception:
+                metadata = None
+            if metadata is not None and getattr(metadata, "status", None) == FileStatus.DELETED:
+                logger.info("Skip updating file %s to PARSED because status is DELETED", file_id)
+                return
+            success = self.file_storage.metadata_store.update_file_metadata(
+                file_id,
+                {"status": FileStatus.PARSED},
+                **kwargs,
+            )
+            if success:
+                logger.info("Updated file %s status to PARSED", file_id)
+            else:
+                logger.warning("Failed to update file %s status to PARSED", file_id)
+        except Exception as e:
+            logger.error("Error updating file %s status to PARSED: %s", file_id, e)
+
+    def _update_file_status_to_chunked(
+        self,
+        file_id: str,
+        **kwargs: Any,
+    ) -> None:
+        from encapsulation.data_model.orm_models import FileStatus
+
+        try:
+            try:
+                metadata = self.file_storage.get_file_metadata(file_id)
+            except Exception:
+                metadata = None
+            if metadata is not None and getattr(metadata, "status", None) == FileStatus.DELETED:
+                logger.info("Skip updating file %s to CHUNKED because status is DELETED", file_id)
+                return
+            success = self.file_storage.metadata_store.update_file_metadata(
+                file_id,
+                {"status": FileStatus.CHUNKED},
+                **kwargs,
+            )
+            if success:
+                logger.info("Updated file %s status to CHUNKED", file_id)
+            else:
+                logger.warning("Failed to update file %s status to CHUNKED", file_id)
+        except Exception as e:
+            logger.error("Error updating file %s status to CHUNKED: %s", file_id, e)
 
     def _update_parsed_content_status_to_chunked(
         self,

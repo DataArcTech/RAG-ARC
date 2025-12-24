@@ -13,6 +13,65 @@ from encapsulation.database.cache_db.redis_db import RedisDB
 
 logger = logging.getLogger(__name__)
 
+_APPEND_PROGRESS_EVENT_LUA = r"""
+-- KEYS:
+--   1) seq_key
+--   2) seq_map_key
+--   3) global_stream
+--   4) run_stream
+-- ARGV:
+--   1) event_json (must be valid JSON; field `seq` will be overwritten)
+--   2) ttl_seconds
+--   3) stream_maxlen
+local seq_key = KEYS[1]
+local seq_map_key = KEYS[2]
+local global_stream = KEYS[3]
+local run_stream = KEYS[4]
+local event_json = ARGV[1]
+local ttl = tonumber(ARGV[2]) or 0
+local maxlen = tonumber(ARGV[3]) or 0
+
+local ok, seq = pcall(redis.call, "INCR", seq_key)
+if not ok then
+  redis.call("DEL", seq_key)
+  seq = redis.call("INCR", seq_key)
+end
+
+if ttl > 0 then
+  redis.call("EXPIRE", seq_key, ttl)
+end
+
+local event = cjson.decode(event_json)
+event["seq"] = seq
+local payload = cjson.encode(event)
+local run_id = tostring(event["run_id"] or "")
+
+local args = {"*", "task_run_id", run_id, "payload", payload}
+if maxlen > 0 then
+  redis.call("XADD", global_stream, "MAXLEN", "~", maxlen, unpack(args))
+  local entry_id = redis.call("XADD", run_stream, "MAXLEN", "~", maxlen, unpack(args))
+  redis.call("ZADD", seq_map_key, seq, entry_id)
+  local card = redis.call("ZCARD", seq_map_key)
+  if card > maxlen then
+    redis.call("ZREMRANGEBYRANK", seq_map_key, 0, card - maxlen - 1)
+  end
+  if ttl > 0 then
+    redis.call("EXPIRE", run_stream, ttl)
+    redis.call("EXPIRE", seq_map_key, ttl)
+  end
+  return {seq, entry_id}
+end
+
+redis.call("XADD", global_stream, unpack(args))
+local entry_id = redis.call("XADD", run_stream, unpack(args))
+redis.call("ZADD", seq_map_key, seq, entry_id)
+if ttl > 0 then
+  redis.call("EXPIRE", run_stream, ttl)
+  redis.call("EXPIRE", seq_map_key, ttl)
+end
+return {seq, entry_id}
+"""
+
 
 def _utc_now_ms() -> int:
     return int(time.time() * 1000)
@@ -131,6 +190,43 @@ class RedisTaskQueue:
             logger.warning("RedisTaskQueue xadd failed (%s): %s", stream, exc)
             return None
 
+    def _seq_map_lookup_stream_id(self, client, *, seq_map_key: str, seq: int) -> Optional[str]:  # noqa: ANN001
+        # Preferred mapping: ZSET score=seq member=stream_id
+        try:
+            members = client.zrangebyscore(seq_map_key, seq, seq)
+            if members:
+                return str(members[0])
+        except Exception:
+            pass
+        # Back-compat: HASH seq->stream_id
+        try:
+            mapped = client.hget(seq_map_key, str(seq))
+            if mapped:
+                return str(mapped)
+        except Exception:
+            return None
+        return None
+
+    def _seq_map_set(self, client, *, seq_map_key: str, seq: int, stream_id: str) -> None:  # noqa: ANN001
+        maxlen = int(self._settings.stream_maxlen or 0)
+        try:
+            client.zadd(seq_map_key, {str(stream_id): int(seq)})
+            if maxlen > 0:
+                try:
+                    card = int(client.zcard(seq_map_key))
+                    if card > maxlen:
+                        client.zremrangebyrank(seq_map_key, 0, card - maxlen - 1)
+                except Exception:
+                    pass
+            return
+        except Exception:
+            pass
+        # Back-compat / minimal clients: best-effort hash (may grow unbounded; used only when ZSET unsupported).
+        try:
+            client.hset(seq_map_key, str(seq), str(stream_id))
+        except Exception:
+            return
+
     def create_task_run(
         self,
         *,
@@ -168,8 +264,11 @@ class RedisTaskQueue:
             return
         key = self._settings.key_task_run(task_run_id)
         try:
-            client.set(key, json.dumps(record, ensure_ascii=False, separators=(",", ":")))
-            client.expire(key, self._settings.task_run_ttl_seconds)
+            client.set(
+                key,
+                json.dumps(record, ensure_ascii=False, separators=(",", ":")),
+                ex=self._settings.task_run_ttl_seconds,
+            )
         except Exception as exc:
             logger.warning("RedisTaskQueue set task_run failed (%s): %s", task_run_id, exc)
             return
@@ -180,8 +279,7 @@ class RedisTaskQueue:
         if resource_id and record.get("task_type"):
             try:
                 pointer_key = self._settings.key_resource_latest(str(record["task_type"]), str(resource_id))
-                client.set(pointer_key, task_run_id)
-                client.expire(pointer_key, self._settings.task_run_ttl_seconds)
+                client.set(pointer_key, task_run_id, ex=self._settings.task_run_ttl_seconds)
             except Exception as exc:
                 logger.warning("RedisTaskQueue set resource pointer failed: %s", exc)
 
@@ -256,6 +354,121 @@ class RedisTaskQueue:
             record["metadata"] = meta
         self.upsert_task_run(record, resource_id=record.get("resource_id"))
 
+    def set_task_result_and_finalize_run(
+        self,
+        task_run_id: str,
+        *,
+        result: Dict[str, Any],
+        state: TaskState,
+        progress_percent: Optional[int] = None,
+        error_message: Optional[str] = None,
+        finished: bool = False,
+        metadata_patch: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        Atomically write `task_result` and the corresponding terminal TaskRun update (MULTI/EXEC).
+
+        This prevents partial states such as:
+        - state=SUCCESS but missing result
+        - result exists but state remains PENDING/RUNNING
+        """
+        client = self._client()
+        if client is None:
+            return
+
+        result_ref = self._settings.key_task_result(task_run_id)
+
+        record = self.get_task_run(task_run_id) or {
+            "task_run_id": task_run_id,
+            "task_type": None,
+            "owner_id": None,
+            "resource_id": None,
+            "state": TaskState.PENDING.value,
+            "progress_percent": 0,
+            "created_at_ms": _utc_now_ms(),
+            "updated_at_ms": _utc_now_ms(),
+            "finished_at_ms": None,
+            "error_message": None,
+            "result_ref": None,
+            "metadata": {},
+        }
+        now_ms = _utc_now_ms()
+        previous_state = str(record.get("state") or "")
+        is_terminal = previous_state in {TaskState.SUCCESS.value, TaskState.FAILURE.value, TaskState.CANCELED.value}
+        if is_terminal and state.value != previous_state:
+            record["state"] = previous_state
+        else:
+            record["state"] = state.value
+        record["updated_at_ms"] = now_ms
+        if progress_percent is not None:
+            record["progress_percent"] = max(0, min(100, int(progress_percent)))
+        if error_message is not None:
+            record["error_message"] = error_message
+        record["result_ref"] = result_ref
+        if finished:
+            record["finished_at_ms"] = now_ms
+        if metadata_patch:
+            meta = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+            meta.update(metadata_patch)
+            record["metadata"] = meta
+
+        task_run_key = self._settings.key_task_run(task_run_id)
+        task_run_payload = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+        result_payload = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+
+        try:
+            try:
+                pipe = client.pipeline(transaction=True)
+            except Exception:
+                pipe = None
+
+            if pipe is None:
+                # Best-effort fallback for minimal clients (tests/fakes) that lack pipelines.
+                client.set(result_ref, result_payload, ex=self._settings.result_ttl_seconds)
+                client.set(task_run_key, task_run_payload, ex=self._settings.task_run_ttl_seconds)
+                try:
+                    client.xadd(
+                        self._settings.stream_task_runs(),
+                        {"task_run_id": task_run_id, "payload": task_run_payload},
+                        maxlen=self._settings.stream_maxlen,
+                        approximate=True,
+                    )
+                except Exception:
+                    pass
+                resource_id = record.get("resource_id")
+                task_type = record.get("task_type")
+                if resource_id and task_type:
+                    try:
+                        client.set(
+                            self._settings.key_resource_latest(str(task_type), str(resource_id)),
+                            task_run_id,
+                            ex=self._settings.task_run_ttl_seconds,
+                        )
+                    except Exception:
+                        pass
+                return
+
+            pipe.set(result_ref, result_payload, ex=self._settings.result_ttl_seconds)
+            pipe.set(task_run_key, task_run_payload, ex=self._settings.task_run_ttl_seconds)
+            pipe.xadd(
+                self._settings.stream_task_runs(),
+                {"task_run_id": task_run_id, "payload": task_run_payload},
+                maxlen=self._settings.stream_maxlen,
+                approximate=True,
+            )
+            resource_id = record.get("resource_id")
+            task_type = record.get("task_type")
+            if resource_id and task_type:
+                pipe.set(
+                    self._settings.key_resource_latest(str(task_type), str(resource_id)),
+                    task_run_id,
+                    ex=self._settings.task_run_ttl_seconds,
+                )
+            pipe.execute()
+        except Exception as exc:
+            logger.warning("RedisTaskQueue finalize_run failed (%s): %s", task_run_id, exc)
+            return
+
     def append_progress_event(
         self,
         *,
@@ -270,12 +483,6 @@ class RedisTaskQueue:
         client = self._client()
         if client is None:
             return None
-        seq_key = self._settings.key_seq(task_run_id)
-        try:
-            seq = int(client.incr(seq_key))
-            client.expire(seq_key, self._settings.progress_ttl_seconds)
-        except Exception:
-            seq = 0
 
         ts_ms = _utc_now_ms()
         event: Dict[str, Any] = {
@@ -283,7 +490,8 @@ class RedisTaskQueue:
             "flow": flow,
             "run_id": task_run_id,
             "resource_id": resource_id,
-            "seq": seq,
+            # seq is assigned by Redis and overwritten by the Lua fast-path.
+            "seq": 0,
             "ts_ms": ts_ms,
             "ts": _utc_from_ms(ts_ms),
             "stage": stage,
@@ -292,13 +500,50 @@ class RedisTaskQueue:
             "payload": payload or {},
         }
         event_payload = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+
+        # Fast-path: one atomic Redis roundtrip (seq increment + stream writes + seq_map + TTLs).
+        try:
+            res = client.eval(
+                _APPEND_PROGRESS_EVENT_LUA,
+                4,
+                self._settings.key_seq(task_run_id),
+                self._settings.key_seq_map(task_run_id),
+                self._settings.stream_progress(),
+                self._settings.stream_progress_for_run(task_run_id),
+                event_payload,
+                str(int(self._settings.progress_ttl_seconds)),
+                str(int(self._settings.stream_maxlen)),
+            )
+            if isinstance(res, (list, tuple)) and len(res) == 2:
+                entry_id = res[1]
+                return str(entry_id) if entry_id else None
+        except Exception:
+            # Fallback below (best-effort).
+            pass
+
+        # Fallback path (best-effort, non-atomic).
+        seq_key = self._settings.key_seq(task_run_id)
+        # Defensive: seq_key can be corrupted to a non-integer value; reset on INCR errors.
+        try:
+            seq = int(client.incr(seq_key))
+        except Exception:
+            try:
+                client.delete(seq_key)
+                seq = int(client.incr(seq_key))
+            except Exception:
+                seq = 0
+        try:
+            client.expire(seq_key, self._settings.progress_ttl_seconds)
+        except Exception:
+            pass
+        event["seq"] = seq
+        event_payload = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+
         # Global stream for archival / Postgres sync.
         self._xadd(self._settings.stream_progress(), {"task_run_id": task_run_id, "payload": event_payload})
 
-        # Per-run stream for efficient SSE replay.
         run_stream = self._settings.stream_progress_for_run(task_run_id)
         entry_id = self._xadd(run_stream, {"task_run_id": task_run_id, "payload": event_payload})
-        # Prevent unbounded growth of per-run stream keys.
         try:
             client.expire(run_stream, self._settings.progress_ttl_seconds)
         except Exception:
@@ -306,7 +551,7 @@ class RedisTaskQueue:
         if entry_id:
             try:
                 seq_map_key = self._settings.key_seq_map(task_run_id)
-                client.hset(seq_map_key, str(seq), entry_id)
+                self._seq_map_set(client, seq_map_key=seq_map_key, seq=seq, stream_id=str(entry_id))
                 client.expire(seq_map_key, self._settings.progress_ttl_seconds)
             except Exception:
                 pass
@@ -318,8 +563,11 @@ class RedisTaskQueue:
             return
         key = self._settings.key_task_result(task_run_id)
         try:
-            client.set(key, json.dumps(result, ensure_ascii=False, separators=(",", ":")))
-            client.expire(key, self._settings.result_ttl_seconds)
+            client.set(
+                key,
+                json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+                ex=self._settings.result_ttl_seconds,
+            )
         except Exception as exc:
             logger.warning("RedisTaskQueue set task result failed (%s): %s", task_run_id, exc)
 
@@ -349,50 +597,85 @@ class RedisTaskQueue:
         if client is None:
             return []
 
+        seq_map_key = self._settings.key_seq_map(task_run_id)
+        stream = self._settings.stream_progress_for_run(task_run_id)
+
         start_id = "0-0"
+        needs_seek = False
         if last_seq >= 0:
             try:
-                mapped = client.hget(self._settings.key_seq_map(task_run_id), str(last_seq))
+                mapped = self._seq_map_lookup_stream_id(client, seq_map_key=seq_map_key, seq=int(last_seq))
                 if mapped:
                     start_id = mapped
+                else:
+                    needs_seek = True
             except Exception:
-                start_id = "0-0"
+                needs_seek = True
 
-        stream = self._settings.stream_progress_for_run(task_run_id)
-        try:
-            if block_ms and block_ms > 0:
-                res = client.xread({stream: start_id}, count=max(1, int(count)), block=int(block_ms))
-            else:
-                res = client.xread({stream: start_id}, count=max(1, int(count)))
-        except Exception as exc:
-            logger.warning("RedisTaskQueue xread progress failed (%s): %s", task_run_id, exc)
-            return []
-
-        if not res:
-            return []
-        entries = res[0][1]
-        events: list[Dict[str, Any]] = []
-        for _, fields in entries:
-            payload = fields.get("payload")
-            if not payload:
-                continue
-            try:
-                parsed = json.loads(payload)
-            except Exception:
-                continue
-            if not isinstance(parsed, dict):
-                continue
-            # When seq_map is missing (expired/flushed), start_id may fall back to "0-0".
-            # Filter by seq to avoid replaying already delivered events.
-            if last_seq >= 0:
-                try:
-                    seq_val = int(parsed.get("seq"))  # type: ignore[arg-type]
-                except Exception:
-                    seq_val = None
-                if seq_val is not None and seq_val <= last_seq:
+        def _parse_entries(entries: list[tuple[str, dict[str, str]]]) -> list[Dict[str, Any]]:
+            parsed_events: list[Dict[str, Any]] = []
+            for entry_id, fields in entries:
+                payload = fields.get("payload")
+                if not payload:
                     continue
-            events.append(parsed)
-        return events
+                try:
+                    parsed = json.loads(payload)
+                except Exception:
+                    continue
+                if not isinstance(parsed, dict):
+                    continue
+                if last_seq >= 0:
+                    try:
+                        seq_val = int(parsed.get("seq"))  # type: ignore[arg-type]
+                    except Exception:
+                        seq_val = None
+                    if seq_val is not None:
+                        if needs_seek:
+                            try:
+                                self._seq_map_set(client, seq_map_key=seq_map_key, seq=int(seq_val), stream_id=str(entry_id))
+                            except Exception:
+                                pass
+                        if seq_val <= last_seq:
+                            continue
+                parsed_events.append(parsed)
+            if needs_seek:
+                try:
+                    client.expire(seq_map_key, self._settings.progress_ttl_seconds)
+                except Exception:
+                    pass
+            return parsed_events
+
+        def _xread_from(start: str, *, block: int, read_count: int | None = None) -> list[tuple[str, dict[str, str]]]:
+            effective_count = max(1, int(read_count if read_count is not None else count))
+            try:
+                if block and block > 0:
+                    res = client.xread({stream: start}, count=effective_count, block=int(block))
+                else:
+                    res = client.xread({stream: start}, count=effective_count)
+            except Exception as exc:
+                logger.warning("RedisTaskQueue xread progress failed (%s): %s", task_run_id, exc)
+                return []
+            if not res:
+                return []
+            return list(res[0][1] or [])
+
+        if not needs_seek:
+            entries = _xread_from(start_id, block=int(block_ms))
+            return _parse_entries(entries)
+
+        cursor_id = start_id
+        scan_count = min(2000, max(200, int(count)))
+        for _ in range(200):
+            entries = _xread_from(cursor_id, block=0, read_count=scan_count)
+            if not entries:
+                break
+            cursor_id = entries[-1][0]
+            events = _parse_entries(entries)
+            if events:
+                return events[: max(1, int(count))]
+
+        entries = _xread_from(cursor_id, block=int(block_ms))
+        return _parse_entries(entries)
 
     def get_latest_progress_event(self, task_run_id: str) -> Optional[Dict[str, Any]]:
         client = self._client()

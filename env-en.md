@@ -388,6 +388,7 @@ Set to `1` (or any non-empty value) to opt-in when the required services/models 
 | `RUN_RAGARC_POSTGRES_TESTS` | _(empty)_ | Run Postgres-dependent test suites. |
 | `RUN_RAGARC_CHAT_STORAGE_TESTS` | _(empty)_ | Run chat-storage test suites. |
 | `RUN_RAGARC_VECTOR_TESTS` | _(empty)_ | Run vector-store test suites. |
+| `RUN_RAGARC_MQ_STRESS_TESTS` | _(empty)_ | Optional: run real-Redis message-queue stress smoke tests (`test/stress/test_mq_stress_real_redis.py`) when set to `1`. |
 | `RAGARC_E2E_TOKEN` | _(empty)_ | Token used by `test/test_complete_e2e_api.py` to authenticate API requests. |
 
 ---

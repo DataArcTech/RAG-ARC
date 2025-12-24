@@ -388,6 +388,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `RUN_RAGARC_POSTGRES_TESTS` | _(空)_ | 运行依赖 Postgres 的测试套件。 |
 | `RUN_RAGARC_CHAT_STORAGE_TESTS` | _(空)_ | 运行 chat storage 测试套件。 |
 | `RUN_RAGARC_VECTOR_TESTS` | _(空)_ | 运行向量库相关测试套件。 |
+| `RUN_RAGARC_MQ_STRESS_TESTS` | _(空)_ | 可选：设为 `1` 时运行真实 Redis 的消息队列轻压测（`test/stress/test_mq_stress_real_redis.py`）。 |
 | `RAGARC_E2E_TOKEN` | _(空)_ | `test/test_complete_e2e_api.py` 用于 API 鉴权的 token。 |
 
 ---

@@ -112,53 +112,64 @@ def index_file(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
         try:
             raise self.retry(exc=RuntimeError("file op lock busy"), countdown=countdown, max_retries=max_retries)
         except Exception as exc:  # noqa: BLE001
-            task_queue.update_task_run(
+            result_payload = {"success": False, "file_id": file_id, "error_message": "failed to acquire file lock"}
+            task_queue.set_task_result_and_finalize_run(
                 run_id,
+                result=result_payload,
                 state=TaskState.FAILURE,
                 progress_percent=100,
                 error_message=f"failed to acquire file lock: {exc}",
                 finished=True,
             )
-            return {"success": False, "file_id": file_id, "error_message": "failed to acquire file lock"}
+            return result_payload
 
     try:
         knowledge = _get_knowledge()
         metadata = knowledge.file_storage.get_file_metadata(file_id)
         if not metadata:
-            task_queue.update_task_run(
+            result_payload = {"success": False, "file_id": file_id, "error_message": "file not found"}
+            task_queue.set_task_result_and_finalize_run(
                 run_id,
+                result=result_payload,
                 state=TaskState.FAILURE,
                 progress_percent=100,
                 error_message="file not found",
                 finished=True,
             )
-            return {"success": False, "file_id": file_id, "error_message": "file not found"}
+            return result_payload
 
         if getattr(metadata, "status", None) == FileStatus.DELETED:
-            task_queue.update_task_run(
+            result_payload = {"success": False, "file_id": file_id, "error_message": "file deleted", "canceled": True}
+            task_queue.set_task_result_and_finalize_run(
                 run_id,
+                result=result_payload,
                 state=TaskState.CANCELED,
+                progress_percent=100,
                 error_message="file deleted",
                 finished=True,
             )
-            return {"success": False, "file_id": file_id, "error_message": "file deleted"}
+            return result_payload
 
         if getattr(metadata, "owner_id", None) != owner_uuid:
-            task_queue.update_task_run(
+            result_payload = {"success": False, "file_id": file_id, "error_message": "owner mismatch"}
+            task_queue.set_task_result_and_finalize_run(
                 run_id,
+                result=result_payload,
                 state=TaskState.FAILURE,
                 progress_percent=100,
                 error_message="owner mismatch",
                 finished=True,
             )
-            return {"success": False, "file_id": file_id, "error_message": "owner mismatch"}
+            return result_payload
 
         # Ensure idempotency under at-least-once semantics by cleaning previous derived artifacts/index entries.
         cleanup = knowledge.file_index.delete_file_data(file_id)
         if not cleanup.get("success", False):
             err = str(cleanup.get("error_message") or "pre-index cleanup failed")
-            task_queue.update_task_run(
+            result_payload = {"success": False, "file_id": file_id, "error_message": err}
+            task_queue.set_task_result_and_finalize_run(
                 run_id,
+                result=result_payload,
                 state=TaskState.FAILURE,
                 progress_percent=100,
                 error_message=err,
@@ -173,7 +184,7 @@ def index_file(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
                 resource_id=file_id,
                 payload={"file_id": file_id, "success": False, "error_message": err},
             )
-            return {"success": False, "file_id": file_id, "error_message": err}
+            return result_payload
 
         task_queue.update_task_run(run_id, state=TaskState.RUNNING, progress_percent=1)
         task_queue.append_progress_event(
@@ -186,9 +197,34 @@ def index_file(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
             payload={"file_id": file_id},
         )
 
-        result = _run_coroutine(knowledge.file_index.index_file(file_id))
+        def _progress(stage: str, percent: int | None, payload: dict[str, Any] | None = None) -> None:
+            try:
+                merged = {"file_id": file_id}
+                if payload and isinstance(payload, dict):
+                    merged.update(payload)
+                task_queue.append_progress_event(
+                    flow="indexing",
+                    task_run_id=run_id,
+                    stage=str(stage),
+                    status="progress",
+                    percent=percent,
+                    resource_id=file_id,
+                    payload=merged,
+                )
+                if percent is not None:
+                    task_queue.update_task_run(run_id, state=TaskState.RUNNING, progress_percent=int(percent))
+            except Exception:
+                return
+
+        result = _run_coroutine(knowledge.file_index.index_file(file_id, progress=_progress))
         if result.get("success"):
-            task_queue.update_task_run(run_id, state=TaskState.SUCCESS, progress_percent=100, finished=True)
+            task_queue.set_task_result_and_finalize_run(
+                run_id,
+                result=result if isinstance(result, dict) else {"result": result},
+                state=TaskState.SUCCESS,
+                progress_percent=100,
+                finished=True,
+            )
             task_queue.append_progress_event(
                 flow="indexing",
                 task_run_id=run_id,
@@ -201,8 +237,10 @@ def index_file(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
             return result
 
         err = str(result.get("error_message") or "indexing failed")
-        task_queue.update_task_run(
+        result_payload = {"success": False, "file_id": file_id, "error_message": err}
+        task_queue.set_task_result_and_finalize_run(
             run_id,
+            result=result_payload,
             state=TaskState.FAILURE,
             progress_percent=100,
             error_message=err,
@@ -217,7 +255,7 @@ def index_file(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
             resource_id=file_id,
             payload={"file_id": file_id, "success": False, "error_message": err},
         )
-        return {"success": False, "file_id": file_id, "error_message": err}
+        return result_payload
     except Retry:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -247,8 +285,10 @@ def index_file(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
             raise self.retry(exc=exc, countdown=countdown, max_retries=max_retries)
 
         logger.exception("Indexing failed (file_id=%s run_id=%s): %s", file_id, run_id, err)
-        task_queue.update_task_run(
+        result_payload = {"success": False, "file_id": file_id, "error_message": err}
+        task_queue.set_task_result_and_finalize_run(
             run_id,
+            result=result_payload,
             state=TaskState.FAILURE,
             progress_percent=100,
             error_message=err,
@@ -263,7 +303,7 @@ def index_file(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
             resource_id=file_id,
             payload={"file_id": file_id, "success": False, "error_message": err},
         )
-        return {"success": False, "file_id": file_id, "error_message": err}
+        return result_payload
     finally:
         _release_lock(redis_client, lock_key, run_id)
 
@@ -304,31 +344,42 @@ def delete_file(self, *, file_id: str, owner_id: str, delete_file_metadata: bool
         try:
             raise self.retry(exc=RuntimeError("file op lock busy"), countdown=countdown, max_retries=max_retries)
         except Exception as exc:  # noqa: BLE001
-            task_queue.update_task_run(
+            result_payload = {"success": False, "file_id": file_id, "error_message": "failed to acquire file lock"}
+            task_queue.set_task_result_and_finalize_run(
                 run_id,
+                result=result_payload,
                 state=TaskState.FAILURE,
                 progress_percent=100,
                 error_message=f"failed to acquire file lock: {exc}",
                 finished=True,
             )
-            return {"success": False, "file_id": file_id, "error_message": "failed to acquire file lock"}
+            return result_payload
 
     try:
         knowledge = _get_knowledge()
         metadata = knowledge.file_storage.get_file_metadata(file_id)
         if not metadata:
-            task_queue.update_task_run(run_id, state=TaskState.SUCCESS, progress_percent=100, finished=True)
-            return {"success": True, "file_id": file_id, "deleted": False}
+            result_payload = {"success": True, "file_id": file_id, "deleted": False}
+            task_queue.set_task_result_and_finalize_run(
+                run_id,
+                result=result_payload,
+                state=TaskState.SUCCESS,
+                progress_percent=100,
+                finished=True,
+            )
+            return result_payload
 
         if getattr(metadata, "owner_id", None) != owner_uuid:
-            task_queue.update_task_run(
+            result_payload = {"success": False, "file_id": file_id, "error_message": "owner mismatch"}
+            task_queue.set_task_result_and_finalize_run(
                 run_id,
+                result=result_payload,
                 state=TaskState.FAILURE,
                 progress_percent=100,
                 error_message="owner mismatch",
                 finished=True,
             )
-            return {"success": False, "file_id": file_id, "error_message": "owner mismatch"}
+            return result_payload
 
         task_queue.update_task_run(run_id, state=TaskState.RUNNING, progress_percent=1)
         task_queue.append_progress_event(
@@ -351,7 +402,14 @@ def delete_file(self, *, file_id: str, owner_id: str, delete_file_metadata: bool
         if not storage_deleted:
             raise RuntimeError("file storage deletion returned False")
 
-        task_queue.update_task_run(run_id, state=TaskState.SUCCESS, progress_percent=100, finished=True)
+        result_payload = {"success": True, "file_id": file_id, "deleted": True}
+        task_queue.set_task_result_and_finalize_run(
+            run_id,
+            result=result_payload,
+            state=TaskState.SUCCESS,
+            progress_percent=100,
+            finished=True,
+        )
         task_queue.append_progress_event(
             flow="deletion",
             task_run_id=run_id,
@@ -361,7 +419,7 @@ def delete_file(self, *, file_id: str, owner_id: str, delete_file_metadata: bool
             resource_id=file_id,
             payload={"file_id": file_id, "success": True},
         )
-        return {"success": True, "file_id": file_id, "deleted": True}
+        return result_payload
     except Retry:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -391,8 +449,10 @@ def delete_file(self, *, file_id: str, owner_id: str, delete_file_metadata: bool
             raise self.retry(exc=exc, countdown=countdown, max_retries=max_retries)
 
         logger.exception("Deletion failed (file_id=%s run_id=%s): %s", file_id, run_id, err)
-        task_queue.update_task_run(
+        result_payload = {"success": False, "file_id": file_id, "error_message": err}
+        task_queue.set_task_result_and_finalize_run(
             run_id,
+            result=result_payload,
             state=TaskState.FAILURE,
             progress_percent=100,
             error_message=err,
@@ -407,7 +467,7 @@ def delete_file(self, *, file_id: str, owner_id: str, delete_file_metadata: bool
             resource_id=file_id,
             payload={"file_id": file_id, "success": False, "error_message": err},
         )
-        return {"success": False, "file_id": file_id, "error_message": err}
+        return result_payload
     finally:
         _release_lock(redis_client, lock_key, run_id)
 
@@ -441,6 +501,27 @@ def export_graph(
             },
         )
 
+    existing = task_queue.get_task_result(run_id)
+    if existing is not None:
+        task_queue.append_progress_event(
+            flow="export",
+            task_run_id=run_id,
+            stage="graph_export",
+            status="dedup",
+            percent=100,
+            resource_id=str(owner_uuid),
+            payload={"owner_id": str(owner_uuid), "dedup": True},
+        )
+        task_queue.update_task_run(
+            run_id,
+            state=TaskState.SUCCESS,
+            progress_percent=100,
+            finished=True,
+            result_ref=task_queue.settings.key_task_result(run_id),
+            metadata_patch={"dedup": True},
+        )
+        return {"run_id": run_id, "done": True, "dedup": True}
+
     try:
         task_queue.update_task_run(run_id, state=TaskState.RUNNING, progress_percent=1)
         task_queue.append_progress_event(
@@ -462,13 +543,12 @@ def export_graph(
             include_node_types=include_node_types,
         )
 
-        task_queue.set_task_result(run_id, result if isinstance(result, dict) else {"result": result})
-        task_queue.update_task_run(
+        task_queue.set_task_result_and_finalize_run(
             run_id,
+            result=result if isinstance(result, dict) else {"result": result},
             state=TaskState.SUCCESS,
             progress_percent=100,
             finished=True,
-            result_ref=task_queue.settings.key_task_result(run_id),
         )
         task_queue.append_progress_event(
             flow="export",
@@ -511,7 +591,14 @@ def export_graph(
         if isinstance(exc, HTTPException):
             err = str(exc.detail)
         logger.exception("Graph export failed (owner_id=%s run_id=%s): %s", owner_id, run_id, err)
-        task_queue.update_task_run(run_id, state=TaskState.FAILURE, progress_percent=100, error_message=err, finished=True)
+        task_queue.set_task_result_and_finalize_run(
+            run_id,
+            result={"success": False, "error_message": err},
+            state=TaskState.FAILURE,
+            progress_percent=100,
+            error_message=err,
+            finished=True,
+        )
         task_queue.append_progress_event(
             flow="export",
             task_run_id=run_id,
@@ -541,6 +628,27 @@ def export_mindmap(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
             resource_id=file_id,
             metadata={"executor": "celery"},
         )
+
+    existing = task_queue.get_task_result(run_id)
+    if existing is not None:
+        task_queue.append_progress_event(
+            flow="export",
+            task_run_id=run_id,
+            stage="mindmap_export",
+            status="dedup",
+            percent=100,
+            resource_id=file_id,
+            payload={"file_id": file_id, "dedup": True},
+        )
+        task_queue.update_task_run(
+            run_id,
+            state=TaskState.SUCCESS,
+            progress_percent=100,
+            finished=True,
+            result_ref=task_queue.settings.key_task_result(run_id),
+            metadata_patch={"dedup": True},
+        )
+        return {"run_id": run_id, "done": True, "dedup": True}
 
     def _progress(stage: str, status: str, percent: int | None, payload: dict[str, Any] | None) -> None:
         try:
@@ -573,13 +681,12 @@ def export_mindmap(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
                 progress=_progress,
             )
         )
-        task_queue.set_task_result(run_id, result)
-        task_queue.update_task_run(
+        task_queue.set_task_result_and_finalize_run(
             run_id,
+            result=result if isinstance(result, dict) else {"result": result},
             state=TaskState.SUCCESS,
             progress_percent=100,
             finished=True,
-            result_ref=task_queue.settings.key_task_result(run_id),
         )
         _progress("mindmap_export", "result", 100, {"file_id": file_id})
         return {"run_id": run_id, "done": True}
@@ -606,6 +713,13 @@ def export_mindmap(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
         if isinstance(exc, HTTPException):
             err = str(exc.detail)
         logger.exception("Mindmap export failed (file_id=%s run_id=%s): %s", file_id, run_id, err)
-        task_queue.update_task_run(run_id, state=TaskState.FAILURE, progress_percent=100, error_message=err, finished=True)
+        task_queue.set_task_result_and_finalize_run(
+            run_id,
+            result={"success": False, "error_message": err},
+            state=TaskState.FAILURE,
+            progress_percent=100,
+            error_message=err,
+            finished=True,
+        )
         _progress("mindmap_export", "error", 100, {"file_id": file_id, "error_message": err})
         return {"run_id": run_id, "done": True, "error": err}

@@ -253,8 +253,29 @@ class Knowledge(AbstractModule):
                             payload={"file_id": doc_id, "success": False, "error_message": err},
                         )
                     return {"success": False, "file_id": doc_id, "error_message": err}
+                def _progress(stage: str, percent: int | None, payload: dict[str, Any] | None = None) -> None:
+                    if not task_run_id:
+                        return
+                    try:
+                        merged = {"file_id": doc_id}
+                        if payload and isinstance(payload, dict):
+                            merged.update(payload)
+                        self.task_queue.append_progress_event(
+                            flow="indexing",
+                            task_run_id=task_run_id,
+                            stage=str(stage),
+                            status="progress",
+                            percent=percent,
+                            resource_id=doc_id,
+                            payload=merged,
+                        )
+                        if percent is not None:
+                            self.task_queue.update_task_run(task_run_id, state=TaskState.RUNNING, progress_percent=int(percent))
+                    except Exception:
+                        return
+
                 # IndexManager is async but performs heavy blocking work; run it off the main event loop.
-                result = await self._run_coroutine_in_thread(self.file_index.index_file, doc_id)
+                result = await self._run_coroutine_in_thread(self.file_index.index_file, doc_id, progress=_progress)
                 if result.get("success"):
                     logger.info(f"Background indexing completed successfully for file_id: {doc_id}")
                     if task_run_id:
