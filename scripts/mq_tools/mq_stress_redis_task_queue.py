@@ -1,3 +1,7 @@
+"""
+MQ tool: small RedisTaskQueue stress (real Redis).
+"""
+
 import argparse
 import time
 import uuid
@@ -84,4 +88,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

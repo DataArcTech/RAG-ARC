@@ -70,8 +70,24 @@ class GlobalThreadPool:
         def run_with_context():
             return ctx.run(partial(func, *args, **kwargs))
         
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self.executor, run_with_context)
+        # NOTE:
+        # We intentionally avoid asyncio's run_in_executor here.
+        # In some constrained runtimes we observed missed wakeups for the 2nd+ executor future,
+        # causing await to hang forever. Polling the concurrent.futures.Future is more robust.
+        future = self.executor.submit(run_with_context)
+
+        sleep_seconds = 0.0
+        try:
+            while not future.done():
+                await asyncio.sleep(sleep_seconds)
+                if sleep_seconds == 0.0:
+                    sleep_seconds = 0.001
+                elif sleep_seconds < 0.05:
+                    sleep_seconds = min(0.05, sleep_seconds * 2)
+            return future.result()
+        except asyncio.CancelledError:
+            future.cancel()
+            raise
     
     def shutdown(self, wait: bool = True):
         """

@@ -39,6 +39,24 @@ stop_containers() {
         print_message "$GREEN" "   ✅ rag-arc-app stopped"
         STOPPED=$((STOPPED + 1))
     fi
+
+    # Stop celery workers
+    for worker in rag-arc-worker-indexing rag-arc-worker-deepsearch rag-arc-worker-export; do
+        if docker ps -q -f name=${worker} | grep -q .; then
+            print_message "$YELLOW" "   Stopping ${worker}..."
+            docker stop "${worker}"
+            print_message "$GREEN" "   ✅ ${worker} stopped"
+            STOPPED=$((STOPPED + 1))
+        fi
+    done
+
+    # Stop MQ sync daemon
+    if docker ps -q -f name=rag-arc-mq-sync | grep -q .; then
+        print_message "$YELLOW" "   Stopping rag-arc-mq-sync..."
+        docker stop rag-arc-mq-sync
+        print_message "$GREEN" "   ✅ rag-arc-mq-sync stopped"
+        STOPPED=$((STOPPED + 1))
+    fi
     
     # Stop postgres container
     if docker ps -q -f name=rag-arc-postgres | grep -q .; then
@@ -110,4 +128,3 @@ main() {
 }
 
 main
-

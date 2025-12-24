@@ -1,3 +1,7 @@
+"""
+MQ tool: small Celery+Redis broker stress (no RedisTaskQueue).
+"""
+
 import argparse
 import os
 import time

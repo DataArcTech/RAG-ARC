@@ -143,12 +143,15 @@ When `TASK_QUEUE_MODE=celery`, these long-running operations are executed by Cel
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `TASK_QUEUE_MODE` | `inprocess` | Background task mode: `inprocess` (in-API) or `celery` (distributed workers). |
+| `TASK_QUEUE_MODE` | `celery` | Background task mode: `inprocess` (in-API) or `celery` (distributed workers). |
 | `CELERY_BROKER_URL` | _(empty)_ | Broker URL (defaults to `redis://REDIS_HOST:REDIS_PORT/REDIS_DB` when empty). |
 | `CELERY_RESULT_BACKEND` | _(empty)_ | Result backend (defaults to broker; for long tasks prefer RedisTaskQueue result keys). |
 | `CELERY_QUEUE_INDEXING` | `indexing` | Queue name for indexing/deletion tasks. |
 | `CELERY_QUEUE_DEEPSEARCH` | `deepsearch` | Queue name for DeepSearch tasks. |
-| `CELERY_QUEUE_EXPORT` | _(empty)_ | Queue name for export tasks (graph/mindmap). When empty, falls back to `CELERY_QUEUE_INDEXING`. |
+| `CELERY_QUEUE_EXPORT` | `export` | Queue name for export tasks (graph/mindmap). When empty, falls back to `CELERY_QUEUE_INDEXING`. |
+| `CELERY_LOGLEVEL` | `info` | Worker log level (used by `./start.sh` when auto-starting workers). |
+| `CELERY_WORKER_CONCURRENCY` | `2` | Worker concurrency (processes/threads; used by `./start.sh` when auto-starting workers). |
+| `CELERY_WORKER_POOL` | `prefork` | Worker pool implementation (used by `./start.sh` when auto-starting workers). |
 | `CELERY_TASK_IGNORE_RESULT` | `true` | Disable Celery result-backend writes by default (recommended for long tasks). |
 | `CELERY_RESULT_EXPIRES_SECONDS` | `3600` | Expiration (seconds) for Celery result backend records. |
 | `CELERY_TASK_ACKS_LATE` | `true` | Acknowledge tasks only after completion (requires idempotency/locking). |
@@ -169,12 +172,19 @@ When `TASK_QUEUE_MODE=celery`, these long-running operations are executed by Cel
 | `CELERY_TASK_RETRY_COUNTDOWN_SECONDS` | `5` | Countdown (seconds) before retrying on exceptions. |
 | `CELERY_TASK_LOCK_MAX_RETRIES` | `30` | Maximum retry attempts when file lock is busy. |
 | `CELERY_TASK_LOCK_RETRY_COUNTDOWN_SECONDS` | `2` | Countdown (seconds) before retrying when file lock is busy. |
+| `MQ_AUTO_START_WORKERS` | `true` | Auto-start `rag-arc-worker-*` containers during `./start.sh` when `TASK_QUEUE_MODE=celery`. |
+| `MQ_SYNC_TO_POSTGRES_ENABLED` | `true` | Start `rag-arc-mq-sync` daemon during `./start.sh` to archive Redis Streams into Postgres. |
+| `MQ_SYNC_POLL_INTERVAL_SECONDS` | `2` | Sync poll interval seconds (daemon mode). |
+| `MQ_SYNC_BATCH_SIZE` | `2000` | Max stream entries read per sync pass. |
+| `MQ_SYNC_BLOCK_MS` | `1000` | Redis XREAD block time (ms) per sync pass (`0` disables blocking). |
+| `MQ_STARTUP_HEALTHCHECK` | `true` | Run a small MQ startup healthcheck during `./start.sh` (writes a tiny event, runs one sync pass, verifies tables). |
 
 ### 5.1.1 Running locally / in tests
 
-- Start Celery workers: `bash local/tmp/start_mq_workers.sh` (loads `.env`).
-- Stop Celery workers: `bash local/tmp/stop_mq_workers.sh`.
-- Optional: archive Redis Streams into Postgres: `uv run python scripts/message_queue_sync.py --daemon` (or `--once`).
+- When `TASK_QUEUE_MODE=celery` and `MQ_AUTO_START_WORKERS=true`, `./start.sh` automatically starts the Celery worker containers.
+- Stop Celery workers: `./stop.sh` (or `bash scripts/mq_tools/stop_mq_workers_local.sh`).
+- Manual start (outside Docker): `bash scripts/mq_tools/start_mq_workers_local.sh` (loads `.env`, logs in `log/mq_workers/`).
+- Optional: archive Redis Streams into Postgres: `uv run python scripts/mq_tools/message_queue_sync.py --daemon` (or `--once`).
 
 ## 6. DeepSearch Defaults
 

@@ -143,12 +143,15 @@
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `TASK_QUEUE_MODE` | `inprocess` | 切换后台任务模式：`inprocess`（进程内）或 `celery`（分布式 worker）。 |
+| `TASK_QUEUE_MODE` | `celery` | 切换后台任务模式：`inprocess`（进程内）或 `celery`（分布式 worker）。 |
 | `CELERY_BROKER_URL` | _(空)_ | Broker URL（留空则使用 `redis://REDIS_HOST:REDIS_PORT/REDIS_DB`）。 |
 | `CELERY_RESULT_BACKEND` | _(空)_ | Result backend（默认同 broker；建议主要用 RedisTaskQueue 的 result key）。 |
 | `CELERY_QUEUE_INDEXING` | `indexing` | 索引/删除任务的队列名。 |
 | `CELERY_QUEUE_DEEPSEARCH` | `deepsearch` | DeepSearch 队列名。 |
-| `CELERY_QUEUE_EXPORT` | _(空)_ | 导出任务队列名（图谱/思维导图）。留空则复用 `CELERY_QUEUE_INDEXING`。 |
+| `CELERY_QUEUE_EXPORT` | `export` | 导出任务队列名（图谱/思维导图）。留空则复用 `CELERY_QUEUE_INDEXING`。 |
+| `CELERY_LOGLEVEL` | `info` | Worker 日志级别（`./start.sh` 自动启动 worker 时使用）。 |
+| `CELERY_WORKER_CONCURRENCY` | `2` | Worker 并发（进程/线程数；`./start.sh` 自动启动 worker 时使用）。 |
+| `CELERY_WORKER_POOL` | `prefork` | Worker pool 实现（`./start.sh` 自动启动 worker 时使用）。 |
 | `CELERY_TASK_IGNORE_RESULT` | `true` | 是否忽略 Celery 原生 result backend 写入（长任务建议 `true`）。 |
 | `CELERY_RESULT_EXPIRES_SECONDS` | `3600` | Celery result backend 的过期时间（秒）。 |
 | `CELERY_TASK_ACKS_LATE` | `true` | 任务结束后再 ack（提高可靠性，但需结合幂等/锁）。 |
@@ -169,12 +172,19 @@
 | `CELERY_TASK_RETRY_COUNTDOWN_SECONDS` | `5` | 任务异常重试的等待秒数。 |
 | `CELERY_TASK_LOCK_MAX_RETRIES` | `30` | 获取 file lock 失败时的最大重试次数。 |
 | `CELERY_TASK_LOCK_RETRY_COUNTDOWN_SECONDS` | `2` | 获取 file lock 失败时的重试等待秒数。 |
+| `MQ_AUTO_START_WORKERS` | `true` | 当 `TASK_QUEUE_MODE=celery` 时，`./start.sh` 自动启动 `rag-arc-worker-*` 容器。 |
+| `MQ_SYNC_TO_POSTGRES_ENABLED` | `true` | `./start.sh` 启动 `rag-arc-mq-sync` 守护进程，将 Redis Streams 归档到 Postgres。 |
+| `MQ_SYNC_POLL_INTERVAL_SECONDS` | `2` | 同步轮询间隔（秒，daemon 模式）。 |
+| `MQ_SYNC_BATCH_SIZE` | `2000` | 每次同步最多读取的 stream 条目数。 |
+| `MQ_SYNC_BLOCK_MS` | `1000` | 每次同步的 Redis XREAD 阻塞时间（毫秒；`0` 表示不阻塞）。 |
+| `MQ_STARTUP_HEALTHCHECK` | `true` | `./start.sh` 启动时执行一段 MQ 健康检查（写入小事件、跑一次同步、校验表存在）。 |
 
 ### 5.1.1 运行方式（本地/测试）
 
-- 启动 Celery worker：`bash local/tmp/start_mq_workers.sh`（读取 `.env`）。
-- 停止 Celery worker：`bash local/tmp/stop_mq_workers.sh`。
-- 可选：将 Redis Streams 归档到 Postgres：`uv run python scripts/message_queue_sync.py --daemon`（或 `--once` 单次同步）。
+- 当 `TASK_QUEUE_MODE=celery` 且 `MQ_AUTO_START_WORKERS=true` 时，`./start.sh` 会自动启动 Celery worker 容器。
+- 停止 Celery worker：`./stop.sh`（或 `bash scripts/mq_tools/stop_mq_workers_local.sh`）。
+- 手动启动（非 Docker）：`bash scripts/mq_tools/start_mq_workers_local.sh`（读取 `.env`，日志输出到 `log/mq_workers/`）。
+- 可选：将 Redis Streams 归档到 Postgres：`uv run python scripts/mq_tools/message_queue_sync.py --daemon`（或 `--once` 单次同步）。
 
 ## 6. DeepSearch 配置
 

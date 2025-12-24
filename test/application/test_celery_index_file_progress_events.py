@@ -118,6 +118,8 @@ async def test_celery_index_file_emits_stage_progress(monkeypatch: pytest.Monkey
     import application.knowledge.celery_tasks as knowledge_celery_tasks
 
     monkeypatch.setattr(knowledge_celery_tasks, "ensure_initialized", lambda: None, raising=True)
+    # Avoid any real Redis socket usage for file locks during this unit test.
+    monkeypatch.setattr(knowledge_celery_tasks, "RedisDB", lambda *args, **kwargs: SimpleNamespace(client=None), raising=True)  # noqa: ARG005
     monkeypatch.setattr(knowledge_celery_tasks, "_acquire_lock", lambda *a, **k: True, raising=True)  # noqa: ANN001
     monkeypatch.setattr(knowledge_celery_tasks, "_release_lock", lambda *a, **k: None, raising=True)  # noqa: ANN001
 

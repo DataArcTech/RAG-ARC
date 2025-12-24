@@ -1,3 +1,7 @@
+"""
+MQ tool: sync RedisTaskQueue streams to PostgreSQL (daemon or one-shot).
+"""
+
 import argparse
 import json
 import logging
