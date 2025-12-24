@@ -217,5 +217,7 @@ benchmark/
 docs-proj/
 sql/
 log/
-*.log
+*.log 
 test_output/
+config_docs/
+webui/

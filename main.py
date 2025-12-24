@@ -13,6 +13,67 @@ from core.graph_adapter.scope_provider import configure_scope_provider
 load_dotenv()
 configure_scope_provider()
 
+# 先配置日志，避免被其他模块的basicConfig覆盖
+from api.utils.logging_handler import DailySizeRotatingHandler
+from asgi_correlation_id.log_filters import CorrelationIdFilter
+
+class AutoUUIDCorrelationFilter(CorrelationIdFilter):
+    """自动生成 UUID 的 CorrelationIdFilter（当 correlation_id 不存在时）"""
+    def filter(self, record):
+        result = super().filter(record)
+        if hasattr(record, 'correlation_id') and record.correlation_id == 'NO-ID':
+            record.correlation_id = str(uuid.uuid4())
+        return result
+
+class BeijingFormatter(logging.Formatter):
+    """使用北京时间的日志格式化器"""
+    def formatTime(self, record, datefmt=None):
+        beijing_tz = timezone(timedelta(hours=8))
+        ct = datetime.fromtimestamp(record.created, tz=beijing_tz)
+        if datefmt:
+            return ct.strftime(datefmt)
+        return ct.strftime('%Y-%m-%d %H:%M:%S')
+
+correlation_filter = AutoUUIDCorrelationFilter(uuid_length=36, default_value='NO-ID')
+log_base_dir = Path(__file__).parent / "log"
+log_base_dir.mkdir(exist_ok=True)
+
+file_handler = DailySizeRotatingHandler(
+    base_dir=str(log_base_dir),
+    maxBytes=100*1024*1024,
+    backupCount=30,
+    encoding='utf-8'
+)
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(BeijingFormatter(
+    '%(asctime)s - [request_id: %(correlation_id)s] - %(name)s - %(levelname)s - %(message)s'
+))
+file_handler.addFilter(correlation_filter)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - [request_id: %(correlation_id)s] - %(name)s - %(levelname)s - %(message)s',
+    handlers=[file_handler],
+    force=True
+)
+
+for handler in logging.root.handlers:
+    if isinstance(handler, logging.StreamHandler) and not isinstance(handler.formatter, BeijingFormatter):
+        handler.setFormatter(BeijingFormatter(
+            '%(asctime)s - [request_id: %(correlation_id)s] - %(name)s - %(levelname)s - %(message)s'
+        ))
+
+for handler in logging.root.handlers:
+    if correlation_filter not in handler.filters:
+        handler.addFilter(correlation_filter)
+
+original_addHandler = logging.Logger.addHandler
+def addHandler_with_filter(self, handler):
+    if correlation_filter not in handler.filters:
+        handler.addFilter(correlation_filter)
+    return original_addHandler(self, handler)
+logging.Logger.addHandler = addHandler_with_filter
+
 import app_registration
 
 # initialize components BEFORE importing routers that depend on them
@@ -27,81 +88,7 @@ from api.routers import auth as auth_router
 from api.routers import user as user_router
 from asgi_correlation_id import CorrelationIdMiddleware
 from asgi_correlation_id.middleware import is_valid_uuid4
-from asgi_correlation_id.log_filters import CorrelationIdFilter
 from api.middleware.response_wrapper import RequestIdResponseWrapper
-from api.utils.logging_handler import DailySizeRotatingHandler
-
-
-class AutoUUIDCorrelationFilter(CorrelationIdFilter):
-    """自动生成 UUID 的 CorrelationIdFilter（当 correlation_id 不存在时）"""
-    def filter(self, record):
-        # 先调用父类方法
-        result = super().filter(record)
-        # 如果 correlation_id 是 'NO-ID'，生成一个新的 UUID
-        if hasattr(record, 'correlation_id') and record.correlation_id == 'NO-ID':
-            record.correlation_id = str(uuid.uuid4())
-        return result
-
-
-# 自定义Formatter，使用北京时间（UTC+8）
-class BeijingFormatter(logging.Formatter):
-    """使用北京时间的日志格式化器"""
-    def formatTime(self, record, datefmt=None):
-        beijing_tz = timezone(timedelta(hours=8))
-        ct = datetime.fromtimestamp(record.created, tz=beijing_tz)
-        if datefmt:
-            return ct.strftime(datefmt)
-        return ct.strftime('%Y-%m-%d %H:%M:%S')
-
-
-# Configure logging with correlation ID
-# 先创建filter（UUID 格式：xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx，共36字符）
-# 当 correlation_id 不存在时，自动生成 UUID
-correlation_filter = AutoUUIDCorrelationFilter(uuid_length=36, default_value='NO-ID')
-
-# 配置日志文件路径（按天文件夹 + 按大小轮转）
-log_base_dir = Path(__file__).parent / "log"
-log_base_dir.mkdir(exist_ok=True)  # 确保基础 log 目录存在
-
-# 创建自定义Handler（按天文件夹 + 单文件最大100MB，保留30天）
-file_handler = DailySizeRotatingHandler(
-    base_dir=str(log_base_dir),
-    maxBytes=100*1024*1024,  # 单文件最大100MB
-    backupCount=30,  # 保留30天的日志
-    encoding='utf-8'
-)
-file_handler.setLevel(logging.INFO)
-file_handler.setFormatter(logging.Formatter(
-    '%(asctime)s - [request_id: %(correlation_id)s] - %(name)s - %(levelname)s - %(message)s'
-))
-file_handler.addFilter(correlation_filter)
-
-# 配置logging（移除默认handler，使用自定义handler）
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - [request_id: %(correlation_id)s] - %(name)s - %(levelname)s - %(message)s',
-    handlers=[file_handler],  # 使用文件handler
-    force=True  # 强制重新配置
-)
-# 为 root logger 设置自定义 formatter（确保所有日志都使用北京时间）
-for handler in logging.root.handlers:
-    if isinstance(handler, logging.StreamHandler) and not isinstance(handler.formatter, BeijingFormatter):
-        handler.setFormatter(BeijingFormatter(
-            '%(asctime)s - [request_id: %(correlation_id)s] - %(name)s - %(levelname)s - %(message)s'
-        ))
-
-# 为所有现有和未来的handler添加correlation_id过滤器
-for handler in logging.root.handlers:
-    if not handler.filters:  # 避免重复添加
-        handler.addFilter(correlation_filter)
-
-# 确保新创建的handler也添加filter
-original_addHandler = logging.Logger.addHandler
-def addHandler_with_filter(self, handler):
-    if correlation_filter not in handler.filters:
-        handler.addFilter(correlation_filter)
-    return original_addHandler(self, handler)
-logging.Logger.addHandler = addHandler_with_filter
 
 logger = logging.getLogger(__name__)
 

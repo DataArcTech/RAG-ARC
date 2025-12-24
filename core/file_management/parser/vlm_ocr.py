@@ -75,8 +75,9 @@ class VLMOcrParser(AbstractParser):
             logger.error(error_msg)
             raise ValueError(error_msg)
 
-        # Get output directory from environment variable
-        output_dir = os.getenv('VLMOCR_OUTPUT_DIR', './vlmocr/output')
+        # Get output directory from environment variable (use unified PARSER_OUTPUT_DIR)
+        parser_base_dir = os.getenv('PARSER_OUTPUT_DIR', './data/parsed_files')
+        output_dir = os.path.join(parser_base_dir, 'vlm_ocr')
         runtime_root = os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime")
         fallback_dir = os.path.join(runtime_root, "vlmocr_output")
         output_dir = ensure_writable_dir(os.path.abspath(output_dir), fallback_dir)
@@ -124,7 +125,7 @@ class VLMOcrParser(AbstractParser):
         """Parse a single image file from binary data - simple OCR"""
         origin_image = Image.open(io.BytesIO(file_data))
         result = self._parse_single_image(
-            origin_image, save_dir, filename, source="image", page_idx=0
+            origin_image, save_dir, os.path.basename(filename), source="image", page_idx=0
         )
         result['filename'] = filename
         return [result]
@@ -161,7 +162,7 @@ class VLMOcrParser(AbstractParser):
             {
                 "origin_image": image,
                 "save_dir": save_dir,
-                "save_name": filename,
+                "save_name": os.path.basename(filename),
                 "source": "pdf",
                 "page_idx": i,
             } for i, image in enumerate(images_origin)

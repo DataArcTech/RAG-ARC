@@ -9,9 +9,11 @@ from config.application.session_config import ChatSessionConfig
 from config.application.chat_message_config import ChatMessageManagerConfig
 from framework.register import Register
 
+# 日志配置已在main.py中完成，这里不再重复配置
 # Set up logging with environment variable support
 log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
-logging.basicConfig(level=getattr(logging, log_level), format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# 只设置日志级别，不重新配置handler（避免覆盖main.py的文件handler）
+logging.getLogger().setLevel(getattr(logging, log_level))
 logger = logging.getLogger(__name__)
 
 registrator = Register()
