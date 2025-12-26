@@ -73,6 +73,8 @@ class GraphReasoningLoop:
         self.max_parallel_branches = self._resolve_max_parallel(strategy_config)
         self._active_parallel_branches = max(1, self.parallel_branches or 1)
         self._tool_timeout = self._resolve_tool_timeout(strategy_config)
+        self._tool_context_max_items = self._resolve_tool_context_max_items(strategy_config)
+        self._tool_context_max_chars = self._resolve_tool_context_max_chars(strategy_config)
 
     async def run(
         self,
@@ -628,13 +630,80 @@ class GraphReasoningLoop:
         return {
             "question": question,
             "plan_step": plan_step_id,
-            "context_evidences": [chunk.model_dump() for chunk in evidences],
+            "context_evidences": self._context_window_evidences(evidences),
             "adapter": self.adapter,
             "access_scope": context.resolve_scope(),
             "extra": dict(extra or {}),
             "graph_context": context.model_dump(exclude_none=True),
             "coverage_metrics": coverage_hint,
         }
+
+    def _context_window_evidences(self, evidences: List[EvidenceChunk]) -> List[Dict[str, Any]]:
+        """Bound evidence payload size for tool calls (recency retention).
+
+        This prevents tool prompts from accidentally exceeding model context limits
+        when the evidence pile grows large.
+        """
+
+        items = list(evidences or [])
+        max_items = max(0, int(self._tool_context_max_items or 0))
+        if max_items:
+            items = items[-max_items:]
+        max_chars = max(0, int(self._tool_context_max_chars or 0))
+        payload: List[Dict[str, Any]] = []
+        for chunk in items:
+            try:
+                chunk_id = getattr(chunk, "chunk_id", None)
+                source = getattr(chunk, "source", None)
+                content = getattr(chunk, "content", "")
+                score = getattr(chunk, "score", None)
+            except Exception:
+                continue
+            text = str(content or "")
+            if max_chars and len(text) > max_chars:
+                text = text[: max(0, max_chars - 3)].rstrip() + "..."
+            payload.append({"chunk_id": chunk_id, "source": source, "content": text, "score": score})
+        return payload
+
+    @staticmethod
+    def _resolve_tool_context_max_items(config: Any) -> int:
+        raw = os.getenv("DEEPSEARCH_TOOL_CONTEXT_MAX_EVIDENCES")
+        if raw is not None:
+            try:
+                return max(1, int(raw))
+            except Exception:
+                return 5
+        if hasattr(config, "tool_context_max_evidences"):
+            try:
+                return max(1, int(getattr(config, "tool_context_max_evidences")))
+            except Exception:
+                return 5
+        if isinstance(config, dict) and config.get("tool_context_max_evidences") is not None:
+            try:
+                return max(1, int(config.get("tool_context_max_evidences")))
+            except Exception:
+                return 5
+        return 5
+
+    @staticmethod
+    def _resolve_tool_context_max_chars(config: Any) -> int:
+        raw = os.getenv("DEEPSEARCH_TOOL_CONTEXT_MAX_CHARS")
+        if raw is not None:
+            try:
+                return max(100, int(raw))
+            except Exception:
+                return 800
+        if hasattr(config, "tool_context_max_chars"):
+            try:
+                return max(100, int(getattr(config, "tool_context_max_chars")))
+            except Exception:
+                return 800
+        if isinstance(config, dict) and config.get("tool_context_max_chars") is not None:
+            try:
+                return max(100, int(config.get("tool_context_max_chars")))
+            except Exception:
+                return 800
+        return 800
 
     @staticmethod
     def _empty_record(spec: PlanSpec) -> ReasoningStepRecord:

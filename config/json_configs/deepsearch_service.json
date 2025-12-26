@@ -7,7 +7,7 @@
     "persist_plan": true,
     "plan_output_dir": "${DEEPSEARCH_PLAN_OUTPUT_DIR}",
     "allow_external_channel": false,
-    "honor_planner_tool_selection": false,
+    "honor_planner_tool_selection": true,
     "graph_channel_tool": "graph_adapter.query",
     "text_channel_tool": "graph.context_rollup",
     "web_channel_tool": "web.search",
@@ -77,7 +77,11 @@
     "probe_tool_names": ["graph.chunk_scan", "graph.pattern_scan"],
     "probe_concurrency": 4,
     "lead_tool_names": ["graph.context_rollup", "graph.evidence_crosscheck"],
-    "lead_tool_concurrency": 2
+    "lead_tool_concurrency": 2,
+    "incremental_parallelism": true,
+    "initial_worker_count": 1,
+    "stop_min_evidence_count": 3,
+    "stop_min_coverage_ratio": 0.85
   },
   "gap_detection": {
     "coverage_threshold": 0.7,
@@ -88,7 +92,10 @@
   "reporter": {
     "include_graph_viz": true,
     "enable_custom_summary": false,
-    "parallel_thinking_runs": 1
+    "parallel_thinking_runs": 1,
+    "sectionwise_writer": true,
+    "sectionwise_retain_k": 5,
+    "outline_evidence_summary_chars": 240
   },
   "tool_manager": {
     "enable_builtin_tools": true,
@@ -103,7 +110,9 @@
     "enabled": false,
     "context_window_limit": 12,
     "http_timeout": 20.0,
-    "max_results": 5
+    "max_results": 5,
+    "cache_mode": "auto",
+    "cache_dir": "${DEEPSEARCH_EXTERNAL_CACHE_DIR}"
   },
   "quality_loop": {
     "enabled": "${DEEPSEARCH_QUALITY_LOOP_ENABLED}"

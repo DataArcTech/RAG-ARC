@@ -1,9 +1,11 @@
 """External channel orchestrator for Tavily provider or MCP tools."""
 import asyncio
+import hashlib
 import json
 import os
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from encapsulation.data_model.deepsearch import EvidenceChunk, GraphQueryContext
@@ -35,6 +37,8 @@ class ExternalSearchChannel:
         except (TypeError, ValueError):
             timeout = 45.0
         self._tool_timeout = max(0.0, timeout)
+        self._cache_mode = (os.getenv("DEEPSEARCH_EXTERNAL_CACHE_MODE") or self.config.get("cache_mode") or "auto").strip().lower()
+        self._cache_dir = os.getenv("DEEPSEARCH_EXTERNAL_CACHE_DIR") or self.config.get("cache_dir")
 
     async def run(
         self,
@@ -54,8 +58,12 @@ class ExternalSearchChannel:
         context_evidences = self._coerce_evidences(trace.get("evidences") or [])
         coverage_metrics = trace.get("coverage_metrics") or {}
         run_id = None
+        artifact_dir: str | None = None
         if graph_context and isinstance(getattr(graph_context, "metadata", None), dict):
             run_id = (graph_context.metadata or {}).get("run_id")
+            artifact_dir = (graph_context.metadata or {}).get("artifact_dir")
+
+        cache_mode, cache_root = self._resolve_cache_context(artifact_dir)
 
         outputs: List[Dict[str, Any]] = []
         logs: List[Dict[str, Any]] = []
@@ -66,6 +74,44 @@ class ExternalSearchChannel:
             log_entry = self._build_log(task=task, provider=provider, gap_result=gap_result)
             call_id = uuid.uuid4().hex
             query = self._task_query(task, default=question or "")
+            tool_name = str(task.get("tool") or "web.search")
+            cache_key = self._cache_key(provider=provider, tool_name=tool_name, query=query, task=task)
+            if cache_root is not None and cache_mode in {"replay", "auto"}:
+                replay = self._load_cache(cache_root, cache_key)
+                if replay is not None:
+                    chunks, diagnostics, event = replay
+                    log_entry["status"] = "replay"
+                    log_entry["evidence_count"] = len(chunks)
+                    log_entry["latency_ms"] = 0
+                    log_entry["cache_key"] = cache_key
+                    logs.append(log_entry)
+                    try:
+                        await emit_trace(
+                            "tool_response",
+                            json.dumps(
+                                json_safe(
+                                    {
+                                        "call_id": call_id,
+                                        "tool_name": tool_name,
+                                        "provider": provider,
+                                        "query": query,
+                                        "status": "replay",
+                                        "cache_key": cache_key,
+                                        "evidence_count": len(chunks),
+                                        "evidences": chunks[:8],
+                                        "diagnostics": diagnostics,
+                                    }
+                                ),
+                                ensure_ascii=False,
+                                indent=2,
+                                default=str,
+                            ),
+                            meta={"call_id": call_id, "tool_name": tool_name, "provider": provider, "ok": True, "cache_mode": cache_mode, "cache_key": cache_key},
+                        )
+                    except Exception:
+                        pass
+                    outputs.extend(chunks)
+                    continue
             try:
                 await emit_trace(
                     "tool_call",
@@ -73,20 +119,22 @@ class ExternalSearchChannel:
                         json_safe(
                             {
                                 "call_id": call_id,
-                                "tool_name": "web.search",
+                                "tool_name": tool_name,
                                 "provider": provider,
                                 "plan_step": log_entry.get("plan_step") or task.get("step_id") or task.get("step") or "external",
                                 "query": query,
                                 "max_results": self._tavily_max_results,
                                 "context_evidence_count": len(context_evidences),
                                 "coverage_metrics": coverage_metrics,
+                                "cache_mode": cache_mode,
+                                "cache_key": cache_key,
                             }
                         ),
                         ensure_ascii=False,
                         indent=2,
                         default=str,
                     ),
-                    meta={"call_id": call_id, "tool_name": "web.search", "provider": provider},
+                    meta={"call_id": call_id, "tool_name": tool_name, "provider": provider, "cache_mode": cache_mode, "cache_key": cache_key},
                 )
             except Exception:
                 pass
@@ -119,7 +167,7 @@ class ExternalSearchChannel:
                             json_safe(
                                 {
                                     "call_id": call_id,
-                                    "tool_name": "web.search",
+                                    "tool_name": tool_name,
                                     "provider": provider,
                                     "query": query,
                                     "error": "timeout",
@@ -129,7 +177,7 @@ class ExternalSearchChannel:
                             indent=2,
                             default=str,
                         ),
-                        meta={"call_id": call_id, "tool_name": "web.search", "provider": provider, "ok": False},
+                        meta={"call_id": call_id, "tool_name": tool_name, "provider": provider, "ok": False},
                     )
                 except Exception:
                     pass
@@ -153,7 +201,7 @@ class ExternalSearchChannel:
                             json_safe(
                                 {
                                     "call_id": call_id,
-                                    "tool_name": "web.search",
+                                    "tool_name": tool_name,
                                     "provider": provider,
                                     "query": query,
                                     "error": str(exc),
@@ -163,11 +211,30 @@ class ExternalSearchChannel:
                             indent=2,
                             default=str,
                         ),
-                        meta={"call_id": call_id, "tool_name": "web.search", "provider": provider, "ok": False},
+                        meta={"call_id": call_id, "tool_name": tool_name, "provider": provider, "ok": False},
                     )
                 except Exception:
                     pass
                 continue
+            if cache_root is not None and cache_mode in {"record", "auto"}:
+                self._save_cache(
+                    cache_root,
+                    cache_key,
+                    record={
+                        "schema_version": 1,
+                        "run_id": run_id,
+                        "provider": provider,
+                        "tool_name": tool_name,
+                        "query": query,
+                        "task": json_safe(task),
+                        "response": {
+                            "chunks": json_safe(chunks),
+                            "diagnostics": json_safe(diagnostics),
+                            "event": event,
+                        },
+                        "created_at_ms": int(time.time() * 1000),
+                    },
+                )
             log_entry["status"] = "ok"
             log_entry["evidence_count"] = len(chunks)
             log_entry["latency_ms"] = int((time.perf_counter() - task_start) * 1000)
@@ -189,7 +256,7 @@ class ExternalSearchChannel:
                         json_safe(
                             {
                                 "call_id": call_id,
-                                "tool_name": "web.search",
+                                "tool_name": tool_name,
                                 "provider": provider,
                                 "query": query,
                                 "latency_ms": log_entry.get("latency_ms"),
@@ -202,12 +269,77 @@ class ExternalSearchChannel:
                         indent=2,
                         default=str,
                     ),
-                    meta={"call_id": call_id, "tool_name": "web.search", "provider": provider, "ok": True},
+                    meta={"call_id": call_id, "tool_name": tool_name, "provider": provider, "ok": True, "cache_mode": cache_mode, "cache_key": cache_key},
                 )
             except Exception:
                 pass
             outputs.extend(chunks)
         return {"evidences": outputs, "logs": logs}
+
+    # ------------------------------------------------------------------
+    def _resolve_cache_context(self, artifact_dir: str | None) -> tuple[str, Path | None]:
+        mode = (self._cache_mode or "off").strip().lower()
+        if mode not in {"off", "record", "replay", "auto"}:
+            mode = "off"
+
+        directory = self._cache_dir
+        if not directory and artifact_dir:
+            directory = str(Path(str(artifact_dir)) / "external_cache")
+        if not directory:
+            return mode, None
+        try:
+            root = Path(str(directory)).expanduser()
+            root.mkdir(parents=True, exist_ok=True)
+            return mode, root
+        except Exception:
+            return mode, None
+
+    @staticmethod
+    def _cache_key(*, provider: str, tool_name: str, query: str, task: Dict[str, Any]) -> str:
+        stable_task = {
+            "tool": task.get("tool"),
+            "tool_args": task.get("tool_args") if isinstance(task.get("tool_args"), dict) else {},
+            "metadata": task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
+            "channel": task.get("channel"),
+            "requires_external": task.get("requires_external"),
+        }
+        payload = {
+            "provider": str(provider or "").strip().lower(),
+            "tool_name": str(tool_name or "").strip().lower(),
+            "query": str(query or "").strip(),
+            "task": json_safe(stable_task),
+        }
+        blob = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
+
+    @staticmethod
+    def _load_cache(root: Path, key: str) -> tuple[List[Dict[str, Any]], Dict[str, Any], str] | None:
+        path = root / f"{key}.json"
+        if not path.exists():
+            return None
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        response = record.get("response") if isinstance(record, dict) else None
+        if not isinstance(response, dict):
+            return None
+        chunks = response.get("chunks") or []
+        diagnostics = response.get("diagnostics") or {}
+        event = response.get("event") or "replay"
+        if not isinstance(chunks, list):
+            chunks = []
+        if not isinstance(diagnostics, dict):
+            diagnostics = {}
+        return [item for item in chunks if isinstance(item, dict)], diagnostics, str(event)
+
+    @staticmethod
+    def _save_cache(root: Path, key: str, *, record: Dict[str, Any]) -> None:
+        path = root / f"{key}.json"
+        try:
+            path.write_text(json.dumps(json_safe(record), ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            return
 
     # ------------------------------------------------------------------
     async def _execute_task(

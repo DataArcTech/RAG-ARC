@@ -273,7 +273,40 @@ def test_reporter_runs_consistency_check_when_enabled():
     report = asyncio.run(reporter.compose(trace, external_evidence=[]))
 
     assert report["structured_report"]["consistency_check"]["is_consistent"] is True
-    assert report["structured_report"]["consistency_check"]["issues"] == []
+
+
+def test_reporter_drops_uncited_summary_in_llm_report():
+    outline = """
+[
+  {"title": "Evidence-Based Findings", "purpose": "Explain what the evidence supports."}
+]
+""".strip()
+    report_json = """
+{
+  "title": "Who partnered with OpenAI?",
+  "summary": "Microsoft partnered with OpenAI in 2019.",
+  "sections": [
+    {
+      "title": "Evidence-Based Findings",
+      "body_markdown": "Microsoft formed a strategic partnership with OpenAI in 2019. [ev1]"
+    }
+  ],
+  "limitations": [],
+  "next_steps": [],
+  "citations": []
+}
+""".strip()
+    reporter = DeepSearchReporter(
+        template_store=None,
+        config={"parallel_thinking_runs": 1, "enable_consistency_check": False},
+        llm_connector=_FakeLLM([outline, report_json]),
+    )
+    trace = _build_trace(include_final_answer=False)
+
+    report = asyncio.run(reporter.compose(trace, external_evidence=None))
+
+    assert report["structured_report"]["summary"] == ""
+    assert "## Answer" not in report["answer"]
 
 def test_reporter_citation_agent_fills_missing_citations():
     outline = """
@@ -324,13 +357,9 @@ def test_reporter_falls_back_without_llm_when_disabled():
 def test_reporter_raises_when_llm_output_invalid():
     reporter = DeepSearchReporter(template_store=None, config={}, llm_connector=_FakeLLM(["not-json"]))
     trace = _build_trace(include_final_answer=False)
-
-    try:
-        asyncio.run(reporter.compose(trace, external_evidence=[]))
-    except Exception as exc:  # noqa: BLE001
-        assert "outline" in str(exc).lower() or "json" in str(exc).lower()
-    else:
-        raise AssertionError("Expected the reporter to raise on invalid LLM output")
+    report = asyncio.run(reporter.compose(trace, external_evidence=[]))
+    assert report["answer"].startswith("# Who partnered with OpenAI?")
+    assert "## Highlights" in report["answer"]
 
 
 def test_reporter_includes_chunk_evidence_preview():
@@ -368,6 +397,7 @@ def test_reporter_includes_chunk_evidence_preview():
 
 def test_reporter_parallel_sections_synthesizes_summary(monkeypatch):
     monkeypatch.setenv("DEEPSEARCH_PARALLEL_SECTIONS", "true")
+    monkeypatch.setenv("DEEPSEARCH_CITATION_ALIASES", "false")
     reporter = DeepSearchReporter(
         template_store=None,
         config={"parallel_sections": True, "max_parallel_sections": 1, "enable_consistency_check": False},

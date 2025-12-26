@@ -11,10 +11,12 @@ from typing import Any, Dict, Literal, Optional, Protocol
 
 TraceTag = Literal[
     "think",
+    "all_tools",
     "write_outline",
     "tool_call",
     "tool_response",
     "write",
+    "progress",
     "terminate",
 ]
 
@@ -73,4 +75,3 @@ async def emit_trace(tag: TraceTag, content: str, *, meta: Optional[Dict[str, An
         )
     except Exception:
         return
-

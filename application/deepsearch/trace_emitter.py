@@ -11,7 +11,7 @@ import asyncio
 from dataclasses import asdict, is_dataclass
 from typing import Any, Awaitable, Callable, Dict, Optional
 
-from core.deepsearch.trace import TraceEmitter, TraceEvent
+from core.deepsearch.trace import TraceEmitter, TraceEvent, with_trace_protocol
 from core.utils.json_safe import json_safe
 
 
@@ -33,12 +33,16 @@ class CallbackTraceEmitter(TraceEmitter):
         meta = event.meta
         if is_dataclass(meta):
             meta = asdict(meta)
-        payload: Dict[str, Any] = {
-            "stage": self._stage,
-            "trace_tag": event.tag,
-            "content": str(event.content),
-            "meta": json_safe(meta) if isinstance(meta, dict) else {"meta": json_safe(meta)},
-        }
+        payload: Dict[str, Any] = with_trace_protocol(
+            {
+                "run_id": self._run_id,
+                "stage": self._stage,
+                "trace_tag": event.tag,
+                "content": str(event.content),
+                "meta": json_safe(meta) if isinstance(meta, dict) else {"meta": json_safe(meta)},
+            },
+            run_id=self._run_id,
+        )
         await self._publish("trace", payload)
 
 
@@ -71,12 +75,16 @@ class RedisTaskQueueTraceEmitter(TraceEmitter):
         meta = event.meta
         if is_dataclass(meta):
             meta = asdict(meta)
-        payload: Dict[str, Any] = {
-            "stage": "trace",
-            "trace_tag": event.tag,
-            "content": str(event.content),
-            "meta": json_safe(meta) if isinstance(meta, dict) else {"meta": json_safe(meta)},
-        }
+        payload: Dict[str, Any] = with_trace_protocol(
+            {
+                "run_id": self._run_id,
+                "stage": "trace",
+                "trace_tag": event.tag,
+                "content": str(event.content),
+                "meta": json_safe(meta) if isinstance(meta, dict) else {"meta": json_safe(meta)},
+            },
+            run_id=self._run_id,
+        )
         await asyncio.to_thread(
             getattr(self._task_queue, "append_progress_event"),
             flow=self._flow,

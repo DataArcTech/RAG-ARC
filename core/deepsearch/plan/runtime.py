@@ -17,7 +17,7 @@ from .generator import PlanGenerator, PlannerSettings
 from core.prompts.deepsearch import GRAPH_PLANNER_SYSTEM_PROMPT, GRAPH_PLANNER_USER_PROMPT
 from core.deepsearch.tooling import describe_available_tools
 from core.deepsearch.tooling.registry import DEFAULT_TOOL_HINT_REGISTRY, ToolHintRegistry
-from core.deepsearch.trace import emit_trace
+from core.deepsearch.trace import emit_trace, with_trace_protocol
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,7 @@ class DeepSearchPlanner:
         self.tool_arg_templates: Mapping[str, Mapping[str, str]] = self._config_value("tool_arg_templates", {})
         self.honor_planner_tool_selection = self._bool_config(
             "honor_planner_tool_selection",
-            default=False,
+            default=True,
             env_var="DEEPSEARCH_HONOR_PLANNER_TOOL_SELECTION",
         )
 
@@ -142,7 +142,8 @@ class DeepSearchPlanner:
             steps=steps_payload,
         )
 
-        artifact = {
+        artifact = with_trace_protocol(
+            {
             "plan_id": plan_id,
             "question": normalized_question,
             "owner_scope": scope_to_dict(scope),
@@ -156,7 +157,8 @@ class DeepSearchPlanner:
             "steps": steps_payload,
             "available_tools": self.available_tools,
             "graph_context": graph_context_payload,
-        }
+            }
+        )
 
         artifact_path = None
         if self.persist_plan:
@@ -285,11 +287,23 @@ class DeepSearchPlanner:
         requires_external = channel == "web"
         tool_enabled = not requires_external or self.allow_external
 
-        tool_args = self._build_tool_args(
-            channel=channel,
-            description=spec.description,
-            extra_metadata=metadata,
-        )
+        requested_tool_args = metadata.get("tool_args") if isinstance(metadata.get("tool_args"), dict) else None
+        if requested_tool_args is not None:
+            metadata.pop("tool_args", None)
+
+        tool_args: Dict[str, Any]
+        if tool_name == "graph_adapter.query":
+            tool_args = self._build_tool_args(
+                channel=channel,
+                description=spec.description,
+                extra_metadata=metadata,
+            )
+            if requested_tool_args:
+                tool_args.update(dict(requested_tool_args))
+        else:
+            # For graph/text tools, tool_args is passed as ToolRunRequest.extra.
+            tool_args = dict(requested_tool_args or {})
+            tool_args.setdefault("focus_query", spec.description.strip())
 
         if requires_external:
             metadata.setdefault("requires_external_channel", True)

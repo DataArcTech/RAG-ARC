@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from api.sse import sse_json
+from core.deepsearch.trace import with_trace_protocol
 from encapsulation.message_queue.redis_task_queue import RedisTaskQueue
 
 def new_run_id() -> str:
@@ -74,6 +75,10 @@ class DeepSearchTaskRegistry:
         info = await self.get(run_id)
         if not info:
             return
+        if isinstance(payload, dict):
+            payload = with_trace_protocol(payload, run_id=run_id)
+        else:
+            payload = with_trace_protocol({"payload": payload}, run_id=run_id)
         event = {
             "id": len(info.events),
             "type": event_type,

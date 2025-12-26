@@ -81,12 +81,22 @@ class PlanGenerator:
             selected_tool = (step.get("tool") or "").strip()
             if selected_tool:
                 metadata["tool"] = selected_tool
+            tool_args = step.get("tool_args")
+            if isinstance(tool_args, dict) and tool_args:
+                metadata["tool_args"] = tool_args
             tool_profile = (step.get("tool_profile") or step.get("profile") or "").strip()
             if tool_profile:
                 metadata["tool_profile"] = tool_profile.upper()
             determinism = (step.get("determinism") or "").strip()
             if determinism:
                 metadata["tool_determinism"] = determinism
+            step_metadata = step.get("metadata")
+            if isinstance(step_metadata, dict) and step_metadata:
+                # Allow LLM to pass through additional executor hints (e.g. parallelizable flags).
+                for key, value in step_metadata.items():
+                    if key in {"tool", "tool_args"}:
+                        continue
+                    metadata.setdefault(key, value)
             plan_specs.append(
                 PlanSpec(
                     step_id=f"plan_{idx+1:02d}",

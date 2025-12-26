@@ -110,9 +110,10 @@ class ConsistencyChecker:
         if self.llm_connector is None:
             return None
 
+        report_excerpt = _trim_report_for_llm(report_markdown)
         limited_evidences = _limit_evidences(list(evidences), max_evidence_items, max_evidence_chars)
         user_prompt = CONSISTENCY_CHECK_USER_PROMPT.format(
-            report_markdown=report_markdown,
+            report_markdown=report_excerpt,
             evidence_json=json.dumps(limited_evidences, ensure_ascii=False, indent=2),
         )
         messages = [
@@ -228,10 +229,43 @@ def _limit_evidences(evidences: List[Dict[str, Any]], max_items: int | None, max
     for entry in subset:
         if not isinstance(entry, dict):
             continue
+        chunk_id = entry.get("chunk_id") or entry.get("evidence_id")
+        source = entry.get("source")
+        score = entry.get("score")
         content = str(entry.get("content") or "")
         if max_chars > 0 and len(content) > max_chars:
             content = content[: max_chars].rstrip() + "…"
-        cloned = dict(entry)
-        cloned["content"] = content
-        limited.append(cloned)
+        limited.append(
+            {
+                "chunk_id": chunk_id,
+                "source": source,
+                "content": content,
+                "score": score,
+            }
+        )
     return limited
+
+
+def _trim_report_for_llm(report_markdown: str) -> str:
+    """Keep the main body of the report and drop large appendices for LLM judging."""
+
+    text = str(report_markdown or "").strip()
+    if not text:
+        return ""
+
+    markers = [
+        "\n## Appendix:",
+        "\n## 附录",
+        "\n## References",
+        "\n## 参考文献",
+    ]
+    for marker in markers:
+        idx = text.find(marker)
+        if idx != -1:
+            text = text[:idx].rstrip()
+            break
+
+    max_chars = 12000
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip() + "\n\n...(truncated)..."
+    return text

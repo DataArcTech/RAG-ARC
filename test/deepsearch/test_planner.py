@@ -9,11 +9,10 @@ from typing import Dict
 import pytest
 from dotenv import load_dotenv
 
-pytest.importorskip("mcp", reason="DeepSearch planner tests require MCP client dependencies")
-
 from config.core.deepsearch.plan_config import DeepSearchPlannerConfig
 from core.graph_adapter.base import GraphAccessScope
 from core.deepsearch.plan import DeepSearchPlanner
+from core.deepsearch.trace import TRACE_FORMAT_VERSION, TRACE_SCHEMA_VERSION
 
 
 def get_deepsearch_config() -> Dict[str, DeepSearchPlannerConfig]:
@@ -97,6 +96,8 @@ def test_planner_generates_real_plan():
         result = asyncio.run(planner.build_plan(question, access_scope=GraphAccessScope(scope_id="planner-test")))
 
         plan = result["plan"]
+        assert plan["schema_version"] == TRACE_SCHEMA_VERSION
+        assert plan["trace_format_version"] == TRACE_FORMAT_VERSION
         assert plan["question"] == question
         assert plan["mode"] == plan_generator.settings.mode
         assert len(plan["steps"]) > 0
@@ -111,6 +112,8 @@ def test_planner_generates_real_plan():
         assert artifact_path.is_file()
 
         saved_payload = json.loads(artifact_path.read_text())
+        assert saved_payload["schema_version"] == TRACE_SCHEMA_VERSION
+        assert saved_payload["trace_format_version"] == TRACE_FORMAT_VERSION
         assert saved_payload["plan_id"] == result["plan_id"]
         assert saved_payload["question"] == question
         assert saved_payload["graph_context"]["adapter_name"] == runtime_config["graph_adapter_name"]
@@ -144,6 +147,11 @@ async def test_planner_adapts_step_budget(tmp_path):
         "highlight blockers, timelines, and propose mitigation roadmap."
     )
     complex_plan = await planner.build_plan(complex_question, access_scope=scope)
+
+    assert short["plan"]["schema_version"] == TRACE_SCHEMA_VERSION
+    assert short["plan"]["trace_format_version"] == TRACE_FORMAT_VERSION
+    assert complex_plan["plan"]["schema_version"] == TRACE_SCHEMA_VERSION
+    assert complex_plan["plan"]["trace_format_version"] == TRACE_FORMAT_VERSION
 
     short_steps = short["plan"]["config"]["max_steps"]
     complex_steps = complex_plan["plan"]["config"]["max_steps"]

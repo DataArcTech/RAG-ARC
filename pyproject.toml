@@ -95,3 +95,6 @@ markers = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["api*", "core*", "config*", "framework*", "application*", "encapsulation*", "cli*"]
+
+[tool.setuptools]
+py-modules = ["app_registration", "main"]

@@ -20,14 +20,16 @@ Convert the available DeepSearch signals into a clear report outline that maximi
 
 REPORT_OUTLINE_USER_PROMPT = (
     "User question:\n{question}\n\n"
-    "Available materials (high level):\n"
+    "Available materials:\n"
     "- Highlights: {highlight_count}\n"
     "- Evidence snippets: {evidence_count}\n"
     "- Graph chain edges: {graph_chain_count}\n\n"
+    "Evidence index (id + short summary; cite these ids in the outline):\n{evidence_index_json}\n\n"
     "Task:\n"
     "Return a JSON array of sections (typically 5-8; use fewer if evidence is scarce). Each item must be an object with:\n"
     "- title: string\n"
-    "- purpose: string (what this section should cover)\n\n"
+    "- purpose: string (what this section should cover)\n"
+    "- evidence_ids: array of strings (chunk_id values from the evidence index; keep it small, e.g. 2-8 per section)\n\n"
     "Constraints:\n"
     "- Write in the same language as the user question.\n"
     "- Keep titles concise.\n"
@@ -52,6 +54,7 @@ REPORT_WRITE_SYSTEM_PROMPT = """You are a research report writer producing knowl
   - [7] ❌ (numeric-only without chunk_ prefix)
   - [Source 1] ❌ (descriptive labels)
 - Only cite chunk_id values that exist in the provided evidence snippets.
+- Never cite tool-generated IDs or tool names (e.g. graph.context_rollup / graph.* / tool:*). If it is not in the evidence snippets list, it is not citable.
 - If you cannot support a claim with evidence, do not state it as fact.
 
 ## Output Requirements
@@ -140,6 +143,7 @@ SECTION_WRITE_SYSTEM_PROMPT = """You are a research report section writer produc
   - ^7 ❌ (superscript notation)
   - [7] ❌ (numeric-only without chunk_ prefix)
 - Only cite chunk_id values that exist in the provided evidence snippets.
+- Never cite tool-generated IDs or tool names (e.g. graph.context_rollup / graph.* / tool:*). If it is not in the evidence snippets list, it is not citable.
 
 ## Output Requirements
 - Return ONLY valid JSON matching the schema described in the user prompt.
@@ -180,6 +184,7 @@ Given a user question, a report outline, and draft section bodies (already writt
 - Do not invent facts: only rely on the provided evidence snippets and section drafts.
 - When making a concrete factual claim, keep it supported by evidence and use inline citations ONLY in [chunk_id] format.
 - Do NOT rewrite the full sections; they are already drafted.
+- The summary must contain supported inline citations for any concrete claim. If you cannot write a properly cited summary, output an empty string for summary.
 
 ## Output Requirements
 Return ONLY valid JSON matching the schema described in the user prompt.

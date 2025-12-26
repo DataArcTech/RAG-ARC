@@ -113,6 +113,7 @@ def test_deepsearch_stream_weaver_renders_human_readable_blocks():
                 run_id = resp.json()["run_id"]
 
                 saw_progress = False
+                saw_all_tools = False
                 saw_tool_call = False
                 saw_tool_response = False
                 saw_done = False
@@ -130,6 +131,10 @@ def test_deepsearch_stream_weaver_renders_human_readable_blocks():
                         if data == "<progress>":
                             saw_progress = True
                             current_tag = "progress"
+                            buffer = []
+                        elif data == "<all_tools>":
+                            saw_all_tools = True
+                            current_tag = "all_tools"
                             buffer = []
                         elif data == "<tool_call>":
                             saw_tool_call = True
@@ -155,12 +160,15 @@ def test_deepsearch_stream_weaver_renders_human_readable_blocks():
                                 if current_tag == "tool_response":
                                     assert "evidence_count=" in body
                                     assert "{" not in body
+                                if current_tag == "all_tools":
+                                    assert "available_tools:" in body
                                 buffer = []
                                 current_tag = None
-                        elif current_tag in {"tool_call", "tool_response"}:
+                        elif current_tag in {"tool_call", "tool_response", "all_tools"}:
                             buffer.append(data)
 
                 assert saw_progress is True
+                assert saw_all_tools is True
                 assert saw_tool_call is True
                 assert saw_tool_response is True
                 assert saw_done is True

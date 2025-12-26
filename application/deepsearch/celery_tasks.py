@@ -12,7 +12,8 @@ from core.presentation.deepsearch_payload import trim_deepsearch_payload
 
 from application.celery_bootstrap import ensure_initialized
 from application.deepsearch.trace_emitter import make_redis_trace_emitter
-from core.deepsearch.trace import emit_trace, reset_trace_emitter, set_trace_emitter
+from core.deepsearch.trace import emit_trace, reset_trace_emitter, set_trace_emitter, with_trace_protocol
+from core.deepsearch.tooling.all_tools import render_all_tools_block
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,10 @@ def run_deepsearch(
             status="dedup",
             percent=100,
             resource_id=run_id,
-            payload={"stage": "reported", "dedup": True},
+            payload=with_trace_protocol(
+                {"run_id": run_id, "stage": "reported", "dedup": True},
+                run_id=run_id,
+            ),
         )
         task_queue.update_task_run(
             run_id,
@@ -117,13 +121,17 @@ def run_deepsearch(
     def _listener(record: Dict[str, Any], state) -> None:  # noqa: ANN001
         stage = getattr(state, "stage", "unknown")
         progress = _stage_progress(stage)
-        payload = {
-            "stage": stage,
-            "stage_record": dict(record),
-            "stage_history": list(getattr(state, "stage_history", []) or []),
-            "errors": list(getattr(state, "errors", []) or []),
-            "progress": progress,
-        }
+        payload = with_trace_protocol(
+            {
+                "run_id": run_id,
+                "stage": stage,
+                "stage_record": dict(record),
+                "stage_history": list(getattr(state, "stage_history", []) or []),
+                "errors": list(getattr(state, "errors", []) or []),
+                "progress": progress,
+            },
+            run_id=run_id,
+        )
         try:
             task_queue.append_progress_event(
                 flow="deepsearch",
@@ -150,6 +158,14 @@ def run_deepsearch(
                     f"Received question. Starting graph-first DeepSearch run.\nrun_id={run_id}",
                     meta={"run_id": run_id, "external_allowed": False},
                 )
+                try:
+                    await emit_trace(
+                        "all_tools",
+                        render_all_tools_block(),
+                        meta={"run_id": run_id},
+                    )
+                except Exception:
+                    pass
                 raw_result = await service.run(
                     question,
                     owner_id=str(owner_uuid),
@@ -203,7 +219,15 @@ def run_deepsearch(
                     status="retry",
                     percent=0,
                     resource_id=run_id,
-                    payload={"stage": "retry", "error": err, "retry_in_seconds": countdown},
+                    payload=with_trace_protocol(
+                        {
+                            "run_id": run_id,
+                            "stage": "retry",
+                            "error": err,
+                            "retry_in_seconds": countdown,
+                        },
+                        run_id=run_id,
+                    ),
                 )
                 task_queue.update_task_run(
                     run_id,
@@ -224,7 +248,15 @@ def run_deepsearch(
             status="error",
             percent=100,
             resource_id=run_id,
-            payload={"stage": "failed", "errors": [{"message": err}], "progress": _stage_progress("failed")},
+            payload=with_trace_protocol(
+                {
+                    "run_id": run_id,
+                    "stage": "failed",
+                    "errors": [{"message": err}],
+                    "progress": _stage_progress("failed"),
+                },
+                run_id=run_id,
+            ),
         )
         task_queue.update_task_run(
             run_id,
@@ -249,9 +281,13 @@ def run_deepsearch(
         status="result",
         percent=100,
         resource_id=run_id,
-        payload={
-            "stage": (result.get("state", {}).get("stage") if isinstance(result, dict) else None),
-            "progress": _stage_progress((result.get("state", {}).get("stage", "") if isinstance(result, dict) else "")),
-        },
+        payload=with_trace_protocol(
+            {
+                "run_id": run_id,
+                "stage": (result.get("state", {}).get("stage") if isinstance(result, dict) else None),
+                "progress": _stage_progress((result.get("state", {}).get("stage", "") if isinstance(result, dict) else "")),
+            },
+            run_id=run_id,
+        ),
     )
     return {"run_id": run_id, "done": True}

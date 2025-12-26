@@ -7,6 +7,7 @@ Keeps the adapter abstraction swappable so semantic or relational strategies can
 """
 import logging
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -157,6 +158,13 @@ class GraphTraversalExecutor:
             latency_ms = int((time.perf_counter() - start) * 1000)
 
             summary_text = summary if isinstance(summary, str) else str(summary)
+            summary_limit_raw = os.getenv("DEEPSEARCH_STEP_SUMMARY_MAX_CHARS")
+            try:
+                summary_limit = int(summary_limit_raw) if summary_limit_raw is not None else 2000
+            except Exception:
+                summary_limit = 2000
+            if summary_limit > 0 and len(summary_text) > summary_limit:
+                summary_text = summary_text[: max(0, summary_limit - 3)].rstrip() + "..."
             subgraph_info = self._extract_subgraph_info(filtered, subgraph)
             triples = self._extract_triples(filtered, subgraph)
             adapter_source = getattr(getattr(self.adapter, "metadata", lambda: None)(), "adapter_name", None)  # type: ignore[misc]

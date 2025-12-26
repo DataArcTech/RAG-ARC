@@ -27,6 +27,16 @@ class ChunkScanTool(GraphTool):
                 "focus_query": {
                     "type": "string",
                     "description": "Optional query override when planner already decomposed the question.",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Optional override for how many chunks to return.",
+                    "minimum": 0,
+                },
+                "max_chunks": {
+                    "type": "integer",
+                    "description": "Alias of top_k for backward compatibility.",
+                    "minimum": 0,
                 }
             }
         ),
@@ -51,7 +61,14 @@ class ChunkScanTool(GraphTool):
             )
         chunks = self._normalize_chunks(payload.get("chunks"))
         selected: List[Dict[str, Any]] = []
-        max_chunks = int(self.max_chunks) if self.max_chunks is not None else 0
+        override = request.extra.get("top_k", None)
+        if override is None:
+            override = request.extra.get("max_chunks", None)
+        try:
+            effective_max = int(override) if override is not None else int(self.max_chunks)
+        except Exception:
+            effective_max = int(self.max_chunks) if self.max_chunks is not None else 0
+        max_chunks = effective_max if effective_max is not None else 0
         if max_chunks < 0:
             max_chunks = 0
         for chunk in chunks:
@@ -68,6 +85,7 @@ class ChunkScanTool(GraphTool):
         diagnostics = {
             "query": query,
             "available_chunks": len(chunks),
+            "top_k": max_chunks,
         }
         return ToolResult(summary=summary, evidences=evidences, diagnostics=diagnostics)
 

@@ -1,6 +1,8 @@
 """Lead/worker style orchestrator for DeepSearch reasoning."""
 import asyncio
+import contextvars
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -12,6 +14,11 @@ from .graph_loop import GraphReasoningLoop
 from core.deepsearch.tooling.protocols import ToolInvoker
 
 logger = logging.getLogger(__name__)
+
+_RUN_SETTINGS: contextvars.ContextVar[Optional["MultiAgentSettings"]] = contextvars.ContextVar(
+    "deepsearch_multi_agent_settings",
+    default=None,
+)
 
 
 @dataclass(frozen=True)
@@ -35,6 +42,29 @@ class MultiAgentSettings:
     worker_timeout_seconds: Optional[float] = None
     worker_retry_attempts: int = 0
     fail_fast: bool = False
+    incremental_parallelism: bool = False
+    initial_worker_count: int = 1
+    stop_min_evidence_count: int = 0
+    stop_min_coverage_ratio: float = 0.0
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "max_subagents": self.max_subagents,
+            "subagent_concurrency": self.subagent_concurrency,
+            "enable_parallel_tool_probes": self.enable_parallel_tool_probes,
+            "probe_tool_names": list(self.probe_tool_names),
+            "probe_concurrency": self.probe_concurrency,
+            "lead_tool_names": list(self.lead_tool_names),
+            "lead_tool_concurrency": self.lead_tool_concurrency,
+            "worker_timeout_seconds": self.worker_timeout_seconds,
+            "worker_retry_attempts": self.worker_retry_attempts,
+            "fail_fast": self.fail_fast,
+            "incremental_parallelism": self.incremental_parallelism,
+            "initial_worker_count": self.initial_worker_count,
+            "stop_min_evidence_count": self.stop_min_evidence_count,
+            "stop_min_coverage_ratio": self.stop_min_coverage_ratio,
+        }
 
 
 @dataclass(frozen=True)
@@ -70,6 +100,7 @@ class MultiAgentGraphReasoningLoop:
         plan_steps: Sequence[Dict[str, Any]],
         *,
         graph_context: Optional[GraphQueryContext] = None,
+        settings_override: MultiAgentSettings | Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         normalized_question = (question or "").strip()
         if not normalized_question:
@@ -79,52 +110,71 @@ class MultiAgentGraphReasoningLoop:
         if not steps:
             raise ValueError("plan_steps must contain at least one step")
 
-        if not self.settings.enabled:
-            worker = self._build_worker()
-            return await worker.run(normalized_question, steps, graph_context=graph_context)
+        token = None
+        if settings_override is not None:
+            token = _RUN_SETTINGS.set(self._coerce_settings(settings_override))
+        try:
+            settings = self._settings()
+            if not settings.enabled:
+                worker = self._build_worker()
+                return await worker.run(normalized_question, steps, graph_context=graph_context)
 
-        context = graph_context.model_copy() if graph_context else None
-        if context is not None and context.question is None:
-            context = context.model_copy(update={"question": normalized_question})
+            context = graph_context.model_copy() if graph_context else None
+            if context is not None and context.question is None:
+                context = context.model_copy(update={"question": normalized_question})
 
-        worker_specs = self._build_worker_specs(steps)
-        started_at = time.perf_counter()
-        worker_outcomes = await self._run_workers(worker_specs, normalized_question, base_context=context)
-        latency_ms = int((time.perf_counter() - started_at) * 1000)
+            worker_specs = self._build_worker_specs(steps)
+            started_at = time.perf_counter()
+            worker_outcomes: List[Dict[str, Any]] = []
+            if settings.incremental_parallelism and len(worker_specs) > 1:
+                initial_n = max(1, int(settings.initial_worker_count or 1))
+                initial_batch = worker_specs[:initial_n]
+                remaining = worker_specs[initial_n:]
+                worker_outcomes.extend(await self._run_workers(initial_batch, normalized_question, base_context=context))
+                merged_preview = self._merge_worker_traces(worker_outcomes)
+                if remaining and not self._should_stop_incremental(merged_preview, settings=settings):
+                    worker_outcomes.extend(await self._run_workers(remaining, normalized_question, base_context=context))
+            else:
+                worker_outcomes = await self._run_workers(worker_specs, normalized_question, base_context=context)
+            latency_ms = int((time.perf_counter() - started_at) * 1000)
 
-        merged = self._merge_worker_traces(worker_outcomes)
-        merged["question"] = normalized_question
-        if context is not None:
-            merged["graph_context"] = context.model_copy(update={"question": normalized_question}).model_dump(exclude_none=True)
-        merged["plan_steps"] = self._order_plan_steps(
-            merged_plan_steps=list(merged.get("plan_steps") or []),
-            original_plan_steps=steps,
-        )
-        merged.setdefault("coverage_metrics", {})
-        merged["coverage_metrics"].setdefault("orchestration_latency_ms", latency_ms)
-        merged["coverage_metrics"].setdefault("worker_count", len(worker_outcomes))
-        merged["coverage_metrics"].setdefault("worker_error_count", 0)
-        merged["coverage_metrics"].setdefault("worker_errors", [])
-        merged["coverage_metrics"].setdefault(
-            "worker_sessions",
-            [outcome["agent_session"] for outcome in worker_outcomes],
-        )
-
-        worker_errors = self._summarize_worker_errors(worker_outcomes)
-        if worker_errors:
-            merged["coverage_metrics"]["worker_error_count"] = len(worker_errors)
-            merged["coverage_metrics"]["worker_errors"] = worker_errors
-
-        if self.tool_manager and self.settings.lead_tool_names:
-            lead_tools = await self._run_lead_tools(
-                normalized_question,
-                merged,
-                base_context=context,
+            merged = self._merge_worker_traces(worker_outcomes)
+            merged["question"] = normalized_question
+            if context is not None:
+                merged["graph_context"] = context.model_copy(update={"question": normalized_question}).model_dump(exclude_none=True)
+            merged["plan_steps"] = self._order_plan_steps(
+                merged_plan_steps=list(merged.get("plan_steps") or []),
+                original_plan_steps=steps,
             )
-            merged = self._merge_lead_tools(merged, lead_tools)
+            merged.setdefault("coverage_metrics", {})
+            merged["coverage_metrics"].setdefault("orchestration_latency_ms", latency_ms)
+            merged["coverage_metrics"].setdefault("worker_count", len(worker_outcomes))
+            merged["coverage_metrics"].setdefault("worker_error_count", 0)
+            merged["coverage_metrics"].setdefault("worker_errors", [])
+            merged["coverage_metrics"].setdefault(
+                "worker_sessions",
+                [outcome["agent_session"] for outcome in worker_outcomes],
+            )
 
-        merged["agent_sessions"] = [outcome["agent_session"] for outcome in worker_outcomes]
-        return merged
+            worker_errors = self._summarize_worker_errors(worker_outcomes)
+            if worker_errors:
+                merged["coverage_metrics"]["worker_error_count"] = len(worker_errors)
+                merged["coverage_metrics"]["worker_errors"] = worker_errors
+
+            if self.tool_manager and settings.lead_tool_names:
+                lead_tools = await self._run_lead_tools(
+                    normalized_question,
+                    merged,
+                    base_context=context,
+                )
+                merged = self._merge_lead_tools(merged, lead_tools)
+
+            merged["agent_sessions"] = [outcome["agent_session"] for outcome in worker_outcomes]
+            merged["coverage_metrics"].setdefault("multi_agent_settings", settings.as_dict())
+            return merged
+        finally:
+            if token is not None:
+                _RUN_SETTINGS.reset(token)
 
     # ------------------------------------------------------------------
     def _build_worker(self) -> GraphReasoningLoop:
@@ -155,8 +205,40 @@ class MultiAgentGraphReasoningLoop:
                 worker_timeout_seconds=payload.get("worker_timeout_seconds"),
                 worker_retry_attempts=int(payload.get("worker_retry_attempts", 0) or 0),
                 fail_fast=bool(payload.get("fail_fast", False)),
+                incremental_parallelism=bool(payload.get("incremental_parallelism", False)),
+                initial_worker_count=int(payload.get("initial_worker_count", 1) or 1),
+                stop_min_evidence_count=int(payload.get("stop_min_evidence_count", 0) or 0),
+                stop_min_coverage_ratio=float(payload.get("stop_min_coverage_ratio", 0.0) or 0.0),
             )
         return MultiAgentSettings()
+
+    def _settings(self) -> MultiAgentSettings:
+        return _RUN_SETTINGS.get() or self.settings
+
+    @staticmethod
+    def _should_stop_incremental(merged_trace: Dict[str, Any], *, settings: MultiAgentSettings) -> bool:
+        min_evidence = max(0, int(settings.stop_min_evidence_count or 0))
+        min_cov = float(settings.stop_min_coverage_ratio or 0.0)
+        if min_evidence <= 0 and min_cov <= 0:
+            return False
+
+        evidences = merged_trace.get("evidences") or []
+        evidence_count = len(evidences) if isinstance(evidences, list) else 0
+
+        coverage = merged_trace.get("coverage_metrics") or {}
+        cov_ratio = None
+        if isinstance(coverage, dict):
+            cov_ratio = coverage.get("coverage_ratio")
+        try:
+            cov_value = float(cov_ratio) if cov_ratio is not None else 0.0
+        except (TypeError, ValueError):
+            cov_value = 0.0
+
+        if min_evidence and evidence_count < min_evidence:
+            return False
+        if min_cov and cov_value < min_cov:
+            return False
+        return True
 
     @staticmethod
     def _order_plan_steps(*, merged_plan_steps: List[Dict[str, Any]], original_plan_steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -229,7 +311,7 @@ class MultiAgentGraphReasoningLoop:
                 )
             ]
 
-        max_agents = max(1, int(self.settings.max_subagents))
+        max_agents = max(1, int(self._settings().max_subagents))
         desired_workers = min(max_agents, max(1, len(plan_steps)))
         buckets: List[List[Dict[str, Any]]] = [[] for _ in range(desired_workers)]
         for idx, step in enumerate(plan_steps):
@@ -273,7 +355,7 @@ class MultiAgentGraphReasoningLoop:
         *,
         base_context: Optional[GraphQueryContext],
     ) -> List[Dict[str, Any]]:
-        semaphore = asyncio.Semaphore(max(1, self.settings.subagent_concurrency))
+        semaphore = asyncio.Semaphore(max(1, self._settings().subagent_concurrency))
 
         async def _run_one(spec: _WorkerSpec) -> Dict[str, Any]:
             async with semaphore:
@@ -328,8 +410,8 @@ class MultiAgentGraphReasoningLoop:
         if (
             not error
             and self.tool_manager
-            and self.settings.enable_parallel_tool_probes
-            and self.settings.probe_tool_names
+            and self._settings().enable_parallel_tool_probes
+            and self._settings().probe_tool_names
         ):
             probe_results = await self._run_parallel_probes(
                 agent_id=agent_id,
@@ -348,7 +430,7 @@ class MultiAgentGraphReasoningLoop:
                 "focus": focus,
                 "session_id": spec.session_id,
                 "assigned_step_ids": assigned_step_ids,
-                "probe_tools": list(self.settings.probe_tool_names),
+                "probe_tools": list(self._settings().probe_tool_names),
                 "latency_ms": worker_latency_ms,
                 "error": error,
                 "debrief": debrief,
@@ -371,8 +453,8 @@ class MultiAgentGraphReasoningLoop:
         worker_plan_steps: List[Dict[str, Any]],
         worker_context: GraphQueryContext,
     ) -> Tuple[Dict[str, Any], int, Optional[str]]:
-        attempts = max(0, int(self.settings.worker_retry_attempts))
-        timeout = self.settings.worker_timeout_seconds
+        attempts = max(0, int(self._settings().worker_retry_attempts))
+        timeout = self._settings().worker_timeout_seconds
 
         last_error: Optional[str] = None
         for attempt in range(attempts + 1):
@@ -397,7 +479,7 @@ class MultiAgentGraphReasoningLoop:
                     last_error,
                 )
 
-        if self.settings.fail_fast:
+        if self._settings().fail_fast:
             raise RuntimeError(last_error or "worker_failed")
         return {"question": worker_question, "graph_context": worker_context.model_dump(exclude_none=True)}, 0, last_error
 
@@ -469,14 +551,15 @@ class MultiAgentGraphReasoningLoop:
         graph_context: Any,
         evidences: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        semaphore = asyncio.Semaphore(max(1, self.settings.probe_concurrency))
+        semaphore = asyncio.Semaphore(max(1, self._settings().probe_concurrency))
+        bounded_evidences = self._limit_tool_context_evidences(evidences)
 
         async def _invoke(tool_name: str) -> Dict[str, Any]:
             async with semaphore:
                 payload = {
                     "question": question,
                     "plan_step": f"{agent_id}:{tool_name}",
-                    "context_evidences": evidences,
+                    "context_evidences": bounded_evidences,
                     "adapter": self.adapter,
                     "access_scope": (graph_context or {}).get("access_scope") if isinstance(graph_context, dict) else None,
                     "extra": {"focus_query": focus_query},
@@ -490,7 +573,7 @@ class MultiAgentGraphReasoningLoop:
                     "result": result.model_dump(),
                 }
 
-        tasks = [asyncio.create_task(_invoke(name)) for name in self.settings.probe_tool_names]
+        tasks = [asyncio.create_task(_invoke(name)) for name in self._settings().probe_tool_names]
         results: List[Dict[str, Any]] = []
         for task in asyncio.as_completed(tasks):
             try:
@@ -498,6 +581,35 @@ class MultiAgentGraphReasoningLoop:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Probe tool failed (%s): %s", agent_id, exc)
         return results
+
+    @staticmethod
+    def _dedupe_and_cap_evidences(evidences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Deduplicate evidences by (source, chunk_id) and cap size to avoid prompt blow-ups."""
+
+        if not evidences:
+            return []
+        raw_cap = os.getenv("DEEPSEARCH_MULTI_AGENT_MAX_EVIDENCES", "60")
+        try:
+            cap = max(0, int(raw_cap))
+        except Exception:
+            cap = 60
+        seen: set[str] = set()
+        unique: List[Dict[str, Any]] = []
+        for ev in evidences:
+            if not isinstance(ev, dict):
+                continue
+            chunk_id = str(ev.get("chunk_id") or "").strip()
+            source = str(ev.get("source") or "").strip()
+            if not chunk_id:
+                continue
+            key = f"{source}::{chunk_id}"
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(ev)
+            if cap and len(unique) >= cap:
+                break
+        return unique
 
     @staticmethod
     def _merge_probe_results(trace: Dict[str, Any], probe_runs: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -513,7 +625,7 @@ class MultiAgentGraphReasoningLoop:
             for chunk in result.get("evidences") or []:
                 if isinstance(chunk, dict):
                     evidences.append(chunk)
-        merged["evidences"] = evidences
+        merged["evidences"] = MultiAgentGraphReasoningLoop._dedupe_and_cap_evidences(evidences)
         return merged
 
     def _merge_worker_traces(self, worker_outcomes: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -584,8 +696,8 @@ class MultiAgentGraphReasoningLoop:
         *,
         base_context: Optional[GraphQueryContext],
     ) -> List[Dict[str, Any]]:
-        semaphore = asyncio.Semaphore(max(1, self.settings.lead_tool_concurrency))
-        evidences = list(merged_trace.get("evidences") or [])
+        semaphore = asyncio.Semaphore(max(1, self._settings().lead_tool_concurrency))
+        evidences = self._limit_tool_context_evidences(list(merged_trace.get("evidences") or []))
         graph_context = merged_trace.get("graph_context") or (base_context.model_dump(exclude_none=True) if base_context else {})
 
         async def _invoke(tool_name: str) -> Dict[str, Any]:
@@ -607,7 +719,7 @@ class MultiAgentGraphReasoningLoop:
                     "result": result.model_dump(),
                 }
 
-        tasks = [asyncio.create_task(_invoke(name)) for name in self.settings.lead_tool_names]
+        tasks = [asyncio.create_task(_invoke(name)) for name in self._settings().lead_tool_names]
         results: List[Dict[str, Any]] = []
         for task in asyncio.as_completed(tasks):
             try:
@@ -630,7 +742,41 @@ class MultiAgentGraphReasoningLoop:
             for chunk in result.get("evidences") or []:
                 if isinstance(chunk, dict):
                     evidences.append(chunk)
-        merged["evidences"] = evidences
+        merged["evidences"] = MultiAgentGraphReasoningLoop._dedupe_and_cap_evidences(evidences)
         merged.setdefault("coverage_metrics", {})
         merged["coverage_metrics"]["lead_tools"] = [run.get("tool_name") for run in lead_tool_runs]
         return merged
+
+    @staticmethod
+    def _tool_context_limits() -> tuple[int, int]:
+        max_items = 5
+        max_chars = 800
+        raw_items = os.getenv("DEEPSEARCH_TOOL_CONTEXT_MAX_EVIDENCES")
+        raw_chars = os.getenv("DEEPSEARCH_TOOL_CONTEXT_MAX_CHARS")
+        if raw_items is not None:
+            try:
+                max_items = max(1, int(raw_items))
+            except Exception:
+                max_items = 5
+        if raw_chars is not None:
+            try:
+                max_chars = max(100, int(raw_chars))
+            except Exception:
+                max_chars = 800
+        return max_items, max_chars
+
+    @classmethod
+    def _limit_tool_context_evidences(cls, evidences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        max_items, max_chars = cls._tool_context_limits()
+        items = [ev for ev in (evidences or []) if isinstance(ev, dict)]
+        if max_items and len(items) > max_items:
+            items = items[-max_items:]
+        bounded: List[Dict[str, Any]] = []
+        for ev in items:
+            chunk_id = ev.get("chunk_id")
+            source = ev.get("source")
+            content = str(ev.get("content") or "")
+            if max_chars and len(content) > max_chars:
+                content = content[: max(0, max_chars - 3)].rstrip() + "..."
+            bounded.append({"chunk_id": chunk_id, "source": source, "content": content, "score": ev.get("score")})
+        return bounded

@@ -168,6 +168,35 @@ class _StubExternalChannel:
         }
 
 
+class _StubBudgetAwareGraphLoop(_StubGraphLoop):
+    def __init__(self):
+        super().__init__()
+        from core.deepsearch.reasoning.multi_agent import MultiAgentSettings
+
+        self.settings = MultiAgentSettings(
+            enabled=True,
+            max_subagents=4,
+            subagent_concurrency=4,
+            enable_parallel_tool_probes=True,
+            probe_tool_names=("graph.chunk_scan", "graph.pattern_scan"),
+            probe_concurrency=4,
+            lead_tool_names=("graph.context_rollup",),
+            lead_tool_concurrency=2,
+        )
+        self.received_overrides: List[Dict[str, Any] | None] = []
+
+    async def run(
+        self,
+        question: str,
+        plan_steps: Sequence[Dict[str, Any]],
+        *,
+        graph_context: GraphQueryContext,
+        settings_override: Dict[str, Any] | None = None,
+    ):
+        self.received_overrides.append(settings_override)
+        return await super().run(question, plan_steps, graph_context=graph_context)
+
+
 @pytest.mark.asyncio
 async def test_service_converts_owner_to_scope():
     planner = _StubPlanner()
@@ -265,6 +294,47 @@ async def test_service_surfaces_worker_failures_into_state_errors():
     assert errors, "worker errors should be surfaced into state.errors"
     assert any(entry.get("stage") == "graph_reasoning" for entry in errors if isinstance(entry, dict))
 
+
+@pytest.mark.asyncio
+async def test_service_applies_low_budget_override_for_simple_questions(monkeypatch):
+    monkeypatch.delenv("DEEPSEARCH_BUDGET_TIER", raising=False)
+    planner = _StubPlanner()
+    graph_loop = _StubBudgetAwareGraphLoop()
+    service = DeepSearchService(
+        planner=planner,
+        graph_loop=graph_loop,
+        gap_detector=_StubGapDetector(),
+        reporter=_StubReporter(),
+        tool_manager=_StubToolManager(),
+        config={"fingerprint": "service-budget"},
+    )
+
+    result = await service.run("Hello", owner_id="tenant-123")
+    assert graph_loop.received_overrides and graph_loop.received_overrides[0] is not None
+    override = graph_loop.received_overrides[0] or {}
+    assert override.get("max_subagents") == 1
+    assert override.get("subagent_concurrency") == 1
+    assert override.get("enable_parallel_tool_probes") is False
+    assert override.get("probe_concurrency") == 1
+    assert result["state"]["cost_telemetry"]["budget"]["tier"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_service_keeps_default_budget_for_complex_questions(monkeypatch):
+    monkeypatch.delenv("DEEPSEARCH_BUDGET_TIER", raising=False)
+    planner = _StubPlanner()
+    graph_loop = _StubBudgetAwareGraphLoop()
+    service = DeepSearchService(
+        planner=planner,
+        graph_loop=graph_loop,
+        gap_detector=_StubGapDetector(),
+        reporter=_StubReporter(),
+        tool_manager=_StubToolManager(),
+        config={"fingerprint": "service-budget"},
+    )
+
+    await service.run("Compare approaches and provide citations", owner_id="tenant-123")
+    assert graph_loop.received_overrides and graph_loop.received_overrides[0] is None
 
 class _GraphLoopTwoPasses:
     def __init__(self):

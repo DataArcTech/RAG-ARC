@@ -13,6 +13,49 @@ from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_
 class PatternProbeTool(GraphTool):
     """Fast, LLM-free probe that mimics grep-like semantics on graph chunks."""
 
+    _DEFAULT_STOPWORDS: frozenset[str] = frozenset(
+        {
+            "根据",
+            "本地",
+            "资料",
+            "材料",
+            "回答",
+            "要求",
+            "如果",
+            "存在",
+            "差异",
+            "冲突",
+            "指出",
+            "采用",
+            "策略",
+            "以及",
+            "并",
+            "与",
+            "和",
+            "或",
+            "的",
+            "了",
+            "是",
+            "在",
+            "对",
+            "从",
+            "为",
+            "于",
+            "按",
+            "把",
+            "将",
+            "需要",
+            "什么",
+            "一个",
+            "判断",
+            "如何",
+            "是否",
+            "哪些",
+            "这个",
+            "这些",
+        }
+    )
+
     descriptor = ToolDescriptor(
         name="graph.pattern_scan",
         channel="graph",
@@ -26,10 +69,23 @@ class PatternProbeTool(GraphTool):
         mcp_callable=True,
         input_schema=build_input_schema(
             extra_properties={
+                "query": {
+                    "type": "string",
+                    "description": "Optional comma/whitespace-separated keyword hints (used when candidate_keywords is absent).",
+                },
+                "focus_query": {
+                    "type": "string",
+                    "description": "Optional focus query text that can be heuristically split into keywords (used when candidate_keywords is absent).",
+                },
                 "candidate_keywords": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Optional pre-selected keywords injected by planner or reasoning loop.",
+                },
+                "max_terms": {
+                    "type": "integer",
+                    "description": "Optional override for how many keywords to probe.",
+                    "minimum": 0,
                 }
             }
         ),
@@ -60,7 +116,12 @@ class PatternProbeTool(GraphTool):
             return ToolResult(summary="Pattern scan skipped: no stable keywords extracted.")
 
         diagnostics: Dict[str, Any] = {"keywords": keywords}
-        max_terms = int(self.max_terms) if self.max_terms is not None else 0
+        override = request.extra.get("max_terms", None)
+        try:
+            effective_max = int(override) if override is not None else int(self.max_terms)
+        except Exception:
+            effective_max = int(self.max_terms) if self.max_terms is not None else 0
+        max_terms = effective_max if effective_max is not None else 0
         if max_terms < 0:
             max_terms = 0
         invoked_keywords: List[str] = []
@@ -130,12 +191,52 @@ class PatternProbeTool(GraphTool):
     def _pick_keywords(self, question: str, extra: Dict[str, Any]) -> List[str]:
         candidate_terms = extra.get("candidate_keywords")
         if isinstance(candidate_terms, list) and candidate_terms:
-            return self._deduplicate([str(term).strip() for term in candidate_terms if str(term).strip()])
+            return self._deduplicate(self._filter_stopwords([str(term).strip() for term in candidate_terms if str(term).strip()]))
+
+        for key in ("query", "focus_query"):
+            raw = extra.get(key)
+            if isinstance(raw, str) and raw.strip():
+                hints = self._split_keyword_hints(raw)
+                if hints:
+                    return self._deduplicate(self._filter_stopwords(hints))
 
         compact = clean_query(question or "", max_chars=480)
         if self._looks_cjk(compact):
-            return self._tokenize_cjk(compact)
-        return self._tokenize_latin(compact)
+            return self._filter_stopwords(self._tokenize_cjk(compact))
+        return self._filter_stopwords(self._tokenize_latin(compact))
+
+    def _split_keyword_hints(self, raw: str) -> List[str]:
+        text = str(raw or "").strip()
+        if not text:
+            return []
+        parts = re.split(r"[，,;；\\n\\t\\s]+", text)
+        cleaned: List[str] = []
+        for part in parts:
+            token = part.strip().strip("\"'`()[]{}<>")
+            if not token:
+                continue
+            if self._looks_cjk(token):
+                if len(token) < self.min_cjk_length:
+                    continue
+            else:
+                if len(token) < self.min_latin_length:
+                    continue
+            cleaned.append(token)
+        return cleaned
+
+    @classmethod
+    def _filter_stopwords(cls, tokens: List[str]) -> List[str]:
+        if not tokens:
+            return []
+        filtered: List[str] = []
+        for token in tokens:
+            value = str(token).strip()
+            if not value:
+                continue
+            if value in cls._DEFAULT_STOPWORDS:
+                continue
+            filtered.append(value)
+        return filtered
 
     @staticmethod
     def _filter_chunks(payload: Dict[str, Any], keyword: str) -> List[EvidenceChunk]:

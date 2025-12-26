@@ -28,7 +28,8 @@ from api.sse import (
     sse_json,
 )
 from encapsulation.message_queue.redis_task_queue import RedisTaskQueue, TaskState
-from core.deepsearch.trace import emit_trace, reset_trace_emitter, set_trace_emitter
+from core.deepsearch.trace import emit_trace, reset_trace_emitter, set_trace_emitter, with_trace_protocol
+from core.deepsearch.tooling.all_tools import render_all_tools_block
 
 router = APIRouter(prefix="/deepsearch", tags=["deepsearch"])
 registrator = Register()
@@ -113,11 +114,10 @@ def _stage_progress(stage: str) -> Dict[str, Any]:
         pct = 0
     return {"stage": normalized, "step_index": idx, "step_total": len(order), "percent": pct}
 
-
 async def _stream_events(run_id: str, *, last_event_id: int = -1):
     info = await TASKS.get(run_id)
     if not info:
-        yield format_sse(event="error", data={"run_id": run_id, "message": "run_id not found"})
+        yield format_sse(event="error", data=with_trace_protocol({"run_id": run_id, "message": "run_id not found"}, run_id=run_id))
         yield sse_done()
         return
 
@@ -129,7 +129,7 @@ async def _stream_events(run_id: str, *, last_event_id: int = -1):
                 try:
                     await asyncio.wait_for(info.cond.wait(), timeout=15.0)
                 except asyncio.TimeoutError:
-                    yield format_sse(event="heartbeat", data={"run_id": run_id})
+                    yield format_sse(event="heartbeat", data=with_trace_protocol({"run_id": run_id}, run_id=run_id))
             pending = info.events[cursor + 1 :]
 
         for event in pending:
@@ -148,19 +148,19 @@ async def _stream_events(run_id: str, *, last_event_id: int = -1):
                 "error": info.error,
                 "progress": info.last_progress.get("progress") if isinstance(info.last_progress, dict) else None,
             }
-            yield format_sse(event="done", data=done_payload, event_id=cursor + 1)
+            yield format_sse(event="done", data=with_trace_protocol(done_payload, run_id=run_id), event_id=cursor + 1)
             yield sse_done()
             return
 
 
 _WEAVER_ALLOWED_TAGS = {
+    "all_tools",
     "think",
     "write_outline",
     "tool_call",
     "tool_response",
     "write",
     "progress",
-    "event",
     "terminate",
 }
 
@@ -412,7 +412,7 @@ def _render_trace_payload(
 def _weaver_block(tag: str, content: str) -> str:
     normalized = (tag or "").strip().lower()
     if normalized not in _WEAVER_ALLOWED_TAGS:
-        normalized = "think"
+        normalized = "progress"
     body = str(content or "")
     if body.endswith("\n"):
         body = body.rstrip("\n")
@@ -522,7 +522,7 @@ async def _stream_events_weaver(run_id: str, *, last_event_id: int = -1):
                 yield sse_text(_weaver_block("terminate", _format_weaver_progress(event_type, payload, run_id=run_id)))
                 await asyncio.sleep(0)
                 continue
-            yield sse_text(_weaver_block("event", _format_weaver_progress(event_type, payload, run_id=run_id)))
+            yield sse_text(_weaver_block("progress", _format_weaver_progress(event_type, payload, run_id=run_id)))
             await asyncio.sleep(0)
 
         if info.done and cursor + 1 >= len(info.events):
@@ -559,6 +559,10 @@ async def _stream_events_openai(
 
     info = await TASKS.get(run_id)
     if not info:
+        missing_payload = with_trace_protocol(
+            {"flow": "deepsearch", "event": "error", "data": {"run_id": run_id, "message": "run_id not found"}},
+            run_id=run_id,
+        )
         tool_calls = [
             {
                 "index": 0,
@@ -567,7 +571,7 @@ async def _stream_events_openai(
                 "function": {
                     "name": "rag_arc_progress",
                     "arguments": json.dumps(
-                        {"flow": "deepsearch", "event": "error", "data": {"run_id": run_id, "message": "run_id not found"}},
+                        missing_payload,
                         ensure_ascii=False,
                         default=str,
                         separators=(",", ":"),
@@ -605,7 +609,7 @@ async def _stream_events_openai(
                 try:
                     await asyncio.wait_for(info.cond.wait(), timeout=15.0)
                 except asyncio.TimeoutError:
-                    heartbeat = {"flow": "deepsearch", "event": "heartbeat", "data": {"run_id": run_id}}
+                    heartbeat = with_trace_protocol({"flow": "deepsearch", "event": "heartbeat", "data": {"run_id": run_id}}, run_id=run_id)
                     tool_calls = [
                         {
                             "index": 0,
@@ -635,13 +639,16 @@ async def _stream_events_openai(
         for event in pending:
             cursor = int(event.get("id", cursor + 1))
             payload = event.get("payload") or {}
-            envelope = {
+            envelope = with_trace_protocol(
+                {
                 "flow": "deepsearch",
                 "event": event.get("type") or "message",
                 "id": cursor,
                 "timestamp_ms": event.get("timestamp_ms") or int(time.time() * 1000),
                 "data": {"run_id": run_id, **payload},
-            }
+                },
+                run_id=run_id,
+            )
             tool_calls = [
                 {
                     "index": 0,
@@ -670,6 +677,7 @@ async def _stream_events_openai(
 
             if not sent_result and (event.get("type") == "result" or info.done) and info.result:
                 sent_result = True
+                payload_envelope = with_trace_protocol({"flow": "deepsearch", "run_id": run_id, "result": info.result}, run_id=run_id)
                 tool_calls = [
                     {
                         "index": 0,
@@ -678,7 +686,7 @@ async def _stream_events_openai(
                         "function": {
                             "name": "rag_arc_payload",
                             "arguments": json.dumps(
-                                {"flow": "deepsearch", "run_id": run_id, "result": info.result},
+                                payload_envelope,
                                 ensure_ascii=False,
                                 default=str,
                                 separators=(",", ":"),
@@ -699,6 +707,7 @@ async def _stream_events_openai(
         if info.done and cursor + 1 >= len(info.events):
             if not sent_result and info.result:
                 sent_result = True
+                payload_envelope = with_trace_protocol({"flow": "deepsearch", "run_id": run_id, "result": info.result}, run_id=run_id)
                 tool_calls = [
                     {
                         "index": 0,
@@ -707,7 +716,7 @@ async def _stream_events_openai(
                         "function": {
                             "name": "rag_arc_payload",
                             "arguments": json.dumps(
-                                {"flow": "deepsearch", "run_id": run_id, "result": info.result},
+                                payload_envelope,
                                 ensure_ascii=False,
                                 default=str,
                                 separators=(",", ":"),
@@ -725,16 +734,19 @@ async def _stream_events_openai(
                 )
                 await asyncio.sleep(0)
 
-            done_payload = {
-                "flow": "deepsearch",
-                "event": "done",
-                "data": {
-                    "run_id": run_id,
-                    "done": True,
-                    "error": info.error,
-                    "progress": info.last_progress.get("progress") if isinstance(info.last_progress, dict) else None,
+            done_payload = with_trace_protocol(
+                {
+                    "flow": "deepsearch",
+                    "event": "done",
+                    "data": {
+                        "run_id": run_id,
+                        "done": True,
+                        "error": info.error,
+                        "progress": info.last_progress.get("progress") if isinstance(info.last_progress, dict) else None,
+                    },
                 },
-            }
+                run_id=run_id,
+            )
             tool_calls = [
                 {
                     "index": 0,
@@ -867,7 +879,7 @@ async def _stream_events_weaver_redis(run_id: str, *, last_event_id: int = -1):
             if normalized_status in {"error"}:
                 yield sse_text(_weaver_block("terminate", _format_weaver_progress(status, payload, run_id=run_id)))
                 continue
-            yield sse_text(_weaver_block("event", _format_weaver_progress(status, payload, run_id=run_id)))
+            yield sse_text(_weaver_block("progress", _format_weaver_progress(status, payload, run_id=run_id)))
 
         if done and not events:
             if not saw_terminate:
@@ -904,7 +916,10 @@ async def _stream_events_openai_redis(
     task_queue = _get_task_queue()
     task_run = task_queue.get_task_run(run_id)
     if not task_run:
-        heartbeat = {"flow": "deepsearch", "event": "error", "data": {"run_id": run_id, "message": "run_id not found"}}
+        heartbeat = with_trace_protocol(
+            {"flow": "deepsearch", "event": "error", "data": {"run_id": run_id, "message": "run_id not found"}},
+            run_id=run_id,
+        )
         tool_calls = [
             {
                 "index": 0,
@@ -947,13 +962,16 @@ async def _stream_events_openai_redis(
                 seq = cursor + 1
             cursor = seq
             payload = event.get("payload") or {}
-            envelope = {
-                "flow": "deepsearch",
-                "event": str(event.get("status") or "message"),
-                "id": cursor,
-                "timestamp_ms": event.get("ts_ms") or int(time.time() * 1000),
-                "data": {"run_id": run_id, **(payload if isinstance(payload, dict) else {"payload": payload})},
-            }
+            envelope = with_trace_protocol(
+                {
+                    "flow": "deepsearch",
+                    "event": str(event.get("status") or "message"),
+                    "id": cursor,
+                    "timestamp_ms": event.get("ts_ms") or int(time.time() * 1000),
+                    "data": {"run_id": run_id, **(payload if isinstance(payload, dict) else {"payload": payload})},
+                },
+                run_id=run_id,
+            )
             tool_calls = [
                 {
                     "index": 0,
@@ -975,7 +993,7 @@ async def _stream_events_openai_redis(
             result = task_queue.get_task_result(run_id)
             if result is not None:
                 sent_result = True
-                envelope = {"flow": "deepsearch", "run_id": run_id, "result": result}
+                envelope = with_trace_protocol({"flow": "deepsearch", "run_id": run_id, "result": result}, run_id=run_id)
                 tool_calls = [
                     {
                         "index": 0,
@@ -997,7 +1015,7 @@ async def _stream_events_openai_redis(
             yield sse_done()
             return
         if not events and not done:
-            heartbeat = {"flow": "deepsearch", "event": "heartbeat", "data": {"run_id": run_id}}
+            heartbeat = with_trace_protocol({"flow": "deepsearch", "event": "heartbeat", "data": {"run_id": run_id}}, run_id=run_id)
             tool_calls = [
                 {
                     "index": 0,
@@ -1118,13 +1136,17 @@ async def _schedule_deepsearch(
 
     def _listener(record: Dict[str, Any], state) -> None:  # noqa: ANN001
         progress = _stage_progress(getattr(state, "stage", "unknown"))
-        payload = {
-            "stage": getattr(state, "stage", "unknown"),
-            "stage_record": dict(record),
-            "stage_history": list(getattr(state, "stage_history", []) or []),
-            "errors": list(getattr(state, "errors", []) or []),
-            "progress": progress,
-        }
+        payload = with_trace_protocol(
+            {
+                "run_id": run_id,
+                "stage": getattr(state, "stage", "unknown"),
+                "stage_record": dict(record),
+                "stage_history": list(getattr(state, "stage_history", []) or []),
+                "errors": list(getattr(state, "errors", []) or []),
+                "progress": progress,
+            },
+            run_id=run_id,
+        )
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(TASKS.publish(run_id, event_type="progress", payload=payload))
@@ -1144,6 +1166,14 @@ async def _schedule_deepsearch(
                 f"Received question. Starting graph-first DeepSearch run.\nrun_id={run_id}",
                 meta={"run_id": run_id, "external_allowed": False},
             )
+            try:
+                await emit_trace(
+                    "all_tools",
+                    render_all_tools_block(),
+                    meta={"run_id": run_id},
+                )
+            except Exception:
+                pass
             result = await service.run(
                 request.question,
                 owner_id=str(effective_owner),
@@ -1155,11 +1185,15 @@ async def _schedule_deepsearch(
             await TASKS.publish(
                 run_id,
                 event_type="progress",
-                payload={
-                    "stage": "failed",
-                    "errors": [{"message": str(exc)}],
-                    "progress": _stage_progress("failed"),
-                },
+                payload=with_trace_protocol(
+                    {
+                        "run_id": run_id,
+                        "stage": "failed",
+                        "errors": [{"message": str(exc)}],
+                        "progress": _stage_progress("failed"),
+                    },
+                    run_id=run_id,
+                ),
             )
             await TASKS.mark_done(run_id, error=str(exc))
             task_queue.update_task_run(
@@ -1197,10 +1231,14 @@ async def _schedule_deepsearch(
         await TASKS.publish(
             run_id,
             event_type="result",
-            payload={
-                "stage": trimmed.get("state", {}).get("stage"),
-                "progress": _stage_progress(trimmed.get("state", {}).get("stage", "")),
-            },
+            payload=with_trace_protocol(
+                {
+                    "run_id": run_id,
+                    "stage": trimmed.get("state", {}).get("stage"),
+                    "progress": _stage_progress(trimmed.get("state", {}).get("stage", "")),
+                },
+                run_id=run_id,
+            ),
         )
         await TASKS.mark_done(run_id, result=trimmed)
         task_queue.update_task_run(run_id, state=TaskState.SUCCESS, progress_percent=100, finished=True)
