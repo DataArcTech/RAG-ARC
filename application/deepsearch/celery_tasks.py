@@ -11,6 +11,8 @@ from encapsulation.message_queue.redis_task_queue import RedisTaskQueue, TaskSta
 from core.presentation.deepsearch_payload import trim_deepsearch_payload
 
 from application.celery_bootstrap import ensure_initialized
+from application.deepsearch.trace_emitter import make_redis_trace_emitter
+from core.deepsearch.trace import emit_trace, reset_trace_emitter, set_trace_emitter
 
 logger = logging.getLogger(__name__)
 
@@ -139,15 +141,53 @@ def run_deepsearch(
     task_queue.update_task_run(run_id, state=TaskState.RUNNING, progress_percent=1)
 
     try:
-        result = asyncio.run(
-            service.run(
-                question,
-                owner_id=str(owner_uuid),
-                metadata=metadata,
-                run_id=run_id,
-                stage_listener=_listener,
-            )
-        )
+        async def _run_with_trace():  # noqa: ANN202
+            emitter = make_redis_trace_emitter(run_id=run_id, task_queue=task_queue, resource_id=run_id)
+            token = set_trace_emitter(emitter)
+            try:
+                await emit_trace(
+                    "think",
+                    f"Received question. Starting graph-first DeepSearch run.\nrun_id={run_id}",
+                    meta={"run_id": run_id, "external_allowed": False},
+                )
+                raw_result = await service.run(
+                    question,
+                    owner_id=str(owner_uuid),
+                    metadata=metadata,
+                    run_id=run_id,
+                    stage_listener=_listener,
+                )
+                graph_store = _get_graph_store()
+                trimmed = trim_deepsearch_payload(
+                    raw_result,
+                    include_evidence=include_evidence,
+                    graph_store=graph_store,
+                )
+                report_block = trimmed.get("report") if isinstance(trimmed, dict) else None
+                report_text = report_block.get("answer") if isinstance(report_block, dict) else None
+                if isinstance(report_text, str) and report_text.strip():
+                    await emit_trace(
+                        "write",
+                        report_text,
+                        meta={"run_id": run_id, "question": trimmed.get("question")},
+                    )
+                await emit_trace(
+                    "terminate",
+                    f"DeepSearch completed.\nrun_id={run_id}",
+                    meta={"run_id": run_id, "ok": True},
+                )
+                return trimmed
+            except Exception as exc:  # noqa: BLE001
+                await emit_trace(
+                    "terminate",
+                    f"DeepSearch failed.\nrun_id={run_id}\nerror={exc}",
+                    meta={"run_id": run_id, "ok": False},
+                )
+                raise
+            finally:
+                reset_trace_emitter(token)
+
+        result = asyncio.run(_run_with_trace())
     except Retry:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -195,16 +235,9 @@ def run_deepsearch(
         )
         return {"run_id": run_id, "done": True, "error": err}
 
-    graph_store = _get_graph_store()
-    trimmed = trim_deepsearch_payload(
-        result,
-        include_evidence=include_evidence,
-        graph_store=graph_store,
-    )
-
     task_queue.set_task_result_and_finalize_run(
         run_id,
-        result=trimmed if isinstance(trimmed, dict) else {"result": trimmed},
+        result=result if isinstance(result, dict) else {"result": result},
         state=TaskState.SUCCESS,
         progress_percent=100,
         finished=True,
@@ -212,10 +245,13 @@ def run_deepsearch(
     task_queue.append_progress_event(
         flow="deepsearch",
         task_run_id=run_id,
-        stage=str(trimmed.get("state", {}).get("stage") or "reported"),
+        stage=str(result.get("state", {}).get("stage") or "reported") if isinstance(result, dict) else "reported",
         status="result",
         percent=100,
         resource_id=run_id,
-        payload={"stage": trimmed.get("state", {}).get("stage"), "progress": _stage_progress(trimmed.get("state", {}).get("stage", ""))},
+        payload={
+            "stage": (result.get("state", {}).get("stage") if isinstance(result, dict) else None),
+            "progress": _stage_progress((result.get("state", {}).get("stage", "") if isinstance(result, dict) else "")),
+        },
     )
     return {"run_id": run_id, "done": True}

@@ -343,7 +343,7 @@ class DeepSearchReporter:
             "sample": sample,
         }
 
-    _CITATION_RE = re.compile(r"\[(?P<token>[^\[\]]{1,64})\]")
+    _CITATION_RE = re.compile(r"(?:\[(?P<bracket>[^\[\]]{1,64})\]|【(?P<cjk>[^【】]{1,64})】)")
 
     def _rewrite_citation_aliases(
         self,
@@ -408,7 +408,7 @@ class DeepSearchReporter:
 
             def _sub(match: re.Match[str]) -> str:
                 nonlocal replaced
-                token = match.group("token")
+                token = match.group("bracket") or match.group("cjk") or ""
                 mapped = _normalize_token(token)
                 if mapped:
                     replaced += 1
@@ -529,13 +529,16 @@ class DeepSearchReporter:
             "pending_external": pending_external,
         }
 
+        graph_evidence_full = self._build_graph_evidence(trace, evidences)
+        graph_evidence_llm = self._slim_graph_evidence_for_llm(graph_evidence_full)
+
         return {
             "question": trace.get("question") or "",
             "final_answer": trace.get("final_answer") or "",
             "highlights": highlights,
             "evidences": evidences,
             "graph_chain": (trace.get("graph_chain") or [])[: self.report_max_graph_chain_items],
-            "graph_evidence": self._build_graph_evidence(trace, evidences),
+            "graph_evidence": graph_evidence_llm,
             "methodology": methodology,
             "coverage": coverage_bundle,
             "request_context": request_context,
@@ -676,6 +679,26 @@ class DeepSearchReporter:
             "graph_chain": trace.get("graph_chain") or [],
         }
         return build_deepsearch_evidence(payload, chunk_limit=self.max_evidence_items, graph_store=self.graph_store)
+
+    @staticmethod
+    def _slim_graph_evidence_for_llm(graph_evidence: Dict[str, Any]) -> Dict[str, Any]:
+        """Reduce graph evidence payload for LLM prompts to avoid context blow-ups.
+
+        The full public payload can still include detailed chunk/graph snapshots, but the report-writing
+        prompt should only receive compact graph signals (seeds + chain + stats) because the authoritative
+        evidence snippets are provided separately.
+        """
+
+        if not isinstance(graph_evidence, dict):
+            return {}
+        seed_entities = graph_evidence.get("seed_entities") if isinstance(graph_evidence.get("seed_entities"), list) else []
+        graph_chain = graph_evidence.get("graph_chain") if isinstance(graph_evidence.get("graph_chain"), list) else []
+        graph_stats = graph_evidence.get("graph_stats") if isinstance(graph_evidence.get("graph_stats"), dict) else {}
+        return {
+            "seed_entities": seed_entities[:12],
+            "graph_chain": graph_chain[:40],
+            "graph_stats": graph_stats,
+        }
 
 
 def _append_chunk_evidence(

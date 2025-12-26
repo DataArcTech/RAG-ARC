@@ -24,6 +24,7 @@ from core.deepsearch.tools import (
 from core.deepsearch.tooling.registry import DEFAULT_TOOL_HINT_REGISTRY, ToolHintRegistry
 from core.utils.json_safe import json_safe
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
+from core.deepsearch.trace import emit_trace
 
 logger = logging.getLogger(__name__)
 
@@ -392,6 +393,7 @@ class DeepSearchToolManager:
     async def invoke(self, tool_name: str, *, payload: Dict[str, Any]) -> ToolResultPayload:
         """Invoke a tool through MCP first, falling back to local registries on failure."""
 
+        call_id = uuid.uuid4().hex
         descriptor = self._resolve_descriptor(tool_name)
         request = self._build_request(payload)
         local_tool = self.local_registry.resolve(tool_name) if self.local_registry else None
@@ -399,10 +401,57 @@ class DeepSearchToolManager:
         if local_disabled:
             local_tool = None
 
+        trace_call = {
+            "call_id": call_id,
+            "tool_name": tool_name,
+            "descriptor": (descriptor.as_hint() if descriptor else None),
+            "plan_step": request.plan_step,
+            "question": request.question,
+            "extra": request.extra,
+            "coverage_metrics": request.coverage_metrics,
+            "access_scope": self._access_scope_payload(request.access_scope),
+            "graph_context": (request.graph_context.model_dump(exclude_none=True) if request.graph_context else None),
+            "routing": {
+                "can_route_remote": bool(self._can_route_remote(tool_name, descriptor)),
+                "prefer_remote": bool(local_disabled),
+                "has_local": bool(local_tool is not None),
+                "default_mcp_server": getattr(self.mcp_router, "default_server_name", None) if self.mcp_router else None,
+            },
+        }
+        await emit_trace(
+            "tool_call",
+            json.dumps(json_safe(trace_call), ensure_ascii=False, indent=2, default=str),
+            meta={"call_id": call_id, "tool_name": tool_name, "plan_step": request.plan_step},
+        )
+
         remote_error: Exception | None = None
         if self._can_route_remote(tool_name, descriptor):
             try:
-                return await self._invoke_remote(tool_name, descriptor, payload, request)
+                result = await self._invoke_remote(tool_name, descriptor, payload, request)
+                await emit_trace(
+                    "tool_response",
+                    json.dumps(
+                        json_safe(
+                            {
+                                "call_id": call_id,
+                                "tool_name": tool_name,
+                                "route": "remote",
+                                "result": result.model_dump(exclude_none=True),
+                            }
+                        ),
+                        ensure_ascii=False,
+                        indent=2,
+                        default=str,
+                    ),
+                    meta={
+                        "call_id": call_id,
+                        "tool_name": tool_name,
+                        "plan_step": request.plan_step,
+                        "ok": True,
+                        "route": "remote",
+                    },
+                )
+                return result
             except Exception as exc:  # noqa: BLE001
                 remote_error = exc
                 logger.warning(
@@ -415,11 +464,75 @@ class DeepSearchToolManager:
             result = await self._invoke_local(tool_name, local_tool, descriptor, request)
             if remote_error:
                 result.diagnostics.setdefault("remote_fallback_reason", str(remote_error))
+            await emit_trace(
+                "tool_response",
+                json.dumps(
+                    json_safe(
+                        {
+                            "call_id": call_id,
+                            "tool_name": tool_name,
+                            "route": "local",
+                            "remote_fallback_reason": (str(remote_error) if remote_error else None),
+                            "result": result.model_dump(exclude_none=True),
+                        }
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                ),
+                meta={
+                    "call_id": call_id,
+                    "tool_name": tool_name,
+                    "plan_step": request.plan_step,
+                    "ok": True,
+                    "route": "local",
+                    "remote_fallback": bool(remote_error is not None),
+                },
+            )
             return result
 
         if remote_error:
+            await emit_trace(
+                "tool_response",
+                json.dumps(
+                    json_safe(
+                        {
+                            "call_id": call_id,
+                            "tool_name": tool_name,
+                            "route": "remote",
+                            "error": str(remote_error),
+                        }
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                ),
+                meta={
+                    "call_id": call_id,
+                    "tool_name": tool_name,
+                    "plan_step": request.plan_step,
+                    "ok": False,
+                    "route": "remote",
+                },
+            )
             raise remote_error
 
+        await emit_trace(
+            "tool_response",
+            json.dumps(
+                json_safe(
+                    {
+                        "call_id": call_id,
+                        "tool_name": tool_name,
+                        "error": "tool_unavailable",
+                    }
+                ),
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            ),
+            meta={"call_id": call_id, "tool_name": tool_name, "plan_step": request.plan_step, "ok": False},
+        )
         raise KeyError(f"Tool '{tool_name}' is not registered locally and MCP routing is unavailable")
 
     async def _invoke_remote(

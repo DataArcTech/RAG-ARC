@@ -1,6 +1,7 @@
 """Plan generation utilities for DeepSearch pipelines."""
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional
@@ -68,7 +69,9 @@ class PlanGenerator:
 
     def _build_plan_specs(self, raw_steps: List[dict]) -> List[PlanSpec]:
         plan_specs: List[PlanSpec] = []
-        for idx, step in enumerate(raw_steps[: self.settings.max_steps]):
+        for idx, step in enumerate(raw_steps):
+            if idx >= self.settings.max_steps:
+                break
             description = step.get("description") or step.get("step") or "Graph inspect"
             channel = self._normalize_channel(step.get("channel"))
             metadata = {
@@ -126,7 +129,11 @@ class PlanGenerator:
             return []
         messages = self._build_messages(question, context)
         try:
-            response = self.llm.chat(messages, temperature=0.1)
+            low_cost_model = (os.getenv("LOW_COST_MODEL") or "").strip()
+            kwargs: Dict[str, object] = {"temperature": 0.1}
+            if low_cost_model:
+                kwargs["model"] = low_cost_model
+            response = self.llm.chat(messages, **kwargs)
             return self._parse_llm_response(response)
         except Exception as exc:  # pragma: no cover - defensive path
             logger.warning("LLM planning failed: %s", exc)
@@ -142,10 +149,14 @@ class PlanGenerator:
             return []
 
         messages = self._build_messages(question, context)
+        low_cost_model = (os.getenv("LOW_COST_MODEL") or "").strip()
+        kwargs: Dict[str, object] = {"temperature": 0.1}
+        if low_cost_model:
+            kwargs["model"] = low_cost_model
         async_chat = getattr(self.llm, "achat", None)
         if callable(async_chat):
             try:
-                response = await async_chat(messages, temperature=0.1)
+                response = await async_chat(messages, **kwargs)
                 return self._parse_llm_response(response)
             except Exception as exc:  # pragma: no cover - defensive path
                 logger.warning("Async LLM planning failed: %s", exc)

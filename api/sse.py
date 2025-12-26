@@ -10,6 +10,31 @@ def sse_json(payload: Any) -> str:
 
     return f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
 
+def sse_text(
+    text: str,
+    *,
+    event: str | None = None,
+    event_id: int | None = None,
+) -> str:
+    """Return an SSE event whose payload is plain text.
+
+    If the text contains newlines, each line is emitted as one SSE `data:` line
+    within the same event, followed by a blank line terminator.
+    """
+
+    lines = (text or "").splitlines()
+    if not lines:
+        lines = [""]
+    chunks: list[str] = []
+    if event is not None:
+        chunks.append(f"event: {event}\n")
+    if event_id is not None:
+        chunks.append(f"id: {event_id}\n")
+    for line in lines:
+        chunks.append(f"data: {line}\n")
+    chunks.append("\n")
+    return "".join(chunks)
+
 
 def sse_done() -> str:
     """Return the final SSE event used by Qwen/OpenAI-compatible streams."""

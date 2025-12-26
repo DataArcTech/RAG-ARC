@@ -77,6 +77,37 @@ class _AliasCitingLLM:
         raise RuntimeError(f"Unexpected prompt: {user_prompt[:80]}")
 
 
+class _AliasCitingCjkLLM:
+    def __init__(self):
+        self.calls = 0
+
+    def chat(self, messages, **kwargs):  # noqa: ANN001
+        self.calls += 1
+        user_prompt = ""
+        for message in reversed(messages):
+            if message.get("role") == "user":
+                user_prompt = str(message.get("content") or "")
+                break
+        if "Return a JSON array of sections" in user_prompt:
+            return """\n[\n  {\"title\": \"Findings\", \"purpose\": \"Summarize evidence.\"}\n]\n""".strip()
+        if "Return a single JSON object with:" in user_prompt and "Evidence snippets" in user_prompt:
+            return (
+                "{\n"
+                '  "title": "Report",\n'
+                '  "summary": "Claim supported by evidence. 【chunk_001】",\n'
+                '  "sections": [\n'
+                '    {"title": "Findings", "body_markdown": "Detail. 【chunk_001】"}\n'
+                "  ],\n"
+                '  "limitations": [],\n'
+                '  "next_steps": [],\n'
+                '  "citations": []\n'
+                "}\n"
+            )
+        if "Return the JSON result now." in user_prompt:
+            return """\n{\"is_consistent\": true, \"confidence\": 0.9, \"issues\": []}\n""".strip()
+        raise RuntimeError(f"Unexpected prompt: {user_prompt[:80]}")
+
+
 class _AliasVariantCitingLLM:
     def __init__(self):
         self.calls = 0
@@ -366,6 +397,23 @@ def test_reporter_rewrites_alias_citations_to_original_ids(monkeypatch):
     answer = report["answer"]
     assert "[chunk_001]" not in answer, "Alias citations should be rewritten before returning markdown"
     assert "[ev1]" in answer, "Alias should be rewritten back to original chunk IDs"
+
+
+def test_reporter_rewrites_alias_citations_with_cjk_brackets(monkeypatch):
+    monkeypatch.setenv("DEEPSEARCH_CITATION_ALIASES", "true")
+    reporter = DeepSearchReporter(
+        template_store=None,
+        config={"enable_consistency_check": True, "enable_citation_agent": False},
+        llm_connector=_AliasCitingCjkLLM(),
+    )
+    trace = _build_trace(include_final_answer=False)
+
+    report = asyncio.run(reporter.compose(trace, external_evidence=[]))
+
+    answer = report["answer"]
+    assert "【chunk_001】" not in answer
+    assert "[chunk_001]" not in answer
+    assert "[ev1]" in answer
 
 
 def test_reporter_rewrites_alias_citation_variants(monkeypatch):

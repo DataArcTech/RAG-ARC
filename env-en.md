@@ -13,6 +13,7 @@ All runtime behavior is controlled through `.env`. By default, `.env.example` al
 | `CHAT_API_KEY` | _(empty)_ | API key for chat provider (required for hosted APIs). |
 | `CHAT_API_BASE_URL` | _(empty)_ | Base URL for OpenAI-compatible chat endpoints (e.g. `https://api.openai.com/v1`). |
 | `OPENAI_CHAT_MODEL` | `gpt-4o-mini` | Legacy/default chat model name used when `CHAT_MODEL_NAME` is empty. |
+| `LOW_COST_MODEL` | _(empty)_ | Optional: cheaper model used for exploration-heavy calls (planning/reflection/quality checks). When empty, the system reuses the main chat model. |
 | `OPENAI_API_BASE` | _(empty)_ | Optional legacy alias for OpenAI-compatible base URL. |
 | `EMBEDDING_MODEL_PROVIDER` | `openai` | Embedding provider (`openai` = OpenAI-compatible API, `huggingface` = local SentenceTransformers). |
 | `EMBEDDING_API_KEY` | _(empty)_ | API key for embedding provider (required for hosted APIs). |

@@ -18,6 +18,7 @@ from core.deepsearch.report import DeepSearchQualityGate, QualityGateConfig
 from core.deepsearch.tooling.protocols import ToolInvoker
 from encapsulation.deepsearch.external import ExternalSearchChannel
 from core.deepsearch.state import DeepSearchState
+from core.deepsearch.trace import emit_trace
 from core.utils.json_safe import json_safe
 
 
@@ -123,6 +124,13 @@ class DeepSearchService:
             external_allowed=self._external_allowed_flag(),
         )
 
+        await self._emit_initial_think(
+            question=normalized_question,
+            scope=scope,
+            reasoning_context=reasoning_context,
+            plan_steps=plan_steps,
+        )
+
         quality_cfg = self._resolve_quality_gate_config()
         quality_gate = DeepSearchQualityGate(
             getattr(self.reporter, "llm_connector", None),
@@ -163,6 +171,20 @@ class DeepSearchService:
                 )
                 state.record_reasoning(cumulative_reasoning)
                 self._surface_worker_failures(state, round_trace)
+                try:
+                    evidence_count = len(cumulative_reasoning.get("evidences") or [])
+                except Exception:
+                    evidence_count = 0
+                await emit_trace(
+                    "progress",
+                    "\n".join(
+                        [
+                            f"Completed graph reasoning round {round_idx}.",
+                            f"evidence_count={evidence_count}",
+                        ]
+                    ),
+                    meta={"stage": "graph_reasoning", "round": round_idx, "evidence_count": evidence_count},
+                )
 
             if cumulative_reasoning is None:
                 raise RuntimeError("DeepSearch reasoning did not produce a trace")
@@ -178,6 +200,20 @@ class DeepSearchService:
                 final_gap = gap_result
                 state.record_gap_result(gap_result)
                 cumulative_reasoning["gap_result"] = gap_result
+                await emit_trace(
+                    "progress",
+                    "\n".join(
+                        [
+                            f"Gap detection round {round_idx}.",
+                            f"coverage_score={gap_result.get('coverage_score')}",
+                            f"confidence_score={gap_result.get('confidence_score')}",
+                            f"should_trigger_external={gap_result.get('should_trigger_external')}",
+                            f"reason={gap_result.get('reason')}",
+                            f"missing_topics={json.dumps(gap_result.get('missing_topics') or [], ensure_ascii=False)}",
+                        ]
+                    ),
+                    meta={"stage": "gap_detection", "round": round_idx, "gap_result": json_safe(gap_result)},
+                )
 
             external_payload = await self._execute_stage(
                 f"external_channel_r{round_idx}",
@@ -196,6 +232,32 @@ class DeepSearchService:
                 state.extend_external_calls(list(external_logs))
             if external_evidences:
                 external_evidences_all.extend([dict(item) for item in external_evidences if isinstance(item, dict)])
+                await emit_trace(
+                    "progress",
+                    "\n".join(
+                        [
+                            f"External channel produced evidence (round {round_idx}).",
+                            f"external_evidence_count={len(external_evidences)}",
+                        ]
+                    ),
+                    meta={
+                        "stage": "external_channel",
+                        "round": round_idx,
+                        "external_evidence_count": len(external_evidences),
+                        "external_logs": json_safe(list(external_logs)),
+                    },
+                )
+            elif gap_result and gap_result.get("reason") == "external_disabled":
+                await emit_trace(
+                    "progress",
+                    "\n".join(
+                        [
+                            f"External channel was requested but is disabled (round {round_idx}).",
+                            "No external tools were executed.",
+                        ]
+                    ),
+                    meta={"stage": "external_channel", "round": round_idx, "blocked": True, "gap_result": json_safe(gap_result)},
+                )
 
             report = await self._execute_stage(
                 f"report_r{round_idx}",
@@ -207,6 +269,17 @@ class DeepSearchService:
             )
             final_report = report
             state.record_report(report)
+            await emit_trace(
+                "progress",
+                "\n".join(
+                    [
+                        f"Draft report generated (round {round_idx}).",
+                        f"answer_length={len((report.get('answer') or '') if isinstance(report, dict) else '')}",
+                        f"evidence_count={len((report.get('evidences') or []) if isinstance(report, dict) else [])}",
+                    ]
+                ),
+                meta={"stage": "report", "round": round_idx},
+            )
 
             structured_report = report.get("structured_report") if isinstance(report, dict) else None
             evidences_for_gate = list(report.get("evidences") or []) if isinstance(report, dict) else []
@@ -226,6 +299,18 @@ class DeepSearchService:
                 report.setdefault("metadata", {}).setdefault("quality_gate", quality_result)
             state.record_quality_gate(quality_result)
             quality_history.append(quality_result)
+            await emit_trace(
+                "progress",
+                "\n".join(
+                    [
+                        f"Quality gate round {round_idx}.",
+                        f"passed={quality_result.get('passed')}",
+                        f"should_iterate={quality_result.get('should_iterate')}",
+                        f"actions={json.dumps(quality_result.get('actions') or [], ensure_ascii=False)}",
+                    ]
+                ),
+                meta={"stage": "quality_gate", "round": round_idx, "quality_result": json_safe(quality_result)},
+            )
 
             passed = bool(quality_result.get("passed"))
             should_iterate = bool(quality_result.get("should_iterate")) and round_idx < max_rounds
@@ -237,6 +322,17 @@ class DeepSearchService:
                 round_idx=round_idx,
             )
             pending_rewrite_only = not bool(followup_steps)
+            if followup_steps:
+                await emit_trace(
+                    "write_outline",
+                    "\n".join(
+                        [
+                            f"Plan update from quality gate (round {round_idx + 1}).",
+                            json.dumps(json_safe(followup_steps), ensure_ascii=False, indent=2, default=str),
+                        ]
+                    ),
+                    meta={"stage": "plan_update", "round": round_idx + 1, "followup_steps": json_safe(followup_steps)},
+                )
             extra_external_tasks = self._build_external_tasks_from_actions(
                 actions=quality_result.get("actions") or [],
                 round_idx=round_idx,
@@ -293,6 +389,76 @@ class DeepSearchService:
             "report": report,
             "state": snapshot,
         }
+
+    async def _emit_initial_think(
+        self,
+        *,
+        question: str,
+        scope: GraphAccessScope,
+        reasoning_context: GraphQueryContext,
+        plan_steps: Sequence[Dict[str, Any]],
+    ) -> None:
+        if not self.tool_manager:
+            return
+
+        try:
+            total_steps = len(plan_steps) if plan_steps is not None else 0
+        except Exception:
+            total_steps = 0
+
+        payload = {
+            "question": question,
+            "plan_step": "think_init",
+            "context_evidences": [],
+            "adapter": getattr(self.graph_loop, "adapter", None),
+            "access_scope": scope,
+            "extra": {
+                "trigger": "initial_think",
+                "plan_steps": list(plan_steps),
+            },
+            "graph_context": reasoning_context.model_dump(exclude_none=True),
+            "coverage_metrics": {
+                "evidence_count": 0,
+                "unique_source_count": 0,
+                "completed_steps": 0,
+                "total_steps": total_steps,
+                "coverage_ratio": 0.0,
+                "plan_progress_ratio": 0.0,
+                "expected_min_chunks": 3,
+                "coverage_score": 0.0,
+                "confidence_score": None,
+                "missing_topics": [],
+            },
+        }
+        try:
+            result = await self.tool_manager.invoke("graph.think", payload=payload)
+        except Exception:
+            return
+
+        notes = getattr(result, "think_notes", None)
+        if not notes:
+            return
+
+        lines: List[str] = ["Initial think checkpoint (before execution)."]
+        for idx, note in enumerate(notes, start=1):
+            lines.append(f"note_{idx}. reasoning={note.reasoning}")
+            if note.next_actions:
+                lines.append(f"note_{idx}. next_actions={note.next_actions}")
+            if note.coverage_delta is not None:
+                lines.append(f"note_{idx}. coverage_delta={note.coverage_delta}")
+            if note.confidence_delta is not None:
+                lines.append(f"note_{idx}. confidence_delta={note.confidence_delta}")
+            missing = None
+            if isinstance(note.metadata, dict):
+                missing = note.metadata.get("missing_topics")
+            if isinstance(missing, list) and missing:
+                lines.append(f"note_{idx}. missing_topics={missing}")
+
+        await emit_trace(
+            "think",
+            "\n".join(lines),
+            meta={"stage": "think_init", "plan_step": "think_init"},
+        )
 
     def _build_state(
         self,
@@ -415,7 +581,9 @@ class DeepSearchService:
         except (TypeError, ValueError):
             count_int = len(errors)
         previews: list[str] = []
-        for entry in errors[:3]:
+        for entry in errors:
+            if len(previews) >= 3:
+                break
             if not isinstance(entry, dict):
                 continue
             agent_id = entry.get("agent_id") or "worker"

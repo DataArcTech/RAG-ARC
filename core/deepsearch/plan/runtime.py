@@ -17,6 +17,7 @@ from .generator import PlanGenerator, PlannerSettings
 from core.prompts.deepsearch import GRAPH_PLANNER_SYSTEM_PROMPT, GRAPH_PLANNER_USER_PROMPT
 from core.deepsearch.tooling import describe_available_tools
 from core.deepsearch.tooling.registry import DEFAULT_TOOL_HINT_REGISTRY, ToolHintRegistry
+from core.deepsearch.trace import emit_trace
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,11 @@ class DeepSearchPlanner:
             "graph_adapter_name", os.getenv("DEEPSEARCH_DEFAULT_ADAPTER") or "hipporag"
         )
         self.tool_arg_templates: Mapping[str, Mapping[str, str]] = self._config_value("tool_arg_templates", {})
+        self.honor_planner_tool_selection = self._bool_config(
+            "honor_planner_tool_selection",
+            default=False,
+            env_var="DEEPSEARCH_HONOR_PLANNER_TOOL_SELECTION",
+        )
 
     async def build_plan(
         self,
@@ -99,6 +105,24 @@ class DeepSearchPlanner:
         if not normalized_question:
             raise ValueError("question must be a non-empty string")
         scope = require_scope(access_scope)
+
+        await emit_trace(
+            "think",
+            "\n".join(
+                [
+                    "Planning the research workflow.",
+                    f"mode={self.plan_generator.settings.mode}",
+                    f"max_steps={self.plan_generator.settings.max_steps}",
+                    f"external_channel_allowed={bool(self.allow_external)}",
+                ]
+            ),
+            meta={
+                "stage": "plan",
+                "mode": self.plan_generator.settings.mode,
+                "max_steps": self.plan_generator.settings.max_steps,
+                "external_channel_allowed": bool(self.allow_external),
+            },
+        )
 
         self._refresh_available_tools()
         dynamic_steps = self._adaptive_step_budget(normalized_question)
@@ -137,6 +161,37 @@ class DeepSearchPlanner:
         artifact_path = None
         if self.persist_plan:
             artifact_path = self._persist_plan(artifact, plan_id)
+
+        plan_lines: List[str] = []
+        plan_lines.append(f"Plan ID: {plan_id}")
+        plan_lines.append(f"Question: {normalized_question}")
+        plan_lines.append(f"Mode: {self.plan_generator.settings.mode}")
+        plan_lines.append(f"External allowed: {bool(self.allow_external)}")
+        plan_lines.append("Note: coarse macro plan; tool selection happens during execution.")
+        plan_lines.append("Steps:")
+        for idx, step in enumerate(steps_payload, start=1):
+            if not isinstance(step, dict):
+                continue
+            step_id = str(step.get("step_id") or f"plan_{idx:02d}")
+            channel = str(step.get("channel") or "graph")
+            description = str(step.get("description") or "")
+            enabled = bool(step.get("enabled", True))
+            requires_external = bool(step.get("requires_external", False))
+            line = f"{idx}. {step_id} [{channel}] enabled={enabled} requires_external={requires_external}"
+            if description:
+                line += f"\n   {description}"
+            plan_lines.append(line)
+
+        await emit_trace(
+            "write_outline",
+            "\n".join(plan_lines),
+            meta={
+                "stage": "plan",
+                "plan_id": plan_id,
+                "step_count": len(steps_payload),
+                "artifact_path": str(artifact_path) if artifact_path else None,
+            },
+        )
 
         logger.info(
             "DeepSearch plan generated (plan_id=%s, steps=%d, artifact=%s)",
@@ -194,9 +249,8 @@ class DeepSearchPlanner:
             profile = str(spec.get("profile") or "F").upper()
             grouped.setdefault(profile, []).append(spec)
         lines = [
-            "For each graph step choose exactly one tool from this catalog and include it "
-            "in the JSON output as `tool` (and `tool_profile` if applicable). "
-            "Prefer cheaper profiles before escalating.",
+            "Tool catalog (used during execution, not required in the initial plan).",
+            "The initial plan should stay coarse; avoid selecting tools unless absolutely necessary.",
             "Profile legend: F=fast deterministic, X=hybrid, H=heavy LLM.",
         ]
         for profile_code in ("F", "X", "H"):
@@ -224,7 +278,9 @@ class DeepSearchPlanner:
         channel = (spec.channel or "graph").lower()
         channel = channel if channel in {"graph", "web", "text"} else "graph"
 
-        requested_tool = metadata.get("tool")
+        requested_tool = metadata.get("tool") if self.honor_planner_tool_selection else None
+        if not self.honor_planner_tool_selection:
+            metadata.pop("tool", None)
         tool_name = requested_tool or self._resolve_tool(channel)
         requires_external = channel == "web"
         tool_enabled = not requires_external or self.allow_external

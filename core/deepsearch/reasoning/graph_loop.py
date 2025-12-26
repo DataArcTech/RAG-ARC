@@ -1,7 +1,9 @@
 """Graph-first reasoning loop that orchestrates adapter traversals and tool calls."""
 import asyncio
 import contextvars
+import json
 import logging
+import os
 import time
 from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, List, Optional, Sequence, Set
@@ -16,7 +18,9 @@ from encapsulation.data_model.deepsearch import (
     ToolExecutionLog,
     ToolResultPayload,
 )
+from core.deepsearch.tools.base import call_llm_async
 from core.deepsearch.tooling.protocols import ToolInvoker
+from core.deepsearch.trace import emit_trace
 from core.graph_adapter.base import GraphAccessScope, GraphDeepSearchAdapter
 from core.graph_adapter.scope_provider import require_scope
 
@@ -37,6 +41,7 @@ _RUN_EVIDENCE_LOCK: contextvars.ContextVar[asyncio.Lock | None] = contextvars.Co
 )
 _RUN_TOTAL_STEPS: contextvars.ContextVar[int] = contextvars.ContextVar("deepsearch_run_total_steps", default=0)
 _RUN_THINK_COUNT: contextvars.ContextVar[int] = contextvars.ContextVar("deepsearch_run_think_count", default=0)
+_RUN_REFLECT_COUNT: contextvars.ContextVar[int] = contextvars.ContextVar("deepsearch_run_reflect_count", default=0)
 
 
 class GraphReasoningLoop:
@@ -103,6 +108,7 @@ class GraphReasoningLoop:
         lock_token = _RUN_EVIDENCE_LOCK.set(evidence_lock)
         total_steps_token = _RUN_TOTAL_STEPS.set(len(normalized_steps))
         think_count_token = _RUN_THINK_COUNT.set(0)
+        reflect_count_token = _RUN_REFLECT_COUNT.set(0)
         parallel_branches = self._determine_parallel_branches(normalized_steps)
         self._active_parallel_branches = parallel_branches
         sub_agents = [
@@ -139,6 +145,13 @@ class GraphReasoningLoop:
                     completed_steps=completed_internal_steps,
                     total_steps=len(normalized_steps),
                 )
+                await self._emit_trace_reflection(
+                    question=question,
+                    context=context,
+                    outcome=outcome,
+                    accumulated_evidences=evidences,
+                    coverage_metrics=coverage_metrics,
+                )
                 ordered_log = [reasoning_results[i] for i in sorted(reasoning_results)]
                 think_record = await self._maybe_run_periodic_think(
                     question=question,
@@ -158,6 +171,7 @@ class GraphReasoningLoop:
             _RUN_EVIDENCE_LOCK.reset(lock_token)
             _RUN_TOTAL_STEPS.reset(total_steps_token)
             _RUN_THINK_COUNT.reset(think_count_token)
+            _RUN_REFLECT_COUNT.reset(reflect_count_token)
 
         ordered_reasoning: List[ReasoningStepRecord] = []
         for idx, entry in enumerate(normalized_steps):
@@ -185,6 +199,117 @@ class GraphReasoningLoop:
         }
 
     # ------------------------------------------------------------------
+    async def _emit_trace_reflection(
+        self,
+        *,
+        question: str,
+        context: GraphQueryContext,
+        outcome: SubAgentOutcome,
+        accumulated_evidences: List[EvidenceChunk],
+        coverage_metrics: Dict[str, Any],
+    ) -> None:
+        """Emit a user-visible reflection after a step completes.
+
+        This is intentionally short and action-oriented (not chain-of-thought).
+        """
+
+        if not bool(os.getenv("DEEPSEARCH_TRACE_REFLECTION_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}):
+            return
+        if self.llm_connector is None:
+            return
+
+        max_reflections = int(os.getenv("DEEPSEARCH_TRACE_REFLECTION_MAX", "24"))
+        if max_reflections <= 0:
+            return
+        next_count = _RUN_REFLECT_COUNT.get() + 1
+        if next_count > max_reflections:
+            return
+        _RUN_REFLECT_COUNT.set(next_count)
+
+        reasoning = outcome.reasoning
+        step_id = reasoning.step_id
+        tool_name = None
+        tool_logs = reasoning.tool_logs or []
+        if tool_logs:
+            tool_name = tool_logs[-1].tool_name
+        if not tool_name and reasoning.diagnostics.get("tool"):
+            tool_name = str(reasoning.diagnostics.get("tool"))
+        tool_name = tool_name or ("graph_adapter.query" if outcome.traversal else "unknown")
+
+        new_evidences = list(outcome.evidences or [])
+        ev_samples: List[Dict[str, Any]] = []
+        for ev in (new_evidences[:4] if new_evidences else accumulated_evidences[:4]):
+            try:
+                ev_samples.append(
+                    {
+                        "chunk_id": ev.chunk_id,
+                        "source": ev.source,
+                        "score": ev.score,
+                        "preview": (ev.content or "")[:220],
+                    }
+                )
+            except Exception:
+                continue
+
+        traversal = outcome.traversal.model_dump(exclude_none=True) if outcome.traversal else None
+        input_payload = {
+            "step": {
+                "step_id": step_id,
+                "description": reasoning.description,
+                "channel": reasoning.channel,
+                "status": reasoning.status,
+                "tool": tool_name,
+                "output_summary": reasoning.output_summary,
+                "produced_evidence_ids": reasoning.produced_evidence_ids,
+            },
+            "evidence_delta": {
+                "new_evidence_count": len(new_evidences),
+                "new_evidence_ids": [ev.chunk_id for ev in new_evidences[:12]],
+                "samples": ev_samples,
+            },
+            "traversal": traversal,
+            "coverage": {
+                "evidence_count": coverage_metrics.get("evidence_count"),
+                "coverage_ratio": coverage_metrics.get("coverage_ratio"),
+                "coverage_score": coverage_metrics.get("coverage_score"),
+                "completed_steps": coverage_metrics.get("completed_steps"),
+                "total_steps": coverage_metrics.get("total_steps"),
+            },
+            "graph_context": context.model_dump(exclude_none=True),
+        }
+
+        system = (
+            "You are writing a user-visible trace reflection for a research agent.\n"
+            "Write concise, action-oriented notes about what was learned from the last step and what to do next.\n"
+            "Do NOT reveal private chain-of-thought. Do NOT invent facts.\n"
+            "Return plain text (no JSON), at most 10 lines."
+        )
+        user = "Question:\n{q}\n\nLast step snapshot:\n{payload}\n\nWrite the reflection now.".format(
+            q=str(question or "").strip(),
+            payload=json.dumps(input_payload, ensure_ascii=False, indent=2, default=str),
+        )
+        try:
+            low_cost_model = (os.getenv("LOW_COST_MODEL") or "").strip()
+            llm_kwargs: Dict[str, Any] = {"temperature": 0.2}
+            if low_cost_model:
+                llm_kwargs["model"] = low_cost_model
+            text = await call_llm_async(self.llm_connector, [{"role": "system", "content": system}, {"role": "user", "content": user}], **llm_kwargs)
+            rendered = (text or "").strip()
+            if not rendered:
+                return
+            await emit_trace(
+                "think",
+                rendered,
+                meta={
+                    "stage": "reflection",
+                    "step_id": step_id,
+                    "tool": tool_name,
+                    "reflection_index": next_count,
+                },
+            )
+        except Exception:
+            return
+
     async def _execute_plan_entry(
         self,
         *,
@@ -264,7 +389,7 @@ class GraphReasoningLoop:
                 tool_name=result.tool_name,
                 server_name=None,
                 arguments_snapshot=entry["tool_args"],
-                response_excerpt=result.summary[:200] if result.summary else None,
+                response_excerpt=result.summary if result.summary else None,
                 latency_ms=latency_ms,
                 graph_context=context,
                 extra={
@@ -309,8 +434,8 @@ class GraphReasoningLoop:
     def _build_think_config(self, config) -> Dict[str, Any]:
         defaults = {
             "tool_name": "graph.think",
-            "cadence": 0,
-            "min_coverage": 0.75,
+            "cadence": 1,
+            "min_coverage": 1.0,
         }
         if not config:
             return defaults
@@ -595,7 +720,7 @@ class GraphReasoningLoop:
             status="running",
         )
         reasoning_log.append(record)
-        think_evidences = list(evidences[-6:]) if evidences else []
+        think_evidences = list(evidences) if evidences else []
         payload = self._build_tool_payload(
             plan_step_id=think_step_id,
             question=question,
@@ -654,7 +779,7 @@ class GraphReasoningLoop:
             tool_name=result.tool_name,
             server_name=None,
             arguments_snapshot={"trigger": "periodic_think"},
-            response_excerpt=result.summary[:200] if result.summary else None,
+            response_excerpt=result.summary if result.summary else None,
             latency_ms=latency_ms,
             graph_context=context,
             extra={
@@ -675,6 +800,29 @@ class GraphReasoningLoop:
         )
         for note in result.think_notes:
             think_notes.append(note.model_dump(exclude_none=True))
+
+        if result.think_notes:
+            lines: List[str] = []
+            lines.append(f"Think checkpoint: {think_step_id}")
+            for idx, note in enumerate(result.think_notes, start=1):
+                prefix = f"note_{idx}"
+                lines.append(f"{prefix}. reasoning={note.reasoning}")
+                if note.next_actions:
+                    lines.append(f"{prefix}. next_actions={note.next_actions}")
+                if note.coverage_delta is not None:
+                    lines.append(f"{prefix}. coverage_delta={note.coverage_delta}")
+                if note.confidence_delta is not None:
+                    lines.append(f"{prefix}. confidence_delta={note.confidence_delta}")
+                missing = None
+                if isinstance(note.metadata, dict):
+                    missing = note.metadata.get("missing_topics")
+                if isinstance(missing, list) and missing:
+                    lines.append(f"{prefix}. missing_topics={missing}")
+            await emit_trace(
+                "think",
+                "\n".join(lines),
+                meta={"stage": "think", "think_step_id": think_step_id, "tool_name": result.tool_name},
+            )
         return record
 
     def _should_run_think(self, completed_steps: int, coverage_metrics: Dict[str, Any]) -> bool:

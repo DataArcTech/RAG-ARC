@@ -6,6 +6,7 @@ judge whether claims are supported by the provided evidence.
 """
 import asyncio
 import json
+import os
 from typing import Any, Dict, List, Optional, Sequence
 
 from pydantic import BaseModel, Field, ValidationError
@@ -120,9 +121,13 @@ class ConsistencyChecker:
         ]
 
         last_exc: Exception | None = None
+        low_cost_model = (os.getenv("LOW_COST_MODEL") or "").strip()
+        llm_kwargs: Dict[str, Any] = {"temperature": self.temperature}
+        if low_cost_model:
+            llm_kwargs["model"] = low_cost_model
         for attempt in range(max(self.max_retries, 1)):
             try:
-                raw = await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
+                raw = await call_llm_async(self.llm_connector, messages, **llm_kwargs)
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 await asyncio.sleep(min(8.0, 2.0**attempt))
@@ -230,4 +235,3 @@ def _limit_evidences(evidences: List[Dict[str, Any]], max_items: int | None, max
         cloned["content"] = content
         limited.append(cloned)
     return limited
-

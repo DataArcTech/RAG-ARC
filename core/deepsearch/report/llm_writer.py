@@ -366,9 +366,17 @@ def render_markdown_from_structured(structured: Dict[str, Any]) -> str:
     next_steps = structured.get("next_steps") or []
     citations = structured.get("citations") or []
 
+    def _has_cjk(text: str) -> bool:
+        for ch in text:
+            code = ord(ch)
+            if 0x4E00 <= code <= 0x9FFF or 0x3400 <= code <= 0x4DBF:
+                return True
+        return False
+    is_cjk = _has_cjk(title) or _has_cjk(summary)
+
     blocks: List[str] = [f"# {title}"]
     if summary:
-        blocks.extend(["", "## Summary", summary])
+        blocks.extend(["", ("## 结论" if is_cjk else "## Answer"), summary])
 
     for section in sections:
         if not isinstance(section, dict):
@@ -379,39 +387,23 @@ def render_markdown_from_structured(structured: Dict[str, Any]) -> str:
             blocks.extend(["", f"## {section_title}", body])
 
     if limitations:
-        blocks.extend(["", "## Limitations", "\n".join(f"- {item}" for item in limitations if str(item).strip())])
-    if next_steps:
-        blocks.extend(["", "## Next Steps", "\n".join(f"- {item}" for item in next_steps if str(item).strip())])
-    if citations:
-        blocks.append("")
-        blocks.append("## Evidence Index")
-        rendered = list(citations)
-        if DEEPSEARCH_TOP_CHUNKS is not None:
-            rendered = rendered[: max(DEEPSEARCH_TOP_CHUNKS, 0)]
         blocks.extend(
             [
-                "| ID | Type | Source | Used For | Location | Confidence |",
-                "|---|---|---|---|---|---|",
+                "",
+                ("## 局限" if is_cjk else "## Limitations"),
+                "\n".join(f"- {item}" for item in limitations if str(item).strip()),
             ]
         )
-        for entry in rendered:
-            if not isinstance(entry, dict):
-                continue
-            evidence_id = str(entry.get("evidence_id") or "").strip()
-            if not evidence_id:
-                continue
-            source_type = str(entry.get("source_type") or "chunk").strip()
-            source = str(entry.get("source") or "").strip()
-            used_for = str(entry.get("used_for") or "").strip() or "Referenced in report"
-            location = str(entry.get("location_in_report") or "").strip()
-            confidence = entry.get("confidence")
-            try:
-                conf_text = f"{float(confidence):.2f}" if confidence is not None else ""
-            except (TypeError, ValueError):
-                conf_text = ""
-            blocks.append(
-                f"| {evidence_id} | {source_type} | {source} | {used_for} | {location} | {conf_text} |"
-            )
+    if next_steps:
+        blocks.extend(
+            [
+                "",
+                ("## 下一步" if is_cjk else "## Next Steps"),
+                "\n".join(f"- {item}" for item in next_steps if str(item).strip()),
+            ]
+        )
+    # Evidence Index is intentionally omitted from the public Markdown because the rendered
+    # answer already contains inline citations and a numbered References section is appended later.
 
     return "\n".join(blocks).strip()
 

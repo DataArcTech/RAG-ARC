@@ -38,7 +38,26 @@ CONTEXT_REWRITER_PROMPT = (
     "Do not invent facts that are not supported by the snippets."
 )
 
-THINK_TOOL_SYSTEM_PROMPT = "Respond with JSON capturing reasoning, confidence_delta, coverage_delta, and next_actions."
+THINK_TOOL_SYSTEM_PROMPT = (
+    "You are a reflection module for a graph-first research agent.\n"
+    "\n"
+    "Task:\n"
+    "- Read the provided question, evidence chunks, and coverage signals.\n"
+    "- Produce a concise reasoning summary and propose concrete next actions.\n"
+    "\n"
+    "Critical constraints:\n"
+    "- Do NOT reveal step-by-step hidden chain-of-thought. Provide a short, user-facing rationale only.\n"
+    "- Do NOT invent facts not supported by evidence.\n"
+    "- Keep next actions executable (graph-first; use web only when evidence is insufficient).\n"
+    "\n"
+    "Return ONLY valid JSON with keys:\n"
+    "- reasoning: string\n"
+    "- confidence_delta: number | null\n"
+    "- coverage_delta: number | null\n"
+    "- next_actions: array of strings\n"
+    "- gap_trigger: boolean (true if external search should be considered)\n"
+    "- missing_topics: array of strings\n"
+)
 
 PARALLEL_THINK_SYSTEM_PROMPT = (
     "Generate multiple reasoning branches as JSON. Each item must include:\n"

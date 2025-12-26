@@ -5,6 +5,7 @@ from encapsulation.data_model.deepsearch import EvidenceChunk
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from core.graph_adapter.concurrency import adapter_locked
+from core.deepsearch.utils.query_clean import clean_query
 
 
 class ChunkScanTool(GraphTool):
@@ -49,7 +50,15 @@ class ChunkScanTool(GraphTool):
                 access_scope=request.access_scope,
             )
         chunks = self._normalize_chunks(payload.get("chunks"))
-        evidences = self._to_evidences(chunks[: self.max_chunks], adapter.metadata().adapter_name)
+        selected: List[Dict[str, Any]] = []
+        max_chunks = int(self.max_chunks) if self.max_chunks is not None else 0
+        if max_chunks < 0:
+            max_chunks = 0
+        for chunk in chunks:
+            if max_chunks and len(selected) >= max_chunks:
+                break
+            selected.append(chunk)
+        evidences = self._to_evidences(selected, adapter.metadata().adapter_name)
         if not evidences:
             return ToolResult(
                 summary="Chunk scan completed but no high-signal chunks surfaced.",
@@ -71,8 +80,8 @@ class ChunkScanTool(GraphTool):
     @staticmethod
     def _resolve_query(request: ToolRunRequest) -> str:
         if isinstance(request.extra.get("focus_query"), str):
-            return request.extra["focus_query"]
-        return request.question
+            return clean_query(request.extra["focus_query"], max_chars=240)
+        return clean_query(request.question, max_chars=240)
 
     @staticmethod
     def _normalize_chunks(chunks: Any) -> List[Dict[str, Any]]:

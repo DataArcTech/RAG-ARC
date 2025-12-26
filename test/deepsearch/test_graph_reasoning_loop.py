@@ -103,8 +103,10 @@ async def test_graph_reasoning_combines_traversal_and_tools():
     assert result["graph_traversals"], "graph traversal should run for the first step"
     assert any(run["tool_name"] == "graph.context_rollup" for run in result["tool_results"])
     assert result["pending_external"] and result["pending_external"][0]["step_id"] == "plan_03"
-    assert tool_manager.calls and tool_manager.calls[0][0] == "graph.context_rollup"
-    assert tool_manager.calls[0][1]["context_evidences"], "tool should receive evidence context"
+    called = [name for name, _ in tool_manager.calls]
+    assert "graph.context_rollup" in called
+    rollup_payloads = [payload for name, payload in tool_manager.calls if name == "graph.context_rollup"]
+    assert rollup_payloads and rollup_payloads[0]["context_evidences"], "tool should receive evidence context"
     statuses = {step["step_id"]: step["status"] for step in result["reasoning_steps"]}
     assert statuses["plan_01"] == "done"
     assert statuses["plan_02"] == "done"

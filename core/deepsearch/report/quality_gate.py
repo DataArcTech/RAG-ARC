@@ -6,6 +6,7 @@ workflow similar to Anthropic's multi-agent Research architecture.
 """
 
 import json
+import os
 import re
 from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Tuple
 
@@ -274,9 +275,13 @@ class DeepSearchQualityGate:
         ]
 
         last_exc: Exception | None = None
+        low_cost_model = (os.getenv("LOW_COST_MODEL") or "").strip()
+        llm_kwargs: Dict[str, Any] = {"temperature": cfg.judge_temperature}
+        if low_cost_model:
+            llm_kwargs["model"] = low_cost_model
         for _ in range(max(cfg.judge_max_retries, 1)):
             try:
-                raw = await call_llm_async(self.llm_connector, messages, temperature=cfg.judge_temperature)
+                raw = await call_llm_async(self.llm_connector, messages, **llm_kwargs)
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 continue

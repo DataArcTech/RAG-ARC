@@ -1,5 +1,6 @@
 """Graph think tool that offers structured reasoning pauses."""
 import json
+import os
 from typing import Any, Dict, List, Optional
 
 from encapsulation.data_model.deepsearch import ThinkNote, GraphQueryContext
@@ -70,9 +71,10 @@ class GraphThinkTool(GraphTool):
         prompt_payload = {
             "question": request.question,
             "plan_step": request.plan_step,
-            "recent_context": [ev.content[:200] for ev in request.context_evidences[-3:]],
+            "context_evidences": [ev.model_dump(exclude_none=True) for ev in request.context_evidences],
             "graph_context": context_snapshot,
             "coverage_metrics": coverage_snapshot,
+            "extra": request.extra,
         }
         messages = [
             {"role": "system", "content": self.system_prompt},
@@ -82,7 +84,11 @@ class GraphThinkTool(GraphTool):
             },
         ]
         try:
-            response = await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
+            low_cost_model = (os.getenv("LOW_COST_MODEL") or "").strip()
+            llm_kwargs: Dict[str, Any] = {"temperature": self.temperature}
+            if low_cost_model:
+                llm_kwargs["model"] = low_cost_model
+            response = await call_llm_async(self.llm_connector, messages, **llm_kwargs)
             parsed = safe_json_loads(response, expected="dict") or {}
             heuristic_metadata = heuristic_note.metadata or {}
             gap_trigger = bool(parsed.get("gap_trigger")) or heuristic_metadata.get("gap_trigger", False)

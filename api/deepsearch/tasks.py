@@ -80,7 +80,8 @@ class DeepSearchTaskRegistry:
             "timestamp_ms": _now_ms(),
             "payload": payload,
         }
-        info.last_progress = payload
+        if event_type != "trace":
+            info.last_progress = payload
         info.append_event(event)
         try:
             progress = payload.get("progress") if isinstance(payload, dict) else None

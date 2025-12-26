@@ -698,3 +698,40 @@ class RedisTaskQueue:
         except Exception:
             return None
         return parsed if isinstance(parsed, dict) else None
+
+    def get_latest_progress_event_filtered(
+        self,
+        task_run_id: str,
+        *,
+        exclude_statuses: set[str],
+        scan_count: int = 200,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the newest progress event whose status is not excluded."""
+
+        client = self._client()
+        if client is None:
+            return None
+        stream = self._settings.stream_progress_for_run(task_run_id)
+        try:
+            entries = client.xrevrange(stream, max="+", min="-", count=max(1, int(scan_count)))
+        except Exception as exc:
+            logger.warning("RedisTaskQueue xrevrange progress failed (%s): %s", task_run_id, exc)
+            return None
+        if not entries:
+            return None
+        excluded = {str(item) for item in exclude_statuses if str(item).strip()}
+        for _, fields in entries:
+            payload = fields.get("payload")
+            if not payload:
+                continue
+            try:
+                parsed = json.loads(payload)
+            except Exception:
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            status = str(parsed.get("status") or "").strip()
+            if status and status in excluded:
+                continue
+            return parsed
+        return None

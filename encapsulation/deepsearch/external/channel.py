@@ -1,11 +1,14 @@
 """External channel orchestrator for Tavily provider or MCP tools."""
 import asyncio
+import json
 import os
 import time
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from encapsulation.data_model.deepsearch import EvidenceChunk, GraphQueryContext
+from core.deepsearch.trace import emit_trace
+from core.utils.json_safe import json_safe
 
 
 class ExternalSearchChannel:
@@ -61,6 +64,32 @@ class ExternalSearchChannel:
                 break
             provider = self._task_provider(task)
             log_entry = self._build_log(task=task, provider=provider, gap_result=gap_result)
+            call_id = uuid.uuid4().hex
+            query = self._task_query(task, default=question or "")
+            try:
+                await emit_trace(
+                    "tool_call",
+                    json.dumps(
+                        json_safe(
+                            {
+                                "call_id": call_id,
+                                "tool_name": "web.search",
+                                "provider": provider,
+                                "plan_step": log_entry.get("plan_step") or task.get("step_id") or task.get("step") or "external",
+                                "query": query,
+                                "max_results": self._tavily_max_results,
+                                "context_evidence_count": len(context_evidences),
+                                "coverage_metrics": coverage_metrics,
+                            }
+                        ),
+                        ensure_ascii=False,
+                        indent=2,
+                        default=str,
+                    ),
+                    meta={"call_id": call_id, "tool_name": "web.search", "provider": provider},
+                )
+            except Exception:
+                pass
             task_start = time.perf_counter()
             try:
                 chunks, diagnostics, event = await self._execute_task(
@@ -83,6 +112,27 @@ class ExternalSearchChannel:
                     diagnostics={"error": "timeout"},
                 )
                 logs.append(log_entry)
+                try:
+                    await emit_trace(
+                        "tool_response",
+                        json.dumps(
+                            json_safe(
+                                {
+                                    "call_id": call_id,
+                                    "tool_name": "web.search",
+                                    "provider": provider,
+                                    "query": query,
+                                    "error": "timeout",
+                                }
+                            ),
+                            ensure_ascii=False,
+                            indent=2,
+                            default=str,
+                        ),
+                        meta={"call_id": call_id, "tool_name": "web.search", "provider": provider, "ok": False},
+                    )
+                except Exception:
+                    pass
                 continue
             except Exception as exc:  # pragma: no cover - defensive telemetry path
                 log_entry["status"] = "error"
@@ -96,6 +146,27 @@ class ExternalSearchChannel:
                     message=str(exc),
                 )
                 logs.append(log_entry)
+                try:
+                    await emit_trace(
+                        "tool_response",
+                        json.dumps(
+                            json_safe(
+                                {
+                                    "call_id": call_id,
+                                    "tool_name": "web.search",
+                                    "provider": provider,
+                                    "query": query,
+                                    "error": str(exc),
+                                }
+                            ),
+                            ensure_ascii=False,
+                            indent=2,
+                            default=str,
+                        ),
+                        meta={"call_id": call_id, "tool_name": "web.search", "provider": provider, "ok": False},
+                    )
+                except Exception:
+                    pass
                 continue
             log_entry["status"] = "ok"
             log_entry["evidence_count"] = len(chunks)
@@ -111,6 +182,30 @@ class ExternalSearchChannel:
                 evidence_count=log_entry["evidence_count"],
                 status=log_entry["status"],
             )
+            try:
+                await emit_trace(
+                    "tool_response",
+                    json.dumps(
+                        json_safe(
+                            {
+                                "call_id": call_id,
+                                "tool_name": "web.search",
+                                "provider": provider,
+                                "query": query,
+                                "latency_ms": log_entry.get("latency_ms"),
+                                "evidence_count": len(chunks),
+                                "evidences": chunks[:8],
+                                "diagnostics": diagnostics,
+                            }
+                        ),
+                        ensure_ascii=False,
+                        indent=2,
+                        default=str,
+                    ),
+                    meta={"call_id": call_id, "tool_name": "web.search", "provider": provider, "ok": True},
+                )
+            except Exception:
+                pass
             outputs.extend(chunks)
         return {"evidences": outputs, "logs": logs}
 

@@ -12,6 +12,7 @@ class CitationAgent:
     """Normalize citations and build an evidence index after report generation."""
 
     _BRACKET_RE = re.compile(r"\[([^\[\]]+)\]")
+    _CJK_BRACKET_RE = re.compile(r"【([^【】]+)】")
 
     def process(
         self,
@@ -133,7 +134,10 @@ def _extract_inline_citations(
         return None
 
     def _scan(text: str, location: str) -> None:
-        for raw in CitationAgent._BRACKET_RE.findall(text or ""):
+        raw_tokens: List[str] = []
+        raw_tokens.extend(CitationAgent._BRACKET_RE.findall(text or ""))
+        raw_tokens.extend(CitationAgent._CJK_BRACKET_RE.findall(text or ""))
+        for raw in raw_tokens:
             candidates = re.split(r"[,\s]+", raw.strip())
             for candidate in candidates:
                 token = _resolve(candidate)

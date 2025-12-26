@@ -203,9 +203,30 @@ async def test_pattern_probe_handles_chinese_tokens():
         extra={},
     )
     result = await tool.run(request)
-    assert result.evidences  # 应该匹配中文 chunk
-    assert result.diagnostics["keywords"]  # 记录被选中的关键词
+    assert result.evidences  # Should return evidence for a CJK query.
+    assert result.diagnostics["keywords"]  # Extracted keywords should be recorded.
     assert "Pattern scan succeeded" in result.summary
+
+
+@pytest.mark.asyncio
+async def test_pattern_probe_merges_patterns_across_keywords():
+    adapter = _StubAdapter()
+    tool = PatternProbeTool()
+    request = ToolRunRequest(
+        question="OpenAI founders",
+        plan_step="plan_01",
+        context_evidences=[],
+        adapter=adapter,
+        access_scope=None,
+        extra={},
+    )
+    result = await tool.run(request)
+    assert result.evidences
+    for ev in result.evidences:
+        patterns = ev.provenance.get("patterns") if isinstance(ev.provenance, dict) else None
+        assert isinstance(patterns, list)
+        assert "openai" in patterns
+        assert "founders" in patterns
 
 
 @pytest.mark.asyncio
