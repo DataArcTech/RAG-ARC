@@ -142,12 +142,31 @@ else
 fi
 echo ""
 
-# 4. 处理Neo4j（已有则重启，无则创建，保留数据卷）
+# 4. 处理Neo4j（已有则检查端口映射，无则创建，保留数据卷）
 echo "🔷 处理Neo4j容器 [${NEO4J_CONTAINER_NAME}]..."
 if docker ps -a | grep -q "${NEO4J_CONTAINER_NAME}"; then
-    # 已有容器：重启
-    docker stop ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 && echo "  ⏹️  已停止旧Neo4j容器"
-    docker start ${NEO4J_CONTAINER_NAME} && echo "  ✅ Neo4j容器重启成功（保留数据）"
+    # 检查现有容器的Bolt端口映射是否匹配
+    CURRENT_BOLT_PORT=$(docker port ${NEO4J_CONTAINER_NAME} 7687 | cut -d':' -f2 || true)
+    if [ "${CURRENT_BOLT_PORT}" != "${NEO4J_BOLT_HOST_PORT}" ]; then
+        echo "  ⚠️  Neo4j容器Bolt端口映射不匹配 (${CURRENT_BOLT_PORT} != ${NEO4J_BOLT_HOST_PORT})，删除并重建容器..."
+        docker stop ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 || true
+        docker rm ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 || true
+        docker run -d \
+            --name ${NEO4J_CONTAINER_NAME} \
+            --network ${NETWORK_NAME} \
+            -p ${NEO4J_WEB_HOST_PORT}:7474 \
+            -p ${NEO4J_BOLT_HOST_PORT}:7687 \
+            -e NEO4J_AUTH=${NEO4J_USERNAME}/${NEO4J_PASSWORD} \
+            -e NEO4J_PLUGINS='["apoc"]' \
+            -e NEO4J_dbms_security_procedures_unrestricted=apoc.* \
+            -v rag-arc-neo4j-data:/data \
+            -v rag-arc-neo4j-logs:/logs \
+            ${NEO4J_IMAGE} && echo "  ✅ Neo4j容器已重建并启动（保留数据卷）"
+    else
+        # 端口映射匹配，只需重启
+        docker stop ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 && echo "  ⏹️  已停止旧Neo4j容器"
+        docker start ${NEO4J_CONTAINER_NAME} && echo "  ✅ Neo4j容器重启成功（保留数据）"
+    fi
 else
     # 无容器：创建新容器+数据卷
     docker run -d \
