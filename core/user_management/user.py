@@ -79,6 +79,8 @@ class UserStorage(AbstractModule):
         self,
         user_name: str,
         hashed_password: str,
+        name: Optional[str] = None,
+        type: int = 0,
         **kwargs: Any
     ) -> uuid.UUID:
         """
@@ -87,6 +89,8 @@ class UserStorage(AbstractModule):
         Args:
             user_name: Unique username
             hashed_password: Hashed password (should be hashed by caller)
+            name: User display name (optional)
+            type: User type, 0=livingKB / 1=chatKB (default: 0)
             **kwargs: Additional arguments
 
         Returns:
@@ -108,7 +112,9 @@ class UserStorage(AbstractModule):
             # Create user metadata
             user_metadata = User(
                 user_name=user_name,
+                name=name,
                 hashed_password=hashed_password,
+                type=type,
                 created_at=datetime.now(),
                 updated_at=datetime.now()
             )

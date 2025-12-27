@@ -34,6 +34,7 @@ class UserCreate(BaseModel):
     name: str
     user_name: str
     password: str
+    type: int  # 0=livingKB / 1=chatKB
 
 
 class Account(AbstractModule):
@@ -93,10 +94,14 @@ class Account(AbstractModule):
         """Register a new user (synchronous)."""
         try:
             hashed_password = self.get_password_hash(user_data.password)
-            new_user = self.user_storage.create_user(
-                user_name=user_data.user_name, 
-                hashed_password=hashed_password
+            new_user_id = self.user_storage.create_user(
+                user_name=user_data.user_name,
+                name=user_data.name,
+                hashed_password=hashed_password,
+                type=user_data.type
             )
+            # 返回创建的用户对象
+            new_user = self.user_storage.get_user(new_user_id)
             return new_user
         except (IntegrityError, UserValidationError) as e:
             logger.error(f"User creation failed: {str(e)}")
