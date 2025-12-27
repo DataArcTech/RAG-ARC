@@ -86,6 +86,7 @@ from api.routers import deepsearch as deepsearch_router
 from api.routers import session as session_router
 from api.routers import auth as auth_router
 from api.routers import user as user_router
+from api.routers import chatbot as chatbot_router
 from asgi_correlation_id import CorrelationIdMiddleware
 from asgi_correlation_id.middleware import is_valid_uuid4
 from api.middleware.response_wrapper import RequestIdResponseWrapper
@@ -204,3 +205,4 @@ app.include_router(deepsearch_router.router)
 app.include_router(session_router.router)
 app.include_router(auth_router.router)
 app.include_router(user_router.router)
+app.include_router(chatbot_router.router)
