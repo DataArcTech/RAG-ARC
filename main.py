@@ -4,7 +4,8 @@ import os
 from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
-from fastapi import FastAPI
+from typing import Annotated
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from core.graph_adapter.scope_provider import configure_scope_provider
@@ -85,6 +86,7 @@ from api.routers import rag_inference
 from api.routers import deepsearch as deepsearch_router
 from api.routers import session as session_router
 from api.routers import auth as auth_router
+from api.routers.auth import get_current_user
 from api.routers import user as user_router
 from api.routers import chatbot as chatbot_router
 from asgi_correlation_id import CorrelationIdMiddleware
