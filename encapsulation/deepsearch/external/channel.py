@@ -2,7 +2,6 @@
 import asyncio
 import hashlib
 import json
-import os
 import time
 import uuid
 from pathlib import Path
@@ -25,20 +24,17 @@ class ExternalSearchChannel:
     ):
         self.tool_manager = tool_manager
         self.config = self._model_to_dict(config)
+        if not self.config:
+            raise ValueError("ExternalSearchChannel requires an explicit config dict")
         self.telemetry_client = telemetry_client
-        self.max_rounds = max(1, int(self.config.get("max_rounds", 2)))
-        provider = self.config.get("default_provider") or os.getenv("DEEPSEARCH_WEB_PROVIDER")
-        self.default_provider = self._normalize_provider(provider)
-        self._context_limit = int(self.config.get("context_window_limit", 12))
-        self._tavily_timeout = float(self.config.get("http_timeout", 20))
-        self._tavily_max_results = int(self.config.get("max_results", 5))
-        try:
-            timeout = float(self.config.get("tool_timeout_seconds", 45.0))
-        except (TypeError, ValueError):
-            timeout = 45.0
-        self._tool_timeout = max(0.0, timeout)
-        self._cache_mode = (os.getenv("DEEPSEARCH_EXTERNAL_CACHE_MODE") or self.config.get("cache_mode") or "auto").strip().lower()
-        self._cache_dir = os.getenv("DEEPSEARCH_EXTERNAL_CACHE_DIR") or self.config.get("cache_dir")
+        self.max_rounds = max(1, int(self.config["max_rounds"]))
+        self.default_provider = self._normalize_provider(self.config["default_provider"])
+        self._context_limit = int(self.config["context_window_limit"])
+        self._tavily_timeout = float(self.config["http_timeout"])
+        self._tavily_max_results = int(self.config["max_results"])
+        self._tool_timeout = max(0.0, float(self.config["tool_timeout_seconds"]))
+        self._cache_mode = str(self.config["cache_mode"]).strip().lower()
+        self._cache_dir = self.config.get("cache_dir")
 
     async def run(
         self,
@@ -73,8 +69,13 @@ class ExternalSearchChannel:
             provider = self._task_provider(task)
             log_entry = self._build_log(task=task, provider=provider, gap_result=gap_result)
             call_id = uuid.uuid4().hex
-            query = self._task_query(task, default=question or "")
-            tool_name = str(task.get("tool") or "web.search")
+            query = self._task_query(task)
+            tool_name = str(task.get("tool") or "").strip()
+            if not tool_name:
+                raise ValueError("External task is missing required tool name")
+            plan_step = str(task.get("step_id") or task.get("step") or "").strip()
+            if not plan_step:
+                raise ValueError("External task is missing required step_id")
             cache_key = self._cache_key(provider=provider, tool_name=tool_name, query=query, task=task)
             if cache_root is not None and cache_mode in {"replay", "auto"}:
                 replay = self._load_cache(cache_root, cache_key)
@@ -106,7 +107,14 @@ class ExternalSearchChannel:
                                 indent=2,
                                 default=str,
                             ),
-                            meta={"call_id": call_id, "tool_name": tool_name, "provider": provider, "ok": True, "cache_mode": cache_mode, "cache_key": cache_key},
+                            meta={
+                                "call_id": call_id,
+                                "tool_name": tool_name,
+                                "provider": provider,
+                                "ok": True,
+                                "cache_mode": cache_mode,
+                                "cache_key": cache_key,
+                            },
                         )
                     except Exception:
                         pass
@@ -121,7 +129,7 @@ class ExternalSearchChannel:
                                 "call_id": call_id,
                                 "tool_name": tool_name,
                                 "provider": provider,
-                                "plan_step": log_entry.get("plan_step") or task.get("step_id") or task.get("step") or "external",
+                                "plan_step": plan_step,
                                 "query": query,
                                 "max_results": self._tavily_max_results,
                                 "context_evidence_count": len(context_evidences),
@@ -134,7 +142,13 @@ class ExternalSearchChannel:
                         indent=2,
                         default=str,
                     ),
-                    meta={"call_id": call_id, "tool_name": tool_name, "provider": provider, "cache_mode": cache_mode, "cache_key": cache_key},
+                    meta={
+                        "call_id": call_id,
+                        "tool_name": tool_name,
+                        "provider": provider,
+                        "cache_mode": cache_mode,
+                        "cache_key": cache_key,
+                    },
                 )
             except Exception:
                 pass
@@ -353,8 +367,10 @@ class ExternalSearchChannel:
         coverage_metrics: Dict[str, Any],
         gap_result: Optional[Dict[str, Any]],
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], str]:
-        tool = task.get("tool") or "web.search"
-        provider = self._normalize_provider(provider or self.default_provider)
+        tool = str(task.get("tool") or "").strip()
+        if not tool:
+            raise ValueError("External task is missing required tool name")
+        provider = self._normalize_provider(provider)
         if provider == "tavily":
             chunks, diagnostics = await self._execute_with_provider(task, provider=provider, question=question)
             return chunks, diagnostics, provider
@@ -369,23 +385,8 @@ class ExternalSearchChannel:
                 coverage_metrics=coverage_metrics,
                 gap_result=gap_result,
             )
-            return chunks, diagnostics, tool
-        # Default: attempt tool manager first; fall back to Tavily HTTP provider.
-        try:
-            chunks, diagnostics = await self._execute_with_tool_manager(
-                task,
-                tool_name=tool,
-                provider=provider,
-                question=question,
-                graph_context=graph_context,
-                context_evidences=context_evidences,
-                coverage_metrics=coverage_metrics,
-                gap_result=gap_result,
-            )
-            return chunks, diagnostics, tool
-        except Exception:
-            chunks, diagnostics = await self._execute_with_provider(task, provider="tavily", question=question)
-            return chunks, diagnostics, "tavily"
+            return chunks, diagnostics, provider
+        raise ValueError(f"Unsupported external provider: {provider}")
 
     async def _execute_with_provider(
         self,
@@ -411,7 +412,7 @@ class ExternalSearchChannel:
         provenance.setdefault("provider", provider)
         provenance.setdefault("tool", tool_name)
         provenance.setdefault("step_id", task.get("step_id"))
-        provenance.setdefault("query", self._task_query(task, default=""))
+        provenance.setdefault("query", self._task_query(task))
         if diagnostics:
             provenance.setdefault("diagnostics", diagnostics)
         chunk["provenance"] = provenance
@@ -428,9 +429,12 @@ class ExternalSearchChannel:
         gap_result: Optional[Dict[str, Any]],
         provider: str,
     ) -> Dict[str, Any]:
+        plan_step = str(task.get("step_id") or "").strip()
+        if not plan_step:
+            raise ValueError("External task is missing required step_id")
         return {
             "question": question,
-            "plan_step": task.get("step_id") or task.get("step") or "external",
+            "plan_step": plan_step,
             "context_evidences": self._context_window(context_evidences),
             "extra": {
                 "provider": provider,
@@ -498,9 +502,7 @@ class ExternalSearchChannel:
         except ImportError as exc:  # pragma: no cover - import guard
             raise RuntimeError("httpx is required for Tavily search; install the 'dev' extras.") from exc
 
-        query = self._task_query(task, default=question)
-        if not query:
-            return [], {"result_count": 0}
+        query = self._task_query(task)
 
         payload = {
             "api_key": api_key,
@@ -594,57 +596,34 @@ class ExternalSearchChannel:
         provider = metadata.get("provider") or metadata.get("external_provider")
         if isinstance(provider, str) and provider.strip():
             return self._normalize_provider(provider)
-        return self._normalize_provider(self.default_provider)
+        raise ValueError("External task is missing required metadata.provider")
 
     @staticmethod
     def _normalize_provider(provider: Any) -> str:
         token = str(provider or "").strip().lower()
-        if token in {"mcp", "tool"}:
+        if token in {"mcp", "tool", "tavily"}:
             return token
-        return "tavily"
+        raise ValueError(f"Unsupported external provider: {token}")
 
-    def _task_query(self, task: Dict[str, Any], *, default: str) -> str:
-        metadata = task.get("metadata") or {}
-        for key in ("query", "search_query", "question"):
-            value = metadata.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        tool_args = task.get("tool_args") or {}
-        for key in ("query", "question", "prompt"):
-            value = tool_args.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        description = task.get("description")
-        if isinstance(description, str) and description.strip():
-            return description.strip()
-        return default
+    def _task_query(self, task: Dict[str, Any]) -> str:
+        tool_args = task.get("tool_args")
+        if not isinstance(tool_args, dict):
+            raise ValueError("External task is missing required tool_args dict")
+        value = tool_args.get("query")
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("External task tool_args.query is required")
+        return value.strip()
 
     def _resolve_tavily_key(self) -> Optional[str]:
-        key = os.getenv("TAVILY_API_KEY")
-        if key:
-            return key.strip()
-        return None
+        key = self.config.get("tavily_api_key")
+        if key is None:
+            return None
+        return str(key).strip() or None
 
     def _is_enabled(self) -> bool:
-        """Resolve enablement (config SoT; env overrides)."""
+        """Resolve enablement from config only (single source of truth)."""
 
-        env = self._read_env_bool("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED")
-        config_enabled = bool(self.config.get("enabled"))
-        if env is not None:
-            return bool(env)
-        return config_enabled
-
-    @staticmethod
-    def _read_env_bool(name: str) -> Optional[bool]:
-        raw = os.getenv(name)
-        if raw is None:
-            return None
-        value = raw.strip().lower()
-        if value in {"1", "true", "yes", "on"}:
-            return True
-        if value in {"0", "false", "no", "off"}:
-            return False
-        return None
+        return bool(self.config.get("enabled"))
 
     def _log_event(
         self,

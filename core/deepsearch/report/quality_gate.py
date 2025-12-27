@@ -6,7 +6,6 @@ workflow similar to Anthropic's multi-agent Research architecture.
 """
 
 import json
-import os
 import re
 from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Tuple
 
@@ -32,6 +31,8 @@ class QualityGateConfig(BaseModel):
     enable_llm_judge: bool = Field(True, description="Use an LLM rubric judge to generate actions/scores.")
     judge_temperature: float = Field(0.0, ge=0.0, le=1.0)
     judge_max_retries: int = Field(1, ge=0, le=5)
+    judge_max_evidence_items: int = Field(20, ge=1, le=80, description="Max evidence snippets forwarded to the LLM judge.")
+    judge_max_evidence_chars: int = Field(900, ge=100, le=5000, description="Max characters per snippet for the LLM judge.")
     trigger_external_on_quality_failure: bool = Field(
         True, description="Allow the gate to request external search even if gap detection did not trigger it."
     )
@@ -155,34 +156,41 @@ class DeepSearchQualityGate:
             deterministic_pass = False
             reasons.append(f"consistency_check_failed (issues={consistency_issue_count})")
 
-        should_call_judge = bool(
-            cfg.enable_llm_judge
-            and self.llm_connector is not None
-            and (not deterministic_pass or bool(missing_topics))
-        )
-        judge = None
-        if should_call_judge:
-            judge = await self._maybe_judge_with_llm(
-                question=question,
-                sr=sr,
-                evidences=evidences,
-                metrics=metrics,
-                external_allowed=external_allowed,
-                cfg=cfg,
-            )
+        if not cfg.enable_llm_judge:
+            raise ValueError("Quality gate is enabled but enable_llm_judge is false.")
+        if self.llm_connector is None:
+            raise RuntimeError("Quality gate requires an LLM connector when enabled.")
 
-        passed = deterministic_pass and (judge.passed if judge else True)
-        should_iterate = (not passed) and cfg.max_rounds > 1
-
-        actions = self._synthesize_actions(
+        judge = await self._maybe_judge_with_llm(
             question=question,
+            sr=sr,
+            evidences=evidences,
             metrics=metrics,
-            judge=judge,
             external_allowed=external_allowed,
             cfg=cfg,
         )
+
+        passed = bool(deterministic_pass and judge and judge.passed)
+        should_iterate = (not passed) and cfg.max_rounds > 1
+
+        actions: List[QualityGateAction] = list(judge.next_actions if judge else [])
         if not cfg.trigger_external_on_quality_failure:
             actions = [a for a in actions if a.action != "external_search"]
+        if not external_allowed:
+            actions = [a for a in actions if a.action != "external_search"]
+        normalized: List[QualityGateAction] = []
+        seen: set[tuple[str, str]] = set()
+        for action in actions:
+            key = (action.action, (action.query or "").strip().lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(action)
+            if len(normalized) >= cfg.max_actions:
+                break
+        actions = normalized
+        if should_iterate and not actions:
+            raise ValueError("Quality gate failed but returned no next_actions.")
 
         return QualityGateResult(
             enabled=True,
@@ -198,15 +206,15 @@ class DeepSearchQualityGate:
     @staticmethod
     def _coerce_config(config: Dict[str, Any] | QualityGateConfig | None) -> QualityGateConfig:
         if config is None:
-            return QualityGateConfig()
+            raise ValueError("Quality gate requires an explicit config (no implicit defaults).")
         if isinstance(config, QualityGateConfig):
             return config
         if isinstance(config, dict):
             try:
                 return QualityGateConfig.model_validate(config)
-            except ValidationError:
-                return QualityGateConfig()
-        return QualityGateConfig()
+            except ValidationError as exc:
+                raise ValueError(f"Invalid quality gate config: {exc}") from exc
+        raise TypeError("Unsupported quality gate config type")
 
     @staticmethod
     def _collect_report_text(sr: Mapping[str, Any]) -> List[Tuple[str, str]]:
@@ -237,9 +245,9 @@ class DeepSearchQualityGate:
         metrics: QualityGateMetrics,
         external_allowed: bool,
         cfg: QualityGateConfig,
-    ) -> Optional[QualityGateJudgeResult]:
+    ) -> QualityGateJudgeResult:
         if not cfg.enable_llm_judge or self.llm_connector is None:
-            return None
+            raise RuntimeError("LLM judge is required when quality gate is enabled.")
 
         summary = str(sr.get("summary") or "").strip()
         sections = sr.get("sections") if isinstance(sr.get("sections"), list) else []
@@ -266,7 +274,11 @@ class DeepSearchQualityGate:
             summary=summary,
             sections_markdown=sections_markdown,
             signals_json=json.dumps(signals, ensure_ascii=False, indent=2),
-            evidence_json=json.dumps(_limit_evidences(evidences, max_items=20, max_chars=900), ensure_ascii=False, indent=2),
+            evidence_json=json.dumps(
+                _limit_evidences(evidences, max_items=cfg.judge_max_evidence_items, max_chars=cfg.judge_max_evidence_chars),
+                ensure_ascii=False,
+                indent=2,
+            ),
             external_allowed=str(bool(external_allowed)).lower(),
         )
         messages = [
@@ -275,165 +287,21 @@ class DeepSearchQualityGate:
         ]
 
         last_exc: Exception | None = None
-        low_cost_model = (os.getenv("LOW_COST_MODEL") or "").strip()
-        llm_kwargs: Dict[str, Any] = {"temperature": cfg.judge_temperature}
-        if low_cost_model:
-            llm_kwargs["model"] = low_cost_model
         for _ in range(max(cfg.judge_max_retries, 1)):
             try:
-                raw = await call_llm_async(self.llm_connector, messages, **llm_kwargs)
+                raw = await call_llm_async(self.llm_connector, messages, temperature=cfg.judge_temperature)
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 continue
             parsed = _safe_parse_json(raw)
             if parsed is None:
-                return QualityGateJudgeResult(
-                    **{
-                        "pass": False,
-                        "overall": 0.0,
-                        "scores": {
-                            "factual_accuracy": 0.0,
-                            "citation_accuracy": 0.0,
-                            "completeness": 0.0,
-                            "source_quality": 0.0,
-                        },
-                        "reasons": ["LLM judge did not return valid JSON."],
-                        "missing_topics": [],
-                        "missing_claims": [],
-                        "next_actions": [],
-                    }
-                )
+                raise ValueError("LLM judge did not return valid JSON.")
             try:
                 return QualityGateJudgeResult.model_validate(parsed)
             except ValidationError:
-                return QualityGateJudgeResult(
-                    **{
-                        "pass": False,
-                        "overall": 0.0,
-                        "scores": {
-                            "factual_accuracy": 0.0,
-                            "citation_accuracy": 0.0,
-                            "completeness": 0.0,
-                            "source_quality": 0.0,
-                        },
-                        "reasons": ["LLM judge returned JSON with an unexpected schema."],
-                        "missing_topics": [],
-                        "missing_claims": [],
-                        "next_actions": [],
-                    }
-                )
+                raise ValueError("LLM judge returned JSON with an unexpected schema.") from None
 
-        if last_exc is not None:
-            return QualityGateJudgeResult(
-                **{
-                    "pass": False,
-                    "overall": 0.0,
-                    "scores": {
-                        "factual_accuracy": 0.0,
-                        "citation_accuracy": 0.0,
-                        "completeness": 0.0,
-                        "source_quality": 0.0,
-                    },
-                    "reasons": [f"LLM judge failed to run: {last_exc}"],
-                    "missing_topics": [],
-                    "missing_claims": [],
-                    "next_actions": [],
-                }
-            )
-        return None
-
-    def _synthesize_actions(
-        self,
-        *,
-        question: str,
-        metrics: QualityGateMetrics,
-        judge: Optional[QualityGateJudgeResult],
-        external_allowed: bool,
-        cfg: QualityGateConfig,
-    ) -> List[QualityGateAction]:
-        actions: List[QualityGateAction] = []
-
-        if judge and judge.next_actions:
-            actions.extend(judge.next_actions)
-
-        missing_topics = list(metrics.missing_topics)
-        if judge and judge.missing_topics:
-            missing_topics = list({*missing_topics, *judge.missing_topics})
-
-        missing_claims: List[str] = []
-        if judge and judge.missing_claims:
-            missing_claims.extend([c for c in judge.missing_claims if isinstance(c, str) and c.strip()])
-        if metrics.uncited_sentences:
-            missing_claims.extend(metrics.uncited_sentences)
-
-        if missing_topics:
-            for topic in missing_topics[: max(cfg.max_actions, 1)]:
-                query = f"{question} {topic}".strip()
-                actions.append(
-                    QualityGateAction(
-                        action="graph_search",
-                        query=query,
-                        rationale=f"Fill missing topic: {topic}",
-                        priority=1,
-                    )
-                )
-                if external_allowed:
-                    actions.append(
-                        QualityGateAction(
-                            action="external_search",
-                            query=query,
-                            rationale=f"Collect external sources for missing topic: {topic}",
-                            priority=2,
-                        )
-                    )
-
-        if missing_claims and metrics.citation_sentence_coverage < cfg.min_citation_sentence_coverage:
-            for claim in missing_claims[: max(cfg.max_actions, 1)]:
-                query = _normalize_query(claim)
-                if not query:
-                    continue
-                actions.append(
-                    QualityGateAction(
-                        action="graph_search",
-                        query=query,
-                        rationale="Find evidence for an uncited claim and rewrite the report with citations.",
-                        priority=2,
-                    )
-                )
-                if external_allowed:
-                    actions.append(
-                        QualityGateAction(
-                            action="external_search",
-                            query=query,
-                            rationale="Find authoritative external sources for an uncited claim.",
-                            priority=3,
-                        )
-                    )
-
-        # Ensure we always request a rewrite if we are missing citations or consistency failed.
-        if (metrics.consistency_ok is False) or (metrics.sentence_count and metrics.uncited_sentences):
-            actions.append(
-                QualityGateAction(
-                    action="rewrite",
-                    query=None,
-                    rationale="Rewrite the report to ensure all factual claims have valid inline citations and remove unsupported claims.",
-                    priority=1,
-                )
-            )
-
-        # Deduplicate + cap
-        normalized: List[QualityGateAction] = []
-        seen: set[tuple[str, str]] = set()
-        for action in actions:
-            key = (action.action, (action.query or "").strip().lower())
-            if key in seen:
-                continue
-            seen.add(key)
-            normalized.append(action)
-            if len(normalized) >= cfg.max_actions:
-                break
-        return normalized
-
+        raise RuntimeError(f"LLM judge failed to run: {last_exc}") from last_exc
 
 def _coerce_topics(value: Any) -> List[str]:
     if not isinstance(value, list):
@@ -553,16 +421,6 @@ def _evidence_source_stats(evidences: Sequence[Dict[str, Any]]) -> tuple[Dict[st
         for key, value in counts.items():
             ratios[key] = round(value / total, 4)
     return counts, ratios
-
-
-def _normalize_query(text: str) -> str:
-    token = (text or "").strip()
-    token = re.sub(r"\[[^\[\]]+\]", "", token).strip()
-    token = re.sub(r"\s+", " ", token).strip()
-    if len(token) < 12:
-        return ""
-    # Cap length to keep tool queries sane.
-    return token[:180].rstrip()
 
 
 def _safe_parse_json(raw: str) -> Dict[str, Any] | None:

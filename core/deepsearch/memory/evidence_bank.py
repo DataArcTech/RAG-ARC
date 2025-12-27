@@ -81,15 +81,13 @@ class EvidenceBank:
 
     def select_evidences(
         self,
-        evidence_ids: Sequence[str] | None,
+        evidence_ids: Sequence[str],
         *,
-        fallback_k: int = 0,
         max_chars: int = 900,
     ) -> List[Dict[str, Any]]:
         """Materialize a bounded evidence list for prompts.
 
-        - When evidence_ids is provided, only include those IDs (in given order).
-        - Otherwise, fall back to the first K evidences (deterministic).
+        - Only include explicitly provided evidence_ids (in given order).
         """
 
         ordered: List[str] = []
@@ -104,12 +102,10 @@ class EvidenceBank:
             seen.add(token)
             ordered.append(token)
 
-        if evidence_ids:
-            for eid in evidence_ids:
-                _add(str(eid))
-        elif fallback_k and fallback_k > 0:
-            for eid in self._order[: max(0, int(fallback_k))]:
-                _add(eid)
+        if not evidence_ids:
+            raise ValueError("evidence_ids must be a non-empty list")
+        for eid in evidence_ids:
+            _add(str(eid))
 
         payload: List[Dict[str, Any]] = []
         for eid in ordered:
@@ -172,4 +168,3 @@ class EvidenceBank:
             seen.add(eid)
             ordered.append(eid)
         return ordered
-

@@ -1,5 +1,4 @@
 """Gap Detection runtime computes evidence coverage and gates external channels."""
-import os
 from typing import Any, Dict, Iterable, List, Optional
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
@@ -93,11 +92,10 @@ class GapDetectionEngine:
     @staticmethod
     def _extract_missing_topics(coverage_metrics: Dict[str, Any], reasoning_trace: Dict[str, Any]) -> List[str]:
         missing = coverage_metrics.get("missing_topics")
-        if isinstance(missing, list):
-            return [str(topic) for topic in missing if str(topic).strip()]
-        # fall back to think notes metadata
-        think_notes = reasoning_trace.get("think_notes") or []
         extracted: List[str] = []
+        if isinstance(missing, list):
+            extracted.extend(str(topic) for topic in missing if str(topic).strip())
+        think_notes = reasoning_trace.get("think_notes") or []
         for note in think_notes:
             topics = (
                 (note.get("metadata") or {}).get("missing_topics")
@@ -149,27 +147,12 @@ class GapDetectionEngine:
         return triggered, missing
 
     def _external_enabled(self) -> tuple[bool, Dict[str, Any]]:
-        """Resolve whether external search is allowed (config SoT; env overrides)."""
+        """Resolve whether external search is allowed (config is the single source of truth)."""
 
-        env = self._read_env_bool("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED")
         config_flag = self.config.get("enable_external_on_gap")
         channel_flag = self.config.get("external_channel_enabled")
         config_enabled = bool(config_flag) and bool(channel_flag)
-        if env is not None:
-            return bool(env), {"source": "env", "env_value": env, "config_value": config_enabled}
-        return config_enabled, {"source": "config", "env_value": None, "config_value": config_enabled}
-
-    @staticmethod
-    def _read_env_bool(name: str) -> Optional[bool]:
-        raw = os.getenv(name)
-        if raw is None:
-            return None
-        value = raw.strip().lower()
-        if value in {"1", "true", "yes", "on"}:
-            return True
-        if value in {"0", "false", "no", "off"}:
-            return False
-        return None
+        return config_enabled, {"source": "config", "config_value": config_enabled}
 
     def _log(self, payload: Dict[str, Any], reasoning_trace: Dict[str, Any]) -> None:
         if not self.telemetry_client:

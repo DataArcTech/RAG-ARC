@@ -1,13 +1,63 @@
-# Environment Configuration (English)
+# Environment variables (minimal `.env`) + full reference
 
-All runtime behavior is controlled through `.env`. By default, `.env.example` already contains values that work for local development (Docker services on `localhost`). Only the model/API credentials typically require edits. This document describes every variable, grouped by subsystem.
+RAG-ARC uses two configuration layers:
+
+- **`.env`**: secrets + feature switches (recommended for most users).
+- **`config/`**: all tunable parameters (retrieval/chunking/top_k/thresholds/budgets/paths/etc.).
+
+The runtime still supports many environment variables as **override knobs** for compatibility.
+This document explains **all** supported env variables and what each one means.
+
+Recommended workflow:
+1) Keep `.env` small (only secrets / enablement).
+2) Tune behavior via `config/` (JSON + Python).
+
+---
+
+## 0. Minimal `.env` (recommended)
+
+Start from:
+
+```bash
+cp .env.example .env
+```
+
+Required secrets (no defaults):
+- `OPENAI_API_KEY` / `OPENAI_BASE_URL` (or component-specific `CHAT_*` / `EMBEDDING_*` / `OCR_*`)
+- `JWT_SECRET_KEY` (generate with `openssl rand -hex 32`)
+
+Optional feature switches (have defaults):
+- `TASK_QUEUE_MODE`, `MODEL_PROFILE`, `DEVELOP_MODE`, `ADMIN_OWNER_ID`
+
+Optional external web search (only if enabled in config):
+- `TAVILY_API_KEY`
+
+Optional infrastructure overrides (defaults work for local/Docker; set only when needed):
+- PostgreSQL: `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
+- Redis: `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, `REDIS_PASSWORD`
+- Neo4j: `NEO4J_URL`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`
+
+---
+
+## 0.1 Advanced configuration (edit `config/`, not `.env`)
+
+Recommended places to tune parameters:
+
+- `config/json_configs/rag_inference*.json`: chat pipeline, retrievers, rerankers, model selection.
+- `config/json_configs/knowledge*.json`: parsing, chunking, indexing/graph build.
+- `config/json_configs/deepsearch_service.json`: DeepSearch planner/tools/report/quality gates.
+- `config/output_limits.py`: response trimming / evidence caps.
+- `config/core/deepsearch/*_defaults.py`: DeepSearch loop/tool/report defaults used at runtime.
+
+How secrets flow into configs:
+- JSON supports `${ENV_VAR}` placeholders (e.g. `${OPENAI_API_KEY}`), so keep secrets in `.env` and reference them from `config/`.
 
 ## 1. Model & LLM Providers
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `CHAT_MODEL_PROVIDER` | `openai` | Chat provider (`openai` = OpenAI-compatible API, `huggingface` = local Transformers). |
-| `CHAT_MODEL_NAME` | _(empty)_ | Optional preferred chat model name (overrides `OPENAI_CHAT_MODEL` when set). |
+| `CHAT_MODEL_NAME` | _(empty)_ | Optional preferred chat model name. When `CHAT_MODEL_PROVIDER=huggingface`, this can be a HuggingFace repo id or a local filesystem path. |
 | `CHAT_MODEL_DEVICE` | `cpu` | HuggingFace chat runtime device (used when `CHAT_MODEL_PROVIDER=huggingface`). |
 | `CHAT_MODEL_CACHE_FOLDER` | _(empty)_ | Optional HuggingFace cache folder for chat weights/tokenizers. |
 | `CHAT_API_KEY` | _(empty)_ | API key for chat provider (required for hosted APIs). |
@@ -21,7 +71,7 @@ All runtime behavior is controlled through `.env`. By default, `.env.example` al
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Default embedding model name. |
 | `EMBEDDING_DEVICE` | `cpu` | HuggingFace embedding runtime device (used when `EMBEDDING_MODEL_PROVIDER=huggingface`). |
 | `EMBEDDING_CACHE_FOLDER` | _(empty)_ | Optional HuggingFace cache folder for embedding weights. |
-| `EMBEDDING_DIMENSIONS` | _(empty)_ | Required for local HuggingFace embeddings: embedding vector dimension. For OpenAI-compatible APIs you can leave it empty (auto-detected) or set it to override. |
+| `EMBEDDING_DIMENSIONS` | _(empty)_ | Optional override for embedding vector dimension. When empty, the system can auto-detect the dimension (and will cache it). |
 | `OCR_MODEL_PROVIDER` | `openai` | OCR/VLM provider (`openai`, `vllm`, `dots_ocr`). |
 | `OCR_API_KEY` | _(empty)_ | API key for OCR provider (required for hosted APIs). |
 | `OCR_API_BASE_URL` | _(empty)_ | Base URL for OCR provider. |
@@ -45,7 +95,7 @@ All runtime behavior is controlled through `.env`. By default, `.env.example` al
 | `OPENAI_API_KEY` | _(empty)_ | Optional shared key reused across OpenAI-compatible modules when component-specific keys are empty. |
 | `OPENAI_BASE_URL` | _(empty)_ | Optional shared base URL reused across OpenAI-compatible modules. |
 | `DEVICE` | `cpu` | Optional shared default device used when component-specific device vars are empty. |
-| `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | Local HuggingFace embedding model name when `EMBEDDING_MODEL_PROVIDER=huggingface`. |
+| `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | Embedding model name. When `EMBEDDING_MODEL_PROVIDER=huggingface`, this can be a HuggingFace repo id or a local filesystem path. |
 | `MODEL_PROFILE` | `api` | Chooses config profile (`api` or `local`). Impacts default JSON configs. |
 | `MINILM_MODEL_NAME` | `sentence-transformers/all-MiniLM-L6-v2` | Default MiniLM model repo id used by `download_models.py`. |
 | `MINILM_CACHE_FOLDER` | `./models/all-MiniLM-L6-v2` | Cache folder used by `download_models.py` when downloading MiniLM. |
@@ -282,7 +332,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `JWT_SECRET_KEY` | `your-secret-key-change-this-in-production` | Secret used to sign JWT tokens. Replace in production. |
+| `JWT_SECRET_KEY` | _(empty)_ | JWT signing secret. If empty, the API auto-generates one and persists it under `RAGARC_RUNTIME_DIR` (default: `./local/runtime/jwt_secret_key`). Set explicitly in production. |
 | `HF_TOKEN` | _(empty)_ | HuggingFace token for downloading gated models (optional). |
 | `HF_ENDPOINT` | _(empty)_ | Optional HuggingFace endpoint override (e.g. `https://hf-mirror.com`). |
 | `LOG_LEVEL` | `INFO` | Python logging level (`DEBUG`, `INFO`, etc.). |
@@ -318,12 +368,12 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINIO_USERNAME` | `ROOTNAME` | MinIO access key / username (used only when MinIO integration is enabled). |
 | `MINIO_PASSWORD` | `CHANGEME123` | MinIO secret key / password. |
 
-The `.env.example` also includes commented placeholders for:
+Common MinIO variables (set them only when enabling object storage integration):
 - `MINIO_ENDPOINT`
 - `MINIO_BUCKET`
 - `MINIO_SECURE`
 
-Uncomment and configure them only when integrating object storage for parsed files.
+These are not required for the default local/Docker setup.
 
 ## 11. Build / Advanced Runtime
 
@@ -411,4 +461,4 @@ Set to `1` (or any non-empty value) to opt-in when the required services/models 
 
 ---
 
-**Tip:** Copy `.env.example` to `.env`, fill in the API keys for the LLM provider you use, and everything else should function with Docker defaults. Adjust the remaining variables only when you need custom deployments or scopes.
+**Tip:** Copy `.env.example` to `.env`, fill in the required secrets (`OPENAI_API_KEY`/`OPENAI_BASE_URL` and `JWT_SECRET_KEY`), and the rest should work with built-in defaults. For advanced tuning, prefer changing `config/` (JSON/Python) over adding many env overrides.

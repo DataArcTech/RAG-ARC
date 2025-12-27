@@ -4,7 +4,6 @@ Make runs reproducible by writing plan/evidence/report/external calls
 to a stable per-run folder, so we can replay and debug regressions.
 """
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -17,11 +16,10 @@ class DeepSearchArtifactStore:
     root_dir: Path
 
     @staticmethod
-    def from_env(root_dir: str | None = None) -> "DeepSearchArtifactStore | None":
-        value = root_dir or os.getenv("DEEPSEARCH_ARTIFACT_DIR")
-        if not value:
-            return None
-        path = Path(str(value)).expanduser()
+    def from_root_dir(root_dir: str) -> "DeepSearchArtifactStore":
+        if not root_dir or not str(root_dir).strip():
+            raise ValueError("DeepSearchArtifactStore requires an explicit root_dir")
+        path = Path(str(root_dir)).expanduser()
         return DeepSearchArtifactStore(root_dir=path)
 
     def ensure_run_dir(self, run_id: str) -> Path:
@@ -44,4 +42,3 @@ class DeepSearchArtifactStore:
     def run_metadata(self, run_id: str) -> Dict[str, Any]:
         folder = self.ensure_run_dir(run_id)
         return {"artifact_dir": str(folder)}
-

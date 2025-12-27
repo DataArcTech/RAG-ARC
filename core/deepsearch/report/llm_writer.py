@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, ValidationError
 
-from config.output_limits import DEEPSEARCH_TOP_CHUNKS
+from config.core.deepsearch import report_writer_defaults as report_defaults
 from core.deepsearch.memory import EvidenceBank
 from core.deepsearch.tools.base import call_llm_async
 from core.prompts.deepsearch.report import (
@@ -42,6 +42,7 @@ class ReportSectionSpec(BaseModel):
     """A single report section specification produced by the outline step."""
 
     title: str = Field(..., min_length=1)
+    section_type: str = Field(..., min_length=1)
     purpose: str = Field(..., min_length=1)
     evidence_ids: List[str] = Field(default_factory=list)
 
@@ -50,6 +51,7 @@ class ReportSectionDraft(BaseModel):
     """A single report section draft produced by the writing step."""
 
     title: str = Field(..., min_length=1)
+    section_type: str = Field(..., min_length=1)
     body_markdown: str = Field(..., min_length=1)
 
 
@@ -68,7 +70,9 @@ class LLMStructuredReport(BaseModel):
     """A structured report produced by the report-writing LLM step."""
 
     title: str = Field(..., min_length=1)
-    summary: str = Field(..., min_length=1)
+    short_answer: str = Field(..., min_length=1)
+    # Backward-compat shim: some callers may still look for `summary`.
+    summary: Optional[str] = None
     sections: List[ReportSectionDraft] = Field(default_factory=list)
     limitations: List[str] = Field(default_factory=list)
     next_steps: List[str] = Field(default_factory=list)
@@ -82,14 +86,15 @@ class DeepSearchLLMReportWriter:
         self,
         llm_connector: Any,
         *,
-        temperature: float = 0.2,
-        max_retries: int = 2,
-        max_evidence_items: int | None = 24,
-        max_evidence_chars: int = 900,
-        max_graph_chain_items: int | None = 48,
-        parallel_sections: bool = False,
-        max_parallel_sections: int = 4,
-        max_section_evidence_items: int = 10,
+        temperature: float = report_defaults.DEFAULT_REPORT_TEMPERATURE,
+        max_retries: int = report_defaults.DEFAULT_REPORT_MAX_RETRIES,
+        max_evidence_items: int | None = report_defaults.DEFAULT_REPORT_MAX_EVIDENCE_ITEMS,
+        max_evidence_chars: int = report_defaults.DEFAULT_REPORT_MAX_EVIDENCE_CHARS,
+        max_graph_chain_items: int | None = report_defaults.DEFAULT_REPORT_MAX_GRAPH_CHAIN_ITEMS,
+        parallel_sections: bool = report_defaults.DEFAULT_REPORT_PARALLEL_SECTIONS,
+        max_parallel_sections: int = report_defaults.DEFAULT_REPORT_MAX_PARALLEL_SECTIONS,
+        max_section_evidence_items: int = report_defaults.DEFAULT_REPORT_MAX_SECTION_EVIDENCE_ITEMS,
+        synthesis_section_max_chars: int = report_defaults.DEFAULT_REPORT_SYNTHESIS_SECTION_MAX_CHARS,
     ) -> None:
         self.llm_connector = llm_connector
         self.temperature = temperature
@@ -100,6 +105,7 @@ class DeepSearchLLMReportWriter:
         self.parallel_sections = parallel_sections
         self.max_parallel_sections = max_parallel_sections
         self.max_section_evidence_items = max(1, int(max_section_evidence_items))
+        self.synthesis_section_max_chars = int(synthesis_section_max_chars)
 
     async def build_outline(self, *, question: str, context: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Produce a JSON outline used to guide report writing."""
@@ -111,23 +117,68 @@ class DeepSearchLLMReportWriter:
         if not isinstance(evidence_index, list):
             evidence_index = []
 
+        evidence_index_json = _dump_json(evidence_index)
         user_prompt = REPORT_OUTLINE_USER_PROMPT.format(
             question=question,
             highlight_count=len(highlights),
             evidence_count=len(evidences),
             graph_chain_count=len(graph_chain),
-            evidence_index_json=_dump_json(evidence_index),
+            evidence_index_json=evidence_index_json,
         )
         messages = [
             {"role": "system", "content": REPORT_OUTLINE_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
-        raw = await self._call(messages, phase="outline")
-        data = _safe_parse_json(raw, expected="list")
-        sections = _coerce_outline(data)
-        if not sections:
-            raise ValueError(f"Report outline generation returned an invalid JSON payload. raw={_snippet(raw)}")
-        return [item.model_dump() for item in sections]
+        last_raw: str | None = None
+        retries = max(int(self.max_retries), 1)
+        for attempt in range(retries):
+            raw = await self._call(messages, phase="outline")
+            last_raw = raw
+            data = _safe_parse_json(raw, expected="list")
+            sections = _coerce_outline(data)
+            missing_titles: List[str] = []
+            validation_error: str | None = None
+            if not sections:
+                validation_error = "outline_schema_invalid"
+            else:
+                missing_titles = [section.title for section in sections if not section.evidence_ids]
+                if missing_titles:
+                    validation_error = "missing_evidence_ids"
+
+            if validation_error is None:
+                return [item.model_dump() for item in sections]
+
+            if attempt >= retries - 1:
+                raise ValueError(
+                    "Report outline generation failed (cite-first requirements not satisfied). "
+                    f"reason={validation_error} missing_sections={missing_titles} raw={_snippet(raw)}"
+                )
+
+            schema_hint = (
+                "Return ONLY a JSON array. Each item MUST be an object with ALL keys:\n"
+                "- title: string\n"
+                "- section_type: string\n"
+                "- purpose: string\n"
+                "- evidence_ids: array of strings (chunk_id values from the evidence index; MUST be non-empty)\n"
+            )
+            repair_prompt = (
+                "Fix the outline.\n"
+                f"Reason: {validation_error}\n"
+                f"Sections missing evidence_ids: {missing_titles}\n\n"
+                f"{schema_hint}\n"
+                "Rules:\n"
+                "- Every section MUST have a non-empty evidence_ids list.\n"
+                "- Use ONLY chunk_id values from the evidence index.\n"
+                "- If a section cannot be supported by the provided evidence index, REMOVE that section.\n\n"
+                "Evidence index (id + short summary; cite these ids in the outline):\n"
+                f"{evidence_index_json}\n\n"
+                f"Previous (invalid) output:\n{_snippet(raw, limit=int(report_defaults.DEFAULT_ERROR_SNIPPET_LIMIT_CHARS))}\n"
+            )
+            messages = [
+                {"role": "system", "content": REPORT_OUTLINE_SYSTEM_PROMPT},
+                {"role": "user", "content": repair_prompt},
+            ]
+        raise RuntimeError(f"Report outline generation failed after retries. raw={_snippet(last_raw or '')}")
 
     async def write_report(self, *, question: str, outline: List[Dict[str, Any]], context: Dict[str, Any]) -> Dict[str, Any]:
         """Write a structured report JSON based on the outline and the context bundle."""
@@ -140,31 +191,37 @@ class DeepSearchLLMReportWriter:
         raw_graph_evidence = context.get("graph_evidence") or {}
         raw_coverage = context.get("coverage") or {}
 
-        raw: str | None = None
+        graph_chain_raw = list(context.get("graph_chain") or [])
+        evidences_raw = list(context.get("evidences") or [])
+
         last_exc: Exception | None = None
-        max_items = self.max_evidence_items
-        max_chars = self.max_evidence_chars
-        graph_chain_limit = self.max_graph_chain_items
-        method_shrink = 0
-        coverage_shrink = 0
-        graph_shrink = 0
-        highlight_limit = len(highlights)
+        budget_levels = report_defaults.REPORT_WRITE_PROMPT_BUDGET_LEVELS
+        budget_attempts = min(len(budget_levels), max(int(self.max_retries), 1))
 
-        for attempt in range(max(self.max_retries, 1)):
-            graph_chain = list(context.get("graph_chain") or [])
-            if graph_chain_limit is not None:
-                graph_chain = graph_chain[: max(graph_chain_limit, 0)]
-            evidences = _limit_evidences(context.get("evidences") or [], max_items, max_chars)
+        for attempt in range(budget_attempts):
+            budget = budget_levels[attempt]
 
-            bounded_highlights = highlights[: max(0, int(highlight_limit))]
-            method = _slim_methodology(raw_method, level=method_shrink)
-            graph_evidence = _slim_graph_evidence(raw_graph_evidence, level=graph_shrink)
-            coverage = _slim_coverage(raw_coverage, level=coverage_shrink)
+            method = _slim_methodology(raw_method, level=budget.methodology_level)
+            graph_evidence = _slim_graph_evidence(raw_graph_evidence, level=budget.graph_evidence_level)
+            coverage = _slim_coverage(raw_coverage, level=budget.coverage_level)
+
+            highlights_limited = _limit_highlights(
+                highlights,
+                max_items=budget.highlights_max_items,
+                text_max_chars=budget.highlight_text_max_chars,
+            )
+
+            graph_chain_limit = _apply_divisor_limit(self.max_graph_chain_items, budget.graph_chain_items_divisor)
+            graph_chain = graph_chain_raw[:graph_chain_limit] if graph_chain_limit is not None else list(graph_chain_raw)
+
+            evidence_items_limit = _apply_divisor_limit(self.max_evidence_items, budget.evidence_items_divisor)
+            evidence_chars_limit = _apply_divisor_limit_required(self.max_evidence_chars, budget.evidence_chars_divisor)
+            evidences = _limit_evidences(evidences_raw, evidence_items_limit, evidence_chars_limit)
 
             user_prompt = REPORT_WRITE_USER_PROMPT.format(
                 question=question,
                 outline_json=outline_json,
-                highlights_json=_dump_json(bounded_highlights),
+                highlights_json=_dump_json(highlights_limited),
                 method_json=_dump_json(method),
                 graph_evidence_json=_dump_json(graph_evidence),
                 graph_chain_json=_dump_json(graph_chain),
@@ -180,26 +237,9 @@ class DeepSearchLLMReportWriter:
                 raw = await self._call(messages, phase="report")
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
-                if _is_context_limit_error(exc) and attempt < self.max_retries - 1:
-                    if max_items is None:
-                        max_items = 12
-                    else:
-                        max_items = max(4, max_items // 2)
-                    max_chars = max(200, max_chars // 2)
-                    if graph_chain_limit is None:
-                        graph_chain_limit = 12
-                    else:
-                        graph_chain_limit = max(0, graph_chain_limit // 2)
-                    if highlight_limit > 0:
-                        highlight_limit = max(0, highlight_limit // 2)
-                    if method_shrink < 3:
-                        method_shrink += 1
-                    if coverage_shrink < 3:
-                        coverage_shrink += 1
-                    if graph_shrink < 2:
-                        graph_shrink += 1
+                if _is_context_limit_error(exc) and attempt < budget_attempts - 1:
                     continue
-                raise RuntimeError(f"Report LLM call failed: {exc}") from exc
+                raise
 
             data = _safe_parse_json(raw, expected="dict")
             if not data:
@@ -210,7 +250,7 @@ class DeepSearchLLMReportWriter:
                 raise ValueError(f"Report writing returned an invalid schema. raw={_snippet(raw)}") from exc
             return report.model_dump()
 
-        raise RuntimeError(f"Report LLM call failed: {last_exc}") from last_exc
+        raise RuntimeError(f"Report writing exceeded context budget: {last_exc}") from last_exc
 
     async def _call(self, messages: List[Dict[str, str]], *, phase: str) -> str:
         last_exc: Exception | None = None
@@ -235,9 +275,6 @@ class DeepSearchLLMReportWriter:
         This method generates each section independently and concurrently, then merges
         them into a final report structure. Best for outlines with 3+ independent sections.
         """
-        if len(outline) <= 2:
-            return await self.write_report(question=question, outline=outline, context=context)
-
         bank = EvidenceBank()
         raw_evidences = context.get("evidences") or []
         if isinstance(raw_evidences, list):
@@ -251,11 +288,9 @@ class DeepSearchLLMReportWriter:
         async def write_section_with_limit(section: Dict[str, Any]) -> Dict[str, Any]:
             async with semaphore:
                 evidence_ids = EvidenceBank.normalize_evidence_ids(section.get("evidence_ids"))
-                section_evidences = bank.select_evidences(
-                    evidence_ids if evidence_ids else None,
-                    fallback_k=min(self.max_section_evidence_items, len(bank.ids())),
-                    max_chars=self.max_evidence_chars,
-                )
+                if not evidence_ids:
+                    raise ValueError("Parallel section writing requires explicit evidence_ids per section.")
+                section_evidences = bank.select_evidences(evidence_ids, max_chars=self.max_evidence_chars)
                 return await self._write_single_section(
                     question=question,
                     section=section,
@@ -264,35 +299,32 @@ class DeepSearchLLMReportWriter:
                 )
 
         tasks = [write_section_with_limit(section) for section in outline]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks)
 
         sections: List[Dict[str, Any]] = []
         all_citations: List[Dict[str, Any]] = []
         for idx, result in enumerate(results):
-            if isinstance(result, Exception):
-                sections.append({
-                    "title": outline[idx].get("title", f"Section {idx + 1}"),
-                    "body_markdown": f"*Section generation failed: {result}*",
-                })
-            else:
-                sections.append({
-                    "title": result.get("title") or outline[idx].get("title", ""),
+            section_spec = outline[idx] if idx < len(outline) and isinstance(outline[idx], dict) else {}
+            sections.append(
+                {
+                    "title": result.get("title") or section_spec.get("title") or "",
+                    "section_type": result.get("section_type") or section_spec.get("section_type") or "",
                     "body_markdown": result.get("body_markdown") or "",
-                })
-                for cit in result.get("citations") or []:
-                    if isinstance(cit, dict) and cit.get("evidence_id"):
-                        cit["location_in_report"] = result.get("title")
-                        all_citations.append(cit)
+                }
+            )
+            for cit in result.get("citations") or []:
+                if isinstance(cit, dict) and cit.get("evidence_id"):
+                    cit["location_in_report"] = result.get("title")
+                    all_citations.append(cit)
 
-        title = question[:80] + ("..." if len(question) > 80 else "")
+        title_limit = int(report_defaults.DEFAULT_PARALLEL_TITLE_MAX_CHARS)
+        title = question[:title_limit] + ("..." if len(question) > title_limit else "")
         synthesis_ids: list[str] = []
         for section in outline:
             synthesis_ids.extend(EvidenceBank.normalize_evidence_ids(section.get("evidence_ids")))
-        synthesis_evidences = bank.select_evidences(
-            synthesis_ids if synthesis_ids else None,
-            fallback_k=min(self.max_evidence_items or 0, len(bank.ids())) if self.max_evidence_items else 0,
-            max_chars=self.max_evidence_chars,
-        )
+        if not synthesis_ids:
+            raise ValueError("Parallel report synthesis requires evidence_ids from the outline.")
+        synthesis_evidences = bank.select_evidences(synthesis_ids, max_chars=self.max_evidence_chars)
         synthesis = await self._synthesize_parallel_fields(
             question=question,
             outline=outline,
@@ -302,20 +334,21 @@ class DeepSearchLLMReportWriter:
         )
         if synthesis:
             title = synthesis.get("title") or title
-            summary = str(synthesis.get("summary") or "").strip()
+            short_answer = str(synthesis.get("short_answer") or synthesis.get("summary") or "").strip()
             limitations = synthesis.get("limitations") or []
             next_steps = synthesis.get("next_steps") or []
         else:
-            summary = ""
+            short_answer = ""
             limitations = []
             next_steps = []
         if not isinstance(limitations, list):
             limitations = []
         if not isinstance(next_steps, list):
             next_steps = []
-        summary_text = str(summary or "").strip()
+        summary_text = str(short_answer or "").strip()
         return {
             "title": title,
+            "short_answer": summary_text,
             "summary": summary_text,
             "sections": sections,
             "limitations": [str(item) for item in limitations if str(item).strip()],
@@ -329,16 +362,13 @@ class DeepSearchLLMReportWriter:
         question: str,
         outline: List[Dict[str, Any]],
         context: Dict[str, Any],
-        retain_k: int = 5,
+        retain_k: int = report_defaults.SECTIONWISE_RETAIN_K_DEFAULT,
     ) -> Dict[str, Any]:
         """Write a structured report section-by-section with recency retention.
 
         Each section retrieves only the evidence it needs, while keeping a small
         recency window of previously used evidence snippets for continuity.
         """
-
-        if len(outline) <= 2:
-            return await self.write_report(question=question, outline=outline, context=context)
 
         bank = EvidenceBank()
         raw_evidences = context.get("evidences") or []
@@ -356,11 +386,9 @@ class DeepSearchLLMReportWriter:
 
         for idx, section in enumerate(outline, start=1):
             evidence_ids = EvidenceBank.normalize_evidence_ids(section.get("evidence_ids"))
-            selected = bank.select_evidences(
-                evidence_ids if evidence_ids else None,
-                fallback_k=min(self.max_section_evidence_items, len(bank.ids())),
-                max_chars=self.max_evidence_chars,
-            )
+            if not evidence_ids:
+                raise ValueError("Sectionwise writer requires explicit evidence_ids per section.")
+            selected = bank.select_evidences(evidence_ids, max_chars=self.max_evidence_chars)
             selected_ids = [
                 str(ev.get("chunk_id") or "").strip()
                 for ev in selected
@@ -370,7 +398,7 @@ class DeepSearchLLMReportWriter:
 
             retained: List[Dict[str, Any]] = []
             if retain_k > 0 and recent_ids:
-                retained = bank.select_evidences(recent_ids, fallback_k=0, max_chars=self.max_evidence_chars)
+                retained = bank.select_evidences(recent_ids, max_chars=self.max_evidence_chars)
 
             merged_evidences = list(selected)
             seen = {ev.get("chunk_id") for ev in merged_evidences if isinstance(ev, dict)}
@@ -384,12 +412,16 @@ class DeepSearchLLMReportWriter:
 
             purpose = str(section.get("purpose") or "").strip()
             if sections:
-                prev_titles = [str(s.get("title") or "").strip() for s in sections[-2:]]
+                prev_count = int(report_defaults.SECTIONWISE_PREVIOUS_TITLES_MAX)
+                prev_titles = [str(s.get("title") or "").strip() for s in sections[-prev_count:]]
                 prev_titles = [t for t in prev_titles if t]
                 if prev_titles:
                     purpose = "\n\n".join([purpose, "Previous sections (titles): " + " / ".join(prev_titles)]).strip()
             if selected_ids:
-                purpose = "\n\n".join([purpose, "Primary evidence_ids for this section: " + ", ".join(selected_ids[:12])]).strip()
+                max_ids = int(report_defaults.SECTIONWISE_PRIMARY_EVIDENCE_IDS_MAX)
+                purpose = "\n\n".join(
+                    [purpose, "Primary evidence_ids for this section: " + ", ".join(selected_ids[:max_ids])]
+                ).strip()
             if recent_ids:
                 purpose = "\n\n".join([purpose, "Recency-retained evidence_ids: " + ", ".join(recent_ids)]).strip()
 
@@ -402,6 +434,7 @@ class DeepSearchLLMReportWriter:
             sections.append(
                 {
                     "title": section_result.get("title") or section.get("title") or f"Section {idx}",
+                    "section_type": section_result.get("section_type") or section.get("section_type") or "",
                     "body_markdown": section_result.get("body_markdown") or "",
                 }
             )
@@ -412,11 +445,9 @@ class DeepSearchLLMReportWriter:
 
             recent_ids = EvidenceBank.update_recency(recent_ids, used_ids=selected_ids, retain_k=int(retain_k))
 
-        synthesis_evidences = bank.select_evidences(
-            used_ids_union if used_ids_union else None,
-            fallback_k=min(self.max_evidence_items or 0, len(bank.ids())) if self.max_evidence_items else 0,
-            max_chars=self.max_evidence_chars,
-        )
+        if not used_ids_union:
+            raise ValueError("Sectionwise synthesis requires at least one evidence_id.")
+        synthesis_evidences = bank.select_evidences(used_ids_union, max_chars=self.max_evidence_chars)
         synthesis = await self._synthesize_parallel_fields(
             question=question,
             outline=outline,
@@ -424,8 +455,11 @@ class DeepSearchLLMReportWriter:
             evidences=synthesis_evidences,
             coverage=context.get("coverage") or {},
         )
-        title = (synthesis.get("title") if synthesis else None) or (question[:80] + ("..." if len(question) > 80 else ""))
-        summary = str(synthesis.get("summary") or "").strip() if synthesis else ""
+        title_limit = int(report_defaults.DEFAULT_PARALLEL_TITLE_MAX_CHARS)
+        title = (synthesis.get("title") if synthesis else None) or (
+            question[:title_limit] + ("..." if len(question) > title_limit else "")
+        )
+        short_answer = str((synthesis.get("short_answer") if synthesis else None) or (synthesis.get("summary") if synthesis else None) or "").strip()
         limitations = (synthesis.get("limitations") if synthesis else None) or []
         next_steps = (synthesis.get("next_steps") if synthesis else None) or []
         if not isinstance(limitations, list):
@@ -435,7 +469,8 @@ class DeepSearchLLMReportWriter:
 
         return {
             "title": title,
-            "summary": str(summary or "").strip(),
+            "short_answer": short_answer,
+            "summary": short_answer,
             "sections": sections,
             "limitations": [str(item) for item in limitations if str(item).strip()],
             "next_steps": [str(item) for item in next_steps if str(item).strip()],
@@ -451,72 +486,43 @@ class DeepSearchLLMReportWriter:
         evidences: List[Dict[str, Any]],
         coverage: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Synthesize title/summary/limitations/next_steps after parallel section drafting."""
+        """Synthesize title/short_answer/limitations/next_steps after parallel section drafting."""
 
         outline_json = _dump_json(outline)
-        max_section_chars = 1200
-        max_evidence_items = len(evidences)
-        max_evidence_chars = int(self.max_evidence_chars)
-        last_exc: Exception | None = None
-        coverage_shrink = 0
+        sections_json = _dump_json(self._compact_sections_for_synthesis(sections, max_chars=self.synthesis_section_max_chars))
+        limited_evidences = _limit_evidences(evidences, len(evidences), int(self.max_evidence_chars))
+        evidence_json = _dump_json(limited_evidences)
+        coverage_json = _dump_json(_slim_coverage(coverage or {}, level=0))
 
-        for attempt in range(max(self.max_retries, 1)):
-            sections_json = _dump_json(self._compact_sections_for_synthesis(sections, max_chars=max_section_chars))
-            limited_evidences = _limit_evidences(
-                evidences,
-                max_evidence_items if max_evidence_items else None,
-                max_evidence_chars,
-            )
-            evidence_json = _dump_json(limited_evidences)
-            coverage_json = _dump_json(_slim_coverage(coverage or {}, level=coverage_shrink))
-
-            user_prompt = PARALLEL_SYNTHESIS_USER_PROMPT.format(
-                question=question,
-                outline_json=outline_json,
-                sections_json=sections_json,
-                evidence_json=evidence_json,
-                coverage_json=coverage_json,
-            )
-            messages = [
-                {"role": "system", "content": PARALLEL_SYNTHESIS_SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ]
-            try:
-                raw = await self._call(messages, phase="parallel_synthesis")
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
-                if _is_context_limit_error(exc) and attempt < self.max_retries - 1:
-                    if max_section_chars > 400:
-                        max_section_chars = max(400, max_section_chars // 2)
-                    if max_evidence_items and max_evidence_items > 6:
-                        max_evidence_items = max(6, max_evidence_items // 2)
-                    if max_evidence_chars and max_evidence_chars > 200:
-                        max_evidence_chars = max(200, max_evidence_chars // 2)
-                    if coverage_shrink < 3:
-                        coverage_shrink += 1
-                    continue
-                raise
-
-            parsed = _safe_parse_json(raw, expected="dict")
-            if not isinstance(parsed, dict):
-                return {}
-            allowed_ids = {
-                str(item.get("chunk_id") or "").strip()
-                for item in limited_evidences
-                if isinstance(item, dict) and str(item.get("chunk_id") or "").strip()
-            }
-            summary = str(parsed.get("summary") or "").strip()
-            if allowed_ids and summary and not _has_supported_inline_citation(summary, allowed_ids=allowed_ids):
-                last_exc = ValueError("Synthesis summary is missing supported inline citations.")
-                if attempt < self.max_retries - 1:
-                    continue
-                parsed["summary"] = ""
-            return parsed
-
-        raise RuntimeError(f"Parallel synthesis LLM call failed: {last_exc}") from last_exc
+        user_prompt = PARALLEL_SYNTHESIS_USER_PROMPT.format(
+            question=question,
+            outline_json=outline_json,
+            sections_json=sections_json,
+            evidence_json=evidence_json,
+            coverage_json=coverage_json,
+        )
+        messages = [
+            {"role": "system", "content": PARALLEL_SYNTHESIS_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+        raw = await self._call(messages, phase="parallel_synthesis")
+        parsed = _safe_parse_json(raw, expected="dict")
+        if not isinstance(parsed, dict):
+            raise ValueError(f"Parallel synthesis returned invalid JSON. raw={_snippet(raw)}")
+        allowed_ids = {
+            str(item.get("chunk_id") or "").strip()
+            for item in limited_evidences
+            if isinstance(item, dict) and str(item.get("chunk_id") or "").strip()
+        }
+        short_answer = str(parsed.get("short_answer") or parsed.get("summary") or "").strip()
+        if allowed_ids and short_answer and not _has_supported_inline_citation(short_answer, allowed_ids=allowed_ids):
+            raise ValueError("Synthesis short_answer is missing supported inline citations.")
+        parsed["short_answer"] = short_answer
+        parsed["summary"] = short_answer
+        return parsed
 
     @staticmethod
-    def _compact_sections_for_synthesis(sections: List[Dict[str, Any]], *, max_chars: int = 1200) -> List[Dict[str, str]]:
+    def _compact_sections_for_synthesis(sections: List[Dict[str, Any]], *, max_chars: int) -> List[Dict[str, str]]:
         payload: List[Dict[str, str]] = []
         for section in sections:
             if not isinstance(section, dict):
@@ -528,16 +534,6 @@ class DeepSearchLLMReportWriter:
             if title or body:
                 payload.append({"title": title, "body_markdown": body})
         return payload
-
-    @staticmethod
-    def _heuristic_summary(*, question: str, sections: List[Dict[str, Any]]) -> str:
-        for section in sections:
-            if not isinstance(section, dict):
-                continue
-            body = str(section.get("body_markdown") or "").strip()
-            if body:
-                return body.splitlines()[0].strip()
-        return str(question or "").strip()
 
     async def _write_single_section(
         self,
@@ -565,6 +561,7 @@ class DeepSearchLLMReportWriter:
             user_prompt = SECTION_WRITE_USER_PROMPT.format(
                 question=question,
                 section_title=section.get("title", ""),
+                section_type=section.get("section_type", ""),
                 section_purpose=section.get("purpose", ""),
                 evidence_json=_dump_json(limited_evidences),
                 graph_chain_json=_dump_json(limited_chain),
@@ -577,19 +574,11 @@ class DeepSearchLLMReportWriter:
                 raw = await self._call(messages, phase=f"section:{section.get('title', 'unknown')}")
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
-                if _is_context_limit_error(exc) and attempt < self.max_retries - 1:
-                    if max_items and max_items > 2:
-                        max_items = max(2, max_items // 2)
-                    if max_chars and max_chars > 200:
-                        max_chars = max(200, max_chars // 2)
-                    if chain_limit and chain_limit > 6:
-                        chain_limit = max(6, chain_limit // 2)
-                    continue
                 raise
 
             data = _safe_parse_json(raw, expected="dict")
             if not data:
-                return {"title": section.get("title", ""), "body_markdown": "", "citations": []}
+                raise ValueError(f"Section writing returned invalid JSON. raw={_snippet(raw)}")
             body = str(data.get("body_markdown") or "").strip()
             if allowed_ids and body and not _has_supported_inline_citation(body, allowed_ids=allowed_ids):
                 last_exc = ValueError("Section body is missing supported inline citations.")
@@ -597,6 +586,7 @@ class DeepSearchLLMReportWriter:
                     continue
             return {
                 "title": data.get("title") or section.get("title", ""),
+                "section_type": data.get("section_type") or section.get("section_type", ""),
                 "body_markdown": body,
                 "citations": data.get("citations") or [],
             }
@@ -608,7 +598,7 @@ def render_markdown_from_structured(structured: Dict[str, Any]) -> str:
     """Render a Markdown report from a structured report dict."""
 
     title = str(structured.get("title") or "DeepSearch Report").strip()
-    summary = str(structured.get("summary") or "").strip()
+    summary = str(structured.get("short_answer") or structured.get("summary") or "").strip()
     sections = structured.get("sections") or []
     limitations = structured.get("limitations") or []
     next_steps = structured.get("next_steps") or []
@@ -739,7 +729,7 @@ def _slim_methodology(method: Dict[str, Any], *, level: int) -> Dict[str, Any]:
 
     if normalized_level == 1:
         slim_plan = []
-        for step in plan_steps[:12]:
+        for step in plan_steps[: report_defaults.SLIM_METHOD_LEVEL_1_PLAN_STEPS]:
             if isinstance(step, dict):
                 slim_plan.append(
                     {
@@ -750,7 +740,7 @@ def _slim_methodology(method: Dict[str, Any], *, level: int) -> Dict[str, Any]:
                     }
                 )
         slim_reasoning = []
-        for step in reasoning_steps[:24]:
+        for step in reasoning_steps[: report_defaults.SLIM_METHOD_LEVEL_1_REASONING_STEPS]:
             if isinstance(step, dict):
                 slim_reasoning.append(
                     {
@@ -768,11 +758,11 @@ def _slim_methodology(method: Dict[str, Any], *, level: int) -> Dict[str, Any]:
 
     if normalized_level == 2:
         slim_plan = []
-        for step in plan_steps[:10]:
+        for step in plan_steps[: report_defaults.SLIM_METHOD_LEVEL_2_PLAN_STEPS]:
             if isinstance(step, dict):
                 slim_plan.append({"step_id": step.get("step_id"), "description": step.get("description")})
         slim_reasoning = []
-        for step in reasoning_steps[:16]:
+        for step in reasoning_steps[: report_defaults.SLIM_METHOD_LEVEL_2_REASONING_STEPS]:
             if isinstance(step, dict):
                 slim_reasoning.append(
                     {"step_id": step.get("step_id"), "output_summary": step.get("output_summary"), "tool": step.get("tool")}
@@ -797,8 +787,11 @@ def _slim_graph_evidence(graph_evidence: Any, *, level: int) -> Dict[str, Any]:
     seed_entities = graph_evidence.get("seed_entities") if isinstance(graph_evidence.get("seed_entities"), list) else []
     graph_stats = graph_evidence.get("graph_stats") if isinstance(graph_evidence.get("graph_stats"), dict) else {}
     if normalized_level == 1:
-        return {"seed_entities": seed_entities[:12], "graph_stats": graph_stats}
-    return {"seed_entities": seed_entities[:12]}
+        return {
+            "seed_entities": seed_entities[: report_defaults.SLIM_GRAPH_EVIDENCE_LEVEL_SEED_ENTITIES],
+            "graph_stats": graph_stats,
+        }
+    return {"seed_entities": seed_entities[: report_defaults.SLIM_GRAPH_EVIDENCE_LEVEL_SEED_ENTITIES]}
 
 
 def _slim_coverage(coverage: Any, *, level: int) -> Dict[str, Any]:
@@ -809,8 +802,9 @@ def _slim_coverage(coverage: Any, *, level: int) -> Dict[str, Any]:
         # Still strip large/potentially noisy lists to avoid accidental prompt blowups.
         trimmed = dict(coverage)
         pending = trimmed.get("pending_external")
-        if isinstance(pending, list) and len(pending) > 6:
-            trimmed["pending_external"] = pending[:6]
+        max_pending = int(report_defaults.SLIM_COVERAGE_BASE_PENDING_EXTERNAL_MAX_ITEMS)
+        if isinstance(pending, list) and len(pending) > max_pending:
+            trimmed["pending_external"] = pending[:max_pending]
             trimmed["pending_external_truncated"] = True
         return trimmed
 
@@ -882,11 +876,42 @@ def _limit_evidences(evidences: List[Dict[str, Any]], max_items: int | None, max
     return limited
 
 
-def _snippet(raw: str, limit: int = 500) -> str:
+def _snippet(raw: str, limit: int = report_defaults.DEFAULT_ERROR_SNIPPET_LIMIT_CHARS) -> str:
     text = (raw or "").strip().replace("\n", "\\n")
     if len(text) > limit:
         return text[:limit] + "…"
     return text
+
+
+def _apply_divisor_limit(value: int | None, divisor: int) -> int | None:
+    if value is None:
+        return None
+    denom = max(int(divisor), 1)
+    return max(int(value // denom), 0)
+
+
+def _apply_divisor_limit_required(value: int, divisor: int) -> int:
+    denom = max(int(divisor), 1)
+    return max(int(value // denom), 0)
+
+
+def _limit_highlights(highlights: list[Any], *, max_items: int | None, text_max_chars: int | None) -> list[dict[str, Any]]:
+    if not isinstance(highlights, list) or not highlights:
+        return []
+    subset = highlights if max_items is None else highlights[: max(int(max_items), 0)]
+    limited: list[dict[str, Any]] = []
+    for item in subset:
+        if not isinstance(item, dict):
+            continue
+        payload: dict[str, Any] = dict(item)
+        if text_max_chars is not None:
+            limit = max(int(text_max_chars), 0)
+            for key in ("summary", "content", "details", "text"):
+                value = payload.get(key)
+                if isinstance(value, str) and limit > 0 and len(value) > limit:
+                    payload[key] = value[:limit].rstrip() + "..."
+        limited.append(payload)
+    return limited
 
 
 _RATE_LIMIT_RE = re.compile(r"(rate limit|too many requests|\\b429\\b)", re.IGNORECASE)
@@ -898,10 +923,6 @@ _CONTEXT_LIMIT_RE = re.compile(
 
 def _is_rate_limit_error(exc: Exception) -> bool:
     return bool(_RATE_LIMIT_RE.search(str(exc)))
-
-
-def _is_context_limit_error(exc: Exception) -> bool:
-    return bool(_CONTEXT_LIMIT_RE.search(str(exc)))
 
 
 def _is_context_limit_error(exc: Exception) -> bool:

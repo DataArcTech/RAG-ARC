@@ -11,7 +11,9 @@
     "graph_channel_tool": "graph_adapter.query",
     "text_channel_tool": "graph.context_rollup",
     "web_channel_tool": "web.search",
+    "include_llm_tools_in_catalog": true,
     "default_web_provider": "${DEEPSEARCH_WEB_PROVIDER}",
+    "graph_adapter_name": "${DEEPSEARCH_DEFAULT_ADAPTER}",
     "tool_arg_templates": {}
   },
   "graph_adapter": {
@@ -61,12 +63,24 @@
     "allow_semantic_channel": true,
     "chain_depth": 4,
     "enable_custom_hooks": false,
+    "tool_context_max_evidences": 5,
+    "tool_context_max_chars": 800,
+    "coverage_expected_min_chunks": 3,
+    "trace_reflection_enabled": true,
+    "trace_reflection_max": 24,
+    "step_summary_max_chars": 2000,
     "parallel_branches": 1,
     "tool_timeout_seconds": 45.0,
     "think": {
       "tool_name": "graph.think",
       "every_n_steps": 2,
-      "min_coverage": 0.75
+      "min_coverage": 0.75,
+      "enable_tool_calls": true,
+      "max_tool_calls": 4,
+      "tool_call_concurrency": 2,
+      "tool_catalog_max_items": 30,
+      "include_llm_tools": true,
+      "max_rounds_per_checkpoint": 2
     }
   },
   "multi_agent": {
@@ -78,6 +92,10 @@
     "probe_concurrency": 4,
     "lead_tool_names": ["graph.context_rollup", "graph.evidence_crosscheck"],
     "lead_tool_concurrency": 2,
+    "max_merge_evidences": 60,
+    "worker_timeout_seconds": null,
+    "worker_retry_attempts": 0,
+    "fail_fast": false,
     "incremental_parallelism": true,
     "initial_worker_count": 1,
     "stop_min_evidence_count": 3,
@@ -90,32 +108,63 @@
     "enable_external_on_gap": true
   },
   "reporter": {
+    "max_highlights": 6,
     "include_graph_viz": true,
     "enable_custom_summary": false,
     "parallel_thinking_runs": 1,
+    "enable_llm_report": true,
+    "report_temperature": 0.2,
+    "report_max_evidence_chars": 900,
+    "max_evidence_items": 10,
+    "report_max_graph_chain_items": 200,
+    "report_max_seed_entities": 15,
+    "enable_consistency_check": true,
+    "consistency_temperature": 0.0,
+    "consistency_max_retries": 2,
     "sectionwise_writer": true,
     "sectionwise_retain_k": 5,
-    "outline_evidence_summary_chars": 240
+    "citation_aliases": true,
+    "outline_evidence_summary_chars": 240,
+    "methodology_summary_chars": 1200,
+    "keep_tool_results": 8,
+    "enable_citation_agent": true,
+    "parallel_sections": false,
+    "max_parallel_sections": 4,
+    "consistency_max_claims": 40,
+    "synthesis_section_max_chars": 1200
   },
   "tool_manager": {
     "enable_builtin_tools": true,
-    "enabled_tools": {},
+    "enabled_tools": {
+      "graph.beam_search": {
+        "params": {
+          "beam_size": 3,
+          "max_depth": 3,
+          "temperature": 0.2,
+          "pattern_probe_max_terms": 6
+        }
+      }
+    },
     "audit_label": "${DEEPSEARCH_TOOL_AUDIT_LABEL}",
     "artifact_dir": "${DEEPSEARCH_TOOL_ARTIFACT_DIR}",
+    "max_remote_evidences": 32,
+    "max_remote_context_chars": 4096,
     "remote_tools": {}
   },
   "external_channel": {
-    "default_provider": "${DEEPSEARCH_WEB_PROVIDER}",
+    "default_provider": "tavily",
     "max_rounds": 2,
     "enabled": false,
     "context_window_limit": 12,
     "http_timeout": 20.0,
     "max_results": 5,
+    "tool_timeout_seconds": 45.0,
     "cache_mode": "auto",
-    "cache_dir": "${DEEPSEARCH_EXTERNAL_CACHE_DIR}"
+    "cache_dir": "${DEEPSEARCH_EXTERNAL_CACHE_DIR}",
+    "tavily_api_key": "${TAVILY_API_KEY}"
   },
   "quality_loop": {
-    "enabled": "${DEEPSEARCH_QUALITY_LOOP_ENABLED}"
+    "enabled": true
   },
   "mcp_client": null,
   "llm": {

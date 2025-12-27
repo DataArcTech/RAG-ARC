@@ -1,6 +1,7 @@
 import logging
 import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -90,3 +91,22 @@ def ensure_writable_dir(
         f"Unable to create writable directory at '{preferred}' or fallback '{fallback}'. "
         "Please adjust filesystem permissions."
     )
+
+
+def require_writable_dir(path: str) -> str:
+    """Ensure a writable directory exists at path, otherwise raise.
+
+    Unlike `ensure_writable_dir`, this function does not attempt any fallback paths.
+    """
+
+    target = Path(path).expanduser().resolve()
+    target.mkdir(parents=True, exist_ok=True)
+    try:
+        with tempfile.NamedTemporaryFile(dir=target, prefix=".perm_probe_", delete=True) as handle:
+            handle.write(b"ok")
+            handle.flush()
+    except OSError as exc:
+        raise RuntimeError(f"Directory '{target}' is not writable") from exc
+    if not _tree_is_writable(target):
+        raise RuntimeError(f"Directory tree under '{target}' is not writable")
+    return str(target)

@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
 import logging
 import os
+from pathlib import Path
+import secrets
 from typing import Annotated, Optional
 
 import jwt
@@ -22,23 +24,57 @@ from encapsulation.data_model.orm_models import ChatSession, User
 from app_registration import Register, initialize as app_initialize
 from application.account.user import Account
 from config.application.account_config import AccountConfig
-from pathlib import Path
 from api.schemas.response import StandardResponse
 
-# Get secret key from environment variable, fallback to default for development
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "f33efd136032819f6017e92272c14afc941eca4fbb94ca266b1d8fa5d8d91107")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 24 * 60  # 24小时，方便调试
 
-# Redis 配置（用于 JWT 黑名单）
+def _get_jwt_secret_key() -> str:
+    """Resolve JWT signing key.
+
+    Priority:
+    1) Explicit env var `JWT_SECRET_KEY`
+    2) Persisted key under `RAGARC_RUNTIME_DIR` (or `./local/runtime`) to keep tokens stable across restarts
+    3) Generate a new random key and persist it
+    """
+
+    value = (os.getenv("JWT_SECRET_KEY") or "").strip()
+    if value:
+        return value
+
+    runtime_dir = Path(os.getenv("RAGARC_RUNTIME_DIR") or "./local/runtime")
+    secret_path = runtime_dir / "jwt_secret_key"
+
+    try:
+        if secret_path.exists():
+            existing = secret_path.read_text(encoding="utf-8").strip()
+            if existing:
+                return existing
+    except Exception:  # noqa: BLE001
+        pass
+
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    generated = secrets.token_hex(32)
+    try:
+        secret_path.write_text(generated, encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        # If we cannot persist, still return a valid secret (tokens won't survive restart).
+        pass
+    return generated
+
+
+SECRET_KEY = _get_jwt_secret_key()
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 24 * 60  # 24 hours, convenient for debugging.
+
+# Redis configuration (for JWT blacklist)
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6380"))
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 REDIS_DB = int(os.getenv("REDIS_DB", "0"))
 JWT_BLACKLIST_PREFIX = "jwt:blacklist:"
 
+
 def get_redis_client():
-    """获取 Redis 客户端（用于 JWT 黑名单）"""
+    """Get a Redis client for JWT blacklist (best-effort)."""
     try:
         client = redis.Redis(
             host=REDIS_HOST,
@@ -49,7 +85,7 @@ def get_redis_client():
             socket_connect_timeout=2,
             socket_timeout=2
         )
-        # 测试连接
+        # Probe connectivity (blacklist is optional)
         client.ping()
         return client
     except Exception as e:
@@ -527,4 +563,3 @@ def validate_user_session(session: ChatSession, current_user: User):
         return False
     logger.info(f"Validating session {session.id} for user {current_user.id}")
     return True
-

@@ -3,10 +3,10 @@ from core.deepsearch.tooling import describe_available_tools
 from core.deepsearch.tools import builtin_tool_descriptors
 
 
-def render_all_tools_block() -> str:
+def render_all_tools_block(*, include_llm_tools: bool) -> str:
     """Render a stable, human-readable tool catalog for <all_tools> trace."""
 
-    hints = describe_available_tools()
+    hints = describe_available_tools(include_llm_tools=include_llm_tools)
     hint_map = {str(h.get("name") or ""): h for h in hints if isinstance(h, dict)}
     descriptors = list(builtin_tool_descriptors())
 
@@ -39,4 +39,3 @@ def render_all_tools_block() -> str:
             + f": {desc.description}{extra_text}{tag_text}"
         )
     return "\n".join(lines).strip()
-

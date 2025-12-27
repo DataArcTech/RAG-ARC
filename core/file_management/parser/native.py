@@ -4,13 +4,10 @@ import logging
 from typing import List, Optional, Dict, Any, TYPE_CHECKING
 from urllib.parse import urlparse
 from pathlib import Path
-from dotenv import load_dotenv
-
-load_dotenv()
 
 from .base import AbstractParser
 from framework.singleton_decorator import singleton
-from core.utils.path_guard import ensure_writable_dir
+from core.utils.path_guard import require_writable_dir
 
 if TYPE_CHECKING:
     from config.core.file_management.parser.native import NativeParserConfig
@@ -47,12 +44,10 @@ class NativeParser(AbstractParser):
         **kwargs: Any
     ) -> List[Dict[str, Any]]:
         """Parse a file of any supported type from binary data"""
-
-        # Get output directory from environment variable
-        output_dir = os.getenv('NATIVE_PARSER_OUTPUT_DIR', './test_output/native')
-        runtime_root = os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime")
-        fallback_dir = os.path.join(runtime_root, "native_parser_output")
-        output_dir = ensure_writable_dir(os.path.abspath(output_dir), fallback_dir)
+        output_dir = getattr(self.config, "output_dir", None)
+        if not isinstance(output_dir, str) or not output_dir.strip():
+            raise ValueError("NativeParser requires config.output_dir (no implicit env defaults).")
+        output_dir = require_writable_dir(output_dir)
 
         # Extract file extension and validate
         base_filename, file_ext = os.path.splitext(filename)
@@ -76,6 +71,8 @@ class NativeParser(AbstractParser):
                 return self._parse_txt(file_data, filename, output_dir, **kwargs)
             elif file_ext == '.md':
                 return self._parse_md(file_data, filename, output_dir, **kwargs)
+            elif file_ext == '.pdf':
+                return self._parse_pdf(file_data, filename, output_dir, **kwargs)
             else:
                 raise ValueError(f"File type '{file_ext}' is listed as supported but no handler exists")
 
@@ -85,7 +82,36 @@ class NativeParser(AbstractParser):
 
     def get_supported_extensions(self) -> List[str]:
         """Get all supported file extensions"""
-        return ['.docx', '.xlsx', '.xls', '.csv', '.pptx', '.html', '.txt', '.md']
+        return ['.docx', '.xlsx', '.xls', '.csv', '.pptx', '.html', '.txt', '.md', '.pdf']
+
+    def _parse_pdf(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[Dict[str, Any]]:
+        """Parse text-based PDF via PyMuPDF (no OCR)."""
+        try:
+            import fitz  # PyMuPDF
+
+            doc = fitz.open(stream=file_data, filetype="pdf")
+            results: List[Dict[str, Any]] = []
+            for page_index in range(doc.page_count):
+                page = doc.load_page(page_index)
+                text = page.get_text("text") or ""
+                if text.strip():
+                    results.append(
+                        {
+                            "text": text,
+                            "metadata": {
+                                "page": page_index + 1,
+                                "page_count": doc.page_count,
+                                "source_file_name": filename,
+                            },
+                        }
+                    )
+            if not results:
+                # Still return a single empty text payload so downstream can surface a clear error.
+                results.append({"text": "", "metadata": {"source_file_name": filename, "page_count": doc.page_count}})
+            return results
+        except Exception as e:
+            logger.error(f"Failed to parse PDF {filename}: {str(e)}")
+            raise RuntimeError(f"Failed to parse PDF {filename}: {str(e)}")
 
     def _parse_docx(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[Dict[str, Any]]:
         """Parse DOCX file from binary data and return structured results"""

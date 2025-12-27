@@ -1,7 +1,6 @@
 """Tool manager that orchestrates local registries and MCP routing (infrastructure layer)."""
 import json
 import logging
-import os
 import time
 import uuid
 from dataclasses import dataclass, asdict, is_dataclass
@@ -76,10 +75,12 @@ class LocalToolRegistry:
         return self._descriptors.get(tool_name)
 
     def should_route_remote(self, tool_name: str) -> bool:
-        """Return True when config requests MCP fallback."""
+        """Return True when tool is configured as MCP-only."""
 
         cfg = self._tool_config(tool_name)
-        return bool(cfg.get("mcp_fallback") or cfg.get("mcp_only"))
+        if cfg.get("mcp_fallback") is not None:
+            raise ValueError("mcp_fallback is not supported (fallbacks are disabled). Use mcp_only instead.")
+        return bool(cfg.get("mcp_only"))
 
     def _is_enabled_globally(self) -> bool:
         flag = self.tool_configs.get("enable_builtin_tools", True)
@@ -113,7 +114,7 @@ class LocalToolRegistry:
                 params = {
                     key: value
                     for key, value in cfg.items()
-                    if key not in {"enabled", "audit_label", "mcp_only", "mcp_fallback"}
+                    if key not in {"enabled", "audit_label", "mcp_only"}
                 }
             if params:
                 overrides[name] = params
@@ -173,13 +174,13 @@ class LocalToolRegistry:
         if not self._is_enabled_globally():
             for name in self._builtin_tool_names:
                 cfg = self._tool_config(name)
-                if cfg.get("mcp_fallback") or cfg.get("mcp_only"):
+                if cfg.get("mcp_only"):
                     continue
                 disabled.add(name)
         for name, cfg in self._enabled_tool_configs.items():
             if not isinstance(cfg, dict):
                 continue
-            if cfg.get("enabled") is False and not (cfg.get("mcp_fallback") or cfg.get("mcp_only")):
+            if cfg.get("enabled") is False and not cfg.get("mcp_only"):
                 disabled.add(name)
         self.tool_hint_registry.set_disabled_tools(disabled)
 
@@ -370,7 +371,9 @@ class DeepSearchToolManager:
         mcp_router: Optional[MCPToolRouter] = None,
         tool_hint_registry: ToolHintRegistry | None = None,
     ):
-        self.tool_configs = tool_configs or {}
+        if not tool_configs:
+            raise ValueError("DeepSearchToolManager requires explicit tool_configs (no implicit defaults).")
+        self.tool_configs = dict(tool_configs)
         self.telemetry_client = telemetry_client
         self.local_registry = local_registry or LocalToolRegistry(
             tool_configs=self.tool_configs,
@@ -384,14 +387,16 @@ class DeepSearchToolManager:
         )
         self.remote_argument_templates = self.tool_configs.get("remote_argument_templates") or {}
         self.audit_label = self.tool_configs.get("audit_label") or getattr(self.local_registry, "audit_label", None)
-        self.max_remote_evidences = int(self.tool_configs.get("max_remote_evidences", 32))
-        self.max_remote_context_chars = int(self.tool_configs.get("max_remote_context_chars", 4096))
+        self.max_remote_evidences = int(self.tool_configs["max_remote_evidences"])
+        self.max_remote_context_chars = int(self.tool_configs["max_remote_context_chars"])
         self.llm_fingerprint = self._fingerprint_llm(self.tool_configs.get("llm_connector"))
-        artifact_dir = self.tool_configs.get("artifact_dir") or os.getenv("DEEPSEARCH_TOOL_ARTIFACT_DIR")
-        self.artifact_dir = Path(artifact_dir).expanduser() if artifact_dir else None
+        artifact_dir = self.tool_configs.get("artifact_dir")
+        if not artifact_dir:
+            raise ValueError("tool_configs.artifact_dir is required (no implicit fallback).")
+        self.artifact_dir = Path(str(artifact_dir)).expanduser()
 
     async def invoke(self, tool_name: str, *, payload: Dict[str, Any]) -> ToolResultPayload:
-        """Invoke a tool through MCP first, falling back to local registries on failure."""
+        """Invoke a tool through MCP and/or local registries according to the routing policy."""
 
         call_id = uuid.uuid4().hex
         descriptor = self._resolve_descriptor(tool_name)
@@ -454,44 +459,9 @@ class DeepSearchToolManager:
                 return result
             except Exception as exc:  # noqa: BLE001
                 remote_error = exc
-                logger.warning(
-                    "Remote tool %s failed via MCP (%s); attempting local fallback",
-                    tool_name,
-                    exc,
-                )
+                logger.warning("Remote tool %s failed via MCP (%s)", tool_name, exc)
 
-        if local_tool:
-            result = await self._invoke_local(tool_name, local_tool, descriptor, request)
-            if remote_error:
-                result.diagnostics.setdefault("remote_fallback_reason", str(remote_error))
-            await emit_trace(
-                "tool_response",
-                json.dumps(
-                    json_safe(
-                        {
-                            "call_id": call_id,
-                            "tool_name": tool_name,
-                            "route": "local",
-                            "remote_fallback_reason": (str(remote_error) if remote_error else None),
-                            "result": result.model_dump(exclude_none=True),
-                        }
-                    ),
-                    ensure_ascii=False,
-                    indent=2,
-                    default=str,
-                ),
-                meta={
-                    "call_id": call_id,
-                    "tool_name": tool_name,
-                    "plan_step": request.plan_step,
-                    "ok": True,
-                    "route": "local",
-                    "remote_fallback": bool(remote_error is not None),
-                },
-            )
-            return result
-
-        if remote_error:
+        if remote_error is not None:
             await emit_trace(
                 "tool_response",
                 json.dumps(
@@ -516,6 +486,33 @@ class DeepSearchToolManager:
                 },
             )
             raise remote_error
+
+        if local_tool:
+            result = await self._invoke_local(tool_name, local_tool, descriptor, request)
+            await emit_trace(
+                "tool_response",
+                json.dumps(
+                    json_safe(
+                        {
+                            "call_id": call_id,
+                            "tool_name": tool_name,
+                            "route": "local",
+                            "result": result.model_dump(exclude_none=True),
+                        }
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                ),
+                meta={
+                    "call_id": call_id,
+                    "tool_name": tool_name,
+                    "plan_step": request.plan_step,
+                    "ok": True,
+                    "route": "local",
+                },
+            )
+            return result
 
         await emit_trace(
             "tool_response",

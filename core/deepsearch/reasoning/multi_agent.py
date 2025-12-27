@@ -2,7 +2,6 @@
 import asyncio
 import contextvars
 import logging
-import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -25,27 +24,22 @@ _RUN_SETTINGS: contextvars.ContextVar[Optional["MultiAgentSettings"]] = contextv
 class MultiAgentSettings:
     """Runtime knobs for lead/worker orchestration."""
 
-    enabled: bool = True
-    max_subagents: int = 4
-    subagent_concurrency: int = 4
-    enable_parallel_tool_probes: bool = True
-    probe_tool_names: Sequence[str] = (
-        "graph.chunk_scan",
-        "graph.pattern_scan",
-    )
-    probe_concurrency: int = 4
-    lead_tool_names: Sequence[str] = (
-        "graph.context_rollup",
-        "graph.evidence_crosscheck",
-    )
-    lead_tool_concurrency: int = 2
-    worker_timeout_seconds: Optional[float] = None
-    worker_retry_attempts: int = 0
-    fail_fast: bool = False
-    incremental_parallelism: bool = False
-    initial_worker_count: int = 1
-    stop_min_evidence_count: int = 0
-    stop_min_coverage_ratio: float = 0.0
+    enabled: bool
+    max_subagents: int
+    subagent_concurrency: int
+    enable_parallel_tool_probes: bool
+    probe_tool_names: Sequence[str]
+    probe_concurrency: int
+    lead_tool_names: Sequence[str]
+    lead_tool_concurrency: int
+    worker_timeout_seconds: Optional[float]
+    worker_retry_attempts: int
+    fail_fast: bool
+    incremental_parallelism: bool
+    initial_worker_count: int
+    stop_min_evidence_count: int
+    stop_min_coverage_ratio: float
+    max_merge_evidences: int
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -64,6 +58,7 @@ class MultiAgentSettings:
             "initial_worker_count": self.initial_worker_count,
             "stop_min_evidence_count": self.stop_min_evidence_count,
             "stop_min_coverage_ratio": self.stop_min_coverage_ratio,
+            "max_merge_evidences": self.max_merge_evidences,
         }
 
 
@@ -87,12 +82,16 @@ class MultiAgentGraphReasoningLoop:
         strategy_config,
         tool_manager: ToolInvoker | None = None,
         settings: MultiAgentSettings | Dict[str, Any] | None = None,
+        graph_channel_tool: str,
     ):
         self.adapter = adapter
         self.llm_connector = llm_connector
         self.strategy_config = strategy_config
         self.tool_manager = tool_manager
         self.settings = self._coerce_settings(settings)
+        self.graph_channel_tool = str(graph_channel_tool).strip()
+        if not self.graph_channel_tool:
+            raise ValueError("graph_channel_tool is required for MultiAgentGraphReasoningLoop")
 
     async def run(
         self,
@@ -183,34 +182,36 @@ class MultiAgentGraphReasoningLoop:
             llm_connector=self.llm_connector,
             strategy_config=self.strategy_config,
             tool_manager=self.tool_manager,
+            graph_channel_tool=self.graph_channel_tool,
         )
 
     @staticmethod
     def _coerce_settings(raw: MultiAgentSettings | Dict[str, Any] | None) -> MultiAgentSettings:
         if raw is None:
-            return MultiAgentSettings()
+            raise ValueError("MultiAgentGraphReasoningLoop requires explicit settings (no implicit defaults).")
         if isinstance(raw, MultiAgentSettings):
             return raw
         if isinstance(raw, dict):
             payload = dict(raw)
             return MultiAgentSettings(
-                enabled=bool(payload.get("enabled", True)),
-                max_subagents=int(payload.get("max_subagents", 4)),
-                subagent_concurrency=int(payload.get("subagent_concurrency", 4)),
-                enable_parallel_tool_probes=bool(payload.get("enable_parallel_tool_probes", True)),
-                probe_tool_names=tuple(payload.get("probe_tool_names") or MultiAgentSettings.probe_tool_names),
-                probe_concurrency=int(payload.get("probe_concurrency", 4)),
-                lead_tool_names=tuple(payload.get("lead_tool_names") or MultiAgentSettings.lead_tool_names),
-                lead_tool_concurrency=int(payload.get("lead_tool_concurrency", 2)),
+                enabled=bool(payload["enabled"]),
+                max_subagents=int(payload["max_subagents"]),
+                subagent_concurrency=int(payload["subagent_concurrency"]),
+                enable_parallel_tool_probes=bool(payload["enable_parallel_tool_probes"]),
+                probe_tool_names=tuple(payload["probe_tool_names"]),
+                probe_concurrency=int(payload["probe_concurrency"]),
+                lead_tool_names=tuple(payload["lead_tool_names"]),
+                lead_tool_concurrency=int(payload["lead_tool_concurrency"]),
                 worker_timeout_seconds=payload.get("worker_timeout_seconds"),
-                worker_retry_attempts=int(payload.get("worker_retry_attempts", 0) or 0),
-                fail_fast=bool(payload.get("fail_fast", False)),
-                incremental_parallelism=bool(payload.get("incremental_parallelism", False)),
-                initial_worker_count=int(payload.get("initial_worker_count", 1) or 1),
-                stop_min_evidence_count=int(payload.get("stop_min_evidence_count", 0) or 0),
-                stop_min_coverage_ratio=float(payload.get("stop_min_coverage_ratio", 0.0) or 0.0),
+                worker_retry_attempts=int(payload["worker_retry_attempts"]),
+                fail_fast=bool(payload["fail_fast"]),
+                incremental_parallelism=bool(payload["incremental_parallelism"]),
+                initial_worker_count=int(payload["initial_worker_count"]),
+                stop_min_evidence_count=int(payload["stop_min_evidence_count"]),
+                stop_min_coverage_ratio=float(payload["stop_min_coverage_ratio"]),
+                max_merge_evidences=int(payload["max_merge_evidences"]),
             )
-        return MultiAgentSettings()
+        raise TypeError("Unsupported settings type")
 
     def _settings(self) -> MultiAgentSettings:
         return _RUN_SETTINGS.get() or self.settings
@@ -251,7 +252,7 @@ class MultiAgentGraphReasoningLoop:
         index = {step_id: idx for idx, step_id in enumerate(order)}
         seen: set[str] = set()
         normalized: List[Tuple[int, Dict[str, Any]]] = []
-        fallback: List[Dict[str, Any]] = []
+        unplaced: List[Dict[str, Any]] = []
 
         for step in merged_plan_steps:
             if not isinstance(step, dict):
@@ -263,10 +264,10 @@ class MultiAgentGraphReasoningLoop:
             if step_id in index:
                 normalized.append((index[step_id], step))
             else:
-                fallback.append(step)
+                unplaced.append(step)
 
         normalized.sort(key=lambda item: item[0])
-        ordered = [payload for _, payload in normalized] + fallback
+        ordered = [payload for _, payload in normalized] + unplaced
 
         if len(seen) < len(order):
             for step in original_plan_steps:
@@ -274,11 +275,14 @@ class MultiAgentGraphReasoningLoop:
                 if not step_id or step_id in seen:
                     continue
                 seen.add(step_id)
+                channel = step.get("channel")
+                if not channel:
+                    raise ValueError(f"Plan step {step_id} is missing required channel")
                 ordered.append(
                     {
                         "step_id": step_id,
                         "description": str(step.get("description") or ""),
-                        "channel": str(step.get("channel") or "graph"),
+                        "channel": str(channel),
                         "metadata": dict(step.get("metadata") or {}),
                     }
                 )
@@ -582,17 +586,12 @@ class MultiAgentGraphReasoningLoop:
                 logger.warning("Probe tool failed (%s): %s", agent_id, exc)
         return results
 
-    @staticmethod
-    def _dedupe_and_cap_evidences(evidences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _dedupe_and_cap_evidences(self, evidences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Deduplicate evidences by (source, chunk_id) and cap size to avoid prompt blow-ups."""
 
         if not evidences:
             return []
-        raw_cap = os.getenv("DEEPSEARCH_MULTI_AGENT_MAX_EVIDENCES", "60")
-        try:
-            cap = max(0, int(raw_cap))
-        except Exception:
-            cap = 60
+        cap = max(0, int(self._settings().max_merge_evidences))
         seen: set[str] = set()
         unique: List[Dict[str, Any]] = []
         for ev in evidences:
@@ -611,8 +610,7 @@ class MultiAgentGraphReasoningLoop:
                 break
         return unique
 
-    @staticmethod
-    def _merge_probe_results(trace: Dict[str, Any], probe_runs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _merge_probe_results(self, trace: Dict[str, Any], probe_runs: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not probe_runs:
             return trace
         merged = dict(trace)
@@ -625,7 +623,7 @@ class MultiAgentGraphReasoningLoop:
             for chunk in result.get("evidences") or []:
                 if isinstance(chunk, dict):
                     evidences.append(chunk)
-        merged["evidences"] = MultiAgentGraphReasoningLoop._dedupe_and_cap_evidences(evidences)
+        merged["evidences"] = self._dedupe_and_cap_evidences(evidences)
         return merged
 
     def _merge_worker_traces(self, worker_outcomes: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -728,8 +726,7 @@ class MultiAgentGraphReasoningLoop:
                 logger.warning("Lead tool failed (%s): %s", question, exc)
         return results
 
-    @staticmethod
-    def _merge_lead_tools(merged_trace: Dict[str, Any], lead_tool_runs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _merge_lead_tools(self, merged_trace: Dict[str, Any], lead_tool_runs: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not lead_tool_runs:
             return merged_trace
         merged = dict(merged_trace)
@@ -742,32 +739,25 @@ class MultiAgentGraphReasoningLoop:
             for chunk in result.get("evidences") or []:
                 if isinstance(chunk, dict):
                     evidences.append(chunk)
-        merged["evidences"] = MultiAgentGraphReasoningLoop._dedupe_and_cap_evidences(evidences)
+        merged["evidences"] = self._dedupe_and_cap_evidences(evidences)
         merged.setdefault("coverage_metrics", {})
         merged["coverage_metrics"]["lead_tools"] = [run.get("tool_name") for run in lead_tool_runs]
         return merged
 
-    @staticmethod
-    def _tool_context_limits() -> tuple[int, int]:
-        max_items = 5
-        max_chars = 800
-        raw_items = os.getenv("DEEPSEARCH_TOOL_CONTEXT_MAX_EVIDENCES")
-        raw_chars = os.getenv("DEEPSEARCH_TOOL_CONTEXT_MAX_CHARS")
-        if raw_items is not None:
-            try:
-                max_items = max(1, int(raw_items))
-            except Exception:
-                max_items = 5
-        if raw_chars is not None:
-            try:
-                max_chars = max(100, int(raw_chars))
-            except Exception:
-                max_chars = 800
-        return max_items, max_chars
+    def _tool_context_limits(self) -> tuple[int, int]:
+        cfg = self.strategy_config
+        if hasattr(cfg, "tool_context_max_evidences") and hasattr(cfg, "tool_context_max_chars"):
+            max_items = int(getattr(cfg, "tool_context_max_evidences"))
+            max_chars = int(getattr(cfg, "tool_context_max_chars"))
+            return max(1, max_items), max(100, max_chars)
+        if isinstance(cfg, dict):
+            if cfg.get("tool_context_max_evidences") is None or cfg.get("tool_context_max_chars") is None:
+                raise ValueError("strategy_config.tool_context_max_evidences/tool_context_max_chars are required")
+            return max(1, int(cfg["tool_context_max_evidences"])), max(100, int(cfg["tool_context_max_chars"]))
+        raise TypeError("strategy_config must expose tool_context_max_evidences/tool_context_max_chars")
 
-    @classmethod
-    def _limit_tool_context_evidences(cls, evidences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        max_items, max_chars = cls._tool_context_limits()
+    def _limit_tool_context_evidences(self, evidences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        max_items, max_chars = self._tool_context_limits()
         items = [ev for ev in (evidences or []) if isinstance(ev, dict)]
         if max_items and len(items) > max_items:
             items = items[-max_items:]

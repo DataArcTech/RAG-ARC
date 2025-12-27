@@ -66,11 +66,9 @@ class OpenAIEmbeddingConfig(AbstractConfig):
 
     @model_validator(mode="after")
     def _validate_embedding_dimensions(self):
-        if self.loading_method == "huggingface" and self.embedding_dimensions is None:
-            raise ValueError(
-                "embedding_dimensions is required when loading_method='huggingface'. "
-                "Set EMBEDDING_DIMENSIONS (or provide embedding_dimensions in config JSON)."
-            )
+        # `embedding_dimensions` is optional:
+        # - If provided, it is used as an override.
+        # - If missing, EmbeddingLLMBase can auto-detect the dimension by running a tiny embedding call.
         return self
 
     def build(self) -> OpenAIEmbeddingLLM:

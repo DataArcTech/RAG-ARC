@@ -1,6 +1,7 @@
 """Deterministic chunk sampler that mirrors TF-IDF style probes."""
 from typing import Any, Dict, List
 
+from config.core.deepsearch.tool_defaults import CHUNK_SCAN_DEFAULT_MAX_CHUNKS, CHUNK_SCAN_DEFAULT_QUERY_MAX_CHARS
 from encapsulation.data_model.deepsearch import EvidenceChunk
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
@@ -47,20 +48,12 @@ class ChunkScanTool(GraphTool):
         },
     )
 
-    def __init__(self, *, max_chunks: int = 5):
+    def __init__(self, *, max_chunks: int = CHUNK_SCAN_DEFAULT_MAX_CHUNKS):
         self.max_chunks = max_chunks
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
         query = self._resolve_query(request)
-        async with adapter_locked(adapter):
-            payload = await adapter.aquery_subgraph(
-                query,
-                channel="graph",
-                access_scope=request.access_scope,
-            )
-        chunks = self._normalize_chunks(payload.get("chunks"))
-        selected: List[Dict[str, Any]] = []
         override = request.extra.get("top_k", None)
         if override is None:
             override = request.extra.get("max_chunks", None)
@@ -71,6 +64,15 @@ class ChunkScanTool(GraphTool):
         max_chunks = effective_max if effective_max is not None else 0
         if max_chunks < 0:
             max_chunks = 0
+        async with adapter_locked(adapter):
+            payload = await adapter.aquery_subgraph(
+                query,
+                channel="graph",
+                access_scope=request.access_scope,
+                query_options={"top_k": max_chunks} if max_chunks else None,
+            )
+        chunks = self._normalize_chunks(payload.get("chunks"))
+        selected: List[Dict[str, Any]] = []
         for chunk in chunks:
             if max_chunks and len(selected) >= max_chunks:
                 break
@@ -97,9 +99,10 @@ class ChunkScanTool(GraphTool):
 
     @staticmethod
     def _resolve_query(request: ToolRunRequest) -> str:
+        max_chars = int(CHUNK_SCAN_DEFAULT_QUERY_MAX_CHARS)
         if isinstance(request.extra.get("focus_query"), str):
-            return clean_query(request.extra["focus_query"], max_chars=240)
-        return clean_query(request.question, max_chars=240)
+            return clean_query(request.extra["focus_query"], max_chars=max_chars)
+        return clean_query(request.question, max_chars=max_chars)
 
     @staticmethod
     def _normalize_chunks(chunks: Any) -> List[Dict[str, Any]]:

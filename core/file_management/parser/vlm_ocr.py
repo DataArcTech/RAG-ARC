@@ -13,7 +13,7 @@ load_dotenv()
 
 from .base import AbstractParser
 from framework.singleton_decorator import singleton
-from core.utils.path_guard import ensure_writable_dir
+from core.utils.path_guard import require_writable_dir
 from framework.thread_pool import get_thread_pool
 
 # Import only necessary utilities
@@ -76,12 +76,10 @@ class VLMOcrParser(AbstractParser):
             logger.error(error_msg)
             raise ValueError(error_msg)
 
-        # Get output directory from environment variable (use unified PARSER_OUTPUT_DIR)
-        parser_base_dir = os.getenv('PARSER_OUTPUT_DIR', './data/parsed_files')
-        output_dir = os.path.join(parser_base_dir, 'vlm_ocr')
-        runtime_root = os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime")
-        fallback_dir = os.path.join(runtime_root, "vlmocr_output")
-        output_dir = ensure_writable_dir(os.path.abspath(output_dir), fallback_dir)
+        output_dir = getattr(self.config, "output_dir", None)
+        if not isinstance(output_dir, str) or not output_dir.strip():
+            raise ValueError("VLMOcrParser requires config.output_dir (no implicit env defaults).")
+        output_dir = require_writable_dir(output_dir)
         save_dir = os.path.join(output_dir, base_filename)
         os.makedirs(save_dir, exist_ok=True)
 

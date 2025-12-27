@@ -11,7 +11,7 @@ class _StubAdapter:
     async def prepare(self, question: str, *, access_scope=None) -> None:  # pragma: no cover - simple stub
         return None
 
-    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None):
+    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None, query_options=None):
         return {
             "chunks": [
                 {"content": f"chunk::{query}", "metadata": {"chunk_id": "c1"}},
@@ -85,11 +85,52 @@ class _HangingToolManager:
         )
 
 
+def _strategy_config(*, overrides: dict | None = None, think_overrides: dict | None = None) -> dict:
+    base = {
+        "strategy_name": "ppr_chain",
+        "allow_semantic_channel": True,
+        "chain_depth": 2,
+        "parallel_branches": 1,
+        "max_parallel_branches": 4,
+        "step_summary_max_chars": 2000,
+        "tool_context_max_evidences": 5,
+        "tool_context_max_chars": 800,
+        "coverage_expected_min_chunks": 3,
+        "trace_reflection_enabled": False,
+        "trace_reflection_max": 0,
+        "tool_timeout_seconds": 0.0,
+        "think": {
+            "tool_name": "graph.think",
+            "every_n_steps": 0,
+            "min_coverage": 0.0,
+            "enable_tool_calls": False,
+            "max_tool_calls": 0,
+            "tool_call_concurrency": 0,
+            "tool_catalog_max_items": 0,
+            "include_llm_tools": True,
+            "max_rounds_per_checkpoint": 1,
+        },
+    }
+    if overrides:
+        base.update(dict(overrides))
+    if think_overrides:
+        merged = dict(base["think"])
+        merged.update(dict(think_overrides))
+        base["think"] = merged
+    return base
+
+
 @pytest.mark.asyncio
 async def test_graph_reasoning_combines_traversal_and_tools():
     adapter = _StubAdapter()
     tool_manager = _StubToolManager()
-    loop = GraphReasoningLoop(adapter=adapter, llm_connector=None, strategy_config={"strategy_name": "ppr_chain"}, tool_manager=tool_manager)
+    loop = GraphReasoningLoop(
+        adapter=adapter,
+        llm_connector=None,
+        strategy_config=_strategy_config(),
+        tool_manager=tool_manager,
+        graph_channel_tool="graph_adapter.query",
+    )
 
     plan_steps = [
         {"step_id": "plan_01", "description": "Inspect graph", "channel": "graph", "tool": "graph_adapter.query"},
@@ -117,7 +158,7 @@ async def test_graph_reasoning_combines_traversal_and_tools():
 
 
 class _HighCoverageAdapter(_StubAdapter):
-    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None):
+    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None, query_options=None):
         return {
             "chunks": [
                 {"content": f"chunk::{query}::{idx}", "metadata": {"chunk_id": f"c{idx}"}}
@@ -136,11 +177,9 @@ async def test_graph_reasoning_skips_periodic_think_when_coverage_is_sufficient(
     loop = GraphReasoningLoop(
         adapter=adapter,
         llm_connector=None,
-        strategy_config={
-            "think_every_n_steps": 1,
-            "think_min_coverage": 0.75,
-        },
+        strategy_config=_strategy_config(think_overrides={"every_n_steps": 1, "min_coverage": 0.75}),
         tool_manager=tool_manager,
+        graph_channel_tool="graph_adapter.query",
     )
 
     plan_steps = [
@@ -163,7 +202,13 @@ async def test_graph_reasoning_skips_periodic_think_when_coverage_is_sufficient(
 @pytest.mark.asyncio
 async def test_graph_reasoning_marks_missing_tool_manager_skips_step():
     adapter = _StubAdapter()
-    loop = GraphReasoningLoop(adapter=adapter, llm_connector=None, strategy_config={})
+    loop = GraphReasoningLoop(
+        adapter=adapter,
+        llm_connector=None,
+        strategy_config=_strategy_config(),
+        tool_manager=None,
+        graph_channel_tool="graph_adapter.query",
+    )
 
     plan_steps = [
         {"step_id": "plan_02", "description": "Text summary", "channel": "text", "tool": "graph.context_rollup"},
@@ -186,8 +231,9 @@ async def test_graph_reasoning_populates_seed_entities_from_plan():
     loop = GraphReasoningLoop(
         adapter=adapter,
         llm_connector=None,
-        strategy_config={},
+        strategy_config=_strategy_config(),
         tool_manager=tool_manager,
+        graph_channel_tool="graph_adapter.query",
     )
 
     plan_steps = [
@@ -217,11 +263,9 @@ async def test_graph_reasoning_inserts_periodic_think():
     loop = GraphReasoningLoop(
         adapter=adapter,
         llm_connector=None,
-        strategy_config={
-            "think_every_n_steps": 1,
-            "think_min_coverage": 1.1,
-        },
+        strategy_config=_strategy_config(think_overrides={"every_n_steps": 1, "min_coverage": 1.1}),
         tool_manager=tool_manager,
+        graph_channel_tool="graph_adapter.query",
     )
 
     plan_steps = [
@@ -238,18 +282,18 @@ async def test_graph_reasoning_inserts_periodic_think():
 
 
 @pytest.mark.asyncio
-async def test_graph_reasoning_think_timeout_falls_back_to_heuristic_note():
+async def test_graph_reasoning_think_timeout_marks_failed():
     adapter = _StubAdapter()
     tool_manager = _HangingToolManager(delay=0.2)
     loop = GraphReasoningLoop(
         adapter=adapter,
         llm_connector=None,
-        strategy_config={
-            "think_every_n_steps": 1,
-            "think_min_coverage": 1.1,
-            "tool_timeout_seconds": 0.01,
-        },
+        strategy_config=_strategy_config(
+            overrides={"tool_timeout_seconds": 0.01},
+            think_overrides={"every_n_steps": 1, "min_coverage": 1.1},
+        ),
         tool_manager=tool_manager,
+        graph_channel_tool="graph_adapter.query",
     )
 
     plan_steps = [
@@ -265,9 +309,9 @@ async def test_graph_reasoning_think_timeout_falls_back_to_heuristic_note():
 
     think_steps = [step for step in result["reasoning_steps"] if step["step_id"].startswith("think_auto_")]
     assert think_steps
-    assert think_steps[0]["status"] == "done"
-    assert think_steps[0]["diagnostics"]["reason"] == "tool_timeout_fallback"
-    assert result["think_notes"], "Timeout fallback should still record a ThinkNote"
+    assert think_steps[0]["status"] == "failed"
+    assert think_steps[0]["diagnostics"]["reason"] == "tool_timeout"
+    assert not result["think_notes"]
 class _SeedAwareAdapter(_StubAdapter):
     def __init__(self):
         super().__init__()
@@ -284,12 +328,21 @@ async def test_graph_traversal_executor_propagates_seed_entities():
     from encapsulation.data_model.deepsearch import GraphQueryContext, PlanSpec
 
     adapter = _SeedAwareAdapter()
-    executor = GraphTraversalExecutor(adapter=adapter, settings=GraphTraversalSettings(chain_depth=2))
+    executor = GraphTraversalExecutor(
+        adapter=adapter,
+        settings=GraphTraversalSettings(
+            strategy_name="ppr_chain",
+            allow_semantic_channel=True,
+            chain_depth=2,
+            parallel_branches=1,
+            step_summary_max_chars=2000,
+        ),
+    )
     context = GraphQueryContext(adapter_name="hipporag", question="Q1", seed_entities=["NodeA"])
     plan = [
         PlanSpec(step_id="plan_seed", description="Hop", channel="graph", metadata={}),
     ]
-    await executor.run(plan, context, tool_args_map={"plan_seed": {"seed_entities": ["NodeB"]}})
+    await executor.run(plan, context, tool_name="graph_adapter.query", tool_args_map={"plan_seed": {"seed_entities": ["NodeB"]}})
 
     assert adapter.chain_payloads, "chain traversal should run"
     payload = adapter.chain_payloads[0]
@@ -302,12 +355,12 @@ class _SlowAdapter(_StubAdapter):
         self.concurrent_calls = 0
         self.max_concurrency = 0
 
-    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None):
+    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None, query_options=None):
         self.concurrent_calls += 1
         self.max_concurrency = max(self.max_concurrency, self.concurrent_calls)
         try:
             await asyncio.sleep(0.05)
-            return await super().aquery_subgraph(query, channel=channel, access_scope=access_scope)
+            return await super().aquery_subgraph(query, channel=channel, access_scope=access_scope, query_options=query_options)
         finally:
             self.concurrent_calls -= 1
 
@@ -333,8 +386,9 @@ async def test_graph_reasoning_parallelises_tool_steps_when_configured():
     loop = GraphReasoningLoop(
         adapter=_StubAdapter(),
         llm_connector=None,
-        strategy_config={"parallel_branches": 3},
+        strategy_config=_strategy_config(overrides={"parallel_branches": 3}),
         tool_manager=tool_manager,
+        graph_channel_tool="graph_adapter.query",
     )
 
     plan_steps = [
@@ -368,8 +422,9 @@ async def test_graph_reasoning_auto_parallel_requires_scheduler_hint():
     loop = GraphReasoningLoop(
         adapter=_StubAdapter(),
         llm_connector=None,
-        strategy_config={"parallel_branches": 0, "max_parallel_branches": 3},
+        strategy_config=_strategy_config(overrides={"parallel_branches": 0, "max_parallel_branches": 3}),
         tool_manager=tool_manager,
+        graph_channel_tool="graph_adapter.query",
     )
 
     plan_steps = [
@@ -405,8 +460,9 @@ async def test_graph_reasoning_auto_parallel_with_scheduler_hint():
     loop = GraphReasoningLoop(
         adapter=_StubAdapter(),
         llm_connector=None,
-        strategy_config={"parallel_branches": 0, "max_parallel_branches": 3},
+        strategy_config=_strategy_config(overrides={"parallel_branches": 0, "max_parallel_branches": 3}),
         tool_manager=tool_manager,
+        graph_channel_tool="graph_adapter.query",
     )
 
     plan_steps = [
@@ -433,8 +489,9 @@ async def test_graph_reasoning_serializes_adapter_calls_even_when_parallel_enabl
     loop = GraphReasoningLoop(
         adapter=adapter,
         llm_connector=None,
-        strategy_config={"parallel_branches": 3},
+        strategy_config=_strategy_config(overrides={"parallel_branches": 3}),
         tool_manager=_StubToolManager(),
+        graph_channel_tool="graph_adapter.query",
     )
 
     plan_steps = [
@@ -455,8 +512,9 @@ async def test_graph_reasoning_marks_tool_timeout():
     loop = GraphReasoningLoop(
         adapter=adapter,
         llm_connector=None,
-        strategy_config={"tool_timeout_seconds": 0.05},
+        strategy_config=_strategy_config(overrides={"tool_timeout_seconds": 0.05}),
         tool_manager=tool_manager,
+        graph_channel_tool="graph_adapter.query",
     )
 
     plan_steps = [
@@ -479,7 +537,7 @@ class _ScopeRecordingAdapter:
         await asyncio.sleep(0.02)
         self.calls.append(("prepare", getattr(access_scope, "scope_id", None)))
 
-    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None):
+    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None, query_options=None):
         await asyncio.sleep(0.01)
         scope_id = getattr(access_scope, "scope_id", None)
         self.calls.append(("query", scope_id))
@@ -521,7 +579,13 @@ class _ScopeRecordingAdapter:
 @pytest.mark.asyncio
 async def test_graph_reasoning_concurrent_runs_do_not_mix_scopes_or_evidence():
     adapter = _ScopeRecordingAdapter()
-    loop = GraphReasoningLoop(adapter=adapter, llm_connector=None, strategy_config={"parallel_branches": 2})
+    loop = GraphReasoningLoop(
+        adapter=adapter,
+        llm_connector=None,
+        strategy_config=_strategy_config(overrides={"parallel_branches": 2}),
+        tool_manager=None,
+        graph_channel_tool="graph_adapter.query",
+    )
     plan_steps = [{"step_id": "plan_01", "description": "Inspect graph", "channel": "graph", "tool": "graph_adapter.query"}]
 
     async def _run(scope_id: str):

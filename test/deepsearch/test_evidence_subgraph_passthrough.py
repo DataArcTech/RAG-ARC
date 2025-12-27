@@ -10,7 +10,7 @@ class _SubgraphAdapter:
     async def prepare(self, question: str, *, access_scope=None) -> None:  # pragma: no cover
         return None
 
-    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None):
+    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None, query_options=None):
         return {
             "chunks": [{"content": f"chunk::{query}", "metadata": {"chunk_id": "c1"}}],
             "nodes": [{"id": "n1"}],
@@ -52,7 +52,37 @@ class _SubgraphAdapter:
 
 @pytest.mark.asyncio
 async def test_traversal_evidence_exposes_subgraph_info_for_presentation(monkeypatch):
-    loop = GraphReasoningLoop(adapter=_SubgraphAdapter(), llm_connector=None, strategy_config={}, tool_manager=None)
+    loop = GraphReasoningLoop(
+        adapter=_SubgraphAdapter(),
+        llm_connector=None,
+        strategy_config={
+            "strategy_name": "ppr_chain",
+            "allow_semantic_channel": True,
+            "chain_depth": 1,
+            "parallel_branches": 1,
+            "max_parallel_branches": 1,
+            "step_summary_max_chars": 2000,
+            "tool_context_max_evidences": 5,
+            "tool_context_max_chars": 800,
+            "coverage_expected_min_chunks": 1,
+            "trace_reflection_enabled": False,
+            "trace_reflection_max": 0,
+            "tool_timeout_seconds": 0.0,
+            "think": {
+                "tool_name": "graph.think",
+                "every_n_steps": 0,
+                "min_coverage": 0.0,
+                "enable_tool_calls": False,
+                "max_tool_calls": 0,
+                "tool_call_concurrency": 0,
+                "tool_catalog_max_items": 0,
+                "include_llm_tools": True,
+                "max_rounds_per_checkpoint": 1,
+            },
+        },
+        tool_manager=None,
+        graph_channel_tool="graph_adapter.query",
+    )
     context = GraphQueryContext(
         adapter_name="hipporag",
         question="Q",
@@ -85,4 +115,3 @@ async def test_traversal_evidence_exposes_subgraph_info_for_presentation(monkeyp
     payload = {"reasoning": result, "report": {"evidences": []}}
     evidence_payload = build_deepsearch_evidence(payload, chunk_limit=1, graph_store=object())
     assert evidence_payload["graph_chain"] == ["EntityA -[related_to]-> EntityB"]
-

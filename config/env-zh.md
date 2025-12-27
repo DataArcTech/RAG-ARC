@@ -1,13 +1,63 @@
-# 环境变量配置说明
+# 环境变量（最小 `.env`）与全量参数说明
 
-项目通过根目录的 `.env` 控制所有行为。默认的 `.env.example` 已经适配本地开发（Docker 服务运行在 `localhost`），通常只需要填入模型/LLM 的 API Key。本文档按模块说明每一个参数的默认值与作用。
+RAG-ARC 将配置拆成两层：
+
+- **`.env`**：只放密钥/secret 与功能开关（推荐）。
+- **`config/`**：所有可调参数（检索/分块/top_k/阈值/预算/路径等）。
+
+为了兼容性，运行时仍支持大量环境变量作为“覆盖/override”开关。
+本文档保留并解释 **所有** 支持的环境变量及其含义。
+
+推荐用法：
+1）让 `.env` 保持精简（只放密钥/开关）。
+2）业务参数在 `config/`（JSON + Python）里调整。
+
+---
+
+## 0）最小 `.env`（推荐）
+
+从模板开始：
+
+```bash
+cp .env.example .env
+```
+
+必填密钥（无默认值）：
+- `OPENAI_API_KEY` / `OPENAI_BASE_URL`（或分别配置 `CHAT_*` / `EMBEDDING_*` / `OCR_*`）
+- `JWT_SECRET_KEY`（建议 `openssl rand -hex 32` 生成）
+
+可选功能开关（有默认值）：
+- `TASK_QUEUE_MODE`、`MODEL_PROFILE`、`DEVELOP_MODE`、`ADMIN_OWNER_ID`
+
+可选外部网页检索（仅在配置开启时需要）：
+- `TAVILY_API_KEY`
+
+可选基础设施连接信息（本地/Docker 默认值可用；仅在需要连接远端服务时配置）：
+- PostgreSQL：`POSTGRES_HOST`、`POSTGRES_PORT`、`POSTGRES_USER`、`POSTGRES_PASSWORD`、`POSTGRES_DB`
+- Redis：`REDIS_HOST`、`REDIS_PORT`、`REDIS_DB`、`REDIS_PASSWORD`
+- Neo4j：`NEO4J_URL`、`NEO4J_USERNAME`、`NEO4J_PASSWORD`、`NEO4J_DATABASE`
+
+---
+
+## 0.1）高级配置（在 `config/` 修改，不建议堆在 `.env`）
+
+推荐修改位置：
+
+- `config/json_configs/rag_inference*.json`：聊天/RAG 主流程、检索器、重排器、模型选择等。
+- `config/json_configs/knowledge*.json`：解析、分块、索引/建图流程等。
+- `config/json_configs/deepsearch_service.json`：DeepSearch 的 planner/tools/report/quality gate 等。
+- `config/output_limits.py`：API 返回裁剪与证据上限（payload 限制）。
+- `config/core/deepsearch/*_defaults.py`：DeepSearch 的 loop/tool/report 默认参数（运行时读取）。
+
+密钥如何在配置里引用：
+- JSON 支持 `${ENV_VAR}` 占位符（例如 `${OPENAI_API_KEY}`），因此密钥放 `.env`，参数放 `config/`。
 
 ## 1. 模型与 LLM 提供方
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `CHAT_MODEL_PROVIDER` | `openai` | 对话模型提供方（`openai`=OpenAI 兼容 API，`huggingface`=本地 Transformers）。 |
-| `CHAT_MODEL_NAME` | _(空)_ | 可选：优先使用的对话模型名（填写后会覆盖 `OPENAI_CHAT_MODEL`）。 |
+| `CHAT_MODEL_NAME` | _(空)_ | 可选：优先使用的对话模型名；当 `CHAT_MODEL_PROVIDER=huggingface` 时可填写 HuggingFace repo id 或本地模型路径。 |
 | `CHAT_MODEL_DEVICE` | `cpu` | HuggingFace 对话模型运行设备（仅当 `CHAT_MODEL_PROVIDER=huggingface` 时使用）。 |
 | `CHAT_MODEL_CACHE_FOLDER` | _(空)_ | 可选：HuggingFace 对话模型权重/Tokenizer 缓存目录。 |
 | `CHAT_API_KEY` | _(空)_ | 对话模型的 API Key（使用云端 API 时必填）。 |
@@ -20,7 +70,7 @@
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | 默认嵌入模型名称。 |
 | `EMBEDDING_DEVICE` | `cpu` | HuggingFace 嵌入模型运行设备（仅当 `EMBEDDING_MODEL_PROVIDER=huggingface` 时使用）。 |
 | `EMBEDDING_CACHE_FOLDER` | _(空)_ | 可选：HuggingFace 嵌入模型缓存目录。 |
-| `EMBEDDING_DIMENSIONS` | _(空)_ | 本地 HuggingFace embedding 必填：嵌入向量维度；使用 OpenAI 兼容 API 时可留空，系统会自动探测维度（也可填入作为覆盖）。 |
+| `EMBEDDING_DIMENSIONS` | _(空)_ | 可选：嵌入向量维度覆盖。留空时系统可自动探测并缓存维度。 |
 | `OCR_MODEL_PROVIDER` | `openai` | OCR/VLM 提供方（`openai`、`vllm`、`dots_ocr` 等）。 |
 | `OCR_API_KEY` | _(空)_ | OCR/VLM 的 API Key（使用云端 API 时必填）。 |
 | `OCR_API_BASE_URL` | _(空)_ | OCR/VLM 的 Base URL。 |
@@ -44,7 +94,7 @@
 | `OPENAI_API_KEY` | _(空)_ | 可选：全局备用 OpenAI Key（组件 Key 为空时复用）。 |
 | `OPENAI_BASE_URL` | _(空)_ | 可选：全局备用 OpenAI Base URL。 |
 | `DEVICE` | `cpu` | 可选：共享默认设备（当各组件设备变量为空时使用）。 |
-| `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | 使用本地 HuggingFace 嵌入时的模型名（`EMBEDDING_MODEL_PROVIDER=huggingface`）。 |
+| `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | 嵌入模型名称；当 `EMBEDDING_MODEL_PROVIDER=huggingface` 时可填写 HuggingFace repo id 或本地模型路径。 |
 | `MODEL_PROFILE` | `api` | 选择配置档（`api` 或 `local`），影响默认 JSON 配置。 |
 | `MINILM_MODEL_NAME` | `sentence-transformers/all-MiniLM-L6-v2` | `download_models.py` 下载 MiniLM 时使用的默认 repo id。 |
 | `MINILM_CACHE_FOLDER` | `./models/all-MiniLM-L6-v2` | `download_models.py` 下载 MiniLM 的缓存目录。 |
@@ -281,7 +331,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `JWT_SECRET_KEY` | `your-secret-key-change-this-in-production` | JWT 签名秘钥，生产环境务必替换。 |
+| `JWT_SECRET_KEY` | _(空)_ | JWT 签名秘钥。留空时 API 会自动生成并写入 `RAGARC_RUNTIME_DIR`（默认：`./local/runtime/jwt_secret_key`）；生产环境建议显式配置。 |
 | `HF_TOKEN` | _(空)_ | HuggingFace Token（下载受限模型时使用）。 |
 | `HF_ENDPOINT` | _(空)_ | 可选：HuggingFace Endpoint 覆盖（例如 `https://hf-mirror.com`）。 |
 | `LOG_LEVEL` | `INFO` | 日志等级。 |
@@ -317,12 +367,12 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINIO_USERNAME` | `ROOTNAME` | MinIO 用户名/Access Key（仅在启用 MinIO 集成时使用）。 |
 | `MINIO_PASSWORD` | `CHANGEME123` | MinIO 密码/Secret Key。 |
 
-`.env.example` 里还提供了以下（默认注释）的占位项：
+MinIO 常用变量（仅在启用对象存储集成时才需要设置）：
 - `MINIO_ENDPOINT`
 - `MINIO_BUCKET`
 - `MINIO_SECURE`
 
-仅当需要接入对象存储时才取消注释并填写。
+默认本地/Docker 部署不需要配置这些项。
 
 ## 11. 构建 / 高级运行参数
 
@@ -410,4 +460,4 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 
 ---
 
-**使用建议**：复制 `.env.example` 为 `.env`，填入自己使用的模型/API Key，其余配置保持默认即可完成本地部署。仅当要接入其他数据库/服务或自定义 DeepSearch 行为时，再根据上表调整相应变量。
+**使用建议**：复制 `.env.example` 为 `.env`，填入必需密钥（`OPENAI_API_KEY`/`OPENAI_BASE_URL` 与 `JWT_SECRET_KEY`）即可完成本地部署。高级参数优先在 `config/`（JSON/Python）里改；只有确实需要覆盖时再使用环境变量。

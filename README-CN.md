@@ -210,7 +210,7 @@ cd RAG-ARC
 
 ### 💻 本地安装
 
-> 配置 `.env` 可参考 [env-en.md](env-en.md)（英文）或 [env-zh.md](env-zh.md)（中文）。
+> 配置 `.env` 可参考 `config/env-en.md`（英文）或 `config/env-zh.md`（中文）。高级参数统一在 `config/` 下修改（不建议写进 `.env`）。
 
 ```bash
 # 1. 克隆仓库
@@ -232,7 +232,12 @@ uv sync --extra dev
 
 # 4. 复制并配置环境变量
 cp .env.example .env
-# 根据 env-zh.md 填写模型/API Key，其余保持默认即可
+# 仅填写必要的密钥/开关：
+# - OPENAI_API_KEY=...
+# - OPENAI_BASE_URL=...（例如 https://api.openai.com/v1）
+# - JWT_SECRET_KEY=...（建议用：openssl rand -hex 32 生成；也可留空使用自动生成的开发密钥）
+# 可选基础设施连接信息（本地/Docker 默认值可用）：POSTGRES_*、REDIS_*、NEO4J_*
+# 全量环境变量说明与高级配置见 config/env-zh.md
 ```
 
 ### 🔐 可选：管理员视角

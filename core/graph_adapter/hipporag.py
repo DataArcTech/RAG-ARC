@@ -60,6 +60,7 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         *,
         channel: str = "graph",
         access_scope: Optional[GraphAccessScope] = None,
+        query_options: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Run HippoRAG retrieval and export the resulting subgraph."""
 
@@ -68,7 +69,8 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             logger.warning("HippoRAG adapter requires an access scope; returning empty payload for query %s", query)
             return self._empty_payload(query)
 
-        return await asyncio.to_thread(self._aquery_subgraph_sync, query, channel, scope_token)
+        options = dict(query_options) if isinstance(query_options, Mapping) else {}
+        return await asyncio.to_thread(self._aquery_subgraph_sync, query, channel, scope_token, options)
 
     async def context_filter(
         self,
@@ -316,15 +318,36 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
                 queue.append((nxt, next_path))
         return []
 
-    def _aquery_subgraph_sync(self, query: str, channel: str, scope_token: str) -> Dict[str, Any]:
-        chunks = self._retrieve_chunks_sync(query, scope_token)
+    def _aquery_subgraph_sync(
+        self,
+        query: str,
+        channel: str,
+        scope_token: str,
+        query_options: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        chunks = self._retrieve_chunks_sync(query, scope_token, query_options=query_options)
         return self._build_graph_payload(query, channel, chunks, scope_token)
 
-    def _retrieve_chunks_sync(self, query: str, owner_token: str) -> List[Chunk]:
+    def _retrieve_chunks_sync(
+        self,
+        query: str,
+        owner_token: str,
+        *,
+        query_options: Optional[Mapping[str, Any]] = None,
+    ) -> List[Chunk]:
         """Execute synchronous HippoRAG retrieval (invoked in a worker thread)."""
 
+        top_k_raw = None
+        if isinstance(query_options, Mapping):
+            top_k_raw = query_options.get("top_k")
+        try:
+            top_k = int(top_k_raw) if top_k_raw is not None else int(self.default_top_k)
+        except (TypeError, ValueError):
+            top_k = int(self.default_top_k)
+        top_k = max(1, top_k)
+
         kwargs = {
-            "k": self.default_top_k,
+            "k": top_k,
             "owner_id": owner_token,
             "return_subgraph_info": True,
         }

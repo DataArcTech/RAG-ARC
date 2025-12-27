@@ -18,7 +18,7 @@ GRAPH_PLANNER_USER_PROMPT = (
     "- When you select a tool, you MAY also provide `tool_args` (object) under the step to control tool parameters.\n"
     "  - `tool_args` will be passed into the tool as `extra` (so include keys like focus_query/top_k/max_terms/etc).\n"
     "- Use F-tools first (fast deterministic probes), then X-tools, and use H-tools sparingly.\n"
-    "- Use 'graph' for evidence retrieval, 'text' for synthesis/structuring, and 'web' only as a fallback.\n"
+    "- Use 'graph' for evidence retrieval, 'text' for synthesis/structuring. Use 'web' only when policy explicitly allows it and local evidence is insufficient.\n"
     "- Keep each step description grounded with key entities/terms from the question (avoid generic filler like '根据资料…').\n"
     "- The plan may be refined later as evidence arrives.\n"
     "- Never exceed {max_steps}.\n"
@@ -28,7 +28,7 @@ GRAPH_PLANNER_USER_PROMPT = (
     "\n"
     "Output:\n"
     "- Return ONLY a JSON array.\n"
-    "- Each item must include: 'description' (string).\n"
-    "- Optional fields: 'channel' (one of ['graph','text','web'], default 'graph'), and 'metadata' (object).\n"
+    "- Each item must include: 'description' (string) and 'channel' (one of ['graph','text','web']).\n"
+    "- Optional fields: 'metadata' (object).\n"
     "- Optional fields: 'tool' (string tool name) and 'tool_args' (object tool parameters).\n"
 )

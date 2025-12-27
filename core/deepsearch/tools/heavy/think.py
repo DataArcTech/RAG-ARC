@@ -1,12 +1,30 @@
 """Graph think tool that offers structured reasoning pauses."""
 import json
-import os
 from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field
 
 from encapsulation.data_model.deepsearch import ThinkNote, GraphQueryContext
 from core.prompts.deepsearch import THINK_TOOL_SYSTEM_PROMPT
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, safe_json_loads
+
+
+class ThinkToolCall(BaseModel):
+    tool_name: str = Field(..., min_length=1)
+    tool_args: Dict[str, Any] = Field(default_factory=dict)
+    rationale: str = Field(..., min_length=1)
+    parallelizable: bool = Field(...)
+
+
+class ThinkToolResponse(BaseModel):
+    reasoning: str = Field(..., min_length=1)
+    confidence_delta: float | None = Field(...)
+    coverage_delta: float | None = Field(...)
+    next_actions: List[str] = Field(...)
+    tool_calls: List[ThinkToolCall] = Field(...)
+    gap_trigger: bool = Field(...)
+    missing_topics: List[str] = Field(...)
 
 
 class GraphThinkTool(GraphTool):
@@ -64,9 +82,8 @@ class GraphThinkTool(GraphTool):
     async def _build_note(self, request: ToolRunRequest) -> ThinkNote:
         context_snapshot = self._graph_context_snapshot(request.graph_context)
         coverage_snapshot = request.coverage_metrics or {}
-        heuristic_note = self._heuristic_note(request, coverage_snapshot, context_snapshot)
         if not self.llm_connector:
-            return heuristic_note
+            raise RuntimeError("GraphThinkTool requires an LLM connector")
 
         prompt_payload = {
             "question": request.question,
@@ -84,87 +101,32 @@ class GraphThinkTool(GraphTool):
             },
         ]
         try:
-            low_cost_model = (os.getenv("LOW_COST_MODEL") or "").strip()
-            llm_kwargs: Dict[str, Any] = {"temperature": self.temperature}
-            if low_cost_model:
-                llm_kwargs["model"] = low_cost_model
-            response = await call_llm_async(self.llm_connector, messages, **llm_kwargs)
-            parsed = safe_json_loads(response, expected="dict") or {}
-            heuristic_metadata = heuristic_note.metadata or {}
-            gap_trigger = bool(parsed.get("gap_trigger")) or heuristic_metadata.get("gap_trigger", False)
+            response = await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
+            parsed = safe_json_loads(response, expected="dict")
+            if not isinstance(parsed, dict):
+                raise ValueError("Think tool returned non-JSON or non-dict payload")
+            payload = ThinkToolResponse.model_validate(parsed)
             missing_topics = self._merge_missing_topics(
-                parsed.get("missing_topics"),
-                heuristic_metadata.get("missing_topics"),
+                payload.missing_topics,
                 coverage_snapshot.get("missing_topics"),
             )
             return ThinkNote(
                 plan_step_id=request.plan_step,
-                reasoning=str(parsed.get("reasoning") or heuristic_note.reasoning),
-                confidence_delta=self._coerce_float(parsed.get("confidence_delta"), heuristic_note.confidence_delta),
-                coverage_delta=self._coerce_float(parsed.get("coverage_delta"), heuristic_note.coverage_delta),
-                next_actions=self._coerce_actions(parsed.get("next_actions"), heuristic_note.next_actions),
+                reasoning=payload.reasoning,
+                confidence_delta=payload.confidence_delta,
+                coverage_delta=payload.coverage_delta,
+                next_actions=[str(item) for item in payload.next_actions],
                 metadata={
                     "raw": parsed,
-                    "heuristic": heuristic_note.model_dump(),
                     "graph_context": context_snapshot,
                     "coverage_metrics": coverage_snapshot,
-                    "gap_trigger": gap_trigger,
+                    "gap_trigger": bool(payload.gap_trigger),
                     "missing_topics": missing_topics,
+                    "tool_calls": [call.model_dump() for call in payload.tool_calls],
                 },
             )
-        except Exception:
-            return heuristic_note
-
-    def _heuristic_note(
-        self,
-        request: ToolRunRequest,
-        coverage_snapshot: Dict[str, Any],
-        context_snapshot: Dict[str, Any],
-    ) -> ThinkNote:
-        context_size = len(request.context_evidences)
-        coverage_delta = self._coerce_float(coverage_snapshot.get("coverage_score"), None)
-        if coverage_delta is None:
-            coverage_delta = min(1.0, 0.1 * context_size)
-        confidence_delta = self._coerce_float(coverage_snapshot.get("confidence_score"), None)
-        if confidence_delta is None:
-            confidence_delta = 0.1 if context_size else -0.2
-        next_actions = []
-        if not context_size:
-            next_actions.append("Trigger fast graph probe to gather seed facts.")
-        else:
-            next_actions.append("Continue with heavy reasoning step using cached context.")
-        gap_trigger = self._should_gap_trigger(coverage_snapshot, context_size)
-        return ThinkNote(
-            plan_step_id=request.plan_step,
-            reasoning="Think window executed heuristically based on available evidences.",
-            confidence_delta=confidence_delta,
-            coverage_delta=coverage_delta,
-            next_actions=next_actions,
-            metadata={
-                "context_size": context_size,
-                "graph_context": context_snapshot,
-                "coverage_metrics": coverage_snapshot,
-                "gap_trigger": gap_trigger,
-                "missing_topics": coverage_snapshot.get("missing_topics") or [],
-            },
-        )
-
-    @staticmethod
-    def _coerce_float(value: Any, fallback: Optional[float]) -> Optional[float]:
-        try:
-            if value is None:
-                return fallback
-            return float(value)
-        except (TypeError, ValueError):
-            return fallback
-
-    @staticmethod
-    def _coerce_actions(payload: Any, fallback: List[str]) -> List[str]:
-        if isinstance(payload, list):
-            actions = [str(item) for item in payload if str(item).strip()]
-            if actions:
-                return actions
-        return fallback
+        except Exception as exc:
+            raise RuntimeError(f"GraphThinkTool failed: {exc}") from exc
 
     @staticmethod
     def _graph_context_snapshot(graph_context: GraphQueryContext | None) -> Dict[str, Any]:
@@ -207,18 +169,3 @@ class GraphThinkTool(GraphTool):
                         seen.add(token)
                         merged.append(token)
         return merged
-
-    @staticmethod
-    def _should_gap_trigger(coverage_snapshot: Dict[str, Any], context_size: int) -> bool:
-        coverage_score = coverage_snapshot.get("coverage_score")
-        coverage_ratio = coverage_snapshot.get("coverage_ratio")
-        missing_topics = coverage_snapshot.get("missing_topics") or []
-        if isinstance(coverage_score, (int, float)) and coverage_score < 0.6:
-            return True
-        if isinstance(coverage_ratio, (int, float)) and coverage_ratio < 0.5:
-            return True
-        if missing_topics:
-            return True
-        if context_size == 0:
-            return True
-        return False

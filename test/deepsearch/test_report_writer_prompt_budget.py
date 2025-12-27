@@ -30,8 +30,9 @@ class _BudgetLLM:
             return json.dumps(
                 {
                     "title": "Test Report",
-                    "summary": "ok",
-                    "sections": [{"title": "Body", "body_markdown": "Answer[ev1]."}],
+                    "short_answer": "ok[ev1]",
+                    "summary": "ok[ev1]",
+                    "sections": [{"title": "Body", "section_type": "analysis", "body_markdown": "Answer[ev1]."}],
                     "limitations": [],
                     "next_steps": [],
                     "citations": [],

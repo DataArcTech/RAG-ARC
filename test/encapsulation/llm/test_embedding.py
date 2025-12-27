@@ -3,6 +3,7 @@ Simple test to understand how Embedding LLMs work (OpenAI and Qwen)
 """
 import sys
 import os
+import pytest
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
 
 from config.encapsulation.llm.embedding.openai import OpenAIEmbeddingConfig
@@ -11,6 +12,8 @@ import asyncio
 
 
 def test_openai_embedding():
+    if not os.getenv("RUN_RAGARC_INTEGRATION_TESTS"):
+        pytest.skip("Requires real embedding backend; set RUN_RAGARC_INTEGRATION_TESTS=1 to enable")
     print("="*50)
     print("TESTING OPENAI EMBEDDING LLM")
     print("="*50)
@@ -76,6 +79,10 @@ def test_openai_embedding():
 
 
 def test_huggingface_embedding():
+    if not os.getenv("RUN_RAGARC_LOCAL_EMBEDDING_TESTS"):
+        pytest.skip("Requires local embedding model; set RUN_RAGARC_LOCAL_EMBEDDING_TESTS=1 to enable")
+    if not os.getenv("RAGARC_ALLOW_LARGE_MODELS"):
+        pytest.skip("Safety gate: set RAGARC_ALLOW_LARGE_MODELS=1 to enable local embedding smoke test")
     print("\n" + "="*50)
     print("TESTING QWEN EMBEDDING LLM")
     print("="*50)

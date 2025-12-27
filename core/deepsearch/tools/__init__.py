@@ -66,6 +66,7 @@ _LLM_REQUIRED = {
     LLMChainExplorerTool,
     HybridNeighborhoodProbeTool,
     ContextRollupTool,
+    EvidenceCrosscheckTool,
     ParallelThinkTool,
     CrossAdapterPlannerTool,
     ContextRewriterTool,
@@ -73,7 +74,6 @@ _LLM_REQUIRED = {
 }
 _LLM_OPTIONAL = {
     GraphThinkTool,
-    EvidenceCrosscheckTool,
 }
 
 

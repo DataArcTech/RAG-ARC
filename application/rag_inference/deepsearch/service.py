@@ -2,8 +2,6 @@
 import inspect
 import json
 import logging
-import os
-import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Sequence, Type, List
@@ -82,27 +80,8 @@ class DeepSearchService:
         state = self._build_state(run_id=run_id, stage_listener=stage_listener)
         artifact_dir: str | None = None
         if self.artifact_store is not None:
-            try:
-                artifact_dir = str(self.artifact_store.ensure_run_dir(state.run_id))
-            except Exception:
-                artifact_dir = None
+            artifact_dir = str(self.artifact_store.ensure_run_dir(state.run_id))
         state.record_request_metadata(metadata)
-        budget = self._resolve_run_budget(normalized_question)
-        state.record_cost("budget", json_safe(budget))
-        try:
-            await emit_trace(
-                "progress",
-                "\n".join(
-                    [
-                        "Resolved run budget profile.",
-                        f"budget_tier={budget.get('tier')}",
-                        f"reason={budget.get('reason')}",
-                    ]
-                ),
-                meta={"stage": "budget", "budget": json_safe(budget)},
-            )
-        except Exception:
-            pass
         state.record_cost(
             "request_context",
             json_safe(
@@ -133,18 +112,7 @@ class DeepSearchService:
         plan_payload = plan_result.get("plan") or {}
         plan_steps: Sequence[Dict[str, Any]] = plan_payload.get("steps") or []
         if not plan_steps:
-            plan_steps = [
-                {
-                    "step_id": "plan_01",
-                    "description": f"Graph search for: {normalized_question}",
-                    "channel": "graph",
-                    "metadata": {"source": "service_fallback", "synthetic": True},
-                    "tool": "graph_adapter.query",
-                    "tool_args": {"query": normalized_question},
-                    "requires_external": False,
-                    "enabled": True,
-                }
-            ]
+            raise RuntimeError("Planner returned an empty plan (no fallback execution allowed).")
         graph_context_payload = plan_payload.get("graph_context") or {}
         reasoning_context = GraphQueryContext(**graph_context_payload)
         reasoning_context = self._attach_run_metadata(
@@ -152,7 +120,6 @@ class DeepSearchService:
             run_id=state.run_id,
             metadata=metadata,
             external_allowed=self._external_allowed_flag(),
-            budget=budget,
             artifact_dir=artifact_dir,
         )
 
@@ -192,7 +159,6 @@ class DeepSearchService:
                     question=normalized_question,
                     plan_steps=active_steps,
                     reasoning_context=reasoning_context,
-                    settings_override=budget.get("multi_agent_settings_override"),
                 )
                 if cumulative_reasoning is None:
                     cumulative_reasoning = round_trace
@@ -488,14 +454,14 @@ class DeepSearchService:
                 "total_steps": total_steps,
                 "coverage_ratio": 0.0,
                 "plan_progress_ratio": 0.0,
-                "expected_min_chunks": 3,
+                "expected_min_chunks": int(self.config["coverage_expected_min_chunks"]),
                 "coverage_score": 0.0,
                 "confidence_score": None,
                 "missing_topics": [],
             },
         }
         try:
-            result = await self.tool_manager.invoke("graph.think", payload=payload)
+            result = await self.tool_manager.invoke(self._tool_names()["think_tool"], payload=payload)
         except Exception:
             return
 
@@ -535,22 +501,7 @@ class DeepSearchService:
             kwargs["run_id"] = run_id
         if stage_listener:
             kwargs["stage_listener"] = stage_listener
-        try:
-            return self.state_cls(**kwargs)
-        except TypeError:
-            # Backward-compatible fallback if custom state_cls does not accept stage_listener/run_id.
-            state = self.state_cls(config_fingerprint=self._config_fingerprint())
-            if run_id:
-                try:
-                    state.run_id = run_id  # type: ignore[misc]
-                except Exception:
-                    pass
-            if stage_listener:
-                try:
-                    state.stage_listener = stage_listener  # type: ignore[misc]
-                except Exception:
-                    pass
-            return state
+        return self.state_cls(**kwargs)
 
     def _resolve_scope(
         self,
@@ -570,10 +521,7 @@ class DeepSearchService:
     def _evaluate_gap(self, reasoning_trace: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not self.gap_detector:
             return None
-        try:
-            return self.gap_detector.evaluate(reasoning_trace)
-        except NotImplementedError:
-            return None
+        return self.gap_detector.evaluate(reasoning_trace)
 
     async def _run_external_if_needed(
         self,
@@ -586,27 +534,17 @@ class DeepSearchService:
             return None
         tasks = list(reasoning_trace.get("pending_external") or [])
         if not tasks:
-            synthesized = self._synthesize_external_tasks(
-                question=reasoning_trace.get("question", ""),
-                gap_result=gap_result,
-                reasoning_trace=reasoning_trace,
-            )
-            if synthesized:
-                tasks.extend(synthesized)
-                reasoning_trace.setdefault("pending_external", []).extend(synthesized)
-        if not tasks:
             return None
-        try:
-            return await self.external_channel.run(
-                tasks,
-                reasoning_trace=reasoning_trace,
-                gap_result=gap_result,
-            )
-        except NotImplementedError:
-            return None
+        return await self.external_channel.run(
+            tasks,
+            reasoning_trace=reasoning_trace,
+            gap_result=gap_result,
+        )
 
     def _config_fingerprint(self) -> str:
-        return str(self.config.get("fingerprint") or self.config.get("name") or "deepsearch-service")
+        if not isinstance(self.config, dict) or not str(self.config.get("fingerprint") or "").strip():
+            raise ValueError("DeepSearchService config fingerprint is required")
+        return str(self.config["fingerprint"])
 
     async def _plan_stage(self, *, question: str, scope: GraphAccessScope) -> Dict[str, Any]:
         return await self.planner.build_plan(question, access_scope=scope)
@@ -706,116 +644,33 @@ class DeepSearchService:
             return None
         if not self._external_allowed_flag():
             return None
-        try:
-            return await self.external_channel.run(
-                list(tasks),
-                reasoning_trace=reasoning_trace,
-                gap_result=gap_result,
-            )
-        except NotImplementedError:
-            return None
+        return await self.external_channel.run(
+            list(tasks),
+            reasoning_trace=reasoning_trace,
+            gap_result=gap_result,
+        )
 
     def _resolve_quality_gate_config(self) -> QualityGateConfig:
-        # Backward-compat: only enable when the builder passes a quality_loop section,
-        # but allow env overrides to toggle / tune thresholds.
-        raw = None
-        if isinstance(self.config, dict):
-            raw = self.config.get("quality_loop")
+        if not isinstance(self.config, dict) or not isinstance(self.config.get("quality_loop"), dict):
+            raise ValueError("DeepSearchService missing required config.quality_loop")
+        return QualityGateConfig.model_validate(self.config["quality_loop"])
 
-        base: Dict[str, Any] = {}
-        if isinstance(raw, dict):
-            base = dict(raw)
-        elif hasattr(raw, "model_dump"):
-            try:
-                base = raw.model_dump(exclude_none=True)
-            except TypeError:
-                base = raw.model_dump()
+    def _tool_names(self) -> Dict[str, str]:
+        if not isinstance(self.config, dict):
+            raise ValueError("DeepSearchService config must be a dict")
+        names = self.config.get("tool_names")
+        if not isinstance(names, dict):
+            raise ValueError("DeepSearchService config.tool_names is required")
+        required = ("graph_channel_tool", "web_channel_tool", "text_channel_tool", "think_tool")
+        missing = [key for key in required if not str(names.get(key) or "").strip()]
+        if missing:
+            raise ValueError(f"DeepSearchService config.tool_names missing: {missing}")
+        return {k: str(names[k]).strip() for k in required}
 
-        updates: Dict[str, Any] = {}
-        env_bool = self._read_env_bool
-        env_int = self._read_env_int
-        env_float = self._read_env_float
-
-        enabled = env_bool("DEEPSEARCH_QUALITY_LOOP_ENABLED")
-        if enabled is not None:
-            updates["enabled"] = enabled
-        max_rounds = env_int("DEEPSEARCH_QUALITY_LOOP_MAX_ROUNDS")
-        if max_rounds is not None:
-            updates["max_rounds"] = max_rounds
-        min_cov = env_float("DEEPSEARCH_QUALITY_LOOP_MIN_CITATION_SENTENCE_COVERAGE")
-        if min_cov is not None:
-            updates["min_citation_sentence_coverage"] = min_cov
-        require_consistency = env_bool("DEEPSEARCH_QUALITY_LOOP_REQUIRE_CONSISTENCY")
-        if require_consistency is not None:
-            updates["require_consistency"] = require_consistency
-        max_uncited = env_int("DEEPSEARCH_QUALITY_LOOP_MAX_UNCITED_SENTENCES")
-        if max_uncited is not None:
-            updates["max_uncited_sentences"] = max_uncited
-        max_actions = env_int("DEEPSEARCH_QUALITY_LOOP_MAX_ACTIONS")
-        if max_actions is not None:
-            updates["max_actions"] = max_actions
-        enable_judge = env_bool("DEEPSEARCH_QUALITY_LOOP_ENABLE_LLM_JUDGE")
-        if enable_judge is not None:
-            updates["enable_llm_judge"] = enable_judge
-        judge_temp = env_float("DEEPSEARCH_QUALITY_LOOP_JUDGE_TEMPERATURE")
-        if judge_temp is not None:
-            updates["judge_temperature"] = judge_temp
-        judge_retries = env_int("DEEPSEARCH_QUALITY_LOOP_JUDGE_MAX_RETRIES")
-        if judge_retries is not None:
-            updates["judge_max_retries"] = judge_retries
-        ext_on_fail = env_bool("DEEPSEARCH_QUALITY_LOOP_TRIGGER_EXTERNAL_ON_FAILURE")
-        if ext_on_fail is not None:
-            updates["trigger_external_on_quality_failure"] = ext_on_fail
-
-        merged = dict(base)
-        merged.update(updates)
-
-        # If config is omitted (or empty after env substitution) and no env toggle is present,
-        # keep the feature off for backward compatibility.
-        if (raw is None or (isinstance(raw, dict) and not raw)) and enabled is None:
-            return QualityGateConfig(enabled=False)
-
-        try:
-            return QualityGateConfig.model_validate(merged)
-        except Exception:
-            return QualityGateConfig(enabled=False)
-
-    @staticmethod
-    def _read_env_bool(name: str) -> Optional[bool]:
-        raw = os.getenv(name)
-        if raw is None:
-            return None
-        value = raw.strip().lower()
-        if value in {"1", "true", "yes", "on"}:
-            return True
-        if value in {"0", "false", "no", "off"}:
-            return False
-        return None
-
-    @staticmethod
-    def _read_env_int(name: str) -> Optional[int]:
-        raw = os.getenv(name)
-        if raw is None:
-            return None
-        try:
-            return int(raw)
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _read_env_float(name: str) -> Optional[float]:
-        raw = os.getenv(name)
-        if raw is None:
-            return None
-        try:
-            return float(raw)
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _build_followup_plan_steps(*, actions: Sequence[Dict[str, Any]], round_idx: int) -> List[Dict[str, Any]]:
+    def _build_followup_plan_steps(self, *, actions: Sequence[Dict[str, Any]], round_idx: int) -> List[Dict[str, Any]]:
         steps: List[Dict[str, Any]] = []
         counter = 0
+        graph_tool = self._tool_names()["graph_channel_tool"]
         for action in actions:
             if not isinstance(action, dict):
                 continue
@@ -832,7 +687,7 @@ class DeepSearchService:
                     "description": f"Quality follow-up graph search: {query}",
                     "channel": "graph",
                     "metadata": {"source": "quality_gate", "round": round_idx + 1},
-                    "tool": "graph_adapter.query",
+                    "tool": graph_tool,
                     "tool_args": {"query": query},
                     "requires_external": False,
                     "enabled": True,
@@ -849,6 +704,7 @@ class DeepSearchService:
     ) -> List[Dict[str, Any]]:
         if not actions:
             return []
+        web_tool = self._tool_names()["web_channel_tool"]
         tasks: List[Dict[str, Any]] = []
         for idx, action in enumerate(actions, start=1):
             if not isinstance(action, dict):
@@ -864,7 +720,7 @@ class DeepSearchService:
                     "step_id": step_id,
                     "description": str(action.get("rationale") or "Quality follow-up external search"),
                     "channel": "web",
-                    "tool": "web.search",
+                    "tool": web_tool,
                     "metadata": {
                         "provider": getattr(self.external_channel, "default_provider", None) if self.external_channel else None,
                         "query": query,
@@ -954,7 +810,6 @@ class DeepSearchService:
         run_id: str,
         metadata: Optional[Dict[str, Any]],
         external_allowed: Optional[bool] = None,
-        budget: Optional[Dict[str, Any]] = None,
         artifact_dir: Optional[str] = None,
     ) -> GraphQueryContext:
         base = dict(context.metadata or {})
@@ -963,12 +818,6 @@ class DeepSearchService:
             base["artifact_dir"] = str(artifact_dir)
         if external_allowed is not None:
             base["external_allowed"] = bool(external_allowed)
-        if budget:
-            base["budget"] = {
-                "tier": budget.get("tier"),
-                "reason": budget.get("reason"),
-                "signals": budget.get("signals") if isinstance(budget.get("signals"), dict) else {},
-            }
         if metadata:
             request_bucket = base.setdefault("request_metadata", {})
             if isinstance(request_bucket, dict):
@@ -993,88 +842,6 @@ class DeepSearchService:
         enabled = getattr(channel, "enabled", None)
         return bool(enabled)
 
-    def _resolve_run_budget(self, question: str) -> Dict[str, Any]:
-        forced = (os.getenv("DEEPSEARCH_BUDGET_TIER") or "").strip().lower() or None
-        if forced not in {None, "low", "default"}:
-            forced = None
-
-        normalized = (question or "").strip()
-        words = [token for token in re.split(r"\\s+", normalized) if token]
-        word_count = len(words)
-        char_count = len(normalized)
-
-        heavy_markers = {
-            "report",
-            "research",
-            "survey",
-            "compare",
-            "timeline",
-            "citations",
-            "references",
-            "综述",
-            "调研",
-            "报告",
-            "比较",
-            "时间线",
-            "引用",
-        }
-        connectors = {" and ", " or ", " vs ", " vs. ", "以及", "并且", "同时", "分别", "对比"}
-        lowered = normalized.lower()
-        saw_heavy = any(marker in lowered or marker in normalized for marker in heavy_markers)
-        saw_connector = any(conn in lowered or conn in normalized for conn in connectors)
-
-        if forced:
-            tier = forced
-            reason = "forced_by_env"
-        elif word_count <= 12 and char_count <= 90 and not saw_heavy and not saw_connector:
-            tier = "low"
-            reason = "heuristic_simple_question"
-        else:
-            tier = "default"
-            reason = "heuristic_complex_or_multi_part"
-
-        override = None
-        if tier == "low":
-            override = self._build_multi_agent_low_budget_override()
-
-        return {
-            "tier": tier,
-            "reason": reason,
-            "signals": {
-                "word_count": word_count,
-                "char_count": char_count,
-                "saw_heavy_marker": saw_heavy,
-                "saw_multi_part_connector": saw_connector,
-                "forced": forced,
-            },
-            "multi_agent_settings_override": override,
-        }
-
-    def _build_multi_agent_low_budget_override(self) -> Optional[Dict[str, Any]]:
-        settings = getattr(self.graph_loop, "settings", None)
-        if settings is None:
-            return None
-        try:
-            from dataclasses import asdict, is_dataclass
-
-            if is_dataclass(settings):
-                payload = asdict(settings)
-            elif isinstance(settings, dict):
-                payload = dict(settings)
-            elif hasattr(settings, "model_dump"):
-                payload = settings.model_dump()
-            else:
-                return None
-        except Exception:
-            return None
-
-        payload["max_subagents"] = min(int(payload.get("max_subagents", 1) or 1), 1)
-        payload["subagent_concurrency"] = min(int(payload.get("subagent_concurrency", 1) or 1), 1)
-        payload["enable_parallel_tool_probes"] = False
-        payload["probe_concurrency"] = min(int(payload.get("probe_concurrency", 1) or 1), 1)
-        payload["lead_tool_concurrency"] = min(int(payload.get("lead_tool_concurrency", 1) or 1), 1)
-        return payload
-
     @staticmethod
     def _coerce_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         if config is None:
@@ -1094,53 +861,22 @@ class DeepSearchService:
             }
         return {"value": config}
 
-    def _synthesize_external_tasks(
-        self,
-        *,
-        question: str,
-        gap_result: Dict[str, Any],
-        reasoning_trace: Dict[str, Any],
-    ) -> Sequence[Dict[str, Any]]:
-        description = gap_result.get("reason") or "External search for missing coverage"
-        normalized_question = (question or reasoning_trace.get("question") or "").strip()
-        if not normalized_question:
-            normalized_question = description
-        metadata = {
-            "provider": getattr(self.external_channel, "default_provider", None),
-            "query": normalized_question,
-            "source": "gap_detection",
-            "gap_reason": gap_result.get("reason"),
-            "missing_topics": gap_result.get("missing_topics") or [],
-        }
-        step_id = f"gap_web_{int(time.time() * 1000)}"
-        return [
-            {
-                "step_id": step_id,
-                "description": description,
-                "channel": "web",
-                "tool": "web.search",
-                "metadata": metadata,
-                "tool_args": {"query": normalized_question, "gap_reason": gap_result.get("reason")},
-                "requires_external": True,
-            }
-        ]
-
     def _resolve_experiment_dir(self) -> Optional[Path]:
         candidate = None
         if isinstance(self.config, dict):
             candidate = self.config.get("experiment_output_dir")
-        override = os.getenv("DEEPSEARCH_EXPERIMENT_OUTPUT_DIR")
-        directory = override or candidate
+        directory = candidate
         if not directory:
             return None
         return Path(str(directory)).expanduser()
 
     def _resolve_artifact_store(self) -> DeepSearchArtifactStore | None:
-        configured = None
-        if isinstance(self.config, dict):
-            configured = self.config.get("artifact_dir")
-        store = DeepSearchArtifactStore.from_env(str(configured) if configured else None)
-        return store
+        if not isinstance(self.config, dict):
+            raise ValueError("DeepSearchService config is required to resolve artifact store")
+        configured = self.config.get("artifact_dir")
+        if not configured:
+            raise ValueError("DeepSearchService config.artifact_dir is required (no implicit env fallback).")
+        return DeepSearchArtifactStore.from_root_dir(str(configured))
 
     def _persist_experiment_snapshot(
         self,

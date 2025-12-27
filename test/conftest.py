@@ -14,4 +14,4 @@ def pytest_configure() -> None:
     """
 
     os.environ.setdefault("TASK_QUEUE_MODE", "inprocess")
-
+    os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret")

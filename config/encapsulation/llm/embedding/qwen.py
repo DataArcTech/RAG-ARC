@@ -5,7 +5,7 @@ from framework.config import AbstractConfig
 from encapsulation.llm.embedding.qwen import QwenEmbeddingLLM
 from typing import Literal, Optional, Dict, Any
 
-from pydantic import Field, model_validator
+from pydantic import Field
 
 
 def _env_int(name: str) -> Optional[int]:
@@ -41,15 +41,6 @@ class QwenEmbeddingConfig(AbstractConfig):
     # Advanced configuration (optional)
     model_kwargs: Dict[str, Any] = Field(default_factory=dict)  # Additional arguments passed to SentenceTransformer initialization
     encode_kwargs: Dict[str, Any] = Field(default_factory=dict)  # Additional arguments passed to model.encode() method
-
-    @model_validator(mode="after")
-    def _validate_embedding_dimensions(self):
-        if self.loading_method == "huggingface" and self.embedding_dimensions is None:
-            raise ValueError(
-                "embedding_dimensions is required for local HuggingFace embeddings. "
-                "Set EMBEDDING_DIMENSIONS (or provide embedding_dimensions in config JSON)."
-            )
-        return self
 
     def build(self) -> QwenEmbeddingLLM:
         return QwenEmbeddingLLM(self)

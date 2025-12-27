@@ -38,14 +38,8 @@ class DeepSearchToolServerConfig(AbstractConfig):
     """Top-level config that wires LLM, adapter, and tool manager for the MCP server."""
 
     type: Literal["deepsearch_tool_mcp_server"] = "deepsearch_tool_mcp_server"
-    instructions: Optional[str] = Field(
-        None,
-        description="Overrides default MCP instructions shown to upstream clients",
-    )
-    enabled_tools: Optional[List[str]] = Field(
-        default=None,
-        description="Optional whitelist; empty means expose all builtin DeepSearch tools",
-    )
+    instructions: str = Field(..., description="MCP instructions shown to upstream clients")
+    enabled_tools: List[str] = Field(..., min_length=1, description="Whitelist of DeepSearch tool names to expose")
     llm_config: OpenAIChatConfig
     graph_adapter: GraphAdapterConfig
     tool_manager: ToolManagerConfig = Field(default_factory=ToolManagerConfig)
@@ -100,5 +94,5 @@ def _replace_env(match: re.Match) -> str:
     var = match.group(1)
     value = os.getenv(var)
     if value is None:
-        return match.group(0)
+        raise ValueError(f"Missing required environment variable for config substitution: {var}")
     return value

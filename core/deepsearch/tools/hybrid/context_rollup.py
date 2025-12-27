@@ -1,6 +1,11 @@
 """LLM-backed context rollup tool for reasoning checkpoints."""
 from typing import Dict, List
 
+from config.core.deepsearch.tool_defaults import (
+    CONTEXT_ROLLUP_DEFAULT_SNIPPET_CHARS,
+    CONTEXT_ROLLUP_DEFAULT_TEMPERATURE,
+    CONTEXT_ROLLUP_DEFAULT_WINDOW_SIZE,
+)
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.prompts.deepsearch import CONTEXT_ROLLUP_PROMPT
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
@@ -36,8 +41,8 @@ class ContextRollupTool(GraphTool):
         self,
         llm_connector,
         *,
-        window_size: int = 6,
-        temperature: float = 0.0,
+        window_size: int = CONTEXT_ROLLUP_DEFAULT_WINDOW_SIZE,
+        temperature: float = CONTEXT_ROLLUP_DEFAULT_TEMPERATURE,
         system_prompt: str = CONTEXT_ROLLUP_PROMPT,
     ):
         self.llm_connector = llm_connector
@@ -79,7 +84,8 @@ class ContextRollupTool(GraphTool):
         return request.context_evidences[-self.window_size :]
 
     async def _summarize(self, request: ToolRunRequest, evidences: List[EvidenceChunk]) -> str:
-        snippets = "\n\n".join(ev.content[:400] for ev in evidences)
+        snippet_chars = int(CONTEXT_ROLLUP_DEFAULT_SNIPPET_CHARS)
+        snippets = "\n\n".join(ev.content[:snippet_chars] for ev in evidences)
         messages = [
             {
                 "role": "system",
@@ -90,15 +96,15 @@ class ContextRollupTool(GraphTool):
                 "content": f"Question: {request.question}\n\nContext:\n{snippets}",
             },
         ]
-        try:
-            response = await call_llm_async(
-                self.llm_connector,
-                messages,
-                temperature=self.temperature,
-            )
-            return response.strip()
-        except Exception:
-            return snippets[:600]
+        response = await call_llm_async(
+            self.llm_connector,
+            messages,
+            temperature=self.temperature,
+        )
+        rendered = (response or "").strip()
+        if not rendered:
+            raise RuntimeError("ContextRollupTool returned an empty response")
+        return rendered
 
     @staticmethod
     def _token_breakdown(evidences: List[EvidenceChunk], summary_text: str) -> Dict[str, int]:

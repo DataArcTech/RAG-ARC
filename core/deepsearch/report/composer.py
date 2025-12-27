@@ -3,60 +3,21 @@
 This reporter converts DeepSearch execution traces into a readable, end-user report by
 prompting an LLM with the collected evidence, highlights, and execution metadata.
 """
-import os
 import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 
-from config.output_limits import (
-    DEEPSEARCH_GRAPH_EDGE_LIMIT,
-    DEEPSEARCH_TOP_CHUNKS,
-    DEEPSEARCH_TOP_SEED_ENTITIES,
-)
 from core.deepsearch.report.consistency_checker import ConsistencyChecker
 from core.deepsearch.report.citation_agent import CitationAgent
 from core.deepsearch.report.llm_writer import DeepSearchLLMReportWriter, render_markdown_from_structured
 from core.deepsearch.trace import emit_trace
 from core.presentation.evidence import build_deepsearch_evidence
 from core.deepsearch.memory import EvidenceBank
+from config.core.deepsearch import report_composer_defaults as composer_defaults
+from config.core.deepsearch.stopwords import EVIDENCE_RANK_STOPWORDS
 
-
-_EVIDENCE_RANK_STOPWORDS: frozenset[str] = frozenset(
-    {
-        "根据",
-        "本地",
-        "资料",
-        "材料",
-        "回答",
-        "要求",
-        "如果",
-        "存在",
-        "差异",
-        "冲突",
-        "指出",
-        "采用",
-        "策略",
-        "以及",
-        "并",
-        "与",
-        "和",
-        "或",
-        "的",
-        "了",
-        "是",
-        "在",
-        "对",
-        "从",
-        "为",
-        "于",
-        "按",
-        "把",
-        "将",
-        "需要",
-    }
-)
 
 def _rank_evidences_for_question(question: str, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Deterministically rank evidences for prompt inclusion (match-first, score-second)."""
@@ -65,20 +26,25 @@ def _rank_evidences_for_question(question: str, items: List[Dict[str, Any]]) -> 
         return []
     q = str(question or "")
     anchors: list[str] = []
-    anchors.extend(re.findall(r"[A-Z]{2,10}", q))
-    if "SAS" not in anchors and "SAS" in q:
-        anchors.append("SAS")
-    for phrase in ("新加坡美国学校", "Singapore American School"):
-        if phrase in q and phrase not in anchors:
-            anchors.append(phrase)
-    for token in re.findall(r"[\u4e00-\u9fff]{2,6}", q):
+    anchors.extend(
+        re.findall(
+            rf"[A-Z]{{{composer_defaults.DEFAULT_EVIDENCE_RANK_ASCII_ANCHOR_MIN},{composer_defaults.DEFAULT_EVIDENCE_RANK_ASCII_ANCHOR_MAX}}}",
+            q,
+        )
+    )
+    for token in re.findall(
+        rf"[\u4e00-\u9fff]{{{composer_defaults.DEFAULT_EVIDENCE_RANK_CJK_ANCHOR_MIN},{composer_defaults.DEFAULT_EVIDENCE_RANK_CJK_ANCHOR_MAX}}}",
+        q,
+    ):
         token = token.strip()
-        if not token or token in _EVIDENCE_RANK_STOPWORDS:
+        if not token or token in EVIDENCE_RANK_STOPWORDS:
             continue
         if token not in anchors:
             anchors.append(token)
 
-    normalized_anchors = [a for a in anchors if a and a not in _EVIDENCE_RANK_STOPWORDS][:24]
+    normalized_anchors = [a for a in anchors if a and a not in EVIDENCE_RANK_STOPWORDS][
+        : composer_defaults.DEFAULT_EVIDENCE_RANK_MAX_ANCHORS
+    ]
 
     def _score(ev: Dict[str, Any]) -> tuple[int, int, float, int, str]:
         content = str(ev.get("content") or "")
@@ -95,8 +61,8 @@ def _rank_evidences_for_question(question: str, items: List[Dict[str, Any]]) -> 
             numeric_score = 0.0
         chunk_id = str(ev.get("chunk_id") or "")
         source = str(ev.get("source") or "").strip().lower()
-        toolish_id = ":" in chunk_id or chunk_id.startswith("graph.") or chunk_id.startswith("tool:")
-        toolish_source = source in {"context_rollup", "evidence_crosscheck", "beam_search", "parallel_think", "think"}
+        toolish_id = ":" in chunk_id or any(chunk_id.startswith(prefix) for prefix in composer_defaults.TOOLISH_CHUNK_ID_PREFIXES)
+        toolish_source = source in composer_defaults.TOOLISH_SOURCE_NAMES
         primary = 0 if (toolish_id or toolish_source) else 1
         # Prefer matched content, then score, then shorter snippets (for prompt efficiency).
         return (primary, 1 if match_count > 0 else 0, match_count, numeric_score, -len(content), chunk_id)
@@ -109,10 +75,10 @@ def _is_tool_generated_evidence(evidence: Dict[str, Any]) -> bool:
     if not chunk_id:
         return False
     lowered = chunk_id.lower()
-    if ":" in chunk_id or lowered.startswith("graph.") or lowered.startswith("tool:"):
+    if ":" in chunk_id or any(lowered.startswith(prefix) for prefix in composer_defaults.TOOLISH_CHUNK_ID_PREFIXES):
         return True
     source = str(evidence.get("source") or "").strip().lower()
-    return source in {"context_rollup", "evidence_crosscheck", "beam_search", "parallel_think", "think"}
+    return source in composer_defaults.TOOLISH_SOURCE_NAMES
 
 
 def _split_authoritative_evidences(evidences: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -134,75 +100,6 @@ def _split_authoritative_evidences(evidences: List[Dict[str, Any]]) -> tuple[Lis
         authoritative.append(ev)
     return authoritative, generated
 
-def _resolve_consistency_check_flag(config_value: bool) -> bool:
-    """Resolve consistency check flag with environment variable override.
-
-    Environment variable DEEPSEARCH_CONSISTENCY_CHECK takes precedence.
-    Valid truthy values: 1, true, yes, on
-    Valid falsy values: 0, false, no, off
-    """
-    env_value = os.getenv("DEEPSEARCH_CONSISTENCY_CHECK")
-    if env_value is None:
-        return config_value
-    normalized = env_value.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    return config_value
-
-
-def _resolve_parallel_sections_flag(config_value: bool) -> bool:
-    """Resolve parallel sections flag with environment variable override.
-
-    Environment variable DEEPSEARCH_PARALLEL_SECTIONS takes precedence.
-    Valid truthy values: 1, true, yes, on
-    Valid falsy values: 0, false, no, off
-    """
-    env_value = os.getenv("DEEPSEARCH_PARALLEL_SECTIONS")
-    if env_value is None:
-        return config_value
-    normalized = env_value.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    return config_value
-
-
-def _resolve_sectionwise_writer_flag(config_value: bool) -> bool:
-    """Resolve sectionwise writer flag with environment variable override.
-
-    Environment variable DEEPSEARCH_SECTIONWISE_WRITER takes precedence.
-    """
-
-    env_value = os.getenv("DEEPSEARCH_SECTIONWISE_WRITER")
-    if env_value is None:
-        return config_value
-    normalized = env_value.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    return config_value
-
-
-def _resolve_citation_alias_flag(config_value: bool) -> bool:
-    """Resolve citation alias flag with environment variable override.
-
-    Environment variable DEEPSEARCH_CITATION_ALIASES takes precedence.
-    """
-
-    env_value = os.getenv("DEEPSEARCH_CITATION_ALIASES")
-    if env_value is None:
-        return config_value
-    normalized = env_value.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    return config_value
-
 
 def _trim_text(value: Any, *, max_chars: int) -> str | None:
     if value is None:
@@ -216,7 +113,12 @@ def _trim_text(value: Any, *, max_chars: int) -> str | None:
     return text[: max(0, limit - 3)].rstrip() + "..."
 
 
-def _slim_diagnostics(payload: Any, *, max_keys: int = 24, max_value_chars: int = 240) -> Dict[str, Any] | None:
+def _slim_diagnostics(
+    payload: Any,
+    *,
+    max_keys: int = composer_defaults.DEFAULT_DIAGNOSTICS_MAX_KEYS,
+    max_value_chars: int = composer_defaults.DEFAULT_DIAGNOSTICS_MAX_VALUE_CHARS,
+) -> Dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
     trimmed: Dict[str, Any] = {}
@@ -228,8 +130,9 @@ def _slim_diagnostics(payload: Any, *, max_keys: int = 24, max_value_chars: int 
             trimmed[str(key)] = raw
         elif isinstance(raw, str):
             trimmed[str(key)] = _trim_text(raw, max_chars=max_value_chars)
-        elif isinstance(raw, (list, tuple)) and len(raw) <= 8:
-            trimmed[str(key)] = [(_trim_text(item, max_chars=80) if isinstance(item, str) else item) for item in raw]
+        elif isinstance(raw, (list, tuple)) and len(raw) <= composer_defaults.DEFAULT_DIAGNOSTICS_MAX_SMALL_LIST_ITEMS:
+            item_limit = composer_defaults.DEFAULT_DIAGNOSTICS_LIST_ITEM_PREVIEW_CHARS
+            trimmed[str(key)] = [(_trim_text(item, max_chars=item_limit) if isinstance(item, str) else item) for item in raw]
         else:
             continue
     return trimmed or None
@@ -249,32 +152,27 @@ class DeepSearchReporter:
         graph_store: Any | None = None,
     ):
         self.template_store = template_store
-        self.config = config or {}
+        if not isinstance(config, dict) or not config:
+            raise ValueError("DeepSearchReporter requires a non-empty config dict")
+        self.config = dict(config)
         self.llm_connector = llm_connector
         self.graph_store = graph_store
 
-        self.max_highlights = int(self.config.get("max_highlights", 6))
-        self.max_evidence_items = DEEPSEARCH_TOP_CHUNKS
-        self.report_temperature = float(self.config.get("report_temperature", 0.2))
-        self.report_max_evidence_chars = int(self.config.get("report_max_evidence_chars", 900))
-        self.report_max_graph_chain_items = DEEPSEARCH_GRAPH_EDGE_LIMIT
-        self.enable_llm_report = bool(self.config.get("enable_llm_report", True))
-        self.enable_consistency_check = _resolve_consistency_check_flag(
-            bool(self.config.get("enable_consistency_check", True))
-        )
-        self.consistency_temperature = float(self.config.get("consistency_temperature", 0.0))
-        self.enable_citation_agent = bool(self.config.get("enable_citation_agent", True))
-        self.parallel_sections = _resolve_parallel_sections_flag(
-            bool(self.config.get("parallel_sections", False))
-        )
-        self.max_parallel_sections = int(self.config.get("max_parallel_sections", 4))
-        self.sectionwise_writer = _resolve_sectionwise_writer_flag(
-            bool(self.config.get("sectionwise_writer", False))
-        )
-        self.sectionwise_retain_k = int(self.config.get("sectionwise_retain_k", 5))
-        self.citation_aliases = _resolve_citation_alias_flag(
-            bool(self.config.get("citation_aliases", True))
-        )
+        self.max_highlights = int(self.config["max_highlights"])
+        self.max_evidence_items = int(self.config["max_evidence_items"])
+        self.report_temperature = float(self.config["report_temperature"])
+        self.report_max_evidence_chars = int(self.config["report_max_evidence_chars"])
+        self.report_max_graph_chain_items = int(self.config["report_max_graph_chain_items"])
+        self.report_max_seed_entities = int(self.config["report_max_seed_entities"])
+        self.enable_llm_report = bool(self.config["enable_llm_report"])
+        self.enable_consistency_check = bool(self.config["enable_consistency_check"])
+        self.consistency_temperature = float(self.config["consistency_temperature"])
+        self.enable_citation_agent = bool(self.config["enable_citation_agent"])
+        self.parallel_sections = bool(self.config["parallel_sections"])
+        self.max_parallel_sections = int(self.config["max_parallel_sections"])
+        self.sectionwise_writer = bool(self.config["sectionwise_writer"])
+        self.sectionwise_retain_k = int(self.config["sectionwise_retain_k"])
+        self.citation_aliases = bool(self.config["citation_aliases"])
 
     async def compose(
         self,
@@ -283,6 +181,8 @@ class DeepSearchReporter:
     ) -> Dict[str, Any]:
         """Compose a report payload for downstream clients (API/CLI/MCP)."""
 
+        if not self.enable_llm_report:
+            raise RuntimeError("Deterministic reports are disabled; enable LLM report generation instead.")
         if self.enable_llm_report and self.llm_connector is None:
             raise RuntimeError("LLM connector is required for LLM report generation")
 
@@ -317,10 +217,10 @@ class DeepSearchReporter:
             "coverage_metrics": coverage_metrics,
             "gap_result": gap_result,
             "pending_external": trace.get("pending_external") or [],
-            "parallel_thinking_runs": int(self.config.get("parallel_thinking_runs", 1)),
+            "parallel_thinking_runs": int(self.config["parallel_thinking_runs"]),
             "report_profile": {
-                "include_graph_viz": bool(self.config.get("include_graph_viz", False)),
-                "enable_custom_summary": bool(self.config.get("enable_custom_summary", False)),
+                "include_graph_viz": bool(self.config["include_graph_viz"]),
+                "enable_custom_summary": bool(self.config["enable_custom_summary"]),
             },
             "evidence_profile": {
                 "total": len(evidences),
@@ -347,59 +247,6 @@ class DeepSearchReporter:
             gap_result=gap_result,
             request_context=request_context,
         )
-        if not self.enable_llm_report:
-            markdown_text = _render_fallback_markdown(
-                question=question,
-                final_answer=str(trace.get("final_answer") or "").strip(),
-                highlights=highlights,
-                evidences=authoritative_evidences,
-            )
-            markdown_text = _append_chunk_evidence(
-                markdown_text,
-                evidences=authoritative_evidences,
-                max_items=self.max_evidence_items,
-            )
-            markdown_text = _append_tool_evidence(
-                markdown_text,
-                evidences=tool_evidences,
-                max_items=self.max_evidence_items,
-            )
-            markdown_text = _append_graph_appendix(
-                markdown_text,
-                graph_evidence=context.get("graph_evidence") or {},
-            )
-            structured_report = {
-                "format_version": self.STRUCTURED_REPORT_VERSION,
-                "title": question,
-                "summary": str(trace.get("final_answer") or "").strip(),
-                "sections": [],
-                "limitations": [],
-                "next_steps": [],
-                "citations": [],
-                "graph_evidence": context.get("graph_evidence") or {},
-                "text": markdown_text,
-                "context": request_context or {},
-                "generation": {"mode": "fallback"},
-            }
-            if self.enable_citation_agent:
-                structured_report, audit = CitationAgent().process(
-                    structured_report=structured_report,
-                    evidences=authoritative_evidences,
-                    graph_evidence=context.get("graph_evidence") or {},
-                    max_chunk_index_items=self.max_evidence_items,
-                    citation_aliases=(alias_bundle.get("alias_to_original") if alias_bundle else None),
-                )
-                metadata["citation_audit"] = audit
-            metadata["structured_report"] = {key: structured_report[key] for key in structured_report if key != "text"}
-            return {
-                "question": question,
-                "answer": markdown_text,
-                "evidences": evidences,
-                "highlights": highlights,
-                "structured_report": structured_report,
-                "metadata": metadata,
-            }
-
         writer = DeepSearchLLMReportWriter(
             self.llm_connector,
             temperature=self.report_temperature,
@@ -408,92 +255,28 @@ class DeepSearchReporter:
             max_graph_chain_items=self.report_max_graph_chain_items,
             parallel_sections=self.parallel_sections,
             max_parallel_sections=self.max_parallel_sections,
+            synthesis_section_max_chars=int(self.config["synthesis_section_max_chars"]),
         )
-        try:
-            outline = await writer.build_outline(question=question, context=context)
-            if self.sectionwise_writer and len(outline) > 2:
-                structured_llm = await writer.write_report_sectionwise(
-                    question=question,
-                    outline=outline,
-                    context=context,
-                    retain_k=max(0, int(self.sectionwise_retain_k)),
-                )
-            elif self.parallel_sections and len(outline) > 2:
-                structured_llm = await writer.write_report_parallel(question=question, outline=outline, context=context)
-            else:
-                structured_llm = await writer.write_report(question=question, outline=outline, context=context)
-        except Exception as exc:
-            await emit_trace(
-                "think",
-                "\n".join(
-                    [
-                        "Report generation failed; falling back to deterministic Markdown renderer.",
-                        f"error={exc}",
-                    ]
-                ),
-                meta={"stage": "report_fallback", "error": str(exc)},
-            )
-            markdown_text = _render_fallback_markdown(
+        outline = await writer.build_outline(question=question, context=context)
+        if self.sectionwise_writer:
+            structured_llm = await writer.write_report_sectionwise(
                 question=question,
-                final_answer=str(trace.get("final_answer") or "").strip(),
-                highlights=highlights,
-                evidences=authoritative_evidences,
+                outline=outline,
+                context=context,
+                retain_k=max(0, int(self.sectionwise_retain_k)),
             )
-            markdown_text = _append_chunk_evidence(
-                markdown_text,
-                evidences=authoritative_evidences,
-                max_items=self.max_evidence_items,
-            )
-            markdown_text = _append_tool_evidence(
-                markdown_text,
-                evidences=tool_evidences,
-                max_items=self.max_evidence_items,
-            )
-            markdown_text = _append_graph_appendix(
-                markdown_text,
-                graph_evidence=context.get("graph_evidence") or {},
-            )
-            structured_report = {
-                "format_version": self.STRUCTURED_REPORT_VERSION,
-                "title": question,
-                "summary": str(trace.get("final_answer") or "").strip(),
-                "sections": [],
-                "limitations": [],
-                "next_steps": [],
-                "citations": [],
-                "graph_evidence": context.get("graph_evidence") or {},
-                "text": markdown_text,
-                "context": request_context or {},
-                "generation": {"mode": "fallback_after_llm_error", "error": str(exc)},
-            }
-            if self.enable_citation_agent:
-                structured_report, audit = CitationAgent().process(
-                    structured_report=structured_report,
-                    evidences=authoritative_evidences,
-                    graph_evidence=context.get("graph_evidence") or {},
-                    max_chunk_index_items=self.max_evidence_items,
-                    citation_aliases=(alias_bundle.get("alias_to_original") if alias_bundle else None),
-                )
-                metadata["citation_audit"] = audit
-            metadata["structured_report"] = {key: structured_report[key] for key in structured_report if key != "text"}
-            return {
-                "question": question,
-                "answer": markdown_text,
-                "evidences": evidences,
-                "highlights": highlights,
-                "structured_report": structured_report,
-                "metadata": metadata,
-            }
+        elif self.parallel_sections:
+            structured_llm = await writer.write_report_parallel(question=question, outline=outline, context=context)
+        else:
+            structured_llm = await writer.write_report(question=question, outline=outline, context=context)
         if alias_bundle:
             structured_llm, alias_diag = self._rewrite_citation_aliases(structured_llm, alias_bundle)
             if alias_diag:
                 metadata["citation_alias_rewrite"] = alias_diag
-        summary_text = structured_llm.get("summary")
+        summary_text = structured_llm.get("short_answer") or structured_llm.get("summary")
         if isinstance(summary_text, str) and summary_text.strip():
-            # Cite-first guard: drop uncited summaries so we don't present factual claims without provenance.
             if not re.search(r"(?:\[[^\[\]]+\]|【[^【】]+】)", summary_text):
-                structured_llm["summary"] = ""
-                metadata["summary_policy"] = "dropped_uncited"
+                raise ValueError("short_answer is missing inline citations (cite-first hard gate).")
         if self.enable_citation_agent:
             structured_llm, audit = CitationAgent().process(
                 structured_report=structured_llm,
@@ -517,12 +300,15 @@ class DeepSearchReporter:
         markdown_text = _append_graph_appendix(
             markdown_text,
             graph_evidence=context.get("graph_evidence") or {},
+            max_seed_entities=self.report_max_seed_entities,
+            max_chain_items=self.report_max_graph_chain_items,
         )
 
         structured_report = {
             "format_version": self.STRUCTURED_REPORT_VERSION,
             "title": structured_llm.get("title") or question,
-            "summary": structured_llm.get("summary") or "",
+            "short_answer": structured_llm.get("short_answer") or structured_llm.get("summary") or "",
+            "summary": structured_llm.get("short_answer") or structured_llm.get("summary") or "",
             "sections": structured_llm.get("sections") or [],
             "limitations": structured_llm.get("limitations") or [],
             "next_steps": structured_llm.get("next_steps") or [],
@@ -538,14 +324,15 @@ class DeepSearchReporter:
             checker = ConsistencyChecker(
                 self.llm_connector,
                 temperature=self.consistency_temperature,
-                max_retries=int(self.config.get("consistency_max_retries", 2)),
+                max_retries=int(self.config["consistency_max_retries"]),
             )
             result = await checker.check(
+                question=question,
                 report_markdown=markdown_text,
                 evidences=authoritative_evidences,
                 structured_report=structured_report,
-                max_evidence_items=self.max_evidence_items,
                 max_evidence_chars=self.report_max_evidence_chars,
+                max_claims=int(self.config["consistency_max_claims"]),
             )
             structured_report["consistency_check"] = result.model_dump()
             if not result.is_consistent:
@@ -595,7 +382,10 @@ class DeepSearchReporter:
             aliased.append(copied)
         if not aliased:
             return evidences, None
-        sample = [{"alias": a, "chunk_id": b} for a, b in list(alias_to_original.items())[:10]]
+        sample = [
+            {"alias": a, "chunk_id": b}
+            for a, b in list(alias_to_original.items())[: composer_defaults.DEFAULT_ALIAS_SAMPLE_SIZE]
+        ]
         return aliased, {
             "count": len(alias_to_original),
             "alias_to_original": alias_to_original,
@@ -603,7 +393,9 @@ class DeepSearchReporter:
             "sample": sample,
         }
 
-    _CITATION_RE = re.compile(r"(?:\[(?P<bracket>[^\[\]]{1,64})\]|【(?P<cjk>[^【】]{1,64})】)")
+    _CITATION_RE = re.compile(
+        rf"(?:\[(?P<bracket>[^\[\]]{{1,{composer_defaults.DEFAULT_CITATION_TOKEN_MAX_CHARS}}})\]|【(?P<cjk>[^【】]{{1,{composer_defaults.DEFAULT_CITATION_TOKEN_MAX_CHARS}}})】)"
+    )
 
     def _rewrite_citation_aliases(
         self,
@@ -698,7 +490,7 @@ class DeepSearchReporter:
             return self._CITATION_RE.sub(_sub, text)
 
         rewritten = dict(structured)
-        for key in ("summary", "title"):
+        for key in ("short_answer", "summary", "title"):
             if isinstance(rewritten.get(key), str):
                 rewritten[key] = _rewrite_text(rewritten[key])
         sections = rewritten.get("sections")
@@ -735,7 +527,7 @@ class DeepSearchReporter:
 
         diag = {
             "replaced": replaced,
-            "unknown_aliases": sorted({token for token in unknown})[:20],
+            "unknown_aliases": sorted({token for token in unknown})[: composer_defaults.DEFAULT_UNKNOWN_ALIAS_SAMPLE_SIZE],
         }
         return rewritten, diag
 
@@ -751,10 +543,15 @@ class DeepSearchReporter:
     ) -> Dict[str, Any]:
         plan_steps = trace.get("plan_steps") or []
         reasoning_steps = trace.get("reasoning_steps") or []
-        tool_results = trace.get("tool_results") or []
+        tool_results = list(trace.get("tool_results") or [])
         pending_external = trace.get("pending_external") or []
 
-        methodology_summary_chars = int(self.config.get("methodology_summary_chars", 1200))
+        methodology_summary_chars = int(self.config["methodology_summary_chars"])
+        keep_tool_results = int(self.config["keep_tool_results"])
+        if keep_tool_results == 0:
+            tool_results = []
+        elif keep_tool_results > 0:
+            tool_results = tool_results[-keep_tool_results:]
         methodology = {
             "plan_steps": plan_steps,
             "reasoning_steps": [
@@ -797,7 +594,10 @@ class DeepSearchReporter:
         bank = EvidenceBank()
         bank.add_many(evidences)
         outline_index_limit = self.max_evidence_items if self.max_evidence_items is not None else None
-        evidence_index = bank.index_for_prompt(max_items=outline_index_limit, max_summary_chars=int(self.config.get("outline_evidence_summary_chars", 240)))
+        evidence_index = bank.index_for_prompt(
+            max_items=outline_index_limit,
+            max_summary_chars=int(self.config["outline_evidence_summary_chars"]),
+        )
 
         return {
             "question": trace.get("question") or "",
@@ -848,7 +648,13 @@ class DeepSearchReporter:
                     return
 
         if external_items and max_items is not None:
-            external_budget = min(len(external_items), max(2, max_items // 3))
+            external_budget = min(
+                len(external_items),
+                max(
+                    composer_defaults.DEFAULT_EXTERNAL_EVIDENCE_MIN_ITEMS,
+                    max_items // composer_defaults.DEFAULT_EXTERNAL_EVIDENCE_FRACTION_DIVISOR,
+                ),
+            )
             internal_budget = max(0, max_items - external_budget)
             _add(internal_items, internal_budget)
             _add(external_items, max_items)
@@ -969,8 +775,8 @@ class DeepSearchReporter:
         graph_chain = graph_evidence.get("graph_chain") if isinstance(graph_evidence.get("graph_chain"), list) else []
         graph_stats = graph_evidence.get("graph_stats") if isinstance(graph_evidence.get("graph_stats"), dict) else {}
         return {
-            "seed_entities": seed_entities[:12],
-            "graph_chain": graph_chain[:40],
+            "seed_entities": seed_entities[: composer_defaults.DEFAULT_GRAPH_EVIDENCE_SEED_ENTITIES_MAX],
+            "graph_chain": graph_chain[: composer_defaults.DEFAULT_GRAPH_CHAIN_PREVIEW_MAX],
             "graph_stats": graph_stats,
         }
 
@@ -980,7 +786,7 @@ def _append_chunk_evidence(
     *,
     evidences: List[Dict[str, Any]],
     max_items: int | None = None,
-    preview_length: int = 100,
+    preview_length: int = composer_defaults.DEFAULT_EVIDENCE_PREVIEW_CHARS,
 ) -> str:
     """Append a compact section listing chunk evidence with content preview."""
 
@@ -1014,7 +820,7 @@ def _append_tool_evidence(
     *,
     evidences: List[Dict[str, Any]],
     max_items: int | None = None,
-    preview_length: int = 100,
+    preview_length: int = composer_defaults.DEFAULT_EVIDENCE_PREVIEW_CHARS,
 ) -> str:
     """Append non-authoritative tool-generated artifacts for debugging."""
 
@@ -1046,7 +852,14 @@ def _append_tool_evidence(
     return (markdown_text or "").rstrip() + "\n" + "\n".join(blocks).rstrip() + "\n"
 
 
-def _append_graph_appendix(markdown_text: str, *, graph_evidence: Dict[str, Any], max_items: int = 40) -> str:
+def _append_graph_appendix(
+    markdown_text: str,
+    *,
+    graph_evidence: Dict[str, Any],
+    max_seed_entities: int,
+    max_chain_items: int,
+    max_items: int = composer_defaults.DEFAULT_EVIDENCE_PREVIEW_MAX_ITEMS,
+) -> str:
     """Append a compact appendix listing graph evidence artifacts."""
 
     if not isinstance(graph_evidence, dict):
@@ -1070,47 +883,12 @@ def _append_graph_appendix(markdown_text: str, *, graph_evidence: Dict[str, Any]
     if seeds:
         blocks.append("")
         blocks.append("### Seed Entities")
-        if DEEPSEARCH_TOP_SEED_ENTITIES is not None:
-            seeds = seeds[: max(DEEPSEARCH_TOP_SEED_ENTITIES, 0)]
+        seeds = seeds[: max(int(max_seed_entities), 0)]
         blocks.extend(f"- {item}" for item in seeds)
     if chain:
         blocks.append("")
         blocks.append("### Graph Chain")
-        if DEEPSEARCH_GRAPH_EDGE_LIMIT is not None:
-            chain = chain[: max(DEEPSEARCH_GRAPH_EDGE_LIMIT, 0)]
+        chain = chain[: max(int(max_chain_items), 0)]
         blocks.extend(f"{idx}. {edge}" for idx, edge in enumerate(chain, start=1))
 
     return (markdown_text or "").rstrip() + "\n" + "\n".join(blocks).rstrip() + "\n"
-
-
-def _render_fallback_markdown(
-    *,
-    question: str,
-    final_answer: str,
-    highlights: List[Dict[str, Any]],
-    evidences: List[Dict[str, Any]],
-) -> str:
-    blocks: List[str] = [f"# {question}"]
-    answer = final_answer or ""
-    if answer:
-        blocks.extend(["", "## Answer", answer])
-    if highlights:
-        blocks.append("")
-        blocks.append("## Highlights")
-        for item in highlights:
-            summary = str(item.get("summary") or "").strip()
-            if summary:
-                blocks.append(f"- {summary}")
-    if evidences:
-        blocks.append("")
-        blocks.append("## Evidence Index")
-        for entry in evidences:
-            if not isinstance(entry, dict):
-                continue
-            chunk_id = str(entry.get("chunk_id") or "").strip()
-            source = str(entry.get("source") or "").strip()
-            content = str(entry.get("content") or "").strip()
-            if chunk_id and content:
-                source_tag = f" ({source})" if source else ""
-                blocks.append(f"- [{chunk_id}]{source_tag}: {content}")
-    return "\n".join(blocks).strip()

@@ -7,7 +7,6 @@ Keeps the adapter abstraction swappable so semantic or relational strategies can
 """
 import logging
 import json
-import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -34,10 +33,11 @@ logger = logging.getLogger(__name__)
 class GraphTraversalSettings:
     """Strategy configuration used by the traversal executor."""
 
-    strategy_name: str = "ppr_chain"
-    allow_semantic_channel: bool = True
-    chain_depth: int = 4
-    parallel_branches: int = 1
+    strategy_name: str
+    allow_semantic_channel: bool
+    chain_depth: int
+    parallel_branches: int
+    step_summary_max_chars: int
 
 
 class GraphTraversalExecutor:
@@ -45,7 +45,9 @@ class GraphTraversalExecutor:
 
     def __init__(self, adapter: GraphDeepSearchAdapter, settings: GraphTraversalSettings | None = None):
         self.adapter = adapter
-        self.settings = settings or GraphTraversalSettings()
+        if settings is None:
+            raise ValueError("GraphTraversalExecutor requires explicit settings (no implicit defaults).")
+        self.settings = settings
 
     async def prepare(self, context: GraphQueryContext) -> None:
         """Ensure the adapter is warmed up for the provided context."""
@@ -60,6 +62,7 @@ class GraphTraversalExecutor:
         context: GraphQueryContext,
         *,
         tool_args_map: Optional[Dict[str, Dict[str, Any]]] = None,
+        tool_name: str,
     ) -> Tuple[List[GraphTraversalRecord], List[ReasoningStepRecord], List[EvidenceChunk]]:
         """Execute plan steps against the graph adapter."""
 
@@ -73,6 +76,7 @@ class GraphTraversalExecutor:
                 step,
                 context,
                 tool_args=tool_args_map.get(step.step_id) if tool_args_map else None,
+                tool_name=tool_name,
             )
             if traversal_record:
                 traversals.append(traversal_record)
@@ -87,8 +91,13 @@ class GraphTraversalExecutor:
         context: GraphQueryContext,
         *,
         tool_args: Optional[Dict[str, Any]] = None,
+        tool_name: str,
     ) -> Tuple[Optional[GraphTraversalRecord], ReasoningStepRecord, List[EvidenceChunk]]:
         """Execute a single plan step so reasoning can interleave with other channels."""
+
+        resolved_tool = str(tool_name or "").strip()
+        if not resolved_tool:
+            raise ValueError("tool_name is required for GraphTraversalExecutor.run_step")
 
         scope = context.resolve_scope()
         reasoning_entry = ReasoningStepRecord(
@@ -111,7 +120,7 @@ class GraphTraversalExecutor:
                     json_safe(
                         {
                             "call_id": call_id,
-                            "tool_name": "graph_adapter.query",
+                            "tool_name": resolved_tool,
                             "plan_step": step.step_id,
                             "channel": step.channel,
                             "query": query,
@@ -127,7 +136,7 @@ class GraphTraversalExecutor:
                     indent=2,
                     default=str,
                 ),
-                meta={"call_id": call_id, "tool_name": "graph_adapter.query", "plan_step": step.step_id},
+                meta={"call_id": call_id, "tool_name": resolved_tool, "plan_step": step.step_id},
             )
 
             async with adapter_locked(self.adapter):
@@ -158,11 +167,7 @@ class GraphTraversalExecutor:
             latency_ms = int((time.perf_counter() - start) * 1000)
 
             summary_text = summary if isinstance(summary, str) else str(summary)
-            summary_limit_raw = os.getenv("DEEPSEARCH_STEP_SUMMARY_MAX_CHARS")
-            try:
-                summary_limit = int(summary_limit_raw) if summary_limit_raw is not None else 2000
-            except Exception:
-                summary_limit = 2000
+            summary_limit = max(0, int(self.settings.step_summary_max_chars))
             if summary_limit > 0 and len(summary_text) > summary_limit:
                 summary_text = summary_text[: max(0, summary_limit - 3)].rstrip() + "..."
             subgraph_info = self._extract_subgraph_info(filtered, subgraph)
@@ -210,7 +215,7 @@ class GraphTraversalExecutor:
                     json_safe(
                         {
                             "call_id": call_id,
-                            "tool_name": "graph_adapter.query",
+                            "tool_name": resolved_tool,
                             "plan_step": step.step_id,
                             "channel": step.channel,
                             "query": query,
@@ -226,7 +231,7 @@ class GraphTraversalExecutor:
                 ),
                 meta={
                     "call_id": call_id,
-                    "tool_name": "graph_adapter.query",
+                    "tool_name": resolved_tool,
                     "plan_step": step.step_id,
                     "ok": True,
                     "evidence_count": len(evidences),
@@ -242,7 +247,7 @@ class GraphTraversalExecutor:
                     json_safe(
                         {
                             "call_id": call_id,
-                            "tool_name": "graph_adapter.query",
+                            "tool_name": resolved_tool,
                             "plan_step": step.step_id,
                             "error": str(exc),
                         }
@@ -251,7 +256,7 @@ class GraphTraversalExecutor:
                     indent=2,
                     default=str,
                 ),
-                meta={"call_id": call_id, "tool_name": "graph_adapter.query", "plan_step": step.step_id, "ok": False},
+                meta={"call_id": call_id, "tool_name": resolved_tool, "plan_step": step.step_id, "ok": False},
             )
         return traversal_record, reasoning_entry, evidences
 

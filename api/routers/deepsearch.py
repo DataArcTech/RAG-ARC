@@ -1167,9 +1167,10 @@ async def _schedule_deepsearch(
                 meta={"run_id": run_id, "external_allowed": False},
             )
             try:
+                planner = getattr(service, "planner", None)
                 await emit_trace(
                     "all_tools",
-                    render_all_tools_block(),
+                    render_all_tools_block(include_llm_tools=bool(getattr(planner, "include_llm_tools_in_catalog", False))),
                     meta={"run_id": run_id},
                 )
             except Exception:

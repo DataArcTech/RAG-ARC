@@ -10,6 +10,7 @@ import shutil
 import logging
 import json
 import asyncio
+import pytest
 from typing import List
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
@@ -71,6 +72,8 @@ def create_test_json_files(temp_dir: str) -> List[str]:
 def test_bm25_indexing_from_json():
     """测试从JSON文件构建BM25索引"""
     print("\n=== 测试从JSON文件构建BM25索引 ===")
+    if not os.getenv("RUN_RAGARC_INTEGRATION_TESTS"):
+        pytest.skip("Requires real indexing stack; set RUN_RAGARC_INTEGRATION_TESTS=1 to enable")
     
     # 创建临时目录
     temp_dir = tempfile.mkdtemp()
@@ -154,6 +157,8 @@ def test_bm25_indexing_from_json():
 def test_faiss_indexing_from_json():
     """测试从JSON文件构建FAISS索引"""
     print("\n=== 测试从JSON文件构建FAISS索引 ===")
+    if not os.getenv("RUN_RAGARC_INTEGRATION_TESTS"):
+        pytest.skip("Requires local models/services; set RUN_RAGARC_INTEGRATION_TESTS=1 to enable")
 
     # 创建临时目录
     temp_dir = tempfile.mkdtemp()

@@ -95,17 +95,15 @@ class LLMChainExplorerTool(GraphTool):
             },
             {"role": "user", "content": prompt},
         ]
-        try:
-            response = await call_llm_async(
-                self.llm_connector,
-                messages,
-                temperature=self.temperature,
-            )
-            return self._parse_response(response)
-        except Exception:
-            # Fallback to heuristic splitting when the LLM is unavailable.
-            question = request.question or ""
-            return [{"query": part.strip(), "rationale": "fallback"} for part in question.split("?") if part.strip()]
+        response = await call_llm_async(
+            self.llm_connector,
+            messages,
+            temperature=self.temperature,
+        )
+        plan = self._parse_response(response)
+        if not plan:
+            raise ValueError("LLM chain explorer returned an empty plan")
+        return plan
 
     def _build_prompt(self, request: ToolRunRequest) -> str:
         adapter_meta = asdict(request.adapter.metadata()) if request.adapter else {}
@@ -117,7 +115,6 @@ class LLMChainExplorerTool(GraphTool):
                 "context": context_snippets,
                 "instructions": {
                     "max_queries": self.max_queries,
-                    "graph_type": adapter_meta.get("graph_type", "hipporag"),
                     "allowed_channels": ["graph", "text"],
                 },
             },

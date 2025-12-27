@@ -1,5 +1,4 @@
 """Graph adapter configuration that builds adapters via the registry."""
-import os
 from typing import Any, Dict, Literal
 
 from pydantic import Field
@@ -16,8 +15,7 @@ class GraphAdapterConfig(AbstractConfig):
     parameters: Dict[str, Any] = Field(default_factory=dict, description="Adapter-specific keyword arguments")
 
     def build(self):
-        env = os.getenv
-        name = env("DEEPSEARCH_DEFAULT_ADAPTER") or self.adapter_name
+        name = self.adapter_name
         self._validate_parameters(name)
         return registry.build_adapter(name, **self.parameters)
 

@@ -2,7 +2,13 @@
 import re
 from typing import Any, Dict, Iterable, List, Optional
 
+from config.core.deepsearch.tool_defaults import (
+    PATTERN_PROBE_DEFAULT_MAX_TERMS,
+    PATTERN_PROBE_DEFAULT_MIN_CJK_LENGTH,
+    PATTERN_PROBE_DEFAULT_MIN_LATIN_LENGTH,
+)
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from config.core.deepsearch.stopwords import PATTERN_PROBE_CJK_STOPWORDS, PATTERN_PROBE_DEFAULT_STOPWORDS
 from core.graph_adapter.base import GraphDeepSearchAdapter
 from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.query_clean import clean_query
@@ -12,49 +18,6 @@ from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_
 
 class PatternProbeTool(GraphTool):
     """Fast, LLM-free probe that mimics grep-like semantics on graph chunks."""
-
-    _DEFAULT_STOPWORDS: frozenset[str] = frozenset(
-        {
-            "根据",
-            "本地",
-            "资料",
-            "材料",
-            "回答",
-            "要求",
-            "如果",
-            "存在",
-            "差异",
-            "冲突",
-            "指出",
-            "采用",
-            "策略",
-            "以及",
-            "并",
-            "与",
-            "和",
-            "或",
-            "的",
-            "了",
-            "是",
-            "在",
-            "对",
-            "从",
-            "为",
-            "于",
-            "按",
-            "把",
-            "将",
-            "需要",
-            "什么",
-            "一个",
-            "判断",
-            "如何",
-            "是否",
-            "哪些",
-            "这个",
-            "这些",
-        }
-    )
 
     descriptor = ToolDescriptor(
         name="graph.pattern_scan",
@@ -86,7 +49,25 @@ class PatternProbeTool(GraphTool):
                     "type": "integer",
                     "description": "Optional override for how many keywords to probe.",
                     "minimum": 0,
-                }
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Optional override for how many candidate chunks to fetch per keyword (adapter-dependent).",
+                    "minimum": 0,
+                },
+                "match_fields": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Fields to enforce match validation against: content, filename, metadata.",
+                },
+                "match_case_sensitive": {
+                    "type": "boolean",
+                    "description": "Whether keyword matching is case-sensitive for Latin strings (defaults to false).",
+                },
+                "match_strip_whitespace": {
+                    "type": "boolean",
+                    "description": "Whether to strip whitespace before matching (defaults to true for CJK-heavy keywords).",
+                },
             }
         ),
         example_args={
@@ -97,13 +78,14 @@ class PatternProbeTool(GraphTool):
     )
 
     CHINESE_PATTERN = re.compile(r"[\u3400-\u9fff]")
+    _NONWORD_SPACES = re.compile(r"[\s\u3000]+")
 
     def __init__(
         self,
         *,
-        max_terms: int = 4,
-        min_latin_length: int = 4,
-        min_cjk_length: int = 2,
+        max_terms: int = PATTERN_PROBE_DEFAULT_MAX_TERMS,
+        min_latin_length: int = PATTERN_PROBE_DEFAULT_MIN_LATIN_LENGTH,
+        min_cjk_length: int = PATTERN_PROBE_DEFAULT_MIN_CJK_LENGTH,
     ):
         self.max_terms = max_terms
         self.min_latin_length = min_latin_length
@@ -116,6 +98,13 @@ class PatternProbeTool(GraphTool):
             return ToolResult(summary="Pattern scan skipped: no stable keywords extracted.")
 
         diagnostics: Dict[str, Any] = {"keywords": keywords}
+        match_fields = self._resolve_match_fields(request.extra)
+        diagnostics["match_fields"] = match_fields
+        top_k = self._resolve_top_k_override(request.extra)
+        if top_k is not None:
+            diagnostics["top_k"] = top_k
+        case_sensitive = self._resolve_bool(request.extra.get("match_case_sensitive"), default=False)
+        diagnostics["match_case_sensitive"] = case_sensitive
         override = request.extra.get("max_terms", None)
         try:
             effective_max = int(override) if override is not None else int(self.max_terms)
@@ -143,9 +132,25 @@ class PatternProbeTool(GraphTool):
                     keyword,
                     channel="graph",
                     access_scope=request.access_scope,
+                    query_options={"top_k": top_k} if top_k is not None else None,
                 )
-                keyword_hits = self._filter_chunks(payload, keyword)
-                diagnostics["per_keyword"].append({"keyword": keyword, "chunk_count": len(keyword_hits)})
+                keyword_hits, filter_diag = self._filter_chunks(
+                    payload,
+                    keyword,
+                    match_fields=match_fields,
+                    case_sensitive=case_sensitive,
+                    strip_whitespace=self._resolve_strip_whitespace(keyword, request.extra),
+                )
+                diagnostics["per_keyword"].append(
+                    {
+                        "keyword": keyword,
+                        "candidate_chunk_count": filter_diag.get("candidate_chunk_count"),
+                        "matched_chunk_count": filter_diag.get("matched_chunk_count"),
+                        "filtered_chunk_count": filter_diag.get("filtered_chunk_count"),
+                        "filter_reasons": filter_diag.get("filter_reasons"),
+                        "file_cluster_counts": filter_diag.get("file_cluster_counts"),
+                    }
+                )
                 for ev in keyword_hits:
                     existing = evidence_by_id.get(ev.chunk_id)
                     if existing is None:
@@ -161,6 +166,17 @@ class PatternProbeTool(GraphTool):
                     if keyword not in patterns:
                         patterns.append(keyword)
                     provenance["patterns"] = patterns
+                    matched_fields = provenance.get("matched_fields")
+                    if not isinstance(matched_fields, list):
+                        matched_fields = []
+                    incoming_fields = ev.provenance.get("matched_fields") if isinstance(ev.provenance, dict) else None
+                    if isinstance(incoming_fields, list):
+                        for field in incoming_fields:
+                            token = str(field or "").strip()
+                            if token and token not in matched_fields:
+                                matched_fields.append(token)
+                    if matched_fields:
+                        provenance["matched_fields"] = matched_fields
                     existing.provenance = provenance
                     if ev.score is not None and (existing.score is None or float(ev.score) > float(existing.score)):
                         existing.score = ev.score
@@ -191,7 +207,10 @@ class PatternProbeTool(GraphTool):
     def _pick_keywords(self, question: str, extra: Dict[str, Any]) -> List[str]:
         candidate_terms = extra.get("candidate_keywords")
         if isinstance(candidate_terms, list) and candidate_terms:
-            return self._deduplicate(self._filter_stopwords([str(term).strip() for term in candidate_terms if str(term).strip()]))
+            expanded: List[str] = []
+            for term in candidate_terms:
+                expanded.extend(self._split_keyword_hints(str(term)))
+            return self._deduplicate(self._filter_stopwords([token for token in expanded if token]))
 
         for key in ("query", "focus_query"):
             raw = extra.get(key)
@@ -209,7 +228,7 @@ class PatternProbeTool(GraphTool):
         text = str(raw or "").strip()
         if not text:
             return []
-        parts = re.split(r"[，,;；\\n\\t\\s]+", text)
+        parts = re.split(r"[，,;；\\n\\t\\s\\|｜/、]+", text)
         cleaned: List[str] = []
         for part in parts:
             token = part.strip().strip("\"'`()[]{}<>")
@@ -233,27 +252,217 @@ class PatternProbeTool(GraphTool):
             value = str(token).strip()
             if not value:
                 continue
-            if value in cls._DEFAULT_STOPWORDS:
+            if value in PATTERN_PROBE_DEFAULT_STOPWORDS:
                 continue
             filtered.append(value)
         return filtered
 
     @staticmethod
-    def _filter_chunks(payload: Dict[str, Any], keyword: str) -> List[EvidenceChunk]:
+    def _resolve_bool(value: Any, *, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        raw = str(value).strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            return True
+        if raw in {"0", "false", "no", "off"}:
+            return False
+        return default
+
+    @staticmethod
+    def _resolve_top_k_override(extra: Dict[str, Any]) -> int | None:
+        raw = extra.get("top_k")
+        if raw is None:
+            return None
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return None
+        if value <= 0:
+            return None
+        return value
+
+    @staticmethod
+    def _resolve_match_fields(extra: Dict[str, Any]) -> List[str]:
+        raw = extra.get("match_fields")
+        fields: List[str] = []
+        if isinstance(raw, list):
+            for item in raw:
+                name = str(item or "").strip().lower()
+                if not name:
+                    continue
+                fields.append(name)
+        if not fields:
+            # Strict by default: only accept chunks that contain the keyword in content.
+            fields = ["content"]
+        seen: set[str] = set()
+        out: List[str] = []
+        for field in fields:
+            if field in seen:
+                continue
+            seen.add(field)
+            out.append(field)
+        return out
+
+    def _resolve_strip_whitespace(self, keyword: str, extra: Dict[str, Any]) -> bool:
+        override = extra.get("match_strip_whitespace")
+        if override is not None:
+            return self._resolve_bool(override, default=self._looks_cjk(keyword))
+        # For CJK-heavy keywords we default to stripping whitespace as PDF extraction can insert it.
+        return self._looks_cjk(keyword)
+
+    def _normalize_match_text(self, text: str, *, case_sensitive: bool, strip_whitespace: bool) -> str:
+        value = str(text or "").strip()
+        if not value:
+            return ""
+        if strip_whitespace:
+            value = self._NONWORD_SPACES.sub("", value)
+        value = value.replace("／", "/").replace("，", ",").replace("（", "(").replace("）", ")")
+        if not case_sensitive:
+            value = value.lower()
+        return value
+
+    def _matched_fields(
+        self,
+        chunk: Dict[str, Any],
+        *,
+        normalized_keyword: str,
+        match_fields: List[str],
+        case_sensitive: bool,
+        strip_whitespace: bool,
+    ) -> List[str]:
+        if not normalized_keyword:
+            return []
+        matched: List[str] = []
+
+        if "content" in match_fields:
+            content = self._normalize_match_text(
+                str(chunk.get("content") or ""),
+                case_sensitive=case_sensitive,
+                strip_whitespace=strip_whitespace,
+            )
+            if content and normalized_keyword in content:
+                matched.append("content")
+
+        metadata = chunk.get("metadata")
+        meta_dict = metadata if isinstance(metadata, dict) else {}
+
+        if "filename" in match_fields:
+            fname = self._normalize_match_text(
+                str(
+                    meta_dict.get("source_file_name")
+                    or meta_dict.get("filename")
+                    or meta_dict.get("source_file")
+                    or meta_dict.get("file_path")
+                    or meta_dict.get("path")
+                    or ""
+                ),
+                case_sensitive=case_sensitive,
+                strip_whitespace=strip_whitespace,
+            )
+            if fname and normalized_keyword in fname:
+                matched.append("filename")
+
+        if "metadata" in match_fields and meta_dict:
+            for key in ("title", "heading", "section", "doc_title", "document_title"):
+                value = meta_dict.get(key)
+                if not isinstance(value, str) or not value.strip():
+                    continue
+                compact = self._normalize_match_text(
+                    value,
+                    case_sensitive=case_sensitive,
+                    strip_whitespace=strip_whitespace,
+                )
+                if compact and normalized_keyword in compact:
+                    matched.append("metadata")
+                    break
+
+        return matched
+
+    @staticmethod
+    def _source_file_cluster(chunk: Dict[str, Any]) -> str | None:
+        metadata = chunk.get("metadata")
+        if not isinstance(metadata, dict):
+            return None
+        for key in ("source_file_id", "file_id", "document_id", "doc_id"):
+            value = metadata.get(key)
+            if value is None:
+                continue
+            token = str(value).strip()
+            if token:
+                return f"id:{token}"
+        for key in ("source_file_name", "filename", "source_file", "file_path", "path"):
+            value = metadata.get(key)
+            if not isinstance(value, str):
+                continue
+            token = value.strip()
+            if token:
+                return f"name:{token}"
+        return None
+
+    def _filter_chunks(
+        self,
+        payload: Dict[str, Any],
+        keyword: str,
+        *,
+        match_fields: List[str],
+        case_sensitive: bool,
+        strip_whitespace: bool,
+    ) -> tuple[List[EvidenceChunk], Dict[str, Any]]:
         chunks_payload = payload.get("chunks", [])
         if not isinstance(chunks_payload, list):
-            return []
+            return [], {"candidate_chunk_count": 0, "matched_chunk_count": 0, "filtered_chunk_count": 0}
+
+        normalized_keyword = self._normalize_match_text(
+            keyword,
+            case_sensitive=case_sensitive,
+            strip_whitespace=strip_whitespace,
+        )
+        if not normalized_keyword:
+            return [], {
+                "candidate_chunk_count": len(chunks_payload),
+                "matched_chunk_count": 0,
+                "filtered_chunk_count": len(chunks_payload),
+                "filter_reasons": {"empty_keyword": len(chunks_payload)},
+                "file_cluster_counts": {},
+            }
+
         matches: List[EvidenceChunk] = []
+        filtered = 0
+        filter_reasons: Dict[str, int] = {}
+        file_cluster_counts: Dict[str, int] = {}
+
+        metadata = payload.get("metadata")
+        source = "hipporag"
+        if isinstance(metadata, dict):
+            source = metadata.get("adapter") or metadata.get("adapter_name") or source
+
         for idx, chunk in enumerate(chunks_payload):
             content = str(chunk.get("content") or "")
             chunk_id = PatternProbeTool._extract_chunk_id(chunk, keyword, idx)
             score = chunk.get("score")
             if score is None and isinstance(chunk.get("metadata"), dict):
                 score = chunk["metadata"].get("score")
-            metadata = payload.get("metadata")
-            source = "hipporag"
-            if isinstance(metadata, dict):
-                source = metadata.get("adapter") or metadata.get("adapter_name") or source
+
+            matched_fields = self._matched_fields(
+                chunk,
+                normalized_keyword=normalized_keyword,
+                match_fields=match_fields,
+                case_sensitive=case_sensitive,
+                strip_whitespace=strip_whitespace,
+            )
+            if not matched_fields:
+                filtered += 1
+                filter_reasons["no_match"] = filter_reasons.get("no_match", 0) + 1
+                continue
+
+            cluster = self._source_file_cluster(chunk)
+            if cluster:
+                file_cluster_counts[cluster] = file_cluster_counts.get(cluster, 0) + 1
+
             evidence = EvidenceChunk(
                 chunk_id=chunk_id,
                 source=str(source),
@@ -261,12 +470,22 @@ class PatternProbeTool(GraphTool):
                 score=score,
                 provenance={
                     "pattern": keyword,
+                    "matched_fields": matched_fields,
                     "metadata": chunk.get("metadata", {}),
                     "raw_chunk": chunk,
                 },
             )
             matches.append(evidence)
-        return matches
+
+        return matches, {
+            "candidate_chunk_count": len(chunks_payload),
+            "matched_chunk_count": len(matches),
+            "filtered_chunk_count": filtered,
+            "filter_reasons": filter_reasons,
+            "file_cluster_counts": dict(sorted(file_cluster_counts.items(), key=lambda kv: (-kv[1], kv[0])))
+            if file_cluster_counts
+            else {},
+        }
 
     @staticmethod
     def _extract_chunk_id(chunk: Dict[str, Any], keyword: str, idx: int) -> str:
@@ -301,8 +520,7 @@ class PatternProbeTool(GraphTool):
         if extracted:
             return self._rank_cjk_terms(extracted)
 
-        # Final fallback to overlapping bigrams so the probe still has signals.
-        return self._deduplicate(self._fallback_cjk_bigrams(question))
+        return []
 
     def _jieba_tokens(self, text: str) -> List[str]:
         try:
@@ -330,15 +548,6 @@ class PatternProbeTool(GraphTool):
             ordered.append(token)
         return ordered
 
-    def _fallback_cjk_bigrams(self, text: str) -> List[str]:
-        cleaned = "".join(ch for ch in text if self._looks_cjk(ch))
-        grams: List[str] = []
-        for idx in range(len(cleaned) - 1):
-            gram = cleaned[idx : idx + self.min_cjk_length]
-            if len(gram) >= self.min_cjk_length:
-                grams.append(gram)
-        return grams
-
     @staticmethod
     def _regex_cjk_terms(text: str) -> List[str]:
         raw = str(text or "")
@@ -350,27 +559,7 @@ class PatternProbeTool(GraphTool):
     def _rank_cjk_terms(self, tokens: List[str]) -> List[str]:
         """Rank terms so we don't accidentally pick meaningless leading bigrams."""
 
-        stop = {
-            "请",
-            "给出",
-            "一份",
-            "结构化",
-            "对比",
-            "报告",
-            "并",
-            "每个",
-            "关键",
-            "事实",
-            "标注",
-            "引用",
-            "基于",
-            "已上传",
-            "涉及文件",
-            "这些",
-            "相关",
-            "主要",
-            "提示",
-        }
+        stop = PATTERN_PROBE_CJK_STOPWORDS
         seen: set[str] = set()
         scored: List[tuple[int, str]] = []
         for token in tokens:
@@ -383,10 +572,6 @@ class PatternProbeTool(GraphTool):
                 continue
             seen.add(token)
             score = len(token)
-            if any(marker in token for marker in ("险", "保", "回报", "退保", "供款", "年金", "提取", "身故", "保障", "风险")):
-                score += 6
-            if any(marker in token for marker in ("规则", "共同点", "差异", "保证", "非保证")):
-                score += 3
             scored.append((score, token))
         scored.sort(key=lambda item: (-item[0], item[1]))
         ranked = [token for _, token in scored]

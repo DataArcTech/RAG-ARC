@@ -1,6 +1,14 @@
 """Hybrid tool combining deterministic probes with LLM summaries."""
 from typing import Any, Dict, List
 
+from config.core.deepsearch.tool_defaults import (
+    HYBRID_NEIGHBORHOOD_DEFAULT_MAX_CHUNKS,
+    HYBRID_NEIGHBORHOOD_DEFAULT_PATTERN_MAX_TERMS,
+    HYBRID_NEIGHBORHOOD_DEFAULT_SNIPPET_CHARS,
+    HYBRID_NEIGHBORHOOD_DEFAULT_SUMMARY_TEMPERATURE,
+    HYBRID_NEIGHBORHOOD_DEFAULT_TRAVERSAL_MAX_DEPTH,
+    HYBRID_NEIGHBORHOOD_DEFAULT_TRAVERSAL_STRATEGY,
+)
 from encapsulation.data_model.deepsearch import EvidenceChunk
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async
@@ -30,10 +38,26 @@ class HybridNeighborhoodProbeTool(GraphTool):
         },
     )
 
-    def __init__(self, llm_connector, *, max_chunks: int = 5):
+    def __init__(
+        self,
+        llm_connector,
+        *,
+        max_chunks: int = HYBRID_NEIGHBORHOOD_DEFAULT_MAX_CHUNKS,
+        pattern_probe_max_terms: int = HYBRID_NEIGHBORHOOD_DEFAULT_PATTERN_MAX_TERMS,
+        traversal_strategy: str = HYBRID_NEIGHBORHOOD_DEFAULT_TRAVERSAL_STRATEGY,
+        traversal_max_depth: int = HYBRID_NEIGHBORHOOD_DEFAULT_TRAVERSAL_MAX_DEPTH,
+        snippet_chars: int = HYBRID_NEIGHBORHOOD_DEFAULT_SNIPPET_CHARS,
+        temperature: float = HYBRID_NEIGHBORHOOD_DEFAULT_SUMMARY_TEMPERATURE,
+    ):
         self.llm_connector = llm_connector
         self.max_chunks = max_chunks
-        self._pattern_tool = PatternProbeTool(max_terms=3)
+        self._pattern_tool = PatternProbeTool(max_terms=int(pattern_probe_max_terms))
+        self.traversal_strategy = str(traversal_strategy).strip()
+        if not self.traversal_strategy:
+            raise ValueError("HybridNeighborhoodProbeTool traversal_strategy must be a non-empty string")
+        self.traversal_max_depth = int(traversal_max_depth)
+        self.snippet_chars = int(snippet_chars)
+        self.temperature = float(temperature)
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         # Step 1: deterministic scan to surface candidate chunks quickly.
@@ -54,9 +78,9 @@ class HybridNeighborhoodProbeTool(GraphTool):
             for ev in pattern_result.evidences[: self.max_chunks]:
                 subgraph = await adapter.chain_traverse(
                     {
-                        "strategy": "ppr_chain",
+                        "strategy": self.traversal_strategy,
                         "seed_chunk": ev.chunk_id,
-                        "max_depth": 2,
+                        "max_depth": self.traversal_max_depth,
                     },
                     access_scope=request.access_scope,
                 )
@@ -85,7 +109,7 @@ class HybridNeighborhoodProbeTool(GraphTool):
         return ToolResult(summary=summary, evidences=enriched, diagnostics=diagnostics)
 
     async def _summarize(self, request: ToolRunRequest, evidences: List[EvidenceChunk]) -> str:
-        context = "\n\n".join(ev.content[:400] for ev in evidences)
+        context = "\n\n".join(ev.content[: self.snippet_chars] for ev in evidences)
         messages = [
             {
                 "role": "system",
@@ -96,11 +120,11 @@ class HybridNeighborhoodProbeTool(GraphTool):
                 "content": f"Question: {request.question}\n\nContext:\n{context}",
             },
         ]
-        try:
-            response = await call_llm_async(self.llm_connector, messages, temperature=0.1)
-            return response.strip()
-        except Exception:
-            return "Hybrid probe summarisation failed; returning raw chunk snippets."
+        response = await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
+        rendered = (response or "").strip()
+        if not rendered:
+            raise RuntimeError("HybridNeighborhoodProbeTool returned an empty response")
+        return rendered
 
     @staticmethod
     def _token_breakdown(evidences: List[EvidenceChunk], summary_text: str) -> Dict[str, int]:

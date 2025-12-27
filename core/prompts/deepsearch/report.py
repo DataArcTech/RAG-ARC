@@ -15,6 +15,7 @@ Convert the available DeepSearch signals into a clear report outline that maximi
 - Write titles in the same language as the user question.
 - Do not invent facts.
 - Do not include an evidence index section (handled separately).
+- Each section must include a lightweight `section_type` tag (used by renderers to decide display shape).
 - Return ONLY valid JSON.
 """
 
@@ -28,6 +29,7 @@ REPORT_OUTLINE_USER_PROMPT = (
     "Task:\n"
     "Return a JSON array of sections (typically 5-8; use fewer if evidence is scarce). Each item must be an object with:\n"
     "- title: string\n"
+    "- section_type: string (a short tag such as 'comparison_table', 'timeline', 'faq', 'narrative', 'methodology')\n"
     "- purpose: string (what this section should cover)\n"
     "- evidence_ids: array of strings (chunk_id values from the evidence index; keep it small, e.g. 2-8 per section)\n\n"
     "Constraints:\n"
@@ -74,8 +76,8 @@ REPORT_WRITE_USER_PROMPT = (
     "Task:\n"
     "Return a single JSON object with:\n"
     "- title: string\n"
-    "- summary: string (3-6 sentences)\n"
-    "- sections: array of {{title: string, body_markdown: string}}\n"
+    "- short_answer: string (3-6 sentences; keep it punchy, not template-like)\n"
+    "- sections: array of objects with keys: title, section_type, body_markdown\n"
     "- limitations: array of strings\n"
     "- next_steps: array of strings\n"
     "- citations: array of objects (may be empty) with:\n"
@@ -88,18 +90,23 @@ REPORT_WRITE_USER_PROMPT = (
     "Constraints:\n"
     "- Write in the same language as the user question.\n"
     "- Use only the evidence provided; do not introduce facts not supported by evidence.\n"
-    "- Add inline citations in the section bodies for any concrete claim.\n"
+    "- Add inline citations in the short_answer and section bodies for any concrete claim.\n"
     "- Include at least one section that explicitly summarizes graph-derived facts (seed entities and graph chain).\n"
     "- If the evidence conflicts or is too weak, say so in limitations.\n"
 )
 
-CONSISTENCY_CHECK_SYSTEM_PROMPT = """You are a strict factual consistency checker.
+CONSISTENCY_CHECK_SYSTEM_PROMPT = """You are a strict supportiveness & contradiction checker for a cite-first research report.
 
 ## Task
-Given a generated report (Markdown) and a list of evidence snippets, verify that:
-1) Claims are supported by evidence.
-2) Inline citations (e.g. [ev1]) reference evidence that actually supports the nearby claim.
-3) The report does not contradict the evidence.
+You are given:
+- a user question
+- a list of extracted claim sentences from the report (each includes its inline citations)
+- the evidence snippets referenced by those citations
+
+Verify that:
+1) Each claim is supported by its cited evidence snippets.
+2) Citations reference evidence that actually supports the nearby claim (no mis-citations/misquotes).
+3) Claims do not contradict the evidence or each other.
 
 ## Output
 Return ONLY valid JSON with the following schema:
@@ -117,13 +124,13 @@ Return ONLY valid JSON with the following schema:
 }
 
 ## Constraints
-- Use ONLY the provided evidence as ground truth.
-- Be conservative: if unsure, mark as an issue with lower confidence.
+- Use ONLY the provided evidence snippets as ground truth.
+- Be conservative: if unsure, surface an issue with lower confidence.
 """
 
 CONSISTENCY_CHECK_USER_PROMPT = (
-    "Report (Markdown):\n{report_markdown}\n\n"
-    "Evidence snippets (authoritative):\n{evidence_json}\n\n"
+    "User question:\n{question}\n\n"
+    "Claim set (JSON):\n{claims_json}\n\n"
     "Return the JSON result now."
 )
 
@@ -154,12 +161,14 @@ SECTION_WRITE_USER_PROMPT = (
     "User question:\n{question}\n\n"
     "Section to write:\n"
     "- Title: {section_title}\n"
+    "- Type: {section_type}\n"
     "- Purpose: {section_purpose}\n\n"
     "Evidence snippets (the only authoritative sources):\n{evidence_json}\n\n"
     "Graph chain edges (for graph-related sections):\n{graph_chain_json}\n\n"
     "Task:\n"
     "Return a single JSON object with:\n"
     "- title: string (the section title)\n"
+    "- section_type: string (repeat the section type tag)\n"
     "- body_markdown: string (the section content in Markdown)\n"
     "- citations: array of objects with:\n"
     "  - evidence_id: string\n"
@@ -175,7 +184,7 @@ PARALLEL_SYNTHESIS_SYSTEM_PROMPT = """You are a report synthesizer.
 ## Goal
 Given a user question, a report outline, and draft section bodies (already written), produce:
 - a concise report title,
-- a 3-6 sentence summary,
+- a 3-6 sentence short_answer,
 - limitations,
 - next steps.
 
@@ -184,7 +193,7 @@ Given a user question, a report outline, and draft section bodies (already writt
 - Do not invent facts: only rely on the provided evidence snippets and section drafts.
 - When making a concrete factual claim, keep it supported by evidence and use inline citations ONLY in [chunk_id] format.
 - Do NOT rewrite the full sections; they are already drafted.
-- The summary must contain supported inline citations for any concrete claim. If you cannot write a properly cited summary, output an empty string for summary.
+- The short_answer must contain supported inline citations for any concrete claim.
 
 ## Output Requirements
 Return ONLY valid JSON matching the schema described in the user prompt.
@@ -199,7 +208,7 @@ PARALLEL_SYNTHESIS_USER_PROMPT = (
     "Task:\n"
     "Return a single JSON object with:\n"
     "- title: string\n"
-    "- summary: string (3-6 sentences)\n"
+    "- short_answer: string (3-6 sentences)\n"
     "- limitations: array of strings\n"
     "- next_steps: array of strings\n"
 )

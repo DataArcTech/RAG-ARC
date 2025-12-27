@@ -81,7 +81,7 @@ class _TracingStubDeepSearchService:
                                 "score": 0.91,
                                 "content": "繳費期：5 年；保證回報：按條款計算（示例片段）。",
                                 "provenance": {
-                                    "path": "docs-proj/To-AI 港险产品小册子/<redacted>.pdf",
+                                    "path": "<path>/<redacted>.pdf",
                                     "page": 3,
                                     "patterns": ["繳費期", "保證回報"],
                                     "triples": [{"head": "繳費期", "relation": "為", "tail": "5年"}],
@@ -237,4 +237,3 @@ def test_deepsearch_weaver_trace_outputs_by_tag():
                     assert by_tag.get(tag), f"missing weaver tag output: {tag}"
 
     asyncio.run(_run())
-

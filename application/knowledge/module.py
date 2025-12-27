@@ -622,7 +622,14 @@ class Knowledge(AbstractModule):
 
         return True
 
-    async def trigger_indexing(self, file_ids: List[str], user_id: uuid.UUID) -> str:
+    async def trigger_indexing(
+        self,
+        file_ids: List[str],
+        user_id: uuid.UUID,
+        *,
+        force: bool = False,
+        wait: bool = False,
+    ) -> str:
         """
         Trigger indexing for multiple files asynchronously.
         
@@ -668,9 +675,13 @@ class Knowledge(AbstractModule):
                         skipped_files.append(file_id)
                         continue
 
-                # Only allow indexing for STORED or FAILED files
-                # Skip files that are already indexed or in intermediate processing states
-                if metadata.status == FileStatus.STORED or metadata.status == FileStatus.FAILED:
+                if metadata.status == FileStatus.DELETED:
+                    invalid_files.append(f"File is deleted: {file_id}")
+                    continue
+
+                # Only allow indexing for STORED or FAILED files, unless force is enabled.
+                # Skip files that are in intermediate processing states (PARSED, CHUNKED) or already running.
+                if metadata.status in {FileStatus.STORED, FileStatus.FAILED} or force:
                     valid_files.append(file_id)
                 else:
                     skipped_files.append(file_id)
@@ -693,15 +704,15 @@ class Knowledge(AbstractModule):
             f"Triggering indexing for files: {'; '.join(valid_files)}"
         )
 
-        # Start background indexing tasks (fire-and-forget) for files not indexed yet only.
-        for file_id in valid_files:
-            task_run_id = self.task_queue.create_task_run(
-                task_type="index_file",
-                owner_id=user_id,
-                resource_id=file_id,
-                metadata={"trigger": "manual"},
-            )
-            if self._use_celery():
+        results: List[Dict[str, Any] | Exception] = []
+        if self._use_celery():
+            for file_id in valid_files:
+                task_run_id = self.task_queue.create_task_run(
+                    task_type="index_file",
+                    owner_id=user_id,
+                    resource_id=file_id,
+                    metadata={"trigger": "manual"},
+                )
                 from application.knowledge.celery_tasks import index_file as index_file_task
 
                 queue = os.getenv("CELERY_QUEUE_INDEXING", "indexing")
@@ -710,14 +721,43 @@ class Knowledge(AbstractModule):
                     task_id=task_run_id,
                     queue=queue,
                 )
-            else:
-                task = asyncio.create_task(self._index_file_background(file_id, task_run_id=task_run_id))
-                self._track_background_task(file_id, task)
+        else:
+            task_specs: List[tuple[str, str]] = []
+            for file_id in valid_files:
+                task_run_id = self.task_queue.create_task_run(
+                    task_type="index_file",
+                    owner_id=user_id,
+                    resource_id=file_id,
+                    metadata={"trigger": "manual"},
+                )
+                task_specs.append((file_id, task_run_id))
 
-        # Return immediately with basic info
-        message_parts = [
-            f"Indexing started for files: {'; '.join(valid_files)}"
-        ]
+            if wait:
+                tasks = [self._index_file_background(file_id, task_run_id=task_run_id) for file_id, task_run_id in task_specs]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+            else:
+                for file_id, task_run_id in task_specs:
+                    task = asyncio.create_task(self._index_file_background(file_id, task_run_id=task_run_id))
+                    self._track_background_task(file_id, task)
+
+        message_parts: List[str] = []
+        if wait and not self._use_celery():
+            succeeded: List[str] = []
+            failed: List[str] = []
+            for file_id, outcome in zip(valid_files, results):
+                if isinstance(outcome, Exception):
+                    failed.append(file_id)
+                    continue
+                if isinstance(outcome, dict) and outcome.get("success", False):
+                    succeeded.append(file_id)
+                else:
+                    failed.append(file_id)
+            message_parts.append(f"Indexing completed for files: {'; '.join(valid_files)}")
+            message_parts.append(f"succeeded={len(succeeded)}, failed={len(failed)}")
+            if failed:
+                message_parts.append(f"failed_files: {'; '.join(failed)}")
+        else:
+            message_parts.append(f"Indexing started for files: {'; '.join(valid_files)}")
         if skipped_files:
             message_parts.append(f"Skipped files (already indexed or in progress): {'; '.join(skipped_files)}")
         if invalid_files:

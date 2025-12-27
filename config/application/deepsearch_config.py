@@ -1,7 +1,6 @@
 """Configuration entry point that wires planner, graph reasoning, gap detection, and external channels."""
 import hashlib
 import json
-import os
 from typing import Any, Dict, Literal, Optional, List
 
 from pydantic import BaseModel, Field
@@ -19,7 +18,7 @@ from core.deepsearch.report import DeepSearchReporter
 from core.deepsearch.tooling.registry import ToolHintRegistry
 from encapsulation.deepsearch.tooling import DeepSearchToolManager
 from encapsulation.deepsearch.external import ExternalSearchChannel
-from application.deepsearch.tool_mcp_server import LoggingTelemetryClient
+from encapsulation.deepsearch.telemetry import LoggingTelemetryClient
 from framework.config import AbstractConfig
 
 
@@ -40,10 +39,22 @@ class PlannerRuntimeConfig(BaseModel):
         description="Default text-channel summariser (chunk rollup).",
     )
     web_channel_tool: str = Field("web.search", description="Default tool name for web channel steps.")
+    include_llm_tools_in_catalog: bool = Field(
+        ...,
+        description="Whether to include LLM-dependent tools in the planner tool catalog (must be explicit; no env heuristics).",
+    )
     default_web_provider: Optional[str] = Field(None, description="Fallback provider for web/search tools.")
     tool_arg_templates: Dict[str, Dict[str, str]] = Field(
         default_factory=dict,
         description="Channel-specific tool argument templates (string.Template supported).",
+    )
+    honor_planner_tool_selection: bool = Field(
+        ...,
+        description="When true, DeepSearchPlanner will honor explicit tool selections in plan steps (must be explicit).",
+    )
+    graph_adapter_name: str = Field(
+        "hipporag",
+        description="Default graph adapter name used in plan artifacts (must match a registered adapter).",
     )
 
 
@@ -53,6 +64,24 @@ class GraphReasoningThinkConfig(BaseModel):
     tool_name: str = Field("graph.think", description="Tool used for think checkpoints.")
     every_n_steps: int = Field(0, description="Trigger periodic think after N completed graph steps (0 disables).")
     min_coverage: float = Field(0.75, description="Only run think when coverage ratio falls below this threshold.")
+    enable_tool_calls: bool = Field(
+        False,
+        description="Allow think checkpoints to propose additional tool calls (executed immediately by the reasoning loop).",
+    )
+    max_tool_calls: int = Field(0, description="Maximum tool calls accepted from a single think response.")
+    tool_call_concurrency: int = Field(0, description="Max concurrent think-proposed tool invocations (0 = sequential).")
+    tool_catalog_max_items: int = Field(
+        0,
+        description="Include up to N tool descriptors in think context (0 disables the tool catalog).",
+    )
+    include_llm_tools: bool = Field(
+        ...,
+        description="Whether to include LLM-dependent tools in the think tool catalog (must be explicit; no env heuristics).",
+    )
+    max_rounds_per_checkpoint: int = Field(
+        1,
+        description="Maximum think→tool_calls→think iterations per periodic checkpoint (>=1).",
+    )
 
 
 class GraphReasoningStrategyConfig(BaseModel):
@@ -62,6 +91,30 @@ class GraphReasoningStrategyConfig(BaseModel):
     allow_semantic_channel: bool = Field(True, description="Allow semantic-only channel as fallback.")
     chain_depth: int = Field(4, description="Maximum traversal chain depth.")
     enable_custom_hooks: bool = Field(False, description="Reserved flag for custom traversal hooks.")
+    tool_context_max_evidences: int = Field(
+        5,
+        description="Maximum number of evidence chunks forwarded into each tool prompt payload.",
+    )
+    tool_context_max_chars: int = Field(
+        800,
+        description="Maximum characters per evidence snippet forwarded into each tool prompt payload.",
+    )
+    coverage_expected_min_chunks: int = Field(
+        3,
+        description="Expected minimum evidence chunks for coverage normalization inside the reasoning loop.",
+    )
+    trace_reflection_enabled: bool = Field(
+        True,
+        description="Emit short user-visible reflections after each step (Trace-first UX).",
+    )
+    trace_reflection_max: int = Field(
+        24,
+        description="Maximum reflection messages emitted per run when trace_reflection_enabled is true.",
+    )
+    step_summary_max_chars: int = Field(
+        2000,
+        description="Maximum characters kept for adapter step summaries in traces/reports.",
+    )
     max_parallel_branches: int = Field(
         4,
         description="Upper bound for auto parallel scheduling when parallel_branches <= 0.",
@@ -83,20 +136,49 @@ class GraphReasoningStrategyConfig(BaseModel):
 class MultiAgentConfig(BaseModel):
     """Lead/worker orchestration knobs for DeepSearch reasoning."""
 
-    enabled: bool = Field(True, description="Enable the lead/worker orchestrator for graph reasoning.")
-    max_subagents: int = Field(4, description="Maximum number of worker agents spawned per request.")
-    subagent_concurrency: int = Field(4, description="Max concurrent worker agents.")
-    enable_parallel_tool_probes: bool = Field(True, description="Run fast probe tools in parallel inside each worker.")
+    enabled: bool = Field(..., description="Enable the lead/worker orchestrator for graph reasoning.")
+    max_subagents: int = Field(..., description="Maximum number of worker agents spawned per request.")
+    subagent_concurrency: int = Field(..., description="Max concurrent worker agents.")
+    enable_parallel_tool_probes: bool = Field(..., description="Run fast probe tools in parallel inside each worker.")
     probe_tool_names: List[str] = Field(
-        default_factory=lambda: ["graph.chunk_scan", "graph.pattern_scan"],
+        ...,
         description="Fast probe tools executed by each worker (invoked concurrently).",
     )
-    probe_concurrency: int = Field(4, description="Max concurrent probe tool invocations per worker.")
+    probe_concurrency: int = Field(..., description="Max concurrent probe tool invocations per worker.")
     lead_tool_names: List[str] = Field(
-        default_factory=lambda: ["graph.context_rollup", "graph.evidence_crosscheck"],
+        ...,
         description="Optional tools invoked by the lead agent after merging worker evidence.",
     )
-    lead_tool_concurrency: int = Field(2, description="Max concurrent tool invocations for lead post-processing.")
+    lead_tool_concurrency: int = Field(..., description="Max concurrent tool invocations for lead post-processing.")
+    max_merge_evidences: int = Field(
+        ...,
+        description="Cap the merged evidence list size (after dedupe) to prevent prompt blow-ups.",
+    )
+    worker_timeout_seconds: Optional[float] = Field(
+        ...,
+        description="Optional per-worker timeout (seconds). When null, rely on underlying tool timeouts.",
+    )
+    worker_retry_attempts: int = Field(..., description="Retry attempts per worker session (0 disables retries).")
+    fail_fast: bool = Field(
+        ...,
+        description="Fail the whole request when any worker/probe/lead tool fails.",
+    )
+    incremental_parallelism: bool = Field(
+        ...,
+        description="When true, launch a small worker batch first and expand if evidence coverage is insufficient.",
+    )
+    initial_worker_count: int = Field(
+        ...,
+        description="Initial number of workers to run when incremental_parallelism is enabled (>=1).",
+    )
+    stop_min_evidence_count: int = Field(
+        ...,
+        description="Stop expanding incremental workers once evidence count reaches this threshold (<=0 disables).",
+    )
+    stop_min_coverage_ratio: float = Field(
+        ...,
+        description="Stop expanding incremental workers once coverage_ratio reaches this threshold (<=0 disables).",
+    )
 
 
 class GapDetectionConfig(BaseModel):
@@ -111,25 +193,70 @@ class GapDetectionConfig(BaseModel):
 class ReporterConfig(BaseModel):
     """Report generation options."""
 
+    max_highlights: int = Field(6, description="Maximum number of reasoning step highlights included in the report context.")
     include_graph_viz: bool = Field(True, description="Include traversal metadata in the report payload.")
     enable_custom_summary: bool = Field(False, description="Enable custom domain summaries.")
     parallel_thinking_runs: int = Field(1, description="Number of combined parallel-thinking passes.")
     enable_llm_report: bool = Field(True, description="Generate the final report via the LLM.")
     report_temperature: float = Field(0.2, description="Sampling temperature for the report writer.")
     report_max_evidence_chars: int = Field(900, description="Maximum characters per evidence snippet forwarded to the report writer.")
+    max_evidence_items: int = Field(
+        10,
+        description="Maximum number of authoritative evidence chunks included in report prompts/appendices.",
+    )
+    report_max_graph_chain_items: int = Field(
+        200,
+        description="Maximum number of graph chain edges listed in the report appendix.",
+    )
+    report_max_seed_entities: int = Field(
+        15,
+        description="Maximum number of seed entities listed in the report appendix.",
+    )
     enable_consistency_check: bool = Field(
-        True, description="Run a consistency check against the evidence after report generation. Override via DEEPSEARCH_CONSISTENCY_CHECK env var."
+        True, description="Run a consistency check against the evidence after report generation."
     )
     consistency_temperature: float = Field(0.0, description="Sampling temperature for the consistency checker.")
     consistency_max_retries: int = Field(2, description="Max retry attempts for the consistency checker LLM call.")
+    consistency_max_claims: int = Field(
+        40,
+        description="Maximum number of cited claim sentences checked for supportiveness/contradictions.",
+    )
     enable_citation_agent: bool = Field(
         True, description="Post-process inline citations and build a structured evidence index."
     )
     parallel_sections: bool = Field(
-        False, description="Generate report sections in parallel for faster report generation. Enable via DEEPSEARCH_PARALLEL_SECTIONS env var."
+        False, description="Generate report sections in parallel for faster report generation."
     )
     max_parallel_sections: int = Field(
         4, description="Maximum number of sections to generate concurrently when parallel_sections is enabled."
+    )
+    sectionwise_writer: bool = Field(
+        True,
+        description="Write reports section-by-section with bounded evidence windows (recommended for long contexts).",
+    )
+    sectionwise_retain_k: int = Field(
+        5,
+        description="Recency retention: keep the last K cited evidence snippets available across section writes.",
+    )
+    citation_aliases: bool = Field(
+        True,
+        description="Alias long chunk IDs into short stable tokens for LLM prompting.",
+    )
+    outline_evidence_summary_chars: int = Field(
+        240,
+        description="Characters per evidence index summary forwarded to the outline planner.",
+    )
+    methodology_summary_chars: int = Field(
+        1200,
+        description="Maximum characters kept per reasoning/tool summary in report prompts.",
+    )
+    keep_tool_results: int = Field(
+        8,
+        description="Recency retention budget for tool results in report prompts (-1 keep all, 0 keep none).",
+    )
+    synthesis_section_max_chars: int = Field(
+        1200,
+        description="Maximum characters per section body forwarded to the parallel synthesis step.",
     )
 
 
@@ -154,7 +281,15 @@ class ToolManagerConfig(BaseModel):
     )
     artifact_dir: Optional[str] = Field(
         None,
-        description="Directory for persisted tool artifacts; defaults to ./local/deepsearch_artifacts when empty.",
+        description="Directory for persisted tool artifacts.",
+    )
+    max_remote_evidences: int = Field(
+        32,
+        description="Maximum number of evidences forwarded to a remote (MCP) tool invocation.",
+    )
+    max_remote_context_chars: int = Field(
+        4096,
+        description="Maximum characters forwarded to a remote (MCP) tool invocation context window.",
     )
 
 
@@ -180,6 +315,10 @@ class ExternalChannelConfig(BaseModel):
     context_window_limit: int = Field(12, description="Evidence window size forwarded to external tools.")
     http_timeout: float = Field(20.0, description="Timeout applied to HTTP-based providers.")
     max_results: int = Field(5, description="Maximum documents returned by HTTP providers.")
+    tool_timeout_seconds: float = Field(45.0, description="Timeout applied to tool_manager invocations.")
+    cache_mode: str = Field("auto", description="External cache mode: off/record/replay/auto.")
+    cache_dir: Optional[str] = Field(None, description="Optional directory for external cache files.")
+    tavily_api_key: Optional[str] = Field(None, description="Optional Tavily API key used by the provider implementation.")
 
 
 class QualityLoopConfig(BaseModel):
@@ -218,7 +357,7 @@ class DeepSearchServiceConfig(AbstractConfig):
     planner: PlannerRuntimeConfig
     graph_adapter: GraphAdapterConfig
     graph_reasoning: GraphReasoningStrategyConfig
-    multi_agent: MultiAgentConfig = Field(default_factory=MultiAgentConfig)
+    multi_agent: MultiAgentConfig
     gap_detection: GapDetectionConfig
     reporter: ReporterConfig
     tool_manager: ToolManagerConfig
@@ -261,6 +400,7 @@ class DeepSearchServiceConfig(AbstractConfig):
             strategy_config=self.graph_reasoning,
             tool_manager=tool_manager,
             settings=self.multi_agent.model_dump(),
+            graph_channel_tool=self.planner.graph_channel_tool,
         )
         gap_detector = self._build_gap_detector(telemetry_client=telemetry_client)
         graph_store = self._resolve_graph_store(adapter)
@@ -285,7 +425,15 @@ class DeepSearchServiceConfig(AbstractConfig):
             config={
                 "name": "deepsearch-service",
                 "fingerprint": self._fingerprint(),
+                "artifact_dir": self.tool_manager.artifact_dir,
                 "quality_loop": self.quality_loop.model_dump(),
+                "tool_names": {
+                    "graph_channel_tool": self.planner.graph_channel_tool,
+                    "text_channel_tool": self.planner.text_channel_tool,
+                    "web_channel_tool": self.planner.web_channel_tool,
+                    "think_tool": self.graph_reasoning.think.tool_name,
+                },
+                "coverage_expected_min_chunks": self.graph_reasoning.coverage_expected_min_chunks,
             },
         )
 
@@ -298,12 +446,9 @@ class DeepSearchServiceConfig(AbstractConfig):
         return getattr(retriever, "graph_store", None)
 
     def _build_llm_connector(self):
-        if self.llm:
-            return self.llm.build()
-        try:
-            return OpenAIChatConfig().build()
-        except Exception:
-            return None
+        if not self.llm:
+            raise ValueError("DeepSearchServiceConfig.llm is required (no implicit LLM fallback).")
+        return self.llm.build()
 
     def _build_mcp_client(self):
         if not self.mcp_client:
@@ -314,7 +459,7 @@ class DeepSearchServiceConfig(AbstractConfig):
         payload = self.tool_manager.model_dump()
         payload["llm_connector"] = payload.get("llm_connector") or llm_connector
         if not payload.get("artifact_dir"):
-            payload["artifact_dir"] = "./local/deepsearch_artifacts"
+            raise ValueError("tool_manager.artifact_dir is required (no implicit default).")
         return DeepSearchToolManager(
             tool_configs=payload,
             telemetry_client=telemetry_client,
@@ -342,14 +487,6 @@ class DeepSearchServiceConfig(AbstractConfig):
         return LoggingTelemetryClient()
 
     def _resolve_telemetry_flag(self) -> bool:
-        raw = os.getenv("DEEPSEARCH_TELEMETRY_ENABLED")
-        if raw is None:
-            return bool(self.telemetry_enabled)
-        normalized = raw.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off"}:
-            return False
         return bool(self.telemetry_enabled)
 
     def _fingerprint(self) -> str:

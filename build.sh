@@ -68,6 +68,7 @@ create_env() {
     print_message "$NC" "   Edit .env file and set:"
     print_message "$NC" "   - OPENAI_API_KEY=sk-your-api-key"
     print_message "$NC" "   - OPENAI_BASE_URL=https://api.openai.com/v1"
+    print_message "$NC" "   - JWT_SECRET_KEY=$(openssl rand -hex 32)   # recommended for API auth"
     echo ""
     
     read -p "Edit .env file now? (Y/n): " -n 1 -r
@@ -294,4 +295,3 @@ main() {
 }
 
 main "$@"
-

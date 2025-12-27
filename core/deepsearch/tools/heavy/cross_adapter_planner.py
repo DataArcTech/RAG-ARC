@@ -102,21 +102,15 @@ class CrossAdapterPlannerTool(GraphTool):
             },
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
-        try:
-            response = await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
-            data = safe_json_loads(response, expected="dict") or {}
-            if isinstance(data, dict):
-                summary = str(data.get("summary") or "Adapter comparison completed.")
-                actions = [str(item) for item in data.get("actions", []) if str(item).strip()]
-                if actions:
-                    return summary, actions
-        except Exception:
-            pass
-        fallback_actions = [
-            "Align traversal depth across adapters.",
-            "Run verification on divergent answers.",
-        ]
-        return "Adapter comparison completed (heuristic).", fallback_actions
+        response = await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
+        data = safe_json_loads(response, expected="dict")
+        if not isinstance(data, dict):
+            raise ValueError("Cross-adapter planner returned non-JSON output")
+        summary = str(data.get("summary") or "").strip()
+        actions = [str(item) for item in data.get("actions", []) if str(item).strip()]
+        if not summary or not actions:
+            raise ValueError("Cross-adapter planner returned an incomplete plan payload")
+        return summary, actions
 
     def _metadata_to_dict(self, metadata: Any) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}

@@ -1,4 +1,3 @@
-import os
 from typing import Literal, Optional, Annotated
 from pydantic import Field
 
@@ -38,8 +37,11 @@ class ParserCombinatorConfig(AbstractConfig):
     type: Literal["parser_combinator"] = "parser_combinator"
 
     # Unified base output directory for all parsers
-    # Can be overridden by environment variable PARSER_OUTPUT_DIR
-    base_output_dir: str = Field(default_factory=lambda: os.getenv("PARSER_OUTPUT_DIR", "./data/parsed_files"))
+    base_output_dir: str = Field("./data/parsed_files", description="Unified base output directory for all parsers.")
+
+    native_output_subdir: str = Field("native", description="Subdirectory name for native parser outputs.")
+    dots_ocr_output_subdir: str = Field("dots_ocr", description="Subdirectory name for DotsOCR parser outputs.")
+    vlm_ocr_output_subdir: str = Field("vlm_ocr", description="Subdirectory name for VLM OCR parser outputs.")
 
     # OCR parser for PDF and images (optional)
     ocr_parser: Optional[Annotated[
