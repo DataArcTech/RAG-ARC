@@ -19,6 +19,12 @@ class MessageContent(BaseModel):
     content: str
 
 
+class MessageRequest(BaseModel):
+    """兼容 /api/messages 的请求格式（session_id 在请求体中）"""
+    session_id: uuid.UUID
+    content: str
+
+
 class ChatMessageResponse(BaseModel):
     """Response model for chat messages"""
     id: uuid.UUID
@@ -101,6 +107,8 @@ async def create_message(
         ChatMessage(session_id=session_id, content={"role": "user", "content": message_content.content}, created_at=datetime.now())
     )
     return messages
+
+
 
 
 @router.get("/{session_id}/messages", response_model=List[ChatMessageResponse])

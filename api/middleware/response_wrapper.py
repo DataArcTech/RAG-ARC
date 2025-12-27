@@ -2,18 +2,43 @@
 响应包装器中间件：统一包装所有响应为 StandardResponse 格式
 """
 import json
+import logging
+import time
 from typing import Callable
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response, JSONResponse
 from asgi_correlation_id import correlation_id
 
+logger = logging.getLogger(__name__)
+
 
 class RequestIdResponseWrapper(BaseHTTPMiddleware):
-    """在所有 JSON 响应体最外层添加 request_id 字段"""
+    """在所有 JSON 响应体最外层添加 request_id 字段，并记录请求日志"""
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        # 记录请求开始时间
+        start_time = time.time()
+        
+        # 获取请求信息
+        method = request.method
+        path = request.url.path
+        client_ip = request.client.host if request.client else "unknown"
+        
+        # 处理请求
         response = await call_next(request)
+        
+        # 计算处理时间
+        process_time = time.time() - start_time
+        
+        # 获取 request_id
+        request_id = response.headers.get("X-Request-ID") or correlation_id.get() or "NO-ID"
+        
+        # 记录请求日志（类似 uvicorn access log 格式，但写入到 Python logging）
+        logger.info(
+            f"{client_ip} - \"{method} {path} HTTP/1.1\" {response.status_code} "
+            f"(process_time: {process_time:.3f}s)"
+        )
         
         # 只处理 JSON 响应（检查 content-type）
         content_type = response.headers.get("content-type", "")
