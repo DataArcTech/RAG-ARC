@@ -174,31 +174,33 @@ async def health_check():
 
 
 # 兼容路由：/api/messages（session_id 在请求体中）
-@app.post("/api/messages")
-async def create_message_compat(
-    message_request: "MessageRequest",
-    current_user: Annotated["User | None", Depends(get_current_user)],
-):
-    """兼容 /api/messages 的请求格式（session_id 在请求体中）"""
-    from api.routers.session import MessageRequest, get_session_handler, get_message_handler, validate_user_session
-    from encapsulation.data_model.orm_models import ChatMessage
-    from fastapi import HTTPException, status
-    from framework.thread_pool import get_thread_pool
-    
-    session_id = message_request.session_id
-    # Validate user has access to the session
-    session = await get_thread_pool().run_blocking(
-        get_session_handler().get_session,
-        session_id
-    )
-    if session is None or not validate_user_session(session, current_user):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
-    
-    messages = await get_thread_pool().run_blocking(
-        get_message_handler().create_message,
-        ChatMessage(session_id=session_id, content={"role": "user", "content": message_request.content}, created_at=datetime.now())
-    )
-    return messages
+# 已注释：与 chatbot 路由冲突，chatbot 路由不需要认证，使用 SSE 流式响应
+# 如需恢复旧接口，取消注释即可
+# @app.post("/api/messages")
+# async def create_message_compat(
+#     message_request: "MessageRequest",
+#     current_user: Annotated["User | None", Depends(get_current_user)],
+# ):
+#     """兼容 /api/messages 的请求格式（session_id 在请求体中）"""
+#     from api.routers.session import MessageRequest, get_session_handler, get_message_handler, validate_user_session
+#     from encapsulation.data_model.orm_models import ChatMessage
+#     from fastapi import HTTPException, status
+#     from framework.thread_pool import get_thread_pool
+#     
+#     session_id = message_request.session_id
+#     # Validate user has access to the session
+#     session = await get_thread_pool().run_blocking(
+#         get_session_handler().get_session,
+#         session_id
+#     )
+#     if session is None or not validate_user_session(session, current_user):
+#         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+#     
+#     messages = await get_thread_pool().run_blocking(
+#         get_message_handler().create_message,
+#         ChatMessage(session_id=session_id, content={"role": "user", "content": message_request.content}, created_at=datetime.now())
+#     )
+#     return messages
 
 app.mount("/mcp", mcp.mcp_app)
 app.include_router(knowledge_router.router)
