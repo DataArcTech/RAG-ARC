@@ -7,6 +7,7 @@ import jwt
 from fastapi import (
     APIRouter,
     Depends,
+    Form,
     HTTPException,
     Request,
     WebSocket,
@@ -15,7 +16,7 @@ from fastapi import (
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jwt.exceptions import InvalidTokenError
 from passlib.context import CryptContext
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from encapsulation.data_model.orm_models import ChatSession, User
 from app_registration import Register, initialize as app_initialize
@@ -85,16 +86,41 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 class Token(BaseModel):
     access_token: str
     token_type: str
+    type: int  # 0=livingKB / 1=chatKB
 
 
 class TokenData(BaseModel):
     username: str | None = None
 
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+    type: Optional[int] = 0  # 0=livingKB / 1=chatKB
+
+
 class UserCreate(BaseModel):
-    name: str
     user_name: str
     password: str
+    type: Optional[int] = 0  # 0=livingKB / 1=chatKB
+
+
+class UserResponse(BaseModel):
+    """User response model for API responses"""
+    id: str
+    user_name: str
+    status: str
+    type: int
+
+    @classmethod
+    def from_user(cls, user: User) -> "UserResponse":
+        """Create UserResponse from User ORM model"""
+        return cls(
+            id=str(user.id),
+            user_name=user.user_name,
+            status=user.status.value,
+            type=user.type
+        )
 
 
 def verify_password(plain_password, hashed_password):
@@ -281,6 +307,7 @@ async def ws_get_current_user(
 @router.post("/token")
 async def login_for_access_token_endpoint(
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
+    type: Optional[int] = Form(None),  # 支持表单数据中的 type 字段，可选，默认 None
 ) -> Token:
     # Use async authentication to avoid blocking the event loop
     user = await get_account_handler().authenticate_user_async(form_data.username, form_data.password)
@@ -290,19 +317,28 @@ async def login_for_access_token_endpoint(
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    # 验证 type 是否匹配（如果 type 为 None，则使用默认值 0）
+    login_type = type if type is not None else 0
+    if user.type != login_type:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User type mismatch",
+        )
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": user.user_name}, expires_delta=access_token_expires
+        data={"sub": user.user_name, "type": user.type}, expires_delta=access_token_expires
     )
-    return Token(access_token=access_token, token_type="bearer")
+
+    return Token(access_token=access_token, token_type="bearer", type=user.type)
 
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
-async def register(user: UserCreate):
+async def register(user: UserCreate) -> UserResponse:
     try:
         # Use async registration to avoid blocking the event loop
         new_user = await get_account_handler().register_user_async(user)
-        return new_user
+        # 转换为响应格式
+        return UserResponse.from_user(new_user)
     except IntegrityError:
         raise HTTPException(status_code=400, detail="Username already exists")
 
