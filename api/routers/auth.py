@@ -324,6 +324,10 @@ async def login_for_access_token_endpoint(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User type mismatch",
         )
+    # 更新用户登录时间
+    account_handler = get_account_handler()
+    await account_handler.update_user_login_time_async(user.id)
+    
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.user_name, "type": user.type}, expires_delta=access_token_expires

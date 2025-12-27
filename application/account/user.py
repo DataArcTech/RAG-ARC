@@ -118,3 +118,11 @@ class Account(AbstractModule):
     async def create_session_async(self, user_id: uuid.UUID):
         """Create a chat session (async, non-blocking)."""
         return await self._run_blocking(self.create_session, user_id)
+
+    def update_user_login_time(self, user_id: uuid.UUID):
+        """Update user's last login time (synchronous)."""
+        return self.user_storage.update_user(user_id, {"last_login_at": datetime.now()})
+
+    async def update_user_login_time_async(self, user_id: uuid.UUID):
+        """Update user's last login time (async, non-blocking)."""
+        return await self._run_blocking(self.update_user_login_time, user_id)
