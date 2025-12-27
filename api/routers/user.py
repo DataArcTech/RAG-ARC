@@ -1,26 +1,8 @@
-from datetime import datetime, timedelta, timezone
-from typing import Annotated, Optional
+from typing import Annotated
 
-from app_registration import registrator
-import jwt
-from fastapi import (
-    APIRouter,
-    Depends,
-    HTTPException,
-    Request,
-    status,
-)
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from jwt.exceptions import InvalidTokenError
-from passlib.context import CryptContext
-from pydantic import BaseModel
-from sqlalchemy.exc import IntegrityError
-from application.account.user import UserCreate
+from fastapi import APIRouter, Depends
 from encapsulation.data_model.orm_models import User
-from app_registration import Register
-from api.routers.auth import get_current_user
-from api.routers.auth import Token
-from application.account.user import Account
+from api.routers.auth import get_current_user, UserResponse
 
 router = APIRouter(prefix="/user", tags=["user"])
 registrator = Register()
@@ -33,5 +15,6 @@ def get_account_handler() -> Account:
 @router.get("/me")
 async def read_users_me(
     current_user: Annotated[User, Depends(get_current_user)],
-):
-    return current_user
+) -> UserResponse:
+    """Get current user information"""
+    return UserResponse.from_user(current_user)
