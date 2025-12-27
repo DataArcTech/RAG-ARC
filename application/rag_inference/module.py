@@ -514,7 +514,7 @@ class RAGInference(AbstractModule):
 
             # Call LLM to generate nodes and edges
             mindmap_messages = [
-                {"role": "system", "content": "你是一个专业的思维导图生成助手。请根据用户的问题、回答和检索到的文档片段,生成结构化的思维导图数据。"},
+                {"role": "system", "content": "你是一个专业的思维导图生成助手。请根据当前用户的问题、回答和检索到的文档片段,生成结构化的思维导图数据。重要：只基于当前问题生成图，不要考虑历史对话中的其他问题或信息。"},
                 {"role": "user", "content": mindmap_prompt}
             ]
 
@@ -547,9 +547,11 @@ class RAGInference(AbstractModule):
 
         prompt = f"""请基于以下信息生成思维导图的节点(nodes)和边(edges)数据:
 
-用户问题: {query}
+重要提示: 请只基于当前用户问题生成思维导图，不要考虑历史对话中的其他问题或信息。思维导图应该只反映当前问题的知识结构。
 
-回答内容: {response}
+当前用户问题: {query}
+
+针对当前问题的回答内容: {response}
 
 检索到的文档片段:
 {chunks_text}
