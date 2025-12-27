@@ -80,6 +80,7 @@ class UserStorage(AbstractModule):
         user_name: str,
         hashed_password: str,
         type: int = 0,
+        name: Optional[str] = None,
         **kwargs: Any
     ) -> uuid.UUID:
         """
@@ -110,6 +111,7 @@ class UserStorage(AbstractModule):
             # Create user metadata
             user_metadata = User(
                 user_name=user_name,
+                name=name,
                 hashed_password=hashed_password,
                 type=type,
                 created_at=datetime.now(),

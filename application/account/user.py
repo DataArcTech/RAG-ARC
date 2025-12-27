@@ -99,7 +99,8 @@ class Account(AbstractModule):
             new_user_id = self.user_storage.create_user(
                 user_name=user_data.user_name,
                 hashed_password=hashed_password,
-                type=user_type
+                type=user_type,
+                name=user_data.name
             )
             # 返回创建的用户对象
             new_user = self.user_storage.get_user(new_user_id)

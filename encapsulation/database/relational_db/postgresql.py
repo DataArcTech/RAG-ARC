@@ -139,8 +139,32 @@ class PostgreSQLDB(RelationalDB):
         # Create tables using SQLAlchemy
         Base.metadata.create_all(engine)
         logger.info("PostgreSQL engine initialized and tables created")
+        
+        # Migrate: Add name column to user table if it doesn't exist
+        self._migrate_add_user_name_column(engine)
 
         return engine
+    
+    def _migrate_add_user_name_column(self, engine: Engine) -> None:
+        """Add name column to user table if it doesn't exist"""
+        try:
+            with engine.begin() as conn:
+                # Check if name column exists
+                result = conn.execute(text("""
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name = 'user' AND column_name = 'name'
+                """))
+                
+                if not result.fetchone():
+                    logger.info("Adding 'name' column to user table...")
+                    conn.execute(text("ALTER TABLE \"user\" ADD COLUMN name VARCHAR(255)"))
+                    logger.info("✓ 'name' column added to user table")
+                else:
+                    logger.debug("'name' column already exists in user table")
+        except Exception as e:
+            logger.warning(f"Could not migrate user table (name column): {e}")
+            # Don't fail initialization if migration fails
     
     def _ensure_database_exists(self) -> None:
         """Create database if it doesn't exist"""

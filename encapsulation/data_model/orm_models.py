@@ -128,6 +128,7 @@ class User(Base):
     )
 
     user_name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)  # 用户昵称
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     type: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 0=livingKB / 1=chatKB
     company_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)  # 企业名称（暂时不使用）

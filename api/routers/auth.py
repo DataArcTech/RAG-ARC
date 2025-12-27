@@ -100,6 +100,7 @@ class LoginRequest(BaseModel):
 
 
 class UserCreate(BaseModel):
+    name: str
     user_name: str
     password: str
     type: Optional[int] = 0  # 0=livingKB / 1=chatKB
@@ -109,6 +110,7 @@ class UserResponse(BaseModel):
     """User response model for API responses"""
     id: str
     user_name: str
+    name: str
     status: str
     type: int
 
@@ -118,6 +120,7 @@ class UserResponse(BaseModel):
         return cls(
             id=str(user.id),
             user_name=user.user_name,
+            name=user.name or user.user_name,  # 如果没有name，使用user_name作为默认值
             status=user.status.value,
             type=user.type
         )

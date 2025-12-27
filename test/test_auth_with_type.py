@@ -18,6 +18,7 @@ async def test_register_user_livingkb():
     async with httpx.AsyncClient() as client:
         # 注册用户
         register_data = {
+            "name": f"测试用户_{current_time}",
             "user_name": f"test_livingkb_{current_time}",
             "password": "test123456",
             "type": 0  # livingKB
@@ -28,6 +29,7 @@ async def test_register_user_livingkb():
         data = response.json()
         assert data["code"] == 201
         assert data["data"]["user_name"] == register_data["user_name"]
+        assert data["data"]["name"] == register_data["name"]
         assert data["data"]["type"] == 0
         assert data["data"]["status"] in ["active", "ACTIVE"]  # 兼容不同格式
         
@@ -39,6 +41,7 @@ async def test_register_user_chatkb():
     async with httpx.AsyncClient() as client:
         # 注册用户
         register_data = {
+            "name": f"测试用户_{current_time}",
             "user_name": f"test_chatkb_{current_time}",
             "password": "test123456",
             "type": 1  # chatKB
@@ -49,6 +52,7 @@ async def test_register_user_chatkb():
         data = response.json()
         assert data["code"] == 201
         assert data["data"]["user_name"] == register_data["user_name"]
+        assert data["data"]["name"] == register_data["name"]
         assert data["data"]["type"] == 1
         assert data["data"]["status"] in ["active", "ACTIVE"]  # 兼容不同格式
         
@@ -60,6 +64,7 @@ async def test_login_livingkb():
     async with httpx.AsyncClient() as client:
         # 先注册
         register_data = {
+            "name": f"测试用户_{current_time}",
             "user_name": f"login_livingkb_{current_time}",
             "password": "test123456",
             "type": 0
@@ -90,6 +95,7 @@ async def test_login_chatkb():
     async with httpx.AsyncClient() as client:
         # 先注册
         register_data = {
+            "name": f"测试用户_{current_time}",
             "user_name": f"login_chatkb_{current_time}",
             "password": "test123456",
             "type": 1
@@ -120,6 +126,7 @@ async def test_login_type_mismatch():
     async with httpx.AsyncClient() as client:
         # 先注册type=0的用户
         register_data = {
+            "name": f"测试用户_{current_time}",
             "user_name": f"type_test_{current_time}",
             "password": "test123456",
             "type": 0
@@ -146,6 +153,7 @@ async def test_get_current_user():
     async with httpx.AsyncClient() as client:
         # 先注册并登录
         register_data = {
+            "name": f"测试用户_{current_time}",
             "user_name": f"current_user_{current_time}",
             "password": "test123456",
             "type": 0
@@ -169,6 +177,7 @@ async def test_get_current_user():
         data = response.json()
         assert data["code"] == 200
         assert data["data"]["user_name"] == register_data["user_name"]
+        assert data["data"]["name"] == register_data["name"]
         assert data["data"]["type"] == 0
         assert data["data"]["status"] in ["active", "ACTIVE"]  # 兼容不同格式
 
@@ -178,6 +187,7 @@ async def test_register_without_type():
     async with httpx.AsyncClient() as client:
         # 注册用户，不传递type字段
         register_data = {
+            "name": f"测试用户_{current_time}",
             "user_name": f"test_default_type_{current_time}",
             "password": "test123456"
             # 不包含 type 字段
@@ -199,6 +209,7 @@ async def test_login_without_type():
     async with httpx.AsyncClient() as client:
         # 先注册type=0的用户
         register_data = {
+            "name": f"测试用户_{current_time}",
             "user_name": f"login_default_type_{current_time}",
             "password": "test123456",
             "type": 0
@@ -229,6 +240,7 @@ async def test_login_without_type_mismatch():
     async with httpx.AsyncClient() as client:
         # 先注册type=1的用户
         register_data = {
+            "name": f"测试用户_{current_time}",
             "user_name": f"mismatch_test_{current_time}",
             "password": "test123456",
             "type": 1  # chatKB
@@ -254,6 +266,7 @@ async def test_register_timestamp():
     """测试注册时是否正确记录created_at（注册时间）到数据库"""
     async with httpx.AsyncClient() as client:
         register_data = {
+            "name": f"测试用户_{current_time}",
             "user_name": f"timestamp_test_{current_time}",
             "password": "test123456",
             "type": 0
@@ -272,6 +285,7 @@ async def test_login_timestamp():
     async with httpx.AsyncClient() as client:
         # 先注册用户
         register_data = {
+            "name": f"测试用户_{current_time}",
             "user_name": f"login_timestamp_{current_time}",
             "password": "test123456",
             "type": 0
