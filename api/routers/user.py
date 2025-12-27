@@ -3,6 +3,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 from encapsulation.data_model.orm_models import User
 from api.routers.auth import get_current_user, UserResponse
+from app_registration import Register
+from application.account.user import Account
 
 router = APIRouter(prefix="/user", tags=["user"])
 registrator = Register()

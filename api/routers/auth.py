@@ -7,15 +7,16 @@ import jwt
 from fastapi import (
     APIRouter,
     Depends,
+    Form,
     HTTPException,
     Request,
     WebSocket,
     status,
 )
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jwt.exceptions import InvalidTokenError
 from passlib.context import CryptContext
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from encapsulation.data_model.orm_models import ChatSession, User
 from app_registration import Register, initialize as app_initialize
@@ -95,21 +96,19 @@ class TokenData(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
-    type: int  # 0=livingKB / 1=chatKB
+    type: Optional[int] = 0  # 0=livingKB / 1=chatKB
 
 
 class UserCreate(BaseModel):
-    name: str
     user_name: str
     password: str
-    type: int  # 0=livingKB / 1=chatKB
+    type: Optional[int] = 0  # 0=livingKB / 1=chatKB
 
 
 class UserResponse(BaseModel):
     """User response model for API responses"""
     id: str
     user_name: str
-    name: Optional[str] = None
     status: str
     type: int
 
@@ -119,7 +118,6 @@ class UserResponse(BaseModel):
         return cls(
             id=str(user.id),
             user_name=user.user_name,
-            name=user.name,
             status=user.status.value,
             type=user.type
         )
@@ -308,18 +306,20 @@ async def ws_get_current_user(
 
 @router.post("/token")
 async def login_for_access_token_endpoint(
-    login_data: LoginRequest,
+    form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
+    type: Optional[int] = Form(None),  # 支持表单数据中的 type 字段，可选，默认 None
 ) -> Token:
     # Use async authentication to avoid blocking the event loop
-    user = await get_account_handler().authenticate_user_async(login_data.username, login_data.password)
+    user = await get_account_handler().authenticate_user_async(form_data.username, form_data.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    # 验证 type 是否匹配
-    if user.type != login_data.type:
+    # 验证 type 是否匹配（如果 type 为 None，则使用默认值 0）
+    login_type = type if type is not None else 0
+    if user.type != login_type:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User type mismatch",
