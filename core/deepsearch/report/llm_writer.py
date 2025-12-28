@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, ValidationError
 from config.core.deepsearch import report_writer_defaults as report_defaults
 from core.deepsearch.memory import EvidenceBank
 from core.deepsearch.tools.base import call_llm_async
+from core.utils.text_regex import INLINE_CITATION_TOKEN_RE
 from core.prompts.deepsearch.report import (
     REPORT_OUTLINE_SYSTEM_PROMPT,
     REPORT_OUTLINE_USER_PROMPT,
@@ -20,7 +21,7 @@ from core.prompts.deepsearch.report import (
     SECTION_WRITE_USER_PROMPT,
 )
 
-_CITATION_TOKEN_RE = re.compile(r"(?:\[(?P<bracket>[^\[\]]{1,128})\]|【(?P<cjk>[^【】]{1,128})】)")
+_CITATION_TOKEN_RE = INLINE_CITATION_TOKEN_RE
 
 
 def _has_supported_inline_citation(text: str, *, allowed_ids: set[str]) -> bool:
@@ -600,21 +601,10 @@ def render_markdown_from_structured(structured: Dict[str, Any]) -> str:
     title = str(structured.get("title") or "DeepSearch Report").strip()
     summary = str(structured.get("short_answer") or structured.get("summary") or "").strip()
     sections = structured.get("sections") or []
-    limitations = structured.get("limitations") or []
-    next_steps = structured.get("next_steps") or []
-    citations = structured.get("citations") or []
-
-    def _has_cjk(text: str) -> bool:
-        for ch in text:
-            code = ord(ch)
-            if 0x4E00 <= code <= 0x9FFF or 0x3400 <= code <= 0x4DBF:
-                return True
-        return False
-    is_cjk = _has_cjk(title) or _has_cjk(summary)
 
     blocks: List[str] = [f"# {title}"]
     if summary:
-        blocks.extend(["", ("## 结论" if is_cjk else "## Answer"), summary])
+        blocks.extend(["", summary])
 
     for section in sections:
         if not isinstance(section, dict):
@@ -623,23 +613,6 @@ def render_markdown_from_structured(structured: Dict[str, Any]) -> str:
         body = str(section.get("body_markdown") or "").strip()
         if section_title and body:
             blocks.extend(["", f"## {section_title}", body])
-
-    if limitations:
-        blocks.extend(
-            [
-                "",
-                ("## 局限" if is_cjk else "## Limitations"),
-                "\n".join(f"- {item}" for item in limitations if str(item).strip()),
-            ]
-        )
-    if next_steps:
-        blocks.extend(
-            [
-                "",
-                ("## 下一步" if is_cjk else "## Next Steps"),
-                "\n".join(f"- {item}" for item in next_steps if str(item).strip()),
-            ]
-        )
     # Evidence Index is intentionally omitted from the public Markdown because the rendered
     # answer already contains inline citations and a numbered References section is appended later.
 

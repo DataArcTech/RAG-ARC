@@ -8,7 +8,45 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 
-_TITLE_RE = re.compile(r"《([^》]{1,120})》")
+_QUOTED_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("《", "》"),
+    ("“", "”"),
+    ("‘", "’"),
+    ("«", "»"),
+    ("「", "」"),
+    ("\"", "\""),
+    ("'", "'"),
+)
+
+_FILE_HINT_EXT_RE = re.compile(r"\.[A-Za-z0-9]{2,8}$")
+_PATH_PREFIX_RE = re.compile(r"^(?:~|/|\\./|\\.\\./|[A-Za-z]:\\\\)")
+
+
+def _looks_like_file_hint(value: str) -> bool:
+    token = str(value or "").strip()
+    if not token:
+        return False
+    lowered = token.lower()
+    if "not found in evidence" in lowered:
+        return False
+    if "chunk_id" in lowered or "chunkid" in lowered:
+        return False
+
+    has_sep = ("/" in token) or ("\\" in token)
+    if has_sep:
+        # Treat as a file hint only when it actually resembles a path (prefix) or contains an extension.
+        if _PATH_PREFIX_RE.search(token):
+            return True
+        if _FILE_HINT_EXT_RE.search(token):
+            return True
+        # Avoid scoping on generic quoted alternatives like "A/B".
+        return False
+    if _FILE_HINT_EXT_RE.search(token):
+        return True
+    # Allow short "title-like" tokens without whitespace; avoid scoping on generic quoted phrases.
+    if len(token) >= 3 and not re.search(r"\s", token):
+        return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -32,14 +70,21 @@ class FileScope:
 
 
 def extract_titles_from_question(question: str) -> list[str]:
-    """Extract `《...》` mentions from the user question."""
+    """Extract quoted spans from the user question as filename/title hints."""
 
     q = str(question or "")
     tokens: list[str] = []
-    for match in _TITLE_RE.finditer(q):
-        value = (match.group(1) or "").strip()
-        if value and value not in tokens:
-            tokens.append(value)
+    for left, right in _QUOTED_PATTERNS:
+        if not left or not right:
+            continue
+        if left == right:
+            pat = re.compile(re.escape(left) + r"([^" + re.escape(left) + r"]{1,120})" + re.escape(right))
+        else:
+            pat = re.compile(re.escape(left) + r"([^" + re.escape(right) + r"]{1,120})" + re.escape(right))
+        for match in pat.finditer(q):
+            value = (match.group(1) or "").strip()
+            if value and _looks_like_file_hint(value) and value not in tokens:
+                tokens.append(value)
     return tokens
 
 
@@ -49,8 +94,10 @@ def normalize_filename_token(value: Any) -> str:
     token = str(value or "").strip()
     if not token:
         return ""
-    if token.startswith("《") and token.endswith("》") and len(token) >= 3:
-        token = token[1:-1].strip()
+    for left, right in _QUOTED_PATTERNS:
+        if token.startswith(left) and token.endswith(right) and len(token) >= len(left) + len(right) + 1:
+            token = token[len(left) : -len(right)].strip()
+            break
     token = token.strip().strip("\"'“”‘’`")
     return token
 

@@ -12,6 +12,10 @@ def render_all_tools_block(*, include_llm_tools: bool) -> str:
 
     lines: list[str] = []
     lines.append("available_tools:")
+    # Pseudo-tool for adapter traversal (not a builtin GraphTool, but a first-class execution primitive).
+    lines.append(
+        " - graph_adapter.query profile=X determinism=adapter: Primary graph traversal via the configured graph adapter (prepare→query→filter→summarize→chain_traverse)."
+    )
     for desc in sorted(descriptors, key=lambda d: str(d.name)):
         hint = hint_map.get(desc.name) or {}
         profile = (hint.get("profile") or desc.profile or "").strip()

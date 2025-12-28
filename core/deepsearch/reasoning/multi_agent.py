@@ -417,14 +417,18 @@ class MultiAgentGraphReasoningLoop:
             and self._settings().enable_parallel_tool_probes
             and self._settings().probe_tool_names
         ):
-            probe_results = await self._run_parallel_probes(
-                agent_id=agent_id,
-                focus_query=focus,
-                question=worker_question,
-                graph_context=trace.get("graph_context"),
-                evidences=trace.get("evidences") or [],
-            )
-            trace = self._merge_probe_results(trace, probe_results)
+            # Budget guard: probe/scan tools are helpful for bootstrapping, but become redundant once
+            # evidence coverage is already above the stop thresholds.
+            should_probe = not self._should_stop_incremental(trace, settings=self._settings())
+            if should_probe:
+                probe_results = await self._run_parallel_probes(
+                    agent_id=agent_id,
+                    focus_query=focus,
+                    question=worker_question,
+                    graph_context=trace.get("graph_context"),
+                    evidences=trace.get("evidences") or [],
+                )
+                trace = self._merge_probe_results(trace, probe_results)
         debrief = self._build_worker_debrief(trace, focus=focus, assigned_step_ids=assigned_step_ids, error=error)
 
         return {

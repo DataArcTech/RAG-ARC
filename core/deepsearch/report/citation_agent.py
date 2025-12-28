@@ -7,12 +7,14 @@ structured evidence index that is consistent with the provided evidence bundle.
 import re
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
+from core.utils.text_regex import BRACKET_CONTENT_RE, CJK_BRACKET_CONTENT_RE
+
 
 class CitationAgent:
     """Normalize citations and build an evidence index after report generation."""
 
-    _BRACKET_RE = re.compile(r"\[([^\[\]]+)\]")
-    _CJK_BRACKET_RE = re.compile(r"【([^【】]+)】")
+    _BRACKET_RE = BRACKET_CONTENT_RE
+    _CJK_BRACKET_RE = CJK_BRACKET_CONTENT_RE
 
     def process(
         self,

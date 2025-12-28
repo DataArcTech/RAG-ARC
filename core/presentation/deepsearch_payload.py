@@ -215,6 +215,10 @@ def _sanitize_report_metadata(metadata: Optional[Dict[str, Any]]) -> Optional[Di
         return None
     allowed_keys = {
         "adapter_metadata",
+        "citation_audit",
+        "citation_aliases",
+        "citation_alias_rewrite",
+        "evidence_profile",
         "graph_summary",
         "plan",
         "coverage_metrics",

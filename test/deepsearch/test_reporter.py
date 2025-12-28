@@ -423,7 +423,11 @@ def test_reporter_includes_chunk_evidence_preview():
     """Verify the markdown output includes chunk evidence preview section."""
     outline = """\n[\n  {\"title\": \"Findings\", \"section_type\": \"analysis\", \"purpose\": \"Show evidence\", \"evidence_ids\": [\"chunk_abc123\"]}\n]\n""".strip()
     report_json = """\n{\n  \"title\": \"Report\",\n  \"short_answer\": \"ok [chunk_abc123]\",\n  \"summary\": \"ok [chunk_abc123]\",\n  \"sections\": [\n    {\"title\": \"Findings\", \"section_type\": \"analysis\", \"body_markdown\": \"Detail. [chunk_abc123]\"}\n  ],\n  \"limitations\": [],\n  \"next_steps\": [],\n  \"citations\": []\n}\n""".strip()
-    reporter = DeepSearchReporter(template_store=None, config=_default_reporter_config(), llm_connector=_FakeLLM([outline, report_json]))
+    reporter = DeepSearchReporter(
+        template_store=None,
+        config=_default_reporter_config(include_appendices_in_answer=True),
+        llm_connector=_FakeLLM([outline, report_json]),
+    )
     trace = _build_trace(include_final_answer=True)
     trace["evidences"] = [
         {
@@ -448,6 +452,45 @@ def test_reporter_includes_chunk_evidence_preview():
     assert "..." in answer
     assert "[chunk_def456]" in answer
     assert "Short content." in answer
+
+
+def test_reporter_comparison_avoids_false_missing_named_files_when_filename_is_nested():
+    outline = """\n[\n  {\"title\": \"Findings\", \"section_type\": \"analysis\", \"purpose\": \"Compare\", \"evidence_ids\": [\"evA\", \"evB\"]}\n]\n""".strip()
+    report_json = """\n{\n  \"title\": \"对比报告\",\n  \"short_answer\": \"两者均可对比。 [evA] [evB]\",\n  \"summary\": \"两者均可对比。 [evA] [evB]\",\n  \"sections\": [\n    {\"title\": \"Findings\", \"section_type\": \"analysis\", \"body_markdown\": \"对比细节。 [evA] [evB]\"}\n  ],\n  \"limitations\": [],\n  \"next_steps\": [],\n  \"citations\": [\n    {\"evidence_id\": \"evA\", \"used_for\": \"Plan A\"},\n    {\"evidence_id\": \"evB\", \"used_for\": \"Plan B\"}\n  ]\n}\n""".strip()
+    reporter = DeepSearchReporter(
+        template_store=None,
+        config=_default_reporter_config(enable_consistency_check=False),
+        llm_connector=_FakeLLM([outline, report_json]),
+    )
+    trace = {
+        "question": "请对比《智盈匯聚(優越版)II壽險計劃》与《價值連承壽險計劃》的关键差异。",
+        "final_answer": "",
+        "plan_steps": [],
+        "reasoning_steps": [],
+        "graph_traversals": [],
+        "adapter_metadata": {"adapter_name": "hipporag"},
+        "coverage_metrics": {},
+        "graph_context": {"adapter_name": "hipporag", "question": "Q", "metadata": {}},
+        "evidences": [
+            {
+                "chunk_id": "evA",
+                "source": "hipporag",
+                "content": "A evidence",
+                "provenance": {"metadata": {"chunk_metadata": {"filename": "智盈匯聚(優越版)II壽險計劃.pdf"}}},
+            },
+            {
+                "chunk_id": "evB",
+                "source": "hipporag",
+                "content": "B evidence",
+                "provenance": {"metadata": {"chunk_metadata": {"filename": "價值連承壽險計劃.pdf"}}},
+            },
+        ],
+    }
+
+    report = asyncio.run(reporter.compose(trace, external_evidence=[]))
+
+    assert "Unable to complete the comparison" not in report["answer"]
+    assert report["structured_report"]["generation"]["mode"] == "llm"
 
 
 def test_reporter_parallel_sections_synthesizes_summary():

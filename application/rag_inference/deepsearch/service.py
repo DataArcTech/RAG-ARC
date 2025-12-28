@@ -135,6 +135,30 @@ class DeepSearchService:
         )
 
         quality_cfg = self._resolve_quality_gate_config()
+        if isinstance(metadata, dict):
+            raw_overrides = metadata.get("quality_loop")
+        else:
+            raw_overrides = None
+        if isinstance(raw_overrides, dict) and raw_overrides:
+            allowed = {
+                "enabled",
+                "max_rounds",
+                "min_citation_sentence_coverage",
+                "require_consistency",
+                "max_uncited_sentences",
+                "max_actions",
+                "enable_llm_judge",
+                "judge_temperature",
+                "judge_max_retries",
+                "judge_max_evidence_items",
+                "judge_max_evidence_chars",
+                "trigger_external_on_quality_failure",
+            }
+            merged = quality_cfg.model_dump()
+            for key, value in raw_overrides.items():
+                if key in allowed:
+                    merged[key] = value
+            quality_cfg = QualityGateConfig.model_validate(merged)
         quality_gate = DeepSearchQualityGate(
             getattr(self.reporter, "llm_connector", None),
             config=quality_cfg.model_dump(),

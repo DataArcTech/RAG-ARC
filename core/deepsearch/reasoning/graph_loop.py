@@ -48,6 +48,10 @@ _RUN_EVIDENCE_LOCK: contextvars.ContextVar[asyncio.Lock | None] = contextvars.Co
 _RUN_TOTAL_STEPS: contextvars.ContextVar[int] = contextvars.ContextVar("deepsearch_run_total_steps", default=0)
 _RUN_THINK_COUNT: contextvars.ContextVar[int] = contextvars.ContextVar("deepsearch_run_think_count", default=0)
 _RUN_REFLECT_COUNT: contextvars.ContextVar[int] = contextvars.ContextVar("deepsearch_run_reflect_count", default=0)
+_RUN_THINK_TOOL_SIGNATURES: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar(
+    "deepsearch_run_think_tool_signatures",
+    default=None,
+)
 
 
 class GraphReasoningLoop:
@@ -124,6 +128,7 @@ class GraphReasoningLoop:
         total_steps_token = _RUN_TOTAL_STEPS.set(len(normalized_steps))
         think_count_token = _RUN_THINK_COUNT.set(0)
         reflect_count_token = _RUN_REFLECT_COUNT.set(0)
+        think_sig_token = _RUN_THINK_TOOL_SIGNATURES.set(set())
         parallel_branches = self._determine_parallel_branches(normalized_steps)
         self._active_parallel_branches = parallel_branches
         sub_agents = [
@@ -187,6 +192,7 @@ class GraphReasoningLoop:
             _RUN_TOTAL_STEPS.reset(total_steps_token)
             _RUN_THINK_COUNT.reset(think_count_token)
             _RUN_REFLECT_COUNT.reset(reflect_count_token)
+            _RUN_THINK_TOOL_SIGNATURES.reset(think_sig_token)
 
         ordered_reasoning: List[ReasoningStepRecord] = []
         for idx, entry in enumerate(normalized_steps):
@@ -795,7 +801,18 @@ class GraphReasoningLoop:
         if limit:
             from core.deepsearch.tooling import describe_available_tools
 
-            tool_catalog = describe_available_tools(include_llm_tools=bool(self._think_config["include_llm_tools"]))[:limit]
+            adapter_hint = {
+                "name": self.graph_channel_tool,
+                "channel": "graph",
+                "description": "Primary graph traversal via the configured graph adapter (prepare→query→filter→summarize→chain_traverse).",
+                "profile": "X",
+                "determinism": "adapter",
+                "strategy_tags": ["graph", "adapter", "traversal"],
+            }
+            tool_catalog = describe_available_tools(
+                extra_hints=[adapter_hint],
+                include_llm_tools=bool(self._think_config["include_llm_tools"]),
+            )[:limit]
             for entry in tool_catalog:
                 if isinstance(entry, dict) and entry.get("name"):
                     available_tool_names.add(str(entry["name"]))
@@ -996,6 +1013,24 @@ class GraphReasoningLoop:
                     diagnostics={"reason": "unknown_tool", "tool_name": tool_name},
                 )
             plan_step_id = f"{think_step_id}_call_{idx:02d}"
+
+            # Dedupe repeated think-proposed tool calls within the same run.
+            signatures = _RUN_THINK_TOOL_SIGNATURES.get()
+            if signatures is not None:
+                try:
+                    sig = tool_name + ":" + json.dumps(tool_args, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                except Exception:
+                    sig = tool_name
+                if sig in signatures:
+                    return ReasoningStepRecord(
+                        step_id=plan_step_id,
+                        description="Think-proposed tool call (deduped)",
+                        channel="graph",
+                        status="skipped",
+                        diagnostics={"reason": "deduped", "tool_name": tool_name},
+                    )
+                signatures.add(sig)
+
             record = ReasoningStepRecord(
                 step_id=plan_step_id,
                 description=str(call.get("rationale") or f"Think-proposed tool call: {tool_name}"),
@@ -1003,6 +1038,47 @@ class GraphReasoningLoop:
                 status="running",
             )
             async with semaphore:
+                if tool_name == self.graph_channel_tool:
+                    # Allow think tool to trigger the primary graph adapter traversal.
+                    # This unlocks non-scan deepsearch actions directly from think checkpoints.
+                    from encapsulation.data_model.deepsearch import PlanSpec
+
+                    query = str(tool_args.get("query") or tool_args.get("focus_query") or "").strip()
+                    if not query:
+                        query = str(call.get("rationale") or "Graph adapter query").strip()
+                    spec = PlanSpec(
+                        step_id=plan_step_id,
+                        description=query,
+                        channel="graph",
+                        metadata={"source": "think_tool_call"},
+                    )
+                    start = time.perf_counter()
+                    traversal_record, reasoning_record, new_evidences = await self.traversal_executor.run_step(
+                        spec,
+                        context,
+                        tool_args=tool_args,
+                        tool_name=self.graph_channel_tool,
+                    )
+                    latency_ms = int((time.perf_counter() - start) * 1000)
+                    reasoning_record.diagnostics.setdefault("reason", "think_tool_call")
+                    reasoning_record.diagnostics.setdefault("latency_ms", latency_ms)
+                    if new_evidences:
+                        await self._extend_shared_evidences(new_evidences)
+                    tool_runs.append(
+                        {
+                            "plan_step_id": plan_step_id,
+                            "tool_name": self.graph_channel_tool,
+                            "channel": "graph",
+                            "result": {
+                                "summary": reasoning_record.output_summary,
+                                "evidence_ids": [ev.chunk_id for ev in new_evidences],
+                                "latency_ms": latency_ms,
+                                "traversal": traversal_record.model_dump(exclude_none=True) if traversal_record else None,
+                            },
+                        }
+                    )
+                    return reasoning_record
+
                 payload = self._build_tool_payload(
                     plan_step_id=plan_step_id,
                     question=question,

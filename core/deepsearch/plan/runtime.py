@@ -266,6 +266,19 @@ class DeepSearchPlanner:
             raise ValueError(f"Unsupported plan channel: {channel}")
 
         requested_tool = metadata.get("tool") if self.honor_planner_tool_selection else None
+        if isinstance(requested_tool, str):
+            requested_tool = requested_tool.strip()
+
+        # Guardrails: keep macro plans coarse; prefer graph_adapter.query for graph steps unless the
+        # planner explicitly labels a step as a probe. This avoids the LLM overusing scan tools as
+        # primary execution steps.
+        if (
+            channel == "graph"
+            and requested_tool in {"graph.pattern_scan", "graph.chunk_scan"}
+            and not bool(metadata.get("force_tool"))
+            and str(metadata.get("tool_intent") or "").strip().lower() != "probe"
+        ):
+            requested_tool = None
         if not self.honor_planner_tool_selection:
             metadata.pop("tool", None)
         tool_name = requested_tool or self._resolve_tool(channel)
@@ -394,7 +407,17 @@ class DeepSearchPlanner:
     def _refresh_available_tools(self, update_generator: bool = True) -> None:
         """Refresh cached tool descriptors so planner sees MCP/runtime additions."""
 
+        graph_channel_tool = str(getattr(self, "graph_channel_tool", None) or "graph_adapter.query").strip() or "graph_adapter.query"
+        adapter_hint = {
+            "name": graph_channel_tool,
+            "channel": "graph",
+            "description": "Primary graph traversal via the configured graph adapter (prepare→query→filter→summarize→chain_traverse).",
+            "profile": "X",
+            "determinism": "adapter",
+            "strategy_tags": ["graph", "adapter", "traversal"],
+        }
         self._available_tools = describe_available_tools(
+            extra_hints=[adapter_hint],
             registry=self._tool_hint_registry,
             include_llm_tools=self.include_llm_tools_in_catalog,
         )

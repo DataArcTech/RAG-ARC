@@ -86,12 +86,25 @@ def convert_bracket_citations_to_sup(
     """
 
     evidence_lookup = _build_evidence_lookup(evidences)
-    ordered_ids = _ordered_evidence_ids(citations)
+    # Prefer the ordering implied by the rendered report text. This prevents emitting references that
+    # are not actually cited (a frequent source of "references != citations" inconsistencies).
+    text_ordered = _infer_ordered_ids_from_text(str(markdown_text or ""), evidence_lookup=evidence_lookup) if evidence_lookup else []
+    citations_ordered = _ordered_evidence_ids(citations)
+
     synthesized_citations: List[Dict[str, Any]] | None = None
-    if not ordered_ids and evidence_lookup:
-        ordered_ids = _infer_ordered_ids_from_text(str(markdown_text or ""), evidence_lookup=evidence_lookup)
-        if ordered_ids:
-            synthesized_citations = [{"evidence_id": ev_id} for ev_id in ordered_ids]
+    ordered_ids: List[str] = []
+    if text_ordered:
+        text_set = set(text_ordered)
+        ordered_ids.extend([ev_id for ev_id in citations_ordered if ev_id in text_set])
+        for ev_id in text_ordered:
+            if ev_id not in ordered_ids:
+                ordered_ids.append(ev_id)
+    else:
+        ordered_ids = list(citations_ordered)
+        if not ordered_ids and evidence_lookup:
+            ordered_ids = list(text_ordered)
+            if ordered_ids:
+                synthesized_citations = [{"evidence_id": ev_id} for ev_id in ordered_ids]
     if not ordered_ids:
         return str(markdown_text or ""), []
 
@@ -102,6 +115,9 @@ def convert_bracket_citations_to_sup(
     active_citations: Sequence[Dict[str, Any]] = citations or []
     if synthesized_citations is not None:
         active_citations = synthesized_citations
+    else:
+        ordered_set = set(ordered_ids)
+        active_citations = [cit for cit in active_citations if isinstance(cit, dict) and str(cit.get("evidence_id") or "").strip() in ordered_set]
 
     text = str(markdown_text or "")
     appendix_marker = "## Appendix:"
@@ -147,6 +163,7 @@ def convert_bracket_citations_to_sup(
         updated_text = updated_text + "\n\n" + suffix.lstrip()
 
     refs = build_reference_entries(
+        ordered_ids=ordered_ids,
         citations=list(active_citations),
         evidence_lookup=evidence_lookup,
         id_to_num=id_to_num,
@@ -160,29 +177,36 @@ def convert_bracket_citations_to_sup(
 
 def build_reference_entries(
     *,
+    ordered_ids: Sequence[str],
     citations: Sequence[Dict[str, Any]],
     evidence_lookup: Mapping[str, Dict[str, Any]],
     id_to_num: Mapping[str, int],
 ) -> List[Dict[str, Any]]:
-    entries: List[Dict[str, Any]] = []
+    citation_by_id: Dict[str, Dict[str, Any]] = {}
     for citation in citations:
         if not isinstance(citation, dict):
             continue
         ev_id = str(citation.get("evidence_id") or "").strip()
-        if not ev_id:
+        if not ev_id or ev_id in citation_by_id:
             continue
-        num = id_to_num.get(ev_id)
+        citation_by_id[ev_id] = citation
+
+    entries: List[Dict[str, Any]] = []
+    for ev_id in ordered_ids:
+        ev_token = str(ev_id or "").strip()
+        if not ev_token:
+            continue
+        num = id_to_num.get(ev_token)
         if num is None:
             continue
-        evidence = evidence_lookup.get(ev_id) or {}
+        citation = citation_by_id.get(ev_token) or {}
+        evidence = evidence_lookup.get(ev_token) or {}
         entries.append(
             {
                 "n": int(num),
-                "evidence_id": ev_id,
+                "evidence_id": ev_token,
                 "source": citation.get("source") or evidence.get("source"),
                 "source_type": citation.get("source_type") or "chunk",
-                "used_for": citation.get("used_for"),
-                "location_in_report": citation.get("location_in_report"),
                 "score": evidence.get("score"),
                 "provenance": evidence.get("provenance") if isinstance(evidence.get("provenance"), dict) else None,
             }
@@ -195,24 +219,42 @@ def render_reference_list_markdown(references: Sequence[Dict[str, Any]]) -> str:
     if not references:
         return ""
     lines: List[str] = ["## References"]
+
+    def _apply_chunk_meta(details: Dict[str, Any], meta: Mapping[str, Any]) -> None:
+        filename = meta.get("filename") or meta.get("source_file_name") or meta.get("path") or meta.get("file_path")
+        if isinstance(filename, str) and filename.strip():
+            details.setdefault("filename", filename.strip())
+        for key in ("chunk_index", "start_idx", "end_idx"):
+            value = meta.get(key)
+            if isinstance(value, int):
+                details.setdefault(key, value)
+
     for ref in references:
         if not isinstance(ref, dict):
             continue
         num = ref.get("n")
         ev_id = str(ref.get("evidence_id") or "").strip()
         source = str(ref.get("source") or "").strip()
-        used_for = str(ref.get("used_for") or "").strip()
-        location = str(ref.get("location_in_report") or "").strip()
-        provenance = ref.get("provenance")
+        # Keep this minimal: frontends can fetch full evidence/provenance from the payload,
+        # while the answer should only show what's needed to verify the citation.
         details: Dict[str, Any] = {"evidence_id": ev_id}
         if source:
             details["source"] = source
-        if used_for:
-            details["used_for"] = used_for
-        if location:
-            details["location"] = location
-        if provenance is not None:
-            details["provenance"] = provenance
+        provenance = ref.get("provenance")
+        if isinstance(provenance, Mapping):
+            meta = provenance.get("metadata")
+            if isinstance(meta, Mapping):
+                _apply_chunk_meta(details, meta)
+
+                chunk_meta = meta.get("chunk_metadata")
+                if isinstance(chunk_meta, Mapping):
+                    _apply_chunk_meta(details, chunk_meta)
+
+            raw_chunk = provenance.get("raw_chunk")
+            if isinstance(raw_chunk, Mapping):
+                raw_meta = raw_chunk.get("metadata")
+                if isinstance(raw_meta, Mapping):
+                    _apply_chunk_meta(details, raw_meta)
         rendered = json.dumps(details, ensure_ascii=False, separators=(",", ":"), default=str)
         lines.append(f"{int(num)}. {rendered}")
     return "\n".join(lines).strip()

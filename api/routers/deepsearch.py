@@ -484,6 +484,7 @@ async def _stream_events_weaver(run_id: str, *, last_event_id: int = -1):
 
     cursor = max(-1, int(last_event_id))
     saw_terminate = False
+    saw_all_tools = False
 
     while True:
         await asyncio.sleep(0)
@@ -509,6 +510,11 @@ async def _stream_events_weaver(run_id: str, *, last_event_id: int = -1):
                 tag, rendered = _render_trace_payload(trace_tag=raw_tag, content=content, run_id=run_id)
                 if tag.strip().lower() == "terminate":
                     saw_terminate = True
+                if tag.strip().lower() == "all_tools":
+                    if saw_all_tools:
+                        await asyncio.sleep(0)
+                        continue
+                    saw_all_tools = True
                 yield sse_text(_weaver_block(tag, rendered))
                 await asyncio.sleep(0)
                 continue
@@ -842,6 +848,7 @@ async def _stream_events_weaver_redis(run_id: str, *, last_event_id: int = -1):
 
     cursor = max(-1, int(last_event_id))
     saw_terminate = False
+    saw_all_tools = False
 
     while True:
         task_run = task_queue.get_task_run(run_id) or {}
@@ -869,6 +876,10 @@ async def _stream_events_weaver_redis(run_id: str, *, last_event_id: int = -1):
                 tag, rendered = _render_trace_payload(trace_tag=raw_tag, content=content, run_id=run_id)
                 if tag.strip().lower() == "terminate":
                     saw_terminate = True
+                if tag.strip().lower() == "all_tools":
+                    if saw_all_tools:
+                        continue
+                    saw_all_tools = True
                 yield sse_text(_weaver_block(tag, rendered))
                 continue
 

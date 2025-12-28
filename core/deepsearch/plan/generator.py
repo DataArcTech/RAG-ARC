@@ -1,11 +1,11 @@
 """Plan generation utilities for DeepSearch pipelines."""
 import json
 import logging
-import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from encapsulation.data_model.deepsearch import GraphQueryContext, PlanSpec
+from core.utils.json_extract import extract_last_json_array_from_text
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +162,8 @@ class PlanGenerator:
         raise RuntimeError("PlanGenerator requires an async-capable LLM connector (missing `achat`).")
 
     def _parse_llm_response(self, response: str) -> List[dict]:
-        response = self._extract_json_payload(response)
+        extracted = extract_last_json_array_from_text(response)
+        response = extracted if extracted is not None else (response or "").strip()
         try:
             data = json.loads(response)
             if isinstance(data, list):
@@ -170,23 +171,6 @@ class PlanGenerator:
         except json.JSONDecodeError:
             raise ValueError("Planner LLM returned non-JSON output")
         raise ValueError("Planner LLM returned an unsupported JSON payload")
-
-    def _extract_json_payload(self, payload: str) -> str:
-        """Handle ```json fenced blocks or extra commentary around JSON."""
-        text = (payload or "").strip()
-        if not text:
-            return ""
-
-        fence = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
-        if fence:
-            return fence.group(1).strip()
-
-        start = text.find("[")
-        end = text.rfind("]")
-        if 0 <= start < end:
-            return text[start : end + 1]
-
-        return text
 
     @staticmethod
     def _normalize_channel(channel: Optional[str]) -> str:

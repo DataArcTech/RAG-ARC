@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
+from core.utils.stopwords import get_stopwords
 
 from core.deepsearch.report.consistency_checker import ConsistencyChecker
 from core.deepsearch.report.citation_agent import CitationAgent
@@ -24,6 +25,8 @@ from core.deepsearch.utils.file_scope import (
     resolve_file_scope,
 )
 
+_EN_STOPWORDS = frozenset(word.lower() for word in get_stopwords("en"))
+
 
 def _rank_evidences_for_question(question: str, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Deterministically rank evidences for prompt inclusion (match-first, score-second)."""
@@ -32,18 +35,22 @@ def _rank_evidences_for_question(question: str, items: List[Dict[str, Any]]) -> 
         return []
     q = str(question or "")
     anchors: list[str] = []
-    anchors.extend(
-        re.findall(
-            rf"[A-Z]{{{composer_defaults.DEFAULT_EVIDENCE_RANK_ASCII_ANCHOR_MIN},{composer_defaults.DEFAULT_EVIDENCE_RANK_ASCII_ANCHOR_MAX}}}",
-            q,
-        )
+    # Language-agnostic anchor extraction: pull compact unicode word tokens + numbers.
+    for token in re.findall(r"\d[\d,\.%]*", q, flags=re.UNICODE):
+        token = token.strip()
+        if not token:
+            continue
+        if token not in anchors:
+            anchors.append(token)
+    token_re = re.compile(
+        rf"[^\W_]{{{composer_defaults.DEFAULT_EVIDENCE_RANK_ASCII_ANCHOR_MIN},{composer_defaults.DEFAULT_EVIDENCE_RANK_ASCII_ANCHOR_MAX}}}",
+        flags=re.UNICODE,
     )
-    for token in re.findall(
-        rf"[\u4e00-\u9fff]{{{composer_defaults.DEFAULT_EVIDENCE_RANK_CJK_ANCHOR_MIN},{composer_defaults.DEFAULT_EVIDENCE_RANK_CJK_ANCHOR_MAX}}}",
-        q,
-    ):
+    for token in token_re.findall(q):
         token = token.strip()
         if not token or token in EVIDENCE_RANK_STOPWORDS:
+            continue
+        if _EN_STOPWORDS and token.lower() in _EN_STOPWORDS:
             continue
         if token not in anchors:
             anchors.append(token)
@@ -74,6 +81,205 @@ def _rank_evidences_for_question(question: str, items: List[Dict[str, Any]]) -> 
         return (primary, 1 if match_count > 0 else 0, match_count, numeric_score, -len(content), chunk_id)
 
     return sorted([ev for ev in items if isinstance(ev, dict)], key=_score, reverse=True)
+
+
+def _extract_question_scope_terms(question: str) -> List[str]:
+    """Best-effort extraction of query scope anchors from the question.
+
+    Language-agnostic heuristic: prefer quoted spans and long unicode word runs.
+    """
+
+    q = str(question or "").strip()
+    if not q:
+        return []
+
+    candidates: list[str] = []
+    # Quoted spans (covers a few common quotation styles without relying on a specific language).
+    for pat in (r"《([^》]{1,120})》", r"\"([^\"]{1,120})\"", r"“([^”]{1,120})”", r"'([^']{1,120})'", r"‘([^’]{1,120})’"):
+        for match in re.finditer(pat, q):
+            token = (match.group(1) or "").strip()
+            if token and token not in candidates:
+                candidates.append(token)
+
+    # Long unicode word runs (letters/digits) optionally with simple separators.
+    for match in re.finditer(r"[\w\-\(\)\.]{4,60}", q, flags=re.UNICODE):
+        token = match.group(0).strip()
+        if not token:
+            continue
+        # Avoid purely numeric strings.
+        if not any(ch.isalpha() for ch in token):
+            continue
+        if token not in candidates:
+            candidates.append(token)
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in candidates:
+        token = normalize_filename_token(raw)
+        if not token:
+            continue
+        # Drop common instruction tokens that frequently appear in prompts but are not part of user scope.
+        low_raw = token.lower()
+        if "chunk_id" in low_raw or "chunkid" in low_raw:
+            continue
+        if "not found in evidence" in low_raw:
+            continue
+        low = token.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        normalized.append(token)
+        if len(normalized) >= 20:
+            break
+
+    # Prune overly-generic tokens: if a token is contained in a longer token, keep the longer one.
+    lowered = [t.lower() for t in normalized]
+    kept: list[str] = []
+    for idx, token in enumerate(normalized):
+        t_low = lowered[idx]
+        if any((other != t_low) and (t_low in other) and (len(other) >= len(t_low) + 2) for other in lowered):
+            continue
+        kept.append(token)
+    return kept[:10]
+
+
+def _filter_evidences_by_question_scope(question: str, items: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    terms = _extract_question_scope_terms(question)
+    if len(terms) < 2:
+        return items, {"scope_terms_applied": False}
+
+    # Prefer terms that are discriminative across the retrieved evidence pool.
+    # This keeps cross-doc questions from "drifting" into unrelated files when generic
+    # words (e.g. "payment", "plan") appear everywhere.
+    evidence_count = len([ev for ev in items if isinstance(ev, dict)])
+    max_common_ratio = 0.65
+    rare_ratio_cutoff = 0.45
+    max_effective_terms = 6
+    term_stats: Dict[str, Dict[str, Any]] = {}
+    for term in terms:
+        term_lower = term.lower()
+        hits = 0
+        for ev in items:
+            if not isinstance(ev, dict):
+                continue
+            content = str(ev.get("content") or "").lower()
+            prov = ev.get("provenance") if isinstance(ev.get("provenance"), dict) else {}
+            meta = prov.get("metadata") if isinstance(prov, dict) and isinstance(prov.get("metadata"), dict) else {}
+            filename = None
+            if isinstance(meta, dict):
+                filename = meta.get("filename") or meta.get("source_file_name") or meta.get("path")
+                if not filename:
+                    chunk_meta = meta.get("chunk_metadata")
+                    if isinstance(chunk_meta, dict):
+                        filename = chunk_meta.get("filename") or chunk_meta.get("source_file_name") or chunk_meta.get("path")
+            filename_lower = str(filename or "").lower()
+            if term_lower and (term_lower in content or term_lower in filename_lower):
+                hits += 1
+        ratio = (hits / evidence_count) if evidence_count else 0.0
+        term_stats[term] = {"hits": hits, "ratio": round(ratio, 3)}
+
+    # Guardrail: if the question includes at least one high-specificity anchor (numbers / roman numerals / parentheses)
+    # and we cannot find it in the evidence pool at all, do NOT fall back to unrelated evidences.
+    def _looks_like_anchor(term: str) -> bool:
+        if re.search(r"\d", term):
+            return True
+        # Roman numerals as standalone markers (avoid matching common letters inside words).
+        if re.search(r"(?:^|[^A-Za-z])[IVX]{1,6}(?:$|[^A-Za-z])", term):
+            return True
+        if re.search(r"[()（）]", term):
+            return True
+        return False
+
+    anchor_terms = [t for t in terms if _looks_like_anchor(t)]
+    if anchor_terms:
+        if all(int(term_stats.get(t, {}).get("hits") or 0) <= 0 for t in anchor_terms):
+            return [], {
+                "scope_terms_applied": True,
+                "hard_filter": True,
+                "anchor_miss": True,
+                "anchor_terms": anchor_terms,
+                "scope_terms": terms,
+                "term_stats": term_stats,
+            }
+
+    dropped_missing = [t for t in terms if int(term_stats.get(t, {}).get("hits") or 0) <= 0]
+    dropped_common = [t for t in terms if t not in dropped_missing and float(term_stats.get(t, {}).get("ratio") or 0.0) > max_common_ratio]
+    candidates = [t for t in terms if t not in dropped_missing and t not in dropped_common]
+    if len(candidates) < 2:
+        return items, {
+            "scope_terms_applied": False,
+            "scope_terms": terms,
+            "term_stats": term_stats,
+            "dropped_missing": dropped_missing,
+            "dropped_common": dropped_common,
+            "fallback": True,
+        }
+
+    # Take the rarest terms first (ratio asc, then prefer longer tokens).
+    ranked = sorted(
+        candidates,
+        key=lambda t: (float(term_stats.get(t, {}).get("ratio") or 1.0), -len(t)),
+    )
+    rare = [t for t in ranked if float(term_stats.get(t, {}).get("ratio") or 1.0) <= rare_ratio_cutoff]
+    if len(rare) >= 2:
+        discriminative_terms = rare[:max_effective_terms]
+    else:
+        discriminative_terms = ranked[: max(2, min(max_effective_terms, len(ranked)))]
+    if len(discriminative_terms) < 2:
+        return items, {
+            "scope_terms_applied": False,
+            "scope_terms": terms,
+            "term_stats": term_stats,
+            "dropped_missing": dropped_missing,
+            "dropped_common": dropped_common,
+            "fallback": True,
+        }
+
+    kept: List[Dict[str, Any]] = []
+    dropped = 0
+    for ev in items:
+        if not isinstance(ev, dict):
+            continue
+        content = str(ev.get("content") or "").lower()
+        prov = ev.get("provenance") if isinstance(ev.get("provenance"), dict) else {}
+        meta = prov.get("metadata") if isinstance(prov, dict) and isinstance(prov.get("metadata"), dict) else {}
+        filename = None
+        if isinstance(meta, dict):
+            filename = meta.get("filename") or meta.get("source_file_name") or meta.get("path")
+            if not filename:
+                chunk_meta = meta.get("chunk_metadata")
+                if isinstance(chunk_meta, dict):
+                    filename = chunk_meta.get("filename") or chunk_meta.get("source_file_name") or chunk_meta.get("path")
+        filename_lower = str(filename or "").lower()
+        in_scope = any(term.lower() in content or term.lower() in filename_lower for term in discriminative_terms)
+        if in_scope:
+            kept.append(ev)
+        else:
+            dropped += 1
+
+    if kept:
+        return kept, {
+            "scope_terms_applied": True,
+            "scope_terms": terms,
+            "scope_terms_effective": discriminative_terms,
+            "term_stats": term_stats,
+            "dropped_missing": dropped_missing,
+            "dropped_common": dropped_common,
+            "kept": len(kept),
+            "dropped": dropped,
+        }
+    # Avoid false negatives: if heuristic drops everything, keep original set.
+    return items, {
+        "scope_terms_applied": False,
+        "scope_terms": terms,
+        "scope_terms_effective": discriminative_terms,
+        "term_stats": term_stats,
+        "dropped_missing": dropped_missing,
+        "dropped_common": dropped_common,
+        "kept": len(items),
+        "dropped": 0,
+        "fallback": True,
+    }
 
 
 def _is_tool_generated_evidence(evidence: Dict[str, Any]) -> bool:
@@ -179,6 +385,7 @@ class DeepSearchReporter:
         self.sectionwise_writer = bool(self.config["sectionwise_writer"])
         self.sectionwise_retain_k = int(self.config["sectionwise_retain_k"])
         self.citation_aliases = bool(self.config["citation_aliases"])
+        self.include_appendices_in_answer = bool(self.config.get("include_appendices_in_answer", False))
 
     async def compose(
         self,
@@ -205,6 +412,9 @@ class DeepSearchReporter:
         file_scope_diag: Dict[str, Any] = {}
         if file_scope.enabled:
             authoritative_evidences, file_scope_diag = filter_evidences(authoritative_evidences, scope=file_scope)
+        question_scope_diag: Dict[str, Any] = {}
+        if authoritative_evidences:
+            authoritative_evidences, question_scope_diag = _filter_evidences_by_question_scope(question, authoritative_evidences)
         if not authoritative_evidences:
             msg = "No reliable evidence was retrieved for this question."
             if file_scope.enabled:
@@ -238,6 +448,8 @@ class DeepSearchReporter:
             }
             if file_scope_diag:
                 metadata["evidence_profile"]["file_scope"] = file_scope_diag
+            if question_scope_diag:
+                metadata["evidence_profile"]["question_scope"] = question_scope_diag
             if request_context:
                 metadata["request_context"] = request_context
             if metadata["report_profile"]["include_graph_viz"]:
@@ -278,18 +490,41 @@ class DeepSearchReporter:
             normalized = [normalize_filename_token(t) for t in requested_titles]
             normalized_map = {t: token for t, token in zip(requested_titles, normalized) if token}
 
+            def _extract_filename(ev: Dict[str, Any]) -> str | None:
+                prov = ev.get("provenance") or {}
+                if not isinstance(prov, dict):
+                    return None
+
+                meta = prov.get("metadata") or {}
+                if isinstance(meta, dict):
+                    for key in ("filename", "source_file_name", "source_file", "file_path", "path"):
+                        value = meta.get(key)
+                        if isinstance(value, str) and value.strip():
+                            return value.strip()
+
+                    chunk_meta = meta.get("chunk_metadata")
+                    if isinstance(chunk_meta, dict):
+                        for key in ("filename", "source_file_name", "source_file", "file_path", "path"):
+                            value = chunk_meta.get(key)
+                            if isinstance(value, str) and value.strip():
+                                return value.strip()
+
+                raw_chunk = prov.get("raw_chunk")
+                if isinstance(raw_chunk, dict):
+                    raw_meta = raw_chunk.get("metadata")
+                    if isinstance(raw_meta, dict):
+                        for key in ("filename", "source_file_name", "source_file", "file_path", "path"):
+                            value = raw_meta.get(key)
+                            if isinstance(value, str) and value.strip():
+                                return value.strip()
+
+                return None
+
             for ev in authoritative_evidences:
                 if not isinstance(ev, dict):
                     continue
-                prov = ev.get("provenance") or {}
-                if not isinstance(prov, dict):
-                    continue
-                meta = prov.get("metadata") or {}
-                if isinstance(meta, dict):
-                    filename = meta.get("filename") or meta.get("source_file_name") or meta.get("path")
-                else:
-                    filename = None
-                if not isinstance(filename, str) or not filename.strip():
+                filename = _extract_filename(ev)
+                if not filename:
                     continue
                 lowered = filename.lower()
                 for title, token in normalized_map.items():
@@ -330,6 +565,8 @@ class DeepSearchReporter:
                 }
                 if file_scope_diag:
                     metadata["evidence_profile"]["file_scope"] = file_scope_diag
+                if question_scope_diag:
+                    metadata["evidence_profile"]["question_scope"] = question_scope_diag
                 if request_context:
                     metadata["request_context"] = request_context
                 if metadata["report_profile"]["include_graph_viz"]:
@@ -400,6 +637,8 @@ class DeepSearchReporter:
         }
         if file_scope_diag:
             metadata["evidence_profile"]["file_scope"] = file_scope_diag
+        if question_scope_diag:
+            metadata["evidence_profile"]["question_scope"] = question_scope_diag
         if alias_bundle:
             metadata["citation_aliases"] = {
                 "enabled": True,
@@ -459,22 +698,23 @@ class DeepSearchReporter:
             )
             metadata["citation_audit"] = audit
         markdown_text = render_markdown_from_structured(structured_llm)
-        markdown_text = _append_chunk_evidence(
-            markdown_text,
-            evidences=authoritative_evidences,
-            max_items=self.max_evidence_items,
-        )
-        markdown_text = _append_tool_evidence(
-            markdown_text,
-            evidences=tool_evidences,
-            max_items=self.max_evidence_items,
-        )
-        markdown_text = _append_graph_appendix(
-            markdown_text,
-            graph_evidence=context.get("graph_evidence") or {},
-            max_seed_entities=self.report_max_seed_entities,
-            max_chain_items=self.report_max_graph_chain_items,
-        )
+        if self.include_appendices_in_answer:
+            markdown_text = _append_chunk_evidence(
+                markdown_text,
+                evidences=authoritative_evidences,
+                max_items=self.max_evidence_items,
+            )
+            markdown_text = _append_tool_evidence(
+                markdown_text,
+                evidences=tool_evidences,
+                max_items=self.max_evidence_items,
+            )
+            markdown_text = _append_graph_appendix(
+                markdown_text,
+                graph_evidence=context.get("graph_evidence") or {},
+                max_seed_entities=self.report_max_seed_entities,
+                max_chain_items=self.report_max_graph_chain_items,
+            )
 
         structured_report = {
             "format_version": self.STRUCTURED_REPORT_VERSION,

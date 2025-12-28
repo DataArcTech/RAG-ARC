@@ -113,6 +113,7 @@
     "enable_custom_summary": false,
     "parallel_thinking_runs": 1,
     "enable_llm_report": true,
+    "include_appendices_in_answer": false,
     "report_temperature": 0.2,
     "report_max_evidence_chars": 900,
     "max_evidence_items": 10,

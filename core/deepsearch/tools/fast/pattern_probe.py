@@ -13,8 +13,13 @@ from core.graph_adapter.base import GraphDeepSearchAdapter
 from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.query_clean import clean_query
 from core.deepsearch.utils.file_scope import chunk_in_scope, resolve_file_scope
+from core.utils.stopwords import get_stopwords
+from core.utils.text_regex import CJK_DETECT_RE, NONWORD_SPACES_RE
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+
+_EN_STOPWORDS = frozenset(word.lower() for word in get_stopwords("en"))
+_ZH_STOPWORDS = get_stopwords("zh")
 
 
 class PatternProbeTool(GraphTool):
@@ -78,8 +83,8 @@ class PatternProbeTool(GraphTool):
         },
     )
 
-    CHINESE_PATTERN = re.compile(r"[\u3400-\u9fff]")
-    _NONWORD_SPACES = re.compile(r"[\s\u3000]+")
+    CHINESE_PATTERN = CJK_DETECT_RE
+    _NONWORD_SPACES = NONWORD_SPACES_RE
 
     def __init__(
         self,
@@ -286,6 +291,11 @@ class PatternProbeTool(GraphTool):
             if not value:
                 continue
             if value in PATTERN_PROBE_DEFAULT_STOPWORDS:
+                continue
+            if value in _ZH_STOPWORDS:
+                continue
+            lowered = value.lower()
+            if any(ch.isalpha() for ch in value) and lowered in _EN_STOPWORDS:
                 continue
             filtered.append(value)
         return filtered

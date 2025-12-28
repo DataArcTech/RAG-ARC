@@ -4,6 +4,8 @@ import logging
 import json
 import re
 
+from core.utils.json_extract import extract_last_json_array_from_text
+
 if TYPE_CHECKING:
     from encapsulation.data_model.schema import Chunk
     from encapsulation.llm.chat.base import ChatLLMBase
@@ -144,15 +146,8 @@ Please strictly follow the format to output a list of {TOPK} ids corresponding t
             if "</think>" in output_str:
                 output_str = output_str.split("</think>")[-1]
 
-            # Extract JSON array from markdown code block
-            json_matches = re.findall(r"(?:```json\s*)(.+)(?:```)", output_str, re.DOTALL)
-
-            if not json_matches:
-                # Try to find JSON array without code block
-                json_matches = re.findall(r"\[\s*[0-9,\s]+\]", output_str)
-            
-            if json_matches:
-                idxs_str = json_matches[-1].strip()
+            idxs_str = extract_last_json_array_from_text(output_str)
+            if idxs_str:
                 idxs = json.loads(idxs_str)
                 
                 # Validate indices
@@ -234,4 +229,3 @@ Please strictly follow the format to output a list of {TOPK} ids corresponding t
             "config_type": getattr(self.config, 'type', 'unknown'),
             "has_custom_prompt": self.default_prompt_template is not None
         }
-

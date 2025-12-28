@@ -1,12 +1,13 @@
 """Common primitives shared by DeepSearch tools."""
 import json
-import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Protocol
 
 from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote, ToolResultPayload, GraphQueryContext
 from core.graph_adapter.base import GraphAccessScope, GraphDeepSearchAdapter
+from core.utils.json_extract import extract_json_from_text as _extract_json_from_text
+from core.utils.json_extract import safe_json_loads as _safe_json_loads
 
 
 def _default_input_schema() -> Dict[str, Any]:
@@ -179,69 +180,9 @@ async def call_llm_async(llm, messages: List[Dict[str, str]], **kwargs) -> str:
 
 def extract_json_from_text(raw: str) -> str | None:
     """Extract the first JSON object/array from model output (handles ```json fences)."""
-
-    text = (raw or "").strip()
-    if not text:
-        return None
-
-    fence = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
-    if fence:
-        text = fence.group(1).strip()
-        if not text:
-            return None
-
-    start_obj = text.find("{")
-    start_list = text.find("[")
-    if start_obj == -1 or (0 <= start_list < start_obj):
-        start = start_list
-    else:
-        start = start_obj
-    if start == -1:
-        return None
-
-    open_brace = {"{": "}", "[": "]"}
-    opener = text[start]
-    closer = open_brace.get(opener)
-    if closer is None:
-        return None
-
-    depth = 0
-    in_string = False
-    escape = False
-    for idx in range(start, len(text)):
-        ch = text[idx]
-        if in_string:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == "\"":
-                in_string = False
-            continue
-        if ch == "\"":
-            in_string = True
-            continue
-        if ch == opener:
-            depth += 1
-        elif ch == closer:
-            depth -= 1
-            if depth == 0:
-                return text[start : idx + 1]
-    return None
+    return _extract_json_from_text(raw)
 
 
 def safe_json_loads(raw: str, *, expected: str | None = None) -> Any | None:
     """Parse JSON from model output; returns None when parsing fails or type mismatches."""
-
-    extracted = extract_json_from_text(raw)
-    if extracted is None:
-        return None
-    try:
-        value = json.loads(extracted)
-    except json.JSONDecodeError:
-        return None
-    if expected == "dict":
-        return value if isinstance(value, dict) else None
-    if expected == "list":
-        return value if isinstance(value, list) else None
-    return value
+    return _safe_json_loads(raw, expected=expected)

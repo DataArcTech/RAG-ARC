@@ -65,3 +65,21 @@ def test_convert_bracket_citations_to_sup_supports_cjk_brackets():
     assert "<sup>2</sup>" in converted
     assert "## References" in converted
     assert refs and refs[0]["n"] == 1 and refs[0]["evidence_id"] == "ev1"
+
+
+def test_convert_bracket_citations_to_sup_drops_unused_citations_from_references():
+    markdown = "Only this claim is cited [ev1]."
+    citations = [
+        {"evidence_id": "ev1", "source": "graph"},
+        {"evidence_id": "ev2", "source": "graph"},
+    ]
+    evidences = [
+        {"chunk_id": "ev1", "source": "graph", "provenance": {"path": "doc1.md"}},
+        {"chunk_id": "ev2", "source": "graph", "provenance": {"path": "doc2.md"}},
+    ]
+
+    converted, refs = convert_bracket_citations_to_sup(markdown, citations=citations, evidences=evidences)
+
+    assert "<sup>1</sup>" in converted
+    assert "ev2" not in converted
+    assert refs and [ref["evidence_id"] for ref in refs] == ["ev1"]
