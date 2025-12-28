@@ -105,16 +105,11 @@ class PathCacheTool(GraphTool):
         for idx, path in enumerate(paths):
             visited_nodes = path.get("nodes") or path.get("visited_nodes") or []
             content = " -> ".join(str(node) for node in visited_nodes) or str(path)
-            raw_id = str(path.get("path_id") or path.get("id") or path.get("metadata", {}).get("id") or "").strip()
-            chunk_id = (
-                f"{raw_id}"
-                if raw_id
-                else derived_chunk_id(tool_name=tool_name, plan_step=plan_step, label=f"path_{idx}", content=content)
-            )
+            chunk_id = derived_chunk_id(tool_name=tool_name, plan_step=plan_step, label=f"path_{idx}", content=content)
             evidences.append(
                 EvidenceChunk(
                     chunk_id=chunk_id,
-                    source=source,
+                    source=tool_name,
                     content=content,
                     score=path.get("score"),
                     provenance={"raw_path": path},

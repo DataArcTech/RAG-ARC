@@ -131,16 +131,11 @@ class BridgeLookupTool(GraphTool):
             relation = bridge.get("relation") or bridge.get("predicate") or "related_to"
             tail = bridge.get("tail") or bridge.get("target") or "unknown_tail"
             content = f"{head} -[{relation}]-> {tail}"
-            raw_id = str(bridge.get("id") or bridge.get("bridge_id") or bridge.get("metadata", {}).get("id") or "").strip()
-            chunk_id = (
-                raw_id
-                if raw_id
-                else derived_chunk_id(tool_name=tool_name, plan_step=plan_step, label=f"bridge_{idx}", content=content)
-            )
+            chunk_id = derived_chunk_id(tool_name=tool_name, plan_step=plan_step, label=f"bridge_{idx}", content=content)
             evidences.append(
                 EvidenceChunk(
                     chunk_id=chunk_id,
-                    source=source,
+                    source=tool_name,
                     content=content,
                     score=bridge.get("score"),
                     provenance={

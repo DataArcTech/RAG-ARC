@@ -20,6 +20,7 @@ from core.graph_adapter.base import (
 )
 from core.graph_adapter.registry import register_adapter
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
+from core.deepsearch.utils.file_scope import FileScope, chunk_in_scope
 
 logger = logging.getLogger(__name__)
 
@@ -325,8 +326,15 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         scope_token: str,
         query_options: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
-        chunks = self._retrieve_chunks_sync(query, scope_token, query_options=query_options)
-        return self._build_graph_payload(query, channel, chunks, scope_token)
+        chunks, subgraph_info, scope_diag = self._retrieve_chunks_sync(query, scope_token, query_options=query_options)
+        return self._build_graph_payload(
+            query,
+            channel,
+            chunks,
+            scope_token,
+            subgraph_info_override=subgraph_info,
+            scope_diagnostics=scope_diag,
+        )
 
     def _retrieve_chunks_sync(
         self,
@@ -334,7 +342,7 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         owner_token: str,
         *,
         query_options: Optional[Mapping[str, Any]] = None,
-    ) -> List[Chunk]:
+    ) -> tuple[List[Chunk], Optional[Dict[str, Any]], Dict[str, Any]]:
         """Execute synchronous HippoRAG retrieval (invoked in a worker thread)."""
 
         top_k_raw = None
@@ -346,12 +354,44 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             top_k = int(self.default_top_k)
         top_k = max(1, top_k)
 
+        file_scope = self._coerce_file_scope(query_options)
+        requested_k = top_k
+        fetch_k = requested_k
+        if file_scope.enabled:
+            # Over-fetch to compensate for post-filtering; keep a small cap.
+            fetch_k = min(max(requested_k * 5, requested_k), 100)
+
         kwargs = {
-            "k": top_k,
+            "k": fetch_k,
             "owner_id": owner_token,
             "return_subgraph_info": True,
         }
-        return self.retriever.invoke(query, **kwargs)
+        raw_chunks: List[Chunk] = self.retriever.invoke(query, **kwargs)
+        subgraph_info = self._extract_subgraph_info(raw_chunks)
+        if not file_scope.enabled:
+            return raw_chunks[:requested_k], subgraph_info, {"file_scope_applied": False}
+
+        filtered: List[Chunk] = []
+        dropped = 0
+        for chunk in raw_chunks:
+            meta = getattr(chunk, "metadata", None) or {}
+            if chunk_in_scope(chunk_metadata=meta, scope=file_scope):
+                filtered.append(chunk)
+            else:
+                dropped += 1
+        return (
+            filtered[:requested_k],
+            subgraph_info,
+            {
+                "file_scope_applied": True,
+                "file_scope": file_scope.as_dict(),
+                "requested_top_k": requested_k,
+                "fetch_top_k": fetch_k,
+                "kept_in_scope": len(filtered[:requested_k]),
+                "dropped_out_of_scope": dropped,
+                "input_chunk_count": len(raw_chunks),
+            },
+        )
 
     def _build_graph_payload(
         self,
@@ -359,11 +399,14 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         channel: str,
         chunks: List[Chunk],
         scope_token: str,
+        *,
+        subgraph_info_override: Optional[Dict[str, Any]] = None,
+        scope_diagnostics: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Convert retriever outputs into a normalized structure consumed by DeepSearch."""
 
         chunk_entries = [self._chunk_to_dict(chunk) for chunk in chunks]
-        subgraph_info = self._extract_subgraph_info(chunks)
+        subgraph_info = subgraph_info_override if subgraph_info_override is not None else self._extract_subgraph_info(chunks)
         exported = self._export_subgraph(subgraph_info) if subgraph_info else {"nodes": [], "edges": [], "chunks": []}
 
         metadata = {
@@ -374,6 +417,8 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             "graph_export_metadata": exported.get("metadata", {}),
             "node_ppr_scores": (subgraph_info or {}).get("node_ppr_scores", {}),
         }
+        if scope_diagnostics:
+            metadata["scope_diagnostics"] = scope_diagnostics
 
         return {
             "query": query,
@@ -406,6 +451,19 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             if metadata and "_subgraph_info" in metadata:
                 return metadata["_subgraph_info"]
         return None
+
+    @staticmethod
+    def _coerce_file_scope(query_options: Optional[Mapping[str, Any]]) -> FileScope:
+        if not isinstance(query_options, Mapping):
+            return FileScope()
+        raw = query_options.get("file_scope")
+        if isinstance(raw, Mapping):
+            return FileScope(
+                file_ids=frozenset(str(x).strip() for x in (raw.get("file_ids") or []) if str(x).strip()),
+                filename_contains=tuple(str(x).strip() for x in (raw.get("filename_contains") or []) if str(x).strip()),
+                source=str(raw.get("source") or "adapter_query_options").strip() or "adapter_query_options",
+            )
+        return FileScope()
 
     def _export_subgraph(self, subgraph_info: Dict[str, Any]) -> Dict[str, Any]:
         """Use the existing graph exporters to obtain nodes/edges for visualization."""

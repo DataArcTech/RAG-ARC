@@ -15,6 +15,7 @@ from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_l
 from ..fast.pattern_probe import PatternProbeTool
 from core.graph_adapter.concurrency import adapter_locked
 from core.prompts.deepsearch import HYBRID_NEIGHBORHOOD_SUMMARY_PROMPT
+from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 
 class HybridNeighborhoodProbeTool(GraphTool):
@@ -86,11 +87,17 @@ class HybridNeighborhoodProbeTool(GraphTool):
                 )
                 enriched.append(
                     EvidenceChunk(
-                        chunk_id=f"{ev.chunk_id}-hybrid",
-                        source=adapter.metadata().adapter_name,
+                        chunk_id=derived_chunk_id(
+                            tool_name=self.descriptor.name,
+                            plan_step=request.plan_step,
+                            label=f"hybrid_{ev.chunk_id}",
+                            content=str(ev.content),
+                        ),
+                        source=self.descriptor.name,
                         content=ev.content,
                         score=ev.score,
                         provenance={
+                            "seed_chunk_id": ev.chunk_id,
                             "pattern_match": ev.provenance,
                             "chain_traverse": subgraph,
                         },

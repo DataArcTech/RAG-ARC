@@ -273,7 +273,78 @@ async def test_pattern_probe_filters_chunks_without_hit_validation():
     result = await tool.run(request)
     assert not result.evidences
     assert "no chunks matched" in result.summary.lower()
-    assert result.diagnostics["per_keyword"][0]["filtered_chunk_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_pattern_probe_respects_source_file_name_scope():
+    class _ScopedAdapter(_StubAdapter):
+        async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None, query_options=None):
+            return {
+                "chunks": [
+                    {"content": f"{query} target hit", "metadata": {"id": 1, "source_file_name": "target_doc.pdf"}},
+                    {"content": f"{query} other hit", "metadata": {"id": 2, "source_file_name": "other_doc.pdf"}},
+                ],
+                "metadata": {"adapter": "hipporag"},
+            }
+
+    adapter = _ScopedAdapter()
+    tool = PatternProbeTool()
+    request = ToolRunRequest(
+        question="compare 《target_doc》",
+        plan_step="plan_scope",
+        context_evidences=[],
+        adapter=adapter,
+        access_scope=None,
+        extra={"focus_query": "target hit", "source_file_name": ["《target_doc》"]},
+    )
+    result = await tool.run(request)
+    assert result.evidences
+    assert all("target_doc.pdf" in (ev.provenance.get("metadata", {}).get("source_file_name") or "") for ev in result.evidences)
+
+
+@pytest.mark.asyncio
+async def test_tool_manager_filters_evidence_by_file_scope(tmp_path: Path):
+    class _ScopedTool:
+        descriptor = ToolDescriptor(
+            name="graph.pattern_scan",
+            channel="graph",
+            description="stub scoped tool",
+            profile="F",
+            determinism="deterministic",
+        )
+
+        async def run(self, request: ToolRunRequest) -> ToolResult:
+            ev1 = EvidenceChunk(
+                chunk_id="c_target",
+                source="hipporag",
+                content="hit",
+                provenance={"metadata": {"source_file_name": "target_doc.pdf"}},
+            )
+            ev2 = EvidenceChunk(
+                chunk_id="c_other",
+                source="hipporag",
+                content="hit",
+                provenance={"metadata": {"source_file_name": "other_doc.pdf"}},
+            )
+            return ToolResult(summary="ok", evidences=[ev1, ev2], diagnostics={})
+
+    configs = _tool_manager_configs(tmp_path, enable_builtin_tools=False, enabled_tools={"graph.pattern_scan": {"enabled": True}})
+    manager = DeepSearchToolManager(tool_configs=configs, telemetry_client=None, local_tools={"graph.pattern_scan": _ScopedTool()})
+    payload = {
+        "question": "compare 《target_doc》",
+        "plan_step": "plan_01",
+        "context_evidences": [],
+        "adapter": None,
+        "access_scope": None,
+        "extra": {"source_file_name": ["《target_doc》"]},
+        "graph_context": {"adapter_name": "hipporag", "metadata": {}},
+    }
+    result = await manager.invoke("graph.pattern_scan", payload=payload)
+    assert [ev.chunk_id for ev in result.evidences] == ["c_target"]
+    assert result.diagnostics.get("file_scope_applied") is True
+    assert result.diagnostics.get("input_evidence_count") == 2
+    assert result.diagnostics.get("kept_in_scope") == 1
+    assert result.diagnostics.get("dropped_out_of_scope") == 1
 
 
 @pytest.mark.asyncio
@@ -768,7 +839,9 @@ async def test_path_cache_returns_evidence_when_adapter_supports_strategy():
         extra={"seed_entities": ["A", "C"]},
     )
     out = await tool.run(req)
-    assert out.evidences and out.evidences[0].chunk_id == "p1"
+    assert out.evidences
+    assert out.evidences[0].chunk_id.startswith("graph.path_cache:")
+    assert out.evidences[0].provenance.get("raw_path", {}).get("path_id") == "p1"
 
 
 def test_tool_hint_registry_isolated_from_global_hints(monkeypatch):

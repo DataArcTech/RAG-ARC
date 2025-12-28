@@ -156,6 +156,29 @@ class DeepSearchQualityGate:
             deterministic_pass = False
             reasons.append(f"consistency_check_failed (issues={consistency_issue_count})")
 
+        generation = sr.get("generation") if isinstance(sr, Mapping) else None
+        generation_mode = generation.get("mode") if isinstance(generation, Mapping) else None
+        terminal_modes = {
+            "deterministic_no_evidence",
+            "deterministic_missing_named_files",
+        }
+        if isinstance(generation_mode, str) and generation_mode in terminal_modes:
+            # These modes are explicit safe-stops (e.g., "no evidence" / "missing named files").
+            # They should terminate the loop without requiring an LLM judge or follow-up actions.
+            return QualityGateResult(
+                enabled=True,
+                passed=True,
+                should_iterate=False,
+                metrics=metrics,
+                actions=[],
+                judge=None,
+                diagnostics={
+                    "terminal_mode": generation_mode,
+                    "deterministic_reasons": reasons,
+                    "external_allowed": external_allowed,
+                },
+            )
+
         if not cfg.enable_llm_judge:
             raise ValueError("Quality gate is enabled but enable_llm_judge is false.")
         if self.llm_connector is None:

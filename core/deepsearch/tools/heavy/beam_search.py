@@ -14,6 +14,7 @@ from config.core.deepsearch.tool_defaults import (
     BEAM_SEARCH_DEFAULT_TEMPERATURE,
 )
 from core.graph_adapter.concurrency import adapter_locked
+from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 
 class BeamSearchTool(GraphTool):
@@ -89,7 +90,7 @@ class BeamSearchTool(GraphTool):
             raise ValueError("Beam search traversal returned no paths.")
 
         ranked_paths = await self._rank_paths(request, paths, beam_size)
-        evidences = self._paths_to_evidences(ranked_paths, adapter.metadata().adapter_name)
+        evidences = self._paths_to_evidences(ranked_paths, tool_name=self.descriptor.name, plan_step=request.plan_step)
         diagnostics = {
             "beam_size": beam_size,
             "max_depth": max_depth,
@@ -244,15 +245,26 @@ class BeamSearchTool(GraphTool):
             )
         return normalized
 
-    def _paths_to_evidences(self, paths: Iterable[Dict[str, Any]], source: str) -> List[EvidenceChunk]:
+    def _paths_to_evidences(
+        self,
+        paths: Iterable[Dict[str, Any]],
+        *,
+        tool_name: str,
+        plan_step: str | None,
+    ) -> List[EvidenceChunk]:
         evidences: List[EvidenceChunk] = []
         for rank, path in enumerate(paths):
             nodes = path.get("nodes") or []
             content = path.get("summary") or self._path_summary(path)
             evidences.append(
                 EvidenceChunk(
-                    chunk_id=f"beam-path-{path['path_id']}",
-                    source=source,
+                    chunk_id=derived_chunk_id(
+                        tool_name=tool_name,
+                        plan_step=plan_step,
+                        label=f"beam_path_{rank}",
+                        content=str(content),
+                    ),
+                    source=tool_name,
                     content=content,
                     score=path.get("score"),
                     provenance={

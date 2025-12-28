@@ -6,6 +6,8 @@ from typing import Any, Dict, List
 from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote
 from core.prompts.deepsearch import LLM_CHAIN_EXPLORER_SYSTEM_PROMPT
 from core.graph_adapter.concurrency import adapter_locked
+from core.deepsearch.utils.file_scope import resolve_file_scope
+from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, safe_json_loads
 
@@ -52,11 +54,18 @@ class LLMChainExplorerTool(GraphTool):
         if adapter is None:
             raise RuntimeError("LLMChainExplorerTool requires a GraphDeepSearchAdapter")
 
+        file_scope = resolve_file_scope(
+            extra=request.extra,
+            graph_context_metadata=(request.graph_context.metadata if request.graph_context else {}),
+            question=request.question,
+        )
         evidences: List[EvidenceChunk] = []
         diagnostics = {
             "plan": plan,
             "thought_log": self._build_thought_log(plan, request.plan_step),
         }
+        if file_scope.enabled:
+            diagnostics["file_scope"] = file_scope.as_dict()
         for idx, spec in enumerate(plan[: self.max_queries]):
             sub_query = spec.get("query") or spec.get("description") or request.question
             channel = spec.get("channel") or "graph"
@@ -65,11 +74,17 @@ class LLMChainExplorerTool(GraphTool):
                     sub_query,
                     channel=channel,
                     access_scope=request.access_scope,
+                    query_options={"file_scope": file_scope.as_dict()} if file_scope.enabled else None,
                 )
                 summary = await adapter.summarize(channel, payload, access_scope=request.access_scope)
             evidence = EvidenceChunk(
-                chunk_id=f"llm-chain-{idx}",
-                source=adapter.metadata().adapter_name,
+                chunk_id=derived_chunk_id(
+                    tool_name=self.descriptor.name,
+                    plan_step=request.plan_step,
+                    label=f"llm_chain_{idx}",
+                    content=str(summary),
+                ),
+                source=self.descriptor.name,
                 content=summary,
                 score=spec.get("priority", 1.0),
                 provenance={

@@ -7,6 +7,7 @@ from encapsulation.data_model.deepsearch import EvidenceChunk
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.query_clean import clean_query
+from core.deepsearch.utils.file_scope import chunk_in_scope, resolve_file_scope
 
 
 class ChunkScanTool(GraphTool):
@@ -64,14 +65,39 @@ class ChunkScanTool(GraphTool):
         max_chunks = effective_max if effective_max is not None else 0
         if max_chunks < 0:
             max_chunks = 0
+        file_scope = resolve_file_scope(
+            extra=request.extra,
+            graph_context_metadata=(request.graph_context.metadata if request.graph_context else {}),
+            question=request.question,
+        )
         async with adapter_locked(adapter):
             payload = await adapter.aquery_subgraph(
                 query,
                 channel="graph",
                 access_scope=request.access_scope,
-                query_options={"top_k": max_chunks} if max_chunks else None,
+                query_options=(
+                    {
+                        "top_k": max_chunks,
+                        "file_scope": file_scope.as_dict(),
+                    }
+                    if max_chunks and file_scope.enabled
+                    else {"top_k": max_chunks}
+                    if max_chunks
+                    else {"file_scope": file_scope.as_dict()}
+                    if file_scope.enabled
+                    else None
+                ),
             )
         chunks = self._normalize_chunks(payload.get("chunks"))
+        if file_scope.enabled:
+            chunks = [
+                chunk
+                for chunk in chunks
+                if chunk_in_scope(
+                    chunk_metadata=(chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}),
+                    scope=file_scope,
+                )
+            ]
         selected: List[Dict[str, Any]] = []
         for chunk in chunks:
             if max_chunks and len(selected) >= max_chunks:

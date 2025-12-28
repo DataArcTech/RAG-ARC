@@ -24,6 +24,7 @@ from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.trace import emit_trace
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 from core.deepsearch.utils.query_clean import clean_query
+from core.deepsearch.utils.file_scope import chunk_in_scope, resolve_file_scope
 from core.utils.json_safe import json_safe
 
 logger = logging.getLogger(__name__)
@@ -113,6 +114,11 @@ class GraphTraversalExecutor:
         try:
             merged_seed_entities = self._merge_seed_entities(context, tool_args)
             query = self._resolve_query(step.description, tool_args)
+            file_scope = resolve_file_scope(
+                extra=tool_args or {},
+                graph_context_metadata=(context.metadata or {}),
+                question=context.question,
+            )
 
             await emit_trace(
                 "tool_call",
@@ -144,6 +150,7 @@ class GraphTraversalExecutor:
                     query,
                     channel=step.channel,
                     access_scope=scope,
+                    query_options={"file_scope": file_scope.as_dict()} if file_scope.enabled else None,
                 )
                 filter_type = "semantic" if self.settings.allow_semantic_channel else "relational"
                 filtered = await self.adapter.context_filter(
@@ -174,7 +181,11 @@ class GraphTraversalExecutor:
             triples = self._extract_triples(filtered, subgraph)
             adapter_source = getattr(getattr(self.adapter, "metadata", lambda: None)(), "adapter_name", None)  # type: ignore[misc]
             source = str(adapter_source or context.adapter_name or "graph").strip() or "graph"
-            chunks = self._extract_chunks(filtered, subgraph)
+            chunks = [
+                chunk
+                for chunk in self._extract_chunks(filtered, subgraph)
+                if chunk_in_scope(chunk_metadata=(chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}), scope=file_scope)
+            ]
             evidences = self._chunks_to_evidences(
                 chunks,
                 source=source,

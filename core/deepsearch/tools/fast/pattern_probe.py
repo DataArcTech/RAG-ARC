@@ -12,6 +12,7 @@ from config.core.deepsearch.stopwords import PATTERN_PROBE_CJK_STOPWORDS, PATTER
 from core.graph_adapter.base import GraphDeepSearchAdapter
 from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.query_clean import clean_query
+from core.deepsearch.utils.file_scope import chunk_in_scope, resolve_file_scope
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 
@@ -98,6 +99,13 @@ class PatternProbeTool(GraphTool):
             return ToolResult(summary="Pattern scan skipped: no stable keywords extracted.")
 
         diagnostics: Dict[str, Any] = {"keywords": keywords}
+        file_scope = resolve_file_scope(
+            extra=request.extra,
+            graph_context_metadata=(request.graph_context.metadata if request.graph_context else {}),
+            question=request.question,
+        )
+        if file_scope.enabled:
+            diagnostics["file_scope"] = file_scope.as_dict()
         match_fields = self._resolve_match_fields(request.extra)
         diagnostics["match_fields"] = match_fields
         top_k = self._resolve_top_k_override(request.extra)
@@ -132,8 +140,33 @@ class PatternProbeTool(GraphTool):
                     keyword,
                     channel="graph",
                     access_scope=request.access_scope,
-                    query_options={"top_k": top_k} if top_k is not None else None,
+                    query_options=(
+                        {
+                            "top_k": top_k,
+                            "file_scope": file_scope.as_dict(),
+                        }
+                        if top_k is not None and file_scope.enabled
+                        else {"top_k": top_k}
+                        if top_k is not None
+                        else {"file_scope": file_scope.as_dict()}
+                        if file_scope.enabled
+                        else None
+                    ),
                 )
+                if file_scope.enabled:
+                    chunks_payload = payload.get("chunks")
+                    if isinstance(chunks_payload, list):
+                        filtered_chunks = [
+                            chunk
+                            for chunk in chunks_payload
+                            if isinstance(chunk, dict)
+                            and chunk_in_scope(
+                                chunk_metadata=(chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}),
+                                scope=file_scope,
+                            )
+                        ]
+                        payload = dict(payload)
+                        payload["chunks"] = filtered_chunks
                 keyword_hits, filter_diag = self._filter_chunks(
                     payload,
                     keyword,

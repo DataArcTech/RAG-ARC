@@ -122,6 +122,10 @@ class DeepSearchService:
             external_allowed=self._external_allowed_flag(),
             artifact_dir=artifact_dir,
         )
+        reasoning_context = self._attach_file_scope_hints(
+            reasoning_context,
+            question=normalized_question,
+        )
 
         await self._emit_initial_think(
             question=normalized_question,
@@ -827,6 +831,34 @@ class DeepSearchService:
         except AttributeError:
             payload = context.model_dump(exclude_none=True)
             payload["metadata"] = base
+            return GraphQueryContext(**payload)
+
+    @staticmethod
+    def _attach_file_scope_hints(context: GraphQueryContext, *, question: str) -> GraphQueryContext:
+        """Attach a default file_scope when the question explicitly names documents (e.g. 《...》).
+
+        This is a safety guard: when users point to specific files/products, downstream tools must not
+        silently borrow evidence from unrelated indexed files.
+        """
+
+        from core.deepsearch.utils.file_scope import extract_titles_from_question
+
+        titles = extract_titles_from_question(question or "")
+        if not titles:
+            return context
+        metadata = dict(context.metadata or {})
+        metadata.setdefault(
+            "file_scope",
+            {
+                "filename_contains": titles,
+                "source": "question_titles",
+            },
+        )
+        try:
+            return context.model_copy(update={"metadata": metadata})
+        except AttributeError:
+            payload = context.model_dump(exclude_none=True)
+            payload["metadata"] = metadata
             return GraphQueryContext(**payload)
 
     def _external_allowed_flag(self) -> bool:

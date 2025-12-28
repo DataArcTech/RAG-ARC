@@ -23,6 +23,7 @@ from core.deepsearch.tools import (
 from core.deepsearch.tooling.registry import DEFAULT_TOOL_HINT_REGISTRY, ToolHintRegistry
 from core.utils.json_safe import json_safe
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
+from core.deepsearch.utils.file_scope import filter_evidences, resolve_file_scope
 from core.deepsearch.trace import emit_trace
 
 logger = logging.getLogger(__name__)
@@ -290,7 +291,7 @@ class MCPToolRouter:
             normalized = str(text).strip()
             evidences.append(
                 EvidenceChunk(
-                    chunk_id=hashed_chunk_id(source=descriptor.namespace or descriptor.name, content=normalized, prefix="mcp"),
+                    chunk_id=hashed_chunk_id(source=descriptor.namespace or descriptor.name, content=normalized, prefix="mcp:"),
                     source=descriptor.namespace or descriptor.name,
                     content=normalized,
                     provenance={"content_type": getattr(block, "type", "text")},
@@ -541,6 +542,7 @@ class DeepSearchToolManager:
     ) -> ToolResultPayload:
         remote_payload = self._prepare_remote_payload(tool_name, payload, request)
         payload_model, log = await self.mcp_router.invoke(descriptor, remote_payload)  # type: ignore[arg-type]
+        self._apply_file_scope_filter(payload_model, request)
         self._attach_artifact_reference(tool_name, payload_model)
         self._record_remote(tool_name, log, request, payload_model, descriptor)
         return payload_model
@@ -559,11 +561,33 @@ class DeepSearchToolManager:
         if descriptor is None:
             raise RuntimeError(f"Local tool '{tool_name}' does not expose a descriptor")
         payload_model = result.as_payload(descriptor)
+        self._apply_file_scope_filter(payload_model, request)
         payload_model.diagnostics.setdefault("latency_ms", latency_ms)
         payload_model.diagnostics.setdefault("evidence_count", len(payload_model.evidences or []))
         self._attach_artifact_reference(tool_name, payload_model)
         self._record_local(tool_name, payload_model, request, latency_ms, descriptor)
         return payload_model
+
+    @staticmethod
+    def _apply_file_scope_filter(result: ToolResultPayload, request: ToolRunRequest) -> None:
+        """Filter tool evidences to enforce file-scope alignment when configured."""
+
+        ctx_meta = None
+        if request.graph_context is not None:
+            ctx_meta = request.graph_context.metadata
+        scope = resolve_file_scope(
+            extra=request.extra,
+            graph_context_metadata=(ctx_meta or {}),
+            question=request.question,
+        )
+        if not scope.enabled:
+            result.diagnostics.setdefault("file_scope_applied", False)
+            return
+
+        kept, diag = filter_evidences(result.evidences or [], scope=scope)
+        result.evidences = kept
+        result.diagnostics.update(diag)
+        result.diagnostics["evidence_count"] = len(kept)
 
     def _resolve_descriptor(self, tool_name: str) -> ToolDescriptor | None:
         descriptor = None

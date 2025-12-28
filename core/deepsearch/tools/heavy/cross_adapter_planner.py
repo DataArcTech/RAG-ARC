@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Mapping, Sequence
 from encapsulation.data_model.deepsearch import EvidenceChunk
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, build_input_schema, safe_json_loads
+from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 
 class CrossAdapterPlannerTool(GraphTool):
@@ -64,8 +65,13 @@ class CrossAdapterPlannerTool(GraphTool):
         summary_text, plan_items = await self._generate_plan(request, adapters)
         evidences = [
             EvidenceChunk(
-                chunk_id=f"adapter-plan-{idx}",
-                source="cross_adapter_planner",
+                chunk_id=derived_chunk_id(
+                    tool_name=self.descriptor.name,
+                    plan_step=request.plan_step,
+                    label=f"adapter_plan_{idx}",
+                    content=str(item),
+                ),
+                source=self.descriptor.name,
                 content=item,
                 provenance={"adapters": adapters},
             )

@@ -17,6 +17,12 @@ from core.presentation.evidence import build_deepsearch_evidence
 from core.deepsearch.memory import EvidenceBank
 from config.core.deepsearch import report_composer_defaults as composer_defaults
 from config.core.deepsearch.stopwords import EVIDENCE_RANK_STOPWORDS
+from core.deepsearch.utils.file_scope import (
+    extract_titles_from_question,
+    filter_evidences,
+    normalize_filename_token,
+    resolve_file_scope,
+)
 
 
 def _rank_evidences_for_question(question: str, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -193,6 +199,170 @@ class DeepSearchReporter:
 
         evidences = self._merge_evidences(trace.get("evidences"), external_evidence, question=question)
         authoritative_evidences, tool_evidences = _split_authoritative_evidences(evidences)
+        graph_context = trace.get("graph_context") if isinstance(trace.get("graph_context"), dict) else {}
+        ctx_meta = graph_context.get("metadata") if isinstance(graph_context, dict) else {}
+        file_scope = resolve_file_scope(graph_context_metadata=(ctx_meta if isinstance(ctx_meta, dict) else {}), question=question)
+        file_scope_diag: Dict[str, Any] = {}
+        if file_scope.enabled:
+            authoritative_evidences, file_scope_diag = filter_evidences(authoritative_evidences, scope=file_scope)
+        if not authoritative_evidences:
+            msg = "No reliable evidence was retrieved for this question."
+            if file_scope.enabled:
+                tokens = ", ".join(file_scope.filename_contains) if file_scope.filename_contains else ""
+                if tokens:
+                    msg = f"No reliable evidence was found within the specified file scope ({tokens})."
+                else:
+                    msg = "No reliable evidence was found within the specified file scope."
+
+            request_context = self._extract_request_context(trace)
+            metadata: Dict[str, Any] = {
+                "question": question,
+                "adapter_metadata": trace.get("adapter_metadata") or {},
+                "graph_summary": self._graph_summary(trace.get("graph_traversals") or []),
+                "plan": {
+                    "steps": trace.get("plan_steps") or [],
+                    "completed": sum(1 for step in ((trace.get("reasoning_steps") or []) or []) if isinstance(step, dict) and step.get("status") == "done"),
+                },
+                "coverage_metrics": trace.get("coverage_metrics") or {},
+                "pending_external": trace.get("pending_external") or [],
+                "parallel_thinking_runs": int(self.config["parallel_thinking_runs"]),
+                "report_profile": {
+                    "include_graph_viz": bool(self.config["include_graph_viz"]),
+                    "enable_custom_summary": bool(self.config["enable_custom_summary"]),
+                },
+                "evidence_profile": {
+                    "total": len(evidences),
+                    "authoritative": 0,
+                    "tool_generated": len(tool_evidences),
+                },
+            }
+            if file_scope_diag:
+                metadata["evidence_profile"]["file_scope"] = file_scope_diag
+            if request_context:
+                metadata["request_context"] = request_context
+            if metadata["report_profile"]["include_graph_viz"]:
+                metadata["graph_visualization"] = trace.get("graph_traversals") or []
+
+                structured_report = {
+                    "format_version": self.STRUCTURED_REPORT_VERSION,
+                    "title": question,
+                    "short_answer": msg,
+                    "summary": msg,
+                    "sections": [],
+                    "limitations": [
+                        "Insufficient evidence is available to produce verifiable, citation-backed conclusions; to avoid mis-citations, report generation was stopped.",
+                    ],
+                    "next_steps": [
+                        "Confirm the target file(s) are indexed successfully and visible under the current user/tenant scope.",
+                        "Rewrite the query with more specific clause/page/table keywords or provide more context hints.",
+                    ],
+                    "citations": [],
+                    "evidence_index": [],
+                    "graph_evidence": {},
+                    "text": msg,
+                "context": request_context or {},
+                "generation": {"mode": "deterministic_no_evidence"},
+            }
+            return {
+                "question": question,
+                "answer": msg,
+                "highlights": [],
+                "evidences": [],
+                "structured_report": structured_report,
+                "metadata": metadata,
+            }
+
+        requested_titles = extract_titles_from_question(question)
+        if len(requested_titles) >= 2:
+            covered: set[str] = set()
+            normalized = [normalize_filename_token(t) for t in requested_titles]
+            normalized_map = {t: token for t, token in zip(requested_titles, normalized) if token}
+
+            for ev in authoritative_evidences:
+                if not isinstance(ev, dict):
+                    continue
+                prov = ev.get("provenance") or {}
+                if not isinstance(prov, dict):
+                    continue
+                meta = prov.get("metadata") or {}
+                if isinstance(meta, dict):
+                    filename = meta.get("filename") or meta.get("source_file_name") or meta.get("path")
+                else:
+                    filename = None
+                if not isinstance(filename, str) or not filename.strip():
+                    continue
+                lowered = filename.lower()
+                for title, token in normalized_map.items():
+                    if token.lower() in lowered:
+                        covered.add(title)
+
+            missing = [t for t in requested_titles if t not in covered]
+            if missing:
+                missing_text = ", ".join(missing)
+                msg = (
+                    "Unable to complete the comparison: no reliable evidence was retrieved for the following named file(s): "
+                    f"{missing_text}."
+                )
+                if covered:
+                    msg += f" (Only retrieved evidence from: {', '.join(sorted(covered))})"
+
+                request_context = self._extract_request_context(trace)
+                metadata: Dict[str, Any] = {
+                    "question": question,
+                    "adapter_metadata": trace.get("adapter_metadata") or {},
+                    "graph_summary": self._graph_summary(trace.get("graph_traversals") or []),
+                    "plan": {
+                        "steps": trace.get("plan_steps") or [],
+                        "completed": sum(1 for step in (trace.get("reasoning_steps") or []) if isinstance(step, dict) and step.get("status") == "done"),
+                    },
+                    "coverage_metrics": trace.get("coverage_metrics") or {},
+                    "pending_external": trace.get("pending_external") or [],
+                    "parallel_thinking_runs": int(self.config["parallel_thinking_runs"]),
+                    "report_profile": {
+                        "include_graph_viz": bool(self.config["include_graph_viz"]),
+                        "enable_custom_summary": bool(self.config["enable_custom_summary"]),
+                    },
+                    "evidence_profile": {
+                        "total": len(evidences),
+                        "authoritative": len(authoritative_evidences),
+                        "tool_generated": len(tool_evidences),
+                    },
+                }
+                if file_scope_diag:
+                    metadata["evidence_profile"]["file_scope"] = file_scope_diag
+                if request_context:
+                    metadata["request_context"] = request_context
+                if metadata["report_profile"]["include_graph_viz"]:
+                    metadata["graph_visualization"] = trace.get("graph_traversals") or []
+
+                structured_report = {
+                    "format_version": self.STRUCTURED_REPORT_VERSION,
+                    "title": question,
+                    "short_answer": msg,
+                    "summary": msg,
+                    "sections": [],
+                    "limitations": [
+                        "A comparison requires verifiable evidence for each named file; to avoid cross-file mis-citations, the comparison was not generated.",
+                    ],
+                    "next_steps": [
+                        "Confirm the missing file(s) are indexed successfully and visible under the current user/tenant scope.",
+                        "Split the comparison into two single-file questions and merge the results after manual verification.",
+                    ],
+                    "citations": [],
+                    "evidence_index": [],
+                    "graph_evidence": {},
+                    "text": msg,
+                    "context": request_context or {},
+                    "generation": {"mode": "deterministic_missing_named_files"},
+                }
+                return {
+                    "question": question,
+                    "answer": msg,
+                    "highlights": [],
+                    "evidences": authoritative_evidences,
+                    "structured_report": structured_report,
+                    "metadata": metadata,
+                }
         llm_base_evidences = authoritative_evidences
         llm_evidences, alias_bundle = (
             self._alias_evidences_for_llm(llm_base_evidences) if self.citation_aliases else (llm_base_evidences, None)
@@ -228,6 +398,8 @@ class DeepSearchReporter:
                 "tool_generated": len(tool_evidences),
             },
         }
+        if file_scope_diag:
+            metadata["evidence_profile"]["file_scope"] = file_scope_diag
         if alias_bundle:
             metadata["citation_aliases"] = {
                 "enabled": True,
@@ -274,7 +446,7 @@ class DeepSearchReporter:
             if alias_diag:
                 metadata["citation_alias_rewrite"] = alias_diag
         summary_text = structured_llm.get("short_answer") or structured_llm.get("summary")
-        if isinstance(summary_text, str) and summary_text.strip():
+        if isinstance(summary_text, str) and summary_text.strip() and authoritative_evidences:
             if not re.search(r"(?:\[[^\[\]]+\]|【[^【】]+】)", summary_text):
                 raise ValueError("short_answer is missing inline citations (cite-first hard gate).")
         if self.enable_citation_agent:
