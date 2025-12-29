@@ -77,7 +77,7 @@ PARSER_OUTPUT_DIR=${PARSER_OUTPUT_DIR:-${APP_DIR}/data/parsed_files}
 LOCAL_FILE_STORAGE_PATH=${LOCAL_FILE_STORAGE_PATH:-${APP_DIR}/local/files}
 
 # PM2 应用名称 (建议使用独特名称以避免冲突)
-PM2_APP_NAME="rag-app-livingKB"
+PM2_APP_NAME="rag-app-livingKB_test"
 
 # ==============================================================================
 # 4. 检查核心依赖命令
