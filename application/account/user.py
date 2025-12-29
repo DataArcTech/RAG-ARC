@@ -51,16 +51,16 @@ class Account(AbstractModule):
     def get_user_by_id(self, user_id: uuid.UUID):
         return self.user_storage.get_user(user_id)
 
-    def get_user_by_username(self, username: str):
-        return self.user_storage.get_user_by_username(username)
+    def get_user_by_username(self, username: str, type: Optional[int] = None):
+        return self.user_storage.get_user_by_username(username, type=type)
     
     async def get_user_by_id_async(self, user_id: uuid.UUID):
         """Async wrapper for get_user_by_id."""
         return await self._run_blocking(self.get_user_by_id, user_id)
 
-    async def get_user_by_username_async(self, username: str):
+    async def get_user_by_username_async(self, username: str, type: Optional[int] = None):
         """Async wrapper for get_user_by_username."""
-        return await self._run_blocking(self.get_user_by_username, username)
+        return await self._run_blocking(self.get_user_by_username, username, type)
     
     # Authentication utility functions
     def verify_password(self, plain_password: str, hashed_password: str) -> bool:
@@ -80,9 +80,9 @@ class Account(AbstractModule):
             return False
         return user
 
-    async def authenticate_user_async(self, username: str, password: str):
-        """Authenticate a user with username and password (async, non-blocking)."""
-        user = await self.get_user_by_username_async(username)
+    async def authenticate_user_async(self, username: str, password: str, type: Optional[int] = None):
+        """Authenticate a user with username, password and type (async, non-blocking)."""
+        user = await self.get_user_by_username_async(username, type=type)
         if not user:
             return False
         # Password verification is CPU-bound but fast, can run in executor if needed
@@ -93,9 +93,14 @@ class Account(AbstractModule):
     def register_user(self, user_data: UserCreate):
         """Register a new user (synchronous)."""
         try:
-            hashed_password = self.get_password_hash(user_data.password)
             # 如果 type 为 None，使用默认值 0
             user_type = user_data.type if user_data.type is not None else 0
+            # 检查用户是否已存在（通过 user_name 和 type 组合）
+            existing_user = self.user_storage.get_user_by_username(user_data.user_name, type=user_type)
+            if existing_user:
+                raise HTTPException(status_code=400, detail="Username already exists for this type")
+            
+            hashed_password = self.get_password_hash(user_data.password)
             new_user_id = self.user_storage.create_user(
                 user_name=user_data.user_name,
                 hashed_password=hashed_password,
@@ -105,6 +110,8 @@ class Account(AbstractModule):
             # 返回创建的用户对象
             new_user = self.user_storage.get_user(new_user_id)
             return new_user
+        except HTTPException:
+            raise
         except (IntegrityError, UserValidationError) as e:
             logger.error(f"User creation failed: {str(e)}")
             raise HTTPException(status_code=400, detail="User creation failed")

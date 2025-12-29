@@ -311,20 +311,15 @@ async def ws_get_current_user(
 async def login_for_access_token_endpoint(
     login_data: LoginRequest,
 ) -> Token:
-    # Use async authentication to avoid blocking the event loop
-    user = await get_account_handler().authenticate_user_async(login_data.user_name, login_data.password)
+    # 如果 type 为 None，使用默认值 0
+    login_type = login_data.type if login_data.type is not None else 0
+    # Use async authentication to avoid blocking the event loop, 传入 type 参数
+    user = await get_account_handler().authenticate_user_async(login_data.user_name, login_data.password, type=login_type)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
-        )
-    # 验证 type 是否匹配（如果 type 为 None，使用默认值 0）
-    login_type = login_data.type if login_data.type is not None else 0
-    if user.type != login_type:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User type mismatch",
         )
     # 更新用户登录时间
     account_handler = get_account_handler()

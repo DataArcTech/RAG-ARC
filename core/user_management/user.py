@@ -103,10 +103,10 @@ class UserStorage(AbstractModule):
             # Validate input
             self._validate_user_creation(user_name, hashed_password)
 
-            # Check if username already exists
-            existing_user = self.metadata_store.get_user_by_username(user_name, **kwargs)
+            # Check if username already exists for this type
+            existing_user = self.metadata_store.get_user_by_username(user_name, type=type, **kwargs)
             if existing_user:
-                raise UserValidationError(f"Username '{user_name}' already exists")
+                raise UserValidationError(f"Username '{user_name}' already exists for type {type}")
 
             # Create user metadata
             user_metadata = User(
@@ -159,20 +159,22 @@ class UserStorage(AbstractModule):
     def get_user_by_username(
         self,
         username: str,
+        type: Optional[int] = None,
         **kwargs: Any
     ) -> Optional[User]:
         """
-        Get user by username.
+        Get user by username and type.
 
         Args:
             username: Username
+            type: User type (0=livingKB / 1=chatKB)
             **kwargs: Additional arguments
 
         Returns:
             User metadata or None if not found
         """
         try:
-            return self.metadata_store.get_user_by_username(username, **kwargs)
+            return self.metadata_store.get_user_by_username(username, type=type, **kwargs)
         except Exception as e:
             logger.error(f"Failed to get user by username {username}: {e}")
             return None

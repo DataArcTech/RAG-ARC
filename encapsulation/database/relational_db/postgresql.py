@@ -877,11 +877,14 @@ class PostgreSQLDB(RelationalDB):
             logger.error(f"Database error getting user {user_id}: {e}")
             raise
 
-    def get_user_by_username(self, user_name: str, **kwargs: Any) -> Optional[User]:
-        """Get user by username using SQLAlchemy ORM"""
+    def get_user_by_username(self, user_name: str, type: Optional[int] = None, **kwargs: Any) -> Optional[User]:
+        """Get user by username and type using SQLAlchemy ORM"""
         try:
             with self.SessionMaker() as session:
-                user = session.query(User).filter_by(user_name=user_name).first()
+                query = session.query(User).filter_by(user_name=user_name)
+                if type is not None:
+                    query = query.filter_by(type=type)
+                user = query.first()
                 if user:
                     # Detach from session to avoid lazy loading issues
                     session.expunge(user)
