@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ==============================================================================
-# 核心优化：自动定位main.py所在目录（无需写死路径）
+# 1. 核心优化：自动定位main.py所在目录（无需写死路径）
 # ==============================================================================
 find_main_py() {
     local current_dir=$(pwd)
@@ -31,34 +31,32 @@ APP_DIR=$(find_main_py)
 echo "🔍 自动定位到应用目录: ${APP_DIR}"
 
 # ==============================================================================
-# 加载.env文件
+# 2. 加载.env文件
 # ==============================================================================
 ENV_FILE=${ENV_FILE:-${APP_DIR}/.env}
 if [ -f "${ENV_FILE}" ]; then
     echo "🔧 加载环境配置文件: ${ENV_FILE}"
     export $(grep -v '^#' ${ENV_FILE} | grep -v '^$' | xargs)
 else
-    echo "⚠️  未找到.env文件（${ENV_FILE}），使用脚本默认值"
+    echo "⚠️  未找到.env文件（${ENV_FILE}），将使用脚本默认值或系统环境变量"
 fi
 
 # ==============================================================================
-# 配置区
+# 3. 配置区 (所有配置项均可通过.env文件覆盖)
 # ==============================================================================
+# Docker 网络和容器配置
 NETWORK_NAME=${NETWORK_NAME:-rag-arc-network}
-
 POSTGRES_CONTAINER_NAME=${POSTGRES_CONTAINER_NAME:-rag-arc-postgres}
+REDIS_CONTAINER_NAME=${REDIS_CONTAINER_NAME:-rag-arc-redis}
+NEO4J_CONTAINER_NAME=${NEO4J_CONTAINER_NAME:-rag-arc-neo4j}
+
+# 数据库端口和凭据
 POSTGRES_HOST_PORT=${POSTGRES_PORT:-5432}
 POSTGRES_USER=${POSTGRES_USER:-postgres}
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres123}
 POSTGRES_DB=${POSTGRES_DB:-rag_arc}
-POSTGRES_IMAGE=${POSTGRES_IMAGE:-postgres:16-alpine}
-
-REDIS_CONTAINER_NAME=${REDIS_CONTAINER_NAME:-rag-arc-redis}
 REDIS_HOST_PORT=${REDIS_PORT:-6379}
-REDIS_IMAGE=${REDIS_IMAGE:-redis:7-alpine}
 REDIS_PASSWORD=${REDIS_PASSWORD:-""}
-
-NEO4J_CONTAINER_NAME=${NEO4J_CONTAINER_NAME:-rag-arc-neo4j}
 NEO4J_WEB_HOST_PORT=${NEO4J_WEB_PORT:-7474}
 NEO4J_BOLT_HOST_PORT=${NEO4J_BOLT_PORT:-7687}
 if [[ -n "${NEO4J_URL:-}" ]]; then
@@ -66,27 +64,51 @@ if [[ -n "${NEO4J_URL:-}" ]]; then
 fi
 NEO4J_USERNAME=${NEO4J_USERNAME:-neo4j}
 NEO4J_PASSWORD=${NEO4J_PASSWORD:-12345678}
+
+# Docker 镜像
+POSTGRES_IMAGE=${POSTGRES_IMAGE:-postgres:16-alpine}
+REDIS_IMAGE=${REDIS_IMAGE:-redis:7-alpine}
 NEO4J_IMAGE=${NEO4J_IMAGE:-neo4j:latest}
 
+# 应用配置
 APP_PORT=${APP_PORT:-8000}
 APP_LOG_FILE=${APP_LOG_FILE:-${APP_DIR}/log/app.log}
 PARSER_OUTPUT_DIR=${PARSER_OUTPUT_DIR:-${APP_DIR}/data/parsed_files}
 LOCAL_FILE_STORAGE_PATH=${LOCAL_FILE_STORAGE_PATH:-${APP_DIR}/local/files}
 
+# PM2 应用名称 (建议使用独特名称以避免冲突)
+PM2_APP_NAME="rag-app-livingKB"
+
 # ==============================================================================
-# 核心功能
+# 4. 检查核心依赖命令
+# ==============================================================================
+check_dependency() {
+    if ! command -v "$1" &> /dev/null; then
+        echo "❌ 错误: 未找到 '$1' 命令。请先安装 $1。" >&2
+        exit 1
+    fi
+}
+
+check_dependency "docker"
+check_dependency "pm2"
+check_dependency "uv"
+check_dependency "lsof" # 用于端口清理
+check_dependency "pkill" # 用于进程清理
+
+# ==============================================================================
+# 5. 核心功能：启动和管理 Docker 容器
 # ==============================================================================
 echo -e "\n=========================================="
 echo "  RAG-ARC 启动脚本 (自动适配路径+PM2守护)"
 echo "=========================================="
 echo ""
 
-# 1. 创建Docker网络
+# 5.1 创建Docker网络
 echo "📦 创建/检查Docker网络 [${NETWORK_NAME}]..."
 docker network create ${NETWORK_NAME} 2>/dev/null || echo "  ✅ 网络已存在，无需创建"
 echo ""
 
-# 2. 处理PostgreSQL
+# 5.2 处理PostgreSQL
 echo "🗄️  处理PostgreSQL容器 [${POSTGRES_CONTAINER_NAME}]..."
 if docker ps -a | grep -q "${POSTGRES_CONTAINER_NAME}"; then
     docker stop ${POSTGRES_CONTAINER_NAME} > /dev/null 2>&1 && echo "  ⏹️  已停止旧PostgreSQL容器"
@@ -104,7 +126,7 @@ else
 fi
 echo ""
 
-# 3. 处理Redis
+# 5.3 处理Redis
 echo "📦 处理Redis容器 [${REDIS_CONTAINER_NAME}]..."
 REDIS_CMD="redis-server --appendonly yes"
 if [[ -n "${REDIS_PASSWORD}" ]]; then
@@ -123,7 +145,7 @@ else
 fi
 echo ""
 
-# 4. 处理Neo4j
+# 5.4 处理Neo4j
 echo "🔷 处理Neo4j容器 [${NEO4J_CONTAINER_NAME}]..."
 if docker ps -a | grep -q "${NEO4J_CONTAINER_NAME}"; then
     docker stop ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 && echo "  ⏹️  已停止旧Neo4j容器"
@@ -143,13 +165,13 @@ else
 fi
 echo ""
 
-# 5. 等待中间件就绪
+# 5.5 等待中间件就绪
 echo "⏳ 等待中间件就绪..."
 sleep 10
 MAX_ATTEMPTS=30
 ATTEMPT=0
 while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-    if docker exec ${POSTGRES_CONTAINER_NAME} pg_isready -U ${POSTGRES_USER} > /dev/null 2>&1; then
+    if docker exec ${POSTGRES_CONTAINER_NAME} pg_isready -U ${POSTGRES_USER} -h localhost > /dev/null 2>&1; then
         echo "  ✅ PostgreSQL已就绪 (端口: ${POSTGRES_HOST_PORT})"
         break
     fi
@@ -159,36 +181,22 @@ while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
 done
 echo ""
 if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
-    echo "  ⚠️  PostgreSQL启动超时，但继续启动应用（请检查容器日志）"
+    echo "  ⚠️  PostgreSQL启动超时，但将继续尝试启动应用（请检查容器日志）"
 fi
 
 # ==============================================================================
-# 6. 使用PM2启动/重启应用
+# 6. 使用 PM2 启动/重启应用
 # ==============================================================================
 echo "🚀 启动/重启应用 [${APP_DIR}]..."
 mkdir -p ${PARSER_OUTPUT_DIR} ${LOCAL_FILE_STORAGE_PATH} $(dirname ${APP_LOG_FILE})
 
+# 确保 uv 命令在 PATH 中
 if [ -f "$HOME/.local/bin/env" ]; then
     source "$HOME/.local/bin/env" 2>/dev/null || true
 fi
 export PATH="$HOME/.local/bin:$PATH"
 
-if ! command -v uv &> /dev/null; then
-    echo "  ❌ uv命令未找到，请先安装: curl -LsSf https://astral.sh/uv/install.sh | sh"
-    exit 1
-fi
-
-if ! command -v pm2 &> /dev/null; then
-    echo "  ❌ pm2命令未找到，请先安装: npm install pm2 -g"
-    exit 1
-fi
-
-cd ${APP_DIR} || { echo "  ❌ 应用目录不存在: ${APP_DIR}"; exit 1; }
-
-if [ ! -f "main.py" ]; then
-    echo "  ❌ 应用目录中缺少 main.py: ${APP_DIR}/main.py"
-    exit 1
-fi
+cd ${APP_DIR} || { echo "❌ 应用目录不存在: ${APP_DIR}"; exit 1; }
 
 if [ -f "pyproject.toml" ]; then
     echo "  📦 同步项目依赖..."
@@ -199,20 +207,23 @@ if [ -f "pyproject.toml" ]; then
     fi
 fi
 
-# --- 使用 PM2 管理进程 ---
-PM2_APP_NAME="rag-app" # 定义一个PM2应用名称
-
-# 停止并删除旧的 PM2 应用
-if pm2 list | grep -q "${PM2_APP_NAME}"; then
-    echo "  ⏹️  正在停止并删除旧的 ${PM2_APP_NAME} 进程 (via PM2)..."
-    pm2 stop "${PM2_APP_NAME}"
-    pm2 delete "${PM2_APP_NAME}"
-else
-    echo "  ℹ️  PM2 中无旧的 ${PM2_APP_NAME} 应用进程"
+# 6.1 终极健壮版：清理残留进程和端口
+echo "🧹 正在清理可能残留的旧应用进程和端口..."
+# 优先通过 PM2 清理
+pm2 stop "${PM2_APP_NAME}" > /dev/null 2>&1 || true
+pm2 delete "${PM2_APP_NAME}" > /dev/null 2>&1 || true
+# 然后通过命令行模式清理
+pkill -f "uvicorn main:app --port ${APP_PORT}" > /dev/null 2>&1 || true
+# 最后通过端口强制清理顽固进程
+PID_TO_KILL=$(lsof -t -i:"${APP_PORT}")
+if [ -n "${PID_TO_KILL}" ]; then
+    echo "  ⚠️  发现进程 ${PID_TO_KILL} 占用端口 ${APP_PORT}，正在强制杀死..."
+    kill -9 "${PID_TO_KILL}" > /dev/null 2>&1 || true
+    sleep 2
 fi
-sleep 2
+echo "  ✅ 清理完成。"
 
-# 使用 PM2 启动新进程
+# 6.2 使用 PM2 启动新进程
 echo "  🚀 正在通过 PM2 启动新的 ${PM2_APP_NAME} 进程..."
 POSTGRES_HOST=${POSTGRES_HOST:-localhost} \
 POSTGRES_PORT=${POSTGRES_HOST_PORT} \
@@ -259,7 +270,7 @@ if pm2 list | grep -q "${PM2_APP_NAME}" && pm2 list | grep -q "online"; then
     echo "📋 服务信息（自动适配路径）："
     echo "  - PostgreSQL: ${POSTGRES_HOST}:${POSTGRES_HOST_PORT} (容器: ${POSTGRES_CONTAINER_NAME})"
     echo "  - Redis: ${REDIS_HOST}:${REDIS_HOST_PORT} (容器: ${REDIS_CONTAINER_NAME})"
-    echo "  - Neo4j Web: localhost:${NEO4J_WEB_HOST_PORT}"
+    echo "  - Neo4j Web: http://localhost:${NEO4J_WEB_HOST_PORT}"
     echo "  - Neo4j Bolt: ${NEO4J_URL} (容器: ${NEO4J_CONTAINER_NAME})"
     echo "  - 应用API: http://localhost:${APP_PORT}"
     echo "  - 自动定位的代码目录: ${APP_DIR}"
@@ -269,6 +280,7 @@ if pm2 list | grep -q "${PM2_APP_NAME}" && pm2 list | grep -q "online"; then
     echo "  - 查看日志: pm2 logs ${PM2_APP_NAME}"
     echo "  - 重启应用: pm2 restart ${PM2_APP_NAME}"
     echo "  - 停止应用: pm2 stop ${PM2_APP_NAME}"
+    echo "  - 开机自启: pm2 startup && pm2 save"
     echo ""
 else
     echo "=========================================="
