@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Mapped, mapped_column, relationship, DeclarativeBase
 from sqlalchemy.dialects.postgresql import UUID, JSON
-from sqlalchemy import String, DateTime, BigInteger, Integer, Boolean, Text, Enum as SQLEnum, ForeignKey
+from sqlalchemy import String, DateTime, BigInteger, Integer, Boolean, Text, Enum as SQLEnum, ForeignKey, UniqueConstraint
 
 
 class Base(DeclarativeBase):
@@ -116,6 +116,9 @@ class User(Base):
     Each user belongs to exactly one department.
     """
     __tablename__ = 'user'
+    __table_args__ = (
+        UniqueConstraint('user_name', 'type', name='uq_user_name_type'),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -127,7 +130,7 @@ class User(Base):
         UUID(as_uuid=True), ForeignKey("role.id"), index=True
     )
 
-    user_name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    user_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)  # 用户昵称
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     type: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 0=livingKB / 1=chatKB
