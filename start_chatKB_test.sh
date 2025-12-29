@@ -170,7 +170,9 @@ if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
     echo "  ⚠️  PostgreSQL启动超时，但继续启动应用（请检查容器日志）"
 fi
 
-# 6. 启动应用（逻辑和正常脚本一致，仅改进程匹配为8001端口）
+# ==============================================================================
+# 6. 启动应用 (已修改为使用 PM2)
+# ==============================================================================
 echo "🚀 启动/重启chatKB_test应用 [${APP_DIR}]..."
 mkdir -p ${PARSER_OUTPUT_DIR} ${LOCAL_FILE_STORAGE_PATH} $(dirname ${APP_LOG_FILE})
 
@@ -181,6 +183,12 @@ export PATH="$HOME/.local/bin:$PATH"
 
 if ! command -v uv &> /dev/null; then
     echo "  ❌ uv命令未找到，请先安装: curl -LsSf https://astral.sh/uv/install.sh | sh"
+    exit 1
+fi
+
+# 检查 PM2 是否安装
+if ! command -v pm2 &> /dev/null; then
+    echo "  ❌ pm2命令未找到，请先安装: npm install pm2 -g"
     exit 1
 fi
 
@@ -200,11 +208,49 @@ if [ -f "pyproject.toml" ]; then
     fi
 fi
 
-# 仅停止chatKB_test的应用进程（避免影响第一套）
-pkill -f "uvicorn main:app --port ${APP_PORT}" 2>/dev/null && echo "  ⏹️  已停止旧chatKB_test应用进程" || echo "  ℹ️  无旧chatKB_test应用进程"
+# ==============================================================================
+# 新增：强制清理残留的旧进程 (终极健壮版)
+# ==============================================================================
+echo "🧹 正在清理可能残留的旧应用进程..."
+
+# 1. 尝试使用 pkill (基于命令行匹配)
+if pkill -f "uvicorn main:app --port ${APP_PORT}"; then
+    echo "  ✅ 通过命令行匹配，已成功清理旧进程。"
+    sleep 2
+else
+    echo "  ℹ️  未通过命令行匹配发现旧进程，尝试按端口清理..."
+    
+    # 2. 如果 pkill 失败，则尝试按端口号查找并杀死进程
+    # lsof -t: 只输出 PID
+    # -i:8001: 指定端口
+    PID_TO_KILL=$(lsof -t -i:"${APP_PORT}")
+    
+    if [ -n "${PID_TO_KILL}" ]; then
+        echo "  ⚠️  发现进程 ${PID_TO_KILL} 占用端口 ${APP_PORT}，正在强制杀死..."
+        kill -9 "${PID_TO_KILL}"
+        sleep 2
+        echo "  ✅ 端口 ${APP_PORT} 已被释放。"
+    else
+        echo "  ✅ 未发现需要清理的旧进程或占用端口的进程。"
+    fi
+fi
+echo ""
+
+# --- 使用 PM2 管理进程 ---
+PM2_APP_NAME="rag-app-chatKB_test"
+
+# 停止并删除旧的 PM2 应用
+if pm2 list | grep -q "${PM2_APP_NAME}"; then
+    echo "  ⏹️  正在停止并删除旧的 ${PM2_APP_NAME} 进程 (via PM2)..."
+    pm2 stop "${PM2_APP_NAME}"
+    pm2 delete "${PM2_APP_NAME}"
+else
+    echo "  ℹ️  PM2 中无旧的 ${PM2_APP_NAME} 应用进程"
+fi
 sleep 2
 
-# 启动新进程（和正常脚本一致，仅用chatKB_test的配置）
+# 使用 PM2 启动新进程
+echo "  🚀 正在通过 PM2 启动新的 ${PM2_APP_NAME} 进程..."
 POSTGRES_HOST=${POSTGRES_HOST:-localhost} \
 POSTGRES_PORT=${POSTGRES_HOST_PORT} \
 POSTGRES_USER=${POSTGRES_USER} \
@@ -228,18 +274,21 @@ PARSER_OUTPUT_DIR=${PARSER_OUTPUT_DIR} \
 LOCAL_FILE_STORAGE_PATH=${LOCAL_FILE_STORAGE_PATH} \
 LOG_LEVEL=${LOG_LEVEL:-INFO} \
 JWT_SECRET_KEY=${JWT_SECRET_KEY:-} \
-nohup uv run uvicorn main:app --host 0.0.0.0 --port ${APP_PORT} >> ${APP_LOG_FILE} 2>&1 &
+pm2 start "uv run uvicorn main:app --host 0.0.0.0 --port ${APP_PORT}" \
+    --name "${PM2_APP_NAME}" \
+    --log "${APP_LOG_FILE}" \
 
-echo "  ✅ chatKB_test应用已启动（后台运行，加载最新.env配置）"
+echo "  ✅ ${PM2_APP_NAME} 应用已通过 PM2 启动！"
 echo ""
 
 # 7. 验证应用状态（和正常脚本一致，仅改端口）
 echo "⏳ 验证chatKB_test应用启动状态..."
 sleep 8
 
-if curl -s http://localhost:${APP_PORT}/ > /dev/null 2>&1; then
+# 验证 PM2 应用状态
+if pm2 list | grep -q "${PM2_APP_NAME}" && pm2 list | grep -q "online"; then
     echo "=========================================="
-    echo "  ✅ chatKB_test所有服务启动/重启成功！（保留数据）"
+    echo "  ✅ chatKB_test所有服务启动/重启成功！（由 PM2 守护）"
     echo "=========================================="
     echo ""
     echo "📋 chatKB_test服务信息（自动适配路径）："
@@ -250,32 +299,20 @@ if curl -s http://localhost:${APP_PORT}/ > /dev/null 2>&1; then
     echo "  - 应用API: http://localhost:${APP_PORT}"
     echo "  - 自动定位的代码目录: ${APP_DIR}"
     echo ""
-    echo "📝 关键提示："
-    echo "  - chatKB_test容器数据已保留（数据卷 rag-arc-*-data-chatKB_test）"
-    echo "  - chatKB_test应用日志: tail -f ${APP_LOG_FILE}"
-    echo "  - chatKB_test容器日志: docker logs ${POSTGRES_CONTAINER_NAME}"
+    echo "📝 PM2 管理命令："
+    echo "  - 查看状态: pm2 list"
+    echo "  - 查看日志: pm2 logs ${PM2_APP_NAME}"
+    echo "  - 重启应用: pm2 restart ${PM2_APP_NAME}"
+    echo "  - 停止应用: pm2 stop ${PM2_APP_NAME}"
     echo ""
 else
     echo "=========================================="
-    echo "  ⚠️  chatKB_test应用启动可能异常（请检查日志）"
+    echo "  ⚠️  chatKB_test应用启动可能异常（请检查 PM2 日志）"
     echo "=========================================="
     echo ""
     echo "📝 快速排查："
-    if [ -f "${APP_LOG_FILE}" ]; then
-        echo "  chatKB_test最近日志内容："
-        tail -30 "${APP_LOG_FILE}" | sed 's/^/    /'
-        echo ""
-        echo "  1. 查看完整应用日志: tail -50 ${APP_LOG_FILE}"
-    else
-        echo "  ⚠️  chatKB_test日志文件不存在: ${APP_LOG_FILE}"
-        echo "  可能原因：应用启动失败，请检查："
-        echo "    - 应用目录是否存在: ${APP_DIR}"
-        echo "    - main.py是否存在: ${APP_DIR}/main.py"
-        echo "    - uv命令是否可用: $(which uv 2>/dev/null || echo '未找到')"
-        echo ""
-    fi
-    echo "  2. 检查chatKB_test容器状态: docker ps | grep chatKB_test"
-    echo "  3. 验证chatKB_test数据库连接: psql -h localhost -p ${POSTGRES_HOST_PORT} -U ${POSTGRES_USER} -d ${POSTGRES_DB}"
-    echo "  4. 检查chatKB_test应用进程: ps aux | grep 'uvicorn main:app --port ${APP_PORT}' | grep -v grep"
+    echo "  1. 查看 PM2 状态: pm2 list"
+    echo "  2. 查看应用日志: pm2 logs ${PM2_APP_NAME}"
+    echo "  3. 检查容器状态: docker ps | grep chatKB_test"
     echo ""
 fi
