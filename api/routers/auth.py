@@ -7,7 +7,6 @@ import jwt
 from fastapi import (
     APIRouter,
     Depends,
-    Form,
     HTTPException,
     Request,
     WebSocket,
@@ -309,19 +308,18 @@ async def ws_get_current_user(
 
 @router.post("/token")
 async def login_for_access_token_endpoint(
-    form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
-    type: Optional[int] = Form(None),  # 支持表单数据中的 type 字段，可选，默认 None
+    login_data: LoginRequest,
 ) -> Token:
     # Use async authentication to avoid blocking the event loop
-    user = await get_account_handler().authenticate_user_async(form_data.username, form_data.password)
+    user = await get_account_handler().authenticate_user_async(login_data.username, login_data.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    # 验证 type 是否匹配（如果 type 为 None，则使用默认值 0）
-    login_type = type if type is not None else 0
+    # 验证 type 是否匹配（如果 type 为 None，使用默认值 0）
+    login_type = login_data.type if login_data.type is not None else 0
     if user.type != login_type:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
