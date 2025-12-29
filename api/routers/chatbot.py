@@ -13,11 +13,14 @@ from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import quote
 
 import anyio
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, HTTPException, Request, Response, status, Depends
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from typing import Annotated
 
 from framework.register import Register
+from api.routers.auth import get_current_user
+from encapsulation.data_model.orm_models import User
 from core.presentation.evidence import build_chat_evidence
 from config.output_limits import CHAT_TOP_CHUNKS
 from core.utils.path_guard import ensure_writable_dir
@@ -567,7 +570,11 @@ async def bootstrap(request: Request):
 
 
 @router.post("/api/messages")
-async def messages(request: Request, payload: ChatbotApiMessagesRequest):
+async def messages(
+    request: Request,
+    payload: ChatbotApiMessagesRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
     started = time.monotonic()
     request_id = str(uuid.uuid4())
 
@@ -575,11 +582,12 @@ async def messages(request: Request, payload: ChatbotApiMessagesRequest):
     conversation_uuid = _parse_uuid(payload.id, "id")
     
     logger.info(
-        "chatbot.sse_start request_id=%s browser_user_id=%s conversation_id=%s message_length=%d",
+        "chatbot.sse_start request_id=%s browser_user_id=%s conversation_id=%s message_length=%d user_id=%s",
         request_id,
         str(browser_user_id),
         str(conversation_uuid),
         len(payload.content) if payload.content else 0,
+        str(current_user.id),
     )
 
     lock_timeout_s = float(os.getenv("CHATBOT_CONVERSATION_LOCK_TIMEOUT_S", "30"))
@@ -589,7 +597,8 @@ async def messages(request: Request, payload: ChatbotApiMessagesRequest):
     context_turns = int(os.getenv("CHATBOT_CONTEXT_TURNS", "5"))
     max_sources = int(os.getenv("CHATBOT_TOP_SOURCES", "5"))
 
-    shared_owner_id = _get_shared_document_owner_id()
+    # Use authenticated user's ID instead of shared owner ID
+    owner_id = current_user.id
     lock = await _get_conversation_lock(_conversation_key(browser_user_id, conversation_uuid))
 
     headers = {
@@ -655,7 +664,7 @@ async def messages(request: Request, payload: ChatbotApiMessagesRequest):
             def _prepare():
                 return rag_inference_handler._build_messages_and_context(
                     query=retrieval_query,
-                    owner_id=shared_owner_id,
+                    owner_id=str(owner_id),
                     return_subgraph=needs_subgraph,
                 )
 

@@ -22,6 +22,7 @@ from app_registration import Register, initialize as app_initialize
 from application.account.user import Account
 from config.application.account_config import AccountConfig
 from pathlib import Path
+from api.schemas.response import StandardResponse
 
 # Get secret key from environment variable, fallback to default for development
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "f33efd136032819f6017e92272c14afc941eca4fbb94ca266b1d8fa5d8d91107")
@@ -93,7 +94,7 @@ class TokenData(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    username: str
+    user_name: str  # 用户名（登录用）
     password: str
     type: Optional[int] = 0  # 0=livingKB / 1=chatKB
 
@@ -311,7 +312,7 @@ async def login_for_access_token_endpoint(
     login_data: LoginRequest,
 ) -> Token:
     # Use async authentication to avoid blocking the event loop
-    user = await get_account_handler().authenticate_user_async(login_data.username, login_data.password)
+    user = await get_account_handler().authenticate_user_async(login_data.user_name, login_data.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -337,13 +338,17 @@ async def login_for_access_token_endpoint(
     return Token(access_token=access_token, token_type="bearer", type=user.type)
 
 
-@router.post("/register", status_code=status.HTTP_201_CREATED)
-async def register(user: UserCreate) -> UserResponse:
+@router.post("/register", status_code=status.HTTP_200_OK)
+async def register(user: UserCreate) -> StandardResponse[UserResponse]:
     try:
         # Use async registration to avoid blocking the event loop
         new_user = await get_account_handler().register_user_async(user)
-        # 转换为响应格式
-        return UserResponse.from_user(new_user)
+        # 转换为响应格式，code 设置为 200（中间件会自动添加 request_id）
+        return StandardResponse(
+            code=200,
+            message="success",
+            data=UserResponse.from_user(new_user)
+        )
     except IntegrityError:
         raise HTTPException(status_code=400, detail="Username already exists")
 

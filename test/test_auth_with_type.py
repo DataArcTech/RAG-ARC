@@ -9,7 +9,7 @@ from typing import Dict, Any
 from datetime import datetime
 
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = "http://localhost:8001"
 current_time = int(time.time())
 
 
@@ -25,9 +25,9 @@ async def test_register_user_livingkb():
         }
         response = await client.post(f"{BASE_URL}/auth/register", json=register_data)
         
-        assert response.status_code == 201, f"注册失败: {response.text}"
+        assert response.status_code == 200, f"注册失败: {response.text}"
         data = response.json()
-        assert data["code"] == 201
+        assert data["code"] == 200
         assert data["data"]["user_name"] == register_data["user_name"]
         assert data["data"]["name"] == register_data["name"]
         assert data["data"]["type"] == 0
@@ -48,9 +48,9 @@ async def test_register_user_chatkb():
         }
         response = await client.post(f"{BASE_URL}/auth/register", json=register_data)
         
-        assert response.status_code == 201, f"注册失败: {response.text}"
+        assert response.status_code == 200, f"注册失败: {response.text}"
         data = response.json()
-        assert data["code"] == 201
+        assert data["code"] == 200
         assert data["data"]["user_name"] == register_data["user_name"]
         assert data["data"]["name"] == register_data["name"]
         assert data["data"]["type"] == 1
@@ -71,14 +71,13 @@ async def test_login_livingkb():
         }
         await client.post(f"{BASE_URL}/auth/register", json=register_data)
         
-        # 登录（使用表单数据格式）
+        # 登录（使用JSON格式）
         login_data = {
-            "username": register_data["user_name"],
+            "user_name": register_data["user_name"],
             "password": register_data["password"],
-            "grant_type": "password",
             "type": 0
         }
-        response = await client.post(f"{BASE_URL}/auth/token", data=login_data)
+        response = await client.post(f"{BASE_URL}/auth/token", json=login_data)
         
         assert response.status_code == 200, f"登录失败: {response.text}"
         data = response.json()
@@ -102,14 +101,13 @@ async def test_login_chatkb():
         }
         await client.post(f"{BASE_URL}/auth/register", json=register_data)
         
-        # 登录（使用表单数据格式）
+        # 登录（使用JSON格式）
         login_data = {
-            "username": register_data["user_name"],
+            "user_name": register_data["user_name"],
             "password": register_data["password"],
-            "grant_type": "password",
             "type": 1
         }
-        response = await client.post(f"{BASE_URL}/auth/token", data=login_data)
+        response = await client.post(f"{BASE_URL}/auth/token", json=login_data)
         
         assert response.status_code == 200, f"登录失败: {response.text}"
         data = response.json()
@@ -135,12 +133,11 @@ async def test_login_type_mismatch():
         
         # 尝试用type=1登录
         login_data = {
-            "username": register_data["user_name"],
+            "user_name": register_data["user_name"],
             "password": register_data["password"],
-            "grant_type": "password",
             "type": 1  # 错误的type
         }
-        response = await client.post(f"{BASE_URL}/auth/token", data=login_data)
+        response = await client.post(f"{BASE_URL}/auth/token", json=login_data)
         
         assert response.status_code == 400, f"应该返回400错误: {response.text}"
         data = response.json()
@@ -161,12 +158,11 @@ async def test_get_current_user():
         await client.post(f"{BASE_URL}/auth/register", json=register_data)
         
         login_data = {
-            "username": register_data["user_name"],
+            "user_name": register_data["user_name"],
             "password": register_data["password"],
-            "grant_type": "password",
             "type": 0
         }
-        login_response = await client.post(f"{BASE_URL}/auth/token", data=login_data)
+        login_response = await client.post(f"{BASE_URL}/auth/token", json=login_data)
         token = login_response.json()["data"]["access_token"]
         
         # 获取当前用户
@@ -194,9 +190,9 @@ async def test_register_without_type():
         }
         response = await client.post(f"{BASE_URL}/auth/register", json=register_data)
         
-        assert response.status_code == 201, f"注册失败: {response.text}"
+        assert response.status_code == 200, f"注册失败: {response.text}"
         data = response.json()
-        assert data["code"] == 201
+        assert data["code"] == 200
         assert data["data"]["user_name"] == register_data["user_name"]
         assert data["data"]["type"] == 0, "type应该默认为0"
         assert data["data"]["status"] in ["active", "ACTIVE"]  # 兼容不同格式
@@ -218,12 +214,11 @@ async def test_login_without_type():
         
         # 登录时不传递type字段
         login_data = {
-            "username": register_data["user_name"],
-            "password": register_data["password"],
-            "grant_type": "password"
+            "user_name": register_data["user_name"],
+            "password": register_data["password"]
             # 不包含 type 字段，应该默认为0
         }
-        response = await client.post(f"{BASE_URL}/auth/token", data=login_data)
+        response = await client.post(f"{BASE_URL}/auth/token", json=login_data)
         
         assert response.status_code == 200, f"登录失败: {response.text}"
         data = response.json()
@@ -249,12 +244,11 @@ async def test_login_without_type_mismatch():
         
         # 登录时不传递type（默认为0），但用户实际是type=1
         login_data = {
-            "username": register_data["user_name"],
-            "password": register_data["password"],
-            "grant_type": "password"
+            "user_name": register_data["user_name"],
+            "password": register_data["password"]
             # 不包含 type 字段，默认为0，但用户是1，应该失败
         }
-        response = await client.post(f"{BASE_URL}/auth/token", data=login_data)
+        response = await client.post(f"{BASE_URL}/auth/token", json=login_data)
         
         assert response.status_code == 400, f"应该返回400错误: {response.text}"
         data = response.json()
@@ -274,7 +268,7 @@ async def test_register_timestamp():
         
         # 注册用户
         response = await client.post(f"{BASE_URL}/auth/register", json=register_data)
-        assert response.status_code == 201, f"注册失败: {response.text}"
+        assert response.status_code == 200, f"注册失败: {response.text}"
         
         # 注册成功即可，时间戳已记录到数据库（可通过数据库查询验证）
         print(f"   ✅ 注册时间已记录到数据库（created_at字段）")
@@ -294,17 +288,16 @@ async def test_login_timestamp():
         
         # 第一次登录
         login_data = {
-            "username": register_data["user_name"],
+            "user_name": register_data["user_name"],
             "password": register_data["password"],
-            "grant_type": "password",
             "type": 0
         }
-        login_response_1 = await client.post(f"{BASE_URL}/auth/token", data=login_data)
+        login_response_1 = await client.post(f"{BASE_URL}/auth/token", json=login_data)
         assert login_response_1.status_code == 200, "第一次登录应该成功"
         
         # 等待一小段时间，然后第二次登录
         await asyncio.sleep(1)
-        login_response_2 = await client.post(f"{BASE_URL}/auth/token", data=login_data)
+        login_response_2 = await client.post(f"{BASE_URL}/auth/token", json=login_data)
         assert login_response_2.status_code == 200, "第二次登录应该成功"
         
         # 登录成功即可，登录时间已更新到数据库（可通过数据库查询验证）

@@ -275,15 +275,28 @@ async def graph_overview(
 @router.get("/stream_chat/{session_id}")
 async def stream_chat_sse(
     session_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
     query: str = Query(..., description="User query text"),
     return_subgraph: bool = Query(default=False),
     target_owner_id: Optional[uuid.UUID] = Query(default=None),
     include_all_owners: bool = Query(default=False),
     include_evidence: bool = Query(default=False),
-    current_user: Annotated[User | None, Depends(get_current_user)] = None,
 ):
-    if current_user is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    """
+    SSE stream chat endpoint with user authentication required
+    
+    Args:
+        session_id: Chat session ID
+        query: User query text
+        return_subgraph: Whether to return subgraph data
+        target_owner_id: Target owner ID (admin only)
+        include_all_owners: Include all owners (admin only)
+        include_evidence: Whether to include evidence
+        current_user: Current authenticated user (required)
+    
+    Returns:
+        StreamingResponse with SSE events
+    """
 
     logger.info("SSE stream_chat request for session_id %s by user %s", session_id, current_user.id)
 
