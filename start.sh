@@ -4,6 +4,32 @@
 
 set -e
 
+# Parse command line arguments
+SERVICES_ONLY=false
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --services-only|-s)
+            SERVICES_ONLY=true
+            shift
+            ;;
+        --help|-h)
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  --services-only, -s    Start only backend services (PostgreSQL, Redis, Neo4j)"
+            echo "                         Skip starting RAG-ARC application container"
+            echo "  --help, -h             Show this help message"
+            echo ""
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Run '$0 --help' for usage information"
+            exit 1
+            ;;
+    esac
+done
+
 load_dotenv() {
     # Load .env so host-side tooling is available to this script.
     # Reload this before starting components so the script always reflects latest .env values.
@@ -80,25 +106,28 @@ check_docker() {
 # Check if images exist
 check_images() {
     print_message "$BLUE" "🔍 Checking Docker images..."
-    
+
     MISSING_IMAGES=()
-    
+
     if ! docker images | grep -q "postgres.*16-alpine"; then
         MISSING_IMAGES+=("postgres:16-alpine")
     fi
-    
+
     if ! docker images | grep -q "redis.*7-alpine"; then
         MISSING_IMAGES+=("redis:7-alpine")
     fi
-    
+
     if ! docker images | grep -q "neo4j.*latest"; then
         MISSING_IMAGES+=("neo4j:latest")
     fi
-    
-    if ! docker images | grep -q "rag_arc"; then
-        MISSING_IMAGES+=("rag_arc:v1 or rag_arc:v1-gpu")
+
+    # Only check for rag_arc image if not in services-only mode
+    if [ "$SERVICES_ONLY" != true ]; then
+        if ! docker images | grep -q "rag_arc"; then
+            MISSING_IMAGES+=("rag_arc:v1 or rag_arc:v1-gpu")
+        fi
     fi
-    
+
     if [ ${#MISSING_IMAGES[@]} -gt 0 ]; then
         print_message "$RED" "❌ Missing Docker images:"
         for img in "${MISSING_IMAGES[@]}"; do
@@ -108,13 +137,20 @@ check_images() {
         print_message "$YELLOW" "⚠️  Please run ./build.sh first to build images"
         exit 1
     fi
-    
+
     print_message "$GREEN" "✅ All required images found"
     echo ""
 }
 
 # Detect which app image to use
 detect_app_image() {
+    # Skip in services-only mode
+    if [ "$SERVICES_ONLY" = true ]; then
+        print_message "$YELLOW" "ℹ️  Services-only mode: skipping RAG-ARC application image detection"
+        echo ""
+        return 0
+    fi
+
     if docker images | grep -q "rag_arc.*v1-gpu"; then
         APP_IMAGE="rag_arc:v1-gpu"
         MODE="gpu"
@@ -638,6 +674,47 @@ wait_for_service() {
     exit 1;
 }
 
+# Show backend services info (services-only mode)
+show_services_info() {
+    load_dotenv
+    refresh_env_derived
+    print_message "$BLUE" "=========================================="
+    print_message "$GREEN" "🎉 Backend Services Started Successfully!"
+    print_message "$BLUE" "=========================================="
+    echo ""
+    print_message "$NC" "📊 Running Containers:"
+    docker ps --filter "name=rag-arc-" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+    echo ""
+    print_message "$NC" "📍 Service Endpoints (internal network):"
+    print_message "$GREEN" "   - PostgreSQL: rag-arc-postgres:5432"
+    print_message "$GREEN" "   - Redis: rag-arc-redis:6379"
+    print_message "$GREEN" "   - Neo4j: bolt://rag-arc-neo4j:7687"
+    echo ""
+
+    if [[ "${EXPOSE_POSTGRES:-true}" == "true" ]]; then
+        print_message "$NC" "📍 Exposed on localhost:"
+        print_message "$GREEN" "   - PostgreSQL: localhost:${POSTGRES_HOST_PORT:-5432}"
+    fi
+    if [[ "${EXPOSE_REDIS:-false}" == "true" ]]; then
+        print_message "$GREEN" "   - Redis: localhost:${REDIS_HOST_PORT:-6379}"
+    fi
+    if [[ "${EXPOSE_NEO4J:-false}" == "true" ]]; then
+        print_message "$GREEN" "   - Neo4j Browser: http://localhost:${NEO4J_HTTP_PORT:-7474}"
+        print_message "$GREEN" "   - Neo4j Bolt: bolt://localhost:${NEO4J_BOLT_PORT:-7687}"
+    fi
+    echo ""
+
+    print_message "$NC" "📝 Common Commands:"
+    print_message "$NC" "   - View postgres logs: docker logs -f rag-arc-postgres"
+    print_message "$NC" "   - View redis logs: docker logs -f rag-arc-redis"
+    print_message "$NC" "   - View neo4j logs: docker logs -f rag-arc-neo4j"
+    print_message "$NC" "   - Stop all: ./stop.sh"
+    print_message "$NC" "   - Start all services: ./start.sh --services-only"
+    print_message "$NC" "   - Start with app: ./start.sh"
+    echo ""
+    print_message "$BLUE" "=========================================="
+}
+
 # Show deployment info
 show_info() {
     load_dotenv
@@ -686,6 +763,15 @@ main() {
     start_neo4j
     wait_for_database
     wait_for_neo4j
+
+    # Skip app-related components in services-only mode
+    if [ "$SERVICES_ONLY" = true ]; then
+        print_message "$GREEN" "✅ Backend services started successfully (services-only mode)"
+        echo ""
+        show_services_info
+        return 0
+    fi
+
     start_app
     maybe_start_message_queue
     wait_for_service
