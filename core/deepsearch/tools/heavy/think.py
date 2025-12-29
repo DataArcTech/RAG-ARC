@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from encapsulation.data_model.deepsearch import ThinkNote, GraphQueryContext
 from core.prompts.deepsearch import THINK_TOOL_SYSTEM_PROMPT
+from core.deepsearch.utils.compression import compact_evidences, resolve_compaction_config
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, safe_json_loads
 
@@ -70,6 +71,8 @@ class GraphThinkTool(GraphTool):
             "graph_context": context_snapshot,
             "coverage_metrics": coverage_snapshot,
         }
+        if isinstance(note.metadata, dict) and isinstance(note.metadata.get("compression"), dict):
+            diagnostics["compression"] = note.metadata.get("compression")
         diagnostics["thought_log"] = [
             self._build_thought_log_entry(
                 note,
@@ -85,13 +88,34 @@ class GraphThinkTool(GraphTool):
         if not self.llm_connector:
             raise RuntimeError("GraphThinkTool requires an LLM connector")
 
+        cfg = resolve_compaction_config(
+            branch="think",
+            graph_context=request.graph_context,
+            extra=(request.extra or {}),
+            default_max_items=8,
+            default_max_chars=1600,
+            default_mode="truncate",
+            default_excerpt_chars=900,
+            default_retention="head",
+            env_max_items="DEEPSEARCH_THINK_MAX_EVIDENCES",
+            env_max_chars="DEEPSEARCH_THINK_EVIDENCE_MAX_CHARS",
+            env_excerpt_chars="DEEPSEARCH_THINK_EVIDENCE_EXCERPT_CHARS",
+        )
+        compacted, compaction_meta = compact_evidences(
+            request.context_evidences or [],
+            cfg=cfg,
+            question=request.question,
+            extra=(request.extra or {}),
+            include_triple_count=True,
+        )
         prompt_payload = {
             "question": request.question,
             "plan_step": request.plan_step,
-            "context_evidences": [ev.model_dump(exclude_none=True) for ev in request.context_evidences],
+            "context_evidences": compacted,
             "graph_context": context_snapshot,
             "coverage_metrics": coverage_snapshot,
             "extra": request.extra,
+            "compression": compaction_meta,
         }
         messages = [
             {"role": "system", "content": self.system_prompt},
@@ -123,6 +147,7 @@ class GraphThinkTool(GraphTool):
                     "gap_trigger": bool(payload.gap_trigger),
                     "missing_topics": missing_topics,
                     "tool_calls": [call.model_dump() for call in payload.tool_calls],
+                    "compression": compaction_meta,
                 },
             )
         except Exception as exc:

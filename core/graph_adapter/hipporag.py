@@ -2,6 +2,8 @@
 import asyncio
 import json
 import logging
+import os
+import re
 from collections import deque
 from contextlib import nullcontext
 from itertools import combinations
@@ -158,6 +160,13 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         if isinstance(seed_entities, list):
             seeds = [str(item).strip() for item in seed_entities if str(item).strip()]
 
+        if not seeds:
+            seed_chunk = str(strategy.get("seed_chunk") or strategy.get("seed_chunk_id") or "").strip()
+            if seed_chunk:
+                derived = await asyncio.to_thread(self._seed_entities_from_chunk_sync, seed_chunk, scope_token)
+                if derived:
+                    seeds = derived
+
         max_depth = strategy.get("max_depth")
         try:
             max_depth_int = int(max_depth) if max_depth is not None else 1
@@ -176,7 +185,12 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         if not query:
             return base
 
-        payload = await self.aquery_subgraph(query, channel="graph", access_scope=access_scope)
+        payload = await self.aquery_subgraph(
+            query,
+            channel="graph",
+            access_scope=access_scope,
+            query_options={"export_subgraph": True},
+        )
         edges = payload.get("edges") if isinstance(payload, dict) else None
         if not isinstance(edges, list) or not edges:
             return base
@@ -202,6 +216,33 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         merged = dict(base)
         merged["paths"] = paths
         return merged
+
+    def _seed_entities_from_chunk_sync(self, chunk_id: str, owner_id: str) -> List[str]:
+        graph_store = getattr(self.retriever, "graph_store", None)
+        if graph_store is None or not hasattr(graph_store, "_execute_query"):
+            return []
+        query = """
+        MATCH (c:Chunk {chunk_id: $chunk_id})
+        WHERE c.owner_id = $owner_id
+        MATCH (c)-[:MENTIONS]->(e:Entity)
+        WHERE e.owner_id = $owner_id
+        RETURN e.entity_name AS name
+        ORDER BY name
+        LIMIT 12
+        """
+        try:
+            rows = graph_store._execute_query(query, {"chunk_id": str(chunk_id), "owner_id": str(owner_id)})
+        except Exception:
+            return []
+        names: List[str] = []
+        seen: set[str] = set()
+        for row in rows or []:
+            name = str((row or {}).get("name") or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            names.append(name)
+        return names
 
     def metadata(self) -> GraphAdapterMetadata:
         """Publish capability metadata for observability dashboards."""
@@ -334,6 +375,7 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             scope_token,
             subgraph_info_override=subgraph_info,
             scope_diagnostics=scope_diag,
+            query_options=query_options,
         )
 
     def _retrieve_chunks_sync(
@@ -379,6 +421,44 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
                 filtered.append(chunk)
             else:
                 dropped += 1
+        # When file_scope is enabled, global retrieval + post-filtering can return 0 results,
+        # especially for cross-language queries. In that case, attempt a single query rewrite
+        # using the retriever's LLM client (when available) to bridge the language gap.
+        xlang_diag: Dict[str, Any] = {}
+        if not filtered[:requested_k] and self._file_scope_xlang_retry_enabled():
+            rewritten = self._maybe_rewrite_query_for_scope(query)
+            if rewritten and rewritten != query:
+                xlang_diag["xlang_retry"] = True
+                xlang_diag["rewritten_query_preview"] = rewritten[:200]
+                try:
+                    raw_retry: List[Chunk] = self.retriever.invoke(rewritten, **kwargs)
+                    retry_info = self._extract_subgraph_info(raw_retry)
+                    retry_filtered: List[Chunk] = []
+                    retry_dropped = 0
+                    for chunk in raw_retry:
+                        meta = getattr(chunk, "metadata", None) or {}
+                        if chunk_in_scope(chunk_metadata=meta, scope=file_scope):
+                            retry_filtered.append(chunk)
+                        else:
+                            retry_dropped += 1
+                    if retry_filtered:
+                        return (
+                            retry_filtered[:requested_k],
+                            retry_info,
+                            {
+                                "file_scope_applied": True,
+                                "file_scope": file_scope.as_dict(),
+                                "requested_top_k": requested_k,
+                                "fetch_top_k": fetch_k,
+                                "kept_in_scope": len(retry_filtered[:requested_k]),
+                                "dropped_out_of_scope": retry_dropped,
+                                "input_chunk_count": len(raw_retry),
+                                **xlang_diag,
+                            },
+                        )
+                    xlang_diag["xlang_retry_no_hits"] = True
+                except Exception as exc:
+                    xlang_diag["xlang_retry_error"] = str(exc)
         return (
             filtered[:requested_k],
             subgraph_info,
@@ -390,6 +470,7 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
                 "kept_in_scope": len(filtered[:requested_k]),
                 "dropped_out_of_scope": dropped,
                 "input_chunk_count": len(raw_chunks),
+                **xlang_diag,
             },
         )
 
@@ -402,12 +483,24 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         *,
         subgraph_info_override: Optional[Dict[str, Any]] = None,
         scope_diagnostics: Optional[Dict[str, Any]] = None,
+        query_options: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Convert retriever outputs into a normalized structure consumed by DeepSearch."""
 
         chunk_entries = [self._chunk_to_dict(chunk) for chunk in chunks]
         subgraph_info = subgraph_info_override if subgraph_info_override is not None else self._extract_subgraph_info(chunks)
-        exported = self._export_subgraph(subgraph_info) if subgraph_info else {"nodes": [], "edges": [], "chunks": []}
+        if isinstance(subgraph_info, dict) and scope_token:
+            subgraph_info.setdefault("owner_scope", scope_token)
+        # Exporting the full subgraph (nodes/edges) can be expensive on Neo4j. Default to disabled unless explicitly
+        # requested by callers that need visualization/triple context (e.g. graph_adapter.query traversal).
+        export_subgraph = False
+        if isinstance(query_options, Mapping) and "export_subgraph" in query_options:
+            export_subgraph = bool(query_options.get("export_subgraph"))
+        exported = (
+            self._export_subgraph(subgraph_info)
+            if (subgraph_info and export_subgraph)
+            else {"nodes": [], "edges": [], "chunks": [], "metadata": {}}
+        )
 
         metadata = {
             "adapter": "hipporag",
@@ -419,6 +512,7 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         }
         if scope_diagnostics:
             metadata["scope_diagnostics"] = scope_diagnostics
+        metadata["export_subgraph"] = export_subgraph
 
         return {
             "query": query,
@@ -465,6 +559,92 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             )
         return FileScope()
 
+    @staticmethod
+    def _file_scope_xlang_retry_enabled() -> bool:
+        raw = os.getenv("DEEPSEARCH_FILE_SCOPE_XLANG_RETRY", "1")
+        return str(raw or "").strip().lower() not in {"0", "false", "no", "off"}
+
+    _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+    _ASCII_ALPHA_RE = re.compile(r"[A-Za-z]")
+
+    def _maybe_rewrite_query_for_scope(self, query: str) -> str | None:
+        llm = getattr(self.retriever, "llm_client", None)
+        chat = getattr(llm, "chat", None)
+        if not callable(chat):
+            return None
+
+        text = str(query or "").strip()
+        if not text:
+            return None
+
+        cjk = len(self._CJK_RE.findall(text))
+        alpha = len(self._ASCII_ALPHA_RE.findall(text))
+        total = max(1, len(text))
+        cjk_ratio = cjk / total
+        alpha_ratio = alpha / total
+
+        direction: str | None = None
+        if alpha_ratio >= 0.25 and cjk_ratio < 0.05:
+            direction = "to_zh"
+        elif cjk_ratio >= 0.15 and alpha_ratio < 0.08:
+            direction = "to_en"
+        else:
+            return None
+
+        prompt = (
+            "You are helping a retrieval system bridge language gaps.\n"
+            "Translate the query and return STRICT JSON only.\n"
+            "Schema: {\"zh_hans\": string, \"zh_hant\": string, \"en\": string}.\n"
+            "Keep it concise; preserve numbers and key terms.\n\n"
+            f"Query: {text}"
+        )
+        try:
+            raw = chat([{"role": "user", "content": prompt}])
+        except Exception:
+            return None
+
+        payload = self._safe_json_loads(str(raw or ""))
+        if not isinstance(payload, dict):
+            return None
+
+        zh_hans = str(payload.get("zh_hans") or "").strip()
+        zh_hant = str(payload.get("zh_hant") or "").strip()
+        en = str(payload.get("en") or "").strip()
+
+        additions: List[str] = []
+        if direction == "to_zh":
+            if zh_hans:
+                additions.append(zh_hans)
+            if zh_hant and zh_hant != zh_hans:
+                additions.append(zh_hant)
+        elif direction == "to_en" and en:
+            additions.append(en)
+
+        if not additions:
+            return None
+        joined = "\n".join(additions)
+        return f"{text}\n\n{joined}"
+
+    @staticmethod
+    def _safe_json_loads(raw: str) -> Any | None:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        # Remove ```json fences when present.
+        if text.startswith("```"):
+            # Strip the leading fence.
+            if text.lower().startswith("```json"):
+                text = text[len("```json") :].strip()
+            else:
+                text = text[len("```") :].strip()
+            # Strip the trailing fence.
+            if text.endswith("```"):
+                text = text[: -len("```")].strip()
+        try:
+            return json.loads(text)
+        except Exception:
+            return None
+
     def _export_subgraph(self, subgraph_info: Dict[str, Any]) -> Dict[str, Any]:
         """Use the existing graph exporters to obtain nodes/edges for visualization."""
 
@@ -488,6 +668,9 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
                         seed_entity_ids=set(str(entity) for entity in seed_entities),
                         retrieved_chunk_ids=retrieved_chunk_ids,
                         node_ppr_scores=node_scores,
+                        owner_id=subgraph_info.get("owner_id") or subgraph_info.get("owner_scope"),
+                        owner_scope_label=subgraph_info.get("owner_scope"),
+                        max_edges=int(os.getenv("DEEPSEARCH_GRAPH_EXPORT_MAX_EDGES", "2000") or 2000),
                     )
                 return GraphExporter.export_subgraph(
                     graph_store=graph_store,

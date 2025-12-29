@@ -65,6 +65,22 @@
     "enable_custom_hooks": false,
     "tool_context_max_evidences": 5,
     "tool_context_max_chars": 800,
+    "compression": {
+      "tool_context": {
+        "mode": "truncate",
+        "max_items": 5,
+        "max_chars": 800,
+        "excerpt_chars": 900,
+        "retention": "tail"
+      },
+      "think": {
+        "mode": "truncate",
+        "max_items": 8,
+        "max_chars": 1600,
+        "excerpt_chars": 900,
+        "retention": "head"
+      }
+    },
     "coverage_expected_min_chunks": 3,
     "trace_reflection_enabled": true,
     "trace_reflection_max": 24,

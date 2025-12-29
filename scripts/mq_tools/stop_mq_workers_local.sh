@@ -16,7 +16,14 @@ while read -r pid name queue; do
   fi
   if kill -0 "${pid}" >/dev/null 2>&1; then
     echo "Stopping pid=${pid} name=${name} queue=${queue}"
-    kill "${pid}" >/dev/null 2>&1 || true
+    # Prefer killing the process group (spawned by `setsid`) so uv wrapper + celery child exit together.
+    kill -TERM -- "-${pid}" >/dev/null 2>&1 || true
+    kill -TERM "${pid}" >/dev/null 2>&1 || true
+    sleep 1
+    if kill -0 "${pid}" >/dev/null 2>&1; then
+      kill -KILL -- "-${pid}" >/dev/null 2>&1 || true
+      kill -KILL "${pid}" >/dev/null 2>&1 || true
+    fi
   else
     echo "Already stopped pid=${pid} name=${name} queue=${queue}"
   fi

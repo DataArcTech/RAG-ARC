@@ -84,6 +84,44 @@ class GraphReasoningThinkConfig(BaseModel):
     )
 
 
+class CompressionBranchConfig(BaseModel):
+    """Shared compaction schema used across tool contexts and think windows."""
+
+    mode: Literal["truncate", "excerpt"] = Field(
+        "truncate",
+        description="truncate keeps prefixes; excerpt extracts windows around key terms.",
+    )
+    max_items: int = Field(0, description="Maximum number of evidence items kept (0 disables item limit).")
+    max_chars: int = Field(0, description="Maximum characters kept per evidence item (0 disables truncation).")
+    excerpt_chars: int = Field(900, description="Excerpt window size (only used when mode == 'excerpt').")
+    retention: Literal["head", "tail"] = Field("tail", description="Retention policy when max_items applies.")
+
+
+class GraphReasoningCompressionConfig(BaseModel):
+    """Unified `compression` schema: tool_context vs think."""
+
+    tool_context: CompressionBranchConfig = Field(
+        default_factory=lambda: CompressionBranchConfig(
+            mode="truncate",
+            max_items=5,
+            max_chars=800,
+            excerpt_chars=900,
+            retention="tail",
+        ),
+        description="Compaction settings applied to tool payload `context_evidences`.",
+    )
+    think: CompressionBranchConfig = Field(
+        default_factory=lambda: CompressionBranchConfig(
+            mode="truncate",
+            max_items=8,
+            max_chars=1600,
+            excerpt_chars=900,
+            retention="head",
+        ),
+        description="Compaction settings applied to `graph.think` context window.",
+    )
+
+
 class GraphReasoningStrategyConfig(BaseModel):
     """Chain-of-exploration parameters, semantic channel flags, and think settings."""
 
@@ -93,11 +131,15 @@ class GraphReasoningStrategyConfig(BaseModel):
     enable_custom_hooks: bool = Field(False, description="Reserved flag for custom traversal hooks.")
     tool_context_max_evidences: int = Field(
         5,
-        description="Maximum number of evidence chunks forwarded into each tool prompt payload.",
+        description="Deprecated: prefer compression.tool_context.max_items (kept for backward compatibility).",
     )
     tool_context_max_chars: int = Field(
         800,
-        description="Maximum characters per evidence snippet forwarded into each tool prompt payload.",
+        description="Deprecated: prefer compression.tool_context.max_chars (kept for backward compatibility).",
+    )
+    compression: GraphReasoningCompressionConfig = Field(
+        default_factory=GraphReasoningCompressionConfig,
+        description="Unified evidence compaction schema shared by tool payload windows and think checkpoints.",
     )
     coverage_expected_min_chunks: int = Field(
         3,

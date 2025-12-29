@@ -1,18 +1,44 @@
 """Helpers for reporting the full DeepSearch tool catalog in traces."""
+import os
+
 from core.deepsearch.tooling import describe_available_tools
 from core.deepsearch.tools import builtin_tool_descriptors
 
 
 def render_all_tools_block(*, include_llm_tools: bool) -> str:
-    """Render a stable, human-readable tool catalog for <all_tools> trace."""
+    """Render a stable, human-readable tool catalog for <all_tools> trace.
+
+    Default output is intentionally compact ("perfect is no more to remove").
+    Set `DEEPSEARCH_WEAVER_ALL_TOOLS_MODE=full` to emit the full catalog.
+    """
+
+    mode = (str(os.getenv("DEEPSEARCH_WEAVER_ALL_TOOLS_MODE", "compact")) or "").strip().lower()
 
     hints = describe_available_tools(include_llm_tools=include_llm_tools)
     hint_map = {str(h.get("name") or ""): h for h in hints if isinstance(h, dict)}
     descriptors = list(builtin_tool_descriptors())
 
+    if mode != "full":
+        profiles = {"F": 0, "X": 0, "H": 0}
+        for desc in descriptors:
+            hint = hint_map.get(desc.name) or {}
+            profile = (hint.get("profile") or desc.profile or "").strip().upper() or "F"
+            if profile not in profiles:
+                continue
+            profiles[profile] += 1
+        total = 1 + len(descriptors)  # includes graph_adapter.query
+        return "\n".join(
+            [
+                "available_tools:",
+                f" - graph_adapter.query (adapter traversal primitive)",
+                f" - builtin_tools: {len(descriptors)} total={total}",
+                f"profiles: F={profiles['F']} X={profiles['X']} H={profiles['H']}",
+                "note: set DEEPSEARCH_WEAVER_ALL_TOOLS_MODE=full for full tool list",
+            ]
+        ).strip()
+
     lines: list[str] = []
     lines.append("available_tools:")
-    # Pseudo-tool for adapter traversal (not a builtin GraphTool, but a first-class execution primitive).
     lines.append(
         " - graph_adapter.query profile=X determinism=adapter: Primary graph traversal via the configured graph adapter (prepare→query→filter→summarize→chain_traverse)."
     )

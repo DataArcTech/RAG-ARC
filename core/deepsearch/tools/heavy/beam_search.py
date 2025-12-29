@@ -15,6 +15,7 @@ from config.core.deepsearch.tool_defaults import (
 )
 from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
+from core.deepsearch.utils.compression import truncate_text
 
 
 class BeamSearchTool(GraphTool):
@@ -87,7 +88,22 @@ class BeamSearchTool(GraphTool):
             )
         paths = self._normalize_paths(traversal.get("paths"))
         if not paths:
-            raise ValueError("Beam search traversal returned no paths.")
+            paths = self._paths_from_chunks(traversal, seeds)
+        if not paths:
+            diagnostics = {
+                "beam_size": beam_size,
+                "max_depth": max_depth,
+                "path_count": 0,
+                "selected_paths": 0,
+                "used_llm_rerank": False,
+                "strategy": traversal.get("strategy") or "beam_search",
+                "note": "beam_search returned no paths; degraded to empty result",
+            }
+            return ToolResult(
+                summary="Beam search executed but no promising paths emerged.",
+                diagnostics=diagnostics,
+                think_notes=[],
+            )
 
         ranked_paths = await self._rank_paths(request, paths, beam_size)
         evidences = self._paths_to_evidences(ranked_paths, tool_name=self.descriptor.name, plan_step=request.plan_step)
@@ -240,7 +256,7 @@ class BeamSearchTool(GraphTool):
                     "nodes": self._deduplicate(nodes) or ["unknown"],
                     "triples": [],
                     "score": 0.2,
-                    "summary": content[:200],
+                    "summary": truncate_text(content, max_chars=200),
                 }
             )
         return normalized

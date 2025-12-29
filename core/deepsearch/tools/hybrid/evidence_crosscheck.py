@@ -35,7 +35,10 @@ class EvidenceCrosscheckTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.evidence_crosscheck",
         channel="text",
-        description="Cross-validates chunk/text-channel evidence against graph triples before reporting.",
+        description=(
+            "Cross-validates chunk/text-channel evidence against graph triples before reporting. "
+            "Requires triples (request.extra.triples or evidence provenance) and non-empty context_evidences."
+        ),
         speed="medium",
         cost="medium",
         strategy_tags=("verification", "triple", "chunk"),
@@ -88,13 +91,63 @@ class EvidenceCrosscheckTool(GraphTool):
     async def run(self, request: ToolRunRequest) -> ToolResult:
         triples = self._collect_triples(request)
         if not triples:
-            raise ValueError("EvidenceCrosscheckTool requires triples in request.extra or evidence provenance")
+            note = ThinkNote(
+                plan_step_id=request.plan_step,
+                reasoning="Skipped evidence crosscheck because no triples were supplied; proceed without crosscheck.",
+                next_actions=[
+                    "Provide triples via request.extra.triples (or attach triples to evidence provenance).",
+                    "Run graph traversal to extract candidate triples before crosschecking.",
+                ],
+                metadata={"reason": "missing_triples"},
+            )
+            return ToolResult(
+                summary="Skipped evidence crosscheck (missing triples).",
+                diagnostics={"skipped": True, "reason": "missing_triples", "triple_count": 0},
+                think_notes=[note],
+            )
 
         chunk_payload = self._extract_chunks(request.context_evidences)
         if not chunk_payload:
-            raise ValueError("EvidenceCrosscheckTool requires context_evidences with non-empty content")
+            note = ThinkNote(
+                plan_step_id=request.plan_step,
+                reasoning="Skipped evidence crosscheck because no non-empty context evidences were provided.",
+                next_actions=[
+                    "Run retrieval tools (chunk_scan/hybrid_neighborhood) to collect supporting chunks.",
+                    "Ensure context_evidences entries include non-empty content.",
+                ],
+                metadata={"reason": "missing_context_evidences"},
+            )
+            return ToolResult(
+                summary="Skipped evidence crosscheck (missing context evidences).",
+                diagnostics={"skipped": True, "reason": "missing_context_evidences", "triple_count": len(triples)},
+                think_notes=[note],
+            )
 
-        llm_report = await self._llm_crosscheck(request, chunk_payload, triples)
+        try:
+            llm_report = await self._llm_crosscheck(request, chunk_payload, triples)
+        except Exception as exc:  # noqa: BLE001
+            note = ThinkNote(
+                plan_step_id=request.plan_step,
+                reasoning="Evidence crosscheck failed to produce a usable structured result; proceed without crosscheck.",
+                next_actions=[
+                    "Retry crosscheck with a smaller set of chunks/triples.",
+                    "Verify tool prompt expects JSON and the LLM is configured correctly.",
+                ],
+                metadata={"error": str(exc), "error_type": type(exc).__name__},
+            )
+            return ToolResult(
+                summary="Evidence crosscheck failed (unusable output). Proceeding without crosscheck.",
+                diagnostics={
+                    "skipped": True,
+                    "reason": "llm_crosscheck_failed",
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "triple_count": len(triples),
+                    "token_breakdown": self._token_breakdown(chunk_payload, bool(self.llm_connector)),
+                },
+                think_notes=[note],
+            )
+
         confirmed = [entry.model_dump() for entry in llm_report.supported]
         missing = [entry.model_dump() for entry in llm_report.unsupported]
         coverage_ratio = len(confirmed) / max(1, len(confirmed) + len(missing))

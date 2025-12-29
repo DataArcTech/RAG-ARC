@@ -265,6 +265,7 @@ class FileStatus(enum.Enum):
     STORED = "STORED"
     PARSED = "PARSED"
     CHUNKED = "CHUNKED"
+    PARTIAL_INDEXED = "PARTIAL_INDEXED"
     INDEXED = "INDEXED"
     FAILED = "FAILED"
     DELETED = "DELETED"

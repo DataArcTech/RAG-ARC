@@ -1,9 +1,9 @@
-"""Render DeepSearch citations as numbered <sup>n</sup> tags.
+"""Render DeepSearch citations as compact evidence-number tags.
 
 The internal pipeline uses bracket citations (e.g. [chunk_001]) so downstream
 components can validate coverage and consistency. This module converts those
-bracket citations into user-facing <sup>n</sup> tags and generates a numbered
-reference list.
+bracket citations into user-facing evidence-number tags (e.g. [E1]) and
+generates a compact evidence index.
 """
 import json
 import re
@@ -78,7 +78,7 @@ def convert_bracket_citations_to_sup(
     citations: Sequence[Dict[str, Any]] | None,
     evidences: Sequence[Dict[str, Any]] | None = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
-    """Convert bracket citations in the markdown into <sup>n</sup> tags.
+    """Convert bracket citations in the markdown into evidence-number tags.
 
     Returns:
       - updated markdown text
@@ -153,8 +153,8 @@ def convert_bracket_citations_to_sup(
             if num in seen_nums:
                 continue
             seen_nums.add(num)
-            parts.append(f"<sup>{num}</sup>")
-        return "".join(parts)
+            parts.append(f"E{num}")
+        return "[" + ",".join(parts) + "]"
 
     converted_prefix = _BRACKET_RE.sub(_replace, prefix)
     converted_prefix = _CJK_BRACKET_RE.sub(_replace, converted_prefix)
@@ -218,12 +218,13 @@ def build_reference_entries(
 def render_reference_list_markdown(references: Sequence[Dict[str, Any]]) -> str:
     if not references:
         return ""
-    lines: List[str] = ["## References"]
+    lines: List[str] = ["## Evidence Index"]
 
     def _apply_chunk_meta(details: Dict[str, Any], meta: Mapping[str, Any]) -> None:
-        filename = meta.get("filename") or meta.get("source_file_name") or meta.get("path") or meta.get("file_path")
-        if isinstance(filename, str) and filename.strip():
-            details.setdefault("filename", filename.strip())
+        # Do not include filenames in public evidence indices (privacy / prompt hygiene).
+        source_file_id = meta.get("source_file_id")
+        if isinstance(source_file_id, str) and source_file_id.strip():
+            details.setdefault("source_file_id", source_file_id.strip())
         for key in ("chunk_index", "start_idx", "end_idx"):
             value = meta.get(key)
             if isinstance(value, int):
@@ -256,7 +257,7 @@ def render_reference_list_markdown(references: Sequence[Dict[str, Any]]) -> str:
                 if isinstance(raw_meta, Mapping):
                     _apply_chunk_meta(details, raw_meta)
         rendered = json.dumps(details, ensure_ascii=False, separators=(",", ":"), default=str)
-        lines.append(f"{int(num)}. {rendered}")
+        lines.append(f"E{int(num)}. {rendered}")
     return "\n".join(lines).strip()
 
 

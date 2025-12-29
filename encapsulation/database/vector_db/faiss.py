@@ -250,19 +250,47 @@ class FaissVectorDB(VectorDB):
         if not chunks:
             return []
 
-        # Extract texts for embedding
-        texts: list[str] = []
-        for chunk in chunks:
+        # Extract texts for embedding (reuse precomputed embeddings when available)
+        embeddings_by_row: list[Optional[np.ndarray]] = [None] * len(chunks)
+        texts_to_embed: list[str] = []
+        rows_to_embed: list[int] = []
+
+        for idx, chunk in enumerate(chunks):
             metadata = getattr(chunk, "metadata", None) or {}
+
+            precomputed = metadata.get("embedding")
+            if precomputed is not None:
+                try:
+                    emb = np.array(precomputed, dtype=np.float32)
+                    if emb.ndim != 1:
+                        raise ValueError("embedding must be a 1D vector")
+                    embeddings_by_row[idx] = emb
+                    continue
+                except Exception:
+                    embeddings_by_row[idx] = None
+
             index_text = metadata.get("index_text")
             if not isinstance(index_text, str) or not index_text.strip():
                 index_text = chunk.content
-            texts.append(index_text)
+            texts_to_embed.append(index_text)
+            rows_to_embed.append(idx)
 
-        # Compute embeddings
-        embeddings = self.embedding_model.embed(texts)
+        if texts_to_embed:
+            computed = self.embedding_model.embed(texts_to_embed)
+            if isinstance(computed, list) and computed and isinstance(computed[0], (int, float)):
+                computed = [computed]
+            if len(computed) != len(texts_to_embed):
+                raise RuntimeError(
+                    f"Embedding size mismatch: got {len(computed)} for {len(texts_to_embed)} inputs"
+                )
+            for row_idx, embedding in zip(rows_to_embed, computed):
+                embeddings_by_row[row_idx] = np.array(embedding, dtype=np.float32)
 
-        embeddings_np = np.array(embeddings).astype(np.float32)
+        missing = [i for i, emb in enumerate(embeddings_by_row) if emb is None]
+        if missing:
+            raise RuntimeError(f"Missing embeddings for {len(missing)} chunks (first_missing_index={missing[0]})")
+
+        embeddings_np = np.vstack([emb for emb in embeddings_by_row if emb is not None]).astype(np.float32)
         embeddings_np = self._normalize_vectors(embeddings_np)
 
         with self._lock:

@@ -850,6 +850,12 @@ class DeepSearchService:
             request_bucket = base.setdefault("request_metadata", {})
             if isinstance(request_bucket, dict):
                 request_bucket.update(metadata)
+            # Promote selected request knobs to the top level so adapters/tools can consume them
+            # without knowing about the `request_metadata` wrapper.
+            for key in ("file_scope", "compression"):
+                value = metadata.get(key)
+                if value is not None:
+                    base[key] = value
         try:
             return context.model_copy(update={"metadata": base})
         except AttributeError:

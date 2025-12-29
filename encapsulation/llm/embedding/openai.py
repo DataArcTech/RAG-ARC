@@ -59,12 +59,16 @@ class OpenAIEmbeddingLLM(EmbeddingLLMBase):
         """
         # Handle single text vs list
         is_single = isinstance(texts, str)
-        text_list = [texts] if is_single else texts
+        text_list = [texts] if is_single else list(texts or [])
 
         # Validate inputs
-        for text in text_list:
+        for idx, text in enumerate(text_list):
             if not self._validate_input(text):
-                raise ValueError(f"Text validation failed: {text}")
+                text_preview_len = len(text) if isinstance(text, str) else None
+                raise ValueError(
+                    "Text validation failed "
+                    f"(index={idx}, type={type(text).__name__}, len={text_preview_len})"
+                )
 
         if self.loading_method == "huggingface":
             try:
@@ -80,35 +84,82 @@ class OpenAIEmbeddingLLM(EmbeddingLLMBase):
                 logger.error(f"Embedding failed: {str(e)}")
                 raise RuntimeError(f"Embedding failed: {str(e)}")
 
-        try:
-            # Clean texts - remove newlines
-            cleaned_texts = [text.replace("\n", " ") for text in text_list]
+        def _extract_embeddings(response) -> list[list[float]]:
+            if hasattr(response, 'data') and response.data:
+                return [item.embedding for item in response.data]
+            if isinstance(response, dict) and 'data' in response:
+                return [item['embedding'] for item in response['data']]
+            raise RuntimeError(f"Unexpected response format: {type(response)}")
 
-            # Create embedding request
+        def _looks_like_batch_input_rejected(exc: Exception) -> bool:
+            msg = str(exc).lower()
+            return (
+                "$.input" in msg
+                or "input' is invalid" in msg
+                or "input is invalid" in msg
+                or "invalid input" in msg
+            )
+
+        def _embed_with_mode(cleaned_texts: list[str], *, supports_batch_input: bool) -> list[list[float]]:
             embedding_kwargs = {}
             if self.embedding_dimensions:
                 embedding_kwargs['dimensions'] = self.embedding_dimensions
 
-            response = self.client.embeddings.create(
-                model=self.model_name,
-                input=cleaned_texts,
-                **embedding_kwargs
-            )
+            batch_size = int(getattr(self.config, "request_batch_size", 64) or 64)
+            batch_size = max(1, batch_size)
 
-            # Extract embeddings - handle different response formats
-            if hasattr(response, 'data') and response.data:
-                embeddings = [item.embedding for item in response.data]
-            elif isinstance(response, dict) and 'data' in response:
-                embeddings = [item['embedding'] for item in response['data']]
+            embeddings: list[list[float]] = []
+            if supports_batch_input:
+                for i in range(0, len(cleaned_texts), batch_size):
+                    batch = cleaned_texts[i:i + batch_size]
+                    response = self.client.embeddings.create(
+                        model=self.model_name,
+                        input=batch,
+                        **embedding_kwargs
+                    )
+                    embeddings.extend(_extract_embeddings(response))
             else:
-                raise RuntimeError(f"Unexpected response format: {type(response)}")
+                for text in cleaned_texts:
+                    response = self.client.embeddings.create(
+                        model=self.model_name,
+                        input=text,
+                        **embedding_kwargs
+                    )
+                    embeddings.extend(_extract_embeddings(response))
+            return embeddings
+
+        try:
+            cleaned_texts = [text.replace("\n", " ") for text in text_list]
+            supports_batch_input = bool(getattr(self.config, "supports_batch_input", True))
+            embeddings = _embed_with_mode(cleaned_texts, supports_batch_input=supports_batch_input)
 
             # Return single embedding or list based on input
             return embeddings[0] if is_single else embeddings
 
         except Exception as e:
+            # Some OpenAI-compatible endpoints reject list inputs for `input`.
+            # Detect and provide an explainable downgrade path.
+            supports_batch_input = bool(getattr(self.config, "supports_batch_input", True))
+            if (
+                supports_batch_input
+                and not is_single
+                and len(text_list) > 1
+                and _looks_like_batch_input_rejected(e)
+            ):
+                logger.warning(
+                    "Embeddings endpoint rejected batched list input; retrying per-item. "
+                    "Set EMBEDDING_SUPPORTS_BATCH_INPUT=0 to skip batching."
+                )
+                try:
+                    cleaned_texts = [text.replace("\n", " ") for text in text_list]
+                    embeddings = _embed_with_mode(cleaned_texts, supports_batch_input=False)
+                    return embeddings[0] if is_single else embeddings
+                except Exception as e2:
+                    logger.error(f"Embedding failed after per-item retry: {str(e2)}")
+                    raise RuntimeError(f"Embedding failed: {str(e2)}") from e2
+
             logger.error(f"Embedding failed: {str(e)}")
-            raise RuntimeError(f"Embedding failed: {str(e)}")
+            raise RuntimeError(f"Embedding failed: {str(e)}") from e
 
     async def aembed(self, texts: Union[str, List[str]]) -> Union[List[float], List[List[float]]]:
         """
@@ -147,15 +198,27 @@ class OpenAIEmbeddingLLM(EmbeddingLLMBase):
                 embedding_kwargs['dimensions'] = self.embedding_dimensions
 
             embeddings = []
-            batch_size = 100
-            for i in range(0, len(text_list), batch_size):
-                batch = text_list[i:i+batch_size]
-                response = await self.async_client.embeddings.create(
-                    model=self.model_name,
-                    input=batch,
-                    **embedding_kwargs
-                )
-                embeddings.extend(data.embedding for data in response.data)
+            supports_batch_input = bool(getattr(self.config, "supports_batch_input", True))
+            batch_size = int(getattr(self.config, "request_batch_size", 64) or 64)
+            batch_size = max(1, batch_size)
+
+            if supports_batch_input:
+                for i in range(0, len(text_list), batch_size):
+                    batch = text_list[i:i + batch_size]
+                    response = await self.async_client.embeddings.create(
+                        model=self.model_name,
+                        input=batch,
+                        **embedding_kwargs
+                    )
+                    embeddings.extend(data.embedding for data in response.data)
+            else:
+                for text in text_list:
+                    response = await self.async_client.embeddings.create(
+                        model=self.model_name,
+                        input=text,
+                        **embedding_kwargs
+                    )
+                    embeddings.extend(data.embedding for data in response.data)
 
             return embeddings[0] if is_single else embeddings
 

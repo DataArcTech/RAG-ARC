@@ -19,10 +19,9 @@ def test_convert_bracket_citations_to_sup_emits_single_number_tags():
 
     converted, refs = convert_bracket_citations_to_sup(markdown, citations=citations, evidences=evidences)
 
-    assert "<sup>1</sup>" in converted
-    assert "<sup>2</sup><sup>3</sup>" in converted
-    assert "<sup>1,2</sup>" not in converted
-    assert "## References" in converted
+    assert "[E1]" in converted
+    assert "[E2,E3]" in converted
+    assert "## Evidence Index" in converted
     assert "[OpenAI](https://example.com)" in converted
     assert refs and refs[0]["n"] == 1 and refs[0]["evidence_id"] == "ev1"
 
@@ -41,7 +40,7 @@ def test_convert_bracket_citations_to_sup_does_not_touch_appendix_sections():
 
     converted, _ = convert_bracket_citations_to_sup(markdown, citations=citations, evidences=evidences)
 
-    assert "Body cites <sup>1</sup>." in converted
+    assert "Body cites [E1]." in converted
     assert "## Appendix: Chunk Evidence" in converted
     assert "- [ev1] (graph): full id should remain in appendix." in converted
 
@@ -61,9 +60,9 @@ def test_convert_bracket_citations_to_sup_supports_cjk_brackets():
 
     assert "【ev1】" not in converted
     assert "【ev2】" not in converted
-    assert "<sup>1</sup>" in converted
-    assert "<sup>2</sup>" in converted
-    assert "## References" in converted
+    assert "[E1]" in converted
+    assert "[E2]" in converted
+    assert "## Evidence Index" in converted
     assert refs and refs[0]["n"] == 1 and refs[0]["evidence_id"] == "ev1"
 
 
@@ -80,6 +79,6 @@ def test_convert_bracket_citations_to_sup_drops_unused_citations_from_references
 
     converted, refs = convert_bracket_citations_to_sup(markdown, citations=citations, evidences=evidences)
 
-    assert "<sup>1</sup>" in converted
+    assert "[E1]" in converted
     assert "ev2" not in converted
     assert refs and [ref["evidence_id"] for ref in refs] == ["ev1"]

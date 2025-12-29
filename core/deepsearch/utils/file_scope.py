@@ -43,9 +43,6 @@ def _looks_like_file_hint(value: str) -> bool:
         return False
     if _FILE_HINT_EXT_RE.search(token):
         return True
-    # Allow short "title-like" tokens without whitespace; avoid scoping on generic quoted phrases.
-    if len(token) >= 3 and not re.search(r"\s", token):
-        return True
     return False
 
 

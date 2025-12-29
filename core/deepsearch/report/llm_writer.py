@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, ValidationError
 from config.core.deepsearch import report_writer_defaults as report_defaults
 from core.deepsearch.memory import EvidenceBank
 from core.deepsearch.tools.base import call_llm_async
+from core.utils.text_regex import CJK_DETECT_RE
 from core.utils.text_regex import INLINE_CITATION_TOKEN_RE
 from core.prompts.deepsearch.report import (
     REPORT_OUTLINE_SYSTEM_PROMPT,
@@ -83,6 +84,28 @@ class LLMStructuredReport(BaseModel):
 class DeepSearchLLMReportWriter:
     """Generate report outlines and full reports using an LLM connector."""
 
+    @staticmethod
+    def _language_enforcement_prompt(question: str) -> str | None:
+        q = str(question or "").strip()
+        if not q:
+            return None
+        # If the question contains no CJK characters, treat it as English and enforce hard output language.
+        if not CJK_DETECT_RE.search(q):
+            return (
+                "Output language policy (STRICT): The user question is in English.\n"
+                "- Write ALL fields in English (title, short_answer, sections, limitations, next_steps).\n"
+                "- If evidence snippets are non-English, translate them into English in your writing.\n"
+                "- Do NOT output Simplified/Traditional Chinese.\n"
+            )
+        return None
+
+    @classmethod
+    def _system_prompt_with_language(cls, base_prompt: str, *, question: str) -> str:
+        hint = cls._language_enforcement_prompt(question)
+        if not hint:
+            return base_prompt
+        return f"{base_prompt.rstrip()}\n\n{hint.strip()}\n"
+
     def __init__(
         self,
         llm_connector: Any,
@@ -127,7 +150,7 @@ class DeepSearchLLMReportWriter:
             evidence_index_json=evidence_index_json,
         )
         messages = [
-            {"role": "system", "content": REPORT_OUTLINE_SYSTEM_PROMPT},
+            {"role": "system", "content": self._system_prompt_with_language(REPORT_OUTLINE_SYSTEM_PROMPT, question=question)},
             {"role": "user", "content": user_prompt},
         ]
         last_raw: str | None = None
@@ -176,7 +199,7 @@ class DeepSearchLLMReportWriter:
                 f"Previous (invalid) output:\n{_snippet(raw, limit=int(report_defaults.DEFAULT_ERROR_SNIPPET_LIMIT_CHARS))}\n"
             )
             messages = [
-                {"role": "system", "content": REPORT_OUTLINE_SYSTEM_PROMPT},
+                {"role": "system", "content": self._system_prompt_with_language(REPORT_OUTLINE_SYSTEM_PROMPT, question=question)},
                 {"role": "user", "content": repair_prompt},
             ]
         raise RuntimeError(f"Report outline generation failed after retries. raw={_snippet(last_raw or '')}")
@@ -230,7 +253,7 @@ class DeepSearchLLMReportWriter:
                 coverage_json=_dump_json(coverage),
             )
             messages = [
-                {"role": "system", "content": REPORT_WRITE_SYSTEM_PROMPT},
+                {"role": "system", "content": self._system_prompt_with_language(REPORT_WRITE_SYSTEM_PROMPT, question=question)},
                 {"role": "user", "content": user_prompt},
             ]
 
@@ -503,7 +526,7 @@ class DeepSearchLLMReportWriter:
             coverage_json=coverage_json,
         )
         messages = [
-            {"role": "system", "content": PARALLEL_SYNTHESIS_SYSTEM_PROMPT},
+            {"role": "system", "content": self._system_prompt_with_language(PARALLEL_SYNTHESIS_SYSTEM_PROMPT, question=question)},
             {"role": "user", "content": user_prompt},
         ]
         raw = await self._call(messages, phase="parallel_synthesis")
@@ -568,7 +591,7 @@ class DeepSearchLLMReportWriter:
                 graph_chain_json=_dump_json(limited_chain),
             )
             messages = [
-                {"role": "system", "content": SECTION_WRITE_SYSTEM_PROMPT},
+                {"role": "system", "content": self._system_prompt_with_language(SECTION_WRITE_SYSTEM_PROMPT, question=question)},
                 {"role": "user", "content": user_prompt},
             ]
             try:

@@ -59,8 +59,7 @@ class PrunedHippoRAGIndexer(BaseIndexer):
             extracted_chunks = await self._extract_graph_data(chunks)
 
             if not extracted_chunks:
-                logger.error("Graph extraction failed for all chunks")
-                return []
+                raise RuntimeError("Graph extraction failed for all chunks")
 
             logger.info(f"Successfully extracted graph data from {len(extracted_chunks)} chunks")
 
@@ -73,8 +72,7 @@ class PrunedHippoRAGIndexer(BaseIndexer):
             success = self.graph_store.update_index(extracted_chunks)
 
             if not success:
-                logger.error("Failed to update graph store")
-                return []
+                raise RuntimeError("Failed to update graph store")
 
             # Collect successfully added chunk IDs
             chunk_ids = [chunk.id for chunk in extracted_chunks]
@@ -88,7 +86,7 @@ class PrunedHippoRAGIndexer(BaseIndexer):
 
         except Exception as e:
             logger.error(f"Error during Pruned HippoRAG graph indexing: {e}", exc_info=True)
-            return []
+            raise
 
     async def _extract_graph_data(self, chunks: List[Chunk]) -> List[Chunk]:
         """
@@ -152,4 +150,3 @@ class PrunedHippoRAGIndexer(BaseIndexer):
         except Exception as e:
             logger.error(f"Error during Pruned HippoRAG graph deletion: {e}", exc_info=True)
             return False
-

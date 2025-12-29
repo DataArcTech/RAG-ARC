@@ -710,6 +710,7 @@ show_services_info() {
     print_message "$NC" "   - View neo4j logs: docker logs -f rag-arc-neo4j"
     print_message "$NC" "   - Stop all: ./stop.sh"
     print_message "$NC" "   - Start all services: ./start.sh --services-only"
+    print_message "$NC" "   - Start local Celery workers: ./scripts/mq_tools/start_mq_workers_local.sh"
     print_message "$NC" "   - Start with app: ./start.sh"
     echo ""
     print_message "$BLUE" "=========================================="
@@ -768,6 +769,19 @@ main() {
     if [ "$SERVICES_ONLY" = true ]; then
         print_message "$GREEN" "✅ Backend services started successfully (services-only mode)"
         echo ""
+        # In services-only mode, users commonly run the API via `uv run uvicorn ...` on the host.
+        # Optionally start host-side Celery workers so the queue is available.
+        local start_local_workers="${MQ_AUTO_START_LOCAL_WORKERS:-true}"
+        if [[ "${start_local_workers,,}" == "1" || "${start_local_workers,,}" == "true" || "${start_local_workers,,}" == "yes" ]]; then
+            print_message "$BLUE" "🧵 Starting local Celery workers (services-only mode)..."
+            if command -v uv >/dev/null 2>&1; then
+                ./scripts/mq_tools/start_mq_workers_local.sh || true
+            else
+                print_message "$YELLOW" "ℹ️  'uv' not found; skipping local Celery workers. Install deps with: uv sync --extra dev"
+            fi
+        else
+            print_message "$YELLOW" "ℹ️  MQ_AUTO_START_LOCAL_WORKERS=${start_local_workers}; skipping local Celery workers"
+        fi
         show_services_info
         return 0
     fi

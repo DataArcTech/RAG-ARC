@@ -35,6 +35,12 @@ def _env_int(name: str) -> Optional[int]:
         return None
     return int(raw)
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
 
 class OpenAIEmbeddingConfig(AbstractConfig):
     """Configuration for OpenAI Embedding LLM"""
@@ -63,6 +69,16 @@ class OpenAIEmbeddingConfig(AbstractConfig):
     # Connection configuration
     timeout: float = 60.0  # Request timeout in seconds
     max_retries: int = 3  # Number of retry attempts on failure
+
+    # Request shaping / compatibility
+    request_batch_size: int = Field(
+        default_factory=lambda: int(os.getenv("EMBEDDING_REQUEST_BATCH_SIZE", "64")),
+        description="Number of inputs per embeddings request when batching is enabled",
+    )
+    supports_batch_input: bool = Field(
+        default_factory=lambda: _env_bool("EMBEDDING_SUPPORTS_BATCH_INPUT", True),
+        description="Whether the embeddings endpoint accepts list inputs for the `input` field",
+    )
 
     @model_validator(mode="after")
     def _validate_embedding_dimensions(self):

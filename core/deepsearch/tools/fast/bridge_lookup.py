@@ -127,9 +127,11 @@ class BridgeLookupTool(GraphTool):
     ) -> List[EvidenceChunk]:
         evidences: List[EvidenceChunk] = []
         for idx, bridge in enumerate(bridges):
-            head = bridge.get("head") or bridge.get("entity") or "unknown_head"
+            head = bridge.get("head") or bridge.get("entity")
+            tail = bridge.get("tail") or bridge.get("target")
+            if not head or not tail:
+                continue
             relation = bridge.get("relation") or bridge.get("predicate") or "related_to"
-            tail = bridge.get("tail") or bridge.get("target") or "unknown_tail"
             content = f"{head} -[{relation}]-> {tail}"
             chunk_id = derived_chunk_id(tool_name=tool_name, plan_step=plan_step, label=f"bridge_{idx}", content=content)
             evidences.append(
@@ -140,6 +142,7 @@ class BridgeLookupTool(GraphTool):
                     score=bridge.get("score"),
                     provenance={
                         "relation": relation,
+                        "triple": {"head": str(head), "relation": str(relation), "tail": str(tail)},
                         "raw": bridge,
                     },
                 )

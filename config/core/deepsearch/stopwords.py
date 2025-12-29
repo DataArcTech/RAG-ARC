@@ -74,6 +74,8 @@ PATTERN_PROBE_CJK_STOPWORDS: frozenset[str] = frozenset(
         "相关",
         "主要",
         "提示",
+        "与非",
+        "类产品",
     }
 )
 

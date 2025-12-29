@@ -11,6 +11,7 @@ from encapsulation.data_model.deepsearch import EvidenceChunk, GraphQueryContext
 
 from .graph_loop import GraphReasoningLoop
 from core.deepsearch.tooling.protocols import ToolInvoker
+from core.deepsearch.utils.compression import compact_evidences, resolve_compaction_config
 
 logger = logging.getLogger(__name__)
 
@@ -560,7 +561,7 @@ class MultiAgentGraphReasoningLoop:
         evidences: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
         semaphore = asyncio.Semaphore(max(1, self._settings().probe_concurrency))
-        bounded_evidences = self._limit_tool_context_evidences(evidences)
+        bounded_evidences = self._limit_tool_context_evidences(evidences, question=question, graph_context=graph_context)
 
         async def _invoke(tool_name: str) -> Dict[str, Any]:
             async with semaphore:
@@ -699,18 +700,62 @@ class MultiAgentGraphReasoningLoop:
         base_context: Optional[GraphQueryContext],
     ) -> List[Dict[str, Any]]:
         semaphore = asyncio.Semaphore(max(1, self._settings().lead_tool_concurrency))
-        evidences = self._limit_tool_context_evidences(list(merged_trace.get("evidences") or []))
+        full_evidences = list(merged_trace.get("evidences") or [])
         graph_context = merged_trace.get("graph_context") or (base_context.model_dump(exclude_none=True) if base_context else {})
+        evidences = self._limit_tool_context_evidences(full_evidences, question=question, graph_context=graph_context)
+
+        triples: List[Dict[str, str]] = []
+        for ev in full_evidences:
+            if not isinstance(ev, dict):
+                continue
+            prov = ev.get("provenance")
+            if not isinstance(prov, dict):
+                continue
+            payload = prov.get("triples") or prov.get("triple")
+            if isinstance(payload, dict):
+                payload = [payload]
+            if not isinstance(payload, list):
+                continue
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                head = item.get("head") or item.get("subject") or item.get("entity")
+                tail = item.get("tail") or item.get("object") or item.get("target")
+                relation = item.get("relation") or item.get("predicate") or item.get("edge")
+                if head and tail and relation:
+                    triples.append({"head": str(head), "relation": str(relation), "tail": str(tail)})
+                if len(triples) >= 24:
+                    break
+            if len(triples) >= 24:
+                break
+
+        skipped: List[Dict[str, Any]] = []
+        lead_tool_names = list(self._settings().lead_tool_names)
+        filtered_lead_tools: List[str] = []
+        for tool_name in lead_tool_names:
+            if tool_name == "graph.evidence_crosscheck" and not triples:
+                skipped.append({"tool_name": tool_name, "reason": "missing_triples"})
+                continue
+            filtered_lead_tools.append(tool_name)
+
+        if skipped:
+            merged_trace.setdefault("coverage_metrics", {})
+            if isinstance(merged_trace.get("coverage_metrics"), dict):
+                merged_trace["coverage_metrics"].setdefault("lead_tools_skipped", [])
+                merged_trace["coverage_metrics"]["lead_tools_skipped"] = list(merged_trace["coverage_metrics"].get("lead_tools_skipped") or []) + skipped
 
         async def _invoke(tool_name: str) -> Dict[str, Any]:
             async with semaphore:
+                extra: Dict[str, Any] = {}
+                if tool_name == "graph.evidence_crosscheck" and triples:
+                    extra = {"triples": triples}
                 payload = {
                     "question": question,
                     "plan_step": f"lead:{tool_name}:{uuid.uuid4().hex[:6]}",
                     "context_evidences": evidences,
                     "adapter": self.adapter,
                     "access_scope": (graph_context or {}).get("access_scope") if isinstance(graph_context, dict) else None,
-                    "extra": {},
+                    "extra": extra,
                     "graph_context": graph_context,
                     "coverage_metrics": merged_trace.get("coverage_metrics") or {},
                 }
@@ -721,7 +766,7 @@ class MultiAgentGraphReasoningLoop:
                     "result": result.model_dump(),
                 }
 
-        tasks = [asyncio.create_task(_invoke(name)) for name in self._settings().lead_tool_names]
+        tasks = [asyncio.create_task(_invoke(name)) for name in filtered_lead_tools]
         results: List[Dict[str, Any]] = []
         for task in asyncio.as_completed(tasks):
             try:
@@ -748,29 +793,61 @@ class MultiAgentGraphReasoningLoop:
         merged["coverage_metrics"]["lead_tools"] = [run.get("tool_name") for run in lead_tool_runs]
         return merged
 
-    def _tool_context_limits(self) -> tuple[int, int]:
-        cfg = self.strategy_config
-        if hasattr(cfg, "tool_context_max_evidences") and hasattr(cfg, "tool_context_max_chars"):
-            max_items = int(getattr(cfg, "tool_context_max_evidences"))
-            max_chars = int(getattr(cfg, "tool_context_max_chars"))
-            return max(1, max_items), max(100, max_chars)
-        if isinstance(cfg, dict):
-            if cfg.get("tool_context_max_evidences") is None or cfg.get("tool_context_max_chars") is None:
-                raise ValueError("strategy_config.tool_context_max_evidences/tool_context_max_chars are required")
-            return max(1, int(cfg["tool_context_max_evidences"])), max(100, int(cfg["tool_context_max_chars"]))
-        raise TypeError("strategy_config must expose tool_context_max_evidences/tool_context_max_chars")
+    def _limit_tool_context_evidences(
+        self,
+        evidences: List[Dict[str, Any]],
+        *,
+        question: str,
+        graph_context: Any,
+    ) -> List[Dict[str, Any]]:
+        """Apply the shared compaction helper to dict-form evidences for tool payloads."""
 
-    def _limit_tool_context_evidences(self, evidences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        max_items, max_chars = self._tool_context_limits()
-        items = [ev for ev in (evidences or []) if isinstance(ev, dict)]
-        if max_items and len(items) > max_items:
-            items = items[-max_items:]
-        bounded: List[Dict[str, Any]] = []
-        for ev in items:
-            chunk_id = ev.get("chunk_id")
-            source = ev.get("source")
-            content = str(ev.get("content") or "")
-            if max_chars and len(content) > max_chars:
-                content = content[: max(0, max_chars - 3)].rstrip() + "..."
-            bounded.append({"chunk_id": chunk_id, "source": source, "content": content, "score": ev.get("score")})
-        return bounded
+        max_items = GraphReasoningLoop._resolve_tool_context_max_items(self.strategy_config)
+        max_chars = GraphReasoningLoop._resolve_tool_context_max_chars(self.strategy_config)
+
+        compression: Dict[str, Any] = {}
+        if isinstance(graph_context, dict):
+            meta = graph_context.get("metadata")
+            if isinstance(meta, dict):
+                if isinstance(meta.get("compression"), dict):
+                    compression.update(dict(meta.get("compression") or {}))
+                req = meta.get("request_metadata")
+                if isinstance(req, dict) and isinstance(req.get("compression"), dict):
+                    compression.update(dict(req.get("compression") or {}))
+
+        cfg = resolve_compaction_config(
+            branch="tool_context",
+            graph_context=None,
+            extra={"compression": compression} if compression else {},
+            default_max_items=max_items,
+            default_max_chars=max_chars,
+            default_mode="truncate",
+            default_retention="tail",
+            env_max_items="DEEPSEARCH_TOOL_CONTEXT_MAX_EVIDENCES",
+            env_max_chars="DEEPSEARCH_TOOL_CONTEXT_MAX_CHARS",
+        )
+
+        chunks: List[EvidenceChunk] = []
+        for item in evidences or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                chunks.append(EvidenceChunk.model_validate(item))
+            except Exception:
+                chunks.append(
+                    EvidenceChunk(
+                        chunk_id=str(item.get("chunk_id") or ""),
+                        source=str(item.get("source") or ""),
+                        content=str(item.get("content") or ""),
+                        score=item.get("score"),
+                    )
+                )
+
+        compacted, _meta = compact_evidences(
+            chunks,
+            cfg=cfg,
+            question=question,
+            extra={},
+            include_triple_count=False,
+        )
+        return compacted

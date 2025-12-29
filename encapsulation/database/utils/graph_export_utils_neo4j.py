@@ -339,7 +339,11 @@ class GraphExporterNeo4j:
         subgraph_node_ids: Set[str],
         seed_entity_ids: Optional[Set[str]] = None,
         retrieved_chunk_ids: Optional[List[str]] = None,
-        node_ppr_scores: Optional[Dict[str, float]] = None
+        node_ppr_scores: Optional[Dict[str, float]] = None,
+        *,
+        max_edges: int = 2000,
+        owner_id: Optional[str] = None,
+        owner_scope_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Export retrieval subgraph for visualization (Neo4j version)
@@ -354,9 +358,9 @@ class GraphExporterNeo4j:
         Returns:
             Dict with 'chunks', 'nodes' (entities), 'edges', and 'metadata'
         """
-        chunks = []
-        nodes = []  # Only entities
-        edges = []
+        chunks: List[Dict[str, Any]] = []
+        nodes: List[Dict[str, Any]] = []  # Only entities
+        edges: List[Dict[str, Any]] = []
         categories_set = set()  # Track unique entity types
 
         seed_entity_ids = seed_entity_ids or set()
@@ -378,17 +382,59 @@ class GraphExporterNeo4j:
                 }
             }
 
-        # Query nodes from Neo4j
-        node_query = """
-        MATCH (n)
-        WHERE (n.chunk_id IN $node_ids OR n.entity_id IN $node_ids)
-        RETURN COALESCE(n.chunk_id, n.entity_id) AS node_id,
-               CASE WHEN n:Chunk THEN 'chunk' ELSE 'entity' END AS node_type,
-               n.content AS content,
-               n.entity_name AS entity_name,
-               n.entity_type AS entity_type
-        """
-        node_results = graph_store._execute_query(node_query, {'node_ids': list(subgraph_node_ids)})
+        # Prefer indexed lookups over `OR` clauses to keep Neo4j exports fast and stable under load.
+        normalized_ids = [str(node_id) for node_id in subgraph_node_ids if str(node_id)]
+        entity_ids = [node_id for node_id in normalized_ids if node_id.startswith("entity-")]
+        chunk_ids = [node_id for node_id in normalized_ids if not node_id.startswith("entity-")]
+
+        owner_key = None
+        if owner_id is not None:
+            owner_key = graph_store._owner_key(owner_id)
+        global_owner = graph_store.OWNER_GLOBAL_KEY
+
+        node_results: List[Dict[str, Any]] = []
+        if chunk_ids:
+            clause = ""
+            params: Dict[str, Any] = {"chunk_ids": chunk_ids, "global_owner": global_owner}
+            if owner_key is not None:
+                clause = "AND COALESCE(c.owner_id, $global_owner) = $owner_id"
+                params["owner_id"] = owner_key
+            node_results.extend(
+                graph_store._execute_query(
+                    f"""
+                    MATCH (c:Chunk)
+                    WHERE c.chunk_id IN $chunk_ids
+                      {clause}
+                    RETURN c.chunk_id AS node_id,
+                           'chunk' AS node_type,
+                           c.content AS content,
+                           NULL AS entity_name,
+                           NULL AS entity_type
+                    """,
+                    params,
+                )
+            )
+        if entity_ids:
+            clause = ""
+            params = {"entity_ids": entity_ids, "global_owner": global_owner}
+            if owner_key is not None:
+                clause = "AND COALESCE(e.owner_id, $global_owner) = $owner_id"
+                params["owner_id"] = owner_key
+            node_results.extend(
+                graph_store._execute_query(
+                    f"""
+                    MATCH (e:Entity)
+                    WHERE e.entity_id IN $entity_ids
+                      {clause}
+                    RETURN e.entity_id AS node_id,
+                           'entity' AS node_type,
+                           NULL AS content,
+                           e.entity_name AS entity_name,
+                           e.entity_type AS entity_type
+                    """,
+                    params,
+                )
+            )
 
         # Export nodes - separate chunks and entities
         seed_marked_count = 0
@@ -442,22 +488,83 @@ class GraphExporterNeo4j:
         if seed_entity_ids:
             logger.info(f"Marked {seed_marked_count} seed entities out of {len(seed_entity_ids)} provided")
 
-        # Query edges within subgraph
-        edge_query = """
-        MATCH (n1)-[r]-(n2)
-        WHERE (n1.chunk_id IN $node_ids OR n1.entity_id IN $node_ids)
-          AND (n2.chunk_id IN $node_ids OR n2.entity_id IN $node_ids)
-        RETURN COALESCE(n1.chunk_id, n1.entity_id) AS source_id,
-               COALESCE(n2.chunk_id, n2.entity_id) AS target_id,
-               type(r) AS rel_type,
-               COALESCE(r.weight, r.similarity, 1.0) AS weight,
-               r.predicate AS predicate,
-               CASE WHEN n1:Chunk THEN 'chunk' ELSE 'entity' END AS source_type,
-               CASE WHEN n2:Chunk THEN 'chunk' ELSE 'entity' END AS target_type,
-               n1.entity_name AS source_name,
-               n2.entity_name AS target_name
-        """
-        edge_results = graph_store._execute_query(edge_query, {'node_ids': list(subgraph_node_ids)})
+        max_edges = max(0, int(max_edges or 0))
+        edge_results: List[Dict[str, Any]] = []
+
+        edge_params: Dict[str, Any] = {"global_owner": global_owner}
+        rel_owner_clause = ""
+        if owner_key is not None:
+            edge_params["owner_id"] = owner_key
+            rel_owner_clause = "AND (r.owner_id IS NULL OR COALESCE(r.owner_id, $global_owner) = $owner_id)"
+
+        edge_clause_chunk_entity = ""
+        edge_clause_entity_entity = ""
+        if owner_key is not None:
+            edge_clause_chunk_entity = (
+                "AND COALESCE(c.owner_id, $global_owner) = $owner_id "
+                "AND COALESCE(e.owner_id, $global_owner) = $owner_id "
+                + rel_owner_clause
+            )
+            edge_clause_entity_entity = (
+                "AND COALESCE(e1.owner_id, $global_owner) = $owner_id "
+                "AND COALESCE(e2.owner_id, $global_owner) = $owner_id "
+                + rel_owner_clause
+            )
+
+        # Chunk-Entity edges
+        if chunk_ids and entity_ids:
+            params = dict(edge_params)
+            params.update({"chunk_ids": chunk_ids, "entity_ids": entity_ids, "limit": max_edges or 2000})
+            edge_results.extend(
+                graph_store._execute_query(
+                    f"""
+                    MATCH (c:Chunk)-[r]-(e:Entity)
+                    WHERE c.chunk_id IN $chunk_ids
+                      AND e.entity_id IN $entity_ids
+                      {edge_clause_chunk_entity}
+                    RETURN c.chunk_id AS source_id,
+                           e.entity_id AS target_id,
+                           type(r) AS rel_type,
+                           COALESCE(r.weight, r.similarity, 1.0) AS weight,
+                           r.predicate AS predicate,
+                           'chunk' AS source_type,
+                           'entity' AS target_type,
+                           NULL AS source_name,
+                           e.entity_name AS target_name
+                    ORDER BY weight DESC
+                    LIMIT $limit
+                    """,
+                    params,
+                )
+            )
+
+        # Entity-Entity edges (dedupe by stable ordering)
+        if entity_ids:
+            params = dict(edge_params)
+            params.update({"entity_ids": entity_ids, "limit": max_edges or 2000})
+            edge_results.extend(
+                graph_store._execute_query(
+                    f"""
+                    MATCH (e1:Entity)-[r]-(e2:Entity)
+                    WHERE e1.entity_id IN $entity_ids
+                      AND e2.entity_id IN $entity_ids
+                      AND e1.entity_id < e2.entity_id
+                      {edge_clause_entity_entity}
+                    RETURN e1.entity_id AS source_id,
+                           e2.entity_id AS target_id,
+                           type(r) AS rel_type,
+                           COALESCE(r.weight, r.similarity, 1.0) AS weight,
+                           r.predicate AS predicate,
+                           'entity' AS source_type,
+                           'entity' AS target_type,
+                           e1.entity_name AS source_name,
+                           e2.entity_name AS target_name
+                    ORDER BY weight DESC
+                    LIMIT $limit
+                    """,
+                    params,
+                )
+            )
 
         # Export edges (skip reverse edges to avoid duplicates)
         seen_edges = set()
@@ -520,11 +627,21 @@ class GraphExporterNeo4j:
 
             edges.append(edge_obj)
 
-        logger.info(f"Exported subgraph: {len(chunks)} chunks, {len(nodes)} entities, {len(edges)} edges")
+        if max_edges and len(edges) > max_edges:
+            edges = edges[:max_edges]
+
+        logger.info(
+            "Exported subgraph: %d chunks, %d entities, %d edges (owner_scope=%s)",
+            len(chunks),
+            len(nodes),
+            len(edges),
+            owner_scope_label if owner_scope_label is not None else owner_key,
+        )
 
         # Build categories list from unique entity types
         categories = [{'name': cat} for cat in sorted(categories_set)]
 
+        scope_value = owner_scope_label if owner_scope_label is not None else owner_key
         return {
             'chunks': chunks,
             'nodes': nodes,  # Only entities
@@ -534,6 +651,7 @@ class GraphExporterNeo4j:
                 'total_edges': len(edges),
                 'seed_entities': len(seed_entity_ids),
                 'retrieved_chunks': len(retrieved_chunk_ids),
-                'categories': categories
+                'categories': categories,
+                'owner_scope': scope_value,
             }
         }

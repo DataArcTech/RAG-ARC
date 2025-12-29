@@ -270,9 +270,10 @@ def _evidence_preview(evidence: Dict[str, Any]) -> str:
         prefix += f" source={source}"
     if isinstance(score, (int, float)):
         prefix += f" score={float(score):.4f}"
+    preview_limit = int(os.getenv("DEEPSEARCH_WEAVER_EVIDENCE_PREVIEW_CHARS", "180") or 180)
     content = str(evidence.get("content") or "").strip().replace("\n", " ")
     if content:
-        prefix += "\n  " + _truncate_text(content, limit=220)
+        prefix += "\n  " + _truncate_text(content, limit=max(80, preview_limit))
     provenance = evidence.get("provenance") if isinstance(evidence.get("provenance"), dict) else None
     if provenance:
         meta = provenance.get("metadata") if isinstance(provenance.get("metadata"), dict) else {}
@@ -308,6 +309,8 @@ def _render_tool_response(payload: Dict[str, Any]) -> str:
         ok = False if result.get("error") else True
 
     summary = str(result.get("summary") or "").strip()
+    if summary:
+        summary = " ".join(summary.splitlines()).strip()
     diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
     evidences = result.get("evidences") if isinstance(result.get("evidences"), list) else []
 
@@ -355,16 +358,19 @@ def _render_tool_response(payload: Dict[str, Any]) -> str:
             )
         )
 
-    if evidences:
+    sample_n = int(os.getenv("DEEPSEARCH_WEAVER_EVIDENCE_SAMPLE_COUNT", "3") or 3)
+    if sample_n < 0:
+        sample_n = 0
+    if evidences and sample_n:
         lines.append("evidence_samples:")
-        for raw in evidences[:6]:
+        for raw in evidences[:sample_n]:
             if isinstance(raw, dict):
                 lines.append(_evidence_preview(raw))
     else:
         lines.append("evidence_samples: (none)")
 
     triple_samples: list[dict] = []
-    for raw in evidences[:6]:
+    for raw in evidences[: max(1, sample_n)]:
         if not isinstance(raw, dict):
             continue
         prov = raw.get("provenance")

@@ -27,6 +27,7 @@ from encapsulation.data_model.deepsearch import (
 from core.deepsearch.tools.base import call_llm_async
 from core.deepsearch.tooling.protocols import ToolInvoker
 from core.deepsearch.trace import emit_trace
+from core.deepsearch.utils.compression import compact_evidences, resolve_compaction_config
 from core.graph_adapter.base import GraphAccessScope, GraphDeepSearchAdapter
 from core.graph_adapter.scope_provider import require_scope
 
@@ -557,7 +558,53 @@ class GraphReasoningLoop:
             planner_hints.setdefault("per_step", {}).update(scheduler_hints)
         if seed_entities:
             metadata.setdefault("planner_hints", {}).setdefault("seed_entities", seed_entities)
+        compression = self._resolve_strategy_compression_schema()
+        if compression:
+            current = metadata.get("compression") if isinstance(metadata.get("compression"), dict) else None
+            metadata["compression"] = self._merge_compression_defaults(defaults=compression, overrides=current)
         return context.model_copy(update={"seed_entities": seed_entities, "metadata": metadata})
+
+    def _resolve_strategy_compression_schema(self) -> Dict[str, Any]:
+        cfg = self.strategy_config
+        if hasattr(cfg, "compression"):
+            fields_set = getattr(cfg, "model_fields_set", None)
+            if isinstance(fields_set, set) and "compression" not in fields_set:
+                return {}
+            raw = getattr(cfg, "compression")
+            if hasattr(raw, "model_dump"):
+                try:
+                    payload = raw.model_dump(exclude_none=True)
+                except TypeError:
+                    payload = raw.model_dump()
+            elif isinstance(raw, dict):
+                payload = dict(raw)
+            else:
+                payload = {}
+        elif isinstance(cfg, dict) and isinstance(cfg.get("compression"), dict):
+            payload = dict(cfg.get("compression") or {})
+        else:
+            payload = {}
+
+        allowed: Dict[str, Any] = {}
+        for key in ("tool_context", "think"):
+            value = payload.get(key)
+            if isinstance(value, dict) and value:
+                allowed[key] = dict(value)
+        return allowed
+
+    @staticmethod
+    def _merge_compression_defaults(*, defaults: Dict[str, Any], overrides: Dict[str, Any] | None) -> Dict[str, Any]:
+        if not overrides:
+            return dict(defaults)
+        merged: Dict[str, Any] = dict(defaults)
+        for branch, override in overrides.items():
+            if branch not in {"tool_context", "think"}:
+                continue
+            if isinstance(override, dict) and isinstance(merged.get(branch), dict):
+                merged[branch] = {**dict(merged.get(branch) or {}), **dict(override)}
+            else:
+                merged[branch] = override
+        return merged
 
     def _normalize_plan_steps(self, plan_steps: Sequence[Dict[str, Any] | PlanSpec]) -> List[Dict[str, Any]]:
         normalized: List[Dict[str, Any]] = []
@@ -654,7 +701,7 @@ class GraphReasoningLoop:
         return {
             "question": question,
             "plan_step": plan_step_id,
-            "context_evidences": self._context_window_evidences(evidences),
+            "context_evidences": self._context_window_evidences(evidences, context=context, extra=extra),
             "adapter": self.adapter,
             "access_scope": context.resolve_scope(),
             "extra": dict(extra or {}),
@@ -662,35 +709,53 @@ class GraphReasoningLoop:
             "coverage_metrics": coverage_hint,
         }
 
-    def _context_window_evidences(self, evidences: List[EvidenceChunk]) -> List[Dict[str, Any]]:
+    def _context_window_evidences(
+        self,
+        evidences: List[EvidenceChunk],
+        *,
+        context: GraphQueryContext,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         """Bound evidence payload size for tool calls (recency retention).
 
         This prevents tool prompts from accidentally exceeding model context limits
         when the evidence pile grows large.
         """
-
-        items = list(evidences or [])
-        max_items = max(0, int(self._tool_context_max_items or 0))
-        if max_items:
-            items = items[-max_items:]
-        max_chars = max(0, int(self._tool_context_max_chars or 0))
-        payload: List[Dict[str, Any]] = []
-        for chunk in items:
-            try:
-                chunk_id = getattr(chunk, "chunk_id", None)
-                source = getattr(chunk, "source", None)
-                content = getattr(chunk, "content", "")
-                score = getattr(chunk, "score", None)
-            except Exception:
-                continue
-            text = str(content or "")
-            if max_chars and len(text) > max_chars:
-                text = text[: max(0, max_chars - 3)].rstrip() + "..."
-            payload.append({"chunk_id": chunk_id, "source": source, "content": text, "score": score})
-        return payload
+        cfg = resolve_compaction_config(
+            branch="tool_context",
+            graph_context=context,
+            extra=(extra or {}),
+            default_max_items=int(self._tool_context_max_items or 0),
+            default_max_chars=int(self._tool_context_max_chars or 0),
+            default_mode="truncate",
+            default_retention="tail",
+            env_max_items="DEEPSEARCH_TOOL_CONTEXT_MAX_EVIDENCES",
+            env_max_chars="DEEPSEARCH_TOOL_CONTEXT_MAX_CHARS",
+        )
+        compacted, _meta = compact_evidences(
+            evidences or [],
+            cfg=cfg,
+            question=(context.question or ""),
+            extra=(extra or {}),
+            include_triple_count=False,
+        )
+        return compacted
 
     @staticmethod
     def _resolve_tool_context_max_items(config: Any) -> int:
+        if hasattr(config, "compression"):
+            fields_set = getattr(config, "model_fields_set", None)
+            if not (isinstance(fields_set, set) and "compression" not in fields_set):
+                comp = getattr(config, "compression")
+                branch = getattr(comp, "tool_context", None) if comp is not None else None
+                if branch is not None and hasattr(branch, "max_items") and getattr(branch, "max_items") is not None:
+                    return max(1, int(getattr(branch, "max_items")))
+        if isinstance(config, dict):
+            comp = config.get("compression")
+            if isinstance(comp, dict):
+                branch = comp.get("tool_context")
+                if isinstance(branch, dict) and branch.get("max_items") is not None:
+                    return max(1, int(branch.get("max_items")))
         if hasattr(config, "tool_context_max_evidences"):
             return max(1, int(getattr(config, "tool_context_max_evidences")))
         if isinstance(config, dict) and config.get("tool_context_max_evidences") is not None:
@@ -699,6 +764,19 @@ class GraphReasoningLoop:
 
     @staticmethod
     def _resolve_tool_context_max_chars(config: Any) -> int:
+        if hasattr(config, "compression"):
+            fields_set = getattr(config, "model_fields_set", None)
+            if not (isinstance(fields_set, set) and "compression" not in fields_set):
+                comp = getattr(config, "compression")
+                branch = getattr(comp, "tool_context", None) if comp is not None else None
+                if branch is not None and hasattr(branch, "max_chars") and getattr(branch, "max_chars") is not None:
+                    return max(100, int(getattr(branch, "max_chars")))
+        if isinstance(config, dict):
+            comp = config.get("compression")
+            if isinstance(comp, dict):
+                branch = comp.get("tool_context")
+                if isinstance(branch, dict) and branch.get("max_chars") is not None:
+                    return max(100, int(branch.get("max_chars")))
         if hasattr(config, "tool_context_max_chars"):
             return max(100, int(getattr(config, "tool_context_max_chars")))
         if isinstance(config, dict) and config.get("tool_context_max_chars") is not None:

@@ -3,7 +3,9 @@ import json
 import logging
 import pickle
 import re
+import random
 import threading
+import time
 from typing import List, Dict, Any, Optional, Sequence, Set, Tuple, TYPE_CHECKING
 import numpy as np
 import igraph as ig
@@ -507,7 +509,133 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
 
         return new_entity_ids
 
-    def batch_generate_embeddings(self):
+    def _graph_embedding_settings(self) -> Dict[str, float]:
+        config_batch_size = getattr(getattr(self.embedding_model, "config", None), "request_batch_size", None)
+        batch_size = int(os.getenv("GRAPH_INDEX_EMBED_BATCH_SIZE", str(config_batch_size or 64)))
+        max_retries = int(os.getenv("GRAPH_INDEX_EMBED_MAX_RETRIES", "6"))
+        backoff_base = float(os.getenv("GRAPH_INDEX_EMBED_BACKOFF_BASE_SECONDS", "1.0"))
+        backoff_cap = float(os.getenv("GRAPH_INDEX_EMBED_BACKOFF_MAX_SECONDS", "30.0"))
+        sleep_between_batches = float(os.getenv("GRAPH_INDEX_EMBED_SLEEP_BETWEEN_BATCHES_SECONDS", "0.0"))
+        return {
+            "batch_size": float(max(1, batch_size)),
+            "max_retries": float(max(0, max_retries)),
+            "backoff_base": float(max(0.0, backoff_base)),
+            "backoff_cap": float(max(0.1, backoff_cap)),
+            "sleep_between_batches": float(max(0.0, sleep_between_batches)),
+        }
+
+    @staticmethod
+    def _looks_like_rate_limit(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return (
+            "429" in msg
+            or "rate limit" in msg
+            or "too many requests" in msg
+            or "ratelimit" in msg
+        )
+
+    def _embed_texts_resilient(self, texts: List[str], *, purpose: str) -> List[List[float]]:
+        """
+        Resilient embedding wrapper for graph indexing.
+
+        - Batches inputs to avoid 429 amplification
+        - Retries on rate limit errors with jittered backoff
+        - If a batch fails, splits down to per-item to isolate bad inputs / backend quirks
+        """
+        settings = self._graph_embedding_settings()
+        batch_size = int(settings["batch_size"])
+        max_retries = int(settings["max_retries"])
+        backoff_base = float(settings["backoff_base"])
+        backoff_cap = float(settings["backoff_cap"])
+        sleep_between_batches = float(settings["sleep_between_batches"])
+
+        if not texts:
+            return []
+
+        normalized: List[str] = []
+        for idx, text in enumerate(texts):
+            if not isinstance(text, str):
+                raise TypeError(f"{purpose} embedding input must be str (index={idx}, type={type(text).__name__})")
+            stripped = text.strip()
+            if not stripped:
+                raise ValueError(f"{purpose} embedding input cannot be empty (index={idx})")
+            normalized.append(stripped.replace("\n", " "))
+
+        embeddings: List[List[float]] = []
+        failures: List[Dict[str, Any]] = []
+
+        def _embed_batch(batch: List[str]) -> List[List[float]]:
+            out = self.embedding_model.embed(batch)
+            if isinstance(out, list) and out and isinstance(out[0], (int, float)):
+                return [out]  # type: ignore[list-item]
+            return out  # type: ignore[return-value]
+
+        for start in range(0, len(normalized), batch_size):
+            batch = normalized[start:start + batch_size]
+            attempt = 0
+            while True:
+                try:
+                    batch_embeddings = _embed_batch(batch)
+                    if len(batch_embeddings) != len(batch):
+                        raise RuntimeError(
+                            f"{purpose} embeddings size mismatch: got {len(batch_embeddings)} for {len(batch)} inputs"
+                        )
+                    embeddings.extend(batch_embeddings)
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    if self._looks_like_rate_limit(exc) and attempt < max_retries:
+                        delay = min(backoff_cap, backoff_base * (2 ** attempt)) * (0.8 + 0.4 * random.random())
+                        logger.warning(
+                            "Graph index embedding rate-limited (%s). Retrying in %.2fs (attempt %s/%s, batch=%s)",
+                            purpose,
+                            delay,
+                            attempt + 1,
+                            max_retries,
+                            len(batch),
+                        )
+                        time.sleep(delay)
+                        attempt += 1
+                        continue
+
+                    # If a batch fails, split to isolate bad inputs / incompatible endpoints.
+                    if len(batch) > 1:
+                        logger.warning(
+                            "Graph index embedding batch failed (%s, batch=%s). Splitting to per-item. error=%s",
+                            purpose,
+                            len(batch),
+                            str(exc),
+                        )
+                        for item in batch:
+                            try:
+                                item_embedding = _embed_batch([item])
+                                if len(item_embedding) != 1:
+                                    raise RuntimeError(
+                                        f"{purpose} embeddings size mismatch: got {len(item_embedding)} for 1 input"
+                                    )
+                                embeddings.extend(item_embedding)
+                            except Exception as item_exc:  # noqa: BLE001
+                                failures.append({"purpose": purpose, "error": str(item_exc)})
+                        break
+
+                    failures.append({"purpose": purpose, "error": str(exc)})
+                    break
+
+            if sleep_between_batches > 0:
+                time.sleep(sleep_between_batches)
+
+        if failures:
+            raise RuntimeError(
+                f"Graph index embedding failed ({purpose}): {len(failures)} failures; first_error={failures[0]['error']}"
+            )
+
+        return embeddings
+
+    def batch_generate_embeddings(
+        self,
+        *,
+        chunk_ids: Optional[Sequence[str]] = None,
+        entity_ids: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Any]:
         """
         Batch generate embeddings for all facts, entities, and chunks.
 
@@ -519,10 +647,16 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
         Only new items (not already in FAISS/memory) are processed.
         """
         logger.info("Batch generating embeddings...")
+        summary: Dict[str, Any] = {"chunks": {}, "entities": {}, "facts": {}}
 
         # 1. Generate chunk embeddings
-        chunk_query = "MATCH (c:Chunk) RETURN c.chunk_id AS chunk_id, c.content AS content"
-        chunks_data = self._execute_query(chunk_query)
+        chunk_params: Dict[str, Any] = {}
+        if chunk_ids:
+            chunk_query = "MATCH (c:Chunk) WHERE c.chunk_id IN $chunk_ids RETURN c.chunk_id AS chunk_id, c.content AS content"
+            chunk_params = {"chunk_ids": list(chunk_ids)}
+        else:
+            chunk_query = "MATCH (c:Chunk) RETURN c.chunk_id AS chunk_id, c.content AS content"
+        chunks_data = self._execute_query(chunk_query, chunk_params or None)
 
         new_chunks = []
         new_chunk_ids = []
@@ -535,8 +669,7 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
 
         if new_chunks:
             logger.info(f"Batch generating embeddings for {len(new_chunks)} chunks...")
-            # Batch generate all chunk embeddings at once
-            chunk_embeddings = self.embedding_model.embed(new_chunks)
+            chunk_embeddings = self._embed_texts_resilient(new_chunks, purpose="chunk")
 
             # Store embeddings
             for chunk_id, embedding in zip(new_chunk_ids, chunk_embeddings):
@@ -549,10 +682,21 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             # Mark array needs rebuild
             self._chunk_embeddings_array = None
             logger.info(f"Chunk embeddings generated for {len(new_chunks)} chunks")
+            summary["chunks"] = {"attempted": len(new_chunks), "embedded": len(new_chunk_ids)}
+        else:
+            summary["chunks"] = {"attempted": 0, "embedded": 0}
 
         # 2. Generate entity embeddings and add to FAISS HNSW
-        entity_query = "MATCH (e:Entity) RETURN e.entity_id AS entity_id, e.entity_name AS entity_name, e.owner_id AS owner_id"
-        entities = self._execute_query(entity_query)
+        entity_params: Dict[str, Any] = {}
+        if entity_ids:
+            entity_query = (
+                "MATCH (e:Entity) WHERE e.entity_id IN $entity_ids "
+                "RETURN e.entity_id AS entity_id, e.entity_name AS entity_name, e.owner_id AS owner_id"
+            )
+            entity_params = {"entity_ids": list(entity_ids)}
+        else:
+            entity_query = "MATCH (e:Entity) RETURN e.entity_id AS entity_id, e.entity_name AS entity_name, e.owner_id AS owner_id"
+        entities = self._execute_query(entity_query, entity_params or None)
 
         new_entities = []
         for record in entities:
@@ -573,9 +717,8 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
 
         if new_entities:
             logger.info(f"Adding {len(new_entities)} entities to FAISS HNSW...")
-            # Generate embeddings
             entity_texts = [chunk.content for chunk in new_entities]
-            entity_embeddings = self.embedding_model.embed(entity_texts)
+            entity_embeddings = self._embed_texts_resilient(entity_texts, purpose="entity")
 
             # Store embeddings in chunk metadata BEFORE adding to FAISS
             for chunk, embedding in zip(new_entities, entity_embeddings):
@@ -588,6 +731,9 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
             entity_index_path = os.path.join(self.storage_path, 'entity_index')
             self.entity_faiss_db.save_index(entity_index_path, 'index')
             logger.info(f"Saved entity index to {entity_index_path}")
+            summary["entities"] = {"attempted": len(new_entities), "embedded": len(new_entities)}
+        else:
+            summary["entities"] = {"attempted": 0, "embedded": 0}
 
         # 3. Generate fact embeddings and add to FAISS Flat
         # Facts are stored as RELATES_TO relationships between entities
@@ -612,12 +758,22 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
 
         if new_facts:
             logger.info(f"Adding {len(new_facts)} facts to FAISS Flat...")
+            fact_texts = [chunk.content for chunk in new_facts]
+            fact_embeddings = self._embed_texts_resilient(fact_texts, purpose="fact")
+            for chunk, embedding in zip(new_facts, fact_embeddings):
+                if isinstance(embedding, list):
+                    embedding = np.array(embedding)
+                chunk.metadata["embedding"] = embedding
             self.fact_faiss_db.update_index(new_facts)
             fact_index_path = os.path.join(self.storage_path, 'fact_index')
             self.fact_faiss_db.save_index(fact_index_path, 'index')
             logger.info(f"Saved fact index to {fact_index_path}")
+            summary["facts"] = {"attempted": len(new_facts), "embedded": len(new_facts)}
+        else:
+            summary["facts"] = {"attempted": 0, "embedded": 0}
 
         logger.info("Batch embedding generation completed!")
+        return summary
 
     def _add_synonymy_edges(self, new_entity_ids: Optional[List[str]] = None):
         """
@@ -1565,7 +1721,7 @@ class PrunedHippoRAGNeo4jStore(GraphStore):
 
             # Step 2: Batch generate embeddings (only for new items)
             logger.info("Step 2: Batch generating embeddings for new items...")
-            self.batch_generate_embeddings()
+            self.batch_generate_embeddings(chunk_ids=new_chunk_ids, entity_ids=new_entity_ids)
             logger.info("Step 2 completed: Embeddings generated")
 
             # Step 3: Incrementally compute synonymy edges (only for new entities)

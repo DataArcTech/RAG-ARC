@@ -14,6 +14,7 @@ from encapsulation.data_model.deepsearch import ThinkNote
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, safe_json_loads
 from core.prompts.deepsearch import PARALLEL_THINK_SYSTEM_PROMPT
+from core.deepsearch.utils.compression import compact_evidences, resolve_compaction_config, truncate_text
 
 
 class ParallelThinkTool(GraphTool):
@@ -72,10 +73,28 @@ class ParallelThinkTool(GraphTool):
     async def _generate_reflections(self, request: ToolRunRequest) -> List[Dict[str, str]]:
         preview_items = int(PARALLEL_THINK_DEFAULT_CONTEXT_PREVIEW_ITEMS)
         preview_chars = int(PARALLEL_THINK_DEFAULT_CONTEXT_PREVIEW_CHARS)
+        cfg = resolve_compaction_config(
+            branch="tool_context",
+            graph_context=request.graph_context,
+            extra=(request.extra or {}),
+            default_max_items=preview_items,
+            default_max_chars=preview_chars,
+            default_mode="truncate",
+            default_retention="tail",
+            env_max_items="DEEPSEARCH_TOOL_CONTEXT_MAX_EVIDENCES",
+            env_max_chars="DEEPSEARCH_TOOL_CONTEXT_MAX_CHARS",
+        )
+        compacted, _meta = compact_evidences(
+            request.context_evidences or [],
+            cfg=cfg,
+            question=request.question,
+            extra=(request.extra or {}),
+            include_triple_count=False,
+        )
         payload = {
             "question": request.question,
             "plan_step": request.plan_step,
-            "context_preview": [ev.content[:preview_chars] for ev in request.context_evidences[-preview_items:]],
+            "context_preview": [str(item.get("content") or "") for item in compacted],
             "branches": self.branches,
         }
         messages = [
@@ -86,13 +105,30 @@ class ParallelThinkTool(GraphTool):
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
         response = await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
-        data = safe_json_loads(response, expected="list")
-        if not isinstance(data, list):
-            raise ValueError("ParallelThinkTool returned non-JSON or non-list payload")
-        branches = [self._coerce_branch(item) for item in data if isinstance(item, dict)]
-        if not branches:
-            raise ValueError("ParallelThinkTool returned an empty list of branches")
-        return branches
+
+        data = safe_json_loads(response)
+        if isinstance(data, dict):
+            for key in ("branches", "reflections", "items", "results"):
+                maybe = data.get(key)
+                if isinstance(maybe, list):
+                    data = maybe
+                    break
+
+        if isinstance(data, list):
+            branches = [self._coerce_branch(item) for item in data if isinstance(item, dict)]
+            if branches:
+                return branches
+
+        # Fallback: keep the tool contract stable (always return at least one branch).
+        raw = str(response or "").strip()
+        thought = raw.replace("\n", " ")
+        thought = truncate_text(thought, max_chars=360)
+        return [
+            {
+                "thought": thought or "Consider reviewing missing evidence and rerunning a focused probe.",
+                "action": "tighten_query_and_probe",
+            }
+        ]
 
     @staticmethod
     def _coerce_branch(item: Dict[str, Any]) -> Dict[str, str]:

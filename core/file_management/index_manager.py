@@ -345,6 +345,20 @@ class IndexManager(AbstractModule):
                 result["indexing_results"] = indexing_results
                 result["metadata"]["indexers_used"] = list(indexing_results.keys())
 
+                successful_indexers = [
+                    name for name, res in indexing_results.items()
+                    if res and res.get("success", False)
+                ]
+                failed_indexers = [
+                    name for name, res in indexing_results.items()
+                    if not (res and res.get("success", False))
+                ]
+                result["metadata"]["indexing_summary"] = {
+                    "total_indexers": len(self.indexers),
+                    "successful_indexers": successful_indexers,
+                    "failed_indexers": failed_indexers,
+                }
+
                 # Step 7: Update chunk metadata status for successfully indexed chunks (use thread pool to avoid blocking)
                 chunks_updated = await get_thread_pool().run_blocking(
                     self._update_indexed_chunks_status,
@@ -353,12 +367,63 @@ class IndexManager(AbstractModule):
                     **kwargs
                 )
 
-                # Step 8: Update file metadata status if indexing succeeded (use thread pool to avoid blocking)
-                if chunks_updated:
+                # Step 8: Update file metadata status based on indexer outcomes (use thread pool to avoid blocking)
+                if not successful_indexers:
+                    from encapsulation.data_model.orm_models import FileStatus
+
+                    result["success"] = False
+                    result["error_message"] = "all indexers failed"
+                    try:
+                        metadata = None
+                        try:
+                            metadata = self.file_storage.get_file_metadata(file_id)
+                        except Exception:
+                            metadata = None
+                        if metadata is not None and getattr(metadata, "status", None) == FileStatus.DELETED:
+                            logger.info("Skip updating file %s to FAILED because status is DELETED", file_id)
+                        else:
+                            await get_thread_pool().run_blocking(
+                                self.file_storage.metadata_store.update_file_status,
+                                file_id,
+                                FileStatus.FAILED,
+                                **kwargs,
+                            )
+                    except Exception as status_error:
+                        logger.error("Failed to update file status to FAILED for %s: %s", file_id, status_error)
+                    _emit(
+                        "index_failed",
+                        100,
+                        {"file_id": file_id, "success": False, "indexers": result["metadata"]["indexing_summary"]},
+                    )
+                    return result
+
+                if len(successful_indexers) == len(self.indexers):
                     await get_thread_pool().run_blocking(
                         self._update_file_status_to_indexed,
                         file_id,
-                        **kwargs
+                        **kwargs,
+                    )
+                    _emit(
+                        "indexed",
+                        95,
+                        {"file_id": file_id, "success": True, "status": "INDEXED", "chunks_updated": chunks_updated},
+                    )
+                else:
+                    await get_thread_pool().run_blocking(
+                        self._update_file_status_to_partially_indexed,
+                        file_id,
+                        **kwargs,
+                    )
+                    _emit(
+                        "indexed_partial",
+                        95,
+                        {
+                            "file_id": file_id,
+                            "success": True,
+                            "status": "PARTIAL_INDEXED",
+                            "chunks_updated": chunks_updated,
+                            "indexers": result["metadata"]["indexing_summary"],
+                        },
                     )
             else:
                 logger.info("Step 6: No indexers configured, skipping indexing")
@@ -705,11 +770,22 @@ class IndexManager(AbstractModule):
             logger.info(f"Indexing {len(chunk_objects)} chunks with {indexer_name}")
             indexed_ids = await indexer.update_index(chunk_objects)
 
+            indexed_ids = indexed_ids or []
+            indexed_count = len(indexed_ids)
+            if indexed_count <= 0:
+                return {
+                    "success": False,
+                    "error_message": "indexer returned no indexed ids",
+                    "indexed_count": 0,
+                    "total_chunks": len(chunk_objects),
+                    "indexed_ids": [],
+                }
+
             return {
                 "success": True,
-                "indexed_count": len(indexed_ids) if indexed_ids else 0,
+                "indexed_count": indexed_count,
                 "total_chunks": len(chunk_objects),
-                "indexed_ids": indexed_ids or []
+                "indexed_ids": indexed_ids,
             }
         except Exception as e:
             logger.error(f"Indexing failed with {indexer_name}: {str(e)}")
@@ -822,6 +898,37 @@ class IndexManager(AbstractModule):
                 logger.warning(f"Failed to update file {file_id} status to INDEXED")
         except Exception as e:
             logger.error(f"Error updating file {file_id} status: {e}")
+
+    def _update_file_status_to_partially_indexed(
+        self,
+        file_id: str,
+        **kwargs: Any,
+    ) -> None:
+        """
+        Update file metadata status to PARTIAL_INDEXED when some indexers succeed but not all.
+        """
+        from encapsulation.data_model.orm_models import FileStatus
+
+        try:
+            try:
+                metadata = self.file_storage.get_file_metadata(file_id)
+            except Exception:
+                metadata = None
+            if metadata is not None and getattr(metadata, "status", None) == FileStatus.DELETED:
+                logger.info("Skip updating file %s to PARTIAL_INDEXED because status is DELETED", file_id)
+                return
+
+            success = self.file_storage.metadata_store.update_file_metadata(
+                file_id,
+                {"status": FileStatus.PARTIAL_INDEXED},
+                **kwargs,
+            )
+            if success:
+                logger.info("Updated file %s status to PARTIAL_INDEXED", file_id)
+            else:
+                logger.warning("Failed to update file %s status to PARTIAL_INDEXED", file_id)
+        except Exception as e:
+            logger.error("Error updating file %s status: %s", file_id, e)
 
     def _update_file_status_to_parsed(
         self,

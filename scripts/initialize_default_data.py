@@ -162,11 +162,9 @@ def create_admin_user(session, default_dept, admin_role):
     # Create admin user
     admin_user = User(
         user_name="admin",
-        email="admin@rag-arc.local",
         hashed_password=pwd_context.hash("admin123"),  # Default password
         department_id=default_dept.id,
         role_id=admin_role.id,
-        full_name="System Administrator",
         status=UserStatus.ACTIVE,
         created_at=datetime.now(),
         updated_at=datetime.now()
@@ -227,7 +225,7 @@ def main():
             logger.info(f"Roles created: {len(roles)}")
             for role_type, role in roles.items():
                 logger.info(f"  - {role.name} ({role_type.value})")
-            logger.info(f"Admin User: {admin_user.user_name} ({admin_user.email})")
+            logger.info(f"Admin User: {admin_user.user_name} ({admin_user.id})")
             logger.info("=" * 80)
             logger.info("✅ Initialization completed successfully!")
             logger.info("=" * 80)

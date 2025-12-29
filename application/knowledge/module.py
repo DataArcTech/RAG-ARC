@@ -230,6 +230,43 @@ class Knowledge(AbstractModule):
                         resource_id=doc_id,
                         payload={"file_id": doc_id},
                     )
+
+                # Dependency preflight (fail fast with actionable diagnosis).
+                try:
+                    from core.utils.dependency_health import check_dependencies, format_dependency_failures
+
+                    health = check_dependencies(
+                        mode_env="RAGARC_INDEXING_DEPENDENCY_CHECK_MODE",
+                        default_mode="strict",
+                    )
+                    failure = format_dependency_failures(health)
+                    if failure:
+                        raise RuntimeError(failure)
+                except Exception as exc:
+                    err = f"dependency health check failed: {exc}"
+                    logger.error(err)
+                    if task_run_id:
+                        try:
+                            self.task_queue.update_task_run(
+                                task_run_id,
+                                state=TaskState.FAILURE,
+                                progress_percent=100,
+                                error_message=err,
+                                finished=True,
+                            )
+                            self.task_queue.append_progress_event(
+                                flow="indexing",
+                                task_run_id=task_run_id,
+                                stage="dependency_check",
+                                status="error",
+                                percent=100,
+                                resource_id=doc_id,
+                                payload={"file_id": doc_id, "success": False, "error_message": err},
+                            )
+                        except Exception:
+                            pass
+                    return {"success": False, "file_id": doc_id, "error_message": err}
+
                 # Idempotency under at-least-once semantics: remove old derived artifacts/index entries first.
                 cleanup = await self._run_blocking(self.file_index.delete_file_data, doc_id)
                 if not cleanup.get("success", False):

@@ -99,7 +99,7 @@ class PatternProbeTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
-        keywords = self._pick_keywords(request.question, request.extra)
+        keywords = self._pick_keywords(request.question, request.extra, request.context_evidences)
         if not keywords:
             return ToolResult(summary="Pattern scan skipped: no stable keywords extracted.")
 
@@ -242,7 +242,12 @@ class PatternProbeTool(GraphTool):
             raise RuntimeError("PatternProbeTool requires a GraphDeepSearchAdapter instance")
         return adapter
 
-    def _pick_keywords(self, question: str, extra: Dict[str, Any]) -> List[str]:
+    def _pick_keywords(
+        self,
+        question: str,
+        extra: Dict[str, Any],
+        context_evidences: Optional[List[EvidenceChunk]] = None,
+    ) -> List[str]:
         candidate_terms = extra.get("candidate_keywords")
         if isinstance(candidate_terms, list) and candidate_terms:
             expanded: List[str] = []
@@ -250,17 +255,61 @@ class PatternProbeTool(GraphTool):
                 expanded.extend(self._split_keyword_hints(str(term)))
             return self._deduplicate(self._filter_stopwords([token for token in expanded if token]))
 
+        context_terms: List[str] = []
+        if context_evidences:
+            context_terms = self._context_terms(context_evidences)
+
         for key in ("query", "focus_query"):
             raw = extra.get(key)
             if isinstance(raw, str) and raw.strip():
                 hints = self._split_keyword_hints(raw)
                 if hints:
-                    return self._deduplicate(self._filter_stopwords(hints))
+                    merged = hints + context_terms
+                    return self._deduplicate(self._filter_stopwords(merged))
 
         compact = clean_query(question or "", max_chars=480)
-        if self._looks_cjk(compact):
-            return self._filter_stopwords(self._tokenize_cjk(compact))
-        return self._filter_stopwords(self._tokenize_latin(compact))
+        candidates: List[str] = []
+        if context_terms:
+            candidates.extend(context_terms)
+        if compact:
+            if self._looks_cjk(compact):
+                candidates.extend(self._tokenize_cjk(compact))
+            candidates.extend(self._tokenize_latin(compact))
+
+        filtered = self._deduplicate(self._filter_stopwords(candidates))
+        return filtered[: max(0, int(self.max_terms))]
+
+    def _context_terms(self, evidences: List[EvidenceChunk]) -> List[str]:
+        terms: List[str] = []
+        seen: set[str] = set()
+
+        def _push(value: Any) -> None:
+            token = str(value or "").strip()
+            if not token or token in seen:
+                return
+            if not self._looks_cjk(token):
+                return
+            if len(token) < self.min_cjk_length:
+                return
+            seen.add(token)
+            terms.append(token)
+
+        for ev in evidences:
+            provenance = getattr(ev, "provenance", None) or {}
+            if not isinstance(provenance, dict):
+                continue
+            triples = provenance.get("triples")
+            if not isinstance(triples, list):
+                continue
+            for triple in triples:
+                if not isinstance(triple, dict):
+                    continue
+                _push(triple.get("head"))
+                _push(triple.get("tail"))
+                _push(triple.get("relation"))
+                if len(terms) >= max(8, int(self.max_terms or 0)):
+                    return terms[: max(8, int(self.max_terms or 0))]
+        return terms
 
     def _split_keyword_hints(self, raw: str) -> List[str]:
         text = str(raw or "").strip()
@@ -363,6 +412,7 @@ class PatternProbeTool(GraphTool):
             return ""
         if strip_whitespace:
             value = self._NONWORD_SPACES.sub("", value)
+            value = re.sub(r"[()（）\\[\\]{}<>《》「」『』【】]", "", value)
         value = value.replace("／", "/").replace("，", ",").replace("（", "(").replace("）", ")")
         if not case_sensitive:
             value = value.lower()

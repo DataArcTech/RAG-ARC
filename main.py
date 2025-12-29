@@ -129,6 +129,21 @@ async def lifespan(app: FastAPI):
     """
     # Startup
     logger.info("Application starting up...")
+    try:
+        from core.utils.dependency_health import check_dependencies
+
+        health = check_dependencies()
+        checks = health.get("checks") or {}
+        logger.info(
+            "Dependency health: postgres=%s redis=%s neo4j=%s (mode=%s)",
+            bool((checks.get("postgres") or {}).get("ok")),
+            bool((checks.get("redis") or {}).get("ok")),
+            bool((checks.get("neo4j") or {}).get("ok")),
+            health.get("mode"),
+        )
+    except Exception as exc:
+        logger.error("Dependency health check failed at startup: %s", exc)
+        raise
     
     # Get MCP lifespan if it exists
     mcp_lifespan = getattr(mcp.mcp_app, 'lifespan', None)

@@ -186,8 +186,9 @@ def _filter_evidences_by_question_scope(question: str, items: List[Dict[str, Any
         # Roman numerals as standalone markers (avoid matching common letters inside words).
         if re.search(r"(?:^|[^A-Za-z])[IVX]{1,6}(?:$|[^A-Za-z])", term):
             return True
-        if re.search(r"[()（）]", term):
-            return True
+        # Parentheses alone are often prompt scaffolding (e.g. "(with evidence)") and should not
+        # hard-filter cross-language evidence pools. Keep parentheses as anchors only when paired
+        # with other high-specificity signals (digits / roman numerals already handled above).
         return False
 
     anchor_terms = [t for t in terms if _looks_like_anchor(t)]

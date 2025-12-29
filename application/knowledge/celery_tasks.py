@@ -162,6 +162,40 @@ def index_file(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
             )
             return result_payload
 
+        # Dependency preflight (fail fast with actionable diagnosis).
+        try:
+            from core.utils.dependency_health import check_dependencies, format_dependency_failures
+
+            health = check_dependencies(
+                mode_env="RAGARC_INDEXING_DEPENDENCY_CHECK_MODE",
+                default_mode="strict",
+            )
+            failure = format_dependency_failures(health)
+            if failure:
+                raise RuntimeError(failure)
+        except Exception as exc:  # noqa: BLE001
+            err = f"dependency health check failed: {exc}"
+            logger.error(err)
+            result_payload = {"success": False, "file_id": file_id, "error_message": err}
+            task_queue.set_task_result_and_finalize_run(
+                run_id,
+                result=result_payload,
+                state=TaskState.FAILURE,
+                progress_percent=100,
+                error_message=err,
+                finished=True,
+            )
+            task_queue.append_progress_event(
+                flow="indexing",
+                task_run_id=run_id,
+                stage="dependency_check",
+                status="error",
+                percent=100,
+                resource_id=file_id,
+                payload={"file_id": file_id, "success": False, "error_message": err},
+            )
+            return result_payload
+
         # Ensure idempotency under at-least-once semantics by cleaning previous derived artifacts/index entries.
         cleanup = knowledge.file_index.delete_file_data(file_id)
         if not cleanup.get("success", False):

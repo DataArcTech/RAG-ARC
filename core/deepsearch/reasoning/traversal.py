@@ -119,6 +119,16 @@ class GraphTraversalExecutor:
                 graph_context_metadata=(context.metadata or {}),
                 question=context.question,
             )
+            query_options: Dict[str, Any] = {}
+            if file_scope.enabled:
+                query_options["file_scope"] = file_scope.as_dict()
+            if tool_args:
+                if "export_subgraph" in tool_args:
+                    query_options["export_subgraph"] = bool(tool_args.get("export_subgraph"))
+                if "top_k" in tool_args:
+                    query_options["top_k"] = tool_args.get("top_k")
+            query_options.setdefault("export_subgraph", bool(step.channel == "graph"))
+            query_options_payload = query_options or None
 
             await emit_trace(
                 "tool_call",
@@ -131,6 +141,7 @@ class GraphTraversalExecutor:
                             "channel": step.channel,
                             "query": query,
                             "seed_entities": merged_seed_entities,
+                            "query_options": query_options_payload,
                             "settings": {
                                 "strategy": self.settings.strategy_name,
                                 "chain_depth": self.settings.chain_depth,
@@ -150,7 +161,7 @@ class GraphTraversalExecutor:
                     query,
                     channel=step.channel,
                     access_scope=scope,
-                    query_options={"file_scope": file_scope.as_dict()} if file_scope.enabled else None,
+                    query_options=query_options_payload,
                 )
                 filter_type = "semantic" if self.settings.allow_semantic_channel else "relational"
                 filtered = await self.adapter.context_filter(
@@ -230,6 +241,7 @@ class GraphTraversalExecutor:
                             "plan_step": step.step_id,
                             "channel": step.channel,
                             "query": query,
+                            "query_options": query_options_payload,
                             "latency_ms": latency_ms,
                             "summary": summary_text,
                             "traversal": (traversal_record.model_dump(exclude_none=True) if traversal_record else None),

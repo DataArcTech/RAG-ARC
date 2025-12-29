@@ -95,11 +95,17 @@ async def run(config: ConcurrencyConfig, *, out_dir: Path) -> None:
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         token_resp.raise_for_status()
-        token = token_resp.json()["access_token"]
+        token_payload = token_resp.json()
+        if isinstance(token_payload, dict) and "data" in token_payload:
+            token_payload = token_payload.get("data") or {}
+        token = token_payload["access_token"]
 
         sess = await client.post(session_endpoint, headers={"Authorization": f"Bearer {token}"})
         sess.raise_for_status()
-        session_id = sess.json()
+        session_payload = sess.json()
+        if isinstance(session_payload, dict) and "data" in session_payload:
+            session_payload = session_payload.get("data")
+        session_id = session_payload
 
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -114,7 +120,10 @@ async def run(config: ConcurrencyConfig, *, out_dir: Path) -> None:
                 data={"relative_path": f"concurrency/{unique_phrase}.txt"},
             )
             up.raise_for_status()
-            uploaded_file_id = up.json()
+            uploaded_payload = up.json()
+            if isinstance(uploaded_payload, dict) and "data" in uploaded_payload:
+                uploaded_payload = uploaded_payload.get("data")
+            uploaded_file_id = str(uploaded_payload)
 
             trig = await client.post(
                 f"{knowledge_endpoint}/trigger_indexing",
@@ -122,7 +131,10 @@ async def run(config: ConcurrencyConfig, *, out_dir: Path) -> None:
                 json={"file_ids": [uploaded_file_id]},
             )
             trig.raise_for_status()
-            return {"uploaded_file_id": uploaded_file_id, "trigger_message": trig.json().get("message")}
+            trig_payload = trig.json()
+            if isinstance(trig_payload, dict) and "data" in trig_payload:
+                trig_payload = trig_payload.get("data") or {}
+            return {"uploaded_file_id": uploaded_file_id, "trigger_message": (trig_payload or {}).get("message")}
 
     async def wait_for_indexed(*, timeout_s: int = 90) -> dict[str, object]:
         if not uploaded_file_id:
@@ -132,7 +144,10 @@ async def run(config: ConcurrencyConfig, *, out_dir: Path) -> None:
             while time.time() - started < timeout_s:
                 resp = await client.get(f"{knowledge_endpoint}/list_files?limit=1000&offset=0", headers=headers)
                 resp.raise_for_status()
-                files = (resp.json() or {}).get("files") or []
+                payload = resp.json()
+                if isinstance(payload, dict) and "data" in payload:
+                    payload = payload.get("data") or {}
+                files = (payload or {}).get("files") or []
                 status = None
                 for item in files:
                     if (item or {}).get("file_id") == uploaded_file_id:
@@ -156,7 +171,9 @@ async def run(config: ConcurrencyConfig, *, out_dir: Path) -> None:
             )
             resp.raise_for_status()
             body = resp.json()
-            chunks = body.get("chunks") or []
+            if isinstance(body, dict) and "data" in body:
+                body = body.get("data") or {}
+            chunks = (body or {}).get("chunks") or []
             returned = set()
             for ch in chunks:
                 meta = (ch or {}).get("metadata") or {}
