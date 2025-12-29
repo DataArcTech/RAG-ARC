@@ -215,7 +215,7 @@ pm2 delete "${PM2_APP_NAME}" > /dev/null 2>&1 || true
 # 然后通过命令行模式清理
 pkill -f "uvicorn main:app --port ${APP_PORT}" > /dev/null 2>&1 || true
 # 最后通过端口强制清理顽固进程
-PID_TO_KILL=$(lsof -t -i:"${APP_PORT}")
+PID_TO_KILL=$(lsof -t -i:"${APP_PORT}" || true)
 if [ -n "${PID_TO_KILL}" ]; then
     echo "  ⚠️  发现进程 ${PID_TO_KILL} 占用端口 ${APP_PORT}，正在强制杀死..."
     kill -9 "${PID_TO_KILL}" > /dev/null 2>&1 || true
