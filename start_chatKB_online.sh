@@ -45,7 +45,7 @@ echo "🔍 自动定位到应用目录: ${APP_DIR}"
 # ==============================================================================
 # 第一步：加载.env文件
 # ==============================================================================
-ENV_FILE=${ENV_FILE:-${APP_DIR}/.env.${ENV_ID}} # 使用环境特定的env文件
+ENV_FILE=${ENV_FILE:-${APP_DIR}/.env} # 线上环境直接使用 .env 文件
 if [ -f "${ENV_FILE}" ]; then
     echo "🔧 加载环境配置文件: ${ENV_FILE}"
     export $(grep -v '^#' ${ENV_FILE} | grep -v '^$' | xargs)
@@ -157,27 +157,16 @@ echo ""
 
 # 4. 处理Neo4j
 echo "🔷 处理Neo4j容器 [${NEO4J_CONTAINER_NAME}]..."
+# 检查容器是否存在
 if docker ps -a | grep -q "${NEO4J_CONTAINER_NAME}"; then
-    CURRENT_BOLT_PORT=$(docker port ${NEO4J_CONTAINER_NAME} 7687 2>/dev/null | awk -F':' '{print $2}')
-    if [ -z "${CURRENT_BOLT_PORT}" ] || [ "${CURRENT_BOLT_PORT}" != "${NEO4J_BOLT_HOST_PORT}" ]; then
-        echo "  ⚠️  Neo4j端口不匹配或未映射，删除并重建..."
-        docker rm -f ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 || true
-        docker run -d \
-            --name ${NEO4J_CONTAINER_NAME} \
-            --network ${NETWORK_NAME} \
-            -p ${NEO4J_WEB_HOST_PORT}:7474 \
-            -p ${NEO4J_BOLT_HOST_PORT}:7687 \
-            -e NEO4J_AUTH=${NEO4J_USERNAME}/${NEO4J_PASSWORD} \
-            -e NEO4J_PLUGINS='["apoc"]' \
-            -e NEO4J_dbms_security_procedures_unrestricted=apoc.* \
-            -v "${NEO4J_CONTAINER_NAME}-data:/data" \
-            -v "${NEO4J_CONTAINER_NAME}-logs:/logs" \
-            ${NEO4J_IMAGE} && echo "  ✅ Neo4j容器已重建并启动"
-    else
-        docker stop ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 && echo "  ⏹️  已停止旧Neo4j容器"
-        docker start ${NEO4J_CONTAINER_NAME} && echo "  ✅ Neo4j容器重启成功（保留数据）"
-    fi
+    # 容器存在，直接重启
+    echo "  ⏹️  已停止旧Neo4j容器"
+    docker stop ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1
+    echo "  ✅ Neo4j容器重启成功（保留数据）"
+    docker start ${NEO4J_CONTAINER_NAME}
 else
+    # 容器不存在，创建新容器
+    echo "  ✅ Neo4j容器已创建并启动（新数据卷）"
     docker run -d \
         --name ${NEO4J_CONTAINER_NAME} \
         --network ${NETWORK_NAME} \
@@ -188,7 +177,7 @@ else
         -e NEO4J_dbms_security_procedures_unrestricted=apoc.* \
         -v "${NEO4J_CONTAINER_NAME}-data:/data" \
         -v "${NEO4J_CONTAINER_NAME}-logs:/logs" \
-        ${NEO4J_IMAGE} && echo "  ✅ Neo4j容器已创建并启动（新数据卷）"
+        ${NEO4J_IMAGE}
 fi
 echo ""
 
