@@ -2,13 +2,19 @@
 set -euo pipefail
 
 # ==============================================================================
-# 线上环境专用配置
+# 线上环境专用配置 (遵循新的命名规范)
 # ==============================================================================
-# PM2 应用名称 (用于线上进程管理)
-PM2_APP_NAME="rag-app-chatKB"
+# PM2 应用名称
+PM2_APP_NAME="rag-app-chatKB_online"
+# 应用标识 (用于Docker资源命名)
+APP_ID="chatKB"
+# 环境标识 (用于Docker资源命名)
+ENV_ID="online"
+# Docker 资源命名前缀
+DOCKER_PREFIX="rag-arc"
 
 # ==============================================================================
-# 核心优化：自动定位main.py所在目录（无需写死路径）
+# 核心优化：自动定位main.py所在目录
 # ==============================================================================
 find_main_py() {
     local current_dir=$(pwd)
@@ -39,7 +45,7 @@ echo "🔍 自动定位到应用目录: ${APP_DIR}"
 # ==============================================================================
 # 第一步：加载.env文件
 # ==============================================================================
-ENV_FILE=${ENV_FILE:-${APP_DIR}/.env}
+ENV_FILE=${ENV_FILE:-${APP_DIR}/.env.${ENV_ID}} # 使用环境特定的env文件
 if [ -f "${ENV_FILE}" ]; then
     echo "🔧 加载环境配置文件: ${ENV_FILE}"
     export $(grep -v '^#' ${ENV_FILE} | grep -v '^$' | xargs)
@@ -48,29 +54,29 @@ else
 fi
 
 # ==============================================================================
-# 第二步：配置区 (线上环境，无任何隔离后缀)
+# 第二步：配置区 (使用新的命名规范，端口与测试环境保持一致)
 # ==============================================================================
 # 1. 网络名称
-NETWORK_NAME=${NETWORK_NAME:-"rag-arc-network"}
+NETWORK_NAME=${NETWORK_NAME:-"${DOCKER_PREFIX}-network-${APP_ID}-${ENV_ID}"}
 
 # 2. PostgreSQL 配置
-POSTGRES_CONTAINER_NAME=${POSTGRES_CONTAINER_NAME:-"rag-arc-postgres"}
-POSTGRES_HOST_PORT=${POSTGRES_PORT:-5432}
+POSTGRES_CONTAINER_NAME=${POSTGRES_CONTAINER_NAME:-"${DOCKER_PREFIX}-postgres-${APP_ID}-${ENV_ID}"}
+POSTGRES_HOST_PORT=${POSTGRES_PORT:-5433} # 端口与测试环境一致
 POSTGRES_USER=${POSTGRES_USER:-postgres}
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres123}
-POSTGRES_DB=${POSTGRES_DB:-rag_arc_chatKB}
+POSTGRES_DB=${POSTGRES_DB:-"rag_arc_${APP_ID}_${ENV_ID}"} # 数据库名也遵循规范
 POSTGRES_IMAGE=${POSTGRES_IMAGE:-postgres:16-alpine}
 
 # 3. Redis 配置
-REDIS_CONTAINER_NAME=${REDIS_CONTAINER_NAME:-"rag-arc-redis"}
-REDIS_HOST_PORT=${REDIS_PORT:-6379}
+REDIS_CONTAINER_NAME=${REDIS_CONTAINER_NAME:-"${DOCKER_PREFIX}-redis-${APP_ID}-${ENV_ID}"}
+REDIS_HOST_PORT=${REDIS_PORT:-6380} # 端口与测试环境一致
 REDIS_IMAGE=${REDIS_IMAGE:-redis:7-alpine}
 REDIS_PASSWORD=${REDIS_PASSWORD:-""}
 
 # 4. Neo4j 配置
-NEO4J_CONTAINER_NAME=${NEO4J_CONTAINER_NAME:-"rag-arc-neo4j"}
-NEO4J_WEB_HOST_PORT=${NEO4J_WEB_PORT:-7474}
-NEO4J_BOLT_HOST_PORT=${NEO4J_BOLT_PORT:-7687}
+NEO4J_CONTAINER_NAME=${NEO4J_CONTAINER_NAME:-"${DOCKER_PREFIX}-neo4j-${APP_ID}-${ENV_ID}"}
+NEO4J_WEB_HOST_PORT=${NEO4J_WEB_PORT:-7475} # 端口与测试环境一致
+NEO4J_BOLT_HOST_PORT=${NEO4J_BOLT_PORT:-7688} # 端口与测试环境一致
 if [[ -n "${NEO4J_URL:-}" ]]; then
     NEO4J_BOLT_HOST_PORT=$(echo ${NEO4J_URL} | awk -F':' '{print $NF}')
 fi
@@ -79,10 +85,10 @@ NEO4J_PASSWORD=${NEO4J_PASSWORD:-12345678}
 NEO4J_IMAGE=${NEO4J_IMAGE:-neo4j:latest}
 
 # 5. 应用配置
-APP_PORT=${APP_PORT:-8001}
-APP_LOG_FILE=${APP_LOG_FILE:-${APP_DIR}/log/app.log}
-PARSER_OUTPUT_DIR=${PARSER_OUTPUT_DIR:-${APP_DIR}/data/parsed_files}
-LOCAL_FILE_STORAGE_PATH=${LOCAL_FILE_STORAGE_PATH:-${APP_DIR}/local/files}
+APP_PORT=${APP_PORT:-8001} # 端口与测试环境一致
+APP_LOG_FILE=${APP_LOG_FILE:-${APP_DIR}/log/app_${ENV_ID}.log}
+PARSER_OUTPUT_DIR=${PARSER_OUTPUT_DIR:-${APP_DIR}/data/parsed_files_${ENV_ID}}
+LOCAL_FILE_STORAGE_PATH=${LOCAL_FILE_STORAGE_PATH:-${APP_DIR}/local/files_${ENV_ID}}
 
 # ==============================================================================
 # 依赖检查
@@ -100,10 +106,10 @@ check_dependency "lsof"
 check_dependency "pkill"
 
 # ==============================================================================
-# 第三步：启动Docker容器 (逻辑与原脚本完全相同)
+# 第三步：启动Docker容器
 # ==============================================================================
 echo -e "\n=========================================="
-echo "  RAG-ARC 线上环境启动脚本 (PM2版)"
+echo "  RAG-ARC ${APP_ID} ${ENV_ID} 环境启动脚本 (PM2版)"
 echo "=========================================="
 echo ""
 
@@ -125,7 +131,7 @@ else
         -e POSTGRES_USER=${POSTGRES_USER} \
         -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD} \
         -e POSTGRES_DB=${POSTGRES_DB} \
-        -v "rag-arc-postgres-data:/var/lib/postgresql/data" \
+        -v "${POSTGRES_CONTAINER_NAME}-data:/var/lib/postgresql/data" \
         ${POSTGRES_IMAGE} && echo "  ✅ PostgreSQL容器已创建并启动（新数据卷）"
 fi
 echo ""
@@ -144,7 +150,7 @@ else
         --name ${REDIS_CONTAINER_NAME} \
         --network ${NETWORK_NAME} \
         -p ${REDIS_HOST_PORT}:6379 \
-        -v "rag-arc-redis-data:/data" \
+        -v "${REDIS_CONTAINER_NAME}-data:/data" \
         ${REDIS_IMAGE} ${REDIS_CMD} && echo "  ✅ Redis容器已创建并启动（新数据卷）"
 fi
 echo ""
@@ -152,9 +158,9 @@ echo ""
 # 4. 处理Neo4j
 echo "🔷 处理Neo4j容器 [${NEO4J_CONTAINER_NAME}]..."
 if docker ps -a | grep -q "${NEO4J_CONTAINER_NAME}"; then
-    CURRENT_BOLT_PORT=$(docker port ${NEO4J_CONTAINER_NAME} 7687 | cut -d':' -f2 || true)
-    if [ "${CURRENT_BOLT_PORT}" != "${NEO4J_BOLT_HOST_PORT}" ]; then
-        echo "  ⚠️  Neo4j端口不匹配，删除并重建..."
+    CURRENT_BOLT_PORT=$(docker port ${NEO4J_CONTAINER_NAME} 7687 2>/dev/null | awk -F':' '{print $2}')
+    if [ -z "${CURRENT_BOLT_PORT}" ] || [ "${CURRENT_BOLT_PORT}" != "${NEO4J_BOLT_HOST_PORT}" ]; then
+        echo "  ⚠️  Neo4j端口不匹配或未映射，删除并重建..."
         docker rm -f ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 || true
         docker run -d \
             --name ${NEO4J_CONTAINER_NAME} \
@@ -164,8 +170,8 @@ if docker ps -a | grep -q "${NEO4J_CONTAINER_NAME}"; then
             -e NEO4J_AUTH=${NEO4J_USERNAME}/${NEO4J_PASSWORD} \
             -e NEO4J_PLUGINS='["apoc"]' \
             -e NEO4J_dbms_security_procedures_unrestricted=apoc.* \
-            -v "rag-arc-neo4j-data:/data" \
-            -v "rag-arc-neo4j-logs:/logs" \
+            -v "${NEO4J_CONTAINER_NAME}-data:/data" \
+            -v "${NEO4J_CONTAINER_NAME}-logs:/logs" \
             ${NEO4J_IMAGE} && echo "  ✅ Neo4j容器已重建并启动"
     else
         docker stop ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 && echo "  ⏹️  已停止旧Neo4j容器"
@@ -180,8 +186,8 @@ else
         -e NEO4J_AUTH=${NEO4J_USERNAME}/${NEO4J_PASSWORD} \
         -e NEO4J_PLUGINS='["apoc"]' \
         -e NEO4J_dbms_security_procedures_unrestricted=apoc.* \
-        -v "rag-arc-neo4j-data:/data" \
-        -v "rag-arc-neo4j-logs:/logs" \
+        -v "${NEO4J_CONTAINER_NAME}-data:/data" \
+        -v "${NEO4J_CONTAINER_NAME}-logs:/logs" \
         ${NEO4J_IMAGE} && echo "  ✅ Neo4j容器已创建并启动（新数据卷）"
 fi
 echo ""
@@ -192,7 +198,7 @@ sleep 10
 MAX_ATTEMPTS=30
 ATTEMPT=0
 while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-    if docker exec ${POSTGRES_CONTAINER_NAME} pg_isready -U ${POSTGRES_USER} > /dev/null 2>&1; then
+    if docker exec ${POSTGRES_CONTAINER_NAME} pg_isready -U ${POSTGRES_USER} -h localhost > /dev/null 2>&1; then
         echo "  ✅ PostgreSQL已就绪 (端口: ${POSTGRES_HOST_PORT})"
         break
     fi
@@ -215,15 +221,15 @@ if [ -f "pyproject.toml" ]; then
     uv sync --quiet && echo "  ✅ 依赖同步完成" || echo "  ⚠️  依赖同步失败，尝试继续启动..."
 fi
 
-# 终极健壮版清理：确保端口和进程干净
+# 终极健壮版清理
 echo "🧹 正在清理可能残留的旧应用进程和端口..."
 pm2 stop "${PM2_APP_NAME}" > /dev/null 2>&1 || true
 pm2 delete "${PM2_APP_NAME}" > /dev/null 2>&1 || true
 pkill -f "uvicorn main:app --port ${APP_PORT}" > /dev/null 2>&1 || true
-PID_TO_KILL=$(lsof -t -i:"${APP_PORT}" || true)
+PID_TO_KILL=$(sudo lsof -t -i:"${APP_PORT}" 2>/dev/null || true)
 if [ -n "${PID_TO_KILL}" ]; then
     echo "  ⚠️  发现进程 ${PID_TO_KILL} 占用端口 ${APP_PORT}，正在强制杀死..."
-    kill -9 "${PID_TO_KILL}" > /dev/null 2>&1 || true
+    sudo kill -9 "${PID_TO_KILL}" > /dev/null 2>&1 || true
     sleep 2
 fi
 echo "  ✅ 清理完成。"
@@ -269,7 +275,7 @@ sleep 5
 
 if pm2 list | grep -q "${PM2_APP_NAME}" && pm2 list | grep -q "online"; then
     echo "=========================================="
-    echo "  ✅ 线上环境所有服务启动/重启成功！"
+    echo "  ✅ ${APP_ID} ${ENV_ID} 环境所有服务启动/重启成功！"
     echo "=========================================="
     echo ""
     echo "📋 服务信息："
@@ -292,6 +298,6 @@ else
     echo "📝 快速排查："
     echo "  1. 查看PM2状态: pm2 list"
     echo "  2. 查看应用日志: pm2 logs ${PM2_APP_NAME}"
-    echo "  3. 检查容器状态: docker ps | grep rag-arc-"
+    echo "  3. 检查容器状态: docker ps | grep ${APP_ID}-${ENV_ID}"
     echo ""
 fi

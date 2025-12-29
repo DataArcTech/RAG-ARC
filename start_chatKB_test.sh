@@ -67,7 +67,7 @@ NEO4J_PASSWORD=${NEO4J_PASSWORD:-12345678}
 
 # Docker 镜像
 POSTGRES_IMAGE=${POSTGRES_IMAGE:-postgres:16-alpine}
-REDIS_IMAGE=${REDIS_IMAGE:-redis:7-alpine}  # <--- 已修复：添加了缺失的定义
+REDIS_IMAGE=${REDIS_IMAGE:-redis:7-alpine}
 NEO4J_IMAGE=${NEO4J_IMAGE:-neo4j:latest}
 
 # 应用配置 (已修改端口和路径以避免冲突)
@@ -207,18 +207,18 @@ if [ -f "pyproject.toml" ]; then
     fi
 fi
 
-# 6.1 终极健壮版：清理残留进程和端口
+# 6.1 终极健壮版：清理残留进程和端口 (已优化)
 echo "🧹 正在清理可能残留的旧应用进程和端口..."
 # 优先通过 PM2 清理
 pm2 stop "${PM2_APP_NAME}" > /dev/null 2>&1 || true
 pm2 delete "${PM2_APP_NAME}" > /dev/null 2>&1 || true
 # 然后通过命令行模式清理
 pkill -f "uvicorn main:app --port ${APP_PORT}" > /dev/null 2>&1 || true
-# 最后通过端口强制清理顽固进程
-PID_TO_KILL=$(lsof -t -i:"${APP_PORT}" || true)
+# 最后通过端口强制清理顽固进程 (已增加 sudo 和 2>/dev/null)
+PID_TO_KILL=$(sudo lsof -t -i:"${APP_PORT}" 2>/dev/null || true)
 if [ -n "${PID_TO_KILL}" ]; then
     echo "  ⚠️  发现进程 ${PID_TO_KILL} 占用端口 ${APP_PORT}，正在强制杀死..."
-    kill -9 "${PID_TO_KILL}" > /dev/null 2>&1 || true
+    sudo kill -9 "${PID_TO_KILL}" > /dev/null 2>&1 || true
     sleep 2
 fi
 echo "  ✅ 清理完成。"
