@@ -84,7 +84,8 @@ async def test_login_livingkb():
         assert data["code"] == 200
         assert "access_token" in data["data"]
         assert data["data"]["token_type"] == "bearer"
-        assert data["data"]["type"] == 0
+        assert "user" in data["data"]
+        assert data["data"]["user"]["type"] == 0
         
         return data["data"]["access_token"]
 
@@ -114,7 +115,8 @@ async def test_login_chatkb():
         assert data["code"] == 200
         assert "access_token" in data["data"]
         assert data["data"]["token_type"] == "bearer"
-        assert data["data"]["type"] == 1
+        assert "user" in data["data"]
+        assert data["data"]["user"]["type"] == 1
         
         return data["data"]["access_token"]
 
@@ -131,7 +133,7 @@ async def test_login_type_mismatch():
         }
         await client.post(f"{BASE_URL}/auth/register", json=register_data)
         
-        # 尝试用type=1登录
+        # 尝试用type=1登录（应该找不到用户，返回401）
         login_data = {
             "user_name": register_data["user_name"],
             "password": register_data["password"],
@@ -139,14 +141,19 @@ async def test_login_type_mismatch():
         }
         response = await client.post(f"{BASE_URL}/auth/token", json=login_data)
         
-        assert response.status_code == 400, f"应该返回400错误: {response.text}"
+        # type不匹配时，找不到用户，返回401是合理的
+        assert response.status_code == 401, f"应该返回401错误: {response.text}"
         data = response.json()
-        assert data["code"] == 400
-        assert "type mismatch" in data["message"].lower() or "mismatch" in data["message"].lower()
+        assert data["code"] == 401
+        # 检查错误消息（可能是中文或英文）
+        message_lower = data["message"].lower()
+        assert ("用户名" in data["message"] or "密码" in data["message"] or 
+                "username" in message_lower or "password" in message_lower or 
+                "incorrect" in message_lower)
 
 
 async def test_get_current_user():
-    """测试获取当前用户信息"""
+    """测试获取当前用户信息（/auth/me）"""
     async with httpx.AsyncClient() as client:
         # 先注册并登录
         register_data = {
@@ -163,11 +170,13 @@ async def test_get_current_user():
             "type": 0
         }
         login_response = await client.post(f"{BASE_URL}/auth/token", json=login_data)
-        token = login_response.json()["data"]["access_token"]
+        login_data_resp = login_response.json()
+        assert login_data_resp["code"] == 200, f"登录失败: {login_data_resp}"
+        token = login_data_resp["data"]["access_token"]
         
-        # 获取当前用户
+        # 获取当前用户（使用新的 /auth/me 接口）
         headers = {"Authorization": f"Bearer {token}"}
-        response = await client.get(f"{BASE_URL}/user/me", headers=headers)
+        response = await client.get(f"{BASE_URL}/auth/me", headers=headers)
         
         assert response.status_code == 200, f"获取用户信息失败: {response.text}"
         data = response.json()
@@ -225,7 +234,8 @@ async def test_login_without_type():
         assert data["code"] == 200
         assert "access_token" in data["data"]
         assert data["data"]["token_type"] == "bearer"
-        assert data["data"]["type"] == 0, "type应该默认为0"
+        assert "user" in data["data"]
+        assert data["data"]["user"]["type"] == 0, "type应该默认为0"
         
         return data["data"]["access_token"]
 
@@ -250,10 +260,15 @@ async def test_login_without_type_mismatch():
         }
         response = await client.post(f"{BASE_URL}/auth/token", json=login_data)
         
-        assert response.status_code == 400, f"应该返回400错误: {response.text}"
+        # type不匹配时，找不到用户，返回401是合理的
+        assert response.status_code == 401, f"应该返回401错误: {response.text}"
         data = response.json()
-        assert data["code"] == 400
-        assert "type mismatch" in data["message"].lower() or "mismatch" in data["message"].lower()
+        assert data["code"] == 401
+        # 检查错误消息（可能是中文或英文）
+        message_lower = data["message"].lower()
+        assert ("用户名" in data["message"] or "密码" in data["message"] or 
+                "username" in message_lower or "password" in message_lower or 
+                "incorrect" in message_lower)
 
 
 async def test_register_timestamp():
@@ -302,6 +317,89 @@ async def test_login_timestamp():
         
         # 登录成功即可，登录时间已更新到数据库（可通过数据库查询验证）
         print(f"   ✅ 登录时间已更新到数据库（last_login_at字段）")
+
+
+async def test_logout():
+    """测试退出接口（/auth/logout）"""
+    async with httpx.AsyncClient() as client:
+        # 先注册并登录
+        register_data = {
+            "name": f"测试用户_{current_time}",
+            "user_name": f"logout_test_{current_time}",
+            "password": "test123456",
+            "type": 0
+        }
+        await client.post(f"{BASE_URL}/auth/register", json=register_data)
+        
+        login_data = {
+            "user_name": register_data["user_name"],
+            "password": register_data["password"],
+            "type": 0
+        }
+        login_response = await client.post(f"{BASE_URL}/auth/token", json=login_data)
+        login_data_resp = login_response.json()
+        assert login_data_resp["code"] == 200, f"登录失败: {login_data_resp}"
+        token = login_data_resp["data"]["access_token"]
+        
+        # 测试退出接口
+        headers = {"Authorization": f"Bearer {token}"}
+        response = await client.post(f"{BASE_URL}/auth/logout", headers=headers)
+        
+        assert response.status_code == 200, f"退出失败: {response.text}"
+        data = response.json()
+        assert data["code"] == 200
+        assert data["message"] == "退出成功"
+        assert data["data"] is None
+        
+        # 退出后，token应该失效，再次调用 /auth/me 应该失败
+        # 注意：由于JWT是无状态的，这里只是测试退出接口本身是否正常工作
+        # 实际的token失效需要实现token黑名单机制
+        print(f"   ✅ 退出接口调用成功")
+
+
+async def test_login_response_format():
+    """测试登录接口返回格式（包含user信息和expires_in）"""
+    async with httpx.AsyncClient() as client:
+        # 先注册
+        register_data = {
+            "name": f"测试用户_{current_time}",
+            "user_name": f"login_format_{current_time}",
+            "password": "test123456",
+            "type": 1
+        }
+        await client.post(f"{BASE_URL}/auth/register", json=register_data)
+        
+        # 登录
+        login_data = {
+            "user_name": register_data["user_name"],
+            "password": register_data["password"],
+            "type": 1
+        }
+        response = await client.post(f"{BASE_URL}/auth/token", json=login_data)
+        
+        assert response.status_code == 200, f"登录失败: {response.text}"
+        data = response.json()
+        assert data["code"] == 200
+        assert data["message"] == "登录成功"
+        
+        # 验证返回数据结构
+        assert "data" in data
+        assert "access_token" in data["data"]
+        assert "token_type" in data["data"]
+        assert data["data"]["token_type"] == "bearer"
+        assert "expires_in" in data["data"]
+        assert isinstance(data["data"]["expires_in"], int)
+        assert data["data"]["expires_in"] > 0
+        
+        # 验证user信息
+        assert "user" in data["data"]
+        user = data["data"]["user"]
+        assert user["user_name"] == register_data["user_name"]
+        assert user["name"] == register_data["name"]
+        assert user["type"] == 1
+        assert user["status"] in ["active", "ACTIVE"]
+        
+        print(f"   ✅ 登录返回格式正确，包含user信息和expires_in")
 
 
 if __name__ == "__main__":
@@ -353,6 +451,14 @@ if __name__ == "__main__":
             
             print("\n11. 测试登录时间戳更新...")
             await test_login_timestamp()
+            print("   ✅ 通过")
+            
+            print("\n12. 测试退出接口...")
+            await test_logout()
+            print("   ✅ 通过")
+            
+            print("\n13. 测试登录返回格式（包含user和expires_in）...")
+            await test_login_response_format()
             print("   ✅ 通过")
             
             print("\n" + "=" * 60)

@@ -126,6 +126,14 @@ class UserResponse(BaseModel):
         )
 
 
+class LoginResponse(BaseModel):
+    """登录响应数据"""
+    access_token: str
+    token_type: str
+    expires_in: int  # token过期时间（秒）
+    user: UserResponse
+
+
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
 
@@ -310,7 +318,8 @@ async def ws_get_current_user(
 @router.post("/token")
 async def login_for_access_token_endpoint(
     login_data: LoginRequest,
-) -> Token:
+) -> StandardResponse[LoginResponse]:
+    """用户登录接口"""
     # 如果 type 为 None，使用默认值 0
     login_type = login_data.type if login_data.type is not None else 0
     # Use async authentication to avoid blocking the event loop, 传入 type 参数
@@ -318,7 +327,7 @@ async def login_for_access_token_endpoint(
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
+            detail="用户名或密码错误",
             headers={"WWW-Authenticate": "Bearer"},
         )
     # 更新用户登录时间
@@ -330,7 +339,16 @@ async def login_for_access_token_endpoint(
         data={"sub": user.user_name, "type": user.type}, expires_delta=access_token_expires
     )
 
-    return Token(access_token=access_token, token_type="bearer", type=user.type)
+    return StandardResponse(
+        code=200,
+        message="登录成功",
+        data=LoginResponse(
+            access_token=access_token,
+            token_type="bearer",
+            expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,  # 转换为秒
+            user=UserResponse.from_user(user)
+        )
+    )
 
 
 @router.post("/register", status_code=status.HTTP_200_OK)
@@ -346,6 +364,32 @@ async def register(user: UserCreate) -> StandardResponse[UserResponse]:
         )
     except IntegrityError:
         raise HTTPException(status_code=400, detail="Username already exists")
+
+@router.post("/logout")
+async def logout(
+    current_user: Annotated[User, Depends(get_current_user)]
+) -> StandardResponse[None]:
+    """用户退出接口"""
+    # 这里可以扩展：记录退出时间、将token加入黑名单等
+    logger.info(f"User {current_user.user_name} logged out")
+    return StandardResponse(
+        code=200,
+        message="退出成功",
+        data=None
+    )
+
+
+@router.get("/me")
+async def get_current_user_info(
+    current_user: Annotated[User, Depends(get_current_user)]
+) -> StandardResponse[UserResponse]:
+    """获取当前登录用户信息"""
+    return StandardResponse(
+        code=200,
+        message="success",
+        data=UserResponse.from_user(current_user)
+    )
+
 
 def validate_user_session(session: ChatSession, current_user: User):
     if session is None:
