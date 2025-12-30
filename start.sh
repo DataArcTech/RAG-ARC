@@ -62,7 +62,8 @@ prepare_host_directories() {
     for dir in data local models; do
         mkdir -p "$dir"
         if command -v chown >/dev/null 2>&1; then
-            sudo chown -R "$HOST_UID:$HOST_GID" "$dir" 2>/dev/null || chown -R "$HOST_UID:$HOST_GID" "$dir" || true
+            # Avoid blocking on sudo password prompts (non-interactive environments).
+            sudo -n chown -R "$HOST_UID:$HOST_GID" "$dir" 2>/dev/null || chown -R "$HOST_UID:$HOST_GID" "$dir" || true
         fi
         chmod -R ug+rwx "$dir" 2>/dev/null || true
     done
