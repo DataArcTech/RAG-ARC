@@ -419,48 +419,103 @@ async def register(user: UserCreate) -> StandardResponse[UserResponse]:
 
 @router.post("/logout")
 async def logout(
-    request: Request,
-    current_user: Annotated[User, Depends(get_current_user)]
+    request: Request
 ) -> StandardResponse[None]:
-    """用户退出接口 - 将 token 加入 Redis 黑名单"""
-    try:
-        # 从请求头获取 token
-        authorization = request.headers.get("Authorization", "")
-        if authorization.startswith("Bearer "):
-            token = authorization[7:]  # 移除 "Bearer " 前缀
-            
-            # 解析 token 获取过期时间
-            try:
-                payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"verify_exp": False})
-                exp = payload.get("exp")
-                if exp:
-                    # 计算剩余过期时间（秒）
-                    current_time = datetime.now(timezone.utc).timestamp()
-                    remaining_ttl = int(exp - current_time)
-                    
-                    # 如果还有剩余时间，加入黑名单
-                    if remaining_ttl > 0:
-                        redis_client = get_redis_client()
-                        if redis_client:
-                            try:
-                                blacklist_key = f"{JWT_BLACKLIST_PREFIX}{token}"
-                                redis_client.setex(blacklist_key, remaining_ttl, "1")
-                                logger.info(f"Token blacklisted for user {current_user.user_name}, TTL: {remaining_ttl}s")
-                            except Exception as e:
-                                logger.error(f"Failed to set token in blacklist: {e}")
-                        else:
-                            logger.warning("Redis client not available, token not blacklisted")
-            except Exception as e:
-                logger.warning(f"Failed to blacklist token: {e}")
-    except Exception as e:
-        logger.warning(f"Error in logout blacklist: {e}")
+    """用户退出接口 - 将 token 加入 Redis 黑名单
     
-    logger.info(f"User {current_user.user_name} logged out")
-    return StandardResponse(
-        code=200,
-        message="退出成功",
-        data=None
-    )
+    设计说明：
+    - 只要服务端不挂，始终返回 200 状态码
+    - 如果 token 无效或已过期，返回 200，但 message 提示认证失效
+    - 如果 token 有效，正常处理登出逻辑
+    """
+    # 从请求头获取 token
+    authorization = request.headers.get("Authorization", "")
+    if not authorization.startswith("Bearer "):
+        # 没有提供 token，返回认证失效提示
+        return StandardResponse(
+            code=200,
+            message="认证已失效，无需重复退出",
+            data=None
+        )
+    
+    token = authorization[7:]  # 移除 "Bearer " 前缀
+    
+    # 检查 token 是否在黑名单中（已登出）
+    try:
+        redis_client = get_redis_client()
+        if redis_client:
+            blacklist_key = f"{JWT_BLACKLIST_PREFIX}{token}"
+            if redis_client.exists(blacklist_key):
+                # token 已在黑名单中，说明已经登出过
+                return StandardResponse(
+                    code=200,
+                    message="认证已失效，无需重复退出",
+                    data=None
+                )
+    except Exception as e:
+        logger.warning(f"Redis blacklist check failed: {e}")
+    
+    # 尝试解析 token（不验证过期时间，因为可能已过期）
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"verify_exp": False})
+        username = payload.get("sub")
+        exp = payload.get("exp")
+        
+        if not username:
+            # token 格式无效
+            return StandardResponse(
+                code=200,
+                message="认证已失效，无需重复退出",
+                data=None
+            )
+        
+        # 检查 token 是否已过期
+        current_time = datetime.now(timezone.utc).timestamp()
+        if exp and exp < current_time:
+            # token 已过期
+            return StandardResponse(
+                code=200,
+                message="认证已失效，无需重复退出",
+                data=None
+            )
+        
+        # token 有效，加入黑名单
+        if exp:
+            remaining_ttl = int(exp - current_time)
+            if remaining_ttl > 0:
+                redis_client = get_redis_client()
+                if redis_client:
+                    try:
+                        blacklist_key = f"{JWT_BLACKLIST_PREFIX}{token}"
+                        redis_client.setex(blacklist_key, remaining_ttl, "1")
+                        logger.info(f"Token blacklisted for user {username}, TTL: {remaining_ttl}s")
+                    except Exception as e:
+                        logger.error(f"Failed to set token in blacklist: {e}")
+                else:
+                    logger.warning("Redis client not available, token not blacklisted")
+        
+        logger.info(f"User {username} logged out")
+        return StandardResponse(
+            code=200,
+            message="退出成功",
+            data=None
+        )
+        
+    except InvalidTokenError:
+        # token 无效（格式错误、签名错误等）
+        return StandardResponse(
+            code=200,
+            message="认证已失效，无需重复退出",
+            data=None
+        )
+    except Exception as e:
+        # 其他异常，记录日志但返回成功
+        logger.warning(f"Error in logout: {e}")
+        return StandardResponse(
+            code=200,
+            message="退出成功",
+            data=None
+        )
 
 
 def validate_user_session(session: ChatSession, current_user: User):

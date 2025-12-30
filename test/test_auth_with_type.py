@@ -348,16 +348,32 @@ async def test_logout():
         me_response_before = await client.get(f"{BASE_URL}/user/me", headers=headers)
         assert me_response_before.status_code == 200, "退出前应该可以访问 /user/me"
         
-        # 测试退出接口
-        logout_response = await client.post(f"{BASE_URL}/auth/logout", headers=headers)
-        assert logout_response.status_code == 200, f"退出失败: {logout_response.text}"
-        logout_data = logout_response.json()
-        assert logout_data["code"] == 200
-        assert logout_data["message"] == "退出成功"
-        assert logout_data["data"] is None
+        # 第一次退出 - 应该成功
+        logout_response_1 = await client.post(f"{BASE_URL}/auth/logout", headers=headers)
+        assert logout_response_1.status_code == 200, f"第一次退出应该返回200: {logout_response_1.text}"
+        logout_data_1 = logout_response_1.json()
+        assert logout_data_1["code"] == 200, "第一次退出应该返回code=200"
+        assert logout_data_1["message"] == "退出成功", "第一次退出应该提示退出成功"
+        assert logout_data_1["data"] is None
+        
+        # 第二次退出 - token已失效，应该返回200但提示认证失效
+        await asyncio.sleep(0.5)  # 等待一下确保黑名单写入完成
+        logout_response_2 = await client.post(f"{BASE_URL}/auth/logout", headers=headers)
+        assert logout_response_2.status_code == 200, f"第二次退出应该返回200（即使token已失效）: {logout_response_2.text}"
+        logout_data_2 = logout_response_2.json()
+        assert logout_data_2["code"] == 200, "第二次退出应该返回code=200"
+        assert "认证已失效" in logout_data_2["message"] or "无需重复退出" in logout_data_2["message"], f"第二次退出应该提示认证失效，实际: {logout_data_2['message']}"
+        assert logout_data_2["data"] is None
+        
+        # 无 token 退出 - 应该返回200但提示认证失效
+        logout_response_3 = await client.post(f"{BASE_URL}/auth/logout")
+        assert logout_response_3.status_code == 200, f"无token退出应该返回200: {logout_response_3.text}"
+        logout_data_3 = logout_response_3.json()
+        assert logout_data_3["code"] == 200, "无token退出应该返回code=200"
+        assert "认证已失效" in logout_data_3["message"] or "无需重复退出" in logout_data_3["message"], f"无token退出应该提示认证失效，实际: {logout_data_3['message']}"
+        assert logout_data_3["data"] is None
         
         # 退出后，旧 token 应该失效（在黑名单中），再次调用 /user/me 应该返回 401
-        await asyncio.sleep(0.5)  # 等待一下确保黑名单写入完成
         me_response_after = await client.get(f"{BASE_URL}/user/me", headers=headers)
         if me_response_after.status_code != 401:
             # 如果旧 token 仍然有效，可能是 Redis 连接问题，记录警告但继续测试
@@ -385,7 +401,7 @@ async def test_logout():
         assert me_data_new["code"] == 200
         assert me_data_new["data"]["user_name"] == register_data["user_name"]
         
-        print(f"   ✅ 退出接口和 JWT 黑名单机制测试通过（新 token 可用）")
+        print(f"   ✅ 退出接口测试通过（第一次退出成功，第二次/无token退出返回200并提示认证失效，新token可用）")
 
 
 async def test_login_response_format():
