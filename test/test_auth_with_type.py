@@ -133,7 +133,7 @@ async def test_login_type_mismatch():
         }
         await client.post(f"{BASE_URL}/auth/register", json=register_data)
         
-        # 尝试用type=1登录（应该找不到用户，返回401）
+        # 尝试用type=1登录（应该找不到用户，返回200但data为None）
         login_data = {
             "user_name": register_data["user_name"],
             "password": register_data["password"],
@@ -141,10 +141,11 @@ async def test_login_type_mismatch():
         }
         response = await client.post(f"{BASE_URL}/auth/token", json=login_data)
         
-        # type不匹配时，找不到用户，返回401是合理的
-        assert response.status_code == 401, f"应该返回401错误: {response.text}"
+        # 登录接口统一返回200，但用户名/密码错误时data为None
+        assert response.status_code == 200, f"应该返回200: {response.text}"
         data = response.json()
-        assert data["code"] == 401
+        assert data["code"] == 200
+        assert data["data"] is None, "用户名/密码错误时data应该为None"
         # 检查错误消息（可能是中文或英文）
         message_lower = data["message"].lower()
         assert ("用户名" in data["message"] or "密码" in data["message"] or 
@@ -260,10 +261,11 @@ async def test_login_without_type_mismatch():
         }
         response = await client.post(f"{BASE_URL}/auth/token", json=login_data)
         
-        # type不匹配时，找不到用户，返回401是合理的
-        assert response.status_code == 401, f"应该返回401错误: {response.text}"
+        # 登录接口统一返回200，但用户名/密码错误时data为None
+        assert response.status_code == 200, f"应该返回200: {response.text}"
         data = response.json()
-        assert data["code"] == 401
+        assert data["code"] == 200
+        assert data["data"] is None, "用户名/密码错误时data应该为None"
         # 检查错误消息（可能是中文或英文）
         message_lower = data["message"].lower()
         assert ("用户名" in data["message"] or "密码" in data["message"] or 

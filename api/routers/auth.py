@@ -319,16 +319,23 @@ async def ws_get_current_user(
 async def login_for_access_token_endpoint(
     login_data: LoginRequest,
 ) -> StandardResponse[LoginResponse]:
-    """用户登录接口"""
+    """用户登录接口
+    
+    设计说明：
+    - 无论成功或失败都返回 200 状态码
+    - 用户名/密码错误时，返回 200，但 data 为 None，message 包含错误信息
+    - 401 状态码仅用于未认证访问需要认证的接口
+    """
     # 如果 type 为 None，使用默认值 0
     login_type = login_data.type if login_data.type is not None else 0
     # Use async authentication to avoid blocking the event loop, 传入 type 参数
     user = await get_account_handler().authenticate_user_async(login_data.user_name, login_data.password, type=login_type)
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="用户名或密码错误",
-            headers={"WWW-Authenticate": "Bearer"},
+        # 用户名/密码错误时，返回 200，但 data 为 None
+        return StandardResponse(
+            code=200,
+            message="用户名或密码错误",
+            data=None
         )
     # 更新用户登录时间
     account_handler = get_account_handler()
