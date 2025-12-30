@@ -1,5 +1,7 @@
 # Repository Guidelines
 
+**注意：任何不符合软件工程规范的代码都是不被允许的。例如：硬编码，不被统一管理的环境变量、global变量、prompt字符串等；补丁/猴子补丁，如仅为了某次运行成功强行加上的补丁（最严重的例子：滥用正则表达式），没有任何泛化性；一个超过1000行的代码，没有任何维护价值。**
+
 ## Project Structure
 
 - `api/`: FastAPI HTTP API, routers, MCP servers (`api/mcp/`).
