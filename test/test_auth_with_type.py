@@ -153,7 +153,7 @@ async def test_login_type_mismatch():
 
 
 async def test_get_current_user():
-    """测试获取当前用户信息（/auth/me）"""
+    """测试获取当前用户信息（/user/me）"""
     async with httpx.AsyncClient() as client:
         # 先注册并登录
         register_data = {
@@ -174,12 +174,12 @@ async def test_get_current_user():
         assert login_data_resp["code"] == 200, f"登录失败: {login_data_resp}"
         token = login_data_resp["data"]["access_token"]
         
-        # 获取当前用户（使用新的 /auth/me 接口）
+        # 获取当前用户（使用 /user/me 接口）
         headers = {"Authorization": f"Bearer {token}"}
-        response = await client.get(f"{BASE_URL}/auth/me", headers=headers)
+        response = await client.get(f"{BASE_URL}/user/me", headers=headers)
         
         assert response.status_code == 200, f"获取用户信息失败: {response.text}"
-        data = response.json()
+        data = response.json()  # 中间件会自动包装为标准格式
         assert data["code"] == 200
         assert data["data"]["user_name"] == register_data["user_name"]
         assert data["data"]["name"] == register_data["name"]
@@ -351,7 +351,7 @@ async def test_logout():
         assert data["message"] == "退出成功"
         assert data["data"] is None
         
-        # 退出后，token应该失效，再次调用 /auth/me 应该失败
+        # 退出后，token应该失效，再次调用 /user/me 应该失败
         # 注意：由于JWT是无状态的，这里只是测试退出接口本身是否正常工作
         # 实际的token失效需要实现token黑名单机制
         print(f"   ✅ 退出接口调用成功")

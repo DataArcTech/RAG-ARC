@@ -379,18 +379,6 @@ async def logout(
     )
 
 
-@router.get("/me")
-async def get_current_user_info(
-    current_user: Annotated[User, Depends(get_current_user)]
-) -> StandardResponse[UserResponse]:
-    """获取当前登录用户信息"""
-    return StandardResponse(
-        code=200,
-        message="success",
-        data=UserResponse.from_user(current_user)
-    )
-
-
 def validate_user_session(session: ChatSession, current_user: User):
     if session is None:
         logger.warning(f"Session validation failed for user {current_user.id}")
