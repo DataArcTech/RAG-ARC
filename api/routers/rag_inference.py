@@ -88,6 +88,15 @@ class ChatRequest(BaseModel):
     include_evidence: bool = False  # Whether to include chunk/seed/triple summary
 
 
+class StreamChatRequest(BaseModel):
+    """Request model for POST SSE stream chat endpoint"""
+    query: str
+    return_subgraph: bool = False
+    target_owner_id: Optional[uuid.UUID] = None
+    include_all_owners: bool = False
+    include_evidence: bool = False
+
+
 class ChatResponse(BaseModel):
     """Response model for chat endpoint"""
     response: str
@@ -272,31 +281,38 @@ async def graph_overview(
     return GraphOverviewResponse(**overview)
 
 
-@router.get("/stream_chat/{session_id}")
+@router.post("/stream_chat/{session_id}")
 async def stream_chat_sse(
     session_id: uuid.UUID,
+    request: StreamChatRequest,
     current_user: Annotated[User, Depends(get_current_user)],
-    query: str = Query(..., description="User query text"),
-    return_subgraph: bool = Query(default=False),
-    target_owner_id: Optional[uuid.UUID] = Query(default=None),
-    include_all_owners: bool = Query(default=False),
-    include_evidence: bool = Query(default=False),
 ):
     """
-    SSE stream chat endpoint with user authentication required
+    SSE stream chat endpoint with user authentication required (POST method)
+    
+    Request body (JSON):
+    {
+        "query": "User query text",
+        "return_subgraph": false,
+        "target_owner_id": null,
+        "include_all_owners": false,
+        "include_evidence": false
+    }
     
     Args:
-        session_id: Chat session ID
-        query: User query text
-        return_subgraph: Whether to return subgraph data
-        target_owner_id: Target owner ID (admin only)
-        include_all_owners: Include all owners (admin only)
-        include_evidence: Whether to include evidence
-        current_user: Current authenticated user (required)
+        session_id: Chat session ID (path parameter)
+        request: StreamChatRequest containing query and optional flags
+        current_user: Current authenticated user (required, from JWT token)
     
     Returns:
-        StreamingResponse with SSE events
+        StreamingResponse with SSE events (text/event-stream)
     """
+    # Extract parameters from request body
+    query = request.query
+    return_subgraph = request.return_subgraph
+    target_owner_id = request.target_owner_id
+    include_all_owners = request.include_all_owners
+    include_evidence = request.include_evidence
 
     logger.info("SSE stream_chat request for session_id %s by user %s", session_id, current_user.id)
 
