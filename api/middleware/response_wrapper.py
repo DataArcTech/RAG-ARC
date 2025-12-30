@@ -34,12 +34,6 @@ class RequestIdResponseWrapper(BaseHTTPMiddleware):
         # 获取 request_id
         request_id = response.headers.get("X-Request-ID") or correlation_id.get() or "NO-ID"
         
-        # 记录请求日志（类似 uvicorn access log 格式，但写入到 Python logging）
-        logger.info(
-            f"{client_ip} - \"{method} {path} HTTP/1.1\" {response.status_code} "
-            f"(process_time: {process_time:.3f}s)"
-        )
-        
         # 只处理 JSON 响应（检查 content-type）
         content_type = response.headers.get("content-type", "")
         if "application/json" in content_type:
@@ -80,6 +74,13 @@ class RequestIdResponseWrapper(BaseHTTPMiddleware):
                         "request_id": request_id
                     }
                 
+                # 记录请求日志（包含完整响应内容）
+                response_json = json.dumps(wrapped_data, ensure_ascii=False)
+                logger.info(
+                    f"{client_ip} - \"{method} {path} HTTP/1.1\" {response.status_code} "
+                    f"(process_time: {process_time:.3f}s) - Response: {response_json}"
+                )
+                
                 # 创建新的 JSON 响应（JSONResponse 会自动计算 Content-Length）
                 new_headers = dict(response.headers)
                 # 移除旧的 Content-Length，让 JSONResponse 重新计算
@@ -93,6 +94,16 @@ class RequestIdResponseWrapper(BaseHTTPMiddleware):
                 )
             except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
                 # 如果不是有效的 JSON，返回原始响应
+                # 记录请求日志（非 JSON 响应）
+                logger.info(
+                    f"{client_ip} - \"{method} {path} HTTP/1.1\" {response.status_code} "
+                    f"(process_time: {process_time:.3f}s) - Response: [Non-JSON response]"
+                )
                 return response
         
+        # 记录请求日志（非 JSON 响应）
+        logger.info(
+            f"{client_ip} - \"{method} {path} HTTP/1.1\" {response.status_code} "
+            f"(process_time: {process_time:.3f}s) - Response: [Non-JSON response]"
+        )
         return response

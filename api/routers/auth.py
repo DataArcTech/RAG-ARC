@@ -4,6 +4,7 @@ import os
 from typing import Annotated, Optional
 
 import jwt
+import redis
 from fastapi import (
     APIRouter,
     Depends,
@@ -28,6 +29,32 @@ from api.schemas.response import StandardResponse
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "f33efd136032819f6017e92272c14afc941eca4fbb94ca266b1d8fa5d8d91107")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 24 * 60  # 24小时，方便调试
+
+# Redis 配置（用于 JWT 黑名单）
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6380"))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
+REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+JWT_BLACKLIST_PREFIX = "jwt:blacklist:"
+
+def get_redis_client():
+    """获取 Redis 客户端（用于 JWT 黑名单）"""
+    try:
+        client = redis.Redis(
+            host=REDIS_HOST,
+            port=REDIS_PORT,
+            password=REDIS_PASSWORD if REDIS_PASSWORD else None,
+            db=REDIS_DB,
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2
+        )
+        # 测试连接
+        client.ping()
+        return client
+    except Exception as e:
+        logger.warning(f"Redis connection failed, JWT blacklist disabled: {e}")
+        return None
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/token")
 
@@ -278,6 +305,24 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
+        # 先检查 token 是否在黑名单中
+        try:
+            redis_client = get_redis_client()
+            if redis_client:
+                blacklist_key = f"{JWT_BLACKLIST_PREFIX}{token}"
+                exists = redis_client.exists(blacklist_key)
+                if exists:
+                    logger.info(f"Token found in blacklist, rejecting: {blacklist_key[:50]}...")
+                    raise credentials_exception
+            else:
+                logger.debug("Redis client not available, skipping blacklist check")
+        except HTTPException:
+            # 重新抛出 HTTP 异常（token 在黑名单中）
+            raise
+        except Exception as e:
+            # Redis 操作失败不影响 token 验证，只记录警告
+            logger.warning(f"Redis blacklist check failed: {e}")
+        
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username = payload.get("sub")
         if username is None:
@@ -374,10 +419,42 @@ async def register(user: UserCreate) -> StandardResponse[UserResponse]:
 
 @router.post("/logout")
 async def logout(
+    request: Request,
     current_user: Annotated[User, Depends(get_current_user)]
 ) -> StandardResponse[None]:
-    """用户退出接口"""
-    # 这里可以扩展：记录退出时间、将token加入黑名单等
+    """用户退出接口 - 将 token 加入 Redis 黑名单"""
+    try:
+        # 从请求头获取 token
+        authorization = request.headers.get("Authorization", "")
+        if authorization.startswith("Bearer "):
+            token = authorization[7:]  # 移除 "Bearer " 前缀
+            
+            # 解析 token 获取过期时间
+            try:
+                payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"verify_exp": False})
+                exp = payload.get("exp")
+                if exp:
+                    # 计算剩余过期时间（秒）
+                    current_time = datetime.now(timezone.utc).timestamp()
+                    remaining_ttl = int(exp - current_time)
+                    
+                    # 如果还有剩余时间，加入黑名单
+                    if remaining_ttl > 0:
+                        redis_client = get_redis_client()
+                        if redis_client:
+                            try:
+                                blacklist_key = f"{JWT_BLACKLIST_PREFIX}{token}"
+                                redis_client.setex(blacklist_key, remaining_ttl, "1")
+                                logger.info(f"Token blacklisted for user {current_user.user_name}, TTL: {remaining_ttl}s")
+                            except Exception as e:
+                                logger.error(f"Failed to set token in blacklist: {e}")
+                        else:
+                            logger.warning("Redis client not available, token not blacklisted")
+            except Exception as e:
+                logger.warning(f"Failed to blacklist token: {e}")
+    except Exception as e:
+        logger.warning(f"Error in logout blacklist: {e}")
+    
     logger.info(f"User {current_user.user_name} logged out")
     return StandardResponse(
         code=200,
