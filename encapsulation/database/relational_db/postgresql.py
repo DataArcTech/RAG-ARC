@@ -10,9 +10,10 @@ import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import create_engine, Engine, text
+from sqlalchemy import create_engine, Engine, text, inspect as sqlalchemy_inspect
 from sqlalchemy.orm import sessionmaker, Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+from sqlalchemy.dialects.postgresql import JSON
 
 from .base import RelationalDB
 from ...data_model.orm_models import (
@@ -140,12 +141,82 @@ class PostgreSQLDB(RelationalDB):
         Base.metadata.create_all(engine)
         logger.info("PostgreSQL engine initialized and tables created")
         
-        # Migrate: Add name column to user table if it doesn't exist
+        # Auto-migrate: Add missing columns to existing tables
+        self._auto_migrate_missing_columns(engine)
+        
+        # Legacy migrations (keep for backward compatibility)
         self._migrate_add_user_name_column(engine)
-        # Migrate: Add company_name column to user table if it doesn't exist
         self._migrate_add_user_company_name_column(engine)
 
         return engine
+    
+    def _auto_migrate_missing_columns(self, engine: Engine) -> None:
+        """
+        自动迁移：检查所有 ORM 模型定义的列，自动添加缺失的列到数据库表
+        
+        这个方法会：
+        1. 遍历所有已注册的 ORM 模型
+        2. 检查每个表的列定义
+        3. 对比数据库中的实际列
+        4. 自动添加缺失的列
+        """
+        try:
+            inspector = sqlalchemy_inspect(engine)
+            migrated_count = 0
+            
+            # 遍历所有已注册的表
+            for table_name, table in Base.metadata.tables.items():
+                # 检查表是否存在
+                if not inspector.has_table(table_name):
+                    continue
+                
+                # 获取数据库中现有的列
+                existing_columns = {col['name'] for col in inspector.get_columns(table_name)}
+                
+                # 检查每个定义的列
+                for column in table.columns:
+                    column_name = column.name
+                    
+                    # 如果列不存在，添加它
+                    if column_name not in existing_columns:
+                        try:
+                            # 生成 ALTER TABLE 语句
+                            column_type = column.type
+                            
+                            # 处理特殊类型
+                            if isinstance(column_type, JSON):
+                                sql_type = "JSON"
+                            else:
+                                # 使用 SQLAlchemy 的编译功能获取 PostgreSQL 类型
+                                # 这会正确处理 VARCHAR(length), TEXT, INTEGER 等类型
+                                sql_type = column_type.compile(dialect=engine.dialect)
+                            
+                            # 构建 ALTER TABLE 语句
+                            # 注意：对于可空列，PostgreSQL 默认允许 NULL，所以可以省略
+                            if column.nullable:
+                                alter_sql = f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {sql_type}'
+                            else:
+                                alter_sql = f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {sql_type} NOT NULL'
+                            
+                            with engine.begin() as conn:
+                                conn.execute(text(alter_sql))
+                            
+                            logger.info(f"✓ 自动添加列: {table_name}.{column_name} ({sql_type})")
+                            migrated_count += 1
+                            
+                        except Exception as e:
+                            # 如果添加列失败（可能因为列已存在或其他原因），记录警告但不中断
+                            logger.warning(f"无法添加列 {table_name}.{column_name}: {e}")
+            
+            if migrated_count > 0:
+                logger.info(f"✅ 自动迁移完成，共添加 {migrated_count} 个缺失的列")
+            else:
+                logger.debug("数据库表结构已是最新，无需迁移")
+                
+        except Exception as e:
+            logger.warning(f"自动迁移过程中出现错误: {e}")
+            # 不抛出异常，避免影响应用启动
+            # Don't fail initialization if auto-migration fails
     
     def _migrate_add_user_name_column(self, engine: Engine) -> None:
         """Add name column to user table if it doesn't exist"""

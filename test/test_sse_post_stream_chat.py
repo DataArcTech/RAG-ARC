@@ -12,7 +12,12 @@ from typing import Dict, Any
 
 BASE_URL = "http://localhost:8001"
 PROVIDED_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ3YW5nc2h1bmNoaSIsInR5cGUiOjEsImV4cCI6MTc2NzE1MzEwOX0.Vfy8HeLUni2OTrff0DT325VmROb7aVcmFDPNEVJE_8s"
-USE_PROVIDED_TOKEN = True
+USE_PROVIDED_TOKEN = False  # 改为 False，使用自动登录
+
+# 测试用的用户名和密码（如果不存在会自动注册）
+TEST_USERNAME = "test_sse_user"
+TEST_PASSWORD = "test_password_123"
+TEST_TYPE = 1  # chatKB
 
 
 async def create_session(token: str) -> str:
@@ -104,14 +109,56 @@ async def read_sse_stream(response: httpx.Response) -> Dict[str, Any]:
     return result
 
 
+async def login_and_get_token(username: str = None, password: str = None, user_type: int = 1) -> str:
+    """登录获取token"""
+    username = username or TEST_USERNAME
+    password = password or TEST_PASSWORD
+    user_type = user_type or TEST_TYPE
+    
+    async with httpx.AsyncClient() as client:
+        # 先尝试注册（如果已存在会失败，但不影响）
+        register_data = {
+            "name": f"测试用户_{int(time.time())}",
+            "user_name": username,
+            "password": password,
+            "type": user_type
+        }
+        try:
+            await client.post(f"{BASE_URL}/auth/register", json=register_data)
+        except Exception:
+            pass  # 用户可能已存在，继续登录
+        
+        # 登录
+        login_data = {
+            "user_name": username,
+            "password": password,
+            "type": user_type
+        }
+        response = await client.post(f"{BASE_URL}/auth/token", json=login_data)
+        assert response.status_code == 200, f"登录失败: {response.text}"
+        data = response.json()
+        assert data.get("code") == 200, f"登录返回code不是200: {data}"
+        assert "access_token" in data.get("data", {}), f"登录响应中没有access_token: {data}"
+        return data["data"]["access_token"]
+
+
 async def get_token_and_session():
     """获取token和session_id"""
     if USE_PROVIDED_TOKEN and PROVIDED_TOKEN:
         token = PROVIDED_TOKEN
+        try:
+            session_id = await create_session(token)
+            return token, session_id
+        except Exception:
+            # Token 可能过期，尝试自动登录
+            print("   ⚠️  提供的token无效，尝试自动登录...")
+            token = await login_and_get_token()
+            session_id = await create_session(token)
+            return token, session_id
+    else:
+        token = await login_and_get_token()
         session_id = await create_session(token)
         return token, session_id
-    else:
-        raise Exception("需要设置USE_PROVIDED_TOKEN=True并提供PROVIDED_TOKEN")
 
 
 async def test_no_token_rejected():
@@ -159,9 +206,63 @@ async def test_invalid_token_rejected():
             print(f"   ✅ 无效token返回401 - 错误: {error_text[:80]}")
 
 
+async def test_invalid_session_id():
+    """测试3: 无效的session_id应该被拒绝（返回403或404）"""
+    print("\n3. 测试无效的session_id应该被拒绝...")
+    token, _ = await get_token_and_session()
+    
+    # 测试不存在的session_id
+    invalid_session_id = str(uuid.uuid4())
+    
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream"
+        }
+        body = {"query": "test query"}
+        async with client.stream(
+            "POST",
+            f"{BASE_URL}/rag_inference/stream_chat/{invalid_session_id}",
+            headers=headers,
+            json=body
+        ) as response:
+            assert response.status_code in [403, 404], f"无效session_id应该返回403或404，实际: {response.status_code}"
+            error_text = await response.aread()
+            if isinstance(error_text, bytes):
+                error_text = error_text.decode("utf-8", errors="replace")
+            print(f"   ✅ 无效session_id返回{response.status_code} - 错误: {error_text[:80]}")
+
+
+async def test_invalid_session_id_format():
+    """测试4: 格式错误的session_id应该返回422"""
+    print("\n4. 测试格式错误的session_id应该返回422...")
+    token, _ = await get_token_and_session()
+    
+    # 测试非UUID格式的session_id
+    invalid_format_session_id = "not-a-valid-uuid"
+    
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream"
+        }
+        body = {"query": "test query"}
+        async with client.stream(
+            "POST",
+            f"{BASE_URL}/rag_inference/stream_chat/{invalid_format_session_id}",
+            headers=headers,
+            json=body
+        ) as response:
+            # FastAPI 会自动验证 UUID 格式，返回 422
+            assert response.status_code == 422, f"格式错误的session_id应该返回422，实际: {response.status_code}"
+            print(f"   ✅ 格式错误的session_id返回422")
+
+
 async def test_valid_token_streams():
-    """测试3: 有效token时SSE流式输出是否正常工作"""
-    print("\n3. 测试有效token时SSE流式输出...")
+    """测试5: 有效token时SSE流式输出是否正常工作"""
+    print("\n5. 测试有效token时SSE流式输出...")
     token, session_id = await get_token_and_session()
     
     async with httpx.AsyncClient(timeout=120.0) as client:
@@ -246,6 +347,8 @@ if __name__ == "__main__":
         try:
             await test_no_token_rejected()
             await test_invalid_token_rejected()
+            await test_invalid_session_id()
+            await test_invalid_session_id_format()
             await test_valid_token_streams()
             
             print("\n" + "=" * 60)
