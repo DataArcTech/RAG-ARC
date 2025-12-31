@@ -130,6 +130,14 @@ How secrets flow into configs:
 | `DEEPSEARCH_MAX_STAGE_HISTORY` | `10` | Maximum stage history entries returned in DeepSearch payloads. |
 | `DEEPSEARCH_MAX_EXTERNAL_CALLS` | `5` | Maximum external call entries returned in DeepSearch payloads. |
 | `DEEPSEARCH_MAX_TOOL_METADATA` | `5` | Maximum tool metadata entries returned in DeepSearch payloads. |
+| `DEEPSEARCH_WEAVER_EVIDENCE_PREVIEW_CHARS` | `180` | Evidence preview character limit in the DeepSearch Weaver trace rendering. |
+| `DEEPSEARCH_WEAVER_EVIDENCE_SAMPLE_COUNT` | `3` | Number of evidence samples included in the DeepSearch Weaver trace rendering. |
+| `DEEPSEARCH_GRAPH_EXPORT_MAX_EDGES` | `2000` | Hard cap on exported edges for DeepSearch subgraph visualization (Neo4j exporter). |
+| `KNOWLEDGE_GRAPH_EXPORT_MAX_NODES` | `1000` | Upper bound for `/knowledge/graph/export*` max_nodes to prevent expensive graph exports. |
+| `KNOWLEDGE_GRAPH_EXPORT_MAX_EDGES` | `5000` | Upper bound for `/knowledge/graph/export*` max_edges to prevent expensive graph exports. |
+| `GRAPH_EXPORT_CHUNK_CONTENT_PREVIEW_CHARS` | `240` | Maximum chunk content characters included in graph export payloads (visualization preview). |
+| `GRAPH_EXPORT_EDGE_FETCH_FACTOR` | `10` | Multiplier used by exporters to cap how many edges are fetched before sampling (fetch_limit = max_edges * factor). |
+| `GRAPH_EXPORT_EDGE_FETCH_MAX` | `50000` | Absolute cap for exporter edge fetch limits (prevents oversized Neo4j edge queries). |
 | `SEMANTIC_UNIT_MAX_MATCHED_SLICES` | `3` | Maximum slice snippets attached to a semantic-unit anchor (post-retrieval merge). |
 | `TABLE_MAX_MERGED_ROWS` | `30` | Maximum table data rows merged into a table anchor after retrieval. |
 | `SEMANTIC_UNIT_MAX_MERGED_SLICE_CHARS` | `1200` | Maximum characters appended per matched slice when merging into `anchor.content`. |
@@ -216,6 +224,11 @@ When `TASK_QUEUE_MODE=celery`, these long-running operations are executed by Cel
 | `MQ_TASK_RUN_TTL_SECONDS` | `86400` | TTL (seconds) for TaskRun KV records. |
 | `MQ_PROGRESS_TTL_SECONDS` | `86400` | TTL (seconds) for per-run progress streams / seq maps. |
 | `MQ_RESULT_TTL_SECONDS` | `86400` | TTL (seconds) for result keys. |
+| `MQ_RESULT_MAX_INLINE_BYTES` | `262144` | Max JSON size (bytes) stored inline in Redis; when exceeded, result is stored externally (local/MinIO) and Redis stores a small ref envelope (`0` disables externalization). |
+| `MQ_RESULT_STORE` | `local` | External result store backend: `local` or `minio`. |
+| `MQ_RESULT_LOCAL_DIR` | `local/mq_results` | Base directory for `local` external results. |
+| `MQ_RESULT_MINIO_ENDPOINT` | _(empty)_ | MinIO endpoint for `minio` result store (TODO implementation). |
+| `MQ_RESULT_MINIO_BUCKET` | _(empty)_ | MinIO bucket for `minio` result store (TODO implementation). |
 | `MQ_STREAM_MAXLEN` | `20000` | Max length for Redis Streams (approximate trimming). |
 | `MQ_FAILFAST_ON_REDIS_DOWN` | _(empty)_ | Whether to fail-fast when Redis is unavailable: default is fail-fast in `celery` mode and best-effort in `inprocess` mode. |
 | `FILE_OP_LOCK_TTL_SECONDS` | `21600` | Distributed file-operation lock TTL (seconds; shared by index/delete). |

@@ -9,7 +9,22 @@ import logging
 import re
 from typing import Dict, List, Any, Set, Optional
 
+from config.output_limits import (
+    GRAPH_EXPORT_CHUNK_CONTENT_PREVIEW_CHARS,
+    GRAPH_EXPORT_EDGE_FETCH_FACTOR,
+    GRAPH_EXPORT_EDGE_FETCH_MAX,
+)
+
 logger = logging.getLogger(__name__)
+
+
+def _truncate_text(text: str, *, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    value = str(text or "")
+    if len(value) <= limit:
+        return value
+    return value[:limit].rstrip() + "…"
 
 
 class GraphExporterNeo4j:
@@ -157,7 +172,10 @@ class GraphExporterNeo4j:
                     'type': 'chunk'
                 }
                 if record.get('content'):
-                    chunk_obj['content'] = record['content']
+                    chunk_obj['content'] = _truncate_text(
+                        record['content'],
+                        limit=int(GRAPH_EXPORT_CHUNK_CONTENT_PREVIEW_CHARS),
+                    )
                 chunks.append(chunk_obj)
 
             elif node_type == 'entity':
@@ -200,22 +218,31 @@ class GraphExporterNeo4j:
             """
             edge_params['owner_id'] = owner_key
 
-        edge_query = f"""
-        MATCH (n1)-[r]-(n2)
-        WHERE (COALESCE(n1.chunk_id, n1.entity_id) IN $node_ids)
-          AND (COALESCE(n2.chunk_id, n2.entity_id) IN $node_ids)
-          {edge_clause}
-        RETURN COALESCE(n1.chunk_id, n1.entity_id) AS source_id,
-               COALESCE(n2.chunk_id, n2.entity_id) AS target_id,
-               type(r) AS rel_type,
-               COALESCE(r.weight, r.similarity, 1.0) AS weight,
-               r.predicate AS predicate,
-               CASE WHEN n1:Chunk THEN 'chunk' ELSE 'entity' END AS source_type,
-               CASE WHEN n2:Chunk THEN 'chunk' ELSE 'entity' END AS target_type,
-               n1.entity_name AS source_name,
-               n2.entity_name AS target_name
-        """
-        edge_results = graph_store._execute_query(edge_query, edge_params)
+        edge_results = []
+        max_edges = max(0, int(max_edges or 0))
+        if max_edges > 0:
+            factor = max(1, int(GRAPH_EXPORT_EDGE_FETCH_FACTOR))
+            fetch_limit = min(int(GRAPH_EXPORT_EDGE_FETCH_MAX), max_edges * factor)
+            edge_query = f"""
+            MATCH (n1)-[r]-(n2)
+            WHERE (COALESCE(n1.chunk_id, n1.entity_id) IN $node_ids)
+              AND (COALESCE(n2.chunk_id, n2.entity_id) IN $node_ids)
+              {edge_clause}
+            RETURN COALESCE(n1.chunk_id, n1.entity_id) AS source_id,
+                   COALESCE(n2.chunk_id, n2.entity_id) AS target_id,
+                   type(r) AS rel_type,
+                   COALESCE(r.weight, r.similarity, 1.0) AS weight,
+                   r.predicate AS predicate,
+                   CASE WHEN n1:Chunk THEN 'chunk' ELSE 'entity' END AS source_type,
+                   CASE WHEN n2:Chunk THEN 'chunk' ELSE 'entity' END AS target_type,
+                   n1.entity_name AS source_name,
+                   n2.entity_name AS target_name
+            ORDER BY weight DESC
+            LIMIT $edge_limit
+            """
+            edge_params = dict(edge_params)
+            edge_params["edge_limit"] = int(fetch_limit)
+            edge_results = graph_store._execute_query(edge_query, edge_params)
 
         seen_edges = set()
         for record in edge_results:

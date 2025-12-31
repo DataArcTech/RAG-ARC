@@ -14,6 +14,7 @@ from encapsulation.data_model.schema import Chunk
 from encapsulation.database.utils.graph_export_utils import GraphExporter
 from encapsulation.database.utils.graph_export_utils_neo4j import GraphExporterNeo4j
 
+from config.output_limits import DEEPSEARCH_GRAPH_EXPORT_MAX_EDGES
 from core.graph_adapter.base import (
     GraphAccessScope,
     GraphAdapterCapability,
@@ -23,6 +24,7 @@ from core.graph_adapter.base import (
 from core.graph_adapter.registry import register_adapter
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 from core.deepsearch.utils.file_scope import FileScope, chunk_in_scope
+from core.prompts import build_file_scope_xlang_rewrite_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -591,13 +593,7 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         else:
             return None
 
-        prompt = (
-            "You are helping a retrieval system bridge language gaps.\n"
-            "Translate the query and return STRICT JSON only.\n"
-            "Schema: {\"zh_hans\": string, \"zh_hant\": string, \"en\": string}.\n"
-            "Keep it concise; preserve numbers and key terms.\n\n"
-            f"Query: {text}"
-        )
+        prompt = build_file_scope_xlang_rewrite_prompt(query=text)
         try:
             raw = chat([{"role": "user", "content": prompt}])
         except Exception:
@@ -670,7 +666,7 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
                         node_ppr_scores=node_scores,
                         owner_id=subgraph_info.get("owner_id") or subgraph_info.get("owner_scope"),
                         owner_scope_label=subgraph_info.get("owner_scope"),
-                        max_edges=int(os.getenv("DEEPSEARCH_GRAPH_EXPORT_MAX_EDGES", "2000") or 2000),
+                        max_edges=DEEPSEARCH_GRAPH_EXPORT_MAX_EDGES,
                     )
                 return GraphExporter.export_subgraph(
                     graph_store=graph_store,

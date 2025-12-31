@@ -1,0 +1,327 @@
+import logging
+import uuid
+from collections import defaultdict
+from typing import List, Optional, Set, Tuple
+
+import numpy as np
+
+from encapsulation.database.utils.pruned_hipporag_utils import compute_entity_id, normalize_entity_text
+from core.utils.owner_guard import normalize_owner_id
+
+logger = logging.getLogger(__name__)
+
+
+class _PrunedHippoRAGFactsMixin:
+    def _get_fact_scores_faiss(self, query: str, owner_id: Optional[uuid.UUID] = None) -> Tuple[np.ndarray, List[str]]:
+        """
+        Retrieve relevant facts using FAISS dense retrieval.
+
+        Args:
+            query: Query string
+            owner_id: Optional owner ID for tenant-aware filtering (unused in base implementation)
+
+        Returns:
+            Tuple of (normalized_scores, fact_ids)
+        """
+        query_embedding = self._get_query_embedding(query)
+
+        try:
+            # Check if fact index exists and is initialized
+            if self.graph_store.fact_faiss_db.index is None:
+                logger.warning("Fact FAISS index is not initialized")
+                return np.array([]), []
+
+            total_facts = self.graph_store.fact_faiss_db.index.ntotal
+            if total_facts == 0:
+                logger.warning("No facts in FAISS index")
+                return np.array([]), []
+
+            query_vector = query_embedding.reshape(1, -1).astype(np.float32)
+
+            # Normalize query vector for cosine similarity
+            if self.graph_store.fact_faiss_db.config.metric == "cosine" or self.graph_store.fact_faiss_db.config.normalize_L2:
+                from core.utils.faiss_lock import FAISS_LOCK
+                import faiss
+
+                with FAISS_LOCK:
+                    faiss.normalize_L2(query_vector)
+
+            # Retrieve top-k facts (with buffer for filtering)
+            k = min(total_facts, self.config.fact_retrieval_top_k * 10)
+            from core.utils.faiss_lock import FAISS_LOCK
+
+            with FAISS_LOCK:
+                scores, indices = self.graph_store.fact_faiss_db.index.search(query_vector, k)
+
+            scores = scores[0]
+            indices = indices[0]
+
+            # Filter out deleted facts
+            fact_ids = []
+            valid_scores = []
+            for idx, score in zip(indices, scores):
+                if idx >= 0 and idx in self.graph_store.fact_faiss_db.index_to_docstore_id:
+                    fact_id = self.graph_store.fact_faiss_db.index_to_docstore_id[idx]
+                    if fact_id not in self.graph_store.fact_faiss_db.deleted_ids:
+                        fact_ids.append(fact_id)
+                        valid_scores.append(score)
+
+            query_fact_scores = np.array(valid_scores)
+
+            # Normalize scores to [0, 1] range
+            if len(query_fact_scores) > 0:
+                query_fact_scores = self._min_max_normalize(query_fact_scores)
+
+            if owner_id is None or len(query_fact_scores) == 0:
+                return query_fact_scores, fact_ids
+
+            owner_str = self._owner_to_str(owner_id)
+            filtered_scores = []
+            filtered_ids = []
+            docstore = getattr(self.graph_store.fact_faiss_db, "docstore", {})
+
+            for score, fact_id in zip(query_fact_scores, fact_ids):
+                chunk = docstore.get(fact_id)
+                if not chunk:
+                    continue
+                fact_owner = getattr(chunk, "owner_id", None)
+                if fact_owner is None and chunk.metadata:
+                    fact_owner = chunk.metadata.get("owner_id")
+
+                if fact_owner is None:
+                    continue
+
+                if str(fact_owner) == owner_str:
+                    filtered_scores.append(score)
+                    filtered_ids.append(fact_id)
+
+            if not filtered_scores:
+                return np.array([]), []
+
+            return np.array(filtered_scores), filtered_ids
+
+        except Exception as e:
+            logger.error(f"FAISS fact retrieval failed: {e}")
+            return np.array([]), []
+
+    def _get_query_embedding(self, query: str) -> np.ndarray:
+        """Generate embedding for query string."""
+        embedding = self.embedding_model.embed(query)
+        if isinstance(embedding, list):
+            embedding = np.array(embedding)
+        return embedding
+
+    def _min_max_normalize(self, scores: np.ndarray) -> np.ndarray:
+        """Normalize scores to [0, 1] range using min-max normalization."""
+        if len(scores) == 0:
+            return scores
+        min_score = np.min(scores)
+        max_score = np.max(scores)
+        if max_score - min_score < 1e-10:
+            return np.zeros_like(scores)
+        return (scores - min_score) / (max_score - min_score)
+
+    def _get_facts_by_indices(
+        self,
+        indices: List[int],
+        fact_ids: List[str],
+        owner_id: Optional[uuid.UUID] = None,
+    ) -> List[Tuple[str, str, str, Optional[str]]]:
+        """
+        Retrieve fact triples from database by their indices.
+
+        Args:
+            indices: List of indices into fact_ids
+            fact_ids: List of fact IDs
+
+        Returns:
+            List of fact triples (head, relation, tail)
+        """
+        facts = []
+        cursor = self.graph_store.conn.cursor()
+
+        for idx in indices:
+            if idx < len(fact_ids):
+                fact_id = fact_ids[idx]
+                cursor.execute(
+                    "SELECT head, relation, tail, owner_id FROM facts WHERE fact_id = ?",
+                    (fact_id,),
+                )
+                row = cursor.fetchone()
+                if row:
+                    facts.append((row[0], row[1], row[2], row[3]))
+
+        return facts
+
+    def _extract_entity_ids_from_facts(self, facts: List[Tuple[str, str, str, Optional[str]]]) -> Set[str]:
+        """
+        Extract unique entity IDs from fact triples.
+
+        Args:
+            facts: List of fact triples (head, relation, tail)
+
+        Returns:
+            Set of entity IDs appearing in the facts
+        """
+        entity_ids: Set[str] = set()
+
+        for head_name, _, tail_name, fact_owner in facts:
+            owner_scope = normalize_owner_id(fact_owner)
+            head_id = compute_entity_id(normalize_entity_text(head_name), owner_id=owner_scope)
+            tail_id = compute_entity_id(normalize_entity_text(tail_name), owner_id=owner_scope)
+
+            if head_id in self.graph_store.node_to_idx:
+                entity_ids.add(head_id)
+            if tail_id in self.graph_store.node_to_idx:
+                entity_ids.add(tail_id)
+
+        return entity_ids
+
+    def _compute_entity_relevance_scores(
+        self,
+        seed_entity_ids: Set[str],
+        top_k_facts: List[Tuple],
+        query_fact_scores: np.ndarray,
+        top_k_fact_indices: List[int],
+        owner_id: Optional[uuid.UUID] = None,
+    ) -> dict:
+        """
+        Compute relevance scores for entities based on their associated fact scores.
+
+        This is used for query-aware pruning: entities with higher relevance scores
+        will have more neighbors retained during graph expansion.
+
+        Args:
+            seed_entity_ids: Set of seed entity IDs
+            top_k_facts: List of top-k fact triples
+            query_fact_scores: Scores for all retrieved facts
+            top_k_fact_indices: Indices of top-k facts
+
+        Returns:
+            Dictionary mapping entity graph indices to relevance scores
+        """
+        # Collect fact scores for each entity
+        entity_to_fact_scores = defaultdict(list)
+
+        for fact_idx, fact in zip(top_k_fact_indices, top_k_facts):
+            fact_owner = normalize_owner_id(fact[3])
+            head_id = compute_entity_id(normalize_entity_text(fact[0]), owner_id=fact_owner)
+            tail_id = compute_entity_id(normalize_entity_text(fact[2]), owner_id=fact_owner)
+
+            fact_score = float(query_fact_scores[fact_idx]) if query_fact_scores.ndim > 0 else float(query_fact_scores)
+
+            entity_to_fact_scores[head_id].append(fact_score)
+            entity_to_fact_scores[tail_id].append(fact_score)
+
+        # Compute average relevance score for each entity
+        entity_relevance_scores = {}
+        node_to_idx = self.graph_store.node_to_idx
+
+        for entity_id in seed_entity_ids:
+            if entity_id in entity_to_fact_scores:
+                avg_score = float(np.mean(entity_to_fact_scores[entity_id]))
+
+                if entity_id in node_to_idx:
+                    entity_idx = node_to_idx[entity_id]
+                    entity_relevance_scores[entity_idx] = avg_score
+
+        if entity_relevance_scores:
+            logger.info(
+                f"[Query-Aware] Entity relevance scores: min={min(entity_relevance_scores.values()):.3f}, "
+                f"max={max(entity_relevance_scores.values()):.3f}, "
+                f"avg={np.mean(list(entity_relevance_scores.values())):.3f}"
+            )
+
+        return entity_relevance_scores
+
+    def _rerank_facts(
+        self,
+        query: str,
+        query_fact_scores: np.ndarray,
+        fact_ids: List[str],
+        owner_id: Optional[uuid.UUID] = None,
+    ) -> Tuple[List[Tuple], List[int]]:
+        """
+        Rerank facts using LLM to improve relevance.
+
+        Args:
+            query: Query string
+            query_fact_scores: Scores for all retrieved facts
+            fact_ids: List of fact IDs
+
+        Returns:
+            Tuple of (reranked_facts, reranked_fact_indices)
+        """
+        link_top_k = self.config.fact_retrieval_top_k
+
+        # Get top-k candidate facts by score
+        candidate_fact_indices = np.argsort(query_fact_scores)[-link_top_k:][::-1].tolist()
+        candidate_facts = self._get_facts_by_indices(candidate_fact_indices, fact_ids, owner_id=owner_id)
+
+        try:
+            # Use LLM to rerank and filter facts
+            top_k_facts, top_k_fact_indices = self._llm_rerank_filter(
+                query,
+                candidate_facts,
+                candidate_fact_indices,
+                len_after_rerank=self.config.max_facts_after_reranking,
+            )
+            logger.info(f"LLM reranked {len(candidate_facts)} facts to {len(top_k_facts)}")
+            return top_k_facts, top_k_fact_indices
+        except Exception as e:
+            logger.warning(f"LLM reranking failed: {e}, using top facts by score")
+            max_facts = min(self.config.max_facts_after_reranking, len(candidate_facts))
+            return candidate_facts[:max_facts], candidate_fact_indices[:max_facts]
+
+    def _llm_rerank_filter(
+        self,
+        query: str,
+        candidate_facts: List[Tuple],
+        candidate_fact_indices: List[int],
+        len_after_rerank: int = 5,
+    ) -> Tuple[List[Tuple], List[int]]:
+        """
+        Use LLM to select the most relevant facts from candidates.
+
+        Args:
+            query: Query string
+            candidate_facts: List of candidate fact triples
+            candidate_fact_indices: Indices of candidate facts
+            len_after_rerank: Number of facts to select
+
+        Returns:
+            Tuple of (selected_facts, selected_fact_indices)
+        """
+        # Format facts for LLM prompt
+        facts_text = "\n".join([f"{i+1}. {head} - {relation} - {tail}" for i, (head, relation, tail, *_) in enumerate(candidate_facts)])
+
+        prompt = f"""Given the query: "{query}"
+
+Select the {len_after_rerank} most relevant facts from the following list:
+
+{facts_text}
+
+Return only the numbers of the selected facts, separated by commas (e.g., "1,3,5").
+"""
+
+        messages = [{"role": "user", "content": prompt}]
+        response = self.llm_client.chat(messages)
+
+        try:
+            # Parse LLM response
+            selected_indices = [int(x.strip()) - 1 for x in response.split(",")]
+            selected_indices = [i for i in selected_indices if 0 <= i < len(candidate_facts)]
+
+            if not selected_indices:
+                raise ValueError("No valid indices in LLM response")
+
+            top_k_facts = [candidate_facts[i] for i in selected_indices[:len_after_rerank]]
+            top_k_fact_indices = [candidate_fact_indices[i] for i in selected_indices[:len_after_rerank]]
+
+            return top_k_facts, top_k_fact_indices
+
+        except Exception as e:
+            logger.warning(f"Failed to parse LLM response: {e}")
+            max_facts = min(len_after_rerank, len(candidate_facts))
+            return candidate_facts[:max_facts], candidate_fact_indices[:max_facts]
+

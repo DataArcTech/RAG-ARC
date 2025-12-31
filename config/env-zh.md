@@ -129,6 +129,14 @@ cp .env.example .env
 | `DEEPSEARCH_MAX_STAGE_HISTORY` | `10` | DeepSearch payload 中最多保留的 stage_history 条数。 |
 | `DEEPSEARCH_MAX_EXTERNAL_CALLS` | `5` | DeepSearch payload 中最多保留的 external_calls 条数。 |
 | `DEEPSEARCH_MAX_TOOL_METADATA` | `5` | DeepSearch payload 中最多保留的 tool_results 条数。 |
+| `DEEPSEARCH_WEAVER_EVIDENCE_PREVIEW_CHARS` | `180` | DeepSearch Weaver trace 渲染时的证据预览字符上限。 |
+| `DEEPSEARCH_WEAVER_EVIDENCE_SAMPLE_COUNT` | `3` | DeepSearch Weaver trace 渲染时展示的证据样本数量。 |
+| `DEEPSEARCH_GRAPH_EXPORT_MAX_EDGES` | `2000` | DeepSearch 子图可视化导出 edges 上限（Neo4j exporter）。 |
+| `KNOWLEDGE_GRAPH_EXPORT_MAX_NODES` | `1000` | `/knowledge/graph/export*` 的 max_nodes 上限，用于防止导出过大导致资源消耗过高。 |
+| `KNOWLEDGE_GRAPH_EXPORT_MAX_EDGES` | `5000` | `/knowledge/graph/export*` 的 max_edges 上限，用于防止导出过大导致资源消耗过高。 |
+| `GRAPH_EXPORT_CHUNK_CONTENT_PREVIEW_CHARS` | `240` | 图导出 payload 中 chunk 内容预览的最大字符数（用于可视化预览，避免返回过大）。 |
+| `GRAPH_EXPORT_EDGE_FETCH_FACTOR` | `10` | exporter 抓取 edges 后再采样的倍率（fetch_limit = max_edges * factor）。 |
+| `GRAPH_EXPORT_EDGE_FETCH_MAX` | `50000` | exporter edges 抓取绝对上限（防止 Neo4j edge query 过大）。 |
 | `SEMANTIC_UNIT_MAX_MATCHED_SLICES` | `3` | 语义单元归并时最多附带的命中 slice 数。 |
 | `TABLE_MAX_MERGED_ROWS` | `30` | 表格归并回 anchor 时最多拼接的数据行数。 |
 | `SEMANTIC_UNIT_MAX_MERGED_SLICE_CHARS` | `1200` | code/list 归并时每个 slice 追加到 `anchor.content` 的最大字符数。 |
@@ -215,6 +223,11 @@ cp .env.example .env
 | `MQ_TASK_RUN_TTL_SECONDS` | `86400` | TaskRun KV 的 TTL（秒）。 |
 | `MQ_PROGRESS_TTL_SECONDS` | `86400` | 进度流（per-run stream/seq_map 等）的 TTL（秒）。 |
 | `MQ_RESULT_TTL_SECONDS` | `86400` | 结果 key 的 TTL（秒）。 |
+| `MQ_RESULT_MAX_INLINE_BYTES` | `262144` | 结果 JSON 存入 Redis 的最大字节数；超过后自动外置存储（local/MinIO），Redis 仅存引用 envelope（`0` 表示禁用外置）。 |
+| `MQ_RESULT_STORE` | `local` | 结果外置存储后端：`local` 或 `minio`。 |
+| `MQ_RESULT_LOCAL_DIR` | `local/mq_results` | `local` 外置结果的基础目录。 |
+| `MQ_RESULT_MINIO_ENDPOINT` | _(空)_ | `minio` 外置结果的 MinIO endpoint（TODO：尚未实现）。 |
+| `MQ_RESULT_MINIO_BUCKET` | _(空)_ | `minio` 外置结果的 bucket（TODO：尚未实现）。 |
 | `MQ_STREAM_MAXLEN` | `20000` | Redis Streams 最大长度（近似裁剪）。 |
 | `MQ_FAILFAST_ON_REDIS_DOWN` | _(空)_ | Redis 不可用时是否 fail-fast：为空则 `celery` 模式默认 fail-fast，`inprocess` 模式默认 best-effort。 |
 | `FILE_OP_LOCK_TTL_SECONDS` | `21600` | 文件操作分布式锁 TTL（秒，索引/删除共用）。 |

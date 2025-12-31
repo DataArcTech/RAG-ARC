@@ -17,6 +17,7 @@ from encapsulation.data_model.orm_models import FileStatus
 from application.celery_bootstrap import ensure_initialized
 from application.knowledge.graph_export import export_full_graph_payload
 from application.knowledge.mindmap_export import export_file_mindmap_payload
+from config.output_limits import KNOWLEDGE_GRAPH_EXPORT_MAX_NODES, KNOWLEDGE_GRAPH_EXPORT_MAX_EDGES
 
 logger = logging.getLogger(__name__)
 
@@ -520,6 +521,8 @@ def export_graph(
     run_id = str(getattr(self.request, "id", "") or uuid.uuid4().hex)
     task_queue = RedisTaskQueue.from_env()
     owner_uuid = _parse_uuid(owner_id)
+    max_nodes = max(1, min(int(max_nodes), int(KNOWLEDGE_GRAPH_EXPORT_MAX_NODES)))
+    max_edges = max(0, min(int(max_edges), int(KNOWLEDGE_GRAPH_EXPORT_MAX_EDGES)))
 
     if not task_queue.get_task_run(run_id):
         task_queue.create_task_run(

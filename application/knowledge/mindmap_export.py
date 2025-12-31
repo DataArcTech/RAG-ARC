@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple, Callable
 from fastapi import HTTPException, status
 
 from encapsulation.data_model.orm_models import FileMindmapCache
+from core.prompts import MINDMAP_MERGE_SYSTEM_PROMPT_EN, build_mindmap_merge_user_prompt
 
 ProgressCallback = Callable[[str, str, int | None, dict[str, Any] | None], None]
 
@@ -25,20 +26,7 @@ def build_mindmap_merge_prompt(filename: str, chunks: List[Dict[str, Any]]) -> s
         )
 
     sections_text = "\n".join(sections)
-    prompt = (
-        f"We extracted multiple mind map fragments (TSV) from the document '{filename}'. "
-        "Please merge them into a single global mind map, still using hierarchical TSV numbering.\n\n"
-        "Output requirements:\n"
-        "1) Use numbering like 1, 1.1, 1.1.1 to represent hierarchy; numbering must be consistent.\n"
-        "2) Output TSV only. Each line must be: '<number>\\t<content>'. Do not add any extra explanation.\n"
-        "3) The root node (1) should summarize the entire document at a high level.\n"
-        "4) Lower-level nodes should cover key information concisely and accurately.\n"
-        "5) If there are duplicates or conflicts, reconcile them and keep the structure coherent.\n\n"
-        "Mind map fragments:\n"
-        f"{sections_text}\n"
-        "Now output the merged TSV mind map:"
-    )
-    return prompt
+    return build_mindmap_merge_user_prompt(filename=filename, sections_text=sections_text)
 
 
 def mindmap_dict_to_tsv(mindmap: Dict[str, Any]) -> str:
@@ -190,7 +178,7 @@ async def export_file_mindmap_payload(
     messages = [
         {
             "role": "system",
-            "content": "You are an experienced knowledge engineer. Merge multiple partial mind maps into one coherent global mind map.",
+            "content": MINDMAP_MERGE_SYSTEM_PROMPT_EN,
         },
         {"role": "user", "content": prompt},
     ]

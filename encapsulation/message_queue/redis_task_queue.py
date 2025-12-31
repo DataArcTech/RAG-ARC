@@ -10,8 +10,10 @@ from typing import Any, Dict, Optional
 
 from config.encapsulation.database.cache_db.redis_config import RedisConfig
 from encapsulation.database.cache_db.redis_db import RedisDB
+from encapsulation.message_queue.result_store import ResultStore, ResultStoreError, build_result_store
 
 logger = logging.getLogger(__name__)
+_RESULT_ENVELOPE_KEY = "__ragarc_result__"
 
 _APPEND_PROGRESS_EVENT_LUA = r"""
 -- KEYS:
@@ -95,6 +97,11 @@ class RedisTaskQueueSettings:
     task_run_ttl_seconds: int = 24 * 3600
     progress_ttl_seconds: int = 24 * 3600
     result_ttl_seconds: int = 24 * 3600
+    result_max_inline_bytes: int = 256 * 1024
+    result_store_backend: str = "local"
+    result_store_local_dir: str = "local/mq_results"
+    result_store_minio_endpoint: str | None = None
+    result_store_minio_bucket: str | None = None
     stream_maxlen: int = 20000
 
     task_run_stream_key: str = "task_runs"
@@ -140,6 +147,7 @@ class RedisTaskQueue:
         self._redis_config = redis_config
         self._settings = settings
         self._redis_db: RedisDB | None = None
+        self._result_store: ResultStore | None = None
 
     @staticmethod
     def _fail_fast_on_unavailable_redis() -> bool:
@@ -158,6 +166,11 @@ class RedisTaskQueue:
             task_run_ttl_seconds=int(os.getenv("MQ_TASK_RUN_TTL_SECONDS", str(24 * 3600))),
             progress_ttl_seconds=int(os.getenv("MQ_PROGRESS_TTL_SECONDS", str(24 * 3600))),
             result_ttl_seconds=int(os.getenv("MQ_RESULT_TTL_SECONDS", str(24 * 3600))),
+            result_max_inline_bytes=int(os.getenv("MQ_RESULT_MAX_INLINE_BYTES", str(256 * 1024))),
+            result_store_backend=os.getenv("MQ_RESULT_STORE", "local"),
+            result_store_local_dir=os.getenv("MQ_RESULT_LOCAL_DIR", "local/mq_results"),
+            result_store_minio_endpoint=os.getenv("MQ_RESULT_MINIO_ENDPOINT") or None,
+            result_store_minio_bucket=os.getenv("MQ_RESULT_MINIO_BUCKET") or None,
             stream_maxlen=int(os.getenv("MQ_STREAM_MAXLEN", "20000")),
         )
         return cls(RedisConfig(), settings)
@@ -178,6 +191,33 @@ class RedisTaskQueue:
             logger.warning("RedisTaskQueue disabled (Redis not available): %s", exc)
             self._redis_db = None
             return None
+
+    def _get_result_store(self) -> ResultStore:
+        if self._result_store is not None:
+            return self._result_store
+        self._result_store = build_result_store(
+            backend=self._settings.result_store_backend,
+            local_dir=self._settings.result_store_local_dir,
+            minio_endpoint=self._settings.result_store_minio_endpoint,
+            minio_bucket=self._settings.result_store_minio_bucket,
+        )
+        return self._result_store
+
+    def _should_externalize_result(self, *, payload_size_bytes: int) -> bool:
+        limit = int(self._settings.result_max_inline_bytes or 0)
+        if limit <= 0:
+            return False
+        return int(payload_size_bytes) > limit
+
+    def _result_envelope(self, *, ref: str, size_bytes: int) -> Dict[str, Any]:
+        return {
+            _RESULT_ENVELOPE_KEY: {
+                "v": 1,
+                "kind": "external",
+                "ref": str(ref),
+                "size_bytes": int(size_bytes),
+            }
+        }
 
     def _xadd(self, stream: str, fields: Dict[str, str]) -> Optional[str]:
         client = self._client()
@@ -376,7 +416,7 @@ class RedisTaskQueue:
         if client is None:
             return
 
-        result_ref = self._settings.key_task_result(task_run_id)
+        result_key = self._settings.key_task_result(task_run_id)
 
         record = self.get_task_run(task_run_id) or {
             "task_run_id": task_run_id,
@@ -404,7 +444,6 @@ class RedisTaskQueue:
             record["progress_percent"] = max(0, min(100, int(progress_percent)))
         if error_message is not None:
             record["error_message"] = error_message
-        record["result_ref"] = result_ref
         if finished:
             record["finished_at_ms"] = now_ms
         if metadata_patch:
@@ -413,8 +452,33 @@ class RedisTaskQueue:
             record["metadata"] = meta
 
         task_run_key = self._settings.key_task_run(task_run_id)
+        result_payload_inline = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+        payload_size_bytes = len(result_payload_inline.encode("utf-8"))
+        external_ref: str | None = None
+        result_payload_to_redis = result_payload_inline
+        record_result_ref = result_key
+        if self._should_externalize_result(payload_size_bytes=payload_size_bytes):
+            try:
+                external_ref = self._get_result_store().put_bytes(
+                    namespace=self._settings.namespace,
+                    run_id=task_run_id,
+                    payload=result_payload_inline.encode("utf-8"),
+                    ttl_seconds=int(self._settings.result_ttl_seconds),
+                )
+                result_payload_to_redis = json.dumps(
+                    self._result_envelope(ref=external_ref, size_bytes=payload_size_bytes),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                record_result_ref = external_ref
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("RedisTaskQueue external result store failed; falling back to inline: %s", exc)
+                external_ref = None
+                result_payload_to_redis = result_payload_inline
+                record_result_ref = result_key
+
+        record["result_ref"] = record_result_ref
         task_run_payload = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
-        result_payload = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
         try:
             try:
@@ -424,7 +488,7 @@ class RedisTaskQueue:
 
             if pipe is None:
                 # Best-effort fallback for minimal clients (tests/fakes) that lack pipelines.
-                client.set(result_ref, result_payload, ex=self._settings.result_ttl_seconds)
+                client.set(result_key, result_payload_to_redis, ex=self._settings.result_ttl_seconds)
                 client.set(task_run_key, task_run_payload, ex=self._settings.task_run_ttl_seconds)
                 try:
                     client.xadd(
@@ -448,7 +512,7 @@ class RedisTaskQueue:
                         pass
                 return
 
-            pipe.set(result_ref, result_payload, ex=self._settings.result_ttl_seconds)
+            pipe.set(result_key, result_payload_to_redis, ex=self._settings.result_ttl_seconds)
             pipe.set(task_run_key, task_run_payload, ex=self._settings.task_run_ttl_seconds)
             pipe.xadd(
                 self._settings.stream_task_runs(),
@@ -466,6 +530,11 @@ class RedisTaskQueue:
                 )
             pipe.execute()
         except Exception as exc:
+            if external_ref:
+                try:
+                    self._get_result_store().delete(external_ref)
+                except Exception:
+                    pass
             logger.warning("RedisTaskQueue finalize_run failed (%s): %s", task_run_id, exc)
             return
 
@@ -562,13 +631,39 @@ class RedisTaskQueue:
         if client is None:
             return
         key = self._settings.key_task_result(task_run_id)
+        result_payload_inline = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+        payload_size_bytes = len(result_payload_inline.encode("utf-8"))
+        external_ref: str | None = None
+        value_to_set = result_payload_inline
+        if self._should_externalize_result(payload_size_bytes=payload_size_bytes):
+            try:
+                external_ref = self._get_result_store().put_bytes(
+                    namespace=self._settings.namespace,
+                    run_id=task_run_id,
+                    payload=result_payload_inline.encode("utf-8"),
+                    ttl_seconds=int(self._settings.result_ttl_seconds),
+                )
+                value_to_set = json.dumps(
+                    self._result_envelope(ref=external_ref, size_bytes=payload_size_bytes),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("RedisTaskQueue external result store failed; falling back to inline: %s", exc)
+                external_ref = None
+                value_to_set = result_payload_inline
         try:
             client.set(
                 key,
-                json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+                value_to_set,
                 ex=self._settings.result_ttl_seconds,
             )
         except Exception as exc:
+            if external_ref:
+                try:
+                    self._get_result_store().delete(external_ref)
+                except Exception:
+                    pass
             logger.warning("RedisTaskQueue set task result failed (%s): %s", task_run_id, exc)
 
     def get_task_result(self, task_run_id: str) -> Optional[Dict[str, Any]]:
@@ -580,7 +675,25 @@ class RedisTaskQueue:
             raw = client.get(key)
             if not raw:
                 return None
-            return json.loads(raw)
+            parsed = json.loads(raw)
+            if (
+                isinstance(parsed, dict)
+                and set(parsed.keys()) == {_RESULT_ENVELOPE_KEY}
+                and isinstance(parsed.get(_RESULT_ENVELOPE_KEY), dict)
+            ):
+                meta = parsed.get(_RESULT_ENVELOPE_KEY) or {}
+                kind = str(meta.get("kind") or "").strip().lower()
+                ref = meta.get("ref")
+                if kind == "external" and isinstance(ref, str) and ref.strip():
+                    try:
+                        return self._get_result_store().get_json(ref)
+                    except ResultStoreError as exc:
+                        logger.warning("RedisTaskQueue external result read failed (%s): %s", task_run_id, exc)
+                        return None
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("RedisTaskQueue external result read unexpected error (%s): %s", task_run_id, exc)
+                        return None
+            return parsed if isinstance(parsed, dict) else None
         except Exception as exc:
             logger.warning("RedisTaskQueue get task result failed (%s): %s", task_run_id, exc)
             return None

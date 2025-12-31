@@ -14,7 +14,6 @@ import time
 import uuid
 from typing import Annotated, Optional, List, Dict, Any, Tuple, Literal
 from datetime import datetime
-from pydantic import BaseModel, Field
 from api.routers.auth import get_current_user
 from api.sse import sse_done, sse_json
 from encapsulation.data_model.orm_models import (
@@ -34,6 +33,28 @@ from fastapi.responses import StreamingResponse
 
 from application.knowledge.graph_export import export_full_graph_payload
 from application.knowledge.mindmap_export import export_file_mindmap_payload
+from api.routers.knowledge_models import (
+    CheckAccessResponse,
+    DepartmentInfo,
+    FileInfo,
+    FileListResponse,
+    FileTaskStatusResponse,
+    GrantPermissionRequest,
+    GrantPermissionResponse,
+    GraphExportRequest,
+    IndexTriggerRequest,
+    IndexTriggerResponse,
+    MindmapEdge,
+    MindmapExportRequest,
+    MindmapExportResponse,
+    MindmapNode,
+    PermissionInfo,
+    PermissionListResponse,
+    RevokePermissionRequest,
+    TaskRunStatusResponse,
+    UserInfo,
+)
+from api.routers.knowledge_streaming import stream_events_redis
 
 router = APIRouter(prefix="/knowledge", tags=["files"])
 
@@ -75,47 +96,6 @@ def _format_sse(*, event: str, data: Dict[str, Any], event_id: int | None = None
     if event_id is not None:
         payload["id"] = event_id
     return sse_json(payload)
-
-
-# Response models
-class FileInfo(BaseModel):
-    """Response model for file information"""
-    file_id: str
-    filename: str
-    status: str
-    created_at: str
-    updated_at: str
-    file_size: int
-    content_type: str
-
-    model_config = {"from_attributes": True}
-
-
-class FileListResponse(BaseModel):
-    """Response model for file list"""
-    files: List[FileInfo]
-    total: int
-
-
-class FileTaskStatusResponse(BaseModel):
-    file_id: str
-    file_status: Optional[str] = None
-    task_run_id: Optional[str] = None
-    task_state: Optional[str] = None
-    progress_percent: Optional[int] = None
-    error_message: Optional[str] = None
-    updated_at_ms: Optional[int] = None
-
-
-class TaskRunStatusResponse(BaseModel):
-    run_id: str
-    task_type: Optional[str] = None
-    state: Optional[str] = None
-    progress_percent: Optional[int] = None
-    error_message: Optional[str] = None
-    resource_id: Optional[str] = None
-    updated_at_ms: Optional[int] = None
-
 @router.post(
     "",
     status_code=status.HTTP_201_CREATED,
@@ -236,55 +216,6 @@ async def get_task_result(
     return result or {"run_id": run_id, "done": True, "result": None}
 
 
-async def _stream_events_redis(run_id: str, *, last_event_id: int = -1):
-    task_queue = _get_task_queue()
-    task_run = task_queue.get_task_run(run_id)
-    if not task_run:
-        yield _format_sse(event="error", data={"run_id": run_id, "message": "run_id not found"})
-        yield sse_done()
-        return
-
-    cursor = max(-1, int(last_event_id))
-    while True:
-        task_run = task_queue.get_task_run(run_id) or {}
-        state = str(task_run.get("state") or "")
-        done = state in {TaskState.SUCCESS.value, TaskState.FAILURE.value, TaskState.CANCELED.value}
-        block_ms = 0 if done else 15000
-        events = await asyncio.to_thread(
-            task_queue.read_progress_events,
-            run_id,
-            last_seq=cursor,
-            count=200,
-            block_ms=block_ms,
-        )
-        for event in events:
-            try:
-                seq = int(event.get("seq", cursor + 1))
-            except Exception:
-                seq = cursor + 1
-            cursor = seq
-            payload = event.get("payload") or {}
-            yield _format_sse(
-                event=str(event.get("status") or "message"),
-                event_id=cursor,
-                data={"run_id": run_id, **(payload if isinstance(payload, dict) else {"payload": payload})},
-            )
-
-        if done and not events:
-            done_payload = {
-                "run_id": run_id,
-                "done": True,
-                "error": task_run.get("error_message"),
-                "progress": {"percent": task_run.get("progress_percent")} if task_run.get("progress_percent") is not None else None,
-            }
-            yield _format_sse(event="done", data=done_payload, event_id=cursor + 1)
-            yield sse_done()
-            return
-        if not events and not done:
-            yield _format_sse(event="heartbeat", data={"run_id": run_id})
-            await asyncio.sleep(0)
-
-
 @router.get("/stream/{run_id}")
 async def stream_task_progress(
     run_id: str,
@@ -306,7 +237,7 @@ async def stream_task_progress(
         "X-Accel-Buffering": "no",
     }
     return StreamingResponse(
-        _stream_events_redis(run_id, last_event_id=last_event_id),
+        stream_events_redis(task_queue, format_sse=_format_sse, run_id=run_id, last_event_id=last_event_id),
         media_type="text/event-stream",
         headers=headers,
     )
@@ -427,50 +358,6 @@ async def list_files(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve files: {str(e)}",
         )
-
-
-class IndexTriggerRequest(BaseModel):
-    """Request model for triggering indexing"""
-    file_ids: List[str]
-
-class IndexTriggerResponse(BaseModel):
-    """Response model for index triggering results"""
-    message: str
-
-class GraphExportRequest(BaseModel):
-    """Request model for graph export"""
-    max_nodes: int = 500
-    max_edges: int = 2000
-    include_node_types: Optional[List[str]] = None  # e.g., ['chunk', 'entity', 'fact']
-
-
-class MindmapNode(BaseModel):
-    """Mind map node structure."""
-    id: str
-    name: str
-    category: str
-    weight: int
-
-
-class MindmapEdge(BaseModel):
-    """Mind map edge structure."""
-    id: str
-    source: str
-    target: str
-    relation: str
-    weight: float
-
-
-class MindmapExportRequest(BaseModel):
-    """Request model for exporting merged mind map."""
-    file_id: str
-
-
-class MindmapExportResponse(BaseModel):
-    """Response model for exported mind map."""
-    tsv: str
-    nodes: List[MindmapNode]
-    edges: List[MindmapEdge]
 
 
 @router.post(
@@ -626,73 +513,6 @@ async def export_knowledge_graph(
 
 
 # ==================== FILE PERMISSION MANAGEMENT ====================
-
-class DepartmentInfo(BaseModel):
-    """Department information model for API responses"""
-    id: str
-    name: str
-    description: Optional[str] = None
-    path: str
-
-    model_config = {"from_attributes": True}
-
-
-class UserInfo(BaseModel):
-    """User information model for API responses"""
-    id: str
-    user_name: str
-    department: Optional[DepartmentInfo] = None
-    status: str
-
-    model_config = {"from_attributes": True}
-
-
-class GrantPermissionRequest(BaseModel):
-    """Request model for granting file permission"""
-    receiver_type: PermissionReceiverType = Field(..., description="Type of receiver: 'user', 'department', or 'all'")
-    permission_type: PermissionType = Field(..., description="Type of permission: 'view' or 'edit'")
-    user_id: Optional[str] = Field(None, description="User ID if receiver_type is 'user'")
-    department_id: Optional[str] = Field(None, description="Department ID if receiver_type is 'department'")
-
-
-class GrantPermissionResponse(BaseModel):
-    """Response model for granting file permission"""
-    permission_id: str
-    message: str
-
-
-class RevokePermissionRequest(BaseModel):
-    """Request model for revoking file permission"""
-    receiver_type: Optional[PermissionReceiverType] = Field(None, description="Type of receiver: 'user', 'department', or 'all'")
-    user_id: Optional[str] = Field(None, description="User ID if receiver_type is 'user'")
-    department_id: Optional[str] = Field(None, description="Department ID if receiver_type is 'department'")
-
-
-class PermissionInfo(BaseModel):
-    """Response model for permission information"""
-    permission_id: str
-    file_id: str
-    receiver_type: str
-    permission_type: str
-    user: Optional[UserInfo] = None
-    department: Optional[DepartmentInfo] = None
-    granted_by: str
-    granted_at: str
-
-    model_config = {"from_attributes": True}
-
-
-class PermissionListResponse(BaseModel):
-    """Response model for permission list"""
-    permissions: List[PermissionInfo]
-    total: int
-
-
-class CheckAccessResponse(BaseModel):
-    """Response model for access check"""
-    has_access: bool
-    permission_type: Optional[str] = None
-
 
 @router.post(
     "/mindmap/export_async",

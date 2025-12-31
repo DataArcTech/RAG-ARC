@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from framework.module import AbstractModule
 from core.utils.owner_guard import normalize_owner_id, is_admin_owner, get_admin_owner_id
+from core.prompts import MINDMAP_GENERATION_SYSTEM_PROMPT_ZH, build_mindmap_generation_user_prompt
 from framework.register import Register
 from framework.thread_pool import get_thread_pool
 
@@ -533,7 +534,7 @@ class RAGInference(AbstractModule):
 
             # Call LLM to generate nodes and edges
             mindmap_messages = [
-                {"role": "system", "content": "你是一个专业的思维导图生成助手。请根据当前用户的问题、回答和检索到的文档片段,生成结构化的思维导图数据。重要：只基于当前问题生成图，不要考虑历史对话中的其他问题或信息。"},
+                {"role": "system", "content": MINDMAP_GENERATION_SYSTEM_PROMPT_ZH},
                 {"role": "user", "content": mindmap_prompt}
             ]
 
@@ -563,55 +564,7 @@ class RAGInference(AbstractModule):
     def _build_mindmap_prompt(self, query: str, response: str, chunks: list[Chunk]) -> str:
         """Build prompt for LLM to generate mind map structure"""
         chunks_text = "\n\n".join([f"Chunk {i+1}:\n{chunk.content}" for i, chunk in enumerate(chunks)])
-
-        prompt = f"""请基于以下信息生成思维导图的节点(nodes)和边(edges)数据:
-
-重要提示: 请只基于当前用户问题生成思维导图，不要考虑历史对话中的其他问题或信息。思维导图应该只反映当前问题的知识结构。
-
-当前用户问题: {query}
-
-针对当前问题的回答内容: {response}
-
-检索到的文档片段:
-{chunks_text}
-
-请生成一个JSON格式的思维导图结构,包含以下字段:
-1. nodes: 节点数组,每个节点包含:
-   - id: 节点唯一标识
-   - name: 节点名称
-   - category: 节点分类
-   - weight: 节点深度(1为根节点,2为二级节点,3为三级节点,以此类推)
-
-2. edges: 边数组,每个边包含:
-   - id: 边的唯一标识
-   - weight: 边的权重(0-1之间的浮点数)
-   - source: 源节点id
-   - target: 目标节点id
-   - relation: 关系类型(如"包含"、"说明"、"步骤"、"依据"等)
-
-要求:
-- 根节点(weight=1)应该是对整个回答的总结
-- 二级节点(weight=2)是主要的知识点或步骤
-- 三级节点(weight=3)是详细的说明或子步骤
-- 边的source应该是父节点,target应该是子节点
-- 边的weight建议: 一级到二级为0.85,二级到三级为0.8
-- 所有节点的id和name要清晰明确,便于理解
-- 对于根节点和二级节点(weight=1和2)的category都是其自己的name，三级节点及更高节点的都和父节点的name相同。
-
-请直接返回JSON格式的数据,不要包含任何其他说明文字。格式如下:
-{{
-  "nodes": [
-    {{"id": "根节点标题", "name": "根节点标题", "category": "根节点标题", "weight": 1}},
-    {{"id": "二级节点1", "name": "二级节点1", "category": "二级节点1", "weight": 2}},
-    {{"id": "三级节点1", "name": "三级节点1", "category": "二级节点1", "weight": 3}}
-  ],
-  "edges": [
-    {{"id": "edge-001", "weight": 0.85, "source": "根节点标题", "target": "二级节点1", "relation": "包含"}},
-    {{"id": "edge-002", "weight": 0.8, "source": "二级节点1", "target": "三级节点1", "relation": "说明"}}
-  ]
-}}
-"""
-        return prompt
+        return build_mindmap_generation_user_prompt(query=query, response=response, chunks_text=chunks_text)
 
     def _extract_json_from_response(self, response: str) -> Dict[str, Any]:
         """Extract JSON from LLM response"""
