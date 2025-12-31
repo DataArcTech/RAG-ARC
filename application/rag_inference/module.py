@@ -171,6 +171,7 @@ class RAGInference(AbstractModule):
         owner_id: uuid.UUID,
         return_subgraph: bool = False,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        history_text: Optional[str] = None,
     ) -> tuple[Iterator[str], list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """Stream chat completion from the configured LLM."""
 
@@ -179,6 +180,7 @@ class RAGInference(AbstractModule):
             owner_id=owner_id,
             return_subgraph=return_subgraph,
             progress_callback=progress_callback,
+            history_text=history_text,
         )
         return (self.llm.stream_chat(messages), chunks, subgraph_data, subgraph_info)
 
@@ -205,6 +207,7 @@ class RAGInference(AbstractModule):
         owner_id: uuid.UUID,
         return_subgraph: bool,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        history_text: Optional[str] = None,
     ) -> tuple[List[Dict[str, str]], list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         def _chunk_preview(chunk: Chunk, *, max_chars: int = 160) -> str:
             metadata = getattr(chunk, "metadata", None) or {}
@@ -368,6 +371,19 @@ class RAGInference(AbstractModule):
             )
 
         messages: List[Dict[str, str]] = []
+        
+        # 如果有历史对话，先添加历史消息（参考 WebSocket 的实现）
+        if history_text:
+            # 解析历史文本为消息列表
+            history_lines = history_text.strip().split("\n")
+            for line in history_lines:
+                if ":" in line:
+                    role, content = line.split(":", 1)
+                    role = role.strip()
+                    content = content.strip()
+                    if role in ("user", "assistant") and content:
+                        messages.append({"role": role, "content": content})
+        
         for i, chunk in enumerate(chunks):
             metadata = getattr(chunk, "metadata", None) or {}
             chunk_text = metadata.get("prompt_text") or metadata.get("index_text")
@@ -377,6 +393,9 @@ class RAGInference(AbstractModule):
         messages.append({"role": "user", "content": f"Based on the above chunks, please answer question: {rewritten_query}"})
         logger.info("Invoked chat with query: %s (owner_id=%s)", query, owner_id)
         logger.info("Query rewritten to: %s", rewritten_query)
+        if history_text:
+            history_count = len([m for m in messages if m.get("role") in ("user", "assistant") and "Chunk" not in m.get("content", "")])
+            logger.info("Including history: %d history messages", history_count)
         logger.info("Prepared %d messages for LLM", len(messages))
         return (messages, chunks, subgraph_data, subgraph_info)
 

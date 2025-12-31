@@ -375,7 +375,53 @@ async def stream_chat_sse(
             content={"role": "user", "content": query},
             created_at=datetime.now(),
         )
-        await get_thread_pool().run_blocking(message_handler.create_message, user_message)
+        user_message = await get_thread_pool().run_blocking(message_handler.create_message, user_message)
+
+        # 获取历史消息（参考 WebSocket 和 chatbot.py 的实现）
+        history_messages = await get_thread_pool().run_blocking(
+            message_handler.list_messages_by_session,
+            session_id,
+        )
+        
+        # 排除当前刚创建的用户消息（避免重复）
+        history_messages = [msg for msg in history_messages if msg.id != user_message.id]
+        
+        # 限制历史消息数量（参考 chatbot.py 的 _normalize_history）
+        # 默认只取最近 5 轮对话（10 条消息：user + assistant）
+        context_turns = int(os.getenv("SSE_CONTEXT_TURNS", "5"))
+        max_history_messages = context_turns * 2
+        if len(history_messages) > max_history_messages:
+            history_messages = history_messages[-max_history_messages:]
+        
+        # 构建历史文本（参考 WebSocket 的实现）
+        history_text = "\n".join(
+            f"{msg.content['role']}: {msg.content['content']}" for msg in history_messages
+        ) if history_messages else None
+
+        # 检查 token 限制（参考 chatbot.py 的 _ensure_context_within_limit）
+        # 估算历史消息的 token 数
+        if history_text:
+            # 简单的 token 估算（参考 chatbot.py 的 _estimate_tokens）
+            history_tokens = len(history_text) if any(ord(ch) >= 128 for ch in history_text) else len(history_text) // 4
+            max_context_tokens = int(os.getenv("SSE_MAX_CONTEXT_TOKENS", "8192"))
+            threshold_fraction = float(os.getenv("SSE_MAX_CONTEXT_FRACTION", "0.9"))
+            allowed_tokens = int(max_context_tokens * threshold_fraction)
+            
+            if history_tokens > allowed_tokens:
+                logger.warning(
+                    "History too long: estimated_tokens=%d, allowed=%d, truncating history",
+                    history_tokens,
+                    allowed_tokens,
+                )
+                # 如果历史太长，进一步限制历史消息数量
+                # 保留更少的历史消息
+                reduced_turns = max(1, context_turns // 2)
+                max_history_messages = reduced_turns * 2
+                if len(history_messages) > max_history_messages:
+                    history_messages = history_messages[-max_history_messages:]
+                    history_text = "\n".join(
+                        f"{msg.content['role']}: {msg.content['content']}" for msg in history_messages
+                    )
 
         response_parts: list[str] = []
         queue: asyncio.Queue[object | None] = asyncio.Queue()
@@ -403,8 +449,10 @@ async def stream_chat_sse(
                         effective_owner,
                         return_subgraph=(return_subgraph or include_evidence),
                         progress_callback=_emit_progress,
+                        history_text=history_text if history_text else None,
                     )
                 except TypeError:
+                    # 兼容旧版本（不支持 history_text 参数）
                     token_stream, chunks, subgraph_data, subgraph_info = rag_inference_handler.stream_chat(
                         query,
                         effective_owner,

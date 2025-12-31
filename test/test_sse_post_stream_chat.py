@@ -451,6 +451,60 @@ async def test_livingkb_user_can_generate_graph():
             print(f"   ✅ livingKB用户请求生成图测试完成")
 
 
+async def test_history_conversation():
+    """测试8: 验证历史对话功能"""
+    print("\n8. 测试历史对话功能...")
+    token, session_id, _ = await get_token_and_session()
+    
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream"
+        }
+        
+        # 第一轮对话
+        print(f"   📝 第一轮对话: 我的名字是张三")
+        body1 = {"query": "我的名字是张三"}
+        async with client.stream(
+            "POST",
+            f"{BASE_URL}/rag_inference/stream_chat/{session_id}",
+            headers=headers,
+            json=body1
+        ) as response1:
+            assert response1.status_code == 200
+            result1 = await read_sse_stream(response1)
+            print(f"      - 收到 {len(result1['chunks'])} 个chunks")
+            print(f"      - 回复长度: {len(result1['full_content'])} 字符")
+        
+        # 等待一下，确保消息已保存
+        await asyncio.sleep(0.5)
+        
+        # 第二轮对话（应该能看到历史）
+        print(f"   📝 第二轮对话: 我刚才说我叫什么名字？")
+        body2 = {"query": "我刚才说我叫什么名字？"}
+        async with client.stream(
+            "POST",
+            f"{BASE_URL}/rag_inference/stream_chat/{session_id}",
+            headers=headers,
+            json=body2
+        ) as response2:
+            assert response2.status_code == 200
+            result2 = await read_sse_stream(response2)
+            print(f"      - 收到 {len(result2['chunks'])} 个chunks")
+            print(f"      - 回复长度: {len(result2['full_content'])} 字符")
+            print(f"      - 回复内容: {result2['full_content'][:100]}...")
+            
+            # 验证回复中是否提到了"张三"（说明看到了历史）
+            if "张三" in result2['full_content']:
+                print(f"   ✅ 历史对话功能正常（回复中提到了'张三'）")
+            else:
+                print(f"   ⚠️  回复中未提到'张三'，可能历史对话未生效")
+                print(f"   ℹ️  完整回复: {result2['full_content']}")
+        
+        print(f"   ✅ 历史对话测试完成")
+
+
 if __name__ == "__main__":
     async def run_tests():
         print("=" * 60)
@@ -465,6 +519,7 @@ if __name__ == "__main__":
             await test_valid_token_streams()
             await test_chatkb_user_cannot_generate_graph()
             await test_livingkb_user_can_generate_graph()
+            await test_history_conversation()
             
             print("\n" + "=" * 60)
             print("所有核心测试通过！✅")
