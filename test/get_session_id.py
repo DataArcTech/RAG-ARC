@@ -6,9 +6,9 @@ import httpx
 import time
 
 BASE_URL = "http://localhost:8001"
-TEST_USERNAME = "test_sse_user"
+TEST_USERNAME = "test_livingkb_user"
 TEST_PASSWORD = "test_password_123"
-TEST_TYPE = 1  # chatKB
+TEST_TYPE = 0  # livingKB (可以生成图)
 
 
 async def login_and_get_token():
@@ -75,8 +75,10 @@ async def main():
     print(f"   Authorization: Bearer {token}")
     print(f"   Content-Type: application/json")
     print(f"   Accept: text/event-stream")
-    print(f"\n3. Body (JSON):")
+    print(f"\n3. Body (JSON) - 基础请求:")
     print(f'   {{"query": "你好"}}')
+    print(f"\n4. Body (JSON) - 生成图请求:")
+    print(f'   {{"query": "你好，请简单介绍一下你自己", "return_subgraph": true}}')
     print("\n" + "=" * 60)
 
 

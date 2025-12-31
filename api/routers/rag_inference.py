@@ -314,6 +314,14 @@ async def stream_chat_sse(
     include_all_owners = request.include_all_owners
     include_evidence = request.include_evidence
 
+    # 校验：只有 type=0 (livingKB) 的用户才能生成图
+    if return_subgraph or include_evidence:
+        if current_user.type != 0:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only livingKB users (type=0) can request subgraph generation"
+            )
+
     logger.info("SSE stream_chat request for session_id %s by user %s", session_id, current_user.id)
 
     # Validate session ownership at the start (use thread pool to avoid blocking)
@@ -406,6 +414,7 @@ async def stream_chat_sse(
                 prepared["subgraph_data"] = subgraph_data
                 prepared["subgraph_info"] = subgraph_info
                 prepared["raw_llm_response"] = None  # 流式响应无法获取完整原始 response
+                prepared["raw_mindmap_response"] = None  # 流式响应无法获取完整 mindmap response
                 _emit_progress({"stage": "prepare", "status": "end"})
                 _emit_progress({"stage": "generate", "status": "start"})
                 for chunk in token_stream:
@@ -477,15 +486,38 @@ async def stream_chat_sse(
         subgraph_data = prepared.get("subgraph_data")
         subgraph_info = prepared.get("subgraph_info")
         raw_llm_response = prepared.get("raw_llm_response")
+        raw_mindmap_response = prepared.get("raw_mindmap_response")
+
+        # 参考 WebSocket 逻辑：如果 return_subgraph=True，总是生成 mindmap（与 WebSocket 保持一致）
+        # 总是用 mindmap prompt 生成图，确保图和 chat 回答相关
+        if return_subgraph:
+            # 使用当前用户问题生成 mindmap，确保图和 chat 回答相关
+            try:
+                subgraph_data, raw_mindmap_response = await get_thread_pool().run_blocking(
+                    rag_inference_handler._generate_mindmap,
+                    query,
+                    assistant_response,
+                    chunks,
+                )
+                logger.info("SSE generated mindmap: %d nodes, %d edges", 
+                           len(subgraph_data.get("nodes", [])) if subgraph_data else 0,
+                           len(subgraph_data.get("edges", [])) if subgraph_data else 0)
+            except Exception as exc:
+                logger.warning("Failed to generate mindmap in SSE: %s", exc)
+                # 如果生成失败，保留原有的 subgraph_data（如果有的话）
+                if not subgraph_data:
+                    subgraph_data = None
+                    raw_mindmap_response = None
 
         # 记录完整的 response 信息（包括图数据）到日志
         logger.info(
-            "SSE chat response: text_length=%d, chunks_count=%d, subgraph_nodes=%d, subgraph_edges=%d, raw_response=%s",
+            "SSE chat response: text_length=%d, chunks_count=%d, subgraph_nodes=%d, subgraph_edges=%d, raw_response=%s, raw_mindmap_response=%s",
             len(assistant_response) if assistant_response else 0,
             len(chunks) if chunks else 0,
             len(subgraph_data.get("nodes", [])) if subgraph_data else 0,
             len(subgraph_data.get("edges", [])) if subgraph_data else 0,
-            json.dumps(raw_llm_response, ensure_ascii=False, default=str) if raw_llm_response else None
+            json.dumps(raw_llm_response, ensure_ascii=False, default=str) if raw_llm_response else None,
+            raw_mindmap_response if raw_mindmap_response else None
         )
         if subgraph_data:
             logger.debug("SSE subgraph data: %s", json.dumps(subgraph_data, ensure_ascii=False, default=str))
@@ -495,58 +527,59 @@ async def stream_chat_sse(
             content={"role": "assistant", "content": assistant_response},
             source_file_ids=[chunk.id for chunk in chunks] if chunks else None,
             subgraph_data=subgraph_data if return_subgraph else None,
-            raw_llm_response=prepared.get("raw_llm_response"),
-            raw_mindmap_response=prepared.get("raw_mindmap_response"),
+            raw_llm_response=raw_llm_response,
+            raw_mindmap_response={"response": raw_mindmap_response} if raw_mindmap_response else None,
             created_at=datetime.now(),
         )
         assistant_message = await get_thread_pool().run_blocking(
             message_handler.create_message, assistant_message
         )
 
-        # Keep legacy "include_evidence/return_subgraph" capability but transmit it via
-        # OpenAI-compatible tool_calls so clients consuming only delta.content are unaffected.
-        if include_evidence or return_subgraph:
-            evidence = None
-            if include_evidence:
+        # 参考 WebSocket 逻辑：总是构建并返回 payload（与 WebSocket 保持一致）
+        # 如果请求了 evidence 或 subgraph，则包含相应数据
+        evidence = None
+        if include_evidence:
+            graph_store = None
+            try:
+                graph_store = rag_inference_handler.get_graph_store()
+            except Exception:  # noqa: BLE001
                 graph_store = None
-                try:
-                    graph_store = rag_inference_handler.get_graph_store()
-                except Exception:  # noqa: BLE001
-                    graph_store = None
-                evidence = build_chat_evidence(
-                    chunks,
-                    subgraph_data=subgraph_data,
-                    subgraph_info=subgraph_info,
-                    max_chunks=CHAT_TOP_CHUNKS,
-                    graph_store=graph_store,
-                )
-
-            payload = _build_stream_chat_payload(
-                assistant_message,
+            evidence = build_chat_evidence(
                 chunks,
-                subgraph=subgraph_data if return_subgraph else None,
-                evidence=evidence,
+                subgraph_data=subgraph_data,
+                subgraph_info=subgraph_info,
+                max_chunks=CHAT_TOP_CHUNKS,
+                graph_store=graph_store,
             )
 
-            tool_calls = [
-                {
-                    "index": 0,
-                    "id": f"call_{assistant_message.id}",
-                    "type": "function",
-                    "function": {
-                        "name": "rag_arc_payload",
-                        "arguments": json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":")),
-                    },
-                }
-            ]
-            yield sse_json(
-                openai_chat_completion_chunk(
-                    chunk_id=chunk_id,
-                    model=model_name,
-                    created=created,
-                    delta=delta_envelope(role=None, tool_calls=tool_calls),
-                )
+        # 构建 payload（与 WebSocket 逻辑一致）
+        payload = _build_stream_chat_payload(
+            assistant_message,
+            chunks,
+            subgraph=subgraph_data if return_subgraph else None,
+            evidence=evidence,
+        )
+
+        # 通过 tool_calls 返回 payload（保持 OpenAI 兼容格式）
+        tool_calls = [
+            {
+                "index": 0,
+                "id": f"call_{assistant_message.id}",
+                "type": "function",
+                "function": {
+                    "name": "rag_arc_payload",
+                    "arguments": json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":")),
+                },
+            }
+        ]
+        yield sse_json(
+            openai_chat_completion_chunk(
+                chunk_id=chunk_id,
+                model=model_name,
+                created=created,
+                delta=delta_envelope(role=None, tool_calls=tool_calls),
             )
+        )
 
         yield sse_json(
             openai_chat_completion_chunk(
@@ -606,6 +639,15 @@ async def stream_chat_ws(
                         target_owner_id = uuid.UUID(str(payload["target_owner_id"]))
             except Exception:  # noqa: BLE001
                 pass
+
+            # 校验：只有 type=0 (livingKB) 的用户才能生成图
+            if return_subgraph or include_evidence:
+                if current_user.type != 0:
+                    await websocket.close(
+                        code=status.WS_1008_POLICY_VIOLATION,
+                        reason="Only livingKB users (type=0) can request subgraph generation"
+                    )
+                    return
 
             effective_owner: uuid.UUID | None = current_user.id
             if include_all_owners:

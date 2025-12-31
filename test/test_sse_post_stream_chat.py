@@ -109,11 +109,12 @@ async def read_sse_stream(response: httpx.Response) -> Dict[str, Any]:
     return result
 
 
-async def login_and_get_token(username: str = None, password: str = None, user_type: int = 1) -> str:
+async def login_and_get_token(username: str = None, password: str = None, user_type: int = None) -> tuple[str, int]:
     """登录获取token"""
     username = username or TEST_USERNAME
     password = password or TEST_PASSWORD
-    user_type = user_type or TEST_TYPE
+    if user_type is None:
+        user_type = TEST_TYPE
     
     async with httpx.AsyncClient() as client:
         # 先尝试注册（如果已存在会失败，但不影响）
@@ -124,9 +125,14 @@ async def login_and_get_token(username: str = None, password: str = None, user_t
             "type": user_type
         }
         try:
-            await client.post(f"{BASE_URL}/auth/register", json=register_data)
-        except Exception:
-            pass  # 用户可能已存在，继续登录
+            register_response = await client.post(f"{BASE_URL}/auth/register", json=register_data)
+            if register_response.status_code == 200:
+                register_data_resp = register_response.json()
+                actual_type = register_data_resp.get("data", {}).get("type", user_type)
+                print(f"   ✅ 注册用户: {username} (请求type={user_type}, 实际type={actual_type})")
+        except Exception as e:
+            print(f"   ℹ️  用户可能已存在: {username} (错误: {e})")
+            # 用户可能已存在，继续登录
         
         # 登录
         login_data = {
@@ -139,32 +145,35 @@ async def login_and_get_token(username: str = None, password: str = None, user_t
         data = response.json()
         assert data.get("code") == 200, f"登录返回code不是200: {data}"
         assert "access_token" in data.get("data", {}), f"登录响应中没有access_token: {data}"
-        return data["data"]["access_token"]
+        # 获取用户类型
+        user_type_from_response = data.get("data", {}).get("user", {}).get("type", user_type)
+        return data["data"]["access_token"], user_type_from_response
 
 
-async def get_token_and_session():
+async def get_token_and_session(user_type: int = None):
     """获取token和session_id"""
+    user_type = user_type or TEST_TYPE
     if USE_PROVIDED_TOKEN and PROVIDED_TOKEN:
         token = PROVIDED_TOKEN
         try:
             session_id = await create_session(token)
-            return token, session_id
+            return token, session_id, user_type
         except Exception:
             # Token 可能过期，尝试自动登录
             print("   ⚠️  提供的token无效，尝试自动登录...")
-            token = await login_and_get_token()
+            token, actual_type = await login_and_get_token(user_type=user_type)
             session_id = await create_session(token)
-            return token, session_id
+            return token, session_id, actual_type
     else:
-        token = await login_and_get_token()
+        token, actual_type = await login_and_get_token(user_type=user_type)
         session_id = await create_session(token)
-        return token, session_id
+        return token, session_id, actual_type
 
 
 async def test_no_token_rejected():
     """测试1: 无token时应该被拒绝（返回401）"""
     print("\n1. 测试无token时应该被拒绝...")
-    token, session_id = await get_token_and_session()
+    token, session_id, _ = await get_token_and_session()
     
     async with httpx.AsyncClient(timeout=30.0) as client:
         body = {"query": "test query"}
@@ -184,7 +193,7 @@ async def test_no_token_rejected():
 async def test_invalid_token_rejected():
     """测试2: 无效token时应该被拒绝（返回401）"""
     print("\n2. 测试无效token时应该被拒绝...")
-    token, session_id = await get_token_and_session()
+    token, session_id, _ = await get_token_and_session()
     
     async with httpx.AsyncClient(timeout=30.0) as client:
         body = {"query": "test query"}
@@ -209,7 +218,7 @@ async def test_invalid_token_rejected():
 async def test_invalid_session_id():
     """测试3: 无效的session_id应该被拒绝（返回403或404）"""
     print("\n3. 测试无效的session_id应该被拒绝...")
-    token, _ = await get_token_and_session()
+    token, _, _ = await get_token_and_session()
     
     # 测试不存在的session_id
     invalid_session_id = str(uuid.uuid4())
@@ -237,7 +246,7 @@ async def test_invalid_session_id():
 async def test_invalid_session_id_format():
     """测试4: 格式错误的session_id应该返回422"""
     print("\n4. 测试格式错误的session_id应该返回422...")
-    token, _ = await get_token_and_session()
+    token, _, _ = await get_token_and_session()
     
     # 测试非UUID格式的session_id
     invalid_format_session_id = "not-a-valid-uuid"
@@ -263,7 +272,7 @@ async def test_invalid_session_id_format():
 async def test_valid_token_streams():
     """测试5: 有效token时SSE流式输出是否正常工作"""
     print("\n5. 测试有效token时SSE流式输出...")
-    token, session_id = await get_token_and_session()
+    token, session_id, _ = await get_token_and_session()
     
     async with httpx.AsyncClient(timeout=120.0) as client:
         headers = {
@@ -338,6 +347,110 @@ async def test_valid_token_streams():
                 print(f"      - Payload事件数: {len(result['payload_events'])}")
 
 
+async def test_chatkb_user_cannot_generate_graph():
+    """测试6: chatKB用户(type=1)请求生成图应该被拒绝（返回403）"""
+    print("\n6. 测试chatKB用户(type=1)请求生成图应该被拒绝...")
+    token, session_id, user_type = await get_token_and_session(user_type=1)
+    print(f"   👤 用户类型: {user_type}")
+    assert user_type == 1, f"应该是type=1的用户，实际: {user_type}"
+    
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream"
+        }
+        body = {"query": "test query", "return_subgraph": True}
+        print(f"   📝 请求体: {body}")
+        async with client.stream(
+            "POST",
+            f"{BASE_URL}/rag_inference/stream_chat/{session_id}",
+            headers=headers,
+            json=body
+        ) as response:
+            print(f"   📊 HTTP状态码: {response.status_code}")
+            if response.status_code != 403:
+                # 读取响应内容看看是什么
+                error_text = await response.aread()
+                if isinstance(error_text, bytes):
+                    error_text = error_text.decode("utf-8", errors="replace")
+                print(f"   ⚠️  实际响应: {error_text[:200]}")
+            assert response.status_code == 403, f"chatKB用户请求生成图应该返回403，实际: {response.status_code}"
+            error_text = await response.aread()
+            if isinstance(error_text, bytes):
+                error_text = error_text.decode("utf-8", errors="replace")
+            print(f"   ✅ chatKB用户请求生成图返回403 - 错误: {error_text[:100]}")
+
+
+async def test_livingkb_user_can_generate_graph():
+    """测试7: livingKB用户(type=0)请求生成图应该成功"""
+    print("\n7. 测试livingKB用户(type=0)请求生成图...")
+    # 使用不同的用户名，避免与之前的用户冲突
+    livingkb_username = f"test_livingkb_{int(time.time())}"
+    livingkb_password = f"test_password_{int(time.time())}"
+    
+    # 直接注册并登录 type=0 的用户
+    token, user_type = await login_and_get_token(username=livingkb_username, password=livingkb_password, user_type=0)
+    print(f"   👤 用户类型: {user_type}")
+    assert user_type == 0, f"应该是type=0的用户，实际: {user_type}"
+    
+    session_id = await create_session(token)
+    
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream"
+        }
+        body = {"query": "你好，请简单介绍一下你自己", "return_subgraph": True}
+        
+        print(f"   📡 请求: POST /rag_inference/stream_chat/{session_id}")
+        print(f"   📝 查询: {body['query']}")
+        print(f"   🎯 请求生成图: return_subgraph=True")
+        
+        async with client.stream(
+            "POST",
+            f"{BASE_URL}/rag_inference/stream_chat/{session_id}",
+            headers=headers,
+            json=body
+        ) as response:
+            print(f"   📊 HTTP状态码: {response.status_code}")
+            
+            assert response.status_code == 200, f"livingKB用户请求生成图应该返回200，实际: {response.status_code}"
+            
+            result = await read_sse_stream(response)
+            
+            # 验证流式输出
+            assert result["http_status"] == 200, f"HTTP状态码应该是200，实际: {result['http_status']}"
+            
+            print(f"   📦 收到 {len(result['chunks'])} 个chunks")
+            print(f"   📄 内容片段数: {len(result['content_parts'])}")
+            print(f"   📊 完整内容长度: {len(result['full_content'])} 字符")
+            
+            # 检查是否有 payload 事件（包含 subgraph）
+            if result["payload_events"]:
+                payload = result["payload_events"][0]
+                has_subgraph = "subgraph" in payload
+                print(f"   🎯 Payload事件数: {len(result['payload_events'])}")
+                print(f"   📊 包含subgraph: {has_subgraph}")
+                if has_subgraph:
+                    subgraph = payload.get("subgraph", {})
+                    nodes_count = len(subgraph.get("nodes", []))
+                    edges_count = len(subgraph.get("edges", []))
+                    print(f"      - 子图节点数: {nodes_count}")
+                    print(f"      - 子图边数: {edges_count}")
+                    if nodes_count > 0 or edges_count > 0:
+                        print(f"   ✅ 成功生成图!")
+                    else:
+                        print(f"   ⚠️  图数据为空（可能是没有相关数据）")
+                else:
+                    print(f"   ⚠️  Payload中没有subgraph字段")
+            else:
+                print(f"   ⚠️  未收到payload事件（可能流还在继续）")
+            
+            print(f"   ✅ livingKB用户请求生成图测试完成")
+
+
 if __name__ == "__main__":
     async def run_tests():
         print("=" * 60)
@@ -350,6 +463,8 @@ if __name__ == "__main__":
             await test_invalid_session_id()
             await test_invalid_session_id_format()
             await test_valid_token_streams()
+            await test_chatkb_user_cannot_generate_graph()
+            await test_livingkb_user_can_generate_graph()
             
             print("\n" + "=" * 60)
             print("所有核心测试通过！✅")
