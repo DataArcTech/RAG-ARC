@@ -134,6 +134,7 @@ class User(Base):
     name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)  # 用户昵称
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     type: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 0=livingKB / 1=chatKB
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)  # 是否为管理员
     company_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)  # 企业名称（暂时不使用）
 
     # Status
@@ -235,6 +236,12 @@ class ChatMessage(Base):
     session_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("chat_session.id"), nullable=False, index=True
     )
+
+    # User information snapshot (for audit and statistics)
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("user.id"), nullable=True, index=True
+    )
+    user_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
 
     # JSON content structure
     content: Mapped[dict] = mapped_column(JSON, nullable=False)

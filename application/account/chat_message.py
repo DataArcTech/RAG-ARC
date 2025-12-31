@@ -130,3 +130,69 @@ class ChatMessageManager(AbstractModule):
         # Get all messages and count them
         messages = self.list_messages_by_session(session_id, limit=10000)
         return len(messages)
+
+    def list_messages_by_user(
+        self,
+        user_id: uuid.UUID,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[ChatMessage]:
+        """
+        List messages for a user with pagination.
+
+        Args:
+            user_id: User ID as UUID
+            limit: Maximum number of messages to return
+            offset: Number of messages to skip
+
+        Returns:
+            List of message metadata, ordered by created_at (descending)
+        """
+        return self.message_storage.list_messages_by_user(
+            user_id=user_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    def list_messages_by_user_type(
+        self,
+        user_type: int,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[ChatMessage]:
+        """
+        List messages for a user type with pagination.
+
+        Args:
+            user_type: User type (0=livingKB, 1=chatKB)
+            limit: Maximum number of messages to return
+            offset: Number of messages to skip
+
+        Returns:
+            List of message metadata, ordered by created_at (descending)
+        """
+        return self.message_storage.list_messages_by_user_type(
+            user_type=user_type,
+            limit=limit,
+            offset=offset,
+        )
+
+    def list_all_messages(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[ChatMessage]:
+        """
+        List all messages (admin only) with pagination.
+
+        Args:
+            limit: Maximum number of messages to return
+            offset: Number of messages to skip
+
+        Returns:
+            List of message metadata, ordered by created_at (descending)
+        """
+        return self.message_storage.list_all_messages(
+            limit=limit,
+            offset=offset,
+        )

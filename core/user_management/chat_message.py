@@ -249,6 +249,96 @@ class ChatMessageStorage(AbstractModule):
             logger.error(f"Failed to list chat messages for session {session_id}: {e}")
             return []
 
+    def list_messages_by_user(
+        self,
+        user_id: uuid.UUID,
+        limit: int = 100,
+        offset: int = 0,
+        **kwargs: Any
+    ) -> List[ChatMessage]:
+        """
+        List all messages for a specific user.
+
+        Args:
+            user_id: User ID as UUID
+            limit: Maximum number of messages to return
+            offset: Number of messages to skip
+            **kwargs: Additional arguments
+
+        Returns:
+            List of chat message metadata, ordered by created_at (descending)
+        """
+        try:
+            messages = self.metadata_store.list_chat_messages_by_user(
+                user_id=user_id,
+                limit=limit,
+                offset=offset,
+                **kwargs
+            )
+            return messages
+        except Exception as e:
+            logger.error(f"Failed to list chat messages for user {user_id}: {e}")
+            return []
+
+    def list_messages_by_user_type(
+        self,
+        user_type: int,
+        limit: int = 100,
+        offset: int = 0,
+        **kwargs: Any
+    ) -> List[ChatMessage]:
+        """
+        List all messages for a specific user type.
+
+        Args:
+            user_type: User type (0=livingKB, 1=chatKB)
+            limit: Maximum number of messages to return
+            offset: Number of messages to skip
+            **kwargs: Additional arguments
+
+        Returns:
+            List of chat message metadata, ordered by created_at (descending)
+        """
+        try:
+            messages = self.metadata_store.list_chat_messages_by_user_type(
+                user_type=user_type,
+                limit=limit,
+                offset=offset,
+                **kwargs
+            )
+            return messages
+        except Exception as e:
+            logger.error(f"Failed to list chat messages for user_type {user_type}: {e}")
+            return []
+
+    def list_all_messages(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        **kwargs: Any
+    ) -> List[ChatMessage]:
+        """
+        List all messages (admin only).
+
+        Args:
+            limit: Maximum number of messages to return
+            offset: Number of messages to skip
+            **kwargs: Additional arguments
+
+        Returns:
+            List of chat message metadata, ordered by created_at (descending)
+        """
+        try:
+            messages = self.metadata_store.list_all_chat_messages(
+                limit=limit,
+                offset=offset,
+                **kwargs
+            )
+            return messages
+        except Exception as e:
+            logger.error(f"Failed to list all chat messages: {e}")
+            return []
+
     def delete_message(
         self,
         message_id: uuid.UUID,

@@ -372,6 +372,8 @@ async def stream_chat_sse(
 
         user_message = ChatMessage(
             session_id=session_id,
+            user_id=current_user.id,
+            user_type=current_user.type,
             content={"role": "user", "content": query},
             created_at=datetime.now(),
         )
@@ -572,6 +574,8 @@ async def stream_chat_sse(
 
         assistant_message = ChatMessage(
             session_id=session_id,
+            user_id=current_user.id,
+            user_type=current_user.type,
             content={"role": "assistant", "content": assistant_response},
             source_file_ids=[chunk.id for chunk in chunks] if chunks else None,
             subgraph_data=subgraph_data if return_subgraph else None,
@@ -715,6 +719,8 @@ async def stream_chat_ws(
 
             user_message = ChatMessage(
                 session_id=session_id,
+                user_id=current_user.id,
+                user_type=current_user.type,
                 content={"role": "user", "content": query},
                 created_at=datetime.now(),
             )
@@ -749,6 +755,8 @@ async def stream_chat_ws(
             
             assistant_message = ChatMessage(
                 session_id=session_id,
+                user_id=current_user.id,
+                user_type=current_user.type,
                 content={"role": "assistant", "content": assistant_response},
                 source_file_ids=[chunk.id for chunk in chunks] if chunks else None,
                 subgraph_data=subgraph_data if return_subgraph else None,

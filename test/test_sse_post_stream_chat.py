@@ -151,29 +151,31 @@ async def login_and_get_token(username: str = None, password: str = None, user_t
 
 
 async def get_token_and_session(user_type: int = None):
-    """获取token和session_id"""
+    """获取token和session_id，返回 (token, session_id, user_id, user_type)"""
     user_type = user_type or TEST_TYPE
     if USE_PROVIDED_TOKEN and PROVIDED_TOKEN:
         token = PROVIDED_TOKEN
         try:
             session_id = await create_session(token)
-            return token, session_id, user_type
+            return token, session_id, None, user_type
         except Exception:
             # Token 可能过期，尝试自动登录
             print("   ⚠️  提供的token无效，尝试自动登录...")
             token, actual_type = await login_and_get_token(user_type=user_type)
             session_id = await create_session(token)
-            return token, session_id, actual_type
+            return token, session_id, None, actual_type
     else:
         token, actual_type = await login_and_get_token(user_type=user_type)
         session_id = await create_session(token)
-        return token, session_id, actual_type
+        return token, session_id, None, actual_type
+
+
 
 
 async def test_no_token_rejected():
     """测试1: 无token时应该被拒绝（返回401）"""
     print("\n1. 测试无token时应该被拒绝...")
-    token, session_id, _ = await get_token_and_session()
+    token, session_id, _, _ = await get_token_and_session()
     
     async with httpx.AsyncClient(timeout=30.0) as client:
         body = {"query": "test query"}
@@ -193,7 +195,7 @@ async def test_no_token_rejected():
 async def test_invalid_token_rejected():
     """测试2: 无效token时应该被拒绝（返回401）"""
     print("\n2. 测试无效token时应该被拒绝...")
-    token, session_id, _ = await get_token_and_session()
+    token, session_id, _, _ = await get_token_and_session()
     
     async with httpx.AsyncClient(timeout=30.0) as client:
         body = {"query": "test query"}
@@ -218,7 +220,7 @@ async def test_invalid_token_rejected():
 async def test_invalid_session_id():
     """测试3: 无效的session_id应该被拒绝（返回403或404）"""
     print("\n3. 测试无效的session_id应该被拒绝...")
-    token, _, _ = await get_token_and_session()
+    token, _, _, _ = await get_token_and_session()
     
     # 测试不存在的session_id
     invalid_session_id = str(uuid.uuid4())
@@ -246,7 +248,7 @@ async def test_invalid_session_id():
 async def test_invalid_session_id_format():
     """测试4: 格式错误的session_id应该返回422"""
     print("\n4. 测试格式错误的session_id应该返回422...")
-    token, _, _ = await get_token_and_session()
+    token, _, _, _ = await get_token_and_session()
     
     # 测试非UUID格式的session_id
     invalid_format_session_id = "not-a-valid-uuid"
@@ -272,7 +274,7 @@ async def test_invalid_session_id_format():
 async def test_valid_token_streams():
     """测试5: 有效token时SSE流式输出是否正常工作"""
     print("\n5. 测试有效token时SSE流式输出...")
-    token, session_id, _ = await get_token_and_session()
+    token, session_id, _, _ = await get_token_and_session()
     
     async with httpx.AsyncClient(timeout=120.0) as client:
         headers = {
@@ -350,7 +352,7 @@ async def test_valid_token_streams():
 async def test_chatkb_user_cannot_generate_graph():
     """测试6: chatKB用户(type=1)请求生成图应该被拒绝（返回403）"""
     print("\n6. 测试chatKB用户(type=1)请求生成图应该被拒绝...")
-    token, session_id, user_type = await get_token_and_session(user_type=1)
+    token, session_id, _, user_type = await get_token_and_session(user_type=1)
     print(f"   👤 用户类型: {user_type}")
     assert user_type == 1, f"应该是type=1的用户，实际: {user_type}"
     
@@ -454,7 +456,7 @@ async def test_livingkb_user_can_generate_graph():
 async def test_history_conversation():
     """测试8: 验证历史对话功能"""
     print("\n8. 测试历史对话功能...")
-    token, session_id, _ = await get_token_and_session()
+    token, session_id, _, _ = await get_token_and_session()
     
     async with httpx.AsyncClient(timeout=120.0) as client:
         headers = {
@@ -505,6 +507,67 @@ async def test_history_conversation():
         print(f"   ✅ 历史对话测试完成")
 
 
+async def test_user_info_stored():
+    """测试9: 验证消息中存储了 user_id 和 user_type"""
+    print("\n9. 测试用户信息存储...")
+    token, session_id, _, user_type = await get_token_and_session()
+    
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream"
+        }
+        
+        # 发送一条消息
+        print(f"   📝 发送测试消息")
+        body = {"query": "测试用户信息存储"}
+        async with client.stream(
+            "POST",
+            f"{BASE_URL}/rag_inference/stream_chat/{session_id}",
+            headers=headers,
+            json=body
+        ) as response:
+            assert response.status_code == 200
+            result = await read_sse_stream(response)
+            print(f"      - 收到 {len(result['chunks'])} 个chunks")
+        
+        # 等待消息保存
+        await asyncio.sleep(0.5)
+        
+        # 查询消息，验证 user_id 和 user_type
+        print(f"   🔍 查询消息验证用户信息")
+        msg_headers = {"Authorization": f"Bearer {token}"}
+        msg_response = await client.get(
+            f"{BASE_URL}/session/{session_id}/messages",
+            headers=msg_headers
+        )
+        assert msg_response.status_code == 200
+        response_data = msg_response.json()
+        # 处理可能的包装格式 {"code":200,"data":[...]}
+        if isinstance(response_data, dict) and "data" in response_data:
+            messages = response_data["data"]
+        else:
+            messages = response_data
+        assert len(messages) > 0, "应该有至少一条消息"
+        
+        # 验证最新消息包含用户信息
+        latest_msg = messages[-1]
+        assert latest_msg.get("user_id") is not None, "消息应该包含 user_id"
+        assert latest_msg.get("user_type") is not None, "消息应该包含 user_type"
+        assert latest_msg["user_type"] == user_type, f"user_type 应该匹配: {latest_msg['user_type']} != {user_type}"
+        
+        # 验证所有消息都有用户信息
+        for msg in messages:
+            assert msg.get("user_id") is not None, f"消息 {msg['id']} 应该包含 user_id"
+            assert msg.get("user_type") is not None, f"消息 {msg['id']} 应该包含 user_type"
+        
+        print(f"      - ✅ user_id: {latest_msg['user_id']}")
+        print(f"      - ✅ user_type: {latest_msg['user_type']}")
+        print(f"      - ✅ 共验证 {len(messages)} 条消息")
+        print(f"   ✅ 用户信息存储测试完成")
+
+
 if __name__ == "__main__":
     async def run_tests():
         print("=" * 60)
@@ -520,6 +583,7 @@ if __name__ == "__main__":
             await test_chatkb_user_cannot_generate_graph()
             await test_livingkb_user_can_generate_graph()
             await test_history_conversation()
+            await test_user_info_stored()
             
             print("\n" + "=" * 60)
             print("所有核心测试通过！✅")

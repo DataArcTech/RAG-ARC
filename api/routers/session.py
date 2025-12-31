@@ -29,6 +29,8 @@ class ChatMessageResponse(BaseModel):
     """Response model for chat messages"""
     id: uuid.UUID
     session_id: uuid.UUID
+    user_id: Optional[uuid.UUID] = None
+    user_type: Optional[int] = None
     content: dict
     source_file_ids: Optional[List[uuid.UUID]] = None
     subgraph_data: Optional[dict] = None
@@ -102,13 +104,39 @@ async def create_message(
     if session is None or not validate_user_session(session, current_user):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
     
+    if current_user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+    
     messages = await get_thread_pool().run_blocking(
         get_message_handler().create_message,
-        ChatMessage(session_id=session_id, content={"role": "user", "content": message_content.content}, created_at=datetime.now())
+        ChatMessage(
+            session_id=session_id,
+            user_id=current_user.id,
+            user_type=current_user.type,
+            content={"role": "user", "content": message_content.content},
+            created_at=datetime.now()
+        )
     )
     return messages
 
 
+
+
+@router.get("/messages", response_model=List[ChatMessageResponse])
+async def list_messages_by_user(
+    current_user: Annotated[User, Depends(get_current_user)],
+    limit: int = 100,
+    offset: int = 0,
+):
+    """List messages by current user with pagination. Users can only query their own messages."""
+    # 用户只能查询自己的消息
+    messages = await get_thread_pool().run_blocking(
+        get_message_handler().list_messages_by_user,
+        current_user.id,
+        limit,
+        offset,
+    )
+    return [ChatMessageResponse.model_validate(msg) for msg in messages]
 
 
 @router.get("/{session_id}/messages", response_model=List[ChatMessageResponse])

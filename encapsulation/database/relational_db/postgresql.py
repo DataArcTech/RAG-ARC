@@ -10,7 +10,7 @@ import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import create_engine, Engine, text, inspect as sqlalchemy_inspect
+from sqlalchemy import create_engine, Engine, text, inspect as sqlalchemy_inspect, Boolean, Integer, String
 from sqlalchemy.orm import sessionmaker, Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from sqlalchemy.dialects.postgresql import JSON
@@ -192,11 +192,37 @@ class PostgreSQLDB(RelationalDB):
                                 sql_type = column_type.compile(dialect=engine.dialect)
                             
                             # 构建 ALTER TABLE 语句
-                            # 注意：对于可空列，PostgreSQL 默认允许 NULL，所以可以省略
+                            # 注意：对于 NOT NULL 的列，需要提供默认值
                             if column.nullable:
                                 alter_sql = f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {sql_type}'
                             else:
-                                alter_sql = f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {sql_type} NOT NULL'
+                                # 对于 NOT NULL 列，需要提供默认值
+                                default_value = None
+                                if hasattr(column, 'default') and column.default is not None:
+                                    if hasattr(column.default, 'arg'):
+                                        default_value = column.default.arg
+                                    elif callable(column.default):
+                                        # 如果是可调用对象（如函数），尝试获取默认值
+                                        try:
+                                            default_value = column.default()
+                                        except:
+                                            pass
+                                
+                                # 根据类型设置默认值
+                                if default_value is None:
+                                    if isinstance(column_type, Boolean):
+                                        default_value = 'false'
+                                    elif isinstance(column_type, Integer):
+                                        default_value = '0'
+                                    elif isinstance(column_type, String):
+                                        default_value = "''"
+                                    else:
+                                        default_value = 'NULL'
+                                
+                                if default_value == 'NULL':
+                                    alter_sql = f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {sql_type}'
+                                else:
+                                    alter_sql = f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {sql_type} NOT NULL DEFAULT {default_value}'
                             
                             with engine.begin() as conn:
                                 conn.execute(text(alter_sql))
@@ -1202,6 +1228,92 @@ class PostgreSQLDB(RelationalDB):
 
         except SQLAlchemyError as e:
             logger.error(f"Database error listing chat messages for session {session_id}: {e}")
+            raise
+
+    def list_chat_messages_by_user(
+        self,
+        user_id: uuid.UUID,
+        limit: int = 100,
+        offset: int = 0,
+        **kwargs: Any
+    ) -> List[ChatMessage]:
+        """List all chat messages for a specific user using SQLAlchemy ORM"""
+        try:
+            with self.SessionMaker() as db_session:
+                query = db_session.query(ChatMessage).filter_by(user_id=user_id).order_by(ChatMessage.created_at.desc())
+
+                if offset:
+                    query = query.offset(offset)
+                if limit:
+                    query = query.limit(limit)
+
+                messages = query.all()
+                # Detach from session
+                for msg in messages:
+                    db_session.expunge(msg)
+
+                logger.debug(f"Retrieved {len(messages)} chat messages for user {user_id}")
+                return messages
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error listing chat messages for user {user_id}: {e}")
+            raise
+
+    def list_chat_messages_by_user_type(
+        self,
+        user_type: int,
+        limit: int = 100,
+        offset: int = 0,
+        **kwargs: Any
+    ) -> List[ChatMessage]:
+        """List all chat messages for a specific user type using SQLAlchemy ORM"""
+        try:
+            with self.SessionMaker() as db_session:
+                query = db_session.query(ChatMessage).filter_by(user_type=user_type).order_by(ChatMessage.created_at.desc())
+
+                if offset:
+                    query = query.offset(offset)
+                if limit:
+                    query = query.limit(limit)
+
+                messages = query.all()
+                # Detach from session
+                for msg in messages:
+                    db_session.expunge(msg)
+
+                logger.debug(f"Retrieved {len(messages)} chat messages for user_type {user_type}")
+                return messages
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error listing chat messages for user_type {user_type}: {e}")
+            raise
+
+    def list_all_chat_messages(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        **kwargs: Any
+    ) -> List[ChatMessage]:
+        """List all chat messages (admin only)"""
+        try:
+            with self.SessionMaker() as db_session:
+                query = db_session.query(ChatMessage).order_by(ChatMessage.created_at.desc())
+
+                if offset:
+                    query = query.offset(offset)
+                if limit:
+                    query = query.limit(limit)
+
+                messages = query.all()
+                # Detach from session
+                for msg in messages:
+                    db_session.expunge(msg)
+
+                logger.debug(f"Retrieved {len(messages)} chat messages (all users)")
+                return messages
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error listing all chat messages: {e}")
             raise
 
     def delete_chat_message(self, message_id: uuid.UUID, **kwargs: Any) -> bool:

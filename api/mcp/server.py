@@ -201,7 +201,9 @@ async def chat(
         await get_thread_pool().run_blocking(
             message_handler.create_message,
             ChatMessage(
-                session_id=session_uuid, 
+                session_id=session_uuid,
+                user_id=current_user.id,
+                user_type=current_user.type,
                 source_file_ids=[chunk.id for chunk in chunks] if chunks else None,
                 content={"role": "user", "content": query}, 
                 created_at=datetime.datetime.now()
@@ -211,6 +213,8 @@ async def chat(
             message_handler.create_message,
             ChatMessage(
                 session_id=session_uuid,
+                user_id=current_user.id,
+                user_type=current_user.type,
                 source_file_ids=[chunk.id for chunk in chunks] if chunks else None,
                 content={"role": "assistant", "content": response_text},
                 subgraph_data=subgraph_data if subgraph_data else None,
