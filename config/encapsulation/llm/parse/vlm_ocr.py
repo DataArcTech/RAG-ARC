@@ -50,4 +50,9 @@ class VLMOcrConfig(AbstractConfig):
     top_p: float = 1.0
 
     def build(self) -> VLMOcrLLM:
+        if self.loading_method == "openai":
+            if not str(self.openai_api_key or "").strip():
+                raise ValueError("OCR API key is required: set OCR_API_KEY or OPENAI_API_KEY.")
+            if not str(self.openai_base_url or "").strip():
+                raise ValueError("OCR base URL is required: set OCR_API_BASE_URL or OPENAI_BASE_URL.")
         return VLMOcrLLM(self)

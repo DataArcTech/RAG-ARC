@@ -16,7 +16,7 @@ class DotsOCRConfig(AbstractConfig):
     use_china_mirror: bool = Field(
         default_factory=lambda: os.getenv("DOTS_OCR_USE_CHINA_MIRROR", "").strip().lower() in {"1", "true", "yes", "y", "on"}
     )
-    cache_folder: Optional[str] = Field(default_factory=lambda: os.getenv("DOTS_OCR_CACHE_FOLDER"))
+    cache_folder: Optional[str] = Field(default_factory=lambda: os.getenv("DOTS_OCR_CACHE_FOLDER", "./models/dots_ocr"))
     use_snapshot_download: bool = Field(
         default_factory=lambda: os.getenv("DOTS_OCR_USE_SNAPSHOT_DOWNLOAD", "").strip().lower() in {"1", "true", "yes", "y", "on"}
     )  # Use snapshot_download to avoid dynamic module issues

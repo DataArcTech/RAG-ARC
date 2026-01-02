@@ -71,6 +71,10 @@ class EvidenceBank:
                 continue
             payload.append(
                 {
+                    # Keep both keys:
+                    # - `chunk_id`: the canonical identifier used by inline citations and most prompts.
+                    # - `evidence_id`: backward-compatible alias (some call sites use this name).
+                    "chunk_id": record.evidence_id,
                     "evidence_id": record.evidence_id,
                     "source": record.source,
                     "score": record.score,

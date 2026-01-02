@@ -60,14 +60,14 @@ How secrets flow into configs:
 | `CHAT_MODEL_NAME` | _(empty)_ | Optional preferred chat model name. When `CHAT_MODEL_PROVIDER=huggingface`, this can be a HuggingFace repo id or a local filesystem path. |
 | `CHAT_MODEL_DEVICE` | `cpu` | HuggingFace chat runtime device (used when `CHAT_MODEL_PROVIDER=huggingface`). |
 | `CHAT_MODEL_CACHE_FOLDER` | _(empty)_ | Optional HuggingFace cache folder for chat weights/tokenizers. |
-| `CHAT_API_KEY` | _(empty)_ | API key for chat provider (required for hosted APIs). |
-| `CHAT_API_BASE_URL` | _(empty)_ | Base URL for OpenAI-compatible chat endpoints (e.g. `https://api.openai.com/v1`). |
+| `CHAT_API_KEY` | _(empty)_ | **Required** (when `CHAT_MODEL_PROVIDER=openai`): API key for chat provider. |
+| `CHAT_API_BASE_URL` | _(empty)_ | **Required** (when `CHAT_MODEL_PROVIDER=openai`): Base URL for OpenAI-compatible chat endpoints (e.g. `https://api.openai.com/v1`). |
 | `OPENAI_CHAT_MODEL` | `gpt-4o-mini` | Legacy/default chat model name used when `CHAT_MODEL_NAME` is empty. |
 | `LOW_COST_MODEL` | _(empty)_ | Optional: cheaper model used for exploration-heavy calls (planning/reflection/quality checks). When empty, the system reuses the main chat model. |
 | `OPENAI_API_BASE` | _(empty)_ | Optional legacy alias for OpenAI-compatible base URL. |
 | `EMBEDDING_MODEL_PROVIDER` | `openai` | Embedding provider (`openai` = OpenAI-compatible API, `huggingface` = local SentenceTransformers). |
-| `EMBEDDING_API_KEY` | _(empty)_ | API key for embedding provider (required for hosted APIs). |
-| `EMBEDDING_API_BASE_URL` | _(empty)_ | Base URL for OpenAI-compatible embedding endpoints. |
+| `EMBEDDING_API_KEY` | _(empty)_ | **Required** (when `EMBEDDING_MODEL_PROVIDER=openai`): API key for embedding provider. |
+| `EMBEDDING_API_BASE_URL` | _(empty)_ | **Required** (when `EMBEDDING_MODEL_PROVIDER=openai`): Base URL for OpenAI-compatible embedding endpoints. |
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Default embedding model name. |
 | `EMBEDDING_DEVICE` | `cpu` | HuggingFace embedding runtime device (used when `EMBEDDING_MODEL_PROVIDER=huggingface`). |
 | `EMBEDDING_CACHE_FOLDER` | _(empty)_ | Optional HuggingFace cache folder for embedding weights. |
@@ -92,8 +92,8 @@ How secrets flow into configs:
 | `RERANKER_MODEL_NAME` | `Qwen/Qwen3-Reranker-0.6B` | Default local reranker model name (used when `MODEL_PROFILE=local`). |
 | `RERANKER_CACHE_FOLDER` | `./models/Qwen` | Cache path for reranker checkpoints. |
 | `RERANKER_DEVICE` | `cpu` | Reranker runtime device. |
-| `OPENAI_API_KEY` | _(empty)_ | Optional shared key reused across OpenAI-compatible modules when component-specific keys are empty. |
-| `OPENAI_BASE_URL` | _(empty)_ | Optional shared base URL reused across OpenAI-compatible modules. |
+| `OPENAI_API_KEY` | _(empty)_ | Shared fallback key (used when component-specific keys are empty). **Required** when any OpenAI-compatible module runs with its `*_API_KEY` unset. |
+| `OPENAI_BASE_URL` | _(empty)_ | Shared fallback base URL (used when component-specific base URLs are empty). **Required** when any OpenAI-compatible module runs with its `*_API_BASE_URL` unset. |
 | `DEVICE` | `cpu` | Optional shared default device used when component-specific device vars are empty. |
 | `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | Embedding model name. When `EMBEDDING_MODEL_PROVIDER=huggingface`, this can be a HuggingFace repo id or a local filesystem path. |
 | `MODEL_PROFILE` | `api` | Chooses config profile (`api` or `local`). Impacts default JSON configs. |
@@ -279,7 +279,7 @@ Planner/graph defaults. Leave as-is unless customizing behavior.
 | `DEEPSEARCH_PERSIST_PLAN` | `true` | Persist plan JSON to disk. |
 | `DEEPSEARCH_PLAN_OUTPUT_DIR` | `./local/deepsearch_runs` | Folder for persisted plans. |
 | `DEEPSEARCH_ARTIFACT_DIR` | _(empty)_ | Optional: per-run DeepSearch artifact root (writes `run_id/plan_result.json`, `reasoning.json`, `report.json`, `report.md`, `state_snapshot.json`, etc.). |
-| `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `./local/deepsearch_artifacts` | Output directory for tool telemetry. |
+| `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `./local/deepsearch_artifacts` | Output directory for tool telemetry/artifacts. |
 | `DEEPSEARCH_ALLOW_EXTERNAL_CHANNEL` | `false` | Planner-only flag for emitting `web` steps (used when `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` is not set). |
 | `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` | `false` | Runtime override for external search enablement (config SoT: `external_channel.enabled` + `gap_detection.enable_external_on_gap`). |
 | `DEEPSEARCH_SECTIONWISE_WRITER` | `false` | Enable section-wise report writing with Memory Bank retrieval + recency retention. |
@@ -288,7 +288,7 @@ Planner/graph defaults. Leave as-is unless customizing behavior.
 | `TAVILY_API_KEY` | _(empty)_ | API key for Tavily (when external search enabled). |
 | `DEEPSEARCH_WEB_PROVIDER` | _(empty)_ | External search routing hint (`tavily` / `tool` / `mcp`; unknown values fall back to `tavily`). |
 | `DEEPSEARCH_EXTERNAL_CACHE_MODE` | `auto` | External search record/replay mode: `off` / `record` / `replay` / `auto`. |
-| `DEEPSEARCH_EXTERNAL_CACHE_DIR` | _(empty)_ | Cache folder; when empty and `artifact_dir` exists in run metadata, uses `artifact_dir/external_cache`. |
+| `DEEPSEARCH_EXTERNAL_CACHE_DIR` | `./local/deepsearch_artifacts/external_cache` | External search cache directory. |
 | `DEEPSEARCH_TOOL_HINTS` | _(empty)_ | JSON list to override planner tool hints. |
 | `DEEPSEARCH_TOOL_MCP_CONFIG_PATH` | _(empty)_ | Custom JSON config for tool MCP server. |
 | `DEEPSEARCH_TOOL_MCP_ADAPTER_CONFIG` | _(empty)_ | JSON file describing adapter overrides. |
@@ -481,4 +481,4 @@ Set to `1` (or any non-empty value) to opt-in when the required services/models 
 
 ---
 
-**Tip:** Copy `.env.example` to `.env`, fill in the required secrets (`OPENAI_API_KEY`/`OPENAI_BASE_URL` and `JWT_SECRET_KEY`), and the rest should work with built-in defaults. For advanced tuning, prefer changing `config/` (JSON/Python) over adding many env overrides.
+**Tip:** Copy `.env.example` to `.env`, fill in the required secrets (`OPENAI_API_KEY`/`OPENAI_BASE_URL` (or per-module `*_API_KEY`/`*_API_BASE_URL`) and `JWT_SECRET_KEY`), and the rest should work with built-in defaults. For advanced tuning, prefer changing `config/` (JSON/Python) over adding many env overrides.

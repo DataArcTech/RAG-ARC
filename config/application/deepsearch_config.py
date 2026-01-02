@@ -322,7 +322,7 @@ class ToolManagerConfig(BaseModel):
         default_factory=dict, description="Descriptors for remote-only tools."
     )
     artifact_dir: Optional[str] = Field(
-        None,
+        "./local/deepsearch_artifacts",
         description="Directory for persisted tool artifacts.",
     )
     max_remote_evidences: int = Field(
@@ -359,7 +359,10 @@ class ExternalChannelConfig(BaseModel):
     max_results: int = Field(5, description="Maximum documents returned by HTTP providers.")
     tool_timeout_seconds: float = Field(45.0, description="Timeout applied to tool_manager invocations.")
     cache_mode: str = Field("auto", description="External cache mode: off/record/replay/auto.")
-    cache_dir: Optional[str] = Field(None, description="Optional directory for external cache files.")
+    cache_dir: Optional[str] = Field(
+        "./local/deepsearch_artifacts/external_cache",
+        description="Directory for external cache files.",
+    )
     tavily_api_key: Optional[str] = Field(None, description="Optional Tavily API key used by the provider implementation.")
 
 

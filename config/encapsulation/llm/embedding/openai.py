@@ -101,4 +101,9 @@ class OpenAIEmbeddingConfig(AbstractConfig):
         return self
 
     def build(self) -> OpenAIEmbeddingLLM:
+        if self.loading_method == "openai":
+            if not str(self.openai_api_key or "").strip():
+                raise ValueError("Embedding API key is required: set EMBEDDING_API_KEY or OPENAI_API_KEY.")
+            if not str(self.openai_base_url or "").strip():
+                raise ValueError("Embedding base URL is required: set EMBEDDING_API_BASE_URL or OPENAI_BASE_URL.")
         return OpenAIEmbeddingLLM(self)

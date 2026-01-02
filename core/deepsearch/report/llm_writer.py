@@ -40,6 +40,93 @@ def _has_supported_inline_citation(text: str, *, allowed_ids: set[str]) -> bool:
     return False
 
 
+def _extract_evidence_ids_from_index(evidence_index: Any) -> List[str]:
+    """Extract citable ids (chunk_id) from the evidence index payload."""
+    if not isinstance(evidence_index, list):
+        return []
+    ordered: List[str] = []
+    seen: set[str] = set()
+    for entry in evidence_index:
+        if not isinstance(entry, dict):
+            continue
+        token = str(entry.get("chunk_id") or entry.get("evidence_id") or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        ordered.append(token)
+    return ordered
+
+
+def _fallback_outline(question: str, *, evidence_index: Any) -> List[Dict[str, Any]]:
+    """Deterministic fallback outline when the LLM outline step fails.
+
+    This exists to keep DeepSearch service available even when the outline LLM returns
+    invalid schema. It is only used when we have at least one evidence_id to cite.
+    """
+    evidence_ids = _extract_evidence_ids_from_index(evidence_index)
+    if not evidence_ids:
+        return []
+    primary = evidence_ids[: min(6, len(evidence_ids))]
+    primary_one = primary[:1]
+    primary_three = primary[: min(3, len(primary))] or primary_one
+
+    is_english = not CJK_DETECT_RE.search(str(question or ""))
+    if is_english:
+        return [
+            {
+                "title": "Direct Answer",
+                "section_type": "narrative",
+                "purpose": "Answer the user question directly, using only the provided evidence.",
+                "evidence_ids": primary_three,
+            },
+            {
+                "title": "Supporting Details",
+                "section_type": "narrative",
+                "purpose": "Provide key supporting details and caveats grounded in evidence.",
+                "evidence_ids": primary,
+            },
+            {
+                "title": "Graph Signals",
+                "section_type": "graph_summary",
+                "purpose": "Summarize graph-derived entities/relations relevant to the question, grounded in evidence.",
+                "evidence_ids": primary_three,
+            },
+            {
+                "title": "Limitations & Next Steps",
+                "section_type": "meta",
+                "purpose": "State evidence limitations and propose next steps without inventing facts.",
+                "evidence_ids": primary_one,
+            },
+        ]
+
+    return [
+        {
+            "title": "直接结论",
+            "section_type": "narrative",
+            "purpose": "直接回答用户问题，仅使用已提供的证据。",
+            "evidence_ids": primary_three,
+        },
+        {
+            "title": "关键依据",
+            "section_type": "narrative",
+            "purpose": "列出支撑结论的关键细节与注意事项，必须有证据支撑。",
+            "evidence_ids": primary,
+        },
+        {
+            "title": "图谱信号",
+            "section_type": "graph_summary",
+            "purpose": "总结与问题相关的图谱实体/关系信号，并明确证据来源。",
+            "evidence_ids": primary_three,
+        },
+        {
+            "title": "局限与下一步",
+            "section_type": "meta",
+            "purpose": "说明证据与覆盖的局限，并给出下一步建议，不得臆造事实。",
+            "evidence_ids": primary_one,
+        },
+    ]
+
+
 class ReportSectionSpec(BaseModel):
     """A single report section specification produced by the outline step."""
 
@@ -142,6 +229,7 @@ class DeepSearchLLMReportWriter:
             evidence_index = []
 
         evidence_index_json = _dump_json(evidence_index)
+        available_ids = _extract_evidence_ids_from_index(evidence_index)
         user_prompt = REPORT_OUTLINE_USER_PROMPT.format(
             question=question,
             highlight_count=len(highlights),
@@ -159,7 +247,20 @@ class DeepSearchLLMReportWriter:
             raw = await self._call(messages, phase="outline")
             last_raw = raw
             data = _safe_parse_json(raw, expected="list")
+            parsed_list = False
+            try:
+                snippet = _extract_first_json(str(raw or "").strip())
+                parsed_list = bool(snippet and snippet.lstrip().startswith("["))
+            except Exception:
+                parsed_list = False
             sections = _coerce_outline(data)
+            if sections and available_ids:
+                # Some models omit evidence_ids; fill with a small stable pool so sectionwise
+                # report generation can proceed while remaining cite-first.
+                fill_ids = available_ids[: min(3, len(available_ids))]
+                for section in sections:
+                    if not section.evidence_ids:
+                        section.evidence_ids = list(fill_ids)
             missing_titles: List[str] = []
             validation_error: str | None = None
             if not sections:
@@ -173,6 +274,9 @@ class DeepSearchLLMReportWriter:
                 return [item.model_dump() for item in sections]
 
             if attempt >= retries - 1:
+                fallback = _fallback_outline(question, evidence_index=evidence_index) if parsed_list else []
+                if fallback:
+                    return fallback
                 raise ValueError(
                     "Report outline generation failed (cite-first requirements not satisfied). "
                     f"reason={validation_error} missing_sections={missing_titles} raw={_snippet(raw)}"

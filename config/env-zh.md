@@ -60,13 +60,13 @@ cp .env.example .env
 | `CHAT_MODEL_NAME` | _(空)_ | 可选：优先使用的对话模型名；当 `CHAT_MODEL_PROVIDER=huggingface` 时可填写 HuggingFace repo id 或本地模型路径。 |
 | `CHAT_MODEL_DEVICE` | `cpu` | HuggingFace 对话模型运行设备（仅当 `CHAT_MODEL_PROVIDER=huggingface` 时使用）。 |
 | `CHAT_MODEL_CACHE_FOLDER` | _(空)_ | 可选：HuggingFace 对话模型权重/Tokenizer 缓存目录。 |
-| `CHAT_API_KEY` | _(空)_ | 对话模型的 API Key（使用云端 API 时必填）。 |
-| `CHAT_API_BASE_URL` | _(空)_ | OpenAI 兼容 API 的 Base URL（例如 `https://api.openai.com/v1`）。 |
+| `CHAT_API_KEY` | _(空)_ | **必填**（当 `CHAT_MODEL_PROVIDER=openai`）：对话模型 API Key。 |
+| `CHAT_API_BASE_URL` | _(空)_ | **必填**（当 `CHAT_MODEL_PROVIDER=openai`）：OpenAI 兼容 API Base URL（例如 `https://api.openai.com/v1`）。 |
 | `OPENAI_CHAT_MODEL` | `gpt-4o-mini` | 兼容/默认的对话模型名（当 `CHAT_MODEL_NAME` 为空时使用）。 |
 | `OPENAI_API_BASE` | _(空)_ | 可选：历史兼容的 OpenAI Base URL 别名。 |
 | `EMBEDDING_MODEL_PROVIDER` | `openai` | 嵌入模型提供方（`openai`=OpenAI 兼容 API，`huggingface`=本地 SentenceTransformers）。 |
-| `EMBEDDING_API_KEY` | _(空)_ | 嵌入模型的 API Key（使用云端 API 时必填）。 |
-| `EMBEDDING_API_BASE_URL` | _(空)_ | 嵌入模型的 Base URL。 |
+| `EMBEDDING_API_KEY` | _(空)_ | **必填**（当 `EMBEDDING_MODEL_PROVIDER=openai`）：嵌入模型 API Key。 |
+| `EMBEDDING_API_BASE_URL` | _(空)_ | **必填**（当 `EMBEDDING_MODEL_PROVIDER=openai`）：嵌入模型 Base URL。 |
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | 默认嵌入模型名称。 |
 | `EMBEDDING_DEVICE` | `cpu` | HuggingFace 嵌入模型运行设备（仅当 `EMBEDDING_MODEL_PROVIDER=huggingface` 时使用）。 |
 | `EMBEDDING_CACHE_FOLDER` | _(空)_ | 可选：HuggingFace 嵌入模型缓存目录。 |
@@ -91,8 +91,8 @@ cp .env.example .env
 | `RERANKER_MODEL_NAME` | `Qwen/Qwen3-Reranker-0.6B` | 默认本地 reranker 模型名（`MODEL_PROFILE=local` 时使用）。 |
 | `RERANKER_CACHE_FOLDER` | `./models/Qwen` | reranker 缓存目录。 |
 | `RERANKER_DEVICE` | `cpu` | reranker 运行设备。 |
-| `OPENAI_API_KEY` | _(空)_ | 可选：全局备用 OpenAI Key（组件 Key 为空时复用）。 |
-| `OPENAI_BASE_URL` | _(空)_ | 可选：全局备用 OpenAI Base URL。 |
+| `OPENAI_API_KEY` | _(空)_ | 全局备用 Key（当各组件 `*_API_KEY` 为空时复用）。只要任一 OpenAI 兼容模块启用且未单独配置 `*_API_KEY`，则该项 **必填**。 |
+| `OPENAI_BASE_URL` | _(空)_ | 全局备用 Base URL（当各组件 `*_API_BASE_URL` 为空时复用）。只要任一 OpenAI 兼容模块启用且未单独配置 `*_API_BASE_URL`，则该项 **必填**。 |
 | `DEVICE` | `cpu` | 可选：共享默认设备（当各组件设备变量为空时使用）。 |
 | `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | 嵌入模型名称；当 `EMBEDDING_MODEL_PROVIDER=huggingface` 时可填写 HuggingFace repo id 或本地模型路径。 |
 | `MODEL_PROFILE` | `api` | 选择配置档（`api` 或 `local`），影响默认 JSON 配置。 |
@@ -278,7 +278,7 @@ cp .env.example .env
 | `DEEPSEARCH_PERSIST_PLAN` | `true` | 是否落盘保存规划。 |
 | `DEEPSEARCH_PLAN_OUTPUT_DIR` | `./local/deepsearch_runs` | 规划输出目录。 |
 | `DEEPSEARCH_ARTIFACT_DIR` | _(空)_ | 可选：DeepSearch 运行 artifacts 根目录（每次 run 会创建 `run_id/` 子目录，写入 plan/reasoning/report/state 等 JSON/Markdown）。 |
-| `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `./local/deepsearch_artifacts` | 工具执行日志目录。 |
+| `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `./local/deepsearch_artifacts` | 工具执行日志/产物目录。 |
 | `DEEPSEARCH_ALLOW_EXTERNAL_CHANNEL` | `false` | 规划器是否允许生成 `web` 步骤（当未设置 `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` 时生效）。 |
 | `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` | `false` | 运行时覆盖外部搜索开关（默认由配置 `external_channel.enabled` + `gap_detection.enable_external_on_gap` 决定）。 |
 | `DEEPSEARCH_SECTIONWISE_WRITER` | `false` | 启用“分节写作 + Memory Bank 检索 + recency retain_k”模式。 |
@@ -287,7 +287,7 @@ cp .env.example .env
 | `TAVILY_API_KEY` | _(空)_ | Tavily 搜索的 Key（启用外部搜索时必填）。 |
 | `DEEPSEARCH_WEB_PROVIDER` | _(空)_ | 外部搜索路由提示（`tavily` / `tool` / `mcp`；其他值会回退到 `tavily`）。 |
 | `DEEPSEARCH_EXTERNAL_CACHE_MODE` | `auto` | 外部搜索录制/回放模式：`off` / `record` / `replay` / `auto`。 |
-| `DEEPSEARCH_EXTERNAL_CACHE_DIR` | _(空)_ | 外部搜索缓存目录；为空时若 run metadata 里有 `artifact_dir` 则使用 `artifact_dir/external_cache`。 |
+| `DEEPSEARCH_EXTERNAL_CACHE_DIR` | `./local/deepsearch_artifacts/external_cache` | 外部搜索缓存目录。 |
 | `DEEPSEARCH_TOOL_HINTS` | _(空)_ | JSON 字符串，覆盖规划器的工具提示。 |
 | `DEEPSEARCH_TOOL_MCP_CONFIG_PATH` | _(空)_ | MCP 服务器 JSON 配置路径。 |
 | `DEEPSEARCH_TOOL_MCP_ADAPTER_CONFIG` | _(空)_ | 适配器配置 JSON。 |
@@ -480,4 +480,4 @@ MinIO 常用变量（仅在启用对象存储集成时才需要设置）：
 
 ---
 
-**使用建议**：复制 `.env.example` 为 `.env`，填入必需密钥（`OPENAI_API_KEY`/`OPENAI_BASE_URL` 与 `JWT_SECRET_KEY`）即可完成本地部署。高级参数优先在 `config/`（JSON/Python）里改；只有确实需要覆盖时再使用环境变量。
+**使用建议**：复制 `.env.example` 为 `.env`，填入必需密钥（`OPENAI_API_KEY`/`OPENAI_BASE_URL`（或按模块配置 `*_API_KEY`/`*_API_BASE_URL`）与 `JWT_SECRET_KEY`）即可完成本地部署。高级参数优先在 `config/`（JSON/Python）里改；只有确实需要覆盖时再使用环境变量。
