@@ -125,20 +125,22 @@ def test_batch_add_chunks_and_graph_data_scopes_owner_metadata():
     assert owner_a_entities and owner_b_entities
 
     for record in owner_a_entities:
-        recalculated = compute_mdhash_id(record['entity_name'], prefix='entity-', owner_id=owner_a)
+        type_key = record.get("entity_type_key") or "entity"
+        recalculated = compute_mdhash_id(f"{record['entity_name_normalized']}|{type_key}", prefix='entity-', owner_id=owner_a)
         assert record['entity_id'] == recalculated
 
     for record in owner_b_entities:
-        recalculated = compute_mdhash_id(record['entity_name'], prefix='entity-', owner_id=owner_b)
+        type_key = record.get("entity_type_key") or "entity"
+        recalculated = compute_mdhash_id(f"{record['entity_name_normalized']}|{type_key}", prefix='entity-', owner_id=owner_b)
         assert record['entity_id'] == recalculated
 
     overlap = {
-        e['entity_name']: e['entity_id']
+        e['entity_name_normalized']: e['entity_id']
         for e in owner_b_entities
     }
     for entity in owner_a_entities:
-        if entity['entity_name'] in overlap:
-            assert entity['entity_id'] != overlap[entity['entity_name']]
+        if entity['entity_name_normalized'] in overlap:
+            assert entity['entity_id'] != overlap[entity['entity_name_normalized']]
 
     mention_payload = next(params for query, params in run_calls if "UNWIND $mentions" in query)['mentions']
     assert {m['owner_id'] for m in mention_payload} == {owner_a, owner_b}
@@ -146,7 +148,11 @@ def test_batch_add_chunks_and_graph_data_scopes_owner_metadata():
     fact_payload = next(params for query, params in run_calls if "UNWIND $facts" in query)['facts']
     assert {f['owner_id'] for f in fact_payload} == {owner_a, owner_b}
     sample_fact = fact_payload[0]
-    expected_fact_id = compute_mdhash_id(sample_fact['fact_text'], prefix='fact-', owner_id=sample_fact['owner_id'])
+    expected_fact_id = compute_mdhash_id(
+        f"{sample_fact['head_id']}|{sample_fact['relation_type']}|{sample_fact['tail_id']}",
+        prefix='fact-',
+        owner_id=sample_fact['owner_id'],
+    )
     assert sample_fact['fact_id'] == expected_fact_id
 
 

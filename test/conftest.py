@@ -15,3 +15,6 @@ def pytest_configure() -> None:
 
     os.environ.setdefault("TASK_QUEUE_MODE", "inprocess")
     os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret")
+    # Knowledge indexing preflight checks attempt to connect to Postgres/Redis/Neo4j.
+    # Unit tests are hermetic by default and should not require external services.
+    os.environ.setdefault("RAGARC_INDEXING_DEPENDENCY_CHECK_MODE", "off")

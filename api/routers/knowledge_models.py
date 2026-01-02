@@ -65,6 +65,8 @@ class GraphExportRequest(BaseModel):
     max_nodes: int = Field(default=500, ge=1, le=KNOWLEDGE_GRAPH_EXPORT_MAX_NODES)
     max_edges: int = Field(default=2000, ge=0, le=KNOWLEDGE_GRAPH_EXPORT_MAX_EDGES)
     include_node_types: Optional[List[str]] = None  # e.g., ['chunk', 'entity', 'fact']
+    directed_edges: bool = False
+    preserve_multi_edges: bool = False
 
 
 class MindmapNode(BaseModel):
@@ -178,4 +180,3 @@ class CheckAccessResponse(BaseModel):
 
 
 JsonDict = Dict[str, Any]
-

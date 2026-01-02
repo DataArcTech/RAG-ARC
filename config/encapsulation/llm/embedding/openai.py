@@ -80,6 +80,19 @@ class OpenAIEmbeddingConfig(AbstractConfig):
         description="Whether the embeddings endpoint accepts list inputs for the `input` field",
     )
 
+    rate_limit_max_retries: int = Field(
+        default=6,
+        description="Extra retries for HTTP 429 rate-limit errors (in addition to OpenAI client retries).",
+    )
+    rate_limit_default_sleep_seconds: float = Field(
+        default=10.0,
+        description="Fallback sleep (seconds) between retries when Retry-After is not available.",
+    )
+    rate_limit_max_sleep_seconds: float = Field(
+        default=60.0,
+        description="Upper bound on sleep (seconds) between rate-limit retries.",
+    )
+
     @model_validator(mode="after")
     def _validate_embedding_dimensions(self):
         # `embedding_dimensions` is optional:

@@ -42,8 +42,23 @@ class _PrunedHippoRAGNeo4jPPRMixin:
 
         normalized_reset = {nid: w / reset_sum for nid, w in node_weights.items()}
 
+        directed_relations = self._direction_sensitive_relations()
+        directed_mode = str(getattr(self, "ppr_directed_mode", "auto") or "auto").strip().lower()
+        # Direction-aware PPR requires relation metadata (predicate) to decide whether to preserve direction.
+        # In 'auto' mode we enable it whenever the KG schema declares direction-sensitive relations.
+        use_directed = (directed_mode == "on") or (directed_mode == "auto" and bool(directed_relations))
+
         # Choose PPR backend
-        if self.ppr_backend == "push":
+        if use_directed:
+            # Direction-aware PPR requires relation metadata; run via igraph+Neo4j edge extraction.
+            pagerank_scores_dict = self._run_ppr_igraph(
+                subgraph_nodes,
+                normalized_reset,
+                damping,
+                owner_id=owner_id,
+                directed_relations=directed_relations,
+            )
+        elif self.ppr_backend == "push":
             pagerank_scores_dict = self._run_ppr_push(subgraph_nodes, normalized_reset, damping, owner_id=owner_id)
         else:
             pagerank_scores_dict = self._run_ppr_igraph(subgraph_nodes, normalized_reset, damping, owner_id=owner_id)
@@ -107,6 +122,7 @@ class _PrunedHippoRAGNeo4jPPRMixin:
         reset: Dict[str, float],
         damping: float,
         owner_id: Optional[uuid.UUID] = None,
+        directed_relations: Optional[Set[str]] = None,
     ) -> Dict[str, float]:
         """
         Run PPR using igraph (fallback method).
@@ -119,11 +135,28 @@ class _PrunedHippoRAGNeo4jPPRMixin:
         Returns:
             Dictionary mapping node_id -> PageRank score
         """
-        # Extract subgraph from cache (faster) or Neo4j (fallback)
-        graph, _, idx_to_node = self.graph_store.extract_subgraph_from_cache(
-            subgraph_nodes,
-            owner_id=self._owner_to_str(owner_id),
-        )
+        # Extract subgraph:
+        # - default path uses the undirected cache for speed
+        # - direction-aware PPR extracts edges (with predicates) from Neo4j to preserve direction semantics
+        if directed_relations:
+            extract_cached = getattr(self.graph_store, "extract_subgraph_from_cache_for_ppr_directed", None)
+            if callable(extract_cached):
+                graph, _, idx_to_node = extract_cached(
+                    subgraph_nodes,
+                    owner_id=self._owner_to_str(owner_id),
+                    directed_relations=directed_relations,
+                )
+            else:
+                graph, _, idx_to_node = self.graph_store.extract_subgraph_from_neo4j_for_ppr(
+                    subgraph_nodes,
+                    owner_id=self._owner_to_str(owner_id),
+                    directed_relations=directed_relations,
+                )
+        else:
+            graph, _, idx_to_node = self.graph_store.extract_subgraph_from_cache(
+                subgraph_nodes,
+                owner_id=self._owner_to_str(owner_id),
+            )
 
         if graph.vcount() == 0:
             logger.warning("Empty subgraph extracted")
@@ -138,7 +171,7 @@ class _PrunedHippoRAGNeo4jPPRMixin:
             # Run PPR on subgraph
             subgraph_pagerank = graph.personalized_pagerank(
                 damping=damping,
-                directed=False,
+                directed=bool(getattr(graph, "is_directed", lambda: False)()),
                 weights="weight",
                 reset=subgraph_reset,
                 implementation="prpack",
@@ -156,3 +189,15 @@ class _PrunedHippoRAGNeo4jPPRMixin:
             logger.error(f"igraph PPR failed: {e}")
             return {}
 
+    def _direction_sensitive_relations(self) -> Set[str]:
+        graph_store = getattr(self, "graph_store", None)
+        schema = getattr(graph_store, "kg_schema", None)
+        if schema is None:
+            return set()
+        get_all = getattr(schema, "direction_sensitive_relations_all", None)
+        if callable(get_all):
+            try:
+                return set(get_all())
+            except Exception:
+                return set()
+        return set()

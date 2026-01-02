@@ -5,9 +5,29 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 
 if [ -f .env ]; then
-  set -a
-  source .env
-  set +a
+  # Load .env as defaults only: already-exported env vars take precedence.
+  eval "$(
+    python3 - <<'PY'
+import os
+import shlex
+
+try:
+    from dotenv import dotenv_values
+except Exception:
+    dotenv_values = None
+
+values = {}
+if dotenv_values is not None:
+    values = dotenv_values(".env") or {}
+
+for key, value in values.items():
+    if value is None:
+        continue
+    if key in os.environ and os.environ.get(key) not in (None, ""):
+        continue
+    print(f"export {key}={shlex.quote(str(value))}")
+PY
+  )"
 fi
 
 export TASK_QUEUE_MODE="${TASK_QUEUE_MODE:-celery}"

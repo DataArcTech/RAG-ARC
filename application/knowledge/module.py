@@ -241,7 +241,7 @@ class Knowledge(KnowledgePermissionMixin, AbstractModule):
                         default_mode="strict",
                     )
                     failure = format_dependency_failures(health)
-                    if failure:
+                    if failure and health.get("mode") == "strict":
                         raise RuntimeError(failure)
                 except Exception as exc:
                     err = f"dependency health check failed: {exc}"

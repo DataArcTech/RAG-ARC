@@ -250,7 +250,19 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
 
         # 3. Generate fact embeddings and add to FAISS Flat
         # Facts are stored as RELATES_TO relationships between entities
-        fact_query = "MATCH ()-[r:RELATES_TO]->() RETURN r.fact_id AS fact_id, r.text AS text, r.owner_id AS owner_id"
+        fact_query = """
+        MATCH (h:Entity)-[r:RELATES_TO]->(t:Entity)
+        RETURN r.fact_id AS fact_id,
+               r.text AS text,
+               r.predicate AS predicate,
+               r.owner_id AS owner_id,
+               h.entity_id AS head_id,
+               t.entity_id AS tail_id,
+               h.entity_name AS head_name,
+               t.entity_name AS tail_name,
+               h.entity_type AS head_type,
+               t.entity_type AS tail_type
+        """
         facts = self._execute_query(fact_query)
 
         new_facts = []
@@ -262,6 +274,19 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
                 metadata = {'type': 'fact'}
                 if fact_owner:
                     metadata['owner_id'] = fact_owner
+                # Preserve structured endpoints for downstream retrieval (avoids re-parsing text and
+                # allows representing same-name different-type entities).
+                for key in (
+                    "head_id",
+                    "tail_id",
+                    "head_name",
+                    "tail_name",
+                    "head_type",
+                    "tail_type",
+                    "predicate",
+                ):
+                    if record.get(key) is not None:
+                        metadata[key] = record.get(key)
                 new_facts.append(Chunk(
                     id=fact_id,
                     content=fact_text,
@@ -511,5 +536,4 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
             logger.info(f"Added {num_synonym_edges} unique synonymy edges ({len(edges_to_add)} directional edges)")
         else:
             logger.info("No synonymy edges to add")
-
 

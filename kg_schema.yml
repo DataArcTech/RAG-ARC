@@ -1,0 +1,75 @@
+# Knowledge Graph Schema Template (RAG-ARC / HippoRAG)
+#
+# This file is consumed by the Neo4j HippoRAG store during indexing to:
+# - Normalize predicates to a bounded canonical set (prevents predicate explosion)
+# - Optionally enforce an allow-list (drop unknown/out-of-contract relations)
+# - Mark direction-sensitive relations for downstream tools/export
+#
+# Tests MUST NOT read this file; build schemas inline in `test/` instead.
+
+version: v1
+default_domain: default
+
+domains:
+  default:
+    # Optional: entity canonicalization helpers used for aggregation/analytics.
+    # NOTE: This does NOT force-merge entity nodes; it populates `entity_canonical_name`.
+    # - `entity_aliases`: normalized raw name -> canonical name
+    # - `entity_suffixes_to_strip`: suffix phrases removed from the end of names
+    entity_aliases: {}
+    entity_suffixes_to_strip: []
+
+    # If non-empty: only relations in this allow-list are persisted.
+    # If empty: the store will not hard-reject by allow-list, but will still normalize/collapse predicates.
+    allowed_relations:
+      - RELATED_TO
+      - OWNS
+      - OWNED_BY
+      - LOCATED_IN
+      - PART_OF
+      - HAS_PART
+      - WORKS_FOR
+      - EMPLOYS
+      - PRODUCES
+      - SUPPLIES
+      - USES
+      - HAS_FEATURE
+      - HAS_POLICY
+      - HAS_CLAUSE
+      - HAS_COVERAGE
+      - HAS_BENEFIT
+
+    # Raw predicate text -> canonical predicate.
+    # Keys are matched after `text_processing` (lowercase + strip punctuation).
+    relation_aliases:
+      "located in": LOCATED_IN
+      "is located in": LOCATED_IN
+      "based in": LOCATED_IN
+      "owns": OWNS
+      "owned by": OWNED_BY
+      "part of": PART_OF
+      "has part": HAS_PART
+      "works for": WORKS_FOR
+      "employs": EMPLOYS
+      "supplies": SUPPLIES
+      "produces": PRODUCES
+      "uses": USES
+      "has feature": HAS_FEATURE
+      "has clause": HAS_CLAUSE
+      "has policy": HAS_POLICY
+      "has coverage": HAS_COVERAGE
+      "has benefit": HAS_BENEFIT
+
+    # How to handle predicates not matched by `relation_aliases`.
+    # - reject: drop the triple
+    # - keep: keep (normalized) token as predicate
+    # - collapse: replace with `unknown_predicate_fallback`
+    unknown_predicate_policy: collapse
+    unknown_predicate_fallback: RELATED_TO
+
+    # Relations whose direction must be preserved end-to-end (query + export + tools).
+    direction_sensitive_relations:
+      - OWNS
+      - OWNED_BY
+      - PART_OF
+      - HAS_PART

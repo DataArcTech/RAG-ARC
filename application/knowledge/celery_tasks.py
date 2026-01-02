@@ -5,7 +5,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional, List
 
-from celery.exceptions import Retry
+from celery.exceptions import MaxRetriesExceededError, Retry
 from fastapi import HTTPException
 
 from encapsulation.database.cache_db.redis_db import RedisDB
@@ -33,7 +33,23 @@ def _run_coroutine(coro):  # noqa: ANN001
 
 def _acquire_lock(client, key: str, token: str, ttl_seconds: int) -> bool:
     try:
-        return bool(client.set(key, token, nx=True, ex=int(ttl_seconds)))
+        ttl_seconds = int(ttl_seconds)
+        if ttl_seconds <= 0:
+            ttl_seconds = 1
+        acquired = bool(client.set(key, token, nx=True, ex=ttl_seconds))
+        if acquired:
+            return True
+        # Re-entrant lock: when a Celery task is retried it keeps the same `run_id` (task id),
+        # so allow the same token to "re-acquire" and refresh TTL instead of deadlocking for hours.
+        existing = client.get(key)
+        if existing is None:
+            return False
+        if isinstance(existing, bytes):
+            existing = existing.decode("utf-8", errors="ignore")
+        if str(existing) != str(token):
+            return False
+        client.expire(key, ttl_seconds)
+        return True
     except Exception:
         return False
 
@@ -112,7 +128,7 @@ def index_file(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
             pass
         try:
             raise self.retry(exc=RuntimeError("file op lock busy"), countdown=countdown, max_retries=max_retries)
-        except Exception as exc:  # noqa: BLE001
+        except MaxRetriesExceededError as exc:
             result_payload = {"success": False, "file_id": file_id, "error_message": "failed to acquire file lock"}
             task_queue.set_task_result_and_finalize_run(
                 run_id,
@@ -172,7 +188,7 @@ def index_file(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
                 default_mode="strict",
             )
             failure = format_dependency_failures(health)
-            if failure:
+            if failure and health.get("mode") == "strict":
                 raise RuntimeError(failure)
         except Exception as exc:  # noqa: BLE001
             err = f"dependency health check failed: {exc}"
@@ -378,7 +394,7 @@ def delete_file(self, *, file_id: str, owner_id: str, delete_file_metadata: bool
             pass
         try:
             raise self.retry(exc=RuntimeError("file op lock busy"), countdown=countdown, max_retries=max_retries)
-        except Exception as exc:  # noqa: BLE001
+        except MaxRetriesExceededError as exc:
             result_payload = {"success": False, "file_id": file_id, "error_message": "failed to acquire file lock"}
             task_queue.set_task_result_and_finalize_run(
                 run_id,
@@ -515,6 +531,8 @@ def export_graph(
     max_nodes: int = 500,
     max_edges: int = 2000,
     include_node_types: Optional[List[str]] = None,
+    directed_edges: bool = False,
+    preserve_multi_edges: bool = False,
 ) -> Dict[str, Any]:
     ensure_initialized()
 
@@ -535,6 +553,8 @@ def export_graph(
                 "max_nodes": int(max_nodes),
                 "max_edges": int(max_edges),
                 "include_node_types": include_node_types or [],
+                "directed_edges": bool(directed_edges),
+                "preserve_multi_edges": bool(preserve_multi_edges),
             },
         )
 
@@ -578,6 +598,8 @@ def export_graph(
             max_nodes=int(max_nodes),
             max_edges=int(max_edges),
             include_node_types=include_node_types,
+            directed_edges=bool(directed_edges),
+            preserve_multi_edges=bool(preserve_multi_edges),
         )
 
         task_queue.set_task_result_and_finalize_run(

@@ -31,6 +31,8 @@ def export_full_graph_payload(
     max_nodes: int = 500,
     max_edges: int = 2000,
     include_node_types: Optional[list[str]] = None,
+    directed_edges: bool = False,
+    preserve_multi_edges: bool = False,
 ) -> dict[str, Any]:
     graph_store = resolve_graph_store(rag_inference)
     if graph_store is None:
@@ -46,5 +48,6 @@ def export_full_graph_payload(
         include_node_types=include_node_types,
         owner_id=owner_scope,
         owner_scope_label=owner_scope,
+        directed_edges=bool(directed_edges),
+        preserve_multi_edges=bool(preserve_multi_edges),
     )
-

@@ -125,7 +125,6 @@ async def upload_file(
             detail="Authentication required"
         )
     try:
-        print(f"Uploading file: {file.filename} for owner_id: {user.id}")
         # Convert string UUID to UUID object
         doc_id = await get_knowledge_handler().upload_file(file, user.id, relative_path=relative_path)
         return doc_id
@@ -430,6 +429,8 @@ async def export_knowledge_graph_async(
             "max_nodes": int(request.max_nodes),
             "max_edges": int(request.max_edges),
             "include_node_types": request.include_node_types or [],
+            "directed_edges": bool(getattr(request, "directed_edges", False)),
+            "preserve_multi_edges": bool(getattr(request, "preserve_multi_edges", False)),
         },
     )
 
@@ -442,6 +443,8 @@ async def export_knowledge_graph_async(
             "max_nodes": int(request.max_nodes),
             "max_edges": int(request.max_edges),
             "include_node_types": request.include_node_types,
+            "directed_edges": bool(getattr(request, "directed_edges", False)),
+            "preserve_multi_edges": bool(getattr(request, "preserve_multi_edges", False)),
         },
         task_id=run_id,
         queue=queue,
@@ -490,6 +493,8 @@ async def export_knowledge_graph(
                 max_nodes=int(request.max_nodes),
                 max_edges=int(request.max_edges),
                 include_node_types=request.include_node_types,
+                directed_edges=bool(getattr(request, "directed_edges", False)),
+                preserve_multi_edges=bool(getattr(request, "preserve_multi_edges", False)),
             )
 
         from framework.thread_pool import get_thread_pool
@@ -501,6 +506,8 @@ async def export_knowledge_graph(
             max_nodes=int(request.max_nodes),
             max_edges=int(request.max_edges),
             include_node_types=request.include_node_types,
+            directed_edges=bool(getattr(request, "directed_edges", False)),
+            preserve_multi_edges=bool(getattr(request, "preserve_multi_edges", False)),
         )
 
     except HTTPException:

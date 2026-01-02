@@ -111,6 +111,11 @@ cp .env.example .env
 | `BM25_INDEX_PATH` | `./data/unified_bm25_index` | 统一 BM25 索引目录。 |
 | `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | 图索引/向量缓存落盘目录（Neo4j HippoRAG）。 |
 | `GRAPH_INDEX_NAME` | `index` | 图索引文件前缀名。 |
+| `KG_SCHEMA_PATH` | `./kg_schema.yml` | Neo4j HippoRAG 的 KG schema YAML 路径（谓词治理 + 方向敏感集合）。 |
+
+补充说明：
+- **FAISS 指纹保护**：FAISS 的 `.pkl` 元数据会写入 `embedding_fingerprint`（provider/model/dim）。当切换 embedding 模型/维度时，建议设置新的 `FAISS_INDEX_PATH`（推荐）或清理重建索引；否则系统会 fail-fast，避免“静默索引污染”。
+- **E2E 隔离**：真实服务测试建议把上述路径指向隔离目录（例如 `./local/e2e_*`），避免污染默认的 `./data/*`。
 
 ## 2. 证据输出控制
 
@@ -348,6 +353,8 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `HF_TOKEN` | _(空)_ | HuggingFace Token（下载受限模型时使用）。 |
 | `HF_ENDPOINT` | _(空)_ | 可选：HuggingFace Endpoint 覆盖（例如 `https://hf-mirror.com`）。 |
 | `LOG_LEVEL` | `INFO` | 日志等级。 |
+| `RAGARC_DEPENDENCY_CHECK_MODE` | `warn` | 应用启动依赖检查模式（Postgres/Redis/Neo4j）：`off`/`warn`/`strict`。注意：当前 API 启动在该变量未设置时默认走 `strict`。 |
+| `RAGARC_INDEXING_DEPENDENCY_CHECK_MODE` | `strict` | 知识库索引任务依赖检查模式（`/knowledge/*` 索引与 Celery 任务使用）：`off`/`warn`/`strict`。单测为保持 hermetic 默认设置为 `off`。 |
 
 ## 8. 文件/解析路径
 
@@ -367,7 +374,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | --- | --- | --- |
 | `NEO4J_URL` | `bolt://localhost:7687` | Neo4j 连接字符串。 |
 | `NEO4J_USERNAME` | `neo4j` | Neo4j 用户名。 |
-| `NEO4J_PASSWORD` | `12345678` | Neo4j 密码。 |
+| `NEO4J_PASSWORD` | _(空)_ | Neo4j 密码。 |
 | `NEO4J_DATABASE` | `neo4j` | 数据库名称。 |
 | `EXPOSE_NEO4J` | `false` | 是否开放 Neo4j Browser/Bolt 端口。 |
 | `NEO4J_HTTP_PORT` | `7474` | 当 `EXPOSE_NEO4J=true` 时映射到宿主机的 HTTP 端口。 |

@@ -20,6 +20,7 @@ warnings.filterwarnings(
 import faiss
 import neo4j
 
+from core.knowledge_graph.schema import KGSchemaConfig, load_schema_from_yaml
 from encapsulation.database.graph_db.base import GraphStore
 from encapsulation.database.graph_db.pruned_hipporag_neo4j_cache import _PrunedHippoRAGNeo4jCacheMixin
 from encapsulation.database.graph_db.pruned_hipporag_neo4j_embeddings import _PrunedHippoRAGNeo4jEmbeddingsMixin
@@ -108,6 +109,27 @@ class PrunedHippoRAGNeo4jStore(
         """
         super().__init__(config)
         self._rwlock = RWLock()
+
+        # KG schema governance (relation whitelist/normalization/provenance knobs).
+        self.kg_schema: KGSchemaConfig | None = None
+        schema_path = getattr(config, "kg_schema_path", None)
+        if schema_path:
+            try:
+                if os.path.exists(str(schema_path)):
+                    self.kg_schema = load_schema_from_yaml(schema_path)
+                    logger.info("Loaded KG schema: path=%s version=%s", schema_path, self.kg_schema.version)
+                else:
+                    logger.warning("KG schema file not found (skipping): path=%s", schema_path)
+            except Exception as exc:
+                logger.error("Failed to load KG schema (skipping): path=%s error=%s", schema_path, exc)
+        self.kg_schema_loaded = self.kg_schema is not None
+        self.kg_schema_version = getattr(self.kg_schema, "version", None) if self.kg_schema_loaded else None
+        logger.info(
+            "KG schema status: loaded=%s version=%s path=%s",
+            self.kg_schema_loaded,
+            self.kg_schema_version,
+            schema_path,
+        )
 
         # Initialize embedding model
         self.embedding_model = config.embedding.build()
@@ -202,25 +224,76 @@ class PrunedHippoRAGNeo4jStore(
         - Note: Facts are now stored as relationships, not nodes
         """
         with self._driver.session(database=self.database) as session:
-            # Chunk constraints and indices
-            try:
-                session.run("CREATE CONSTRAINT chunk_id_unique IF NOT EXISTS FOR (c:Chunk) REQUIRE c.chunk_id IS UNIQUE")
-                session.run("CREATE INDEX chunk_owner IF NOT EXISTS FOR (c:Chunk) ON (c.owner_id)")
-                logger.info("Created Chunk constraints and indices")
-            except Exception as e:
-                logger.warning(f"Failed to create Chunk constraints: {e}")
+            for stmt in self.neo4j_schema_statements():
+                try:
+                    session.run(stmt)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to apply Neo4j schema statement: %s error=%s", stmt, exc)
+            logger.info("Neo4j schema initialized/verified (Facts stored as relationships)")
 
-            # Entity constraints and indices
-            try:
-                session.run("CREATE CONSTRAINT entity_id_unique IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_id IS UNIQUE")
-                session.run("CREATE INDEX entity_name IF NOT EXISTS FOR (e:Entity) ON (e.entity_name)")
-                logger.info("Created Entity constraints and indices")
-            except Exception as e:
-                logger.warning(f"Failed to create Entity constraints: {e}")
+    @staticmethod
+    def neo4j_schema_statements() -> List[str]:
+        """
+        Return Neo4j DDL statements required by HippoRAG + DeepSearch Cypher tools.
 
-            # Note: Facts are now stored as :Fact relationships between entities
-            # No separate Fact nodes needed
-            logger.info("Schema initialized (Facts stored as relationships)")
+        Notes:
+        - Neo4j cannot enforce relationship-level uniqueness constraints; `fact_id` uniqueness is ensured
+          by construction (owner-scoped hash) and MERGE patterns. We still create relationship indexes
+          and existence constraints for query stability and diagnostics.
+        """
+        return [
+            # Chunk nodes
+            "CREATE CONSTRAINT chunk_id_unique IF NOT EXISTS FOR (c:Chunk) REQUIRE c.chunk_id IS UNIQUE",
+            "CREATE CONSTRAINT chunk_owner_required IF NOT EXISTS FOR (c:Chunk) REQUIRE c.owner_id IS NOT NULL",
+            "CREATE INDEX chunk_owner IF NOT EXISTS FOR (c:Chunk) ON (c.owner_id)",
+            # Entity nodes
+            "CREATE CONSTRAINT entity_id_unique IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_id IS UNIQUE",
+            "CREATE CONSTRAINT entity_owner_required IF NOT EXISTS FOR (e:Entity) REQUIRE e.owner_id IS NOT NULL",
+            # Legacy constraint (owner_id, entity_name) prevented representing same-name different-type entities.
+            "DROP CONSTRAINT entity_owner_name_unique IF EXISTS",
+            "CREATE CONSTRAINT entity_type_required IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_type IS NOT NULL",
+            "CREATE CONSTRAINT entity_type_key_required IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_type_key IS NOT NULL",
+            "CREATE CONSTRAINT entity_owner_name_type_unique IF NOT EXISTS FOR (e:Entity) REQUIRE (e.owner_id, e.entity_name_normalized, e.entity_type_key) IS UNIQUE",
+            "CREATE CONSTRAINT entity_name_normalized_required IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_name_normalized IS NOT NULL",
+            "CREATE INDEX entity_name IF NOT EXISTS FOR (e:Entity) ON (e.entity_name)",
+            "CREATE INDEX entity_owner_name IF NOT EXISTS FOR (e:Entity) ON (e.owner_id, e.entity_name)",
+            "CREATE INDEX entity_owner_name_normalized IF NOT EXISTS FOR (e:Entity) ON (e.owner_id, e.entity_name_normalized)",
+            "CREATE INDEX entity_owner_type IF NOT EXISTS FOR (e:Entity) ON (e.owner_id, e.entity_type)",
+            "CREATE INDEX entity_owner_type_key IF NOT EXISTS FOR (e:Entity) ON (e.owner_id, e.entity_type_key)",
+            "CREATE INDEX entity_owner_canonical_name IF NOT EXISTS FOR (e:Entity) ON (e.owner_id, e.entity_canonical_name)",
+            "CREATE INDEX entity_owner_canonical_key IF NOT EXISTS FOR (e:Entity) ON (e.owner_id, e.entity_canonical_key)",
+            # Relationships: MENTIONS
+            "CREATE CONSTRAINT mentions_owner_required IF NOT EXISTS FOR ()-[r:MENTIONS]-() REQUIRE r.owner_id IS NOT NULL",
+            "CREATE INDEX mentions_owner IF NOT EXISTS FOR ()-[r:MENTIONS]-() ON (r.owner_id)",
+            # Relationships: RELATES_TO (facts)
+            "CREATE CONSTRAINT relates_owner_required IF NOT EXISTS FOR ()-[r:RELATES_TO]-() REQUIRE r.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT relates_fact_id_required IF NOT EXISTS FOR ()-[r:RELATES_TO]-() REQUIRE r.fact_id IS NOT NULL",
+            "CREATE CONSTRAINT relates_predicate_required IF NOT EXISTS FOR ()-[r:RELATES_TO]-() REQUIRE r.predicate IS NOT NULL",
+            "CREATE INDEX relates_fact_id IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.fact_id)",
+            "CREATE INDEX relates_owner_fact_id IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.owner_id, r.fact_id)",
+            "CREATE INDEX relates_owner_predicate IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.owner_id, r.predicate)",
+            # Relationships: SIMILAR_TO (synonymy)
+            "CREATE CONSTRAINT similar_owner_required IF NOT EXISTS FOR ()-[r:SIMILAR_TO]-() REQUIRE r.owner_id IS NOT NULL",
+            "CREATE INDEX similar_owner IF NOT EXISTS FOR ()-[r:SIMILAR_TO]-() ON (r.owner_id)",
+            # Nodes: KG ingest metadata (per owner).
+            "CREATE CONSTRAINT kg_ingest_meta_owner_unique IF NOT EXISTS FOR (m:KGIngestMeta) REQUIRE m.owner_id IS UNIQUE",
+            # Nodes: canonical entity keys (queryable alias/canonicalization layer).
+            "CREATE CONSTRAINT entity_canonical_id_unique IF NOT EXISTS FOR (c:EntityCanonical) REQUIRE c.canonical_id IS UNIQUE",
+            "CREATE CONSTRAINT entity_canonical_owner_required IF NOT EXISTS FOR (c:EntityCanonical) REQUIRE c.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT entity_canonical_key_required IF NOT EXISTS FOR (c:EntityCanonical) REQUIRE c.canonical_key IS NOT NULL",
+            "CREATE INDEX entity_canonical_owner_key IF NOT EXISTS FOR (c:EntityCanonical) ON (c.owner_id, c.canonical_key)",
+            "CREATE INDEX entity_canonical_owner_name IF NOT EXISTS FOR (c:EntityCanonical) ON (c.owner_id, c.canonical_name)",
+            # Nodes: entity aliases (queryable alias resolution).
+            "CREATE CONSTRAINT entity_alias_id_unique IF NOT EXISTS FOR (a:EntityAlias) REQUIRE a.alias_id IS UNIQUE",
+            "CREATE CONSTRAINT entity_alias_owner_required IF NOT EXISTS FOR (a:EntityAlias) REQUIRE a.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT entity_alias_text_required IF NOT EXISTS FOR (a:EntityAlias) REQUIRE a.alias_text_normalized IS NOT NULL",
+            "CREATE INDEX entity_alias_owner_text IF NOT EXISTS FOR (a:EntityAlias) ON (a.owner_id, a.alias_text_normalized)",
+            # Relationships: CANONICAL_OF / ALIAS_OF.
+            "CREATE CONSTRAINT canonical_of_owner_required IF NOT EXISTS FOR ()-[r:CANONICAL_OF]-() REQUIRE r.owner_id IS NOT NULL",
+            "CREATE INDEX canonical_of_owner IF NOT EXISTS FOR ()-[r:CANONICAL_OF]-() ON (r.owner_id)",
+            "CREATE CONSTRAINT alias_of_owner_required IF NOT EXISTS FOR ()-[r:ALIAS_OF]-() REQUIRE r.owner_id IS NOT NULL",
+            "CREATE INDEX alias_of_owner IF NOT EXISTS FOR ()-[r:ALIAS_OF]-() ON (r.owner_id)",
+        ]
 
     def _execute_query(self, query: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
@@ -236,6 +309,3 @@ class PrunedHippoRAGNeo4jStore(
         with self._driver.session(database=self.database) as session:
             result = session.run(query, params or {})
             return [record.data() for record in result]
-
-
-

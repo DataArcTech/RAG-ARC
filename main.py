@@ -132,7 +132,7 @@ async def lifespan(app: FastAPI):
     try:
         from core.utils.dependency_health import check_dependencies
 
-        health = check_dependencies()
+        health = check_dependencies(default_mode="strict")
         checks = health.get("checks") or {}
         logger.info(
             "Dependency health: postgres=%s redis=%s neo4j=%s (mode=%s)",

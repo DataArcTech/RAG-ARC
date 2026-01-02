@@ -46,7 +46,7 @@ def check_neo4j() -> Dict[str, Any]:
 
         url = os.getenv("NEO4J_URL", "bolt://localhost:7687")
         username = os.getenv("NEO4J_USERNAME", "neo4j")
-        password = os.getenv("NEO4J_PASSWORD", "12345678")
+        password = os.getenv("NEO4J_PASSWORD", "")
         database = os.getenv("NEO4J_DATABASE", "neo4j")
 
         driver = neo4j.GraphDatabase.driver(url, auth=(username, password), notifications_min_severity="OFF")
@@ -106,4 +106,3 @@ def format_dependency_failures(health: Dict[str, Any]) -> Optional[str]:
     if not failures:
         return None
     return "; ".join(f"{name}: {err}" for name, err in failures)
-

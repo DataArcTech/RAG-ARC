@@ -21,6 +21,7 @@ from core.graph_adapter.base import (
     GraphAdapterMetadata,
     GraphDeepSearchAdapter,
 )
+from core.graph_adapter.cypher import assert_read_only_cypher
 from core.graph_adapter.registry import register_adapter
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 from core.deepsearch.utils.file_scope import FileScope, chunk_in_scope
@@ -76,6 +77,38 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
 
         options = dict(query_options) if isinstance(query_options, Mapping) else {}
         return await asyncio.to_thread(self._aquery_subgraph_sync, query, channel, scope_token, options)
+
+    async def acypher(
+        self,
+        cypher: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        access_scope: Optional[GraphAccessScope] = None,
+    ) -> list[Dict[str, Any]]:
+        assert_read_only_cypher(str(cypher or ""))
+        scope_token = self._scope_token(access_scope)
+        if scope_token is None:
+            raise RuntimeError("HippoRAGGraphAdapter.acypher requires an access scope")
+
+        graph_store = getattr(self.retriever, "graph_store", None)
+        if graph_store is None or not hasattr(graph_store, "_execute_query"):
+            raise RuntimeError("HippoRAGGraphAdapter.acypher requires a graph_store with _execute_query")
+
+        owner_key = scope_token
+        try:
+            owner_key = graph_store._owner_key(scope_token)
+        except Exception:
+            owner_key = scope_token
+
+        merged: Dict[str, Any] = dict(params or {})
+        # Prevent callers from overriding owner scope or global-owner sentinel via params (security boundary).
+        reserved = {"owner_id", "global_owner"}
+        overridden = sorted(reserved.intersection(merged.keys()))
+        if overridden:
+            raise ValueError(f"HippoRAGGraphAdapter.acypher params must not include reserved keys: {overridden}")
+        merged["global_owner"] = getattr(graph_store, "OWNER_GLOBAL_KEY", "__GLOBAL__")
+        merged["owner_id"] = owner_key
+        return await asyncio.to_thread(graph_store._execute_query, str(cypher), merged)
 
     async def context_filter(
         self,
@@ -179,7 +212,7 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         visited = seeds[: max_depth_int] if seeds else []
         base = {"strategy": strategy_name, "hops": max_depth_int, "visited": visited, "scope": scope_token}
 
-        if strategy_name not in {"ppr_prefetch", "bridge_lookup"}:
+        if strategy_name not in {"ppr_prefetch", "bridge_lookup", "beam_search"}:
             return base
 
         question = str(strategy.get("question") or "").strip()
@@ -206,6 +239,18 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             merged = dict(base)
             merged["bridges"] = bridges
             merged["hops"] = min(max_depth_int, 3) if max_depth_int else 1
+            return merged
+
+        if strategy_name == "beam_search":
+            beam_size_raw = strategy.get("beam_size")
+            try:
+                beam_size_int = int(beam_size_raw) if beam_size_raw is not None else 3
+            except (TypeError, ValueError):
+                beam_size_int = 3
+            beam_size_int = max(1, min(beam_size_int, 8))
+            paths = self._beam_search_paths(entity_edges, seeds=seeds, beam_size=beam_size_int, max_depth=max_depth_int)
+            merged = dict(base)
+            merged["paths"] = paths
             return merged
 
         max_paths = strategy.get("max_paths")
@@ -256,8 +301,13 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         )
         chain_capability = GraphAdapterCapability(
             name="chain_of_exploration",
-            modes=("ppr_chain", "ppr_prefetch", "bridge_lookup"),
+            modes=("ppr_chain", "ppr_prefetch", "bridge_lookup", "beam_search"),
             metrics={"chain_depth": self.summary_max_chunks},
+        )
+        cypher_capability = GraphAdapterCapability(
+            name="cypher_query",
+            modes=("neo4j",),
+            metrics={"read_only": True},
         )
         concurrency_capability = GraphAdapterCapability(
             name="concurrency",
@@ -269,14 +319,14 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             graph_type=self.extra_metadata.get("graph_type", "hipporag"),
             version=self.adapter_version,
             owner=self.extra_metadata.get("owner"),
-            capabilities=(retrieval_capability, chain_capability, concurrency_capability),
+            capabilities=(retrieval_capability, chain_capability, cypher_capability, concurrency_capability),
             domain_tags=tuple(self.extra_metadata.get("domain_tags", [])),
             config_fingerprint=self.extra_metadata.get("config_fingerprint"),
         )
 
     @staticmethod
-    def _entity_relation_edges(edges: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-        relations: List[Dict[str, str]] = []
+    def _entity_relation_edges(edges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        relations: List[Dict[str, Any]] = []
         for edge in edges:
             if not isinstance(edge, dict):
                 continue
@@ -287,11 +337,24 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             tail = str(edge.get("target") or "").strip()
             if not head or not tail:
                 continue
-            relations.append({"head": head, "relation": relation, "tail": tail})
+            try:
+                weight = float(edge.get("weight", 1.0))
+            except (TypeError, ValueError):
+                weight = 1.0
+            relations.append(
+                {
+                    "head": head,
+                    "relation": relation,
+                    "tail": tail,
+                    "directed": bool(edge.get("directed", False)),
+                    "weight": weight,
+                    "fact_id": edge.get("fact_id"),
+                }
+            )
         return relations
 
     @staticmethod
-    def _extract_bridges(relations: List[Dict[str, str]], *, seeds: List[str]) -> List[Dict[str, Any]]:
+    def _extract_bridges(relations: List[Dict[str, Any]], *, seeds: List[str]) -> List[Dict[str, Any]]:
         if not seeds:
             return []
         seed_set = {seed for seed in seeds if seed}
@@ -308,7 +371,7 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
 
     @staticmethod
     def _prefetch_paths(
-        relations: List[Dict[str, str]],
+        relations: List[Dict[str, Any]],
         *,
         seeds: List[str],
         max_depth: int,
@@ -336,6 +399,96 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             if len(paths) >= max_paths:
                 break
         return paths
+
+    @staticmethod
+    def _beam_search_paths(
+        relations: List[Dict[str, Any]],
+        *,
+        seeds: List[str],
+        beam_size: int,
+        max_depth: int,
+    ) -> List[Dict[str, Any]]:
+        if not relations:
+            return []
+
+        seed_set = {seed for seed in seeds if seed}
+        adjacency: Dict[str, List[Dict[str, Any]]] = {}
+        for rel in relations:
+            head = str(rel.get("head") or "").strip()
+            tail = str(rel.get("tail") or "").strip()
+            relation = str(rel.get("relation") or "").strip()
+            if not head or not tail or not relation:
+                continue
+            directed = bool(rel.get("directed", False))
+            try:
+                weight = float(rel.get("weight", 1.0))
+            except (TypeError, ValueError):
+                weight = 1.0
+            adjacency.setdefault(head, []).append({"tail": tail, "relation": relation, "weight": weight})
+            if not directed:
+                adjacency.setdefault(tail, []).append({"tail": head, "relation": relation, "weight": weight})
+
+        starts = seeds[: max(1, min(len(seeds), 6))] if seeds else list(adjacency.keys())[:3]
+        if not starts:
+            return []
+
+        beam_size = max(1, min(int(beam_size), 8))
+        max_hops = max(1, min(int(max_depth), 6))
+
+        beams: List[Dict[str, Any]] = [{"nodes": [s], "edges": [], "score": 0.0} for s in starts]
+        candidates: List[Dict[str, Any]] = []
+
+        for _ in range(max_hops):
+            expanded: List[Dict[str, Any]] = []
+            for state in beams:
+                nodes = state["nodes"]
+                last = nodes[-1]
+                for edge in adjacency.get(last, []):
+                    nxt = str(edge.get("tail") or "").strip()
+                    if not nxt or nxt in nodes:
+                        continue
+                    rel_name = str(edge.get("relation") or "").strip()
+                    weight = float(edge.get("weight", 1.0))
+                    new_nodes = nodes + [nxt]
+                    new_edges = list(state["edges"]) + [{"head": last, "relation": rel_name, "tail": nxt}]
+                    score = float(state["score"]) + weight
+                    if seed_set and nxt in seed_set:
+                        score += 0.5
+                    expanded.append({"nodes": new_nodes, "edges": new_edges, "score": score})
+
+            if not expanded:
+                break
+            expanded.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+            beams = expanded[: max(beam_size * 3, beam_size)]
+
+            for state in beams:
+                if len(state["nodes"]) < 2:
+                    continue
+                if seed_set and state["nodes"][-1] not in seed_set:
+                    continue
+                candidates.append(state)
+
+        if not candidates:
+            return []
+
+        unique: Dict[str, Dict[str, Any]] = {}
+        for state in sorted(candidates, key=lambda item: float(item.get("score", 0.0)), reverse=True):
+            nodes = state["nodes"]
+            signature = "->".join(nodes)
+            if signature in unique:
+                continue
+            content = signature + " | " + "; ".join(f"{e['head']}[{e['relation']}]{e['tail']}" for e in state["edges"])
+            path_id = hashed_chunk_id(source="beam_search", content=content, prefix="path")
+            unique[signature] = {
+                "path_id": path_id,
+                "nodes": nodes,
+                "edges": state["edges"],
+                "score": float(state.get("score", 0.0)),
+            }
+            if len(unique) >= beam_size:
+                break
+
+        return list(unique.values())
 
     @staticmethod
     def _shortest_path(adjacency: Dict[str, List[str]], source: str, target: str, *, max_depth: int) -> List[str]:
@@ -667,6 +820,9 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
                         owner_id=subgraph_info.get("owner_id") or subgraph_info.get("owner_scope"),
                         owner_scope_label=subgraph_info.get("owner_scope"),
                         max_edges=DEEPSEARCH_GRAPH_EXPORT_MAX_EDGES,
+                        # Preserve multiple predicates between the same node pair for reasoning/debug,
+                        # while letting the exporter decide per-edge direction based on KG schema.
+                        preserve_multi_edges=True,
                     )
                 return GraphExporter.export_subgraph(
                     graph_store=graph_store,

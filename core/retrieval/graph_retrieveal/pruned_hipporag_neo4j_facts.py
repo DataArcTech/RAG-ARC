@@ -48,7 +48,7 @@ class _PrunedHippoRAGNeo4jFactsMixin:
         indices: List[int],
         fact_ids: List[str],
         owner_id: Optional[uuid.UUID] = None,
-    ) -> List[Tuple[str, str, str, Optional[str]]]:
+    ) -> List[Tuple]:
         """
         Retrieve fact triples from FAISS docstore (no database query needed).
 
@@ -57,11 +57,13 @@ class _PrunedHippoRAGNeo4jFactsMixin:
             fact_ids: List of fact IDs
 
         Returns:
-            List of fact triples (head, relation, tail)
+            List of fact tuples:
+            - Legacy: (head, relation, tail, owner)
+            - Extended (when available): (head, relation, tail, owner, head_id, tail_id, head_type, tail_type)
         """
         import ast
 
-        facts: List[Tuple[str, str, str, Optional[str]]] = []
+        facts: List[Tuple] = []
         owner_str = self._owner_to_str(owner_id)
 
         for idx in indices:
@@ -76,6 +78,19 @@ class _PrunedHippoRAGNeo4jFactsMixin:
                         fact_owner = chunk.metadata.get("owner_id")
 
                     if owner_str and str(fact_owner) != owner_str:
+                        continue
+
+                    meta = chunk.metadata if isinstance(getattr(chunk, "metadata", None), dict) else {}
+                    head_id = meta.get("head_id")
+                    tail_id = meta.get("tail_id")
+                    head_type = meta.get("head_type")
+                    tail_type = meta.get("tail_type")
+
+                    predicate_meta = meta.get("predicate")
+                    head_meta = meta.get("head_name")
+                    tail_meta = meta.get("tail_name")
+                    if head_meta and predicate_meta and tail_meta:
+                        facts.append((str(head_meta), str(predicate_meta), str(tail_meta), fact_owner, head_id, tail_id, head_type, tail_type))
                         continue
 
                     fact_content = chunk.content
@@ -101,11 +116,11 @@ class _PrunedHippoRAGNeo4jFactsMixin:
                         parsed_fact = (fact_content[0], fact_content[1], fact_content[2])
 
                     if parsed_fact:
-                        facts.append((parsed_fact[0], parsed_fact[1], parsed_fact[2], fact_owner))
+                        facts.append((parsed_fact[0], parsed_fact[1], parsed_fact[2], fact_owner, head_id, tail_id, head_type, tail_type))
 
         return facts
 
-    def _extract_entity_ids_from_facts(self, facts: List[Tuple[str, str, str, Optional[str]]]) -> Set[str]:
+    def _extract_entity_ids_from_facts(self, facts: List[Tuple]) -> Set[str]:
         """
         Extract unique entity IDs from fact triples using Neo4j.
 
@@ -115,18 +130,28 @@ class _PrunedHippoRAGNeo4jFactsMixin:
         Returns:
             Set of entity IDs appearing in the facts
         """
-        from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id, text_processing
-
         entity_ids = set()
 
-        for head_name, _, tail_name, fact_owner in facts:
+        for fact in facts:
+            head_id = fact[4] if len(fact) > 4 else None
+            tail_id = fact[5] if len(fact) > 5 else None
+            if head_id and tail_id:
+                entity_ids.add(str(head_id))
+                entity_ids.add(str(tail_id))
+                continue
+
+            # Backward-compatible fallback for older fact payloads that do not carry endpoint IDs.
+            from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id
+            from core.utils.text_processing import text_processing
+
+            head_name = fact[0]
+            tail_name = fact[2]
+            fact_owner = fact[3] if len(fact) > 3 else None
             owner_str = self._owner_to_str(fact_owner)
             head_normalized = text_processing(head_name)
             tail_normalized = text_processing(tail_name)
-            head_id = compute_mdhash_id(head_normalized, prefix="entity-", owner_id=owner_str)
-            tail_id = compute_mdhash_id(tail_normalized, prefix="entity-", owner_id=owner_str)
-            entity_ids.add(head_id)
-            entity_ids.add(tail_id)
+            entity_ids.add(compute_mdhash_id(head_normalized, prefix="entity-", owner_id=owner_str))
+            entity_ids.add(compute_mdhash_id(tail_normalized, prefix="entity-", owner_id=owner_str))
 
         return entity_ids
 
@@ -192,17 +217,23 @@ class _PrunedHippoRAGNeo4jFactsMixin:
             Dictionary mapping entity IDs to relevance scores (not graph indices)
         """
         from collections import defaultdict
-        from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id, text_processing
 
         # Collect fact scores for each entity
         entity_to_fact_scores = defaultdict(list)
 
         for fact_idx, fact in zip(top_k_fact_indices, top_k_facts):
-            fact_owner = self._owner_to_str(fact[3])
-            head_name = text_processing(fact[0])
-            tail_name = text_processing(fact[2])
-            head_id = compute_mdhash_id(head_name, prefix="entity-", owner_id=fact_owner)
-            tail_id = compute_mdhash_id(tail_name, prefix="entity-", owner_id=fact_owner)
+            head_id = fact[4] if len(fact) > 4 else None
+            tail_id = fact[5] if len(fact) > 5 else None
+            if not head_id or not tail_id:
+                # Backward-compatible fallback: older fact payloads do not have endpoint IDs.
+                from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id
+                from core.utils.text_processing import text_processing
+
+                fact_owner = self._owner_to_str(fact[3] if len(fact) > 3 else None)
+                head_name = text_processing(fact[0])
+                tail_name = text_processing(fact[2])
+                head_id = compute_mdhash_id(head_name, prefix="entity-", owner_id=fact_owner)
+                tail_id = compute_mdhash_id(tail_name, prefix="entity-", owner_id=fact_owner)
 
             fact_score = float(query_fact_scores[fact_idx]) if query_fact_scores.ndim > 0 else float(query_fact_scores)
 
@@ -226,4 +257,3 @@ class _PrunedHippoRAGNeo4jFactsMixin:
             )
 
         return entity_relevance_scores
-

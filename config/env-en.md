@@ -112,6 +112,11 @@ How secrets flow into configs:
 | `BM25_INDEX_PATH` | `./data/unified_bm25_index` | Unified BM25 index directory. |
 | `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | Graph index / embedding cache directory (Neo4j HippoRAG). |
 | `GRAPH_INDEX_NAME` | `index` | Graph index file name prefix. |
+| `KG_SCHEMA_PATH` | `./kg_schema.yml` | KG schema YAML path for Neo4j HippoRAG (predicate governance + direction-sensitive set). |
+
+Notes:
+- **FAISS fingerprint guard**: the FAISS `.pkl` metadata stores an `embedding_fingerprint` (provider/model/dim). If you switch embedding models/dimensions, set a new `FAISS_INDEX_PATH` (recommended) or rebuild the index; otherwise the system will fail-fast to avoid silent corruption.
+- **E2E isolation**: for real-service tests, point the path knobs above to an isolated directory (for example under `./local/e2e_*`) to avoid polluting `./data/*`.
 
 ## 2. Evidence Output Controls
 
@@ -349,6 +354,8 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `HF_TOKEN` | _(empty)_ | HuggingFace token for downloading gated models (optional). |
 | `HF_ENDPOINT` | _(empty)_ | Optional HuggingFace endpoint override (e.g. `https://hf-mirror.com`). |
 | `LOG_LEVEL` | `INFO` | Python logging level (`DEBUG`, `INFO`, etc.). |
+| `RAGARC_DEPENDENCY_CHECK_MODE` | `warn` | Dependency check mode for app startup (Postgres/Redis/Neo4j): `off`/`warn`/`strict`. Note: the API startup currently defaults to `strict` when this env var is unset. |
+| `RAGARC_INDEXING_DEPENDENCY_CHECK_MODE` | `strict` | Dependency check mode for knowledge indexing tasks (used by `/knowledge/*` indexing and Celery tasks): `off`/`warn`/`strict`. Unit tests set this to `off` for hermetic runs. |
 
 ## 8. File Storage & Parser Paths
 
@@ -368,7 +375,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | --- | --- | --- |
 | `NEO4J_URL` | `bolt://localhost:7687` | Connection string for Neo4j. |
 | `NEO4J_USERNAME` | `neo4j` | Neo4j username. |
-| `NEO4J_PASSWORD` | `12345678` | Neo4j password. |
+| `NEO4J_PASSWORD` | _(empty)_ | Neo4j password. |
 | `NEO4J_DATABASE` | `neo4j` | Database name/alias. |
 | `EXPOSE_NEO4J` | `false` | Whether to expose Neo4j browser/bolt port. |
 | `NEO4J_HTTP_PORT` | `7474` | Host HTTP port when `EXPOSE_NEO4J=true`. |

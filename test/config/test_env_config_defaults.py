@@ -49,9 +49,12 @@ def test_bm25_config_reads_env_index_path(monkeypatch):
 def test_graph_config_reads_env_storage_path(monkeypatch):
     monkeypatch.setenv("GRAPH_STORAGE_PATH", "./data/custom_graph")
     monkeypatch.setenv("GRAPH_INDEX_NAME", "custom_index")
+    monkeypatch.setenv("NEO4J_PASSWORD", "neo4j-pass")
+    monkeypatch.setenv("KG_SCHEMA_PATH", "./config/custom_kg_schema.yml")
     cfg = PrunedHippoRAGNeo4jConfig(
         embedding=OpenAIEmbeddingConfig(model_name="text-embedding-3-small"),
     )
     assert cfg.storage_path == "./data/custom_graph"
     assert cfg.index_name == "custom_index"
-
+    assert cfg.password == "neo4j-pass"
+    assert cfg.kg_schema_path == "./config/custom_kg_schema.yml"

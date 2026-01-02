@@ -14,6 +14,156 @@ logger = logging.getLogger(__name__)
 
 
 class _PrunedHippoRAGNeo4jCacheMixin:
+    def _directed_fact_cache_for_owner(self, owner_key: str) -> Dict[str, List[Tuple[str, float, str]]]:
+        cache = getattr(self, "_directed_fact_cache", None)
+        if cache is None or not isinstance(cache, dict):
+            cache = {}
+            setattr(self, "_directed_fact_cache", cache)
+        owner_cache = cache.get(owner_key)
+        if owner_cache is None or not isinstance(owner_cache, dict):
+            owner_cache = {}
+            cache[owner_key] = owner_cache
+        return owner_cache
+
+    def _load_directed_fact_cache(self, *, owner_id: Optional[Any], force_reload: bool = False) -> None:
+        """
+        Load directed Entity->Entity fact edges (RELATES_TO) into memory for direction-aware PPR.
+
+        This cache complements the existing undirected `_graph_cache`:
+        - `_graph_cache`: undirected adjacency for fast neighbor lookups and push-PPR.
+        - `_directed_fact_cache`: directed adjacency with normalized predicates for direction-aware PPR.
+        """
+        with self.read_lock():
+            if not (getattr(self, "_cache_loaded", False) and getattr(self, "_graph_cache", None)):
+                self._load_graph_cache()
+
+        owner_key = self._owner_key(owner_id) if owner_id is not None else None
+        if owner_key is None:
+            return
+
+        loaded_key = getattr(self, "_directed_fact_cache_loaded_key", None)
+        if loaded_key == owner_key and not force_reload:
+            return
+
+        from core.knowledge_graph.schema import normalize_relation_token
+
+        global_owner = getattr(self, "OWNER_GLOBAL_KEY", "__GLOBAL__")
+        params: Dict[str, Any] = {"global_owner": global_owner, "owner_id": owner_key}
+        rows = self._execute_query(
+            """
+            MATCH (e1:Entity)-[r:RELATES_TO]->(e2:Entity)
+            WHERE COALESCE(e1.owner_id, $global_owner) = $owner_id
+              AND COALESCE(e2.owner_id, $global_owner) = $owner_id
+              AND COALESCE(r.owner_id, $global_owner) = $owner_id
+            RETURN e1.entity_id AS source_id,
+                   e2.entity_id AS target_id,
+                   COALESCE(r.weight, 1.0) AS weight,
+                   r.predicate AS predicate
+            """,
+            params,
+        )
+
+        owner_cache: Dict[str, List[Tuple[str, float, str]]] = {}
+        edge_count = 0
+        for record in rows or []:
+            src = str(record.get("source_id") or "").strip()
+            dst = str(record.get("target_id") or "").strip()
+            if not src or not dst:
+                continue
+            pred = str(record.get("predicate") or "").strip()
+            pred_norm = normalize_relation_token(pred) if pred else ""
+            if not pred_norm:
+                continue
+            try:
+                w = float(record.get("weight") or 1.0)
+            except (TypeError, ValueError):
+                w = 1.0
+            owner_cache.setdefault(src, []).append((dst, w, pred_norm))
+            edge_count += 1
+
+        setattr(self, "_directed_fact_cache_loaded_key", owner_key)
+        cache = getattr(self, "_directed_fact_cache", None)
+        if cache is None or not isinstance(cache, dict):
+            cache = {}
+            setattr(self, "_directed_fact_cache", cache)
+        cache[owner_key] = owner_cache
+        logger.info("Directed fact cache loaded: owner=%s edges=%s", owner_key, edge_count)
+
+    def extract_subgraph_from_cache_for_ppr_directed(
+        self,
+        subgraph_node_ids: Set[str],
+        *,
+        owner_id: Optional[Any] = None,
+        directed_relations: Optional[Set[str]] = None,
+    ) -> Tuple[ig.Graph, Dict[str, int], Dict[int, str]]:
+        """
+        Extract a directed igraph subgraph from in-memory caches for direction-aware PPR.
+
+        - Chunk<->Entity edges are treated as undirected (added in both directions).
+        - Entity->Entity edges come from the directed fact cache with normalized predicates.
+          - If predicate in `directed_relations`: keep stored direction.
+          - Else: add edges both ways (legacy undirected semantics).
+        """
+        if not subgraph_node_ids:
+            return ig.Graph(directed=True), {}, {}
+
+        with self.read_lock():
+            cache_ready = bool(getattr(self, "_cache_loaded", False) and getattr(self, "_graph_cache", None))
+        if not cache_ready:
+            self._load_graph_cache()
+
+        owner_key = self._owner_key(owner_id) if owner_id is not None else None
+        if owner_key is None:
+            return ig.Graph(directed=True), {}, {}
+
+        self._load_directed_fact_cache(owner_id=owner_id)
+        directed_relations = set(directed_relations or set())
+
+        with self.read_lock():
+            owner_cache = (getattr(self, "_graph_cache", None) or {}).get(owner_key, {})
+        fact_cache = self._directed_fact_cache_for_owner(owner_key)
+
+        normalized_ids = {str(nid) for nid in subgraph_node_ids if str(nid).strip()}
+        node_to_idx = {node_id: i for i, node_id in enumerate(sorted(normalized_ids))}
+        idx_to_node = {i: node_id for node_id, i in node_to_idx.items()}
+
+        graph = ig.Graph(directed=True)
+        graph.add_vertices(len(node_to_idx))
+
+        weights_by_pair: Dict[Tuple[int, int], float] = {}
+
+        def _add(src: str, dst: str, weight: float) -> None:
+            if src not in node_to_idx or dst not in node_to_idx:
+                return
+            key = (node_to_idx[src], node_to_idx[dst])
+            weights_by_pair[key] = float(weights_by_pair.get(key, 0.0)) + float(weight)
+
+        # Chunk-Entity edges from undirected cache (MENTIONS in DB).
+        for node_id in normalized_ids:
+            if node_id.startswith("entity-"):
+                continue
+            for neighbor_id, w in owner_cache.get(node_id, []) or []:
+                if not str(neighbor_id).startswith("entity-"):
+                    continue
+                if neighbor_id not in node_to_idx:
+                    continue
+                _add(node_id, neighbor_id, float(w))
+                _add(neighbor_id, node_id, float(w))
+
+        # Entity-Entity fact edges with predicate-aware direction handling.
+        for src in [nid for nid in normalized_ids if nid.startswith("entity-")]:
+            for dst, w, pred in fact_cache.get(src, []) or []:
+                if dst not in node_to_idx:
+                    continue
+                _add(src, dst, float(w))
+                if pred not in directed_relations:
+                    _add(dst, src, float(w))
+
+        if weights_by_pair:
+            graph.add_edges(list(weights_by_pair.keys()))
+            graph.es["weight"] = [weights_by_pair[pair] for pair in weights_by_pair.keys()]
+
+        return graph, node_to_idx, idx_to_node
     def get_neighbors_with_weights(self, node_id: str, owner_id: Optional[Any] = None) -> List[Tuple[str, float]]:
         """
         Get all neighbors of a node with their edge weights from Neo4j.
@@ -447,6 +597,148 @@ class _PrunedHippoRAGNeo4jCacheMixin:
 
         return graph, node_to_idx, idx_to_node
 
+    def extract_subgraph_from_neo4j_for_ppr(
+        self,
+        subgraph_node_ids: Set[str],
+        *,
+        owner_id: Optional[Any] = None,
+        directed_relations: Optional[Set[str]] = None,
+        max_edges: int = 200_000,
+    ) -> Tuple[ig.Graph, Dict[str, int], Dict[int, str]]:
+        """
+        Extract a subgraph from Neo4j with relation metadata so PPR can preserve direction semantics.
+
+        Design:
+        - Always returns a directed igraph (Graph(directed=True)).
+        - Chunk↔Entity (MENTIONS) edges are treated as undirected (added in both directions).
+        - Entity↔Entity edges:
+          - If predicate is in `directed_relations`: keep the stored direction (e1 -> e2).
+          - Otherwise: treat as undirected (add edges both ways) to preserve legacy behaviour.
+        """
+        if not subgraph_node_ids:
+            logger.warning("Empty subgraph node set")
+            return ig.Graph(directed=True), {}, {}
+
+        directed_relations = set(directed_relations or set())
+
+        normalized_ids = {str(nid) for nid in subgraph_node_ids if str(nid).strip()}
+        entity_ids = sorted([nid for nid in normalized_ids if nid.startswith("entity-")])
+        chunk_ids = sorted([nid for nid in normalized_ids if not nid.startswith("entity-")])
+
+        node_to_idx = {node_id: i for i, node_id in enumerate(sorted(normalized_ids))}
+        idx_to_node = {i: node_id for node_id, i in node_to_idx.items()}
+
+        graph = ig.Graph(directed=True)
+        graph.add_vertices(len(node_to_idx))
+
+        global_owner = getattr(self, "OWNER_GLOBAL_KEY", "__GLOBAL__")
+        owner_key = None
+        if owner_id is not None:
+            owner_key = self._owner_key(owner_id)
+
+        edge_list: list[tuple[int, int]] = []
+        edge_weights: list[float] = []
+
+        def _add_edge(src: str, dst: str, weight: float) -> None:
+            if src not in node_to_idx or dst not in node_to_idx:
+                return
+            edge_list.append((node_to_idx[src], node_to_idx[dst]))
+            edge_weights.append(float(weight))
+
+        # 1) Chunk-Entity edges (MENTIONS) - treat as undirected.
+        if chunk_ids and entity_ids:
+            clause = ""
+            params: Dict[str, Any] = {
+                "chunk_ids": chunk_ids,
+                "entity_ids": entity_ids,
+                "global_owner": global_owner,
+                "limit": int(max_edges),
+            }
+            if owner_key is not None:
+                clause = (
+                    "AND COALESCE(c.owner_id, $global_owner) = $owner_id "
+                    "AND COALESCE(e.owner_id, $global_owner) = $owner_id "
+                    "AND COALESCE(r.owner_id, $global_owner) = $owner_id"
+                )
+                params["owner_id"] = owner_key
+            rows = self._execute_query(
+                f"""
+                MATCH (c:Chunk)-[r:MENTIONS]->(e:Entity)
+                WHERE c.chunk_id IN $chunk_ids
+                  AND e.entity_id IN $entity_ids
+                  {clause}
+                RETURN c.chunk_id AS source_id,
+                       e.entity_id AS target_id,
+                       COALESCE(r.weight, 1.0) AS weight
+                LIMIT $limit
+                """,
+                params,
+            )
+            for row in rows or []:
+                src = str((row or {}).get("source_id") or "").strip()
+                dst = str((row or {}).get("target_id") or "").strip()
+                try:
+                    w = float((row or {}).get("weight") or 1.0)
+                except (TypeError, ValueError):
+                    w = 1.0
+                if not src or not dst:
+                    continue
+                _add_edge(src, dst, w)
+                _add_edge(dst, src, w)
+
+        # 2) Entity-Entity edges (RELATES_TO) - predicate-aware direction handling.
+        if entity_ids:
+            clause = ""
+            params = {
+                "entity_ids": entity_ids,
+                "global_owner": global_owner,
+                "limit": int(max_edges),
+            }
+            if owner_key is not None:
+                clause = (
+                    "AND COALESCE(e1.owner_id, $global_owner) = $owner_id "
+                    "AND COALESCE(e2.owner_id, $global_owner) = $owner_id "
+                    "AND COALESCE(r.owner_id, $global_owner) = $owner_id"
+                )
+                params["owner_id"] = owner_key
+            rows = self._execute_query(
+                f"""
+                MATCH (e1:Entity)-[r:RELATES_TO]->(e2:Entity)
+                WHERE e1.entity_id IN $entity_ids
+                  AND e2.entity_id IN $entity_ids
+                  {clause}
+                RETURN e1.entity_id AS source_id,
+                       e2.entity_id AS target_id,
+                       r.predicate AS predicate,
+                       COALESCE(r.weight, 1.0) AS weight
+                LIMIT $limit
+                """,
+                params,
+            )
+            from core.knowledge_graph.schema import normalize_relation_token
+
+            for row in rows or []:
+                src = str((row or {}).get("source_id") or "").strip()
+                dst = str((row or {}).get("target_id") or "").strip()
+                raw_pred = str((row or {}).get("predicate") or "").strip()
+                pred = normalize_relation_token(raw_pred) if raw_pred else ""
+                try:
+                    w = float((row or {}).get("weight") or 1.0)
+                except (TypeError, ValueError):
+                    w = 1.0
+                if not src or not dst:
+                    continue
+                _add_edge(src, dst, w)
+                if pred not in directed_relations:
+                    _add_edge(dst, src, w)
+
+        if edge_list:
+            graph.add_edges(edge_list)
+            graph.es["weight"] = edge_weights
+
+        logger.info("Extracted directed subgraph from Neo4j: %d nodes, %d edges", graph.vcount(), graph.ecount())
+        return graph, node_to_idx, idx_to_node
+
 
 
     def compute_ppr_push(
@@ -534,5 +826,3 @@ class _PrunedHippoRAGNeo4jCacheMixin:
                     self._graph_cache.pop(owner_key, None)
 
             self._entity_chunk_count_cache = self._compute_entity_chunk_count_cache(self._graph_cache)
-
-

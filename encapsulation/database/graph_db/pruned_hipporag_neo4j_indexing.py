@@ -1,10 +1,8 @@
 import os
 import json
 import logging
-import pickle
 from typing import List, Dict, Any, Optional, Sequence
 
-import numpy as np
 import warnings
 
 warnings.filterwarnings(
@@ -14,12 +12,32 @@ warnings.filterwarnings(
 )
 
 from encapsulation.data_model.schema import Chunk, GraphData
+from encapsulation.database.graph_db.pruned_hipporag_neo4j_chunk_embeddings import _PrunedHippoRAGNeo4jChunkEmbeddingsMixin
+from encapsulation.database.utils.fact_provenance import upsert_fact_occurrence
 from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id, text_processing
+from core.knowledge_graph.schema import normalize_relation_token
 
 logger = logging.getLogger(__name__)
 
 
-class _PrunedHippoRAGNeo4jIndexingMixin:
+def _coerce_fact_provenance_max_source_chunks(raw: Any, *, default: int = 50, max_value: int = 1000) -> int:
+    """
+    Coerce `fact_provenance_max_source_chunks` into a safe integer.
+
+    Note:
+    - `0` is a valid value meaning "disable source_chunk_ids storage", so do NOT use `or default`.
+    """
+    if raw is None:
+        value = int(default)
+    else:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = int(default)
+    return max(0, min(int(max_value), value))
+
+
+class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin):
     def _init_faiss_indices(self):
         """
         Initialize FAISS indices for facts and entities.
@@ -77,28 +95,6 @@ class _PrunedHippoRAGNeo4jIndexingMixin:
 
         logger.info("FAISS indices initialized (fact: Flat, entity: HNSW)")
 
-    def _load_chunk_embeddings(self):
-        """
-        Load chunk embeddings from disk if available.
-
-        This is called during initialization to restore chunk embeddings
-        that were saved during previous sessions.
-        """
-        embeddings_path = os.path.join(self.storage_path, f"{self.index_name}_chunk_embeddings.pkl")
-        if os.path.exists(embeddings_path):
-            try:
-                with open(embeddings_path, 'rb') as f:
-                    loaded = pickle.load(f)
-                with self.write_lock():
-                    self.chunk_embeddings = loaded
-                    # Mark array for rebuild on first use
-                    self._chunk_embeddings_array = None
-                logger.info(f"Loaded {len(self.chunk_embeddings)} chunk embeddings from {embeddings_path}")
-            except Exception as e:
-                logger.warning(f"Failed to load chunk embeddings: {e}")
-        else:
-            logger.info(f"No existing chunk embeddings found at {embeddings_path}")
-
     def _batch_add_chunks_and_graph_data(self, chunks: List[Chunk]) -> List[str]:
         """
         Batch add chunks and their graph data to Neo4j (OPTIMIZED).
@@ -119,8 +115,19 @@ class _PrunedHippoRAGNeo4jIndexingMixin:
         chunk_data = []
         entity_data: Dict[str, Dict[str, Any]] = {}  # entity_id -> entity payload
         mention_data = []
-        fact_data = []
+        fact_data_by_id: Dict[str, Dict[str, Any]] = {}
         new_entity_ids = []
+
+        # HippoRAG chunk-triples contract: keep only triples whose endpoints are extracted named entities.
+        # (Precision-first; endpoints outside extracted entities are dropped.)
+
+        stats_by_owner: Dict[str, Dict[str, int]] = {}
+        cfg = getattr(self, "config", None)
+        max_source_chunks = _coerce_fact_provenance_max_source_chunks(
+            getattr(cfg, "fact_provenance_max_source_chunks", 50),
+            default=50,
+            max_value=1000,
+        )
 
         for chunk in chunks:
             # Prepare chunk data
@@ -131,6 +138,16 @@ class _PrunedHippoRAGNeo4jIndexingMixin:
             if owner_str:
                 metadata['owner_id'] = owner_str
             db_owner_id = self._owner_key(owner_str)
+            owner_stats = stats_by_owner.setdefault(
+                db_owner_id,
+                {
+                    "triples_total": 0,
+                    "triples_kept": 0,
+                    "triples_dropped_endpoints": 0,
+                    "triples_dropped_ambiguous_endpoints": 0,
+                    "triples_dropped_schema": 0,
+                },
+            )
 
             chunk_data.append({
                 'chunk_id': chunk.id,
@@ -141,78 +158,224 @@ class _PrunedHippoRAGNeo4jIndexingMixin:
 
             # Process graph data
             if chunk.graph and not chunk.graph.is_empty():
-                # Build entity name to type mapping from graph.entities
-                # IMPORTANT: Use text_processing() on entity names to match processed triple entities
-                entity_name_to_type = {}
-                for entity_dict in chunk.graph.entities:
-                    entity_name = entity_dict.get('entity_name')
-                    entity_type = entity_dict.get('entity_type', 'Entity')
-                    if entity_name:
-                        # Process entity name to match the processed names in triples
-                        processed_name = text_processing(entity_name)
-                        if processed_name:
-                            entity_name_to_type[processed_name] = entity_type
+                domain_raw = chunk.domain or metadata.get("domain") or "default"
+                domain = str(domain_raw).strip() or "default"
+                schema = getattr(self, "kg_schema", None)
+                domain_schema = schema.for_domain(domain) if schema else None
+                schema_version = getattr(schema, "version", None) or "unmanaged"
 
-                # Process and normalize relation triples
-                processed_triples = []
+                # Build entity mapping from NER outputs.
+                # - `entity_name_normalized` is used for stable matching + hashing.
+                # - `entity_name` keeps the display value for explainability/exports.
+                entity_name_to_type_keys: dict[str, set[str]] = {}
+                entity_key_to_type_display: dict[tuple[str, str], str] = {}
+                entity_key_to_display: dict[tuple[str, str], str] = {}
+                entity_key_to_canonical: dict[tuple[str, str], str] = {}
+                for entity_dict in chunk.graph.entities:
+                    raw_name = entity_dict.get("entity_name")
+                    if not raw_name:
+                        continue
+                    display_name = str(raw_name).strip()
+                    if not display_name:
+                        continue
+
+                    normalized_name = text_processing(display_name)
+                    if not normalized_name:
+                        continue
+
+                    entity_type_display = str(entity_dict.get("entity_type", "Entity") or "Entity").strip() or "Entity"
+                    entity_type_key = text_processing(entity_type_display) or "entity"
+
+                    entity_name_to_type_keys.setdefault(normalized_name, set()).add(entity_type_key)
+                    entity_key = (normalized_name, entity_type_key)
+                    entity_key_to_type_display.setdefault(entity_key, entity_type_display)
+                    entity_key_to_display.setdefault(entity_key, display_name)
+
+                    canonical = None
+                    if domain_schema is not None:
+                        canonical = domain_schema.canonicalize_entity_name(display_name)
+                    canonical_name = canonical or normalized_name
+                    entity_key_to_canonical[entity_key] = canonical_name
+
+                # Collect entity nodes + chunk mentions from NER outputs (not only triple endpoints).
+                # This keeps the entity layer usable even when relation extraction is sparse or schema-rejected.
+                mention_keys: set[tuple[str, str]] = set()
+                for (normalized_name, entity_type_key), entity_type_display in entity_key_to_type_display.items():
+                    entity_id = compute_mdhash_id(
+                        f"{normalized_name}|{entity_type_key}",
+                        prefix="entity-",
+                        owner_id=owner_str,
+                    )
+                    display_name = entity_key_to_display.get((normalized_name, entity_type_key)) or normalized_name
+                    if entity_id not in entity_data:
+                        canonical_name = entity_key_to_canonical.get((normalized_name, entity_type_key)) or normalized_name
+                        entity_data[entity_id] = {
+                            "entity_id": entity_id,
+                            "entity_name": display_name,
+                            "entity_name_normalized": normalized_name,
+                            "entity_canonical_name": canonical_name,
+                            # Canonical key keeps type to avoid collapsing same-name different-type entities in COUNT DISTINCT.
+                            "entity_canonical_key": f"{canonical_name}|{entity_type_key}",
+                            "entity_type": entity_type_display or "Entity",
+                            "entity_type_key": entity_type_key,
+                            "owner_id": db_owner_id,
+                        }
+                    mention_key = (chunk.id, entity_id)
+                    if mention_key not in mention_keys:
+                        mention_keys.add(mention_key)
+                        mention_data.append({
+                            'chunk_id': chunk.id,
+                            'entity_id': entity_id,
+                            'owner_id': db_owner_id
+                        })
+
+                # Process and normalize relation triples (schema-governed predicate normalization)
+                processed_triples: list[tuple[str, str, str, str, str]] = []
                 for relation in chunk.graph.relations:
                     if len(relation) >= 3:
                         head = text_processing(relation[0])
-                        rel_type = text_processing(relation[1])
                         tail = text_processing(relation[2])
 
-                        if head and tail:
-                            processed_triples.append([head, rel_type, tail])
+                        if not head or not tail:
+                            continue
+                        owner_stats["triples_total"] += 1
 
-                # Extract unique entities from triples
-                triple_entities = set()
-                for triple in processed_triples:
-                    triple_entities.add(triple[0])  # head
-                    triple_entities.add(triple[2])  # tail
+                        # Enforce HippoRAG chunk-triples endpoint constraint (precision-first):
+                        # triples must use extracted named entities as endpoints.
+                        if head not in entity_name_to_type_keys or tail not in entity_name_to_type_keys:
+                            owner_stats["triples_dropped_endpoints"] += 1
+                            continue
+                        head_types = entity_name_to_type_keys.get(head) or set()
+                        tail_types = entity_name_to_type_keys.get(tail) or set()
+                        if len(head_types) != 1 or len(tail_types) != 1:
+                            # Without entity linking, multiple types for the same surface form is ambiguous.
+                            # Drop the triple to avoid mixing semantics across types (precision-first).
+                            owner_stats["triples_dropped_ambiguous_endpoints"] += 1
+                            continue
+                        head_type_key = next(iter(head_types))
+                        tail_type_key = next(iter(tail_types))
+                        head_id = compute_mdhash_id(f"{head}|{head_type_key}", prefix="entity-", owner_id=owner_str)
+                        tail_id = compute_mdhash_id(f"{tail}|{tail_type_key}", prefix="entity-", owner_id=owner_str)
+                        head_display = entity_key_to_display.get((head, head_type_key)) or head
+                        tail_display = entity_key_to_display.get((tail, tail_type_key)) or tail
 
-                # Collect entity data (deduplicated across all chunks)
-                for entity_name in triple_entities:
-                    entity_id = compute_mdhash_id(entity_name, prefix='entity-', owner_id=owner_str)
-                    if entity_id not in entity_data:
-                        # Get entity type from mapping, default to 'Entity'
-                        entity_type = entity_name_to_type.get(entity_name, 'Entity')
-                        entity_data[entity_id] = {
-                            'entity_id': entity_id,
-                            'entity_name': entity_name,
-                            'entity_type': entity_type,
-                            'owner_id': db_owner_id
-                        }
+                        raw_predicate = relation[1]
+                        if domain_schema is not None:
+                            normalized_predicate = domain_schema.normalize_predicate(str(raw_predicate))
+                        else:
+                            # Keep predicate token shape stable even without schema governance.
+                            normalized_predicate = normalize_relation_token(str(raw_predicate))
+                        if not normalized_predicate:
+                            owner_stats["triples_dropped_schema"] += 1
+                            continue
 
-                    # Collect mention data
-                    mention_data.append({
-                        'chunk_id': chunk.id,
-                        'entity_id': entity_id,
-                        'owner_id': db_owner_id
-                    })
+                        processed_triples.append((head_id, head_display, normalized_predicate, tail_id, tail_display))
+                        owner_stats["triples_kept"] += 1
 
-                # Collect fact data
-                for head_name, relation_type, tail_name in processed_triples:
-                    fact_text = str((head_name, relation_type, tail_name))
-                    fact_id = compute_mdhash_id(fact_text, prefix='fact-', owner_id=owner_str)
-                    head_id = compute_mdhash_id(head_name, prefix='entity-', owner_id=owner_str)
-                    tail_id = compute_mdhash_id(tail_name, prefix='entity-', owner_id=owner_str)
-
-                    fact_data.append({
-                        'fact_id': fact_id,
-                        'head_id': head_id,
-                        'tail_id': tail_id,
-                        'head_name': head_name,
-                        'relation_type': relation_type,
-                        'tail_name': tail_name,
-                        'fact_text': fact_text,
-                        'owner_id': db_owner_id
-                    })
+                # Collect fact data (aggregated with provenance)
+                for head_id, head_name, relation_type, tail_id, tail_name in processed_triples:
+                    # When schema governance is not configured, preserve legacy direction semantics.
+                    # When schema is present, only relations declared as direction-sensitive keep direction;
+                    # all others are treated as undirected for storage/provenance canonicalization.
+                    direction_sensitive = True if domain_schema is None else bool(domain_schema.is_direction_sensitive(relation_type))
+                    upsert_fact_occurrence(
+                        fact_data_by_id,
+                        head_id=head_id,
+                        head_name=head_name,
+                        relation_type=relation_type,
+                        tail_id=tail_id,
+                        tail_name=tail_name,
+                        chunk_id=chunk.id,
+                        owner_id=owner_str,
+                        db_owner_id=db_owner_id,
+                        schema_version=schema_version,
+                        domain=domain,
+                        direction_sensitive=direction_sensitive,
+                        max_source_chunks=max_source_chunks,
+                    )
 
         # Prepare entity list for batch insertion
         entity_list = list(entity_data.values())
+        fact_data = list(fact_data_by_id.values())
 
-        logger.info(f"Batch data prepared: {len(chunk_data)} chunks, {len(entity_list)} entities, "
-                   f"{len(mention_data)} mentions, {len(fact_data)} facts")
+        # Phase 2: queryable canonicalization layer (canonical keys + aliases).
+        canonical_nodes_by_id: Dict[str, Dict[str, Any]] = {}
+        canonical_links: List[Dict[str, Any]] = []
+        alias_nodes_by_id: Dict[str, Dict[str, Any]] = {}
+        alias_links: List[Dict[str, Any]] = []
+        for entity in entity_list:
+            owner_key = str(entity.get("owner_id") or "").strip()
+            entity_id = str(entity.get("entity_id") or "").strip()
+            canonical_key = str(entity.get("entity_canonical_key") or "").strip()
+            canonical_name = str(entity.get("entity_canonical_name") or "").strip()
+            entity_type_key = str(entity.get("entity_type_key") or "").strip() or "entity"
+            alias_text_normalized = str(entity.get("entity_name_normalized") or "").strip()
+            alias_text_display = str(entity.get("entity_name") or "").strip()
+
+            if not owner_key or not entity_id or not canonical_key or not canonical_name:
+                continue
+
+            canonical_id = compute_mdhash_id(canonical_key, prefix="canonical-", owner_id=owner_key)
+            canonical_nodes_by_id.setdefault(
+                canonical_id,
+                {
+                    "canonical_id": canonical_id,
+                    "canonical_key": canonical_key,
+                    "canonical_name": canonical_name,
+                    "entity_type_key": entity_type_key,
+                    "owner_id": owner_key,
+                },
+            )
+            canonical_links.append({"entity_id": entity_id, "canonical_id": canonical_id, "owner_id": owner_key})
+
+            # Only create alias nodes when the surface form differs from the canonicalized key.
+            if alias_text_normalized and alias_text_normalized != canonical_name:
+                alias_id = compute_mdhash_id(f"{alias_text_normalized}|{canonical_id}", prefix="alias-", owner_id=owner_key)
+                alias_nodes_by_id.setdefault(
+                    alias_id,
+                    {
+                        "alias_id": alias_id,
+                        "alias_text_normalized": alias_text_normalized,
+                        "alias_text": alias_text_display or alias_text_normalized,
+                        "owner_id": owner_key,
+                    },
+                )
+                alias_links.append({"alias_id": alias_id, "canonical_id": canonical_id, "owner_id": owner_key})
+
+        canonical_nodes = list(canonical_nodes_by_id.values())
+        alias_nodes = list(alias_nodes_by_id.values())
+
+        kg_ingest_meta_payloads: List[Dict[str, Any]] = []
+        for owner_id, counters in stats_by_owner.items():
+            total = int(counters.get("triples_total", 0))
+            dropped_endpoints = int(counters.get("triples_dropped_endpoints", 0))
+            dropped_ambiguous = int(counters.get("triples_dropped_ambiguous_endpoints", 0))
+            drop_ratio = (float(dropped_endpoints) / float(total)) if total else 0.0
+            payload = {
+                "owner_id": owner_id,
+                "triples_total": total,
+                "triples_kept": int(counters.get("triples_kept", 0)),
+                "triples_dropped_endpoints": dropped_endpoints,
+                "triples_dropped_ambiguous_endpoints": dropped_ambiguous,
+                "triples_dropped_schema": int(counters.get("triples_dropped_schema", 0)),
+                "endpoint_drop_ratio": float(drop_ratio),
+                "fact_provenance_max_source_chunks": int(max_source_chunks),
+            }
+            kg_ingest_meta_payloads.append(payload)
+            logger.info(
+                "KG ingest stats (owner=%s): total=%s kept=%s dropped_endpoints=%s dropped_schema=%s endpoint_drop_ratio=%.4f",
+                owner_id,
+                payload["triples_total"],
+                payload["triples_kept"],
+                payload["triples_dropped_endpoints"],
+                payload["triples_dropped_schema"],
+                payload["endpoint_drop_ratio"],
+            )
+
+        logger.info(
+            f"Batch data prepared: {len(chunk_data)} chunks, {len(entity_list)} entities, "
+            f"{len(mention_data)} mentions, {len(fact_data)} facts"
+        )
 
         # Batch insert using single transaction
         with self._driver.session(database=self.database) as session:
@@ -238,7 +401,11 @@ class _PrunedHippoRAGNeo4jIndexingMixin:
                     MERGE (e:Entity {entity_id: entity.entity_id})
                     ON CREATE SET e.entity_name = entity.entity_name,
                                   e.entity_text = entity.entity_name,
+                                  e.entity_name_normalized = entity.entity_name_normalized,
+                                  e.entity_canonical_name = entity.entity_canonical_name,
+                                  e.entity_canonical_key = entity.entity_canonical_key,
                                   e.entity_type = entity.entity_type,
+                                  e.entity_type_key = entity.entity_type_key,
                                   e.node_type = 'entity',
                                   e.attributes = '{}',
                                   e.owner_id = entity.owner_id,
@@ -247,7 +414,11 @@ class _PrunedHippoRAGNeo4jIndexingMixin:
                                   e.is_new = true
                     ON MATCH SET e.entity_name = entity.entity_name,
                                  e.entity_text = entity.entity_name,
+                                 e.entity_name_normalized = entity.entity_name_normalized,
+                                 e.entity_canonical_name = entity.entity_canonical_name,
+                                 e.entity_canonical_key = entity.entity_canonical_key,
                                  e.entity_type = entity.entity_type,
+                                 e.entity_type_key = entity.entity_type_key,
                                  e.owner_id = entity.owner_id,
                                  e.updated_at = datetime(),
                                  e.is_new = false
@@ -258,6 +429,69 @@ class _PrunedHippoRAGNeo4jIndexingMixin:
                         if record['is_new']:
                             new_entity_ids.append(record['entity_id'])
                     logger.info(f"  Batch inserted {len(entity_list)} entities ({len(new_entity_ids)} new)")
+
+                # 2.5 Canonicalization layer: canonical key nodes + canonical/alias relationships.
+                if canonical_nodes:
+                    canonical_query = """
+                    UNWIND $canonicals AS c
+                    MERGE (n:EntityCanonical {canonical_id: c.canonical_id})
+                    ON CREATE SET n.owner_id = c.owner_id,
+                                  n.canonical_key = c.canonical_key,
+                                  n.canonical_name = c.canonical_name,
+                                  n.entity_type_key = c.entity_type_key,
+                                  n.created_at = datetime(),
+                                  n.updated_at = datetime()
+                    ON MATCH SET  n.owner_id = c.owner_id,
+                                  n.canonical_key = c.canonical_key,
+                                  n.canonical_name = c.canonical_name,
+                                  n.entity_type_key = c.entity_type_key,
+                                  n.updated_at = datetime()
+                    """
+                    tx.run(canonical_query, {"canonicals": canonical_nodes})
+                    logger.info("  Upserted %s EntityCanonical nodes", len(canonical_nodes))
+
+                if canonical_links:
+                    canonical_rel_query = """
+                    UNWIND $links AS link
+                    MATCH (e:Entity {entity_id: link.entity_id, owner_id: link.owner_id})
+                    MATCH (c:EntityCanonical {canonical_id: link.canonical_id})
+                    MERGE (e)-[r:CANONICAL_OF]->(c)
+                    SET r.owner_id = link.owner_id,
+                        r.updated_at = datetime(),
+                        r.created_at = COALESCE(r.created_at, datetime())
+                    """
+                    tx.run(canonical_rel_query, {"links": canonical_links})
+                    logger.info("  Upserted %s CANONICAL_OF relationships", len(canonical_links))
+
+                if alias_nodes:
+                    alias_query = """
+                    UNWIND $aliases AS a
+                    MERGE (n:EntityAlias {alias_id: a.alias_id})
+                    ON CREATE SET n.owner_id = a.owner_id,
+                                  n.alias_text_normalized = a.alias_text_normalized,
+                                  n.alias_text = a.alias_text,
+                                  n.created_at = datetime(),
+                                  n.updated_at = datetime()
+                    ON MATCH SET  n.owner_id = a.owner_id,
+                                  n.alias_text_normalized = a.alias_text_normalized,
+                                  n.alias_text = a.alias_text,
+                                  n.updated_at = datetime()
+                    """
+                    tx.run(alias_query, {"aliases": alias_nodes})
+                    logger.info("  Upserted %s EntityAlias nodes", len(alias_nodes))
+
+                if alias_links:
+                    alias_rel_query = """
+                    UNWIND $links AS link
+                    MATCH (a:EntityAlias {alias_id: link.alias_id, owner_id: link.owner_id})
+                    MATCH (c:EntityCanonical {canonical_id: link.canonical_id})
+                    MERGE (a)-[r:ALIAS_OF]->(c)
+                    SET r.owner_id = link.owner_id,
+                        r.updated_at = datetime(),
+                        r.created_at = COALESCE(r.created_at, datetime())
+                    """
+                    tx.run(alias_rel_query, {"links": alias_links})
+                    logger.info("  Upserted %s ALIAS_OF relationships", len(alias_links))
 
                 # 3. Batch create chunk-entity relationships
                 if mention_data:
@@ -281,17 +515,47 @@ class _PrunedHippoRAGNeo4jIndexingMixin:
                     MATCH (e1:Entity {entity_id: f.head_id, owner_id: f.owner_id})
                     MATCH (e2:Entity {entity_id: f.tail_id, owner_id: f.owner_id})
                     MERGE (e1)-[r:RELATES_TO {fact_id: f.fact_id}]->(e2)
+                    WITH e1, e2, r, f,
+                         CASE
+                             WHEN r.source_chunk_ids IS NULL THEN f.source_chunk_ids
+                             ELSE r.source_chunk_ids + [cid IN f.source_chunk_ids WHERE NOT cid IN r.source_chunk_ids]
+                         END AS merged_chunk_ids
                     SET r.head = f.head_name,
                         r.predicate = f.relation_type,
                         r.tail = f.tail_name,
                         r.text = f.fact_text,
                         r.owner_id = f.owner_id,
-                        r.weight = COALESCE(r.weight, 0.0) + 1.0,
+                        r.schema_version = f.schema_version,
+                        r.domain = f.domain,
+                        r.occurrences = COALESCE(r.occurrences, 0) + COALESCE(toInteger(f.occurrences), 1),
+                        r.source_chunk_ids = merged_chunk_ids[..$max_source_chunks],
+                        r.source_chunk_ids_truncated = COALESCE(r.source_chunk_ids_truncated, false)
+                            OR COALESCE(f.source_chunk_ids_truncated, false)
+                            OR size(merged_chunk_ids) > $max_source_chunks,
+                        r.weight = COALESCE(r.weight, 0.0) + COALESCE(toFloat(f.occurrences), 1.0),
                         r.updated_at = datetime(),
                         r.created_at = COALESCE(r.created_at, datetime())
                     """
-                    tx.run(fact_query, {'facts': fact_data})
+                    tx.run(fact_query, {"facts": fact_data, "max_source_chunks": int(max_source_chunks)})
                     logger.info(f"  Batch created {len(fact_data)} RELATES_TO relationships")
+
+                # 5. Persist per-owner ingest stats (avoids process-global state and survives concurrency).
+                if kg_ingest_meta_payloads:
+                    meta_query = """
+                    UNWIND $metas AS meta
+                    MERGE (m:KGIngestMeta {owner_id: meta.owner_id})
+                    SET m.triples_total = meta.triples_total,
+                        m.triples_kept = meta.triples_kept,
+                        m.triples_dropped_endpoints = meta.triples_dropped_endpoints,
+                        m.triples_dropped_ambiguous_endpoints = meta.triples_dropped_ambiguous_endpoints,
+                        m.triples_dropped_schema = meta.triples_dropped_schema,
+                        m.endpoint_drop_ratio = meta.endpoint_drop_ratio,
+                        m.fact_provenance_max_source_chunks = meta.fact_provenance_max_source_chunks,
+                        m.updated_at = datetime(),
+                        m.created_at = COALESCE(m.created_at, datetime())
+                    """
+                    tx.run(meta_query, {"metas": kg_ingest_meta_payloads})
+                    logger.info("  Updated %s KGIngestMeta rows", len(kg_ingest_meta_payloads))
 
                 tx.commit()
 
@@ -299,163 +563,6 @@ class _PrunedHippoRAGNeo4jIndexingMixin:
         logger.info(f"Batch insertion completed in {elapsed:.2f}s")
 
         return new_entity_ids
-
-    def _append_chunk_embeddings(self, new_chunk_ids: List[str]):
-        """
-        Incrementally append new chunk embeddings to the array (OPTIMIZED).
-
-        This method only processes new chunks instead of rebuilding the entire array,
-        which is much faster for incremental updates.
-
-        Args:
-            new_chunk_ids: List of new chunk IDs to append
-        """
-        if not new_chunk_ids:
-            logger.info("No new chunks to append")
-            return
-
-        import time
-        start_time = time.time()
-
-        logger.info(f"Appending {len(new_chunk_ids)} new chunk embeddings...")
-
-        new_embeddings_list = []
-        new_chunk_ids_ordered = []
-
-        with self.read_lock():
-            for cid in sorted(new_chunk_ids):  # Sort for consistency
-                if cid not in self.chunk_embeddings:
-                    logger.warning(f"Chunk {cid} not found in chunk_embeddings, skipping")
-                    continue
-
-                emb = self.chunk_embeddings[cid]
-
-                # Ensure it's a numpy array
-                if isinstance(emb, list):
-                    emb = np.array(emb)
-                elif not isinstance(emb, np.ndarray):
-                    logger.warning(f"Chunk {cid} has invalid embedding type: {type(emb)}, skipping")
-                    continue
-
-                # Check shape consistency with existing array
-                if self._chunk_embeddings_array is not None and len(self._chunk_embeddings_array) > 0:
-                    expected_shape = (self._chunk_embeddings_array.shape[1],)
-                    if emb.shape != expected_shape:
-                        logger.warning(f"Chunk {cid} has shape {emb.shape}, expected {expected_shape}, skipping")
-                        continue
-
-                # Normalize if enabled (for cosine similarity)
-                if self.normalize_chunk_embeddings:
-                    norm = np.linalg.norm(emb)
-                    if norm > 0:
-                        emb = emb / norm
-
-                new_embeddings_list.append(emb)
-                new_chunk_ids_ordered.append(cid)
-
-        if new_embeddings_list:
-            # Convert to array with optional float16
-            if self.use_float16_embeddings:
-                new_array = np.array(new_embeddings_list, dtype=np.float16)
-            else:
-                new_array = np.array(new_embeddings_list, dtype=np.float32)
-
-            # Append to existing array or create new one
-            with self.write_lock():
-                if self._chunk_embeddings_array is not None and len(self._chunk_embeddings_array) > 0:
-                    self._chunk_embeddings_array = np.vstack([self._chunk_embeddings_array, new_array])
-                    if self._chunk_ids_list is None:
-                        self._chunk_ids_list = []
-                    self._chunk_ids_list.extend(new_chunk_ids_ordered)
-                else:
-                    self._chunk_embeddings_array = new_array
-                    self._chunk_ids_list = new_chunk_ids_ordered
-
-            elapsed = time.time() - start_time
-            dtype_str = "float16" if self.use_float16_embeddings else "float32"
-            logger.info(f"Appended {len(new_embeddings_list)} chunk embeddings ({dtype_str}) in {elapsed:.3f}s, "
-                       f"total: {len(self._chunk_ids_list)} chunks, "
-                       f"memory: {self._chunk_embeddings_array.nbytes / 1024 / 1024:.2f} MB")
-        else:
-            logger.warning("No valid new chunk embeddings to append")
-
-    def _rebuild_chunk_embeddings_array(self):
-        """
-        Rebuild chunk embeddings array for dense passage retrieval.
-
-        This method creates a numpy array of chunk embeddings ordered by chunk IDs,
-        enabling efficient brute-force similarity search during retrieval.
-        The array is cached and only rebuilt when marked as dirty.
-
-        Optimizations:
-        - Uses float16 to reduce memory usage (if enabled)
-        - Normalizes embeddings for cosine similarity (if enabled)
-        """
-        with self.read_lock():
-            if self._chunk_embeddings_array is not None:
-                return  # Already built
-            chunk_ids = list(self.chunk_embeddings.keys())
-
-        logger.info("Rebuilding chunk embeddings array...")
-
-        kept_chunk_ids: list[str] = []
-        embeddings_list: list[np.ndarray] = []
-
-        with self.read_lock():
-            for i, cid in enumerate(chunk_ids):
-                emb = self.chunk_embeddings.get(cid)
-                if emb is None:
-                    continue
-                if isinstance(emb, list):
-                    emb = np.array(emb)
-                elif not isinstance(emb, np.ndarray):
-                    logger.warning(f"Chunk {cid} has invalid embedding type: {type(emb)}")
-                    continue
-
-                if embeddings_list and emb.shape != embeddings_list[0].shape:
-                    logger.error(f"Chunk {cid} (index {i}) has shape {emb.shape}, expected {embeddings_list[0].shape}")
-                    logger.error(f"  First chunk ID: {kept_chunk_ids[0] if kept_chunk_ids else 'N/A'}, shape: {embeddings_list[0].shape}")
-                    logger.error(f"  Current chunk ID: {cid}, shape: {emb.shape}")
-                    continue
-
-                if self.normalize_chunk_embeddings:
-                    norm = np.linalg.norm(emb)
-                    if norm > 0:
-                        emb = emb / norm
-
-                kept_chunk_ids.append(cid)
-                embeddings_list.append(emb)
-
-        if not embeddings_list:
-            new_array = np.array([])
-            logger.warning("No chunk embeddings found")
-        else:
-            try:
-                if self.use_float16_embeddings:
-                    new_array = np.array(embeddings_list, dtype=np.float16)
-                else:
-                    new_array = np.array(embeddings_list, dtype=np.float32)
-            except ValueError as e:
-                logger.error(f"Failed to build chunk embeddings array: {e}")
-                logger.error(f"  Total chunks: {len(chunk_ids)}")
-                logger.error(f"  Valid embeddings: {len(embeddings_list)}")
-                if embeddings_list:
-                    logger.error(f"  First embedding shape: {embeddings_list[0].shape}")
-                    logger.error(f"  Last embedding shape: {embeddings_list[-1].shape}")
-                raise
-
-        with self.write_lock():
-            if self._chunk_embeddings_array is not None:
-                return
-            self._chunk_ids_list = kept_chunk_ids
-            self._chunk_embeddings_array = new_array
-
-        if len(new_array) > 0 and isinstance(new_array, np.ndarray):
-            dtype_str = "float16" if self.use_float16_embeddings else "float32"
-            logger.info(
-                f"Chunk embeddings array built ({dtype_str}): {len(kept_chunk_ids)} chunks, "
-                f"memory: {new_array.nbytes / 1024 / 1024:.2f} MB"
-            )
 
     # ========== GraphStore Interface Implementation ==========
 
@@ -859,4 +966,3 @@ class _PrunedHippoRAGNeo4jIndexingMixin:
             Query results
         """
         return self._execute_query(query, params)
-

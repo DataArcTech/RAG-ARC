@@ -220,39 +220,36 @@ class _PrunedHippoRAGNeo4jGraphMixin:
         Returns:
             Tuple of (chunk_ids, chunk_scores, ppr_scores_dict)
         """
-        from encapsulation.database.utils.pruned_hipporag_utils import compute_entity_id, normalize_entity_text
-
         phrase_weights = {}
         passage_weights = {}
 
         # Get entity-to-chunk counts from cache (optimized, no Neo4j query)
         # Collect all entity IDs that appear in facts
-        owner_str = self._owner_to_str(owner_id)
-
         entity_ids_in_facts = set()
         for f in top_k_facts:
-            for entity_text in [f[0], f[2]]:  # head and tail
-                entity_id = compute_entity_id(normalize_entity_text(entity_text), owner_id=owner_str)
-                if entity_id in subgraph_nodes:
-                    entity_ids_in_facts.add(entity_id)
+            head_id = f[4] if len(f) > 4 else None
+            tail_id = f[5] if len(f) > 5 else None
+            if head_id and head_id in subgraph_nodes:
+                entity_ids_in_facts.add(head_id)
+            if tail_id and tail_id in subgraph_nodes:
+                entity_ids_in_facts.add(tail_id)
 
         # Batch get chunk counts from cache
-        entity_to_chunk_count = self.graph_store.get_batch_entity_chunk_counts_from_cache(list(entity_ids_in_facts), owner_id=owner_str)
+        entity_to_chunk_count = self.graph_store.get_batch_entity_chunk_counts_from_cache(list(entity_ids_in_facts), owner_id=self._owner_to_str(owner_id))
 
         # Assign weights to entity nodes based on fact scores
         for rank, f in enumerate(top_k_facts):
             fact_score = query_fact_scores[top_k_fact_indices[rank]] if query_fact_scores.ndim > 0 else query_fact_scores
 
-            for entity_text in [f[0], f[2]]:  # head and tail
-                entity_id = compute_entity_id(normalize_entity_text(entity_text), owner_id=owner_str)
-
-                if entity_id in subgraph_nodes:
-                    phrase_weights[entity_id] = fact_score
-
-                    # Normalize by chunk count (entities appearing in more chunks get lower weight)
-                    chunk_count = entity_to_chunk_count.get(entity_id, 0)
-                    if chunk_count != 0:
-                        phrase_weights[entity_id] /= chunk_count
+            head_id = f[4] if len(f) > 4 else None
+            tail_id = f[5] if len(f) > 5 else None
+            for entity_id in (head_id, tail_id):
+                if not entity_id or entity_id not in subgraph_nodes:
+                    continue
+                phrase_weights[entity_id] = fact_score
+                chunk_count = entity_to_chunk_count.get(entity_id, 0)
+                if chunk_count != 0:
+                    phrase_weights[entity_id] /= chunk_count
 
         # Assign weights to passage nodes based on dense retrieval
         query_doc_scores = self._dense_passage_retrieval_scores(query)
@@ -303,4 +300,3 @@ class _PrunedHippoRAGNeo4jGraphMixin:
                 chunk_scores.append(score)
 
         return chunk_ids, chunk_scores, ppr_scores_dict
-
