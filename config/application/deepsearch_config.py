@@ -1,6 +1,7 @@
 """Configuration entry point that wires planner, graph reasoning, gap detection, and external channels."""
 import hashlib
 import json
+from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, Literal, Optional, List
 
 from pydantic import BaseModel, Field
@@ -16,6 +17,7 @@ from core.deepsearch.reasoning import MultiAgentGraphReasoningLoop
 from core.deepsearch.gap import GapDetectionEngine
 from core.deepsearch.report import DeepSearchReporter
 from core.deepsearch.tooling.registry import ToolHintRegistry
+from core.deepsearch.tooling.adapter_capability_gate import disabled_tools_for_adapter, merge_disabled_tools
 from encapsulation.deepsearch.tooling import DeepSearchToolManager
 from encapsulation.deepsearch.external import ExternalSearchChannel
 from encapsulation.deepsearch.telemetry import LoggingTelemetryClient
@@ -423,6 +425,10 @@ class DeepSearchServiceConfig(AbstractConfig):
     def build(self) -> DeepSearchService:
         llm_connector = self._build_llm_connector()
         adapter = self.graph_adapter.build()
+        try:
+            adapter_meta = adapter.metadata()
+        except Exception:
+            adapter_meta = None
         mcp_client = self._build_mcp_client()
         telemetry_client = self._build_telemetry_client() if self._resolve_telemetry_flag() else None
         tool_hint_registry = ToolHintRegistry()
@@ -431,6 +437,10 @@ class DeepSearchServiceConfig(AbstractConfig):
             mcp_client=mcp_client,
             telemetry_client=telemetry_client,
             tool_hint_registry=tool_hint_registry,
+        )
+        adapter_disabled = disabled_tools_for_adapter(adapter_meta) if adapter_meta is not None else set()
+        tool_hint_registry.set_disabled_tools(
+            merge_disabled_tools(tool_hint_registry.get_disabled_tool_names(), adapter_disabled)
         )
         planner = DeepSearchPlanner(
             prompt_store=None,
@@ -460,6 +470,15 @@ class DeepSearchServiceConfig(AbstractConfig):
             config=self.external_channel,
             telemetry_client=telemetry_client,
         )
+        adapter_meta_payload: Any | None = adapter_meta
+        if adapter_meta is not None:
+            if hasattr(adapter_meta, "model_dump"):
+                try:
+                    adapter_meta_payload = adapter_meta.model_dump(exclude_none=True)
+                except TypeError:
+                    adapter_meta_payload = adapter_meta.model_dump()
+            elif is_dataclass(adapter_meta):
+                adapter_meta_payload = asdict(adapter_meta)
         return DeepSearchService(
             planner=planner,
             graph_loop=graph_loop,
@@ -472,6 +491,8 @@ class DeepSearchServiceConfig(AbstractConfig):
                 "fingerprint": self._fingerprint(),
                 "artifact_dir": self.tool_manager.artifact_dir,
                 "quality_loop": self.quality_loop.model_dump(),
+                "adapter": adapter_meta_payload,
+                "disabled_tools": sorted(tool_hint_registry.get_disabled_tool_names()),
                 "tool_names": {
                     "graph_channel_tool": self.planner.graph_channel_tool,
                     "text_channel_tool": self.planner.text_channel_tool,

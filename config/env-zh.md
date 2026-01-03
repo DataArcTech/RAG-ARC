@@ -103,9 +103,9 @@ cp .env.example .env
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `FILE_STORE_BASE_PATH` | `./data/file_store` | 文件原始内容存储目录（本地 blob store）。 |
-| `PARSED_CONTENT_STORE_BASE_PATH` | `./data/parsed_content_store` | 解析结果存储目录。 |
-| `CHUNK_STORE_BASE_PATH` | `./data/chunk_store` | Chunk 存储目录。 |
+| `FILE_STORE_BASE_PATH` | `./data/file_store` | 文件原始内容存储目录（本地 blob store；相对路径按项目根目录解析）。 |
+| `PARSED_CONTENT_STORE_BASE_PATH` | `./data/parsed_content_store` | 解析结果存储目录（相对路径按项目根目录解析）。 |
+| `CHUNK_STORE_BASE_PATH` | `./data/chunk_store` | Chunk 存储目录（相对路径按项目根目录解析）。 |
 | `LOCAL_BLOB_STORE_BASE_PATH` | `./data/files` | `LOCAL_FILE_STORAGE_PATH` 的历史别名（仅在 JSON 未提供 `base_path` 时才会使用）。 |
 | `FAISS_INDEX_PATH` | `./data/unified_faiss_index` | 统一 FAISS 索引目录。 |
 | `BM25_INDEX_PATH` | `./data/unified_bm25_index` | 统一 BM25 索引目录。 |
@@ -366,7 +366,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `VLMOCR_OUTPUT_DIR` | _(空)_ | 可选：VLM OCR 输出目录覆盖。 |
 | `OCR_MODEL_NAME` | _(空)_ | 可选：历史兼容的 OCR 模型名别名。 |
 | `RAGARC_RUNTIME_DIR` | `./local/runtime` | 当首选目录不可写时的运行时兜底根目录。 |
-| `LOCAL_FILE_STORAGE_PATH` | `./data/files` | 当 JSON 未提供 `base_path` 时，`local_blob_store` 的默认根目录。 |
+| `LOCAL_FILE_STORAGE_PATH` | `./data/files` | 当 JSON 未提供 `base_path` 时，`local_blob_store` 的默认根目录（相对路径按项目根目录解析）。 |
 
 ## 9. Neo4j 图数据库
 

@@ -1,133 +1,125 @@
 import logging
 import uuid
-import os
-from pathlib import Path
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone, timedelta
-from typing import Annotated
-from fastapi import FastAPI, Depends
-from fastapi.middleware.cors import CORSMiddleware
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
 from dotenv import load_dotenv
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
 from core.graph_adapter.scope_provider import configure_scope_provider
 
 # Load environment variables from .env file
 load_dotenv()
 configure_scope_provider()
 
-# 先配置日志，避免被其他模块的basicConfig覆盖
-from api.utils.logging_handler import DailySizeRotatingHandler
-from asgi_correlation_id.log_filters import CorrelationIdFilter
+import app_registration
 
-class AutoUUIDCorrelationFilter(CorrelationIdFilter):
-    """自动生成 UUID 的 CorrelationIdFilter（当 correlation_id 不存在时）"""
-    def filter(self, record):
-        result = super().filter(record)
-        if hasattr(record, 'correlation_id') and record.correlation_id == 'NO-ID':
-            record.correlation_id = str(uuid.uuid4())
-        return result
+# Initialize components BEFORE importing routers that depend on them
+app_registration.initialize()
+
+from api.middleware.response_wrapper import RequestIdResponseWrapper
+from api.routers import auth as auth_router
+from api.routers import chatbot as chatbot_router
+from api.routers import deepsearch as deepsearch_router
+from api.routers import knowledge as knowledge_router
+from api.routers import mcp
+from api.routers import rag_inference
+from api.routers import session as session_router
+from api.routers import user as user_router
+from api.utils.logging_handler import DailySizeRotatingHandler
+from asgi_correlation_id import CorrelationIdMiddleware
+from asgi_correlation_id.log_filters import CorrelationIdFilter
+from asgi_correlation_id.middleware import is_valid_uuid4
+
 
 class BeijingFormatter(logging.Formatter):
-    """使用北京时间的日志格式化器"""
-    def formatTime(self, record, datefmt=None):
+    """Log formatter that uses Beijing time (UTC+8) for timestamps."""
+
+    def formatTime(self, record, datefmt=None):  # noqa: N802
         beijing_tz = timezone(timedelta(hours=8))
         ct = datetime.fromtimestamp(record.created, tz=beijing_tz)
         if datefmt:
             return ct.strftime(datefmt)
-        return ct.strftime('%Y-%m-%d %H:%M:%S')
+        return ct.strftime("%Y-%m-%d %H:%M:%S")
 
-correlation_filter = AutoUUIDCorrelationFilter(uuid_length=36, default_value='NO-ID')
-log_base_dir = Path(__file__).parent / "log"
-log_base_dir.mkdir(exist_ok=True)
 
-file_handler = DailySizeRotatingHandler(
-    base_dir=str(log_base_dir),
-    maxBytes=100*1024*1024,
-    backupCount=30,
-    encoding='utf-8'
-)
-file_handler.setLevel(logging.INFO)
-file_handler.setFormatter(BeijingFormatter(
-    '%(asctime)s - [request_id: %(correlation_id)s] - %(name)s - %(levelname)s - %(message)s'
-))
-file_handler.addFilter(correlation_filter)
+def _configure_logging() -> None:
+    """Configure application logging without monkey patching."""
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - [request_id: %(correlation_id)s] - %(name)s - %(levelname)s - %(message)s',
-    handlers=[file_handler],
-    force=True
-)
+    correlation_filter = CorrelationIdFilter(uuid_length=36, default_value="NO-ID")
 
-for handler in logging.root.handlers:
-    if isinstance(handler, logging.StreamHandler) and not isinstance(handler.formatter, BeijingFormatter):
-        handler.setFormatter(BeijingFormatter(
-            '%(asctime)s - [request_id: %(correlation_id)s] - %(name)s - %(levelname)s - %(message)s'
-        ))
+    log_dir = Path(__file__).parent / "log"
+    log_dir.mkdir(exist_ok=True)
 
-for handler in logging.root.handlers:
-    if correlation_filter not in handler.filters:
+    fmt = "%(asctime)s - [request_id: %(correlation_id)s] - %(name)s - %(levelname)s - %(message)s"
+    formatter = BeijingFormatter(fmt)
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+
+    handler = next((h for h in root.handlers if isinstance(h, DailySizeRotatingHandler)), None)
+    if handler is None:
+        handler = DailySizeRotatingHandler(
+            base_dir=str(log_dir),
+            maxBytes=100 * 1024 * 1024,
+            backupCount=30,
+            encoding="utf-8",
+        )
+        root.addHandler(handler)
+
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(formatter)
+    if not any(isinstance(f, CorrelationIdFilter) for f in getattr(handler, "filters", []) or []):
         handler.addFilter(correlation_filter)
 
-original_addHandler = logging.Logger.addHandler
-def addHandler_with_filter(self, handler):
-    if correlation_filter not in handler.filters:
-        handler.addFilter(correlation_filter)
-    return original_addHandler(self, handler)
-logging.Logger.addHandler = addHandler_with_filter
+    if not any(isinstance(f, CorrelationIdFilter) for f in getattr(root, "filters", []) or []):
+        root.addFilter(correlation_filter)
 
-import app_registration
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        target_logger = logging.getLogger(name)
+        if any(isinstance(h, DailySizeRotatingHandler) for h in target_logger.handlers):
+            continue
+        target_logger.addHandler(handler)
 
-# initialize components BEFORE importing routers that depend on them
-app_registration.initialize()
 
-from api.routers import mcp
-from api.routers import knowledge as knowledge_router
-from api.routers import rag_inference
-from api.routers import deepsearch as deepsearch_router
-from api.routers import session as session_router
-from api.routers import auth as auth_router
-from api.routers.auth import get_current_user
-from api.routers import user as user_router
-from api.routers import chatbot as chatbot_router
-from asgi_correlation_id import CorrelationIdMiddleware
-from asgi_correlation_id.middleware import is_valid_uuid4
-from api.middleware.response_wrapper import RequestIdResponseWrapper
+_configure_logging()
 
 logger = logging.getLogger(__name__)
 
 
-async def shutdown_knowledge_module():
+async def shutdown_knowledge_module() -> None:
     """Shutdown Knowledge module to flush pending BM25 chunks."""
+
     logger.info("Application shutting down...")
     try:
         knowledge = app_registration.registrator.get_object("knowledge")
-        if knowledge and hasattr(knowledge, 'shutdown'):
+        if knowledge and hasattr(knowledge, "shutdown"):
             await knowledge.shutdown()
-    except Exception as e:
-        logger.error(f"Error during shutdown: {e}")
-    
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Error during shutdown: %s", exc)
+
     # Shutdown global thread pool
     try:
         from framework.thread_pool import get_thread_pool
-        thread_pool = get_thread_pool()
-        thread_pool.shutdown(wait=True)
-    except Exception as e:
-        logger.error(f"Error shutting down thread pool: {e}")
+
+        get_thread_pool().shutdown(wait=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Error shutting down thread pool: %s", exc)
 
 
 @asynccontextmanager
 async def _noop_context():
     """No-op async context manager for when MCP lifespan is not available."""
+
     yield
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Lifespan context manager for FastAPI application.
-    Handles startup and shutdown events for both FastAPI and FastMCP.
-    """
-    # Startup
+    """Lifespan context manager for FastAPI startup/shutdown."""
+
     logger.info("Application starting up...")
     try:
         from core.utils.dependency_health import check_dependencies
@@ -141,19 +133,15 @@ async def lifespan(app: FastAPI):
             bool((checks.get("neo4j") or {}).get("ok")),
             health.get("mode"),
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.error("Dependency health check failed at startup: %s", exc)
         raise
-    
-    # Get MCP lifespan if it exists
-    mcp_lifespan = getattr(mcp.mcp_app, 'lifespan', None)
-    
-    # Use MCP lifespan if available, otherwise use a no-op context manager
+
+    mcp_lifespan = getattr(mcp.mcp_app, "lifespan", None)
     mcp_context = mcp_lifespan(mcp.mcp_app) if mcp_lifespan else _noop_context()
-    
+
     async with mcp_context:
         yield
-        # Shutdown Knowledge module to flush pending BM25 chunks
         await shutdown_knowledge_module()
 
 
@@ -162,7 +150,7 @@ app = FastAPI(title="RAG-ARC HTTP Server", lifespan=lifespan)
 # Add Correlation ID middleware (must be first to capture all requests)
 app.add_middleware(
     CorrelationIdMiddleware,
-    header_name='X-Request-ID',
+    header_name="X-Request-ID",
     update_request_header=False,
     generator=lambda: str(uuid.uuid4()),
     validator=is_valid_uuid4,
@@ -178,7 +166,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
-    expose_headers=["X-Request-ID"],  # 暴露 request_id 给前端
+    expose_headers=["X-Request-ID"],  # Expose request id to clients
 )
 
 
@@ -188,34 +176,10 @@ async def health_check():
     return "ok"
 
 
-# 兼容路由：/api/messages（session_id 在请求体中）
-# 已注释：与 chatbot 路由冲突，chatbot 路由不需要认证，使用 SSE 流式响应
-# 如需恢复旧接口，取消注释即可
-# @app.post("/api/messages")
-# async def create_message_compat(
-#     message_request: "MessageRequest",
-#     current_user: Annotated["User | None", Depends(get_current_user)],
-# ):
-#     """兼容 /api/messages 的请求格式（session_id 在请求体中）"""
-#     from api.routers.session import MessageRequest, get_session_handler, get_message_handler, validate_user_session
-#     from encapsulation.data_model.orm_models import ChatMessage
-#     from fastapi import HTTPException, status
-#     from framework.thread_pool import get_thread_pool
-#     
-#     session_id = message_request.session_id
-#     # Validate user has access to the session
-#     session = await get_thread_pool().run_blocking(
-#         get_session_handler().get_session,
-#         session_id
-#     )
-#     if session is None or not validate_user_session(session, current_user):
-#         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
-#     
-#     messages = await get_thread_pool().run_blocking(
-#         get_message_handler().create_message,
-#         ChatMessage(session_id=session_id, content={"role": "user", "content": message_request.content}, created_at=datetime.now())
-#     )
-#     return messages
+# Compatibility route note:
+# `/api/messages` (session_id in request body) was previously served here, but it conflicts with the
+# chatbot SSE route and had different auth expectations. Keep it disabled unless legacy clients
+# must be supported.
 
 app.mount("/mcp", mcp.mcp_app)
 app.include_router(knowledge_router.router)
@@ -225,3 +189,4 @@ app.include_router(session_router.router)
 app.include_router(auth_router.router)
 app.include_router(user_router.router)
 app.include_router(chatbot_router.router)
+

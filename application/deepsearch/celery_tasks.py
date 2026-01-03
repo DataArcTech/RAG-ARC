@@ -164,7 +164,10 @@ def run_deepsearch(
                 try:
                     await emit_trace(
                         "all_tools",
-                        render_all_tools_block(include_llm_tools=bool(getattr(service.planner, "include_llm_tools_in_catalog"))),
+                        render_all_tools_block(
+                            include_llm_tools=bool(getattr(service.planner, "include_llm_tools_in_catalog")),
+                            registry=getattr(service.planner, "_tool_hint_registry", None),
+                        ),
                         meta={"run_id": run_id},
                     )
                 except Exception:

@@ -104,9 +104,9 @@ How secrets flow into configs:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `FILE_STORE_BASE_PATH` | `./data/file_store` | Local blob store base path for original files. |
-| `PARSED_CONTENT_STORE_BASE_PATH` | `./data/parsed_content_store` | Parsed content store path. |
-| `CHUNK_STORE_BASE_PATH` | `./data/chunk_store` | Chunk store path. |
+| `FILE_STORE_BASE_PATH` | `./data/file_store` | Local blob store base path for original files (relative paths are resolved against the repo root). |
+| `PARSED_CONTENT_STORE_BASE_PATH` | `./data/parsed_content_store` | Parsed content store path (relative paths are resolved against the repo root). |
+| `CHUNK_STORE_BASE_PATH` | `./data/chunk_store` | Chunk store path (relative paths are resolved against the repo root). |
 | `LOCAL_BLOB_STORE_BASE_PATH` | `./data/files` | Legacy alias for `LOCAL_FILE_STORAGE_PATH` (only used when a JSON `base_path` is not provided). |
 | `FAISS_INDEX_PATH` | `./data/unified_faiss_index` | Unified FAISS index directory. |
 | `BM25_INDEX_PATH` | `./data/unified_bm25_index` | Unified BM25 index directory. |
@@ -367,7 +367,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `VLMOCR_OUTPUT_DIR` | _(empty)_ | Optional override for VLM OCR output directory. |
 | `OCR_MODEL_NAME` | _(empty)_ | Optional backward-compatible OCR model name alias. |
 | `RAGARC_RUNTIME_DIR` | `./local/runtime` | Fallback runtime root when preferred local directories are not writable. |
-| `LOCAL_FILE_STORAGE_PATH` | `./data/files` | Default root for `local_blob_store` when JSON `base_path` is not provided. |
+| `LOCAL_FILE_STORAGE_PATH` | `./data/files` | Default root for `local_blob_store` when JSON `base_path` is not provided (relative paths are resolved against the repo root). |
 
 ## 9. Neo4j Graph Database
 

@@ -3,9 +3,10 @@ import os
 
 from core.deepsearch.tooling import describe_available_tools
 from core.deepsearch.tools import builtin_tool_descriptors
+from core.deepsearch.tooling.registry import ToolHintRegistry
 
 
-def render_all_tools_block(*, include_llm_tools: bool) -> str:
+def render_all_tools_block(*, include_llm_tools: bool, registry: ToolHintRegistry | None = None) -> str:
     """Render a stable, human-readable tool catalog for <all_tools> trace.
 
     Default output is intentionally compact ("perfect is no more to remove").
@@ -14,9 +15,10 @@ def render_all_tools_block(*, include_llm_tools: bool) -> str:
 
     mode = (str(os.getenv("DEEPSEARCH_WEAVER_ALL_TOOLS_MODE", "compact")) or "").strip().lower()
 
-    hints = describe_available_tools(include_llm_tools=include_llm_tools)
+    hints = describe_available_tools(registry=registry, include_llm_tools=include_llm_tools)
     hint_map = {str(h.get("name") or ""): h for h in hints if isinstance(h, dict)}
     descriptors = list(builtin_tool_descriptors())
+    disabled = registry.get_disabled_tool_names() if registry is not None else set()
 
     if mode != "full":
         profiles = {"F": 0, "X": 0, "H": 0}
@@ -27,12 +29,14 @@ def render_all_tools_block(*, include_llm_tools: bool) -> str:
                 continue
             profiles[profile] += 1
         total = 1 + len(descriptors)  # includes graph_adapter.query
+        disabled_text = f"disabled_tools: {len(disabled)}" if disabled else "disabled_tools: 0"
         return "\n".join(
             [
                 "available_tools:",
                 f" - graph_adapter.query (adapter traversal primitive)",
                 f" - builtin_tools: {len(descriptors)} total={total}",
                 f"profiles: F={profiles['F']} X={profiles['X']} H={profiles['H']}",
+                disabled_text,
                 "note: set DEEPSEARCH_WEAVER_ALL_TOOLS_MODE=full for full tool list",
             ]
         ).strip()

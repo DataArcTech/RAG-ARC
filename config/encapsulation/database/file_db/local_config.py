@@ -1,10 +1,13 @@
 """Configuration for Local file storage"""
 
 import os
+from pathlib import Path
 from framework.config import AbstractConfig
 from encapsulation.database.file_db.local import LocalDB
 from typing import Literal
 from pydantic import Field
+
+from core.utils.filename_guard import project_root_dir
 
 
 class LocalDBConfig(AbstractConfig):
@@ -20,4 +23,8 @@ class LocalDBConfig(AbstractConfig):
     cleanup_empty_dirs: bool = False  # Whether to remove empty directories on cleanup
 
     def build(self) -> LocalDB:
-        return LocalDB(self)
+        base = Path(str(self.base_path or "")).expanduser()
+        if not base.is_absolute():
+            base = (project_root_dir() / base).resolve()
+        normalized = self.model_copy(update={"base_path": str(base)})
+        return LocalDB(normalized)
