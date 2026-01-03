@@ -28,9 +28,15 @@ class _PostgreSQLFilesMixin:
                 logger.debug(f"Stored file metadata for asset: {file_metadata.file_id}")
                 return file_metadata.file_id
 
-        except IntegrityError:
-            logger.error(f"File metadata with file_id '{file_metadata.file_id}' already exists")
-            raise ValueError(f"File metadata with file_id '{file_metadata.file_id}' already exists")
+        except IntegrityError as exc:
+            # Do not assume all integrity errors are duplicates (e.g., NOT NULL / FK violations).
+            logger.error(
+                "Integrity error storing file metadata (file_id=%s): %s",
+                file_metadata.file_id,
+                exc,
+                exc_info=True,
+            )
+            raise ValueError(f"File metadata insert failed for file_id='{file_metadata.file_id}': {exc}") from exc
         except SQLAlchemyError as e:
             logger.error(f"Database error storing file metadata: {e}")
             raise
@@ -382,4 +388,3 @@ class _PostgreSQLFilesMixin:
             logger.error(f"Database error counting accessible files for user {user_id}: {e}")
             raise
     
-

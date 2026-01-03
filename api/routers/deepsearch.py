@@ -61,6 +61,21 @@ def _assert_task_owner(task_run: Dict[str, Any], *, user_id: uuid.UUID) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to access this run_id")
 
 
+def _assert_inprocess_task_owner(info: Any, *, user_id: uuid.UUID) -> None:
+    """Enforce per-owner isolation for in-process DeepSearch runs."""
+    if is_admin_owner(user_id):
+        return
+    raw_owner = getattr(info, "owner_id", None)
+    if not raw_owner:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to access this run_id")
+    try:
+        owner_uuid = uuid.UUID(str(raw_owner))
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to access this run_id") from None
+    if owner_uuid != user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to access this run_id")
+
+
 def _get_deepsearch_service():
     try:
         return registrator.get_object("deepsearch_service")
@@ -174,7 +189,7 @@ async def _schedule_deepsearch(
         )
 
     service = _get_deepsearch_service()
-    await TASKS.create(run_id)
+    await TASKS.create(run_id, owner_id=str(effective_owner))
 
     def _listener(record: Dict[str, Any], state) -> None:  # noqa: ANN001
         progress = _stage_progress(getattr(state, "stage", "unknown"))
@@ -329,6 +344,7 @@ async def get_progress(
     info = await TASKS.get(run_id)
     if not info:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run_id not found")
+    _assert_inprocess_task_owner(info, user_id=current_user.id)
     payload = dict(info.last_progress or {})
     payload.setdefault("run_id", run_id)
     payload.setdefault("done", info.done)
@@ -365,6 +381,7 @@ async def get_result(
     info = await TASKS.get(run_id)
     if not info:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run_id not found")
+    _assert_inprocess_task_owner(info, user_id=current_user.id)
     if not info.done:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run not finished")
     if info.error:
@@ -383,6 +400,12 @@ async def stream_progress(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
 
     headers = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
+
+    if not _use_celery():
+        info = await TASKS.get(run_id)
+        if not info:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run_id not found")
+        _assert_inprocess_task_owner(info, user_id=current_user.id)
 
     if format == "weaver":
         if _use_celery():
@@ -432,7 +455,6 @@ async def stream_progress(
             media_type="text/event-stream",
             headers=headers,
         )
-
     return StreamingResponse(
         stream_events_inprocess(run_id, last_event_id=last_event_id),
         media_type="text/event-stream",

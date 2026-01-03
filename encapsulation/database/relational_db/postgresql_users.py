@@ -3,8 +3,9 @@ import uuid
 import logging
 
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+from sqlalchemy import select
 
-from ...data_model.orm_models import User
+from ...data_model.orm_models import ChatMessage, ChatSession, User
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +41,14 @@ class _PostgreSQLUsersMixin:
             logger.error(f"Database error getting user {user_id}: {e}")
             raise
 
-    def get_user_by_username(self, user_name: str, **kwargs: Any) -> Optional[User]:
-        """Get user by username using SQLAlchemy ORM"""
+    def get_user_by_username(self, user_name: str, type: Optional[int] = None, **kwargs: Any) -> Optional[User]:
+        """Get user by username (and optional type) using SQLAlchemy ORM."""
         try:
             with self.SessionMaker() as session:
-                user = session.query(User).filter_by(user_name=user_name).first()
+                query = session.query(User).filter_by(user_name=user_name)
+                if type is not None:
+                    query = query.filter(User.type == type)
+                user = query.first()
                 if user:
                     # Detach from session to avoid lazy loading issues
                     session.expunge(user)
@@ -104,9 +108,22 @@ class _PostgreSQLUsersMixin:
             raise
 
     def delete_user(self, user_id: uuid.UUID, **kwargs: Any) -> bool:
-        """Delete user using SQLAlchemy ORM (cascades to sessions and messages)"""
+        """Delete user and dependent chat data using SQLAlchemy ORM.
+
+        Notes:
+        - Historical deployments may not have FK constraints with `ON DELETE CASCADE`.
+        - We explicitly delete dependent chat sessions and messages to keep behavior consistent.
+        """
         try:
             with self.SessionMaker() as session:
+                # Delete messages for sessions owned by this user.
+                session_ids_select = select(ChatSession.id).where(ChatSession.user_id == user_id)
+                session.query(ChatMessage).filter(ChatMessage.session_id.in_(session_ids_select)).delete(
+                    synchronize_session=False
+                )
+                # Delete sessions owned by this user.
+                session.query(ChatSession).filter(ChatSession.user_id == user_id).delete(synchronize_session=False)
+                # Delete the user row.
                 rows_deleted = session.query(User).filter_by(id=user_id).delete()
                 session.commit()
 
@@ -122,5 +139,3 @@ class _PostgreSQLUsersMixin:
             raise
 
     # ==================== CHAT SESSION MANAGEMENT ====================
-
-

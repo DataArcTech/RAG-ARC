@@ -20,6 +20,7 @@ from config.encapsulation.database.relational_db.postgresql_config import Postgr
 from config.core.file_management.storage.chat_message_storage import ChatMessageStorageConfig
 from config.core.file_management.storage.chat_session_storage import ChatSessionStorageConfig
 from config.core.file_management.storage.user_storage import UserStorageConfig
+from encapsulation.data_model.orm_models import ChatMessage
 import hashlib
 
 
@@ -57,7 +58,7 @@ def test_without_redis():
     # Clean up existing test user
     existing_user = user_storage.get_user_by_username("test_no_redis_user")
     if existing_user:
-        user_storage.delete_user(str(existing_user.id))
+        user_storage.delete_user(existing_user.id)
         print(" 清理已存在的测试用户")
 
     user_id = user_storage.create_user(
@@ -94,16 +95,17 @@ def test_without_redis():
     
     message_ids = []
     for i in range(5):
-        msg_id = message_storage.create_message(
+        message = ChatMessage(
             session_id=uuid.UUID(session_id),
             content={
                 "role": "user" if i % 2 == 0 else "assistant",
                 "content": f"Test message {i+1} without Redis",
-                "metadata": {"index": i}
-            }
+                "metadata": {"index": i},
+            },
         )
-        message_ids.append(msg_id)
-        print(f" 创建消息 {i+1}: {msg_id}")
+        stored = message_storage.create_message(message)
+        message_ids.append(stored.id)
+        print(f" 创建消息 {i+1}: {stored.id}")
 
     # ==================== Test Message Retrieval ====================
     print("\n 测试消息读取...")
@@ -124,18 +126,16 @@ def test_without_redis():
     print(f" 删除消息: {message_ids[0]}")
 
     # Verify deletion
-    messages_after = message_storage.list_messages_by_session(session_id, limit=10)
+    messages_after = message_storage.list_messages_by_session(uuid.UUID(session_id), limit=10)
     assert len(messages_after) == 4, "Should have 4 messages after deletion"
     print(f" 验证删除成功，剩余 {len(messages_after)} 条消息")
 
-    # ==================== Test Conversation History ====================
-    print("\n测试对话历史...")
-    
-    history = message_storage.get_conversation_history(uuid.UUID(session_id), limit=10)
+    # ==================== Conversation History (derived) ====================
+    print("\n测试对话历史（由消息列表推导）...")
+    history = [{"role": m.content.get("role"), "content": m.content.get("content")} for m in messages_after]
     print(f" 获取对话历史: {len(history)} 条消息")
-    
     for i, msg in enumerate(history):
-        print(f"   {i+1}. [{msg['role']}] {msg['content'][:50]}...")
+        print(f"   {i+1}. [{msg['role']}] {str(msg['content'])[:50]}...")
 
     # ==================== Cleanup ====================
     print("\n 清理测试数据...")

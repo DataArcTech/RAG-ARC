@@ -7,6 +7,7 @@ from typing import (
 )
 import logging
 import uuid
+from datetime import datetime
 
 from encapsulation.data_model.orm_models import ChatMessage
 
@@ -106,6 +107,67 @@ class ChatMessageStorage(AbstractModule):
             "created_at": cache_data.get("created_at")
         }
 
+    def _cache_format_to_chat_message(self, cache_data: Dict[str, Any]) -> Optional[ChatMessage]:
+        """Convert cached payload into a lightweight ChatMessage ORM object."""
+        try:
+            message_id = cache_data.get("message_id")
+            session_id = cache_data.get("session_id")
+            if not message_id or not session_id:
+                return None
+
+            created_at_raw = cache_data.get("created_at")
+            created_at = None
+            if isinstance(created_at_raw, str) and created_at_raw:
+                try:
+                    created_at = datetime.fromisoformat(created_at_raw)
+                except ValueError:
+                    created_at = None
+
+            return ChatMessage(
+                id=uuid.UUID(str(message_id)),
+                session_id=uuid.UUID(str(session_id)),
+                content={
+                    "role": cache_data.get("role", "user"),
+                    "content": cache_data.get("content", ""),
+                    "metadata": cache_data.get("metadata", {}),
+                },
+                created_at=created_at or datetime.now(),
+            )
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _cache_append_message(self, message: ChatMessage) -> None:
+        """Best-effort append of a single message into Redis cache."""
+        if not self.cache_store:
+            return
+
+        cache_key = self._get_cache_key(str(message.session_id))
+        payload = self._message_to_cache_format(message)
+        self.cache_store.rpush(cache_key, payload)
+
+        if self.cache_max_messages and self.cache_max_messages > 0:
+            # Keep only the newest N messages while preserving chronological order.
+            self.cache_store.ltrim(cache_key, -int(self.cache_max_messages), -1)
+        if self.cache_ttl and self.cache_ttl > 0:
+            self.cache_store.expire(cache_key, int(self.cache_ttl))
+
+    def _cache_backfill_messages(self, session_id: uuid.UUID, messages: List[ChatMessage]) -> None:
+        """Best-effort backfill of cached messages for a session."""
+        if not self.cache_store:
+            return
+
+        cache_key = self._get_cache_key(str(session_id))
+        try:
+            self.cache_store.delete(cache_key)
+        except Exception:  # noqa: BLE001
+            pass
+
+        payloads = [self._message_to_cache_format(m) for m in messages]
+        if payloads:
+            self.cache_store.rpush(cache_key, *payloads)
+        if self.cache_ttl and self.cache_ttl > 0:
+            self.cache_store.expire(cache_key, int(self.cache_ttl))
+
     def _validate_message_creation(
         self,
         chat_message: ChatMessage
@@ -180,6 +242,12 @@ class ChatMessageStorage(AbstractModule):
             if not chat_message:
                 raise StorageOperationError("Failed to create chat message")
 
+            # Best-effort cache write (do not block persistence).
+            try:
+                self._cache_append_message(chat_message)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Failed to write chat message to Redis cache: %s", e)
+
             logger.info(f"Successfully created chat message (message_id: {chat_message.id})")
             return chat_message
 
@@ -235,13 +303,38 @@ class ChatMessageStorage(AbstractModule):
             List of chat message metadata, ordered by created_at (oldest first)
         """
         try:
-            # Read from PostgreSQL
+            cache_key = self._get_cache_key(str(session_id))
+            if self.cache_store and offset == 0 and limit > 0:
+                try:
+                    cached = self.cache_store.lrange(cache_key, 0, limit - 1)
+                except Exception as e:  # noqa: BLE001
+                    cached = []
+                    logger.warning("Failed to read chat messages from Redis cache: %s", e)
+
+                if cached and len(cached) >= limit:
+                    cached_messages: List[ChatMessage] = []
+                    for item in cached:
+                        if isinstance(item, dict):
+                            msg = self._cache_format_to_chat_message(item)
+                            if msg is not None:
+                                cached_messages.append(msg)
+                    if len(cached_messages) >= limit:
+                        return cached_messages
+
+            # Read from PostgreSQL (authoritative)
             messages = self.metadata_store.list_chat_messages_by_session(
                 session_id=session_id,
                 limit=limit,
                 offset=offset,
                 **kwargs
             )
+
+            # Best-effort cache backfill (only when reading from the start).
+            if self.cache_store and offset == 0 and messages:
+                try:
+                    self._cache_backfill_messages(session_id, messages)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("Failed to backfill chat messages into Redis cache: %s", e)
 
             return messages
 
@@ -317,7 +410,7 @@ class ChatMessageStorage(AbstractModule):
             # Delete from Redis
             if self.cache_store:
                 try:
-                    cache_key = self._get_cache_key(session_id)
+                    cache_key = self._get_cache_key(str(session_id))
                     self.cache_store.delete(cache_key)
                     logger.debug(f"Deleted Redis cache for session {session_id}")
                 except Exception as e:

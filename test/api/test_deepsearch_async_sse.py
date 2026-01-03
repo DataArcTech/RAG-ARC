@@ -84,7 +84,8 @@ def test_deepsearch_run_async_exposes_progress_and_result():
 
     app = FastAPI()
     app.include_router(deepsearch_router.router)
-    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=uuid.uuid4())
+    user_id = uuid.uuid4()
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=user_id)
 
     async def _run():
         async with _serve_app(app) as (host, port):
@@ -129,7 +130,8 @@ def test_deepsearch_stream_emits_done_marker():
 
     app = FastAPI()
     app.include_router(deepsearch_router.router)
-    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=uuid.uuid4())
+    user_id = uuid.uuid4()
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=user_id)
 
     async def _run():
         async with _serve_app(app) as (host, port):
@@ -179,7 +181,8 @@ def test_deepsearch_stream_openai_format_emits_tool_calls():
 
     app = FastAPI()
     app.include_router(deepsearch_router.router)
-    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=uuid.uuid4())
+    user_id = uuid.uuid4()
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=user_id)
 
     async def _run():
         async with _serve_app(app) as (host, port):

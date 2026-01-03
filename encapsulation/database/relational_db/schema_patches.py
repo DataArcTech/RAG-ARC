@@ -18,6 +18,16 @@ def apply_postgres_schema_patches(engine: Engine) -> None:
     """
 
     statements: list[str] = [
+        # Backward compatible user schema upgrades.
+        # Historical deployments created `public.user` without `type`, but newer auth/account logic requires it.
+        'ALTER TABLE public."user" ADD COLUMN IF NOT EXISTS type integer NOT NULL DEFAULT 0;',
+        'ALTER TABLE public."user" ADD COLUMN IF NOT EXISTS last_login_at timestamp;',
+        'ALTER TABLE public."user" ADD COLUMN IF NOT EXISTS name varchar(255);',
+        'ALTER TABLE public."user" ADD COLUMN IF NOT EXISTS company_name varchar(255);',
+        'ALTER TABLE public."user" ADD COLUMN IF NOT EXISTS department_id uuid;',
+        'ALTER TABLE public."user" ADD COLUMN IF NOT EXISTS role_id uuid;',
+        # Ensure uniqueness matches ORM expectation (`UniqueConstraint("user_name", "type")`).
+        'CREATE UNIQUE INDEX IF NOT EXISTS uq_user_name_type_idx ON public."user"(user_name, type);',
         # Added in ORM (`FileMetadata.content_hash`) but may be missing in older DBs.
         "ALTER TABLE public.file_metadata ADD COLUMN IF NOT EXISTS content_hash varchar(64);",
         "CREATE INDEX IF NOT EXISTS ix_file_metadata_content_hash ON public.file_metadata (content_hash);",

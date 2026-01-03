@@ -271,30 +271,30 @@ class GraphLoopRuntimeMixin:
         tool_catalog: List[Dict[str, Any]] = []
         available_tool_names: set[str] = set()
         limit = max(0, int(self._think_config.get("tool_catalog_max_items") or 0))
-            if limit:
-                from core.deepsearch.tooling import describe_available_tools
+        if limit:
+            from core.deepsearch.tooling import describe_available_tools
 
-                adapter_hint = {
-                    "name": self.graph_channel_tool,
-                    "channel": "graph",
-                    "description": "Primary graph traversal via the configured graph adapter (prepare→query→filter→summarize→chain_traverse).",
-                    "profile": "X",
-                    "determinism": "adapter",
-                    "strategy_tags": ["graph", "adapter", "traversal"],
-                }
+            adapter_hint = {
+                "name": self.graph_channel_tool,
+                "channel": "graph",
+                "description": "Primary graph traversal via the configured graph adapter (prepare→query→filter→summarize→chain_traverse).",
+                "profile": "X",
+                "determinism": "adapter",
+                "strategy_tags": ["graph", "adapter", "traversal"],
+            }
+            registry = None
+            try:
+                registry = getattr(getattr(self.tool_manager, "local_registry", None), "tool_hint_registry", None)
+            except Exception:
                 registry = None
-                try:
-                    registry = getattr(getattr(self.tool_manager, "local_registry", None), "tool_hint_registry", None)
-                except Exception:
-                    registry = None
-                tool_catalog = describe_available_tools(
-                    extra_hints=[adapter_hint],
-                    registry=registry,
-                    include_llm_tools=bool(self._think_config["include_llm_tools"]),
-                )[:limit]
-                for entry in tool_catalog:
-                    if isinstance(entry, dict) and entry.get("name"):
-                        available_tool_names.add(str(entry["name"]))
+            tool_catalog = describe_available_tools(
+                extra_hints=[adapter_hint],
+                registry=registry,
+                include_llm_tools=bool(self._think_config["include_llm_tools"]),
+            )[:limit]
+            for entry in tool_catalog:
+                if isinstance(entry, dict) and entry.get("name"):
+                    available_tool_names.add(str(entry["name"]))
 
         max_rounds = max(1, int(self._think_config.get("max_rounds_per_checkpoint") or 1))
         checkpoint_records: List[ReasoningStepRecord] = []

@@ -4,10 +4,18 @@
 """
 import asyncio
 import json
+import os
 import time
 import httpx
 import uuid
 from typing import Dict, Any
+import pytest
+
+
+pytestmark = pytest.mark.skipif(
+    os.getenv("RUN_RAGARC_INTEGRATION_TESTS") != "1",
+    reason="Requires a running API server; set RUN_RAGARC_INTEGRATION_TESTS=1 to enable.",
+)
 
 
 BASE_URL = "http://localhost:8001"

@@ -188,13 +188,28 @@ async def chat(
         response_text: str = ""
         chunks: list[Chunk] = []
         subgraph_data: GraphData = None
-        response_text, chunks, subgraph_data, subgraph_info, raw_llm_response, raw_mindmap_response = await rag_inference.chat_async(
-            query,
-            owner_id=current_user.id,
-            return_subgraph=True,
-            progress_callback=_on_progress,
-            current_user_query=query,
-        )
+        try:
+            result = await rag_inference.chat_async(
+                query,
+                owner_id=current_user.id,
+                return_subgraph=True,
+                progress_callback=_on_progress,
+                current_user_query=query,
+            )
+        except TypeError:
+            result = await rag_inference.chat_async(
+                query,
+                owner_id=current_user.id,
+                return_subgraph=True,
+                progress_callback=_on_progress,
+            )
+
+        raw_llm_response = None
+        raw_mindmap_response = None
+        if isinstance(result, tuple) and len(result) == 4:
+            response_text, chunks, subgraph_data, subgraph_info = result
+        else:
+            response_text, chunks, subgraph_data, subgraph_info, raw_llm_response, raw_mindmap_response = result
 
         # Create message in the session (use thread pool to avoid blocking)
         message_handler = registrator.get_object("chat_message")

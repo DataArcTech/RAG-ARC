@@ -21,6 +21,7 @@ from encapsulation.data_model.orm_models import (
     ParsedContentMetadata, ParsedContentStatus,
     ChunkMetadata, ChunkIndexStatus
 )
+from encapsulation.data_model.orm_models import User
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -48,14 +49,38 @@ def db():
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"PostgreSQL unavailable: {exc}")
 
+@pytest.fixture(scope="module")
+def owner_user_id(db: PostgreSQLDB) -> uuid.UUID:
+    """Create a temporary owner user for FK-required tables."""
+    with db.SessionMaker() as session:
+        user = User(
+            user_name=f"postgres-test-{uuid.uuid4()}",
+            name="postgres-test",
+            hashed_password="test-password-hash",
+            type=0,
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        user_id = user.id
+        session.expunge(user)
+
+    try:
+        yield user_id
+    finally:
+        with db.SessionMaker() as session:
+            session.query(User).filter_by(id=user_id).delete()
+            session.commit()
+
 
 @pytest.fixture
-def source_file(db: PostgreSQLDB):
+def source_file(db: PostgreSQLDB, owner_user_id: uuid.UUID):
     """Insert a temporary file metadata row for downstream tests."""
     now = datetime.now(tz=datetime.now().astimezone().tzinfo)
     file_id = f"test-file-{uuid.uuid4()}"
     file_metadata = FileMetadata(
         file_id=file_id,
+        owner_id=owner_user_id,
         blob_key=f"assets/te/{file_id}/document.pdf",
         filename="document.pdf",
         status=FileStatus.STORED,
@@ -92,7 +117,7 @@ def source_parsed(db: PostgreSQLDB, source_file: FileMetadata):
     finally:
         db.delete_parsed_content_metadata(parsed_id)
 
-def test_file_metadata_operations(db: PostgreSQLDB):
+def test_file_metadata_operations(db: PostgreSQLDB, owner_user_id: uuid.UUID):
     """Test complete CRUD operations for FileMetadata"""
     print("\n=== FILE METADATA OPERATIONS ===")
 
@@ -101,6 +126,7 @@ def test_file_metadata_operations(db: PostgreSQLDB):
     file_id = f"test-file-{uuid.uuid4()}"
     file_metadata = FileMetadata(
         file_id=file_id,
+        owner_id=owner_user_id,
         blob_key=f"assets/te/{file_id}/document.pdf",
         filename="document.pdf",
         status=FileStatus.STORED,  # Using new enum value
@@ -131,7 +157,7 @@ def test_file_metadata_operations(db: PostgreSQLDB):
         "blob_key": f"assets/te/{file_id}/document-v2.pdf"
     })
     if success:
-        updated = db.get_file_metadata("test-file-123")
+        updated = db.get_file_metadata(file_id)
         print(f"  Updated status to: {updated.status}")
         print(f"  Updated blob_key to: {updated.blob_key}")
     else:
@@ -146,7 +172,6 @@ def test_file_metadata_operations(db: PostgreSQLDB):
 
     # Cleanup
     db.delete_file_metadata(file_id)
-    return retrieved
 
 def test_parsed_content_operations(db: PostgreSQLDB, source_file: FileMetadata):
     """Test complete CRUD operations for ParsedContentMetadata"""
@@ -183,11 +208,11 @@ def test_parsed_content_operations(db: PostgreSQLDB, source_file: FileMetadata):
     # Test UPDATE
     print("3. Testing parsed content update...")
     success = db.update_parsed_content_metadata(parsed_id, {
-        "status": ParsedContentStatus.PARSED,  # Progress to next status
+        "status": ParsedContentStatus.CHUNKED,  # Progress to next status
         "parser_type": "updated_pdf_parser"
     })
     if success:
-        updated = db.get_parsed_content_metadata("parsed-123")
+        updated = db.get_parsed_content_metadata(parsed_id)
         print(f"  Updated status to: {updated.status}")
         print(f"  Updated parser_type to: {updated.parser_type}")
     else:
@@ -197,15 +222,14 @@ def test_parsed_content_operations(db: PostgreSQLDB, source_file: FileMetadata):
     print("4. Testing parsed content listing...")
     parsed_list = db.list_parsed_content_metadata(
         source_file_id=source_file.file_id,
-        status=ParsedContentStatus.PARSED,
+        status=ParsedContentStatus.CHUNKED,
         limit=5
     )
     print(f"  Found {len(parsed_list)} parsed content for source file")
 
     db.delete_parsed_content_metadata(parsed_id)
-    return retrieved
 
-def test_chunk_operations(db: PostgreSQLDB, source_parsed: ParsedContentMetadata):
+def test_chunk_operations(db: PostgreSQLDB, source_parsed: ParsedContentMetadata, owner_user_id: uuid.UUID):
     """Test complete CRUD operations for ChunkMetadata"""
     print("\n=== CHUNK METADATA OPERATIONS ===")
 
@@ -215,8 +239,10 @@ def test_chunk_operations(db: PostgreSQLDB, source_parsed: ParsedContentMetadata
     chunk_metadata = ChunkMetadata(
         chunk_id=chunk_id,
         source_parsed_content_id=source_parsed.parsed_content_id,  # Back to ParsedContent reference
+        owner_id=owner_user_id,
         blob_key=f"chunks/pa/{source_parsed.parsed_content_id}/{chunk_id}.json",
         chunker_type="semantic",
+        chunk_index=0,
         index_status=ChunkIndexStatus.STORED,  # Using new enum value
         created_at=now,
         indexed_at=None  # Not indexed yet
@@ -245,7 +271,7 @@ def test_chunk_operations(db: PostgreSQLDB, source_parsed: ParsedContentMetadata
         "indexed_at": datetime.now(tz=datetime.now().astimezone().tzinfo)
     })
     if success:
-        updated = db.get_chunk_metadata("chunk-123")
+        updated = db.get_chunk_metadata(chunk_id)
         print(f"  Updated status to: {updated.index_status}")
         print(f"  Indexed at: {updated.indexed_at}")
     else:
@@ -261,9 +287,8 @@ def test_chunk_operations(db: PostgreSQLDB, source_parsed: ParsedContentMetadata
     print(f"    Found {len(chunk_list)} indexed chunks for source parsed content")
 
     db.delete_chunk_metadata(chunk_id)
-    return retrieved
 
-def test_cleanup_operations(db: PostgreSQLDB):
+def test_cleanup_operations(db: PostgreSQLDB, owner_user_id: uuid.UUID):
     """Test cleanup by deleting all test data"""
     print("\n=== CLEANUP OPERATIONS ===")
 
@@ -274,6 +299,7 @@ def test_cleanup_operations(db: PostgreSQLDB):
 
     db.store_file_metadata(FileMetadata(
         file_id=file_id,
+        owner_id=owner_user_id,
         blob_key=f"assets/cleanup/{file_id}/document.pdf",
         filename="cleanup.pdf",
         status=FileStatus.STORED,
@@ -297,8 +323,10 @@ def test_cleanup_operations(db: PostgreSQLDB):
     db.store_chunk_metadata(ChunkMetadata(
         chunk_id=chunk_id,
         source_parsed_content_id=parsed_id,
+        owner_id=owner_user_id,
         blob_key=f"chunks/cleanup/{parsed_id}/{chunk_id}.json",
         chunker_type="semantic",
+        chunk_index=0,
         index_status=ChunkIndexStatus.STORED,
         created_at=now,
         indexed_at=None,

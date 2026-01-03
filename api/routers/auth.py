@@ -3,7 +3,7 @@ import logging
 import os
 from pathlib import Path
 import secrets
-from typing import Annotated, Optional
+from typing import Annotated, Any, Mapping, Optional
 
 import jwt
 import redis
@@ -157,7 +157,7 @@ class TokenData(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    user_name: str  # 用户名（登录用）
+    user_name: str  # Username (for login)
     password: str
     type: Optional[int] = 0  # 0=livingKB / 1=chatKB
 
@@ -178,22 +178,48 @@ class UserResponse(BaseModel):
     type: int
 
     @classmethod
-    def from_user(cls, user: User) -> "UserResponse":
-        """Create UserResponse from User ORM model"""
+    def from_user(cls, user: User | Mapping[str, Any]) -> "UserResponse":
+        """Create `UserResponse` from either a `User` ORM instance or a plain mapping."""
+
+        if isinstance(user, Mapping):
+            user_id = user.get("id")
+            user_name = str(user.get("user_name") or "")
+            name = str(user.get("name") or user_name)
+            raw_status = user.get("status")
+            if hasattr(raw_status, "value"):
+                status_value = str(getattr(raw_status, "value"))
+            elif isinstance(raw_status, str):
+                status_value = raw_status
+            else:
+                status_value = "ACTIVE"
+            user_type = user.get("type")
+            try:
+                type_value = int(user_type) if user_type is not None else 0
+            except (TypeError, ValueError):
+                type_value = 0
+
+            return cls(
+                id=str(user_id),
+                user_name=user_name,
+                name=name,
+                status=status_value,
+                type=type_value,
+            )
+
         return cls(
             id=str(user.id),
             user_name=user.user_name,
-            name=user.name or user.user_name,  # 如果没有name，使用user_name作为默认值
+            name=user.name or user.user_name,
             status=user.status.value,
-            type=user.type
+            type=user.type,
         )
 
 
 class LoginResponse(BaseModel):
-    """登录响应数据"""
+    """Login response payload."""
     access_token: str
     token_type: str
-    expires_in: int  # token过期时间（秒）
+    expires_in: int  # Token TTL in seconds
     user: UserResponse
 
 
@@ -341,7 +367,7 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        # 先检查 token 是否在黑名单中
+        # Best-effort: reject tokens that were explicitly logged out (Redis blacklist).
         try:
             redis_client = get_redis_client()
             if redis_client:
@@ -353,10 +379,10 @@ async def get_current_user(
             else:
                 logger.debug("Redis client not available, skipping blacklist check")
         except HTTPException:
-            # 重新抛出 HTTP 异常（token 在黑名单中）
+            # Re-raise (token is blacklisted).
             raise
         except Exception as e:
-            # Redis 操作失败不影响 token 验证，只记录警告
+            # Redis errors should not block authentication; log and continue.
             logger.warning(f"Redis blacklist check failed: {e}")
         
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -397,34 +423,72 @@ async def ws_get_current_user(
     return user
 
 @router.post("/token")
-async def login_for_access_token_endpoint(
-    login_data: LoginRequest,
-) -> StandardResponse[LoginResponse]:
-    """用户登录接口
-    
-    设计说明：
-    - 无论成功或失败都返回 200 状态码
-    - 用户名/密码错误时，返回 200，但 data 为 None，message 包含错误信息
-    - 401 状态码仅用于未认证访问需要认证的接口
+async def login_for_access_token_endpoint(request: Request):
+    """Login endpoint.
+
+    Supports two input/output modes for backward compatibility:
+    - OAuth2 form (`application/x-www-form-urlencoded`): returns `{"access_token": ..., "token_type": ...}`.
+    - JSON body: returns `StandardResponse[LoginResponse]`.
     """
-    # 如果 type 为 None，使用默认值 0
-    login_type = login_data.type if login_data.type is not None else 0
-    # Use async authentication to avoid blocking the event loop, 传入 type 参数
-    user = await get_account_handler().authenticate_user_async(login_data.user_name, login_data.password, type=login_type)
-    if not user:
-        # 用户名/密码错误时，返回 200，但 data 为 None
-        return StandardResponse(
-            code=200,
-            message="用户名或密码错误",
-            data=None
-        )
-    # 更新用户登录时间
+
+    content_type = (request.headers.get("content-type") or "").lower()
+    is_form = "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type
     account_handler = get_account_handler()
-    await account_handler.update_user_login_time_async(user.id)
-    
+
+    if is_form:
+        form = await request.form()
+        username = str(form.get("username") or "")
+        password = str(form.get("password") or "")
+        if not username or not password:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Missing username/password")
+
+        try:
+            user = await account_handler.authenticate_user_async(username, password)
+        except TypeError:
+            user = await account_handler.authenticate_user_async(username, password)  # type: ignore[misc]
+
+        if not user:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect username or password")
+
+        user_type = getattr(user, "type", 0)
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": user.user_name, "type": user_type},
+            expires_delta=access_token_expires,
+        )
+        return Token(access_token=access_token, token_type="bearer", type=int(user_type or 0))
+
+    payload = await request.json()
+    username = str(payload.get("user_name") or payload.get("username") or "")
+    password = str(payload.get("password") or "")
+    login_type = payload.get("type", 0)
+    try:
+        login_type = int(login_type) if login_type is not None else 0
+    except (TypeError, ValueError):
+        login_type = 0
+
+    if not username or not password:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Missing user_name/password")
+
+    try:
+        user = await account_handler.authenticate_user_async(username, password, type=login_type)
+    except TypeError:
+        user = await account_handler.authenticate_user_async(username, password)
+
+    if not user:
+        return StandardResponse(code=200, message="Incorrect username or password", data=None)
+
+    update_login_time = getattr(account_handler, "update_user_login_time_async", None)
+    if update_login_time is not None:
+        try:
+            await update_login_time(user.id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to update user login time: %s", exc)
+
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": user.user_name, "type": user.type}, expires_delta=access_token_expires
+        data={"sub": user.user_name, "type": getattr(user, "type", login_type)},
+        expires_delta=access_token_expires,
     )
 
     return StandardResponse(
@@ -433,9 +497,9 @@ async def login_for_access_token_endpoint(
         data=LoginResponse(
             access_token=access_token,
             token_type="bearer",
-            expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,  # 转换为秒
-            user=UserResponse.from_user(user)
-        )
+            expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+            user=UserResponse.from_user(user),
+        ),
     )
 
 
@@ -444,7 +508,7 @@ async def register(user: UserCreate) -> StandardResponse[UserResponse]:
     try:
         # Use async registration to avoid blocking the event loop
         new_user = await get_account_handler().register_user_async(user)
-        # 转换为响应格式，code 设置为 200（中间件会自动添加 request_id）
+        # Convert to response format (request_id is added by middleware).
         return StandardResponse(
             code=200,
             message="success",
@@ -457,32 +521,33 @@ async def register(user: UserCreate) -> StandardResponse[UserResponse]:
 async def logout(
     request: Request
 ) -> StandardResponse[None]:
-    """用户退出接口 - 将 token 加入 Redis 黑名单
-    
-    设计说明：
-    - 只要服务端不挂，始终返回 200 状态码
-    - 如果 token 无效或已过期，返回 200，但 message 提示认证失效
-    - 如果 token 有效，正常处理登出逻辑
+    """Logout endpoint.
+
+    Behavior:
+    - Always returns HTTP 200 as long as the server is alive.
+    - When Redis is available, the token is added to a blacklist until expiry.
+    - When the token is missing/invalid/expired, returns 200 with an explanatory message.
     """
-    # 从请求头获取 token
+
+    # Get token from Authorization header.
     authorization = request.headers.get("Authorization", "")
     if not authorization.startswith("Bearer "):
-        # 没有提供 token，返回认证失效提示
+        # No token provided.
         return StandardResponse(
             code=200,
             message="认证已失效，无需重复退出",
             data=None
         )
     
-    token = authorization[7:]  # 移除 "Bearer " 前缀
+    token = authorization[7:]  # Strip "Bearer " prefix.
     
-    # 检查 token 是否在黑名单中（已登出）
+    # Check blacklist (already logged out).
     try:
         redis_client = get_redis_client()
         if redis_client:
             blacklist_key = f"{JWT_BLACKLIST_PREFIX}{token}"
             if redis_client.exists(blacklist_key):
-                # token 已在黑名单中，说明已经登出过
+                # Token already blacklisted.
                 return StandardResponse(
                     code=200,
                     message="认证已失效，无需重复退出",
@@ -491,31 +556,31 @@ async def logout(
     except Exception as e:
         logger.warning(f"Redis blacklist check failed: {e}")
     
-    # 尝试解析 token（不验证过期时间，因为可能已过期）
+    # Decode token (skip exp verification to allow expired tokens to return a stable response).
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"verify_exp": False})
         username = payload.get("sub")
         exp = payload.get("exp")
         
         if not username:
-            # token 格式无效
+            # Invalid token format.
             return StandardResponse(
                 code=200,
                 message="认证已失效，无需重复退出",
                 data=None
             )
         
-        # 检查 token 是否已过期
+        # Check if token already expired.
         current_time = datetime.now(timezone.utc).timestamp()
         if exp and exp < current_time:
-            # token 已过期
+            # Token expired.
             return StandardResponse(
                 code=200,
                 message="认证已失效，无需重复退出",
                 data=None
             )
         
-        # token 有效，加入黑名单
+        # Token still valid; add to blacklist.
         if exp:
             remaining_ttl = int(exp - current_time)
             if remaining_ttl > 0:
@@ -538,14 +603,14 @@ async def logout(
         )
         
     except InvalidTokenError:
-        # token 无效（格式错误、签名错误等）
+        # Invalid token (bad format/signature/etc.).
         return StandardResponse(
             code=200,
             message="认证已失效，无需重复退出",
             data=None
         )
     except Exception as e:
-        # 其他异常，记录日志但返回成功
+        # Unexpected error: log but still return a stable response.
         logger.warning(f"Error in logout: {e}")
         return StandardResponse(
             code=200,

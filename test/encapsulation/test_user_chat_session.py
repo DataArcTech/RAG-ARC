@@ -29,6 +29,7 @@ from encapsulation.database.relational_db.postgresql import PostgreSQLDB
 from core.user_management.user import UserStorage
 from core.user_management.chat_session import ChatSessionStorage
 from core.user_management.chat_message import ChatMessageStorage
+from encapsulation.data_model.orm_models import ChatMessage
 import hashlib
 
 
@@ -47,55 +48,123 @@ def get_db_config():
         password=os.getenv("POSTGRES_PASSWORD", "123")
     )
 
+@pytest.fixture(scope="module")
+def db_config() -> PostgreSQLConfig:
+    return get_db_config()
 
-def test_user_management():
+
+@pytest.fixture(scope="module")
+def user_storage(db_config: PostgreSQLConfig) -> UserStorage:
+    return UserStorageConfig(relational_db_config=db_config).build()
+
+
+@pytest.fixture(scope="module")
+def session_storage(db_config: PostgreSQLConfig) -> ChatSessionStorage:
+    return ChatSessionStorageConfig(relational_db_config=db_config).build()
+
+
+@pytest.fixture(scope="module")
+def message_storage(db_config: PostgreSQLConfig) -> ChatMessageStorage:
+    return ChatMessageStorageConfig(relational_db_config=db_config).build()
+
+
+@pytest.fixture(scope="module")
+def user_ids(user_storage: UserStorage) -> tuple[uuid.UUID, uuid.UUID]:
+    """Create two temporary users for chat storage tests."""
+    suffix = str(uuid.uuid4())[:8]
+    user1_id = user_storage.create_user(
+        user_name=f"alice_test_{suffix}",
+        hashed_password=hash_password("password123"),
+    )
+    user2_id = user_storage.create_user(
+        user_name=f"bob_test_{suffix}",
+        hashed_password=hash_password("password456"),
+    )
+    try:
+        yield user1_id, user2_id
+    finally:
+        user_storage.delete_user(user1_id)
+        user_storage.delete_user(user2_id)
+
+
+@pytest.fixture
+def session_ids(session_storage: ChatSessionStorage, user_ids: tuple[uuid.UUID, uuid.UUID]) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    user1_id, user2_id = user_ids
+    session1_id = uuid.UUID(session_storage.create_session(user_id=user1_id, name="Alice's Research Session"))
+    session2_id = uuid.UUID(session_storage.create_session(user_id=user1_id, name="Alice's Coding Session"))
+    session3_id = uuid.UUID(session_storage.create_session(user_id=user2_id, name="Bob's Project Session"))
+    try:
+        yield session1_id, session2_id, session3_id
+    finally:
+        session_storage.delete_session(session1_id)
+        session_storage.delete_session(session2_id)
+        session_storage.delete_session(session3_id)
+
+
+@pytest.fixture
+def message_ids(message_storage: ChatMessageStorage, session_ids: tuple[uuid.UUID, uuid.UUID, uuid.UUID]) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    session1_id, _, _ = session_ids
+    msg1 = message_storage.create_message(
+        ChatMessage(
+            session_id=session1_id,
+            content={
+                "role": "user",
+                "content": "What is machine learning?",
+                "metadata": {"timestamp": "2025-10-15T10:00:00"},
+            },
+        )
+    )
+    msg2 = message_storage.create_message(
+        ChatMessage(
+            session_id=session1_id,
+            content={
+                "role": "assistant",
+                "content": "Machine learning is a subset of artificial intelligence...",
+                "metadata": {"model": "gpt-4", "tokens": 150},
+            },
+        )
+    )
+    msg3 = message_storage.create_message(
+        ChatMessage(
+            session_id=session1_id,
+            content={
+                "role": "user",
+                "content": "Can you give me an example?",
+                "metadata": {"timestamp": "2025-10-15T10:01:00"},
+            },
+        )
+    )
+    try:
+        yield msg1.id, msg2.id, msg3.id
+    finally:
+        message_storage.delete_messages_by_session(session1_id)
+
+
+def test_user_management(user_storage: UserStorage, user_ids: tuple[uuid.UUID, uuid.UUID]):
     """Test user management operations"""
     print("\n" + "=" * 80)
     print("测试 1: 用户管理")
     print("=" * 80)
 
-    # Initialize database
-    db_config = get_db_config()
-    db = PostgreSQLDB(db_config)
-
-    # Create UserStorage
-    user_storage_config = UserStorageConfig(relational_db_config=db_config)
-    user_storage = UserStorage(user_storage_config)
-
-    # Clean up existing test users
-    for username in ["alice_test", "bob_test"]:
-        existing_user = user_storage.get_user_by_username(username)
-        if existing_user:
-            user_storage.delete_user(str(existing_user.id))
-            print(f"清理已存在的测试用户: {username}")
-
-    # Test 1: Create users
-    print("\n 创建用户...")
-    user1_id = user_storage.create_user(
-        user_name="alice_test",
-        hashed_password=hash_password("password123")
-    )
-    print(f" 创建用户 1: alice_test (ID: {user1_id})")
-
-    user2_id = user_storage.create_user(
-        user_name="bob_test",
-        hashed_password=hash_password("password456")
-    )
-    print(f" 创建用户 2: bob_test (ID: {user2_id})")
+    # Note: user creation is handled by the `user_ids` fixture.
+    print("\n 创建用户... (由 pytest fixture 提供)")
+    user1_id, user2_id = user_ids
 
     # Test 2: Get user by ID
     print("\n 通过 ID 获取用户...")
     user1 = user_storage.get_user(user1_id)
     assert user1 is not None, "User 1 should exist"
-    assert user1.user_name == "alice_test", "Username should match"
+    assert user1.user_name, "Username should not be empty"
     print(f" 获取用户成功: {user1.user_name}")
 
     # Test 3: Get user by username
     print("\n 通过用户名获取用户...")
-    user2 = user_storage.get_user_by_username("bob_test")
+    user2 = user_storage.get_user(user2_id)
     assert user2 is not None, "User 2 should exist"
-    assert user2.id == user2_id, "User ID should match"
-    print(f" 获取用户成功: {user2.user_name} (ID: {user2.id})")
+    user2_by_username = user_storage.get_user_by_username(user2.user_name)
+    assert user2_by_username is not None, "User 2 should be retrievable by username"
+    assert user2_by_username.id == user2_id, "User ID should match"
+    print(f" 获取用户成功: {user2_by_username.user_name} (ID: {user2_by_username.id})")
 
     # Test 4: List users
     print("\n 列出所有用户...")
@@ -106,48 +175,26 @@ def test_user_management():
 
     # Test 5: Update user
     print("\n 更新用户...")
+    new_username = f"{user1.user_name}_updated"
     success = user_storage.update_user(
         user1_id,
-        {"user_name": "alice_updated"}
+        {"user_name": new_username}
     )
     assert success, "Update should succeed"
     user1_updated = user_storage.get_user(user1_id)
-    assert user1_updated.user_name == "alice_updated", "Username should be updated"
+    assert user1_updated.user_name == new_username, "Username should be updated"
     print(f" 用户更新成功: {user1_updated.user_name}")
 
-    return user1_id, user2_id
 
-
-def test_chat_session_management(user1_id, user2_id):
+def test_chat_session_management(user_ids, session_ids, session_storage):
     """Test chat session management operations"""
     print("\n" + "=" * 80)
     print("测试 2: 聊天会话管理")
     print("=" * 80)
 
-    # Initialize ChatSessionStorage
-    db_config = get_db_config()
-    session_storage_config = ChatSessionStorageConfig(relational_db_config=db_config)
-    session_storage = ChatSessionStorage(session_storage_config)
-
-    # Test 1: Create sessions
-    print("\n 创建聊天会话...")
-    session1_id = session_storage.create_session(
-        user_id=user1_id,
-        name="Alice's Research Session"
-    )
-    print(f" 创建会话 1: Alice's Research Session (ID: {session1_id})")
-
-    session2_id = session_storage.create_session(
-        user_id=user1_id,
-        name="Alice's Coding Session"
-    )
-    print(f" 创建会话 2: Alice's Coding Session (ID: {session2_id})")
-
-    session3_id = session_storage.create_session(
-        user_id=user2_id,
-        name="Bob's Project Session"
-    )
-    print(f" 创建会话 3: Bob's Project Session (ID: {session3_id})")
+    user1_id, user2_id = user_ids
+    session1_id, session2_id, session3_id = session_ids
+    print("\n 创建聊天会话... (由 pytest fixture 提供)")
 
     # Test 2: Get session
     print("\n 获取会话...")
@@ -176,60 +223,22 @@ def test_chat_session_management(user1_id, user2_id):
 
     # Test 5: Update session
     print("\n 更新会话...")
-    success = session_storage.update_session(
-        session1_id,
-        {"name": "Alice's Updated Research Session"}
-    )
+    success = session_storage.update_session(session1_id, {"name": "Alice's Updated Research Session"})
     assert success, "Update should succeed"
     session1_updated = session_storage.get_session(session1_id)
     assert session1_updated.name == "Alice's Updated Research Session", "Session name should be updated"
     print(f" 会话更新成功: {session1_updated.name}")
 
-    return session1_id, session2_id, session3_id
 
-
-def test_chat_message_management(session1_id: str, session2_id: str):
+def test_chat_message_management(message_storage, session_ids, message_ids):
     """Test chat message management operations"""
     print("\n" + "=" * 80)
     print("测试 3: 聊天消息管理")
     print("=" * 80)
 
-    # Initialize ChatMessageStorage
-    db_config = get_db_config()
-    message_storage_config = ChatMessageStorageConfig(relational_db_config=db_config)
-    message_storage = ChatMessageStorage(message_storage_config)
-
-    # Test 1: Create messages
-    print("\n 创建聊天消息...")
-    msg1_id = message_storage.create_message(
-        session_id=uuid.UUID(session1_id),
-        content={
-            "role": "user",
-            "content": "What is machine learning?",
-            "metadata": {"timestamp": "2025-10-15T10:00:00"}
-        }
-    )
-    print(f" 创建消息 1: user message (ID: {msg1_id})")
-
-    msg2_id = message_storage.create_message(
-        session_id=uuid.UUID(session1_id),
-        content={
-            "role": "assistant",
-            "content": "Machine learning is a subset of artificial intelligence...",
-            "metadata": {"model": "gpt-4", "tokens": 150}
-        }
-    )
-    print(f" 创建消息 2: assistant message (ID: {msg2_id})")
-
-    msg3_id = message_storage.create_message(
-        session_id=uuid.UUID(session1_id),
-        content={
-            "role": "user",
-            "content": "Can you give me an example?",
-            "metadata": {"timestamp": "2025-10-15T10:01:00"}
-        }
-    )
-    print(f" 创建消息 3: user message (ID: {msg3_id})")
+    session1_id, _, _ = session_ids
+    msg1_id, msg2_id, msg3_id = message_ids
+    print("\n 创建聊天消息... (由 pytest fixture 提供)")
 
     # Test 2: Get message
     print("\n 获取消息...")
@@ -248,48 +257,53 @@ def test_chat_message_management(session1_id: str, session2_id: str):
         content = msg.content.get("content", "")[:50]
         print(f"   {i}. [{role}] {content}...")
 
-    # Test 4: Get conversation history
-    print("\n 获取对话历史...")
-    history = message_storage.get_conversation_history(session1_id, limit=10)
+    # Conversation history (derived)
+    print("\n 获取对话历史（由消息列表推导）...")
+    history = [{"role": m.content.get("role"), "content": m.content.get("content")} for m in messages]
     print(f" 对话历史: {len(history)} 条消息")
     for i, msg in enumerate(history, 1):
-        print(f"   {i}. [{msg['role']}] {msg['content'][:50]}...")
-
-    return msg1_id, msg2_id, msg3_id
+        print(f"   {i}. [{msg['role']}] {str(msg['content'])[:50]}...")
 
 
-def test_cascade_deletion(user1_id):
+def test_cascade_deletion(user_storage: UserStorage, session_storage: ChatSessionStorage, message_storage: ChatMessageStorage):
     """Test cascade deletion"""
     print("\n" + "=" * 80)
     print("测试 4: 级联删除")
     print("=" * 80)
 
-    db_config = get_db_config()
-
-    user_storage_config = UserStorageConfig(relational_db_config=db_config)
-    user_storage = UserStorage(user_storage_config)
-
-    session_storage_config = ChatSessionStorageConfig(relational_db_config=db_config)
-    session_storage = ChatSessionStorage(session_storage_config)
+    suffix = str(uuid.uuid4())[:8]
+    cascade_user_id = user_storage.create_user(
+        user_name=f"cascade_user_{suffix}",
+        hashed_password=hash_password("password123"),
+    )
+    cascade_session_id = uuid.UUID(
+        session_storage.create_session(user_id=cascade_user_id, name="Cascade Session")
+    )
+    message_storage.create_message(
+        ChatMessage(
+            session_id=cascade_session_id,
+            content={"role": "user", "content": "hello", "metadata": {}},
+        )
+    )
 
     # Check sessions before deletion
     print("\n 删除前检查...")
-    sessions_before = session_storage.list_sessions_by_user(user1_id)
+    sessions_before = session_storage.list_sessions_by_user(cascade_user_id)
     print(f"   用户 1 的会话数: {len(sessions_before)}")
 
     # Delete user (should cascade delete sessions and messages)
     print("\n 删除用户...")
-    success = user_storage.delete_user(user1_id)
+    success = user_storage.delete_user(cascade_user_id)
     assert success, "User deletion should succeed"
-    print(f" 用户删除成功: {user1_id}")
+    print(f" 用户删除成功: {cascade_user_id}")
 
     # Verify user is deleted
-    user1 = user_storage.get_user(user1_id)
+    user1 = user_storage.get_user(cascade_user_id)
     assert user1 is None, "User should be deleted"
     print(" 验证：用户已删除")
 
     # Verify sessions are deleted (cascade)
-    sessions_after = session_storage.list_sessions_by_user(user1_id)
+    sessions_after = session_storage.list_sessions_by_user(cascade_user_id)
     assert len(sessions_after) == 0, "Sessions should be cascade deleted"
     print(f" 验证：会话已级联删除 (删除前: {len(sessions_before)}, 删除后: {len(sessions_after)})")
 

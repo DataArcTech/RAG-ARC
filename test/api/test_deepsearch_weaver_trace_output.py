@@ -195,7 +195,8 @@ def test_deepsearch_weaver_trace_outputs_by_tag():
 
     app = FastAPI()
     app.include_router(deepsearch_router.router)
-    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=uuid.uuid4())
+    user_id = uuid.uuid4()
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=user_id)
 
     async def _run():
         async with _serve_app(app) as (host, port):

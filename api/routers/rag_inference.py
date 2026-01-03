@@ -202,7 +202,7 @@ async def chat(
         current_user_query=request.query,
     )
     
-    # 记录完整的 response 信息（包括图数据）到日志
+    # Log full response details (including graph payload).
     logger.info(
         "Chat response: text_length=%d, chunks_count=%d, subgraph_nodes=%d, subgraph_edges=%d, raw_response=%s, raw_mindmap_response=%s",
         len(response_text) if response_text else 0,
@@ -285,7 +285,7 @@ async def graph_overview(
 async def stream_chat_sse(
     session_id: uuid.UUID,
     request: StreamChatRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User | None, Depends(get_current_user)],
 ):
     """
     SSE stream chat endpoint with user authentication required (POST method)
@@ -307,6 +307,9 @@ async def stream_chat_sse(
     Returns:
         StreamingResponse with SSE events (text/event-stream)
     """
+    if current_user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+
     # Extract parameters from request body
     query = request.query
     return_subgraph = request.return_subgraph
@@ -314,9 +317,10 @@ async def stream_chat_sse(
     include_all_owners = request.include_all_owners
     include_evidence = request.include_evidence
 
-    # 校验：只有 type=0 (livingKB) 的用户才能生成图
+    # Guard: only livingKB users (type=0) may request subgraph/evidence generation.
     if return_subgraph or include_evidence:
-        if current_user.type != 0:
+        user_type = getattr(current_user, "type", 0)
+        if user_type != 0:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only livingKB users (type=0) can request subgraph generation"
@@ -377,31 +381,31 @@ async def stream_chat_sse(
         )
         user_message = await get_thread_pool().run_blocking(message_handler.create_message, user_message)
 
-        # 获取历史消息（参考 WebSocket 和 chatbot.py 的实现）
+        # Load recent history messages (aligned with WebSocket + chatbot behavior).
         history_messages = await get_thread_pool().run_blocking(
             message_handler.list_messages_by_session,
             session_id,
         )
         
-        # 排除当前刚创建的用户消息（避免重复）
+        # Exclude the message we just created (avoid duplication).
         history_messages = [msg for msg in history_messages if msg.id != user_message.id]
         
-        # 限制历史消息数量（参考 chatbot.py 的 _normalize_history）
-        # 默认只取最近 5 轮对话（10 条消息：user + assistant）
+        # Limit history length (similar to chatbot.py `_normalize_history`).
+        # Default: keep the last 5 turns (10 messages: user + assistant).
         context_turns = int(os.getenv("SSE_CONTEXT_TURNS", "5"))
         max_history_messages = context_turns * 2
         if len(history_messages) > max_history_messages:
             history_messages = history_messages[-max_history_messages:]
         
-        # 构建历史文本（参考 WebSocket 的实现）
+        # Build history text (similar to WebSocket implementation).
         history_text = "\n".join(
             f"{msg.content['role']}: {msg.content['content']}" for msg in history_messages
         ) if history_messages else None
 
-        # 检查 token 限制（参考 chatbot.py 的 _ensure_context_within_limit）
-        # 估算历史消息的 token 数
+        # Enforce a rough context budget (similar to chatbot.py `_ensure_context_within_limit`).
+        # Estimate tokens for the history text.
         if history_text:
-            # 简单的 token 估算（参考 chatbot.py 的 _estimate_tokens）
+            # Simple token estimate (aligned with chatbot.py `_estimate_tokens`).
             history_tokens = len(history_text) if any(ord(ch) >= 128 for ch in history_text) else len(history_text) // 4
             max_context_tokens = int(os.getenv("SSE_MAX_CONTEXT_TOKENS", "8192"))
             threshold_fraction = float(os.getenv("SSE_MAX_CONTEXT_FRACTION", "0.9"))
@@ -413,8 +417,7 @@ async def stream_chat_sse(
                     history_tokens,
                     allowed_tokens,
                 )
-                # 如果历史太长，进一步限制历史消息数量
-                # 保留更少的历史消息
+                # If history is too long, reduce the number of retained turns further.
                 reduced_turns = max(1, context_turns // 2)
                 max_history_messages = reduced_turns * 2
                 if len(history_messages) > max_history_messages:
@@ -452,7 +455,7 @@ async def stream_chat_sse(
                         history_text=history_text if history_text else None,
                     )
                 except TypeError:
-                    # 兼容旧版本（不支持 history_text 参数）
+                    # Backward compatibility: older implementations may not accept `history_text`.
                     token_stream, chunks, subgraph_data, subgraph_info = rag_inference_handler.stream_chat(
                         query,
                         effective_owner,
@@ -461,8 +464,8 @@ async def stream_chat_sse(
                 prepared["chunks"] = chunks
                 prepared["subgraph_data"] = subgraph_data
                 prepared["subgraph_info"] = subgraph_info
-                prepared["raw_llm_response"] = None  # 流式响应无法获取完整原始 response
-                prepared["raw_mindmap_response"] = None  # 流式响应无法获取完整 mindmap response
+                prepared["raw_llm_response"] = None  # Streaming does not capture a full raw response.
+                prepared["raw_mindmap_response"] = None  # Streaming does not capture a full raw mindmap response.
                 _emit_progress({"stage": "prepare", "status": "end"})
                 _emit_progress({"stage": "generate", "status": "start"})
                 for chunk in token_stream:
@@ -536,10 +539,10 @@ async def stream_chat_sse(
         raw_llm_response = prepared.get("raw_llm_response")
         raw_mindmap_response = prepared.get("raw_mindmap_response")
 
-        # 参考 WebSocket 逻辑：如果 return_subgraph=True，总是生成 mindmap（与 WebSocket 保持一致）
-        # 总是用 mindmap prompt 生成图，确保图和 chat 回答相关
+        # Align with WebSocket behavior: when return_subgraph=True, always generate a mindmap
+        # to ensure the graph is tightly coupled to the current chat answer.
         if return_subgraph:
-            # 使用当前用户问题生成 mindmap，确保图和 chat 回答相关
+            # Generate the mindmap from the current user query to keep it consistent with the answer.
             try:
                 subgraph_data, raw_mindmap_response = await get_thread_pool().run_blocking(
                     rag_inference_handler._generate_mindmap,
@@ -552,12 +555,12 @@ async def stream_chat_sse(
                            len(subgraph_data.get("edges", [])) if subgraph_data else 0)
             except Exception as exc:
                 logger.warning("Failed to generate mindmap in SSE: %s", exc)
-                # 如果生成失败，保留原有的 subgraph_data（如果有的话）
+                # If generation fails, keep the original subgraph_data (if any).
                 if not subgraph_data:
                     subgraph_data = None
                     raw_mindmap_response = None
 
-        # 记录完整的 response 信息（包括图数据）到日志
+        # Log full response details (including graph payload).
         logger.info(
             "SSE chat response: text_length=%d, chunks_count=%d, subgraph_nodes=%d, subgraph_edges=%d, raw_response=%s, raw_mindmap_response=%s",
             len(assistant_response) if assistant_response else 0,
@@ -583,8 +586,8 @@ async def stream_chat_sse(
             message_handler.create_message, assistant_message
         )
 
-        # 参考 WebSocket 逻辑：总是构建并返回 payload（与 WebSocket 保持一致）
-        # 如果请求了 evidence 或 subgraph，则包含相应数据
+        # Align with WebSocket behavior: always build and return a payload.
+        # When evidence/subgraph is requested, include the corresponding fields.
         evidence = None
         if include_evidence:
             graph_store = None
@@ -600,7 +603,7 @@ async def stream_chat_sse(
                 graph_store=graph_store,
             )
 
-        # 构建 payload（与 WebSocket 逻辑一致）
+        # Build payload (aligned with WebSocket behavior).
         payload = _build_stream_chat_payload(
             assistant_message,
             chunks,
@@ -608,7 +611,7 @@ async def stream_chat_sse(
             evidence=evidence,
         )
 
-        # 通过 tool_calls 返回 payload（保持 OpenAI 兼容格式）
+        # Return payload via tool_calls (OpenAI-compatible format).
         tool_calls = [
             {
                 "index": 0,
@@ -646,6 +649,28 @@ async def stream_chat_sse(
         "X-Accel-Buffering": "no",
     }
     return StreamingResponse(event_generator(), media_type="text/event-stream", headers=headers)
+
+
+@router.get("/stream_chat/{session_id}")
+async def stream_chat_sse_get(
+    session_id: uuid.UUID,
+    query: str,
+    current_user: Annotated[User | None, Depends(get_current_user)],
+    return_subgraph: bool = False,
+    target_owner_id: uuid.UUID | None = None,
+    include_all_owners: bool = False,
+    include_evidence: bool = False,
+):
+    """Backward compatible GET variant of the SSE stream chat endpoint."""
+
+    request = StreamChatRequest(
+        query=query,
+        return_subgraph=return_subgraph,
+        target_owner_id=target_owner_id,
+        include_all_owners=include_all_owners,
+        include_evidence=include_evidence,
+    )
+    return await stream_chat_sse(session_id=session_id, request=request, current_user=current_user)
 
 
 @router.websocket("/stream_chat/{session_id}")
@@ -688,9 +713,10 @@ async def stream_chat_ws(
             except Exception:  # noqa: BLE001
                 pass
 
-            # 校验：只有 type=0 (livingKB) 的用户才能生成图
+            # Guard: only livingKB users (type=0) may request subgraph/evidence generation.
             if return_subgraph or include_evidence:
-                if current_user.type != 0:
+                user_type = getattr(current_user, "type", 0)
+                if user_type != 0:
                     await websocket.close(
                         code=status.WS_1008_POLICY_VIOLATION,
                         reason="Only livingKB users (type=0) can request subgraph generation"
@@ -727,14 +753,36 @@ async def stream_chat_ws(
                 f"{msg.content['role']}: {msg.content['content']}" for msg in history_messages
             )
 
-            assistant_response, chunks, subgraph_data, subgraph_info, raw_llm_response, raw_mindmap_response = await rag_inference_handler.chat_async(
-                history_text,
-                owner_id=effective_owner,
-                return_subgraph=(return_subgraph or include_evidence),
-                current_user_query=query,
-            )
+            return_subgraph_flag = return_subgraph or include_evidence
+            try:
+                result = await rag_inference_handler.chat_async(
+                    history_text,
+                    owner_id=effective_owner,
+                    return_subgraph=return_subgraph_flag,
+                    current_user_query=query,
+                )
+            except TypeError:
+                result = await rag_inference_handler.chat_async(
+                    history_text,
+                    owner_id=effective_owner,
+                    return_subgraph=return_subgraph_flag,
+                )
+
+            raw_llm_response = None
+            raw_mindmap_response = None
+            if isinstance(result, tuple) and len(result) == 4:
+                assistant_response, chunks, subgraph_data, subgraph_info = result
+            else:
+                (
+                    assistant_response,
+                    chunks,
+                    subgraph_data,
+                    subgraph_info,
+                    raw_llm_response,
+                    raw_mindmap_response,
+                ) = result
             
-            # 记录完整的 response 信息（包括图数据）到日志
+            # Log full response details (including graph payload).
             logger.info(
                 "WebSocket chat response: text_length=%d, chunks_count=%d, subgraph_nodes=%d, subgraph_edges=%d, raw_response=%s, raw_mindmap_response=%s",
                 len(assistant_response) if assistant_response else 0,

@@ -28,6 +28,7 @@ def format_sse(*, event: str, data: Dict[str, Any], event_id: int | None = None)
 @dataclass
 class DeepSearchTaskInfo:
     run_id: str
+    owner_id: Optional[str] = None
     created_at_ms: int = field(default_factory=_now_ms)
     done: bool = False
     error: Optional[str] = None
@@ -49,9 +50,9 @@ class DeepSearchTaskRegistry:
         self._items: Dict[str, DeepSearchTaskInfo] = {}
         self._lock = asyncio.Lock()
 
-    async def create(self, run_id: Optional[str] = None) -> DeepSearchTaskInfo:
+    async def create(self, run_id: Optional[str] = None, *, owner_id: Optional[str] = None) -> DeepSearchTaskInfo:
         run_id = run_id or new_run_id()
-        info = DeepSearchTaskInfo(run_id=run_id)
+        info = DeepSearchTaskInfo(run_id=run_id, owner_id=str(owner_id) if owner_id else None)
         async with self._lock:
             self._items[run_id] = info
         return info
