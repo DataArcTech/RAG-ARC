@@ -9,6 +9,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from core.graph_adapter.scope_provider import configure_scope_provider
+from framework.runtime_warnings import configure_runtime_warnings
+
+# Configure warnings before importing modules that may import SWIG-backed libs (e.g., FAISS).
+configure_runtime_warnings()
 
 # Load environment variables from .env file
 load_dotenv()
@@ -189,4 +193,3 @@ app.include_router(session_router.router)
 app.include_router(auth_router.router)
 app.include_router(user_router.router)
 app.include_router(chatbot_router.router)
-

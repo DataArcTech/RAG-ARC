@@ -1,5 +1,7 @@
 import os
 
+from framework.runtime_warnings import configure_runtime_warnings
+
 
 def pytest_configure() -> None:
     """
@@ -13,6 +15,7 @@ def pytest_configure() -> None:
     it (e.g. celery-mode e2e tests via `monkeypatch.setenv`).
     """
 
+    configure_runtime_warnings()
     os.environ.setdefault("TASK_QUEUE_MODE", "inprocess")
     os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret")
     # Knowledge indexing preflight checks attempt to connect to Postgres/Redis/Neo4j.

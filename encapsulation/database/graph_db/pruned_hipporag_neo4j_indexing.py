@@ -3,14 +3,6 @@ import json
 import logging
 from typing import List, Dict, Any, Optional, Sequence
 
-import warnings
-
-warnings.filterwarnings(
-    "ignore",
-    message="builtin type SwigPy.* has no __module__ attribute",
-    category=DeprecationWarning,
-)
-
 from encapsulation.data_model.schema import Chunk, GraphData
 from encapsulation.database.graph_db.pruned_hipporag_neo4j_chunk_embeddings import _PrunedHippoRAGNeo4jChunkEmbeddingsMixin
 from encapsulation.database.utils.fact_provenance import upsert_fact_occurrence
@@ -36,7 +28,6 @@ def _coerce_fact_provenance_max_source_chunks(raw: Any, *, default: int = 50, ma
             value = int(default)
     return max(0, min(int(max_value), value))
 
-
 class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin):
     def _init_faiss_indices(self):
         """
@@ -47,7 +38,8 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
         """
         from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBConfig
 
-        storage_path = getattr(self.config, 'storage_path', './data/graph_index_neo4j')
+        storage_path = self.config.storage_path
+        index_name = self.config.index_name
         os.makedirs(storage_path, exist_ok=True)
 
         # Initialize fact index (FAISS Flat for exact search)
@@ -57,7 +49,7 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
             metric='cosine',
             normalize_L2=True,
             index_path=os.path.join(storage_path, 'fact_index'),
-            index_name='index'
+            index_name=index_name,
         )
         self.fact_faiss_db = fact_config.build()
 
@@ -76,11 +68,11 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
             index_type='hnsw',
             metric='cosine',
             normalize_L2=True,
-            m=getattr(self.config, 'hnsw_M', 32),
-            efConstruction=getattr(self.config, 'hnsw_ef_construction', 200),
-            efSearch=getattr(self.config, 'hnsw_ef_search', 100),
+            m=self.config.hnsw_M,
+            efConstruction=self.config.hnsw_ef_construction,
+            efSearch=self.config.hnsw_ef_search,
             index_path=os.path.join(storage_path, 'entity_index'),
-            index_name='index'
+            index_name=index_name,
         )
         self.entity_faiss_db = entity_config.build()
 
@@ -124,7 +116,7 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
         stats_by_owner: Dict[str, Dict[str, int]] = {}
         cfg = getattr(self, "config", None)
         max_source_chunks = _coerce_fact_provenance_max_source_chunks(
-            getattr(cfg, "fact_provenance_max_source_chunks", 50),
+            getattr(cfg, "fact_provenance_max_source_chunks", None),
             default=50,
             max_value=1000,
         )
@@ -938,11 +930,11 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
             })
             entity_names.add(entity_name)
 
-        # Get relations (facts) from :Fact relationships between entities
+        # Get relations (facts) from :RELATES_TO relationships between entities
         relations = []
         if entity_names:
             relation_query = """
-            MATCH (e1:Entity)-[r:Fact]->(e2:Entity)
+            MATCH (e1:Entity)-[r:RELATES_TO]->(e2:Entity)
             WHERE e1.entity_name IN $entity_names AND e2.entity_name IN $entity_names
             RETURN r.head AS head, r.relation AS relation, r.tail AS tail
             """

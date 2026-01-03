@@ -9,13 +9,6 @@ import time
 from typing import List, Dict, Any, Optional, Sequence, Set, Tuple, TYPE_CHECKING
 import numpy as np
 import igraph as ig
-import warnings
-
-warnings.filterwarnings(
-    "ignore",
-    message="builtin type SwigPy.* has no __module__ attribute",
-    category=DeprecationWarning,
-)
 
 import faiss
 import neo4j
@@ -154,7 +147,7 @@ class PrunedHippoRAGNeo4jStore(
         self.conn = None
 
         # Ensure storage path is writable
-        storage_path = getattr(config, 'storage_path', './data/graph_index_neo4j')
+        storage_path = config.storage_path
         fallback_storage = os.path.join(
             os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime"),
             "graph_index_neo4j"
@@ -175,8 +168,8 @@ class PrunedHippoRAGNeo4jStore(
         self._chunk_ids_list = None
 
         # Chunk embeddings optimization settings
-        self.use_float16_embeddings = getattr(config, 'use_float16_embeddings', True)
-        self.normalize_chunk_embeddings = getattr(config, 'normalize_chunk_embeddings', True)
+        self.use_float16_embeddings = config.use_float16_embeddings
+        self.normalize_chunk_embeddings = config.normalize_chunk_embeddings
 
         # In-memory graph cache for fast neighbor lookups
         self._graph_cache: Optional[Dict[str, Dict[str, List[Tuple[str, float]]]]] = None
@@ -188,12 +181,12 @@ class PrunedHippoRAGNeo4jStore(
         # Cache version counter - incremented on any modification (add/delete)
         self._cache_version: int = 0
 
-        self.index_name = getattr(config, 'index_name', 'index')
+        self.index_name = config.index_name
 
         # Synonymy edge configuration
-        self.add_synonymy_edges = getattr(config, 'add_synonymy_edges', False)
-        self.synonymy_edge_topk = getattr(config, 'synonymy_edge_topk', 100)
-        self.synonymy_edge_sim_threshold = getattr(config, 'synonymy_edge_sim_threshold', 0.8)
+        self.add_synonymy_edges = config.add_synonymy_edges
+        self.synonymy_edge_topk = config.synonymy_edge_topk
+        self.synonymy_edge_sim_threshold = config.synonymy_edge_sim_threshold
 
         # Load graph structure into memory for fast lookups
         self._load_graph_cache()

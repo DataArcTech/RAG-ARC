@@ -108,7 +108,7 @@ class _PrunedHippoRAGNeo4jPersistenceMixin:
 
         # Count relationships
         mentions_count_query = "MATCH ()-[r:MENTIONS]->() RETURN count(r) AS count"
-        fact_count_query = "MATCH ()-[r:Fact]->() RETURN count(r) AS count"
+        fact_count_query = "MATCH ()-[r:RELATES_TO]->() RETURN count(r) AS count"
         similar_count_query = "MATCH ()-[r:SIMILAR_TO]-() RETURN count(r) AS count"
 
         mentions_count = self._execute_query(mentions_count_query)[0]['count']
@@ -151,5 +151,4 @@ class _PrunedHippoRAGNeo4jPersistenceMixin:
         if driver:
             driver.close()
             logger.info("Neo4j driver closed")
-
 

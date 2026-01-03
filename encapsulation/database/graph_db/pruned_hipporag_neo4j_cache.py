@@ -2,13 +2,6 @@ import logging
 from typing import List, Dict, Any, Optional, Set, Tuple
 
 import igraph as ig
-import warnings
-
-warnings.filterwarnings(
-    "ignore",
-    message="builtin type SwigPy.* has no __module__ attribute",
-    category=DeprecationWarning,
-)
 
 logger = logging.getLogger(__name__)
 

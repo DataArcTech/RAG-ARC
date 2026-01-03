@@ -19,6 +19,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import typer
 
+from framework.runtime_warnings import configure_runtime_warnings
+
+configure_runtime_warnings()
+
 from application.knowledge.module import Knowledge
 from application.rag_inference.cli_module import (
     PipelineArtifacts,

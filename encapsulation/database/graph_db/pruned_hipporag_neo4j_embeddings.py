@@ -6,13 +6,6 @@ import time
 from typing import List, Dict, Any, Optional, Sequence, Set, Tuple
 
 import numpy as np
-import warnings
-
-warnings.filterwarnings(
-    "ignore",
-    message="builtin type SwigPy.* has no __module__ attribute",
-    category=DeprecationWarning,
-)
 
 import faiss
 
@@ -536,4 +529,3 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
             logger.info(f"Added {num_synonym_edges} unique synonymy edges ({len(edges_to_add)} directional edges)")
         else:
             logger.info("No synonymy edges to add")
-

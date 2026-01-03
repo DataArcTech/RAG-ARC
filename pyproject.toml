@@ -90,6 +90,10 @@ rag-arc = "cli.rag:app"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["test"]
+filterwarnings = [
+    "ignore:builtin type SwigPy.* has no __module__ attribute:DeprecationWarning",
+    "ignore:builtin type swigvarlink has no __module__ attribute:DeprecationWarning",
+]
 markers = [
     "integration: marks tests that require external services (set RUN_RAGARC_INTEGRATION_TESTS=1 to run)",
 ]

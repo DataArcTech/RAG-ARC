@@ -72,7 +72,7 @@ if [ "$RUN_ASYNC_STATUS" != "202" ]; then
   exit 1
 fi
 
-RUN_ID=$(echo "$RUN_ASYNC_BODY" | python3 -c 'import sys, json; print(json.load(sys.stdin).get("run_id",""))')
+RUN_ID=$(echo "$RUN_ASYNC_BODY" | python3 -c 'import sys, json; obj=json.load(sys.stdin); print((obj.get("run_id") if isinstance(obj, dict) else "") or ((obj.get("data") or {}).get("run_id","") if isinstance(obj, dict) else "") )')
 if [ -z "$RUN_ID" ]; then
   echo "❌ Did not receive run_id"
   exit 1
@@ -160,4 +160,3 @@ while true; do
 done
 
 echo -e "\n🎉 DeepSearch comprehensive tests passed!"
-
