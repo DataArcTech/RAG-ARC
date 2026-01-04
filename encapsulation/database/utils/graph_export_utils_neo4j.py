@@ -43,11 +43,20 @@ def _kg_ingest_stats(graph_store, *, owner_key: str | None) -> Dict[str, Any] | 
         rows = graph_store._execute_query(
             """
             MATCH (m:KGIngestMeta {owner_id: $owner_id})
-            RETURN m.triples_total AS triples_total,
+            RETURN m.chunks_total AS chunks_total,
+                   m.chunks_graph_empty AS chunks_graph_empty,
+                   m.chunks_extraction_failed AS chunks_extraction_failed,
+                   m.triples_total AS triples_total,
                    m.triples_kept AS triples_kept,
                    m.triples_dropped_endpoints AS triples_dropped_endpoints,
                    m.triples_dropped_ambiguous_endpoints AS triples_dropped_ambiguous_endpoints,
                    m.triples_dropped_schema AS triples_dropped_schema,
+                   m.predicates_aliased AS predicates_aliased,
+                   m.predicates_kept AS predicates_kept,
+                   m.predicates_collapsed AS predicates_collapsed,
+                   m.predicates_rejected AS predicates_rejected,
+                   m.predicates_allowlist_rejected AS predicates_allowlist_rejected,
+                   m.triples_kept_direction_insensitive AS triples_kept_direction_insensitive,
                    m.endpoint_drop_ratio AS endpoint_drop_ratio,
                    m.fact_provenance_max_source_chunks AS fact_provenance_max_source_chunks,
                    m.updated_at AS updated_at
@@ -60,11 +69,20 @@ def _kg_ingest_stats(graph_store, *, owner_key: str | None) -> Dict[str, Any] | 
             return None
         updated_at = row0.get("updated_at")
         return {
+            "chunks_total": int(row0.get("chunks_total") or 0),
+            "chunks_graph_empty": int(row0.get("chunks_graph_empty") or 0),
+            "chunks_extraction_failed": int(row0.get("chunks_extraction_failed") or 0),
             "triples_total": int(row0.get("triples_total") or 0),
             "triples_kept": int(row0.get("triples_kept") or 0),
             "triples_dropped_endpoints": int(row0.get("triples_dropped_endpoints") or 0),
             "triples_dropped_ambiguous_endpoints": int(row0.get("triples_dropped_ambiguous_endpoints") or 0),
             "triples_dropped_schema": int(row0.get("triples_dropped_schema") or 0),
+            "predicates_aliased": int(row0.get("predicates_aliased") or 0),
+            "predicates_kept": int(row0.get("predicates_kept") or 0),
+            "predicates_collapsed": int(row0.get("predicates_collapsed") or 0),
+            "predicates_rejected": int(row0.get("predicates_rejected") or 0),
+            "predicates_allowlist_rejected": int(row0.get("predicates_allowlist_rejected") or 0),
+            "triples_kept_direction_insensitive": int(row0.get("triples_kept_direction_insensitive") or 0),
             "endpoint_drop_ratio": float(row0.get("endpoint_drop_ratio") or 0.0),
             "fact_provenance_max_source_chunks": row0.get("fact_provenance_max_source_chunks"),
             "updated_at": str(updated_at) if updated_at is not None else None,

@@ -3,6 +3,7 @@ import json
 import logging
 from typing import List, Dict, Any, Optional, Sequence
 
+from core.file_management.extractor.metadata_keys import EXTRACTION_ERROR_KEY
 from encapsulation.data_model.schema import Chunk, GraphData
 from encapsulation.database.graph_db.pruned_hipporag_neo4j_chunk_embeddings import _PrunedHippoRAGNeo4jChunkEmbeddingsMixin
 from encapsulation.database.utils.fact_provenance import upsert_fact_occurrence
@@ -133,13 +134,23 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
             owner_stats = stats_by_owner.setdefault(
                 db_owner_id,
                 {
+                    "chunks_total": 0,
+                    "chunks_graph_empty": 0,
+                    "chunks_extraction_failed": 0,
                     "triples_total": 0,
                     "triples_kept": 0,
                     "triples_dropped_endpoints": 0,
                     "triples_dropped_ambiguous_endpoints": 0,
                     "triples_dropped_schema": 0,
+                    "predicates_aliased": 0,
+                    "predicates_kept": 0,
+                    "predicates_collapsed": 0,
+                    "predicates_rejected": 0,
+                    "predicates_allowlist_rejected": 0,
+                    "triples_kept_direction_insensitive": 0,
                 },
             )
+            owner_stats["chunks_total"] += 1
 
             chunk_data.append({
                 'chunk_id': chunk.id,
@@ -149,6 +160,12 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
             })
 
             # Process graph data
+            if chunk.graph and chunk.graph.is_empty():
+                if chunk.graph.metadata.get(EXTRACTION_ERROR_KEY):
+                    owner_stats["chunks_extraction_failed"] += 1
+                else:
+                    owner_stats["chunks_graph_empty"] += 1
+
             if chunk.graph and not chunk.graph.is_empty():
                 domain_raw = chunk.domain or metadata.get("domain") or "default"
                 domain = str(domain_raw).strip() or "default"
@@ -222,7 +239,7 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
                         })
 
                 # Process and normalize relation triples (schema-governed predicate normalization)
-                processed_triples: list[tuple[str, str, str, str, str]] = []
+                processed_triples: list[tuple[str, str, str, str, str, bool]] = []
                 for relation in chunk.graph.relations:
                     if len(relation) >= 3:
                         head = text_processing(relation[0])
@@ -253,23 +270,37 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
 
                         raw_predicate = relation[1]
                         if domain_schema is not None:
-                            normalized_predicate = domain_schema.normalize_predicate(str(raw_predicate))
+                            normalization = domain_schema.normalize_predicate_with_meta(str(raw_predicate))
+                            normalized_predicate = normalization.canonical_predicate
+                            strategy = (normalization.normalization_strategy or "").strip().lower()
+                            if strategy == "alias":
+                                owner_stats["predicates_aliased"] += 1
+                            elif strategy == "keep":
+                                owner_stats["predicates_kept"] += 1
+                            elif strategy == "collapse":
+                                owner_stats["predicates_collapsed"] += 1
+                            elif strategy == "reject":
+                                owner_stats["predicates_rejected"] += 1
+                            if normalization.allowlist_rejected:
+                                owner_stats["predicates_allowlist_rejected"] += 1
+                            direction_sensitive = bool(domain_schema.is_direction_sensitive_from_normalization(normalization))
                         else:
                             # Keep predicate token shape stable even without schema governance.
                             normalized_predicate = normalize_relation_token(str(raw_predicate))
+                            direction_sensitive = True
                         if not normalized_predicate:
                             owner_stats["triples_dropped_schema"] += 1
                             continue
 
-                        processed_triples.append((head_id, head_display, normalized_predicate, tail_id, tail_display))
+                        if not direction_sensitive:
+                            owner_stats["triples_kept_direction_insensitive"] += 1
+                        processed_triples.append(
+                            (head_id, head_display, normalized_predicate, tail_id, tail_display, direction_sensitive)
+                        )
                         owner_stats["triples_kept"] += 1
 
                 # Collect fact data (aggregated with provenance)
-                for head_id, head_name, relation_type, tail_id, tail_name in processed_triples:
-                    # When schema governance is not configured, preserve legacy direction semantics.
-                    # When schema is present, only relations declared as direction-sensitive keep direction;
-                    # all others are treated as undirected for storage/provenance canonicalization.
-                    direction_sensitive = True if domain_schema is None else bool(domain_schema.is_direction_sensitive(relation_type))
+                for head_id, head_name, relation_type, tail_id, tail_name, direction_sensitive in processed_triples:
                     upsert_fact_occurrence(
                         fact_data_by_id,
                         head_id=head_id,
@@ -345,11 +376,20 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
             drop_ratio = (float(dropped_endpoints) / float(total)) if total else 0.0
             payload = {
                 "owner_id": owner_id,
+                "chunks_total": int(counters.get("chunks_total", 0)),
+                "chunks_graph_empty": int(counters.get("chunks_graph_empty", 0)),
+                "chunks_extraction_failed": int(counters.get("chunks_extraction_failed", 0)),
                 "triples_total": total,
                 "triples_kept": int(counters.get("triples_kept", 0)),
                 "triples_dropped_endpoints": dropped_endpoints,
                 "triples_dropped_ambiguous_endpoints": dropped_ambiguous,
                 "triples_dropped_schema": int(counters.get("triples_dropped_schema", 0)),
+                "predicates_aliased": int(counters.get("predicates_aliased", 0)),
+                "predicates_kept": int(counters.get("predicates_kept", 0)),
+                "predicates_collapsed": int(counters.get("predicates_collapsed", 0)),
+                "predicates_rejected": int(counters.get("predicates_rejected", 0)),
+                "predicates_allowlist_rejected": int(counters.get("predicates_allowlist_rejected", 0)),
+                "triples_kept_direction_insensitive": int(counters.get("triples_kept_direction_insensitive", 0)),
                 "endpoint_drop_ratio": float(drop_ratio),
                 "fact_provenance_max_source_chunks": int(max_source_chunks),
             }
@@ -536,11 +576,20 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
                     meta_query = """
                     UNWIND $metas AS meta
                     MERGE (m:KGIngestMeta {owner_id: meta.owner_id})
-                    SET m.triples_total = meta.triples_total,
+                    SET m.chunks_total = meta.chunks_total,
+                        m.chunks_graph_empty = meta.chunks_graph_empty,
+                        m.chunks_extraction_failed = meta.chunks_extraction_failed,
+                        m.triples_total = meta.triples_total,
                         m.triples_kept = meta.triples_kept,
                         m.triples_dropped_endpoints = meta.triples_dropped_endpoints,
                         m.triples_dropped_ambiguous_endpoints = meta.triples_dropped_ambiguous_endpoints,
                         m.triples_dropped_schema = meta.triples_dropped_schema,
+                        m.predicates_aliased = meta.predicates_aliased,
+                        m.predicates_kept = meta.predicates_kept,
+                        m.predicates_collapsed = meta.predicates_collapsed,
+                        m.predicates_rejected = meta.predicates_rejected,
+                        m.predicates_allowlist_rejected = meta.predicates_allowlist_rejected,
+                        m.triples_kept_direction_insensitive = meta.triples_kept_direction_insensitive,
                         m.endpoint_drop_ratio = meta.endpoint_drop_ratio,
                         m.fact_provenance_max_source_chunks = meta.fact_provenance_max_source_chunks,
                         m.updated_at = datetime(),

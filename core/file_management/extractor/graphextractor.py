@@ -36,23 +36,17 @@ class GraphExtractor(ExtractorBase):
 
         # Extraction loop driven by max_rounds (1 round = single-round extraction, >1 round = multi-round extraction)
         for round_num in range(self.config.max_rounds):
-            try:
-                # Build prompt (supporting bilingual support)
-                prompt = self.build_extraction_prompt(chunk.content, accumulated_graph)
+            # Build prompt (supporting bilingual support)
+            prompt = self.build_extraction_prompt(chunk.content, accumulated_graph)
+            response = await self.llm.achat([{"role": "user", "content": prompt}])
+            new_graph = self.parse_tsv_response(response)
 
-                response = await self.llm.achat([{"role": "user", "content": prompt}])
-                new_graph = self.parse_tsv_response(response)
-
-                # If there are no new extraction results, end early
-                if not new_graph.entities and not new_graph.relations:
-                    break
-
-                # Merge results
-                accumulated_graph = self.merge_graph_data(accumulated_graph, new_graph)
-
-            except Exception as e:
-                self.logger.error(f"Error in round {round_num + 1}: {e}")
+            # If there are no new extraction results, end early
+            if not new_graph.entities and not new_graph.relations:
                 break
+
+            # Merge results
+            accumulated_graph = self.merge_graph_data(accumulated_graph, new_graph)
 
         # Clean data if enabled
         if self.config.enable_cleaning:
@@ -468,4 +462,3 @@ class GraphExtractor(ExtractorBase):
             relations=converted_relations,    # Relationships use entity names
             metadata=graph_data.metadata
         )
-

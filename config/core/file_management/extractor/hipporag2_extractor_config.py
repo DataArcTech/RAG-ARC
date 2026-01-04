@@ -34,6 +34,11 @@ class HippoRAG2ExtractorConfig(AbstractConfig):
         ge=1
     )
 
+    error_policy: Literal["attach", "raise", "empty"] = Field(
+        default="attach",
+        description="How to handle extraction errors: attach=return empty graph with error metadata; raise=propagate; empty=legacy silent empty graph",
+    )
+
     # Optional custom prompts (if user wants to override defaults)
     ner_prompt: Optional[str] = Field(
         default=None,
@@ -54,4 +59,3 @@ class HippoRAG2ExtractorConfig(AbstractConfig):
 
     def build(self):
         return HippoRAG2Extractor(self)
-

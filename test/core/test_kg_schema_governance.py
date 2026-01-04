@@ -57,6 +57,46 @@ def test_schema_direction_sensitive_relations_union() -> None:
     assert schema.direction_sensitive_relations_all() == {"OWNS", "PART_OF"}
 
 
+def test_schema_direction_policy_blacklist_defaults_to_directed() -> None:
+    schema = schema_from_dict(
+        {
+            "version": "v1",
+            "default_domain": "default",
+            "domains": {
+                "default": {
+                    "direction_policy": "blacklist",
+                    "direction_insensitive_relations": ["RELATED_TO"],
+                }
+            },
+        }
+    )
+    domain_schema = schema.for_domain("default")
+    assert domain_schema.is_direction_sensitive("HAS_POLICY") is True
+    assert domain_schema.is_direction_sensitive("RELATED_TO") is False
+
+
+def test_schema_collapse_unknown_predicate_forces_direction_sensitive() -> None:
+    schema = schema_from_dict(
+        {
+            "version": "v1",
+            "default_domain": "default",
+            "domains": {
+                "default": {
+                    "allowed_relations": ["RELATED_TO"],
+                    "unknown_predicate_policy": "collapse",
+                    "unknown_predicate_fallback": "RELATED_TO",
+                    "direction_policy": "whitelist",
+                }
+            },
+        }
+    )
+    domain_schema = schema.for_domain("default")
+    normalization = domain_schema.normalize_predicate_with_meta("acquired")
+    assert normalization.canonical_predicate == "RELATED_TO"
+    assert normalization.normalization_strategy == "collapse"
+    assert domain_schema.is_direction_sensitive_from_normalization(normalization) is True
+
+
 def test_fact_provenance_upsert_merges_occurrences_and_sources() -> None:
     facts: dict[str, dict] = {}
     fact_id_1 = upsert_fact_occurrence(
