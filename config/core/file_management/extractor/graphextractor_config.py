@@ -21,6 +21,10 @@ class GraphExtractorConfig(AbstractConfig):
     max_rounds: int = Field(default=3, description="max_rounds", ge=1)
 
     max_concurrent: int = Field(default=100, description="Maximum number of concurrent operations", ge=1)
+    error_policy: Literal["attach", "raise", "empty"] = Field(
+        default="attach",
+        description="How to handle extraction errors: attach=return empty graph with error metadata; raise=propagate; empty=legacy silent empty graph",
+    )
     llm_config: OpenAIChatConfig = Field(default=None, description="Configuration for the LLM to be used")
 
     def model_post_init(self, __context) -> None:

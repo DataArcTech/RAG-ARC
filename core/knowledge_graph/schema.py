@@ -25,39 +25,94 @@ def normalize_relation_token(value: str) -> str:
 
 
 @dataclass(frozen=True)
+class PredicateNormalizationResult:
+    raw_predicate: str
+    raw_predicate_normalized: Optional[str]
+    canonical_predicate: Optional[str]
+    normalization_strategy: str  # empty | alias | keep | collapse | reject
+    allowlist_rejected: bool = False
+
+
+@dataclass(frozen=True)
 class DomainSchema:
     allowed_relations: Set[str] = field(default_factory=set)
     relation_aliases: Dict[str, str] = field(default_factory=dict)
     direction_sensitive_relations: Set[str] = field(default_factory=set)
+    direction_policy: str = "whitelist"  # whitelist | blacklist
+    direction_insensitive_relations: Set[str] = field(default_factory=set)
     entity_aliases: Dict[str, str] = field(default_factory=dict)
     entity_suffixes_to_strip: List[str] = field(default_factory=list)
     unknown_predicate_policy: str = "collapse"  # reject | keep | collapse
     unknown_predicate_fallback: str = "RELATED_TO"
 
     def normalize_predicate(self, raw_predicate: str) -> Optional[str]:
+        return self.normalize_predicate_with_meta(raw_predicate).canonical_predicate
+
+    def normalize_predicate_with_meta(self, raw_predicate: str) -> PredicateNormalizationResult:
         token = text_processing(raw_predicate or "")
         if not token:
-            return None
+            return PredicateNormalizationResult(
+                raw_predicate=str(raw_predicate or ""),
+                raw_predicate_normalized=None,
+                canonical_predicate=None,
+                normalization_strategy="empty",
+                allowlist_rejected=False,
+            )
 
         alias_hit = self.relation_aliases.get(token)
         if alias_hit:
             canonical = normalize_relation_token(alias_hit)
+            strategy = "alias"
         else:
             policy = (self.unknown_predicate_policy or "collapse").strip().lower()
             if policy == "reject":
-                return None
+                return PredicateNormalizationResult(
+                    raw_predicate=str(raw_predicate or ""),
+                    raw_predicate_normalized=token,
+                    canonical_predicate=None,
+                    normalization_strategy="reject",
+                    allowlist_rejected=False,
+                )
             if policy == "keep":
                 canonical = normalize_relation_token(token)
+                strategy = "keep"
             else:
                 canonical = normalize_relation_token(self.unknown_predicate_fallback or "RELATED_TO")
+                strategy = "collapse"
 
         if self.allowed_relations and canonical not in self.allowed_relations:
-            return None
-        return canonical
+            return PredicateNormalizationResult(
+                raw_predicate=str(raw_predicate or ""),
+                raw_predicate_normalized=token,
+                canonical_predicate=None,
+                normalization_strategy=strategy,
+                allowlist_rejected=True,
+            )
+        return PredicateNormalizationResult(
+            raw_predicate=str(raw_predicate or ""),
+            raw_predicate_normalized=token,
+            canonical_predicate=canonical,
+            normalization_strategy=strategy,
+            allowlist_rejected=False,
+        )
 
     def is_direction_sensitive(self, predicate: str) -> bool:
         canonical = normalize_relation_token(predicate or "")
+        policy = (self.direction_policy or "whitelist").strip().lower()
+        if policy == "blacklist":
+            return canonical not in self.direction_insensitive_relations
         return canonical in self.direction_sensitive_relations
+
+    def is_direction_sensitive_from_normalization(self, normalization: PredicateNormalizationResult) -> bool:
+        """
+        Decide direction sensitivity using both schema configuration and normalization outcome.
+
+        Safety rule (P0): when an unknown predicate is collapsed to a fallback (e.g. RELATED_TO),
+        preserve direction by default to avoid head/tail swaps caused by incomplete schema configuration.
+        """
+        if (normalization.normalization_strategy or "").strip().lower() == "collapse":
+            return True
+        return self.is_direction_sensitive(normalization.canonical_predicate or "")
 
     def canonicalize_entity_name(self, raw_entity_name: str) -> Optional[str]:
         token = text_processing(raw_entity_name or "")
@@ -176,6 +231,8 @@ def schema_from_dict(payload: Mapping[str, Any]) -> KGSchemaConfig:
 
         allowed_relations = _coerce_set(domain_payload.get("allowed_relations"))
         direction_sensitive = _coerce_set(domain_payload.get("direction_sensitive_relations"))
+        direction_policy = str(domain_payload.get("direction_policy") or "whitelist").strip() or "whitelist"
+        direction_insensitive = _coerce_set(domain_payload.get("direction_insensitive_relations"))
         aliases = _coerce_aliases(domain_payload.get("relation_aliases"))
         entity_aliases = _coerce_entity_aliases(domain_payload.get("entity_aliases"))
         suffixes = _coerce_suffixes(domain_payload.get("entity_suffixes_to_strip"))
@@ -186,6 +243,8 @@ def schema_from_dict(payload: Mapping[str, Any]) -> KGSchemaConfig:
             allowed_relations=allowed_relations,
             relation_aliases=aliases,
             direction_sensitive_relations=direction_sensitive,
+            direction_policy=direction_policy,
+            direction_insensitive_relations=direction_insensitive,
             entity_aliases=entity_aliases,
             entity_suffixes_to_strip=suffixes,
             unknown_predicate_policy=policy,

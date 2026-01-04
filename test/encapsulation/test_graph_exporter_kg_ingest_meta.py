@@ -21,10 +21,19 @@ class _MetaStore:
         if "MATCH (m:KGIngestMeta" in text:
             return [
                 {
+                    "chunks_total": 4,
+                    "chunks_graph_empty": 1,
+                    "chunks_extraction_failed": 1,
                     "triples_total": 10,
                     "triples_kept": 7,
                     "triples_dropped_endpoints": 2,
                     "triples_dropped_schema": 1,
+                    "predicates_aliased": 2,
+                    "predicates_kept": 4,
+                    "predicates_collapsed": 1,
+                    "predicates_rejected": 0,
+                    "predicates_allowlist_rejected": 0,
+                    "triples_kept_direction_insensitive": 3,
                     "endpoint_drop_ratio": 0.2,
                     "fact_provenance_max_source_chunks": 50,
                     "updated_at": "2026-01-01T00:00:00Z",
@@ -69,6 +78,8 @@ def test_exporter_includes_persisted_kg_ingest_stats_in_metadata() -> None:
         include_node_types=["entity"],
     )
     assert full["metadata"]["kg_ingest_stats"]["triples_total"] == 10
+    assert full["metadata"]["kg_ingest_stats"]["chunks_total"] == 4
+    assert full["metadata"]["kg_ingest_stats"]["predicates_kept"] == 4
 
     sub = GraphExporterNeo4j.export_subgraph(
         graph_store=store,
@@ -77,4 +88,3 @@ def test_exporter_includes_persisted_kg_ingest_stats_in_metadata() -> None:
         max_edges=10,
     )
     assert sub["metadata"]["kg_ingest_stats"]["triples_kept"] == 7
-

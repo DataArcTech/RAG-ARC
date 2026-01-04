@@ -15,6 +15,7 @@ import re
 from typing import List, TYPE_CHECKING, Tuple
 
 from core.file_management.extractor.base import ExtractorBase
+from core.file_management.extractor.metadata_keys import MINDMAP_ERROR_KEY
 from core.prompts.hipporag2_extractor_prompt import (
     HIPPORAG2_NER_SYSTEM, HIPPORAG2_NER_SYSTEM_WITH_TYPES,
     HIPPORAG2_NER_ONE_SHOT_INPUT, HIPPORAG2_NER_ONE_SHOT_OUTPUT,
@@ -35,7 +36,6 @@ if TYPE_CHECKING:
     from config.core.file_management.extractor.hipporag2_extractor_config import HippoRAG2ExtractorConfig
 
 logger = logging.getLogger(__name__)
-
 
 class HippoRAG2Extractor(ExtractorBase):
     """
@@ -87,12 +87,7 @@ class HippoRAG2Extractor(ExtractorBase):
         """
         if not chunk.content:
             return GraphData()
-
-        try:
-            return await self.extract_two_stage(chunk)
-        except Exception as e:
-            self.logger.error(f"Error during HippoRAG2 extraction: {e}")
-            return GraphData()
+        return await self.extract_two_stage(chunk)
 
     async def extract_two_stage(self, chunk: Chunk) -> GraphData:
         """
@@ -100,34 +95,29 @@ class HippoRAG2Extractor(ExtractorBase):
         More accurate and follows HippoRAG2's original approach
         Also extracts mind map and saves to chunk.metadata
         """
+        # Stage 1: Named Entity Recognition
+        entities = await self.extract_entities(chunk.content)
+
+        # Stage 2: Triple Extraction using extracted entities
+        triples: list[tuple[str, str, str]] = []
+        if entities:
+            triples = await self.extract_triples(chunk.content, entities)
+        else:
+            self.logger.warning("No entities extracted, skipping triple extraction")
+
+        # Stage 3: Mind Map Extraction (non-fatal, but must be observable)
         try:
-            # Stage 1: Named Entity Recognition
-            entities = await self.extract_entities(chunk.content)
-            
-            # Stage 2: Triple Extraction using extracted entities
-            triples = []
-            if entities:
-                triples = await self.extract_triples(chunk.content, entities)
-            else:
-                self.logger.warning("No entities extracted, skipping triple extraction")
-            
-            # Stage 3: Mind Map Extraction
             mindmap = await self.extract_mindmap(chunk.content)
-            
-            # Save mind map to chunk metadata
-            if mindmap:
-                if chunk.metadata is None:
-                    chunk.metadata = {}
-                chunk.metadata['mindmap'] = mindmap
-            
-            # Convert to GraphData format
-            graph_data = self.build_graph_data(entities, triples)
-            
-            return graph_data
-            
-        except Exception as e:
-            self.logger.error(f"Error in two-stage extraction: {e}")
-            return GraphData()
+        except Exception as exc:
+            self.logger.error("Error in mind map extraction: %s", exc, exc_info=True)
+            chunk.metadata[MINDMAP_ERROR_KEY] = {"exception_type": exc.__class__.__name__, "message": str(exc)}
+            mindmap = {}
+
+        if mindmap:
+            chunk.metadata["mindmap"] = mindmap
+
+        # Convert to GraphData format
+        return self.build_graph_data(entities, triples)
 
     async def extract_entities(self, text: str) -> List[Tuple[str, str]]:
         """
@@ -140,19 +130,11 @@ class HippoRAG2Extractor(ExtractorBase):
         Returns:
             List of (entity_name, entity_type) tuples
         """
-        try:
-            prompt = self.build_ner_prompt(text)
-
-            response = await self.llm.achat([{"role": "user", "content": prompt}])
-
-            entities = self.parse_ner_response(response)
-
-            self.logger.info(f"Extracted {len(entities)} entities")
-            return entities
-
-        except Exception as e:
-            self.logger.error(f"Error in entity extraction: {e}")
-            return []
+        prompt = self.build_ner_prompt(text)
+        response = await self.llm.achat([{"role": "user", "content": prompt}])
+        entities = self.parse_ner_response(response)
+        self.logger.info("Extracted %s entities", len(entities))
+        return entities
 
     async def extract_triples(self, text: str, entities: List[Tuple[str, str]]) -> List[Tuple[str, str, str]]:
         """
@@ -165,20 +147,12 @@ class HippoRAG2Extractor(ExtractorBase):
         Returns:
             List of (subject, predicate, object) triples
         """
-        try:
-            # Extract just entity names for the prompt
-            entity_names = [entity[0] for entity in entities]
-            prompt = self.build_triple_prompt(text, entity_names)
-            response = await self.llm.achat([{"role": "user", "content": prompt}])
-
-            triples = self.parse_triple_response(response)
-
-            self.logger.info(f"Extracted {len(triples)} triples")
-            return triples
-
-        except Exception as e:
-            self.logger.error(f"Error in triple extraction: {e}")
-            return []
+        entity_names = [entity[0] for entity in entities]
+        prompt = self.build_triple_prompt(text, entity_names)
+        response = await self.llm.achat([{"role": "user", "content": prompt}])
+        triples = self.parse_triple_response(response)
+        self.logger.info("Extracted %s triples", len(triples))
+        return triples
 
     def build_ner_prompt(self, text: str) -> str:
         """
@@ -390,19 +364,12 @@ class HippoRAG2Extractor(ExtractorBase):
         Returns:
             Dictionary with mind map structure (hierarchical TSV format)
         """
-        try:
-            prompt = self.build_mindmap_prompt(text)
-            response = await self.llm.achat([{"role": "user", "content": prompt}])
-            
-            mindmap_data = self.parse_mindmap_response(response)
-            
-            node_count = len(mindmap_data.get('nodes', []))
-            self.logger.info(f"Extracted mind map with {node_count} nodes")
-            return mindmap_data
-            
-        except Exception as e:
-            self.logger.error(f"Error in mind map extraction: {e}")
-            return {}
+        prompt = self.build_mindmap_prompt(text)
+        response = await self.llm.achat([{"role": "user", "content": prompt}])
+        mindmap_data = self.parse_mindmap_response(response)
+        node_count = len(mindmap_data.get("nodes", []))
+        self.logger.info("Extracted mind map with %s nodes", node_count)
+        return mindmap_data
 
     def build_mindmap_prompt(self, text: str) -> str:
         """
