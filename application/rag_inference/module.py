@@ -372,6 +372,24 @@ class RAGInference(AbstractModule):
 
         messages: List[Dict[str, str]] = []
         
+        # 添加系统提示（要求使用<sup>标签引用来源）
+        system_prompt = (
+            "You are a helpful RAG assistant.\n"
+            "You may be given a list of numbered Sources (key=1..N).\n"
+            "Rules:\n"
+            "1) If the user message is just a greeting / test / acknowledgement (e.g. '测试', 'test', 'hello', 'hi', '你好'),\n"
+            "   answer briefly and DO NOT use any Sources and DO NOT include any <sup> tags.\n"
+            "2) Otherwise, if Sources are provided, ground your answer in Sources and add inline citations using HTML <sup> tags.\n"
+            "   - Every sentence that contains factual information supported by Sources MUST end with one or more <sup>key</sup>.\n"
+            "   - Cite only the minimal number of sources needed; do NOT cite all sources by default.\n"
+            "   - Do NOT output a bare block/list of citations (e.g. '<sup>1</sup><sup>2</sup>...') without nearby supporting text.\n"
+            "   - Do NOT cite a source you did not use.\n"
+            "3) If Sources are provided but none are relevant, say you don't know based on the provided Sources and ask a clarifying question.\n"
+            "4) Do NOT use bracket citations like [1] and do NOT add a trailing 'Sources:' section.\n"
+            "5) Output in Markdown. The only HTML allowed is <sup>...</sup>.\n"
+        )
+        messages.append({"role": "system", "content": system_prompt})
+        
         # 如果有历史对话，先添加历史消息（参考 WebSocket 的实现）
         if history_text:
             # 解析历史文本为消息列表
@@ -384,13 +402,15 @@ class RAGInference(AbstractModule):
                     if role in ("user", "assistant") and content:
                         messages.append({"role": role, "content": content})
         
+        # 使用"Source key=N"格式（与chatbot.py保持一致）
         for i, chunk in enumerate(chunks):
             metadata = getattr(chunk, "metadata", None) or {}
             chunk_text = metadata.get("prompt_text") or metadata.get("index_text")
             if not isinstance(chunk_text, str) or not chunk_text.strip():
                 chunk_text = chunk.content
-            messages.append({"role": "user", "content": f"Chunk {i+1}:\n{chunk_text}"})
-        messages.append({"role": "user", "content": f"Based on the above chunks, please answer question: {rewritten_query}"})
+            filename = str(metadata.get("filename") or "").strip() or "source"
+            messages.append({"role": "user", "content": f"Source key={i+1} title={filename}\n{chunk_text}"})
+        messages.append({"role": "user", "content": f"Based on the above Sources, please answer question: {rewritten_query}"})
         logger.info("Invoked chat with query: %s (owner_id=%s)", query, owner_id)
         logger.info("Query rewritten to: %s", rewritten_query)
         if history_text:

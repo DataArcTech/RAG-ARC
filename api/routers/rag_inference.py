@@ -4,6 +4,9 @@ import asyncio
 import os
 import time
 import threading
+import re
+from pathlib import Path
+from urllib.parse import quote
 from typing import Annotated, Any, Dict, List, Optional
 from fastapi import (
     APIRouter,
@@ -42,6 +45,11 @@ import logging
 from core.utils.owner_guard import is_admin_owner, get_admin_owner_id
 from core.presentation.evidence import build_chat_evidence
 from config.output_limits import CHAT_TOP_CHUNKS
+from api.routers.chatbot import (
+    _sanitize_title,
+    _fallback_title,
+    _generate_title_messages,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -113,11 +121,116 @@ class GraphOverviewResponse(BaseModel):
     edges: List[Dict[str, Any]]
     metadata: Dict[str, Any]
 
+# 脚标引用相关函数（从chatbot.py复制）
+_SUP_KEY_RE = re.compile(r"<sup>\s*(?P<key>\d{1,4})\s*</sup>")
+
+def _extract_sup_keys(text: str) -> List[int]:
+    """Extract referenced source keys in the order they appear."""
+    if not text:
+        return []
+    seen: set[int] = set()
+    keys: List[int] = []
+    for match in _SUP_KEY_RE.finditer(text):
+        try:
+            key = int(match.group("key"))
+        except Exception:  # noqa: BLE001
+            continue
+        if key <= 0:
+            continue
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    return keys
+
+def _build_sources_for_frontend(chunks: List[Chunk], max_sources: int = 5) -> List[Dict[str, Any]]:
+    """Build sources list for frontend with citation keys."""
+    max_chars = int(os.getenv("CHATBOT_SOURCE_MAX_CHARS", "1600"))
+    sources: List[Dict[str, Any]] = []
+    seen_chunk_ids: set[str] = set()
+    
+    # 获取knowledge模块以访问file_storage
+    try:
+        registrator = Register()
+        knowledge = registrator.get_object("knowledge")
+        file_storage = getattr(knowledge, "file_storage", None)
+    except Exception:  # noqa: BLE001
+        file_storage = None
+
+    for chunk in chunks:
+        if len(sources) >= max_sources:
+            break
+        chunk_id = str(getattr(chunk, "id", "") or "").strip()
+        if not chunk_id or chunk_id in seen_chunk_ids:
+            continue
+        seen_chunk_ids.add(chunk_id)
+
+        metadata = getattr(chunk, "metadata", None) or {}
+        file_id = str(metadata.get("source_file_id") or "").strip() or None
+        filename = str(metadata.get("filename") or "").strip() or "source"
+
+        content = str(getattr(chunk, "content", "") or "").strip()
+        if max_chars > 0 and len(content) > max_chars:
+            content = f"{content[:max_chars].rstrip()}..."
+
+        file_url = None
+        if file_id and file_storage is not None:
+            try:
+                meta = file_storage.get_file_metadata(file_id)
+                meta_filename = getattr(meta, "filename", None) if meta is not None else None
+                safe_name = Path((meta_filename or filename or "source")).name
+                file_url = f"/static/files/{file_id}/{quote(safe_name)}"
+            except Exception:  # noqa: BLE001
+                file_url = None
+
+        sources.append({
+            "key": len(sources) + 1,
+            "chunk_id": chunk_id,
+            "file_id": file_id,
+            "title": filename,
+            "file": file_url,
+            "description": content,
+        })
+    return sources
+
+def _filter_sources_by_sup_keys(sources: List[Dict[str, Any]], answer_text: str) -> List[Dict[str, Any]]:
+    """Filter sources to only include those referenced by <sup> tags."""
+    if not sources:
+        return []
+    used_keys = set(_extract_sup_keys(answer_text))
+    if not used_keys:
+        return []
+    return [s for s in sources if s.get("key") in used_keys]
+
+# Title生成函数（复用chatbot.py中的函数）
+async def _generate_title_via_llm(
+    rag_inference_handler: RAGInference,
+    user_text: str,
+    assistant_text: str,
+) -> str:
+    """生成标题，复用chatbot.py中的辅助函数"""
+    llm = getattr(rag_inference_handler, "llm", None)
+    if llm is None:
+        return _fallback_title(user_text)
+
+    messages = _generate_title_messages(user_text, assistant_text)
+
+    def _run():
+        return llm.chat(messages)
+
+    try:
+        raw = await get_thread_pool().run_blocking(_run)
+    except Exception:  # noqa: BLE001
+        return _fallback_title(user_text)
+
+    title = _sanitize_title(str(raw or ""))
+    return title or _fallback_title(user_text)
+
 def _build_stream_chat_payload(
     message: ChatMessage,
     chunks: list[Chunk],
     subgraph: dict | None = None,
     evidence: Dict[str, Any] | None = None,
+    sources: List[Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
     message_dict = {
         "id": str(message.id),
@@ -139,6 +252,8 @@ def _build_stream_chat_payload(
         response_dict["subgraph"] = subgraph
     if evidence is not None:
         response_dict["evidence"] = evidence
+    if sources is not None:
+        response_dict["sources"] = sources
     return response_dict
 
 
@@ -390,6 +505,13 @@ async def stream_chat_sse(
         # 排除当前刚创建的用户消息（避免重复）
         history_messages = [msg for msg in history_messages if msg.id != user_message.id]
         
+        # 判断是否是第一轮对话（检查是否有assistant消息）
+        first_turn = not any(
+            msg.content.get("role") == "assistant" 
+            for msg in history_messages 
+            if isinstance(msg.content, dict)
+        )
+        
         # 限制历史消息数量（参考 chatbot.py 的 _normalize_history）
         # 默认只取最近 5 轮对话（10 条消息：user + assistant）
         context_turns = int(os.getenv("SSE_CONTEXT_TURNS", "5"))
@@ -608,12 +730,24 @@ async def stream_chat_sse(
                 graph_store=graph_store,
             )
 
+        # 构建sources（脚标引用功能）
+        sources = None
+        if chunks:
+            all_sources = await get_thread_pool().run_blocking(
+                _build_sources_for_frontend,
+                chunks,
+                CHAT_TOP_CHUNKS
+            )
+            # 只返回被引用的sources
+            sources = _filter_sources_by_sup_keys(all_sources, assistant_response)
+
         # 构建 payload（与 WebSocket 逻辑一致）
         payload = _build_stream_chat_payload(
                 assistant_message,
                 chunks,
                 subgraph=subgraph_data if return_subgraph else None,
                 evidence=evidence,
+                sources=sources,
             )
 
         # 通过 tool_calls 返回 payload（保持 OpenAI 兼容格式）
@@ -648,6 +782,24 @@ async def stream_chat_sse(
             ),
             request_id=request_id
         )
+        
+        # 如果是第一轮对话，生成并发送title（参考chatbot.py的实现）
+        if first_turn:
+            try:
+                title = await _generate_title_via_llm(
+                    rag_inference_handler,
+                    query.strip(),
+                    assistant_response.strip(),
+                )
+                # 发送title事件（使用统一的StandardResponse格式）
+                yield sse_json_wrapped(
+                    {"type": "title", "title": title},
+                    request_id=request_id
+                )
+            except Exception as exc:
+                logger.warning("Failed to generate title: %s", exc)
+                # title生成失败不影响主流程，继续执行
+        
         yield sse_done()
 
     headers = {
