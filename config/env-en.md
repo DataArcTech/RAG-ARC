@@ -143,6 +143,7 @@ Notes:
 | `GRAPH_EXPORT_CHUNK_CONTENT_PREVIEW_CHARS` | `240` | Maximum chunk content characters included in graph export payloads (visualization preview). |
 | `GRAPH_EXPORT_EDGE_FETCH_FACTOR` | `10` | Multiplier used by exporters to cap how many edges are fetched before sampling (fetch_limit = max_edges * factor). |
 | `GRAPH_EXPORT_EDGE_FETCH_MAX` | `50000` | Absolute cap for exporter edge fetch limits (prevents oversized Neo4j edge queries). |
+| `GRAPH_EXPORT_FILTER_NUMERIC_TIME_ENTITIES` | `true` | Whether graph exporters filter numeric/date/time-like entity nodes (visualization noise reduction). Set `false` for finance/insurance workloads where those nodes are important. |
 | `SEMANTIC_UNIT_MAX_MATCHED_SLICES` | `3` | Maximum slice snippets attached to a semantic-unit anchor (post-retrieval merge). |
 | `TABLE_MAX_MERGED_ROWS` | `30` | Maximum table data rows merged into a table anchor after retrieval. |
 | `SEMANTIC_UNIT_MAX_MERGED_SLICE_CHARS` | `1200` | Maximum characters appended per matched slice when merging into `anchor.content`. |

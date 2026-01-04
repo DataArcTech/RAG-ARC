@@ -7,12 +7,16 @@ for frontend visualization using Cytoscape.js or other graph libraries.
 
 import logging
 import re
+import json
 from typing import Dict, List, Any, Set, Optional
 
 from config.output_limits import (
     GRAPH_EXPORT_CHUNK_CONTENT_PREVIEW_CHARS,
     GRAPH_EXPORT_EDGE_FETCH_FACTOR,
     GRAPH_EXPORT_EDGE_FETCH_MAX,
+    DEEPSEARCH_GRAPH_EXPORT_MAX_ALIASES,
+    DEEPSEARCH_MINDMAP_MAX_NODES_PER_CHUNK,
+    GRAPH_EXPORT_FILTER_NUMERIC_TIME_ENTITIES,
 )
 
 logger = logging.getLogger(__name__)
@@ -261,8 +265,8 @@ class GraphExporterNeo4j:
             elif node_type == 'entity':
                 entity_name = record.get('entity_name')
 
-                # Filter out entities that are pure numbers, timestamps, or time formats
-                if GraphExporterNeo4j._should_filter_entity(entity_name):
+                # Filter out entities that are pure numbers, timestamps, or time formats (optional).
+                if GRAPH_EXPORT_FILTER_NUMERIC_TIME_ENTITIES and GraphExporterNeo4j._should_filter_entity(entity_name):
                     continue
 
                 entity_obj = {
@@ -571,6 +575,7 @@ class GraphExporterNeo4j:
                     RETURN c.chunk_id AS node_id,
                            'chunk' AS node_type,
                            c.content AS content,
+                           c.metadata AS metadata,
                            NULL AS entity_name,
                            NULL AS entity_type
                     """,
@@ -592,6 +597,7 @@ class GraphExporterNeo4j:
                     RETURN e.entity_id AS node_id,
                            'entity' AS node_type,
                            NULL AS content,
+                           NULL AS metadata,
                            e.entity_name AS entity_name,
                            e.entity_type AS entity_type
                     """,
@@ -613,6 +619,31 @@ class GraphExporterNeo4j:
                 }
                 if record.get('content'):
                     chunk_obj['content'] = record['content']
+                raw_meta = record.get("metadata")
+                if isinstance(raw_meta, str) and raw_meta.strip():
+                    try:
+                        parsed = json.loads(raw_meta)
+                    except Exception:
+                        parsed = {}
+                    if isinstance(parsed, dict):
+                        mindmap = parsed.get("mindmap")
+                        if isinstance(mindmap, dict) and isinstance(mindmap.get("nodes"), list):
+                            nodes_preview = []
+                            for item in mindmap.get("nodes") or []:
+                                if not isinstance(item, dict):
+                                    continue
+                                level = str(item.get("level") or "").strip()
+                                content = str(item.get("content") or "").strip()
+                                if not content:
+                                    continue
+                                nodes_preview.append({"level": level, "content": content})
+                                if len(nodes_preview) >= int(DEEPSEARCH_MINDMAP_MAX_NODES_PER_CHUNK):
+                                    break
+                            if nodes_preview:
+                                chunk_obj["mindmap"] = {"nodes": nodes_preview}
+                        business_time = parsed.get("business_time")
+                        if isinstance(business_time, dict) and business_time:
+                            chunk_obj["business_time"] = dict(business_time)
                 # Add PPR score if available
                 if node_ppr_scores and node_id in node_ppr_scores:
                     chunk_obj['ppr_score'] = node_ppr_scores[node_id]
@@ -621,8 +652,8 @@ class GraphExporterNeo4j:
             elif node_type == 'entity':
                 entity_name = record.get('entity_name')
 
-                # Filter out entities that are pure numbers, timestamps, or time formats
-                if GraphExporterNeo4j._should_filter_entity(entity_name):
+                # Filter out entities that are pure numbers, timestamps, or time formats (optional).
+                if GRAPH_EXPORT_FILTER_NUMERIC_TIME_ENTITIES and GraphExporterNeo4j._should_filter_entity(entity_name):
                     continue
 
                 entity_obj = {
@@ -650,6 +681,76 @@ class GraphExporterNeo4j:
 
         if seed_entity_ids:
             logger.info(f"Marked {seed_marked_count} seed entities out of {len(seed_entity_ids)} provided")
+
+        # Concept layer: attach canonical + alias hints to exported entities (schema-layered, does not affect retrieval).
+        exported_entity_ids = [node.get("id") for node in nodes if isinstance(node, dict) and node.get("id")]
+        if exported_entity_ids:
+            clause = ""
+            params = {"entity_ids": exported_entity_ids, "global_owner": global_owner}
+            if owner_key is not None:
+                clause = (
+                    "AND COALESCE(e.owner_id, $global_owner) = $owner_id "
+                    "AND COALESCE(c.owner_id, $global_owner) = $owner_id "
+                    "AND (r.owner_id IS NULL OR COALESCE(r.owner_id, $global_owner) = $owner_id)"
+                )
+                params["owner_id"] = owner_key
+
+            canonical_rows = graph_store._execute_query(
+                f"""
+                MATCH (e:Entity)-[r:CANONICAL_OF]->(c:EntityCanonical)
+                WHERE e.entity_id IN $entity_ids
+                  {clause}
+                RETURN e.entity_id AS entity_id,
+                       c.canonical_name AS canonical_name,
+                       c.canonical_key AS canonical_key
+                """,
+                params,
+            )
+            canonical_by_entity = {
+                str(row.get("entity_id")): {
+                    "canonical_name": row.get("canonical_name"),
+                    "canonical_key": row.get("canonical_key"),
+                }
+                for row in (canonical_rows or [])
+                if isinstance(row, dict) and row.get("entity_id")
+            }
+
+            alias_rows = graph_store._execute_query(
+                f"""
+                MATCH (e:Entity)-[r:CANONICAL_OF]->(c:EntityCanonical)<-[:ALIAS_OF]-(a:EntityAlias)
+                WHERE e.entity_id IN $entity_ids
+                  {clause}
+                RETURN e.entity_id AS entity_id,
+                       collect(DISTINCT a.alias_text)[..$limit] AS aliases
+                """,
+                {**params, "limit": int(DEEPSEARCH_GRAPH_EXPORT_MAX_ALIASES)},
+            )
+            aliases_by_entity = {}
+            for row in alias_rows or []:
+                if not isinstance(row, dict) or not row.get("entity_id"):
+                    continue
+                items = row.get("aliases") or []
+                if not isinstance(items, list):
+                    continue
+                aliases = [str(x).strip() for x in items if str(x).strip()]
+                if aliases:
+                    aliases_by_entity[str(row["entity_id"])] = aliases
+
+            for node in nodes:
+                entity_id = str(node.get("id") or "")
+                if not entity_id:
+                    continue
+                canon = canonical_by_entity.get(entity_id)
+                if canon:
+                    cname = str(canon.get("canonical_name") or "").strip()
+                    ckey = str(canon.get("canonical_key") or "").strip()
+                    if cname:
+                        node["canonical_name"] = cname
+                    if ckey:
+                        node["canonical_key"] = ckey
+                aliases = aliases_by_entity.get(entity_id)
+                if aliases:
+                    node["aliases"] = aliases
 
         max_edges = max(0, int(max_edges or 0))
         edge_results: List[Dict[str, Any]] = []

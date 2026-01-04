@@ -34,9 +34,32 @@ class HippoRAG2ExtractorConfig(AbstractConfig):
         ge=1
     )
 
+    batch_size: Optional[int] = Field(
+        default=None,
+        description="Optional batch size for extractor concurrency scheduling (limits in-flight tasks for very large corpora).",
+        ge=1,
+    )
+
+    retry_attempts: Optional[int] = Field(
+        default=None,
+        description="Optional override for LLM retry attempts (mapped to llm_config.max_retries).",
+        ge=0,
+    )
+
+    timeout: Optional[float] = Field(
+        default=None,
+        description="Optional override for LLM timeout seconds (mapped to llm_config.timeout).",
+        gt=0,
+    )
+
     error_policy: Literal["attach", "raise", "empty"] = Field(
         default="attach",
         description="How to handle extraction errors: attach=return empty graph with error metadata; raise=propagate; empty=legacy silent empty graph",
+    )
+
+    enable_temporal_extraction: bool = Field(
+        default=True,
+        description="Whether to extract business-time (effective_date/valid_from/valid_to) via LLM for temporal tools (e.g. latest_truth).",
     )
 
     # Optional custom prompts (if user wants to override defaults)
@@ -56,6 +79,11 @@ class HippoRAG2ExtractorConfig(AbstractConfig):
             raise ValueError("max_concurrent must be greater than 0")
         if self.llm_config is None:
             raise ValueError("llm_config is required for HippoRAG2 extraction")
+
+        if self.retry_attempts is not None:
+            self.llm_config.max_retries = int(self.retry_attempts)
+        if self.timeout is not None:
+            self.llm_config.timeout = float(self.timeout)
 
     def build(self):
         return HippoRAG2Extractor(self)

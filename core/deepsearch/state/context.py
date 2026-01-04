@@ -208,6 +208,7 @@ class DeepSearchState:
                     tool_timeouts += 1
 
         remote_fallbacks = 0
+        deterministic_tool_runs = 0
         tool_results = trace.get("tool_results") or []
         if isinstance(tool_results, list):
             for entry in tool_results:
@@ -217,6 +218,8 @@ class DeepSearchState:
                 diagnostics = result.get("diagnostics") if isinstance(result, dict) else None
                 if isinstance(diagnostics, dict) and diagnostics.get("remote_fallback_reason"):
                     remote_fallbacks += 1
+                if isinstance(result, dict) and str(result.get("determinism") or "").strip().lower() == "deterministic":
+                    deterministic_tool_runs += 1
 
         coverage = trace.get("coverage_metrics") or {}
         worker_errors = 0
@@ -229,6 +232,7 @@ class DeepSearchState:
             "tool_invocation_count": tool_invocations,
             "tool_failure_steps": tool_failures,
             "tool_timeout_steps": tool_timeouts,
+            "deterministic_tool_run_count": deterministic_tool_runs,
             "remote_fallback_count": remote_fallbacks,
             "external_call_count": len(self.external_calls or []),
             "worker_error_count": worker_errors,

@@ -17,6 +17,11 @@ def _resolve_chat_provider() -> str:
 def _default_model_name() -> str:
     return os.getenv("CHAT_MODEL_NAME", os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"))
 
+def _default_low_cost_model_name() -> Optional[str]:
+    value = os.getenv("LOW_COST_MODEL")
+    token = (value or "").strip()
+    return token or None
+
 
 def _default_api_key() -> str:
     return os.getenv("CHAT_API_KEY") or os.getenv("OPENAI_API_KEY", "")
@@ -35,6 +40,10 @@ class OpenAIChatConfig(AbstractConfig):
         default_factory=_resolve_chat_provider
     )
     model_name: str = Field(default_factory=_default_model_name)
+    low_cost_model_name: Optional[str] = Field(
+        default_factory=_default_low_cost_model_name,
+        description="Optional cheaper model used for exploration-heavy calls (planning/reflection/quality checks).",
+    )
     max_tokens: int = 2000
     temperature: float = 0.7
 

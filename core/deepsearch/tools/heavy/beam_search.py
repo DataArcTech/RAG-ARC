@@ -16,6 +16,7 @@ from config.core.deepsearch.tool_defaults import (
 from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 from core.deepsearch.utils.compression import truncate_text
+from core.prompts.deepsearch.heavy_tools import BEAM_SEARCH_RERANK_SYSTEM_PROMPT_V1
 
 
 class BeamSearchTool(GraphTool):
@@ -182,10 +183,7 @@ class BeamSearchTool(GraphTool):
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "You evaluate beam search candidates on a knowledge graph. "
-                    "Return JSON array [{\"path_id\": \"...\", \"score\": 0-1}] preferring informative paths."
-                ),
+                "content": BEAM_SEARCH_RERANK_SYSTEM_PROMPT_V1,
             },
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]

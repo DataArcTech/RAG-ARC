@@ -69,7 +69,17 @@ class PrunedHippoRAGIGraphConfig(AbstractConfig):
         description="HNSW parameter efSearch: size of dynamic candidate list during search"
     )
 
+    shared_instance: bool = Field(
+        default=True,
+        description=(
+            "Whether to reuse a process-level shared PrunedHippoRAGIGraphStore instance for identical configs "
+            "(shared_module). Disable for strict isolation in tests/multi-tenant workers."
+        ),
+    )
+
     def build(self):
         """Build and return a PrunedHippoRAGIGraphStore instance."""
-        return PrunedHippoRAGIGraphStore(config=self)
-
+        store_cls = PrunedHippoRAGIGraphStore
+        if not bool(self.shared_instance):
+            store_cls = getattr(PrunedHippoRAGIGraphStore, "__wrapped__", PrunedHippoRAGIGraphStore)
+        return store_cls(config=self)

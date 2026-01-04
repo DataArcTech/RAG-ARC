@@ -1,4 +1,5 @@
 """Shared helpers for Cypher-backed deterministic graph tools."""
+from dataclasses import dataclass
 from typing import Any, List, Sequence, Set
 
 from core.utils.text_processing import text_processing
@@ -22,19 +23,54 @@ def normalize_predicates(values: Any) -> List[str]:
     return sorted(set(out))
 
 
-def direction_sensitive_predicates(adapter: Any) -> Set[str]:
+@dataclass(frozen=True)
+class DirectionalityConfig:
+    schema_loaded: bool
+    policy: str  # whitelist | blacklist
+    directed_relations: Set[str]
+    undirected_relations: Set[str]
+
+    def is_sensitive(self, predicate: str) -> bool:
+        token = normalize_relation_token(str(predicate or ""))
+        if not token:
+            return False
+        if str(self.policy or "whitelist").strip().lower() == "blacklist":
+            return token not in self.undirected_relations
+        return token in self.directed_relations
+
+
+def directionality_config(adapter: Any) -> DirectionalityConfig:
     retriever = getattr(adapter, "retriever", None)
     graph_store = getattr(retriever, "graph_store", None) if retriever is not None else None
     schema = getattr(graph_store, "kg_schema", None) if graph_store is not None else None
     if schema is None:
-        return set()
-    getter = getattr(schema, "direction_sensitive_relations_all", None)
-    if not callable(getter):
-        return set()
-    try:
-        return {normalize_relation_token(str(item)) for item in (getter() or []) if str(item).strip()}
-    except Exception:
-        return set()
+        return DirectionalityConfig(schema_loaded=False, policy="whitelist", directed_relations=set(), undirected_relations=set())
+
+    policy = "whitelist"
+    getter_policy = getattr(schema, "direction_policy_all", None)
+    if callable(getter_policy):
+        try:
+            policy = str(getter_policy() or "whitelist").strip().lower() or "whitelist"
+        except Exception:
+            policy = "whitelist"
+
+    directed: Set[str] = set()
+    getter_directed = getattr(schema, "direction_sensitive_relations_all", None)
+    if callable(getter_directed):
+        try:
+            directed = {normalize_relation_token(str(item)) for item in (getter_directed() or []) if str(item).strip()}
+        except Exception:
+            directed = set()
+
+    undirected: Set[str] = set()
+    getter_undirected = getattr(schema, "direction_insensitive_relations_all", None)
+    if callable(getter_undirected):
+        try:
+            undirected = {normalize_relation_token(str(item)) for item in (getter_undirected() or []) if str(item).strip()}
+        except Exception:
+            undirected = set()
+
+    return DirectionalityConfig(schema_loaded=True, policy=policy, directed_relations=directed, undirected_relations=undirected)
 
 
 def kg_schema_loaded(adapter: Any) -> bool:
@@ -48,7 +84,7 @@ def enforce_direction_for_sensitive_predicates(
     direction: str,
     predicates: Sequence[str],
     *,
-    sensitive_predicates: Set[str],
+    directionality: DirectionalityConfig,
     default_direction: str,
 ) -> tuple[str, bool]:
     token = str(direction or "").strip().lower()
@@ -59,7 +95,7 @@ def enforce_direction_for_sensitive_predicates(
     if not predicates:
         return token, False
     normalized = {normalize_relation_token(p) for p in predicates if str(p).strip()}
-    if normalized.isdisjoint(sensitive_predicates):
+    if not any(directionality.is_sensitive(p) for p in normalized):
         return token, False
     return default_direction, True
 
@@ -68,8 +104,7 @@ def enforce_undirected_for_non_sensitive_predicates(
     direction: str,
     predicates: Sequence[str],
     *,
-    sensitive_predicates: Set[str],
-    schema_loaded: bool,
+    directionality: DirectionalityConfig,
 ) -> tuple[str, bool]:
     """
     If all provided predicates are NOT direction-sensitive, force undirected traversal.
@@ -80,7 +115,7 @@ def enforce_undirected_for_non_sensitive_predicates(
     token = str(direction or "").strip().lower()
     if token not in {"out", "in", "both"}:
         token = "out"
-    if not schema_loaded:
+    if not directionality.schema_loaded:
         return token, False
     if token == "both":
         return token, False
@@ -89,7 +124,7 @@ def enforce_undirected_for_non_sensitive_predicates(
     normalized = {normalize_relation_token(p) for p in predicates if str(p).strip()}
     if not normalized:
         return token, False
-    if normalized.isdisjoint(sensitive_predicates):
+    if not any(directionality.is_sensitive(p) for p in normalized):
         return "both", True
     return token, False
 

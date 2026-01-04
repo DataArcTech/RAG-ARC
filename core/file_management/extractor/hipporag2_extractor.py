@@ -11,11 +11,12 @@ This extractor follows HippoRAG2's approach:
 """
 
 import logging
+import json
 import re
 from typing import List, TYPE_CHECKING, Tuple
 
 from core.file_management.extractor.base import ExtractorBase
-from core.file_management.extractor.metadata_keys import MINDMAP_ERROR_KEY
+from core.file_management.extractor.metadata_keys import BUSINESS_TIME_KEY, MINDMAP_ERROR_KEY, TEMPORAL_ERROR_KEY
 from core.prompts.hipporag2_extractor_prompt import (
     HIPPORAG2_NER_SYSTEM, HIPPORAG2_NER_SYSTEM_WITH_TYPES,
     HIPPORAG2_NER_ONE_SHOT_INPUT, HIPPORAG2_NER_ONE_SHOT_OUTPUT,
@@ -30,6 +31,7 @@ from core.prompts.hipporag2_extractor_prompt import (
     HIPPORAG2_MINDMAP_SYSTEM, HIPPORAG2_MINDMAP_ONE_SHOT_INPUT, HIPPORAG2_MINDMAP_ONE_SHOT_OUTPUT, HIPPORAG2_MINDMAP_PROMPT,
     HIPPORAG2_MINDMAP_SYSTEM_ZH, HIPPORAG2_MINDMAP_ONE_SHOT_INPUT_ZH, HIPPORAG2_MINDMAP_ONE_SHOT_OUTPUT_ZH, HIPPORAG2_MINDMAP_PROMPT_ZH
 )
+from core.prompts.hipporag2_temporal_prompt import HIPPORAG2_TEMPORAL_PROMPT_ZH, HIPPORAG2_TEMPORAL_SYSTEM_ZH
 from encapsulation.data_model.schema import Chunk, GraphData
 
 if TYPE_CHECKING:
@@ -116,8 +118,26 @@ class HippoRAG2Extractor(ExtractorBase):
         if mindmap:
             chunk.metadata["mindmap"] = mindmap
 
+        # Stage 4: Business-time extraction (temporal; non-fatal, but must be observable)
+        if bool(getattr(self.config, "enable_temporal_extraction", True)):
+            try:
+                business_time = await self.extract_business_time(chunk.content)
+            except Exception as exc:
+                self.logger.error("Error in temporal extraction: %s", exc, exc_info=True)
+                chunk.metadata[TEMPORAL_ERROR_KEY] = {"exception_type": exc.__class__.__name__, "message": str(exc)}
+                business_time = {}
+            if business_time:
+                chunk.metadata[BUSINESS_TIME_KEY] = business_time
+
         # Convert to GraphData format
-        return self.build_graph_data(entities, triples)
+        graph = self.build_graph_data(entities, triples)
+        if chunk.metadata.get(BUSINESS_TIME_KEY):
+            graph.metadata[BUSINESS_TIME_KEY] = chunk.metadata.get(BUSINESS_TIME_KEY)
+        if chunk.metadata.get(TEMPORAL_ERROR_KEY):
+            graph.metadata[TEMPORAL_ERROR_KEY] = chunk.metadata.get(TEMPORAL_ERROR_KEY)
+        if chunk.metadata.get(MINDMAP_ERROR_KEY):
+            graph.metadata[MINDMAP_ERROR_KEY] = chunk.metadata.get(MINDMAP_ERROR_KEY)
+        return graph
 
     async def extract_entities(self, text: str) -> List[Tuple[str, str]]:
         """
@@ -443,3 +463,49 @@ class HippoRAG2Extractor(ExtractorBase):
                     nodes.append({'level': level, 'content': content})
         
         return {'nodes': nodes}
+
+    async def extract_business_time(self, text: str) -> dict:
+        """
+        Extract business-time fields (effective_date / valid_from / valid_to) via LLM.
+
+        Contract:
+        - Returns a JSON-serializable dict with keys subset of {effective_date, valid_from, valid_to, confidence}.
+        - Returns {} when unknown or unparseable (no silent swallowing of exceptions at caller).
+        """
+        prompt = self.build_temporal_prompt(text)
+        response = await self.llm.achat([{"role": "user", "content": prompt}])
+        payload = self._parse_json_object(str(response or ""))
+        if not isinstance(payload, dict):
+            return {}
+
+        out: dict = {}
+        for key in ("effective_date", "valid_from", "valid_to"):
+            val = payload.get(key)
+            if val is None:
+                continue
+            sval = str(val).strip()
+            if sval:
+                out[key] = sval
+        conf = payload.get("confidence")
+        if isinstance(conf, (int, float)):
+            out["confidence"] = float(conf)
+        return out
+
+    def build_temporal_prompt(self, text: str) -> str:
+        # For now, use the ZH prompt for both languages (the extractor is used heavily for ZH docs).
+        return HIPPORAG2_TEMPORAL_PROMPT_ZH.format(system=HIPPORAG2_TEMPORAL_SYSTEM_ZH, passage=text)
+
+    @staticmethod
+    def _parse_json_object(raw: str) -> dict | None:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        snippet = text[start : end + 1]
+        try:
+            return json.loads(snippet)
+        except Exception:
+            return None

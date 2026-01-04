@@ -9,10 +9,9 @@ from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from .graph_ops_common import (
-    direction_sensitive_predicates,
+    directionality_config,
     enforce_direction_for_sensitive_predicates,
     enforce_undirected_for_non_sensitive_predicates,
-    kg_schema_loaded,
     limit_int,
     normalize_entity_name,
     normalize_predicates,
@@ -75,6 +74,7 @@ class GraphRuleCheckTool(GraphTool):
         invalid_indices: List[int] = []
 
         async with adapter_locked(adapter):
+            directionality = directionality_config(adapter)
             for idx, cond in enumerate(conditions):
                 if not isinstance(cond, Mapping):
                     invalid_indices.append(idx)
@@ -87,19 +87,16 @@ class GraphRuleCheckTool(GraphTool):
                 predicate_list = normalize_predicates(cond.get("predicate"))
                 predicate = predicate_list[0] if predicate_list else None
                 direction_raw = str(cond.get("direction") or "out")
-                sensitive = direction_sensitive_predicates(adapter)
-                schema_loaded = kg_schema_loaded(adapter)
                 direction, forced_sensitive = enforce_direction_for_sensitive_predicates(
                     direction_raw,
                     [predicate] if predicate else [],
-                    sensitive_predicates=sensitive,
+                    directionality=directionality,
                     default_direction="out",
                 )
                 direction, forced_undirected = enforce_undirected_for_non_sensitive_predicates(
                     direction,
                     [predicate] if predicate else [],
-                    sensitive_predicates=sensitive,
-                    schema_loaded=schema_loaded,
+                    directionality=directionality,
                 )
                 if not head or not tail or not predicate:
                     invalid_indices.append(idx)

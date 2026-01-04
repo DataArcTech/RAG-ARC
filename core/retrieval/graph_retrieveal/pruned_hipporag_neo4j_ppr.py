@@ -42,21 +42,40 @@ class _PrunedHippoRAGNeo4jPPRMixin:
 
         normalized_reset = {nid: w / reset_sum for nid, w in node_weights.items()}
 
-        directed_relations = self._direction_sensitive_relations()
+        directionality = self._directionality_config()
         directed_mode = str(getattr(self, "ppr_directed_mode", "auto") or "auto").strip().lower()
         # Direction-aware PPR requires relation metadata (predicate) to decide whether to preserve direction.
-        # In 'auto' mode we enable it whenever the KG schema declares direction-sensitive relations.
-        use_directed = (directed_mode == "on") or (directed_mode == "auto" and bool(directed_relations))
+        # In 'auto' mode we enable it whenever the KG schema declares direction semantics:
+        # - blacklist policy: direction-sensitive by default (except explicit undirected list)
+        # - whitelist policy: enable only when explicit directed predicates exist
+        use_directed = (
+            directed_mode == "on"
+            or (
+                directed_mode == "auto"
+                and bool(directionality.get("schema_loaded"))
+                and (
+                    directionality.get("direction_policy") == "blacklist"
+                    or bool(directionality.get("directed_relations"))
+                )
+            )
+        )
 
         # Choose PPR backend
         if use_directed:
             # Direction-aware PPR requires relation metadata; run via igraph+Neo4j edge extraction.
+            effective_policy = str(directionality.get("direction_policy") or "whitelist")
+            if directed_mode == "on":
+                # Forced-on should preserve direction even when schema is missing/incomplete.
+                # Treat predicates as direction-sensitive by default (blacklist with empty undirected set).
+                effective_policy = "blacklist"
             pagerank_scores_dict = self._run_ppr_igraph(
                 subgraph_nodes,
                 normalized_reset,
                 damping,
                 owner_id=owner_id,
-                directed_relations=directed_relations,
+                direction_policy=effective_policy,
+                directed_relations=set(directionality.get("directed_relations") or set()),
+                direction_insensitive_relations=set(directionality.get("direction_insensitive_relations") or set()),
             )
         elif self.ppr_backend == "push":
             pagerank_scores_dict = self._run_ppr_push(subgraph_nodes, normalized_reset, damping, owner_id=owner_id)
@@ -122,7 +141,9 @@ class _PrunedHippoRAGNeo4jPPRMixin:
         reset: Dict[str, float],
         damping: float,
         owner_id: Optional[uuid.UUID] = None,
+        direction_policy: str = "whitelist",
         directed_relations: Optional[Set[str]] = None,
+        direction_insensitive_relations: Optional[Set[str]] = None,
     ) -> Dict[str, float]:
         """
         Run PPR using igraph (fallback method).
@@ -138,19 +159,23 @@ class _PrunedHippoRAGNeo4jPPRMixin:
         # Extract subgraph:
         # - default path uses the undirected cache for speed
         # - direction-aware PPR extracts edges (with predicates) from Neo4j to preserve direction semantics
-        if directed_relations:
+        if direction_policy == "blacklist" or (directed_relations and direction_policy == "whitelist"):
             extract_cached = getattr(self.graph_store, "extract_subgraph_from_cache_for_ppr_directed", None)
             if callable(extract_cached):
                 graph, _, idx_to_node = extract_cached(
                     subgraph_nodes,
                     owner_id=self._owner_to_str(owner_id),
-                    directed_relations=directed_relations,
+                    direction_policy=direction_policy,
+                    directed_relations=set(directed_relations or set()),
+                    direction_insensitive_relations=set(direction_insensitive_relations or set()),
                 )
             else:
                 graph, _, idx_to_node = self.graph_store.extract_subgraph_from_neo4j_for_ppr(
                     subgraph_nodes,
                     owner_id=self._owner_to_str(owner_id),
-                    directed_relations=directed_relations,
+                    direction_policy=direction_policy,
+                    directed_relations=set(directed_relations or set()),
+                    direction_insensitive_relations=set(direction_insensitive_relations or set()),
                 )
         else:
             graph, _, idx_to_node = self.graph_store.extract_subgraph_from_cache(
@@ -189,15 +214,39 @@ class _PrunedHippoRAGNeo4jPPRMixin:
             logger.error(f"igraph PPR failed: {e}")
             return {}
 
-    def _direction_sensitive_relations(self) -> Set[str]:
+    def _directionality_config(self) -> dict:
         graph_store = getattr(self, "graph_store", None)
         schema = getattr(graph_store, "kg_schema", None)
         if schema is None:
-            return set()
-        get_all = getattr(schema, "direction_sensitive_relations_all", None)
-        if callable(get_all):
+            return {"schema_loaded": False, "direction_policy": "whitelist", "directed_relations": set(), "direction_insensitive_relations": set()}
+
+        policy = "whitelist"
+        policy_getter = getattr(schema, "direction_policy_all", None)
+        if callable(policy_getter):
             try:
-                return set(get_all())
+                policy = str(policy_getter() or "whitelist").strip().lower() or "whitelist"
             except Exception:
-                return set()
-        return set()
+                policy = "whitelist"
+
+        directed_relations: Set[str] = set()
+        get_directed = getattr(schema, "direction_sensitive_relations_all", None)
+        if callable(get_directed):
+            try:
+                directed_relations = set(get_directed() or set())
+            except Exception:
+                directed_relations = set()
+
+        direction_insensitive_relations: Set[str] = set()
+        get_undirected = getattr(schema, "direction_insensitive_relations_all", None)
+        if callable(get_undirected):
+            try:
+                direction_insensitive_relations = set(get_undirected() or set())
+            except Exception:
+                direction_insensitive_relations = set()
+
+        return {
+            "schema_loaded": True,
+            "direction_policy": policy,
+            "directed_relations": directed_relations,
+            "direction_insensitive_relations": direction_insensitive_relations,
+        }

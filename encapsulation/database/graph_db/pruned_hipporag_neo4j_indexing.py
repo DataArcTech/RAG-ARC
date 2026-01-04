@@ -4,9 +4,11 @@ import logging
 from typing import List, Dict, Any, Optional, Sequence
 
 from core.file_management.extractor.metadata_keys import EXTRACTION_ERROR_KEY
+from core.file_management.extractor.metadata_keys import BUSINESS_TIME_KEY
 from encapsulation.data_model.schema import Chunk, GraphData
 from encapsulation.database.graph_db.pruned_hipporag_neo4j_chunk_embeddings import _PrunedHippoRAGNeo4jChunkEmbeddingsMixin
 from encapsulation.database.utils.fact_provenance import upsert_fact_occurrence
+from encapsulation.database.utils.schema_layer_nodes import build_schema_layer_payload
 from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id, text_processing
 from core.knowledge_graph.schema import normalize_relation_token
 
@@ -109,6 +111,8 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
         entity_data: Dict[str, Dict[str, Any]] = {}  # entity_id -> entity payload
         mention_data = []
         fact_data_by_id: Dict[str, Dict[str, Any]] = {}
+        schema_nodes_by_id: Dict[str, Dict[str, Any]] = {}
+        schema_links: List[Dict[str, Any]] = []
         new_entity_ids = []
 
         # HippoRAG chunk-triples contract: keep only triples whose endpoints are extracted named entities.
@@ -121,6 +125,9 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
             default=50,
             max_value=1000,
         )
+        enable_schema_layers = bool(getattr(cfg, "enable_schema_layer_nodes", False))
+        raw_schema_max_nodes = getattr(cfg, "schema_layer_max_nodes_per_chunk", None)
+        schema_layer_max_nodes = int(raw_schema_max_nodes) if raw_schema_max_nodes is not None else 0
 
         for chunk in chunks:
             # Prepare chunk data
@@ -158,6 +165,22 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
                 'metadata': json.dumps(metadata) if metadata else '{}',
                 'owner_id': db_owner_id
             })
+
+            if enable_schema_layers:
+                mindmap = None
+                if isinstance(metadata.get("mindmap"), dict):
+                    mindmap = metadata.get("mindmap")
+                nodes_raw = mindmap.get("nodes") if isinstance(mindmap, dict) else None
+                schema_nodes, schema_occurrences = build_schema_layer_payload(
+                    mindmap_nodes=nodes_raw if isinstance(nodes_raw, list) else None,
+                    chunk_id=chunk.id,
+                    owner_id=owner_str,
+                    db_owner_id=db_owner_id,
+                    max_nodes=schema_layer_max_nodes,
+                )
+                for node in schema_nodes:
+                    schema_nodes_by_id.setdefault(str(node.get("schema_id")), node)
+                schema_links.extend(schema_occurrences)
 
             # Process graph data
             if chunk.graph and chunk.graph.is_empty():
@@ -300,6 +323,16 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
                         owner_stats["triples_kept"] += 1
 
                 # Collect fact data (aggregated with provenance)
+                business_time = {}
+                if chunk.graph and isinstance(getattr(chunk.graph, "metadata", None), dict):
+                    raw = chunk.graph.metadata.get(BUSINESS_TIME_KEY)
+                    if isinstance(raw, dict):
+                        business_time = dict(raw)
+                if not business_time and isinstance(metadata.get(BUSINESS_TIME_KEY), dict):
+                    business_time = dict(metadata.get(BUSINESS_TIME_KEY) or {})
+                valid_from = business_time.get("valid_from") or business_time.get("effective_date")
+                effective_date = business_time.get("effective_date") or business_time.get("valid_from")
+                valid_to = business_time.get("valid_to")
                 for head_id, head_name, relation_type, tail_id, tail_name, direction_sensitive in processed_triples:
                     upsert_fact_occurrence(
                         fact_data_by_id,
@@ -315,6 +348,9 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
                         domain=domain,
                         direction_sensitive=direction_sensitive,
                         max_source_chunks=max_source_chunks,
+                        valid_from=str(valid_from) if valid_from else None,
+                        valid_to=str(valid_to) if valid_to else None,
+                        effective_date=str(effective_date) if effective_date else None,
                     )
 
         # Prepare entity list for batch insertion
@@ -367,6 +403,7 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
 
         canonical_nodes = list(canonical_nodes_by_id.values())
         alias_nodes = list(alias_nodes_by_id.values())
+        schema_node_list = list(schema_nodes_by_id.values())
 
         kg_ingest_meta_payloads: List[Dict[str, Any]] = []
         for owner_id, counters in stats_by_owner.items():
@@ -466,7 +503,7 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
                 if canonical_nodes:
                     canonical_query = """
                     UNWIND $canonicals AS c
-                    MERGE (n:EntityCanonical {canonical_id: c.canonical_id})
+                    MERGE (n:EntityCanonical:Concept {canonical_id: c.canonical_id})
                     ON CREATE SET n.owner_id = c.owner_id,
                                   n.canonical_key = c.canonical_key,
                                   n.canonical_name = c.canonical_name,
@@ -494,6 +531,19 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
                     """
                     tx.run(canonical_rel_query, {"links": canonical_links})
                     logger.info("  Upserted %s CANONICAL_OF relationships", len(canonical_links))
+
+                    # Concept-layer alias: expose the canonicalization mapping as a concept edge for downstream tooling.
+                    concept_rel_query = """
+                    UNWIND $links AS link
+                    MATCH (e:Entity {entity_id: link.entity_id, owner_id: link.owner_id})
+                    MATCH (c:EntityCanonical {canonical_id: link.canonical_id})
+                    MERGE (e)-[r:HAS_CONCEPT]->(c)
+                    SET r.owner_id = link.owner_id,
+                        r.updated_at = datetime(),
+                        r.created_at = COALESCE(r.created_at, datetime())
+                    """
+                    tx.run(concept_rel_query, {"links": canonical_links})
+                    logger.info("  Upserted %s HAS_CONCEPT relationships", len(canonical_links))
 
                 if alias_nodes:
                     alias_query = """
@@ -524,6 +574,41 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
                     """
                     tx.run(alias_rel_query, {"links": alias_links})
                     logger.info("  Upserted %s ALIAS_OF relationships", len(alias_links))
+
+                # 2.6 Schema layer nodes derived from mindmap (Concept/Process/Instance scaffolding).
+                if schema_node_list:
+                    schema_query = """
+                    UNWIND $nodes AS n
+                    MERGE (s:SchemaNode {schema_id: n.schema_id})
+                    ON CREATE SET s.owner_id = n.owner_id,
+                                  s.layer = n.layer,
+                                  s.text = n.text,
+                                  s.text_normalized = n.text_normalized,
+                                  s.created_at = datetime(),
+                                  s.updated_at = datetime()
+                    ON MATCH SET  s.owner_id = n.owner_id,
+                                  s.layer = n.layer,
+                                  s.text = n.text,
+                                  s.text_normalized = n.text_normalized,
+                                  s.updated_at = datetime()
+                    """
+                    tx.run(schema_query, {"nodes": schema_node_list})
+                    logger.info("  Upserted %s SchemaNode nodes", len(schema_node_list))
+
+                if schema_links:
+                    schema_link_query = """
+                    UNWIND $links AS link
+                    MATCH (c:Chunk {chunk_id: link.chunk_id, owner_id: link.owner_id})
+                    MATCH (s:SchemaNode {schema_id: link.schema_id})
+                    MERGE (c)-[r:HAS_SCHEMA_NODE {chunk_id: link.chunk_id, schema_id: link.schema_id}]->(s)
+                    SET r.owner_id = link.owner_id,
+                        r.level = link.level,
+                        r.layer = link.layer,
+                        r.updated_at = datetime(),
+                        r.created_at = COALESCE(r.created_at, datetime())
+                    """
+                    tx.run(schema_link_query, {"links": schema_links})
+                    logger.info("  Upserted %s HAS_SCHEMA_NODE relationships", len(schema_links))
 
                 # 3. Batch create chunk-entity relationships
                 if mention_data:
@@ -559,6 +644,9 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
                         r.owner_id = f.owner_id,
                         r.schema_version = f.schema_version,
                         r.domain = f.domain,
+                        r.valid_from = CASE WHEN f.valid_from IS NULL OR f.valid_from = '' THEN r.valid_from ELSE datetime(f.valid_from) END,
+                        r.valid_to = CASE WHEN f.valid_to IS NULL OR f.valid_to = '' THEN r.valid_to ELSE datetime(f.valid_to) END,
+                        r.effective_date = CASE WHEN f.effective_date IS NULL OR f.effective_date = '' THEN r.effective_date ELSE datetime(f.effective_date) END,
                         r.occurrences = COALESCE(r.occurrences, 0) + COALESCE(toInteger(f.occurrences), 1),
                         r.source_chunk_ids = merged_chunk_ids[..$max_source_chunks],
                         r.source_chunk_ids_truncated = COALESCE(r.source_chunk_ids_truncated, false)

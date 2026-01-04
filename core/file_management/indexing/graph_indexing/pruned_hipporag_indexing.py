@@ -100,24 +100,16 @@ class PrunedHippoRAGIndexer(BaseIndexer):
         Returns:
             List of chunks with extracted graph data
         """
+        # Use the extractor's __call__ method which handles concurrent extraction.
+        # NOTE (P0): Do NOT filter out empty graphs or extraction failures here.
+        # Empty/failed chunks must still be ingested so downstream graph stores can:
+        # - keep dense fallback over chunk embeddings covering all chunks
+        # - record `chunks_graph_empty` / `chunks_extraction_failed` in ingest meta
         try:
-            # Use the extractor's __call__ method which handles concurrent extraction
-            # This internally calls extract_concurrent() with proper semaphore control
-            extracted_chunks = await self.extractor(chunks)
-
-            # Filter out chunks that failed extraction (empty graph data)
-            valid_chunks = []
-            for chunk in extracted_chunks:
-                if chunk.graph and not chunk.graph.is_empty():
-                    valid_chunks.append(chunk)
-                else:
-                    logger.warning(f"Chunk {chunk.id} has empty graph data, skipping")
-
-            return valid_chunks
-
-        except Exception as e:
-            logger.error(f"Error during graph extraction: {e}", exc_info=True)
-            return []
+            return await self.extractor(chunks)
+        except Exception as exc:
+            logger.error("Error during graph extraction", exc_info=True)
+            raise exc
 
     def delete_chunks(self, chunk_ids: List[str]) -> bool:
         """

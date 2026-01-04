@@ -9,10 +9,9 @@ from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from .graph_ops_common import (
-    direction_sensitive_predicates,
+    directionality_config,
     enforce_direction_for_sensitive_predicates,
     enforce_undirected_for_non_sensitive_predicates,
-    kg_schema_loaded,
     limit_int,
     normalize_entity_name,
     normalize_predicates,
@@ -102,19 +101,18 @@ class GraphIntersectionTool(GraphTool):
         direction_default = str(request.extra.get("direction") or "out")
         left_direction_raw = str(request.extra.get("left_direction") or direction_default)
         right_direction_raw = str(request.extra.get("right_direction") or direction_default)
-        sensitive = direction_sensitive_predicates(adapter)
-        schema_loaded = kg_schema_loaded(adapter)
+        directionality = directionality_config(adapter)
         left_direction, left_forced = enforce_direction_for_sensitive_predicates(
-            left_direction_raw, left_preds, sensitive_predicates=sensitive, default_direction="out"
+            left_direction_raw, left_preds, directionality=directionality, default_direction="out"
         )
         left_direction, left_forced_undirected = enforce_undirected_for_non_sensitive_predicates(
-            left_direction, left_preds, sensitive_predicates=sensitive, schema_loaded=schema_loaded
+            left_direction, left_preds, directionality=directionality
         )
         right_direction, right_forced = enforce_direction_for_sensitive_predicates(
-            right_direction_raw, right_preds, sensitive_predicates=sensitive, default_direction="out"
+            right_direction_raw, right_preds, directionality=directionality, default_direction="out"
         )
         right_direction, right_forced_undirected = enforce_undirected_for_non_sensitive_predicates(
-            right_direction, right_preds, sensitive_predicates=sensitive, schema_loaded=schema_loaded
+            right_direction, right_preds, directionality=directionality
         )
         limit = limit_int(request.extra.get("limit"), 12, max_value=50)
 
