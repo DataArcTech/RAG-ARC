@@ -147,6 +147,9 @@ class PostgreSQLDB(RelationalDB):
         # Legacy migrations (keep for backward compatibility)
         self._migrate_add_user_name_column(engine)
         self._migrate_add_user_company_name_column(engine)
+        
+        # Migrate foreign key constraints to CASCADE
+        self._migrate_chat_message_fk_cascade(engine)
 
         return engine
     
@@ -284,6 +287,53 @@ class PostgreSQLDB(RelationalDB):
                     logger.debug("'company_name' column already exists in user table")
         except Exception as e:
             logger.warning(f"Could not migrate user table (company_name column): {e}")
+            # Don't fail initialization if migration fails
+    
+    def _migrate_chat_message_fk_cascade(self, engine: Engine) -> None:
+        """Migrate chat_message.session_id foreign key to use CASCADE delete"""
+        try:
+            with engine.begin() as conn:
+                # Check current foreign key constraint delete rule
+                result = conn.execute(text("""
+                    SELECT 
+                        tc.constraint_name,
+                        rc.delete_rule
+                    FROM 
+                        information_schema.table_constraints AS tc
+                        JOIN information_schema.referential_constraints AS rc
+                          ON rc.constraint_name = tc.constraint_name
+                          AND rc.constraint_schema = tc.table_schema
+                    WHERE 
+                        tc.constraint_type = 'FOREIGN KEY'
+                        AND tc.table_name = 'chat_message'
+                        AND tc.constraint_name = 'chat_message_session_id_fkey'
+                """))
+                
+                row = result.fetchone()
+                if row:
+                    constraint_name, delete_rule = row
+                    if delete_rule != 'CASCADE':
+                        logger.info(f"Migrating foreign key constraint '{constraint_name}' to CASCADE (current: {delete_rule})...")
+                        
+                        # Drop existing constraint
+                        conn.execute(text(f'ALTER TABLE chat_message DROP CONSTRAINT {constraint_name}'))
+                        
+                        # Add new constraint with CASCADE
+                        conn.execute(text("""
+                            ALTER TABLE chat_message 
+                            ADD CONSTRAINT chat_message_session_id_fkey 
+                            FOREIGN KEY (session_id) 
+                            REFERENCES chat_session(id) 
+                            ON DELETE CASCADE
+                        """))
+                        
+                        logger.info("✓ Foreign key constraint migrated to CASCADE")
+                    else:
+                        logger.debug("Foreign key constraint already uses CASCADE")
+                else:
+                    logger.debug("Foreign key constraint not found (table may not exist yet)")
+        except Exception as e:
+            logger.warning(f"Could not migrate foreign key constraint to CASCADE: {e}")
             # Don't fail initialization if migration fails
     
     def _ensure_database_exists(self) -> None:
@@ -1150,15 +1200,18 @@ class PostgreSQLDB(RelationalDB):
         """Delete chat session using SQLAlchemy ORM (cascades to messages)"""
         try:
             with self.SessionMaker() as db_session:
-                rows_deleted = db_session.query(ChatSession).filter_by(id=session_id).delete()
-                db_session.commit()
-
-                if rows_deleted > 0:
-                    logger.info(f"Deleted chat session: {session_id}")
-                    return True
-                else:
+                # 先获取对象，使用ORM的级联删除（cascade="all, delete-orphan"）
+                session_obj = db_session.query(ChatSession).filter_by(id=session_id).first()
+                if session_obj is None:
                     logger.warning(f"No chat session found with ID: {session_id}")
                     return False
+                
+                # 使用ORM删除，会自动级联删除关联的messages
+                db_session.delete(session_obj)
+                db_session.commit()
+
+                logger.info(f"Deleted chat session: {session_id}")
+                return True
 
         except SQLAlchemyError as e:
             logger.error(f"Database error deleting chat session {session_id}: {e}")
