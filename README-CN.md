@@ -358,6 +358,7 @@ CLI 仍会连接 `.env` 中配置的 PostgreSQL / Redis / Neo4j / MinIO 等基�
 
 - 通过 `uv run rag-arc tool-mcp-server --transport stdio` 启动 FastMCP 服务器，向上游智能体暴露 DeepSearch 内置工具。服务默认读取 `config/json_configs/deepsearch_tool_mcp_server.json`（可用 `DEEPSEARCH_TOOL_MCP_CONFIG_PATH` 覆盖），从而与 HTTP/CLI 入口共用相同的 LLM 和图适配器配置。
 - **ToolManager 默认直接在本地进程中执行所有内建工具**，只有当配置了 `mcp_client`、在某个工具上设置 `mcp_only/mcp_fallback`，或通过 `remote_tools` 注册外部描述符时，才会把调用通过 MCP server 转发出去。因此 MCP 服务器不是必需组件，仅在需要远程托管/复用工具时才需要提前启动。
+- DeepSearch 内置确定性计算工具 `code.python`，用于数学/金融计算验算；Weaver trace 的 `<tool_response>` 会始终包含 ```python``` 代码块与 stdout/result。可在 `config/json_configs/deepsearch_service.json` 的 `tool_manager.enabled_tools["code.python"]` 中调整 `allowed_imports`、超时与输出/内存上限。
 - JSON 配置中的 `tool_manager` 字段遵循 `config/application/deepsearch_config.py` 的同一结构，可在此关闭/调整单个工具或注入远程 MCP 描述符，避免重复粘贴环境变量。
 - 需要只暴露部分工具时设置 `DEEPSEARCH_TOOL_MCP_TOOLS`（逗号分隔）；留空则默认启用全部内建工具。
 - HTTP、CLI、MCP 的 DeepSearch/Chat 响应现在都会输出统一的 `evidence` 字段（chunk、三元组、种子实体、图统计）。HTTP 端通过 `include_evidence=true`（可配合 `return_subgraph=true`）启用，CLI 使用 `--with-evidence`，MCP 接口默认携带该信息。

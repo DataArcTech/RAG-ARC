@@ -1,8 +1,5 @@
 """Regression suite for deterministic graph tools.
 
-These tests are minimal reproducible examples aligned with:
-`docs-proj/kg增强计划/知识图谱替代RAG生产指南-严谨版.md` (examples 01–12).
-
 The tools under test are Neo4j-Cypher-backed deterministic operators exposed to DeepSearch
 via the built-in tool catalog.
 """

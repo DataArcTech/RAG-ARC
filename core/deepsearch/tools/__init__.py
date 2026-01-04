@@ -31,6 +31,7 @@ from .hybrid import (
     EvidenceCrosscheckTool,
     HybridNeighborhoodProbeTool,
     MultiAdapterComparatorTool,
+    CodePythonTool,
 )
 
 __all__ = [
@@ -62,6 +63,7 @@ __all__ = [
     "ContextRewriterTool",
     "MultiAdapterComparatorTool",
     "BeamSearchTool",
+    "CodePythonTool",
     "build_builtin_tools",
     "builtin_tool_descriptors",
     "get_tool_descriptor",
@@ -94,6 +96,7 @@ _BUILTIN_CLASSES = [
     ContextRewriterTool,
     MultiAdapterComparatorTool,
     BeamSearchTool,
+    CodePythonTool,
 ]
 
 _DESCRIPTOR_MAP = {cls.descriptor.name: cls.descriptor for cls in _BUILTIN_CLASSES}

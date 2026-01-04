@@ -4,6 +4,12 @@ from typing import Any, Dict
 from config.output_limits import (
     DEEPSEARCH_WEAVER_EVIDENCE_PREVIEW_CHARS,
     DEEPSEARCH_WEAVER_EVIDENCE_SAMPLE_COUNT,
+    DEEPSEARCH_WEAVER_TOOL_ABOUT_CHARS,
+    DEEPSEARCH_WEAVER_TOOL_CODE_PREVIEW_CHARS,
+    DEEPSEARCH_WEAVER_TOOL_ERROR_CHARS,
+    DEEPSEARCH_WEAVER_TOOL_EXEC_ERROR_CHARS,
+    DEEPSEARCH_WEAVER_TOOL_PURPOSE_CHARS,
+    DEEPSEARCH_WEAVER_TOOL_QUERY_CHARS,
 )
 
 _WEAVER_ALLOWED_TAGS = {
@@ -79,10 +85,43 @@ def _render_tool_call(payload: Dict[str, Any]) -> str:
                 )
             )
         if about:
-            lines.append("about=" + _truncate_text(about, limit=200))
+            lines.append("about=" + _truncate_text(about, limit=int(DEEPSEARCH_WEAVER_TOOL_ABOUT_CHARS)))
 
     if query:
-        lines.append("query=" + _truncate_text(query, limit=280))
+        lines.append("query=" + _truncate_text(query, limit=int(DEEPSEARCH_WEAVER_TOOL_QUERY_CHARS)))
+
+    if tool_name == "code.python":
+        runtime = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else {}
+        pyver = runtime.get("python_version")
+        plat = runtime.get("platform")
+        allowed = runtime.get("allowed_imports")
+        packages = runtime.get("packages_available")
+        if pyver or plat:
+            lines.append(
+                "env="
+                + json.dumps(
+                    {"python_version": pyver, "platform": plat},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                )
+            )
+        if isinstance(allowed, list) and allowed:
+            lines.append("allowed_imports=" + json.dumps(allowed, ensure_ascii=False, separators=(",", ":"), default=str))
+        if isinstance(packages, dict) and packages:
+            lines.append(
+                "packages_available="
+                + json.dumps(packages, ensure_ascii=False, separators=(",", ":"), default=str)
+            )
+        purpose = extra.get("purpose")
+        if isinstance(purpose, str) and purpose.strip():
+            lines.append("purpose=" + _truncate_text(purpose.strip(), limit=int(DEEPSEARCH_WEAVER_TOOL_PURPOSE_CHARS)))
+        code = extra.get("code")
+        if isinstance(code, str) and code.strip():
+            preview = code.strip().replace("\n", " ")
+            lines.append(
+                "code_preview=" + _truncate_text(preview, limit=int(DEEPSEARCH_WEAVER_TOOL_CODE_PREVIEW_CHARS))
+            )
 
     routing = payload.get("routing") if isinstance(payload.get("routing"), dict) else {}
     if routing:
@@ -174,9 +213,69 @@ def _render_tool_response(payload: Dict[str, Any]) -> str:
 
     error_message = extra.get("error") or extra.get("error_message")
     if isinstance(error_message, str) and error_message.strip():
-        lines.append("error=" + _truncate_text(error_message.strip(), limit=600))
+        lines.append("error=" + _truncate_text(error_message.strip(), limit=int(DEEPSEARCH_WEAVER_TOOL_ERROR_CHARS)))
+
+    top_error = payload.get("error")
+    if isinstance(top_error, str) and top_error.strip():
+        lines.append("error=" + _truncate_text(top_error.strip(), limit=int(DEEPSEARCH_WEAVER_TOOL_ERROR_CHARS)))
 
     result_obj = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+
+    if tool_name == "code.python" and isinstance(result_obj, dict):
+        diagnostics = result_obj.get("diagnostics") if isinstance(result_obj.get("diagnostics"), dict) else {}
+        exec_status = diagnostics.get("exec_status")
+        if exec_status:
+            lines.append(f"exec_status={exec_status}")
+        env = diagnostics.get("env") if isinstance(diagnostics.get("env"), dict) else {}
+        if env:
+            lines.append(
+                "env="
+                + json.dumps(
+                    {
+                        "python_version": env.get("python_version"),
+                        "platform": env.get("platform"),
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                )
+            )
+        allowed = env.get("allowed_imports")
+        if isinstance(allowed, list) and allowed:
+            lines.append("allowed_imports=" + json.dumps(allowed, ensure_ascii=False, separators=(",", ":"), default=str))
+        purpose = diagnostics.get("purpose")
+        if isinstance(purpose, str) and purpose.strip():
+            lines.append("purpose=" + _truncate_text(purpose.strip(), limit=int(DEEPSEARCH_WEAVER_TOOL_PURPOSE_CHARS)))
+
+        code_block = diagnostics.get("code_block")
+        if isinstance(code_block, str) and code_block.strip():
+            lines.append(code_block.rstrip())
+
+        stdout = diagnostics.get("stdout")
+        if isinstance(stdout, str) and stdout.strip():
+            lines.append("stdout:")
+            lines.append(stdout.rstrip())
+        stderr = diagnostics.get("stderr")
+        if isinstance(stderr, str) and stderr.strip():
+            lines.append("stderr:")
+            lines.append(stderr.rstrip())
+        result_text = diagnostics.get("result_text")
+        if isinstance(result_text, str) and result_text.strip():
+            lines.append("result:")
+            lines.append(result_text.rstrip())
+        err = diagnostics.get("error")
+        if isinstance(err, dict) and (err.get("message") or err.get("type")):
+            message = str(err.get("message") or err.get("type"))
+            lines.append(
+                "exec_error=" + _truncate_text(message, limit=int(DEEPSEARCH_WEAVER_TOOL_EXEC_ERROR_CHARS))
+            )
+            tb = err.get("traceback")
+            if isinstance(tb, str) and tb.strip():
+                lines.append("traceback:")
+                lines.append(tb.rstrip())
+        # Skip generic evidence previews for code tool; stdout/result are the primary artifacts.
+        return "\n".join([ln for ln in lines if str(ln).strip()])
+
     evidences = None
     if isinstance(result_obj, dict):
         evidences = result_obj.get("evidences")
