@@ -63,6 +63,7 @@ cp .env.example .env
 | `CHAT_API_KEY` | _(空)_ | **必填**（当 `CHAT_MODEL_PROVIDER=openai`）：对话模型 API Key。 |
 | `CHAT_API_BASE_URL` | _(空)_ | **必填**（当 `CHAT_MODEL_PROVIDER=openai`）：OpenAI 兼容 API Base URL（例如 `https://api.openai.com/v1`）。 |
 | `OPENAI_CHAT_MODEL` | `gpt-4o-mini` | 兼容/默认的对话模型名（当 `CHAT_MODEL_NAME` 为空时使用）。 |
+| `LOW_COST_MODEL` | _(空)_ | 可选：更便宜的模型，用于探索型/多次调用的场景（planning/reflection/quality checks）。留空则复用主对话模型。 |
 | `OPENAI_API_BASE` | _(空)_ | 可选：历史兼容的 OpenAI Base URL 别名。 |
 | `EMBEDDING_MODEL_PROVIDER` | `openai` | 嵌入模型提供方（`openai`=OpenAI 兼容 API，`huggingface`=本地 SentenceTransformers）。 |
 | `EMBEDDING_API_KEY` | _(空)_ | **必填**（当 `EMBEDDING_MODEL_PROVIDER=openai`）：嵌入模型 API Key。 |
@@ -142,6 +143,7 @@ cp .env.example .env
 | `GRAPH_EXPORT_CHUNK_CONTENT_PREVIEW_CHARS` | `240` | 图导出 payload 中 chunk 内容预览的最大字符数（用于可视化预览，避免返回过大）。 |
 | `GRAPH_EXPORT_EDGE_FETCH_FACTOR` | `10` | exporter 抓取 edges 后再采样的倍率（fetch_limit = max_edges * factor）。 |
 | `GRAPH_EXPORT_EDGE_FETCH_MAX` | `50000` | exporter edges 抓取绝对上限（防止 Neo4j edge query 过大）。 |
+| `GRAPH_EXPORT_FILTER_NUMERIC_TIME_ENTITIES` | `true` | 图导出时是否过滤纯数字/日期/时间格式的实体节点（可视化降噪）。金融/保险场景可设为 `false` 以保留关键数值/日期节点。 |
 | `SEMANTIC_UNIT_MAX_MATCHED_SLICES` | `3` | 语义单元归并时最多附带的命中 slice 数。 |
 | `TABLE_MAX_MERGED_ROWS` | `30` | 表格归并回 anchor 时最多拼接的数据行数。 |
 | `SEMANTIC_UNIT_MAX_MERGED_SLICE_CHARS` | `1200` | code/list 归并时每个 slice 追加到 `anchor.content` 的最大字符数。 |

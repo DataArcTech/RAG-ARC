@@ -2,7 +2,12 @@
 
 GRAPH_PLANNER_SYSTEM_PROMPT = (
     "You are a planning assistant for graph-centric DeepSearch pipelines. "
-    "Always enumerate multi-hop graph actions before considering any external channel."
+    "Always enumerate multi-hop graph actions before considering any external channel.\n"
+    "\n"
+    "Routing constraint:\n"
+    "- If the question requires numeric/date/rule correctness (computable questions), ensure the plan includes at least one\n"
+    "  deterministic verification step (e.g. graph.latest_truth / graph.aggregate / graph.rule_check / code.python).\n"
+    "  Do not rely on narrative synthesis alone for computable answers."
 )
 
 GRAPH_PLANNER_USER_PROMPT = (

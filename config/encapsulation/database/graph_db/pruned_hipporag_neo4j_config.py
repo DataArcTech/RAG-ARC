@@ -67,6 +67,21 @@ class PrunedHippoRAGNeo4jConfig(AbstractConfig):
         description="Max chunk ids to retain per fact edge in Neo4j (`RELATES_TO.source_chunk_ids`). 0 disables storage.",
     )
 
+    enable_schema_layer_nodes: bool = Field(
+        default=False,
+        description=(
+            "Persist schema-layer nodes derived from chunk mindmaps into Neo4j (Concept/Process/Instance scaffolding). "
+            "Disabled by default to avoid extra writes for general-domain deployments."
+        ),
+    )
+
+    schema_layer_max_nodes_per_chunk: int = Field(
+        default=60,
+        ge=1,
+        le=1000,
+        description="Max mindmap nodes per chunk to convert into SchemaNode nodes when enable_schema_layer_nodes is true.",
+    )
+
     # Embedding model configuration
     embedding: Annotated[
         Union[QwenEmbeddingConfig, OpenAIEmbeddingConfig],
@@ -111,6 +126,17 @@ class PrunedHippoRAGNeo4jConfig(AbstractConfig):
         description="Normalize chunk embeddings to unit vectors for cosine similarity"
     )
 
+    shared_instance: bool = Field(
+        default=True,
+        description=(
+            "Whether to reuse a process-level shared PrunedHippoRAGNeo4jStore instance for identical configs "
+            "(shared_module). Disable for strict isolation in tests/multi-tenant workers."
+        ),
+    )
+
     def build(self):
         """Build and return a PrunedHippoRAGNeo4jStore instance."""
-        return PrunedHippoRAGNeo4jStore(config=self)
+        store_cls = PrunedHippoRAGNeo4jStore
+        if not bool(self.shared_instance):
+            store_cls = getattr(PrunedHippoRAGNeo4jStore, "__wrapped__", PrunedHippoRAGNeo4jStore)
+        return store_cls(config=self)

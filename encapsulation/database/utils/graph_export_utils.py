@@ -13,6 +13,7 @@ from config.output_limits import (
     GRAPH_EXPORT_CHUNK_CONTENT_PREVIEW_CHARS,
     GRAPH_EXPORT_EDGE_FETCH_FACTOR,
     GRAPH_EXPORT_EDGE_FETCH_MAX,
+    GRAPH_EXPORT_FILTER_NUMERIC_TIME_ENTITIES,
 )
 
 logger = logging.getLogger(__name__)
@@ -198,8 +199,8 @@ class GraphExporter:
                     continue
                 entity_name, entity_type, _ = entity_info
 
-                # Filter out entities that are pure numbers, timestamps, or time formats
-                if GraphExporter._should_filter_entity(entity_name):
+                # Filter out entities that are pure numbers, timestamps, or time formats (optional).
+                if GRAPH_EXPORT_FILTER_NUMERIC_TIME_ENTITIES and GraphExporter._should_filter_entity(entity_name):
                     continue
 
                 node_set.add(idx)
@@ -417,8 +418,8 @@ class GraphExporter:
                 if entity_info:
                     entity_name, entity_type = entity_info
 
-                    # Filter out entities that are pure numbers, timestamps, or time formats
-                    if GraphExporter._should_filter_entity(entity_name):
+                    # Filter out entities that are pure numbers, timestamps, or time formats (optional).
+                    if GRAPH_EXPORT_FILTER_NUMERIC_TIME_ENTITIES and GraphExporter._should_filter_entity(entity_name):
                         continue
 
                     entity_obj = {

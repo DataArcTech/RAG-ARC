@@ -3,6 +3,19 @@ from typing import Any, Dict, Optional
 from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id
 
 
+def _max_iso_datetime(a: Optional[str], b: Optional[str]) -> Optional[str]:
+    """
+    Merge ISO-8601 datetime strings by taking the later one.
+
+    Assumes both values are in a comparable ISO format (e.g. `...+00:00`).
+    """
+    if not a:
+        return b
+    if not b:
+        return a
+    return max(str(a), str(b))
+
+
 def upsert_fact_occurrence(
     fact_data_by_id: Dict[str, Dict[str, Any]],
     *,
@@ -18,6 +31,9 @@ def upsert_fact_occurrence(
     domain: str,
     direction_sensitive: bool = True,
     max_source_chunks: int = 50,
+    valid_from: Optional[str] = None,
+    valid_to: Optional[str] = None,
+    effective_date: Optional[str] = None,
 ) -> str:
     """
     Merge a (head, predicate, tail) occurrence into an aggregated payload used by Neo4j UNWIND insertion.
@@ -61,10 +77,16 @@ def upsert_fact_occurrence(
             "domain": domain,
             "source_chunk_ids_truncated": False,
             "direction_sensitive": bool(direction_sensitive),
+            "valid_from": str(valid_from) if valid_from else None,
+            "valid_to": str(valid_to) if valid_to else None,
+            "effective_date": str(effective_date) if effective_date else (str(valid_from) if valid_from else None),
         }
         return fact_id
 
     existing["mentions"] = int(existing.get("mentions", existing.get("occurrences", 1))) + 1
+    existing["valid_from"] = _max_iso_datetime(existing.get("valid_from"), valid_from)
+    existing["valid_to"] = _max_iso_datetime(existing.get("valid_to"), valid_to)
+    existing["effective_date"] = _max_iso_datetime(existing.get("effective_date"), effective_date or valid_from)
     max_source_chunks = max(0, int(max_source_chunks))
     source_chunks = list(existing.get("source_chunk_ids") or [])
     if chunk_id not in source_chunks:

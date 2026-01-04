@@ -8,6 +8,18 @@ def shared_module(class_):
     instances = {}
     
     def getinstance(*args, **kwargs):
+        # Opt-out: allow config-driven isolation.
+        # Convention: when the first positional arg is a config object with `shared_instance=False`,
+        # bypass the process-level cache and always create a new instance.
+        if args:
+            cfg = args[0]
+            try:
+                shared_instance = getattr(cfg, "shared_instance", None)
+            except Exception:
+                shared_instance = None
+            if shared_instance is False:
+                return class_(*args, **kwargs)
+
         config_key = None
         if args and hasattr(args[0], 'model_dump'): 
             config_dict = args[0].model_dump()
@@ -33,6 +45,12 @@ def shared_module(class_):
     getinstance.__doc__ = class_.__doc__
     getinstance.__module__ = class_.__module__
     getinstance.__wrapped__ = class_
+    getinstance._shared_module_instances = instances  # type: ignore[attr-defined]
+
+    def _clear_cache() -> None:
+        instances.clear()
+
+    getinstance.clear_cache = _clear_cache  # type: ignore[attr-defined]
     return getinstance
 
 # def make_hashable(obj):

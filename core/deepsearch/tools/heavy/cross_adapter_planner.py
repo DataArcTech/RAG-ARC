@@ -4,6 +4,7 @@ from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, List, Mapping, Sequence
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.prompts.deepsearch.heavy_tools import CROSS_ADAPTER_PLANNER_SYSTEM_PROMPT_V1
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, build_input_schema, safe_json_loads
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
@@ -104,7 +105,7 @@ class CrossAdapterPlannerTool(GraphTool):
         messages = [
             {
                 "role": "system",
-                "content": "Compare adapters and output JSON with 'summary' and 'actions'.",
+                "content": CROSS_ADAPTER_PLANNER_SYSTEM_PROMPT_V1,
             },
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]

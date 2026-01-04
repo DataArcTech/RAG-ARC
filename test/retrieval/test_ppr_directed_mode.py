@@ -11,14 +11,28 @@ class _DummyPPR(_PrunedHippoRAGNeo4jPPRMixin):
         self._directed_relations = directed_relations
         self.calls: list[tuple[str, object]] = []
 
-    def _direction_sensitive_relations(self) -> set[str]:
-        return set(self._directed_relations)
+    def _directionality_config(self) -> dict:
+        return {
+            "schema_loaded": True,
+            "direction_policy": "whitelist",
+            "directed_relations": set(self._directed_relations),
+            "direction_insensitive_relations": set(),
+        }
 
     def _run_ppr_push(self, subgraph_nodes, reset, damping, owner_id=None):  # noqa: ARG002
         self.calls.append(("push", None))
         return {"chunk-1": 0.9}
 
-    def _run_ppr_igraph(self, subgraph_nodes, reset, damping, owner_id=None, directed_relations=None):  # noqa: ARG002
+    def _run_ppr_igraph(  # noqa: PLR0913
+        self,
+        subgraph_nodes,
+        reset,
+        damping,
+        owner_id=None,
+        direction_policy: str = "whitelist",  # noqa: ARG002
+        directed_relations=None,
+        direction_insensitive_relations=None,  # noqa: ARG002
+    ):  # noqa: ARG002
         self.calls.append(("igraph", set(directed_relations or set())))
         return {"chunk-1": 0.9}
 
@@ -47,4 +61,3 @@ def test_ppr_directed_mode_auto_without_sensitive_relations_keeps_backend() -> N
     dummy = _DummyPPR(directed_mode="auto", directed_relations=set(), backend="push")
     _, _, _ = dummy._run_ppr_with_weights(node_weights={"chunk-1": 1.0}, damping=0.5, subgraph_nodes={"chunk-1"})
     assert dummy.calls[0][0] == "push"
-

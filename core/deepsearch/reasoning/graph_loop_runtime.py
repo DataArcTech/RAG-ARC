@@ -26,6 +26,10 @@ from encapsulation.data_model.deepsearch import (
 )
 from core.deepsearch.tools.base import call_llm_async
 from core.deepsearch.trace import emit_trace
+from core.prompts.deepsearch.runtime import (
+    TRACE_REFLECTION_SYSTEM_PROMPT_TEMPLATE,
+    TRACE_REFLECTION_USER_PROMPT_TEMPLATE,
+)
 
 from .graph_loop_state import _RUN_REFLECT_COUNT, _RUN_THINK_COUNT, _RUN_THINK_TOOL_SIGNATURES
 from .subagent import SubAgentOutcome
@@ -115,14 +119,9 @@ class GraphLoopRuntimeMixin:
             "graph_context": context.model_dump(exclude_none=True),
         }
 
-        system = (
-            "You are writing a user-visible trace reflection for a research agent.\n"
-            "Write concise, action-oriented notes about what was learned from the last step and what to do next.\n"
-            "Do NOT reveal private chain-of-thought. Do NOT invent facts.\n"
-            f"Return plain text (no JSON), at most {int(TRACE_REFLECTION_DEFAULT_MAX_LINES)} lines."
-        )
-        user = "Question:\n{q}\n\nLast step snapshot:\n{payload}\n\nWrite the reflection now.".format(
-            q=str(question or "").strip(),
+        system = TRACE_REFLECTION_SYSTEM_PROMPT_TEMPLATE.format(max_lines=int(TRACE_REFLECTION_DEFAULT_MAX_LINES))
+        user = TRACE_REFLECTION_USER_PROMPT_TEMPLATE.format(
+            question=str(question or "").strip(),
             payload=json.dumps(input_payload, ensure_ascii=False, indent=2, default=str),
         )
         text = await call_llm_async(

@@ -9,10 +9,9 @@ from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from .graph_ops_common import (
-    direction_sensitive_predicates,
+    directionality_config,
     enforce_direction_for_sensitive_predicates,
     enforce_undirected_for_non_sensitive_predicates,
-    kg_schema_loaded,
     limit_int,
     normalize_entity_name,
     normalize_predicates,
@@ -65,13 +64,12 @@ class GraphFactsByTypeTool(GraphTool):
         limit = limit_int(request.extra.get("limit"), 50, max_value=300)
         predicate_clause = "AND r.predicate IN $predicates" if predicates else ""
         direction_raw = str(request.extra.get("direction") or "out")
-        sensitive = direction_sensitive_predicates(adapter)
-        schema_loaded = kg_schema_loaded(adapter)
+        directionality = directionality_config(adapter)
         direction, forced_sensitive = enforce_direction_for_sensitive_predicates(
-            direction_raw, predicates, sensitive_predicates=sensitive, default_direction="out"
+            direction_raw, predicates, directionality=directionality, default_direction="out"
         )
         direction, forced_undirected = enforce_undirected_for_non_sensitive_predicates(
-            direction, predicates, sensitive_predicates=sensitive, schema_loaded=schema_loaded
+            direction, predicates, directionality=directionality
         )
 
         if direction == "in":
@@ -212,13 +210,12 @@ class GraphExpandTermsTool(GraphTool):
         concept_type = str(request.extra.get("concept_type") or "").strip()
         predicates = normalize_predicates(request.extra.get("predicates"))
         direction_raw = str(request.extra.get("direction") or "in")
-        sensitive = direction_sensitive_predicates(adapter)
-        schema_loaded = kg_schema_loaded(adapter)
+        directionality = directionality_config(adapter)
         direction, forced_sensitive = enforce_direction_for_sensitive_predicates(
-            direction_raw, predicates, sensitive_predicates=sensitive, default_direction="in"
+            direction_raw, predicates, directionality=directionality, default_direction="in"
         )
         direction, forced_undirected = enforce_undirected_for_non_sensitive_predicates(
-            direction, predicates, sensitive_predicates=sensitive, schema_loaded=schema_loaded
+            direction, predicates, directionality=directionality
         )
         limit = limit_int(request.extra.get("limit"), 25, max_value=200)
 

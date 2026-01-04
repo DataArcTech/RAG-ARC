@@ -165,6 +165,23 @@ class KGSchemaConfig:
             merged.update(domain.direction_sensitive_relations)
         return merged
 
+    def direction_insensitive_relations_all(self) -> Set[str]:
+        merged: Set[str] = set()
+        for domain in self.domains.values():
+            merged.update(domain.direction_insensitive_relations)
+        return merged
+
+    def direction_policy_all(self) -> str:
+        """
+        Compute an aggregate direction policy for multi-domain deployments.
+
+        - If any domain declares `blacklist`, treat the overall schema as blacklist
+          (safer default: most predicates are direction-sensitive).
+        - Otherwise default to `whitelist`.
+        """
+        policies = {(domain.direction_policy or "whitelist").strip().lower() for domain in self.domains.values()}
+        return "blacklist" if "blacklist" in policies else "whitelist"
+
 
 def _coerce_set(values: Any) -> Set[str]:
     if values is None:

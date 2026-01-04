@@ -91,9 +91,23 @@ class ExtractorBase(AbstractModule):
         logger.info(f"Starting concurrent extraction with max_concurrent={self.config.max_concurrent}")
 
         semaphore = asyncio.Semaphore(self.config.max_concurrent)
+        batch_size = getattr(self.config, "batch_size", None)
+        try:
+            batch_size_int = int(batch_size) if batch_size is not None else 0
+        except (TypeError, ValueError):
+            batch_size_int = 0
+
         # process_chunk handles all exceptions internally, so we don't need return_exceptions=True
-        tasks = [self.process_chunk(chunk, semaphore=semaphore) for chunk in chunks]
-        return await asyncio.gather(*tasks)
+        if batch_size_int <= 0:
+            tasks = [self.process_chunk(chunk, semaphore=semaphore) for chunk in chunks]
+            return await asyncio.gather(*tasks)
+
+        out: list[Chunk] = []
+        for start in range(0, len(chunks), batch_size_int):
+            batch = chunks[start : start + batch_size_int]
+            tasks = [self.process_chunk(chunk, semaphore=semaphore) for chunk in batch]
+            out.extend(await asyncio.gather(*tasks))
+        return out
 
     async def __call__(self, chunks: List[Chunk]) -> List[Chunk]:
         return await self.extract_concurrent(chunks)

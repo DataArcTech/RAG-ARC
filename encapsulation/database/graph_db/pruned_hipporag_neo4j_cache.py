@@ -7,6 +7,29 @@ logger = logging.getLogger(__name__)
 
 
 class _PrunedHippoRAGNeo4jCacheMixin:
+    @staticmethod
+    def _should_add_reverse_edge_for_predicate(
+        predicate: str,
+        *,
+        direction_policy: str,
+        directed_relations: Set[str],
+        direction_insensitive_relations: Set[str],
+    ) -> bool:
+        """
+        Decide whether to add the reverse edge for an Entity->Entity fact edge.
+
+        - direction_policy=whitelist (legacy): default undirected, except explicitly directed predicates.
+        - direction_policy=blacklist (safer): default directed, except explicitly undirected predicates.
+        """
+        policy = str(direction_policy or "whitelist").strip().lower()
+        pred = str(predicate or "").strip()
+        if not pred:
+            # Fail closed: preserve direction by default.
+            return False
+        if policy == "blacklist":
+            return pred in direction_insensitive_relations
+        return pred not in directed_relations
+
     def _directed_fact_cache_for_owner(self, owner_key: str) -> Dict[str, List[Tuple[str, float, str]]]:
         cache = getattr(self, "_directed_fact_cache", None)
         if cache is None or not isinstance(cache, dict):
@@ -88,14 +111,16 @@ class _PrunedHippoRAGNeo4jCacheMixin:
         *,
         owner_id: Optional[Any] = None,
         directed_relations: Optional[Set[str]] = None,
+        direction_policy: str = "whitelist",
+        direction_insensitive_relations: Optional[Set[str]] = None,
     ) -> Tuple[ig.Graph, Dict[str, int], Dict[int, str]]:
         """
         Extract a directed igraph subgraph from in-memory caches for direction-aware PPR.
 
         - Chunk<->Entity edges are treated as undirected (added in both directions).
         - Entity->Entity edges come from the directed fact cache with normalized predicates.
-          - If predicate in `directed_relations`: keep stored direction.
-          - Else: add edges both ways (legacy undirected semantics).
+          - direction_policy=whitelist: predicates in `directed_relations` are directed; others undirected.
+          - direction_policy=blacklist: predicates in `direction_insensitive_relations` are undirected; others directed.
         """
         if not subgraph_node_ids:
             return ig.Graph(directed=True), {}, {}
@@ -111,6 +136,7 @@ class _PrunedHippoRAGNeo4jCacheMixin:
 
         self._load_directed_fact_cache(owner_id=owner_id)
         directed_relations = set(directed_relations or set())
+        direction_insensitive_relations = set(direction_insensitive_relations or set())
 
         with self.read_lock():
             owner_cache = (getattr(self, "_graph_cache", None) or {}).get(owner_key, {})
@@ -149,7 +175,12 @@ class _PrunedHippoRAGNeo4jCacheMixin:
                 if dst not in node_to_idx:
                     continue
                 _add(src, dst, float(w))
-                if pred not in directed_relations:
+                if self._should_add_reverse_edge_for_predicate(
+                    pred,
+                    direction_policy=direction_policy,
+                    directed_relations=directed_relations,
+                    direction_insensitive_relations=direction_insensitive_relations,
+                ):
                     _add(dst, src, float(w))
 
         if weights_by_pair:
@@ -596,6 +627,8 @@ class _PrunedHippoRAGNeo4jCacheMixin:
         *,
         owner_id: Optional[Any] = None,
         directed_relations: Optional[Set[str]] = None,
+        direction_policy: str = "whitelist",
+        direction_insensitive_relations: Optional[Set[str]] = None,
         max_edges: int = 200_000,
     ) -> Tuple[ig.Graph, Dict[str, int], Dict[int, str]]:
         """
@@ -605,14 +638,15 @@ class _PrunedHippoRAGNeo4jCacheMixin:
         - Always returns a directed igraph (Graph(directed=True)).
         - Chunk↔Entity (MENTIONS) edges are treated as undirected (added in both directions).
         - Entity↔Entity edges:
-          - If predicate is in `directed_relations`: keep the stored direction (e1 -> e2).
-          - Otherwise: treat as undirected (add edges both ways) to preserve legacy behaviour.
+          - direction_policy=whitelist: predicates in `directed_relations` are directed; others undirected.
+          - direction_policy=blacklist: predicates in `direction_insensitive_relations` are undirected; others directed.
         """
         if not subgraph_node_ids:
             logger.warning("Empty subgraph node set")
             return ig.Graph(directed=True), {}, {}
 
         directed_relations = set(directed_relations or set())
+        direction_insensitive_relations = set(direction_insensitive_relations or set())
 
         normalized_ids = {str(nid) for nid in subgraph_node_ids if str(nid).strip()}
         entity_ids = sorted([nid for nid in normalized_ids if nid.startswith("entity-")])
@@ -722,7 +756,12 @@ class _PrunedHippoRAGNeo4jCacheMixin:
                 if not src or not dst:
                     continue
                 _add_edge(src, dst, w)
-                if pred not in directed_relations:
+                if self._should_add_reverse_edge_for_predicate(
+                    pred,
+                    direction_policy=direction_policy,
+                    directed_relations=directed_relations,
+                    direction_insensitive_relations=direction_insensitive_relations,
+                ):
                     _add_edge(dst, src, w)
 
         if edge_list:

@@ -46,6 +46,7 @@
         "llm_config": {
           "type": "openai_chat",
           "model_name": "${OPENAI_CHAT_MODEL}",
+          "low_cost_model_name": "${LOW_COST_MODEL}",
           "temperature": 0.0,
           "openai_api_key": "${OPENAI_API_KEY}",
           "openai_base_url": "${OPENAI_BASE_URL}"
@@ -196,10 +197,26 @@
   "quality_loop": {
     "enabled": true
   },
+  "deterministic_routing": {
+    "enabled": false,
+    "classifier": "llm",
+    "fail_on_classifier_error": false,
+    "hard_gate_missing_deterministic_tools": false,
+    "llm_model_name": "${LOW_COST_MODEL}",
+    "llm_temperature": 0.0,
+    "computable_keywords": [],
+    "computable_operators": [],
+    "computable_policy": {
+      "min_strong_hits": 1,
+      "min_weak_hits": 1,
+      "require_weak_cue": true
+    }
+  },
   "mcp_client": null,
   "llm": {
     "type": "openai_chat",
     "model_name": "${OPENAI_CHAT_MODEL}",
+    "low_cost_model_name": "${LOW_COST_MODEL}",
     "openai_api_key": "${OPENAI_API_KEY}",
     "openai_base_url": "${OPENAI_BASE_URL}"
   },
