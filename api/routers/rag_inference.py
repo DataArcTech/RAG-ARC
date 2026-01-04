@@ -796,6 +796,16 @@ async def stream_chat_sse(
                     {"type": "title", "title": title},
                     request_id=request_id
                 )
+                # 更新数据库中的session name
+                try:
+                    await get_thread_pool().run_blocking(
+                        get_session_handler().update_session,
+                        session_id,
+                        {"name": title}
+                    )
+                    logger.info("Successfully updated session %s name to: %s", session_id, title)
+                except Exception as exc:
+                    logger.warning("Failed to update session name: %s", exc)
             except Exception as exc:
                 logger.warning("Failed to generate title: %s", exc)
                 # title生成失败不影响主流程，继续执行
