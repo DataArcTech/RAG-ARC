@@ -11,6 +11,19 @@ def sse_json(payload: Any) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
 
 
+def sse_json_wrapped(payload: Any, request_id: str | None = None, code: int = 200, message: str = "success") -> str:
+    """Return a single SSE `data:` event wrapped in standard response format."""
+    if request_id is None:
+        request_id = uuid.uuid4().hex
+    wrapped = {
+        "code": code,
+        "message": message,
+        "data": payload,
+        "request_id": request_id
+    }
+    return f"data: {json.dumps(wrapped, ensure_ascii=False, separators=(',', ':'))}\n\n"
+
+
 def sse_done() -> str:
     """Return the final SSE event used by Qwen/OpenAI-compatible streams."""
 

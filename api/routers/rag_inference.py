@@ -27,6 +27,7 @@ from api.sse import (
     openai_chat_completion_chunk,
     sse_done,
     sse_json,
+    sse_json_wrapped,
 )
 from encapsulation.data_model.orm_models import ChatMessage, User
 from encapsulation.data_model.schema import Chunk, GraphData
@@ -361,13 +362,14 @@ async def stream_chat_sse(
         progress_seq = 0
 
         # Qwen/OpenAI-compatible streams typically start with a chunk that sets role=assistant.
-        yield sse_json(
+        yield sse_json_wrapped(
             openai_chat_completion_chunk(
                 chunk_id=chunk_id,
                 model=model_name,
                 created=created,
                 delta=delta_envelope(role="assistant", content=""),
-            )
+            ),
+            request_id=request_id
         )
 
         user_message = ChatMessage(
@@ -499,13 +501,14 @@ async def stream_chat_sse(
                         },
                     }
                 ]
-                yield sse_json(
+                yield sse_json_wrapped(
                     openai_chat_completion_chunk(
                         chunk_id=chunk_id,
                         model=model_name,
                         created=created,
                         delta=delta_envelope(role=None, tool_calls=tool_calls),
-                    )
+                    ),
+                    request_id=request_id
                 )
                 continue
 
@@ -515,19 +518,20 @@ async def stream_chat_sse(
                     continue
                 for delta_piece in iter_text_deltas(piece):
                     response_parts.append(delta_piece)
-                    yield sse_json(
+                    yield sse_json_wrapped(
                         openai_chat_completion_chunk(
                             chunk_id=chunk_id,
                             model=model_name,
                             created=created,
                             delta=delta_envelope(role=None, content=delta_piece),
-                        )
+                        ),
+                        request_id=request_id
                     )
                     await asyncio.sleep(0)
                 continue
 
         if stream_error[0] is not None:
-            yield sse_json({"error": {"message": str(stream_error[0])}})
+            yield sse_json_wrapped({"error": {"message": str(stream_error[0])}}, request_id=request_id, code=500, message="Internal server error")
             yield sse_done()
             return
 
@@ -606,11 +610,11 @@ async def stream_chat_sse(
 
         # 构建 payload（与 WebSocket 逻辑一致）
         payload = _build_stream_chat_payload(
-            assistant_message,
-            chunks,
-            subgraph=subgraph_data if return_subgraph else None,
-            evidence=evidence,
-        )
+                assistant_message,
+                chunks,
+                subgraph=subgraph_data if return_subgraph else None,
+                evidence=evidence,
+            )
 
         # 通过 tool_calls 返回 payload（保持 OpenAI 兼容格式）
         tool_calls = [
@@ -624,23 +628,25 @@ async def stream_chat_sse(
                 },
             }
         ]
-        yield sse_json(
+        yield sse_json_wrapped(
             openai_chat_completion_chunk(
                 chunk_id=chunk_id,
                 model=model_name,
                 created=created,
                 delta=delta_envelope(role=None, tool_calls=tool_calls),
-            )
+            ),
+            request_id=request_id
         )
 
-        yield sse_json(
+        yield sse_json_wrapped(
             openai_chat_completion_chunk(
                 chunk_id=chunk_id,
                 model=model_name,
                 created=created,
                 delta=delta_envelope(),
                 finish_reason="stop",
-            )
+            ),
+            request_id=request_id
         )
         yield sse_done()
 

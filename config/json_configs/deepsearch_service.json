@@ -15,7 +15,7 @@
   },
   "graph_adapter": {
     "type": "graph_adapter",
-    "adapter_name": "${DEEPSEARCH_DEFAULT_ADAPTER}",
+    "adapter_name": "hipporag",
     "parameters": {
       "retriever_config": {
         "type": "pruned_hipporag_neo4j_retrieval",

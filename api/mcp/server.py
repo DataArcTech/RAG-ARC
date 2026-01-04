@@ -201,7 +201,7 @@ async def chat(
         await get_thread_pool().run_blocking(
             message_handler.create_message,
             ChatMessage(
-                session_id=session_uuid,
+                session_id=session_uuid, 
                 user_id=current_user.id,
                 user_type=current_user.type,
                 source_file_ids=[chunk.id for chunk in chunks] if chunks else None,
