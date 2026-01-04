@@ -152,3 +152,33 @@ async def list_messages(
     if session is None or not validate_user_session(session, current_user):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
     return await list_session_messages(session_id)
+
+
+@router.delete("/{session_id}")
+async def delete_session(
+    session_id: uuid.UUID,
+    current_user: Annotated[User | None, Depends(get_current_user)],
+):
+    """Delete a session asynchronously using thread pool."""
+    # 验证用户权限
+    session = await get_thread_pool().run_blocking(
+        get_session_handler().get_session,
+        session_id
+    )
+    if session is None:
+        # 不存在，返回200但提示不存在
+        return {"message": "Session not found"}
+    if not validate_user_session(session, current_user):
+        # 存在但不是当前用户的，返回401
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+    
+    # 删除会话（会级联删除所有关联的消息）
+    success = await get_thread_pool().run_blocking(
+        get_session_handler().delete_session,
+        session_id
+    )
+    if not success:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete session")
+    
+    # 返回明确的消息，中间件会自动包装为标准响应格式
+    return {"message": "Session deleted successfully"}
