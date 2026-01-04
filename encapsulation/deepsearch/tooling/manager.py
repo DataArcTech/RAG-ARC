@@ -407,6 +407,15 @@ class DeepSearchToolManager:
         if local_disabled:
             local_tool = None
 
+        runtime_hint = None
+        if tool_name == "code.python" and local_tool is not None:
+            hint_fn = getattr(local_tool, "runtime_hint", None)
+            if callable(hint_fn):
+                try:
+                    runtime_hint = json_safe(dict(hint_fn() or {}))
+                except Exception:
+                    runtime_hint = None
+
         trace_call = {
             "call_id": call_id,
             "tool_name": tool_name,
@@ -417,6 +426,7 @@ class DeepSearchToolManager:
             "coverage_metrics": request.coverage_metrics,
             "access_scope": self._access_scope_payload(request.access_scope),
             "graph_context": (request.graph_context.model_dump(exclude_none=True) if request.graph_context else None),
+            "runtime": runtime_hint,
             "routing": {
                 "can_route_remote": bool(self._can_route_remote(tool_name, descriptor)),
                 "prefer_remote": bool(local_disabled),
@@ -489,7 +499,34 @@ class DeepSearchToolManager:
             raise remote_error
 
         if local_tool:
-            result = await self._invoke_local(tool_name, local_tool, descriptor, request)
+            try:
+                result = await self._invoke_local(tool_name, local_tool, descriptor, request)
+            except Exception as exc:  # noqa: BLE001
+                await emit_trace(
+                    "tool_response",
+                    json.dumps(
+                        json_safe(
+                            {
+                                "call_id": call_id,
+                                "tool_name": tool_name,
+                                "route": "local",
+                                "error": str(exc),
+                            }
+                        ),
+                        ensure_ascii=False,
+                        indent=2,
+                        default=str,
+                    ),
+                    meta={
+                        "call_id": call_id,
+                        "tool_name": tool_name,
+                        "plan_step": request.plan_step,
+                        "ok": False,
+                        "route": "local",
+                    },
+                )
+                raise
+
             await emit_trace(
                 "tool_response",
                 json.dumps(

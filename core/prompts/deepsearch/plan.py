@@ -20,6 +20,7 @@ GRAPH_PLANNER_USER_PROMPT = (
     "  - DO NOT use probe/scan tools (graph.pattern_scan / graph.chunk_scan) as the primary tool for macro plan steps.\n"
     "  - Use graph.beam_search only when you truly need multi-hop path enumeration/ranking.\n"
     "  - Prefer deterministic operators when applicable:\n"
+    "    - code.python (math/finance verification; put full code in `tool_args.code` and optional inputs in `tool_args.inputs`)\n"
     "    - graph.intersection (shared neighbors / common targets)\n"
     "    - graph.set_difference (NOT / exclusion queries)\n"
     "    - graph.aggregate (COUNT DISTINCT / aggregation)\n"

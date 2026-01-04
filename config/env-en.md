@@ -259,6 +259,24 @@ When `TASK_QUEUE_MODE=celery`, these long-running operations are executed by Cel
 
 Planner/graph defaults. Leave as-is unless customizing behavior.
 
+Note: DeepSearch tool parameters (including the deterministic `code.python` math/finance verification tool) are configured via `config/json_configs/deepsearch_service.json` → `tool_manager.enabled_tools[...]` rather than individual environment variables.
+
+### code.python tool parameters (JSON config)
+
+Location: `config/json_configs/deepsearch_service.json` → `tool_manager.enabled_tools["code.python"].params`.
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `allowed_imports` | `["json","math","decimal","fractions","statistics","datetime","numpy","pandas","scipy"]` | Whitelist of importable top-level packages inside `code.python` (anything else raises `ImportError`). |
+| `timeout_seconds` | `6.0` | Wall-clock timeout for the Python subprocess execution. |
+| `max_code_chars` | `12000` | Maximum accepted size of `extra.code`; larger payloads fail fast with `code_too_large`. |
+| `max_stdout_chars` | `8000` | Maximum captured stdout characters (bounded writer; additional output is truncated). |
+| `max_stderr_chars` | `8000` | Maximum captured stderr characters (bounded writer; additional output is truncated). |
+| `max_result_chars` | `12000` | Maximum serialized length of `result` (or its JSON string) returned as `result_text`. |
+| `max_memory_mb` | `1024` | Best-effort memory cap for the subprocess (applies `RLIMIT_AS/RLIMIT_DATA` when available). |
+| `emit_result_evidence` | `true` | When true, the tool emits an `EvidenceChunk` (source=`code.python`) so the next `<think>` can read the result via `context_evidences`. |
+| `disable_file_io` | `true` | When true, `open()` is blocked inside the subprocess (prevents file I/O by default). |
+
 | Variable | Default | Description |
 | --- | --- | --- |
 | `DEEPSEARCH_DEFAULT_ADAPTER` | `hipporag` | Graph adapter registered in the registry. |

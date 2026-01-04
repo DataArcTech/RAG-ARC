@@ -258,6 +258,24 @@ cp .env.example .env
 
 若无特殊需求，请保留默认值；只有在需要自定义规划器或工具链时才修改。
 
+说明：DeepSearch 工具参数（包括确定性计算工具 `code.python` 的 `allowed_imports`、超时与输出/内存上限）统一通过 `config/json_configs/deepsearch_service.json` → `tool_manager.enabled_tools[...]` 配置，而不是单独的环境变量。
+
+### code.python 工具参数（JSON 配置）
+
+配置位置：`config/json_configs/deepsearch_service.json` → `tool_manager.enabled_tools["code.python"].params`。
+
+| Key | 默认值 | 说明 |
+| --- | --- | --- |
+| `allowed_imports` | `["json","math","decimal","fractions","statistics","datetime","numpy","pandas","scipy"]` | `code.python` 子进程允许导入的顶级包白名单（不在白名单的 import 会抛 `ImportError`）。 |
+| `timeout_seconds` | `6.0` | Python 子进程执行的 wall time 超时（秒）。 |
+| `max_code_chars` | `12000` | `extra.code` 最大字符数，超出会直接失败并返回 `code_too_large`。 |
+| `max_stdout_chars` | `8000` | stdout 最大捕获字符数（超过会截断）。 |
+| `max_stderr_chars` | `8000` | stderr 最大捕获字符数（超过会截断）。 |
+| `max_result_chars` | `12000` | `result` 序列化后的 `result_text` 最大字符数（超过会截断）。 |
+| `max_memory_mb` | `1024` | 子进程内存上限（尽力：可用时设置 `RLIMIT_AS/RLIMIT_DATA`）。 |
+| `emit_result_evidence` | `true` | 是否将执行结果写入一条 evidence（source=`code.python`），供下一轮 `<think>` 通过 `context_evidences` 读取。 |
+| `disable_file_io` | `true` | 是否在子进程内阻断 `open()`（默认禁用文件 I/O）。 |
+
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `DEEPSEARCH_DEFAULT_ADAPTER` | `hipporag` | 图适配器名称。 |

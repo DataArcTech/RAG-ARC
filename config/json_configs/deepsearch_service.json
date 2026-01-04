@@ -160,6 +160,19 @@
           "temperature": 0.2,
           "pattern_probe_max_terms": 6
         }
+      },
+      "code.python": {
+        "params": {
+          "allowed_imports": ["json", "math", "decimal", "fractions", "statistics", "datetime", "numpy", "pandas", "scipy"],
+          "timeout_seconds": 6.0,
+          "max_code_chars": 12000,
+          "max_stdout_chars": 8000,
+          "max_stderr_chars": 8000,
+          "max_result_chars": 12000,
+          "max_memory_mb": 1024,
+          "emit_result_evidence": true,
+          "disable_file_io": true
+        }
       }
     },
     "audit_label": "${DEEPSEARCH_TOOL_AUDIT_LABEL}",
