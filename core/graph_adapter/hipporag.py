@@ -110,6 +110,10 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         merged["owner_id"] = owner_key
         return await asyncio.to_thread(graph_store._execute_query, str(cypher), merged)
 
+    def cypher_capable(self) -> bool:
+        graph_store = getattr(self.retriever, "graph_store", None)
+        return bool(graph_store is not None and hasattr(graph_store, "_execute_query"))
+
     async def context_filter(
         self,
         data: Mapping[str, Any],

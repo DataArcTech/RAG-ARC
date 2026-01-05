@@ -3,11 +3,11 @@ import json
 import logging
 from typing import List, Dict, Any, Optional, Sequence
 
-from core.file_management.extractor.metadata_keys import EXTRACTION_ERROR_KEY
-from core.file_management.extractor.metadata_keys import BUSINESS_TIME_KEY
+from core.file_management.extractor.metadata_keys import BUSINESS_TIME_KEY, EXTRACTION_ERROR_KEY, SDF_KEY
 from encapsulation.data_model.schema import Chunk, GraphData
 from encapsulation.database.graph_db.pruned_hipporag_neo4j_chunk_embeddings import _PrunedHippoRAGNeo4jChunkEmbeddingsMixin
 from encapsulation.database.utils.fact_provenance import upsert_fact_occurrence
+from encapsulation.database.utils.sdf_schema_payload import build_sdf_schema_payload
 from encapsulation.database.utils.schema_layer_nodes import build_schema_layer_payload
 from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id, text_processing
 from core.knowledge_graph.schema import normalize_relation_token
@@ -113,6 +113,10 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
         fact_data_by_id: Dict[str, Dict[str, Any]] = {}
         schema_nodes_by_id: Dict[str, Dict[str, Any]] = {}
         schema_links: List[Dict[str, Any]] = []
+        sdf_event_nodes_by_id: Dict[str, Dict[str, Any]] = {}
+        sdf_has_subevent_edges: List[Dict[str, Any]] = []
+        sdf_before_edges: List[Dict[str, Any]] = []
+        sdf_chunk_event_links: List[Dict[str, Any]] = []
         new_entity_ids = []
 
         # HippoRAG chunk-triples contract: keep only triples whose endpoints are extracted named entities.
@@ -128,6 +132,14 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
         enable_schema_layers = bool(getattr(cfg, "enable_schema_layer_nodes", False))
         raw_schema_max_nodes = getattr(cfg, "schema_layer_max_nodes_per_chunk", None)
         schema_layer_max_nodes = int(raw_schema_max_nodes) if raw_schema_max_nodes is not None else 0
+        enable_sdf_schema = bool(getattr(cfg, "enable_sdf_schema", False))
+        sdf_max_events = int(getattr(cfg, "sdf_max_events_per_chunk", 0) or 0)
+        sdf_max_relations = int(getattr(cfg, "sdf_max_relations_per_chunk", 0) or 0)
+        sdf_max_source_chunks = _coerce_fact_provenance_max_source_chunks(
+            getattr(cfg, "sdf_provenance_max_source_chunks", None),
+            default=50,
+            max_value=1000,
+        )
 
         for chunk in chunks:
             # Prepare chunk data
@@ -185,6 +197,22 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
                 for node in schema_nodes:
                     schema_nodes_by_id.setdefault(str(node.get("schema_id")), node)
                 schema_links.extend(schema_occurrences)
+
+            if enable_sdf_schema:
+                sdf = metadata.get(SDF_KEY) if isinstance(metadata.get(SDF_KEY), dict) else None
+                sdf_nodes, sdf_sub_edges, sdf_before, sdf_links = build_sdf_schema_payload(
+                    sdf=sdf,
+                    chunk_id=chunk.id,
+                    db_owner_id=db_owner_id,
+                    max_events=sdf_max_events,
+                    max_relations=sdf_max_relations,
+                    max_source_chunks=sdf_max_source_chunks,
+                )
+                for node in sdf_nodes:
+                    sdf_event_nodes_by_id.setdefault(str(node.get("sdf_event_id")), node)
+                sdf_has_subevent_edges.extend(sdf_sub_edges)
+                sdf_before_edges.extend(sdf_before)
+                sdf_chunk_event_links.extend(sdf_links)
 
             # Process graph data
             if chunk.graph and chunk.graph.is_empty():
@@ -408,6 +436,7 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
         canonical_nodes = list(canonical_nodes_by_id.values())
         alias_nodes = list(alias_nodes_by_id.values())
         schema_node_list = list(schema_nodes_by_id.values())
+        sdf_event_node_list = list(sdf_event_nodes_by_id.values())
 
         kg_ingest_meta_payloads: List[Dict[str, Any]] = []
         for owner_id, counters in stats_by_owner.items():
@@ -614,6 +643,101 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
                     """
                     tx.run(schema_link_query, {"links": schema_links})
                     logger.info("  Upserted %s HAS_SCHEMA_NODE relationships", len(schema_links))
+
+                # 2.7 Process schema (SDFEvent + SDF_BEFORE/HAS_SUBEVENT).
+                if sdf_event_node_list:
+                    sdf_event_query = """
+                    UNWIND $events AS e
+                    MERGE (n:SDFEvent {sdf_event_id: e.sdf_event_id})
+                    WITH n, e,
+                         CASE
+                             WHEN n.source_chunk_ids IS NULL THEN e.source_chunk_ids
+                             ELSE n.source_chunk_ids + [cid IN e.source_chunk_ids WHERE NOT cid IN n.source_chunk_ids]
+                         END AS merged_chunk_ids
+                    SET n.owner_id = e.owner_id,
+                        n.doc_namespace = e.doc_namespace,
+                        n.name = e.name,
+                        n.name_normalized = e.name_normalized,
+                        n.description = COALESCE(e.description, n.description),
+                        n.children_gate = COALESCE(e.children_gate, n.children_gate),
+                        n.effective_date = COALESCE(e.effective_date, n.effective_date),
+                        n.valid_from = COALESCE(e.valid_from, n.valid_from),
+                        n.valid_to = COALESCE(e.valid_to, n.valid_to),
+                        n.scope = COALESCE(e.scope, n.scope),
+                        n.priority = COALESCE(e.priority, n.priority),
+                        n.attributes_json = COALESCE(e.attributes_json, n.attributes_json),
+                        n.occurrences = COALESCE(n.occurrences, 0) + COALESCE(toInteger(e.occurrences), 1),
+                        n.source_chunk_ids = merged_chunk_ids[..$max_source_chunks],
+                        n.source_chunk_ids_truncated = COALESCE(n.source_chunk_ids_truncated, false)
+                            OR COALESCE(e.source_chunk_ids_truncated, false)
+                            OR ($max_source_chunks > 0 AND size(merged_chunk_ids) > $max_source_chunks),
+                        n.updated_at = datetime(),
+                        n.created_at = COALESCE(n.created_at, datetime())
+                    """
+                    tx.run(sdf_event_query, {"events": sdf_event_node_list, "max_source_chunks": int(sdf_max_source_chunks)})
+                    logger.info("  Upserted %s SDFEvent nodes", len(sdf_event_node_list))
+
+                if sdf_has_subevent_edges:
+                    sdf_child_query = """
+                    UNWIND $edges AS e
+                    MATCH (p:SDFEvent {sdf_event_id: e.parent_id})
+                    MATCH (c:SDFEvent {sdf_event_id: e.child_id})
+                    MERGE (p)-[r:SDF_HAS_SUBEVENT {parent_id: e.parent_id, child_id: e.child_id}]->(c)
+                    WITH r, e,
+                         CASE
+                             WHEN r.source_chunk_ids IS NULL THEN e.source_chunk_ids
+                             ELSE r.source_chunk_ids + [cid IN e.source_chunk_ids WHERE NOT cid IN r.source_chunk_ids]
+                         END AS merged_chunk_ids
+                    SET r.owner_id = e.owner_id,
+                        r.doc_namespace = e.doc_namespace,
+                        r.importance = COALESCE(e.importance, r.importance),
+                        r.occurrences = COALESCE(r.occurrences, 0) + COALESCE(toInteger(e.occurrences), 1),
+                        r.source_chunk_ids = merged_chunk_ids[..$max_source_chunks],
+                        r.source_chunk_ids_truncated = COALESCE(r.source_chunk_ids_truncated, false)
+                            OR COALESCE(e.source_chunk_ids_truncated, false)
+                            OR ($max_source_chunks > 0 AND size(merged_chunk_ids) > $max_source_chunks),
+                        r.updated_at = datetime(),
+                        r.created_at = COALESCE(r.created_at, datetime())
+                    """
+                    tx.run(sdf_child_query, {"edges": sdf_has_subevent_edges, "max_source_chunks": int(sdf_max_source_chunks)})
+                    logger.info("  Upserted %s SDF_HAS_SUBEVENT relationships", len(sdf_has_subevent_edges))
+
+                if sdf_before_edges:
+                    sdf_before_query = """
+                    UNWIND $edges AS e
+                    MATCH (s:SDFEvent {sdf_event_id: e.subject_id})
+                    MATCH (t:SDFEvent {sdf_event_id: e.object_id})
+                    MERGE (s)-[r:SDF_BEFORE {subject_id: e.subject_id, object_id: e.object_id}]->(t)
+                    WITH r, e,
+                         CASE
+                             WHEN r.source_chunk_ids IS NULL THEN e.source_chunk_ids
+                             ELSE r.source_chunk_ids + [cid IN e.source_chunk_ids WHERE NOT cid IN r.source_chunk_ids]
+                         END AS merged_chunk_ids
+                    SET r.owner_id = e.owner_id,
+                        r.doc_namespace = e.doc_namespace,
+                        r.occurrences = COALESCE(r.occurrences, 0) + COALESCE(toInteger(e.occurrences), 1),
+                        r.source_chunk_ids = merged_chunk_ids[..$max_source_chunks],
+                        r.source_chunk_ids_truncated = COALESCE(r.source_chunk_ids_truncated, false)
+                            OR COALESCE(e.source_chunk_ids_truncated, false)
+                            OR ($max_source_chunks > 0 AND size(merged_chunk_ids) > $max_source_chunks),
+                        r.updated_at = datetime(),
+                        r.created_at = COALESCE(r.created_at, datetime())
+                    """
+                    tx.run(sdf_before_query, {"edges": sdf_before_edges, "max_source_chunks": int(sdf_max_source_chunks)})
+                    logger.info("  Upserted %s SDF_BEFORE relationships", len(sdf_before_edges))
+
+                if sdf_chunk_event_links:
+                    sdf_chunk_link_query = """
+                    UNWIND $links AS link
+                    MATCH (c:Chunk {chunk_id: link.chunk_id, owner_id: link.owner_id})
+                    MATCH (e:SDFEvent {sdf_event_id: link.sdf_event_id})
+                    MERGE (c)-[r:HAS_SDF_EVENT {chunk_id: link.chunk_id, sdf_event_id: link.sdf_event_id}]->(e)
+                    SET r.owner_id = link.owner_id,
+                        r.updated_at = datetime(),
+                        r.created_at = COALESCE(r.created_at, datetime())
+                    """
+                    tx.run(sdf_chunk_link_query, {"links": sdf_chunk_event_links})
+                    logger.info("  Upserted %s HAS_SDF_EVENT relationships", len(sdf_chunk_event_links))
 
                 # 3. Batch create chunk-entity relationships
                 if mention_data:

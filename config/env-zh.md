@@ -112,7 +112,7 @@ cp .env.example .env
 | `BM25_INDEX_PATH` | `./data/unified_bm25_index` | 统一 BM25 索引目录。 |
 | `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | 图索引/向量缓存落盘目录（Neo4j HippoRAG）。 |
 | `GRAPH_INDEX_NAME` | `index` | 图索引文件前缀名。 |
-| `KG_SCHEMA_PATH` | `./kg_schema.yml` | Neo4j HippoRAG 的 KG schema YAML 路径（谓词治理 + 方向敏感集合）。 |
+| `KG_SCHEMA_PATH` | `./kg_schema.yml` | Neo4j HippoRAG 的 KG schema YAML 路径（谓词治理 + 方向敏感集合）。可选：金融/保险部署可切换到 `./fin_kg_schema.yml`。 |
 
 补充说明：
 - **FAISS 指纹保护**：FAISS 的 `.pkl` 元数据会写入 `embedding_fingerprint`（provider/model/dim）。当切换 embedding 模型/维度时，建议设置新的 `FAISS_INDEX_PATH`（推荐）或清理重建索引；否则系统会 fail-fast，避免“静默索引污染”。

@@ -1,3 +1,13 @@
+"""
+Pruned HippoRAG Graph Store (igraph backend).
+
+Design note (important):
+- This backend builds an **undirected** igraph (`igraph.Graph(directed=False)`) for a lightweight, local/test-friendly
+  retrieval path.
+- Direction-sensitive KG semantics (e.g., OWNS, creditor/debtor, before/after) require the Neo4j backend, which
+  preserves per-predicate directionality and supports Cypher-backed deterministic DeepSearch tools.
+"""
+
 import os
 import json
 import logging
@@ -143,4 +153,3 @@ class PrunedHippoRAGIGraphStore(
 
     def write_lock(self):
         return self._rwlock.write_lock()
-
