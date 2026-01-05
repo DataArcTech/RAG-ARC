@@ -61,7 +61,7 @@ class FileListResponse(BaseModel):
 
 @router.post(
     "",
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_200_OK,
 )
 async def upload_file(
     file: UploadFile,
