@@ -269,33 +269,50 @@ class FileStorage(AbstractModule):
                 except Exception as e:
                     logger.warning(f"Failed to check duplicates, proceeding with upload: {e}")
 
-            # Generate IDs and keys
-            file_id = self._generate_file_id()
-            blob_key = self._generate_blob_key(file_id, filename)
-
             # Calculate file properties
             file_size = len(file_data)
             content_type = content_type or "application/octet-stream"
 
-            # Create metadata object with STORED status
-            now = datetime.now(tz=datetime.now().astimezone().tzinfo)
-            metadata = FileMetadata(
-                file_id=file_id,
-                owner_id=owner_id,
-                blob_key=blob_key,
-                filename=filename,
-                status=FileStatus.STORED,
-                file_size=file_size,
-                content_type=content_type,
-                content_hash=content_hash,
-                created_at=now,
-                updated_at=now
-            )
+            # Store metadata first through metadata store (retry on UUID collision).
+            max_id_attempts = 10
+            last_id_error: Exception | None = None
+            for attempt in range(1, max_id_attempts + 1):
+                file_id = self._generate_file_id()
+                blob_key = self._generate_blob_key(file_id, filename)
 
-            # Store metadata first through metadata store
-            logger.info(f"Storing metadata for file: {filename} (file_id: {file_id})")
-            stored_metadata_id = self.metadata_store.store_file_metadata(metadata, **kwargs)
-            assert stored_metadata_id == file_id
+                now = datetime.now(tz=datetime.now().astimezone().tzinfo)
+                metadata = FileMetadata(
+                    file_id=file_id,
+                    owner_id=owner_id,
+                    blob_key=blob_key,
+                    filename=filename,
+                    status=FileStatus.STORED,
+                    file_size=file_size,
+                    content_type=content_type,
+                    content_hash=content_hash,
+                    created_at=now,
+                    updated_at=now,
+                )
+
+                logger.info(f"Storing metadata for file: {filename} (file_id: {file_id})")
+                try:
+                    stored_metadata_id = self.metadata_store.store_file_metadata(metadata, **kwargs)
+                    assert stored_metadata_id == file_id
+                    break
+                except ValueError as exc:
+                    if "already exists" not in str(exc):
+                        raise
+                    last_id_error = exc
+                    logger.warning(
+                        "File ID collision detected while storing metadata (attempt %s/%s): %s",
+                        attempt,
+                        max_id_attempts,
+                        exc,
+                    )
+            else:
+                raise StorageOperationError(
+                    f"Failed to allocate a unique file_id after {max_id_attempts} attempts: {last_id_error}"
+                )
 
             try:
                 # Store blob data through blob store
