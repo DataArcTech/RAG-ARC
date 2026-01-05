@@ -4,6 +4,7 @@ import asyncio
 import os
 import time
 import threading
+import contextvars
 from typing import Annotated, Any, Dict, List, Optional
 from fastapi import (
     APIRouter,
@@ -47,6 +48,15 @@ import logging
 from core.utils.owner_guard import is_admin_owner, get_admin_owner_id
 from core.presentation.evidence import build_chat_evidence
 from config.output_limits import CHAT_TOP_CHUNKS
+
+
+def _get_shared_document_owner_id() -> uuid.UUID:
+    """Get shared document owner ID from environment variable for unified file retrieval."""
+    raw = os.getenv("CHATBOT_SHARED_DOCUMENT_OWNER_ID", "00000000-0000-0000-0000-000000000001")
+    try:
+        return uuid.UUID(str(raw))
+    except ValueError as exc:
+        raise RuntimeError("CHATBOT_SHARED_DOCUMENT_OWNER_ID must be a valid UUID") from exc
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -192,7 +202,8 @@ async def chat(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required"
         )
-    effective_owner_id: uuid.UUID | None = current_user.id
+    # Use shared document owner ID for unified file retrieval across all users
+    effective_owner_id: uuid.UUID | None = _get_shared_document_owner_id()
 
     if request.include_all_owners:
         if not is_admin_owner(current_user.id):
@@ -371,7 +382,8 @@ async def stream_chat_sse(
     message_handler = get_message_handler()
     rag_inference_handler = get_rag_inference_handler()
 
-    effective_owner: uuid.UUID | None = current_user.id
+    # Use shared document owner ID for unified file retrieval across all users
+    effective_owner: uuid.UUID | None = _get_shared_document_owner_id()
     if include_all_owners:
         if not is_admin_owner(current_user.id):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admin users can access all owners")
@@ -507,15 +519,38 @@ async def stream_chat_sse(
                 prepared["raw_mindmap_response"] = None  # Streaming does not capture a full raw mindmap response.
                 _emit_progress({"stage": "prepare", "status": "end"})
                 _emit_progress({"stage": "generate", "status": "start"})
+                
+                # Log token stream collection
+                token_count = 0
+                total_token_length = 0
                 for chunk in token_stream:
+                    token_count += 1
+                    chunk_str = str(chunk) if chunk else ""
+                    total_token_length += len(chunk_str)
+                    if token_count <= 5:  # Log first few tokens
+                        logger.debug(
+                            "SSE token_stream chunk %d: chunk_type=%s chunk_length=%d chunk_preview=%s",
+                            token_count,
+                            type(chunk).__name__,
+                            len(chunk_str),
+                            chunk_str[:100] if chunk_str else "None",
+                        )
                     asyncio.run_coroutine_threadsafe(queue.put({"kind": "token", "text": chunk}), loop)
+                
+                logger.info(
+                    "SSE token_stream collection completed: total_tokens=%d total_length=%d",
+                    token_count,
+                    total_token_length,
+                )
                 _emit_progress({"stage": "generate", "status": "end"})
             except Exception as exc:  # noqa: BLE001
                 stream_error[0] = exc
             finally:
                 asyncio.run_coroutine_threadsafe(queue.put(None), loop)
 
-        threading.Thread(target=_run_stream, daemon=True).start()
+        # Capture contextvars (including correlation_id) before creating thread
+        ctx = contextvars.copy_context()
+        threading.Thread(target=lambda: ctx.run(_run_stream), daemon=True).start()
 
         while True:
             item = await queue.get()
@@ -579,6 +614,16 @@ async def stream_chat_sse(
             return
 
         assistant_response = "".join(response_parts)
+        if not assistant_response:
+            logger.warning(
+                "SSE assistant_response is empty after streaming; "
+                "query=%r owner_id=%s history_len=%d prepared_chunks=%d",
+                query,
+                str(effective_owner),
+                len(history_messages),
+                len(prepared.get("chunks") or []),
+            )
+
         chunks = prepared.get("chunks") or []
         subgraph_data = prepared.get("subgraph_data")
         subgraph_info = prepared.get("subgraph_info")
@@ -619,6 +664,14 @@ async def stream_chat_sse(
         )
         if subgraph_data:
             logger.debug("SSE subgraph data: %s", json.dumps(subgraph_data, ensure_ascii=False, default=str))
+
+        # Guard: LLM 有时可能返回空字符串，为了避免消息校验失败，这里使用兜底文案
+        if not assistant_response or not assistant_response.strip():
+            logger.warning(
+                "Assistant response is empty; using fallback message to satisfy validation (session_id=%s)",
+                session_id,
+            )
+            assistant_response = "当前没有找到与您问题相关的内容，请尝试换个问法或提供更多信息。"
 
         assistant_message = ChatMessage(
             session_id=session_id,

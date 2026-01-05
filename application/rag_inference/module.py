@@ -121,6 +121,23 @@ class RAGInference(AbstractModule):
         
         # 获取原始 LLM response（用于调试）
         def _chat_with_raw():
+            # Debug log: show the messages we send to LLM (truncated)
+            try:
+                preview_messages = []
+                for m in messages:
+                    content = m.get("content", "")
+                    if isinstance(content, str) and len(content) > 500:
+                        content = content[:500] + "...[truncated]"
+                    preview_messages.append({"role": m.get("role"), "content": content})
+                logger.info(
+                    "RAGInference.chat_async LLM request: owner_id=%s return_subgraph=%s messages=%s",
+                    str(owner_id),
+                    return_subgraph,
+                    json.dumps(preview_messages, ensure_ascii=False, default=str),
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
             if hasattr(self.llm, 'client') and hasattr(self.llm.client, 'chat'):
                 # OpenAI 客户端
                 raw_response = self.llm.client.chat.completions.create(
@@ -145,10 +162,28 @@ class RAGInference(AbstractModule):
                         'total_tokens': raw_response.usage.total_tokens if raw_response.usage else None,
                     } if raw_response.usage else None,
                 }
+                try:
+                    # Debug log: full raw LLM response (truncated for safety)
+                    logger.info(
+                        "RAGInference.chat_async LLM raw_response: id=%s model=%s text_preview=%s",
+                        raw_dict.get("id"),
+                        raw_dict.get("model"),
+                        (response_text[:500] + "...[truncated]") if len(response_text) > 500 else response_text,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 return response_text, raw_dict
             else:
                 # 其他 LLM（HuggingFace 等），只返回文本
                 response_text = self.llm.chat(messages)
+                try:
+                    logger.info(
+                        "RAGInference.chat_async LLM text_response (no raw object): owner_id=%s text_preview=%s",
+                        str(owner_id),
+                        (response_text[:500] + "...[truncated]") if isinstance(response_text, str) and len(response_text) > 500 else response_text,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 return response_text, None
         
         response_text, raw_response = await self._run_blocking(_chat_with_raw)

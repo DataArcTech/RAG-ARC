@@ -1,5 +1,6 @@
 from .base import ChatLLMBase
 from typing import Any, AsyncGenerator, Dict, List, Optional, TYPE_CHECKING
+import json
 
 if TYPE_CHECKING:
     from config.encapsulation.llm.chat.openai import OpenAIChatConfig
@@ -272,22 +273,221 @@ class OpenAIChatLLM(ChatLLMBase):
             model = kwargs.pop("model", self.model_name)
             temperature = float(kwargs.pop("temperature", self.temperature))
             max_tokens = int(kwargs.pop("max_tokens", self.max_tokens))
-            stream = self.client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                stream=True,
-                **kwargs
-            )
+            
+            # Log complete API request details
+            try:
+                # Log full messages (truncated per message but all messages included)
+                messages_log = []
+                for idx, msg in enumerate(messages):
+                    msg_role = msg.get("role", "unknown")
+                    msg_content = msg.get("content", "")
+                    msg_len = len(msg_content)
+                    # Log first 500 chars of each message, or full if shorter
+                    msg_preview = msg_content[:500] + f"...[truncated {msg_len} chars]" if msg_len > 500 else msg_content
+                    messages_log.append({
+                        "index": idx,
+                        "role": msg_role,
+                        "content_length": msg_len,
+                        "content_preview": msg_preview
+                    })
+                
+                # Log all request parameters
+                request_params = {
+                    "model": model,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "stream": True,
+                    "messages_count": len(messages),
+                    "additional_kwargs": kwargs,
+                }
+                
+                logger.info(
+                    "OpenAIChatLLM.stream_chat REQUEST: params=%s messages_detail=%s",
+                    json.dumps(request_params, ensure_ascii=False, default=str),
+                    json.dumps(messages_log, ensure_ascii=False, default=str),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("OpenAIChatLLM.stream_chat failed to log request details: %s", exc)
+            
+            try:
+                stream = self.client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    stream=True,
+                    **kwargs
+                )
+            except Exception as exc:
+                logger.error(
+                    "OpenAIChatLLM.stream_chat API call FAILED: model=%s error=%s error_type=%s",
+                    model,
+                    str(exc),
+                    type(exc).__name__,
+                    exc_info=True,
+                )
+                raise
 
-            for chunk in stream:
-                # Check for content in choices
-                if chunk.choices and len(chunk.choices) > 0:
-                    delta = chunk.choices[0].delta
-                    if hasattr(delta, 'content') and delta.content is not None:
-                        content = delta.content
-                        yield content
+            chunk_count = 0
+            total_content_length = 0
+            all_chunks_detail = []
+            
+            try:
+                for chunk in stream:
+                    chunk_count += 1
+                    # Log COMPLETE chunk structure
+                    try:
+                        chunk_dict = {
+                            'chunk_number': chunk_count,
+                            'id': getattr(chunk, 'id', None),
+                            'object': getattr(chunk, 'object', None),
+                            'created': getattr(chunk, 'created', None),
+                            'model': getattr(chunk, 'model', None),
+                            'system_fingerprint': getattr(chunk, 'system_fingerprint', None),
+                        }
+                        
+                        # Log choices in detail
+                        choices_detail = []
+                        if chunk.choices and len(chunk.choices) > 0:
+                            for choice_idx, choice in enumerate(chunk.choices):
+                                choice_dict = {
+                                    'index': getattr(choice, 'index', choice_idx),
+                                    'finish_reason': getattr(choice, 'finish_reason', None),
+                                    'logprobs': getattr(choice, 'logprobs', None),
+                                }
+                                
+                                # Log delta in COMPLETE detail
+                                delta = getattr(choice, 'delta', None)
+                                if delta:
+                                    delta_dict = {
+                                        'role': getattr(delta, 'role', None),
+                                        'content': getattr(delta, 'content', None),
+                                        'content_type': type(getattr(delta, 'content', None)).__name__ if hasattr(delta, 'content') else None,
+                                        'content_repr': repr(getattr(delta, 'content', None)) if hasattr(delta, 'content') else None,
+                                        'tool_calls': getattr(delta, 'tool_calls', None),
+                                        'refusal': getattr(delta, 'refusal', None),
+                                    }
+                                    # Skip other_attrs to reduce log size (only log essential fields)
+                                    choice_dict['delta'] = delta_dict
+                                
+                                choices_detail.append(choice_dict)
+                        
+                        chunk_dict['choices'] = choices_detail
+                        chunk_dict['choices_count'] = len(chunk.choices) if chunk.choices else 0
+                        
+                        # Log usage if present
+                        if hasattr(chunk, 'usage') and chunk.usage:
+                            chunk_dict['usage'] = {
+                                'prompt_tokens': getattr(chunk.usage, 'prompt_tokens', None),
+                                'completion_tokens': getattr(chunk.usage, 'completion_tokens', None),
+                                'total_tokens': getattr(chunk.usage, 'total_tokens', None),
+                            }
+                        
+                        # Store chunk detail
+                        all_chunks_detail.append(chunk_dict)
+                        
+                        # Log first 3 chunks in FULL detail, then every 20th chunk
+                        if chunk_count <= 3 or chunk_count % 20 == 0:
+                            logger.info(
+                                "OpenAIChatLLM.stream_chat CHUNK %d DETAIL: %s",
+                                chunk_count,
+                                json.dumps(chunk_dict, ensure_ascii=False, default=str),
+                            )
+                        
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error(
+                            "OpenAIChatLLM.stream_chat failed to log chunk %d: error=%s chunk_repr=%s",
+                            chunk_count,
+                            str(exc),
+                            repr(chunk)[:500],
+                            exc_info=True,
+                        )
+                    
+                    # Check for content in choices
+                    if chunk.choices and len(chunk.choices) > 0:
+                        delta = chunk.choices[0].delta
+                        if hasattr(delta, 'content') and delta.content is not None:
+                            content = delta.content
+                            content_len = len(content) if isinstance(content, str) else 0
+                            total_content_length += content_len
+                            if chunk_count <= 5:  # Log first 5 content pieces
+                                logger.debug(
+                                    "OpenAIChatLLM.stream_chat chunk %d CONTENT: length=%d content=%s",
+                                    chunk_count,
+                                    content_len,
+                                    repr(content)[:200],
+                                )
+                            yield content
+                        elif chunk_count <= 5:  # Log first 5 chunks even if no content
+                            logger.debug(
+                                "OpenAIChatLLM.stream_chat chunk %d NO CONTENT: delta_has_content=%s delta_content=%s",
+                                chunk_count,
+                                hasattr(delta, 'content') if delta else False,
+                                getattr(delta, 'content', None) if delta and hasattr(delta, 'content') else None,
+                            )
+                            
+            except Exception as stream_exc:
+                logger.error(
+                    "OpenAIChatLLM.stream_chat STREAM ERROR: chunk_count=%d total_content_length=%d error=%s error_type=%s",
+                    chunk_count,
+                    total_content_length,
+                    str(stream_exc),
+                    type(stream_exc).__name__,
+                    exc_info=True,
+                )
+                raise
+            
+            # Log COMPLETE summary after streaming completes
+            try:
+                summary = {
+                    'model': model,
+                    'total_chunks': chunk_count,
+                    'total_content_length': total_content_length,
+                    'chunks_with_content': sum(1 for c in all_chunks_detail if c.get('choices') and any(
+                        choice.get('delta', {}).get('content') not in (None, '') 
+                        for choice in c.get('choices', [])
+                    )),
+                    'chunks_with_finish_reason': sum(1 for c in all_chunks_detail if c.get('choices') and any(
+                        choice.get('finish_reason') is not None 
+                        for choice in c.get('choices', [])
+                    )),
+                    'all_finish_reasons': [
+                        choice.get('finish_reason')
+                        for c in all_chunks_detail
+                        for choice in c.get('choices', [])
+                        if choice.get('finish_reason') is not None
+                    ],
+                    'chunks_detail_summary': [
+                        {
+                            'chunk_number': c.get('chunk_number'),
+                            'has_content': any(
+                                choice.get('delta', {}).get('content') not in (None, '')
+                                for choice in c.get('choices', [])
+                            ),
+                            'finish_reason': next((
+                                choice.get('finish_reason')
+                                for choice in c.get('choices', [])
+                                if choice.get('finish_reason') is not None
+                            ), None),
+                        }
+                        for c in all_chunks_detail
+                        # Only include chunks with issues (no content or non-stop finish_reason) or first/last 5
+                        if not any(
+                            choice.get('delta', {}).get('content') not in (None, '')
+                            for choice in c.get('choices', [])
+                        ) or c.get('chunk_number', 0) <= 5 or c.get('chunk_number', 0) > chunk_count - 5
+                    ],
+                }
+                logger.info(
+                    "OpenAIChatLLM.stream_chat COMPLETED SUMMARY: %s",
+                    json.dumps(summary, ensure_ascii=False, default=str, indent=2),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "OpenAIChatLLM.stream_chat failed to log summary: %s",
+                    exc,
+                    exc_info=True,
+                )
 
         except Exception as e:
             logger.error(f"Streaming chat failed: {str(e)}")

@@ -33,7 +33,7 @@ from api.routers import rag_inference
 from api.routers import session as session_router
 from api.routers import user as user_router
 from api.utils.logging_handler import DailySizeRotatingHandler
-from asgi_correlation_id import CorrelationIdMiddleware
+from asgi_correlation_id import CorrelationIdMiddleware, correlation_id
 from asgi_correlation_id.log_filters import CorrelationIdFilter
 from asgi_correlation_id.middleware import is_valid_uuid4
 
@@ -123,7 +123,8 @@ async def _noop_context():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for FastAPI startup/shutdown."""
-
+    # Set system-level correlation_id for startup/shutdown logs
+    correlation_id.set(str(uuid.uuid4()))
     logger.info("Application starting up...")
     try:
         from core.utils.dependency_health import check_dependencies
@@ -146,6 +147,8 @@ async def lifespan(app: FastAPI):
 
     async with mcp_context:
         yield
+        # Set system-level correlation_id for shutdown logs
+        correlation_id.set(str(uuid.uuid4()))
         await shutdown_knowledge_module()
 
 
