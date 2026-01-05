@@ -2,7 +2,7 @@
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
 
-from core.graph_adapter.cypher import GraphCypherQueryable
+from core.graph_adapter.cypher import adapter_supports_cypher
 from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
@@ -37,7 +37,7 @@ class GraphSdfChildrenTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
-        if not isinstance(adapter, GraphCypherQueryable) or not adapter.cypher_capable():
+        if not adapter_supports_cypher(adapter):
             return ToolResult(
                 summary="SDF children requires a Cypher-capable graph adapter (Neo4j).",
                 diagnostics={"reason": "cypher_unavailable"},
@@ -154,7 +154,7 @@ class GraphSdfDependenciesTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
-        if not isinstance(adapter, GraphCypherQueryable) or not adapter.cypher_capable():
+        if not adapter_supports_cypher(adapter):
             return ToolResult(
                 summary="SDF dependencies requires a Cypher-capable graph adapter (Neo4j).",
                 diagnostics={"reason": "cypher_unavailable"},

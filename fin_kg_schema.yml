@@ -68,6 +68,11 @@ domains:
       - corp
       - inc
       - ltd
+      - limited
+      - plc
+      - incorporated
+      - company
+      - co
       - llc
 
     # Strict predicate governance for finance/insurance QA:
@@ -92,6 +97,14 @@ domains:
       - HAS_CLAUSE
       - HAS_COVERAGE
       - HAS_BENEFIT
+      - HAS_FEATURE
+      - HAS_CURRENCY
+      - HAS_INTEREST_RATE
+      - HAS_REFUND
+      - HAS_CASH_VALUE
+      - HAS_SURRENDER_VALUE
+      - HAS_PAYMENT_MODE
+      - HAS_PREMIUM_PAYMENT_TERM
       - HAS_EXCLUSION
       - HAS_WAITING_PERIOD
       - HAS_DEDUCTIBLE
@@ -131,6 +144,8 @@ domains:
       "责任": HAS_COVERAGE
       "给付": HAS_BENEFIT
       "保险金": HAS_BENEFIT
+      "功能": HAS_FEATURE
+      "特性": HAS_FEATURE
       "除外": HAS_EXCLUSION
       "除外责任": HAS_EXCLUSION
       "免责": HAS_EXCLUSION
@@ -149,11 +164,107 @@ domains:
       "排除": EXCLUDES
       "要求": REQUIRES
 
+      # Insurance contract semantics (English; normalized by text_processing)
+      "policy": HAS_POLICY
+      "policy name": HAS_POLICY
+      "product": HAS_POLICY
+      "plan": HAS_POLICY
+      "has policy": HAS_POLICY
+      "clause": HAS_CLAUSE
+      "policy clause": HAS_CLAUSE
+      "has clause": HAS_CLAUSE
+      "coverage": HAS_COVERAGE
+      "covered": HAS_COVERAGE
+      "has coverage": HAS_COVERAGE
+      "benefit": HAS_BENEFIT
+      "death benefit": HAS_BENEFIT
+      "has benefit": HAS_BENEFIT
+      "exclusion": HAS_EXCLUSION
+      "excluded": HAS_EXCLUSION
+      "has exclusion": HAS_EXCLUSION
+      "waiting period": HAS_WAITING_PERIOD
+      "has waiting period": HAS_WAITING_PERIOD
+      "deductible": HAS_DEDUCTIBLE
+      "has deductible": HAS_DEDUCTIBLE
+      "sum insured": HAS_SUM_INSURED
+      "sum assured": HAS_SUM_INSURED
+      "insured amount": HAS_SUM_INSURED
+      "sum insured amount": HAS_SUM_INSURED
+      "has sum insured": HAS_SUM_INSURED
+      "premium": HAS_PREMIUM
+      "has premium": HAS_PREMIUM
+      "policy term": HAS_TERM
+      "term": HAS_TERM
+      "has term": HAS_TERM
+      "limit": HAS_LIMIT
+      "has limit": HAS_LIMIT
+      "applies to": APPLIES_TO
+      "exclude": EXCLUDES
+      "excludes": EXCLUDES
+      "require": REQUIRES
+      "requires": REQUIRES
+
+      # Product attributes & options (English; HK savings insurance product brochures)
+      "feature": HAS_FEATURE
+      "features": HAS_FEATURE
+      "has feature": HAS_FEATURE
+      "offer": HAS_FEATURE
+      "offers": HAS_FEATURE
+      "provide": HAS_FEATURE
+      "provides": HAS_FEATURE
+      "enable": HAS_FEATURE
+      "enables": HAS_FEATURE
+      "allow": HAS_FEATURE
+      "allows": HAS_FEATURE
+      "include": HAS_FEATURE
+      "includes": HAS_FEATURE
+      "policy currency": HAS_CURRENCY
+      "currency": HAS_CURRENCY
+      "has currency": HAS_CURRENCY
+      "interest rate": HAS_INTEREST_RATE
+      "guaranteed preferential interest rate": HAS_INTEREST_RATE
+      "has interest rate": HAS_INTEREST_RATE
+      "premium refund": HAS_REFUND
+      "refund": HAS_REFUND
+      "has refund": HAS_REFUND
+      "cash value": HAS_CASH_VALUE
+      "total cash value": HAS_CASH_VALUE
+      "projected total cash value": HAS_CASH_VALUE
+      "has cash value": HAS_CASH_VALUE
+      "surrender value": HAS_SURRENDER_VALUE
+      "has surrender value": HAS_SURRENDER_VALUE
+      "payment mode": HAS_PAYMENT_MODE
+      "annual payment mode": HAS_PAYMENT_MODE
+      "has payment mode": HAS_PAYMENT_MODE
+      "premium payment term": HAS_PREMIUM_PAYMENT_TERM
+      "has premium payment term": HAS_PREMIUM_PAYMENT_TERM
+
+      # HK savings insurance brochure fields (broader coverage; normalize into existing contract)
+      "death benefit": HAS_BENEFIT
+      "death benefit settlement option": HAS_FEATURE
+      "death benefit settlement": HAS_FEATURE
+      "surrender benefit": HAS_BENEFIT
+      "reversionary bonus": HAS_BENEFIT
+      "terminal bonus": HAS_BENEFIT
+      "basic terminal bonus": HAS_BENEFIT
+      "extra terminal bonus": HAS_BENEFIT
+      "compassionate benefit": HAS_BENEFIT
+      "policy loan": HAS_FEATURE
+      "automatic premium loan": HAS_FEATURE
+      "designated withdrawal": HAS_FEATURE
+      "prevailing interest rate": HAS_INTEREST_RATE
+      "non guaranteed interest rate": HAS_INTEREST_RATE
+      "non-guaranteed interest rate": HAS_INTEREST_RATE
+
       # Temporal (best-effort, still prefer edge properties valid_from/effective_date)
       "生效": EFFECTIVE_FROM
       "生效日": EFFECTIVE_FROM
       "有效期": EFFECTIVE_TO
       "更新于": UPDATED_ON
+      "effective date": EFFECTIVE_FROM
+      "valid from": EFFECTIVE_FROM
+      "valid to": EFFECTIVE_TO
+      "updated on": UPDATED_ON
 
       # Misc
       "located in": LOCATED_IN
@@ -169,4 +280,3 @@ domains:
     direction_policy: blacklist
     direction_insensitive_relations:
       - RELATED_TO
-

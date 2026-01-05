@@ -1,6 +1,6 @@
 """Optional adapter protocol for deterministic Cypher-backed graph queries."""
 import re
-from typing import Any, Dict, Mapping, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, Iterable, Mapping, Optional, Protocol, runtime_checkable
 
 from core.graph_adapter.base import GraphAccessScope
 
@@ -61,3 +61,46 @@ class GraphCypherQueryable(Protocol):
         access_scope: Optional[GraphAccessScope] = None,
     ) -> list[Dict[str, Any]]:
         """Execute a Cypher query and return rows as dictionaries."""
+
+
+def adapter_supports_cypher(adapter: Any) -> bool:
+    """Best-effort check for whether an adapter can run deterministic Cypher queries.
+
+    Preference order:
+    1) adapter.cypher_capable() when present
+    2) adapter.metadata().capabilities includes "cypher_query"
+    """
+    if adapter is None:
+        return False
+    acypher = getattr(adapter, "acypher", None)
+    if not callable(acypher):
+        return False
+
+    cap = getattr(adapter, "cypher_capable", None)
+    if callable(cap):
+        try:
+            return bool(cap())
+        except Exception:
+            return False
+
+    meta_fn = getattr(adapter, "metadata", None)
+    if not callable(meta_fn):
+        return False
+    try:
+        meta = meta_fn()
+    except Exception:
+        return False
+    capabilities = getattr(meta, "capabilities", None)
+    if capabilities is None and isinstance(meta, dict):
+        capabilities = meta.get("capabilities")
+    if not isinstance(capabilities, Iterable):
+        return False
+    for item in capabilities:
+        if item is None:
+            continue
+        name = getattr(item, "name", None)
+        if name is None and isinstance(item, dict):
+            name = item.get("name")
+        if str(name or "").strip() == "cypher_query":
+            return True
+    return False

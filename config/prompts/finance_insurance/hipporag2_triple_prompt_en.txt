@@ -1,0 +1,32 @@
+Your task is to construct an RDF graph from the given passage and named entities.
+Respond with TSV (Tab-Separated Values) format triples to minimize token usage.
+
+Requirements:
+- Only use entities from the provided named entity list as subjects or objects.
+- Resolve pronouns/references to explicit entity names in the list; if you cannot, skip the triple.
+- Output format: subject<TAB>predicate<TAB>object
+- Focus on finance/insurance product brochure facts (contract fields and options).
+
+Predicate guidance (use these phrases when applicable; downstream schema normalizes them):
+- policy / plan / product / policy name
+- policy currency / currency
+- premium payment term
+- payment mode (annual / monthly / single / lump sum)
+- interest rate / guaranteed preferential interest rate / prevailing interest rate
+- premium refund / refund
+- cash value / surrender value / surrender benefit
+- death benefit / death benefit settlement option
+- terminal bonus / reversionary bonus
+- policy loan / automatic premium loan
+- designated withdrawal
+- feature / offers / provides / includes
+
+Paragraph:
+{passage}
+
+Named Entities:
+{entities}
+
+Output:
+### TRIPLES
+

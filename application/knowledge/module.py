@@ -25,6 +25,7 @@ from encapsulation.data_model.orm_models import (
 from core.utils.thread_pool import run_blocking, run_coroutine_in_thread
 from encapsulation.message_queue.redis_task_queue import RedisTaskQueue, TaskState
 from application.knowledge.permission_mixin import KnowledgePermissionMixin
+from config.output_limits import KNOWLEDGE_MINDMAP_EXPORT_MAX_CHUNKS
 
 class Knowledge(KnowledgePermissionMixin, AbstractModule):
     def __init__(self, config: 'KnowledgeConfig'):
@@ -885,7 +886,12 @@ class Knowledge(KnowledgePermissionMixin, AbstractModule):
         }
 
     async def get_file_chunk_mindmaps(self, file_id: str, user_id: uuid.UUID) -> Dict[str, Any]:
-        """Retrieve chunk mind map data for a file owned by the user."""
+        """
+        Retrieve per-chunk payloads for mindmap export.
+
+        Mindmaps are optional: if a chunk has no `metadata["mindmap"]`, we still include the chunk content so the
+        downstream mindmap export can infer structure from text (on-demand export).
+        """
         metadata = await self._run_blocking(self.file_storage.get_file_metadata, file_id)
 
         if metadata is None:
@@ -925,6 +931,27 @@ class Knowledge(KnowledgePermissionMixin, AbstractModule):
         if not chunk_id_order:
             return {"file_id": file_id, "filename": metadata.filename, "chunks": []}
 
+        total_chunks = len(chunk_id_order)
+        max_chunks = int(KNOWLEDGE_MINDMAP_EXPORT_MAX_CHUNKS or 0)
+        truncated = False
+        if max_chunks > 0 and total_chunks > max_chunks:
+            truncated = True
+            if max_chunks == 1:
+                chunk_id_order = [chunk_id_order[0]]
+            else:
+                n = total_chunks
+                sampled: list[str] = []
+                last_idx = -1
+                for i in range(max_chunks):
+                    idx = int(i * (n - 1) / (max_chunks - 1))
+                    if idx <= last_idx:
+                        idx = last_idx + 1
+                    if idx >= n:
+                        idx = n - 1
+                    sampled.append(chunk_id_order[idx])
+                    last_idx = idx
+                chunk_id_order = sampled
+
         graph_store = None
         for indexer in getattr(self.file_index, "indexers", []):
             if hasattr(indexer, "graph_store"):
@@ -951,18 +978,22 @@ class Knowledge(KnowledgePermissionMixin, AbstractModule):
             metadata_dict = chunk.metadata or {}
             mindmap = metadata_dict.get("mindmap") if isinstance(metadata_dict, dict) else None
 
-            if mindmap and isinstance(mindmap, dict) and mindmap.get("nodes"):
-                mindmap_chunks.append({
+            mindmap_chunks.append(
+                {
                     "chunk_id": chunk_id,
                     "chunk_index": chunk_index_map.get(chunk_id),
                     "content": chunk.content,
-                    "mindmap": mindmap
-                })
+                    "mindmap": mindmap if isinstance(mindmap, dict) else {},
+                }
+            )
 
         return {
             "file_id": file_id,
             "filename": metadata.filename,
-            "chunks": mindmap_chunks
+            "chunks": mindmap_chunks,
+            "chunks_total": total_chunks,
+            "chunks_sampled": len(chunk_id_order),
+            "chunks_truncated": truncated,
         }
 
     async def shutdown(self):

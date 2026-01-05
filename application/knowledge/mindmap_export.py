@@ -6,6 +6,7 @@ from fastapi import HTTPException, status
 
 from encapsulation.data_model.orm_models import FileMindmapCache
 from core.prompts import MINDMAP_MERGE_SYSTEM_PROMPT_EN, build_mindmap_merge_user_prompt
+from config.output_limits import KNOWLEDGE_MINDMAP_EXPORT_SEGMENT_SNIPPET_CHARS
 
 ProgressCallback = Callable[[str, str, int | None, dict[str, Any] | None], None]
 
@@ -16,14 +17,18 @@ def build_mindmap_merge_prompt(filename: str, chunks: List[Dict[str, Any]]) -> s
         chunk_id = chunk.get("chunk_id", "")
         chunk_index = chunk.get("chunk_index", "")
         content = chunk.get("content", "") or ""
-        snippet = (content[:400] + "...") if len(content) > 400 else content
+        max_chars = int(KNOWLEDGE_MINDMAP_EXPORT_SEGMENT_SNIPPET_CHARS or 0) or 600
+        snippet = (content[:max_chars] + "...") if len(content) > max_chars else content
         mindmap = chunk.get("mindmap", {}) or {}
         mindmap_tsv = mindmap_dict_to_tsv(mindmap)
-        sections.append(
+
+        block = (
             f"### Segment {idx} (Chunk ID: {chunk_id}, Chunk Index: {chunk_index})\n"
-            f"Content summary:\n{snippet}\n\n"
-            f"Local mind map (TSV):\n{mindmap_tsv}\n"
+            f"Content summary:\n{snippet}\n"
         )
+        if mindmap_tsv.strip():
+            block += f"\nLocal mind map (TSV):\n{mindmap_tsv}\n"
+        sections.append(block)
 
     sections_text = "\n".join(sections)
     return build_mindmap_merge_user_prompt(filename=filename, sections_text=sections_text)
@@ -37,7 +42,7 @@ def mindmap_dict_to_tsv(mindmap: Dict[str, Any]) -> str:
         content = node.get("content") if isinstance(node, dict) else None
         if level and content:
             lines.append(f"{level}\t{content}")
-    return "\n".join(lines) if lines else "(empty)"
+    return "\n".join(lines) if lines else ""
 
 
 def extract_tsv_from_response(response: str) -> str:

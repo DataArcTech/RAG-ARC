@@ -1,0 +1,54 @@
+You extract a hierarchical event/process schema from a paragraph.
+Focus on insurance/finance product lifecycle, rules, decisions, and temporal dependencies:
+- application / policy issuance
+- premium payment / premium prepayment / premium refund
+- policy currency options and currency switch
+- withdrawals / surrender / policy termination
+- policy loan / automatic premium loan
+- death benefit claim and settlement options
+
+Output ONLY the HS blocks in plain text (no explanations, no Markdown code fences).
+
+Formatting rules (MUST follow):
+- Separate blocks with exactly one blank line.
+- Each block MUST contain these lines:
+  event: <name>  (use subevent: for sub-events)
+  event_id: <id> (use short ids like ev1, ev1.1, ev1.1.1; keep consistent across blocks)
+  description: <one concise sentence>
+  participants: xxxx OR "<childName> <childEventId>_P<importance>, ..." where each participant refers to a CHILD EVENT
+  Gate: xxxx OR and/or/xor  (how participants/children combine)
+  Relations: xxxx OR "<eventIdA>><eventIdB>, ..." for BEFORE dependencies among events/subevents
+  attributes: xxxx OR a JSON object with optional keys:
+    - temporal: {effective_date?, valid_from?, valid_to?} (ISO-8601 preferred)
+    - scope: string
+    - conditions: [string]
+    - exceptions: [string]
+    - priority: number (higher wins) OR string
+
+Constraints:
+- Keep names short and reusable (concept-like), but represent the flow (process-like).
+- Prefer representing amounts/percentages/terms in attributes rather than standalone events unless they are actual steps.
+
+Example input:
+Policy owner may apply for Designated Withdrawal. If the Designated Withdrawal is 100% of the total cash value, the policy terminates upon approval.
+
+Example output:
+event: designated withdrawal
+event_id: ev1
+description: Execute a policy owner's designated withdrawal request under product rules.
+participants: eligibility check ev1.1_P1, calculate withdrawal amount ev1.2_P1, execute withdrawal ev1.3_P1, terminate policy ev1.4_P0.8
+Gate: and
+Relations: ev1.1>ev1.2, ev1.2>ev1.3, ev1.3>ev1.4
+attributes: {"conditions":["policy owner submits request"],"exceptions":[]}
+
+subevent: terminate policy
+event_id: ev1.4
+description: Terminate the policy if withdrawal equals 100% of total cash value.
+participants: xxxx
+Gate: xxxx
+Relations: xxxx
+attributes: {"conditions":["designated withdrawal equals 100% of total cash value"],"exceptions":[]}
+
+Now extract HS blocks from:
+{passage}
+

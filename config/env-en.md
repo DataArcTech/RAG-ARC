@@ -117,6 +117,7 @@ How secrets flow into configs:
 Notes:
 - **FAISS fingerprint guard**: the FAISS `.pkl` metadata stores an `embedding_fingerprint` (provider/model/dim). If you switch embedding models/dimensions, set a new `FAISS_INDEX_PATH` (recommended) or rebuild the index; otherwise the system will fail-fast to avoid silent corruption.
 - **E2E isolation**: for real-service tests, point the path knobs above to an isolated directory (for example under `./local/e2e_*`) to avoid polluting `./data/*`.
+- **KG domain fallback**: when chunks do not provide `chunk.domain` (or `chunk.metadata["domain"]`), Neo4j indexing falls back to the loaded schema's `default_domain` (for example `finance_insurance` when using `./fin_kg_schema.yml`).
 
 ## 2. Evidence Output Controls
 
@@ -140,6 +141,8 @@ Notes:
 | `DEEPSEARCH_GRAPH_EXPORT_MAX_EDGES` | `2000` | Hard cap on exported edges for DeepSearch subgraph visualization (Neo4j exporter). |
 | `KNOWLEDGE_GRAPH_EXPORT_MAX_NODES` | `1000` | Upper bound for `/knowledge/graph/export*` max_nodes to prevent expensive graph exports. |
 | `KNOWLEDGE_GRAPH_EXPORT_MAX_EDGES` | `5000` | Upper bound for `/knowledge/graph/export*` max_edges to prevent expensive graph exports. |
+| `KNOWLEDGE_MINDMAP_EXPORT_MAX_CHUNKS` | `60` | Maximum chunks sampled when exporting a file-level mindmap (prevents oversize LLM prompts). |
+| `KNOWLEDGE_MINDMAP_EXPORT_SEGMENT_SNIPPET_CHARS` | `600` | Per-chunk content snippet size included in the mindmap export merge prompt. |
 | `GRAPH_EXPORT_CHUNK_CONTENT_PREVIEW_CHARS` | `240` | Maximum chunk content characters included in graph export payloads (visualization preview). |
 | `GRAPH_EXPORT_EDGE_FETCH_FACTOR` | `10` | Multiplier used by exporters to cap how many edges are fetched before sampling (fetch_limit = max_edges * factor). |
 | `GRAPH_EXPORT_EDGE_FETCH_MAX` | `50000` | Absolute cap for exporter edge fetch limits (prevents oversized Neo4j edge queries). |
@@ -322,7 +325,6 @@ Location: `config/json_configs/deepsearch_service.json` → `tool_manager.enable
 | `DEEPSEARCH_CHAIN_DEPTH` | `4` | Graph traversal depth. |
 | `DEEPSEARCH_TOOL_CONTEXT_MAX_EVIDENCES` | `5` | Max number of `context_evidences` sent to tool calls (recency retention). |
 | `DEEPSEARCH_TOOL_CONTEXT_MAX_CHARS` | `800` | Max characters per evidence content in tool prompts (truncates beyond this). |
-| `DEEPSEARCH_ENABLE_FINANCE_HOOKS` | `false` | Enable finance-specific heuristics. |
 | `DEEPSEARCH_MCP_SERVER_URI` | _(empty)_ | Remote MCP URI for DeepSearch (disable by default). |
 | `DEEPSEARCH_MCP_API_KEY` | _(empty)_ | API key for remote MCP. |
 | `DEEPSEARCH_MCP_TRANSPORT` | `auto` | Transport for MCP clients (`auto`/`sse`/`stdio`). |

@@ -67,6 +67,15 @@ class PrunedHippoRAGNeo4jConfig(AbstractConfig):
         description="Max chunk ids to retain per fact edge in Neo4j (`RELATES_TO.source_chunk_ids`). 0 disables storage.",
     )
 
+    enable_endpoint_canonical_fallback: bool = Field(
+        default=True,
+        description=(
+            "When a triple endpoint is not found in the extracted NER entities, attempt a precision-first "
+            "fallback match using KG schema entity canonicalization (e.g., suffix stripping). "
+            "Requires an unambiguous unique match; otherwise the triple is still dropped."
+        ),
+    )
+
     enable_schema_layer_nodes: bool = Field(
         default=False,
         description=(

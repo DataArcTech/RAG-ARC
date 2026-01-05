@@ -3,7 +3,7 @@ from typing import Any, Dict, List
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
 
-from core.graph_adapter.cypher import GraphCypherQueryable
+from core.graph_adapter.cypher import adapter_supports_cypher
 from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
@@ -59,7 +59,7 @@ class GraphPathExistsTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
-        if not isinstance(adapter, GraphCypherQueryable) or not adapter.cypher_capable():
+        if not adapter_supports_cypher(adapter):
             return ToolResult(
                 summary="Path query requires a Cypher-capable graph adapter (Neo4j).",
                 diagnostics={"reason": "cypher_unavailable"},
@@ -208,7 +208,7 @@ class GraphNeighborsTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
-        if not isinstance(adapter, GraphCypherQueryable) or not adapter.cypher_capable():
+        if not adapter_supports_cypher(adapter):
             return ToolResult(
                 summary="Neighbors query requires a Cypher-capable graph adapter (Neo4j).",
                 diagnostics={"reason": "cypher_unavailable"},
@@ -345,7 +345,7 @@ class GraphTraceToRootTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
-        if not isinstance(adapter, GraphCypherQueryable) or not adapter.cypher_capable():
+        if not adapter_supports_cypher(adapter):
             return ToolResult(
                 summary="Trace-to-root query requires a Cypher-capable graph adapter (Neo4j).",
                 diagnostics={"reason": "cypher_unavailable"},

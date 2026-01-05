@@ -7,6 +7,7 @@ Optimized for minimal token usage with TSV format
 from framework.config import AbstractConfig
 from typing import Literal, Optional, List
 from pydantic import Field
+from pathlib import Path
 from core.file_management.extractor.hipporag2_extractor import HippoRAG2Extractor
 from config.encapsulation.llm.chat.openai import OpenAIChatConfig
 
@@ -62,11 +63,52 @@ class HippoRAG2ExtractorConfig(AbstractConfig):
         description="Whether to extract business-time (effective_date/valid_from/valid_to) via LLM for temporal tools (e.g. latest_truth).",
     )
 
+    enable_mindmap_extraction: bool = Field(
+        default=False,
+        description=(
+            "Whether to extract mindmap TSV blocks into chunk.metadata['mindmap']. "
+            "Disabled by default because HippoRAG/DeepSearch core flows do not require mindmaps; "
+            "enable only when users need schema-layer scaffolding or mindmap UX."
+        ),
+    )
+
+    temporal_prompt: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional custom temporal/business-time extraction prompt template. "
+            "Use placeholders like {passage} and {language}. When empty, built-in EN/ZH prompts are used."
+        ),
+    )
+
+    temporal_prompt_path: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional file path for the temporal/business-time extraction prompt template. "
+            "When set, the file contents are used as the template."
+        ),
+    )
+
     enable_sdf_extraction: bool = Field(
         default=False,
         description=(
             "Whether to extract hierarchical process schema (HS) and convert it into an SDF contract "
             "stored in chunk metadata. Disabled by default for general-domain deployments."
+        ),
+    )
+
+    sdf_hs_prompt: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional custom HS (hierarchical structure) extraction prompt template used by SDF extraction. "
+            "Use placeholders like {passage} and {language}. When empty, built-in prompts are used."
+        ),
+    )
+
+    sdf_hs_prompt_path: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional file path for the HS (hierarchical structure) extraction prompt template used by SDF extraction. "
+            "When set, the file contents are used as the template."
         ),
     )
 
@@ -88,10 +130,31 @@ class HippoRAG2ExtractorConfig(AbstractConfig):
         description="Custom NER prompt (overrides default)"
     )
 
+    ner_prompt_path: Optional[str] = Field(
+        default=None,
+        description="Optional file path for the custom NER prompt template (overrides default).",
+    )
+
     triple_prompt: Optional[str] = Field(
         default=None,
         description="Custom triple extraction prompt (overrides default)"
     )
+
+    triple_prompt_path: Optional[str] = Field(
+        default=None,
+        description="Optional file path for the custom triple extraction prompt template (overrides default).",
+    )
+
+    @staticmethod
+    def _validate_optional_path(value: Optional[str], *, field_name: str) -> None:
+        token = str(value or "").strip()
+        if not token:
+            return
+        path = Path(token)
+        if not path.exists():
+            raise ValueError(f"{field_name} points to a missing file: {token}")
+        if not path.is_file():
+            raise ValueError(f"{field_name} must be a file path, got: {token}")
 
     def model_post_init(self, __context) -> None:
         """Validate configuration after initialization"""
@@ -99,6 +162,11 @@ class HippoRAG2ExtractorConfig(AbstractConfig):
             raise ValueError("max_concurrent must be greater than 0")
         if self.llm_config is None:
             raise ValueError("llm_config is required for HippoRAG2 extraction")
+
+        self._validate_optional_path(self.temporal_prompt_path, field_name="temporal_prompt_path")
+        self._validate_optional_path(self.sdf_hs_prompt_path, field_name="sdf_hs_prompt_path")
+        self._validate_optional_path(self.ner_prompt_path, field_name="ner_prompt_path")
+        self._validate_optional_path(self.triple_prompt_path, field_name="triple_prompt_path")
 
         if self.retry_attempts is not None:
             self.llm_config.max_retries = int(self.retry_attempts)

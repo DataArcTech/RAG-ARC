@@ -146,6 +146,10 @@ class DomainSchema:
                 return ""
             if token.endswith(" " + suf):
                 token = token[: -(len(suf) + 1)].strip()
+                continue
+            # CJK/company suffixes are often written without spaces (e.g., "股份有限公司").
+            if token.endswith(suf):
+                token = token[: -len(suf)].strip()
         return token
 
 
