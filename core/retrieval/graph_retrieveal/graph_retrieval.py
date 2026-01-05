@@ -12,8 +12,6 @@ Based on the design document specifications.
 """
 
 from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
-from dataclasses import dataclass, field
-from pydantic import Field
 import logging
 import json
 import numpy as np
@@ -21,48 +19,14 @@ import math
 
 from encapsulation.data_model.schema import Chunk
 from core.retrieval.graph_retrieveal.base import BaseGraphRetriever
+from core.retrieval.graph_retrieveal.models import CandidateResult, ChunkScore, PPRResult, SubgraphResult
+from core.retrieval.graph_retrieveal.ppr import compute_personalized_pagerank as _compute_personalized_pagerank
+from core.retrieval.graph_retrieveal.query_executor import GraphQueryExecutor, build_graph_query_executor
 
 if TYPE_CHECKING:
     from config.core.retrieval.graph_retrieval_config import GraphRetrievalConfig
 
 logger = logging.getLogger(__name__)
-
-
-
-@dataclass
-class CandidateResult:
-    """Candidate recall result"""
-    entity_candidates: List[Dict[str, Any]] = field(default_factory=list)  # [(entity_id, entity_name, similarity)]
-    chunk_candidates: List[Dict[str, Any]] = field(default_factory=list)   # [(chunk_id, content, similarity)]
-
-
-@dataclass
-class SubgraphResult:
-    """Subgraph construction result"""
-    nodes: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # entity_id -> entity_data
-    edges: List[Tuple[str, str, str]] = field(default_factory=list)  # [(from_id, relation_type, to_id)]
-    seed_entities: List[str] = field(default_factory=list)
-
-
-@dataclass
-class PPRResult:
-    """Personalized PageRank result"""
-    scores: Dict[str, float] = field(default_factory=dict)  # entity_id -> ppr_score
-    normalized_scores: Dict[str, float] = field(default_factory=dict)  # entity_id -> normalized_score
-
-
-@dataclass
-class ChunkScore:
-    """Chunk scoring result"""
-    chunk_id: str
-    content: str
-    graph_score: float
-    embedding_score: float
-    final_score: float
-    mentioned_entities: List[str] = field(default_factory=list)
-
-
-
 
 
 class GraphRetrieval(BaseGraphRetriever):
@@ -88,6 +52,10 @@ class GraphRetrieval(BaseGraphRetriever):
         # Determine graph store type for query adaptation
         self.graph_store_type = config.graph_config.type
         logger.info(f"Initialized graph store type: {self.graph_store_type}")
+        self._query_executor: GraphQueryExecutor = build_graph_query_executor(
+            graph_store=self.graph_store,
+            graph_store_type=self.graph_store_type,
+        )
 
         # Initialize LLM for entity filtering (optional)
         self.llm = None
@@ -102,285 +70,7 @@ class GraphRetrieval(BaseGraphRetriever):
 
     def _execute_graph_query(self, query_type: str, params: dict = None) -> List[Dict[str, Any]]:
         """Execute graph query with adaptation for different graph stores"""
-        if self.graph_store_type.startswith("neo4j"):
-            # Use Cypher queries for Neo4j
-            return self._execute_neo4j_query(query_type, params)
-        elif self.graph_store_type.startswith("networkx"):
-            # Use NetworkX-specific queries
-            return self._execute_networkx_query(query_type, params)
-        else:
-            raise ValueError(f"Unsupported graph store type: {self.graph_store_type}")
-
-    def _execute_neo4j_query(self, query_type: str, params: dict = None) -> List[Dict[str, Any]]:
-        """Execute Neo4j Cypher queries"""
-        params = params or {}
-
-        if query_type == "semantic_search_entities":
-            query = """
-            MATCH (e:Entity)
-            WHERE e.embedding IS NOT NULL
-            OPTIONAL MATCH (e)<-[:MENTIONS]-(d:Chunk)
-            WITH e, count(d) as mention_count
-            RETURN e.id_ as entity_id,
-                   e.entity_name as entity_name,
-                   e.entity_type as entity_type,
-                   e.embedding as embedding,
-                   mention_count,
-                   e.attributes as attributes
-            ORDER BY mention_count DESC
-            LIMIT 2000
-            """
-        elif query_type == "semantic_search_chunks":
-            query = """
-            MATCH (d:Chunk)
-            WHERE d.embedding IS NOT NULL
-            OPTIONAL MATCH (d)-[:MENTIONS]->(e:Entity)
-            WITH d, count(e) as entity_count, collect(e.entity_name) as entity_names
-            RETURN d.id_ as chunk_id,
-                   d.content as content,
-                   d.embedding as embedding,
-                   d.metadata as metadata,
-                   entity_count,
-                   entity_names
-            ORDER BY entity_count DESC
-            LIMIT 2000
-            """
-        elif query_type == "get_entity_data":
-            query = """
-            MATCH (e:Entity {id_: $entity_id})
-            RETURN e.entity_name as name, e.entity_type as type, e.attributes as attributes
-            """
-        elif query_type == "get_entity_neighbors":
-            query = """
-            MATCH (e1:Entity {id_: $entity_id})-[r]->(e2:Entity)
-            OPTIONAL MATCH (e2)<-[:MENTIONS]-(d:Chunk)
-            WITH e2, type(r) as relation_type, count(d) as mention_count
-            RETURN e2.id_ as neighbor_id, relation_type, mention_count
-            UNION
-            MATCH (e1:Entity)-[r]->(e2:Entity {id_: $entity_id})
-            OPTIONAL MATCH (e1)<-[:MENTIONS]-(d:Chunk)
-            WITH e1, type(r) as relation_type, count(d) as mention_count
-            RETURN e1.id_ as neighbor_id, relation_type, mention_count
-            """
-        elif query_type == "get_entity_degree":
-            query = """
-            MATCH (e:Entity {id_: $entity_id})-[r]-()
-            RETURN count(r) as degree
-            """
-        elif query_type == "get_entity_mentions":
-            query = """
-            MATCH (e:Entity {id_: $entity_id})<-[:MENTIONS]-(d:Chunk)
-            RETURN count(d) as mention_count
-            """
-        elif query_type == "get_chunk_entities":
-            query = """
-            MATCH (d:Chunk {id_: $chunk_id})-[:MENTIONS]->(e:Entity)
-            RETURN e.id_ as entity_id
-            """
-        elif query_type == "backtrack_chunks":
-            query = """
-            MATCH (e:Entity {id_: $entity_id})<-[:MENTIONS]-(d:Chunk)
-            WHERE d.embedding IS NOT NULL
-            RETURN d.id_ as chunk_id, d.content as content, d.embedding as embedding
-            LIMIT $chunks_per_entity
-            """
-        else:
-            raise ValueError(f"Unknown query type: {query_type}")
-
-        return self.graph_store.query(query, params)
-
-    def _execute_networkx_query(self, query_type: str, params: dict = None) -> List[Dict[str, Any]]:
-        """Execute NetworkX-specific queries"""
-        params = params or {}
-        results = []
-
-        if query_type == "semantic_search_entities":
-            # Get all entity nodes with embeddings
-            for node_id, node_data in self.graph_store.graph.nodes(data=True):
-                if (node_data.get('node_type') == 'Entity' and
-                    node_data.get('embedding')):
-
-                    # Count mentions (chunks that mention this entity)
-                    mention_count = 0
-                    for edge in self.graph_store.graph.edges(data=True):
-                        source, target, edge_data = edge
-                        if (target == node_id and
-                            edge_data.get('relation_type') == 'MENTIONS'):
-                            mention_count += 1
-
-                    results.append({
-                        'entity_id': node_data.get('id_'),
-                        'entity_name': node_data.get('entity_name'),
-                        'entity_type': node_data.get('entity_type'),
-                        'embedding': node_data.get('embedding'),
-                        'mention_count': mention_count,
-                        'attributes': node_data.get('attributes', '{}')
-                    })
-
-            # Sort by mention count
-            results.sort(key=lambda x: x['mention_count'], reverse=True)
-            return results[:2000]
-
-        elif query_type == "semantic_search_chunks":
-            # Get all chunk nodes with embeddings
-            for node_id, node_data in self.graph_store.graph.nodes(data=True):
-                if (node_data.get('node_type') == 'Chunk' and
-                    node_data.get('embedding')):
-
-                    # Count entities and collect entity names
-                    entity_count = 0
-                    entity_names = []
-                    for edge in self.graph_store.graph.edges(data=True):
-                        source, target, edge_data = edge
-                        if (source == node_id and
-                            edge_data.get('relation_type') == 'MENTIONS'):
-                            entity_count += 1
-                            target_data = self.graph_store.graph.nodes[target]
-                            if target_data.get('entity_name'):
-                                entity_names.append(target_data['entity_name'])
-
-                    results.append({
-                        'chunk_id': node_data.get('id_'),
-                        'content': node_data.get('content'),
-                        'embedding': node_data.get('embedding'),
-                        'metadata': node_data.get('metadata', '{}'),
-                        'entity_count': entity_count,
-                        'entity_names': entity_names
-                    })
-
-            # Sort by entity count
-            results.sort(key=lambda x: x['entity_count'], reverse=True)
-            return results[:2000]
-
-        elif query_type == "get_entity_data":
-            entity_id = params.get('entity_id')
-            entity_node_id = f"entity_{entity_id}"
-
-            if self.graph_store.graph.has_node(entity_node_id):
-                node_data = self.graph_store.graph.nodes[entity_node_id]
-                return [{
-                    'name': node_data.get('entity_name'),
-                    'type': node_data.get('entity_type'),
-                    'attributes': node_data.get('attributes', '{}')
-                }]
-            return []
-
-        elif query_type == "get_entity_neighbors":
-            entity_id = params.get('entity_id')
-            entity_node_id = f"entity_{entity_id}"
-
-            if not self.graph_store.graph.has_node(entity_node_id):
-                return []
-
-            neighbors = []
-            # Get outgoing edges
-            for target in self.graph_store.graph.successors(entity_node_id):
-                edge_data = self.graph_store.graph.get_edge_data(entity_node_id, target)
-                if edge_data:
-                    for edge_key, edge_attrs in edge_data.items():
-                        if edge_attrs.get('relation_type') != 'MENTIONS':
-                            # Count mentions for target entity
-                            mention_count = 0
-                            for edge in self.graph_store.graph.edges(data=True):
-                                if (edge[1] == target and
-                                    edge[2].get('relation_type') == 'MENTIONS'):
-                                    mention_count += 1
-
-                            target_data = self.graph_store.graph.nodes[target]
-                            neighbors.append({
-                                'neighbor_id': target_data.get('id_'),
-                                'relation_type': edge_attrs.get('relation_type'),
-                                'mention_count': mention_count
-                            })
-
-            # Get incoming edges
-            for source in self.graph_store.graph.predecessors(entity_node_id):
-                edge_data = self.graph_store.graph.get_edge_data(source, entity_node_id)
-                if edge_data:
-                    for edge_key, edge_attrs in edge_data.items():
-                        if edge_attrs.get('relation_type') != 'MENTIONS':
-                            # Count mentions for source entity
-                            mention_count = 0
-                            for edge in self.graph_store.graph.edges(data=True):
-                                if (edge[1] == source and
-                                    edge[2].get('relation_type') == 'MENTIONS'):
-                                    mention_count += 1
-
-                            source_data = self.graph_store.graph.nodes[source]
-                            neighbors.append({
-                                'neighbor_id': source_data.get('id_'),
-                                'relation_type': edge_attrs.get('relation_type'),
-                                'mention_count': mention_count
-                            })
-
-            return neighbors
-
-        elif query_type == "get_entity_degree":
-            entity_id = params.get('entity_id')
-            entity_node_id = f"entity_{entity_id}"
-
-            if self.graph_store.graph.has_node(entity_node_id):
-                degree = self.graph_store.graph.degree(entity_node_id)
-                return [{'degree': degree}]
-            return [{'degree': 0}]
-
-        elif query_type == "get_entity_mentions":
-            entity_id = params.get('entity_id')
-            entity_node_id = f"entity_{entity_id}"
-
-            mention_count = 0
-            for edge in self.graph_store.graph.edges(data=True):
-                if (edge[1] == entity_node_id and
-                    edge[2].get('relation_type') == 'MENTIONS'):
-                    mention_count += 1
-
-            return [{'mention_count': mention_count}]
-
-        elif query_type == "get_chunk_entities":
-            chunk_id = params.get('chunk_id')
-            chunk_node_id = f"chunk_{chunk_id}"
-
-            entity_ids = []
-            for target in self.graph_store.graph.successors(chunk_node_id):
-                edge_data = self.graph_store.graph.get_edge_data(chunk_node_id, target)
-                if edge_data:
-                    for edge_key, edge_attrs in edge_data.items():
-                        if edge_attrs.get('relation_type') == 'MENTIONS':
-                            target_data = self.graph_store.graph.nodes[target]
-                            entity_ids.append({'entity_id': target_data.get('id_')})
-
-            return entity_ids
-
-        elif query_type == "backtrack_chunks":
-            entity_id = params.get('entity_id')
-            entity_node_id = f"entity_{entity_id}"
-            chunks_per_entity = params.get('chunks_per_entity', 10)
-
-            chunks = []
-            for source in self.graph_store.graph.predecessors(entity_node_id):
-                edge_data = self.graph_store.graph.get_edge_data(source, entity_node_id)
-                if edge_data:
-                    for edge_key, edge_attrs in edge_data.items():
-                        if edge_attrs.get('relation_type') == 'MENTIONS':
-                            source_data = self.graph_store.graph.nodes[source]
-                            if (source_data.get('node_type') == 'Chunk' and
-                                source_data.get('embedding')):
-                                chunks.append({
-                                    'chunk_id': source_data.get('id_'),
-                                    'content': source_data.get('content'),
-                                    'embedding': source_data.get('embedding')
-                                })
-
-                                if len(chunks) >= chunks_per_entity:
-                                    break
-
-                    if len(chunks) >= chunks_per_entity:
-                        break
-
-            return chunks
-
-        else:
-            raise ValueError(f"Unknown query type: {query_type}")
+        return self._query_executor.execute(query_type, params)
 
     def retrieve(self, query: str, top_k: int = 10) -> List[Chunk]:
         """
@@ -893,151 +583,13 @@ Selected indices:"""
         # Normalize mention count to [0, 1] range (log scale)
         return min(math.log(mention_count + 1) / 10, 1.0)
 
-    def compute_personalized_pagerank(self, subgraph: SubgraphResult,
-                                    entity_candidates: List[Dict[str, Any]]) -> PPRResult:
-        """
-        Step 3: Personalized PageRank
-
-        Compute PPR scores for entities in the subgraph
-        """
-        if not subgraph.nodes:
-            return PPRResult()
-
-        # Build adjacency matrix
-        entity_ids = list(subgraph.nodes.keys())
-        n = len(entity_ids)
-        id_to_idx = {entity_id: i for i, entity_id in enumerate(entity_ids)}
-
-        # Initialize weighted adjacency matrix (undirected graph)
-        adj_matrix = np.zeros((n, n))
-        edge_weights = {}  # Store edge weights for better transition matrix
-
-        for from_id, relation_type, to_id in subgraph.edges:
-            if from_id in id_to_idx and to_id in id_to_idx:
-                i, j = id_to_idx[from_id], id_to_idx[to_id]
-
-                # Get edge weight (could be computed based on relation type)
-                weight = self._get_ppr_edge_weight(relation_type)
-
-                adj_matrix[i][j] = weight
-                adj_matrix[j][i] = weight  # Undirected
-                edge_weights[(i, j)] = weight
-                edge_weights[(j, i)] = weight
-
-        # Normalize adjacency matrix (transition matrix)
-        transition_matrix = np.zeros((n, n))
-        for i in range(n):
-            row_sum = np.sum(adj_matrix[i])
-            if row_sum > 0:
-                transition_matrix[i] = adj_matrix[i] / row_sum
-            else:
-                # Handle isolated nodes: uniform transition to all nodes
-                transition_matrix[i] = np.ones(n) / n
-
-        # Compute personalization vector
-        personalization_vector = self._compute_personalization_vector(
-            entity_ids, entity_candidates, subgraph
+    def compute_personalized_pagerank(self, subgraph: SubgraphResult, entity_candidates: List[Dict[str, Any]]) -> PPRResult:
+        """Step 3: Personalized PageRank."""
+        return _compute_personalized_pagerank(
+            config=self.config,
+            subgraph=subgraph,
+            entity_candidates=entity_candidates,
         )
-
-        # Run PPR algorithm
-        ppr_scores = self._run_ppr_algorithm(
-            transition_matrix, personalization_vector
-        )
-
-        # Convert back to entity_id -> score mapping
-        scores = {}
-        for i, entity_id in enumerate(entity_ids):
-            scores[entity_id] = ppr_scores[i]
-
-        # Normalize scores
-        max_score = max(scores.values()) if scores else 1.0
-        normalized_scores = {entity_id: score / max_score for entity_id, score in scores.items()}
-
-        return PPRResult(scores=scores, normalized_scores=normalized_scores)
-
-    def _compute_personalization_vector(self, entity_ids: List[str],
-                                      entity_candidates: List[Dict[str, Any]],
-                                      subgraph: SubgraphResult) -> np.ndarray:
-        """Compute personalization vector for PPR"""
-        n = len(entity_ids)
-        personalization = np.zeros(n)
-
-        # Create mapping for quick lookup
-        id_to_idx = {entity_id: i for i, entity_id in enumerate(entity_ids)}
-        candidate_similarities = {c['entity_id']: c['similarity'] for c in entity_candidates}
-
-        # Compute personalization scores
-        total_score = 0.0
-        for i, entity_id in enumerate(entity_ids):
-            sim_e = candidate_similarities.get(entity_id, 0.0)
-            triple_boost = self._compute_triple_boost(entity_id, subgraph)
-
-            score = self.config.beta1 * sim_e + self.config.beta2 * triple_boost
-            personalization[i] = score
-            total_score += score
-
-        # Normalize to probability distribution
-        if total_score > 0:
-            personalization = personalization / total_score
-        else:
-            # Uniform distribution if no scores
-            personalization = np.ones(n) / n
-
-        return personalization
-
-    def _compute_triple_boost(self, entity_id: str, subgraph: SubgraphResult) -> float:
-        """Compute triple boost score for entity"""
-        # Simple implementation: count of relations
-        # In production, could be more sophisticated
-        relation_count = 0
-        for from_id, _, to_id in subgraph.edges:
-            if from_id == entity_id or to_id == entity_id:
-                relation_count += 1
-
-        # Normalize by log to avoid extreme values
-        return math.log(relation_count + 1)
-
-    def _run_ppr_algorithm(self, transition_matrix: np.ndarray,
-                          personalization_vector: np.ndarray) -> np.ndarray:
-        """Run the PPR algorithm"""
-        n = len(personalization_vector)
-
-        # Initialize PPR scores
-        ppr_scores = personalization_vector.copy()
-
-        # Iterative computation
-        for iteration in range(self.config.max_iterations):
-            old_scores = ppr_scores.copy()
-
-            # PPR update: (1-d) * personalization + d * transition * scores
-            ppr_scores = (
-                (1 - self.config.damping_factor) * personalization_vector +
-                self.config.damping_factor * np.dot(transition_matrix.T, ppr_scores)
-            )
-
-            # Check convergence
-            diff = np.linalg.norm(ppr_scores - old_scores)
-            if diff < self.config.tolerance:
-                logger.info(f"PPR converged after {iteration + 1} iterations")
-                break
-
-        return ppr_scores
-
-    def _get_ppr_edge_weight(self, relation_type: str) -> float:
-        """Get edge weight for PPR computation based on relation type"""
-        # Configure relation weights for PPR (different from subgraph construction)
-        ppr_weights = {
-            'MENTIONS': 0.3,  # Lower weight for document mentions
-            'RELATED_TO': 1.0,
-            'PART_OF': 1.5,   # Higher weight for hierarchical relations
-            'INSTANCE_OF': 1.3,
-            'SIMILAR_TO': 0.8,
-            'CONTAINS': 1.4,
-            'DEPENDS_ON': 1.2,
-            'SYNONYM': 0.6    # Lower weight for synonym relations
-        }
-
-        return ppr_weights.get(relation_type, 1.0)
 
     def compute_chunk_scores(self, query: str, ppr_result: PPRResult,
                            chunk_candidates: List[Dict[str, Any]]) -> List[ChunkScore]:

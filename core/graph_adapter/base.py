@@ -54,6 +54,7 @@ class GraphDeepSearchAdapter(Protocol):
         *,
         channel: str = "graph",
         access_scope: Optional[GraphAccessScope] = None,
+        query_options: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Return a subgraph result for the current query/plan step."""
 

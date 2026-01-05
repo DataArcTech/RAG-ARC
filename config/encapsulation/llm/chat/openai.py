@@ -50,4 +50,9 @@ class OpenAIChatConfig(AbstractConfig):
     max_retries: int = 3
 
     def build(self) -> OpenAIChatLLM:
+        if self.loading_method == "openai":
+            if not str(self.openai_api_key or "").strip():
+                raise ValueError("Chat API key is required: set CHAT_API_KEY or OPENAI_API_KEY.")
+            if not str(self.openai_base_url or "").strip():
+                raise ValueError("Chat base URL is required: set CHAT_API_BASE_URL or OPENAI_BASE_URL.")
         return OpenAIChatLLM(self)

@@ -89,5 +89,16 @@ def test_local_blob_store_respects_base_path_and_is_not_singleton(tmp_path):
     assert not second.exists(key)
 
 
+def test_local_blob_store_resolves_relative_base_path_against_project_root(tmp_path, monkeypatch):
+    from config.encapsulation.database.file_db import local_config
+
+    monkeypatch.setattr(local_config, "project_root_dir", lambda: tmp_path)
+    store = LocalDBConfig(base_path="relative_store").build()
+    store.store("probe.txt", b"ok", "text/plain")
+
+    expected = tmp_path / "relative_store" / "probe.txt"
+    assert expected.exists()
+
+
 if __name__ == "__main__":
     test_local_blob_store()

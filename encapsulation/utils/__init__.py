@@ -1,0 +1,2 @@
+"""Shared encapsulation-layer helpers."""
+

@@ -84,7 +84,8 @@ def test_deepsearch_run_async_exposes_progress_and_result():
 
     app = FastAPI()
     app.include_router(deepsearch_router.router)
-    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=uuid.uuid4())
+    user_id = uuid.uuid4()
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=user_id)
 
     async def _run():
         async with _serve_app(app) as (host, port):
@@ -117,6 +118,8 @@ def test_deepsearch_stream_emits_done_marker():
         def get_user_by_username(self, username: str):
             return None
 
+    from core.deepsearch.trace import TRACE_FORMAT_VERSION, TRACE_SCHEMA_VERSION
+
     registrator = Register()
     registrator.registrations["account"] = _StubAccount()
     registrator.registrations["deepsearch_service"] = _StubDeepSearchService()
@@ -127,7 +130,8 @@ def test_deepsearch_stream_emits_done_marker():
 
     app = FastAPI()
     app.include_router(deepsearch_router.router)
-    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=uuid.uuid4())
+    user_id = uuid.uuid4()
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=user_id)
 
     async def _run():
         async with _serve_app(app) as (host, port):
@@ -153,7 +157,11 @@ def test_deepsearch_stream_emits_done_marker():
                         events.append(json.loads(data))
 
                 assert saw_done_marker is True
-                assert any(event.get("event") == "done" for event in events)
+                done_events = [event for event in events if event.get("event") == "done"]
+                assert done_events
+                done_payload = done_events[0].get("data") or {}
+                assert done_payload.get("schema_version") == TRACE_SCHEMA_VERSION
+                assert done_payload.get("trace_format_version") == TRACE_FORMAT_VERSION
 
     asyncio.run(_run())
 
@@ -173,7 +181,8 @@ def test_deepsearch_stream_openai_format_emits_tool_calls():
 
     app = FastAPI()
     app.include_router(deepsearch_router.router)
-    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=uuid.uuid4())
+    user_id = uuid.uuid4()
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=user_id)
 
     async def _run():
         async with _serve_app(app) as (host, port):

@@ -149,6 +149,7 @@ class OpenAIChatLLM(ChatLLMBase):
 
         if self.loading_method == "huggingface":
             prompt = self._build_hf_prompt(messages)
+            kwargs.pop("model", None)
             temperature = float(kwargs.pop("temperature", self.temperature))
             max_tokens = int(kwargs.pop("max_tokens", self.max_tokens))
             return self._hf_generate(
@@ -159,11 +160,13 @@ class OpenAIChatLLM(ChatLLMBase):
             )
 
         try:
-            temperature = kwargs.pop("temperature", self.temperature)
+            model = kwargs.pop("model", self.model_name)
+            temperature = float(kwargs.pop("temperature", self.temperature))
+            max_tokens = int(kwargs.pop("max_tokens", self.max_tokens))
             response = self.client.chat.completions.create(
-                model=self.model_name,
+                model=model,
                 messages=messages,
-                max_tokens=self.max_tokens,
+                max_tokens=max_tokens,
                 temperature=temperature,
                 **kwargs
             )
@@ -187,6 +190,7 @@ class OpenAIChatLLM(ChatLLMBase):
 
         if self.loading_method == "huggingface":
             prompt = self._build_hf_prompt(messages)
+            kwargs.pop("model", None)
             temperature = float(kwargs.pop("temperature", self.temperature))
             max_tokens = int(kwargs.pop("max_tokens", self.max_tokens))
             try:
@@ -265,11 +269,13 @@ class OpenAIChatLLM(ChatLLMBase):
                 return
 
         try:
-            temperature = kwargs.pop("temperature", self.temperature)
+            model = kwargs.pop("model", self.model_name)
+            temperature = float(kwargs.pop("temperature", self.temperature))
+            max_tokens = int(kwargs.pop("max_tokens", self.max_tokens))
             stream = self.client.chat.completions.create(
-                model=self.model_name,
+                model=model,
                 messages=messages,
-                max_tokens=self.max_tokens,
+                max_tokens=max_tokens,
                 temperature=temperature,
                 stream=True,
                 **kwargs
@@ -302,11 +308,13 @@ class OpenAIChatLLM(ChatLLMBase):
             return await asyncio.to_thread(self.chat, messages, **kwargs)
 
         try:
-            temperature = kwargs.pop("temperature", self.temperature)
+            model = kwargs.pop("model", self.model_name)
+            temperature = float(kwargs.pop("temperature", self.temperature))
+            max_tokens = int(kwargs.pop("max_tokens", self.max_tokens))
             response = await self.async_client.chat.completions.create(
-                model=self.model_name,
+                model=model,
                 messages=messages,
-                max_tokens=self.max_tokens,
+                max_tokens=max_tokens,
                 temperature=temperature,
                 **kwargs
             )
@@ -352,11 +360,13 @@ class OpenAIChatLLM(ChatLLMBase):
             return
 
         try:
-            temperature = kwargs.pop("temperature", self.temperature)
+            model = kwargs.pop("model", self.model_name)
+            temperature = float(kwargs.pop("temperature", self.temperature))
+            max_tokens = int(kwargs.pop("max_tokens", self.max_tokens))
             stream = await self.async_client.chat.completions.create(
-                model=self.model_name,
+                model=model,
                 messages=messages,
-                max_tokens=self.max_tokens,
+                max_tokens=max_tokens,
                 temperature=temperature,
                 stream=True,
                 **kwargs

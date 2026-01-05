@@ -14,6 +14,13 @@ from framework.singleton_decorator import singleton
 
 _UNRESOLVED_ENV_PLACEHOLDER = object()
 
+try:  # Centralized placeholder policy lives in config/
+    from config.env_placeholder_policy import ENV_DEFAULTS as _ENV_DEFAULTS
+    from config.env_placeholder_policy import SILENT_MISSING_ENV_VARS as _SILENT_MISSING_ENV_VARS
+except Exception:  # pragma: no cover - defensive for minimal runtimes
+    _ENV_DEFAULTS = {}
+    _SILENT_MISSING_ENV_VARS = set()
+
 @singleton
 class Register:
     """
@@ -43,6 +50,11 @@ class Register:
                 var_name = whole.group(1)
                 env_value = os.getenv(var_name)
                 if not env_value:
+                    default_value = _ENV_DEFAULTS.get(var_name)
+                    if default_value is not None:
+                        return default_value
+                    if var_name in _SILENT_MISSING_ENV_VARS:
+                        return _UNRESOLVED_ENV_PLACEHOLDER
                     logger.warning(
                         "Environment variable '%s' is not set, omitting placeholder value %r",
                         var_name,
@@ -56,6 +68,11 @@ class Register:
                 var_name = match.group(1)
                 env_value = os.getenv(var_name)
                 if not env_value:
+                    default_value = _ENV_DEFAULTS.get(var_name)
+                    if default_value is not None:
+                        return default_value
+                    if var_name in _SILENT_MISSING_ENV_VARS:
+                        return match.group(0)
                     # Environment variable not set - log warning and return original
                     logger.warning(f"Environment variable '{var_name}' is not set, using placeholder '{match.group(0)}'")
                     return match.group(0)  # Return original placeholder

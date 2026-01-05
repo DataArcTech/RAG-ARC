@@ -33,7 +33,16 @@ class _DummyRetriever:
 
 async def _run_executor(context: GraphQueryContext, retriever: _DummyRetriever):
     adapter = HippoRAGGraphAdapter(retriever=retriever, default_top_k=1, summary_max_chunks=1)
-    executor = GraphTraversalExecutor(adapter=adapter, settings=GraphTraversalSettings(chain_depth=1))
+    executor = GraphTraversalExecutor(
+        adapter=adapter,
+        settings=GraphTraversalSettings(
+            strategy_name="ppr_chain",
+            allow_semantic_channel=True,
+            chain_depth=1,
+            parallel_branches=1,
+            step_summary_max_chars=2000,
+        ),
+    )
     plan = [
         PlanSpec(
             step_id="plan_01",
@@ -42,7 +51,7 @@ async def _run_executor(context: GraphQueryContext, retriever: _DummyRetriever):
             metadata={},
         )
     ]
-    await executor.run(plan, context)
+    await executor.run(plan, context, tool_name="graph_adapter.query")
 
 
 @pytest.mark.asyncio
@@ -62,7 +71,16 @@ async def test_adapter_uses_owner_scope_for_retrieval():
 async def test_adapter_isolated_for_multiple_owners():
     retriever = _DummyRetriever()
     adapter = HippoRAGGraphAdapter(retriever=retriever, default_top_k=1, summary_max_chunks=1)
-    executor = GraphTraversalExecutor(adapter=adapter, settings=GraphTraversalSettings(chain_depth=1))
+    executor = GraphTraversalExecutor(
+        adapter=adapter,
+        settings=GraphTraversalSettings(
+            strategy_name="ppr_chain",
+            allow_semantic_channel=True,
+            chain_depth=1,
+            parallel_branches=1,
+            step_summary_max_chars=2000,
+        ),
+    )
     plan = [
         PlanSpec(step_id="plan_01", description="hop one", channel="graph", metadata={}),
     ]
@@ -70,8 +88,8 @@ async def test_adapter_isolated_for_multiple_owners():
     ctx_a = GraphQueryContext(adapter_name="hipporag", owner_id="alice", question="Q1")
     ctx_b = GraphQueryContext(adapter_name="hipporag", owner_id="bob", question="Q2")
 
-    await executor.run(plan, ctx_a)
-    await executor.run(plan, ctx_b)
+    await executor.run(plan, ctx_a, tool_name="graph_adapter.query")
+    await executor.run(plan, ctx_b, tool_name="graph_adapter.query")
 
     assert len(retriever.calls) == 2
     owners = [kwargs["owner_id"] for _, kwargs in retriever.calls]

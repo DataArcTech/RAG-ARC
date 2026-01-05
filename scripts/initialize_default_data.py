@@ -30,6 +30,7 @@ from encapsulation.data_model.orm_models import (
     UserStatus
 )
 from config.encapsulation.database.relational_db.postgresql_config import PostgreSQLConfig
+from encapsulation.database.relational_db.schema_patches import apply_postgres_schema_patches
 
 logging.basicConfig(
     level=logging.INFO,
@@ -161,11 +162,9 @@ def create_admin_user(session, default_dept, admin_role):
     # Create admin user
     admin_user = User(
         user_name="admin",
-        email="admin@rag-arc.local",
         hashed_password=pwd_context.hash("admin123"),  # Default password
         department_id=default_dept.id,
         role_id=admin_role.id,
-        full_name="System Administrator",
         status=UserStatus.ACTIVE,
         created_at=datetime.now(),
         updated_at=datetime.now()
@@ -194,6 +193,7 @@ def main():
         # Create tables if they don't exist
         logger.info("Creating database schema...")
         Base.metadata.create_all(db.engine)
+        apply_postgres_schema_patches(db.engine)
         logger.info("Database schema ready")
         
         # Start transaction
@@ -225,7 +225,7 @@ def main():
             logger.info(f"Roles created: {len(roles)}")
             for role_type, role in roles.items():
                 logger.info(f"  - {role.name} ({role_type.value})")
-            logger.info(f"Admin User: {admin_user.user_name} ({admin_user.email})")
+            logger.info(f"Admin User: {admin_user.user_name} ({admin_user.id})")
             logger.info("=" * 80)
             logger.info("✅ Initialization completed successfully!")
             logger.info("=" * 80)
@@ -254,4 +254,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

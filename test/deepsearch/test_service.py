@@ -9,6 +9,37 @@ from encapsulation.data_model.deepsearch import GraphQueryContext
 from core.graph_adapter.base import GraphAccessScope
 
 
+def _default_service_config(*, tmp_path, fingerprint: str, **overrides):  # noqa: ANN001
+    base = {
+        "fingerprint": fingerprint,
+        "artifact_dir": str(tmp_path / "artifacts"),
+        "experiment_output_dir": None,
+        "coverage_expected_min_chunks": 1,
+        "tool_names": {
+            "graph_channel_tool": "graph_adapter.query",
+            "text_channel_tool": "graph.context_rollup",
+            "web_channel_tool": "web.search",
+            "think_tool": "graph.think",
+        },
+        "quality_loop": {
+            "enabled": False,
+            "max_rounds": 1,
+            "min_citation_sentence_coverage": 1.0,
+            "require_consistency": False,
+            "max_uncited_sentences": 0,
+            "max_actions": 0,
+            "enable_llm_judge": True,
+            "judge_temperature": 0.0,
+            "judge_max_retries": 1,
+            "judge_max_evidence_items": 1,
+            "judge_max_evidence_chars": 200,
+            "trigger_external_on_quality_failure": False,
+        },
+    }
+    base.update(overrides)
+    return base
+
+
 class _StubPlanner:
     def __init__(self):
         self.scopes: List[GraphAccessScope] = []
@@ -25,7 +56,14 @@ class _StubPlanner:
             "plan": {
                 "plan_id": "plan-test",
                 "question": question,
-                "steps": [],
+                "steps": [
+                    {
+                        "step_id": "plan_01",
+                        "description": "Collect evidence",
+                        "channel": "graph",
+                        "metadata": {},
+                    }
+                ],
                 "graph_context": context.model_dump(exclude_none=True),
             },
         }
@@ -53,7 +91,13 @@ class _StubGraphLoop:
             "reasoning_steps": [],
             "evidences": [],
             "tool_results": [],
-            "pending_external": [],
+            "pending_external": [
+                {
+                    "step_id": "gap_web_01",
+                    "metadata": {"query": question},
+                    "tool_args": {"query": question},
+                }
+            ],
             "think_notes": [],
             "coverage_metrics": {},
         }
@@ -94,8 +138,9 @@ class _StubReporter:
 
 
 class _QualityLoopReporter:
-    def __init__(self):
+    def __init__(self, *, llm_connector):
         self.calls = 0
+        self.llm_connector = llm_connector
 
     def compose(self, reasoning_trace: Dict[str, Any], external_evidence=None):
         self.calls += 1
@@ -106,6 +151,8 @@ class _QualityLoopReporter:
         if self.calls == 1:
             structured_report = {
                 "title": "stub",
+                "short_answer": "This sentence makes a concrete factual claim without citations. "
+                "This second sentence also lacks citations and should trigger the quality gate.",
                 "summary": "This sentence makes a concrete factual claim without citations. "
                 "This second sentence also lacks citations and should trigger the quality gate.",
                 "sections": [
@@ -118,6 +165,8 @@ class _QualityLoopReporter:
         else:
             structured_report = {
                 "title": "stub",
+                "short_answer": "This sentence is supported by evidence [ev2]. "
+                "This second sentence is also supported [ev1].",
                 "summary": "This sentence is supported by evidence [ev2]. "
                 "This second sentence is also supported [ev1].",
                 "sections": [
@@ -168,8 +217,25 @@ class _StubExternalChannel:
         }
 
 
+class _StubBudgetAwareGraphLoop(_StubGraphLoop):
+    def __init__(self):
+        super().__init__()
+        self.received_overrides: List[Dict[str, Any] | None] = []
+
+    async def run(
+        self,
+        question: str,
+        plan_steps: Sequence[Dict[str, Any]],
+        *,
+        graph_context: GraphQueryContext,
+        settings_override: Dict[str, Any] | None = None,
+    ):
+        self.received_overrides.append(settings_override)
+        return await super().run(question, plan_steps, graph_context=graph_context)
+
+
 @pytest.mark.asyncio
-async def test_service_converts_owner_to_scope():
+async def test_service_converts_owner_to_scope(tmp_path):
     planner = _StubPlanner()
     graph_loop = _StubGraphLoop()
     service = DeepSearchService(
@@ -178,7 +244,7 @@ async def test_service_converts_owner_to_scope():
         gap_detector=_StubGapDetector(),
         reporter=_StubReporter(),
         tool_manager=_StubToolManager(),
-        config={"fingerprint": "service-test"},
+        config=_default_service_config(tmp_path=tmp_path, fingerprint="service-test"),
     )
 
     metadata = {"priority": "urgent"}
@@ -199,8 +265,7 @@ async def test_service_converts_owner_to_scope():
 
 
 @pytest.mark.asyncio
-async def test_service_persists_experiment_snapshot(tmp_path, monkeypatch):
-    monkeypatch.setenv("DEEPSEARCH_EXPERIMENT_OUTPUT_DIR", str(tmp_path))
+async def test_service_persists_experiment_snapshot(tmp_path):
     planner = _StubPlanner()
     graph_loop = _StubGraphLoop()
     service = DeepSearchService(
@@ -209,12 +274,12 @@ async def test_service_persists_experiment_snapshot(tmp_path, monkeypatch):
         gap_detector=_StubGapDetector(),
         reporter=_StubReporter(),
         tool_manager=_StubToolManager(),
-        config={"fingerprint": "experiment-test"},
+        config=_default_service_config(tmp_path=tmp_path, fingerprint="experiment-test", experiment_output_dir=str(tmp_path)),
     )
 
     await service.run("Run experiment", owner_id="tenant-321")
 
-    files = list(tmp_path.iterdir())
+    files = list(tmp_path.glob("*.json"))
     assert files, "Experiment snapshot should be persisted"
     payload = json.loads(files[0].read_text(encoding="utf-8"))
     assert payload["question"] == "Run experiment"
@@ -222,7 +287,7 @@ async def test_service_persists_experiment_snapshot(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_service_creates_external_task_when_gap_detected():
+async def test_service_creates_external_task_when_gap_detected(tmp_path):
     planner = _StubPlanner()
     graph_loop = _StubGraphLoop()
     external_channel = _StubExternalChannel()
@@ -233,7 +298,7 @@ async def test_service_creates_external_task_when_gap_detected():
         reporter=_StubReporter(),
         tool_manager=_StubToolManager(),
         external_channel=external_channel,
-        config={"fingerprint": "service-gap"},
+        config=_default_service_config(tmp_path=tmp_path, fingerprint="service-gap"),
     )
 
     result = await service.run("Need more info", owner_id="tenant-gap")
@@ -247,7 +312,7 @@ async def test_service_creates_external_task_when_gap_detected():
 
 
 @pytest.mark.asyncio
-async def test_service_surfaces_worker_failures_into_state_errors():
+async def test_service_surfaces_worker_failures_into_state_errors(tmp_path):
     planner = _StubPlanner()
     graph_loop = _StubGraphLoopWithWorkerError()
     service = DeepSearchService(
@@ -256,7 +321,7 @@ async def test_service_surfaces_worker_failures_into_state_errors():
         gap_detector=_StubGapDetector(),
         reporter=_StubReporter(),
         tool_manager=_StubToolManager(),
-        config={"fingerprint": "service-worker-errors"},
+        config=_default_service_config(tmp_path=tmp_path, fingerprint="service-worker-errors"),
     )
 
     result = await service.run("Explain HippoRAG impact", owner_id="tenant-123")
@@ -265,6 +330,39 @@ async def test_service_surfaces_worker_failures_into_state_errors():
     assert errors, "worker errors should be surfaced into state.errors"
     assert any(entry.get("stage") == "graph_reasoning" for entry in errors if isinstance(entry, dict))
 
+
+@pytest.mark.asyncio
+async def test_service_does_not_inject_budget_overrides_by_default(tmp_path):
+    planner = _StubPlanner()
+    graph_loop = _StubBudgetAwareGraphLoop()
+    service = DeepSearchService(
+        planner=planner,
+        graph_loop=graph_loop,
+        gap_detector=_StubGapDetector(),
+        reporter=_StubReporter(),
+        tool_manager=_StubToolManager(),
+        config=_default_service_config(tmp_path=tmp_path, fingerprint="service-budget"),
+    )
+
+    await service.run("Hello", owner_id="tenant-123")
+    assert graph_loop.received_overrides == [None]
+
+
+@pytest.mark.asyncio
+async def test_service_keeps_default_budget_for_complex_questions(tmp_path):
+    planner = _StubPlanner()
+    graph_loop = _StubBudgetAwareGraphLoop()
+    service = DeepSearchService(
+        planner=planner,
+        graph_loop=graph_loop,
+        gap_detector=_StubGapDetector(),
+        reporter=_StubReporter(),
+        tool_manager=_StubToolManager(),
+        config=_default_service_config(tmp_path=tmp_path, fingerprint="service-budget"),
+    )
+
+    await service.run("Compare approaches and provide citations", owner_id="tenant-123")
+    assert graph_loop.received_overrides == [None]
 
 class _GraphLoopTwoPasses:
     def __init__(self):
@@ -301,21 +399,84 @@ class _GraphLoopTwoPasses:
 
 
 @pytest.mark.asyncio
-async def test_service_quality_loop_triggers_followup_round(monkeypatch):
-    monkeypatch.setenv("DEEPSEARCH_QUALITY_LOOP_ENABLED", "true")
-    monkeypatch.setenv("DEEPSEARCH_QUALITY_LOOP_MAX_ROUNDS", "2")
-    monkeypatch.setenv("DEEPSEARCH_QUALITY_LOOP_MIN_CITATION_SENTENCE_COVERAGE", "0.8")
+async def test_service_quality_loop_triggers_followup_round(tmp_path):
+    class _QualityGateLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def chat(self, messages, **kwargs):  # noqa: ANN001
+            self.calls += 1
+            if self.calls == 1:
+                return json.dumps(
+                    {
+                        "pass": False,
+                        "overall": 0.2,
+                        "scores": {
+                            "factual_accuracy": 0.5,
+                            "citation_accuracy": 0.0,
+                            "completeness": 0.6,
+                            "source_quality": 0.8,
+                        },
+                        "reasons": ["Missing citations in short_answer/sections."],
+                        "missing_topics": [],
+                        "missing_claims": ["Provide cited support for the key claims."],
+                        "next_actions": [
+                            {
+                                "action": "graph_search",
+                                "query": "ev2",
+                                "rationale": "Retrieve additional authoritative evidence to cite.",
+                                "priority": 1,
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            return json.dumps(
+                {
+                    "pass": True,
+                    "overall": 0.9,
+                    "scores": {
+                        "factual_accuracy": 0.9,
+                        "citation_accuracy": 0.9,
+                        "completeness": 0.9,
+                        "source_quality": 0.9,
+                    },
+                    "reasons": [],
+                    "missing_topics": [],
+                    "missing_claims": [],
+                    "next_actions": [],
+                },
+                ensure_ascii=False,
+            )
 
     planner = _StubPlanner()
     graph_loop = _GraphLoopTwoPasses()
-    reporter = _QualityLoopReporter()
+    llm = _QualityGateLLM()
+    reporter = _QualityLoopReporter(llm_connector=llm)
     service = DeepSearchService(
         planner=planner,
         graph_loop=graph_loop,
         gap_detector=_StubGapDetector(),
         reporter=reporter,
         tool_manager=_StubToolManager(),
-        config={"fingerprint": "service-quality-loop"},
+        config=_default_service_config(
+            tmp_path=tmp_path,
+            fingerprint="service-quality-loop",
+            quality_loop={
+                "enabled": True,
+                "max_rounds": 2,
+                "min_citation_sentence_coverage": 0.8,
+                "require_consistency": False,
+                "max_uncited_sentences": 6,
+                "max_actions": 6,
+                "enable_llm_judge": True,
+                "judge_temperature": 0.0,
+                "judge_max_retries": 1,
+                "judge_max_evidence_items": 5,
+                "judge_max_evidence_chars": 200,
+                "trigger_external_on_quality_failure": False,
+            },
+        ),
     )
 
     result = await service.run("Need citations", owner_id="tenant-ql")

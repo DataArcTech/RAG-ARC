@@ -7,14 +7,11 @@ from tqdm import tqdm
 from multiprocessing.pool import ThreadPool
 from PIL import Image
 import fitz
-from dotenv import load_dotenv
-
-load_dotenv()
 
 from .base import AbstractParser
 from framework.singleton_decorator import singleton
 from framework.thread_pool import get_thread_pool
-from core.utils.path_guard import ensure_writable_dir
+from core.utils.path_guard import require_writable_dir
 
 # Import DotsOCR utilities
 from .dots_ocr_utils.image_utils import fetch_image, smart_resize, get_image_by_fitz_doc
@@ -72,10 +69,9 @@ class DotsOCRParser(AbstractParser):
     ) -> List[Dict[str, Any]]:
         """Parse a file (PDF or image) from binary data"""
 
-        # Get parsing parameters from config
-        prompt_mode = getattr(self.config, 'default_prompt_mode', "prompt_layout_all_en")
-        bbox = getattr(self.config, 'default_bbox', None)
-        fitz_preprocess = getattr(self.config, 'default_fitz_preprocess', False)
+        prompt_mode = getattr(self.config, "default_prompt_mode")
+        bbox = getattr(self.config, "default_bbox")
+        fitz_preprocess = bool(getattr(self.config, "default_fitz_preprocess"))
 
         # Check if file type is supported
         base_filename, file_ext = os.path.splitext(filename)
@@ -87,11 +83,10 @@ class DotsOCRParser(AbstractParser):
             logger.error(error_msg)
             raise ValueError(error_msg)
 
-        # Get output directory from environment variable
-        output_dir = os.getenv('DOTSOCR_OUTPUT_DIR', './dotsorc/output')
-        runtime_root = os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime")
-        fallback_dir = os.path.join(runtime_root, "dotsocr_output")
-        output_dir = ensure_writable_dir(os.path.abspath(output_dir), fallback_dir)
+        output_dir = getattr(self.config, "output_dir", None)
+        if not isinstance(output_dir, str) or not output_dir.strip():
+            raise ValueError("DotsOCRParser requires config.output_dir (no implicit env defaults).")
+        output_dir = require_writable_dir(output_dir)
         save_dir = os.path.join(output_dir, base_filename)
         os.makedirs(save_dir, exist_ok=True)
 
@@ -168,7 +163,7 @@ class DotsOCRParser(AbstractParser):
         for page_num in range(len(pdf_doc)):
             page = pdf_doc.load_page(page_num)
             # Convert page to image at specified DPI
-            dpi = getattr(self.config, 'dpi', 200)
+            dpi = int(getattr(self.config, "dpi"))
             mat = fitz.Matrix(dpi/72, dpi/72)
             pix = page.get_pixmap(matrix=mat)
             img_data = pix.tobytes("ppm")
@@ -193,7 +188,7 @@ class DotsOCRParser(AbstractParser):
             return self._parse_single_image(**task_args)
 
         # Use single thread for stability
-        num_threads = min(total_pages, getattr(self.config, 'num_threads', 1))
+        num_threads = min(total_pages, int(getattr(self.config, "num_threads")))
         logger.info(f"Parsing PDF with {total_pages} pages using {num_threads} threads...")
 
         results = []
@@ -224,14 +219,8 @@ class DotsOCRParser(AbstractParser):
         min_pixels = getattr(self.config, 'min_pixels', None)
         max_pixels = getattr(self.config, 'max_pixels', None)
 
-        # Read max_pixels from config file (default value in config class is 4000000)
-        # If still None, use MAX_PIXELS as fallback
         if max_pixels is None:
-            max_pixels = MAX_PIXELS
-            logger.warning(
-                f"max_pixels not configured, using MAX_PIXELS ({MAX_PIXELS}) as fallback. "
-                f"To avoid GPU OOM, set max_pixels=4000000 in config file."
-            )
+            raise ValueError("DotsOCRParser config.max_pixels must be set (no implicit fallbacks).")
 
         if prompt_mode == "prompt_grounding_ocr":
             min_pixels = min_pixels or MIN_PIXELS
@@ -242,7 +231,7 @@ class DotsOCRParser(AbstractParser):
             assert max_pixels <= MAX_PIXELS
 
         if source == 'image' and fitz_preprocess:
-            image = get_image_by_fitz_doc(origin_image, target_dpi=getattr(self.config, 'dpi', 200))
+            image = get_image_by_fitz_doc(origin_image, target_dpi=int(getattr(self.config, "dpi")))
             image = fetch_image(image, min_pixels=min_pixels, max_pixels=max_pixels)
         else:
             image = fetch_image(origin_image, min_pixels=min_pixels, max_pixels=max_pixels)

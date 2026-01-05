@@ -92,6 +92,14 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
         description="PPR computation backend: 'push' (fast, recommended) or 'igraph' (fallback)"
     )
 
+    ppr_directed_mode: Literal["off", "auto", "on"] = Field(
+        default="auto",
+        description=(
+            "Whether to run direction-aware PPR for direction-sensitive predicates. "
+            "'auto' enables directed PPR when kg_schema declares direction_sensitive_relations; "
+            "'on' forces directed PPR; 'off' keeps legacy undirected behaviour."
+        ),
+    )
+
     def build(self):
         return PrunedHippoRAGNeo4jRetriever(config=self)
-

@@ -19,6 +19,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import typer
 
+from framework.runtime_warnings import configure_runtime_warnings
+
+configure_runtime_warnings()
+
 from application.knowledge.module import Knowledge
 from application.rag_inference.cli_module import (
     PipelineArtifacts,
@@ -690,6 +694,16 @@ def delete_file(
 def trigger_index(
     file_ids: List[str] = typer.Argument(..., help="One or more file IDs to re-index.", metavar="FILE_ID"),
     owner_id: str = typer.Option(None, help="Optional owner UUID overriding default."),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Re-index files even when their status is already INDEXED (skips only when in progress).",
+    ),
+    wait: bool = typer.Option(
+        True,
+        "--wait/--no-wait",
+        help="Wait for indexing to finish (recommended for CLI runs without Celery).",
+    ),
 ) -> None:
     """Trigger indexing for existing files."""
     if not file_ids:
@@ -698,7 +712,7 @@ def trigger_index(
     ctx = initialize(owner_id=owner_id)
     knowledge = _get_knowledge_module()
     try:
-        message = asyncio.run(knowledge.trigger_indexing(file_ids, ctx.owner_id))
+        message = asyncio.run(knowledge.trigger_indexing(file_ids, ctx.owner_id, force=force, wait=wait))
     except Exception as exc:  # noqa: BLE001
         typer.secho(f"Failed to trigger indexing: {exc}", fg=typer.colors.RED)
         raise typer.Exit(code=1)

@@ -1,26 +1,77 @@
-# Environment Configuration (English)
+# Environment variables (minimal `.env`) + full reference
 
-All runtime behavior is controlled through `.env`. By default, `.env.example` already contains values that work for local development (Docker services on `localhost`). Only the model/API credentials typically require edits. This document describes every variable, grouped by subsystem.
+RAG-ARC uses two configuration layers:
+
+- **`.env`**: secrets + feature switches (recommended for most users).
+- **`config/`**: all tunable parameters (retrieval/chunking/top_k/thresholds/budgets/paths/etc.).
+
+The runtime still supports many environment variables as **override knobs** for compatibility.
+This document explains **all** supported env variables and what each one means.
+
+Recommended workflow:
+1) Keep `.env` small (only secrets / enablement).
+2) Tune behavior via `config/` (JSON + Python).
+
+---
+
+## 0. Minimal `.env` (recommended)
+
+Start from:
+
+```bash
+cp .env.example .env
+```
+
+Required secrets (no defaults):
+- `OPENAI_API_KEY` / `OPENAI_BASE_URL` (or component-specific `CHAT_*` / `EMBEDDING_*` / `OCR_*`)
+- `JWT_SECRET_KEY` (generate with `openssl rand -hex 32`)
+
+Optional feature switches (have defaults):
+- `TASK_QUEUE_MODE`, `MODEL_PROFILE`, `DEVELOP_MODE`, `ADMIN_OWNER_ID`
+
+Optional external web search (only if enabled in config):
+- `TAVILY_API_KEY`
+
+Optional infrastructure overrides (defaults work for local/Docker; set only when needed):
+- PostgreSQL: `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
+- Redis: `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, `REDIS_PASSWORD`
+- Neo4j: `NEO4J_URL`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`
+
+---
+
+## 0.1 Advanced configuration (edit `config/`, not `.env`)
+
+Recommended places to tune parameters:
+
+- `config/json_configs/rag_inference*.json`: chat pipeline, retrievers, rerankers, model selection.
+- `config/json_configs/knowledge*.json`: parsing, chunking, indexing/graph build.
+- `config/json_configs/deepsearch_service.json`: DeepSearch planner/tools/report/quality gates.
+- `config/output_limits.py`: response trimming / evidence caps.
+- `config/core/deepsearch/*_defaults.py`: DeepSearch loop/tool/report defaults used at runtime.
+
+How secrets flow into configs:
+- JSON supports `${ENV_VAR}` placeholders (e.g. `${OPENAI_API_KEY}`), so keep secrets in `.env` and reference them from `config/`.
 
 ## 1. Model & LLM Providers
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `CHAT_MODEL_PROVIDER` | `openai` | Chat provider (`openai` = OpenAI-compatible API, `huggingface` = local Transformers). |
-| `CHAT_MODEL_NAME` | _(empty)_ | Optional preferred chat model name (overrides `OPENAI_CHAT_MODEL` when set). |
+| `CHAT_MODEL_NAME` | _(empty)_ | Optional preferred chat model name. When `CHAT_MODEL_PROVIDER=huggingface`, this can be a HuggingFace repo id or a local filesystem path. |
 | `CHAT_MODEL_DEVICE` | `cpu` | HuggingFace chat runtime device (used when `CHAT_MODEL_PROVIDER=huggingface`). |
 | `CHAT_MODEL_CACHE_FOLDER` | _(empty)_ | Optional HuggingFace cache folder for chat weights/tokenizers. |
-| `CHAT_API_KEY` | _(empty)_ | API key for chat provider (required for hosted APIs). |
-| `CHAT_API_BASE_URL` | _(empty)_ | Base URL for OpenAI-compatible chat endpoints (e.g. `https://api.openai.com/v1`). |
+| `CHAT_API_KEY` | _(empty)_ | **Required** (when `CHAT_MODEL_PROVIDER=openai`): API key for chat provider. |
+| `CHAT_API_BASE_URL` | _(empty)_ | **Required** (when `CHAT_MODEL_PROVIDER=openai`): Base URL for OpenAI-compatible chat endpoints (e.g. `https://api.openai.com/v1`). |
 | `OPENAI_CHAT_MODEL` | `gpt-4o-mini` | Legacy/default chat model name used when `CHAT_MODEL_NAME` is empty. |
+| `LOW_COST_MODEL` | _(empty)_ | Optional: cheaper model used for exploration-heavy calls (planning/reflection/quality checks). When empty, the system reuses the main chat model. |
 | `OPENAI_API_BASE` | _(empty)_ | Optional legacy alias for OpenAI-compatible base URL. |
 | `EMBEDDING_MODEL_PROVIDER` | `openai` | Embedding provider (`openai` = OpenAI-compatible API, `huggingface` = local SentenceTransformers). |
-| `EMBEDDING_API_KEY` | _(empty)_ | API key for embedding provider (required for hosted APIs). |
-| `EMBEDDING_API_BASE_URL` | _(empty)_ | Base URL for OpenAI-compatible embedding endpoints. |
+| `EMBEDDING_API_KEY` | _(empty)_ | **Required** (when `EMBEDDING_MODEL_PROVIDER=openai`): API key for embedding provider. |
+| `EMBEDDING_API_BASE_URL` | _(empty)_ | **Required** (when `EMBEDDING_MODEL_PROVIDER=openai`): Base URL for OpenAI-compatible embedding endpoints. |
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Default embedding model name. |
 | `EMBEDDING_DEVICE` | `cpu` | HuggingFace embedding runtime device (used when `EMBEDDING_MODEL_PROVIDER=huggingface`). |
 | `EMBEDDING_CACHE_FOLDER` | _(empty)_ | Optional HuggingFace cache folder for embedding weights. |
-| `EMBEDDING_DIMENSIONS` | _(empty)_ | Required for local HuggingFace embeddings: embedding vector dimension. For OpenAI-compatible APIs you can leave it empty (auto-detected) or set it to override. |
+| `EMBEDDING_DIMENSIONS` | _(empty)_ | Optional override for embedding vector dimension. When empty, the system can auto-detect the dimension (and will cache it). |
 | `OCR_MODEL_PROVIDER` | `openai` | OCR/VLM provider (`openai`, `vllm`, `dots_ocr`). |
 | `OCR_API_KEY` | _(empty)_ | API key for OCR provider (required for hosted APIs). |
 | `OCR_API_BASE_URL` | _(empty)_ | Base URL for OCR provider. |
@@ -41,10 +92,10 @@ All runtime behavior is controlled through `.env`. By default, `.env.example` al
 | `RERANKER_MODEL_NAME` | `Qwen/Qwen3-Reranker-0.6B` | Default local reranker model name (used when `MODEL_PROFILE=local`). |
 | `RERANKER_CACHE_FOLDER` | `./models/Qwen` | Cache path for reranker checkpoints. |
 | `RERANKER_DEVICE` | `cpu` | Reranker runtime device. |
-| `OPENAI_API_KEY` | _(empty)_ | Optional shared key reused across OpenAI-compatible modules when component-specific keys are empty. |
-| `OPENAI_BASE_URL` | _(empty)_ | Optional shared base URL reused across OpenAI-compatible modules. |
+| `OPENAI_API_KEY` | _(empty)_ | Shared fallback key (used when component-specific keys are empty). **Required** when any OpenAI-compatible module runs with its `*_API_KEY` unset. |
+| `OPENAI_BASE_URL` | _(empty)_ | Shared fallback base URL (used when component-specific base URLs are empty). **Required** when any OpenAI-compatible module runs with its `*_API_BASE_URL` unset. |
 | `DEVICE` | `cpu` | Optional shared default device used when component-specific device vars are empty. |
-| `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | Local HuggingFace embedding model name when `EMBEDDING_MODEL_PROVIDER=huggingface`. |
+| `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | Embedding model name. When `EMBEDDING_MODEL_PROVIDER=huggingface`, this can be a HuggingFace repo id or a local filesystem path. |
 | `MODEL_PROFILE` | `api` | Chooses config profile (`api` or `local`). Impacts default JSON configs. |
 | `MINILM_MODEL_NAME` | `sentence-transformers/all-MiniLM-L6-v2` | Default MiniLM model repo id used by `download_models.py`. |
 | `MINILM_CACHE_FOLDER` | `./models/all-MiniLM-L6-v2` | Cache folder used by `download_models.py` when downloading MiniLM. |
@@ -53,14 +104,19 @@ All runtime behavior is controlled through `.env`. By default, `.env.example` al
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `FILE_STORE_BASE_PATH` | `./data/file_store` | Local blob store base path for original files. |
-| `PARSED_CONTENT_STORE_BASE_PATH` | `./data/parsed_content_store` | Parsed content store path. |
-| `CHUNK_STORE_BASE_PATH` | `./data/chunk_store` | Chunk store path. |
+| `FILE_STORE_BASE_PATH` | `./data/file_store` | Local blob store base path for original files (relative paths are resolved against the repo root). |
+| `PARSED_CONTENT_STORE_BASE_PATH` | `./data/parsed_content_store` | Parsed content store path (relative paths are resolved against the repo root). |
+| `CHUNK_STORE_BASE_PATH` | `./data/chunk_store` | Chunk store path (relative paths are resolved against the repo root). |
 | `LOCAL_BLOB_STORE_BASE_PATH` | `./data/files` | Legacy alias for `LOCAL_FILE_STORAGE_PATH` (only used when a JSON `base_path` is not provided). |
 | `FAISS_INDEX_PATH` | `./data/unified_faiss_index` | Unified FAISS index directory. |
 | `BM25_INDEX_PATH` | `./data/unified_bm25_index` | Unified BM25 index directory. |
 | `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | Graph index / embedding cache directory (Neo4j HippoRAG). |
 | `GRAPH_INDEX_NAME` | `index` | Graph index file name prefix. |
+| `KG_SCHEMA_PATH` | `./kg_schema.yml` | KG schema YAML path for Neo4j HippoRAG (predicate governance + direction-sensitive set). |
+
+Notes:
+- **FAISS fingerprint guard**: the FAISS `.pkl` metadata stores an `embedding_fingerprint` (provider/model/dim). If you switch embedding models/dimensions, set a new `FAISS_INDEX_PATH` (recommended) or rebuild the index; otherwise the system will fail-fast to avoid silent corruption.
+- **E2E isolation**: for real-service tests, point the path knobs above to an isolated directory (for example under `./local/e2e_*`) to avoid polluting `./data/*`.
 
 ## 2. Evidence Output Controls
 
@@ -79,6 +135,14 @@ All runtime behavior is controlled through `.env`. By default, `.env.example` al
 | `DEEPSEARCH_MAX_STAGE_HISTORY` | `10` | Maximum stage history entries returned in DeepSearch payloads. |
 | `DEEPSEARCH_MAX_EXTERNAL_CALLS` | `5` | Maximum external call entries returned in DeepSearch payloads. |
 | `DEEPSEARCH_MAX_TOOL_METADATA` | `5` | Maximum tool metadata entries returned in DeepSearch payloads. |
+| `DEEPSEARCH_WEAVER_EVIDENCE_PREVIEW_CHARS` | `180` | Evidence preview character limit in the DeepSearch Weaver trace rendering. |
+| `DEEPSEARCH_WEAVER_EVIDENCE_SAMPLE_COUNT` | `3` | Number of evidence samples included in the DeepSearch Weaver trace rendering. |
+| `DEEPSEARCH_GRAPH_EXPORT_MAX_EDGES` | `2000` | Hard cap on exported edges for DeepSearch subgraph visualization (Neo4j exporter). |
+| `KNOWLEDGE_GRAPH_EXPORT_MAX_NODES` | `1000` | Upper bound for `/knowledge/graph/export*` max_nodes to prevent expensive graph exports. |
+| `KNOWLEDGE_GRAPH_EXPORT_MAX_EDGES` | `5000` | Upper bound for `/knowledge/graph/export*` max_edges to prevent expensive graph exports. |
+| `GRAPH_EXPORT_CHUNK_CONTENT_PREVIEW_CHARS` | `240` | Maximum chunk content characters included in graph export payloads (visualization preview). |
+| `GRAPH_EXPORT_EDGE_FETCH_FACTOR` | `10` | Multiplier used by exporters to cap how many edges are fetched before sampling (fetch_limit = max_edges * factor). |
+| `GRAPH_EXPORT_EDGE_FETCH_MAX` | `50000` | Absolute cap for exporter edge fetch limits (prevents oversized Neo4j edge queries). |
 | `SEMANTIC_UNIT_MAX_MATCHED_SLICES` | `3` | Maximum slice snippets attached to a semantic-unit anchor (post-retrieval merge). |
 | `TABLE_MAX_MERGED_ROWS` | `30` | Maximum table data rows merged into a table anchor after retrieval. |
 | `SEMANTIC_UNIT_MAX_MERGED_SLICE_CHARS` | `1200` | Maximum characters appended per matched slice when merging into `anchor.content`. |
@@ -134,6 +198,63 @@ These knobs apply when the knowledge config selects `semantic_unit_chunker` (for
 | `REDIS_HOST_PORT` | `6379` | Host port exposed when `EXPOSE_REDIS=true`. |
 | `EXPOSE_REDIS` | `false` | Whether to expose Redis outside Docker. |
 
+## 5.1 Celery / Long-Task Queue (Celery + Redis)
+
+When `TASK_QUEUE_MODE=celery`, these long-running operations are executed by Celery workers and can scale across processes:
+- knowledge file indexing / deletion
+- DeepSearch `run_async` (SSE progress supports `last_event_id` replay)
+- knowledge export tasks: `/knowledge/graph/export_async`, `/knowledge/mindmap/export_async`
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `TASK_QUEUE_MODE` | `celery` | Background task mode: `inprocess` (in-API) or `celery` (distributed workers). |
+| `CELERY_BROKER_URL` | _(empty)_ | Broker URL (defaults to `redis://REDIS_HOST:REDIS_PORT/REDIS_DB` when empty). |
+| `CELERY_RESULT_BACKEND` | _(empty)_ | Result backend (defaults to broker; for long tasks prefer RedisTaskQueue result keys). |
+| `CELERY_QUEUE_INDEXING` | `indexing` | Queue name for indexing/deletion tasks. |
+| `CELERY_QUEUE_DEEPSEARCH` | `deepsearch` | Queue name for DeepSearch tasks. |
+| `CELERY_QUEUE_EXPORT` | `export` | Queue name for export tasks (graph/mindmap). When empty, falls back to `CELERY_QUEUE_INDEXING`. |
+| `CELERY_LOGLEVEL` | `info` | Worker log level (used by `./start.sh` when auto-starting workers). |
+| `CELERY_WORKER_CONCURRENCY` | `2` | Worker concurrency (processes/threads; used by `./start.sh` when auto-starting workers). |
+| `CELERY_WORKER_POOL` | `prefork` | Worker pool implementation (used by `./start.sh` when auto-starting workers). |
+| `CELERY_TASK_IGNORE_RESULT` | `true` | Disable Celery result-backend writes by default (recommended for long tasks). |
+| `CELERY_RESULT_EXPIRES_SECONDS` | `3600` | Expiration (seconds) for Celery result backend records. |
+| `CELERY_TASK_ACKS_LATE` | `true` | Acknowledge tasks only after completion (requires idempotency/locking). |
+| `CELERY_ACKS_ON_FAILURE_OR_TIMEOUT` | `true` | Acknowledge on failure/timeout (used with acks_late). |
+| `CELERY_REJECT_ON_WORKER_LOST` | `true` | Re-queue tasks when a worker is lost. |
+| `CELERY_WORKER_PREFETCH_MULTIPLIER` | `1` | Prefetch multiplier (long tasks usually want `1`). |
+| `CELERY_TASK_SOFT_TIME_LIMIT_SECONDS` | `0` | Soft time limit in seconds (`0` disables). |
+| `CELERY_TASK_TIME_LIMIT_SECONDS` | `0` | Hard time limit in seconds (`0` disables). |
+| `CELERY_VISIBILITY_TIMEOUT_SECONDS` | `86400` | Redis broker visibility timeout (seconds; must exceed max task runtime). |
+| `MQ_NAMESPACE` | `rag-arc:mq` | RedisTaskQueue namespace prefix. |
+| `MQ_TASK_RUN_TTL_SECONDS` | `86400` | TTL (seconds) for TaskRun KV records. |
+| `MQ_PROGRESS_TTL_SECONDS` | `86400` | TTL (seconds) for per-run progress streams / seq maps. |
+| `MQ_RESULT_TTL_SECONDS` | `86400` | TTL (seconds) for result keys. |
+| `MQ_RESULT_MAX_INLINE_BYTES` | `262144` | Max JSON size (bytes) stored inline in Redis; when exceeded, result is stored externally (local/MinIO) and Redis stores a small ref envelope (`0` disables externalization). |
+| `MQ_RESULT_STORE` | `local` | External result store backend: `local` or `minio`. |
+| `MQ_RESULT_LOCAL_DIR` | `local/mq_results` | Base directory for `local` external results. |
+| `MQ_RESULT_MINIO_ENDPOINT` | _(empty)_ | MinIO endpoint for `minio` result store (TODO implementation). |
+| `MQ_RESULT_MINIO_BUCKET` | _(empty)_ | MinIO bucket for `minio` result store (TODO implementation). |
+| `MQ_STREAM_MAXLEN` | `20000` | Max length for Redis Streams (approximate trimming). |
+| `MQ_FAILFAST_ON_REDIS_DOWN` | _(empty)_ | Whether to fail-fast when Redis is unavailable: default is fail-fast in `celery` mode and best-effort in `inprocess` mode. |
+| `FILE_OP_LOCK_TTL_SECONDS` | `21600` | Distributed file-operation lock TTL (seconds; shared by index/delete). |
+| `CELERY_TASK_MAX_RETRIES` | `3` | Maximum retry attempts for task exceptions. |
+| `CELERY_TASK_RETRY_COUNTDOWN_SECONDS` | `5` | Countdown (seconds) before retrying on exceptions. |
+| `CELERY_TASK_LOCK_MAX_RETRIES` | `30` | Maximum retry attempts when file lock is busy. |
+| `CELERY_TASK_LOCK_RETRY_COUNTDOWN_SECONDS` | `2` | Countdown (seconds) before retrying when file lock is busy. |
+| `MQ_AUTO_START_WORKERS` | `true` | Auto-start `rag-arc-worker-*` containers during `./start.sh` when `TASK_QUEUE_MODE=celery`. |
+| `MQ_SYNC_TO_POSTGRES_ENABLED` | `true` | Start `rag-arc-mq-sync` daemon during `./start.sh` to archive Redis Streams into Postgres. |
+| `MQ_SYNC_POLL_INTERVAL_SECONDS` | `2` | Sync poll interval seconds (daemon mode). |
+| `MQ_SYNC_BATCH_SIZE` | `2000` | Max stream entries read per sync pass. |
+| `MQ_SYNC_BLOCK_MS` | `1000` | Redis XREAD block time (ms) per sync pass (`0` disables blocking). |
+| `MQ_STARTUP_HEALTHCHECK` | `true` | Run a small MQ startup healthcheck during `./start.sh` (writes a tiny event, runs one sync pass, verifies tables). |
+
+### 5.1.1 Running locally / in tests
+
+- When `TASK_QUEUE_MODE=celery` and `MQ_AUTO_START_WORKERS=true`, `./start.sh` automatically starts the Celery worker containers.
+- Stop Celery workers: `./stop.sh` (or `bash scripts/mq_tools/stop_mq_workers_local.sh`).
+- Manual start (outside Docker): `bash scripts/mq_tools/start_mq_workers_local.sh` (loads `.env`, logs in `log/mq_workers/`).
+- Optional: archive Redis Streams into Postgres: `uv run python scripts/mq_tools/message_queue_sync.py --daemon` (or `--once`).
+
 ## 6. DeepSearch Defaults
 
 Planner/graph defaults. Leave as-is unless customizing behavior.
@@ -157,12 +278,17 @@ Planner/graph defaults. Leave as-is unless customizing behavior.
 | `DEEPSEARCH_PLANNER_MAX_RETRIES` | _(empty)_ | Optional: planner-specific retry count. |
 | `DEEPSEARCH_PERSIST_PLAN` | `true` | Persist plan JSON to disk. |
 | `DEEPSEARCH_PLAN_OUTPUT_DIR` | `./local/deepsearch_runs` | Folder for persisted plans. |
-| `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `./local/deepsearch_artifacts` | Output directory for tool telemetry. |
+| `DEEPSEARCH_ARTIFACT_DIR` | _(empty)_ | Optional: per-run DeepSearch artifact root (writes `run_id/plan_result.json`, `reasoning.json`, `report.json`, `report.md`, `state_snapshot.json`, etc.). |
+| `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `./local/deepsearch_artifacts` | Output directory for tool telemetry/artifacts. |
 | `DEEPSEARCH_ALLOW_EXTERNAL_CHANNEL` | `false` | Planner-only flag for emitting `web` steps (used when `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` is not set). |
 | `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` | `false` | Runtime override for external search enablement (config SoT: `external_channel.enabled` + `gap_detection.enable_external_on_gap`). |
+| `DEEPSEARCH_SECTIONWISE_WRITER` | `false` | Enable section-wise report writing with Memory Bank retrieval + recency retention. |
+| `DEEPSEARCH_BUDGET_TIER` | _(empty)_ | Optional runtime override for complexity→budget scaling (`low` / `default`); when empty, DeepSearch uses a heuristic based on the question. |
 | `DEEPSEARCH_TELEMETRY_ENABLED` | `true` | Enable telemetry capture for tool runs (local artifacts). |
 | `TAVILY_API_KEY` | _(empty)_ | API key for Tavily (when external search enabled). |
 | `DEEPSEARCH_WEB_PROVIDER` | _(empty)_ | External search routing hint (`tavily` / `tool` / `mcp`; unknown values fall back to `tavily`). |
+| `DEEPSEARCH_EXTERNAL_CACHE_MODE` | `auto` | External search record/replay mode: `off` / `record` / `replay` / `auto`. |
+| `DEEPSEARCH_EXTERNAL_CACHE_DIR` | `./local/deepsearch_artifacts/external_cache` | External search cache directory. |
 | `DEEPSEARCH_TOOL_HINTS` | _(empty)_ | JSON list to override planner tool hints. |
 | `DEEPSEARCH_TOOL_MCP_CONFIG_PATH` | _(empty)_ | Custom JSON config for tool MCP server. |
 | `DEEPSEARCH_TOOL_MCP_ADAPTER_CONFIG` | _(empty)_ | JSON file describing adapter overrides. |
@@ -175,6 +301,8 @@ Planner/graph defaults. Leave as-is unless customizing behavior.
 | `DEEPSEARCH_TOOL_MCP_TOOLS` | _(empty)_ | Optional comma separated tool allowlist. |
 | `DEEPSEARCH_ALLOW_SEMANTIC_CHANNEL` | `true` | Allow semantic traversal branch. |
 | `DEEPSEARCH_CHAIN_DEPTH` | `4` | Graph traversal depth. |
+| `DEEPSEARCH_TOOL_CONTEXT_MAX_EVIDENCES` | `5` | Max number of `context_evidences` sent to tool calls (recency retention). |
+| `DEEPSEARCH_TOOL_CONTEXT_MAX_CHARS` | `800` | Max characters per evidence content in tool prompts (truncates beyond this). |
 | `DEEPSEARCH_ENABLE_FINANCE_HOOKS` | `false` | Enable finance-specific heuristics. |
 | `DEEPSEARCH_MCP_SERVER_URI` | _(empty)_ | Remote MCP URI for DeepSearch (disable by default). |
 | `DEEPSEARCH_MCP_API_KEY` | _(empty)_ | API key for remote MCP. |
@@ -222,10 +350,12 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `JWT_SECRET_KEY` | `your-secret-key-change-this-in-production` | Secret used to sign JWT tokens. Replace in production. |
+| `JWT_SECRET_KEY` | _(empty)_ | JWT signing secret. If empty, the API auto-generates one and persists it under `RAGARC_RUNTIME_DIR` (default: `./local/runtime/jwt_secret_key`). Set explicitly in production. |
 | `HF_TOKEN` | _(empty)_ | HuggingFace token for downloading gated models (optional). |
 | `HF_ENDPOINT` | _(empty)_ | Optional HuggingFace endpoint override (e.g. `https://hf-mirror.com`). |
 | `LOG_LEVEL` | `INFO` | Python logging level (`DEBUG`, `INFO`, etc.). |
+| `RAGARC_DEPENDENCY_CHECK_MODE` | `warn` | Dependency check mode for app startup (Postgres/Redis/Neo4j): `off`/`warn`/`strict`. Note: the API startup currently defaults to `strict` when this env var is unset. |
+| `RAGARC_INDEXING_DEPENDENCY_CHECK_MODE` | `strict` | Dependency check mode for knowledge indexing tasks (used by `/knowledge/*` indexing and Celery tasks): `off`/`warn`/`strict`. Unit tests set this to `off` for hermetic runs. |
 
 ## 8. File Storage & Parser Paths
 
@@ -237,7 +367,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `VLMOCR_OUTPUT_DIR` | _(empty)_ | Optional override for VLM OCR output directory. |
 | `OCR_MODEL_NAME` | _(empty)_ | Optional backward-compatible OCR model name alias. |
 | `RAGARC_RUNTIME_DIR` | `./local/runtime` | Fallback runtime root when preferred local directories are not writable. |
-| `LOCAL_FILE_STORAGE_PATH` | `./data/files` | Default root for `local_blob_store` when JSON `base_path` is not provided. |
+| `LOCAL_FILE_STORAGE_PATH` | `./data/files` | Default root for `local_blob_store` when JSON `base_path` is not provided (relative paths are resolved against the repo root). |
 
 ## 9. Neo4j Graph Database
 
@@ -245,7 +375,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | --- | --- | --- |
 | `NEO4J_URL` | `bolt://localhost:7687` | Connection string for Neo4j. |
 | `NEO4J_USERNAME` | `neo4j` | Neo4j username. |
-| `NEO4J_PASSWORD` | `12345678` | Neo4j password. |
+| `NEO4J_PASSWORD` | _(empty)_ | Neo4j password. |
 | `NEO4J_DATABASE` | `neo4j` | Database name/alias. |
 | `EXPOSE_NEO4J` | `false` | Whether to expose Neo4j browser/bolt port. |
 | `NEO4J_HTTP_PORT` | `7474` | Host HTTP port when `EXPOSE_NEO4J=true`. |
@@ -258,12 +388,12 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINIO_USERNAME` | `ROOTNAME` | MinIO access key / username (used only when MinIO integration is enabled). |
 | `MINIO_PASSWORD` | `CHANGEME123` | MinIO secret key / password. |
 
-The `.env.example` also includes commented placeholders for:
+Common MinIO variables (set them only when enabling object storage integration):
 - `MINIO_ENDPOINT`
 - `MINIO_BUCKET`
 - `MINIO_SECURE`
 
-Uncomment and configure them only when integrating object storage for parsed files.
+These are not required for the default local/Docker setup.
 
 ## 11. Build / Advanced Runtime
 
@@ -346,8 +476,9 @@ Set to `1` (or any non-empty value) to opt-in when the required services/models 
 | `RUN_RAGARC_POSTGRES_TESTS` | _(empty)_ | Run Postgres-dependent test suites. |
 | `RUN_RAGARC_CHAT_STORAGE_TESTS` | _(empty)_ | Run chat-storage test suites. |
 | `RUN_RAGARC_VECTOR_TESTS` | _(empty)_ | Run vector-store test suites. |
+| `RUN_RAGARC_MQ_STRESS_TESTS` | _(empty)_ | Optional: run real-Redis message-queue stress smoke tests (`test/stress/test_mq_stress_real_redis.py`) when set to `1`. |
 | `RAGARC_E2E_TOKEN` | _(empty)_ | Token used by `test/test_complete_e2e_api.py` to authenticate API requests. |
 
 ---
 
-**Tip:** Copy `.env.example` to `.env`, fill in the API keys for the LLM provider you use, and everything else should function with Docker defaults. Adjust the remaining variables only when you need custom deployments or scopes.
+**Tip:** Copy `.env.example` to `.env`, fill in the required secrets (`OPENAI_API_KEY`/`OPENAI_BASE_URL` (or per-module `*_API_KEY`/`*_API_BASE_URL`) and `JWT_SECRET_KEY`), and the rest should work with built-in defaults. For advanced tuning, prefer changing `config/` (JSON/Python) over adding many env overrides.

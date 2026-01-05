@@ -1,11 +1,10 @@
 from typing import List, Optional, Dict, Any, Tuple, TYPE_CHECKING
 import logging
-import os
 from pathlib import Path
 
 from core.file_management.parser.base import AbstractParser
 from framework.module import AbstractModule
-from core.utils.path_guard import ensure_writable_dir
+from core.utils.path_guard import require_writable_dir
 
 if TYPE_CHECKING:
     from config.core.file_management.parser_combinator_config import ParserCombinatorConfig
@@ -23,8 +22,7 @@ class ParserCombinator(AbstractModule):
 
     Features:
     - Automatic parser selection based on file extension
-    - Fallback mechanism if primary parser fails
-    - Support for all file types from both parsers
+    - Support for all file types from configured parsers
     - Configurable parser instances
 
     Architecture:
@@ -37,41 +35,24 @@ class ParserCombinator(AbstractModule):
         """Initialize ParserCombinator with OCR and Native parsers"""
         super().__init__(config)
 
-        # Get base output directory from config
-        base_output_dir = getattr(self.config, 'base_output_dir', './data/parsed_files')
-        fallback_base = os.path.join(
-            os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime"),
-            "parsed_files"
-        )
-        base_output_dir = ensure_writable_dir(base_output_dir, fallback_base)
-        logger.info(f"ParserCombinator base output directory: {base_output_dir}")
-        os.environ.setdefault("PARSER_OUTPUT_DIR", base_output_dir)
-
-        runtime_root = os.getenv("RAGARC_RUNTIME_DIR", "./local/runtime")
+        base_output_dir = getattr(self.config, "base_output_dir", None)
+        if not isinstance(base_output_dir, str) or not base_output_dir.strip():
+            raise ValueError("ParserCombinator requires config.base_output_dir")
+        self.base_output_dir = require_writable_dir(base_output_dir)
+        logger.info("ParserCombinator base output directory: %s", self.base_output_dir)
 
         # Build OCR parser if configured
         ocr_parser_config = getattr(self.config, 'ocr_parser', None)
         if ocr_parser_config is not None:
             logger.info(f"Building OCR parser: {ocr_parser_config.type}")
-
-            # Set output directory for OCR parser based on type
-            if ocr_parser_config.type == "dots_ocr_parser":
-                ocr_output_dir = os.path.join(base_output_dir, "dots_ocr")
-                ocr_output_dir = ensure_writable_dir(
-                    ocr_output_dir,
-                    os.path.join(runtime_root, "dots_ocr")
-                )
-                os.environ['DOTSOCR_OUTPUT_DIR'] = ocr_output_dir
-                logger.info(f"DotsOCR output directory: {ocr_output_dir}")
-            elif ocr_parser_config.type == "vlm_ocr_parser":
-                ocr_output_dir = os.path.join(base_output_dir, "vlm_ocr")
-                ocr_output_dir = ensure_writable_dir(
-                    ocr_output_dir,
-                    os.path.join(runtime_root, "vlm_ocr")
-                )
-                os.environ['VLMOCR_OUTPUT_DIR'] = ocr_output_dir
-                logger.info(f"VLM OCR output directory: {ocr_output_dir}")
-
+            ocr_subdir = self._resolve_ocr_output_subdir(ocr_parser_config.type)
+            resolved_output_dir = require_writable_dir(str(Path(self.base_output_dir) / ocr_subdir))
+            ocr_cfg_output = getattr(ocr_parser_config, "output_dir", None)
+            if ocr_cfg_output is None:
+                ocr_parser_config = ocr_parser_config.model_copy(update={"output_dir": resolved_output_dir})
+            else:
+                resolved_output_dir = require_writable_dir(str(ocr_cfg_output))
+                ocr_parser_config = ocr_parser_config.model_copy(update={"output_dir": resolved_output_dir})
             self.ocr_parser = ocr_parser_config.build()
         else:
             logger.warning("OCR parser not configured, PDF/image files will not be supported")
@@ -81,16 +62,16 @@ class ParserCombinator(AbstractModule):
         native_parser_config = getattr(self.config, 'native_parser', None)
         if native_parser_config is not None:
             logger.info(f"Building Native parser: {native_parser_config.type}")
-
-            # Set output directory for Native parser
-            native_output_dir = os.path.join(base_output_dir, "native")
-            native_output_dir = ensure_writable_dir(
-                native_output_dir,
-                os.path.join(runtime_root, "native")
-            )
-            os.environ['NATIVE_PARSER_OUTPUT_DIR'] = native_output_dir
-            logger.info(f"Native parser output directory: {native_output_dir}")
-
+            native_subdir = getattr(self.config, "native_output_subdir", None)
+            if not isinstance(native_subdir, str) or not native_subdir.strip():
+                raise ValueError("ParserCombinator config.native_output_subdir is required when native_parser is set")
+            resolved_output_dir = require_writable_dir(str(Path(self.base_output_dir) / native_subdir))
+            native_cfg_output = getattr(native_parser_config, "output_dir", None)
+            if native_cfg_output is None:
+                native_parser_config = native_parser_config.model_copy(update={"output_dir": resolved_output_dir})
+            else:
+                resolved_output_dir = require_writable_dir(str(native_cfg_output))
+                native_parser_config = native_parser_config.model_copy(update={"output_dir": resolved_output_dir})
             self.native_parser = native_parser_config.build()
         else:
             logger.warning("Native parser not configured, office/text files will not be supported")
@@ -102,6 +83,18 @@ class ParserCombinator(AbstractModule):
 
         # Build extension to parser mapping
         self._build_extension_mapping()
+
+    def _resolve_ocr_output_subdir(self, parser_type: str) -> str:
+        token = str(parser_type or "").strip()
+        if token == "dots_ocr_parser":
+            subdir = getattr(self.config, "dots_ocr_output_subdir", None)
+        elif token == "vlm_ocr_parser":
+            subdir = getattr(self.config, "vlm_ocr_output_subdir", None)
+        else:
+            raise ValueError(f"Unknown OCR parser type '{token}'")
+        if not isinstance(subdir, str) or not subdir.strip():
+            raise ValueError(f"ParserCombinator config missing output subdir for OCR parser type '{token}'")
+        return subdir
 
     def _build_extension_mapping(self):
         """Build mapping from file extensions to parsers"""

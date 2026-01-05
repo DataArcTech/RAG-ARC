@@ -1,12 +1,11 @@
 """Plan generation utilities for DeepSearch pipelines."""
 import json
 import logging
-import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from encapsulation.data_model.deepsearch import GraphQueryContext, PlanSpec
-from core.prompts.deepsearch import GRAPH_PLANNER_SYSTEM_PROMPT, GRAPH_PLANNER_USER_PROMPT
+from core.utils.json_extract import extract_last_json_array_from_text
 
 logger = logging.getLogger(__name__)
 
@@ -15,20 +14,20 @@ logger = logging.getLogger(__name__)
 class PlannerSettings:
     """Runtime knobs that influence plan generation."""
 
-    mode: str = "react"
-    max_steps: int = 6
-    enable_sub_question: bool = True
-    system_prompt: str = GRAPH_PLANNER_SYSTEM_PROMPT
-    user_prompt_template: str = GRAPH_PLANNER_USER_PROMPT
-    available_tools_hint: str = ""
+    mode: str
+    max_steps: int
+    enable_sub_question: bool
+    system_prompt: str
+    user_prompt_template: str
+    available_tools_hint: str
 
 
 class PlanGenerator:
-    """Generate PlanSpec sequences using either an LLM or heuristics."""
+    """Generate PlanSpec sequences using an LLM."""
 
-    def __init__(self, llm=None, settings: Optional[PlannerSettings] = None):
+    def __init__(self, llm, settings: PlannerSettings):
         self.llm = llm
-        self.settings = settings or PlannerSettings()
+        self.settings = settings
 
     def generate_plan(
         self,
@@ -43,7 +42,7 @@ class PlanGenerator:
 
         raw_steps = self._call_llm(question, context=context)
         if not raw_steps:
-            raw_steps = self._fallback_plan(question)
+            raise RuntimeError("Planner did not return a usable JSON plan")
 
         return self._build_plan_specs(raw_steps)
 
@@ -60,7 +59,7 @@ class PlanGenerator:
 
         raw_steps = await self._call_llm_async(question, context=context)
         if not raw_steps:
-            raw_steps = self._fallback_plan(question)
+            raise RuntimeError("Planner did not return a usable JSON plan")
 
         return self._build_plan_specs(raw_steps)
 
@@ -68,22 +67,36 @@ class PlanGenerator:
 
     def _build_plan_specs(self, raw_steps: List[dict]) -> List[PlanSpec]:
         plan_specs: List[PlanSpec] = []
-        for idx, step in enumerate(raw_steps[: self.settings.max_steps]):
-            description = step.get("description") or step.get("step") or "Graph inspect"
+        for idx, step in enumerate(raw_steps):
+            if idx >= self.settings.max_steps:
+                break
+            description = str(step.get("description") or step.get("step") or "").strip()
+            if not description:
+                raise ValueError("Planner step is missing required 'description'")
             channel = self._normalize_channel(step.get("channel"))
             metadata = {
                 "mode": self.settings.mode,
-                "source": step.get("source", "llm" if self.llm else "rule"),
+                "source": step.get("source", "llm"),
             }
             selected_tool = (step.get("tool") or "").strip()
             if selected_tool:
                 metadata["tool"] = selected_tool
+            tool_args = step.get("tool_args")
+            if isinstance(tool_args, dict) and tool_args:
+                metadata["tool_args"] = tool_args
             tool_profile = (step.get("tool_profile") or step.get("profile") or "").strip()
             if tool_profile:
                 metadata["tool_profile"] = tool_profile.upper()
             determinism = (step.get("determinism") or "").strip()
             if determinism:
                 metadata["tool_determinism"] = determinism
+            step_metadata = step.get("metadata")
+            if isinstance(step_metadata, dict) and step_metadata:
+                # Allow LLM to pass through additional executor hints (e.g. parallelizable flags).
+                for key, value in step_metadata.items():
+                    if key in {"tool", "tool_args"}:
+                        continue
+                    metadata.setdefault(key, value)
             plan_specs.append(
                 PlanSpec(
                     step_id=f"plan_{idx+1:02d}",
@@ -123,14 +136,13 @@ class PlanGenerator:
         context: Optional[GraphQueryContext],
     ) -> List[dict]:
         if self.llm is None:
-            return []
+            raise RuntimeError("PlanGenerator requires an LLM connector")
         messages = self._build_messages(question, context)
         try:
             response = self.llm.chat(messages, temperature=0.1)
             return self._parse_llm_response(response)
         except Exception as exc:  # pragma: no cover - defensive path
-            logger.warning("LLM planning failed: %s", exc)
-            return []
+            raise RuntimeError(f"LLM planning failed: {exc}") from exc
 
     async def _call_llm_async(
         self,
@@ -139,73 +151,32 @@ class PlanGenerator:
         context: Optional[GraphQueryContext],
     ) -> List[dict]:
         if self.llm is None:
-            return []
+            raise RuntimeError("PlanGenerator requires an LLM connector")
 
         messages = self._build_messages(question, context)
         async_chat = getattr(self.llm, "achat", None)
         if callable(async_chat):
-            try:
-                response = await async_chat(messages, temperature=0.1)
-                return self._parse_llm_response(response)
-            except Exception as exc:  # pragma: no cover - defensive path
-                logger.warning("Async LLM planning failed: %s", exc)
-                return []
+            response = await async_chat(messages, temperature=0.1)
+            return self._parse_llm_response(response)
 
-        # Fall back to sync connector when async entry point is unavailable.
-        return self._call_llm(question, context=context)
+        raise RuntimeError("PlanGenerator requires an async-capable LLM connector (missing `achat`).")
 
     def _parse_llm_response(self, response: str) -> List[dict]:
-        response = self._extract_json_payload(response)
+        extracted = extract_last_json_array_from_text(response)
+        response = extracted if extracted is not None else (response or "").strip()
         try:
             data = json.loads(response)
             if isinstance(data, list):
                 return [step for step in data if isinstance(step, dict)]
         except json.JSONDecodeError:
-            logger.warning("Planner LLM returned non-JSON response, switching to rule-based plan")
-        return []
-
-    def _extract_json_payload(self, payload: str) -> str:
-        """Handle ```json fenced blocks or extra commentary around JSON."""
-        text = (payload or "").strip()
-        if not text:
-            return ""
-
-        fence = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
-        if fence:
-            return fence.group(1).strip()
-
-        start = text.find("[")
-        end = text.rfind("]")
-        if 0 <= start < end:
-            return text[start : end + 1]
-
-        return text
-
-    def _fallback_plan(self, question: str) -> List[dict]:
-        clauses = re.split(r"[?。.!]", question)
-        sub_questions = [cl for cl in clauses if cl.strip()]
-        if not sub_questions:
-            sub_questions = [question]
-        steps: List[dict] = []
-        for clause in sub_questions:
-            description = clause.strip()
-            if not description:
-                continue
-            channel = "graph"
-            if "web" in description.lower() or "search" in description.lower():
-                channel = "web"
-            steps.append({"description": description, "channel": channel, "source": "rule"})
-        if self.settings.enable_sub_question and len(steps) == 1:
-            steps.append({
-                "description": "Validate graph findings and propose next-hop queries",
-                "channel": "graph",
-                "source": "rule",
-            })
-        return steps
+            raise ValueError("Planner LLM returned non-JSON output")
+        raise ValueError("Planner LLM returned an unsupported JSON payload")
 
     @staticmethod
     def _normalize_channel(channel: Optional[str]) -> str:
-        value = (channel or "graph").strip().lower()
+        if channel is None:
+            raise ValueError("Planner step is missing required 'channel'")
+        value = str(channel).strip().lower()
         if value not in {"graph", "web", "text"}:
-            return "graph"
+            raise ValueError(f"Planner step has unsupported channel: {value}")
         return value

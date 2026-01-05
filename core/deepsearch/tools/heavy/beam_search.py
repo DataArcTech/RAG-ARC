@@ -7,7 +7,15 @@ from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema, call_llm_async, safe_json_loads
 from ..fast.pattern_probe import PatternProbeTool
+from config.core.deepsearch.tool_defaults import (
+    BEAM_SEARCH_DEFAULT_BEAM_SIZE,
+    BEAM_SEARCH_DEFAULT_MAX_DEPTH,
+    BEAM_SEARCH_DEFAULT_PATTERN_PROBE_MAX_TERMS,
+    BEAM_SEARCH_DEFAULT_TEMPERATURE,
+)
 from core.graph_adapter.concurrency import adapter_locked
+from core.deepsearch.utils.evidence_ids import derived_chunk_id
+from core.deepsearch.utils.compression import truncate_text
 
 
 class BeamSearchTool(GraphTool):
@@ -47,16 +55,19 @@ class BeamSearchTool(GraphTool):
         self,
         llm_connector,
         *,
-        beam_size: int = 3,
-        max_depth: int = 3,
-        temperature: float = 0.2,
+        beam_size: int = BEAM_SEARCH_DEFAULT_BEAM_SIZE,
+        max_depth: int = BEAM_SEARCH_DEFAULT_MAX_DEPTH,
+        temperature: float = BEAM_SEARCH_DEFAULT_TEMPERATURE,
+        pattern_probe_max_terms: int = BEAM_SEARCH_DEFAULT_PATTERN_PROBE_MAX_TERMS,
     ):
+        if llm_connector is None:
+            raise ValueError("BeamSearchTool requires an LLM connector (no fallback ranking).")
         self.llm_connector = llm_connector
         self.beam_size = max(1, beam_size)
         self.max_depth = max(1, max_depth)
         self.temperature = temperature
         # Reuse deterministic tokenization from PatternProbe to mine candidate entities.
-        self._pattern_probe = PatternProbeTool(max_terms=6)
+        self._pattern_probe = PatternProbeTool(max_terms=int(pattern_probe_max_terms))
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
@@ -75,24 +86,33 @@ class BeamSearchTool(GraphTool):
                 },
                 access_scope=request.access_scope,
             )
-        paths = self._normalize_paths(traversal.get("paths"), fallback_prefix="beam")
+        paths = self._normalize_paths(traversal.get("paths"))
         if not paths:
-            async with adapter_locked(adapter):
-                fallback = await adapter.aquery_subgraph(
-                    request.question,
-                    channel="graph",
-                    access_scope=request.access_scope,
-                )
-            paths = self._paths_from_chunks(fallback, seeds)
+            paths = self._paths_from_chunks(traversal, seeds)
+        if not paths:
+            diagnostics = {
+                "beam_size": beam_size,
+                "max_depth": max_depth,
+                "path_count": 0,
+                "selected_paths": 0,
+                "used_llm_rerank": False,
+                "strategy": traversal.get("strategy") or "beam_search",
+                "note": "beam_search returned no paths; degraded to empty result",
+            }
+            return ToolResult(
+                summary="Beam search executed but no promising paths emerged.",
+                diagnostics=diagnostics,
+                think_notes=[],
+            )
 
         ranked_paths = await self._rank_paths(request, paths, beam_size)
-        evidences = self._paths_to_evidences(ranked_paths, adapter.metadata().adapter_name)
+        evidences = self._paths_to_evidences(ranked_paths, tool_name=self.descriptor.name, plan_step=request.plan_step)
         diagnostics = {
             "beam_size": beam_size,
             "max_depth": max_depth,
             "path_count": len(paths),
             "selected_paths": len(ranked_paths),
-            "used_llm_rerank": bool(self.llm_connector),
+            "used_llm_rerank": True,
         }
         if traversal.get("strategy"):
             diagnostics["strategy"] = traversal["strategy"]
@@ -130,10 +150,7 @@ class BeamSearchTool(GraphTool):
     def _extract_question_seeds(self, request: ToolRunRequest) -> List[str]:
         extra = request.extra or {}
         question = request.question or ""
-        try:
-            keywords = self._pattern_probe._pick_keywords(question, extra)  # type: ignore[attr-defined]
-        except Exception:
-            keywords = []
+        keywords = self._pattern_probe._pick_keywords(question, extra)  # type: ignore[attr-defined]
         if keywords:
             return keywords
         return self._extract_tokens(question)
@@ -142,13 +159,7 @@ class BeamSearchTool(GraphTool):
         if not paths:
             return []
         limited = sorted(paths, key=lambda item: item.get("score", 0.0), reverse=True)[: max(beam_size * 2, beam_size)]
-        if not self.llm_connector:
-            return limited[:beam_size]
-
-        try:
-            llm_scores = await self._llm_rerank(request, limited)
-        except Exception:
-            return limited[:beam_size]
+        llm_scores = await self._llm_rerank(request, limited)
 
         def _sort_key(item: Dict[str, Any]) -> float:
             return llm_scores.get(item["path_id"], item.get("score", 0.0))
@@ -196,14 +207,16 @@ class BeamSearchTool(GraphTool):
                 scores[str(item["path_id"])] = score
         return scores
 
-    def _normalize_paths(self, payload: Any, *, fallback_prefix: str) -> List[Dict[str, Any]]:
+    def _normalize_paths(self, payload: Any) -> List[Dict[str, Any]]:
         if not isinstance(payload, list):
             return []
         normalized: List[Dict[str, Any]] = []
         for idx, item in enumerate(payload):
             if not isinstance(item, dict):
                 continue
-            path_id = str(item.get("path_id") or f"{fallback_prefix}-{idx}")
+            if not item.get("path_id"):
+                raise ValueError("Beam search path is missing required path_id")
+            path_id = str(item["path_id"])
             nodes = item.get("nodes") or item.get("entities") or []
             if isinstance(nodes, list):
                 nodes = [str(node) for node in nodes if str(node).strip()]
@@ -243,20 +256,31 @@ class BeamSearchTool(GraphTool):
                     "nodes": self._deduplicate(nodes) or ["unknown"],
                     "triples": [],
                     "score": 0.2,
-                    "summary": content[:200],
+                    "summary": truncate_text(content, max_chars=200),
                 }
             )
         return normalized
 
-    def _paths_to_evidences(self, paths: Iterable[Dict[str, Any]], source: str) -> List[EvidenceChunk]:
+    def _paths_to_evidences(
+        self,
+        paths: Iterable[Dict[str, Any]],
+        *,
+        tool_name: str,
+        plan_step: str | None,
+    ) -> List[EvidenceChunk]:
         evidences: List[EvidenceChunk] = []
         for rank, path in enumerate(paths):
             nodes = path.get("nodes") or []
             content = path.get("summary") or self._path_summary(path)
             evidences.append(
                 EvidenceChunk(
-                    chunk_id=f"beam-path-{path['path_id']}",
-                    source=source,
+                    chunk_id=derived_chunk_id(
+                        tool_name=tool_name,
+                        plan_step=plan_step,
+                        label=f"beam_path_{rank}",
+                        content=str(content),
+                    ),
+                    source=tool_name,
                     content=content,
                     score=path.get("score"),
                     provenance={

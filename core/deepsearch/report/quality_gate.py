@@ -13,10 +13,11 @@ from pydantic import BaseModel, Field, ValidationError
 
 from core.deepsearch.tools.base import call_llm_async
 from core.prompts.deepsearch.quality_gate import QUALITY_GATE_SYSTEM_PROMPT, QUALITY_GATE_USER_PROMPT
+from core.utils.text_regex import BRACKET_CONTENT_RE, SENTENCE_SPLIT_RE
 
 
-_BRACKET_RE = re.compile(r"\[([^\[\]]+)\]")
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[\.\!\?\u3002\uff01\uff1f])\s+")
+_BRACKET_RE = BRACKET_CONTENT_RE
+_SENTENCE_SPLIT_RE = SENTENCE_SPLIT_RE
 
 
 class QualityGateConfig(BaseModel):
@@ -31,6 +32,8 @@ class QualityGateConfig(BaseModel):
     enable_llm_judge: bool = Field(True, description="Use an LLM rubric judge to generate actions/scores.")
     judge_temperature: float = Field(0.0, ge=0.0, le=1.0)
     judge_max_retries: int = Field(1, ge=0, le=5)
+    judge_max_evidence_items: int = Field(20, ge=1, le=80, description="Max evidence snippets forwarded to the LLM judge.")
+    judge_max_evidence_chars: int = Field(900, ge=100, le=5000, description="Max characters per snippet for the LLM judge.")
     trigger_external_on_quality_failure: bool = Field(
         True, description="Allow the gate to request external search even if gap detection did not trigger it."
     )
@@ -71,6 +74,8 @@ class QualityGateMetrics(BaseModel):
     consistency_ok: Optional[bool] = None
     consistency_issue_count: int = Field(0, ge=0)
     missing_topics: List[str] = Field(default_factory=list)
+    citation_mismatch_count: int = Field(0, ge=0)
+    citation_mismatch_samples: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class QualityGateResult(BaseModel):
@@ -115,7 +120,8 @@ class DeepSearchQualityGate:
             )
 
         sr = structured_report if isinstance(structured_report, Mapping) else {}
-        evidence_ids = {str(ev.get("chunk_id") or "").strip() for ev in evidences if isinstance(ev, dict)}
+        evidence_lookup = {str(ev.get("chunk_id") or "").strip(): ev for ev in evidences if isinstance(ev, dict)}
+        evidence_ids = set(evidence_lookup)
         evidence_ids.discard("")
 
         citations_text = self._collect_report_text(sr)
@@ -129,6 +135,12 @@ class DeepSearchQualityGate:
         missing_topics = _coerce_topics((gap_result or {}).get("missing_topics")) if gap_result else []
 
         consistency_ok, consistency_issue_count = _coerce_consistency(sr.get("consistency_check"))
+        mismatch_count, mismatch_samples = _citation_integrity_checks(
+            citations_text,
+            evidence_lookup=evidence_lookup,
+            known_ids=evidence_ids,
+            max_samples=max(0, int(cfg.max_uncited_sentences)),
+        )
 
         metrics = QualityGateMetrics(
             citation_sentence_coverage=round((cited_sentences / sentence_count), 4) if sentence_count else 1.0,
@@ -141,6 +153,8 @@ class DeepSearchQualityGate:
             consistency_ok=consistency_ok,
             consistency_issue_count=consistency_issue_count,
             missing_topics=missing_topics,
+            citation_mismatch_count=mismatch_count,
+            citation_mismatch_samples=mismatch_samples,
         )
 
         deterministic_pass = True
@@ -153,35 +167,123 @@ class DeepSearchQualityGate:
         if cfg.require_consistency and consistency_ok is False:
             deterministic_pass = False
             reasons.append(f"consistency_check_failed (issues={consistency_issue_count})")
+        if mismatch_count:
+            deterministic_pass = False
+            reasons.append(f"citation_integrity_failed (mismatches={mismatch_count})")
 
-        should_call_judge = bool(
-            cfg.enable_llm_judge
-            and self.llm_connector is not None
-            and (not deterministic_pass or bool(missing_topics))
-        )
-        judge = None
-        if should_call_judge:
-            judge = await self._maybe_judge_with_llm(
+        generation = sr.get("generation") if isinstance(sr, Mapping) else None
+        generation_mode = generation.get("mode") if isinstance(generation, Mapping) else None
+        terminal_modes = {
+            "deterministic_no_evidence",
+            "deterministic_missing_named_files",
+        }
+        if isinstance(generation_mode, str) and generation_mode in terminal_modes:
+            # These modes are explicit safe-stops (e.g., "no evidence" / "missing named files").
+            # They should terminate the loop without requiring an LLM judge or follow-up actions.
+            return QualityGateResult(
+                enabled=True,
+                passed=True,
+                should_iterate=False,
+                metrics=metrics,
+                actions=[],
+                judge=None,
+                diagnostics={
+                    "terminal_mode": generation_mode,
+                    "deterministic_reasons": reasons,
+                    "external_allowed": external_allowed,
+                },
+            )
+
+        judge: QualityGateJudgeResult | None = None
+        actions: List[QualityGateAction] = []
+        if cfg.enable_llm_judge:
+            if self.llm_connector is None:
+                raise RuntimeError("Quality gate requires an LLM connector when enable_llm_judge is true.")
+            try:
+                judge = await self._maybe_judge_with_llm(
+                    question=question,
+                    sr=sr,
+                    evidences=evidences,
+                    metrics=metrics,
+                    external_allowed=external_allowed,
+                    cfg=cfg,
+                )
+                actions = list(judge.next_actions if judge else [])
+            except Exception as exc:  # noqa: BLE001
+                # Do not crash the run: fall back to deterministic signals and synthesized actions.
+                should_iterate = bool((not deterministic_pass) and cfg.max_rounds > 1)
+                return QualityGateResult(
+                    enabled=True,
+                    passed=bool(deterministic_pass),
+                    should_iterate=should_iterate,
+                    metrics=metrics,
+                    actions=_synthesize_followups(
+                        question=question,
+                        metrics=metrics,
+                        external_allowed=external_allowed,
+                        cfg=cfg,
+                    )
+                    if should_iterate
+                    else [],
+                    judge=None,
+                    diagnostics={
+                        "deterministic_reasons": reasons,
+                        "external_allowed": external_allowed,
+                        "judge_error": str(exc) or exc.__class__.__name__,
+                    },
+                )
+        else:
+            if not deterministic_pass and cfg.max_rounds > 1:
+                actions = _synthesize_followups(
+                    question=question,
+                    metrics=metrics,
+                    external_allowed=external_allowed,
+                    cfg=cfg,
+                )
+
+        passed = bool(deterministic_pass and (judge.passed if judge else True))
+        should_iterate = (not passed) and cfg.max_rounds > 1
+        if not cfg.trigger_external_on_quality_failure:
+            actions = [a for a in actions if a.action != "external_search"]
+        if not external_allowed:
+            actions = [a for a in actions if a.action != "external_search"]
+        normalized: List[QualityGateAction] = []
+        seen: set[tuple[str, str]] = set()
+        for action in actions:
+            key = (action.action, (action.query or "").strip().lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(action)
+            if len(normalized) >= cfg.max_actions:
+                break
+        actions = normalized
+        if should_iterate and not actions:
+            actions = _synthesize_followups(
                 question=question,
-                sr=sr,
-                evidences=evidences,
                 metrics=metrics,
                 external_allowed=external_allowed,
                 cfg=cfg,
             )
-
-        passed = deterministic_pass and (judge.passed if judge else True)
-        should_iterate = (not passed) and cfg.max_rounds > 1
-
-        actions = self._synthesize_actions(
-            question=question,
-            metrics=metrics,
-            judge=judge,
-            external_allowed=external_allowed,
-            cfg=cfg,
-        )
-        if not cfg.trigger_external_on_quality_failure:
-            actions = [a for a in actions if a.action != "external_search"]
+        if should_iterate and actions:
+            has_graph = any(a.action == "graph_search" for a in actions)
+            if not has_graph:
+                extra = _synthesize_followups(
+                    question=question,
+                    metrics=metrics,
+                    external_allowed=external_allowed,
+                    cfg=cfg,
+                )
+                for action in extra:
+                    if action.action != "graph_search" or not action.query:
+                        continue
+                    key = (action.action, (action.query or "").strip().lower())
+                    if key in seen:
+                        continue
+                    actions.append(action)
+                    seen.add(key)
+                    if len(actions) >= cfg.max_actions:
+                        break
 
         return QualityGateResult(
             enabled=True,
@@ -197,15 +299,15 @@ class DeepSearchQualityGate:
     @staticmethod
     def _coerce_config(config: Dict[str, Any] | QualityGateConfig | None) -> QualityGateConfig:
         if config is None:
-            return QualityGateConfig()
+            raise ValueError("Quality gate requires an explicit config (no implicit defaults).")
         if isinstance(config, QualityGateConfig):
             return config
         if isinstance(config, dict):
             try:
                 return QualityGateConfig.model_validate(config)
-            except ValidationError:
-                return QualityGateConfig()
-        return QualityGateConfig()
+            except ValidationError as exc:
+                raise ValueError(f"Invalid quality gate config: {exc}") from exc
+        raise TypeError("Unsupported quality gate config type")
 
     @staticmethod
     def _collect_report_text(sr: Mapping[str, Any]) -> List[Tuple[str, str]]:
@@ -236,9 +338,9 @@ class DeepSearchQualityGate:
         metrics: QualityGateMetrics,
         external_allowed: bool,
         cfg: QualityGateConfig,
-    ) -> Optional[QualityGateJudgeResult]:
+    ) -> QualityGateJudgeResult:
         if not cfg.enable_llm_judge or self.llm_connector is None:
-            return None
+            raise RuntimeError("LLM judge is required when quality gate is enabled.")
 
         summary = str(sr.get("summary") or "").strip()
         sections = sr.get("sections") if isinstance(sr.get("sections"), list) else []
@@ -251,10 +353,17 @@ class DeepSearchQualityGate:
             if body:
                 section_blocks.append(f"## {title}\n{body}")
         sections_markdown = "\n\n".join(section_blocks)
+        # Keep judge prompt bounded: the judge mostly needs coverage signals and a compact report snapshot.
+        if len(sections_markdown) > 8000:
+            sections_markdown = sections_markdown[:7999].rstrip() + "…"
+        if len(summary) > 1200:
+            summary = summary[:1199].rstrip() + "…"
 
         signals = {
             "citation_sentence_coverage": metrics.citation_sentence_coverage,
             "uncited_sentences": metrics.uncited_sentences,
+            "citation_mismatch_count": metrics.citation_mismatch_count,
+            "citation_mismatch_samples": metrics.citation_mismatch_samples,
             "consistency_ok": metrics.consistency_ok,
             "consistency_issue_count": metrics.consistency_issue_count,
             "missing_topics": metrics.missing_topics,
@@ -265,7 +374,11 @@ class DeepSearchQualityGate:
             summary=summary,
             sections_markdown=sections_markdown,
             signals_json=json.dumps(signals, ensure_ascii=False, indent=2),
-            evidence_json=json.dumps(_limit_evidences(evidences, max_items=20, max_chars=900), ensure_ascii=False, indent=2),
+            evidence_json=json.dumps(
+                _limit_evidences(evidences, max_items=cfg.judge_max_evidence_items, max_chars=cfg.judge_max_evidence_chars),
+                ensure_ascii=False,
+                indent=2,
+            ),
             external_allowed=str(bool(external_allowed)).lower(),
         )
         messages = [
@@ -282,153 +395,13 @@ class DeepSearchQualityGate:
                 continue
             parsed = _safe_parse_json(raw)
             if parsed is None:
-                return QualityGateJudgeResult(
-                    **{
-                        "pass": False,
-                        "overall": 0.0,
-                        "scores": {
-                            "factual_accuracy": 0.0,
-                            "citation_accuracy": 0.0,
-                            "completeness": 0.0,
-                            "source_quality": 0.0,
-                        },
-                        "reasons": ["LLM judge did not return valid JSON."],
-                        "missing_topics": [],
-                        "missing_claims": [],
-                        "next_actions": [],
-                    }
-                )
+                raise ValueError("LLM judge did not return valid JSON.")
             try:
                 return QualityGateJudgeResult.model_validate(parsed)
             except ValidationError:
-                return QualityGateJudgeResult(
-                    **{
-                        "pass": False,
-                        "overall": 0.0,
-                        "scores": {
-                            "factual_accuracy": 0.0,
-                            "citation_accuracy": 0.0,
-                            "completeness": 0.0,
-                            "source_quality": 0.0,
-                        },
-                        "reasons": ["LLM judge returned JSON with an unexpected schema."],
-                        "missing_topics": [],
-                        "missing_claims": [],
-                        "next_actions": [],
-                    }
-                )
+                raise ValueError("LLM judge returned JSON with an unexpected schema.") from None
 
-        if last_exc is not None:
-            return QualityGateJudgeResult(
-                **{
-                    "pass": False,
-                    "overall": 0.0,
-                    "scores": {
-                        "factual_accuracy": 0.0,
-                        "citation_accuracy": 0.0,
-                        "completeness": 0.0,
-                        "source_quality": 0.0,
-                    },
-                    "reasons": [f"LLM judge failed to run: {last_exc}"],
-                    "missing_topics": [],
-                    "missing_claims": [],
-                    "next_actions": [],
-                }
-            )
-        return None
-
-    def _synthesize_actions(
-        self,
-        *,
-        question: str,
-        metrics: QualityGateMetrics,
-        judge: Optional[QualityGateJudgeResult],
-        external_allowed: bool,
-        cfg: QualityGateConfig,
-    ) -> List[QualityGateAction]:
-        actions: List[QualityGateAction] = []
-
-        if judge and judge.next_actions:
-            actions.extend(judge.next_actions)
-
-        missing_topics = list(metrics.missing_topics)
-        if judge and judge.missing_topics:
-            missing_topics = list({*missing_topics, *judge.missing_topics})
-
-        missing_claims: List[str] = []
-        if judge and judge.missing_claims:
-            missing_claims.extend([c for c in judge.missing_claims if isinstance(c, str) and c.strip()])
-        if metrics.uncited_sentences:
-            missing_claims.extend(metrics.uncited_sentences)
-
-        if missing_topics:
-            for topic in missing_topics[: max(cfg.max_actions, 1)]:
-                query = f"{question} {topic}".strip()
-                actions.append(
-                    QualityGateAction(
-                        action="graph_search",
-                        query=query,
-                        rationale=f"Fill missing topic: {topic}",
-                        priority=1,
-                    )
-                )
-                if external_allowed:
-                    actions.append(
-                        QualityGateAction(
-                            action="external_search",
-                            query=query,
-                            rationale=f"Collect external sources for missing topic: {topic}",
-                            priority=2,
-                        )
-                    )
-
-        if missing_claims and metrics.citation_sentence_coverage < cfg.min_citation_sentence_coverage:
-            for claim in missing_claims[: max(cfg.max_actions, 1)]:
-                query = _normalize_query(claim)
-                if not query:
-                    continue
-                actions.append(
-                    QualityGateAction(
-                        action="graph_search",
-                        query=query,
-                        rationale="Find evidence for an uncited claim and rewrite the report with citations.",
-                        priority=2,
-                    )
-                )
-                if external_allowed:
-                    actions.append(
-                        QualityGateAction(
-                            action="external_search",
-                            query=query,
-                            rationale="Find authoritative external sources for an uncited claim.",
-                            priority=3,
-                        )
-                    )
-
-        # Ensure we always request a rewrite if we are missing citations or consistency failed.
-        if (metrics.consistency_ok is False) or (metrics.sentence_count and metrics.uncited_sentences):
-            actions.append(
-                QualityGateAction(
-                    action="rewrite",
-                    query=None,
-                    rationale="Rewrite the report to ensure all factual claims have valid inline citations and remove unsupported claims.",
-                    priority=1,
-                )
-            )
-
-        # Deduplicate + cap
-        normalized: List[QualityGateAction] = []
-        seen: set[tuple[str, str]] = set()
-        for action in actions:
-            key = (action.action, (action.query or "").strip().lower())
-            if key in seen:
-                continue
-            seen.add(key)
-            normalized.append(action)
-            if len(normalized) >= cfg.max_actions:
-                break
-        return normalized
-
+        raise RuntimeError(f"LLM judge failed to run: {last_exc}") from last_exc
 
 def _coerce_topics(value: Any) -> List[str]:
     if not isinstance(value, list):
@@ -488,7 +461,14 @@ def _iter_sentences(text: str) -> Iterable[str]:
     # Split by lines first to respect bullets/markdown formatting.
     lines = [line.strip() for line in normalized.splitlines() if line.strip()]
     sentences: List[str] = []
-    for line in lines:
+    for idx, line in enumerate(lines):
+        # Skip markdown table separators and headers (these are structural, not claims).
+        if re.fullmatch(r"[\s\|:\-]+", line):
+            continue
+        if line.startswith("|") and line.endswith("|"):
+            # A header row is typically followed by a separator row like: | --- | --- |
+            if idx + 1 < len(lines) and re.fullmatch(r"[\s\|:\-]+", lines[idx + 1]):
+                continue
         # Remove headings/list markers but keep content.
         line = re.sub(r"^#{1,6}\s+", "", line).strip()
         line = re.sub(r"^[-*]\s+", "", line).strip()
@@ -550,16 +530,6 @@ def _evidence_source_stats(evidences: Sequence[Dict[str, Any]]) -> tuple[Dict[st
     return counts, ratios
 
 
-def _normalize_query(text: str) -> str:
-    token = (text or "").strip()
-    token = re.sub(r"\[[^\[\]]+\]", "", token).strip()
-    token = re.sub(r"\s+", " ", token).strip()
-    if len(token) < 12:
-        return ""
-    # Cap length to keep tool queries sane.
-    return token[:180].rstrip()
-
-
 def _safe_parse_json(raw: str) -> Dict[str, Any] | None:
     text = (raw or "").strip()
     if not text:
@@ -612,7 +582,196 @@ def _limit_evidences(evidences: Sequence[Dict[str, Any]], *, max_items: int, max
         content = str(entry.get("content") or "")
         if max_chars > 0 and len(content) > max_chars:
             content = content[: max_chars].rstrip() + "…"
-        cloned = dict(entry)
-        cloned["content"] = content
-        limited.append(cloned)
+        prov = entry.get("provenance")
+        filename = None
+        if isinstance(prov, dict):
+            meta = prov.get("metadata")
+            if isinstance(meta, dict):
+                filename = meta.get("filename") or meta.get("source_file_name") or meta.get("path") or meta.get("file_path")
+                if not filename:
+                    chunk_meta = meta.get("chunk_metadata")
+                    if isinstance(chunk_meta, dict):
+                        filename = (
+                            chunk_meta.get("filename")
+                            or chunk_meta.get("source_file_name")
+                            or chunk_meta.get("path")
+                            or chunk_meta.get("file_path")
+                        )
+            if not filename:
+                filename = prov.get("path") or prov.get("file_path") or prov.get("source_path")
+        limited.append(
+            {
+                "chunk_id": entry.get("chunk_id"),
+                "source": entry.get("source"),
+                "score": entry.get("score"),
+                "filename": filename,
+                "content": content,
+            }
+        )
     return limited
+
+
+def _extract_anchors(text: str) -> List[str]:
+    """Extract lightweight lexical anchors for citation integrity checks.
+
+    Keep this language-agnostic and conservative: favor numeric anchors.
+    (Free-form word tokens are often too generic and cause false positives.)
+    """
+
+    q = str(text or "").strip()
+    if not q:
+        return []
+    anchors: list[str] = []
+    for token in re.findall(r"\d[\d,\.%]*", q):
+        token = token.strip()
+        # Skip ultra-weak anchors like bare "1"/"2" that often appear in lists/years and create false mismatches.
+        if len(token) < 2 and token.isdigit():
+            continue
+        if token and token not in anchors:
+            anchors.append(token)
+    # Mixed alnum tokens containing digits (e.g. "v2", "x86", "2023Q4").
+    for token in re.findall(r"[^\W_]*\d[^\W_]*", q, flags=re.UNICODE):
+        token = token.strip()
+        if len(token) < 3:
+            continue
+        if token and token not in anchors:
+            anchors.append(token)
+    return anchors[:12]
+
+
+def _citation_integrity_checks(
+    texts: Sequence[Tuple[str, str]],
+    *,
+    evidence_lookup: Mapping[str, Dict[str, Any]],
+    known_ids: set[str],
+    max_samples: int,
+) -> tuple[int, List[Dict[str, Any]]]:
+    """Return (mismatch_count, samples[]) for sentences whose citations don't match evidence anchors."""
+
+    mismatches = 0
+    samples: List[Dict[str, Any]] = []
+    for location, text in texts:
+        for sentence in _iter_sentences(text):
+            found, ids = _sentence_has_known_citation(sentence, known_ids=known_ids)
+            if not found or not ids:
+                continue
+            # Anchors should come from the claim text, not from the citation tokens themselves.
+            claim_text = re.sub(_BRACKET_RE, "", sentence or "").strip()
+            anchors = _extract_anchors(claim_text)
+            if not anchors:
+                continue
+            for ev_id in ids:
+                ev = evidence_lookup.get(ev_id) or {}
+                content = str(ev.get("content") or "")
+                if not content.strip():
+                    continue
+                content_lower = content.lower()
+                ok = any(anchor.lower() in content_lower for anchor in anchors if anchor)
+                if ok:
+                    continue
+                mismatches += 1
+                if max_samples > 0 and len(samples) < max_samples:
+                    samples.append(
+                        {
+                            "location": location,
+                            "sentence": sentence[:280],
+                            "evidence_id": ev_id,
+                            "anchors": anchors[:6],
+                        }
+                    )
+    return mismatches, samples
+
+
+def _synthesize_followups(
+    *,
+    question: str,
+    metrics: QualityGateMetrics,
+    external_allowed: bool,
+    cfg: QualityGateConfig,
+) -> List[QualityGateAction]:
+    """Fallback follow-ups that guarantee the loop executes more retrieval before rewriting."""
+
+    actions: List[QualityGateAction] = []
+    max_actions = max(0, int(cfg.max_actions))
+
+    def _append(action: QualityGateAction) -> None:
+        if len(actions) >= max_actions:
+            return
+        actions.append(action)
+
+    priority = 1
+    for sample in metrics.citation_mismatch_samples:
+        if len(actions) >= max_actions:
+            break
+        if not isinstance(sample, dict):
+            continue
+        anchors = sample.get("anchors") if isinstance(sample.get("anchors"), list) else []
+        query = " ".join([str(a).strip() for a in anchors if str(a).strip()][:6]).strip()
+        if not query:
+            continue
+        _append(
+            QualityGateAction(
+                action="graph_search",
+                query=query[:220],
+                rationale="Citations appear mismatched; retrieve supporting evidence for the anchored claim terms.",
+                priority=priority,
+            )
+        )
+        priority = min(5, priority + 1)
+
+    for topic in metrics.missing_topics:
+        if len(actions) >= max_actions:
+            break
+        token = str(topic).strip()
+        if not token:
+            continue
+        _append(
+            QualityGateAction(
+                action="graph_search",
+                query=token[:220],
+                rationale="Key topic is missing; gather more internal evidence before rewriting.",
+                priority=priority,
+            )
+        )
+        priority = min(5, priority + 1)
+
+    for sentence in metrics.uncited_sentences:
+        if len(actions) >= max_actions:
+            break
+        seed = str(sentence).strip()
+        if not seed:
+            continue
+        seed = re.sub(_BRACKET_RE, "", seed).strip()
+        if not seed:
+            continue
+        _append(
+            QualityGateAction(
+                action="graph_search",
+                query=seed[:220],
+                rationale="The report contains uncited claims; retrieve evidence to cite or delete the claim.",
+                priority=priority,
+            )
+        )
+        priority = min(5, priority + 1)
+
+    if external_allowed and len(actions) < max_actions:
+        _append(
+            QualityGateAction(
+                action="external_search",
+                query=question[:220],
+                rationale="Internal sources appear insufficient; broaden search externally.",
+                priority=min(5, priority),
+            )
+        )
+
+    if len(actions) < max_actions:
+        _append(
+            QualityGateAction(
+                action="rewrite",
+                query=None,
+                rationale="Rewrite the report to include only evidence-backed claims (delete unsupported content).",
+                priority=5,
+            )
+        )
+
+    return actions

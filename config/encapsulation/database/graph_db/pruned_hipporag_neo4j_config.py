@@ -36,7 +36,7 @@ class PrunedHippoRAGNeo4jConfig(AbstractConfig):
         description="Database username",
     )
     password: str = Field(
-        default_factory=lambda: os.getenv("NEO4J_PASSWORD", "12345678"),
+        default_factory=lambda: os.getenv("NEO4J_PASSWORD", ""),
         description="Database password",
     )
     database: str = Field(
@@ -52,6 +52,19 @@ class PrunedHippoRAGNeo4jConfig(AbstractConfig):
     index_name: str = Field(
         default_factory=lambda: os.getenv("GRAPH_INDEX_NAME", "index"),
         description="Name prefix for index files"
+    )
+
+    # KG schema governance (YAML)
+    kg_schema_path: str = Field(
+        default_factory=lambda: os.getenv("KG_SCHEMA_PATH", "./kg_schema.yml"),
+        description="Path to KG schema YAML (relation whitelist/normalization/provenance knobs)",
+    )
+
+    fact_provenance_max_source_chunks: int = Field(
+        default=50,
+        ge=0,
+        le=1000,
+        description="Max chunk ids to retain per fact edge in Neo4j (`RELATES_TO.source_chunk_ids`). 0 disables storage.",
     )
 
     # Embedding model configuration

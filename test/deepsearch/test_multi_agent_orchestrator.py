@@ -7,11 +7,70 @@ from core.deepsearch.reasoning import MultiAgentGraphReasoningLoop
 from core.graph_adapter.base import GraphAccessScope
 
 
+def _strategy_config(*, overrides: dict | None = None, think_overrides: dict | None = None) -> dict:
+    base = {
+        "strategy_name": "ppr_chain",
+        "allow_semantic_channel": True,
+        "chain_depth": 2,
+        "parallel_branches": 1,
+        "max_parallel_branches": 4,
+        "step_summary_max_chars": 2000,
+        "tool_context_max_evidences": 5,
+        "tool_context_max_chars": 800,
+        "coverage_expected_min_chunks": 3,
+        "trace_reflection_enabled": False,
+        "trace_reflection_max": 0,
+        "tool_timeout_seconds": 0.0,
+        "think": {
+            "tool_name": "graph.think",
+            "every_n_steps": 0,
+            "min_coverage": 0.0,
+            "enable_tool_calls": False,
+            "max_tool_calls": 0,
+            "tool_call_concurrency": 0,
+            "tool_catalog_max_items": 0,
+            "include_llm_tools": True,
+            "max_rounds_per_checkpoint": 1,
+        },
+    }
+    if overrides:
+        base.update(dict(overrides))
+    if think_overrides:
+        merged = dict(base["think"])
+        merged.update(dict(think_overrides))
+        base["think"] = merged
+    return base
+
+
+def _multi_agent_settings(*, overrides: dict | None = None) -> dict:
+    base = {
+        "enabled": True,
+        "max_subagents": 2,
+        "subagent_concurrency": 2,
+        "enable_parallel_tool_probes": False,
+        "probe_tool_names": [],
+        "probe_concurrency": 1,
+        "lead_tool_names": [],
+        "lead_tool_concurrency": 1,
+        "worker_timeout_seconds": None,
+        "worker_retry_attempts": 0,
+        "fail_fast": False,
+        "incremental_parallelism": False,
+        "initial_worker_count": 1,
+        "stop_min_evidence_count": 0,
+        "stop_min_coverage_ratio": 0.0,
+        "max_merge_evidences": 60,
+    }
+    if overrides:
+        base.update(dict(overrides))
+    return base
+
+
 class _StubAdapter:
     async def prepare(self, question: str, *, access_scope=None) -> None:  # pragma: no cover
         await asyncio.sleep(0)
 
-    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None):
+    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None, query_options=None):
         return {
             "chunks": [
                 {"content": f"chunk::{query}", "metadata": {"chunk_id": f"c::{query}"}},
@@ -51,14 +110,14 @@ class _NonConcurrentAdapter(_StubAdapter):
         self.in_flight = 0
         self.max_in_flight = 0
 
-    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None):
+    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None, query_options=None):
         if self.in_flight:
             raise RuntimeError("concurrent adapter access")
         self.in_flight = 1
         self.max_in_flight = max(self.max_in_flight, self.in_flight)
         try:
             await asyncio.sleep(self.delay)
-            return await super().aquery_subgraph(query, channel=channel, access_scope=access_scope)
+            return await super().aquery_subgraph(query, channel=channel, access_scope=access_scope, query_options=query_options)
         finally:
             self.in_flight = 0
 
@@ -124,18 +183,23 @@ async def test_multi_agent_runs_workers_and_invokes_tools_concurrently():
     loop = MultiAgentGraphReasoningLoop(
         adapter=_StubAdapter(),
         llm_connector=None,
-        strategy_config={"parallel_branches": 1},
+        strategy_config=_strategy_config(overrides={"parallel_branches": 1}),
         tool_manager=tool_manager,
-        settings={
-            "enabled": True,
-            "max_subagents": 3,
-            "subagent_concurrency": 3,
-            "enable_parallel_tool_probes": True,
-            "probe_tool_names": ["graph.chunk_scan", "graph.pattern_scan"],
-            "probe_concurrency": 2,
-            "lead_tool_names": ["graph.context_rollup", "graph.evidence_crosscheck"],
-            "lead_tool_concurrency": 2,
-        },
+        settings=_multi_agent_settings(
+            overrides={
+                "max_subagents": 3,
+                "subagent_concurrency": 3,
+                "enable_parallel_tool_probes": True,
+                "probe_tool_names": ["graph.chunk_scan", "graph.pattern_scan"],
+                "probe_concurrency": 2,
+                "lead_tool_names": ["graph.context_rollup", "graph.evidence_crosscheck"],
+                "lead_tool_concurrency": 2,
+                "incremental_parallelism": False,
+                "initial_worker_count": 3,
+                "max_merge_evidences": 60,
+            }
+        ),
+        graph_channel_tool="graph_adapter.query",
     )
 
     plan_steps = [
@@ -173,16 +237,15 @@ async def test_multi_agent_serializes_shared_adapter_access():
     loop = MultiAgentGraphReasoningLoop(
         adapter=adapter,
         llm_connector=None,
-        strategy_config={"parallel_branches": 1},
+        strategy_config=_strategy_config(overrides={"parallel_branches": 1}),
         tool_manager=None,
-        settings={
-            "enabled": True,
-            "max_subagents": 2,
-            "subagent_concurrency": 2,
-            "enable_parallel_tool_probes": False,
-            "probe_tool_names": [],
-            "lead_tool_names": [],
-        },
+        settings=_multi_agent_settings(
+            overrides={
+                "max_subagents": 2,
+                "subagent_concurrency": 2,
+            }
+        ),
+        graph_channel_tool="graph_adapter.query",
     )
 
     plan_steps = [
@@ -219,19 +282,16 @@ async def test_multi_agent_surfaces_worker_failures_in_coverage_metrics():
     loop = MultiAgentGraphReasoningLoop(
         adapter=_StubAdapter(),
         llm_connector=None,
-        strategy_config={"parallel_branches": 1},
+        strategy_config=_strategy_config(overrides={"parallel_branches": 1}),
         tool_manager=tool_manager,
-        settings={
-            "enabled": True,
-            "max_subagents": 2,
-            "subagent_concurrency": 2,
-            "enable_parallel_tool_probes": False,
-            "probe_tool_names": [],
-            "lead_tool_names": [],
-            "worker_timeout_seconds": 0.05,
-            "worker_retry_attempts": 0,
-            "fail_fast": False,
-        },
+        settings=_multi_agent_settings(
+            overrides={
+                "max_subagents": 2,
+                "subagent_concurrency": 2,
+                "worker_timeout_seconds": 0.05,
+            }
+        ),
+        graph_channel_tool="graph_adapter.query",
     )
 
     plan_steps = [
@@ -269,16 +329,15 @@ async def test_multi_agent_respects_serial_scheduler_and_runs_single_worker():
     loop = MultiAgentGraphReasoningLoop(
         adapter=_StubAdapter(),
         llm_connector=None,
-        strategy_config={"parallel_branches": 1},
+        strategy_config=_strategy_config(overrides={"parallel_branches": 1}),
         tool_manager=None,
-        settings={
-            "enabled": True,
-            "max_subagents": 4,
-            "subagent_concurrency": 4,
-            "enable_parallel_tool_probes": False,
-            "probe_tool_names": [],
-            "lead_tool_names": [],
-        },
+        settings=_multi_agent_settings(
+            overrides={
+                "max_subagents": 4,
+                "subagent_concurrency": 4,
+            }
+        ),
+        graph_channel_tool="graph_adapter.query",
     )
 
     plan_steps = [

@@ -9,11 +9,12 @@ from typing import Dict
 import pytest
 from dotenv import load_dotenv
 
-pytest.importorskip("mcp", reason="DeepSearch planner tests require MCP client dependencies")
-
+from encapsulation.data_model.deepsearch import PlanSpec
 from config.core.deepsearch.plan_config import DeepSearchPlannerConfig
+from config.encapsulation.llm.chat.openai import OpenAIChatConfig
 from core.graph_adapter.base import GraphAccessScope
 from core.deepsearch.plan import DeepSearchPlanner
+from core.deepsearch.trace import TRACE_FORMAT_VERSION, TRACE_SCHEMA_VERSION
 
 
 def get_deepsearch_config() -> Dict[str, DeepSearchPlannerConfig]:
@@ -35,22 +36,23 @@ def _ensure_chat_credentials() -> None:
 
 
 def test_get_deepsearch_config(monkeypatch):
-    """Planner config should honor .env overrides and allow LLM disable."""
+    """Planner config builds PlanGenerator without env overrides."""
 
-    monkeypatch.setenv("DEEPSEARCH_PLANNER_DISABLE_LLM", "true")
-    monkeypatch.setenv("DEEPSEARCH_PLANNER_MODE", "iter_research")
-    monkeypatch.setenv("DEEPSEARCH_PLANNER_MAX_STEPS", "4")
-    monkeypatch.setenv("DEEPSEARCH_PLANNER_ENABLE_SUBQUESTION", "false")
+    class _StubLLM:
+        def chat(self, messages, **kwargs):
+            return "[]"
+
+    monkeypatch.setattr(OpenAIChatConfig, "build", lambda self: _StubLLM())
 
     config = get_deepsearch_config()
     planner_cfg = config["planner"]
 
     plan_generator = planner_cfg.build()
 
-    assert plan_generator.llm is None
-    assert plan_generator.settings.mode == "iter_research"
-    assert plan_generator.settings.max_steps == 4
-    assert plan_generator.settings.enable_sub_question is False
+    assert plan_generator.llm is not None
+    assert plan_generator.settings.mode == planner_cfg.mode
+    assert plan_generator.settings.max_steps == planner_cfg.max_steps
+    assert plan_generator.settings.enable_sub_question == planner_cfg.enable_sub_question
 
 
 def test_planner_generates_real_plan():
@@ -76,9 +78,11 @@ def test_planner_generates_real_plan():
         "persist_plan": True,
         "plan_output_dir": str(plan_output_dir),
         "allow_external_channel": True,
+        "honor_planner_tool_selection": True,
         "graph_channel_tool": "graph_adapter.query",
         "text_channel_tool": "graph.context_rollup",
         "web_channel_tool": "web.search",
+        "include_llm_tools_in_catalog": True,
         "default_web_provider": os.getenv("DEEPSEARCH_WEB_PROVIDER") or "tavily",
         "graph_adapter_name": os.getenv("DEEPSEARCH_DEFAULT_ADAPTER") or "hipporag",
         "tool_arg_templates": {},
@@ -97,6 +101,8 @@ def test_planner_generates_real_plan():
         result = asyncio.run(planner.build_plan(question, access_scope=GraphAccessScope(scope_id="planner-test")))
 
         plan = result["plan"]
+        assert plan["schema_version"] == TRACE_SCHEMA_VERSION
+        assert plan["trace_format_version"] == TRACE_FORMAT_VERSION
         assert plan["question"] == question
         assert plan["mode"] == plan_generator.settings.mode
         assert len(plan["steps"]) > 0
@@ -111,6 +117,8 @@ def test_planner_generates_real_plan():
         assert artifact_path.is_file()
 
         saved_payload = json.loads(artifact_path.read_text())
+        assert saved_payload["schema_version"] == TRACE_SCHEMA_VERSION
+        assert saved_payload["trace_format_version"] == TRACE_FORMAT_VERSION
         assert saved_payload["plan_id"] == result["plan_id"]
         assert saved_payload["question"] == question
         assert saved_payload["graph_context"]["adapter_name"] == runtime_config["graph_adapter_name"]
@@ -119,7 +127,17 @@ def test_planner_generates_real_plan():
 
 
 @pytest.mark.asyncio
-async def test_planner_adapts_step_budget(tmp_path):
+async def test_planner_keeps_configured_max_steps(tmp_path):
+    class _StubPlanGenerator:
+        def __init__(self, max_steps: int):
+            self.settings = type("_S", (), {"mode": "react", "max_steps": max_steps, "enable_sub_question": True})()
+
+        async def agenerate_plan(self, question: str, context=None):
+            return [
+                PlanSpec(step_id="plan_01", description="Step", channel="graph", metadata={})
+                for _ in range(self.settings.max_steps)
+            ]
+
     runtime_config = {
         "mode": "react",
         "max_steps": 6,
@@ -127,26 +145,29 @@ async def test_planner_adapts_step_budget(tmp_path):
         "persist_plan": False,
         "plan_output_dir": str(tmp_path),
         "allow_external_channel": False,
+        "honor_planner_tool_selection": True,
         "graph_channel_tool": "graph_adapter.query",
         "text_channel_tool": "graph.context_rollup",
         "web_channel_tool": "web.search",
+        "include_llm_tools_in_catalog": True,
+        "graph_adapter_name": "hipporag",
+        "tool_arg_templates": {},
     }
     planner = DeepSearchPlanner(
         prompt_store=None,
         llm_connector=None,
         config=runtime_config,
+        plan_generator=_StubPlanGenerator(max_steps=runtime_config["max_steps"]),
     )
     scope = GraphAccessScope(scope_id="dynamic-test")
 
     short = await planner.build_plan("定义 RAG-ARC", access_scope=scope)
-    complex_question = (
-        "Compare RAG-ARC adoption plans across APAC, EMEA, and AMER, "
-        "highlight blockers, timelines, and propose mitigation roadmap."
-    )
-    complex_plan = await planner.build_plan(complex_question, access_scope=scope)
+    complex_plan = await planner.build_plan("复杂问题", access_scope=scope)
 
-    short_steps = short["plan"]["config"]["max_steps"]
-    complex_steps = complex_plan["plan"]["config"]["max_steps"]
+    assert short["plan"]["schema_version"] == TRACE_SCHEMA_VERSION
+    assert short["plan"]["trace_format_version"] == TRACE_FORMAT_VERSION
+    assert complex_plan["plan"]["schema_version"] == TRACE_SCHEMA_VERSION
+    assert complex_plan["plan"]["trace_format_version"] == TRACE_FORMAT_VERSION
 
-    assert short_steps < planner._base_max_steps
-    assert complex_steps > short_steps
+    assert short["plan"]["config"]["max_steps"] == runtime_config["max_steps"]
+    assert complex_plan["plan"]["config"]["max_steps"] == runtime_config["max_steps"]

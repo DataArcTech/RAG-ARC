@@ -1,62 +1,12 @@
-import re
 import hashlib
 from typing import Optional, Union
 
+from encapsulation.utils.text_processing import normalize_entity_text, text_processing
+
 OwnerIdType = Optional[Union[str, "uuid.UUID"]]
 
-
-# Regex pattern for text normalization (remove special characters, keep alphanumeric, Chinese characters, and spaces)
-# \u4e00-\u9fff: Chinese characters (CJK Unified Ideographs)
-TEXT_NORMALIZATION_PATTERN = re.compile('[^A-Za-z0-9\u4e00-\u9fff ]')
-
-
-def normalize_entity_text(text: str) -> str:
-    """
-    Normalize entity text for consistent matching.
-    
-    Converts to lowercase and removes special characters, keeping only alphanumeric and spaces.
-    This ensures "Apple Inc.", "apple inc", and "APPLE INC" are treated as the same entity.
-    
-    Args:
-        text: Input text to normalize
-        
-    Returns:
-        Normalized text (lowercase, alphanumeric + spaces only)
-    
-    Examples:
-        >>> normalize_entity_text("Apple Inc.")
-        'apple inc'
-        >>> normalize_entity_text("APPLE INC")
-        'apple inc'
-        >>> normalize_entity_text("New York City!")
-        'new york city'
-    """
-    return TEXT_NORMALIZATION_PATTERN.sub(' ', text.lower()).strip()
-
-
-def text_processing(text: str) -> str:
-    """
-    Normalize text by removing special characters and converting to lowercase.
-    
-    This is an alias for normalize_entity_text() for backward compatibility.
-    This ensures consistent entity matching across the system.
-    For example: "Apple Inc.", "apple inc", "APPLE INC" → "apple inc"
-    
-    Args:
-        text: Input text to normalize
-        
-    Returns:
-        Normalized text (lowercase, alphanumeric + spaces only)
-    
-    Examples:
-        >>> text_processing("Apple Inc.")
-        'apple inc'
-        >>> text_processing("APPLE INC")
-        'apple inc'
-    """
-    if not isinstance(text, str):
-        text = str(text)
-    return TEXT_NORMALIZATION_PATTERN.sub(' ', text.lower()).strip()
+# NOTE: `text_processing` and `normalize_entity_text` are imported from
+# `encapsulation.utils.text_processing` to keep a single source of truth.
 
 
 def _owner_scoped_value(value: str, owner_id: OwnerIdType = None) -> str:

@@ -34,6 +34,25 @@ from core.deepsearch.tooling import describe_available_tools, clear_tool_hints, 
 from core.deepsearch.tooling.registry import ToolHintRegistry
 
 
+def _tool_manager_configs(
+    tmp_path: Path,
+    *,
+    enable_builtin_tools: bool,
+    llm_connector=None,
+    enabled_tools: dict | None = None,
+    remote_tools: dict | None = None,
+) -> dict:
+    return {
+        "enable_builtin_tools": bool(enable_builtin_tools),
+        "enabled_tools": dict(enabled_tools or {}),
+        "remote_tools": dict(remote_tools or {}),
+        "artifact_dir": str(tmp_path),
+        "max_remote_evidences": 32,
+        "max_remote_context_chars": 4096,
+        "llm_connector": llm_connector,
+    }
+
+
 class _StubAdapter:
     def __init__(self):
         capability = GraphAdapterCapability(name="test")
@@ -47,7 +66,7 @@ class _StubAdapter:
     async def prepare(self, question: str, *, access_scope=None) -> None:
         return None
 
-    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None):
+    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None, query_options=None):
         return {
             "chunks": [
                 {"content": f"{query} chunk A", "metadata": {"id": 1}},
@@ -127,7 +146,7 @@ async def test_adapter_locked_allows_concurrent_calls_when_adapter_opted_in():
         async def prepare(self, question: str, *, access_scope=None) -> None:
             return None
 
-        async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None):
+        async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None, query_options=None):
             if not self.first_started.is_set():
                 self.first_started.set()
                 await asyncio.wait_for(self.second_started.wait(), timeout=0.5)
@@ -203,9 +222,160 @@ async def test_pattern_probe_handles_chinese_tokens():
         extra={},
     )
     result = await tool.run(request)
-    assert result.evidences  # 应该匹配中文 chunk
-    assert result.diagnostics["keywords"]  # 记录被选中的关键词
+    assert result.evidences  # Should return evidence for a CJK query.
+    assert result.diagnostics["keywords"]  # Extracted keywords should be recorded.
     assert "Pattern scan succeeded" in result.summary
+
+
+@pytest.mark.asyncio
+async def test_pattern_probe_merges_patterns_across_keywords():
+    adapter = _StubAdapter()
+    tool = PatternProbeTool()
+    request = ToolRunRequest(
+        question="OpenAI founders",
+        plan_step="plan_01",
+        context_evidences=[],
+        adapter=adapter,
+        access_scope=None,
+        extra={},
+    )
+    result = await tool.run(request)
+    assert result.evidences
+    for ev in result.evidences:
+        patterns = ev.provenance.get("patterns") if isinstance(ev.provenance, dict) else None
+        assert isinstance(patterns, list)
+        assert "openai" in patterns
+        assert "founders" in patterns
+
+
+@pytest.mark.asyncio
+async def test_pattern_probe_filters_chunks_without_hit_validation():
+    class _NoHitAdapter(_StubAdapter):
+        async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None, query_options=None):
+            return {
+                "chunks": [
+                    {"content": "totally unrelated", "metadata": {"id": 1, "source_file_name": "doc_a.pdf"}},
+                    {"content": "still unrelated", "metadata": {"id": 2, "source_file_name": "doc_b.pdf"}},
+                ],
+                "metadata": {"adapter": "hipporag"},
+            }
+
+    adapter = _NoHitAdapter()
+    tool = PatternProbeTool()
+    request = ToolRunRequest(
+        question="供款期怎么写？",
+        plan_step="plan_hit",
+        context_evidences=[],
+        adapter=adapter,
+        access_scope=None,
+        extra={"candidate_keywords": ["供款期"], "match_fields": ["content", "filename"]},
+    )
+    result = await tool.run(request)
+    assert not result.evidences
+    assert "no chunks matched" in result.summary.lower()
+
+
+@pytest.mark.asyncio
+async def test_pattern_probe_respects_source_file_name_scope():
+    class _ScopedAdapter(_StubAdapter):
+        async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None, query_options=None):
+            return {
+                "chunks": [
+                    {"content": f"{query} target hit", "metadata": {"id": 1, "source_file_name": "target_doc.pdf"}},
+                    {"content": f"{query} other hit", "metadata": {"id": 2, "source_file_name": "other_doc.pdf"}},
+                ],
+                "metadata": {"adapter": "hipporag"},
+            }
+
+    adapter = _ScopedAdapter()
+    tool = PatternProbeTool()
+    request = ToolRunRequest(
+        question="compare 《target_doc》",
+        plan_step="plan_scope",
+        context_evidences=[],
+        adapter=adapter,
+        access_scope=None,
+        extra={"focus_query": "target hit", "source_file_name": ["《target_doc》"]},
+    )
+    result = await tool.run(request)
+    assert result.evidences
+    assert all("target_doc.pdf" in (ev.provenance.get("metadata", {}).get("source_file_name") or "") for ev in result.evidences)
+
+
+@pytest.mark.asyncio
+async def test_tool_manager_filters_evidence_by_file_scope(tmp_path: Path):
+    class _ScopedTool:
+        descriptor = ToolDescriptor(
+            name="graph.pattern_scan",
+            channel="graph",
+            description="stub scoped tool",
+            profile="F",
+            determinism="deterministic",
+        )
+
+        async def run(self, request: ToolRunRequest) -> ToolResult:
+            ev1 = EvidenceChunk(
+                chunk_id="c_target",
+                source="hipporag",
+                content="hit",
+                provenance={"metadata": {"source_file_name": "target_doc.pdf"}},
+            )
+            ev2 = EvidenceChunk(
+                chunk_id="c_other",
+                source="hipporag",
+                content="hit",
+                provenance={"metadata": {"source_file_name": "other_doc.pdf"}},
+            )
+            return ToolResult(summary="ok", evidences=[ev1, ev2], diagnostics={})
+
+    configs = _tool_manager_configs(tmp_path, enable_builtin_tools=False, enabled_tools={"graph.pattern_scan": {"enabled": True}})
+    manager = DeepSearchToolManager(tool_configs=configs, telemetry_client=None, local_tools={"graph.pattern_scan": _ScopedTool()})
+    payload = {
+        "question": "compare 《target_doc》",
+        "plan_step": "plan_01",
+        "context_evidences": [],
+        "adapter": None,
+        "access_scope": None,
+        "extra": {"source_file_name": ["《target_doc》"]},
+        "graph_context": {"adapter_name": "hipporag", "metadata": {}},
+    }
+    result = await manager.invoke("graph.pattern_scan", payload=payload)
+    assert [ev.chunk_id for ev in result.evidences] == ["c_target"]
+    assert result.diagnostics.get("file_scope_applied") is True
+    assert result.diagnostics.get("input_evidence_count") == 2
+    assert result.diagnostics.get("kept_in_scope") == 1
+    assert result.diagnostics.get("dropped_out_of_scope") == 1
+
+
+@pytest.mark.asyncio
+async def test_pattern_probe_accepts_filename_hits_when_content_uses_placeholders():
+    class _FilenameHitAdapter(_StubAdapter):
+        async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None, query_options=None):
+            return {
+                "chunks": [
+                    {
+                        "content": "由第1個保單週年起，《本計劃》將每年派發保險基本可支取現金。",
+                        "metadata": {"id": 1, "source_file_name": "年年享息儲蓄保險計劃-小册子.pdf"},
+                    }
+                ],
+                "metadata": {"adapter": "hipporag"},
+            }
+
+    adapter = _FilenameHitAdapter()
+    tool = PatternProbeTool()
+    request = ToolRunRequest(
+        question="年年享息儲蓄保險計劃的派息规则？",
+        plan_step="plan_fname",
+        context_evidences=[],
+        adapter=adapter,
+        access_scope=None,
+        extra={"candidate_keywords": ["年年享息儲蓄保險計劃"], "match_fields": ["content", "filename"]},
+    )
+    result = await tool.run(request)
+    assert result.evidences
+    matched_fields = result.evidences[0].provenance.get("matched_fields")
+    assert isinstance(matched_fields, list)
+    assert "filename" in matched_fields
 
 
 @pytest.mark.asyncio
@@ -230,10 +400,8 @@ async def test_hybrid_probe_combines_scans_and_chain(monkeypatch):
 
 
 def test_describe_available_tools_defaults(monkeypatch):
-    monkeypatch.delenv("DEEPSEARCH_TOOL_HINTS", raising=False)
-    monkeypatch.setenv("DEEPSEARCH_ENABLE_LLM_TOOLS", "true")
     clear_tool_hints()
-    hints = describe_available_tools()
+    hints = describe_available_tools(include_llm_tools=True)
     names = [hint["name"] for hint in hints]
     assert "graph.pattern_scan" in names
     assert "graph.llm_chain_explorer" in names
@@ -248,7 +416,6 @@ def test_describe_available_tools_defaults(monkeypatch):
 
 
 def test_describe_available_tools_includes_registered_hints(monkeypatch):
-    monkeypatch.delenv("DEEPSEARCH_TOOL_HINTS", raising=False)
     clear_tool_hints()
     register_tool_hints(
         [
@@ -265,12 +432,11 @@ def test_describe_available_tools_includes_registered_hints(monkeypatch):
             }
         ]
     )
-    hints = describe_available_tools()
+    hints = describe_available_tools(include_llm_tools=True)
     assert any(hint["name"] == "custom.remote_planner" for hint in hints)
 
 
 def test_local_registry_registers_custom_tool_hints(monkeypatch):
-    monkeypatch.delenv("DEEPSEARCH_TOOL_HINTS", raising=False)
     clear_tool_hints()
 
     class _CustomTool(GraphTool):
@@ -287,19 +453,32 @@ def test_local_registry_registers_custom_tool_hints(monkeypatch):
             return ToolResult(summary="inline")
 
     LocalToolRegistry(tool_configs={}, injected_tools={"custom.inline": _CustomTool()})
-    hints = describe_available_tools()
+    hints = describe_available_tools(include_llm_tools=True)
     assert any(hint["name"] == "custom.inline" for hint in hints)
 
 
 @pytest.mark.asyncio
-async def test_planner_plan_reflects_registered_remote_tools(monkeypatch):
-    monkeypatch.delenv("DEEPSEARCH_TOOL_HINTS", raising=False)
+async def test_planner_plan_reflects_registered_remote_tools(tmp_path):
     clear_tool_hints()
 
     planner = DeepSearchPlanner(
         prompt_store={},
         llm_connector=None,
-        config={"persist_plan": False},
+        config={
+            "mode": "react",
+            "max_steps": 2,
+            "enable_sub_question": True,
+            "persist_plan": False,
+            "plan_output_dir": str(tmp_path),
+            "allow_external_channel": False,
+            "honor_planner_tool_selection": True,
+            "graph_channel_tool": "graph_adapter.query",
+            "text_channel_tool": "graph.context_rollup",
+            "web_channel_tool": "web.search",
+            "include_llm_tools_in_catalog": True,
+            "graph_adapter_name": "hipporag",
+            "tool_arg_templates": {},
+        },
         plan_generator=_StubPlanGenerator(),
     )
 
@@ -333,24 +512,20 @@ async def test_planner_plan_reflects_registered_remote_tools(monkeypatch):
 
 
 def test_describe_available_tools_respects_llm_toggle(monkeypatch):
-    monkeypatch.delenv("DEEPSEARCH_TOOL_HINTS", raising=False)
     clear_tool_hints()
-    monkeypatch.setenv("DEEPSEARCH_DISABLE_LLM_TOOLS", "true")
-    hints = describe_available_tools()
+    hints = describe_available_tools(include_llm_tools=False)
     names = {hint["name"] for hint in hints}
     assert "graph.llm_chain_explorer" not in names
     assert "graph.parallel_think" not in names
 
-    monkeypatch.delenv("DEEPSEARCH_DISABLE_LLM_TOOLS", raising=False)
-    monkeypatch.setenv("DEEPSEARCH_ENABLE_LLM_TOOLS", "true")
-    hints = describe_available_tools()
+    hints = describe_available_tools(include_llm_tools=True)
     names = {hint["name"] for hint in hints}
     assert "graph.llm_chain_explorer" in names
     assert "graph.parallel_think" in names
 
 
 @pytest.mark.asyncio
-async def test_tool_manager_invokes_local_tool():
+async def test_tool_manager_invokes_local_tool(tmp_path):
     class _LocalTool(GraphTool):
         descriptor = ToolDescriptor(
             name="custom.echo",
@@ -373,7 +548,7 @@ async def test_tool_manager_invokes_local_tool():
 
     telemetry = _Telemetry()
     manager = DeepSearchToolManager(
-        tool_configs={},
+        tool_configs=_tool_manager_configs(tmp_path, enable_builtin_tools=False),
         telemetry_client=telemetry,
         local_tools={"custom.echo": _LocalTool()},
     )
@@ -386,13 +561,13 @@ async def test_tool_manager_invokes_local_tool():
 
 
 @pytest.mark.asyncio
-async def test_tool_manager_without_mcp_client_avoids_remote():
+async def test_tool_manager_without_mcp_client_avoids_remote(tmp_path):
     class _Telemetry:
         def log_tool_invocation(self, **kwargs):
             return None
 
     manager = DeepSearchToolManager(
-        tool_configs={"enable_builtin_tools": True},
+        tool_configs=_tool_manager_configs(tmp_path, enable_builtin_tools=False),
         telemetry_client=_Telemetry(),
         mcp_client=None,
     )
@@ -420,7 +595,7 @@ async def test_tool_manager_persists_artifacts(tmp_path):
             return None
 
     manager = DeepSearchToolManager(
-        tool_configs={"artifact_dir": str(tmp_path)},
+        tool_configs=_tool_manager_configs(tmp_path, enable_builtin_tools=False),
         telemetry_client=_Telemetry(),
         local_tools={"custom.echo": _LocalTool()},
     )
@@ -439,7 +614,27 @@ def test_bridge_lookup_schema_exposes_seed_entities():
 
 @pytest.mark.asyncio
 async def test_evidence_crosscheck_detects_missing_and_confirmed():
-    tool = EvidenceCrosscheckTool()
+    llm = _StubLLM(
+        json.dumps(
+            {
+                "supported": [
+                    {
+                        "triple": "OpenAI -[founded_by]-> Sam Altman",
+                        "chunks": ["chunk-1"],
+                        "reason": "Chunk explicitly mentions the founder relation.",
+                    }
+                ],
+                "unsupported": [
+                    {
+                        "triple": "GPT-4 -[released_in]-> 2023",
+                        "reason": "No retrieved chunk supports this triple.",
+                    }
+                ],
+                "summary": "1 supported triple, 1 unsupported triple.",
+            }
+        )
+    )
+    tool = EvidenceCrosscheckTool(llm)
     evidences = [
         EvidenceChunk(
             chunk_id="chunk-1",
@@ -481,7 +676,7 @@ async def test_evidence_crosscheck_consumes_triples_from_traversal_evidence():
         async def prepare(self, question: str, *, access_scope=None):
             return None
 
-        async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None):
+        async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None, query_options=None):
             return {
                 "chunks": [{"id": "kb_chunk_1", "content": "OpenAI was founded by Sam Altman.", "metadata": {}}],
                 "nodes": [{"id": "OpenAI"}, {"id": "Sam Altman"}],
@@ -501,16 +696,40 @@ async def test_evidence_crosscheck_consumes_triples_from_traversal_evidence():
         def metadata(self):
             return GraphAdapterMetadata(adapter_name="dummy", graph_type="dummy", version="0")
 
-    executor = GraphTraversalExecutor(_Adapter(), settings=GraphTraversalSettings(chain_depth=1))
+    executor = GraphTraversalExecutor(
+        _Adapter(),
+        settings=GraphTraversalSettings(
+            strategy_name="ppr_chain",
+            allow_semantic_channel=True,
+            chain_depth=1,
+            parallel_branches=1,
+            step_summary_max_chars=2000,
+        ),
+    )
     ctx = GraphQueryContext(adapter_name="dummy", question="Who founded OpenAI?")
     step = PlanSpec(step_id="plan_01", description="OpenAI founders", channel="graph", metadata={})
 
-    _, _, evidences = await executor.run_step(step, ctx)
+    _, _, evidences = await executor.run_step(step, ctx, tool_name="graph_adapter.query")
     assert evidences
     triples = (evidences[0].provenance or {}).get("triples") or []
     assert triples and triples[0]["head"] == "OpenAI" and triples[0]["tail"] == "Sam Altman"
 
-    tool = EvidenceCrosscheckTool(llm_connector=None)
+    llm = _StubLLM(
+        json.dumps(
+            {
+                "supported": [
+                    {
+                        "triple": "OpenAI -[founded_by]-> Sam Altman",
+                        "chunks": ["kb_chunk_1"],
+                        "reason": "The chunk states the founding relation.",
+                    }
+                ],
+                "unsupported": [],
+                "summary": "All triples are supported by the chunk context.",
+            }
+        )
+    )
+    tool = EvidenceCrosscheckTool(llm)
     request = ToolRunRequest(
         question="Who founded OpenAI?",
         plan_step="plan_verify",
@@ -531,7 +750,7 @@ async def test_traversal_executor_emits_raw_chunks_not_summary():
         async def prepare(self, question: str, *, access_scope=None):
             return None
 
-        async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None):
+        async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None, query_options=None):
             return {
                 "chunks": [{"id": "kb_chunk_1", "content": "RAW_CHUNK", "metadata": {}}],
                 "nodes": [],
@@ -551,11 +770,20 @@ async def test_traversal_executor_emits_raw_chunks_not_summary():
         def metadata(self):
             return GraphAdapterMetadata(adapter_name="dummy", graph_type="dummy", version="0")
 
-    executor = GraphTraversalExecutor(_Adapter(), settings=GraphTraversalSettings(chain_depth=1))
+    executor = GraphTraversalExecutor(
+        _Adapter(),
+        settings=GraphTraversalSettings(
+            strategy_name="ppr_chain",
+            allow_semantic_channel=True,
+            chain_depth=1,
+            parallel_branches=1,
+            step_summary_max_chars=2000,
+        ),
+    )
     ctx = GraphQueryContext(adapter_name="dummy", question="Q")
     step = PlanSpec(step_id="plan_01", description="desc", channel="graph", metadata={})
 
-    _, reasoning, evidences = await executor.run_step(step, ctx)
+    _, reasoning, evidences = await executor.run_step(step, ctx, tool_name="graph_adapter.query")
     assert reasoning.output_summary == "SUMMARY_ONLY"
     assert evidences and evidences[0].content == "RAW_CHUNK"
     assert evidences[0].chunk_id == "kb_chunk_1"
@@ -611,7 +839,9 @@ async def test_path_cache_returns_evidence_when_adapter_supports_strategy():
         extra={"seed_entities": ["A", "C"]},
     )
     out = await tool.run(req)
-    assert out.evidences and out.evidences[0].chunk_id == "p1"
+    assert out.evidences
+    assert out.evidences[0].chunk_id.startswith("graph.path_cache:")
+    assert out.evidences[0].provenance.get("raw_path", {}).get("path_id") == "p1"
 
 
 def test_tool_hint_registry_isolated_from_global_hints(monkeypatch):
@@ -633,13 +863,31 @@ def test_tool_hint_registry_isolated_from_global_hints(monkeypatch):
             return ToolResult(summary="ok")
 
     LocalToolRegistry(tool_configs={}, injected_tools={"custom.isolated": _CustomTool()}, tool_hint_registry=registry)
-    assert any(hint["name"] == "custom.isolated" for hint in describe_available_tools(registry=registry))
-    assert not any(hint["name"] == "custom.isolated" for hint in describe_available_tools())
+    assert any(
+        hint["name"] == "custom.isolated"
+        for hint in describe_available_tools(registry=registry, include_llm_tools=True)
+    )
+    assert not any(
+        hint["name"] == "custom.isolated"
+        for hint in describe_available_tools(include_llm_tools=True)
+    )
 
 
 @pytest.mark.asyncio
 async def test_graph_think_includes_graph_context_metadata():
-    llm = _StubLLM(json.dumps({"reasoning": "pause", "confidence_delta": 0.4, "coverage_delta": 0.3, "next_actions": ["rerun"]}))
+    llm = _StubLLM(
+        json.dumps(
+            {
+                "reasoning": "pause",
+                "confidence_delta": 0.4,
+                "coverage_delta": 0.3,
+                "next_actions": ["rerun"],
+                "tool_calls": [],
+                "gap_trigger": False,
+                "missing_topics": [],
+            }
+        )
+    )
     tool = GraphThinkTool(llm)
     graph_context = GraphQueryContext(
         adapter_name="hipporag",
@@ -672,7 +920,7 @@ class _RaisingLLM:
 
 
 @pytest.mark.asyncio
-async def test_graph_think_llm_failure_falls_back_to_heuristic_note():
+async def test_graph_think_llm_failure_raises():
     tool = GraphThinkTool(_RaisingLLM())
     request = ToolRunRequest(
         question="Q1",
@@ -684,11 +932,8 @@ async def test_graph_think_llm_failure_falls_back_to_heuristic_note():
         graph_context=None,
         coverage_metrics={"coverage_score": 0.2, "confidence_score": 0.3},
     )
-    result = await tool.run(request)
-    assert result.think_notes, "LLM failures should still yield a heuristic ThinkNote"
-    note = result.think_notes[0]
-    assert "heuristic" in note.reasoning.lower()
-    assert note.metadata.get("context_size") == 0
+    with pytest.raises(RuntimeError):
+        await tool.run(request)
 
 
 @pytest.mark.asyncio
@@ -732,7 +977,7 @@ async def test_context_rollup_produces_summary():
 
 
 @pytest.mark.asyncio
-async def test_tool_manager_routes_to_mcp_with_arguments(monkeypatch):
+async def test_tool_manager_routes_to_mcp_with_arguments(tmp_path, monkeypatch):
     remote_payload = {
         "summary": "remote summary",
         "evidences": [
@@ -764,7 +1009,7 @@ async def test_tool_manager_routes_to_mcp_with_arguments(monkeypatch):
     mcp_client = _StubMCPClient()
     manager = DeepSearchToolManager(
         tool_configs={
-            "enable_builtin_tools": True,
+            **_tool_manager_configs(tmp_path, enable_builtin_tools=True),
             "enabled_tools": {"graph.think": {"enabled": False}},
             "remote_argument_templates": {"graph.think": {"custom_field": "$question"}},
         },
@@ -784,7 +1029,7 @@ async def test_tool_manager_routes_to_mcp_with_arguments(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_tool_manager_serializes_complex_payloads_for_remote():
+async def test_tool_manager_serializes_complex_payloads_for_remote(tmp_path):
     remote_payload = {"summary": "complex summary"}
     call_result = SimpleNamespace(content=[SimpleNamespace(text=json.dumps(remote_payload))])
     log = ToolExecutionLog(
@@ -817,7 +1062,7 @@ async def test_tool_manager_serializes_complex_payloads_for_remote():
 
     manager = DeepSearchToolManager(
         tool_configs={
-            "enable_builtin_tools": False,
+            **_tool_manager_configs(tmp_path, enable_builtin_tools=False),
             "remote_tools": {
                 "graph.think": {
                     "description": "remote think",
@@ -859,7 +1104,7 @@ async def test_tool_manager_serializes_complex_payloads_for_remote():
 
 
 @pytest.mark.asyncio
-async def test_tool_manager_routes_remote_only_descriptor():
+async def test_tool_manager_routes_remote_only_descriptor(tmp_path):
     remote_payload = {
         "summary": "remote-only summary",
         "evidences": [],
@@ -886,7 +1131,7 @@ async def test_tool_manager_routes_remote_only_descriptor():
     mcp_client = _StubMCPClient()
     manager = DeepSearchToolManager(
         tool_configs={
-            "enable_builtin_tools": False,
+            **_tool_manager_configs(tmp_path, enable_builtin_tools=False),
             "remote_tools": {
                 "custom.remote": {
                     "description": "remote only",
@@ -911,7 +1156,7 @@ async def test_tool_manager_routes_remote_only_descriptor():
 
 
 @pytest.mark.asyncio
-async def test_tool_manager_falls_back_to_local_when_remote_errors():
+async def test_tool_manager_raises_when_remote_errors_even_if_local_tool_exists(tmp_path):
     class _LocalTool(GraphTool):
         descriptor = ToolDescriptor(
             name="custom.echo",
@@ -942,16 +1187,16 @@ async def test_tool_manager_falls_back_to_local_when_remote_errors():
     telemetry = _Telemetry()
     manager = DeepSearchToolManager(
         tool_configs={
-            "enabled_tools": {"custom.echo": {"mcp_fallback": True}},
+            **_tool_manager_configs(tmp_path, enable_builtin_tools=False),
+            "enabled_tools": {"custom.echo": {"mcp_only": True}},
         },
         telemetry_client=telemetry,
         mcp_client=_FailingMCPClient(),
         local_tools={"custom.echo": _LocalTool()},
     )
 
-    result = await manager.invoke("custom.echo", payload={"question": "fallback", "context_evidences": []})
-    assert result.summary == "local::fallback"
-    assert "remote_fallback_reason" in result.diagnostics
+    with pytest.raises(RuntimeError):
+        await manager.invoke("custom.echo", payload={"question": "fallback", "context_evidences": []})
 
 
 @pytest.mark.asyncio
@@ -1043,16 +1288,16 @@ async def test_beam_search_tool_ranks_paths_with_llm():
     assert result.think_notes
 
 
-def test_llm_required_tools_not_created_when_connector_missing_attrs():
+def test_llm_required_tools_not_created_when_connector_missing_attrs(tmp_path):
     manager = DeepSearchToolManager(
-        tool_configs={"enable_builtin_tools": True, "llm_connector": "fake-string"},
+        tool_configs=_tool_manager_configs(tmp_path, enable_builtin_tools=True, llm_connector="fake-string"),
         telemetry_client=None,
     )
     assert manager.local_registry.resolve("graph.llm_chain_explorer") is None
 
 
 @pytest.mark.asyncio
-async def test_tool_manager_records_local_latency_in_diagnostics():
+async def test_tool_manager_records_local_latency_in_diagnostics(tmp_path):
     class _EchoTool:
         descriptor = ToolDescriptor(
             name="graph.echo",
@@ -1070,7 +1315,7 @@ async def test_tool_manager_records_local_latency_in_diagnostics():
             return ToolResult(summary="ok", evidences=[chunk], diagnostics={})
 
     manager = DeepSearchToolManager(
-        tool_configs={"enable_builtin_tools": False},
+        tool_configs=_tool_manager_configs(tmp_path, enable_builtin_tools=False),
         telemetry_client=None,
         local_tools={"graph.echo": _EchoTool()},
     )

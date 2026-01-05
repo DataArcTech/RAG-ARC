@@ -4,9 +4,6 @@ import asyncio
 import os
 import time
 import threading
-import re
-from pathlib import Path
-from urllib.parse import quote
 from typing import Annotated, Any, Dict, List, Optional
 from fastapi import (
     APIRouter,
@@ -30,7 +27,6 @@ from api.sse import (
     openai_chat_completion_chunk,
     sse_done,
     sse_json,
-    sse_json_wrapped,
 )
 from encapsulation.data_model.orm_models import ChatMessage, User
 from encapsulation.data_model.schema import Chunk, GraphData
@@ -45,11 +41,6 @@ import logging
 from core.utils.owner_guard import is_admin_owner, get_admin_owner_id
 from core.presentation.evidence import build_chat_evidence
 from config.output_limits import CHAT_TOP_CHUNKS
-from api.routers.chatbot import (
-    _sanitize_title,
-    _fallback_title,
-    _generate_title_messages,
-)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -121,116 +112,11 @@ class GraphOverviewResponse(BaseModel):
     edges: List[Dict[str, Any]]
     metadata: Dict[str, Any]
 
-# 脚标引用相关函数（从chatbot.py复制）
-_SUP_KEY_RE = re.compile(r"<sup>\s*(?P<key>\d{1,4})\s*</sup>")
-
-def _extract_sup_keys(text: str) -> List[int]:
-    """Extract referenced source keys in the order they appear."""
-    if not text:
-        return []
-    seen: set[int] = set()
-    keys: List[int] = []
-    for match in _SUP_KEY_RE.finditer(text):
-        try:
-            key = int(match.group("key"))
-        except Exception:  # noqa: BLE001
-            continue
-        if key <= 0:
-            continue
-        if key not in seen:
-            seen.add(key)
-            keys.append(key)
-    return keys
-
-def _build_sources_for_frontend(chunks: List[Chunk], max_sources: int = 5) -> List[Dict[str, Any]]:
-    """Build sources list for frontend with citation keys."""
-    max_chars = int(os.getenv("CHATBOT_SOURCE_MAX_CHARS", "1600"))
-    sources: List[Dict[str, Any]] = []
-    seen_chunk_ids: set[str] = set()
-    
-    # 获取knowledge模块以访问file_storage
-    try:
-        registrator = Register()
-        knowledge = registrator.get_object("knowledge")
-        file_storage = getattr(knowledge, "file_storage", None)
-    except Exception:  # noqa: BLE001
-        file_storage = None
-
-    for chunk in chunks:
-        if len(sources) >= max_sources:
-            break
-        chunk_id = str(getattr(chunk, "id", "") or "").strip()
-        if not chunk_id or chunk_id in seen_chunk_ids:
-            continue
-        seen_chunk_ids.add(chunk_id)
-
-        metadata = getattr(chunk, "metadata", None) or {}
-        file_id = str(metadata.get("source_file_id") or "").strip() or None
-        filename = str(metadata.get("filename") or "").strip() or "source"
-
-        content = str(getattr(chunk, "content", "") or "").strip()
-        if max_chars > 0 and len(content) > max_chars:
-            content = f"{content[:max_chars].rstrip()}..."
-
-        file_url = None
-        if file_id and file_storage is not None:
-            try:
-                meta = file_storage.get_file_metadata(file_id)
-                meta_filename = getattr(meta, "filename", None) if meta is not None else None
-                safe_name = Path((meta_filename or filename or "source")).name
-                file_url = f"/static/files/{file_id}/{quote(safe_name)}"
-            except Exception:  # noqa: BLE001
-                file_url = None
-
-        sources.append({
-            "key": len(sources) + 1,
-            "chunk_id": chunk_id,
-            "file_id": file_id,
-            "title": filename,
-            "file": file_url,
-            "description": content,
-        })
-    return sources
-
-def _filter_sources_by_sup_keys(sources: List[Dict[str, Any]], answer_text: str) -> List[Dict[str, Any]]:
-    """Filter sources to only include those referenced by <sup> tags."""
-    if not sources:
-        return []
-    used_keys = set(_extract_sup_keys(answer_text))
-    if not used_keys:
-        return []
-    return [s for s in sources if s.get("key") in used_keys]
-
-# Title生成函数（复用chatbot.py中的函数）
-async def _generate_title_via_llm(
-    rag_inference_handler: RAGInference,
-    user_text: str,
-    assistant_text: str,
-) -> str:
-    """生成标题，复用chatbot.py中的辅助函数"""
-    llm = getattr(rag_inference_handler, "llm", None)
-    if llm is None:
-        return _fallback_title(user_text)
-
-    messages = _generate_title_messages(user_text, assistant_text)
-
-    def _run():
-        return llm.chat(messages)
-
-    try:
-        raw = await get_thread_pool().run_blocking(_run)
-    except Exception:  # noqa: BLE001
-        return _fallback_title(user_text)
-
-    title = _sanitize_title(str(raw or ""))
-    return title or _fallback_title(user_text)
-
 def _build_stream_chat_payload(
     message: ChatMessage,
     chunks: list[Chunk],
     subgraph: dict | None = None,
     evidence: Dict[str, Any] | None = None,
-    sources: List[Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
     message_dict = {
         "id": str(message.id),
@@ -252,8 +138,6 @@ def _build_stream_chat_payload(
         response_dict["subgraph"] = subgraph
     if evidence is not None:
         response_dict["evidence"] = evidence
-    if sources is not None:
-        response_dict["sources"] = sources
     return response_dict
 
 
@@ -318,7 +202,7 @@ async def chat(
         current_user_query=request.query,
     )
     
-    # 记录完整的 response 信息（包括图数据）到日志
+    # Log full response details (including graph payload).
     logger.info(
         "Chat response: text_length=%d, chunks_count=%d, subgraph_nodes=%d, subgraph_edges=%d, raw_response=%s, raw_mindmap_response=%s",
         len(response_text) if response_text else 0,
@@ -401,7 +285,7 @@ async def graph_overview(
 async def stream_chat_sse(
     session_id: uuid.UUID,
     request: StreamChatRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User | None, Depends(get_current_user)],
 ):
     """
     SSE stream chat endpoint with user authentication required (POST method)
@@ -423,6 +307,9 @@ async def stream_chat_sse(
     Returns:
         StreamingResponse with SSE events (text/event-stream)
     """
+    if current_user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+
     # Extract parameters from request body
     query = request.query
     return_subgraph = request.return_subgraph
@@ -430,9 +317,10 @@ async def stream_chat_sse(
     include_all_owners = request.include_all_owners
     include_evidence = request.include_evidence
 
-    # 校验：只有 type=0 (livingKB) 的用户才能生成图
+    # Guard: only livingKB users (type=0) may request subgraph/evidence generation.
     if return_subgraph or include_evidence:
-        if current_user.type != 0:
+        user_type = getattr(current_user, "type", 0)
+        if user_type != 0:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only livingKB users (type=0) can request subgraph generation"
@@ -477,57 +365,47 @@ async def stream_chat_sse(
         progress_seq = 0
 
         # Qwen/OpenAI-compatible streams typically start with a chunk that sets role=assistant.
-        yield sse_json_wrapped(
+        yield sse_json(
             openai_chat_completion_chunk(
                 chunk_id=chunk_id,
                 model=model_name,
                 created=created,
                 delta=delta_envelope(role="assistant", content=""),
-            ),
-            request_id=request_id
+            )
         )
 
         user_message = ChatMessage(
             session_id=session_id,
-            user_id=current_user.id,
-            user_type=current_user.type,
             content={"role": "user", "content": query},
             created_at=datetime.now(),
         )
         user_message = await get_thread_pool().run_blocking(message_handler.create_message, user_message)
 
-        # 获取历史消息（参考 WebSocket 和 chatbot.py 的实现）
+        # Load recent history messages (aligned with WebSocket + chatbot behavior).
         history_messages = await get_thread_pool().run_blocking(
             message_handler.list_messages_by_session,
             session_id,
         )
         
-        # 排除当前刚创建的用户消息（避免重复）
+        # Exclude the message we just created (avoid duplication).
         history_messages = [msg for msg in history_messages if msg.id != user_message.id]
         
-        # 判断是否是第一轮对话（检查是否有assistant消息）
-        first_turn = not any(
-            msg.content.get("role") == "assistant" 
-            for msg in history_messages 
-            if isinstance(msg.content, dict)
-        )
-        
-        # 限制历史消息数量（参考 chatbot.py 的 _normalize_history）
-        # 默认只取最近 5 轮对话（10 条消息：user + assistant）
+        # Limit history length (similar to chatbot.py `_normalize_history`).
+        # Default: keep the last 5 turns (10 messages: user + assistant).
         context_turns = int(os.getenv("SSE_CONTEXT_TURNS", "5"))
         max_history_messages = context_turns * 2
         if len(history_messages) > max_history_messages:
             history_messages = history_messages[-max_history_messages:]
         
-        # 构建历史文本（参考 WebSocket 的实现）
+        # Build history text (similar to WebSocket implementation).
         history_text = "\n".join(
             f"{msg.content['role']}: {msg.content['content']}" for msg in history_messages
         ) if history_messages else None
 
-        # 检查 token 限制（参考 chatbot.py 的 _ensure_context_within_limit）
-        # 估算历史消息的 token 数
+        # Enforce a rough context budget (similar to chatbot.py `_ensure_context_within_limit`).
+        # Estimate tokens for the history text.
         if history_text:
-            # 简单的 token 估算（参考 chatbot.py 的 _estimate_tokens）
+            # Simple token estimate (aligned with chatbot.py `_estimate_tokens`).
             history_tokens = len(history_text) if any(ord(ch) >= 128 for ch in history_text) else len(history_text) // 4
             max_context_tokens = int(os.getenv("SSE_MAX_CONTEXT_TOKENS", "8192"))
             threshold_fraction = float(os.getenv("SSE_MAX_CONTEXT_FRACTION", "0.9"))
@@ -539,8 +417,7 @@ async def stream_chat_sse(
                     history_tokens,
                     allowed_tokens,
                 )
-                # 如果历史太长，进一步限制历史消息数量
-                # 保留更少的历史消息
+                # If history is too long, reduce the number of retained turns further.
                 reduced_turns = max(1, context_turns // 2)
                 max_history_messages = reduced_turns * 2
                 if len(history_messages) > max_history_messages:
@@ -578,7 +455,7 @@ async def stream_chat_sse(
                         history_text=history_text if history_text else None,
                     )
                 except TypeError:
-                    # 兼容旧版本（不支持 history_text 参数）
+                    # Backward compatibility: older implementations may not accept `history_text`.
                     token_stream, chunks, subgraph_data, subgraph_info = rag_inference_handler.stream_chat(
                         query,
                         effective_owner,
@@ -587,8 +464,8 @@ async def stream_chat_sse(
                 prepared["chunks"] = chunks
                 prepared["subgraph_data"] = subgraph_data
                 prepared["subgraph_info"] = subgraph_info
-                prepared["raw_llm_response"] = None  # 流式响应无法获取完整原始 response
-                prepared["raw_mindmap_response"] = None  # 流式响应无法获取完整 mindmap response
+                prepared["raw_llm_response"] = None  # Streaming does not capture a full raw response.
+                prepared["raw_mindmap_response"] = None  # Streaming does not capture a full raw mindmap response.
                 _emit_progress({"stage": "prepare", "status": "end"})
                 _emit_progress({"stage": "generate", "status": "start"})
                 for chunk in token_stream:
@@ -623,14 +500,13 @@ async def stream_chat_sse(
                         },
                     }
                 ]
-                yield sse_json_wrapped(
+                yield sse_json(
                     openai_chat_completion_chunk(
                         chunk_id=chunk_id,
                         model=model_name,
                         created=created,
                         delta=delta_envelope(role=None, tool_calls=tool_calls),
-                    ),
-                    request_id=request_id
+                    )
                 )
                 continue
 
@@ -640,20 +516,19 @@ async def stream_chat_sse(
                     continue
                 for delta_piece in iter_text_deltas(piece):
                     response_parts.append(delta_piece)
-                    yield sse_json_wrapped(
+                    yield sse_json(
                         openai_chat_completion_chunk(
                             chunk_id=chunk_id,
                             model=model_name,
                             created=created,
                             delta=delta_envelope(role=None, content=delta_piece),
-                        ),
-                        request_id=request_id
+                        )
                     )
                     await asyncio.sleep(0)
                 continue
 
         if stream_error[0] is not None:
-            yield sse_json_wrapped({"error": {"message": str(stream_error[0])}}, request_id=request_id, code=500, message="Internal server error")
+            yield sse_json({"error": {"message": str(stream_error[0])}})
             yield sse_done()
             return
 
@@ -664,10 +539,10 @@ async def stream_chat_sse(
         raw_llm_response = prepared.get("raw_llm_response")
         raw_mindmap_response = prepared.get("raw_mindmap_response")
 
-        # 参考 WebSocket 逻辑：如果 return_subgraph=True，总是生成 mindmap（与 WebSocket 保持一致）
-        # 总是用 mindmap prompt 生成图，确保图和 chat 回答相关
+        # Align with WebSocket behavior: when return_subgraph=True, always generate a mindmap
+        # to ensure the graph is tightly coupled to the current chat answer.
         if return_subgraph:
-            # 使用当前用户问题生成 mindmap，确保图和 chat 回答相关
+            # Generate the mindmap from the current user query to keep it consistent with the answer.
             try:
                 subgraph_data, raw_mindmap_response = await get_thread_pool().run_blocking(
                     rag_inference_handler._generate_mindmap,
@@ -680,12 +555,12 @@ async def stream_chat_sse(
                            len(subgraph_data.get("edges", [])) if subgraph_data else 0)
             except Exception as exc:
                 logger.warning("Failed to generate mindmap in SSE: %s", exc)
-                # 如果生成失败，保留原有的 subgraph_data（如果有的话）
+                # If generation fails, keep the original subgraph_data (if any).
                 if not subgraph_data:
                     subgraph_data = None
                     raw_mindmap_response = None
 
-        # 记录完整的 response 信息（包括图数据）到日志
+        # Log full response details (including graph payload).
         logger.info(
             "SSE chat response: text_length=%d, chunks_count=%d, subgraph_nodes=%d, subgraph_edges=%d, raw_response=%s, raw_mindmap_response=%s",
             len(assistant_response) if assistant_response else 0,
@@ -700,8 +575,6 @@ async def stream_chat_sse(
 
         assistant_message = ChatMessage(
             session_id=session_id,
-            user_id=current_user.id,
-            user_type=current_user.type,
             content={"role": "assistant", "content": assistant_response},
             source_file_ids=[chunk.id for chunk in chunks] if chunks else None,
             subgraph_data=subgraph_data if return_subgraph else None,
@@ -713,8 +586,8 @@ async def stream_chat_sse(
             message_handler.create_message, assistant_message
         )
 
-        # 参考 WebSocket 逻辑：总是构建并返回 payload（与 WebSocket 保持一致）
-        # 如果请求了 evidence 或 subgraph，则包含相应数据
+        # Align with WebSocket behavior: always build and return a payload.
+        # When evidence/subgraph is requested, include the corresponding fields.
         evidence = None
         if include_evidence:
             graph_store = None
@@ -730,27 +603,15 @@ async def stream_chat_sse(
                 graph_store=graph_store,
             )
 
-        # 构建sources（脚标引用功能）
-        sources = None
-        if chunks:
-            all_sources = await get_thread_pool().run_blocking(
-                _build_sources_for_frontend,
-                chunks,
-                CHAT_TOP_CHUNKS
-            )
-            # 只返回被引用的sources
-            sources = _filter_sources_by_sup_keys(all_sources, assistant_response)
-
-        # 构建 payload（与 WebSocket 逻辑一致）
+        # Build payload (aligned with WebSocket behavior).
         payload = _build_stream_chat_payload(
-                assistant_message,
-                chunks,
-                subgraph=subgraph_data if return_subgraph else None,
-                evidence=evidence,
-                sources=sources,
-            )
+            assistant_message,
+            chunks,
+            subgraph=subgraph_data if return_subgraph else None,
+            evidence=evidence,
+        )
 
-        # 通过 tool_calls 返回 payload（保持 OpenAI 兼容格式）
+        # Return payload via tool_calls (OpenAI-compatible format).
         tool_calls = [
             {
                 "index": 0,
@@ -762,54 +623,24 @@ async def stream_chat_sse(
                 },
             }
         ]
-        yield sse_json_wrapped(
+        yield sse_json(
             openai_chat_completion_chunk(
                 chunk_id=chunk_id,
                 model=model_name,
                 created=created,
                 delta=delta_envelope(role=None, tool_calls=tool_calls),
-            ),
-            request_id=request_id
+            )
         )
 
-        yield sse_json_wrapped(
+        yield sse_json(
             openai_chat_completion_chunk(
                 chunk_id=chunk_id,
                 model=model_name,
                 created=created,
                 delta=delta_envelope(),
                 finish_reason="stop",
-            ),
-            request_id=request_id
+            )
         )
-        
-        # 如果是第一轮对话，生成并发送title（参考chatbot.py的实现）
-        if first_turn:
-            try:
-                title = await _generate_title_via_llm(
-                    rag_inference_handler,
-                    query.strip(),
-                    assistant_response.strip(),
-                )
-                # 发送title事件（使用统一的StandardResponse格式）
-                yield sse_json_wrapped(
-                    {"type": "title", "title": title},
-                    request_id=request_id
-                )
-                # 更新数据库中的session name
-                try:
-                    await get_thread_pool().run_blocking(
-                        get_session_handler().update_session,
-                        session_id,
-                        {"name": title}
-                    )
-                    logger.info("Successfully updated session %s name to: %s", session_id, title)
-                except Exception as exc:
-                    logger.warning("Failed to update session name: %s", exc)
-            except Exception as exc:
-                logger.warning("Failed to generate title: %s", exc)
-                # title生成失败不影响主流程，继续执行
-        
         yield sse_done()
 
     headers = {
@@ -818,6 +649,28 @@ async def stream_chat_sse(
         "X-Accel-Buffering": "no",
     }
     return StreamingResponse(event_generator(), media_type="text/event-stream", headers=headers)
+
+
+@router.get("/stream_chat/{session_id}")
+async def stream_chat_sse_get(
+    session_id: uuid.UUID,
+    query: str,
+    current_user: Annotated[User | None, Depends(get_current_user)],
+    return_subgraph: bool = False,
+    target_owner_id: uuid.UUID | None = None,
+    include_all_owners: bool = False,
+    include_evidence: bool = False,
+):
+    """Backward compatible GET variant of the SSE stream chat endpoint."""
+
+    request = StreamChatRequest(
+        query=query,
+        return_subgraph=return_subgraph,
+        target_owner_id=target_owner_id,
+        include_all_owners=include_all_owners,
+        include_evidence=include_evidence,
+    )
+    return await stream_chat_sse(session_id=session_id, request=request, current_user=current_user)
 
 
 @router.websocket("/stream_chat/{session_id}")
@@ -860,9 +713,10 @@ async def stream_chat_ws(
             except Exception:  # noqa: BLE001
                 pass
 
-            # 校验：只有 type=0 (livingKB) 的用户才能生成图
+            # Guard: only livingKB users (type=0) may request subgraph/evidence generation.
             if return_subgraph or include_evidence:
-                if current_user.type != 0:
+                user_type = getattr(current_user, "type", 0)
+                if user_type != 0:
                     await websocket.close(
                         code=status.WS_1008_POLICY_VIOLATION,
                         reason="Only livingKB users (type=0) can request subgraph generation"
@@ -887,8 +741,6 @@ async def stream_chat_ws(
 
             user_message = ChatMessage(
                 session_id=session_id,
-                user_id=current_user.id,
-                user_type=current_user.type,
                 content={"role": "user", "content": query},
                 created_at=datetime.now(),
             )
@@ -901,14 +753,36 @@ async def stream_chat_ws(
                 f"{msg.content['role']}: {msg.content['content']}" for msg in history_messages
             )
 
-            assistant_response, chunks, subgraph_data, subgraph_info, raw_llm_response, raw_mindmap_response = await rag_inference_handler.chat_async(
-                history_text,
-                owner_id=effective_owner,
-                return_subgraph=(return_subgraph or include_evidence),
-                current_user_query=query,
-            )
+            return_subgraph_flag = return_subgraph or include_evidence
+            try:
+                result = await rag_inference_handler.chat_async(
+                    history_text,
+                    owner_id=effective_owner,
+                    return_subgraph=return_subgraph_flag,
+                    current_user_query=query,
+                )
+            except TypeError:
+                result = await rag_inference_handler.chat_async(
+                    history_text,
+                    owner_id=effective_owner,
+                    return_subgraph=return_subgraph_flag,
+                )
+
+            raw_llm_response = None
+            raw_mindmap_response = None
+            if isinstance(result, tuple) and len(result) == 4:
+                assistant_response, chunks, subgraph_data, subgraph_info = result
+            else:
+                (
+                    assistant_response,
+                    chunks,
+                    subgraph_data,
+                    subgraph_info,
+                    raw_llm_response,
+                    raw_mindmap_response,
+                ) = result
             
-            # 记录完整的 response 信息（包括图数据）到日志
+            # Log full response details (including graph payload).
             logger.info(
                 "WebSocket chat response: text_length=%d, chunks_count=%d, subgraph_nodes=%d, subgraph_edges=%d, raw_response=%s, raw_mindmap_response=%s",
                 len(assistant_response) if assistant_response else 0,
@@ -923,8 +797,6 @@ async def stream_chat_ws(
             
             assistant_message = ChatMessage(
                 session_id=session_id,
-                user_id=current_user.id,
-                user_type=current_user.type,
                 content={"role": "assistant", "content": assistant_response},
                 source_file_ids=[chunk.id for chunk in chunks] if chunks else None,
                 subgraph_data=subgraph_data if return_subgraph else None,

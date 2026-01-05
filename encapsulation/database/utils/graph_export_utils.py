@@ -9,7 +9,22 @@ import logging
 import re
 from typing import Dict, List, Any, Set, Optional
 
+from config.output_limits import (
+    GRAPH_EXPORT_CHUNK_CONTENT_PREVIEW_CHARS,
+    GRAPH_EXPORT_EDGE_FETCH_FACTOR,
+    GRAPH_EXPORT_EDGE_FETCH_MAX,
+)
+
 logger = logging.getLogger(__name__)
+
+
+def _truncate_text(text: str, *, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    value = str(text or "")
+    if len(value) <= limit:
+        return value
+    return value[:limit].rstrip() + "…"
 
 
 class GraphExporter:
@@ -110,32 +125,50 @@ class GraphExporter:
 
         cursor = graph_store.conn.cursor()
 
-        # Load chunk metadata/content for quick lookup
-        chunk_query = 'SELECT chunk_id, content, owner_id FROM chunks'
-        chunk_params: tuple = ()
-        if owner_filter is not None:
-            chunk_query += ' WHERE owner_id = ?'
-            chunk_params = (owner_filter,)
-        cursor.execute(chunk_query, chunk_params)
-        chunk_info = {
-            chunk_id: {'content': content, 'owner_id': owner or None}
-            for chunk_id, content, owner in cursor.fetchall()
-        }
+        # Load only metadata needed for the sampled node set (avoid scanning full tables).
+        candidate_chunk_ids: List[str] = []
+        candidate_entity_ids: List[str] = []
+        for idx in node_indices:
+            node_id = idx_to_node.get(idx)
+            if not node_id:
+                continue
+            node_type = graph.vs[idx]["node_type"]
+            if node_type == "chunk":
+                candidate_chunk_ids.append(node_id)
+            elif node_type == "entity":
+                candidate_entity_ids.append(node_id)
 
-        # Build entity_id to entity_name and entity_type mapping (with owner scope)
-        entity_query = 'SELECT entity_id, entity_name, entity_type, owner_id FROM entities'
-        entity_params: tuple = ()
-        if owner_filter is not None:
-            entity_query += ' WHERE owner_id = ?'
-            entity_params = (owner_filter,)
-        cursor.execute(entity_query, entity_params)
-        entity_id_to_info = {
-            eid: (name, etype, owner or None)
-            for eid, name, etype, owner in cursor.fetchall()
-        }
+        chunk_info: Dict[str, Dict[str, Any]] = {}
+        if candidate_chunk_ids:
+            placeholders = ",".join(["?"] * len(candidate_chunk_ids))
+            chunk_query = f"SELECT chunk_id, content, owner_id FROM chunks WHERE chunk_id IN ({placeholders})"
+            params: List[Any] = list(candidate_chunk_ids)
+            if owner_filter is not None:
+                chunk_query += " AND owner_id = ?"
+                params.append(owner_filter)
+            cursor.execute(chunk_query, tuple(params))
+            for chunk_id, content, owner in cursor.fetchall():
+                chunk_info[str(chunk_id)] = {
+                    "content": _truncate_text(content or "", limit=int(GRAPH_EXPORT_CHUNK_CONTENT_PREVIEW_CHARS)),
+                    "owner_id": (owner or None),
+                }
+
+        entity_id_to_info: Dict[str, tuple[Any, Any, Any]] = {}
+        if candidate_entity_ids:
+            placeholders = ",".join(["?"] * len(candidate_entity_ids))
+            entity_query = (
+                f"SELECT entity_id, entity_name, entity_type, owner_id FROM entities WHERE entity_id IN ({placeholders})"
+            )
+            params = list(candidate_entity_ids)
+            if owner_filter is not None:
+                entity_query += " AND owner_id = ?"
+                params.append(owner_filter)
+            cursor.execute(entity_query, tuple(params))
+            entity_id_to_info = {eid: (name, etype, owner or None) for eid, name, etype, owner in cursor.fetchall()}
 
         # Export nodes - separate chunks and entities
         node_set = set()
+        selected_entity_names: List[str] = []
         for idx in node_indices:
             node_id = idx_to_node.get(idx)
             if not node_id:
@@ -148,24 +181,12 @@ class GraphExporter:
             if node_type not in include_node_types:
                 continue
 
-            # Owner filtering
-            if owner_filter is not None:
-                if node_type == 'chunk':
-                    chunk_meta = chunk_info.get(node_id)
-                    if not chunk_meta or chunk_meta['owner_id'] != owner_filter:
-                        continue
-                elif node_type == 'entity':
-                    entity_meta = entity_id_to_info.get(node_id)
-                    if not entity_meta or entity_meta[2] != owner_filter:
-                        continue
-
-            node_set.add(idx)
-
             # Build node structure based on type
             if node_type == 'chunk':
                 chunk_meta = chunk_info.get(node_id)
                 if chunk_meta is None:
                     continue
+                node_set.add(idx)
                 chunk_obj = {'id': node_id, 'type': 'chunk'}
                 if chunk_meta.get('content'):
                     chunk_obj['content'] = chunk_meta['content']
@@ -173,39 +194,44 @@ class GraphExporter:
 
             elif node_type == 'entity':
                 entity_info = entity_id_to_info.get(node_id)
+                if not entity_info:
+                    continue
+                entity_name, entity_type, _ = entity_info
+
+                # Filter out entities that are pure numbers, timestamps, or time formats
+                if GraphExporter._should_filter_entity(entity_name):
+                    continue
+
+                node_set.add(idx)
                 entity_obj = {
-                    'id': node_id,
-                    'type': 'entity'
+                    "id": node_id,
+                    "type": "entity",
+                    "name": entity_name,
+                    "category": entity_type or "Entity",
                 }
-                if entity_info:
-                    entity_name, entity_type, _ = entity_info
+                categories_set.add(entity_type or "Entity")
+                nodes.append(entity_obj)
+                selected_entity_names.append(entity_name)
 
-                    # Filter out entities that are pure numbers, timestamps, or time formats
-                    if GraphExporter._should_filter_entity(entity_name):
-                        continue
-
-                    entity_obj = {
-                        'id': node_id
-                    }
-                    # Use 'name' instead of 'entity_name'
-                    entity_obj['name'] = entity_name
-                    # Use 'category' for entity_type
-                    entity_obj['category'] = entity_type or 'Entity'
-                    categories_set.add(entity_type or 'Entity')
-                    nodes.append(entity_obj)
-
-        # Build fact_id to relation mapping scoped by owner when requested
-        fact_query = 'SELECT fact_id, head, relation, tail, owner_id FROM facts'
-        fact_params: tuple = ()
-        if owner_filter is not None:
-            fact_query += ' WHERE owner_id = ?'
-            fact_params = (owner_filter,)
-        cursor.execute(fact_query, fact_params)
-        fact_relations = {}
-        for fid, head, relation, tail, owner in cursor.fetchall():
-            if owner_filter is not None and owner != owner_filter:
-                continue
-            fact_relations[fid] = (head, relation, tail)
+        # Build (head, tail) -> relation map for O(1) lookups during edge rendering.
+        fact_pair_to_relation: Dict[tuple[str, str], str] = {}
+        if selected_entity_names:
+            placeholders = ",".join(["?"] * len(selected_entity_names))
+            fact_query = f"SELECT head, relation, tail, owner_id FROM facts WHERE head IN ({placeholders}) OR tail IN ({placeholders})"
+            params = list(selected_entity_names) + list(selected_entity_names)
+            if owner_filter is not None:
+                fact_query += " AND owner_id = ?"
+                params.append(owner_filter)
+            cursor.execute(fact_query, tuple(params))
+            for head, relation, tail, owner in cursor.fetchall():
+                if owner_filter is not None and owner != owner_filter:
+                    continue
+                head_text = str(head or "")
+                tail_text = str(tail or "")
+                rel_text = str(relation or "").strip()
+                if not head_text or not tail_text or not rel_text:
+                    continue
+                fact_pair_to_relation.setdefault((head_text, tail_text), rel_text)
 
         # Collect edges by type for uniform sampling
         edges_by_type = {
@@ -215,97 +241,76 @@ class GraphExporter:
             'other': []
         }
 
-        for edge in graph.es:
-            source_idx = edge.source
-            target_idx = edge.target
+        max_edges = max(0, int(max_edges or 0))
+        if max_edges <= 0:
+            edges = []
+        else:
+            node_idx_list = sorted(node_set)
+            subgraph = graph.induced_subgraph(node_idx_list)
+            index_to_node_id = [idx_to_node.get(idx) for idx in node_idx_list]
+            index_to_node_type = [subgraph.vs[i]["node_type"] for i in range(subgraph.vcount())]
 
-            # Only include edges between sampled nodes
-            if source_idx not in node_set or target_idx not in node_set:
-                continue
+            factor = max(1, int(GRAPH_EXPORT_EDGE_FETCH_FACTOR))
+            fetch_cap = max_edges * factor
+            fetch_cap = min(int(GRAPH_EXPORT_EDGE_FETCH_MAX), fetch_cap) if fetch_cap > 0 else 0
+            if fetch_cap <= 0:
+                fetch_cap = min(int(GRAPH_EXPORT_EDGE_FETCH_MAX), max_edges)
 
-            source_id = idx_to_node.get(source_idx)
-            target_id = idx_to_node.get(target_idx)
+            for edge in subgraph.es[:fetch_cap]:
+                source_idx = int(edge.source)
+                target_idx = int(edge.target)
 
-            if not source_id or not target_id:
-                continue
+                source_id = index_to_node_id[source_idx]
+                target_id = index_to_node_id[target_idx]
 
-            weight = edge['weight'] if 'weight' in edge.attributes() else 1.0
+                if not source_id or not target_id:
+                    continue
 
-            # Determine edge type and relation
-            source_type = graph.vs[source_idx]['node_type']
-            target_type = graph.vs[target_idx]['node_type']
+                weight = edge["weight"] if "weight" in edge.attributes() else 1.0
 
-            # Owner filtering - ensure both endpoints were included
-            if owner_filter is not None:
-                if source_type == 'chunk':
-                    chunk_meta = chunk_info.get(source_id)
-                    if not chunk_meta or chunk_meta['owner_id'] != owner_filter:
+                # Determine edge type and relation
+                source_type = index_to_node_type[source_idx]
+                target_type = index_to_node_type[target_idx]
+
+                # Build edge object with source/target as entity_name or chunk_id
+                edge_obj = {
+                    "id": f"{source_id}_{target_id}",
+                    "weight": weight,
+                }
+
+                # Determine relation and source/target display
+                if source_type == "chunk" and target_type == "entity":
+                    edge_obj["source"] = source_id
+                    entity_info = entity_id_to_info.get(target_id)
+                    edge_obj["target"] = entity_info[0] if entity_info else target_id
+                    edge_obj["relation"] = "mentions"
+                    edges_by_type["mentions"].append(edge_obj)
+                elif source_type == "entity" and target_type == "chunk":
+                    continue
+                elif source_type == "entity" and target_type == "entity":
+                    source_info = entity_id_to_info.get(source_id)
+                    target_info = entity_id_to_info.get(target_id)
+                    source_name = source_info[0] if source_info else source_id
+                    target_name = target_info[0] if target_info else target_id
+
+                    relation = fact_pair_to_relation.get((str(source_name), str(target_name)))
+                    if relation:
+                        edge_obj["source"] = source_name
+                        edge_obj["target"] = target_name
+                        edge_obj["relation"] = relation
+                        edges_by_type["fact_relation"].append(edge_obj)
                         continue
-                elif source_type == 'entity':
-                    entity_meta = entity_id_to_info.get(source_id)
-                    if not entity_meta or entity_meta[2] != owner_filter:
-                        continue
-
-                if target_type == 'chunk':
-                    chunk_meta = chunk_info.get(target_id)
-                    if not chunk_meta or chunk_meta['owner_id'] != owner_filter:
-                        continue
-                elif target_type == 'entity':
-                    entity_meta = entity_id_to_info.get(target_id)
-                    if not entity_meta or entity_meta[2] != owner_filter:
-                        continue
-
-            # Build edge object with source/target as entity_name or chunk_id
-            edge_obj = {
-                'id': f"{source_id}_{target_id}",
-                'weight': weight
-            }
-
-            # Determine relation and source/target display
-            if source_type == 'chunk' and target_type == 'entity':
-                edge_obj['source'] = source_id  # chunk_id
-                # Get entity name from entity_id_to_info
-                entity_info = entity_id_to_info.get(target_id)
-                edge_obj['target'] = entity_info[0] if entity_info else target_id  # entity_name
-                edge_obj['relation'] = 'mentions'
-                edges_by_type['mentions'].append(edge_obj)
-
-            elif source_type == 'entity' and target_type == 'chunk':
-                # Skip reverse edge (mentioned_by), as edges are undirected
-                continue
-
-            elif source_type == 'entity' and target_type == 'entity':
-                source_info = entity_id_to_info.get(source_id)
-                target_info = entity_id_to_info.get(target_id)
-                source_name = source_info[0] if source_info else source_id
-                target_name = target_info[0] if target_info else target_id
-
-                # Try to find relation from facts and determine correct direction
-                relation_found = False
-                for _, (head, relation, tail) in fact_relations.items():
-                    if head == source_name and tail == target_name:
-                        edge_obj['source'] = source_name
-                        edge_obj['target'] = target_name
-                        edge_obj['relation'] = relation
-                        relation_found = True
-                        edges_by_type['fact_relation'].append(edge_obj)
-                        break
-                    elif head == target_name and tail == source_name:
-                        edge_obj['source'] = target_name
-                        edge_obj['target'] = source_name
-                        edge_obj['relation'] = relation
-                        relation_found = True
-                        edges_by_type['fact_relation'].append(edge_obj)
-                        break
-
-                # If no fact relation found, skip (no synonymy edges anymore)
-                # SIMILAR_TO relationships are filtered out
-
-            else:
-                edge_obj['source'] = source_id
-                edge_obj['target'] = target_id
-                edge_obj['relation'] = 'related'
-                edges_by_type['other'].append(edge_obj)
+                    relation = fact_pair_to_relation.get((str(target_name), str(source_name)))
+                    if relation:
+                        edge_obj["source"] = target_name
+                        edge_obj["target"] = source_name
+                        edge_obj["relation"] = relation
+                        edges_by_type["fact_relation"].append(edge_obj)
+                else:
+                    edge_obj["source"] = source_id
+                    edge_obj["target"] = target_id
+                    edge_obj["relation"] = "related"
+                    edges_by_type["other"].append(edge_obj)
 
         # Uniformly sample edges from different types
         # Allocate edge quota: mentions (50%), fact_relation (35%), synonymy (10%), other (5%)

@@ -107,7 +107,6 @@ class HippoRAG2Extractor(ExtractorBase):
             # Stage 2: Triple Extraction using extracted entities
             triples = []
             if entities:
-                print(entities)
                 triples = await self.extract_triples(chunk.content, entities)
             else:
                 self.logger.warning("No entities extracted, skipping triple extraction")
@@ -477,4 +476,3 @@ class HippoRAG2Extractor(ExtractorBase):
                     nodes.append({'level': level, 'content': content})
         
         return {'nodes': nodes}
-

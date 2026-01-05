@@ -1,10 +1,13 @@
 """Deterministic chunk sampler that mirrors TF-IDF style probes."""
 from typing import Any, Dict, List
 
+from config.core.deepsearch.tool_defaults import CHUNK_SCAN_DEFAULT_MAX_CHUNKS, CHUNK_SCAN_DEFAULT_QUERY_MAX_CHARS
 from encapsulation.data_model.deepsearch import EvidenceChunk
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from core.graph_adapter.concurrency import adapter_locked
+from core.deepsearch.utils.query_clean import clean_query
+from core.deepsearch.utils.file_scope import chunk_in_scope, resolve_file_scope
 
 
 class ChunkScanTool(GraphTool):
@@ -26,6 +29,16 @@ class ChunkScanTool(GraphTool):
                 "focus_query": {
                     "type": "string",
                     "description": "Optional query override when planner already decomposed the question.",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Optional override for how many chunks to return.",
+                    "minimum": 0,
+                },
+                "max_chunks": {
+                    "type": "integer",
+                    "description": "Alias of top_k for backward compatibility.",
+                    "minimum": 0,
                 }
             }
         ),
@@ -36,20 +49,61 @@ class ChunkScanTool(GraphTool):
         },
     )
 
-    def __init__(self, *, max_chunks: int = 5):
+    def __init__(self, *, max_chunks: int = CHUNK_SCAN_DEFAULT_MAX_CHUNKS):
         self.max_chunks = max_chunks
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
         query = self._resolve_query(request)
+        override = request.extra.get("top_k", None)
+        if override is None:
+            override = request.extra.get("max_chunks", None)
+        try:
+            effective_max = int(override) if override is not None else int(self.max_chunks)
+        except Exception:
+            effective_max = int(self.max_chunks) if self.max_chunks is not None else 0
+        max_chunks = effective_max if effective_max is not None else 0
+        if max_chunks < 0:
+            max_chunks = 0
+        file_scope = resolve_file_scope(
+            extra=request.extra,
+            graph_context_metadata=(request.graph_context.metadata if request.graph_context else {}),
+            question=request.question,
+        )
         async with adapter_locked(adapter):
             payload = await adapter.aquery_subgraph(
                 query,
                 channel="graph",
                 access_scope=request.access_scope,
+                query_options=(
+                    {
+                        "top_k": max_chunks,
+                        "file_scope": file_scope.as_dict(),
+                    }
+                    if max_chunks and file_scope.enabled
+                    else {"top_k": max_chunks}
+                    if max_chunks
+                    else {"file_scope": file_scope.as_dict()}
+                    if file_scope.enabled
+                    else None
+                ),
             )
         chunks = self._normalize_chunks(payload.get("chunks"))
-        evidences = self._to_evidences(chunks[: self.max_chunks], adapter.metadata().adapter_name)
+        if file_scope.enabled:
+            chunks = [
+                chunk
+                for chunk in chunks
+                if chunk_in_scope(
+                    chunk_metadata=(chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}),
+                    scope=file_scope,
+                )
+            ]
+        selected: List[Dict[str, Any]] = []
+        for chunk in chunks:
+            if max_chunks and len(selected) >= max_chunks:
+                break
+            selected.append(chunk)
+        evidences = self._to_evidences(selected, adapter.metadata().adapter_name)
         if not evidences:
             return ToolResult(
                 summary="Chunk scan completed but no high-signal chunks surfaced.",
@@ -59,6 +113,7 @@ class ChunkScanTool(GraphTool):
         diagnostics = {
             "query": query,
             "available_chunks": len(chunks),
+            "top_k": max_chunks,
         }
         return ToolResult(summary=summary, evidences=evidences, diagnostics=diagnostics)
 
@@ -70,9 +125,10 @@ class ChunkScanTool(GraphTool):
 
     @staticmethod
     def _resolve_query(request: ToolRunRequest) -> str:
+        max_chars = int(CHUNK_SCAN_DEFAULT_QUERY_MAX_CHARS)
         if isinstance(request.extra.get("focus_query"), str):
-            return request.extra["focus_query"]
-        return request.question
+            return clean_query(request.extra["focus_query"], max_chars=max_chars)
+        return clean_query(request.question, max_chars=max_chars)
 
     @staticmethod
     def _normalize_chunks(chunks: Any) -> List[Dict[str, Any]]:

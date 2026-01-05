@@ -8,7 +8,11 @@ def project_root_dir() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def normalize_project_filename(filename: str, *, root: Path | None = None) -> str:
+def normalize_project_filename(
+    filename: str,
+    *,
+    root: Path | None = None,
+) -> str:
     """
     Normalize a user-provided filename/path into a safe, repo-root-prefixed relative path.
 
@@ -58,4 +62,3 @@ def project_relative_path(path: Path, *, root: Path | None = None) -> str:
         raise ValueError(f"path must be under project root: {root_resolved}") from exc
     rel_str = rel.as_posix().lstrip("/")
     return f"{root.name}/{rel_str}" if rel_str else f"{root.name}/"
-

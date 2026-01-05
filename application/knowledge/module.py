@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 import uuid
 import asyncio
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -21,12 +22,15 @@ from encapsulation.data_model.orm_models import (
     FilePermission, PermissionReceiverType, PermissionType
 )
 from core.utils.thread_pool import run_blocking, run_coroutine_in_thread
+from encapsulation.message_queue.redis_task_queue import RedisTaskQueue, TaskState
+from application.knowledge.permission_mixin import KnowledgePermissionMixin
 
-class Knowledge(AbstractModule):
+class Knowledge(KnowledgePermissionMixin, AbstractModule):
     def __init__(self, config: 'KnowledgeConfig'):
         super().__init__(config=config)
         self.file_storage = config.file_storage_config.build()
         self.file_index = config.index_manager_config.build()
+        self.task_queue = RedisTaskQueue.from_env()
         
         # Semaphore to control concurrent indexing operations
         self.indexing_semaphore = asyncio.Semaphore(config.max_concurrent_indexing)
@@ -36,6 +40,9 @@ class Knowledge(AbstractModule):
         self._file_owner_cache: Dict[str, uuid.UUID] = {}
         self._active_deletion_tasks: Dict[str, asyncio.Task] = {}
         self._deletion_failures: Dict[str, str] = {}
+
+    def _use_celery(self) -> bool:
+        return os.getenv("TASK_QUEUE_MODE", "inprocess").lower() == "celery"
 
     def _track_background_task(self, doc_id: str, task: asyncio.Task) -> None:
         """Register a background indexing task so it can be cancelled or awaited later."""
@@ -154,18 +161,35 @@ class Knowledge(AbstractModule):
                 owner_id=user_id,
                 content_type=file.content_type
             )
-            # Start indexing in background (fire-and-forget)
-            # execute file indexing without waiting for it to complete
-            task = asyncio.create_task(self._index_file_background(doc_id))
-            self._track_background_task(doc_id, task)
-            logger.info(f"File {file.filename} uploaded with ID {doc_id}, indexing started in background")
+
+            task_run_id = self.task_queue.create_task_run(
+                task_type="index_file",
+                owner_id=user_id,
+                resource_id=doc_id,
+                metadata={"filename": relative_path or file.filename, "content_type": file.content_type},
+            )
+            if self._use_celery():
+                from application.knowledge.celery_tasks import index_file as index_file_task
+
+                queue = os.getenv("CELERY_QUEUE_INDEXING", "indexing")
+                index_file_task.apply_async(
+                    kwargs={"file_id": doc_id, "owner_id": str(user_id)},
+                    task_id=task_run_id,
+                    queue=queue,
+                )
+                logger.info("File %s uploaded with ID %s, indexing enqueued (task_run_id=%s)", file.filename, doc_id, task_run_id)
+            else:
+                # Start indexing in background (fire-and-forget)
+                task = asyncio.create_task(self._index_file_background(doc_id, task_run_id=task_run_id))
+                self._track_background_task(doc_id, task)
+                logger.info(f"File {file.filename} uploaded with ID {doc_id}, indexing started in background")
             return doc_id
 
         except Exception as e:
             logger.error(e)
             raise
 
-    async def _index_file_background(self, doc_id: str) -> Dict[str, Any]:
+    async def _index_file_background(self, doc_id: str, *, task_run_id: str | None = None) -> Dict[str, Any]:
         """Background task for indexing files with semaphore control
         
         Returns:
@@ -173,27 +197,186 @@ class Knowledge(AbstractModule):
         """
         if self._is_file_marked_for_deletion(doc_id):
             logger.info(f"Skipping indexing for file_id {doc_id} because it is marked for deletion")
+            if task_run_id:
+                self.task_queue.update_task_run(
+                    task_run_id,
+                    state=TaskState.CANCELED,
+                    error_message="file scheduled for deletion",
+                    finished=True,
+                )
             return {"success": False, "file_id": doc_id, "error_message": "file scheduled for deletion"}
 
         async with self.indexing_semaphore:
             try:
                 if self._is_file_marked_for_deletion(doc_id):
                     logger.info(f"Aborting indexing for file_id {doc_id}; deletion scheduled")
+                    if task_run_id:
+                        self.task_queue.update_task_run(
+                            task_run_id,
+                            state=TaskState.CANCELED,
+                            error_message="file scheduled for deletion",
+                            finished=True,
+                        )
                     return {"success": False, "file_id": doc_id, "error_message": "file scheduled for deletion"}
 
                 logger.info(f"Starting background indexing for file_id: {doc_id} (semaphore acquired)")
+                if task_run_id:
+                    self.task_queue.update_task_run(task_run_id, state=TaskState.RUNNING, progress_percent=1)
+                    self.task_queue.append_progress_event(
+                        flow="indexing",
+                        task_run_id=task_run_id,
+                        stage="index",
+                        status="start",
+                        percent=1,
+                        resource_id=doc_id,
+                        payload={"file_id": doc_id},
+                    )
+
+                # Dependency preflight (fail fast with actionable diagnosis).
+                try:
+                    from core.utils.dependency_health import check_dependencies, format_dependency_failures
+
+                    health = check_dependencies(
+                        mode_env="RAGARC_INDEXING_DEPENDENCY_CHECK_MODE",
+                        default_mode="strict",
+                    )
+                    failure = format_dependency_failures(health)
+                    if failure and health.get("mode") == "strict":
+                        raise RuntimeError(failure)
+                except Exception as exc:
+                    err = f"dependency health check failed: {exc}"
+                    logger.error(err)
+                    if task_run_id:
+                        try:
+                            self.task_queue.update_task_run(
+                                task_run_id,
+                                state=TaskState.FAILURE,
+                                progress_percent=100,
+                                error_message=err,
+                                finished=True,
+                            )
+                            self.task_queue.append_progress_event(
+                                flow="indexing",
+                                task_run_id=task_run_id,
+                                stage="dependency_check",
+                                status="error",
+                                percent=100,
+                                resource_id=doc_id,
+                                payload={"file_id": doc_id, "success": False, "error_message": err},
+                            )
+                        except Exception:
+                            pass
+                    return {"success": False, "file_id": doc_id, "error_message": err}
+
+                # Idempotency under at-least-once semantics: remove old derived artifacts/index entries first.
+                cleanup = await self._run_blocking(self.file_index.delete_file_data, doc_id)
+                if not cleanup.get("success", False):
+                    err = str(cleanup.get("error_message") or "pre-index cleanup failed")
+                    logger.error("Pre-index cleanup failed for file_id=%s: %s", doc_id, err)
+                    if task_run_id:
+                        self.task_queue.update_task_run(
+                            task_run_id,
+                            state=TaskState.FAILURE,
+                            progress_percent=100,
+                            error_message=err,
+                            finished=True,
+                        )
+                        self.task_queue.append_progress_event(
+                            flow="indexing",
+                            task_run_id=task_run_id,
+                            stage="cleanup",
+                            status="error",
+                            percent=100,
+                            resource_id=doc_id,
+                            payload={"file_id": doc_id, "success": False, "error_message": err},
+                        )
+                    return {"success": False, "file_id": doc_id, "error_message": err}
+                def _progress(stage: str, percent: int | None, payload: dict[str, Any] | None = None) -> None:
+                    if not task_run_id:
+                        return
+                    try:
+                        merged = {"file_id": doc_id}
+                        if payload and isinstance(payload, dict):
+                            merged.update(payload)
+                        self.task_queue.append_progress_event(
+                            flow="indexing",
+                            task_run_id=task_run_id,
+                            stage=str(stage),
+                            status="progress",
+                            percent=percent,
+                            resource_id=doc_id,
+                            payload=merged,
+                        )
+                        if percent is not None:
+                            self.task_queue.update_task_run(task_run_id, state=TaskState.RUNNING, progress_percent=int(percent))
+                    except Exception:
+                        return
+
                 # IndexManager is async but performs heavy blocking work; run it off the main event loop.
-                result = await self._run_coroutine_in_thread(self.file_index.index_file, doc_id)
+                result = await self._run_coroutine_in_thread(self.file_index.index_file, doc_id, progress=_progress)
                 if result.get("success"):
                     logger.info(f"Background indexing completed successfully for file_id: {doc_id}")
+                    if task_run_id:
+                        self.task_queue.update_task_run(task_run_id, state=TaskState.SUCCESS, progress_percent=100, finished=True)
+                        self.task_queue.append_progress_event(
+                            flow="indexing",
+                            task_run_id=task_run_id,
+                            stage="index",
+                            status="end",
+                            percent=100,
+                            resource_id=doc_id,
+                            payload={"file_id": doc_id, "success": True},
+                        )
                 else:
                     logger.error(f"Background indexing failed for file_id: {doc_id}, error: {result.get('error_message')}")
+                    if task_run_id:
+                        err = str(result.get("error_message") or "indexing failed")
+                        self.task_queue.update_task_run(
+                            task_run_id,
+                            state=TaskState.FAILURE,
+                            progress_percent=100,
+                            error_message=err,
+                            finished=True,
+                        )
+                        self.task_queue.append_progress_event(
+                            flow="indexing",
+                            task_run_id=task_run_id,
+                            stage="index",
+                            status="error",
+                            percent=100,
+                            resource_id=doc_id,
+                            payload={"file_id": doc_id, "success": False, "error_message": err},
+                        )
                 return result
             except asyncio.CancelledError:
                 logger.info(f"Background indexing task cancelled for file_id: {doc_id}")
+                if task_run_id:
+                    self.task_queue.update_task_run(
+                        task_run_id,
+                        state=TaskState.CANCELED,
+                        error_message="cancelled",
+                        finished=True,
+                    )
                 raise
             except Exception as e:
                 logger.error(f"Background indexing failed for file_id: {doc_id}, exception: {str(e)}")
+                if task_run_id:
+                    self.task_queue.update_task_run(
+                        task_run_id,
+                        state=TaskState.FAILURE,
+                        progress_percent=100,
+                        error_message=str(e),
+                        finished=True,
+                    )
+                    self.task_queue.append_progress_event(
+                        flow="indexing",
+                        task_run_id=task_run_id,
+                        stage="index",
+                        status="error",
+                        percent=100,
+                        resource_id=doc_id,
+                        payload={"file_id": doc_id, "success": False, "error_message": str(e)},
+                    )
                 return {"success": False, "file_id": doc_id, "error_message": str(e)}
             finally:
                 logger.debug(f"Background indexing semaphore released for file_id: {doc_id}")
@@ -296,10 +479,27 @@ class Knowledge(AbstractModule):
             FileStatus.DELETED
         )
 
-        # Schedule deletion in background
-        delete_task = asyncio.create_task(self._delete_file_background(doc_id))
-        self._track_deletion_task(doc_id, delete_task)
-        logger.info(f"Deletion scheduled for file_id: {doc_id}")
+        if self._use_celery():
+            from application.knowledge.celery_tasks import delete_file as delete_file_task
+
+            task_run_id = self.task_queue.create_task_run(
+                task_type="delete_file",
+                owner_id=user_id,
+                resource_id=doc_id,
+                metadata={"trigger": "api_delete"},
+            )
+            queue = os.getenv("CELERY_QUEUE_INDEXING", "indexing")
+            delete_file_task.apply_async(
+                kwargs={"file_id": doc_id, "owner_id": str(user_id), "delete_file_metadata": True},
+                task_id=task_run_id,
+                queue=queue,
+            )
+            logger.info("Deletion enqueued for file_id=%s (task_run_id=%s)", doc_id, task_run_id)
+        else:
+            # Schedule deletion in background
+            delete_task = asyncio.create_task(self._delete_file_background(doc_id))
+            self._track_deletion_task(doc_id, delete_task)
+            logger.info(f"Deletion scheduled for file_id: {doc_id}")
 
         response = {"status": "deleting", "file_id": doc_id}
         if failure_reason:
@@ -460,7 +660,14 @@ class Knowledge(AbstractModule):
 
         return True
 
-    async def trigger_indexing(self, file_ids: List[str], user_id: uuid.UUID) -> str:
+    async def trigger_indexing(
+        self,
+        file_ids: List[str],
+        user_id: uuid.UUID,
+        *,
+        force: bool = False,
+        wait: bool = False,
+    ) -> str:
         """
         Trigger indexing for multiple files asynchronously.
         
@@ -488,14 +695,31 @@ class Knowledge(AbstractModule):
                     invalid_files.append(f"You are not authorized to operate on this file: {file_id}")
                     continue
 
-                active_task = self._active_index_tasks.get(file_id)
-                if active_task is not None and not active_task.done():
-                    skipped_files.append(file_id)
+                if self._use_celery():
+                    # Cross-process de-duplication: skip when an active TaskRun exists.
+                    latest_run_id = self.task_queue.get_latest_task_run_id_for_resource(
+                        task_type="index_file",
+                        resource_id=file_id,
+                    )
+                    if latest_run_id:
+                        latest_run = self.task_queue.get_task_run(latest_run_id) or {}
+                        latest_state = str(latest_run.get("state") or "")
+                        if latest_state in {TaskState.PENDING.value, TaskState.RUNNING.value}:
+                            skipped_files.append(file_id)
+                            continue
+                else:
+                    active_task = self._active_index_tasks.get(file_id)
+                    if active_task is not None and not active_task.done():
+                        skipped_files.append(file_id)
+                        continue
+
+                if metadata.status == FileStatus.DELETED:
+                    invalid_files.append(f"File is deleted: {file_id}")
                     continue
 
-                # Only allow indexing for STORED or FAILED files
-                # Skip files that are already indexed or in intermediate processing states
-                if metadata.status == FileStatus.STORED or metadata.status == FileStatus.FAILED:
+                # Only allow indexing for STORED or FAILED files, unless force is enabled.
+                # Skip files that are in intermediate processing states (PARSED, CHUNKED) or already running.
+                if metadata.status in {FileStatus.STORED, FileStatus.FAILED} or force:
                     valid_files.append(file_id)
                 else:
                     skipped_files.append(file_id)
@@ -518,21 +742,96 @@ class Knowledge(AbstractModule):
             f"Triggering indexing for files: {'; '.join(valid_files)}"
         )
 
-        # Start background indexing tasks (fire-and-forget) for files not indexed yet only.
-        for file_id in valid_files:
-            task = asyncio.create_task(self._index_file_background(file_id))
-            self._track_background_task(file_id, task)
+        results: List[Dict[str, Any] | Exception] = []
+        if self._use_celery():
+            for file_id in valid_files:
+                task_run_id = self.task_queue.create_task_run(
+                    task_type="index_file",
+                    owner_id=user_id,
+                    resource_id=file_id,
+                    metadata={"trigger": "manual"},
+                )
+                from application.knowledge.celery_tasks import index_file as index_file_task
 
-        # Return immediately with basic info
-        message_parts = [
-            f"Indexing started for files: {'; '.join(valid_files)}"
-        ]
+                queue = os.getenv("CELERY_QUEUE_INDEXING", "indexing")
+                index_file_task.apply_async(
+                    kwargs={"file_id": file_id, "owner_id": str(user_id)},
+                    task_id=task_run_id,
+                    queue=queue,
+                )
+        else:
+            task_specs: List[tuple[str, str]] = []
+            for file_id in valid_files:
+                task_run_id = self.task_queue.create_task_run(
+                    task_type="index_file",
+                    owner_id=user_id,
+                    resource_id=file_id,
+                    metadata={"trigger": "manual"},
+                )
+                task_specs.append((file_id, task_run_id))
+
+            if wait:
+                tasks = [self._index_file_background(file_id, task_run_id=task_run_id) for file_id, task_run_id in task_specs]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+            else:
+                for file_id, task_run_id in task_specs:
+                    task = asyncio.create_task(self._index_file_background(file_id, task_run_id=task_run_id))
+                    self._track_background_task(file_id, task)
+
+        message_parts: List[str] = []
+        if wait and not self._use_celery():
+            succeeded: List[str] = []
+            failed: List[str] = []
+            for file_id, outcome in zip(valid_files, results):
+                if isinstance(outcome, Exception):
+                    failed.append(file_id)
+                    continue
+                if isinstance(outcome, dict) and outcome.get("success", False):
+                    succeeded.append(file_id)
+                else:
+                    failed.append(file_id)
+            message_parts.append(f"Indexing completed for files: {'; '.join(valid_files)}")
+            message_parts.append(f"succeeded={len(succeeded)}, failed={len(failed)}")
+            if failed:
+                message_parts.append(f"failed_files: {'; '.join(failed)}")
+        else:
+            message_parts.append(f"Indexing started for files: {'; '.join(valid_files)}")
         if skipped_files:
             message_parts.append(f"Skipped files (already indexed or in progress): {'; '.join(skipped_files)}")
         if invalid_files:
             message_parts.append(f"Invalid files: {'; '.join(invalid_files)}")
 
         return "\n".join(message_parts)
+
+    async def get_file_task_status(self, file_id: str, user_id: uuid.UUID) -> Dict[str, Any]:
+        metadata = await self._run_blocking(self.file_storage.get_file_metadata, file_id)
+        if not metadata:
+            raise HTTPException(status_code=404, detail="File not found")
+        if metadata.status == FileStatus.DELETED or self._is_file_marked_for_deletion(file_id):
+            raise HTTPException(status_code=404, detail="File not found")
+
+        permission_type = await self._run_blocking(self.check_file_access, file_id, user_id)
+        if permission_type is None:
+            raise HTTPException(status_code=403, detail="You are not allowed to access this file")
+
+        task_run_id = await self._run_blocking(
+            self.task_queue.get_latest_task_run_id_for_resource,
+            task_type="index_file",
+            resource_id=file_id,
+        )
+        task_run = None
+        if task_run_id:
+            task_run = await self._run_blocking(self.task_queue.get_task_run, task_run_id)
+
+        return {
+            "file_id": file_id,
+            "file_status": metadata.status.value if metadata.status else None,
+            "task_run_id": task_run_id,
+            "task_state": (task_run or {}).get("state"),
+            "progress_percent": (task_run or {}).get("progress_percent"),
+            "error_message": (task_run or {}).get("error_message"),
+            "updated_at_ms": (task_run or {}).get("updated_at_ms"),
+        }
 
     async def _index_multiple_files_background(self, file_ids: List[str], user_id: uuid.UUID):
         """Background task for indexing multiple files with semaphore control
@@ -681,246 +980,3 @@ class Knowledge(AbstractModule):
                         logger.error(f"Error shutting down indexer {type(indexer).__name__}: {e}")
 
         logger.info("Knowledge module shutdown complete")
-
-    # ==================== FILE PERMISSION MANAGEMENT ====================
-    def get_file_id_by_permission_id(
-        self,
-        permission_id: uuid.UUID
-    ) -> Optional[str]:
-        """
-        Get the file ID by permission ID.
-
-        Args:
-            permission_id: Permission ID to look up
-
-        Returns:
-            File ID string if permission exists, None otherwise
-        """
-        permission = self.file_storage.metadata_store.get_file_permission(permission_id)
-        if not permission or not permission.file_id:
-            return None
-        return permission.file_id
-
-    def grant_file_permission(
-        self,
-        file_id: str,
-        receiver_type: PermissionReceiverType,
-        permission_type: PermissionType,
-        granted_by: uuid.UUID,
-        user_id: Optional[uuid.UUID] = None,
-        department_id: Optional[uuid.UUID] = None
-    ) -> uuid.UUID:
-        """
-        Grant file permission to a user, department, or all users.
-
-        Args:
-            file_id: File ID to grant permission for
-            receiver_type: Type of receiver (USER, DEPARTMENT, or ALL)
-            permission_type: Type of permission (VIEW or EDIT)
-            granted_by: User ID who is granting the permission
-            user_id: User ID if receiver_type is USER
-            department_id: Department ID if receiver_type is DEPARTMENT
-
-        Returns:
-            Permission ID (UUID) of the created permission
-
-        Raises:
-            HTTPException: If file not found or user doesn't have permission to grant
-        """
-        metadata = self.file_storage.get_file_metadata(file_id)
-        if not metadata:
-            raise HTTPException(status_code=404, detail="File not found")
-
-        # Check if user has EDIT permission to grant permissions
-        if self.check_file_access(file_id, granted_by) != PermissionType.EDIT:
-            raise HTTPException(status_code=403, detail="You are not allowed to grant permissions for this file")
-
-        try:
-            permission_id = self.file_storage.metadata_store.grant_file_permission(
-                file_id=file_id,
-                receiver_type=receiver_type,
-                permission_type=permission_type,
-                granted_by=granted_by,
-                user_id=user_id,
-                department_id=department_id,
-            )
-            logger.info(f"Granted {permission_type.value} permission for file {file_id} to {receiver_type.value}")
-            return permission_id
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        except Exception as e:
-            logger.error(f"Failed to grant file permission: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to grant permission: {str(e)}")
-
-    def revoke_file_permission(
-        self,
-        permission_id: uuid.UUID,
-        user_id: uuid.UUID
-    ) -> bool:
-        """
-        Revoke a file permission by permission ID.
-
-        Args:
-            permission_id: Permission ID to revoke
-            user_id: User ID requesting the revocation (must have EDIT permission)
-
-        Returns:
-            True if permission was revoked, False if not found
-
-        Raises:
-            HTTPException: If user doesn't have permission to revoke
-        """
-        # Get permission to check user has EDIT permission to revoke permissions
-        permission = self.file_storage.metadata_store.get_file_permission(permission_id)
-        if not permission:
-            raise HTTPException(status_code=404, detail="Permission not found")
-        if self.check_file_access(permission.file_id, user_id) != PermissionType.EDIT:
-            raise HTTPException(status_code=403, detail="You are not allowed to revoke permissions for this file")
-        
-        try:
-            result = self.file_storage.metadata_store.revoke_file_permission(
-                permission_id=permission_id
-            )
-            if result:
-                logger.info(f"Revoked permission {permission_id}")
-            return result
-        except Exception as e:
-            logger.error(f"Failed to revoke file permission: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to revoke permission: {str(e)}")
-
-
-    def list_file_permissions(
-        self,
-        file_id: str,
-        user_id: uuid.UUID
-    ) -> List[FilePermission]:
-        """
-        List all permissions for a specific file.
-
-        Args:
-            file_id: File ID to list permissions for
-            user_id: User ID requesting the list (must have VIEW or EDIT permission)
-
-        Returns:
-            List of FilePermission objects
-
-        Raises:
-            HTTPException: If file not found or user doesn't have permission
-        """
-        # Check if file exists
-        metadata = self.file_storage.get_file_metadata(file_id)
-        if not metadata:
-            raise HTTPException(status_code=404, detail="File not found")
-
-        # Check if user has VIEW or EDIT permission to list permissions
-        permission_type = self.check_file_access(file_id, user_id)
-        if permission_type is None:
-            raise HTTPException(status_code=403, detail="You are not allowed to list permissions for this file")
-
-        try:
-            permissions = self.file_storage.metadata_store.list_file_permissions(file_id)
-            logger.info(f"Retrieved {len(permissions)} permissions for file {file_id}")
-            return permissions
-        except Exception as e:
-            logger.error(f"Failed to list file permissions: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to list permissions: {str(e)}")
-
-    def list_user_permissions(
-        self,
-        user_id: uuid.UUID
-    ) -> List[FilePermission]:
-        """
-        List all permissions granted to a specific user (direct grants and department grants).
-
-        Args:
-            user_id: User ID to list permissions for
-
-        Returns:
-            List of FilePermission objects
-
-        Raises:
-            HTTPException: If user not found
-        """
-        try:
-            permissions = self.file_storage.metadata_store.list_user_permissions(user_id)
-            logger.info(f"Retrieved {len(permissions)} permissions for user {user_id}")
-            return permissions
-        except ValueError as e:
-            raise HTTPException(status_code=404, detail=str(e))
-        except Exception as e:
-            logger.error(f"Failed to list user permissions: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to list permissions: {str(e)}")
-
-    def check_file_access(
-        self,
-        file_id: str,
-        user_id: uuid.UUID
-    ) -> Optional[PermissionType]:
-        """
-        Check if a user has access to a file and return the permission type.
-
-        Args:
-            file_id: File ID to check
-            user_id: User ID to check access for
-
-        Returns:
-            PermissionType (VIEW or EDIT) if user has access, None otherwise
-        """
-        try:
-            permission_type = self.file_storage.metadata_store.check_file_access(
-                file_id=file_id,
-                user_id=user_id
-            )
-            return permission_type
-        except Exception as e:
-            logger.error(f"Failed to check file access: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to check access: {str(e)}")
-
-    def update_file_permission(
-        self,
-        permission_id: uuid.UUID,
-        permission_type: PermissionType,
-        user_id: uuid.UUID,
-    ) -> bool:
-        """
-        Update an existing file permission.
-
-        Args:
-            permission_id: Permission ID to update
-            permission_type: New permission type (VIEW or EDIT)
-            user_id: User ID requesting the update (must have EDIT permission)
-
-        Returns:
-            True if permission was updated, False if not found
-
-        Raises:
-            HTTPException: If permission not found or user doesn't have permission
-        """
-        # Get permission to check user has EDIT permission to update permissions
-        permission = self.file_storage.metadata_store.get_file_permission(permission_id)
-        if not permission:
-            raise HTTPException(status_code=404, detail="Permission not found")
-        
-        file_id = permission.file_id
-
-        # Check if user has EDIT permission
-        if self.check_file_access(file_id, user_id) != PermissionType.EDIT:
-            raise HTTPException(
-                status_code=403,
-                detail="Only users with EDIT permission can update permissions"
-            )
-
-        try:
-            result = self.file_storage.metadata_store.update_file_permission(
-                permission_id=permission_id,
-                permission_type=permission_type,
-            )
-            
-            if result:
-                logger.info(f"Updated permission {permission_id}")
-            return result
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Failed to update file permission: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to update permission: {str(e)}")

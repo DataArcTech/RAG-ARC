@@ -1,0 +1,231 @@
+import logging
+import os
+import pickle
+from typing import List
+
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+
+class _PrunedHippoRAGNeo4jChunkEmbeddingsMixin:
+    def _load_chunk_embeddings(self):
+        """
+        Load chunk embeddings from disk if available.
+
+        This is called during initialization to restore chunk embeddings
+        that were saved during previous sessions.
+        """
+        embeddings_path = os.path.join(self.storage_path, f"{self.index_name}_chunk_embeddings.pkl")
+        if os.path.exists(embeddings_path):
+            try:
+                with open(embeddings_path, 'rb') as f:
+                    loaded = pickle.load(f)
+                expected_dim = None
+                cfg = getattr(getattr(self, "embedding_model", None), "config", None)
+                candidate = getattr(cfg, "embedding_dimensions", None)
+                if candidate is not None:
+                    try:
+                        expected_dim = int(candidate)
+                    except Exception:
+                        expected_dim = None
+                if expected_dim is None:
+                    try:
+                        probe = self.embedding_model.embed(["dimension probe"])
+                        if isinstance(probe, list) and probe:
+                            first = probe[0]
+                            expected_dim = len(first) if isinstance(first, list) else len(probe)  # type: ignore[arg-type]
+                    except Exception:
+                        expected_dim = None
+
+                filtered = {}
+                dropped = 0
+                if isinstance(loaded, dict) and expected_dim is not None and expected_dim > 0:
+                    for chunk_id, emb in loaded.items():
+                        if emb is None:
+                            continue
+                        try:
+                            arr = np.array(emb, dtype=np.float32)
+                            if arr.ndim != 1 or arr.shape[0] != expected_dim:
+                                dropped += 1
+                                continue
+                            filtered[chunk_id] = arr
+                        except Exception:
+                            dropped += 1
+                else:
+                    filtered = loaded if isinstance(loaded, dict) else {}
+
+                with self.write_lock():
+                    self.chunk_embeddings = filtered
+                    # Mark array for rebuild on first use
+                    self._chunk_embeddings_array = None
+                logger.info(f"Loaded {len(self.chunk_embeddings)} chunk embeddings from {embeddings_path}")
+                if dropped:
+                    logger.warning(
+                        "Dropped %s chunk embeddings due to dimension/type mismatch (expected_dim=%s).",
+                        dropped,
+                        expected_dim,
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to load chunk embeddings: {e}")
+        else:
+            logger.info(f"No existing chunk embeddings found at {embeddings_path}")
+
+    def _append_chunk_embeddings(self, new_chunk_ids: List[str]):
+        """
+        Incrementally append new chunk embeddings to the array (OPTIMIZED).
+
+        This method only processes new chunks instead of rebuilding the entire array,
+        which is much faster for incremental updates.
+
+        Args:
+            new_chunk_ids: List of new chunk IDs to append
+        """
+        if not new_chunk_ids:
+            logger.info("No new chunks to append")
+            return
+
+        import time
+
+        start_time = time.time()
+
+        logger.info(f"Appending {len(new_chunk_ids)} new chunk embeddings...")
+
+        new_embeddings_list = []
+        new_chunk_ids_ordered = []
+
+        with self.read_lock():
+            for cid in sorted(new_chunk_ids):  # Sort for consistency
+                if cid not in self.chunk_embeddings:
+                    logger.warning(f"Chunk {cid} not found in chunk_embeddings, skipping")
+                    continue
+
+                emb = self.chunk_embeddings[cid]
+
+                # Ensure it's a numpy array
+                if isinstance(emb, list):
+                    emb = np.array(emb)
+                elif not isinstance(emb, np.ndarray):
+                    logger.warning(f"Chunk {cid} has invalid embedding type: {type(emb)}, skipping")
+                    continue
+
+                # Check shape consistency with existing array
+                if self._chunk_embeddings_array is not None and len(self._chunk_embeddings_array) > 0:
+                    expected_shape = (self._chunk_embeddings_array.shape[1],)
+                    if emb.shape != expected_shape:
+                        logger.warning(f"Chunk {cid} has shape {emb.shape}, expected {expected_shape}, skipping")
+                        continue
+
+                # Normalize if enabled (for cosine similarity)
+                if self.normalize_chunk_embeddings:
+                    norm = np.linalg.norm(emb)
+                    if norm > 0:
+                        emb = emb / norm
+
+                new_embeddings_list.append(emb)
+                new_chunk_ids_ordered.append(cid)
+
+        if new_embeddings_list:
+            # Convert to array with optional float16
+            if self.use_float16_embeddings:
+                new_array = np.array(new_embeddings_list, dtype=np.float16)
+            else:
+                new_array = np.array(new_embeddings_list, dtype=np.float32)
+
+            # Append to existing array or create new one
+            with self.write_lock():
+                if self._chunk_embeddings_array is not None and len(self._chunk_embeddings_array) > 0:
+                    self._chunk_embeddings_array = np.vstack([self._chunk_embeddings_array, new_array])
+                else:
+                    self._chunk_embeddings_array = new_array
+
+                # Update chunk IDs list
+                if hasattr(self, '_chunk_ids_list') and self._chunk_ids_list:
+                    self._chunk_ids_list.extend(new_chunk_ids_ordered)
+                else:
+                    self._chunk_ids_list = new_chunk_ids_ordered
+
+            logger.info(
+                f"Appended {len(new_chunk_ids_ordered)} embeddings in {time.time() - start_time:.2f}s"
+            )
+        else:
+            logger.warning("No valid new embeddings to append")
+
+    def _rebuild_chunk_embeddings_array(self):
+        """
+        Build the chunk embeddings array for fast dense retrieval.
+
+        This method:
+        - Converts the chunk_embeddings dict to a numpy array
+        - Optionally uses float16 for memory efficiency
+        - Normalizes embeddings for cosine similarity (if enabled)
+        """
+        with self.read_lock():
+            if self._chunk_embeddings_array is not None:
+                return  # Already built
+            chunk_ids = list(self.chunk_embeddings.keys())
+
+        logger.info("Rebuilding chunk embeddings array...")
+
+        kept_chunk_ids: list[str] = []
+        embeddings_list: list[np.ndarray] = []
+
+        with self.read_lock():
+            for i, cid in enumerate(chunk_ids):
+                emb = self.chunk_embeddings.get(cid)
+                if emb is None:
+                    continue
+                if isinstance(emb, list):
+                    emb = np.array(emb)
+                elif not isinstance(emb, np.ndarray):
+                    logger.warning(f"Chunk {cid} has invalid embedding type: {type(emb)}")
+                    continue
+
+                if embeddings_list and emb.shape != embeddings_list[0].shape:
+                    logger.error(f"Chunk {cid} (index {i}) has shape {emb.shape}, expected {embeddings_list[0].shape}")
+                    logger.error(
+                        f"  First chunk ID: {kept_chunk_ids[0] if kept_chunk_ids else 'N/A'}, "
+                        f"shape: {embeddings_list[0].shape}"
+                    )
+                    logger.error(f"  Current chunk ID: {cid}, shape: {emb.shape}")
+                    continue
+
+                if self.normalize_chunk_embeddings:
+                    norm = np.linalg.norm(emb)
+                    if norm > 0:
+                        emb = emb / norm
+
+                kept_chunk_ids.append(cid)
+                embeddings_list.append(emb)
+
+        if not embeddings_list:
+            new_array = np.array([])
+            logger.warning("No chunk embeddings found")
+        else:
+            try:
+                if self.use_float16_embeddings:
+                    new_array = np.array(embeddings_list, dtype=np.float16)
+                else:
+                    new_array = np.array(embeddings_list, dtype=np.float32)
+            except ValueError as e:
+                logger.error(f"Failed to build chunk embeddings array: {e}")
+                logger.error(f"  Total chunks: {len(chunk_ids)}")
+                logger.error(f"  Valid embeddings: {len(embeddings_list)}")
+                if embeddings_list:
+                    logger.error(f"  First embedding shape: {embeddings_list[0].shape}")
+                    logger.error(f"  Last embedding shape: {embeddings_list[-1].shape}")
+                raise
+
+        with self.write_lock():
+            if self._chunk_embeddings_array is not None:
+                return
+            self._chunk_ids_list = kept_chunk_ids
+            self._chunk_embeddings_array = new_array
+
+        if len(new_array) > 0 and isinstance(new_array, np.ndarray):
+            dtype_str = "float16" if self.use_float16_embeddings else "float32"
+            logger.info(
+                f"Chunk embeddings array built ({dtype_str}): {len(kept_chunk_ids)} chunks, "
+                f"memory: {new_array.nbytes / 1024 / 1024:.2f} MB"
+            )
+

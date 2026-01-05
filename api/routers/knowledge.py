@@ -8,24 +8,53 @@ from fastapi import (
     Query,
     Body,
 )
-from typing import Annotated, Optional, List, Dict, Any, Tuple
+import asyncio
+import os
+import time
+import uuid
+from typing import Annotated, Optional, List, Dict, Any, Tuple, Literal
 from datetime import datetime
-from pydantic import BaseModel, Field
 from api.routers.auth import get_current_user
+from api.sse import sse_done, sse_json
 from encapsulation.data_model.orm_models import (
     User,
     Department,
     FilePermission,
     PermissionReceiverType,
     PermissionType,
-    FileMindmapCache
 )
 from framework.register import Register
-import uuid
-import hashlib
 from application.knowledge.module import Knowledge
 from application.account.user import Account
 from core.file_management.storage.file import FileValidationError
+from core.utils.owner_guard import is_admin_owner
+from encapsulation.message_queue.redis_task_queue import RedisTaskQueue, TaskState
+from fastapi.responses import StreamingResponse
+
+from application.knowledge.graph_export import export_full_graph_payload
+from application.knowledge.mindmap_export import export_file_mindmap_payload
+from api.routers.knowledge_models import (
+    CheckAccessResponse,
+    DepartmentInfo,
+    FileInfo,
+    FileListResponse,
+    FileTaskStatusResponse,
+    GrantPermissionRequest,
+    GrantPermissionResponse,
+    GraphExportRequest,
+    IndexTriggerRequest,
+    IndexTriggerResponse,
+    MindmapEdge,
+    MindmapExportRequest,
+    MindmapExportResponse,
+    MindmapNode,
+    PermissionInfo,
+    PermissionListResponse,
+    RevokePermissionRequest,
+    TaskRunStatusResponse,
+    UserInfo,
+)
+from api.routers.knowledge_streaming import stream_events_redis
 
 router = APIRouter(prefix="/knowledge", tags=["files"])
 
@@ -40,25 +69,33 @@ def get_knowledge_handler() -> Knowledge:
     return registrator.get_object("knowledge")
 
 
-# Response models
-class FileInfo(BaseModel):
-    """Response model for file information"""
-    file_id: str
-    filename: str
-    status: str
-    created_at: str
-    updated_at: str
-    file_size: int
-    content_type: str
-
-    model_config = {"from_attributes": True}
+def _get_task_queue() -> RedisTaskQueue:
+    return RedisTaskQueue.from_env()
 
 
-class FileListResponse(BaseModel):
-    """Response model for file list"""
-    files: List[FileInfo]
-    total: int
+def _use_celery() -> bool:
+    return os.getenv("TASK_QUEUE_MODE", "inprocess").strip().lower() == "celery"
 
+
+def _assert_task_owner(task_run: Dict[str, Any], *, user_id: uuid.UUID) -> None:
+    if is_admin_owner(user_id):
+        return
+    raw = task_run.get("owner_id")
+    if not raw:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to access this run_id")
+    try:
+        owner_uuid = uuid.UUID(str(raw))
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to access this run_id") from None
+    if owner_uuid != user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to access this run_id")
+
+
+def _format_sse(*, event: str, data: Dict[str, Any], event_id: int | None = None) -> str:
+    payload: Dict[str, Any] = {"event": event, "data": data}
+    if event_id is not None:
+        payload["id"] = event_id
+    return sse_json(payload)
 @router.post(
     "",
     status_code=status.HTTP_200_OK,
@@ -88,10 +125,9 @@ async def upload_file(
             detail="Authentication required"
         )
     try:
-        print(f"Uploading file: {file.filename} for owner_id: {user.id}")
         # Convert string UUID to UUID object
         doc_id = await get_knowledge_handler().upload_file(file, user.id, relative_path=relative_path)
-        return {"file_id": doc_id}
+        return doc_id
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -107,6 +143,103 @@ async def upload_file(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to upload file: {str(e)}",
         )
+
+
+@router.get("/{file_id}/task", response_model=FileTaskStatusResponse, status_code=status.HTTP_200_OK)
+async def get_file_task_status(
+    file_id: str,
+    user: Annotated[User | None, Depends(get_current_user)],
+):
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+        )
+    try:
+        status_payload = await get_knowledge_handler().get_file_task_status(file_id, user.id)
+        return FileTaskStatusResponse(**status_payload)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get task status: {str(e)}",
+        )
+
+
+@router.get("/task_run/{run_id}", response_model=TaskRunStatusResponse, status_code=status.HTTP_200_OK)
+async def get_task_run(
+    run_id: str,
+    user: Annotated[User | None, Depends(get_current_user)],
+):
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    if not _use_celery():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Task queue mode is not enabled")
+    task_queue = _get_task_queue()
+    task_run = await asyncio.to_thread(task_queue.get_task_run, run_id)
+    if not task_run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run_id not found")
+    _assert_task_owner(task_run, user_id=user.id)
+    return TaskRunStatusResponse(
+        run_id=run_id,
+        task_type=task_run.get("task_type"),
+        state=task_run.get("state"),
+        progress_percent=task_run.get("progress_percent"),
+        error_message=task_run.get("error_message"),
+        resource_id=task_run.get("resource_id"),
+        updated_at_ms=task_run.get("updated_at_ms"),
+    )
+
+
+@router.get("/result/{run_id}", status_code=status.HTTP_200_OK)
+async def get_task_result(
+    run_id: str,
+    user: Annotated[User | None, Depends(get_current_user)],
+):
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    if not _use_celery():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Task queue mode is not enabled")
+    task_queue = _get_task_queue()
+    task_run = await asyncio.to_thread(task_queue.get_task_run, run_id)
+    if not task_run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run_id not found")
+    _assert_task_owner(task_run, user_id=user.id)
+    state = str(task_run.get("state") or "")
+    if state not in {TaskState.SUCCESS.value, TaskState.FAILURE.value, TaskState.CANCELED.value}:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run not finished")
+    if state != TaskState.SUCCESS.value:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(task_run.get("error_message") or "task failed"))
+    result = await asyncio.to_thread(task_queue.get_task_result, run_id)
+    return result or {"run_id": run_id, "done": True, "result": None}
+
+
+@router.get("/stream/{run_id}")
+async def stream_task_progress(
+    run_id: str,
+    user: Annotated[User | None, Depends(get_current_user)],
+    last_event_id: int = -1,
+):
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    if not _use_celery():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Task queue mode is not enabled")
+    task_queue = _get_task_queue()
+    task_run = task_queue.get_task_run(run_id)
+    if not task_run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run_id not found")
+    _assert_task_owner(task_run, user_id=user.id)
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(
+        stream_events_redis(task_queue, format_sse=_format_sse, run_id=run_id, last_event_id=last_event_id),
+        media_type="text/event-stream",
+        headers=headers,
+    )
 
 
 @router.get("/{file_id}/download")
@@ -226,50 +359,6 @@ async def list_files(
         )
 
 
-class IndexTriggerRequest(BaseModel):
-    """Request model for triggering indexing"""
-    file_ids: List[str]
-
-class IndexTriggerResponse(BaseModel):
-    """Response model for index triggering results"""
-    message: str
-
-class GraphExportRequest(BaseModel):
-    """Request model for graph export"""
-    max_nodes: int = 500
-    max_edges: int = 2000
-    include_node_types: Optional[List[str]] = None  # e.g., ['chunk', 'entity', 'fact']
-
-
-class MindmapNode(BaseModel):
-    """Mind map node structure."""
-    id: str
-    name: str
-    category: str
-    weight: int
-
-
-class MindmapEdge(BaseModel):
-    """Mind map edge structure."""
-    id: str
-    source: str
-    target: str
-    relation: str
-    weight: float
-
-
-class MindmapExportRequest(BaseModel):
-    """Request model for exporting merged mind map."""
-    file_id: str
-
-
-class MindmapExportResponse(BaseModel):
-    """Response model for exported mind map."""
-    tsv: str
-    nodes: List[MindmapNode]
-    edges: List[MindmapEdge]
-
-
 @router.post(
     "/trigger_indexing",
     response_model=IndexTriggerResponse,
@@ -318,6 +407,58 @@ async def trigger_indexing(
         )
 
 
+@router.post("/graph/export_async", status_code=status.HTTP_202_ACCEPTED)
+async def export_knowledge_graph_async(
+    request: GraphExportRequest,
+    user: Annotated[User | None, Depends(get_current_user)],
+):
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    if not _use_celery():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Task queue mode is not enabled")
+
+    run_id = uuid.uuid4().hex
+    task_queue = _get_task_queue()
+    task_queue.create_task_run(
+        task_run_id=run_id,
+        task_type="graph_export",
+        owner_id=user.id,
+        resource_id=str(user.id),
+        metadata={
+            "executor": "api",
+            "max_nodes": int(request.max_nodes),
+            "max_edges": int(request.max_edges),
+            "include_node_types": request.include_node_types or [],
+            "directed_edges": bool(getattr(request, "directed_edges", False)),
+            "preserve_multi_edges": bool(getattr(request, "preserve_multi_edges", False)),
+        },
+    )
+
+    from application.knowledge.celery_tasks import export_graph as export_graph_task
+
+    queue = os.getenv("CELERY_QUEUE_EXPORT") or os.getenv("CELERY_QUEUE_INDEXING", "indexing")
+    export_graph_task.apply_async(
+        kwargs={
+            "owner_id": str(user.id),
+            "max_nodes": int(request.max_nodes),
+            "max_edges": int(request.max_edges),
+            "include_node_types": request.include_node_types,
+            "directed_edges": bool(getattr(request, "directed_edges", False)),
+            "preserve_multi_edges": bool(getattr(request, "preserve_multi_edges", False)),
+        },
+        task_id=run_id,
+        queue=queue,
+    )
+
+    return {
+        "run_id": run_id,
+        "status": "scheduled",
+        "task_run_url": f"/knowledge/task_run/{run_id}",
+        "stream_url": f"/knowledge/stream/{run_id}",
+        "result_url": f"/knowledge/result/{run_id}",
+    }
+
+
 @router.post("/graph/export", status_code=status.HTTP_200_OK)
 async def export_knowledge_graph(
     request: GraphExportRequest,
@@ -340,67 +481,34 @@ async def export_knowledge_graph(
         )
 
     try:
-        # Get the RAG inference handler to access the retriever
         rag_inference = registrator.get_object("rag_inference")
-
-        # Find graph_store from retriever (support both direct and multipath retrievers)
-        graph_store = None
-
-        # Check if retriever has graph_store directly
-        if hasattr(rag_inference.retriever, 'graph_store'):
-            graph_store = rag_inference.retriever.graph_store
-        # Check if it's a multipath retriever with sub-retrievers
-        elif hasattr(rag_inference.retriever, 'retrievers'):
-            # Find the first retriever with graph_store
-            for sub_retriever in rag_inference.retriever.retrievers:
-                if hasattr(sub_retriever, 'graph_store'):
-                    graph_store = sub_retriever.graph_store
-                    break
-
-        if graph_store is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Current retriever does not support graph visualization"
-            )
-
-        # Import appropriate GraphExporter based on graph_store type
-        # Check by class name to avoid import issues
-        graph_store_class_name = graph_store.__class__.__name__
-
-        if graph_store_class_name == 'PrunedHippoRAGNeo4jStore':
-            from encapsulation.database.utils.graph_export_utils_neo4j import GraphExporterNeo4j as GraphExporter
-        else:
-            from encapsulation.database.utils.graph_export_utils import GraphExporter
-
-        # Export full graph asynchronously to avoid blocking the event loop
-        scope = str(user.id)
         knowledge_handler = get_knowledge_handler()
-        
-        # Use knowledge_handler's _run_blocking method if available, otherwise use global thread pool
-        if hasattr(knowledge_handler, '_run_blocking'):
-            graph_data = await get_knowledge_handler()._run_blocking(
-                GraphExporter.export_full_graph,
-                graph_store=graph_store,
-                max_nodes=request.max_nodes,
-                max_edges=request.max_edges,
+        owner_scope = str(user.id)
+
+        if hasattr(knowledge_handler, "_run_blocking"):
+            return await knowledge_handler._run_blocking(  # noqa: SLF001
+                export_full_graph_payload,
+                rag_inference=rag_inference,
+                owner_scope=owner_scope,
+                max_nodes=int(request.max_nodes),
+                max_edges=int(request.max_edges),
                 include_node_types=request.include_node_types,
-                owner_id=scope,
-                owner_scope_label=scope,
-            )
-        else:
-            # Fallback: use global thread pool
-            from framework.thread_pool import get_thread_pool
-            graph_data = await get_thread_pool().run_blocking(
-                GraphExporter.export_full_graph,
-                graph_store=graph_store,
-                max_nodes=request.max_nodes,
-                max_edges=request.max_edges,
-                include_node_types=request.include_node_types,
-                owner_id=scope,
-                owner_scope_label=scope,
+                directed_edges=bool(getattr(request, "directed_edges", False)),
+                preserve_multi_edges=bool(getattr(request, "preserve_multi_edges", False)),
             )
 
-        return graph_data
+        from framework.thread_pool import get_thread_pool
+
+        return await get_thread_pool().run_blocking(
+            export_full_graph_payload,
+            rag_inference=rag_inference,
+            owner_scope=owner_scope,
+            max_nodes=int(request.max_nodes),
+            max_edges=int(request.max_edges),
+            include_node_types=request.include_node_types,
+            directed_edges=bool(getattr(request, "directed_edges", False)),
+            preserve_multi_edges=bool(getattr(request, "preserve_multi_edges", False)),
+        )
 
     except HTTPException:
         raise
@@ -413,71 +521,47 @@ async def export_knowledge_graph(
 
 # ==================== FILE PERMISSION MANAGEMENT ====================
 
-class DepartmentInfo(BaseModel):
-    """Department information model for API responses"""
-    id: str
-    name: str
-    description: Optional[str] = None
-    path: str
+@router.post(
+    "/mindmap/export_async",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def export_file_mindmap_async(
+    request: MindmapExportRequest,
+    user: Annotated[User | None, Depends(get_current_user)],
+):
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    if not request.file_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="file_id is required")
+    if not _use_celery():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Task queue mode is not enabled")
 
-    model_config = {"from_attributes": True}
+    run_id = uuid.uuid4().hex
+    task_queue = _get_task_queue()
+    task_queue.create_task_run(
+        task_run_id=run_id,
+        task_type="mindmap_export",
+        owner_id=user.id,
+        resource_id=request.file_id,
+        metadata={"executor": "api"},
+    )
 
+    from application.knowledge.celery_tasks import export_mindmap as export_mindmap_task
 
-class UserInfo(BaseModel):
-    """User information model for API responses"""
-    id: str
-    user_name: str
-    department: Optional[DepartmentInfo] = None
-    status: str
+    queue = os.getenv("CELERY_QUEUE_EXPORT") or os.getenv("CELERY_QUEUE_INDEXING", "indexing")
+    export_mindmap_task.apply_async(
+        kwargs={"file_id": request.file_id, "owner_id": str(user.id)},
+        task_id=run_id,
+        queue=queue,
+    )
 
-    model_config = {"from_attributes": True}
-
-
-class GrantPermissionRequest(BaseModel):
-    """Request model for granting file permission"""
-    receiver_type: PermissionReceiverType = Field(..., description="Type of receiver: 'user', 'department', or 'all'")
-    permission_type: PermissionType = Field(..., description="Type of permission: 'view' or 'edit'")
-    user_id: Optional[str] = Field(None, description="User ID if receiver_type is 'user'")
-    department_id: Optional[str] = Field(None, description="Department ID if receiver_type is 'department'")
-
-
-class GrantPermissionResponse(BaseModel):
-    """Response model for granting file permission"""
-    permission_id: str
-    message: str
-
-
-class RevokePermissionRequest(BaseModel):
-    """Request model for revoking file permission"""
-    receiver_type: Optional[PermissionReceiverType] = Field(None, description="Type of receiver: 'user', 'department', or 'all'")
-    user_id: Optional[str] = Field(None, description="User ID if receiver_type is 'user'")
-    department_id: Optional[str] = Field(None, description="Department ID if receiver_type is 'department'")
-
-
-class PermissionInfo(BaseModel):
-    """Response model for permission information"""
-    permission_id: str
-    file_id: str
-    receiver_type: str
-    permission_type: str
-    user: Optional[UserInfo] = None
-    department: Optional[DepartmentInfo] = None
-    granted_by: str
-    granted_at: str
-
-    model_config = {"from_attributes": True}
-
-
-class PermissionListResponse(BaseModel):
-    """Response model for permission list"""
-    permissions: List[PermissionInfo]
-    total: int
-
-
-class CheckAccessResponse(BaseModel):
-    """Response model for access check"""
-    has_access: bool
-    permission_type: Optional[str] = None
+    return {
+        "run_id": run_id,
+        "status": "scheduled",
+        "task_run_url": f"/knowledge/task_run/{run_id}",
+        "stream_url": f"/knowledge/stream/{run_id}",
+        "result_url": f"/knowledge/result/{run_id}",
+    }
 
 
 @router.post(
@@ -502,122 +586,18 @@ async def export_file_mindmap(
             detail="file_id is required"
         )
 
-    try:
-        file_mindmaps = await get_knowledge_handler().get_file_chunk_mindmaps(request.file_id, user.id)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to gather chunk mind maps: {str(e)}",
-        )
-
-    chunks = file_mindmaps.get("chunks", []) if isinstance(file_mindmaps, dict) else []
-    if not chunks:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No mind map data found for this file"
-        )
-
-    # PostgreSQL缓存：检查缓存（仅按file_id判断）
     knowledge_handler = get_knowledge_handler()
-    metadata_store = knowledge_handler.file_storage.metadata_store
-    
-    if hasattr(metadata_store, 'SessionMaker'):
-        try:
-            with metadata_store.SessionMaker() as session:
-                cache = session.query(FileMindmapCache).filter_by(file_id=request.file_id).first()
-                if cache:
-                    # 缓存存在，直接返回
-                    return MindmapExportResponse(
-                        tsv=cache.tsv,
-                        nodes=[MindmapNode(**node) for node in cache.nodes],
-                        edges=[MindmapEdge(**edge) for edge in cache.edges],
-                    )
-        except Exception:
-            pass  # 查询缓存失败，继续生成新的
-
-    # 缓存不存在或已过期，重新生成
-    filename = file_mindmaps.get("filename") or request.file_id
-    prompt = _build_mindmap_merge_prompt(filename, chunks)
-
     rag_inference = registrator.get_object("rag_inference")
-    llm = getattr(rag_inference, "llm", None)
-    if llm is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="LLM service is not configured"
-        )
-
-    messages = [
-        {
-            "role": "system",
-            "content": "你是一位资深的知识工程专家，擅长将多个思维导图整合为结构化的全局思维导图。"
-        },
-        {
-            "role": "user",
-            "content": prompt
-        }
-    ]
-
-    try:
-        llm_response = llm.chat(messages)
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to generate merged mind map: {str(e)}"
-        )
-
-    merged_tsv = _extract_tsv_from_response(llm_response)
-    if not merged_tsv.strip():
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="LLM did not return valid TSV content"
-        )
-
-    nodes, edges = _convert_tsv_to_graph(merged_tsv)
-
-    # 保存到PostgreSQL缓存
-    if hasattr(metadata_store, 'SessionMaker'):
-        try:
-            with metadata_store.SessionMaker() as session:
-                now = datetime.now()
-                nodes_data = [{"id": n["id"], "name": n["name"], "category": n["category"], "weight": n.get("weight", 1)} for n in nodes]
-                edges_data = [{"id": e["id"], "source": e["source"], "target": e["target"], "relation": e.get("relation", "包含"), "weight": e.get("weight", 1.0)} for e in edges]
-                
-                # 计算chunk的hash用于存储
-                chunk_ids = sorted([chunk.get("chunk_id", "") for chunk in chunks])
-                chunk_hash = hashlib.sha256("|".join(chunk_ids).encode()).hexdigest()
-                
-                cache = session.query(FileMindmapCache).filter_by(file_id=request.file_id).first()
-                if cache:
-                    # 更新现有缓存
-                    cache.tsv = merged_tsv
-                    cache.nodes = nodes_data
-                    cache.edges = edges_data
-                    cache.chunk_hash = chunk_hash
-                    cache.updated_at = now
-                else:
-                    # 创建新缓存
-                    cache = FileMindmapCache(
-                        file_id=request.file_id,
-                        tsv=merged_tsv,
-                        nodes=nodes_data,
-                        edges=edges_data,
-                        chunk_hash=chunk_hash,
-                        created_at=now,
-                        updated_at=now
-                    )
-                    session.add(cache)
-                
-                session.commit()
-        except Exception:
-            pass  # 保存缓存失败不影响主流程
-
+    payload = await export_file_mindmap_payload(
+        knowledge=knowledge_handler,
+        rag_inference=rag_inference,
+        file_id=request.file_id,
+        owner_id=user.id,
+    )
     return MindmapExportResponse(
-        tsv=merged_tsv,
-        nodes=[MindmapNode(**node) for node in nodes],
-        edges=[MindmapEdge(**edge) for edge in edges],
+        tsv=str(payload.get("tsv") or ""),
+        nodes=[MindmapNode(**node) for node in (payload.get("nodes") or [])],
+        edges=[MindmapEdge(**edge) for edge in (payload.get("edges") or [])],
     )
 
 
@@ -986,136 +966,3 @@ async def update_file_permission(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update permission: {str(e)}",
         )
-
-
-def _build_mindmap_merge_prompt(filename: str, chunks: List[Dict[str, Any]]) -> str:
-    sections = []
-    for idx, chunk in enumerate(chunks, start=1):
-        chunk_id = chunk.get("chunk_id", "")
-        chunk_index = chunk.get("chunk_index")
-        content = chunk.get("content", "") or ""
-        snippet = content.strip().replace("\t", " ")
-        if len(snippet) > 400:
-            snippet = snippet[:400] + "..."
-
-        mindmap = chunk.get("mindmap", {}) or {}
-        mindmap_tsv = _mindmap_dict_to_tsv(mindmap)
-
-        sections.append(
-            f"### 片段 {idx} (Chunk ID: {chunk_id}, Chunk Index: {chunk_index})\n"
-            f"内容摘要:\n{snippet}\n\n"
-            f"局部思维导图 (TSV):\n{mindmap_tsv}\n"
-        )
-
-    sections_text = "\n".join(sections)
-
-    prompt = (
-        f"我们从文档《{filename}》的多个片段中提取了思维导图片段 (TSV 格式)。"
-        "请综合这些片段，生成一个完整的全局思维导图，仍然使用 TSV 层级编号。\n\n"
-        "输出要求:\n"
-        "1. 使用 1, 1.1, 1.1.1 等编号表达层级，编号需连续、严谨。\n"
-        "2. 仅输出 TSV 内容，每一行采用“编号\t内容”的形式，不要添加额外说明、标题或前缀。\n"
-        "3. 根节点 (编号 1) 应对整篇文档进行高度概括。\n"
-        "4. 二级及以下节点应覆盖所有重要信息，保持表达简洁准确。\n"
-        "5. 若某些信息重复或冲突，请自行消解并保持结构一致性。\n\n"
-        "以下是分片的思维导图信息：\n"
-        f"{sections_text}\n"
-        "请现在输出汇总后的 TSV 思维导图："
-    )
-
-    return prompt
-
-
-def _mindmap_dict_to_tsv(mindmap: Dict[str, Any]) -> str:
-    nodes = mindmap.get("nodes", []) if isinstance(mindmap, dict) else []
-    lines = []
-    for node in nodes:
-        level = node.get("level") if isinstance(node, dict) else None
-        content = node.get("content") if isinstance(node, dict) else None
-        if level and content:
-            lines.append(f"{level}\t{content}")
-    return "\n".join(lines) if lines else "(空)"
-
-
-def _extract_tsv_from_response(response: str) -> str:
-    if not response:
-        return ""
-
-    if "```" in response:
-        # Try to capture code block (prefer ```tsv`` or ```)
-        start = None
-        end = None
-        for marker in ("```tsv", "```txt", "```text", "```"):
-            if marker in response:
-                start = response.find(marker) + len(marker)
-                end = response.find("```", start)
-                if end != -1:
-                    break
-        if start is not None and end != -1:
-            return response[start:end].strip()
-
-    return response.strip()
-
-
-def _convert_tsv_to_graph(tsv_text: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    entries: List[Tuple[str, str]] = []
-    for line in tsv_text.strip().splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if "\t" not in stripped:
-            continue
-        level, content = stripped.split("\t", 1)
-        level = level.strip()
-        content = content.strip()
-        if not level or not content:
-            continue
-        entries.append((level, content))
-
-    nodes: List[Dict[str, Any]] = []
-    edges: List[Dict[str, Any]] = []
-    node_lookup: Dict[str, Dict[str, Any]] = {}
-
-    for level, content in entries:
-        depth = len(level.split('.')) if level else 1
-        node_id = f"{level} {content}"
-        parent_level = '.'.join(level.split('.')[:-1]) if depth > 1 else None
-        parent_info = node_lookup.get(parent_level) if parent_level else None
-
-
-        if depth <= 2:
-            category = content
-        else:
-            level_parts = level.split('.')
-            second_level = '.'.join(level_parts[:2]) if len(level_parts) >= 2 else None
-            second_level_info = node_lookup.get(second_level) if second_level else None
-            category = second_level_info["name"] if second_level_info else content
-
-        node_data = {
-            "id": node_id,
-            "name": content,
-            "category": category,
-            "weight": depth
-        }
-        nodes.append(node_data)
-        node_lookup[level] = {"id": node_id, "name": content}
-
-        if parent_info:
-            parent_id = parent_info["id"]
-            if depth == 2:
-                edge_weight = 0.85
-            elif depth == 3:
-                edge_weight = 0.8
-            else:
-                edge_weight = 0.75
-
-            edge_data = {
-                "id": f"edge-{len(edges) + 1:03d}",
-                "source": parent_id,
-                "target": node_id,
-                "relation": "包含",
-                "weight": edge_weight
-            }
-            edges.append(edge_data)
-
-    return nodes, edges

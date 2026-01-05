@@ -16,18 +16,15 @@ dependencies = [
     "dill",
     "python-dotenv",
     "asgi-correlation-id>=3.0.0",
-
     # Vector database
     "faiss-gpu-cu12; platform_system == 'Linux' and platform_machine == 'x86_64'",
     "faiss-cpu; platform_system != 'Linux' or platform_machine != 'x86_64'",
-
     # Document processing
     "pillow>=11.3.0",
     "pymupdf>=1.24.10",
     "python-docx>=0.8.11",
     "xlrd>=2.0.1",
     "chardet>=5.0.0",
-
     # NLP and ML
     "torch==2.4.1",
     "torchvision==0.19.1",
@@ -36,47 +33,41 @@ dependencies = [
     "sentence-transformers>=3.0.1",
     "accelerate>=0.20.0",
     "qwen-vl-utils>=0.0.8",
-
     # Search and indexing
     "tqdm>=4.67.1",
     "jieba>=0.42.1",
     "tantivy>=0.25.0",
     "tiktoken>=0.12.0",
     "bs4>=0.0.2",
-
     # Graph databases
     "networkx>=3.5",
     "python-igraph>=0.11.0",
     "neo4j>=5.15.0",
     "hnswlib>=0.7.0",
-
     # Relational databases
     "sqlalchemy>=2.0.43",
     "psycopg>=3.2.10",
     "psycopg2-binary>=2.9.0",
-
     # Cache and messaging / storage
     "redis>=6.4.0",
     "minio>=7.2.7",
-
     # Authentication
     "passlib>=1.7.4",
     "pyjwt>=2.8.0",
-
     # API clients
     "openai>=2.2.0",
     "huggingface-hub>=0.20.0",
     "sse-starlette>=2.1.3",
-
     # System utilities
     "psutil>=7.1.0",
-
+    "pyyaml>=6.0.0",
     # CLI
     "typer>=0.12.5",
-
     # Scientific computing
     "numpy>=1.24.0",
     "scipy>=1.10.0",
+    "celery>=5.4.0",
+    "stopwordsiso>=0.6.1",
 ]
 
 [project.optional-dependencies]
@@ -99,6 +90,10 @@ rag-arc = "cli.rag:app"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["test"]
+filterwarnings = [
+    "ignore:builtin type SwigPy.* has no __module__ attribute:DeprecationWarning",
+    "ignore:builtin type swigvarlink has no __module__ attribute:DeprecationWarning",
+]
 markers = [
     "integration: marks tests that require external services (set RUN_RAGARC_INTEGRATION_TESTS=1 to run)",
 ]
@@ -106,3 +101,6 @@ markers = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["api*", "core*", "config*", "framework*", "application*", "encapsulation*", "cli*"]
+
+[tool.setuptools]
+py-modules = ["app_registration", "main"]

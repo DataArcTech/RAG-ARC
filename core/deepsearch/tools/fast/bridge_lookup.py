@@ -28,6 +28,16 @@ class BridgeLookupTool(GraphTool):
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Seed entities or chunk IDs used to anchor the traversal.",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Optional override for how many bridge triples to return.",
+                    "minimum": 0,
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Alias of top_k for backward compatibility.",
+                    "minimum": 0,
                 }
             }
         ),
@@ -66,8 +76,17 @@ class BridgeLookupTool(GraphTool):
                 summary="Bridge lookup completed but no connective triples were reported.",
                 diagnostics={"strategy": traversal.get("strategy")},
             )
+        override = request.extra.get("top_k", None)
+        if override is None:
+            override = request.extra.get("max_results", None)
+        try:
+            limit = int(override) if override is not None else int(self.max_results)
+        except Exception:
+            limit = int(self.max_results) if self.max_results is not None else 0
+        if limit < 0:
+            limit = 0
         evidences = self._build_evidences(
-            bridges[: self.max_results],
+            bridges[:limit] if limit else [],
             source=adapter.metadata().adapter_name,
             tool_name=self.descriptor.name,
             plan_step=request.plan_step,
@@ -76,6 +95,7 @@ class BridgeLookupTool(GraphTool):
         diagnostics = {
             "available_bridges": len(bridges),
             "strategy": traversal.get("strategy"),
+            "top_k": limit,
         }
         return ToolResult(summary=summary, evidences=evidences, diagnostics=diagnostics)
 
@@ -107,24 +127,22 @@ class BridgeLookupTool(GraphTool):
     ) -> List[EvidenceChunk]:
         evidences: List[EvidenceChunk] = []
         for idx, bridge in enumerate(bridges):
-            head = bridge.get("head") or bridge.get("entity") or "unknown_head"
+            head = bridge.get("head") or bridge.get("entity")
+            tail = bridge.get("tail") or bridge.get("target")
+            if not head or not tail:
+                continue
             relation = bridge.get("relation") or bridge.get("predicate") or "related_to"
-            tail = bridge.get("tail") or bridge.get("target") or "unknown_tail"
             content = f"{head} -[{relation}]-> {tail}"
-            raw_id = str(bridge.get("id") or bridge.get("bridge_id") or bridge.get("metadata", {}).get("id") or "").strip()
-            chunk_id = (
-                raw_id
-                if raw_id
-                else derived_chunk_id(tool_name=tool_name, plan_step=plan_step, label=f"bridge_{idx}", content=content)
-            )
+            chunk_id = derived_chunk_id(tool_name=tool_name, plan_step=plan_step, label=f"bridge_{idx}", content=content)
             evidences.append(
                 EvidenceChunk(
                     chunk_id=chunk_id,
-                    source=source,
+                    source=tool_name,
                     content=content,
                     score=bridge.get("score"),
                     provenance={
                         "relation": relation,
+                        "triple": {"head": str(head), "relation": str(relation), "tail": str(tail)},
                         "raw": bridge,
                     },
                 )

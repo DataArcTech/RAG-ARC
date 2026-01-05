@@ -3,76 +3,32 @@
 This reporter converts DeepSearch execution traces into a readable, end-user report by
 prompting an LLM with the collected evidence, highlights, and execution metadata.
 """
-import os
 import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 
-from config.output_limits import (
-    DEEPSEARCH_GRAPH_EDGE_LIMIT,
-    DEEPSEARCH_TOP_CHUNKS,
-    DEEPSEARCH_TOP_SEED_ENTITIES,
-)
 from core.deepsearch.report.consistency_checker import ConsistencyChecker
 from core.deepsearch.report.citation_agent import CitationAgent
 from core.deepsearch.report.llm_writer import DeepSearchLLMReportWriter, render_markdown_from_structured
+from core.deepsearch.trace import emit_trace
 from core.presentation.evidence import build_deepsearch_evidence
-
-
-def _resolve_consistency_check_flag(config_value: bool) -> bool:
-    """Resolve consistency check flag with environment variable override.
-
-    Environment variable DEEPSEARCH_CONSISTENCY_CHECK takes precedence.
-    Valid truthy values: 1, true, yes, on
-    Valid falsy values: 0, false, no, off
-    """
-    env_value = os.getenv("DEEPSEARCH_CONSISTENCY_CHECK")
-    if env_value is None:
-        return config_value
-    normalized = env_value.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    return config_value
-
-
-def _resolve_parallel_sections_flag(config_value: bool) -> bool:
-    """Resolve parallel sections flag with environment variable override.
-
-    Environment variable DEEPSEARCH_PARALLEL_SECTIONS takes precedence.
-    Valid truthy values: 1, true, yes, on
-    Valid falsy values: 0, false, no, off
-    """
-    env_value = os.getenv("DEEPSEARCH_PARALLEL_SECTIONS")
-    if env_value is None:
-        return config_value
-    normalized = env_value.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    return config_value
-
-
-def _resolve_citation_alias_flag(config_value: bool) -> bool:
-    """Resolve citation alias flag with environment variable override.
-
-    Environment variable DEEPSEARCH_CITATION_ALIASES takes precedence.
-    """
-
-    env_value = os.getenv("DEEPSEARCH_CITATION_ALIASES")
-    if env_value is None:
-        return config_value
-    normalized = env_value.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    return config_value
-
+from core.deepsearch.memory import EvidenceBank
+from config.core.deepsearch import report_composer_defaults as composer_defaults
+from core.deepsearch.utils.file_scope import (
+    extract_titles_from_question,
+    filter_evidences,
+    normalize_filename_token,
+    resolve_file_scope,
+)
+from core.deepsearch.report.composer_helpers import (
+    _filter_evidences_by_question_scope,
+    _rank_evidences_for_question,
+    _slim_diagnostics,
+    _split_authoritative_evidences,
+    _trim_text,
+)
 
 class DeepSearchReporter:
     """Generate a structured report from DeepSearch traces."""
@@ -88,28 +44,28 @@ class DeepSearchReporter:
         graph_store: Any | None = None,
     ):
         self.template_store = template_store
-        self.config = config or {}
+        if not isinstance(config, dict) or not config:
+            raise ValueError("DeepSearchReporter requires a non-empty config dict")
+        self.config = dict(config)
         self.llm_connector = llm_connector
         self.graph_store = graph_store
 
-        self.max_highlights = int(self.config.get("max_highlights", 6))
-        self.max_evidence_items = DEEPSEARCH_TOP_CHUNKS
-        self.report_temperature = float(self.config.get("report_temperature", 0.2))
-        self.report_max_evidence_chars = int(self.config.get("report_max_evidence_chars", 900))
-        self.report_max_graph_chain_items = DEEPSEARCH_GRAPH_EDGE_LIMIT
-        self.enable_llm_report = bool(self.config.get("enable_llm_report", True))
-        self.enable_consistency_check = _resolve_consistency_check_flag(
-            bool(self.config.get("enable_consistency_check", True))
-        )
-        self.consistency_temperature = float(self.config.get("consistency_temperature", 0.0))
-        self.enable_citation_agent = bool(self.config.get("enable_citation_agent", True))
-        self.parallel_sections = _resolve_parallel_sections_flag(
-            bool(self.config.get("parallel_sections", False))
-        )
-        self.max_parallel_sections = int(self.config.get("max_parallel_sections", 4))
-        self.citation_aliases = _resolve_citation_alias_flag(
-            bool(self.config.get("citation_aliases", True))
-        )
+        self.max_highlights = int(self.config["max_highlights"])
+        self.max_evidence_items = int(self.config["max_evidence_items"])
+        self.report_temperature = float(self.config["report_temperature"])
+        self.report_max_evidence_chars = int(self.config["report_max_evidence_chars"])
+        self.report_max_graph_chain_items = int(self.config["report_max_graph_chain_items"])
+        self.report_max_seed_entities = int(self.config["report_max_seed_entities"])
+        self.enable_llm_report = bool(self.config["enable_llm_report"])
+        self.enable_consistency_check = bool(self.config["enable_consistency_check"])
+        self.consistency_temperature = float(self.config["consistency_temperature"])
+        self.enable_citation_agent = bool(self.config["enable_citation_agent"])
+        self.parallel_sections = bool(self.config["parallel_sections"])
+        self.max_parallel_sections = int(self.config["max_parallel_sections"])
+        self.sectionwise_writer = bool(self.config["sectionwise_writer"])
+        self.sectionwise_retain_k = int(self.config["sectionwise_retain_k"])
+        self.citation_aliases = bool(self.config["citation_aliases"])
+        self.include_appendices_in_answer = bool(self.config.get("include_appendices_in_answer", False))
 
     async def compose(
         self,
@@ -118,6 +74,8 @@ class DeepSearchReporter:
     ) -> Dict[str, Any]:
         """Compose a report payload for downstream clients (API/CLI/MCP)."""
 
+        if not self.enable_llm_report:
+            raise RuntimeError("Deterministic reports are disabled; enable LLM report generation instead.")
         if self.enable_llm_report and self.llm_connector is None:
             raise RuntimeError("LLM connector is required for LLM report generation")
 
@@ -126,8 +84,206 @@ class DeepSearchReporter:
         if not question:
             raise ValueError("DeepSearch reasoning trace is missing 'question'")
 
-        evidences = self._merge_evidences(trace.get("evidences"), external_evidence)
-        llm_evidences, alias_bundle = self._alias_evidences_for_llm(evidences) if self.citation_aliases else (evidences, None)
+        evidences = self._merge_evidences(trace.get("evidences"), external_evidence, question=question)
+        authoritative_evidences, tool_evidences = _split_authoritative_evidences(evidences)
+        graph_context = trace.get("graph_context") if isinstance(trace.get("graph_context"), dict) else {}
+        ctx_meta = graph_context.get("metadata") if isinstance(graph_context, dict) else {}
+        file_scope = resolve_file_scope(graph_context_metadata=(ctx_meta if isinstance(ctx_meta, dict) else {}), question=question)
+        file_scope_diag: Dict[str, Any] = {}
+        if file_scope.enabled:
+            authoritative_evidences, file_scope_diag = filter_evidences(authoritative_evidences, scope=file_scope)
+        question_scope_diag: Dict[str, Any] = {}
+        if authoritative_evidences:
+            authoritative_evidences, question_scope_diag = _filter_evidences_by_question_scope(question, authoritative_evidences)
+        if not authoritative_evidences:
+            msg = "No reliable evidence was retrieved for this question."
+            if file_scope.enabled:
+                tokens = ", ".join(file_scope.filename_contains) if file_scope.filename_contains else ""
+                if tokens:
+                    msg = f"No reliable evidence was found within the specified file scope ({tokens})."
+                else:
+                    msg = "No reliable evidence was found within the specified file scope."
+
+            request_context = self._extract_request_context(trace)
+            metadata: Dict[str, Any] = {
+                "question": question,
+                "adapter_metadata": trace.get("adapter_metadata") or {},
+                "graph_summary": self._graph_summary(trace.get("graph_traversals") or []),
+                "plan": {
+                    "steps": trace.get("plan_steps") or [],
+                    "completed": sum(1 for step in ((trace.get("reasoning_steps") or []) or []) if isinstance(step, dict) and step.get("status") == "done"),
+                },
+                "coverage_metrics": trace.get("coverage_metrics") or {},
+                "pending_external": trace.get("pending_external") or [],
+                "parallel_thinking_runs": int(self.config["parallel_thinking_runs"]),
+                "report_profile": {
+                    "include_graph_viz": bool(self.config["include_graph_viz"]),
+                    "enable_custom_summary": bool(self.config["enable_custom_summary"]),
+                },
+                "evidence_profile": {
+                    "total": len(evidences),
+                    "authoritative": 0,
+                    "tool_generated": len(tool_evidences),
+                },
+            }
+            if file_scope_diag:
+                metadata["evidence_profile"]["file_scope"] = file_scope_diag
+            if question_scope_diag:
+                metadata["evidence_profile"]["question_scope"] = question_scope_diag
+            if request_context:
+                metadata["request_context"] = request_context
+            if metadata["report_profile"]["include_graph_viz"]:
+                metadata["graph_visualization"] = trace.get("graph_traversals") or []
+
+                structured_report = {
+                    "format_version": self.STRUCTURED_REPORT_VERSION,
+                    "title": question,
+                    "short_answer": msg,
+                    "summary": msg,
+                    "sections": [],
+                    "limitations": [
+                        "Insufficient evidence is available to produce verifiable, citation-backed conclusions; to avoid mis-citations, report generation was stopped.",
+                    ],
+                    "next_steps": [
+                        "Confirm the target file(s) are indexed successfully and visible under the current user/tenant scope.",
+                        "Rewrite the query with more specific clause/page/table keywords or provide more context hints.",
+                    ],
+                    "citations": [],
+                    "evidence_index": [],
+                    "graph_evidence": {},
+                    "text": msg,
+                "context": request_context or {},
+                "generation": {"mode": "deterministic_no_evidence"},
+            }
+            return {
+                "question": question,
+                "answer": msg,
+                "highlights": [],
+                "evidences": [],
+                "structured_report": structured_report,
+                "metadata": metadata,
+            }
+
+        requested_titles = extract_titles_from_question(question)
+        if len(requested_titles) >= 2:
+            covered: set[str] = set()
+            normalized = [normalize_filename_token(t) for t in requested_titles]
+            normalized_map = {t: token for t, token in zip(requested_titles, normalized) if token}
+
+            def _extract_filename(ev: Dict[str, Any]) -> str | None:
+                prov = ev.get("provenance") or {}
+                if not isinstance(prov, dict):
+                    return None
+
+                meta = prov.get("metadata") or {}
+                if isinstance(meta, dict):
+                    for key in ("filename", "source_file_name", "source_file", "file_path", "path"):
+                        value = meta.get(key)
+                        if isinstance(value, str) and value.strip():
+                            return value.strip()
+
+                    chunk_meta = meta.get("chunk_metadata")
+                    if isinstance(chunk_meta, dict):
+                        for key in ("filename", "source_file_name", "source_file", "file_path", "path"):
+                            value = chunk_meta.get(key)
+                            if isinstance(value, str) and value.strip():
+                                return value.strip()
+
+                raw_chunk = prov.get("raw_chunk")
+                if isinstance(raw_chunk, dict):
+                    raw_meta = raw_chunk.get("metadata")
+                    if isinstance(raw_meta, dict):
+                        for key in ("filename", "source_file_name", "source_file", "file_path", "path"):
+                            value = raw_meta.get(key)
+                            if isinstance(value, str) and value.strip():
+                                return value.strip()
+
+                return None
+
+            for ev in authoritative_evidences:
+                if not isinstance(ev, dict):
+                    continue
+                filename = _extract_filename(ev)
+                if not filename:
+                    continue
+                lowered = filename.lower()
+                for title, token in normalized_map.items():
+                    if token.lower() in lowered:
+                        covered.add(title)
+
+            missing = [t for t in requested_titles if t not in covered]
+            if missing:
+                missing_text = ", ".join(missing)
+                msg = (
+                    "Unable to complete the comparison: no reliable evidence was retrieved for the following named file(s): "
+                    f"{missing_text}."
+                )
+                if covered:
+                    msg += f" (Only retrieved evidence from: {', '.join(sorted(covered))})"
+
+                request_context = self._extract_request_context(trace)
+                metadata: Dict[str, Any] = {
+                    "question": question,
+                    "adapter_metadata": trace.get("adapter_metadata") or {},
+                    "graph_summary": self._graph_summary(trace.get("graph_traversals") or []),
+                    "plan": {
+                        "steps": trace.get("plan_steps") or [],
+                        "completed": sum(1 for step in (trace.get("reasoning_steps") or []) if isinstance(step, dict) and step.get("status") == "done"),
+                    },
+                    "coverage_metrics": trace.get("coverage_metrics") or {},
+                    "pending_external": trace.get("pending_external") or [],
+                    "parallel_thinking_runs": int(self.config["parallel_thinking_runs"]),
+                    "report_profile": {
+                        "include_graph_viz": bool(self.config["include_graph_viz"]),
+                        "enable_custom_summary": bool(self.config["enable_custom_summary"]),
+                    },
+                    "evidence_profile": {
+                        "total": len(evidences),
+                        "authoritative": len(authoritative_evidences),
+                        "tool_generated": len(tool_evidences),
+                    },
+                }
+                if file_scope_diag:
+                    metadata["evidence_profile"]["file_scope"] = file_scope_diag
+                if question_scope_diag:
+                    metadata["evidence_profile"]["question_scope"] = question_scope_diag
+                if request_context:
+                    metadata["request_context"] = request_context
+                if metadata["report_profile"]["include_graph_viz"]:
+                    metadata["graph_visualization"] = trace.get("graph_traversals") or []
+
+                structured_report = {
+                    "format_version": self.STRUCTURED_REPORT_VERSION,
+                    "title": question,
+                    "short_answer": msg,
+                    "summary": msg,
+                    "sections": [],
+                    "limitations": [
+                        "A comparison requires verifiable evidence for each named file; to avoid cross-file mis-citations, the comparison was not generated.",
+                    ],
+                    "next_steps": [
+                        "Confirm the missing file(s) are indexed successfully and visible under the current user/tenant scope.",
+                        "Split the comparison into two single-file questions and merge the results after manual verification.",
+                    ],
+                    "citations": [],
+                    "evidence_index": [],
+                    "graph_evidence": {},
+                    "text": msg,
+                    "context": request_context or {},
+                    "generation": {"mode": "deterministic_missing_named_files"},
+                }
+                return {
+                    "question": question,
+                    "answer": msg,
+                    "highlights": [],
+                    "evidences": authoritative_evidences,
+                    "structured_report": structured_report,
+                    "metadata": metadata,
+                }
+        llm_base_evidences = authoritative_evidences
+        llm_evidences, alias_bundle = (
+            self._alias_evidences_for_llm(llm_base_evidences) if self.citation_aliases else (llm_base_evidences, None)
+        )
         reasoning_steps = trace.get("reasoning_steps") or []
         highlights = self._build_highlights(reasoning_steps)
         coverage_metrics = trace.get("coverage_metrics") or {}
@@ -148,12 +304,21 @@ class DeepSearchReporter:
             "coverage_metrics": coverage_metrics,
             "gap_result": gap_result,
             "pending_external": trace.get("pending_external") or [],
-            "parallel_thinking_runs": int(self.config.get("parallel_thinking_runs", 1)),
+            "parallel_thinking_runs": int(self.config["parallel_thinking_runs"]),
             "report_profile": {
-                "include_graph_viz": bool(self.config.get("include_graph_viz", False)),
-                "enable_custom_summary": bool(self.config.get("enable_custom_summary", False)),
+                "include_graph_viz": bool(self.config["include_graph_viz"]),
+                "enable_custom_summary": bool(self.config["enable_custom_summary"]),
+            },
+            "evidence_profile": {
+                "total": len(evidences),
+                "authoritative": len(authoritative_evidences),
+                "tool_generated": len(tool_evidences),
             },
         }
+        if file_scope_diag:
+            metadata["evidence_profile"]["file_scope"] = file_scope_diag
+        if question_scope_diag:
+            metadata["evidence_profile"]["question_scope"] = question_scope_diag
         if alias_bundle:
             metadata["citation_aliases"] = {
                 "enabled": True,
@@ -173,54 +338,6 @@ class DeepSearchReporter:
             gap_result=gap_result,
             request_context=request_context,
         )
-        if not self.enable_llm_report:
-            markdown_text = _render_fallback_markdown(
-                question=question,
-                final_answer=str(trace.get("final_answer") or "").strip(),
-                highlights=highlights,
-                evidences=evidences,
-            )
-            markdown_text = _append_chunk_evidence(
-                markdown_text,
-                evidences=evidences,
-                max_items=self.max_evidence_items,
-            )
-            markdown_text = _append_graph_appendix(
-                markdown_text,
-                graph_evidence=context.get("graph_evidence") or {},
-            )
-            structured_report = {
-                "format_version": self.STRUCTURED_REPORT_VERSION,
-                "title": question,
-                "summary": str(trace.get("final_answer") or "").strip(),
-                "sections": [],
-                "limitations": [],
-                "next_steps": [],
-                "citations": [],
-                "graph_evidence": context.get("graph_evidence") or {},
-                "text": markdown_text,
-                "context": request_context or {},
-                "generation": {"mode": "fallback"},
-            }
-            if self.enable_citation_agent:
-                structured_report, audit = CitationAgent().process(
-                    structured_report=structured_report,
-                    evidences=evidences,
-                    graph_evidence=context.get("graph_evidence") or {},
-                    max_chunk_index_items=self.max_evidence_items,
-                    citation_aliases=(alias_bundle.get("alias_to_original") if alias_bundle else None),
-                )
-                metadata["citation_audit"] = audit
-            metadata["structured_report"] = {key: structured_report[key] for key in structured_report if key != "text"}
-            return {
-                "question": question,
-                "answer": markdown_text,
-                "evidences": evidences,
-                "highlights": highlights,
-                "structured_report": structured_report,
-                "metadata": metadata,
-            }
-
         writer = DeepSearchLLMReportWriter(
             self.llm_connector,
             temperature=self.report_temperature,
@@ -229,9 +346,17 @@ class DeepSearchReporter:
             max_graph_chain_items=self.report_max_graph_chain_items,
             parallel_sections=self.parallel_sections,
             max_parallel_sections=self.max_parallel_sections,
+            synthesis_section_max_chars=int(self.config["synthesis_section_max_chars"]),
         )
         outline = await writer.build_outline(question=question, context=context)
-        if self.parallel_sections and len(outline) > 2:
+        if self.sectionwise_writer:
+            structured_llm = await writer.write_report_sectionwise(
+                question=question,
+                outline=outline,
+                context=context,
+                retain_k=max(0, int(self.sectionwise_retain_k)),
+            )
+        elif self.parallel_sections:
             structured_llm = await writer.write_report_parallel(question=question, outline=outline, context=context)
         else:
             structured_llm = await writer.write_report(question=question, outline=outline, context=context)
@@ -239,30 +364,43 @@ class DeepSearchReporter:
             structured_llm, alias_diag = self._rewrite_citation_aliases(structured_llm, alias_bundle)
             if alias_diag:
                 metadata["citation_alias_rewrite"] = alias_diag
+        summary_text = structured_llm.get("short_answer") or structured_llm.get("summary")
+        if isinstance(summary_text, str) and summary_text.strip() and authoritative_evidences:
+            if not re.search(r"(?:\[[^\[\]]+\]|【[^【】]+】)", summary_text):
+                raise ValueError("short_answer is missing inline citations (cite-first hard gate).")
         if self.enable_citation_agent:
             structured_llm, audit = CitationAgent().process(
                 structured_report=structured_llm,
-                evidences=evidences,
+                evidences=authoritative_evidences,
                 graph_evidence=context.get("graph_evidence") or {},
                 max_chunk_index_items=self.max_evidence_items,
                 citation_aliases=(alias_bundle.get("alias_to_original") if alias_bundle else None),
             )
             metadata["citation_audit"] = audit
         markdown_text = render_markdown_from_structured(structured_llm)
-        markdown_text = _append_chunk_evidence(
-            markdown_text,
-            evidences=evidences,
-            max_items=self.max_evidence_items,
-        )
-        markdown_text = _append_graph_appendix(
-            markdown_text,
-            graph_evidence=context.get("graph_evidence") or {},
-        )
+        if self.include_appendices_in_answer:
+            markdown_text = _append_chunk_evidence(
+                markdown_text,
+                evidences=authoritative_evidences,
+                max_items=self.max_evidence_items,
+            )
+            markdown_text = _append_tool_evidence(
+                markdown_text,
+                evidences=tool_evidences,
+                max_items=self.max_evidence_items,
+            )
+            markdown_text = _append_graph_appendix(
+                markdown_text,
+                graph_evidence=context.get("graph_evidence") or {},
+                max_seed_entities=self.report_max_seed_entities,
+                max_chain_items=self.report_max_graph_chain_items,
+            )
 
         structured_report = {
             "format_version": self.STRUCTURED_REPORT_VERSION,
             "title": structured_llm.get("title") or question,
-            "summary": structured_llm.get("summary") or "",
+            "short_answer": structured_llm.get("short_answer") or structured_llm.get("summary") or "",
+            "summary": structured_llm.get("short_answer") or structured_llm.get("summary") or "",
             "sections": structured_llm.get("sections") or [],
             "limitations": structured_llm.get("limitations") or [],
             "next_steps": structured_llm.get("next_steps") or [],
@@ -274,18 +412,19 @@ class DeepSearchReporter:
             "generation": {"mode": "llm"},
         }
 
-        if self.enable_consistency_check and evidences:
+        if self.enable_consistency_check and authoritative_evidences:
             checker = ConsistencyChecker(
                 self.llm_connector,
                 temperature=self.consistency_temperature,
-                max_retries=int(self.config.get("consistency_max_retries", 2)),
+                max_retries=int(self.config["consistency_max_retries"]),
             )
             result = await checker.check(
+                question=question,
                 report_markdown=markdown_text,
-                evidences=evidences,
+                evidences=authoritative_evidences,
                 structured_report=structured_report,
-                max_evidence_items=self.max_evidence_items,
                 max_evidence_chars=self.report_max_evidence_chars,
+                max_claims=int(self.config["consistency_max_claims"]),
             )
             structured_report["consistency_check"] = result.model_dump()
             if not result.is_consistent:
@@ -335,7 +474,10 @@ class DeepSearchReporter:
             aliased.append(copied)
         if not aliased:
             return evidences, None
-        sample = [{"alias": a, "chunk_id": b} for a, b in list(alias_to_original.items())[:10]]
+        sample = [
+            {"alias": a, "chunk_id": b}
+            for a, b in list(alias_to_original.items())[: composer_defaults.DEFAULT_ALIAS_SAMPLE_SIZE]
+        ]
         return aliased, {
             "count": len(alias_to_original),
             "alias_to_original": alias_to_original,
@@ -343,7 +485,9 @@ class DeepSearchReporter:
             "sample": sample,
         }
 
-    _CITATION_RE = re.compile(r"\[(?P<token>[^\[\]]{1,64})\]")
+    _CITATION_RE = re.compile(
+        rf"(?:\[(?P<bracket>[^\[\]]{{1,{composer_defaults.DEFAULT_CITATION_TOKEN_MAX_CHARS}}})\]|【(?P<cjk>[^【】]{{1,{composer_defaults.DEFAULT_CITATION_TOKEN_MAX_CHARS}}})】)"
+    )
 
     def _rewrite_citation_aliases(
         self,
@@ -408,7 +552,7 @@ class DeepSearchReporter:
 
             def _sub(match: re.Match[str]) -> str:
                 nonlocal replaced
-                token = match.group("token")
+                token = match.group("bracket") or match.group("cjk") or ""
                 mapped = _normalize_token(token)
                 if mapped:
                     replaced += 1
@@ -438,7 +582,7 @@ class DeepSearchReporter:
             return self._CITATION_RE.sub(_sub, text)
 
         rewritten = dict(structured)
-        for key in ("summary", "title"):
+        for key in ("short_answer", "summary", "title"):
             if isinstance(rewritten.get(key), str):
                 rewritten[key] = _rewrite_text(rewritten[key])
         sections = rewritten.get("sections")
@@ -475,7 +619,7 @@ class DeepSearchReporter:
 
         diag = {
             "replaced": replaced,
-            "unknown_aliases": sorted({token for token in unknown})[:20],
+            "unknown_aliases": sorted({token for token in unknown})[: composer_defaults.DEFAULT_UNKNOWN_ALIAS_SAMPLE_SIZE],
         }
         return rewritten, diag
 
@@ -491,9 +635,15 @@ class DeepSearchReporter:
     ) -> Dict[str, Any]:
         plan_steps = trace.get("plan_steps") or []
         reasoning_steps = trace.get("reasoning_steps") or []
-        tool_results = trace.get("tool_results") or []
+        tool_results = list(trace.get("tool_results") or [])
         pending_external = trace.get("pending_external") or []
 
+        methodology_summary_chars = int(self.config["methodology_summary_chars"])
+        keep_tool_results = int(self.config["keep_tool_results"])
+        if keep_tool_results == 0:
+            tool_results = []
+        elif keep_tool_results > 0:
+            tool_results = tool_results[-keep_tool_results:]
         methodology = {
             "plan_steps": plan_steps,
             "reasoning_steps": [
@@ -502,7 +652,7 @@ class DeepSearchReporter:
                     "description": step.get("description"),
                     "channel": step.get("channel"),
                     "status": step.get("status"),
-                    "output_summary": step.get("output_summary"),
+                    "output_summary": _trim_text(step.get("output_summary"), max_chars=methodology_summary_chars),
                     "tool": step.get("tool")
                     or (step.get("metadata") or {}).get("tool")
                     or (step.get("diagnostics") or {}).get("tool"),
@@ -516,7 +666,9 @@ class DeepSearchReporter:
                     "tool_name": entry.get("tool_name"),
                     "channel": entry.get("channel"),
                     "summary": (entry.get("result") or {}).get("summary") if isinstance(entry.get("result"), dict) else None,
-                    "diagnostics": (entry.get("result") or {}).get("diagnostics") if isinstance(entry.get("result"), dict) else None,
+                    "diagnostics": _slim_diagnostics(
+                        (entry.get("result") or {}).get("diagnostics") if isinstance(entry.get("result"), dict) else None
+                    ),
                 }
                 for entry in tool_results
                 if isinstance(entry, dict)
@@ -529,13 +681,24 @@ class DeepSearchReporter:
             "pending_external": pending_external,
         }
 
+        graph_evidence_full = self._build_graph_evidence(trace, evidences)
+        graph_evidence_llm = self._slim_graph_evidence_for_llm(graph_evidence_full)
+        bank = EvidenceBank()
+        bank.add_many(evidences)
+        outline_index_limit = self.max_evidence_items if self.max_evidence_items is not None else None
+        evidence_index = bank.index_for_prompt(
+            max_items=outline_index_limit,
+            max_summary_chars=int(self.config["outline_evidence_summary_chars"]),
+        )
+
         return {
             "question": trace.get("question") or "",
             "final_answer": trace.get("final_answer") or "",
             "highlights": highlights,
             "evidences": evidences,
+            "evidence_index": evidence_index,
             "graph_chain": (trace.get("graph_chain") or [])[: self.report_max_graph_chain_items],
-            "graph_evidence": self._build_graph_evidence(trace, evidences),
+            "graph_evidence": graph_evidence_llm,
             "methodology": methodology,
             "coverage": coverage_bundle,
             "request_context": request_context,
@@ -545,6 +708,8 @@ class DeepSearchReporter:
         self,
         internal: Optional[Iterable[Dict[str, Any] | EvidenceChunk]],
         external: Optional[Iterable[Dict[str, Any] | EvidenceChunk]],
+        *,
+        question: str,
     ) -> List[Dict[str, Any]]:
         internal_items = [item for item in (self._normalize_evidence(payload) for payload in (internal or [])) if item]
         external_items = [item for item in (self._normalize_evidence(payload) for payload in (external or [])) if item]
@@ -552,6 +717,10 @@ class DeepSearchReporter:
         max_items = self.max_evidence_items if self.max_evidence_items is not None else None
         if max_items is not None and max_items <= 0:
             return []
+
+        # Rank before applying the final max_items budget so prompts focus on high-signal chunks.
+        internal_items = _rank_evidences_for_question(question, internal_items)
+        external_items = _rank_evidences_for_question(question, external_items)
 
         merged: List[Dict[str, Any]] = []
         seen: set[str] = set()
@@ -571,7 +740,13 @@ class DeepSearchReporter:
                     return
 
         if external_items and max_items is not None:
-            external_budget = min(len(external_items), max(2, max_items // 3))
+            external_budget = min(
+                len(external_items),
+                max(
+                    composer_defaults.DEFAULT_EXTERNAL_EVIDENCE_MIN_ITEMS,
+                    max_items // composer_defaults.DEFAULT_EXTERNAL_EVIDENCE_FRACTION_DIVISOR,
+                ),
+            )
             internal_budget = max(0, max_items - external_budget)
             _add(internal_items, internal_budget)
             _add(external_items, max_items)
@@ -677,13 +852,33 @@ class DeepSearchReporter:
         }
         return build_deepsearch_evidence(payload, chunk_limit=self.max_evidence_items, graph_store=self.graph_store)
 
+    @staticmethod
+    def _slim_graph_evidence_for_llm(graph_evidence: Dict[str, Any]) -> Dict[str, Any]:
+        """Reduce graph evidence payload for LLM prompts to avoid context blow-ups.
+
+        The full public payload can still include detailed chunk/graph snapshots, but the report-writing
+        prompt should only receive compact graph signals (seeds + chain + stats) because the authoritative
+        evidence snippets are provided separately.
+        """
+
+        if not isinstance(graph_evidence, dict):
+            return {}
+        seed_entities = graph_evidence.get("seed_entities") if isinstance(graph_evidence.get("seed_entities"), list) else []
+        graph_chain = graph_evidence.get("graph_chain") if isinstance(graph_evidence.get("graph_chain"), list) else []
+        graph_stats = graph_evidence.get("graph_stats") if isinstance(graph_evidence.get("graph_stats"), dict) else {}
+        return {
+            "seed_entities": seed_entities[: composer_defaults.DEFAULT_GRAPH_EVIDENCE_SEED_ENTITIES_MAX],
+            "graph_chain": graph_chain[: composer_defaults.DEFAULT_GRAPH_CHAIN_PREVIEW_MAX],
+            "graph_stats": graph_stats,
+        }
+
 
 def _append_chunk_evidence(
     markdown_text: str,
     *,
     evidences: List[Dict[str, Any]],
     max_items: int | None = None,
-    preview_length: int = 100,
+    preview_length: int = composer_defaults.DEFAULT_EVIDENCE_PREVIEW_CHARS,
 ) -> str:
     """Append a compact section listing chunk evidence with content preview."""
 
@@ -712,7 +907,51 @@ def _append_chunk_evidence(
     return (markdown_text or "").rstrip() + "\n" + "\n".join(blocks).rstrip() + "\n"
 
 
-def _append_graph_appendix(markdown_text: str, *, graph_evidence: Dict[str, Any], max_items: int = 40) -> str:
+def _append_tool_evidence(
+    markdown_text: str,
+    *,
+    evidences: List[Dict[str, Any]],
+    max_items: int | None = None,
+    preview_length: int = composer_defaults.DEFAULT_EVIDENCE_PREVIEW_CHARS,
+) -> str:
+    """Append non-authoritative tool-generated artifacts for debugging."""
+
+    if not evidences:
+        return markdown_text
+
+    capped = evidences[:max_items] if max_items is not None and max_items > 0 else evidences
+    if not capped:
+        return markdown_text
+
+    blocks: List[str] = ["", "## Appendix: Tool Artifacts (Non-authoritative)"]
+    blocks.append(
+        "These entries are generated by tools/LLMs (e.g. rollups). They can help debugging, but should NOT be treated as source-of-truth citations."
+    )
+    for entry in capped:
+        if not isinstance(entry, dict):
+            continue
+        chunk_id = str(entry.get("chunk_id") or "").strip()
+        source = str(entry.get("source") or "").strip()
+        content = str(entry.get("content") or "").strip()
+        if not chunk_id:
+            continue
+        preview = content[:preview_length].replace("\n", " ").strip()
+        if len(content) > preview_length:
+            preview += "..."
+        source_tag = f" ({source})" if source else ""
+        blocks.append(f"- [{chunk_id}]{source_tag}: {preview}")
+
+    return (markdown_text or "").rstrip() + "\n" + "\n".join(blocks).rstrip() + "\n"
+
+
+def _append_graph_appendix(
+    markdown_text: str,
+    *,
+    graph_evidence: Dict[str, Any],
+    max_seed_entities: int,
+    max_chain_items: int,
+    max_items: int = composer_defaults.DEFAULT_EVIDENCE_PREVIEW_MAX_ITEMS,
+) -> str:
     """Append a compact appendix listing graph evidence artifacts."""
 
     if not isinstance(graph_evidence, dict):
@@ -736,47 +975,12 @@ def _append_graph_appendix(markdown_text: str, *, graph_evidence: Dict[str, Any]
     if seeds:
         blocks.append("")
         blocks.append("### Seed Entities")
-        if DEEPSEARCH_TOP_SEED_ENTITIES is not None:
-            seeds = seeds[: max(DEEPSEARCH_TOP_SEED_ENTITIES, 0)]
+        seeds = seeds[: max(int(max_seed_entities), 0)]
         blocks.extend(f"- {item}" for item in seeds)
     if chain:
         blocks.append("")
         blocks.append("### Graph Chain")
-        if DEEPSEARCH_GRAPH_EDGE_LIMIT is not None:
-            chain = chain[: max(DEEPSEARCH_GRAPH_EDGE_LIMIT, 0)]
+        chain = chain[: max(int(max_chain_items), 0)]
         blocks.extend(f"{idx}. {edge}" for idx, edge in enumerate(chain, start=1))
 
     return (markdown_text or "").rstrip() + "\n" + "\n".join(blocks).rstrip() + "\n"
-
-
-def _render_fallback_markdown(
-    *,
-    question: str,
-    final_answer: str,
-    highlights: List[Dict[str, Any]],
-    evidences: List[Dict[str, Any]],
-) -> str:
-    blocks: List[str] = [f"# {question}"]
-    answer = final_answer or ""
-    if answer:
-        blocks.extend(["", "## Answer", answer])
-    if highlights:
-        blocks.append("")
-        blocks.append("## Highlights")
-        for item in highlights:
-            summary = str(item.get("summary") or "").strip()
-            if summary:
-                blocks.append(f"- {summary}")
-    if evidences:
-        blocks.append("")
-        blocks.append("## Evidence Index")
-        for entry in evidences:
-            if not isinstance(entry, dict):
-                continue
-            chunk_id = str(entry.get("chunk_id") or "").strip()
-            source = str(entry.get("source") or "").strip()
-            content = str(entry.get("content") or "").strip()
-            if chunk_id and content:
-                source_tag = f" ({source})" if source else ""
-                blocks.append(f"- [{chunk_id}]{source_tag}: {content}")
-    return "\n".join(blocks).strip()

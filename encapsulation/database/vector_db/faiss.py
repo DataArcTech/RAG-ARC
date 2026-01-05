@@ -1,15 +1,8 @@
-import warnings
-
-warnings.filterwarnings(
-    "ignore",
-    message="builtin type SwigPy.* has no __module__ attribute",
-    category=DeprecationWarning,
-)
-
 import faiss
 import pickle
 import os
 import uuid
+import json
 import numpy as np
 from typing import Any, Optional, List, Dict, TYPE_CHECKING
 
@@ -145,6 +138,25 @@ class FaissVectorDB(VectorDB):
                 self.index = faiss.read_index(faiss_path)
             logger.info(f"FAISS index loaded: {self.index.ntotal} vectors, dimension {self.index.d}")
 
+            expected_dim = self._infer_embedding_dim()
+            if expected_dim is not None and getattr(self.index, "d", None) is not None:
+                loaded_dim = int(self.index.d)
+                if loaded_dim != int(expected_dim):
+                    logger.warning(
+                        "FAISS index dimension mismatch: index.d=%s embedding_dim=%s. "
+                        "Ignoring loaded index and requiring a rebuild.",
+                        loaded_dim,
+                        expected_dim,
+                    )
+                    with self._lock:
+                        self.index = None
+                        self.docstore = {}
+                        self.index_to_docstore_id = {}
+                        self.deleted_ids = set()
+                    raise ValueError(
+                        f"FAISS index dimension mismatch: index.d={loaded_dim} embedding_dim={int(expected_dim)}"
+                    )
+
         # Find .pkl file
         if pkl_files:
             pkl_path = os.path.join(path, pkl_files[0])
@@ -156,13 +168,70 @@ class FaissVectorDB(VectorDB):
             self.docstore = data.get("docstore", {})
             self.index_to_docstore_id = data.get("index_to_docstore_id", {})
             self.deleted_ids = set(data.get("deleted_ids", []))
+            stored_fingerprint = data.get("embedding_fingerprint")
+            current_fingerprint = self._embedding_fingerprint()
+            if stored_fingerprint and stored_fingerprint != current_fingerprint:
+                logger.warning(
+                    "FAISS embedding fingerprint mismatch; requiring rebuild. stored=%s current=%s",
+                    stored_fingerprint,
+                    current_fingerprint,
+                )
+                with self._lock:
+                    self.index = None
+                    self.docstore = {}
+                    self.index_to_docstore_id = {}
+                    self.deleted_ids = set()
+                raise ValueError("FAISS embedding fingerprint mismatch (requires rebuild)")
             logger.info(f"Loaded {len(self.docstore)} chunks from metadata ({len(self.deleted_ids)} soft-deleted)")
 
-            # Save pkl file parameters to override config values
-            self.index_type = data.get("index_type")
-            self.metric = data.get("metric")
-            self.normalize_L2 = data.get("normalize_L2")
-            logger.info(f"Index configuration: type={self.index_type}, metric={self.metric}")
+            # Replay persisted index parameters so load+update stays consistent with the on-disk index.
+            self.saved_index_type = data.get("index_type")
+            self.saved_metric = data.get("metric")
+            self.saved_normalize_L2 = data.get("normalize_L2")
+            # Backward-compatible mirrors (some callers may read these directly).
+            self.index_type = self.saved_index_type
+            self.metric = self.saved_metric
+            self.normalize_L2 = self.saved_normalize_L2
+            logger.info(
+                "Index configuration (replayed): type=%s metric=%s normalize_L2=%s",
+                self.saved_index_type,
+                self.saved_metric,
+                self.saved_normalize_L2,
+            )
+
+    def _infer_embedding_dim(self) -> Optional[int]:
+        cfg = getattr(self.embedding_model, "config", None)
+        candidate = getattr(cfg, "embedding_dimensions", None)
+        if candidate is not None:
+            try:
+                dim = int(candidate)
+                if dim > 0:
+                    return dim
+            except Exception:
+                pass
+        try:
+            probe = self.embedding_model.embed(["dimension probe"])
+            if isinstance(probe, list) and probe:
+                first = probe[0]
+                if isinstance(first, list):
+                    dim = len(first)
+                else:
+                    dim = len(probe)  # type: ignore[arg-type]
+                return int(dim) if dim > 0 else None
+        except Exception:
+            return None
+
+    def _embedding_fingerprint(self) -> str:
+        cfg = getattr(self.embedding_model, "config", None)
+        payload: Dict[str, Any] = {}
+        if cfg is not None:
+            payload = {
+                "type": getattr(cfg, "type", None) or cfg.__class__.__name__,
+                "loading_method": getattr(cfg, "loading_method", None),
+                "model_name": getattr(cfg, "model_name", None),
+                "embedding_dimensions": getattr(cfg, "embedding_dimensions", None),
+            }
+        return json.dumps(payload, sort_keys=True, ensure_ascii=False)
     
     def build_index(self, chunks: List[Chunk]):
         """Build index from chunks
@@ -250,19 +319,47 @@ class FaissVectorDB(VectorDB):
         if not chunks:
             return []
 
-        # Extract texts for embedding
-        texts: list[str] = []
-        for chunk in chunks:
+        # Extract texts for embedding (reuse precomputed embeddings when available)
+        embeddings_by_row: list[Optional[np.ndarray]] = [None] * len(chunks)
+        texts_to_embed: list[str] = []
+        rows_to_embed: list[int] = []
+
+        for idx, chunk in enumerate(chunks):
             metadata = getattr(chunk, "metadata", None) or {}
+
+            precomputed = metadata.get("embedding")
+            if precomputed is not None:
+                try:
+                    emb = np.array(precomputed, dtype=np.float32)
+                    if emb.ndim != 1:
+                        raise ValueError("embedding must be a 1D vector")
+                    embeddings_by_row[idx] = emb
+                    continue
+                except Exception:
+                    embeddings_by_row[idx] = None
+
             index_text = metadata.get("index_text")
             if not isinstance(index_text, str) or not index_text.strip():
                 index_text = chunk.content
-            texts.append(index_text)
+            texts_to_embed.append(index_text)
+            rows_to_embed.append(idx)
 
-        # Compute embeddings
-        embeddings = self.embedding_model.embed(texts)
+        if texts_to_embed:
+            computed = self.embedding_model.embed(texts_to_embed)
+            if isinstance(computed, list) and computed and isinstance(computed[0], (int, float)):
+                computed = [computed]
+            if len(computed) != len(texts_to_embed):
+                raise RuntimeError(
+                    f"Embedding size mismatch: got {len(computed)} for {len(texts_to_embed)} inputs"
+                )
+            for row_idx, embedding in zip(rows_to_embed, computed):
+                embeddings_by_row[row_idx] = np.array(embedding, dtype=np.float32)
 
-        embeddings_np = np.array(embeddings).astype(np.float32)
+        missing = [i for i, emb in enumerate(embeddings_by_row) if emb is None]
+        if missing:
+            raise RuntimeError(f"Missing embeddings for {len(missing)} chunks (first_missing_index={missing[0]})")
+
+        embeddings_np = np.vstack([emb for emb in embeddings_by_row if emb is not None]).astype(np.float32)
         embeddings_np = self._normalize_vectors(embeddings_np)
 
         with self._lock:
@@ -276,7 +373,7 @@ class FaissVectorDB(VectorDB):
             if (
                 hasattr(self.index, "is_trained")
                 and not self.index.is_trained
-                and len(embeddings) >= 100
+                and embeddings_np.shape[0] >= 100
             ):
                 self.index.train(embeddings_np)
 
@@ -496,13 +593,49 @@ class FaissVectorDB(VectorDB):
             return []
 
         try:
-            # Add updated chunks (embeddings will be generated automatically)
             chunk_ids = self._add_chunks(chunks)
             logger.info(f"Update completed: {self.index.ntotal} total vectors")
             return chunk_ids
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Update failed")
 
-        except Exception as e:
-            logger.error(f"Update failed: {str(e)}")
+            if self.index is not None and chunks:
+                try:
+                    probe_text = getattr(chunks[0], "content", "") or ""
+                    probe_emb = self.embedding_model.embed([probe_text])[0]
+                    probe_dim = int(np.array(probe_emb, dtype=np.float32).shape[0])
+                    if int(getattr(self.index, "d", 0) or 0) != probe_dim:
+                        logger.warning(
+                            "FAISS index dimension mismatch (index.d=%s, embedding_dim=%s). Rebuilding index.",
+                            getattr(self.index, "d", None),
+                            probe_dim,
+                        )
+                        # Rebuild using current embedding model to keep the index consistent.
+                        merged: Dict[str, Chunk] = {}
+                        for chunk_id, chunk in self.docstore.items():
+                            if chunk_id in self.deleted_ids:
+                                continue
+                            merged[chunk_id] = chunk
+                        for chunk in chunks:
+                            chunk_id = getattr(chunk, "id", None) or str(uuid.uuid4())
+                            chunk.id = chunk_id
+                            merged[chunk_id] = chunk
+
+                        with self._lock:
+                            self.docstore.clear()
+                            self.index_to_docstore_id.clear()
+                            self.deleted_ids.clear()
+                            if self.index is not None:
+                                self.index.reset()
+                            self.index = None
+
+                        rebuilt_ids = self._add_chunks(list(merged.values()))
+                        logger.info("FAISS index rebuilt successfully (%s chunks).", len(rebuilt_ids))
+                        return rebuilt_ids
+                except Exception:  # noqa: BLE001
+                    logger.exception("Failed to rebuild FAISS index after update failure")
+
+            logger.error("Update failed: %s", str(exc))
             return []
     
     def save_index(self, path: str, name: str = "index") -> None:
@@ -536,6 +669,7 @@ class FaissVectorDB(VectorDB):
                 "index_type": getattr(self, 'saved_index_type', getattr(self.config, 'index_type', 'flat')),
                 "metric": getattr(self, 'saved_metric', getattr(self.config, 'metric', 'cosine')),
                 "normalize_L2": getattr(self, 'saved_normalize_L2', getattr(self.config, 'normalize_L2', False)),
+                "embedding_fingerprint": self._embedding_fingerprint(),
             }
 
             pkl_path = os.path.join(path, f"{name}.pkl")

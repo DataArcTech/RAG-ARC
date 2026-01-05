@@ -2,11 +2,31 @@
 import json
 from typing import Any, Dict, Iterable, List, Tuple
 
+from pydantic import BaseModel, Field
+
 from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, build_input_schema, safe_json_loads
 from core.prompts.deepsearch import EVIDENCE_CROSSCHECK_PROMPT
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
+
+
+class _SupportedEntry(BaseModel):
+    triple: str = Field(..., min_length=1)
+    chunks: List[str] = Field(...)
+    reason: str = Field(..., min_length=1)
+
+
+class _UnsupportedEntry(BaseModel):
+    triple: str = Field(..., min_length=1)
+    chunks: List[str] | None = Field(default=None)
+    reason: str = Field(..., min_length=1)
+
+
+class _CrosscheckResponse(BaseModel):
+    supported: List[_SupportedEntry] = Field(...)
+    unsupported: List[_UnsupportedEntry] = Field(...)
+    summary: str = Field(..., min_length=1)
 
 
 class EvidenceCrosscheckTool(GraphTool):
@@ -15,7 +35,10 @@ class EvidenceCrosscheckTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.evidence_crosscheck",
         channel="text",
-        description="Cross-validates chunk/text-channel evidence against graph triples before reporting.",
+        description=(
+            "Cross-validates chunk/text-channel evidence against graph triples before reporting. "
+            "Requires triples (request.extra.triples or evidence provenance) and non-empty context_evidences."
+        ),
         speed="medium",
         cost="medium",
         strategy_tags=("verification", "triple", "chunk"),
@@ -56,37 +79,77 @@ class EvidenceCrosscheckTool(GraphTool):
 
     def __init__(
         self,
-        llm_connector=None,
+        llm_connector,
         *,
-        min_match_ratio: float = 0.75,
-        prompt_template: str | None = None,
+        prompt_template: str = EVIDENCE_CROSSCHECK_PROMPT,
     ):
+        if llm_connector is None:
+            raise ValueError("EvidenceCrosscheckTool requires an LLM connector (no heuristic fallback).")
         self.llm_connector = llm_connector
-        self.min_match_ratio = min_match_ratio
-        self.prompt_template = prompt_template or EVIDENCE_CROSSCHECK_PROMPT
+        self.prompt_template = prompt_template
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         triples = self._collect_triples(request)
         if not triples:
+            note = ThinkNote(
+                plan_step_id=request.plan_step,
+                reasoning="Skipped evidence crosscheck because no triples were supplied; proceed without crosscheck.",
+                next_actions=[
+                    "Provide triples via request.extra.triples (or attach triples to evidence provenance).",
+                    "Run graph traversal to extract candidate triples before crosschecking.",
+                ],
+                metadata={"reason": "missing_triples"},
+            )
             return ToolResult(
-                summary="Evidence crosscheck skipped because no triples were provided.",
-                diagnostics={"triple_count": 0},
+                summary="Skipped evidence crosscheck (missing triples).",
+                diagnostics={"skipped": True, "reason": "missing_triples", "triple_count": 0},
+                think_notes=[note],
             )
 
         chunk_payload = self._extract_chunks(request.context_evidences)
         if not chunk_payload:
+            note = ThinkNote(
+                plan_step_id=request.plan_step,
+                reasoning="Skipped evidence crosscheck because no non-empty context evidences were provided.",
+                next_actions=[
+                    "Run retrieval tools (chunk_scan/hybrid_neighborhood) to collect supporting chunks.",
+                    "Ensure context_evidences entries include non-empty content.",
+                ],
+                metadata={"reason": "missing_context_evidences"},
+            )
             return ToolResult(
-                summary="Evidence crosscheck skipped because no chunk context was supplied.",
-                diagnostics={"triple_count": len(triples)},
+                summary="Skipped evidence crosscheck (missing context evidences).",
+                diagnostics={"skipped": True, "reason": "missing_context_evidences", "triple_count": len(triples)},
+                think_notes=[note],
             )
 
-        heuristic_hits = self._analyze_chunks(chunk_payload, triples)
-        if self.llm_connector:
-            llm_report = await self._llm_crosscheck(request, chunk_payload, triples, heuristic_hits)
-        else:
-            llm_report = self._from_heuristic(heuristic_hits)
+        try:
+            llm_report = await self._llm_crosscheck(request, chunk_payload, triples)
+        except Exception as exc:  # noqa: BLE001
+            note = ThinkNote(
+                plan_step_id=request.plan_step,
+                reasoning="Evidence crosscheck failed to produce a usable structured result; proceed without crosscheck.",
+                next_actions=[
+                    "Retry crosscheck with a smaller set of chunks/triples.",
+                    "Verify tool prompt expects JSON and the LLM is configured correctly.",
+                ],
+                metadata={"error": str(exc), "error_type": type(exc).__name__},
+            )
+            return ToolResult(
+                summary="Evidence crosscheck failed (unusable output). Proceeding without crosscheck.",
+                diagnostics={
+                    "skipped": True,
+                    "reason": "llm_crosscheck_failed",
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "triple_count": len(triples),
+                    "token_breakdown": self._token_breakdown(chunk_payload, bool(self.llm_connector)),
+                },
+                think_notes=[note],
+            )
 
-        confirmed, missing = llm_report["supported"], llm_report["unsupported"]
+        confirmed = [entry.model_dump() for entry in llm_report.supported]
+        missing = [entry.model_dump() for entry in llm_report.unsupported]
         coverage_ratio = len(confirmed) / max(1, len(confirmed) + len(missing))
 
         diagnostics = {
@@ -102,7 +165,7 @@ class EvidenceCrosscheckTool(GraphTool):
             tool_name=self.descriptor.name,
             plan_step=request.plan_step,
         )
-        summary = llm_report.get("summary") or self._default_summary(diagnostics)
+        summary = llm_report.summary
         think_notes = self._maybe_build_think_note(request, coverage_ratio, len(missing))
 
         return ToolResult(
@@ -149,95 +212,26 @@ class EvidenceCrosscheckTool(GraphTool):
     def _extract_chunks(evidences: List[EvidenceChunk]) -> List[Tuple[str, str]]:
         return [(ev.chunk_id, ev.content) for ev in evidences if ev.content]
 
-    @staticmethod
-    def _analyze_chunks(
-        chunk_payload: List[Tuple[str, str]],
-        triples: List[Dict[str, str]],
-    ) -> List[Dict[str, object]]:
-        chunk_hits: List[Dict[str, object]] = []
-        for triple in triples:
-            matched_chunks: List[str] = []
-            for chunk_id, content in chunk_payload:
-                if EvidenceCrosscheckTool._chunk_supports_triple(content, triple):
-                    matched_chunks.append(chunk_id)
-            chunk_hits.append({"triple": triple, "matched_chunks": matched_chunks})
-        return chunk_hits
-
-    @staticmethod
-    def _chunk_supports_triple(content: str, triple: Dict[str, str]) -> bool:
-        text = (content or "").lower()
-        head = triple["head"].lower()
-        tail = triple["tail"].lower()
-        relation = triple["relation"].lower()
-        if head in text and tail in text:
-            return True
-        relation_tokens = [tok for tok in relation.split() if tok]
-        return all(token in text for token in relation_tokens[:2])
-
     async def _llm_crosscheck(
         self,
         request: ToolRunRequest,
         chunk_payload: List[Tuple[str, str]],
         triples: List[Dict[str, str]],
-        heuristic_hits: List[Dict[str, object]],
-    ) -> Dict[str, Any]:
+    ) -> _CrosscheckResponse:
         prompt_payload = {
             "question": request.question,
             "chunks": [{"chunk_id": cid, "content": text} for cid, text in chunk_payload],
             "triples": triples,
-            "heuristic": heuristic_hits,
         }
         messages = [
             {"role": "system", "content": self.prompt_template},
             {"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False)},
         ]
-        try:
-            response = await call_llm_async(self.llm_connector, messages, temperature=0.0)
-            parsed = safe_json_loads(response, expected="dict") or {}
-            return {
-                "supported": self._coerce_entries(parsed.get("supported")),
-                "unsupported": self._coerce_entries(parsed.get("unsupported")),
-                "summary": str(parsed.get("summary") or "").strip(),
-            }
-        except Exception:
-            return self._from_heuristic(heuristic_hits)
-
-    @staticmethod
-    def _coerce_entries(payload: Any) -> List[Dict[str, Any]]:
-        entries: List[Dict[str, Any]] = []
-        if isinstance(payload, list):
-            for item in payload:
-                if isinstance(item, dict) and "triple" in item:
-                    entries.append(
-                        {
-                            "triple": item["triple"],
-                            "chunks": item.get("chunks", []),
-                            "reason": item.get("reason", ""),
-                        }
-                    )
-        return entries
-
-    @staticmethod
-    def _from_heuristic(heuristic_hits: List[Dict[str, object]]) -> Dict[str, Any]:
-        supported, unsupported = [], []
-        for item in heuristic_hits:
-            triple = item["triple"]
-            formatted = {
-                "triple": f"{triple['head']} -[{triple['relation']}]-> {triple['tail']}",
-                "chunks": item["matched_chunks"],
-                "reason": "keyword match" if item["matched_chunks"] else "no chunk match",
-            }
-            if item["matched_chunks"]:
-                supported.append(formatted)
-            else:
-                unsupported.append(formatted)
-        return {
-            "supported": supported,
-            "unsupported": unsupported,
-            "summary": (
-                f"Heuristic crosscheck confirmed {len(supported)} triples and flagged {len(unsupported)} gaps."
-            ),
-        }
+        response = await call_llm_async(self.llm_connector, messages, temperature=0.0)
+        parsed = safe_json_loads(response, expected="dict")
+        if not isinstance(parsed, dict):
+            raise ValueError("EvidenceCrosscheckTool returned non-JSON or non-dict output")
+        return _CrosscheckResponse.model_validate(parsed)
 
     def _build_evidence_payload(
         self,
@@ -304,13 +298,11 @@ class EvidenceCrosscheckTool(GraphTool):
         coverage_ratio: float,
         missing_count: int,
     ) -> List[ThinkNote]:
-        if coverage_ratio >= self.min_match_ratio or missing_count == 0:
+        if missing_count == 0:
             return []
-        delta = coverage_ratio - self.min_match_ratio
         note = ThinkNote(
             plan_step_id=request.plan_step,
             reasoning="Crosscheck detected unsupported triples; rerun targeted retrieval before finalizing.",
-            confidence_delta=delta,
             coverage_delta=coverage_ratio,
             next_actions=[
                 "Issue focused graph probes for unsupported triples.",

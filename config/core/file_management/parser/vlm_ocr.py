@@ -1,4 +1,5 @@
-from typing import Literal
+from typing import Literal, Optional
+from pydantic import Field
 from framework.config import AbstractConfig
 from core.file_management.parser.vlm_ocr import VLMOcrParser
 from config.encapsulation.llm.parse.vlm_ocr import VLMOcrConfig
@@ -7,6 +8,11 @@ from config.encapsulation.llm.parse.vlm_ocr import VLMOcrConfig
 class VLMOcrParserConfig(AbstractConfig):
     """Configuration for VLM OCR Parser (Core Layer) - Simple OCR Mode"""
     type: Literal["vlm_ocr_parser"] = "vlm_ocr_parser"
+
+    output_dir: Optional[str] = Field(
+        default=None,
+        description="Output directory for OCR artifacts. When using ParserCombinator this is set automatically.",
+    )
 
     # LLM service configuration (required)
     vlm_ocr: VLMOcrConfig
@@ -17,4 +23,3 @@ class VLMOcrParserConfig(AbstractConfig):
 
     def build(self) -> VLMOcrParser:
         return VLMOcrParser(self)
-

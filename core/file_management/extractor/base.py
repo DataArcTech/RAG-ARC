@@ -18,7 +18,6 @@ class ExtractorBase(AbstractModule):
     def __init__(self, config):
         super().__init__(config)
         self.llm = config.llm_config.build()
-        self.extraction_semaphore = asyncio.Semaphore(config.max_concurrent)
 
     @abstractmethod
     async def extract(self, chunk: Chunk) -> GraphData:
@@ -32,9 +31,9 @@ class ExtractorBase(AbstractModule):
         """
         pass
 
-    async def process_chunk(self, chunk: Chunk) -> Chunk:
+    async def process_chunk(self, chunk: Chunk, *, semaphore: asyncio.Semaphore) -> Chunk:
         """process a single chunk"""
-        async with self.extraction_semaphore:
+        async with semaphore:
             try:
                 graph_data = await self.extract(chunk)
                 chunk.graph = graph_data
@@ -51,8 +50,9 @@ class ExtractorBase(AbstractModule):
 
         logger.info(f"Starting concurrent extraction with max_concurrent={self.config.max_concurrent}")
 
+        semaphore = asyncio.Semaphore(self.config.max_concurrent)
         # process_chunk handles all exceptions internally, so we don't need return_exceptions=True
-        tasks = [self.process_chunk(chunk) for chunk in chunks]
+        tasks = [self.process_chunk(chunk, semaphore=semaphore) for chunk in chunks]
         return await asyncio.gather(*tasks)
 
     async def __call__(self, chunks: List[Chunk]) -> List[Chunk]:

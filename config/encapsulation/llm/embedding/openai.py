@@ -35,6 +35,12 @@ def _env_int(name: str) -> Optional[int]:
         return None
     return int(raw)
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
 
 class OpenAIEmbeddingConfig(AbstractConfig):
     """Configuration for OpenAI Embedding LLM"""
@@ -64,14 +70,40 @@ class OpenAIEmbeddingConfig(AbstractConfig):
     timeout: float = 60.0  # Request timeout in seconds
     max_retries: int = 3  # Number of retry attempts on failure
 
+    # Request shaping / compatibility
+    request_batch_size: int = Field(
+        default_factory=lambda: int(os.getenv("EMBEDDING_REQUEST_BATCH_SIZE", "64")),
+        description="Number of inputs per embeddings request when batching is enabled",
+    )
+    supports_batch_input: bool = Field(
+        default_factory=lambda: _env_bool("EMBEDDING_SUPPORTS_BATCH_INPUT", True),
+        description="Whether the embeddings endpoint accepts list inputs for the `input` field",
+    )
+
+    rate_limit_max_retries: int = Field(
+        default=6,
+        description="Extra retries for HTTP 429 rate-limit errors (in addition to OpenAI client retries).",
+    )
+    rate_limit_default_sleep_seconds: float = Field(
+        default=10.0,
+        description="Fallback sleep (seconds) between retries when Retry-After is not available.",
+    )
+    rate_limit_max_sleep_seconds: float = Field(
+        default=60.0,
+        description="Upper bound on sleep (seconds) between rate-limit retries.",
+    )
+
     @model_validator(mode="after")
     def _validate_embedding_dimensions(self):
-        if self.loading_method == "huggingface" and self.embedding_dimensions is None:
-            raise ValueError(
-                "embedding_dimensions is required when loading_method='huggingface'. "
-                "Set EMBEDDING_DIMENSIONS (or provide embedding_dimensions in config JSON)."
-            )
+        # `embedding_dimensions` is optional:
+        # - If provided, it is used as an override.
+        # - If missing, EmbeddingLLMBase can auto-detect the dimension by running a tiny embedding call.
         return self
 
     def build(self) -> OpenAIEmbeddingLLM:
+        if self.loading_method == "openai":
+            if not str(self.openai_api_key or "").strip():
+                raise ValueError("Embedding API key is required: set EMBEDDING_API_KEY or OPENAI_API_KEY.")
+            if not str(self.openai_base_url or "").strip():
+                raise ValueError("Embedding base URL is required: set EMBEDDING_API_BASE_URL or OPENAI_BASE_URL.")
         return OpenAIEmbeddingLLM(self)

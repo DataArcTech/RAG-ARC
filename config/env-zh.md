@@ -1,26 +1,76 @@
-# 环境变量配置说明
+# 环境变量（最小 `.env`）与全量参数说明
 
-项目通过根目录的 `.env` 控制所有行为。默认的 `.env.example` 已经适配本地开发（Docker 服务运行在 `localhost`），通常只需要填入模型/LLM 的 API Key。本文档按模块说明每一个参数的默认值与作用。
+RAG-ARC 将配置拆成两层：
+
+- **`.env`**：只放密钥/secret 与功能开关（推荐）。
+- **`config/`**：所有可调参数（检索/分块/top_k/阈值/预算/路径等）。
+
+为了兼容性，运行时仍支持大量环境变量作为“覆盖/override”开关。
+本文档保留并解释 **所有** 支持的环境变量及其含义。
+
+推荐用法：
+1）让 `.env` 保持精简（只放密钥/开关）。
+2）业务参数在 `config/`（JSON + Python）里调整。
+
+---
+
+## 0）最小 `.env`（推荐）
+
+从模板开始：
+
+```bash
+cp .env.example .env
+```
+
+必填密钥（无默认值）：
+- `OPENAI_API_KEY` / `OPENAI_BASE_URL`（或分别配置 `CHAT_*` / `EMBEDDING_*` / `OCR_*`）
+- `JWT_SECRET_KEY`（建议 `openssl rand -hex 32` 生成）
+
+可选功能开关（有默认值）：
+- `TASK_QUEUE_MODE`、`MODEL_PROFILE`、`DEVELOP_MODE`、`ADMIN_OWNER_ID`
+
+可选外部网页检索（仅在配置开启时需要）：
+- `TAVILY_API_KEY`
+
+可选基础设施连接信息（本地/Docker 默认值可用；仅在需要连接远端服务时配置）：
+- PostgreSQL：`POSTGRES_HOST`、`POSTGRES_PORT`、`POSTGRES_USER`、`POSTGRES_PASSWORD`、`POSTGRES_DB`
+- Redis：`REDIS_HOST`、`REDIS_PORT`、`REDIS_DB`、`REDIS_PASSWORD`
+- Neo4j：`NEO4J_URL`、`NEO4J_USERNAME`、`NEO4J_PASSWORD`、`NEO4J_DATABASE`
+
+---
+
+## 0.1）高级配置（在 `config/` 修改，不建议堆在 `.env`）
+
+推荐修改位置：
+
+- `config/json_configs/rag_inference*.json`：聊天/RAG 主流程、检索器、重排器、模型选择等。
+- `config/json_configs/knowledge*.json`：解析、分块、索引/建图流程等。
+- `config/json_configs/deepsearch_service.json`：DeepSearch 的 planner/tools/report/quality gate 等。
+- `config/output_limits.py`：API 返回裁剪与证据上限（payload 限制）。
+- `config/core/deepsearch/*_defaults.py`：DeepSearch 的 loop/tool/report 默认参数（运行时读取）。
+
+密钥如何在配置里引用：
+- JSON 支持 `${ENV_VAR}` 占位符（例如 `${OPENAI_API_KEY}`），因此密钥放 `.env`，参数放 `config/`。
 
 ## 1. 模型与 LLM 提供方
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `CHAT_MODEL_PROVIDER` | `openai` | 对话模型提供方（`openai`=OpenAI 兼容 API，`huggingface`=本地 Transformers）。 |
-| `CHAT_MODEL_NAME` | _(空)_ | 可选：优先使用的对话模型名（填写后会覆盖 `OPENAI_CHAT_MODEL`）。 |
+| `CHAT_MODEL_NAME` | _(空)_ | 可选：优先使用的对话模型名；当 `CHAT_MODEL_PROVIDER=huggingface` 时可填写 HuggingFace repo id 或本地模型路径。 |
 | `CHAT_MODEL_DEVICE` | `cpu` | HuggingFace 对话模型运行设备（仅当 `CHAT_MODEL_PROVIDER=huggingface` 时使用）。 |
 | `CHAT_MODEL_CACHE_FOLDER` | _(空)_ | 可选：HuggingFace 对话模型权重/Tokenizer 缓存目录。 |
-| `CHAT_API_KEY` | _(空)_ | 对话模型的 API Key（使用云端 API 时必填）。 |
-| `CHAT_API_BASE_URL` | _(空)_ | OpenAI 兼容 API 的 Base URL（例如 `https://api.openai.com/v1`）。 |
+| `CHAT_API_KEY` | _(空)_ | **必填**（当 `CHAT_MODEL_PROVIDER=openai`）：对话模型 API Key。 |
+| `CHAT_API_BASE_URL` | _(空)_ | **必填**（当 `CHAT_MODEL_PROVIDER=openai`）：OpenAI 兼容 API Base URL（例如 `https://api.openai.com/v1`）。 |
 | `OPENAI_CHAT_MODEL` | `gpt-4o-mini` | 兼容/默认的对话模型名（当 `CHAT_MODEL_NAME` 为空时使用）。 |
 | `OPENAI_API_BASE` | _(空)_ | 可选：历史兼容的 OpenAI Base URL 别名。 |
 | `EMBEDDING_MODEL_PROVIDER` | `openai` | 嵌入模型提供方（`openai`=OpenAI 兼容 API，`huggingface`=本地 SentenceTransformers）。 |
-| `EMBEDDING_API_KEY` | _(空)_ | 嵌入模型的 API Key（使用云端 API 时必填）。 |
-| `EMBEDDING_API_BASE_URL` | _(空)_ | 嵌入模型的 Base URL。 |
+| `EMBEDDING_API_KEY` | _(空)_ | **必填**（当 `EMBEDDING_MODEL_PROVIDER=openai`）：嵌入模型 API Key。 |
+| `EMBEDDING_API_BASE_URL` | _(空)_ | **必填**（当 `EMBEDDING_MODEL_PROVIDER=openai`）：嵌入模型 Base URL。 |
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | 默认嵌入模型名称。 |
 | `EMBEDDING_DEVICE` | `cpu` | HuggingFace 嵌入模型运行设备（仅当 `EMBEDDING_MODEL_PROVIDER=huggingface` 时使用）。 |
 | `EMBEDDING_CACHE_FOLDER` | _(空)_ | 可选：HuggingFace 嵌入模型缓存目录。 |
-| `EMBEDDING_DIMENSIONS` | _(空)_ | 本地 HuggingFace embedding 必填：嵌入向量维度；使用 OpenAI 兼容 API 时可留空，系统会自动探测维度（也可填入作为覆盖）。 |
+| `EMBEDDING_DIMENSIONS` | _(空)_ | 可选：嵌入向量维度覆盖。留空时系统可自动探测并缓存维度。 |
 | `OCR_MODEL_PROVIDER` | `openai` | OCR/VLM 提供方（`openai`、`vllm`、`dots_ocr` 等）。 |
 | `OCR_API_KEY` | _(空)_ | OCR/VLM 的 API Key（使用云端 API 时必填）。 |
 | `OCR_API_BASE_URL` | _(空)_ | OCR/VLM 的 Base URL。 |
@@ -41,10 +91,10 @@
 | `RERANKER_MODEL_NAME` | `Qwen/Qwen3-Reranker-0.6B` | 默认本地 reranker 模型名（`MODEL_PROFILE=local` 时使用）。 |
 | `RERANKER_CACHE_FOLDER` | `./models/Qwen` | reranker 缓存目录。 |
 | `RERANKER_DEVICE` | `cpu` | reranker 运行设备。 |
-| `OPENAI_API_KEY` | _(空)_ | 可选：全局备用 OpenAI Key（组件 Key 为空时复用）。 |
-| `OPENAI_BASE_URL` | _(空)_ | 可选：全局备用 OpenAI Base URL。 |
+| `OPENAI_API_KEY` | _(空)_ | 全局备用 Key（当各组件 `*_API_KEY` 为空时复用）。只要任一 OpenAI 兼容模块启用且未单独配置 `*_API_KEY`，则该项 **必填**。 |
+| `OPENAI_BASE_URL` | _(空)_ | 全局备用 Base URL（当各组件 `*_API_BASE_URL` 为空时复用）。只要任一 OpenAI 兼容模块启用且未单独配置 `*_API_BASE_URL`，则该项 **必填**。 |
 | `DEVICE` | `cpu` | 可选：共享默认设备（当各组件设备变量为空时使用）。 |
-| `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | 使用本地 HuggingFace 嵌入时的模型名（`EMBEDDING_MODEL_PROVIDER=huggingface`）。 |
+| `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | 嵌入模型名称；当 `EMBEDDING_MODEL_PROVIDER=huggingface` 时可填写 HuggingFace repo id 或本地模型路径。 |
 | `MODEL_PROFILE` | `api` | 选择配置档（`api` 或 `local`），影响默认 JSON 配置。 |
 | `MINILM_MODEL_NAME` | `sentence-transformers/all-MiniLM-L6-v2` | `download_models.py` 下载 MiniLM 时使用的默认 repo id。 |
 | `MINILM_CACHE_FOLDER` | `./models/all-MiniLM-L6-v2` | `download_models.py` 下载 MiniLM 的缓存目录。 |
@@ -53,14 +103,19 @@
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `FILE_STORE_BASE_PATH` | `./data/file_store` | 文件原始内容存储目录（本地 blob store）。 |
-| `PARSED_CONTENT_STORE_BASE_PATH` | `./data/parsed_content_store` | 解析结果存储目录。 |
-| `CHUNK_STORE_BASE_PATH` | `./data/chunk_store` | Chunk 存储目录。 |
+| `FILE_STORE_BASE_PATH` | `./data/file_store` | 文件原始内容存储目录（本地 blob store；相对路径按项目根目录解析）。 |
+| `PARSED_CONTENT_STORE_BASE_PATH` | `./data/parsed_content_store` | 解析结果存储目录（相对路径按项目根目录解析）。 |
+| `CHUNK_STORE_BASE_PATH` | `./data/chunk_store` | Chunk 存储目录（相对路径按项目根目录解析）。 |
 | `LOCAL_BLOB_STORE_BASE_PATH` | `./data/files` | `LOCAL_FILE_STORAGE_PATH` 的历史别名（仅在 JSON 未提供 `base_path` 时才会使用）。 |
 | `FAISS_INDEX_PATH` | `./data/unified_faiss_index` | 统一 FAISS 索引目录。 |
 | `BM25_INDEX_PATH` | `./data/unified_bm25_index` | 统一 BM25 索引目录。 |
 | `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | 图索引/向量缓存落盘目录（Neo4j HippoRAG）。 |
 | `GRAPH_INDEX_NAME` | `index` | 图索引文件前缀名。 |
+| `KG_SCHEMA_PATH` | `./kg_schema.yml` | Neo4j HippoRAG 的 KG schema YAML 路径（谓词治理 + 方向敏感集合）。 |
+
+补充说明：
+- **FAISS 指纹保护**：FAISS 的 `.pkl` 元数据会写入 `embedding_fingerprint`（provider/model/dim）。当切换 embedding 模型/维度时，建议设置新的 `FAISS_INDEX_PATH`（推荐）或清理重建索引；否则系统会 fail-fast，避免“静默索引污染”。
+- **E2E 隔离**：真实服务测试建议把上述路径指向隔离目录（例如 `./local/e2e_*`），避免污染默认的 `./data/*`。
 
 ## 2. 证据输出控制
 
@@ -79,6 +134,14 @@
 | `DEEPSEARCH_MAX_STAGE_HISTORY` | `10` | DeepSearch payload 中最多保留的 stage_history 条数。 |
 | `DEEPSEARCH_MAX_EXTERNAL_CALLS` | `5` | DeepSearch payload 中最多保留的 external_calls 条数。 |
 | `DEEPSEARCH_MAX_TOOL_METADATA` | `5` | DeepSearch payload 中最多保留的 tool_results 条数。 |
+| `DEEPSEARCH_WEAVER_EVIDENCE_PREVIEW_CHARS` | `180` | DeepSearch Weaver trace 渲染时的证据预览字符上限。 |
+| `DEEPSEARCH_WEAVER_EVIDENCE_SAMPLE_COUNT` | `3` | DeepSearch Weaver trace 渲染时展示的证据样本数量。 |
+| `DEEPSEARCH_GRAPH_EXPORT_MAX_EDGES` | `2000` | DeepSearch 子图可视化导出 edges 上限（Neo4j exporter）。 |
+| `KNOWLEDGE_GRAPH_EXPORT_MAX_NODES` | `1000` | `/knowledge/graph/export*` 的 max_nodes 上限，用于防止导出过大导致资源消耗过高。 |
+| `KNOWLEDGE_GRAPH_EXPORT_MAX_EDGES` | `5000` | `/knowledge/graph/export*` 的 max_edges 上限，用于防止导出过大导致资源消耗过高。 |
+| `GRAPH_EXPORT_CHUNK_CONTENT_PREVIEW_CHARS` | `240` | 图导出 payload 中 chunk 内容预览的最大字符数（用于可视化预览，避免返回过大）。 |
+| `GRAPH_EXPORT_EDGE_FETCH_FACTOR` | `10` | exporter 抓取 edges 后再采样的倍率（fetch_limit = max_edges * factor）。 |
+| `GRAPH_EXPORT_EDGE_FETCH_MAX` | `50000` | exporter edges 抓取绝对上限（防止 Neo4j edge query 过大）。 |
 | `SEMANTIC_UNIT_MAX_MATCHED_SLICES` | `3` | 语义单元归并时最多附带的命中 slice 数。 |
 | `TABLE_MAX_MERGED_ROWS` | `30` | 表格归并回 anchor 时最多拼接的数据行数。 |
 | `SEMANTIC_UNIT_MAX_MERGED_SLICE_CHARS` | `1200` | code/list 归并时每个 slice 追加到 `anchor.content` 的最大字符数。 |
@@ -134,6 +197,63 @@
 | `REDIS_HOST_PORT` | `6379` | `EXPOSE_REDIS=true` 时映射到宿主机的端口。 |
 | `EXPOSE_REDIS` | `false` | 是否对宿主机暴露 Redis。 |
 
+## 5.1 Celery / 长任务队列（Celery + Redis）
+
+当 `TASK_QUEUE_MODE=celery` 时，以下长任务会由 Celery worker 执行并可跨进程扩展：
+- knowledge 文件索引 / 删除
+- DeepSearch `run_async`（进度 SSE 支持 `last_event_id` 重放）
+- knowledge 导出任务：`/knowledge/graph/export_async`、`/knowledge/mindmap/export_async`
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `TASK_QUEUE_MODE` | `celery` | 切换后台任务模式：`inprocess`（进程内）或 `celery`（分布式 worker）。 |
+| `CELERY_BROKER_URL` | _(空)_ | Broker URL（留空则使用 `redis://REDIS_HOST:REDIS_PORT/REDIS_DB`）。 |
+| `CELERY_RESULT_BACKEND` | _(空)_ | Result backend（默认同 broker；建议主要用 RedisTaskQueue 的 result key）。 |
+| `CELERY_QUEUE_INDEXING` | `indexing` | 索引/删除任务的队列名。 |
+| `CELERY_QUEUE_DEEPSEARCH` | `deepsearch` | DeepSearch 队列名。 |
+| `CELERY_QUEUE_EXPORT` | `export` | 导出任务队列名（图谱/思维导图）。留空则复用 `CELERY_QUEUE_INDEXING`。 |
+| `CELERY_LOGLEVEL` | `info` | Worker 日志级别（`./start.sh` 自动启动 worker 时使用）。 |
+| `CELERY_WORKER_CONCURRENCY` | `2` | Worker 并发（进程/线程数；`./start.sh` 自动启动 worker 时使用）。 |
+| `CELERY_WORKER_POOL` | `prefork` | Worker pool 实现（`./start.sh` 自动启动 worker 时使用）。 |
+| `CELERY_TASK_IGNORE_RESULT` | `true` | 是否忽略 Celery 原生 result backend 写入（长任务建议 `true`）。 |
+| `CELERY_RESULT_EXPIRES_SECONDS` | `3600` | Celery result backend 的过期时间（秒）。 |
+| `CELERY_TASK_ACKS_LATE` | `true` | 任务结束后再 ack（提高可靠性，但需结合幂等/锁）。 |
+| `CELERY_ACKS_ON_FAILURE_OR_TIMEOUT` | `true` | 失败/超时时是否 ack（与 acks_late 配合）。 |
+| `CELERY_REJECT_ON_WORKER_LOST` | `true` | worker 丢失时是否让任务重入队。 |
+| `CELERY_WORKER_PREFETCH_MULTIPLIER` | `1` | 每 worker 预取任务倍数（长任务建议 `1`）。 |
+| `CELERY_TASK_SOFT_TIME_LIMIT_SECONDS` | `0` | Soft time limit（秒，`0` 表示不启用）。 |
+| `CELERY_TASK_TIME_LIMIT_SECONDS` | `0` | Hard time limit（秒，`0` 表示不启用）。 |
+| `CELERY_VISIBILITY_TIMEOUT_SECONDS` | `86400` | Redis broker visibility timeout（秒；需大于最长任务耗时）。 |
+| `MQ_NAMESPACE` | `rag-arc:mq` | RedisTaskQueue 命名空间前缀。 |
+| `MQ_TASK_RUN_TTL_SECONDS` | `86400` | TaskRun KV 的 TTL（秒）。 |
+| `MQ_PROGRESS_TTL_SECONDS` | `86400` | 进度流（per-run stream/seq_map 等）的 TTL（秒）。 |
+| `MQ_RESULT_TTL_SECONDS` | `86400` | 结果 key 的 TTL（秒）。 |
+| `MQ_RESULT_MAX_INLINE_BYTES` | `262144` | 结果 JSON 存入 Redis 的最大字节数；超过后自动外置存储（local/MinIO），Redis 仅存引用 envelope（`0` 表示禁用外置）。 |
+| `MQ_RESULT_STORE` | `local` | 结果外置存储后端：`local` 或 `minio`。 |
+| `MQ_RESULT_LOCAL_DIR` | `local/mq_results` | `local` 外置结果的基础目录。 |
+| `MQ_RESULT_MINIO_ENDPOINT` | _(空)_ | `minio` 外置结果的 MinIO endpoint（TODO：尚未实现）。 |
+| `MQ_RESULT_MINIO_BUCKET` | _(空)_ | `minio` 外置结果的 bucket（TODO：尚未实现）。 |
+| `MQ_STREAM_MAXLEN` | `20000` | Redis Streams 最大长度（近似裁剪）。 |
+| `MQ_FAILFAST_ON_REDIS_DOWN` | _(空)_ | Redis 不可用时是否 fail-fast：为空则 `celery` 模式默认 fail-fast，`inprocess` 模式默认 best-effort。 |
+| `FILE_OP_LOCK_TTL_SECONDS` | `21600` | 文件操作分布式锁 TTL（秒，索引/删除共用）。 |
+| `CELERY_TASK_MAX_RETRIES` | `3` | 任务异常时最大重试次数。 |
+| `CELERY_TASK_RETRY_COUNTDOWN_SECONDS` | `5` | 任务异常重试的等待秒数。 |
+| `CELERY_TASK_LOCK_MAX_RETRIES` | `30` | 获取 file lock 失败时的最大重试次数。 |
+| `CELERY_TASK_LOCK_RETRY_COUNTDOWN_SECONDS` | `2` | 获取 file lock 失败时的重试等待秒数。 |
+| `MQ_AUTO_START_WORKERS` | `true` | 当 `TASK_QUEUE_MODE=celery` 时，`./start.sh` 自动启动 `rag-arc-worker-*` 容器。 |
+| `MQ_SYNC_TO_POSTGRES_ENABLED` | `true` | `./start.sh` 启动 `rag-arc-mq-sync` 守护进程，将 Redis Streams 归档到 Postgres。 |
+| `MQ_SYNC_POLL_INTERVAL_SECONDS` | `2` | 同步轮询间隔（秒，daemon 模式）。 |
+| `MQ_SYNC_BATCH_SIZE` | `2000` | 每次同步最多读取的 stream 条目数。 |
+| `MQ_SYNC_BLOCK_MS` | `1000` | 每次同步的 Redis XREAD 阻塞时间（毫秒；`0` 表示不阻塞）。 |
+| `MQ_STARTUP_HEALTHCHECK` | `true` | `./start.sh` 启动时执行一段 MQ 健康检查（写入小事件、跑一次同步、校验表存在）。 |
+
+### 5.1.1 运行方式（本地/测试）
+
+- 当 `TASK_QUEUE_MODE=celery` 且 `MQ_AUTO_START_WORKERS=true` 时，`./start.sh` 会自动启动 Celery worker 容器。
+- 停止 Celery worker：`./stop.sh`（或 `bash scripts/mq_tools/stop_mq_workers_local.sh`）。
+- 手动启动（非 Docker）：`bash scripts/mq_tools/start_mq_workers_local.sh`（读取 `.env`，日志输出到 `log/mq_workers/`）。
+- 可选：将 Redis Streams 归档到 Postgres：`uv run python scripts/mq_tools/message_queue_sync.py --daemon`（或 `--once` 单次同步）。
+
 ## 6. DeepSearch 配置
 
 若无特殊需求，请保留默认值；只有在需要自定义规划器或工具链时才修改。
@@ -157,12 +277,17 @@
 | `DEEPSEARCH_PLANNER_MAX_RETRIES` | _(空)_ | 可选：规划器专用重试次数。 |
 | `DEEPSEARCH_PERSIST_PLAN` | `true` | 是否落盘保存规划。 |
 | `DEEPSEARCH_PLAN_OUTPUT_DIR` | `./local/deepsearch_runs` | 规划输出目录。 |
-| `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `./local/deepsearch_artifacts` | 工具执行日志目录。 |
+| `DEEPSEARCH_ARTIFACT_DIR` | _(空)_ | 可选：DeepSearch 运行 artifacts 根目录（每次 run 会创建 `run_id/` 子目录，写入 plan/reasoning/report/state 等 JSON/Markdown）。 |
+| `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `./local/deepsearch_artifacts` | 工具执行日志/产物目录。 |
 | `DEEPSEARCH_ALLOW_EXTERNAL_CHANNEL` | `false` | 规划器是否允许生成 `web` 步骤（当未设置 `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` 时生效）。 |
 | `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` | `false` | 运行时覆盖外部搜索开关（默认由配置 `external_channel.enabled` + `gap_detection.enable_external_on_gap` 决定）。 |
+| `DEEPSEARCH_SECTIONWISE_WRITER` | `false` | 启用“分节写作 + Memory Bank 检索 + recency retain_k”模式。 |
+| `DEEPSEARCH_BUDGET_TIER` | _(空)_ | 可选的复杂度→预算覆盖开关（`low` / `default`）；为空时将基于问题内容做启发式预算分配。 |
 | `DEEPSEARCH_TELEMETRY_ENABLED` | `true` | 是否启用工具运行遥测（本地 artifacts）。 |
 | `TAVILY_API_KEY` | _(空)_ | Tavily 搜索的 Key（启用外部搜索时必填）。 |
 | `DEEPSEARCH_WEB_PROVIDER` | _(空)_ | 外部搜索路由提示（`tavily` / `tool` / `mcp`；其他值会回退到 `tavily`）。 |
+| `DEEPSEARCH_EXTERNAL_CACHE_MODE` | `auto` | 外部搜索录制/回放模式：`off` / `record` / `replay` / `auto`。 |
+| `DEEPSEARCH_EXTERNAL_CACHE_DIR` | `./local/deepsearch_artifacts/external_cache` | 外部搜索缓存目录。 |
 | `DEEPSEARCH_TOOL_HINTS` | _(空)_ | JSON 字符串，覆盖规划器的工具提示。 |
 | `DEEPSEARCH_TOOL_MCP_CONFIG_PATH` | _(空)_ | MCP 服务器 JSON 配置路径。 |
 | `DEEPSEARCH_TOOL_MCP_ADAPTER_CONFIG` | _(空)_ | 适配器配置 JSON。 |
@@ -175,6 +300,8 @@
 | `DEEPSEARCH_TOOL_MCP_TOOLS` | _(空)_ | MCP 工具白名单，逗号分隔。 |
 | `DEEPSEARCH_ALLOW_SEMANTIC_CHANNEL` | `true` | 是否启用语义通道。 |
 | `DEEPSEARCH_CHAIN_DEPTH` | `4` | 图遍历层数。 |
+| `DEEPSEARCH_TOOL_CONTEXT_MAX_EVIDENCES` | `5` | 工具调用时传入的 `context_evidences` 最大条数（recency 保留最近 K 条，防止 context 爆炸）。 |
+| `DEEPSEARCH_TOOL_CONTEXT_MAX_CHARS` | `800` | 工具调用时每条 evidence 的最大字符数（超出会截断）。 |
 | `DEEPSEARCH_ENABLE_FINANCE_HOOKS` | `false` | 启用金融场景特化逻辑。 |
 | `DEEPSEARCH_MCP_SERVER_URI` | _(空)_ | 远程 MCP 服务地址。 |
 | `DEEPSEARCH_MCP_API_KEY` | _(空)_ | MCP 远程访问 Key。 |
@@ -222,10 +349,12 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `JWT_SECRET_KEY` | `your-secret-key-change-this-in-production` | JWT 签名秘钥，生产环境务必替换。 |
+| `JWT_SECRET_KEY` | _(空)_ | JWT 签名秘钥。留空时 API 会自动生成并写入 `RAGARC_RUNTIME_DIR`（默认：`./local/runtime/jwt_secret_key`）；生产环境建议显式配置。 |
 | `HF_TOKEN` | _(空)_ | HuggingFace Token（下载受限模型时使用）。 |
 | `HF_ENDPOINT` | _(空)_ | 可选：HuggingFace Endpoint 覆盖（例如 `https://hf-mirror.com`）。 |
 | `LOG_LEVEL` | `INFO` | 日志等级。 |
+| `RAGARC_DEPENDENCY_CHECK_MODE` | `warn` | 应用启动依赖检查模式（Postgres/Redis/Neo4j）：`off`/`warn`/`strict`。注意：当前 API 启动在该变量未设置时默认走 `strict`。 |
+| `RAGARC_INDEXING_DEPENDENCY_CHECK_MODE` | `strict` | 知识库索引任务依赖检查模式（`/knowledge/*` 索引与 Celery 任务使用）：`off`/`warn`/`strict`。单测为保持 hermetic 默认设置为 `off`。 |
 
 ## 8. 文件/解析路径
 
@@ -237,7 +366,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `VLMOCR_OUTPUT_DIR` | _(空)_ | 可选：VLM OCR 输出目录覆盖。 |
 | `OCR_MODEL_NAME` | _(空)_ | 可选：历史兼容的 OCR 模型名别名。 |
 | `RAGARC_RUNTIME_DIR` | `./local/runtime` | 当首选目录不可写时的运行时兜底根目录。 |
-| `LOCAL_FILE_STORAGE_PATH` | `./data/files` | 当 JSON 未提供 `base_path` 时，`local_blob_store` 的默认根目录。 |
+| `LOCAL_FILE_STORAGE_PATH` | `./data/files` | 当 JSON 未提供 `base_path` 时，`local_blob_store` 的默认根目录（相对路径按项目根目录解析）。 |
 
 ## 9. Neo4j 图数据库
 
@@ -245,7 +374,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | --- | --- | --- |
 | `NEO4J_URL` | `bolt://localhost:7687` | Neo4j 连接字符串。 |
 | `NEO4J_USERNAME` | `neo4j` | Neo4j 用户名。 |
-| `NEO4J_PASSWORD` | `12345678` | Neo4j 密码。 |
+| `NEO4J_PASSWORD` | _(空)_ | Neo4j 密码。 |
 | `NEO4J_DATABASE` | `neo4j` | 数据库名称。 |
 | `EXPOSE_NEO4J` | `false` | 是否开放 Neo4j Browser/Bolt 端口。 |
 | `NEO4J_HTTP_PORT` | `7474` | 当 `EXPOSE_NEO4J=true` 时映射到宿主机的 HTTP 端口。 |
@@ -258,12 +387,12 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINIO_USERNAME` | `ROOTNAME` | MinIO 用户名/Access Key（仅在启用 MinIO 集成时使用）。 |
 | `MINIO_PASSWORD` | `CHANGEME123` | MinIO 密码/Secret Key。 |
 
-`.env.example` 里还提供了以下（默认注释）的占位项：
+MinIO 常用变量（仅在启用对象存储集成时才需要设置）：
 - `MINIO_ENDPOINT`
 - `MINIO_BUCKET`
 - `MINIO_SECURE`
 
-仅当需要接入对象存储时才取消注释并填写。
+默认本地/Docker 部署不需要配置这些项。
 
 ## 11. 构建 / 高级运行参数
 
@@ -346,8 +475,9 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `RUN_RAGARC_POSTGRES_TESTS` | _(空)_ | 运行依赖 Postgres 的测试套件。 |
 | `RUN_RAGARC_CHAT_STORAGE_TESTS` | _(空)_ | 运行 chat storage 测试套件。 |
 | `RUN_RAGARC_VECTOR_TESTS` | _(空)_ | 运行向量库相关测试套件。 |
+| `RUN_RAGARC_MQ_STRESS_TESTS` | _(空)_ | 可选：设为 `1` 时运行真实 Redis 的消息队列轻压测（`test/stress/test_mq_stress_real_redis.py`）。 |
 | `RAGARC_E2E_TOKEN` | _(空)_ | `test/test_complete_e2e_api.py` 用于 API 鉴权的 token。 |
 
 ---
 
-**使用建议**：复制 `.env.example` 为 `.env`，填入自己使用的模型/API Key，其余配置保持默认即可完成本地部署。仅当要接入其他数据库/服务或自定义 DeepSearch 行为时，再根据上表调整相应变量。
+**使用建议**：复制 `.env.example` 为 `.env`，填入必需密钥（`OPENAI_API_KEY`/`OPENAI_BASE_URL`（或按模块配置 `*_API_KEY`/`*_API_BASE_URL`）与 `JWT_SECRET_KEY`）即可完成本地部署。高级参数优先在 `config/`（JSON/Python）里改；只有确实需要覆盖时再使用环境变量。

@@ -6,6 +6,9 @@ from typing import Any, Dict, List
 from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote
 from core.prompts.deepsearch import LLM_CHAIN_EXPLORER_SYSTEM_PROMPT
 from core.graph_adapter.concurrency import adapter_locked
+from core.deepsearch.utils.file_scope import resolve_file_scope
+from core.deepsearch.utils.evidence_ids import derived_chunk_id
+from core.deepsearch.utils.compression import compact_context_snippet, resolve_compaction_config
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, safe_json_loads
 
@@ -52,24 +55,40 @@ class LLMChainExplorerTool(GraphTool):
         if adapter is None:
             raise RuntimeError("LLMChainExplorerTool requires a GraphDeepSearchAdapter")
 
+        file_scope = resolve_file_scope(
+            extra=request.extra,
+            graph_context_metadata=(request.graph_context.metadata if request.graph_context else {}),
+            question=request.question,
+        )
         evidences: List[EvidenceChunk] = []
         diagnostics = {
             "plan": plan,
             "thought_log": self._build_thought_log(plan, request.plan_step),
         }
+        if file_scope.enabled:
+            diagnostics["file_scope"] = file_scope.as_dict()
         for idx, spec in enumerate(plan[: self.max_queries]):
-            sub_query = spec.get("query") or spec.get("description") or request.question
-            channel = spec.get("channel") or "graph"
+            raw_query = spec.get("query") or spec.get("description") or request.question
+            if isinstance(raw_query, list):
+                raw_query = " ".join(str(item) for item in raw_query if str(item).strip())
+            sub_query = str(raw_query or request.question).strip() or str(request.question)
+            channel = str(spec.get("channel") or "graph").strip() or "graph"
             async with adapter_locked(adapter):
                 payload = await adapter.aquery_subgraph(
                     sub_query,
                     channel=channel,
                     access_scope=request.access_scope,
+                    query_options={"file_scope": file_scope.as_dict()} if file_scope.enabled else None,
                 )
                 summary = await adapter.summarize(channel, payload, access_scope=request.access_scope)
             evidence = EvidenceChunk(
-                chunk_id=f"llm-chain-{idx}",
-                source=adapter.metadata().adapter_name,
+                chunk_id=derived_chunk_id(
+                    tool_name=self.descriptor.name,
+                    plan_step=request.plan_step,
+                    label=f"llm_chain_{idx}",
+                    content=str(summary),
+                ),
+                source=self.descriptor.name,
                 content=summary,
                 score=spec.get("priority", 1.0),
                 provenance={
@@ -95,21 +114,47 @@ class LLMChainExplorerTool(GraphTool):
             },
             {"role": "user", "content": prompt},
         ]
-        try:
-            response = await call_llm_async(
-                self.llm_connector,
-                messages,
-                temperature=self.temperature,
-            )
-            return self._parse_response(response)
-        except Exception:
-            # Fallback to heuristic splitting when the LLM is unavailable.
-            question = request.question or ""
-            return [{"query": part.strip(), "rationale": "fallback"} for part in question.split("?") if part.strip()]
+        response = await call_llm_async(
+            self.llm_connector,
+            messages,
+            temperature=self.temperature,
+        )
+        plan = self._parse_response(response)
+        if not plan:
+            fallback_query = (request.extra.get("focus_query") or request.question or "").strip()
+            if not fallback_query:
+                fallback_query = "graph_followup"
+            plan = [
+                {
+                    "query": fallback_query,
+                    "rationale": "fallback: model output was not a usable JSON plan; using a single hop",
+                    "channel": "graph",
+                    "priority": 1.0,
+                    "fallback": True,
+                }
+            ]
+        return plan
 
     def _build_prompt(self, request: ToolRunRequest) -> str:
         adapter_meta = asdict(request.adapter.metadata()) if request.adapter else {}
-        context_snippets = "\n".join(e.content[:200] for e in request.context_evidences[-3:])
+        cfg = resolve_compaction_config(
+            branch="tool_context",
+            graph_context=request.graph_context,
+            extra=(request.extra or {}),
+            default_max_items=3,
+            default_max_chars=200,
+            default_mode="truncate",
+            default_retention="tail",
+            env_max_items="DEEPSEARCH_TOOL_CONTEXT_MAX_EVIDENCES",
+            env_max_chars="DEEPSEARCH_TOOL_CONTEXT_MAX_CHARS",
+        )
+        context_snippets, _meta = compact_context_snippet(
+            request.context_evidences or [],
+            cfg=cfg,
+            question=request.question,
+            extra=(request.extra or {}),
+            joiner="\n",
+        )
         return json.dumps(
             {
                 "question": request.question,
@@ -117,7 +162,6 @@ class LLMChainExplorerTool(GraphTool):
                 "context": context_snippets,
                 "instructions": {
                     "max_queries": self.max_queries,
-                    "graph_type": adapter_meta.get("graph_type", "hipporag"),
                     "allowed_channels": ["graph", "text"],
                 },
             },

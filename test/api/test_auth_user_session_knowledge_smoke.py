@@ -65,7 +65,7 @@ def _register_and_login(client: TestClient):
     username = f"u_{uuid.uuid4().hex[:8]}"
     password = "pw"
     resp = client.post("/auth/register", json={"name": "n", "user_name": username, "password": password})
-    assert resp.status_code == 201
+    assert resp.status_code == 200
     token_resp = client.post(
         "/auth/token",
         data={"username": username, "password": password},
@@ -100,4 +100,3 @@ def test_knowledge_upload_requires_auth(client, tmp_path):
     with file_path.open("rb") as f:
         resp = client.post("/knowledge", files={"file": ("a.txt", f, "text/plain")})
     assert resp.status_code == 401
-

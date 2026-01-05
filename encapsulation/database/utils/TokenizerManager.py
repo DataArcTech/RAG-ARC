@@ -1,9 +1,10 @@
-import re
 from typing import List, Callable, Optional, Tuple
 import logging
 import jieba
 from pathlib import Path
 from encapsulation.data_model.schema import Chunk
+
+from core.utils.text_regex import CJK_DETECT_RE, WHITESPACE_RE
 
 logger = logging.getLogger(__name__)
 
@@ -132,17 +133,16 @@ class TokenizerManager:
         if not chunks:
             return False, {"reason": "no_chunks"}
 
-        chinese_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]')
         sample_docs = chunks[:sample_size] if len(chunks) > sample_size else chunks
 
         total_chars, chinese_chars, docs_with_chinese = 0, 0, 0
         for doc in sample_docs:
             content = doc.content or ""
-            non_space_content = re.sub(r'\s+', '', content)
+            non_space_content = WHITESPACE_RE.sub("", content)
             if not non_space_content:
                 continue
             doc_total = len(non_space_content)
-            doc_chinese = len(chinese_pattern.findall(non_space_content))
+            doc_chinese = len(CJK_DETECT_RE.findall(non_space_content))
             total_chars += doc_total
             chinese_chars += doc_chinese
             if doc_chinese > 0:

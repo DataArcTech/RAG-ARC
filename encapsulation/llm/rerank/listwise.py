@@ -4,6 +4,9 @@ import logging
 import json
 import re
 
+from core.utils.json_extract import extract_last_json_array_from_text
+from core.prompts import LISTWISE_RERANK_DEFAULT_PROMPT_TEMPLATE
+
 if TYPE_CHECKING:
     from encapsulation.data_model.schema import Chunk
     from encapsulation.llm.chat.base import ChatLLMBase
@@ -87,18 +90,7 @@ class ListwiseRerankLLM(RerankLLMBase):
 
         if prompt_template is None:
             # Default prompt template
-            prompt_template = '''The following documents are related to query: {QUERY}
-
-Documents:
-{DOC_STR}
-
-First identify the essential problem in the query. Think step by step to reason about why each document is relevant or irrelevant. Rank these documents based on their relevance to the query.
-Please output the ranking result of documents as a list, where the first element is the id of the most relevant document, the second element is the id of the second most element, etc.
-Please strictly follow the format to output a list of {TOPK} ids corresponding to the most relevant {TOPK} documents, sorted from the most to least relevant document. First think step by step and write the reasoning process, then output the ranking results as a list of ids in a json format like
-```json
-[... integer ids here ...]
-```
-'''
+            prompt_template = LISTWISE_RERANK_DEFAULT_PROMPT_TEMPLATE
 
         # Format the prompt
         prompt = prompt_template.format(QUERY=query, DOC_STR=doc_str, TOPK=top_k)
@@ -144,15 +136,8 @@ Please strictly follow the format to output a list of {TOPK} ids corresponding t
             if "</think>" in output_str:
                 output_str = output_str.split("</think>")[-1]
 
-            # Extract JSON array from markdown code block
-            json_matches = re.findall(r"(?:```json\s*)(.+)(?:```)", output_str, re.DOTALL)
-
-            if not json_matches:
-                # Try to find JSON array without code block
-                json_matches = re.findall(r"\[\s*[0-9,\s]+\]", output_str)
-            
-            if json_matches:
-                idxs_str = json_matches[-1].strip()
+            idxs_str = extract_last_json_array_from_text(output_str)
+            if idxs_str:
                 idxs = json.loads(idxs_str)
                 
                 # Validate indices
@@ -234,4 +219,3 @@ Please strictly follow the format to output a list of {TOPK} ids corresponding t
             "config_type": getattr(self.config, 'type', 'unknown'),
             "has_custom_prompt": self.default_prompt_template is not None
         }
-

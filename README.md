@@ -131,7 +131,7 @@ RAG-ARC/
 
 ## 🚀 Quick Start
 
-> Need help configuring `.env`? See [env-en.md](env-en.md) (English) or [env-zh.md](env-zh.md) for a complete reference.
+> Need help configuring `.env`? See `config/env-en.md` (English) or `config/env-zh.md` (中文). Advanced tuning lives in `config/` (not `.env`).
 
 ### 🐳 Docker Deployment (Recommended)
 
@@ -216,7 +216,12 @@ uv sync --extra dev
 
 # 4. Copy and configure environment variables
 cp .env.example .env
-# Edit .env and fill in the model/API keys you need (see env-en.md for every option)
+# Edit .env and fill in only the required secrets / switches:
+# - OPENAI_API_KEY=...
+# - OPENAI_BASE_URL=... (e.g. https://api.openai.com/v1)
+# - JWT_SECRET_KEY=... (generate with: openssl rand -hex 32; optional if you accept auto-generated dev secret)
+# Optional infra overrides (defaults work for local/Docker): POSTGRES_*, REDIS_*, NEO4J_*
+# See config/env-en.md for the full env reference and advanced configuration.
 ```
 
 ### 🔐 Optional: Admin Access

@@ -171,7 +171,7 @@ def layoutjson2md(image: Image.Image, cells: list, text_key: str = 'text', no_pa
     """
     Converts a layout JSON format to Markdown.
 
-    In the layout JSON, formulas are LaTeX, tables are HTML, and text is Markdown.
+    In the layout JSON, formulas are LaTeX, tables are Markdown tables, and text is Markdown.
 
     Args:
         image: A PIL Image object.
@@ -196,6 +196,9 @@ def layoutjson2md(image: Image.Image, cells: list, text_key: str = 'text', no_pa
             text_items.append(f"[Image: Picture at position ({x1}, {y1}, {x2}, {y2})]")
         elif cell['category'] == 'Formula':
             text_items.append(get_formula_in_markdown(text))
+        elif cell['category'] == 'Table':
+            # Preserve table newlines/pipes for Markdown rendering.
+            text_items.append((text or "").strip())
         else:
             text = clean_text(text)
             text_items.append(f"{text}")

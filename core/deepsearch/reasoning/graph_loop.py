@@ -1,6 +1,5 @@
 """Graph-first reasoning loop that orchestrates adapter traversals and tool calls."""
 import asyncio
-import contextvars
 import logging
 import time
 from dataclasses import asdict, is_dataclass
@@ -17,29 +16,28 @@ from encapsulation.data_model.deepsearch import (
     ToolResultPayload,
 )
 from core.deepsearch.tooling.protocols import ToolInvoker
+from core.deepsearch.trace import emit_trace
+from core.deepsearch.utils.compression import compact_evidences, resolve_compaction_config
 from core.graph_adapter.base import GraphAccessScope, GraphDeepSearchAdapter
 from core.graph_adapter.scope_provider import require_scope
 
 from .parallel import ParallelExecutionManager
+from .graph_loop_runtime import GraphLoopRuntimeMixin
+from .graph_loop_state import (
+    _RUN_EVIDENCES,
+    _RUN_EVIDENCE_LOCK,
+    _RUN_REFLECT_COUNT,
+    _RUN_THINK_COUNT,
+    _RUN_THINK_TOOL_SIGNATURES,
+    _RUN_TOTAL_STEPS,
+    _run_evidence_state,
+)
 from .subagent import PlanSubAgent, SubAgentOutcome
 from .traversal import GraphTraversalExecutor, GraphTraversalSettings
 
 logger = logging.getLogger(__name__)
 
-
-_RUN_EVIDENCES: contextvars.ContextVar[List[EvidenceChunk] | None] = contextvars.ContextVar(
-    "deepsearch_run_evidences",
-    default=None,
-)
-_RUN_EVIDENCE_LOCK: contextvars.ContextVar[asyncio.Lock | None] = contextvars.ContextVar(
-    "deepsearch_run_evidence_lock",
-    default=None,
-)
-_RUN_TOTAL_STEPS: contextvars.ContextVar[int] = contextvars.ContextVar("deepsearch_run_total_steps", default=0)
-_RUN_THINK_COUNT: contextvars.ContextVar[int] = contextvars.ContextVar("deepsearch_run_think_count", default=0)
-
-
-class GraphReasoningLoop:
+class GraphReasoningLoop(GraphLoopRuntimeMixin):
     """Run multi-step graph reasoning using adapters, graph tools, and MCP routing."""
 
     def __init__(
@@ -49,6 +47,7 @@ class GraphReasoningLoop:
         strategy_config,
         *,
         tool_manager: ToolInvoker | None = None,
+        graph_channel_tool: str,
     ):
         # adapter: dynamically injected HippoRAG/other graphrag implementation
         self.adapter = adapter
@@ -57,6 +56,9 @@ class GraphReasoningLoop:
         # strategy_config: Chain-of-Exploration parameters controlling traversal depth/filters
         self.strategy_config = strategy_config
         self.tool_manager = tool_manager
+        self.graph_channel_tool = str(graph_channel_tool).strip()
+        if not self.graph_channel_tool:
+            raise ValueError("graph_channel_tool is required for GraphReasoningLoop")
         self.traversal_settings = self._build_traversal_settings(strategy_config)
         self.traversal_executor = GraphTraversalExecutor(
             adapter=self.adapter,
@@ -68,6 +70,11 @@ class GraphReasoningLoop:
         self.max_parallel_branches = self._resolve_max_parallel(strategy_config)
         self._active_parallel_branches = max(1, self.parallel_branches or 1)
         self._tool_timeout = self._resolve_tool_timeout(strategy_config)
+        self._tool_context_max_items = self._resolve_tool_context_max_items(strategy_config)
+        self._tool_context_max_chars = self._resolve_tool_context_max_chars(strategy_config)
+        self._coverage_expected_min_chunks = self._resolve_expected_min_chunks(strategy_config)
+        self._trace_reflection_enabled = self._resolve_trace_reflection_enabled(strategy_config)
+        self._trace_reflection_max = self._resolve_trace_reflection_max(strategy_config)
 
     async def run(
         self,
@@ -103,6 +110,8 @@ class GraphReasoningLoop:
         lock_token = _RUN_EVIDENCE_LOCK.set(evidence_lock)
         total_steps_token = _RUN_TOTAL_STEPS.set(len(normalized_steps))
         think_count_token = _RUN_THINK_COUNT.set(0)
+        reflect_count_token = _RUN_REFLECT_COUNT.set(0)
+        think_sig_token = _RUN_THINK_TOOL_SIGNATURES.set(set())
         parallel_branches = self._determine_parallel_branches(normalized_steps)
         self._active_parallel_branches = parallel_branches
         sub_agents = [
@@ -139,8 +148,15 @@ class GraphReasoningLoop:
                     completed_steps=completed_internal_steps,
                     total_steps=len(normalized_steps),
                 )
+                await self._emit_trace_reflection(
+                    question=question,
+                    context=context,
+                    outcome=outcome,
+                    accumulated_evidences=evidences,
+                    coverage_metrics=coverage_metrics,
+                )
                 ordered_log = [reasoning_results[i] for i in sorted(reasoning_results)]
-                think_record = await self._maybe_run_periodic_think(
+                think_records = await self._maybe_run_periodic_think(
                     question=question,
                     context=context,
                     evidences=evidences,
@@ -151,13 +167,15 @@ class GraphReasoningLoop:
                     completed_steps=completed_internal_steps,
                     total_steps=len(normalized_steps),
                 )
-                if think_record:
-                    aux_reasoning.append(think_record)
+                if think_records:
+                    aux_reasoning.extend(think_records)
         finally:
             _RUN_EVIDENCES.reset(evidences_token)
             _RUN_EVIDENCE_LOCK.reset(lock_token)
             _RUN_TOTAL_STEPS.reset(total_steps_token)
             _RUN_THINK_COUNT.reset(think_count_token)
+            _RUN_REFLECT_COUNT.reset(reflect_count_token)
+            _RUN_THINK_TOOL_SIGNATURES.reset(think_sig_token)
 
         ordered_reasoning: List[ReasoningStepRecord] = []
         for idx, entry in enumerate(normalized_steps):
@@ -184,112 +202,6 @@ class GraphReasoningLoop:
             "coverage_metrics": coverage_metrics,
         }
 
-    # ------------------------------------------------------------------
-    async def _execute_plan_entry(
-        self,
-        *,
-        step_index: int,
-        entry: Dict[str, Any],
-        question: str,
-        context: GraphQueryContext,
-    ) -> SubAgentOutcome:
-        spec = entry["spec"]
-        record = self._empty_record(spec)
-        traversal_record: GraphTraversalRecord | None = None
-        new_evidences: List[EvidenceChunk] = []
-        tool_runs: List[Dict[str, Any]] = []
-        think_notes: List[Dict[str, Any]] = []
-        pending_external_payload: Dict[str, Any] | None = None
-
-        record.diagnostics.setdefault("sub_agent", f"sub_agent_{step_index + 1:02d}")
-
-        if not entry["enabled"]:
-            record.status = "skipped"
-            record.diagnostics.setdefault("reason", "disabled_by_planner")
-            return SubAgentOutcome(step_index, record, None, [], [], [], None)
-
-        if entry["requires_external"]:
-            record.status = "pending_external"
-            record.diagnostics.setdefault("reason", "requires_external_channel")
-            pending_external_payload = self._pending_external_payload(entry)
-            return SubAgentOutcome(step_index, record, None, [], [], [], pending_external_payload)
-
-        if entry["run_with_adapter"]:
-            traversal_record, reasoning_record, new_evidences = await self.traversal_executor.run_step(
-                spec,
-                context,
-                tool_args=entry["tool_args"],
-            )
-            reasoning_record.diagnostics.setdefault("tool", entry["tool"] or "graph_adapter.query")
-            return SubAgentOutcome(step_index, reasoning_record, traversal_record, new_evidences, [], [], None)
-
-        if entry["should_invoke_tool"] and not self.tool_manager:
-            record.status = "skipped"
-            record.diagnostics.setdefault("reason", "tool_manager_disabled")
-            record.diagnostics.setdefault("tool", entry["tool"])
-            return SubAgentOutcome(step_index, record, None, [], [], [], None)
-
-        if entry["should_invoke_tool"]:
-            evidence_snapshot = await self._snapshot_evidences()
-            coverage_hint = self._coverage_hint_for_step(step_index, evidence_snapshot)
-            try:
-                result, latency_ms = await self._invoke_tool(
-                    tool_name=entry["tool"],
-                    step=entry,
-                    context=context,
-                    question=question,
-                    accumulated_evidence=evidence_snapshot,
-                    coverage_hint=coverage_hint,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("Tool %s timed out for %s", entry["tool"], spec.step_id)
-                record.status = "failed"
-                record.diagnostics.setdefault("reason", "tool_timeout")
-                record.diagnostics.setdefault("latency_ms", int(self._tool_timeout * 1000) if self._tool_timeout else None)
-                return SubAgentOutcome(step_index, record, None, [], [], [], None)
-            except Exception as exc:  # pragma: no cover - defensive guardrails
-                logger.warning("Tool %s failed for %s: %s", entry["tool"], spec.step_id, exc)
-                record.status = "failed"
-                record.diagnostics.setdefault("error", str(exc))
-                record.diagnostics.setdefault("reason", "tool_failure")
-                return SubAgentOutcome(step_index, record, None, [], [], [], None)
-
-            new_evidences = list(result.evidences)
-            record.status = "done"
-            record.output_summary = result.summary
-            record.produced_evidence_ids = [chunk.chunk_id for chunk in result.evidences]
-            record.diagnostics.setdefault("tool", entry["tool"])
-            record.diagnostics.setdefault("latency_ms", latency_ms)
-            log_entry = ToolExecutionLog(
-                tool_name=result.tool_name,
-                server_name=None,
-                arguments_snapshot=entry["tool_args"],
-                response_excerpt=result.summary[:200] if result.summary else None,
-                latency_ms=latency_ms,
-                graph_context=context,
-                extra={
-                    "channel": spec.channel,
-                    "profile": result.profile,
-                    "determinism": result.determinism,
-                },
-            )
-            record.tool_logs.append(log_entry)
-            tool_runs.append(
-                {
-                    "plan_step_id": spec.step_id,
-                    "tool_name": result.tool_name,
-                    "channel": spec.channel,
-                    "result": result.model_dump(),
-                }
-            )
-            for note in result.think_notes:
-                think_notes.append(note.model_dump(exclude_none=True))
-            return SubAgentOutcome(step_index, record, None, new_evidences, tool_runs, think_notes, None)
-
-        record.status = "skipped"
-        record.diagnostics.setdefault("reason", "no_tool_available")
-        return SubAgentOutcome(step_index, record, None, [], [], [], None)
-
     def _build_traversal_settings(self, config) -> GraphTraversalSettings:
         if isinstance(config, GraphTraversalSettings):
             return config
@@ -299,45 +211,50 @@ class GraphReasoningLoop:
             payload = dict(config)
         else:
             payload = getattr(config, "__dict__", {})
-        allowed = {
-            key: payload.get(key)
-            for key in ("strategy_name", "allow_semantic_channel", "chain_depth", "parallel_branches")
-            if key in payload and payload.get(key) is not None
-        }
-        return GraphTraversalSettings(**allowed)
+        required_keys = ("strategy_name", "allow_semantic_channel", "chain_depth", "parallel_branches", "step_summary_max_chars")
+        missing = [key for key in required_keys if payload.get(key) is None]
+        if missing:
+            raise ValueError(f"graph_reasoning config missing required keys: {missing}")
+        return GraphTraversalSettings(
+            strategy_name=str(payload["strategy_name"]),
+            allow_semantic_channel=bool(payload["allow_semantic_channel"]),
+            chain_depth=int(payload["chain_depth"]),
+            parallel_branches=int(payload["parallel_branches"]),
+            step_summary_max_chars=int(payload["step_summary_max_chars"]),
+        )
 
     def _build_think_config(self, config) -> Dict[str, Any]:
-        defaults = {
-            "tool_name": "graph.think",
-            "cadence": 0,
-            "min_coverage": 0.75,
-        }
-        if not config:
-            return defaults
-        if hasattr(config, "model_dump"):
-            try:
-                payload = config.model_dump()
-            except TypeError:
-                payload = config.model_dump(exclude_none=True)
-        elif isinstance(config, dict):
-            payload = dict(config)
-        else:
-            payload = getattr(config, "__dict__", {})
-        think_section = payload.get("think") if isinstance(payload.get("think"), dict) else {}
-        tool_name = think_section.get("tool_name") or payload.get("think_tool_name") or defaults["tool_name"]
-        cadence = think_section.get("every_n_steps") or payload.get("think_every_n_steps") or defaults["cadence"]
-        min_coverage = (
-            think_section.get("min_coverage")
-            or payload.get("think_min_coverage")
-            or defaults["min_coverage"]
-        )
+        think = None
+        if hasattr(config, "think"):
+            think = getattr(config, "think")
+        elif isinstance(config, dict) and isinstance(config.get("think"), dict):
+            think = config.get("think")
+
+        if think is None:
+            raise ValueError("strategy_config.think is required for GraphReasoningLoop")
+
+        def _get(obj: Any, key: str) -> Any:
+            if isinstance(obj, dict):
+                return obj.get(key)
+            return getattr(obj, key)
+
+        include_llm_tools = _get(think, "include_llm_tools")
+        if include_llm_tools is None:
+            raise ValueError("think.include_llm_tools is required for GraphReasoningLoop")
+
         cfg = {
-            "tool_name": str(tool_name).strip() if tool_name else "",
-            "cadence": int(cadence) if cadence is not None else 0,
-            "min_coverage": float(min_coverage) if min_coverage is not None else defaults["min_coverage"],
+            "tool_name": str(_get(think, "tool_name") or "").strip(),
+            "cadence": int(_get(think, "every_n_steps") or 0),
+            "min_coverage": float(_get(think, "min_coverage")),
+            "enable_tool_calls": bool(_get(think, "enable_tool_calls")),
+            "max_tool_calls": int(_get(think, "max_tool_calls")),
+            "tool_call_concurrency": int(_get(think, "tool_call_concurrency")),
+            "tool_catalog_max_items": int(_get(think, "tool_catalog_max_items")),
+            "max_rounds_per_checkpoint": max(1, int(_get(think, "max_rounds_per_checkpoint") or 1)),
+            "include_llm_tools": bool(include_llm_tools),
         }
-        if cfg["cadence"] < 0:
-            cfg["cadence"] = 0
+        if cfg["enable_tool_calls"] and cfg["tool_catalog_max_items"] <= 0:
+            raise ValueError("think.tool_catalog_max_items must be > 0 when think.enable_tool_calls is true")
         return cfg
 
     def _resolve_adapter_metadata(self) -> Dict[str, Any]:
@@ -406,7 +323,53 @@ class GraphReasoningLoop:
             planner_hints.setdefault("per_step", {}).update(scheduler_hints)
         if seed_entities:
             metadata.setdefault("planner_hints", {}).setdefault("seed_entities", seed_entities)
+        compression = self._resolve_strategy_compression_schema()
+        if compression:
+            current = metadata.get("compression") if isinstance(metadata.get("compression"), dict) else None
+            metadata["compression"] = self._merge_compression_defaults(defaults=compression, overrides=current)
         return context.model_copy(update={"seed_entities": seed_entities, "metadata": metadata})
+
+    def _resolve_strategy_compression_schema(self) -> Dict[str, Any]:
+        cfg = self.strategy_config
+        if hasattr(cfg, "compression"):
+            fields_set = getattr(cfg, "model_fields_set", None)
+            if isinstance(fields_set, set) and "compression" not in fields_set:
+                return {}
+            raw = getattr(cfg, "compression")
+            if hasattr(raw, "model_dump"):
+                try:
+                    payload = raw.model_dump(exclude_none=True)
+                except TypeError:
+                    payload = raw.model_dump()
+            elif isinstance(raw, dict):
+                payload = dict(raw)
+            else:
+                payload = {}
+        elif isinstance(cfg, dict) and isinstance(cfg.get("compression"), dict):
+            payload = dict(cfg.get("compression") or {})
+        else:
+            payload = {}
+
+        allowed: Dict[str, Any] = {}
+        for key in ("tool_context", "think"):
+            value = payload.get(key)
+            if isinstance(value, dict) and value:
+                allowed[key] = dict(value)
+        return allowed
+
+    @staticmethod
+    def _merge_compression_defaults(*, defaults: Dict[str, Any], overrides: Dict[str, Any] | None) -> Dict[str, Any]:
+        if not overrides:
+            return dict(defaults)
+        merged: Dict[str, Any] = dict(defaults)
+        for branch, override in overrides.items():
+            if branch not in {"tool_context", "think"}:
+                continue
+            if isinstance(override, dict) and isinstance(merged.get(branch), dict):
+                merged[branch] = {**dict(merged.get(branch) or {}), **dict(override)}
+            else:
+                merged[branch] = override
+        return merged
 
     def _normalize_plan_steps(self, plan_steps: Sequence[Dict[str, Any] | PlanSpec]) -> List[Dict[str, Any]]:
         normalized: List[Dict[str, Any]] = []
@@ -438,13 +401,13 @@ class GraphReasoningLoop:
             run_with_adapter = bool(
                 not requires_external
                 and (channel == "graph")
-                and (not tool or tool == "graph_adapter.query")
+                and (not tool or tool == self.graph_channel_tool)
             )
             should_invoke_tool = bool(
                 not requires_external
                 and channel in {"graph", "text"}
                 and tool
-                and tool != "graph_adapter.query"
+                and tool != self.graph_channel_tool
             )
             normalized.append(
                 {
@@ -503,13 +466,111 @@ class GraphReasoningLoop:
         return {
             "question": question,
             "plan_step": plan_step_id,
-            "context_evidences": [chunk.model_dump() for chunk in evidences],
+            "context_evidences": self._context_window_evidences(evidences, context=context, extra=extra),
             "adapter": self.adapter,
             "access_scope": context.resolve_scope(),
             "extra": dict(extra or {}),
             "graph_context": context.model_dump(exclude_none=True),
             "coverage_metrics": coverage_hint,
         }
+
+    def _context_window_evidences(
+        self,
+        evidences: List[EvidenceChunk],
+        *,
+        context: GraphQueryContext,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Bound evidence payload size for tool calls (recency retention).
+
+        This prevents tool prompts from accidentally exceeding model context limits
+        when the evidence pile grows large.
+        """
+        cfg = resolve_compaction_config(
+            branch="tool_context",
+            graph_context=context,
+            extra=(extra or {}),
+            default_max_items=int(self._tool_context_max_items or 0),
+            default_max_chars=int(self._tool_context_max_chars or 0),
+            default_mode="truncate",
+            default_retention="tail",
+            env_max_items="DEEPSEARCH_TOOL_CONTEXT_MAX_EVIDENCES",
+            env_max_chars="DEEPSEARCH_TOOL_CONTEXT_MAX_CHARS",
+        )
+        compacted, _meta = compact_evidences(
+            evidences or [],
+            cfg=cfg,
+            question=(context.question or ""),
+            extra=(extra or {}),
+            include_triple_count=False,
+        )
+        return compacted
+
+    @staticmethod
+    def _resolve_tool_context_max_items(config: Any) -> int:
+        if hasattr(config, "compression"):
+            fields_set = getattr(config, "model_fields_set", None)
+            if not (isinstance(fields_set, set) and "compression" not in fields_set):
+                comp = getattr(config, "compression")
+                branch = getattr(comp, "tool_context", None) if comp is not None else None
+                if branch is not None and hasattr(branch, "max_items") and getattr(branch, "max_items") is not None:
+                    return max(1, int(getattr(branch, "max_items")))
+        if isinstance(config, dict):
+            comp = config.get("compression")
+            if isinstance(comp, dict):
+                branch = comp.get("tool_context")
+                if isinstance(branch, dict) and branch.get("max_items") is not None:
+                    return max(1, int(branch.get("max_items")))
+        if hasattr(config, "tool_context_max_evidences"):
+            return max(1, int(getattr(config, "tool_context_max_evidences")))
+        if isinstance(config, dict) and config.get("tool_context_max_evidences") is not None:
+            return max(1, int(config.get("tool_context_max_evidences")))
+        raise ValueError("strategy_config.tool_context_max_evidences is required for GraphReasoningLoop")
+
+    @staticmethod
+    def _resolve_tool_context_max_chars(config: Any) -> int:
+        if hasattr(config, "compression"):
+            fields_set = getattr(config, "model_fields_set", None)
+            if not (isinstance(fields_set, set) and "compression" not in fields_set):
+                comp = getattr(config, "compression")
+                branch = getattr(comp, "tool_context", None) if comp is not None else None
+                if branch is not None and hasattr(branch, "max_chars") and getattr(branch, "max_chars") is not None:
+                    return max(100, int(getattr(branch, "max_chars")))
+        if isinstance(config, dict):
+            comp = config.get("compression")
+            if isinstance(comp, dict):
+                branch = comp.get("tool_context")
+                if isinstance(branch, dict) and branch.get("max_chars") is not None:
+                    return max(100, int(branch.get("max_chars")))
+        if hasattr(config, "tool_context_max_chars"):
+            return max(100, int(getattr(config, "tool_context_max_chars")))
+        if isinstance(config, dict) and config.get("tool_context_max_chars") is not None:
+            return max(100, int(config.get("tool_context_max_chars")))
+        raise ValueError("strategy_config.tool_context_max_chars is required for GraphReasoningLoop")
+
+    @staticmethod
+    def _resolve_expected_min_chunks(config: Any) -> int:
+        if hasattr(config, "coverage_expected_min_chunks"):
+            return max(1, int(getattr(config, "coverage_expected_min_chunks")))
+        if isinstance(config, dict) and config.get("coverage_expected_min_chunks") is not None:
+            return max(1, int(config.get("coverage_expected_min_chunks")))
+        raise ValueError("strategy_config.coverage_expected_min_chunks is required for GraphReasoningLoop")
+
+    @staticmethod
+    def _resolve_trace_reflection_enabled(config: Any) -> bool:
+        if hasattr(config, "trace_reflection_enabled"):
+            return bool(getattr(config, "trace_reflection_enabled"))
+        if isinstance(config, dict) and config.get("trace_reflection_enabled") is not None:
+            return bool(config.get("trace_reflection_enabled"))
+        raise ValueError("strategy_config.trace_reflection_enabled is required for GraphReasoningLoop")
+
+    @staticmethod
+    def _resolve_trace_reflection_max(config: Any) -> int:
+        if hasattr(config, "trace_reflection_max"):
+            return max(0, int(getattr(config, "trace_reflection_max")))
+        if isinstance(config, dict) and config.get("trace_reflection_max") is not None:
+            return max(0, int(config.get("trace_reflection_max")))
+        raise ValueError("strategy_config.trace_reflection_max is required for GraphReasoningLoop")
 
     @staticmethod
     def _empty_record(spec: PlanSpec) -> ReasoningStepRecord:
@@ -532,8 +593,8 @@ class GraphReasoningLoop:
             "metadata": spec.metadata,
         }
 
-    @staticmethod
     def _coverage_snapshot(
+        self,
         *,
         evidence_count: int,
         source_labels: Optional[Sequence[str]],
@@ -542,16 +603,7 @@ class GraphReasoningLoop:
     ) -> Dict[str, Any]:
         unique_sources = len({label for label in source_labels or [] if label})
         plan_progress_ratio = (completed_steps / total_steps) if total_steps else 0.0
-        expected_min_chunks = 3
-        try:
-            # Optional override used for heuristic think windows (gap detector remains authoritative).
-            import os
-
-            raw = os.getenv("DEEPSEARCH_GAP_EXPECTED_MIN_CHUNKS")
-            if raw is not None:
-                expected_min_chunks = max(1, int(raw))
-        except Exception:
-            expected_min_chunks = 3
+        expected_min_chunks = max(1, int(self._coverage_expected_min_chunks))
         evidence_ratio = evidence_count / max(1, expected_min_chunks)
         coverage_score = min(1.0, evidence_ratio)
         coverage_ratio = coverage_score
@@ -567,115 +619,6 @@ class GraphReasoningLoop:
             "confidence_score": None,
             "missing_topics": [],
         }
-
-    async def _maybe_run_periodic_think(
-        self,
-        *,
-        question: str,
-        context: GraphQueryContext,
-        evidences: List[EvidenceChunk],
-        reasoning_log: List[ReasoningStepRecord],
-        tool_runs: List[Dict[str, Any]],
-        think_notes: List[Dict[str, Any]],
-        coverage_metrics: Dict[str, Any],
-        completed_steps: int,
-        total_steps: int,
-    ) -> Optional[ReasoningStepRecord]:
-        if not self._should_run_think(completed_steps, coverage_metrics):
-            return None
-        if not self.tool_manager or not self._think_config["tool_name"]:
-            return None
-        next_count = _RUN_THINK_COUNT.get() + 1
-        _RUN_THINK_COUNT.set(next_count)
-        think_step_id = f"think_auto_{next_count:02d}"
-        record = ReasoningStepRecord(
-            step_id=think_step_id,
-            description="Periodic think checkpoint",
-            channel="graph",
-            status="running",
-        )
-        reasoning_log.append(record)
-        think_evidences = list(evidences[-6:]) if evidences else []
-        payload = self._build_tool_payload(
-            plan_step_id=think_step_id,
-            question=question,
-            context=context,
-            evidences=think_evidences,
-            coverage_hint=coverage_metrics,
-            extra={
-                "trigger": "periodic_think",
-                "completed_steps": completed_steps,
-                "total_steps": total_steps,
-                "context_window": {"evidence_items": len(think_evidences)},
-            },
-        )
-        try:
-            start = time.perf_counter()
-            invocation = self.tool_manager.invoke(self._think_config["tool_name"], payload=payload)
-            if self._tool_timeout and self._tool_timeout > 0:
-                result = await asyncio.wait_for(invocation, timeout=self._tool_timeout)
-            else:
-                result = await invocation
-            latency_ms = int((time.perf_counter() - start) * 1000)
-        except asyncio.TimeoutError:
-            record.status = "done"
-            record.output_summary = "Think tool timed out; proceeding with a heuristic checkpoint."
-            record.diagnostics.setdefault("reason", "tool_timeout_fallback")
-            record.diagnostics.setdefault("trigger", "periodic_think")
-            note = ThinkNote(
-                plan_step_id=think_step_id,
-                reasoning="Periodic think checkpoint fell back due to tool timeout.",
-                confidence_delta=None,
-                coverage_delta=None,
-                next_actions=["Continue execution; consider rerunning think with a smaller context if needed."],
-                metadata={
-                    "trigger": "periodic_think",
-                    "fallback": True,
-                    "timeout_seconds": self._tool_timeout,
-                    "coverage_metrics": coverage_metrics,
-                    "context_window": {"evidence_items": len(think_evidences)},
-                },
-            )
-            think_notes.append(note.model_dump(exclude_none=True))
-            return record
-        except Exception as exc:  # pragma: no cover - defensive guardrail
-            record.status = "failed"
-            record.diagnostics.setdefault("error", str(exc))
-            record.diagnostics.setdefault("reason", "periodic_think")
-            return record
-
-        await self._extend_shared_evidences(result.evidences)
-        record.status = "done"
-        record.output_summary = result.summary
-        record.produced_evidence_ids = [chunk.chunk_id for chunk in result.evidences]
-        record.diagnostics.setdefault("reason", "periodic_think")
-        record.diagnostics.setdefault("latency_ms", latency_ms)
-        log_entry = ToolExecutionLog(
-            tool_name=result.tool_name,
-            server_name=None,
-            arguments_snapshot={"trigger": "periodic_think"},
-            response_excerpt=result.summary[:200] if result.summary else None,
-            latency_ms=latency_ms,
-            graph_context=context,
-            extra={
-                "channel": "graph",
-                "profile": result.profile,
-                "determinism": result.determinism,
-                "trigger": "periodic_think",
-            },
-        )
-        record.tool_logs.append(log_entry)
-        tool_runs.append(
-            {
-                "plan_step_id": think_step_id,
-                "tool_name": result.tool_name,
-                "channel": "graph",
-                "result": result.model_dump(),
-            }
-        )
-        for note in result.think_notes:
-            think_notes.append(note.model_dump(exclude_none=True))
-        return record
 
     def _should_run_think(self, completed_steps: int, coverage_metrics: Dict[str, Any]) -> bool:
         cadence = self._think_config["cadence"]
@@ -740,12 +683,12 @@ class GraphReasoningLoop:
     async def _extend_shared_evidences(self, additions: Sequence[EvidenceChunk]) -> None:
         if not additions:
             return
-        evidences, lock = self._run_evidence_state()
+        evidences, lock = _run_evidence_state()
         async with lock:
             evidences.extend(additions)
 
     async def _snapshot_evidences(self) -> List[EvidenceChunk]:
-        evidences, lock = self._run_evidence_state()
+        evidences, lock = _run_evidence_state()
         async with lock:
             return list(evidences)
 
@@ -759,56 +702,53 @@ class GraphReasoningLoop:
             total_steps=total,
         )
 
-    @staticmethod
-    def _run_evidence_state() -> tuple[List[EvidenceChunk], asyncio.Lock]:
-        evidences = _RUN_EVIDENCES.get()
-        lock = _RUN_EVIDENCE_LOCK.get()
-        if evidences is None or lock is None:
-            raise RuntimeError("GraphReasoningLoop evidence state is not initialised; call run() first")
-        return evidences, lock
-
     def _resolve_parallel_branches(self, config) -> int:
-        if not config:
-            return 1
-        if hasattr(config, "parallel_branches"):
-            value = getattr(config, "parallel_branches")
-        elif isinstance(config, dict):
-            value = config.get("parallel_branches")
+        if isinstance(config, dict):
+            if "parallel_branches" not in config:
+                raise ValueError("strategy_config.parallel_branches is required for GraphReasoningLoop")
+            value = config["parallel_branches"]
         else:
-            value = getattr(config, "parallel_branches", 1)
+            if not hasattr(config, "parallel_branches"):
+                raise ValueError("strategy_config.parallel_branches is required for GraphReasoningLoop")
+            value = getattr(config, "parallel_branches")
         try:
-            numeric = int(value)
-        except (TypeError, ValueError):  # pragma: no cover - defensive
-            return 1
-        return numeric if numeric >= 0 else 0
+            return int(value)
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError("strategy_config.parallel_branches must be an integer") from exc
 
     def _resolve_max_parallel(self, config) -> int:
-        if not config:
-            return 4
-        if hasattr(config, "max_parallel_branches"):
-            value = getattr(config, "max_parallel_branches")
-        elif isinstance(config, dict):
-            value = config.get("max_parallel_branches")
+        if isinstance(config, dict):
+            if "max_parallel_branches" not in config:
+                raise ValueError("strategy_config.max_parallel_branches is required for GraphReasoningLoop")
+            value = config["max_parallel_branches"]
         else:
-            value = getattr(config, "max_parallel_branches", 4)
+            if not hasattr(config, "max_parallel_branches"):
+                raise ValueError("strategy_config.max_parallel_branches is required for GraphReasoningLoop")
+            value = getattr(config, "max_parallel_branches")
         try:
             numeric = int(value)
-        except (TypeError, ValueError):  # pragma: no cover - defensive
-            return 4
-        return max(1, numeric)
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError("strategy_config.max_parallel_branches must be an integer") from exc
+        if numeric < 1:
+            raise ValueError("strategy_config.max_parallel_branches must be >= 1")
+        return numeric
 
     def _resolve_tool_timeout(self, config) -> float:
-        if not config:
-            return 45.0
         if isinstance(config, dict):
-            value = config.get("tool_timeout_seconds")
+            if "tool_timeout_seconds" not in config:
+                raise ValueError("strategy_config.tool_timeout_seconds is required for GraphReasoningLoop")
+            value = config["tool_timeout_seconds"]
         else:
-            value = getattr(config, "tool_timeout_seconds", None)
+            if not hasattr(config, "tool_timeout_seconds"):
+                raise ValueError("strategy_config.tool_timeout_seconds is required for GraphReasoningLoop")
+            value = getattr(config, "tool_timeout_seconds")
         try:
-            numeric = float(value) if value is not None else 45.0
-        except (TypeError, ValueError):  # pragma: no cover - defensive
-            return 45.0
-        return max(0.0, numeric)
+            numeric = float(value)
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError("strategy_config.tool_timeout_seconds must be a float") from exc
+        if numeric < 0:
+            raise ValueError("strategy_config.tool_timeout_seconds must be >= 0")
+        return numeric
 
     def _determine_parallel_branches(self, steps: Sequence[Dict[str, Any]]) -> int:
         configured = self.parallel_branches

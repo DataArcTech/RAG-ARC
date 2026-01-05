@@ -10,7 +10,7 @@ Usage:
     # For development (drops and recreates all tables)
     python scripts/migrate_database.py --mode=dev
     
-    # For production (attempts to preserve data - NOT IMPLEMENTED YET)
+    # For production (non-destructive; additive patches only)
     python scripts/migrate_database.py --mode=prod
 """
 
@@ -27,6 +27,7 @@ import logging
 from datetime import datetime
 
 from encapsulation.database.relational_db.postgresql import PostgreSQLDB
+from encapsulation.database.relational_db.schema_patches import apply_postgres_schema_patches
 from encapsulation.data_model.orm_models import Base
 from config.encapsulation.database.relational_db.postgresql_config import PostgreSQLConfig
 
@@ -71,6 +72,7 @@ def migrate_dev_mode(db: PostgreSQLDB):
         # Recreate all tables
         logger.info("Creating new table structure...")
         Base.metadata.create_all(db.engine)
+        apply_postgres_schema_patches(db.engine)
         logger.info("✓ All tables created")
         
         logger.info("=" * 80)
@@ -91,29 +93,37 @@ def migrate_dev_mode(db: PostgreSQLDB):
 def migrate_prod_mode(db: PostgreSQLDB):
     """
     Production mode migration: Attempt to preserve existing data.
-    
-    NOT IMPLEMENTED YET - This requires careful data migration logic.
+
+    This mode is intentionally conservative:
+    - Create missing tables/types via `Base.metadata.create_all()`
+    - Apply backward-compatible, additive patches (ALTER TABLE ADD COLUMN, CREATE INDEX, ...)
+    - No destructive operations and no data rewrites
     """
-    logger.error("=" * 80)
-    logger.error("PRODUCTION MODE MIGRATION - NOT IMPLEMENTED")
-    logger.error("=" * 80)
-    logger.error("Production mode migration is not yet implemented.")
-    logger.error("This requires:")
-    logger.error("1. Backup of existing user data")
-    logger.error("2. Creation of default department and roles")
-    logger.error("3. Migration of existing users to new schema")
-    logger.error("4. Careful handling of foreign key constraints")
-    logger.error("")
-    logger.error("For now, please use development mode or perform manual migration.")
-    logger.error("=" * 80)
-    return False
+    logger.warning("=" * 80)
+    logger.warning("PRODUCTION MODE MIGRATION (NON-DESTRUCTIVE)")
+    logger.warning("=" * 80)
+    logger.warning("This will only APPLY ADDITIVE SCHEMA PATCHES (no drops).")
+    logger.warning("=" * 80)
+
+    try:
+        logger.info("Creating missing tables/types (create_all)...")
+        Base.metadata.create_all(db.engine)
+        logger.info("Applying schema patches...")
+        apply_postgres_schema_patches(db.engine)
+        logger.info("✅ Production mode migration completed successfully!")
+        return True
+    except Exception as exc:
+        logger.error("Production mode migration failed: %s", exc, exc_info=True)
+        return False
 
 
 def check_database_connection(db: PostgreSQLDB) -> bool:
     """Check if database connection is working."""
     try:
         with db.engine.connect() as conn:
-            conn.execute("SELECT 1")
+            from sqlalchemy import text
+
+            conn.execute(text("SELECT 1"))
         logger.info("✓ Database connection successful")
         return True
     except Exception as e:
@@ -205,4 +215,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

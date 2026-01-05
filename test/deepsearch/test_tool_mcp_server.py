@@ -34,7 +34,7 @@ class _StubAdapter:
     async def prepare(self, question: str, *, access_scope=None):
         return None
 
-    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None):
+    async def aquery_subgraph(self, query: str, *, channel: str = "graph", access_scope=None, query_options=None):
         return {"nodes": [], "edges": [], "metadata": {}}
 
     async def context_filter(self, data, *, filter_type: str = "semantic", access_scope=None):
@@ -57,13 +57,14 @@ class _StubAdapter:
 
 
 @pytest.mark.asyncio
-async def test_tool_mcp_server_invokes_registered_tool_with_adapter_injection():
+async def test_tool_mcp_server_invokes_registered_tool_with_adapter_injection(tmp_path):
     server = build_tool_mcp_server(
         llm_connector=_StubLLM(),
         enabled_tools=["graph.bridge_lookup"],
         instructions="test",
         adapter=_StubAdapter(),
         default_scope=GraphAccessScope(scope_id="stub-owner"),
+        tool_manager_config={"artifact_dir": str(tmp_path)},
     )
 
     descriptor = get_tool_descriptor("graph.bridge_lookup")
@@ -87,6 +88,7 @@ async def test_tool_mcp_server_invokes_registered_tool_with_adapter_injection():
 @pytest.mark.asyncio
 async def test_tool_server_config_loader_builds_server(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_SCOPE_ID", "owner-xyz")
+    monkeypatch.setenv("TEST_TOOL_ARTIFACT_DIR", str(tmp_path / "tool_artifacts"))
     monkeypatch.delenv("DEEPSEARCH_DEFAULT_ADAPTER", raising=False)
     payload = {
         "type": "deepsearch_tool_mcp_server",
@@ -106,7 +108,8 @@ async def test_tool_server_config_loader_builds_server(tmp_path, monkeypatch):
         "tool_manager": {
             "enable_builtin_tools": True,
             "enabled_tools": {},
-            "audit_label": "config-test"
+            "audit_label": "config-test",
+            "artifact_dir": "${TEST_TOOL_ARTIFACT_DIR}"
         },
         "scope": {
             "scope_id": "${TEST_SCOPE_ID}",

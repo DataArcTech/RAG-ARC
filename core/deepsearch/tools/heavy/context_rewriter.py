@@ -4,6 +4,7 @@ from typing import Any, List
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.prompts.deepsearch import CONTEXT_REWRITER_PROMPT
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
+from core.deepsearch.utils.compression import compact_context_snippet, resolve_compaction_config, truncate_text
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async
 
@@ -62,7 +63,24 @@ class ContextRewriterTool(GraphTool):
         return ToolResult(summary="Context rewritten to emphasise gaps.", evidences=[evidence_chunk], diagnostics=diagnostics)
 
     async def _rewrite(self, request: ToolRunRequest, evidences: List[EvidenceChunk]) -> str:
-        snippets = "\n\n".join(ev.content[:400] for ev in evidences)
+        cfg = resolve_compaction_config(
+            branch="tool_context",
+            graph_context=request.graph_context,
+            extra=(request.extra or {}),
+            default_max_items=max(1, int(self.window_size)),
+            default_max_chars=400,
+            default_mode="truncate",
+            default_retention="tail",
+            env_max_items="DEEPSEARCH_TOOL_CONTEXT_MAX_EVIDENCES",
+            env_max_chars="DEEPSEARCH_TOOL_CONTEXT_MAX_CHARS",
+        )
+        snippets, _meta = compact_context_snippet(
+            evidences,
+            cfg=cfg,
+            question=request.question,
+            extra=(request.extra or {}),
+            joiner="\n\n",
+        )
         messages = [
             {"role": "system", "content": CONTEXT_REWRITER_PROMPT},
             {
@@ -75,7 +93,7 @@ class ContextRewriterTool(GraphTool):
             response = await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
             return response.strip()
         except Exception:
-            return snippets[:800]
+            return truncate_text(snippets, max_chars=800)
 
     @staticmethod
     def _token_breakdown(evidences: List[EvidenceChunk], rewritten_text: str) -> dict[str, int]:

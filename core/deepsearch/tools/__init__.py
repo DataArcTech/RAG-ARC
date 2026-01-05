@@ -2,7 +2,22 @@
 from typing import Any, Dict, Iterable, Optional
 
 from .base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest
-from .fast import BridgeLookupTool, ChunkScanTool, PathCacheTool, PatternProbeTool
+from .fast import (
+    BridgeLookupTool,
+    ChunkScanTool,
+    GraphAggregateTool,
+    GraphExpandTermsTool,
+    GraphFactsByTypeTool,
+    GraphIntersectionTool,
+    GraphLatestTruthTool,
+    GraphNeighborsTool,
+    GraphPathExistsTool,
+    GraphRuleCheckTool,
+    GraphSetDifferenceTool,
+    GraphTraceToRootTool,
+    PathCacheTool,
+    PatternProbeTool,
+)
 from .heavy import (
     GraphThinkTool,
     LLMChainExplorerTool,
@@ -27,6 +42,16 @@ __all__ = [
     "ChunkScanTool",
     "BridgeLookupTool",
     "PathCacheTool",
+    "GraphIntersectionTool",
+    "GraphSetDifferenceTool",
+    "GraphAggregateTool",
+    "GraphRuleCheckTool",
+    "GraphPathExistsTool",
+    "GraphNeighborsTool",
+    "GraphFactsByTypeTool",
+    "GraphExpandTermsTool",
+    "GraphLatestTruthTool",
+    "GraphTraceToRootTool",
     "LLMChainExplorerTool",
     "HybridNeighborhoodProbeTool",
     "ContextRollupTool",
@@ -49,6 +74,16 @@ _BUILTIN_CLASSES = [
     ChunkScanTool,
     BridgeLookupTool,
     PathCacheTool,
+    GraphIntersectionTool,
+    GraphSetDifferenceTool,
+    GraphAggregateTool,
+    GraphRuleCheckTool,
+    GraphPathExistsTool,
+    GraphNeighborsTool,
+    GraphFactsByTypeTool,
+    GraphExpandTermsTool,
+    GraphLatestTruthTool,
+    GraphTraceToRootTool,
     LLMChainExplorerTool,
     HybridNeighborhoodProbeTool,
     ContextRollupTool,
@@ -66,6 +101,7 @@ _LLM_REQUIRED = {
     LLMChainExplorerTool,
     HybridNeighborhoodProbeTool,
     ContextRollupTool,
+    EvidenceCrosscheckTool,
     ParallelThinkTool,
     CrossAdapterPlannerTool,
     ContextRewriterTool,
@@ -73,7 +109,6 @@ _LLM_REQUIRED = {
 }
 _LLM_OPTIONAL = {
     GraphThinkTool,
-    EvidenceCrosscheckTool,
 }
 
 

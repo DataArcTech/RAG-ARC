@@ -2,6 +2,8 @@
 import asyncio
 import json
 import logging
+import os
+import re
 from collections import deque
 from contextlib import nullcontext
 from itertools import combinations
@@ -12,14 +14,18 @@ from encapsulation.data_model.schema import Chunk
 from encapsulation.database.utils.graph_export_utils import GraphExporter
 from encapsulation.database.utils.graph_export_utils_neo4j import GraphExporterNeo4j
 
+from config.output_limits import DEEPSEARCH_GRAPH_EXPORT_MAX_EDGES
 from core.graph_adapter.base import (
     GraphAccessScope,
     GraphAdapterCapability,
     GraphAdapterMetadata,
     GraphDeepSearchAdapter,
 )
+from core.graph_adapter.cypher import assert_read_only_cypher
 from core.graph_adapter.registry import register_adapter
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
+from core.deepsearch.utils.file_scope import FileScope, chunk_in_scope
+from core.prompts import build_file_scope_xlang_rewrite_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +66,7 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         *,
         channel: str = "graph",
         access_scope: Optional[GraphAccessScope] = None,
+        query_options: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Run HippoRAG retrieval and export the resulting subgraph."""
 
@@ -68,7 +75,40 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             logger.warning("HippoRAG adapter requires an access scope; returning empty payload for query %s", query)
             return self._empty_payload(query)
 
-        return await asyncio.to_thread(self._aquery_subgraph_sync, query, channel, scope_token)
+        options = dict(query_options) if isinstance(query_options, Mapping) else {}
+        return await asyncio.to_thread(self._aquery_subgraph_sync, query, channel, scope_token, options)
+
+    async def acypher(
+        self,
+        cypher: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        access_scope: Optional[GraphAccessScope] = None,
+    ) -> list[Dict[str, Any]]:
+        assert_read_only_cypher(str(cypher or ""))
+        scope_token = self._scope_token(access_scope)
+        if scope_token is None:
+            raise RuntimeError("HippoRAGGraphAdapter.acypher requires an access scope")
+
+        graph_store = getattr(self.retriever, "graph_store", None)
+        if graph_store is None or not hasattr(graph_store, "_execute_query"):
+            raise RuntimeError("HippoRAGGraphAdapter.acypher requires a graph_store with _execute_query")
+
+        owner_key = scope_token
+        try:
+            owner_key = graph_store._owner_key(scope_token)
+        except Exception:
+            owner_key = scope_token
+
+        merged: Dict[str, Any] = dict(params or {})
+        # Prevent callers from overriding owner scope or global-owner sentinel via params (security boundary).
+        reserved = {"owner_id", "global_owner"}
+        overridden = sorted(reserved.intersection(merged.keys()))
+        if overridden:
+            raise ValueError(f"HippoRAGGraphAdapter.acypher params must not include reserved keys: {overridden}")
+        merged["global_owner"] = getattr(graph_store, "OWNER_GLOBAL_KEY", "__GLOBAL__")
+        merged["owner_id"] = owner_key
+        return await asyncio.to_thread(graph_store._execute_query, str(cypher), merged)
 
     async def context_filter(
         self,
@@ -155,6 +195,13 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         if isinstance(seed_entities, list):
             seeds = [str(item).strip() for item in seed_entities if str(item).strip()]
 
+        if not seeds:
+            seed_chunk = str(strategy.get("seed_chunk") or strategy.get("seed_chunk_id") or "").strip()
+            if seed_chunk:
+                derived = await asyncio.to_thread(self._seed_entities_from_chunk_sync, seed_chunk, scope_token)
+                if derived:
+                    seeds = derived
+
         max_depth = strategy.get("max_depth")
         try:
             max_depth_int = int(max_depth) if max_depth is not None else 1
@@ -165,7 +212,7 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         visited = seeds[: max_depth_int] if seeds else []
         base = {"strategy": strategy_name, "hops": max_depth_int, "visited": visited, "scope": scope_token}
 
-        if strategy_name not in {"ppr_prefetch", "bridge_lookup"}:
+        if strategy_name not in {"ppr_prefetch", "bridge_lookup", "beam_search"}:
             return base
 
         question = str(strategy.get("question") or "").strip()
@@ -173,7 +220,12 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         if not query:
             return base
 
-        payload = await self.aquery_subgraph(query, channel="graph", access_scope=access_scope)
+        payload = await self.aquery_subgraph(
+            query,
+            channel="graph",
+            access_scope=access_scope,
+            query_options={"export_subgraph": True},
+        )
         edges = payload.get("edges") if isinstance(payload, dict) else None
         if not isinstance(edges, list) or not edges:
             return base
@@ -189,6 +241,18 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             merged["hops"] = min(max_depth_int, 3) if max_depth_int else 1
             return merged
 
+        if strategy_name == "beam_search":
+            beam_size_raw = strategy.get("beam_size")
+            try:
+                beam_size_int = int(beam_size_raw) if beam_size_raw is not None else 3
+            except (TypeError, ValueError):
+                beam_size_int = 3
+            beam_size_int = max(1, min(beam_size_int, 8))
+            paths = self._beam_search_paths(entity_edges, seeds=seeds, beam_size=beam_size_int, max_depth=max_depth_int)
+            merged = dict(base)
+            merged["paths"] = paths
+            return merged
+
         max_paths = strategy.get("max_paths")
         try:
             max_paths_int = int(max_paths) if max_paths is not None else 3
@@ -200,6 +264,33 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         merged["paths"] = paths
         return merged
 
+    def _seed_entities_from_chunk_sync(self, chunk_id: str, owner_id: str) -> List[str]:
+        graph_store = getattr(self.retriever, "graph_store", None)
+        if graph_store is None or not hasattr(graph_store, "_execute_query"):
+            return []
+        query = """
+        MATCH (c:Chunk {chunk_id: $chunk_id})
+        WHERE c.owner_id = $owner_id
+        MATCH (c)-[:MENTIONS]->(e:Entity)
+        WHERE e.owner_id = $owner_id
+        RETURN e.entity_name AS name
+        ORDER BY name
+        LIMIT 12
+        """
+        try:
+            rows = graph_store._execute_query(query, {"chunk_id": str(chunk_id), "owner_id": str(owner_id)})
+        except Exception:
+            return []
+        names: List[str] = []
+        seen: set[str] = set()
+        for row in rows or []:
+            name = str((row or {}).get("name") or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            names.append(name)
+        return names
+
     def metadata(self) -> GraphAdapterMetadata:
         """Publish capability metadata for observability dashboards."""
 
@@ -210,8 +301,13 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         )
         chain_capability = GraphAdapterCapability(
             name="chain_of_exploration",
-            modes=("ppr_chain", "ppr_prefetch", "bridge_lookup"),
+            modes=("ppr_chain", "ppr_prefetch", "bridge_lookup", "beam_search"),
             metrics={"chain_depth": self.summary_max_chunks},
+        )
+        cypher_capability = GraphAdapterCapability(
+            name="cypher_query",
+            modes=("neo4j",),
+            metrics={"read_only": True},
         )
         concurrency_capability = GraphAdapterCapability(
             name="concurrency",
@@ -223,14 +319,14 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             graph_type=self.extra_metadata.get("graph_type", "hipporag"),
             version=self.adapter_version,
             owner=self.extra_metadata.get("owner"),
-            capabilities=(retrieval_capability, chain_capability, concurrency_capability),
+            capabilities=(retrieval_capability, chain_capability, cypher_capability, concurrency_capability),
             domain_tags=tuple(self.extra_metadata.get("domain_tags", [])),
             config_fingerprint=self.extra_metadata.get("config_fingerprint"),
         )
 
     @staticmethod
-    def _entity_relation_edges(edges: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-        relations: List[Dict[str, str]] = []
+    def _entity_relation_edges(edges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        relations: List[Dict[str, Any]] = []
         for edge in edges:
             if not isinstance(edge, dict):
                 continue
@@ -241,11 +337,24 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             tail = str(edge.get("target") or "").strip()
             if not head or not tail:
                 continue
-            relations.append({"head": head, "relation": relation, "tail": tail})
+            try:
+                weight = float(edge.get("weight", 1.0))
+            except (TypeError, ValueError):
+                weight = 1.0
+            relations.append(
+                {
+                    "head": head,
+                    "relation": relation,
+                    "tail": tail,
+                    "directed": bool(edge.get("directed", False)),
+                    "weight": weight,
+                    "fact_id": edge.get("fact_id"),
+                }
+            )
         return relations
 
     @staticmethod
-    def _extract_bridges(relations: List[Dict[str, str]], *, seeds: List[str]) -> List[Dict[str, Any]]:
+    def _extract_bridges(relations: List[Dict[str, Any]], *, seeds: List[str]) -> List[Dict[str, Any]]:
         if not seeds:
             return []
         seed_set = {seed for seed in seeds if seed}
@@ -262,7 +371,7 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
 
     @staticmethod
     def _prefetch_paths(
-        relations: List[Dict[str, str]],
+        relations: List[Dict[str, Any]],
         *,
         seeds: List[str],
         max_depth: int,
@@ -292,6 +401,96 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         return paths
 
     @staticmethod
+    def _beam_search_paths(
+        relations: List[Dict[str, Any]],
+        *,
+        seeds: List[str],
+        beam_size: int,
+        max_depth: int,
+    ) -> List[Dict[str, Any]]:
+        if not relations:
+            return []
+
+        seed_set = {seed for seed in seeds if seed}
+        adjacency: Dict[str, List[Dict[str, Any]]] = {}
+        for rel in relations:
+            head = str(rel.get("head") or "").strip()
+            tail = str(rel.get("tail") or "").strip()
+            relation = str(rel.get("relation") or "").strip()
+            if not head or not tail or not relation:
+                continue
+            directed = bool(rel.get("directed", False))
+            try:
+                weight = float(rel.get("weight", 1.0))
+            except (TypeError, ValueError):
+                weight = 1.0
+            adjacency.setdefault(head, []).append({"tail": tail, "relation": relation, "weight": weight})
+            if not directed:
+                adjacency.setdefault(tail, []).append({"tail": head, "relation": relation, "weight": weight})
+
+        starts = seeds[: max(1, min(len(seeds), 6))] if seeds else list(adjacency.keys())[:3]
+        if not starts:
+            return []
+
+        beam_size = max(1, min(int(beam_size), 8))
+        max_hops = max(1, min(int(max_depth), 6))
+
+        beams: List[Dict[str, Any]] = [{"nodes": [s], "edges": [], "score": 0.0} for s in starts]
+        candidates: List[Dict[str, Any]] = []
+
+        for _ in range(max_hops):
+            expanded: List[Dict[str, Any]] = []
+            for state in beams:
+                nodes = state["nodes"]
+                last = nodes[-1]
+                for edge in adjacency.get(last, []):
+                    nxt = str(edge.get("tail") or "").strip()
+                    if not nxt or nxt in nodes:
+                        continue
+                    rel_name = str(edge.get("relation") or "").strip()
+                    weight = float(edge.get("weight", 1.0))
+                    new_nodes = nodes + [nxt]
+                    new_edges = list(state["edges"]) + [{"head": last, "relation": rel_name, "tail": nxt}]
+                    score = float(state["score"]) + weight
+                    if seed_set and nxt in seed_set:
+                        score += 0.5
+                    expanded.append({"nodes": new_nodes, "edges": new_edges, "score": score})
+
+            if not expanded:
+                break
+            expanded.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+            beams = expanded[: max(beam_size * 3, beam_size)]
+
+            for state in beams:
+                if len(state["nodes"]) < 2:
+                    continue
+                if seed_set and state["nodes"][-1] not in seed_set:
+                    continue
+                candidates.append(state)
+
+        if not candidates:
+            return []
+
+        unique: Dict[str, Dict[str, Any]] = {}
+        for state in sorted(candidates, key=lambda item: float(item.get("score", 0.0)), reverse=True):
+            nodes = state["nodes"]
+            signature = "->".join(nodes)
+            if signature in unique:
+                continue
+            content = signature + " | " + "; ".join(f"{e['head']}[{e['relation']}]{e['tail']}" for e in state["edges"])
+            path_id = hashed_chunk_id(source="beam_search", content=content, prefix="path")
+            unique[signature] = {
+                "path_id": path_id,
+                "nodes": nodes,
+                "edges": state["edges"],
+                "score": float(state.get("score", 0.0)),
+            }
+            if len(unique) >= beam_size:
+                break
+
+        return list(unique.values())
+
+    @staticmethod
     def _shortest_path(adjacency: Dict[str, List[str]], source: str, target: str, *, max_depth: int) -> List[str]:
         if source == target:
             return [source]
@@ -316,19 +515,119 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
                 queue.append((nxt, next_path))
         return []
 
-    def _aquery_subgraph_sync(self, query: str, channel: str, scope_token: str) -> Dict[str, Any]:
-        chunks = self._retrieve_chunks_sync(query, scope_token)
-        return self._build_graph_payload(query, channel, chunks, scope_token)
+    def _aquery_subgraph_sync(
+        self,
+        query: str,
+        channel: str,
+        scope_token: str,
+        query_options: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        chunks, subgraph_info, scope_diag = self._retrieve_chunks_sync(query, scope_token, query_options=query_options)
+        return self._build_graph_payload(
+            query,
+            channel,
+            chunks,
+            scope_token,
+            subgraph_info_override=subgraph_info,
+            scope_diagnostics=scope_diag,
+            query_options=query_options,
+        )
 
-    def _retrieve_chunks_sync(self, query: str, owner_token: str) -> List[Chunk]:
+    def _retrieve_chunks_sync(
+        self,
+        query: str,
+        owner_token: str,
+        *,
+        query_options: Optional[Mapping[str, Any]] = None,
+    ) -> tuple[List[Chunk], Optional[Dict[str, Any]], Dict[str, Any]]:
         """Execute synchronous HippoRAG retrieval (invoked in a worker thread)."""
 
+        top_k_raw = None
+        if isinstance(query_options, Mapping):
+            top_k_raw = query_options.get("top_k")
+        try:
+            top_k = int(top_k_raw) if top_k_raw is not None else int(self.default_top_k)
+        except (TypeError, ValueError):
+            top_k = int(self.default_top_k)
+        top_k = max(1, top_k)
+
+        file_scope = self._coerce_file_scope(query_options)
+        requested_k = top_k
+        fetch_k = requested_k
+        if file_scope.enabled:
+            # Over-fetch to compensate for post-filtering; keep a small cap.
+            fetch_k = min(max(requested_k * 5, requested_k), 100)
+
         kwargs = {
-            "k": self.default_top_k,
+            "k": fetch_k,
             "owner_id": owner_token,
             "return_subgraph_info": True,
         }
-        return self.retriever.invoke(query, **kwargs)
+        raw_chunks: List[Chunk] = self.retriever.invoke(query, **kwargs)
+        subgraph_info = self._extract_subgraph_info(raw_chunks)
+        if not file_scope.enabled:
+            return raw_chunks[:requested_k], subgraph_info, {"file_scope_applied": False}
+
+        filtered: List[Chunk] = []
+        dropped = 0
+        for chunk in raw_chunks:
+            meta = getattr(chunk, "metadata", None) or {}
+            if chunk_in_scope(chunk_metadata=meta, scope=file_scope):
+                filtered.append(chunk)
+            else:
+                dropped += 1
+        # When file_scope is enabled, global retrieval + post-filtering can return 0 results,
+        # especially for cross-language queries. In that case, attempt a single query rewrite
+        # using the retriever's LLM client (when available) to bridge the language gap.
+        xlang_diag: Dict[str, Any] = {}
+        if not filtered[:requested_k] and self._file_scope_xlang_retry_enabled():
+            rewritten = self._maybe_rewrite_query_for_scope(query)
+            if rewritten and rewritten != query:
+                xlang_diag["xlang_retry"] = True
+                xlang_diag["rewritten_query_preview"] = rewritten[:200]
+                try:
+                    raw_retry: List[Chunk] = self.retriever.invoke(rewritten, **kwargs)
+                    retry_info = self._extract_subgraph_info(raw_retry)
+                    retry_filtered: List[Chunk] = []
+                    retry_dropped = 0
+                    for chunk in raw_retry:
+                        meta = getattr(chunk, "metadata", None) or {}
+                        if chunk_in_scope(chunk_metadata=meta, scope=file_scope):
+                            retry_filtered.append(chunk)
+                        else:
+                            retry_dropped += 1
+                    if retry_filtered:
+                        return (
+                            retry_filtered[:requested_k],
+                            retry_info,
+                            {
+                                "file_scope_applied": True,
+                                "file_scope": file_scope.as_dict(),
+                                "requested_top_k": requested_k,
+                                "fetch_top_k": fetch_k,
+                                "kept_in_scope": len(retry_filtered[:requested_k]),
+                                "dropped_out_of_scope": retry_dropped,
+                                "input_chunk_count": len(raw_retry),
+                                **xlang_diag,
+                            },
+                        )
+                    xlang_diag["xlang_retry_no_hits"] = True
+                except Exception as exc:
+                    xlang_diag["xlang_retry_error"] = str(exc)
+        return (
+            filtered[:requested_k],
+            subgraph_info,
+            {
+                "file_scope_applied": True,
+                "file_scope": file_scope.as_dict(),
+                "requested_top_k": requested_k,
+                "fetch_top_k": fetch_k,
+                "kept_in_scope": len(filtered[:requested_k]),
+                "dropped_out_of_scope": dropped,
+                "input_chunk_count": len(raw_chunks),
+                **xlang_diag,
+            },
+        )
 
     def _build_graph_payload(
         self,
@@ -336,12 +635,27 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         channel: str,
         chunks: List[Chunk],
         scope_token: str,
+        *,
+        subgraph_info_override: Optional[Dict[str, Any]] = None,
+        scope_diagnostics: Optional[Dict[str, Any]] = None,
+        query_options: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Convert retriever outputs into a normalized structure consumed by DeepSearch."""
 
         chunk_entries = [self._chunk_to_dict(chunk) for chunk in chunks]
-        subgraph_info = self._extract_subgraph_info(chunks)
-        exported = self._export_subgraph(subgraph_info) if subgraph_info else {"nodes": [], "edges": [], "chunks": []}
+        subgraph_info = subgraph_info_override if subgraph_info_override is not None else self._extract_subgraph_info(chunks)
+        if isinstance(subgraph_info, dict) and scope_token:
+            subgraph_info.setdefault("owner_scope", scope_token)
+        # Exporting the full subgraph (nodes/edges) can be expensive on Neo4j. Default to disabled unless explicitly
+        # requested by callers that need visualization/triple context (e.g. graph_adapter.query traversal).
+        export_subgraph = False
+        if isinstance(query_options, Mapping) and "export_subgraph" in query_options:
+            export_subgraph = bool(query_options.get("export_subgraph"))
+        exported = (
+            self._export_subgraph(subgraph_info)
+            if (subgraph_info and export_subgraph)
+            else {"nodes": [], "edges": [], "chunks": [], "metadata": {}}
+        )
 
         metadata = {
             "adapter": "hipporag",
@@ -351,6 +665,9 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             "graph_export_metadata": exported.get("metadata", {}),
             "node_ppr_scores": (subgraph_info or {}).get("node_ppr_scores", {}),
         }
+        if scope_diagnostics:
+            metadata["scope_diagnostics"] = scope_diagnostics
+        metadata["export_subgraph"] = export_subgraph
 
         return {
             "query": query,
@@ -384,6 +701,99 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
                 return metadata["_subgraph_info"]
         return None
 
+    @staticmethod
+    def _coerce_file_scope(query_options: Optional[Mapping[str, Any]]) -> FileScope:
+        if not isinstance(query_options, Mapping):
+            return FileScope()
+        raw = query_options.get("file_scope")
+        if isinstance(raw, Mapping):
+            return FileScope(
+                file_ids=frozenset(str(x).strip() for x in (raw.get("file_ids") or []) if str(x).strip()),
+                filename_contains=tuple(str(x).strip() for x in (raw.get("filename_contains") or []) if str(x).strip()),
+                source=str(raw.get("source") or "adapter_query_options").strip() or "adapter_query_options",
+            )
+        return FileScope()
+
+    @staticmethod
+    def _file_scope_xlang_retry_enabled() -> bool:
+        raw = os.getenv("DEEPSEARCH_FILE_SCOPE_XLANG_RETRY", "1")
+        return str(raw or "").strip().lower() not in {"0", "false", "no", "off"}
+
+    _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+    _ASCII_ALPHA_RE = re.compile(r"[A-Za-z]")
+
+    def _maybe_rewrite_query_for_scope(self, query: str) -> str | None:
+        llm = getattr(self.retriever, "llm_client", None)
+        chat = getattr(llm, "chat", None)
+        if not callable(chat):
+            return None
+
+        text = str(query or "").strip()
+        if not text:
+            return None
+
+        cjk = len(self._CJK_RE.findall(text))
+        alpha = len(self._ASCII_ALPHA_RE.findall(text))
+        total = max(1, len(text))
+        cjk_ratio = cjk / total
+        alpha_ratio = alpha / total
+
+        direction: str | None = None
+        if alpha_ratio >= 0.25 and cjk_ratio < 0.05:
+            direction = "to_zh"
+        elif cjk_ratio >= 0.15 and alpha_ratio < 0.08:
+            direction = "to_en"
+        else:
+            return None
+
+        prompt = build_file_scope_xlang_rewrite_prompt(query=text)
+        try:
+            raw = chat([{"role": "user", "content": prompt}])
+        except Exception:
+            return None
+
+        payload = self._safe_json_loads(str(raw or ""))
+        if not isinstance(payload, dict):
+            return None
+
+        zh_hans = str(payload.get("zh_hans") or "").strip()
+        zh_hant = str(payload.get("zh_hant") or "").strip()
+        en = str(payload.get("en") or "").strip()
+
+        additions: List[str] = []
+        if direction == "to_zh":
+            if zh_hans:
+                additions.append(zh_hans)
+            if zh_hant and zh_hant != zh_hans:
+                additions.append(zh_hant)
+        elif direction == "to_en" and en:
+            additions.append(en)
+
+        if not additions:
+            return None
+        joined = "\n".join(additions)
+        return f"{text}\n\n{joined}"
+
+    @staticmethod
+    def _safe_json_loads(raw: str) -> Any | None:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        # Remove ```json fences when present.
+        if text.startswith("```"):
+            # Strip the leading fence.
+            if text.lower().startswith("```json"):
+                text = text[len("```json") :].strip()
+            else:
+                text = text[len("```") :].strip()
+            # Strip the trailing fence.
+            if text.endswith("```"):
+                text = text[: -len("```")].strip()
+        try:
+            return json.loads(text)
+        except Exception:
+            return None
+
     def _export_subgraph(self, subgraph_info: Dict[str, Any]) -> Dict[str, Any]:
         """Use the existing graph exporters to obtain nodes/edges for visualization."""
 
@@ -407,6 +817,12 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
                         seed_entity_ids=set(str(entity) for entity in seed_entities),
                         retrieved_chunk_ids=retrieved_chunk_ids,
                         node_ppr_scores=node_scores,
+                        owner_id=subgraph_info.get("owner_id") or subgraph_info.get("owner_scope"),
+                        owner_scope_label=subgraph_info.get("owner_scope"),
+                        max_edges=DEEPSEARCH_GRAPH_EXPORT_MAX_EDGES,
+                        # Preserve multiple predicates between the same node pair for reasoning/debug,
+                        # while letting the exporter decide per-edge direction based on KG schema.
+                        preserve_multi_edges=True,
                     )
                 return GraphExporter.export_subgraph(
                     graph_store=graph_store,

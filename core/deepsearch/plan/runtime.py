@@ -1,8 +1,6 @@
 """Plan runtime for DeepSearch: generate graph-centric task lists and emit JSON artifacts for execution."""
 import json
 import logging
-import os
-import re
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -17,6 +15,7 @@ from .generator import PlanGenerator, PlannerSettings
 from core.prompts.deepsearch import GRAPH_PLANNER_SYSTEM_PROMPT, GRAPH_PLANNER_USER_PROMPT
 from core.deepsearch.tooling import describe_available_tools
 from core.deepsearch.tooling.registry import DEFAULT_TOOL_HINT_REGISTRY, ToolHintRegistry
+from core.deepsearch.trace import emit_trace, with_trace_protocol
 
 logger = logging.getLogger(__name__)
 
@@ -52,40 +51,32 @@ class DeepSearchPlanner:
         self._tool_hint_registry = tool_hint_registry or DEFAULT_TOOL_HINT_REGISTRY
         self._available_tools: List[Dict[str, str]] = []
         self._tool_hint_revision: int = -1
-        self._refresh_available_tools(update_generator=False)
+
+        if "include_llm_tools_in_catalog" not in self._config_dict:
+            raise ValueError("planner.include_llm_tools_in_catalog is required (no implicit default).")
+        self.include_llm_tools_in_catalog = bool(self._config_dict["include_llm_tools_in_catalog"])
 
         settings = self._build_planner_settings()
-        self.plan_generator = plan_generator or PlanGenerator(llm=self.llm_connector, settings=settings)
-        self._base_max_steps = self.plan_generator.settings.max_steps
+        self.plan_generator = plan_generator or PlanGenerator(self.llm_connector, settings)
         self.plan_generator.settings.available_tools_hint = self._tool_hint_text()
 
-        self.persist_plan = self._bool_config(
-            "persist_plan",
-            default=True,
-            env_var="DEEPSEARCH_PERSIST_PLAN",
-        )
-        default_output_dir = "./local/deepsearch_runs"
-        self.plan_output_dir = Path(
-            self._config_value("plan_output_dir", os.getenv("DEEPSEARCH_PLAN_OUTPUT_DIR") or default_output_dir)
-        )
-        global_external = self._resolve_env_bool("DEEPSEARCH_EXTERNAL_SEARCH_ENABLED")
-        if global_external is not None:
-            self.allow_external = global_external
-        else:
-            self.allow_external = self._bool_config(
-                "allow_external_channel",
-                default=False,
-                env_var="DEEPSEARCH_ALLOW_EXTERNAL_CHANNEL",
-            )
+        self.persist_plan = bool(self._config_dict["persist_plan"])
+        plan_output_dir = self._config_dict.get("plan_output_dir")
+        if not plan_output_dir or not str(plan_output_dir).strip():
+            raise ValueError("planner.plan_output_dir is required (no implicit default).")
+        self.plan_output_dir = Path(str(plan_output_dir))
 
-        self.graph_channel_tool = self._config_value("graph_channel_tool", "graph_adapter.query")
-        self.text_channel_tool = self._config_value("text_channel_tool", "graph.context_rollup")
-        self.web_channel_tool = self._config_value("web_channel_tool", "web.search")
-        self.default_web_provider = self._config_value("default_web_provider", os.getenv("DEEPSEARCH_WEB_PROVIDER"))
-        self.graph_adapter_name = self._config_value(
-            "graph_adapter_name", os.getenv("DEEPSEARCH_DEFAULT_ADAPTER") or "hipporag"
-        )
-        self.tool_arg_templates: Mapping[str, Mapping[str, str]] = self._config_value("tool_arg_templates", {})
+        self.allow_external = bool(self._config_dict["allow_external_channel"])
+
+        self.graph_channel_tool = str(self._config_dict["graph_channel_tool"]).strip()
+        self.text_channel_tool = str(self._config_dict["text_channel_tool"]).strip()
+        self.web_channel_tool = str(self._config_dict["web_channel_tool"]).strip()
+        self.default_web_provider = self._config_dict.get("default_web_provider")
+        self.graph_adapter_name = str(self._config_dict["graph_adapter_name"]).strip()
+        self.tool_arg_templates: Mapping[str, Mapping[str, str]] = self._config_dict.get("tool_arg_templates") or {}
+        self.honor_planner_tool_selection = bool(self._config_dict["honor_planner_tool_selection"])
+
+        self._refresh_available_tools(update_generator=True)
 
     async def build_plan(
         self,
@@ -100,10 +91,25 @@ class DeepSearchPlanner:
             raise ValueError("question must be a non-empty string")
         scope = require_scope(access_scope)
 
+        await emit_trace(
+            "think",
+            "\n".join(
+                [
+                    "Planning the research workflow.",
+                    f"mode={self.plan_generator.settings.mode}",
+                    f"max_steps={self.plan_generator.settings.max_steps}",
+                    f"external_channel_allowed={bool(self.allow_external)}",
+                ]
+            ),
+            meta={
+                "stage": "plan",
+                "mode": self.plan_generator.settings.mode,
+                "max_steps": self.plan_generator.settings.max_steps,
+                "external_channel_allowed": bool(self.allow_external),
+            },
+        )
+
         self._refresh_available_tools()
-        dynamic_steps = self._adaptive_step_budget(normalized_question)
-        if dynamic_steps != self.plan_generator.settings.max_steps:
-            self.plan_generator.settings.max_steps = dynamic_steps
         plan_specs = await self._generate_plan_async(normalized_question)
         steps_payload = [
             self._build_step_payload(spec)
@@ -118,7 +124,8 @@ class DeepSearchPlanner:
             steps=steps_payload,
         )
 
-        artifact = {
+        artifact = with_trace_protocol(
+            {
             "plan_id": plan_id,
             "question": normalized_question,
             "owner_scope": scope_to_dict(scope),
@@ -132,11 +139,43 @@ class DeepSearchPlanner:
             "steps": steps_payload,
             "available_tools": self.available_tools,
             "graph_context": graph_context_payload,
-        }
+            }
+        )
 
         artifact_path = None
         if self.persist_plan:
             artifact_path = self._persist_plan(artifact, plan_id)
+
+        plan_lines: List[str] = []
+        plan_lines.append(f"Plan ID: {plan_id}")
+        plan_lines.append(f"Question: {normalized_question}")
+        plan_lines.append(f"Mode: {self.plan_generator.settings.mode}")
+        plan_lines.append(f"External allowed: {bool(self.allow_external)}")
+        plan_lines.append("Note: coarse macro plan; tool selection happens during execution.")
+        plan_lines.append("Steps:")
+        for idx, step in enumerate(steps_payload, start=1):
+            if not isinstance(step, dict):
+                continue
+            step_id = str(step.get("step_id") or f"plan_{idx:02d}")
+            channel = str(step.get("channel") or "graph")
+            description = str(step.get("description") or "")
+            enabled = bool(step.get("enabled", True))
+            requires_external = bool(step.get("requires_external", False))
+            line = f"{idx}. {step_id} [{channel}] enabled={enabled} requires_external={requires_external}"
+            if description:
+                line += f"\n   {description}"
+            plan_lines.append(line)
+
+        await emit_trace(
+            "write_outline",
+            "\n".join(plan_lines),
+            meta={
+                "stage": "plan",
+                "plan_id": plan_id,
+                "step_count": len(steps_payload),
+                "artifact_path": str(artifact_path) if artifact_path else None,
+            },
+        )
 
         logger.info(
             "DeepSearch plan generated (plan_id=%s, steps=%d, artifact=%s)",
@@ -165,9 +204,9 @@ class DeepSearchPlanner:
         return self.plan_generator.generate_plan(question, context=context)
 
     def _build_planner_settings(self) -> PlannerSettings:
-        mode = self._config_value("mode", "react")
-        max_steps = int(self._config_value("max_steps", 6))
-        enable_sub_question = self._bool_config("enable_sub_question", True)
+        mode = str(self._config_dict["mode"]).strip()
+        max_steps = int(self._config_dict["max_steps"])
+        enable_sub_question = bool(self._config_dict["enable_sub_question"])
         system_prompt = self._prompt(self.PLAN_SYSTEM_PROMPT_KEY, GRAPH_PLANNER_SYSTEM_PROMPT)
         user_prompt = self._prompt(self.PLAN_USER_PROMPT_KEY, GRAPH_PLANNER_USER_PROMPT)
         tool_hint = self._tool_hint_text()
@@ -194,9 +233,8 @@ class DeepSearchPlanner:
             profile = str(spec.get("profile") or "F").upper()
             grouped.setdefault(profile, []).append(spec)
         lines = [
-            "For each graph step choose exactly one tool from this catalog and include it "
-            "in the JSON output as `tool` (and `tool_profile` if applicable). "
-            "Prefer cheaper profiles before escalating.",
+            "Tool catalog (used during execution, not required in the initial plan).",
+            "The initial plan should stay coarse; avoid selecting tools unless absolutely necessary.",
             "Profile legend: F=fast deterministic, X=hybrid, H=heavy LLM.",
         ]
         for profile_code in ("F", "X", "H"):
@@ -221,19 +259,49 @@ class DeepSearchPlanner:
 
     def _build_step_payload(self, spec: PlanSpec) -> Dict[str, Any]:
         metadata = dict(spec.metadata or {})
-        channel = (spec.channel or "graph").lower()
-        channel = channel if channel in {"graph", "web", "text"} else "graph"
+        if not spec.channel:
+            raise ValueError("PlanSpec.channel is required")
+        channel = str(spec.channel).lower()
+        if channel not in {"graph", "web", "text"}:
+            raise ValueError(f"Unsupported plan channel: {channel}")
 
-        requested_tool = metadata.get("tool")
+        requested_tool = metadata.get("tool") if self.honor_planner_tool_selection else None
+        if isinstance(requested_tool, str):
+            requested_tool = requested_tool.strip()
+
+        # Guardrails: keep macro plans coarse; prefer graph_adapter.query for graph steps unless the
+        # planner explicitly labels a step as a probe. This avoids the LLM overusing scan tools as
+        # primary execution steps.
+        if (
+            channel == "graph"
+            and requested_tool in {"graph.pattern_scan", "graph.chunk_scan"}
+            and not bool(metadata.get("force_tool"))
+            and str(metadata.get("tool_intent") or "").strip().lower() != "probe"
+        ):
+            requested_tool = None
+        if not self.honor_planner_tool_selection:
+            metadata.pop("tool", None)
         tool_name = requested_tool or self._resolve_tool(channel)
         requires_external = channel == "web"
         tool_enabled = not requires_external or self.allow_external
 
-        tool_args = self._build_tool_args(
-            channel=channel,
-            description=spec.description,
-            extra_metadata=metadata,
-        )
+        requested_tool_args = metadata.get("tool_args") if isinstance(metadata.get("tool_args"), dict) else None
+        if requested_tool_args is not None:
+            metadata.pop("tool_args", None)
+
+        tool_args: Dict[str, Any]
+        if tool_name == self.graph_channel_tool:
+            tool_args = self._build_tool_args(
+                channel=channel,
+                description=spec.description,
+                extra_metadata=metadata,
+            )
+            if requested_tool_args:
+                tool_args.update(dict(requested_tool_args))
+        else:
+            # For graph/text tools, tool_args is passed as ToolRunRequest.extra.
+            tool_args = dict(requested_tool_args or {})
+            tool_args.setdefault("focus_query", spec.description.strip())
 
         if requires_external:
             metadata.setdefault("requires_external_channel", True)
@@ -321,36 +389,6 @@ class DeepSearchPlanner:
                 return value
         return default
 
-    def _bool_config(self, key: str, default: bool, env_var: Optional[str] = None) -> bool:
-        env_override = self._resolve_env_bool(env_var) if env_var else None
-        if env_override is not None:
-            return env_override
-        raw = self._config_value(key, default)
-        if isinstance(raw, bool):
-            return raw
-        if isinstance(raw, str):
-            return raw.strip().lower() in {"1", "true", "yes", "on"}
-        return bool(raw)
-
-    @staticmethod
-    def _resolve_env_bool(env_var: Optional[str]) -> Optional[bool]:
-        if not env_var:
-            return None
-        value = os.getenv(env_var)
-        if value is None:
-            return None
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off"}:
-            return False
-        return None
-
-    def _config_value(self, key: str, default: Any = None) -> Any:
-        if isinstance(self._config_dict, Mapping):
-            return self._config_dict.get(key, default)
-        return getattr(self.config, key, default) if self.config else default
-
     @staticmethod
     def _as_dict(config: Any) -> Dict[str, Any]:
         if not config:
@@ -369,7 +407,20 @@ class DeepSearchPlanner:
     def _refresh_available_tools(self, update_generator: bool = True) -> None:
         """Refresh cached tool descriptors so planner sees MCP/runtime additions."""
 
-        self._available_tools = describe_available_tools(registry=self._tool_hint_registry)
+        graph_channel_tool = str(getattr(self, "graph_channel_tool", None) or "graph_adapter.query").strip() or "graph_adapter.query"
+        adapter_hint = {
+            "name": graph_channel_tool,
+            "channel": "graph",
+            "description": "Primary graph traversal via the configured graph adapter (prepare→query→filter→summarize→chain_traverse).",
+            "profile": "X",
+            "determinism": "adapter",
+            "strategy_tags": ["graph", "adapter", "traversal"],
+        }
+        self._available_tools = describe_available_tools(
+            extra_hints=[adapter_hint],
+            registry=self._tool_hint_registry,
+            include_llm_tools=self.include_llm_tools_in_catalog,
+        )
         self._tool_hint_revision = self._tool_hint_registry.get_revision()
         if update_generator and getattr(self, "plan_generator", None):
             self.plan_generator.settings.available_tools_hint = self._tool_hint_text(self._available_tools)
@@ -404,31 +455,6 @@ class DeepSearchPlanner:
             access_scope=access_scope,
         )
         return context.model_dump(exclude_none=True)
-
-    def _adaptive_step_budget(self, question: str) -> int:
-        complexity = self._estimate_question_complexity(question)
-        if complexity == "low":
-            return max(3, min(self._base_max_steps - 2, self._base_max_steps))
-        if complexity == "high":
-            return min(self._base_max_steps + 2, 12)
-        return self._base_max_steps
-
-    @staticmethod
-    def _estimate_question_complexity(question: str) -> str:
-        text = (question or "").strip()
-        lower = text.lower()
-        length = len(text)
-        clause_breaks = len(re.findall(r"[。.!?;；]+", text))
-        commas = text.count(",") + text.count("、") + text.count("，")
-        keyword_high = ("compare", "比较", "timeline", "roadmap", "mitigation", "analysis", "strategy", "plan")
-        low_terms_en = ("what is", "who is", "define")
-        low_terms_local = ("定义", "概述")
-        low_hit = any(term in lower for term in low_terms_en) or any(term in text for term in low_terms_local)
-        if low_hit and length < 80 and clause_breaks <= 1:
-            return "low"
-        if length > 180 or clause_breaks >= 2 or commas >= 3 or any(term in lower for term in keyword_high):
-            return "high"
-        return "medium"
 
     @staticmethod
     def _collect_seed_entities(steps: List[Dict[str, Any]]) -> List[str]:

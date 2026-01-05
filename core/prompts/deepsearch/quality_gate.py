@@ -39,6 +39,7 @@ Return ONLY valid JSON with this schema:
 - Use ONLY the provided evidence list; do not assume outside facts.
 - Be conservative: if evidence is insufficient, fail with actionable next actions.
 - Prefer graph_search for internal sources; only propose external_search if allowed.
+- If "pass" is false, you MUST include at least one item in next_actions (e.g. graph_search and/or rewrite).
 """
 
 QUALITY_GATE_USER_PROMPT = (
@@ -51,4 +52,3 @@ QUALITY_GATE_USER_PROMPT = (
     "- external_allowed: {external_allowed}\n\n"
     "Return the JSON result now."
 )
-

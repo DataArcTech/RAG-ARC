@@ -9,6 +9,11 @@ class DotsOCRParserConfig(AbstractConfig):
     """Configuration for DotsOCR Parser (Core Layer)"""
     type: Literal["dots_ocr_parser"] = "dots_ocr_parser"
 
+    output_dir: Optional[str] = Field(
+        default=None,
+        description="Output directory for OCR artifacts. When using ParserCombinator this is set automatically.",
+    )
+
     # LLM service configuration (required)
     dots_ocr: DotsOCRConfig
 

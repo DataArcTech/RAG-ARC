@@ -2,11 +2,19 @@
 测试认证功能（包含type字段）
 测试注册、登录和获取当前用户信息
 """
+import os
+import pytest
 import asyncio
 import time
 import httpx
 from typing import Dict, Any
 from datetime import datetime
+
+
+pytestmark = pytest.mark.skipif(
+    os.getenv("RUN_RAGARC_INTEGRATION_TESTS") != "1",
+    reason="Requires a running API server; set RUN_RAGARC_INTEGRATION_TESTS=1 to enable.",
+)
 
 
 BASE_URL = "http://localhost:8001"
@@ -518,4 +526,3 @@ if __name__ == "__main__":
             traceback.print_exc()
     
     asyncio.run(run_tests())
-
