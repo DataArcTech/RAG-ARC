@@ -103,6 +103,12 @@ class _PostgreSQLChatMixin:
         """Delete chat session using SQLAlchemy ORM (cascades to messages)"""
         try:
             with self.SessionMaker() as db_session:
+                # First, delete all messages for this session to avoid foreign key constraint violation
+                messages_deleted = db_session.query(ChatMessage).filter_by(session_id=session_id).delete(synchronize_session=False)
+                if messages_deleted > 0:
+                    logger.info(f"Deleted {messages_deleted} messages for session {session_id}")
+                
+                # Then delete the session
                 rows_deleted = db_session.query(ChatSession).filter_by(id=session_id).delete()
                 db_session.commit()
 
