@@ -608,13 +608,14 @@ async def stream_chat_sse(
 
         # Log full response details (including graph payload).
         logger.info(
-            "SSE chat response: text_length=%d, chunks_count=%d, subgraph_nodes=%d, subgraph_edges=%d, raw_response=%s, raw_mindmap_response=%s",
+            "SSE chat response: text_length=%d, chunks_count=%d, subgraph_nodes=%d, subgraph_edges=%d, raw_response=%s, raw_mindmap_response=%s, response_content=%s",
             len(assistant_response) if assistant_response else 0,
             len(chunks) if chunks else 0,
             len(subgraph_data.get("nodes", [])) if subgraph_data else 0,
             len(subgraph_data.get("edges", [])) if subgraph_data else 0,
             json.dumps(raw_llm_response, ensure_ascii=False, default=str) if raw_llm_response else None,
-            raw_mindmap_response if raw_mindmap_response else None
+            raw_mindmap_response if raw_mindmap_response else None,
+            assistant_response[:500] if assistant_response else None  # Log first 500 chars of response content
         )
         if subgraph_data:
             logger.debug("SSE subgraph data: %s", json.dumps(subgraph_data, ensure_ascii=False, default=str))
