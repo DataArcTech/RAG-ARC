@@ -195,9 +195,10 @@ class PostgreSQLDB(
                 if column_name in existing_columns:
                     continue
 
-                if not column.nullable:
+                # Skip non-nullable columns without defaults (would break existing rows)
+                if not column.nullable and column.default is None and column.server_default is None:
                     logger.info(
-                        "Skipping non-nullable missing column %s.%s; use an explicit migration.",
+                        "Skipping non-nullable missing column %s.%s (no default); use an explicit migration.",
                         table_name,
                         column_name,
                     )
@@ -210,7 +211,25 @@ class PostgreSQLDB(
                     else:
                         sql_type = column_type.compile(dialect=engine.dialect)
 
+                    # Build ALTER statement with default if present
                     alter_sql = f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {sql_type}'
+                    if not column.nullable and (column.default is not None or column.server_default is not None):
+                        # For non-nullable columns with defaults, add DEFAULT clause
+                        if column.server_default is not None:
+                            default_expr = str(column.server_default.arg) if hasattr(column.server_default, 'arg') else str(column.server_default)
+                            alter_sql += f' DEFAULT {default_expr}'
+                        elif column.default is not None:
+                            # Handle Python default values
+                            if hasattr(column.default, 'arg'):
+                                default_val = column.default.arg
+                                if isinstance(default_val, bool):
+                                    alter_sql += f" DEFAULT {str(default_val).lower()}"
+                                elif isinstance(default_val, (int, float)):
+                                    alter_sql += f" DEFAULT {default_val}"
+                                else:
+                                    alter_sql += f" DEFAULT '{default_val}'"
+                    alter_sql += ' NOT NULL' if not column.nullable else ''
+                    
                     with engine.begin() as conn:
                         conn.execute(text(alter_sql))
                     migrated_count += 1
