@@ -117,6 +117,7 @@ cp .env.example .env
 补充说明：
 - **FAISS 指纹保护**：FAISS 的 `.pkl` 元数据会写入 `embedding_fingerprint`（provider/model/dim）。当切换 embedding 模型/维度时，建议设置新的 `FAISS_INDEX_PATH`（推荐）或清理重建索引；否则系统会 fail-fast，避免“静默索引污染”。
 - **E2E 隔离**：真实服务测试建议把上述路径指向隔离目录（例如 `./local/e2e_*`），避免污染默认的 `./data/*`。
+- **KG domain 回退**：当 chunk 未提供 `chunk.domain`（或 `chunk.metadata["domain"]`）时，Neo4j 入库会回退到已加载 schema 的 `default_domain`（例如使用 `./fin_kg_schema.yml` 时为 `finance_insurance`）。
 
 ## 2. 证据输出控制
 
@@ -140,6 +141,8 @@ cp .env.example .env
 | `DEEPSEARCH_GRAPH_EXPORT_MAX_EDGES` | `2000` | DeepSearch 子图可视化导出 edges 上限（Neo4j exporter）。 |
 | `KNOWLEDGE_GRAPH_EXPORT_MAX_NODES` | `1000` | `/knowledge/graph/export*` 的 max_nodes 上限，用于防止导出过大导致资源消耗过高。 |
 | `KNOWLEDGE_GRAPH_EXPORT_MAX_EDGES` | `5000` | `/knowledge/graph/export*` 的 max_edges 上限，用于防止导出过大导致资源消耗过高。 |
+| `KNOWLEDGE_MINDMAP_EXPORT_MAX_CHUNKS` | `60` | 导出文件级思维导图时采样的最大 chunk 数（避免 LLM prompt 过大）。 |
+| `KNOWLEDGE_MINDMAP_EXPORT_SEGMENT_SNIPPET_CHARS` | `600` | 思维导图导出合并 prompt 中每个 chunk 的内容摘要长度（字符数）。 |
 | `GRAPH_EXPORT_CHUNK_CONTENT_PREVIEW_CHARS` | `240` | 图导出 payload 中 chunk 内容预览的最大字符数（用于可视化预览，避免返回过大）。 |
 | `GRAPH_EXPORT_EDGE_FETCH_FACTOR` | `10` | exporter 抓取 edges 后再采样的倍率（fetch_limit = max_edges * factor）。 |
 | `GRAPH_EXPORT_EDGE_FETCH_MAX` | `50000` | exporter edges 抓取绝对上限（防止 Neo4j edge query 过大）。 |
@@ -322,7 +325,6 @@ cp .env.example .env
 | `DEEPSEARCH_CHAIN_DEPTH` | `4` | 图遍历层数。 |
 | `DEEPSEARCH_TOOL_CONTEXT_MAX_EVIDENCES` | `5` | 工具调用时传入的 `context_evidences` 最大条数（recency 保留最近 K 条，防止 context 爆炸）。 |
 | `DEEPSEARCH_TOOL_CONTEXT_MAX_CHARS` | `800` | 工具调用时每条 evidence 的最大字符数（超出会截断）。 |
-| `DEEPSEARCH_ENABLE_FINANCE_HOOKS` | `false` | 启用金融场景特化逻辑。 |
 | `DEEPSEARCH_MCP_SERVER_URI` | _(空)_ | 远程 MCP 服务地址。 |
 | `DEEPSEARCH_MCP_API_KEY` | _(空)_ | MCP 远程访问 Key。 |
 | `DEEPSEARCH_MCP_TRANSPORT` | `auto` | MCP 传输方式。 |

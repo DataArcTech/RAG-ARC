@@ -52,8 +52,10 @@ def _kg_ingest_stats(graph_store, *, owner_key: str | None) -> Dict[str, Any] | 
                    m.chunks_extraction_failed AS chunks_extraction_failed,
                    m.triples_total AS triples_total,
                    m.triples_kept AS triples_kept,
+                   m.triples_kept_via_canonical_endpoints AS triples_kept_via_canonical_endpoints,
                    m.triples_dropped_endpoints AS triples_dropped_endpoints,
                    m.triples_dropped_ambiguous_endpoints AS triples_dropped_ambiguous_endpoints,
+                   m.triples_dropped_canonical_ambiguous_endpoints AS triples_dropped_canonical_ambiguous_endpoints,
                    m.triples_dropped_schema AS triples_dropped_schema,
                    m.predicates_aliased AS predicates_aliased,
                    m.predicates_kept AS predicates_kept,
@@ -78,8 +80,12 @@ def _kg_ingest_stats(graph_store, *, owner_key: str | None) -> Dict[str, Any] | 
             "chunks_extraction_failed": int(row0.get("chunks_extraction_failed") or 0),
             "triples_total": int(row0.get("triples_total") or 0),
             "triples_kept": int(row0.get("triples_kept") or 0),
+            "triples_kept_via_canonical_endpoints": int(row0.get("triples_kept_via_canonical_endpoints") or 0),
             "triples_dropped_endpoints": int(row0.get("triples_dropped_endpoints") or 0),
             "triples_dropped_ambiguous_endpoints": int(row0.get("triples_dropped_ambiguous_endpoints") or 0),
+            "triples_dropped_canonical_ambiguous_endpoints": int(
+                row0.get("triples_dropped_canonical_ambiguous_endpoints") or 0
+            ),
             "triples_dropped_schema": int(row0.get("triples_dropped_schema") or 0),
             "predicates_aliased": int(row0.get("predicates_aliased") or 0),
             "predicates_kept": int(row0.get("predicates_kept") or 0),
@@ -120,6 +126,12 @@ class GraphExporterNeo4j:
         - Pure numbers (integers, decimals)
         - Timestamps (Unix timestamps, millisecond timestamps)
         - Common time formats (YYYY-MM-DD, HH:MM:SS, etc.)
+
+        Notes:
+        - This filter is applied ONLY to exported visualization payloads (DeepSearch subgraph export).
+          It does not delete or hide data in Neo4j storage.
+        - Disable via `GRAPH_EXPORT_FILTER_NUMERIC_TIME_ENTITIES=false` when numeric/date/time nodes
+          carry business meaning (common in finance/insurance: policy numbers, limits, premiums, dates).
 
         Args:
             entity_name: Entity name to check
@@ -179,9 +191,16 @@ class GraphExporterNeo4j:
         if include_node_types is None:
             include_node_types = ['chunk', 'entity']
 
+        # Owner scoping is security-critical: always enforce the owner filter when we have a scope label
+        # (API callers pass both `owner_id` and `owner_scope_label`, but some call sites historically only
+        # set the label). Falling back avoids accidental cross-tenant exports.
+        effective_owner_id = str(owner_id or "").strip() or None
+        if effective_owner_id is None:
+            effective_owner_id = str(owner_scope_label or "").strip() or None
+
         owner_key = None
-        if owner_id is not None:
-            owner_key = graph_store._owner_key(owner_id)
+        if effective_owner_id is not None:
+            owner_key = graph_store._owner_key(effective_owner_id)
 
         chunks = []
         nodes = []  # Only entities
@@ -195,9 +214,11 @@ class GraphExporterNeo4j:
             owner_clause = "AND COALESCE(n.owner_id, $global_owner) = $owner_id"
             params['owner_id'] = owner_key
 
+        # IMPORTANT: keep parentheses around `(n:Chunk OR n:Entity)` so `AND owner_clause` does not
+        # accidentally bind only to `n:Entity` (Cypher operator precedence: AND > OR).
         count_query = f"""
         MATCH (n)
-        WHERE n:Chunk OR n:Entity
+        WHERE (n:Chunk OR n:Entity)
           {owner_clause}
         RETURN count(n) AS total_nodes
         """
@@ -212,7 +233,7 @@ class GraphExporterNeo4j:
             # Use COUNT {} instead of size() for Neo4j 5.x compatibility
             node_query = f"""
             MATCH (n)
-            WHERE n:Chunk OR n:Entity
+            WHERE (n:Chunk OR n:Entity)
               {owner_clause}
             WITH n, COUNT {{ (n)--() }} AS degree
             ORDER BY degree DESC
@@ -227,7 +248,7 @@ class GraphExporterNeo4j:
         else:
             node_query = f"""
             MATCH (n)
-            WHERE n:Chunk OR n:Entity
+            WHERE (n:Chunk OR n:Entity)
               {owner_clause}
             RETURN COALESCE(n.chunk_id, n.entity_id) AS node_id,
                    CASE WHEN n:Chunk THEN 'chunk' ELSE 'entity' END AS node_type,
@@ -521,9 +542,13 @@ class GraphExporterNeo4j:
         edges: List[Dict[str, Any]] = []
         categories_set = set()  # Track unique entity types
 
+        effective_owner_id = str(owner_id or "").strip() or None
+        if effective_owner_id is None:
+            effective_owner_id = str(owner_scope_label or "").strip() or None
+
         owner_key = None
-        if owner_id is not None:
-            owner_key = graph_store._owner_key(owner_id)
+        if effective_owner_id is not None:
+            owner_key = graph_store._owner_key(effective_owner_id)
         global_owner = graph_store.OWNER_GLOBAL_KEY
 
         kg_schema_loaded, kg_schema_version, kg_schema_path = _kg_schema_status(graph_store)

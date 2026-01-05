@@ -13,6 +13,7 @@ This extractor follows HippoRAG2's approach:
 import logging
 import json
 import re
+from pathlib import Path
 from typing import List, TYPE_CHECKING, Tuple
 
 from core.file_management.extractor.base import ExtractorBase
@@ -48,7 +49,12 @@ from core.prompts.hipporag2_sdf_prompt import (
     HIPPORAG2_SDF_HS_SYSTEM,
     HIPPORAG2_SDF_HS_SYSTEM_ZH,
 )
-from core.prompts.hipporag2_temporal_prompt import HIPPORAG2_TEMPORAL_PROMPT_ZH, HIPPORAG2_TEMPORAL_SYSTEM_ZH
+from core.prompts.hipporag2_temporal_prompt import (
+    HIPPORAG2_TEMPORAL_PROMPT_EN,
+    HIPPORAG2_TEMPORAL_PROMPT_ZH,
+    HIPPORAG2_TEMPORAL_SYSTEM_EN,
+    HIPPORAG2_TEMPORAL_SYSTEM_ZH,
+)
 from core.knowledge_graph.sdf import hs_to_sdf_schema, parse_hs_blocks
 from encapsulation.data_model.schema import Chunk, GraphData
 
@@ -73,6 +79,7 @@ class HippoRAG2Extractor(ExtractorBase):
         super().__init__(config)
         self.logger = logging.getLogger(__name__)
         self.entity_types = getattr(config, 'entity_types', None)  # Optional entity types to extract
+        self._prompt_cache: dict[str, str] = {}
 
     def detect_language(self, text: str) -> str:
         """
@@ -113,7 +120,7 @@ class HippoRAG2Extractor(ExtractorBase):
         """
         Two-stage extraction: NER first, then Triple Extraction
         More accurate and follows HippoRAG2's original approach
-        Also extracts mind map and saves to chunk.metadata
+        Optionally extracts mind map and saves to chunk.metadata
         """
         # Stage 1: Named Entity Recognition
         entities = await self.extract_entities(chunk.content)
@@ -125,16 +132,17 @@ class HippoRAG2Extractor(ExtractorBase):
         else:
             self.logger.warning("No entities extracted, skipping triple extraction")
 
-        # Stage 3: Mind Map Extraction (non-fatal, but must be observable)
-        try:
-            mindmap = await self.extract_mindmap(chunk.content)
-        except Exception as exc:
-            self.logger.error("Error in mind map extraction: %s", exc, exc_info=True)
-            chunk.metadata[MINDMAP_ERROR_KEY] = {"exception_type": exc.__class__.__name__, "message": str(exc)}
-            mindmap = {}
+        # Stage 3: Mind Map Extraction (optional; non-fatal, but must be observable)
+        if bool(getattr(self.config, "enable_mindmap_extraction", False)):
+            try:
+                mindmap = await self.extract_mindmap(chunk.content)
+            except Exception as exc:
+                self.logger.error("Error in mind map extraction: %s", exc, exc_info=True)
+                chunk.metadata[MINDMAP_ERROR_KEY] = {"exception_type": exc.__class__.__name__, "message": str(exc)}
+                mindmap = {}
 
-        if mindmap:
-            chunk.metadata["mindmap"] = mindmap
+            if mindmap:
+                chunk.metadata["mindmap"] = mindmap
 
         # Stage 4: Business-time extraction (temporal; non-fatal, but must be observable)
         if bool(getattr(self.config, "enable_temporal_extraction", True)):
@@ -238,6 +246,27 @@ class HippoRAG2Extractor(ExtractorBase):
         # Detect language
         language = self.detect_language(text)
 
+        custom_template = getattr(self.config, "ner_prompt", None)
+        if isinstance(custom_template, str) and custom_template.strip():
+            return self._render_custom_prompt(
+                custom_template,
+                passage=text,
+                entities="",
+                entity_types=", ".join(self.entity_types) if self.entity_types else "",
+                language=language,
+            )
+
+        custom_path = getattr(self.config, "ner_prompt_path", None)
+        if isinstance(custom_path, str) and custom_path.strip():
+            template = self._read_prompt_file(custom_path)
+            return self._render_custom_prompt(
+                template,
+                passage=text,
+                entities="",
+                entity_types=", ".join(self.entity_types) if self.entity_types else "",
+                language=language,
+            )
+
         if self.entity_types:
             # Use entity type-specific prompt (only extract specified types)
             entity_types_str = ', '.join(self.entity_types)
@@ -284,6 +313,27 @@ class HippoRAG2Extractor(ExtractorBase):
         # Detect language
         language = self.detect_language(text)
 
+        custom_template = getattr(self.config, "triple_prompt", None)
+        if isinstance(custom_template, str) and custom_template.strip():
+            return self._render_custom_prompt(
+                custom_template,
+                passage=text,
+                entities=entities_str,
+                entity_types=", ".join(self.entity_types) if self.entity_types else "",
+                language=language,
+            )
+
+        custom_path = getattr(self.config, "triple_prompt_path", None)
+        if isinstance(custom_path, str) and custom_path.strip():
+            template = self._read_prompt_file(custom_path)
+            return self._render_custom_prompt(
+                template,
+                passage=text,
+                entities=entities_str,
+                entity_types=", ".join(self.entity_types) if self.entity_types else "",
+                language=language,
+            )
+
         if language == 'zh':
             return HIPPORAG2_TRIPLE_PROMPT_ZH.format(
                 system=HIPPORAG2_TRIPLE_SYSTEM_ZH,
@@ -300,6 +350,45 @@ class HippoRAG2Extractor(ExtractorBase):
                 passage=text,
                 entities=entities_str
             )
+
+    @staticmethod
+    def _render_custom_prompt(
+        template: str,
+        *,
+        passage: str,
+        entities: str,
+        entity_types: str,
+        language: str,
+    ) -> str:
+        """
+        Render a custom prompt template supplied via config.
+
+        Supported placeholders (optional):
+        - {passage}
+        - {entities}
+        - {entity_types}
+        - {language}
+
+        If formatting fails or placeholders are absent, fall back to appending the passage.
+        """
+        raw = str(template or "").strip()
+        if not raw:
+            return ""
+        if "{passage}" in raw or "{entities}" in raw or "{entity_types}" in raw or "{language}" in raw:
+            try:
+                return raw.format(
+                    passage=passage,
+                    entities=entities,
+                    entity_types=entity_types,
+                    language=language,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to format custom prompt template; falling back to appending passage: %s",
+                    exc,
+                    exc_info=True,
+                )
+        return f"{raw}\n\n{passage}"
 
     def parse_ner_response(self, response: str) -> List[Tuple[str, str]]:
         """
@@ -361,28 +450,56 @@ class HippoRAG2Extractor(ExtractorBase):
         subject\tpredicate\tobject
         ...
         """
-        triples = []
+        triples: list[tuple[str, str, str]] = []
+        text = str(response or "").strip()
+        if not text:
+            return triples
+
         in_triples_section = False
-        
-        for line in response.strip().split('\n'):
-            line = line.strip()
-            
+        saw_triples_header = False
+
+        # Notes:
+        # - Production LLMs sometimes vary casing ("### Triples") or omit the section header entirely.
+        # - Triple rows are unambiguously identified by having at least 2 tab separators (3 columns).
+        # - We treat header detection as a guide, not a hard requirement, to avoid silently discarding valid triples.
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
             if not line:
                 continue
-                
-            if line.startswith('### TRIPLES'):
-                in_triples_section = True
+
+            # Skip code fence markers; content inside may still include TSV lines.
+            if line.startswith("```"):
                 continue
-            
-            if line.startswith('###'):
+
+            normalized_header = line.lstrip("#").strip().lower()
+            if normalized_header in {"triples", "triple", "relations", "relationships"}:
+                in_triples_section = True
+                saw_triples_header = True
+                continue
+
+            if line.startswith("###"):
                 in_triples_section = False
                 continue
-            
-            if in_triples_section and '\t' in line:
-                parts = line.split('\t')
-                if len(parts) >= 3:
-                    triples.append((parts[0].strip(), parts[1].strip(), parts[2].strip()))
-        
+
+            if saw_triples_header and not in_triples_section:
+                continue
+
+            # Accept bullet-prefixed TSV rows.
+            candidate = line.lstrip("-•* ").strip()
+            if candidate.count("\t") < 2:
+                continue
+
+            parts = candidate.split("\t")
+            if len(parts) < 3:
+                continue
+
+            subject = parts[0].strip()
+            predicate = parts[1].strip()
+            obj = parts[2].strip()
+            if not subject or not predicate or not obj:
+                continue
+            triples.append((subject, predicate, obj))
+
         return triples
 
     def build_graph_data(self, entities: List[Tuple[str, str]], triples: List[Tuple[str, str, str]]) -> GraphData:
@@ -536,8 +653,32 @@ class HippoRAG2Extractor(ExtractorBase):
         return out
 
     def build_temporal_prompt(self, text: str) -> str:
-        # For now, use the ZH prompt for both languages (the extractor is used heavily for ZH docs).
-        return HIPPORAG2_TEMPORAL_PROMPT_ZH.format(system=HIPPORAG2_TEMPORAL_SYSTEM_ZH, passage=text)
+        language = self.detect_language(text)
+
+        custom_template = getattr(self.config, "temporal_prompt", None)
+        if isinstance(custom_template, str) and custom_template.strip():
+            return self._render_custom_prompt(
+                custom_template,
+                passage=text,
+                entities="",
+                entity_types="",
+                language=language,
+            )
+
+        custom_path = getattr(self.config, "temporal_prompt_path", None)
+        if isinstance(custom_path, str) and custom_path.strip():
+            template = self._read_prompt_file(custom_path)
+            return self._render_custom_prompt(
+                template,
+                passage=text,
+                entities="",
+                entity_types="",
+                language=language,
+            )
+
+        if language == "zh":
+            return HIPPORAG2_TEMPORAL_PROMPT_ZH.format(system=HIPPORAG2_TEMPORAL_SYSTEM_ZH, passage=text)
+        return HIPPORAG2_TEMPORAL_PROMPT_EN.format(system=HIPPORAG2_TEMPORAL_SYSTEM_EN, passage=text)
 
     async def extract_sdf_hs(self, text: str) -> str:
         prompt = self.build_sdf_hs_prompt(text)
@@ -546,6 +687,25 @@ class HippoRAG2Extractor(ExtractorBase):
 
     def build_sdf_hs_prompt(self, text: str) -> str:
         language = self.detect_language(text)
+        custom_template = getattr(self.config, "sdf_hs_prompt", None)
+        if isinstance(custom_template, str) and custom_template.strip():
+            return self._render_custom_prompt(
+                custom_template,
+                passage=text,
+                entities="",
+                entity_types="",
+                language=language,
+            )
+        custom_path = getattr(self.config, "sdf_hs_prompt_path", None)
+        if isinstance(custom_path, str) and custom_path.strip():
+            template = self._read_prompt_file(custom_path)
+            return self._render_custom_prompt(
+                template,
+                passage=text,
+                entities="",
+                entity_types="",
+                language=language,
+            )
         if language == "zh":
             return HIPPORAG2_SDF_HS_PROMPT_ZH.format(
                 system=HIPPORAG2_SDF_HS_SYSTEM_ZH,
@@ -559,6 +719,17 @@ class HippoRAG2Extractor(ExtractorBase):
             example_output=HIPPORAG2_SDF_HS_ONE_SHOT_OUTPUT,
             passage=text,
         )
+
+    def _read_prompt_file(self, path: str) -> str:
+        token = str(path or "").strip()
+        if not token:
+            return ""
+        cached = self._prompt_cache.get(token)
+        if cached is not None:
+            return cached
+        raw = Path(token).read_text(encoding="utf-8")
+        self._prompt_cache[token] = raw
+        return raw
 
     @staticmethod
     def _parse_json_object(raw: str) -> dict | None:

@@ -31,6 +31,25 @@ def _coerce_fact_provenance_max_source_chunks(raw: Any, *, default: int = 50, ma
             value = int(default)
     return max(0, min(int(max_value), value))
 
+
+def _select_domain_for_chunk(chunk: Chunk, metadata: Dict[str, Any], schema: Any) -> str:
+    """
+    Select a chunk domain for KG schema governance.
+
+    Policy:
+    - Prefer explicit chunk.domain (ingestion-provided)
+    - Fallback to chunk.metadata["domain"] (optional upstream classifier)
+    - Finally: use KG schema default_domain when available, otherwise "default"
+    """
+    schema_default = getattr(schema, "default_domain", None) if schema is not None else None
+    fallback = str(schema_default).strip() if schema_default is not None else ""
+    if not fallback:
+        fallback = "default"
+
+    domain_raw = chunk.domain or metadata.get("domain") or fallback
+    domain = str(domain_raw).strip()
+    return domain or fallback
+
 class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin):
     def _init_faiss_indices(self):
         """
@@ -141,6 +160,8 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
             max_value=1000,
         )
 
+        schema = getattr(self, "kg_schema", None)
+
         for chunk in chunks:
             # Prepare chunk data
             metadata = dict(chunk.metadata) if chunk.metadata else {}
@@ -158,8 +179,10 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
                     "chunks_extraction_failed": 0,
                     "triples_total": 0,
                     "triples_kept": 0,
+                    "triples_kept_via_canonical_endpoints": 0,
                     "triples_dropped_endpoints": 0,
                     "triples_dropped_ambiguous_endpoints": 0,
+                    "triples_dropped_canonical_ambiguous_endpoints": 0,
                     "triples_dropped_schema": 0,
                     "predicates_aliased": 0,
                     "predicates_kept": 0,
@@ -216,11 +239,8 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
                     owner_stats["chunks_extraction_failed"] += 1
                 else:
                     owner_stats["chunks_graph_empty"] += 1
-
             if chunk.graph and not chunk.graph.is_empty():
-                domain_raw = chunk.domain or metadata.get("domain") or "default"
-                domain = str(domain_raw).strip() or "default"
-                schema = getattr(self, "kg_schema", None)
+                domain = _select_domain_for_chunk(chunk, metadata, schema)
                 domain_schema = schema.for_domain(domain) if schema else None
                 schema_version = getattr(schema, "version", None) or "unmanaged"
 
@@ -283,41 +303,79 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
                     mention_key = (chunk.id, entity_id)
                     if mention_key not in mention_keys:
                         mention_keys.add(mention_key)
-                        mention_data.append({
-                            'chunk_id': chunk.id,
-                            'entity_id': entity_id,
-                            'owner_id': db_owner_id
-                        })
+                        mention_data.append({"chunk_id": chunk.id, "entity_id": entity_id, "owner_id": db_owner_id})
 
                 # Process and normalize relation triples (schema-governed predicate normalization)
+                canonical_to_entity_keys: dict[str, set[tuple[str, str]]] = {}
+                for entity_key, canonical_name in entity_key_to_canonical.items():
+                    token = str(canonical_name or "").strip()
+                    if not token:
+                        continue
+                    canonical_to_entity_keys.setdefault(token, set()).add(entity_key)
+
+                enable_endpoint_fallback = bool(getattr(cfg, "enable_endpoint_canonical_fallback", True))
+
+                def _resolve_endpoint_key(raw: Any) -> tuple[tuple[str, str] | None, bool, bool]:
+                    """
+                    Resolve a triple endpoint into an (entity_name_normalized, entity_type_key) key.
+
+                    Returns:
+                    - entity_key (normalized_name, type_key) when unambiguously resolved
+                    - used_canonical_fallback: True when resolution required schema canonicalization fallback
+                    - canonical_ambiguous: True when fallback matched >1 candidates (precision-first drop)
+                    """
+
+                    display = str(raw or "").strip()
+                    if not display:
+                        return None, False, False
+
+                    normalized = text_processing(display)
+                    if normalized and normalized in entity_name_to_type_keys:
+                        types = entity_name_to_type_keys.get(normalized) or set()
+                        if len(types) != 1:
+                            return None, False, False
+                        return (normalized, next(iter(types))), False, False
+
+                    if not enable_endpoint_fallback or domain_schema is None:
+                        return None, False, False
+
+                    canonical = domain_schema.canonicalize_entity_name(display) or normalized
+                    canonical = str(canonical or "").strip()
+                    if not canonical:
+                        return None, True, False
+                    candidates = canonical_to_entity_keys.get(canonical) or set()
+                    if len(candidates) != 1:
+                        return None, True, bool(candidates)
+                    return next(iter(candidates)), True, False
+
                 processed_triples: list[tuple[str, str, str, str, str, bool]] = []
                 for relation in chunk.graph.relations:
                     if len(relation) >= 3:
-                        head = text_processing(relation[0])
-                        tail = text_processing(relation[2])
-
-                        if not head or not tail:
-                            continue
+                        head_key, head_used_canonical, head_canonical_ambiguous = _resolve_endpoint_key(relation[0])
+                        tail_key, tail_used_canonical, tail_canonical_ambiguous = _resolve_endpoint_key(relation[2])
                         owner_stats["triples_total"] += 1
 
                         # Enforce HippoRAG chunk-triples endpoint constraint (precision-first):
                         # triples must use extracted named entities as endpoints.
-                        if head not in entity_name_to_type_keys or tail not in entity_name_to_type_keys:
+                        if head_key is None or tail_key is None:
+                            if head_canonical_ambiguous or tail_canonical_ambiguous:
+                                owner_stats["triples_dropped_canonical_ambiguous_endpoints"] += 1
+                            else:
+                                owner_stats["triples_dropped_endpoints"] += 1
+                            continue
+
+                        head, head_type_key = head_key
+                        tail, tail_type_key = tail_key
+
+                        if not head or not tail:
                             owner_stats["triples_dropped_endpoints"] += 1
                             continue
-                        head_types = entity_name_to_type_keys.get(head) or set()
-                        tail_types = entity_name_to_type_keys.get(tail) or set()
-                        if len(head_types) != 1 or len(tail_types) != 1:
-                            # Without entity linking, multiple types for the same surface form is ambiguous.
-                            # Drop the triple to avoid mixing semantics across types (precision-first).
-                            owner_stats["triples_dropped_ambiguous_endpoints"] += 1
-                            continue
-                        head_type_key = next(iter(head_types))
-                        tail_type_key = next(iter(tail_types))
                         head_id = compute_mdhash_id(f"{head}|{head_type_key}", prefix="entity-", owner_id=owner_str)
                         tail_id = compute_mdhash_id(f"{tail}|{tail_type_key}", prefix="entity-", owner_id=owner_str)
                         head_display = entity_key_to_display.get((head, head_type_key)) or head
                         tail_display = entity_key_to_display.get((tail, tail_type_key)) or tail
+                        if head_used_canonical or tail_used_canonical:
+                            owner_stats["triples_kept_via_canonical_endpoints"] += 1
 
                         raw_predicate = relation[1]
                         if domain_schema is not None:
@@ -447,8 +505,12 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
                 "chunks_extraction_failed": int(counters.get("chunks_extraction_failed", 0)),
                 "triples_total": total,
                 "triples_kept": int(counters.get("triples_kept", 0)),
+                "triples_kept_via_canonical_endpoints": int(counters.get("triples_kept_via_canonical_endpoints", 0)),
                 "triples_dropped_endpoints": dropped_endpoints,
                 "triples_dropped_ambiguous_endpoints": dropped_ambiguous,
+                "triples_dropped_canonical_ambiguous_endpoints": int(
+                    counters.get("triples_dropped_canonical_ambiguous_endpoints", 0)
+                ),
                 "triples_dropped_schema": int(counters.get("triples_dropped_schema", 0)),
                 "predicates_aliased": int(counters.get("predicates_aliased", 0)),
                 "predicates_kept": int(counters.get("predicates_kept", 0)),
@@ -793,8 +855,10 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
                         m.chunks_extraction_failed = meta.chunks_extraction_failed,
                         m.triples_total = meta.triples_total,
                         m.triples_kept = meta.triples_kept,
+                        m.triples_kept_via_canonical_endpoints = meta.triples_kept_via_canonical_endpoints,
                         m.triples_dropped_endpoints = meta.triples_dropped_endpoints,
                         m.triples_dropped_ambiguous_endpoints = meta.triples_dropped_ambiguous_endpoints,
+                        m.triples_dropped_canonical_ambiguous_endpoints = meta.triples_dropped_canonical_ambiguous_endpoints,
                         m.triples_dropped_schema = meta.triples_dropped_schema,
                         m.predicates_aliased = meta.predicates_aliased,
                         m.predicates_kept = meta.predicates_kept,

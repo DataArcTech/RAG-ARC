@@ -134,6 +134,7 @@
     "report_temperature": 0.2,
     "report_max_evidence_chars": 900,
     "max_evidence_items": 10,
+    "provenance_chunk_attach_max": 10,
     "report_max_graph_chain_items": 200,
     "report_max_seed_entities": 15,
     "enable_consistency_check": true,
@@ -198,7 +199,7 @@
     "enabled": true
   },
   "deterministic_routing": {
-    "enabled": false,
+    "enabled": true,
     "classifier": "llm",
     "fail_on_classifier_error": false,
     "hard_gate_missing_deterministic_tools": false,

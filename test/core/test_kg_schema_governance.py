@@ -243,3 +243,46 @@ def test_beam_search_paths_respect_direction() -> None:
     ]
     paths = HippoRAGGraphAdapter._beam_search_paths(relations, seeds=["A", "C"], beam_size=3, max_depth=3)
     assert any(path.get("nodes") == ["A", "B", "C"] for path in paths)
+
+
+def test_finance_insurance_schema_normalizes_common_english_policy_fields() -> None:
+    schema = schema_from_dict(
+        {
+            "version": "v1",
+            "default_domain": "finance_insurance",
+            "domains": {
+                "finance_insurance": {
+                    "unknown_predicate_policy": "reject",
+                    "allowed_relations": [
+                        "HAS_POLICY",
+                        "HAS_CLAUSE",
+                        "HAS_COVERAGE",
+                        "HAS_BENEFIT",
+                        "HAS_SUM_INSURED",
+                        "HAS_PREMIUM",
+                        "HAS_TERM",
+                        "HAS_CURRENCY",
+                        "HAS_PREMIUM_PAYMENT_TERM",
+                        "HAS_INTEREST_RATE",
+                        "HAS_REFUND",
+                        "HAS_CASH_VALUE",
+                    ],
+                    "relation_aliases": {
+                        "policy currency": "HAS_CURRENCY",
+                        "premium payment term": "HAS_PREMIUM_PAYMENT_TERM",
+                        "guaranteed preferential interest rate": "HAS_INTEREST_RATE",
+                        "premium refund": "HAS_REFUND",
+                        "sum assured": "HAS_SUM_INSURED",
+                        "cash value": "HAS_CASH_VALUE",
+                    },
+                }
+            },
+        }
+    )
+    domain = schema.for_domain("finance_insurance")
+    assert domain.normalize_predicate("Policy currency") == "HAS_CURRENCY"
+    assert domain.normalize_predicate("premium payment term") == "HAS_PREMIUM_PAYMENT_TERM"
+    assert domain.normalize_predicate("Guaranteed Preferential Interest Rate") == "HAS_INTEREST_RATE"
+    assert domain.normalize_predicate("Premium Refund") == "HAS_REFUND"
+    assert domain.normalize_predicate("Sum assured") == "HAS_SUM_INSURED"
+    assert domain.normalize_predicate("cash value") == "HAS_CASH_VALUE"

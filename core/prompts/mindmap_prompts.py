@@ -63,8 +63,8 @@ MINDMAP_MERGE_SYSTEM_PROMPT_EN: Final[str] = (
     "You are an experienced knowledge engineer. Merge multiple partial mind maps into one coherent global mind map."
 )
 
-MINDMAP_MERGE_USER_PROMPT_TEMPLATE_EN: Final[str] = """We extracted multiple mind map fragments (TSV) from the document '{filename}'.
-Please merge them into a single global mind map, still using hierarchical TSV numbering.
+MINDMAP_MERGE_USER_PROMPT_TEMPLATE_EN: Final[str] = """We are building a global mind map for the document '{filename}' from multiple segments.
+Each segment provides a content summary and may also include a partial mind map fragment (TSV). If a segment has no TSV fragment, infer structure from the content summary.
 
 Output requirements:
 1) Use numbering like 1, 1.1, 1.1.1 to represent hierarchy; numbering must be consistent.
@@ -73,7 +73,7 @@ Output requirements:
 4) Lower-level nodes should cover key information concisely and accurately.
 5) If there are duplicates or conflicts, reconcile them and keep the structure coherent.
 
-Mind map fragments:
+Segments:
 {sections_text}
 
 Now output the merged TSV mind map:
@@ -85,4 +85,3 @@ def build_mindmap_merge_user_prompt(*, filename: str, sections_text: str) -> str
         filename=str(filename or "").strip(),
         sections_text=str(sections_text or "").strip(),
     )
-

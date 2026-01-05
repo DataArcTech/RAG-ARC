@@ -6,6 +6,7 @@ from .bridge_lookup import BridgeLookupTool
 from .path_cache import PathCacheTool
 from .graph_ops import (
     GraphAggregateTool,
+    GraphEntityConceptsTool,
     GraphExpandTermsTool,
     GraphFactsByTypeTool,
     GraphIntersectionTool,
@@ -13,6 +14,7 @@ from .graph_ops import (
     GraphNeighborsTool,
     GraphPathExistsTool,
     GraphRuleCheckTool,
+    GraphSchemaNodesTool,
     GraphSdfChildrenTool,
     GraphSdfDependenciesTool,
     GraphSetDifferenceTool,
@@ -27,7 +29,9 @@ __all__ = [
     "GraphIntersectionTool",
     "GraphSetDifferenceTool",
     "GraphAggregateTool",
+    "GraphEntityConceptsTool",
     "GraphRuleCheckTool",
+    "GraphSchemaNodesTool",
     "GraphPathExistsTool",
     "GraphNeighborsTool",
     "GraphFactsByTypeTool",

@@ -2,6 +2,25 @@
 
 # Keep prompt text centralized (non-negotiable): do not scatter prompt strings in business code.
 
+HIPPORAG2_TEMPORAL_SYSTEM_EN = """You are an information extraction assistant. Extract business-time (effective/validity) fields from the given text.
+
+Requirements:
+- Output ONLY JSON (no explanations, no Markdown).
+- Use ISO-8601: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS+00:00 (date-only is preferred).
+- If uncertain, output null. Do not guess.
+- If multiple dates exist, prioritize the effective/validity window for clauses/rules/policies/versions.
+
+JSON schema:
+{
+  "effective_date": string|null,
+  "valid_from": string|null,
+  "valid_to": string|null,
+  "confidence": number
+}
+
+confidence is 0~1 (higher means more certain).
+"""
+
 HIPPORAG2_TEMPORAL_SYSTEM_ZH = """你是一个信息抽取助手。你的任务是从给定文本中抽取“业务时间”（生效/有效期）信息。
 
 要求：
@@ -28,3 +47,9 @@ HIPPORAG2_TEMPORAL_PROMPT_ZH = """{system}
 {passage}
 """
 
+
+HIPPORAG2_TEMPORAL_PROMPT_EN = """{system}
+
+Text:
+{passage}
+"""
