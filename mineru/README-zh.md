@@ -1,6 +1,6 @@
 ## MinerU 文件解析服务（独立部署）
 
-本目录提供一个**独立于 RAG-ARC** 的 MinerU 多模态文件解析服务（FastAPI Server + Client），用于在 GPU 机器上运行解析，并通过 HTTP/SSH 隧道在本地调用。
+本目录提供一个可**独立部署**的 MinerU 多模态文件解析服务（FastAPI Server + Client），用于在 GPU 机器上运行解析，并通过 HTTP/SSH 隧道在本地调用；同时也可以作为 RAG-ARC 的远程解析后端。
 
 - **与 RAG-ARC 运行环境/依赖隔离**：MinerU 的安装与配置请参考上游官方教程，本目录只负责“封装成服务”。
 - 适用于“本地算力不足，把解析服务迁移到任意服务器上运行”的场景。
@@ -99,6 +99,15 @@ python mineru/mineru_client.py bench \
 ```
 
 ---
+
+## RAG-ARC 集成方式
+
+RAG-ARC 可通过 `.env` 把 PDF/图片解析切到该服务：
+
+- 设置 `PARSER_PARSE_MODE=mineru`
+- 设置 `MINERU_SERVER_URL=http://<server-ip>:8899`（可选 `MINERU_TIMEOUT_S=900`）
+
+解析产物会被镜像到 `PARSER_OUTPUT_DIR`（默认 `./data/parsed_files/mineru/...`），与 RAG-ARC 原有解析输出目录结构保持一致。
 
 ## 通过 SSH 隧道调用（推荐）
 
@@ -269,4 +278,3 @@ Client 可把整个任务目录同步到：
 - Client 统一通过 `MINERU_SERVER_URL` 配置服务地址，避免写死 IP。
 - 多 worker 场景建议使用 `CHAT_API_KEY_FILE` 管理密钥（避免把 key 写进配置文件/历史记录）。
 - `--workers > 1` 时会在 `mineru/.tmp/` 写入 config JSON 供 worker 进程读取，请保证该目录可写且权限受控。
-

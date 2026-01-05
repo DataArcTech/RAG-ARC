@@ -2,8 +2,9 @@
 
 This directory contains a standalone FastAPI service + clients that wrap the upstream [MinerU](https://github.com/opendatalab/MinerU) multimodal parser.
 
-- It is **independent from RAG-ARC** (imports, environment, deployment, and runtime output directories).
+- It is **deployable independently from RAG-ARC** (imports, environment, deployment).
 - It is designed to run on a separate GPU machine and be accessed from your laptop via `MINERU_SERVER_URL` or an SSH tunnel.
+- RAG-ARC can use it as a remote PDF/image parsing backend via `.env` (see “RAG-ARC Integration” below).
 
 ---
 
@@ -109,6 +110,15 @@ python mineru/mineru_client.py parse --file demo.pdf --output-dir ./mineru_clien
 ```
 
 ---
+
+## RAG-ARC Integration
+
+RAG-ARC can route PDF/image parsing to this service:
+
+- Set `PARSER_PARSE_MODE=mineru`
+- Set `MINERU_SERVER_URL=http://<server-ip>:8899` (and optionally `MINERU_TIMEOUT_S=900`)
+
+Parsed outputs are mirrored under `PARSER_OUTPUT_DIR` (default `./data/parsed_files/mineru/...`) to match the existing RAG-ARC parser artifact layout.
 
 ## HTTP API (Server)
 
@@ -267,4 +277,3 @@ The client can mirror the entire task directory to:
 - Configure the client via `MINERU_SERVER_URL` (no hard-coded IPs).
 - Store secrets in files (`CHAT_API_KEY_FILE`) instead of inline env vars if you use multiple workers.
 - For `--workers > 1`, a config JSON is written under `mineru/.tmp/` to share settings with worker processes.
-

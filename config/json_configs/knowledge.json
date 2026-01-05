@@ -64,7 +64,7 @@
         },
         "parser_config": {
             "type": "parser_combinator",
-            "base_output_dir": "./data/parsed_files",
+            "base_output_dir": "${PARSER_OUTPUT_DIR}",
             "ocr_parser": {
                 "type": "vlm_ocr_parser",
                 "vlm_ocr": {
@@ -75,6 +75,9 @@
                     "temperature": 0.0
                 },
                 "num_threads": 4
+            },
+            "mineru_parser": {
+                "type": "mineru_parser"
             },
             "native_parser": {
                 "type": "native_parser"

@@ -21,6 +21,8 @@ ENV_DEFAULTS: dict[str, str] = {
     "FILE_STORE_BASE_PATH": "./data/file_store",
     "PARSED_CONTENT_STORE_BASE_PATH": "./data/parsed_content_store",
     "CHUNK_STORE_BASE_PATH": "./data/chunk_store",
+    # Parser output root (controls native/dots_ocr/vlm_ocr/mineru subfolders).
+    "PARSER_OUTPUT_DIR": "./data/parsed_files",
 }
 
 # Missing placeholders that should not produce warnings because downstream config has safe defaults.

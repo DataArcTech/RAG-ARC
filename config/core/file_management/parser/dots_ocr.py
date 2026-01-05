@@ -1,3 +1,4 @@
+import os
 from typing import Literal, Annotated, Optional, Any
 from pydantic import Field
 from framework.config import AbstractConfig
@@ -5,12 +6,17 @@ from core.file_management.parser.dots_ocr import DotsOCRParser
 from config.encapsulation.llm.parse.dots_ocr import DotsOCRConfig
 
 
+def _default_dotsocr_output_dir() -> Optional[str]:
+    value = str(os.getenv("DOTSOCR_OUTPUT_DIR", "") or "").strip()
+    return value or None
+
+
 class DotsOCRParserConfig(AbstractConfig):
     """Configuration for DotsOCR Parser (Core Layer)"""
     type: Literal["dots_ocr_parser"] = "dots_ocr_parser"
 
     output_dir: Optional[str] = Field(
-        default=None,
+        default_factory=_default_dotsocr_output_dir,
         description="Output directory for OCR artifacts. When using ParserCombinator this is set automatically.",
     )
 

@@ -292,6 +292,19 @@ RAG-ARC使用模块化配置系统。关键配置文件位于`config/json_config
 
 如果想进一步自定义流程，可在 `.env` 中设置 `RAG_INFERENCE_CONFIG_PATH`、`KNOWLEDGE_CONFIG_PATH` 指向你自己的 JSON 文件。
 
+### 📄 PDF / 图片解析方式
+
+RAG-ARC 支持通过 `.env` 切换 PDF/图片解析方式：
+
+- `PARSER_PARSE_MODE=native`（默认）：不做 OCR；仅对 PDF 做文本抽取（图片不支持）。
+- `PARSER_PARSE_MODE=dotsocr`：使用本地 DotsOCR 做 OCR。
+- `PARSER_PARSE_MODE=mineru`（推荐）：使用远程 MinerU 服务进行版面/多模态解析。
+
+使用 MinerU 时：
+
+- 设置 `MINERU_SERVER_URL`（例如 `http://127.0.0.1:8899`），可选 `MINERU_TIMEOUT_S=900`。
+- 解析产物会落在 `PARSER_OUTPUT_DIR`（默认 `./data/parsed_files/mineru/...`），与原有解析输出目录结构保持一致。
+
 如需直接切换官方提供的两套配置，可设置 `MODEL_PROFILE=api` 或 `MODEL_PROFILE=local`（或自行指定配置文件路径）。
 
 **⚠️ 重要提示：使用Docker部署时**，如果更改了模型提供商（例如从`openai`切换到`huggingface`，或更改`MODEL_PROFILE`），您**必须重新构建Docker镜像**才能应用更改：

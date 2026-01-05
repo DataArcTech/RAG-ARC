@@ -90,29 +90,50 @@ class ParserCombinator(AbstractModule):
             subdir = getattr(self.config, "dots_ocr_output_subdir", None)
         elif token == "vlm_ocr_parser":
             subdir = getattr(self.config, "vlm_ocr_output_subdir", None)
+        elif token == "mineru_parser":
+            subdir = getattr(self.config, "mineru_output_subdir", None)
         else:
             raise ValueError(f"Unknown OCR parser type '{token}'")
         if not isinstance(subdir, str) or not subdir.strip():
             raise ValueError(f"ParserCombinator config missing output subdir for OCR parser type '{token}'")
         return subdir
 
+    @staticmethod
+    def _build_extension_mapping_from_parsers(
+        *,
+        ocr_parser: Optional[AbstractParser],
+        native_parser: Optional[AbstractParser],
+    ) -> Dict[str, Tuple[str, AbstractParser]]:
+        """
+        Build mapping from file extensions to parsers.
+
+        Precedence: OCR overrides native for overlapping extensions (e.g., .pdf).
+        """
+        mapping: Dict[str, Tuple[str, AbstractParser]] = {}
+
+        if native_parser:
+            native_extensions = native_parser.get_supported_extensions()
+            for ext in native_extensions:
+                mapping[ext] = ("native", native_parser)
+
+        if ocr_parser:
+            ocr_extensions = ocr_parser.get_supported_extensions()
+            for ext in ocr_extensions:
+                mapping[ext] = ("ocr", ocr_parser)
+
+        return mapping
+
     def _build_extension_mapping(self):
         """Build mapping from file extensions to parsers"""
-        self.extension_to_parser: Dict[str, Tuple[str, AbstractParser]] = {}
+        self.extension_to_parser = self._build_extension_mapping_from_parsers(
+            ocr_parser=self.ocr_parser,
+            native_parser=self.native_parser,
+        )
 
-        # Map OCR parser extensions
-        if self.ocr_parser:
-            ocr_extensions = self.ocr_parser.get_supported_extensions()
-            for ext in ocr_extensions:
-                self.extension_to_parser[ext] = ('ocr', self.ocr_parser)
-            logger.info(f"OCR parser supports: {ocr_extensions}")
-
-        # Map Native parser extensions
         if self.native_parser:
-            native_extensions = self.native_parser.get_supported_extensions()
-            for ext in native_extensions:
-                self.extension_to_parser[ext] = ('native', self.native_parser)
-            logger.info(f"Native parser supports: {native_extensions}")
+            logger.info(f"Native parser supports: {self.native_parser.get_supported_extensions()}")
+        if self.ocr_parser:
+            logger.info(f"OCR parser supports: {self.ocr_parser.get_supported_extensions()}")
 
         # Log all supported extensions
         all_extensions = list(self.extension_to_parser.keys())
