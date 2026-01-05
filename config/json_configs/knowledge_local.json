@@ -64,7 +64,7 @@
         },
         "parser_config": {
             "type": "parser_combinator",
-            "base_output_dir": "./data/parsed_files",
+            "base_output_dir": "${PARSER_OUTPUT_DIR}",
             "ocr_parser": {
                 "type": "dots_ocr_parser",
                 "dots_ocr": {
@@ -76,6 +76,9 @@
                     "device": "${DEVICE}"
                 },
                 "num_threads": 4
+            },
+            "mineru_parser": {
+                "type": "mineru_parser"
             },
             "native_parser": {
                 "type": "native_parser"

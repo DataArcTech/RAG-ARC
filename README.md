@@ -276,6 +276,19 @@ Each capability can independently use either the OpenAI API or local models—co
 
 Each provider falls back to `OPENAI_API_KEY` / `OPENAI_BASE_URL` when its dedicated key is empty, and you can point `RAG_INFERENCE_CONFIG_PATH` / `KNOWLEDGE_CONFIG_PATH` to fully customized JSON files.
 
+### 📄 PDF / Image Parse Mode
+
+RAG-ARC supports switching the PDF/image parsing backend via `.env`:
+
+- `PARSER_PARSE_MODE=native` (default): no OCR; extract text from PDF only (images are not supported).
+- `PARSER_PARSE_MODE=dotsocr`: local DotsOCR OCR.
+- `PARSER_PARSE_MODE=mineru` (recommended): remote MinerU service for better layout + multimodal parsing.
+
+When using MinerU:
+
+- Set `MINERU_SERVER_URL` (e.g. `http://127.0.0.1:8899`) and optionally `MINERU_TIMEOUT_S=900`.
+- Outputs are stored under `PARSER_OUTPUT_DIR` (default `./data/parsed_files/mineru/...`) to match the existing parser artifact layout.
+
 To switch the bundled pipeline between API and local defaults without editing JSON, set `MODEL_PROFILE=api` or `MODEL_PROFILE=local` in `.env` (or point `*_CONFIG_PATH` to your own files).
 
 **⚠️ IMPORTANT: When using Docker deployment**, if you change model providers (e.g., switching from `openai` to `huggingface`, or changing `MODEL_PROFILE`), you **must rebuild the Docker image** to apply the changes:

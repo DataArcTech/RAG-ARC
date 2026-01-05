@@ -3,10 +3,6 @@ Prompt templates used by MinerU server.
 
 Centralized here to avoid scattering prompt strings across business logic.
 """
-
-from __future__ import annotations
-
-
 def build_caption_system_prompt(*, language: str, attempt: int, fixed_context: str = "") -> str:
     """
     Build the system prompt for multimodal captioning.
