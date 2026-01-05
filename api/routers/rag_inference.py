@@ -27,6 +27,12 @@ from api.sse import (
     openai_chat_completion_chunk,
     sse_done,
     sse_json,
+    sse_json_wrapped,
+)
+from api.routers.chatbot import (
+    _sanitize_title,
+    _fallback_title,
+    _generate_title_messages,
 )
 from encapsulation.data_model.orm_models import ChatMessage, User
 from encapsulation.data_model.schema import Chunk, GraphData
@@ -47,6 +53,31 @@ logger.setLevel(logging.INFO)
 
 
 router = APIRouter(prefix="/rag_inference", tags=["rag_inference"])
+
+
+# Title生成函数（复用chatbot.py中的函数）
+async def _generate_title_via_llm(
+    rag_inference_handler: RAGInference,
+    user_text: str,
+    assistant_text: str,
+) -> str:
+    """生成标题，复用chatbot.py中的辅助函数"""
+    llm = getattr(rag_inference_handler, "llm", None)
+    if llm is None:
+        return _fallback_title(user_text)
+
+    messages = _generate_title_messages(user_text, assistant_text)
+
+    def _run():
+        return llm.chat(messages)
+
+    try:
+        raw = await get_thread_pool().run_blocking(_run)
+    except Exception:  # noqa: BLE001
+        return _fallback_title(user_text)
+
+    title = _sanitize_title(str(raw or ""))
+    return title or _fallback_title(user_text)
 
 registrator = Register()
 
@@ -365,13 +396,14 @@ async def stream_chat_sse(
         progress_seq = 0
 
         # Qwen/OpenAI-compatible streams typically start with a chunk that sets role=assistant.
-        yield sse_json(
+        yield sse_json_wrapped(
             openai_chat_completion_chunk(
                 chunk_id=chunk_id,
                 model=model_name,
                 created=created,
                 delta=delta_envelope(role="assistant", content=""),
-            )
+            ),
+            request_id=request_id
         )
 
         user_message = ChatMessage(
@@ -389,6 +421,13 @@ async def stream_chat_sse(
         
         # Exclude the message we just created (avoid duplication).
         history_messages = [msg for msg in history_messages if msg.id != user_message.id]
+        
+        # 判断是否是第一轮对话（检查是否有assistant消息）
+        first_turn = not any(
+            msg.content.get("role") == "assistant" 
+            for msg in history_messages 
+            if isinstance(msg.content, dict)
+        )
         
         # Limit history length (similar to chatbot.py `_normalize_history`).
         # Default: keep the last 5 turns (10 messages: user + assistant).
@@ -500,13 +539,14 @@ async def stream_chat_sse(
                         },
                     }
                 ]
-                yield sse_json(
+                yield sse_json_wrapped(
                     openai_chat_completion_chunk(
                         chunk_id=chunk_id,
                         model=model_name,
                         created=created,
                         delta=delta_envelope(role=None, tool_calls=tool_calls),
-                    )
+                    ),
+                    request_id=request_id
                 )
                 continue
 
@@ -516,19 +556,25 @@ async def stream_chat_sse(
                     continue
                 for delta_piece in iter_text_deltas(piece):
                     response_parts.append(delta_piece)
-                    yield sse_json(
+                    yield sse_json_wrapped(
                         openai_chat_completion_chunk(
                             chunk_id=chunk_id,
                             model=model_name,
                             created=created,
                             delta=delta_envelope(role=None, content=delta_piece),
-                        )
+                        ),
+                        request_id=request_id
                     )
                     await asyncio.sleep(0)
                 continue
 
         if stream_error[0] is not None:
-            yield sse_json({"error": {"message": str(stream_error[0])}})
+            yield sse_json_wrapped(
+                {"error": {"message": str(stream_error[0])}},
+                request_id=request_id,
+                code=500,
+                message="error"
+            )
             yield sse_done()
             return
 
@@ -586,6 +632,30 @@ async def stream_chat_sse(
             message_handler.create_message, assistant_message
         )
 
+        # 如果是第一轮对话，生成并发送title（参考chatbot.py的实现）
+        if first_turn:
+            try:
+                title = await _generate_title_via_llm(
+                    rag_inference_handler,
+                    query.strip(),
+                    assistant_response.strip(),
+                )
+                # 发送title事件（使用统一的StandardResponse格式）
+                yield sse_json_wrapped(
+                    {"type": "title", "title": title},
+                    request_id=request_id
+                )
+                # 更新数据库中的session name字段
+                await get_thread_pool().run_blocking(
+                    get_session_handler().update_session,
+                    session_id,
+                    {"name": title},
+                )
+                logger.info("SSE generated and updated session title: session_id=%s, title=%s", session_id, title)
+            except Exception as exc:
+                logger.warning("Failed to generate title: %s", exc)
+                # title生成失败不影响主流程，继续执行
+
         # Align with WebSocket behavior: always build and return a payload.
         # When evidence/subgraph is requested, include the corresponding fields.
         evidence = None
@@ -623,23 +693,25 @@ async def stream_chat_sse(
                 },
             }
         ]
-        yield sse_json(
+        yield sse_json_wrapped(
             openai_chat_completion_chunk(
                 chunk_id=chunk_id,
                 model=model_name,
                 created=created,
                 delta=delta_envelope(role=None, tool_calls=tool_calls),
-            )
+            ),
+            request_id=request_id
         )
 
-        yield sse_json(
+        yield sse_json_wrapped(
             openai_chat_completion_chunk(
                 chunk_id=chunk_id,
                 model=model_name,
                 created=created,
                 delta=delta_envelope(),
                 finish_reason="stop",
-            )
+            ),
+            request_id=request_id
         )
         yield sse_done()
 
