@@ -86,8 +86,11 @@ class GraphIntersectionTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
-        if not isinstance(adapter, GraphCypherQueryable):
-            return ToolResult(summary="Intersection skipped because the adapter does not support Cypher queries.")
+        if not isinstance(adapter, GraphCypherQueryable) or not adapter.cypher_capable():
+            return ToolResult(
+                summary="Intersection requires a Cypher-capable graph adapter (Neo4j).",
+                diagnostics={"reason": "cypher_unavailable"},
+            )
 
         left = normalize_entity_name(request.extra.get("left"))
         right = normalize_entity_name(request.extra.get("right"))

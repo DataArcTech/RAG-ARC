@@ -16,7 +16,14 @@ import re
 from typing import List, TYPE_CHECKING, Tuple
 
 from core.file_management.extractor.base import ExtractorBase
-from core.file_management.extractor.metadata_keys import BUSINESS_TIME_KEY, MINDMAP_ERROR_KEY, TEMPORAL_ERROR_KEY
+from core.file_management.extractor.metadata_keys import (
+    BUSINESS_TIME_KEY,
+    MINDMAP_ERROR_KEY,
+    SDF_ERROR_KEY,
+    SDF_HS_KEY,
+    SDF_KEY,
+    TEMPORAL_ERROR_KEY,
+)
 from core.prompts.hipporag2_extractor_prompt import (
     HIPPORAG2_NER_SYSTEM, HIPPORAG2_NER_SYSTEM_WITH_TYPES,
     HIPPORAG2_NER_ONE_SHOT_INPUT, HIPPORAG2_NER_ONE_SHOT_OUTPUT,
@@ -31,7 +38,18 @@ from core.prompts.hipporag2_extractor_prompt import (
     HIPPORAG2_MINDMAP_SYSTEM, HIPPORAG2_MINDMAP_ONE_SHOT_INPUT, HIPPORAG2_MINDMAP_ONE_SHOT_OUTPUT, HIPPORAG2_MINDMAP_PROMPT,
     HIPPORAG2_MINDMAP_SYSTEM_ZH, HIPPORAG2_MINDMAP_ONE_SHOT_INPUT_ZH, HIPPORAG2_MINDMAP_ONE_SHOT_OUTPUT_ZH, HIPPORAG2_MINDMAP_PROMPT_ZH
 )
+from core.prompts.hipporag2_sdf_prompt import (
+    HIPPORAG2_SDF_HS_ONE_SHOT_INPUT,
+    HIPPORAG2_SDF_HS_ONE_SHOT_INPUT_ZH,
+    HIPPORAG2_SDF_HS_ONE_SHOT_OUTPUT,
+    HIPPORAG2_SDF_HS_ONE_SHOT_OUTPUT_ZH,
+    HIPPORAG2_SDF_HS_PROMPT,
+    HIPPORAG2_SDF_HS_PROMPT_ZH,
+    HIPPORAG2_SDF_HS_SYSTEM,
+    HIPPORAG2_SDF_HS_SYSTEM_ZH,
+)
 from core.prompts.hipporag2_temporal_prompt import HIPPORAG2_TEMPORAL_PROMPT_ZH, HIPPORAG2_TEMPORAL_SYSTEM_ZH
+from core.knowledge_graph.sdf import hs_to_sdf_schema, parse_hs_blocks
 from encapsulation.data_model.schema import Chunk, GraphData
 
 if TYPE_CHECKING:
@@ -129,6 +147,28 @@ class HippoRAG2Extractor(ExtractorBase):
             if business_time:
                 chunk.metadata[BUSINESS_TIME_KEY] = business_time
 
+        # Stage 5: SDF (process schema) extraction (non-fatal, but must be observable)
+        if bool(getattr(self.config, "enable_sdf_extraction", False)):
+            try:
+                hs_text = await self.extract_sdf_hs(chunk.content)
+                max_events = int(getattr(self.config, "sdf_max_events_per_chunk", 40) or 40)
+                hs_events = parse_hs_blocks(hs_text)[: max(0, max_events)]
+                doc_namespace = str(chunk.metadata.get("source_file_id") or chunk.metadata.get("file_id") or "").strip()
+                sdf = hs_to_sdf_schema(
+                    hs_events=hs_events,
+                    owner_id=str(chunk.owner_id or chunk.metadata.get("owner_id") or "").strip() or None,
+                    doc_namespace=doc_namespace or None,
+                    schema_version="v0",
+                    default_temporal=chunk.metadata.get(BUSINESS_TIME_KEY) if isinstance(chunk.metadata.get(BUSINESS_TIME_KEY), dict) else None,
+                )
+                if sdf:
+                    chunk.metadata[SDF_KEY] = sdf
+                if bool(getattr(self.config, "sdf_store_raw_hs", False)) and hs_text.strip():
+                    chunk.metadata[SDF_HS_KEY] = hs_text
+            except Exception as exc:
+                self.logger.error("Error in SDF extraction: %s", exc, exc_info=True)
+                chunk.metadata[SDF_ERROR_KEY] = {"exception_type": exc.__class__.__name__, "message": str(exc)}
+
         # Convert to GraphData format
         graph = self.build_graph_data(entities, triples)
         if chunk.metadata.get(BUSINESS_TIME_KEY):
@@ -137,6 +177,10 @@ class HippoRAG2Extractor(ExtractorBase):
             graph.metadata[TEMPORAL_ERROR_KEY] = chunk.metadata.get(TEMPORAL_ERROR_KEY)
         if chunk.metadata.get(MINDMAP_ERROR_KEY):
             graph.metadata[MINDMAP_ERROR_KEY] = chunk.metadata.get(MINDMAP_ERROR_KEY)
+        if chunk.metadata.get(SDF_KEY):
+            graph.metadata[SDF_KEY] = chunk.metadata.get(SDF_KEY)
+        if chunk.metadata.get(SDF_ERROR_KEY):
+            graph.metadata[SDF_ERROR_KEY] = chunk.metadata.get(SDF_ERROR_KEY)
         return graph
 
     async def extract_entities(self, text: str) -> List[Tuple[str, str]]:
@@ -494,6 +538,27 @@ class HippoRAG2Extractor(ExtractorBase):
     def build_temporal_prompt(self, text: str) -> str:
         # For now, use the ZH prompt for both languages (the extractor is used heavily for ZH docs).
         return HIPPORAG2_TEMPORAL_PROMPT_ZH.format(system=HIPPORAG2_TEMPORAL_SYSTEM_ZH, passage=text)
+
+    async def extract_sdf_hs(self, text: str) -> str:
+        prompt = self.build_sdf_hs_prompt(text)
+        response = await self.llm.achat([{"role": "user", "content": prompt}])
+        return str(response or "").strip()
+
+    def build_sdf_hs_prompt(self, text: str) -> str:
+        language = self.detect_language(text)
+        if language == "zh":
+            return HIPPORAG2_SDF_HS_PROMPT_ZH.format(
+                system=HIPPORAG2_SDF_HS_SYSTEM_ZH,
+                example_input=HIPPORAG2_SDF_HS_ONE_SHOT_INPUT_ZH,
+                example_output=HIPPORAG2_SDF_HS_ONE_SHOT_OUTPUT_ZH,
+                passage=text,
+            )
+        return HIPPORAG2_SDF_HS_PROMPT.format(
+            system=HIPPORAG2_SDF_HS_SYSTEM,
+            example_input=HIPPORAG2_SDF_HS_ONE_SHOT_INPUT,
+            example_output=HIPPORAG2_SDF_HS_ONE_SHOT_OUTPUT,
+            passage=text,
+        )
 
     @staticmethod
     def _parse_json_object(raw: str) -> dict | None:

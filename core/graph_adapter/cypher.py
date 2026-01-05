@@ -50,6 +50,9 @@ def assert_read_only_cypher(cypher: str) -> None:
 class GraphCypherQueryable(Protocol):
     """Adapters that can execute deterministic Cypher queries against a graph store."""
 
+    def cypher_capable(self) -> bool:
+        """Return True when the adapter is backed by a Cypher-capable graph store (e.g., Neo4j)."""
+
     async def acypher(
         self,
         cypher: str,

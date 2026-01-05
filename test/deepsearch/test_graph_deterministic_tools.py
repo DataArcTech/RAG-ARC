@@ -15,6 +15,8 @@ from core.deepsearch.tools import (
     GraphNeighborsTool,
     GraphPathExistsTool,
     GraphRuleCheckTool,
+    GraphSdfChildrenTool,
+    GraphSdfDependenciesTool,
     GraphSetDifferenceTool,
     GraphTraceToRootTool,
     ToolRunRequest,
@@ -64,6 +66,9 @@ class _StubCypherAdapter:
     async def chain_traverse(self, strategy, *, access_scope=None):  # noqa: ARG002
         return {"strategy": strategy.get("strategy"), "hops": 1, "visited": []}
 
+    def cypher_capable(self) -> bool:
+        return True
+
     async def acypher(self, cypher: str, params=None, *, access_scope=None):  # noqa: ARG002
         text = str(cypher or "")
         if "AS left_fact_ids" in text and "AS right_fact_ids" in text:
@@ -90,6 +95,10 @@ class _StubCypherAdapter:
             return self._rows_by_tool.get("expand_terms", [])
         if "latest_truth" in text or "ORDER BY sort_key DESC" in text:
             return self._rows_by_tool.get("latest_truth", [])
+        if "SDF_HAS_SUBEVENT" in text and "candidate_count AS candidate_count" in text and "c.sdf_event_id AS child_event_id" in text:
+            return self._rows_by_tool.get("sdf_children", [])
+        if "before_list AS before" in text and "SDF_BEFORE" in text:
+            return self._rows_by_tool.get("sdf_dependencies", [])
         return []
 
     def metadata(self):
@@ -255,6 +264,65 @@ async def test_example_01_multi_hop_path_exists() -> None:
     )
     result = await tool.run(req)
     assert "ok=true" in result.summary.lower()
+    assert result.evidences
+
+
+@pytest.mark.asyncio
+async def test_sdf_children_returns_children() -> None:
+    adapter = _StubCypherAdapter(
+        rows_by_tool={
+            "sdf_children": [
+                {
+                    "candidate_count": 1,
+                    "gate": "and",
+                    "child": "生效期校验",
+                    "child_event_id": "sdf-ev-b",
+                    "importance": 1.0,
+                    "source_chunk_ids": ["chunk-a"],
+                }
+            ]
+        }
+    )
+    tool = GraphSdfChildrenTool()
+    req = ToolRunRequest(
+        question="保险责任裁决流程是什么？",
+        plan_step="p-sdf-children",
+        context_evidences=[],
+        adapter=adapter,
+        access_scope=GraphAccessScope(scope_id="owner-1"),
+        extra={"event": "保险责任裁决", "doc_namespace": "doc-1", "limit": 10},
+    )
+    result = await tool.run(req)
+    assert "children=1" in result.summary
+    assert result.evidences
+    assert result.evidences[0].provenance.get("children")
+
+
+@pytest.mark.asyncio
+async def test_sdf_dependencies_returns_neighbors() -> None:
+    adapter = _StubCypherAdapter(
+        rows_by_tool={
+            "sdf_dependencies": [
+                {
+                    "candidate_count": 1,
+                    "before": [{"name": "生效期校验", "event_id": "sdf-ev-b", "source_chunk_ids": ["chunk-a"]}],
+                    "after": [{"name": "除外条款校验", "event_id": "sdf-ev-c", "source_chunk_ids": ["chunk-b"]}],
+                }
+            ]
+        }
+    )
+    tool = GraphSdfDependenciesTool()
+    req = ToolRunRequest(
+        question="哪些步骤在除外条款校验之前/之后？",
+        plan_step="p-sdf-deps",
+        context_evidences=[],
+        adapter=adapter,
+        access_scope=GraphAccessScope(scope_id="owner-1"),
+        extra={"event": "除外条款校验", "doc_namespace": "doc-1", "limit": 10},
+    )
+    result = await tool.run(req)
+    assert "before=1" in result.summary
+    assert "after=1" in result.summary
     assert result.evidences
 
 

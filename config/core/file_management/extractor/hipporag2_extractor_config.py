@@ -62,6 +62,26 @@ class HippoRAG2ExtractorConfig(AbstractConfig):
         description="Whether to extract business-time (effective_date/valid_from/valid_to) via LLM for temporal tools (e.g. latest_truth).",
     )
 
+    enable_sdf_extraction: bool = Field(
+        default=False,
+        description=(
+            "Whether to extract hierarchical process schema (HS) and convert it into an SDF contract "
+            "stored in chunk metadata. Disabled by default for general-domain deployments."
+        ),
+    )
+
+    sdf_store_raw_hs: bool = Field(
+        default=False,
+        description="Whether to store the raw HS text in chunk metadata (`sdf_hs`) in addition to the derived SDF JSON (`sdf`).",
+    )
+
+    sdf_max_events_per_chunk: int = Field(
+        default=40,
+        ge=1,
+        le=300,
+        description="Max HS event blocks to accept per chunk when SDF extraction is enabled.",
+    )
+
     # Optional custom prompts (if user wants to override defaults)
     ner_prompt: Optional[str] = Field(
         default=None,

@@ -1,0 +1,172 @@
+# Finance/Insurance KG Schema (optional)
+#
+# Usage:
+# - Default (open-source): keep `KG_SCHEMA_PATH=./kg_schema.yml` (general-domain, permissive).
+# - Finance/Insurance deployments: set `KG_SCHEMA_PATH=./fin_kg_schema.yml` to enable stricter predicate governance.
+#
+# Notes:
+# - This schema is consumed by the Neo4j HippoRAG store during indexing. It does NOT apply to the igraph store.
+# - Keep this file relatively small and maintainable; grow it via domain eval + regression, not ad-hoc additions.
+
+version: v1
+default_domain: finance_insurance
+
+domains:
+  # Keep a permissive fallback domain so mixed-domain corpora can still be ingested
+  # when a chunk/document explicitly sets `domain=default`.
+  default:
+    entity_aliases: {}
+    entity_suffixes_to_strip: []
+    allowed_relations: []
+    relation_aliases:
+      "located in": LOCATED_IN
+      "is located in": LOCATED_IN
+      "based in": LOCATED_IN
+      "owns": OWNS
+      "owned by": OWNED_BY
+      "part of": PART_OF
+      "has part": HAS_PART
+      "works for": WORKS_FOR
+      "employs": EMPLOYS
+      "supplies": SUPPLIES
+      "produces": PRODUCES
+      "uses": USES
+      "has feature": HAS_FEATURE
+      "has clause": HAS_CLAUSE
+      "has policy": HAS_POLICY
+      "has coverage": HAS_COVERAGE
+      "has benefit": HAS_BENEFIT
+    unknown_predicate_policy: keep
+    unknown_predicate_fallback: RELATED_TO
+    direction_policy: blacklist
+    direction_insensitive_relations:
+      - RELATED_TO
+
+  finance_insurance:
+    # Entity canonicalization helpers (used to populate `entity_canonical_name/key`).
+    # Add project-specific aliases via downstream config management rather than hard-coding here.
+    entity_aliases: {}
+    entity_suffixes_to_strip:
+      - 股份有限公司
+      - 有限公司
+      - 有限责任公司
+      - 集团
+      - 分公司
+      - 支公司
+      - 总公司
+      - 公司
+      - 分行
+      - 支行
+      - 银行
+      - 保险公司
+      - 保险股份有限公司
+      - 保险有限责任公司
+      - 证券股份有限公司
+      - 证券有限公司
+      - 信托有限公司
+      - 基金管理有限公司
+      - corp
+      - inc
+      - ltd
+      - llc
+
+    # Strict predicate governance for finance/insurance QA:
+    # - Unknown predicates are rejected to avoid predicate explosion and ensure deterministic tools can be reused.
+    allowed_relations:
+      - LOCATED_IN
+      - OWNS
+      - OWNED_BY
+      - PARENT_OF
+      - SUBSIDIARY_OF
+      - ACQUIRED
+      - ACQUIRED_BY
+      - INVESTS_IN
+      - INVESTED_BY
+      - GUARANTEES
+      - GUARANTEED_BY
+      - ISSUES
+      - ISSUED_BY
+      - UNDERWRITES
+      - UNDERWRITTEN_BY
+      - HAS_POLICY
+      - HAS_CLAUSE
+      - HAS_COVERAGE
+      - HAS_BENEFIT
+      - HAS_EXCLUSION
+      - HAS_WAITING_PERIOD
+      - HAS_DEDUCTIBLE
+      - HAS_SUM_INSURED
+      - HAS_PREMIUM
+      - HAS_TERM
+      - HAS_LIMIT
+      - APPLIES_TO
+      - EXCLUDES
+      - REQUIRES
+      - EFFECTIVE_FROM
+      - EFFECTIVE_TO
+      - UPDATED_ON
+      - RELATED_TO
+
+    # Raw predicate text -> canonical predicate.
+    # Keys are matched after `text_processing` (lowercase + strip punctuation).
+    relation_aliases:
+      # Ownership / corporate structure
+      "控股": OWNS
+      "持股": OWNS
+      "持有": OWNS
+      "拥有": OWNS
+      "隶属于": SUBSIDIARY_OF
+      "子公司": SUBSIDIARY_OF
+      "母公司": PARENT_OF
+      "收购": ACQUIRED
+      "被收购": ACQUIRED_BY
+      "投资": INVESTS_IN
+      "被投资": INVESTED_BY
+
+      # Insurance contract semantics (high-level)
+      "保单": HAS_POLICY
+      "条款": HAS_CLAUSE
+      "保障": HAS_COVERAGE
+      "保险责任": HAS_COVERAGE
+      "责任": HAS_COVERAGE
+      "给付": HAS_BENEFIT
+      "保险金": HAS_BENEFIT
+      "除外": HAS_EXCLUSION
+      "除外责任": HAS_EXCLUSION
+      "免责": HAS_EXCLUSION
+      "等待期": HAS_WAITING_PERIOD
+      "免赔": HAS_DEDUCTIBLE
+      "免赔额": HAS_DEDUCTIBLE
+      "保额": HAS_SUM_INSURED
+      "保险金额": HAS_SUM_INSURED
+      "保费": HAS_PREMIUM
+      "保险费": HAS_PREMIUM
+      "期限": HAS_TERM
+      "期间": HAS_TERM
+      "限额": HAS_LIMIT
+      "适用": APPLIES_TO
+      "不适用": EXCLUDES
+      "排除": EXCLUDES
+      "要求": REQUIRES
+
+      # Temporal (best-effort, still prefer edge properties valid_from/effective_date)
+      "生效": EFFECTIVE_FROM
+      "生效日": EFFECTIVE_FROM
+      "有效期": EFFECTIVE_TO
+      "更新于": UPDATED_ON
+
+      # Misc
+      "located in": LOCATED_IN
+      "based in": LOCATED_IN
+      "owns": OWNS
+      "owned by": OWNED_BY
+
+    unknown_predicate_policy: reject
+    unknown_predicate_fallback: RELATED_TO
+
+    # Direction semantics:
+    # Use blacklist so most predicates are treated as direction-sensitive unless explicitly listed.
+    direction_policy: blacklist
+    direction_insensitive_relations:
+      - RELATED_TO
+

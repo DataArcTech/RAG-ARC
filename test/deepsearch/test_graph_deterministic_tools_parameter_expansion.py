@@ -26,6 +26,9 @@ class _CaptureCypherAdapter:
     async def chain_traverse(self, strategy, *, access_scope=None):  # noqa: ARG002
         return {"strategy": strategy.get("strategy"), "hops": 1, "visited": []}
 
+    def cypher_capable(self) -> bool:
+        return True
+
     async def acypher(self, cypher: str, params=None, *, access_scope=None):  # noqa: ARG002
         self.last_cypher = str(cypher or "")
         return list(self.rows)
@@ -103,4 +106,3 @@ async def test_facts_by_type_supports_direction_in_param() -> None:
     assert adapter.last_cypher is not None
     assert "MATCH (t:Entity)-[r:RELATES_TO]->(e)" in adapter.last_cypher
     assert "RETURN t.entity_name AS head" in adapter.last_cypher
-

@@ -53,8 +53,11 @@ class GraphFactsByTypeTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
-        if not isinstance(adapter, GraphCypherQueryable):
-            return ToolResult(summary="Facts-by-type skipped because the adapter does not support Cypher queries.")
+        if not isinstance(adapter, GraphCypherQueryable) or not adapter.cypher_capable():
+            return ToolResult(
+                summary="Facts-by-type requires a Cypher-capable graph adapter (Neo4j).",
+                diagnostics={"reason": "cypher_unavailable"},
+            )
 
         entity_type = str(request.extra.get("entity_type") or "").strip()
         if not entity_type:
@@ -200,8 +203,11 @@ class GraphExpandTermsTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
-        if not isinstance(adapter, GraphCypherQueryable):
-            return ToolResult(summary="Expand terms skipped because the adapter does not support Cypher queries.")
+        if not isinstance(adapter, GraphCypherQueryable) or not adapter.cypher_capable():
+            return ToolResult(
+                summary="Expand terms requires a Cypher-capable graph adapter (Neo4j).",
+                diagnostics={"reason": "cypher_unavailable"},
+            )
 
         concept = normalize_entity_name(request.extra.get("concept"))
         if not concept:

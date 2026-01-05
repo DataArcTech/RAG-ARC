@@ -82,6 +82,35 @@ class PrunedHippoRAGNeo4jConfig(AbstractConfig):
         description="Max mindmap nodes per chunk to convert into SchemaNode nodes when enable_schema_layer_nodes is true.",
     )
 
+    enable_sdf_schema: bool = Field(
+        default=False,
+        description=(
+            "Persist SDF process schema nodes into Neo4j (SDFEvent + SDF_BEFORE/HAS_SUBEVENT). "
+            "Disabled by default for general-domain deployments."
+        ),
+    )
+
+    sdf_max_events_per_chunk: int = Field(
+        default=80,
+        ge=1,
+        le=2000,
+        description="Max SDF events per chunk to persist when enable_sdf_schema is true.",
+    )
+
+    sdf_max_relations_per_chunk: int = Field(
+        default=200,
+        ge=0,
+        le=5000,
+        description="Max SDF relations per chunk to persist when enable_sdf_schema is true.",
+    )
+
+    sdf_provenance_max_source_chunks: int = Field(
+        default=50,
+        ge=0,
+        le=1000,
+        description="Max chunk ids to retain per SDF node/edge for provenance (`source_chunk_ids`). 0 disables storage.",
+    )
+
     # Embedding model configuration
     embedding: Annotated[
         Union[QwenEmbeddingConfig, OpenAIEmbeddingConfig],

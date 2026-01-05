@@ -59,8 +59,11 @@ class GraphPathExistsTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
-        if not isinstance(adapter, GraphCypherQueryable):
-            return ToolResult(summary="Path query skipped because the adapter does not support Cypher queries.")
+        if not isinstance(adapter, GraphCypherQueryable) or not adapter.cypher_capable():
+            return ToolResult(
+                summary="Path query requires a Cypher-capable graph adapter (Neo4j).",
+                diagnostics={"reason": "cypher_unavailable"},
+            )
 
         source = normalize_entity_name(request.extra.get("source"))
         target = normalize_entity_name(request.extra.get("target"))
@@ -205,8 +208,11 @@ class GraphNeighborsTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
-        if not isinstance(adapter, GraphCypherQueryable):
-            return ToolResult(summary="Neighbors skipped because the adapter does not support Cypher queries.")
+        if not isinstance(adapter, GraphCypherQueryable) or not adapter.cypher_capable():
+            return ToolResult(
+                summary="Neighbors query requires a Cypher-capable graph adapter (Neo4j).",
+                diagnostics={"reason": "cypher_unavailable"},
+            )
 
         entity = normalize_entity_name(request.extra.get("entity"))
         if not entity:
@@ -339,8 +345,11 @@ class GraphTraceToRootTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
-        if not isinstance(adapter, GraphCypherQueryable):
-            return ToolResult(summary="Trace-to-root skipped because the adapter does not support Cypher queries.")
+        if not isinstance(adapter, GraphCypherQueryable) or not adapter.cypher_capable():
+            return ToolResult(
+                summary="Trace-to-root query requires a Cypher-capable graph adapter (Neo4j).",
+                diagnostics={"reason": "cypher_unavailable"},
+            )
 
         leaf = normalize_entity_name(request.extra.get("leaf"))
         if not leaf:

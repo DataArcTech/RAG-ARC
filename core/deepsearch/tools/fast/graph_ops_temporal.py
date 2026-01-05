@@ -41,8 +41,11 @@ class GraphLatestTruthTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
-        if not isinstance(adapter, GraphCypherQueryable):
-            return ToolResult(summary="Latest truth skipped because the adapter does not support Cypher queries.")
+        if not isinstance(adapter, GraphCypherQueryable) or not adapter.cypher_capable():
+            return ToolResult(
+                summary="Latest truth requires a Cypher-capable graph adapter (Neo4j).",
+                diagnostics={"reason": "cypher_unavailable"},
+            )
 
         topic = normalize_entity_name(request.extra.get("topic"))
         if not topic:

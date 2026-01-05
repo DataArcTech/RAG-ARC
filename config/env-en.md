@@ -112,7 +112,7 @@ How secrets flow into configs:
 | `BM25_INDEX_PATH` | `./data/unified_bm25_index` | Unified BM25 index directory. |
 | `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | Graph index / embedding cache directory (Neo4j HippoRAG). |
 | `GRAPH_INDEX_NAME` | `index` | Graph index file name prefix. |
-| `KG_SCHEMA_PATH` | `./kg_schema.yml` | KG schema YAML path for Neo4j HippoRAG (predicate governance + direction-sensitive set). |
+| `KG_SCHEMA_PATH` | `./kg_schema.yml` | KG schema YAML path for Neo4j HippoRAG (predicate governance + direction-sensitive set). Optional: `./fin_kg_schema.yml` for finance/insurance deployments. |
 
 Notes:
 - **FAISS fingerprint guard**: the FAISS `.pkl` metadata stores an `embedding_fingerprint` (provider/model/dim). If you switch embedding models/dimensions, set a new `FAISS_INDEX_PATH` (recommended) or rebuild the index; otherwise the system will fail-fast to avoid silent corruption.

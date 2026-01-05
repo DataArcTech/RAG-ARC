@@ -60,8 +60,11 @@ class GraphSetDifferenceTool(GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
-        if not isinstance(adapter, GraphCypherQueryable):
-            return ToolResult(summary="Set difference skipped because the adapter does not support Cypher queries.")
+        if not isinstance(adapter, GraphCypherQueryable) or not adapter.cypher_capable():
+            return ToolResult(
+                summary="Set difference requires a Cypher-capable graph adapter (Neo4j).",
+                diagnostics={"reason": "cypher_unavailable"},
+            )
 
         excludes_raw = request.extra.get("exclude") or []
         if isinstance(excludes_raw, str):
