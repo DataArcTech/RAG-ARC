@@ -9,7 +9,9 @@ from fastapi import (
     Body,
 )
 import asyncio
+import logging
 import os
+import re
 import time
 import uuid
 from typing import Annotated, Optional, List, Dict, Any, Tuple, Literal
@@ -56,6 +58,8 @@ from api.routers.knowledge_models import (
 )
 from api.routers.knowledge_streaming import stream_events_redis
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/knowledge", tags=["files"])
 
 registrator = Register()
@@ -96,6 +100,27 @@ def _format_sse(*, event: str, data: Dict[str, Any], event_id: int | None = None
     if event_id is not None:
         payload["id"] = event_id
     return sse_json(payload)
+
+
+def _normalize_file_id(file_id: str) -> str:
+    """Normalize file_id by extracting the last valid UUID if it appears to be duplicated."""
+    # Standard UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (36 chars)
+    if len(file_id) <= 36:
+        return file_id
+    # If length > 36, try to extract valid UUID from the end
+    # Try last 36 characters first (most common case)
+    if len(file_id) >= 36:
+        candidate = file_id[-36:]
+        parts = candidate.split('-')
+        if len(parts) == 5 and [len(p) for p in parts] == [8, 4, 4, 4, 12]:
+            return candidate
+    # Fallback: try from position 29 (for 72-char duplicated UUIDs)
+    if len(file_id) >= 65:
+        candidate = file_id[29:29+36]
+        parts = candidate.split('-')
+        if len(parts) == 5 and [len(p) for p in parts] == [8, 4, 4, 4, 12]:
+            return candidate
+    return file_id
 @router.post(
     "",
     status_code=status.HTTP_200_OK,
@@ -250,7 +275,14 @@ async def download_file(file_id: str, user: Annotated[User | None, Depends(get_c
             detail="Authentication required"
         )
     try:
-        return await get_knowledge_handler().get_file(file_id, user.id)
+        # Log original file_id to debug URL construction issues
+        if len(file_id) > 36:
+            logger.warning(f"Received malformed file_id (length={len(file_id)}): {file_id[:50]}...")
+        # Normalize file_id to handle duplicated UUIDs in URL
+        normalized_file_id = _normalize_file_id(file_id)
+        if normalized_file_id != file_id:
+            logger.info(f"Normalized file_id from {file_id[:50]}... to {normalized_file_id}")
+        return await get_knowledge_handler().get_file(normalized_file_id, user.id)
     except HTTPException:
         # re-raise 404s from underlying module
         raise

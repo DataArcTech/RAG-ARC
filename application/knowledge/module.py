@@ -15,6 +15,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 from fastapi.responses import Response
 from fastapi import UploadFile, HTTPException
 from encapsulation.data_model.orm_models import (
@@ -410,7 +411,9 @@ class Knowledge(KnowledgePermissionMixin, AbstractModule):
             raise HTTPException(status_code=404, detail="File content not found")
 
         download_name = Path(str(metadata.filename or "")).name or "download"
-        headers = {"Content-Disposition": f"attachment; filename=\"{download_name}\""}
+        # Encode filename for Content-Disposition header to handle non-ASCII characters
+        encoded_filename = quote(download_name.encode('utf-8'))
+        headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"}
         return Response(content=content, media_type=metadata.content_type, headers=headers)
 
     async def mark_file_deleted_cli(self, doc_id: str, user_id: uuid.UUID) -> Dict[str, Any]:
