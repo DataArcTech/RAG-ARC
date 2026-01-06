@@ -112,15 +112,15 @@ class DeepSearchState:
         if not payload:
             return
         self.quality_gates.append(payload)
-        record = {"stage": "quality_gated", "timestamp": _utc_now()}
-        record["metadata"] = {
-            "round": payload.get("round"),
-            "passed": payload.get("passed"),
-            "should_iterate": payload.get("should_iterate"),
-            "enabled": payload.get("enabled"),
-        }
-        self.stage_history.append(record)
-        self._emit_stage(record)
+        self.transition_stage(
+            "quality_gated",
+            metadata={
+                "round": payload.get("round"),
+                "passed": payload.get("passed"),
+                "should_iterate": payload.get("should_iterate"),
+                "enabled": payload.get("enabled"),
+            },
+        )
 
     def mark_failed(self, reason: str, *, details: Optional[Dict[str, Any]] = None) -> None:
         entry = {"reason": reason, "timestamp": _utc_now()}

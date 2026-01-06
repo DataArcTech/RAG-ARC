@@ -320,7 +320,7 @@ cp .env.example .env
 | `DEEPSEARCH_TOOL_MCP_SCOPE_TYPE` | `owner` | MCP Scope 类型。 |
 | `DEEPSEARCH_TOOL_MCP_SCOPE_LABELS` | `[]` | MCP Scope 标签列表。 |
 | `DEEPSEARCH_TOOL_MCP_SCOPE_ATTRIBUTES` | `{}` | MCP Scope 拓展属性。 |
-| `DEEPSEARCH_TOOL_MCP_TOOLS` | _(空)_ | MCP 工具白名单，逗号分隔。 |
+| `DEEPSEARCH_TOOL_MCP_TOOLS` | _(空)_ | MCP 工具白名单（逗号分隔）；设置为 `__all__` 可暴露全部内建工具。 |
 | `DEEPSEARCH_ALLOW_SEMANTIC_CHANNEL` | `true` | 是否启用语义通道。 |
 | `DEEPSEARCH_CHAIN_DEPTH` | `4` | 图遍历层数。 |
 | `DEEPSEARCH_TOOL_CONTEXT_MAX_EVIDENCES` | `5` | 工具调用时传入的 `context_evidences` 最大条数（recency 保留最近 K 条，防止 context 爆炸）。 |

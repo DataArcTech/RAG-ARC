@@ -217,7 +217,8 @@ class PrunedHippoRAGNeo4jStore(
         - Note: Facts are now stored as relationships, not nodes
         """
         with self._driver.session(database=self.database) as session:
-            for stmt in self.neo4j_schema_statements():
+            include_existence = self._supports_existence_constraints(session)
+            for stmt in self.neo4j_schema_statements(include_existence_constraints=include_existence):
                 try:
                     session.run(stmt)
                 except Exception as exc:  # noqa: BLE001
@@ -225,7 +226,7 @@ class PrunedHippoRAGNeo4jStore(
             logger.info("Neo4j schema initialized/verified (Facts stored as relationships)")
 
     @staticmethod
-    def neo4j_schema_statements() -> List[str]:
+    def neo4j_schema_statements(*, include_existence_constraints: bool = True) -> List[str]:
         """
         Return Neo4j DDL statements required by HippoRAG + DeepSearch Cypher tools.
 
@@ -234,20 +235,15 @@ class PrunedHippoRAGNeo4jStore(
           by construction (owner-scoped hash) and MERGE patterns. We still create relationship indexes
           and existence constraints for query stability and diagnostics.
         """
-        return [
+        statements = [
             # Chunk nodes
             "CREATE CONSTRAINT chunk_id_unique IF NOT EXISTS FOR (c:Chunk) REQUIRE c.chunk_id IS UNIQUE",
-            "CREATE CONSTRAINT chunk_owner_required IF NOT EXISTS FOR (c:Chunk) REQUIRE c.owner_id IS NOT NULL",
             "CREATE INDEX chunk_owner IF NOT EXISTS FOR (c:Chunk) ON (c.owner_id)",
             # Entity nodes
             "CREATE CONSTRAINT entity_id_unique IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_id IS UNIQUE",
-            "CREATE CONSTRAINT entity_owner_required IF NOT EXISTS FOR (e:Entity) REQUIRE e.owner_id IS NOT NULL",
             # Legacy constraint (owner_id, entity_name) prevented representing same-name different-type entities.
             "DROP CONSTRAINT entity_owner_name_unique IF EXISTS",
-            "CREATE CONSTRAINT entity_type_required IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_type IS NOT NULL",
-            "CREATE CONSTRAINT entity_type_key_required IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_type_key IS NOT NULL",
             "CREATE CONSTRAINT entity_owner_name_type_unique IF NOT EXISTS FOR (e:Entity) REQUIRE (e.owner_id, e.entity_name_normalized, e.entity_type_key) IS UNIQUE",
-            "CREATE CONSTRAINT entity_name_normalized_required IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_name_normalized IS NOT NULL",
             "CREATE INDEX entity_name IF NOT EXISTS FOR (e:Entity) ON (e.entity_name)",
             "CREATE INDEX entity_owner_name IF NOT EXISTS FOR (e:Entity) ON (e.owner_id, e.entity_name)",
             "CREATE INDEX entity_owner_name_normalized IF NOT EXISTS FOR (e:Entity) ON (e.owner_id, e.entity_name_normalized)",
@@ -256,37 +252,70 @@ class PrunedHippoRAGNeo4jStore(
             "CREATE INDEX entity_owner_canonical_name IF NOT EXISTS FOR (e:Entity) ON (e.owner_id, e.entity_canonical_name)",
             "CREATE INDEX entity_owner_canonical_key IF NOT EXISTS FOR (e:Entity) ON (e.owner_id, e.entity_canonical_key)",
             # Relationships: MENTIONS
-            "CREATE CONSTRAINT mentions_owner_required IF NOT EXISTS FOR ()-[r:MENTIONS]-() REQUIRE r.owner_id IS NOT NULL",
             "CREATE INDEX mentions_owner IF NOT EXISTS FOR ()-[r:MENTIONS]-() ON (r.owner_id)",
             # Relationships: RELATES_TO (facts)
-            "CREATE CONSTRAINT relates_owner_required IF NOT EXISTS FOR ()-[r:RELATES_TO]-() REQUIRE r.owner_id IS NOT NULL",
-            "CREATE CONSTRAINT relates_fact_id_required IF NOT EXISTS FOR ()-[r:RELATES_TO]-() REQUIRE r.fact_id IS NOT NULL",
-            "CREATE CONSTRAINT relates_predicate_required IF NOT EXISTS FOR ()-[r:RELATES_TO]-() REQUIRE r.predicate IS NOT NULL",
             "CREATE INDEX relates_fact_id IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.fact_id)",
             "CREATE INDEX relates_owner_fact_id IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.owner_id, r.fact_id)",
             "CREATE INDEX relates_owner_predicate IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.owner_id, r.predicate)",
             # Relationships: SIMILAR_TO (synonymy)
-            "CREATE CONSTRAINT similar_owner_required IF NOT EXISTS FOR ()-[r:SIMILAR_TO]-() REQUIRE r.owner_id IS NOT NULL",
             "CREATE INDEX similar_owner IF NOT EXISTS FOR ()-[r:SIMILAR_TO]-() ON (r.owner_id)",
             # Nodes: KG ingest metadata (per owner).
             "CREATE CONSTRAINT kg_ingest_meta_owner_unique IF NOT EXISTS FOR (m:KGIngestMeta) REQUIRE m.owner_id IS UNIQUE",
             # Nodes: canonical entity keys (queryable alias/canonicalization layer).
             "CREATE CONSTRAINT entity_canonical_id_unique IF NOT EXISTS FOR (c:EntityCanonical) REQUIRE c.canonical_id IS UNIQUE",
-            "CREATE CONSTRAINT entity_canonical_owner_required IF NOT EXISTS FOR (c:EntityCanonical) REQUIRE c.owner_id IS NOT NULL",
-            "CREATE CONSTRAINT entity_canonical_key_required IF NOT EXISTS FOR (c:EntityCanonical) REQUIRE c.canonical_key IS NOT NULL",
             "CREATE INDEX entity_canonical_owner_key IF NOT EXISTS FOR (c:EntityCanonical) ON (c.owner_id, c.canonical_key)",
             "CREATE INDEX entity_canonical_owner_name IF NOT EXISTS FOR (c:EntityCanonical) ON (c.owner_id, c.canonical_name)",
             # Nodes: entity aliases (queryable alias resolution).
             "CREATE CONSTRAINT entity_alias_id_unique IF NOT EXISTS FOR (a:EntityAlias) REQUIRE a.alias_id IS UNIQUE",
-            "CREATE CONSTRAINT entity_alias_owner_required IF NOT EXISTS FOR (a:EntityAlias) REQUIRE a.owner_id IS NOT NULL",
-            "CREATE CONSTRAINT entity_alias_text_required IF NOT EXISTS FOR (a:EntityAlias) REQUIRE a.alias_text_normalized IS NOT NULL",
             "CREATE INDEX entity_alias_owner_text IF NOT EXISTS FOR (a:EntityAlias) ON (a.owner_id, a.alias_text_normalized)",
             # Relationships: CANONICAL_OF / ALIAS_OF.
-            "CREATE CONSTRAINT canonical_of_owner_required IF NOT EXISTS FOR ()-[r:CANONICAL_OF]-() REQUIRE r.owner_id IS NOT NULL",
             "CREATE INDEX canonical_of_owner IF NOT EXISTS FOR ()-[r:CANONICAL_OF]-() ON (r.owner_id)",
-            "CREATE CONSTRAINT alias_of_owner_required IF NOT EXISTS FOR ()-[r:ALIAS_OF]-() REQUIRE r.owner_id IS NOT NULL",
             "CREATE INDEX alias_of_owner IF NOT EXISTS FOR ()-[r:ALIAS_OF]-() ON (r.owner_id)",
         ]
+
+        if not include_existence_constraints:
+            return statements
+
+        existence = [
+            "CREATE CONSTRAINT chunk_owner_required IF NOT EXISTS FOR (c:Chunk) REQUIRE c.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT entity_owner_required IF NOT EXISTS FOR (e:Entity) REQUIRE e.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT entity_type_required IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_type IS NOT NULL",
+            "CREATE CONSTRAINT entity_type_key_required IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_type_key IS NOT NULL",
+            "CREATE CONSTRAINT entity_name_normalized_required IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_name_normalized IS NOT NULL",
+            "CREATE CONSTRAINT mentions_owner_required IF NOT EXISTS FOR ()-[r:MENTIONS]-() REQUIRE r.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT relates_owner_required IF NOT EXISTS FOR ()-[r:RELATES_TO]-() REQUIRE r.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT relates_fact_id_required IF NOT EXISTS FOR ()-[r:RELATES_TO]-() REQUIRE r.fact_id IS NOT NULL",
+            "CREATE CONSTRAINT relates_predicate_required IF NOT EXISTS FOR ()-[r:RELATES_TO]-() REQUIRE r.predicate IS NOT NULL",
+            "CREATE CONSTRAINT similar_owner_required IF NOT EXISTS FOR ()-[r:SIMILAR_TO]-() REQUIRE r.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT entity_canonical_owner_required IF NOT EXISTS FOR (c:EntityCanonical) REQUIRE c.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT entity_canonical_key_required IF NOT EXISTS FOR (c:EntityCanonical) REQUIRE c.canonical_key IS NOT NULL",
+            "CREATE CONSTRAINT entity_alias_owner_required IF NOT EXISTS FOR (a:EntityAlias) REQUIRE a.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT entity_alias_text_required IF NOT EXISTS FOR (a:EntityAlias) REQUIRE a.alias_text_normalized IS NOT NULL",
+            "CREATE CONSTRAINT canonical_of_owner_required IF NOT EXISTS FOR ()-[r:CANONICAL_OF]-() REQUIRE r.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT alias_of_owner_required IF NOT EXISTS FOR ()-[r:ALIAS_OF]-() REQUIRE r.owner_id IS NOT NULL",
+        ]
+        return statements + existence
+
+    @staticmethod
+    def _supports_existence_constraints(session) -> bool:  # noqa: ANN001
+        """Return True when the connected Neo4j supports property existence constraints.
+
+        Neo4j Community does not support them; Enterprise does.
+        """
+
+        try:
+            records = list(session.run("CALL dbms.components() YIELD edition RETURN edition AS edition"))
+            for record in records:
+                try:
+                    edition = str(record.get("edition") or "").strip().lower()
+                except Exception:
+                    continue
+                if edition:
+                    return "enterprise" in edition
+        except Exception:
+            # Conservative default: skip existence constraints to avoid noisy warnings.
+            return False
+        return False
 
     def _execute_query(self, query: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """

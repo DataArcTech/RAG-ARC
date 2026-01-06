@@ -400,8 +400,9 @@ async def test_hybrid_probe_combines_scans_and_chain(monkeypatch):
 
 
 def test_describe_available_tools_defaults(monkeypatch):
-    clear_tool_hints()
-    hints = describe_available_tools(include_llm_tools=True)
+    registry = ToolHintRegistry()
+    clear_tool_hints(registry=registry)
+    hints = describe_available_tools(registry=registry, include_llm_tools=True)
     names = [hint["name"] for hint in hints]
     assert "graph.pattern_scan" in names
     assert "graph.llm_chain_explorer" in names
@@ -416,7 +417,8 @@ def test_describe_available_tools_defaults(monkeypatch):
 
 
 def test_describe_available_tools_includes_registered_hints(monkeypatch):
-    clear_tool_hints()
+    registry = ToolHintRegistry()
+    clear_tool_hints(registry=registry)
     register_tool_hints(
         [
             {
@@ -430,14 +432,16 @@ def test_describe_available_tools_includes_registered_hints(monkeypatch):
                 "cost": "high",
                 "strategy_tags": ["remote"],
             }
-        ]
+        ],
+        registry=registry,
     )
-    hints = describe_available_tools(include_llm_tools=True)
+    hints = describe_available_tools(registry=registry, include_llm_tools=True)
     assert any(hint["name"] == "custom.remote_planner" for hint in hints)
 
 
 def test_local_registry_registers_custom_tool_hints(monkeypatch):
-    clear_tool_hints()
+    registry = ToolHintRegistry()
+    clear_tool_hints(registry=registry)
 
     class _CustomTool(GraphTool):
         descriptor = ToolDescriptor(
@@ -452,14 +456,15 @@ def test_local_registry_registers_custom_tool_hints(monkeypatch):
         async def run(self, request: ToolRunRequest) -> ToolResult:
             return ToolResult(summary="inline")
 
-    LocalToolRegistry(tool_configs={}, injected_tools={"custom.inline": _CustomTool()})
-    hints = describe_available_tools(include_llm_tools=True)
+    LocalToolRegistry(tool_configs={}, injected_tools={"custom.inline": _CustomTool()}, tool_hint_registry=registry)
+    hints = describe_available_tools(registry=registry, include_llm_tools=True)
     assert any(hint["name"] == "custom.inline" for hint in hints)
 
 
 @pytest.mark.asyncio
 async def test_planner_plan_reflects_registered_remote_tools(tmp_path):
-    clear_tool_hints()
+    registry = ToolHintRegistry()
+    clear_tool_hints(registry=registry)
 
     planner = DeepSearchPlanner(
         prompt_store={},
@@ -480,6 +485,7 @@ async def test_planner_plan_reflects_registered_remote_tools(tmp_path):
             "tool_arg_templates": {},
         },
         plan_generator=_StubPlanGenerator(),
+        tool_hint_registry=registry,
     )
 
     register_tool_hints(
@@ -495,7 +501,8 @@ async def test_planner_plan_reflects_registered_remote_tools(tmp_path):
                 "cost": "high",
                 "strategy_tags": ["remote"],
             }
-        ]
+        ],
+        registry=registry,
     )
 
     artifact = await planner.build_plan(
@@ -512,8 +519,9 @@ async def test_planner_plan_reflects_registered_remote_tools(tmp_path):
 
 
 def test_describe_available_tools_respects_llm_toggle(monkeypatch):
-    clear_tool_hints()
-    hints = describe_available_tools(include_llm_tools=False)
+    registry = ToolHintRegistry()
+    clear_tool_hints(registry=registry)
+    hints = describe_available_tools(registry=registry, include_llm_tools=False)
     names = {hint["name"] for hint in hints}
     assert "graph.llm_chain_explorer" not in names
     assert "graph.parallel_think" not in names
@@ -846,8 +854,8 @@ async def test_path_cache_returns_evidence_when_adapter_supports_strategy():
 
 def test_tool_hint_registry_isolated_from_global_hints(monkeypatch):
     monkeypatch.delenv("DEEPSEARCH_TOOL_HINTS", raising=False)
-    clear_tool_hints()
     registry = ToolHintRegistry()
+    clear_tool_hints(registry=registry)
 
     class _CustomTool(GraphTool):
         descriptor = ToolDescriptor(

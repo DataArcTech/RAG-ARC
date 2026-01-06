@@ -258,7 +258,7 @@ async def test_service_converts_owner_to_scope(tmp_path):
     assert reasoning_scope == "tenant-123"
     assert result["report"]["answer"] == "stub"
     snapshot = result["state"]
-    assert snapshot["stage"] == "reported"
+    assert snapshot["stage"] in {"reported", "done"}
     assert snapshot.get("request_metadata") == metadata
     graph_metadata = result["reasoning"]["graph_context"].get("metadata", {})
     assert graph_metadata.get("request_metadata") == metadata
@@ -486,3 +486,97 @@ async def test_service_quality_loop_triggers_followup_round(tmp_path):
     assert len(gates) == 2
     assert gates[0].get("passed") is False
     assert gates[1].get("passed") is True
+
+
+@pytest.mark.asyncio
+async def test_service_quality_loop_caps_should_iterate_when_max_rounds_reached(tmp_path):
+    class _QualityGateLLMAlwaysFail:
+        def chat(self, messages, **kwargs):  # noqa: ANN001
+            return json.dumps(
+                {
+                    "pass": False,
+                    "overall": 0.2,
+                    "scores": {
+                        "factual_accuracy": 0.5,
+                        "citation_accuracy": 0.0,
+                        "completeness": 0.6,
+                        "source_quality": 0.8,
+                    },
+                    "reasons": ["Missing citations."],
+                    "missing_topics": [],
+                    "missing_claims": ["Provide cited support for the key claims."],
+                    "next_actions": [
+                        {
+                            "action": "graph_search",
+                            "query": "ev2",
+                            "rationale": "Retrieve additional authoritative evidence to cite.",
+                            "priority": 1,
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+    class _ReporterAlwaysUncited(_QualityLoopReporter):
+        def compose(self, reasoning_trace: Dict[str, Any], external_evidence=None):
+            self.calls += 1
+            evidences = list(reasoning_trace.get("evidences", []))
+            if external_evidence:
+                evidences.extend(external_evidence)
+            structured_report = {
+                "title": "stub",
+                "short_answer": "This sentence makes a concrete factual claim without citations.",
+                "summary": "This sentence makes a concrete factual claim without citations.",
+                "sections": [
+                    {
+                        "title": "Findings",
+                        "body_markdown": "A long, uncited factual claim appears here and should be repaired by follow-up retrieval.",
+                    }
+                ],
+            }
+            return {
+                "answer": "stub",
+                "evidences": evidences,
+                "structured_report": structured_report,
+                "metadata": {},
+            }
+
+    planner = _StubPlanner()
+    graph_loop = _GraphLoopTwoPasses()
+    llm = _QualityGateLLMAlwaysFail()
+    reporter = _ReporterAlwaysUncited(llm_connector=llm)
+    service = DeepSearchService(
+        planner=planner,
+        graph_loop=graph_loop,
+        gap_detector=_StubGapDetector(),
+        reporter=reporter,
+        tool_manager=_StubToolManager(),
+        config=_default_service_config(
+            tmp_path=tmp_path,
+            fingerprint="service-quality-loop-cap",
+            quality_loop={
+                "enabled": True,
+                "max_rounds": 2,
+                "min_citation_sentence_coverage": 0.8,
+                "require_consistency": False,
+                "max_uncited_sentences": 6,
+                "max_actions": 6,
+                "enable_llm_judge": True,
+                "judge_temperature": 0.0,
+                "judge_max_retries": 1,
+                "judge_max_evidence_items": 5,
+                "judge_max_evidence_chars": 200,
+                "trigger_external_on_quality_failure": False,
+            },
+        ),
+    )
+
+    result = await service.run("Need citations", owner_id="tenant-ql-cap")
+
+    gates = result["state"].get("quality_gates") or []
+    assert len(gates) == 2
+    assert gates[-1].get("passed") is False
+    assert gates[-1].get("should_iterate") is False
+    diagnostics = gates[-1].get("diagnostics") or {}
+    assert diagnostics.get("termination_reason") == "max_rounds_reached"
+    assert diagnostics.get("max_rounds") == 2

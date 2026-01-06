@@ -17,6 +17,7 @@ from application.celery_bootstrap import ensure_initialized
 from application.deepsearch.trace_emitter import make_redis_trace_emitter
 from core.deepsearch.trace import emit_trace, reset_trace_emitter, set_trace_emitter, with_trace_protocol
 from core.deepsearch.tooling.all_tools import render_all_tools_block
+from core.deepsearch.utils.progress import compute_deepsearch_progress
 
 logger = logging.getLogger(__name__)
 
@@ -29,23 +30,7 @@ def _parse_uuid(value: str) -> uuid.UUID:
 
 
 def _stage_progress(stage: str) -> Dict[str, Any]:
-    order = [
-        "created",
-        "planned",
-        "reasoned",
-        "gap_evaluated",
-        "external_invoked",
-        "reported",
-        "failed",
-    ]
-    normalized = (stage or "").strip().lower() or "unknown"
-    try:
-        idx = order.index(normalized)
-        pct = int((idx / max(1, len(order) - 1)) * 100)
-    except ValueError:
-        idx = 0
-        pct = 0
-    return {"stage": normalized, "step_index": idx, "step_total": len(order), "percent": pct}
+    return compute_deepsearch_progress(stage)
 
 
 def _get_deepsearch_service():
@@ -100,12 +85,12 @@ def run_deepsearch(
         task_queue.append_progress_event(
             flow="deepsearch",
             task_run_id=run_id,
-            stage="reported",
+            stage="done",
             status="dedup",
             percent=100,
             resource_id=run_id,
             payload=with_trace_protocol(
-                {"run_id": run_id, "stage": "reported", "dedup": True},
+                {"run_id": run_id, "stage": "done", "dedup": True, "progress": _stage_progress("done")},
                 run_id=run_id,
             ),
         )
@@ -123,7 +108,11 @@ def run_deepsearch(
 
     def _listener(record: Dict[str, Any], state) -> None:  # noqa: ANN001
         stage = getattr(state, "stage", "unknown")
-        progress = _stage_progress(stage)
+        progress = compute_deepsearch_progress(
+            stage,
+            stage_history=getattr(state, "stage_history", None),
+            stage_record=record,
+        )
         payload = with_trace_protocol(
             {
                 "run_id": run_id,

@@ -145,6 +145,41 @@ class HippoRAG2ExtractorConfig(AbstractConfig):
         description="Optional file path for the custom triple extraction prompt template (overrides default).",
     )
 
+    kg_schema_path: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional KG schema YAML path used for schema-aware triple extraction prompting. "
+            "When unset, the extractor will fall back to env KG_SCHEMA_PATH."
+        ),
+    )
+
+    schema_aware_triple_extraction: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Whether to inject KG schema predicate allow-list + alias hints into the triple extraction prompt. "
+            "When null, defaults to enabled when a KG schema path is configured (kg_schema_path or env KG_SCHEMA_PATH)."
+        ),
+    )
+
+    schema_prompt_domain: Optional[str] = Field(
+        default=None,
+        description="Optional KG schema domain key to use when building prompt hints (defaults to schema.default_domain).",
+    )
+
+    schema_prompt_max_allowed_relations: int = Field(
+        default=80,
+        ge=0,
+        le=500,
+        description="Max number of allowed predicate tokens to include in the schema hint prompt.",
+    )
+
+    schema_prompt_max_relation_aliases: int = Field(
+        default=120,
+        ge=0,
+        le=800,
+        description="Max number of predicate alias entries to include in the schema hint prompt.",
+    )
+
     @staticmethod
     def _validate_optional_path(value: Optional[str], *, field_name: str) -> None:
         token = str(value or "").strip()
@@ -167,6 +202,7 @@ class HippoRAG2ExtractorConfig(AbstractConfig):
         self._validate_optional_path(self.sdf_hs_prompt_path, field_name="sdf_hs_prompt_path")
         self._validate_optional_path(self.ner_prompt_path, field_name="ner_prompt_path")
         self._validate_optional_path(self.triple_prompt_path, field_name="triple_prompt_path")
+        self._validate_optional_path(self.kg_schema_path, field_name="kg_schema_path")
 
         if self.retry_attempts is not None:
             self.llm_config.max_retries = int(self.retry_attempts)

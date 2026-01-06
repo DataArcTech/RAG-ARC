@@ -11,11 +11,15 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from pydantic import BaseModel, Field, ValidationError
 
+from config.core.deepsearch import report_writer_defaults as report_defaults
 from core.deepsearch.tools.base import call_llm_async
+from core.deepsearch.utils.language_policy import infer_user_language
 from core.prompts.deepsearch.report import (
     CONSISTENCY_CHECK_SYSTEM_PROMPT,
     CONSISTENCY_CHECK_USER_PROMPT,
+    JSON_REPAIR_USER_PROMPT,
 )
+from core.utils.json_extract import safe_json_loads
 
 _BRACKET_RE = re.compile(r"\[([^\[\]]+)\]")
 _CJK_BRACKET_RE = re.compile(r"【([^【】]+)】")
@@ -126,72 +130,59 @@ class ConsistencyChecker:
             max_claims=max_claims,
         )
         user_prompt = CONSISTENCY_CHECK_USER_PROMPT.format(question=question, claims_json=json.dumps(claims, ensure_ascii=False, indent=2))
+        output_language = infer_user_language(question)
         messages = [
-            {"role": "system", "content": CONSISTENCY_CHECK_SYSTEM_PROMPT},
+            {"role": "system", "content": CONSISTENCY_CHECK_SYSTEM_PROMPT.replace("{output_language}", output_language)},
             {"role": "user", "content": user_prompt},
         ]
 
         last_exc: Exception | None = None
+        repair_messages: List[Dict[str, str]] | None = None
         for attempt in range(max(self.max_retries, 1)):
             try:
-                raw = await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
+                raw = await call_llm_async(
+                    self.llm_connector,
+                    (repair_messages or messages),
+                    temperature=self.temperature,
+                )
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 await asyncio.sleep(min(8.0, 2.0**attempt))
                 continue
 
-            parsed = _safe_parse_json(raw)
+            parsed = safe_json_loads(raw, expected="dict")
             if parsed is None:
-                raise ValueError("Consistency judge did not return valid JSON.")
+                last_exc = ValueError("Consistency judge did not return valid JSON.")
+                if attempt < self.max_retries - 1:
+                    repair_prompt = JSON_REPAIR_USER_PROMPT.format(
+                        expected_top_level="object",
+                        error="invalid_json",
+                        raw_snippet=_snippet(raw, limit=int(report_defaults.DEFAULT_ERROR_SNIPPET_LIMIT_CHARS)),
+                    )
+                    repair_messages = messages + [{"role": "assistant", "content": str(raw or "")}, {"role": "user", "content": repair_prompt}]
+                    continue
+                raise ValueError(f"Consistency judge did not return valid JSON. raw={_snippet(raw)}") from None
             try:
                 return ConsistencyCheckResult.model_validate(parsed)
-            except ValidationError:
-                raise ValueError("Consistency judge returned JSON with an unexpected schema.") from None
+            except ValidationError as exc:
+                last_exc = exc
+                if attempt < self.max_retries - 1:
+                    repair_prompt = JSON_REPAIR_USER_PROMPT.format(
+                        expected_top_level="object",
+                        error="schema_validation_error",
+                        raw_snippet=_snippet(raw, limit=int(report_defaults.DEFAULT_ERROR_SNIPPET_LIMIT_CHARS)),
+                    )
+                    repair_messages = messages + [{"role": "assistant", "content": str(raw or "")}, {"role": "user", "content": repair_prompt}]
+                    continue
+                raise ValueError(f"Consistency judge returned JSON with an unexpected schema. raw={_snippet(raw)}") from None
         raise RuntimeError(f"Consistency judge failed to run: {last_exc}") from last_exc
 
 
-def _safe_parse_json(raw: str) -> Dict[str, Any] | None:
-    text = (raw or "").strip()
-    if not text:
-        return None
-    extracted = _extract_first_json(text)
-    if extracted is None:
-        return None
-    try:
-        value = json.loads(extracted)
-    except json.JSONDecodeError:
-        return None
-    return value if isinstance(value, dict) else None
-
-
-def _extract_first_json(text: str) -> str | None:
-    start = text.find("{")
-    if start == -1:
-        return None
-
-    depth = 0
-    in_string = False
-    escape = False
-    for idx in range(start, len(text)):
-        ch = text[idx]
-        if in_string:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == "\"":
-                in_string = False
-            continue
-        if ch == "\"":
-            in_string = True
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : idx + 1]
-    return None
+def _snippet(text: str, *, limit: int = 500) -> str:
+    value = str(text or "").strip()
+    if limit <= 0 or len(value) <= limit:
+        return value
+    return value[: max(0, limit - 1)] + "…"
 
 
 def _extract_cited_claims(

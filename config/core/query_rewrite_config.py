@@ -15,6 +15,7 @@ class LLMQueryRewriterConfig(AbstractConfig):
     instruction: str = (
         "You are a query rewriting assistant for a retrieval system. "
         "Your task is to rewrite user queries to improve information retrieval. "
+        "Preserve the original query language; do NOT translate or switch languages. "
         "Rewrite the query to be more specific, add relevant context, and use "
         "terminology that would appear in documents. Keep the rewritten query "
         "concise and focused. Return only the rewritten query, no explanations."

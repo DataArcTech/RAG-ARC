@@ -20,7 +20,7 @@ from core.deepsearch.tools import (
     get_tool_descriptor,
 )
 
-from core.deepsearch.tooling.registry import DEFAULT_TOOL_HINT_REGISTRY, ToolHintRegistry
+from core.deepsearch.tooling.registry import ToolHintRegistry
 from core.utils.json_safe import json_safe
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 from core.deepsearch.utils.file_scope import filter_evidences, resolve_file_scope
@@ -41,7 +41,7 @@ class LocalToolRegistry:
         tool_hint_registry: ToolHintRegistry | None = None,
     ):
         self.tool_configs = tool_configs or {}
-        self.tool_hint_registry = tool_hint_registry or DEFAULT_TOOL_HINT_REGISTRY
+        self.tool_hint_registry = tool_hint_registry or ToolHintRegistry()
         self.audit_label = self.tool_configs.get("audit_label")
         self._enabled_tool_configs = self.tool_configs.get("enabled_tools") or {}
         builtin_map = {desc.name: desc for desc in builtin_tool_descriptors()}

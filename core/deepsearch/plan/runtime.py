@@ -14,7 +14,7 @@ from core.graph_adapter.scope_provider import require_scope, scope_to_dict
 from .generator import PlanGenerator, PlannerSettings
 from core.prompts.deepsearch import GRAPH_PLANNER_SYSTEM_PROMPT, GRAPH_PLANNER_USER_PROMPT
 from core.deepsearch.tooling import describe_available_tools
-from core.deepsearch.tooling.registry import DEFAULT_TOOL_HINT_REGISTRY, ToolHintRegistry
+from core.deepsearch.tooling.registry import ToolHintRegistry
 from core.deepsearch.trace import emit_trace, with_trace_protocol
 
 logger = logging.getLogger(__name__)
@@ -48,7 +48,7 @@ class DeepSearchPlanner:
         # config: contains runtime knobs such as mode, max steps, output directories
         self.config = config
         self._config_dict = self._as_dict(config)
-        self._tool_hint_registry = tool_hint_registry or DEFAULT_TOOL_HINT_REGISTRY
+        self._tool_hint_registry = tool_hint_registry or ToolHintRegistry()
         self._available_tools: List[Dict[str, str]] = []
         self._tool_hint_revision: int = -1
 
@@ -416,11 +416,32 @@ class DeepSearchPlanner:
             "determinism": "adapter",
             "strategy_tags": ["graph", "adapter", "traversal"],
         }
-        self._available_tools = describe_available_tools(
-            extra_hints=[adapter_hint],
+        hints = describe_available_tools(
+            extra_hints=[],
             registry=self._tool_hint_registry,
             include_llm_tools=self.include_llm_tools_in_catalog,
         )
+        # Ensure graph_adapter.query is always present and prominent.
+        hints = [hint for hint in hints if isinstance(hint, dict) and hint.get("name") != graph_channel_tool]
+        hints.insert(0, adapter_hint)
+
+        # Optional: cap the planner tool catalog to reduce cognitive load / prompt size.
+        allowlist = self._config_dict.get("tool_catalog_allowlist")
+        if isinstance(allowlist, (list, tuple, set)):
+            allowed = {str(name).strip() for name in allowlist if str(name).strip()}
+            # Always keep the adapter traversal primitive.
+            allowed.add(graph_channel_tool)
+            hints = [hint for hint in hints if str(hint.get("name") or "").strip() in allowed]
+
+        raw_limit = self._config_dict.get("tool_catalog_max_items")
+        try:
+            limit = int(raw_limit) if raw_limit is not None else 0
+        except (TypeError, ValueError):
+            limit = 0
+        if limit > 0 and len(hints) > limit:
+            hints = hints[:limit]
+
+        self._available_tools = hints
         self._tool_hint_revision = self._tool_hint_registry.get_revision()
         if update_generator and getattr(self, "plan_generator", None):
             self.plan_generator.settings.available_tools_hint = self._tool_hint_text(self._available_tools)

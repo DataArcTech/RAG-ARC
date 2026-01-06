@@ -9,8 +9,10 @@ from pydantic import BaseModel, Field, ValidationError
 from config.core.deepsearch import report_writer_defaults as report_defaults
 from core.deepsearch.memory import EvidenceBank
 from core.deepsearch.tools.base import call_llm_async
+from core.utils.json_extract import extract_json_from_text as _extract_json_from_text
 from core.utils.text_regex import CJK_DETECT_RE
 from core.utils.text_regex import INLINE_CITATION_TOKEN_RE
+from core.deepsearch.utils.language_policy import infer_user_language
 from core.prompts.deepsearch.report import (
     REPORT_OUTLINE_SYSTEM_PROMPT,
     REPORT_OUTLINE_USER_PROMPT,
@@ -20,6 +22,7 @@ from core.prompts.deepsearch.report import (
     PARALLEL_SYNTHESIS_USER_PROMPT,
     SECTION_WRITE_SYSTEM_PROMPT,
     SECTION_WRITE_USER_PROMPT,
+    JSON_REPAIR_USER_PROMPT,
 )
 
 _CITATION_TOKEN_RE = INLINE_CITATION_TOKEN_RE
@@ -70,8 +73,7 @@ def _fallback_outline(question: str, *, evidence_index: Any) -> List[Dict[str, A
     primary_one = primary[:1]
     primary_three = primary[: min(3, len(primary))] or primary_one
 
-    is_english = not CJK_DETECT_RE.search(str(question or ""))
-    if is_english:
+    if infer_user_language(str(question or "")) == "en":
         return [
             {
                 "title": "Direct Answer",
@@ -176,13 +178,20 @@ class DeepSearchLLMReportWriter:
         q = str(question or "").strip()
         if not q:
             return None
-        # If the question contains no CJK characters, treat it as English and enforce hard output language.
-        if not CJK_DETECT_RE.search(q):
+        lang = infer_user_language(q)
+        if lang == "en":
             return (
                 "Output language policy (STRICT): The user question is in English.\n"
                 "- Write ALL fields in English (title, short_answer, sections, limitations, next_steps).\n"
                 "- If evidence snippets are non-English, translate them into English in your writing.\n"
                 "- Do NOT output Simplified/Traditional Chinese.\n"
+            )
+        if lang == "zh":
+            return (
+                "Output language policy (STRICT): The user question is in Chinese.\n"
+                "- Write ALL fields in Simplified Chinese (title, short_answer, sections, limitations, next_steps).\n"
+                "- If evidence snippets are non-Chinese, translate them into Chinese in your writing.\n"
+                "- Do NOT switch languages due to file names or document titles.\n"
             )
         return None
 
@@ -199,6 +208,7 @@ class DeepSearchLLMReportWriter:
         *,
         temperature: float = report_defaults.DEFAULT_REPORT_TEMPERATURE,
         max_retries: int = report_defaults.DEFAULT_REPORT_MAX_RETRIES,
+        json_repair_attempts: int = report_defaults.DEFAULT_REPORT_JSON_REPAIR_ATTEMPTS,
         max_evidence_items: int | None = report_defaults.DEFAULT_REPORT_MAX_EVIDENCE_ITEMS,
         max_evidence_chars: int = report_defaults.DEFAULT_REPORT_MAX_EVIDENCE_CHARS,
         max_graph_chain_items: int | None = report_defaults.DEFAULT_REPORT_MAX_GRAPH_CHAIN_ITEMS,
@@ -210,6 +220,7 @@ class DeepSearchLLMReportWriter:
         self.llm_connector = llm_connector
         self.temperature = temperature
         self.max_retries = max_retries
+        self.json_repair_attempts = max(0, int(json_repair_attempts))
         self.max_evidence_items = max_evidence_items
         self.max_evidence_chars = max_evidence_chars
         self.max_graph_chain_items = max_graph_chain_items
@@ -370,6 +381,15 @@ class DeepSearchLLMReportWriter:
                 raise
 
             data = _safe_parse_json(raw, expected="dict")
+            if not data:
+                repaired = await self._attempt_json_repair(
+                    base_messages=messages,
+                    raw=raw,
+                    error=_json_parse_error(raw, expected="dict"),
+                    phase="report_repair",
+                    expected="dict",
+                )
+                data = repaired or {}
             if not data:
                 raise ValueError(f"Report writing returned invalid JSON. raw={_snippet(raw)}")
             try:
@@ -635,7 +655,16 @@ class DeepSearchLLMReportWriter:
         ]
         raw = await self._call(messages, phase="parallel_synthesis")
         parsed = _safe_parse_json(raw, expected="dict")
-        if not isinstance(parsed, dict):
+        if not isinstance(parsed, dict) or not parsed:
+            repaired = await self._attempt_json_repair(
+                base_messages=messages,
+                raw=raw,
+                error=_json_parse_error(raw, expected="dict"),
+                phase="parallel_synthesis_repair",
+                expected="dict",
+            )
+            parsed = repaired or {}
+        if not isinstance(parsed, dict) or not parsed:
             raise ValueError(f"Parallel synthesis returned invalid JSON. raw={_snippet(raw)}")
         allowed_ids = {
             str(item.get("chunk_id") or "").strip()
@@ -694,19 +723,31 @@ class DeepSearchLLMReportWriter:
                 evidence_json=_dump_json(limited_evidences),
                 graph_chain_json=_dump_json(limited_chain),
             )
-            messages = [
+            base_messages = [
                 {"role": "system", "content": self._system_prompt_with_language(SECTION_WRITE_SYSTEM_PROMPT, question=question)},
                 {"role": "user", "content": user_prompt},
             ]
             try:
-                raw = await self._call(messages, phase=f"section:{section.get('title', 'unknown')}")
+                raw = await self._call(base_messages, phase=f"section:{section.get('title', 'unknown')}")
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 raise
 
             data = _safe_parse_json(raw, expected="dict")
             if not data:
-                raise ValueError(f"Section writing returned invalid JSON. raw={_snippet(raw)}")
+                repaired = await self._attempt_json_repair(
+                    base_messages=base_messages,
+                    raw=raw,
+                    error=_json_parse_error(raw, expected="dict"),
+                    phase="section_repair",
+                    expected="dict",
+                )
+                data = repaired or {}
+            if not data:
+                last_exc = ValueError(f"Section writing returned invalid JSON. raw={_snippet(raw)}")
+                if attempt < self.max_retries - 1:
+                    continue
+                break
             body = str(data.get("body_markdown") or "").strip()
             if allowed_ids and body and not _has_supported_inline_citation(body, allowed_ids=allowed_ids):
                 last_exc = ValueError("Section body is missing supported inline citations.")
@@ -720,6 +761,38 @@ class DeepSearchLLMReportWriter:
             }
 
         raise RuntimeError(f"Section LLM call failed: {last_exc}") from last_exc
+
+    async def _attempt_json_repair(
+        self,
+        *,
+        base_messages: List[Dict[str, str]],
+        raw: str,
+        error: str,
+        phase: str,
+        expected: str,
+    ) -> Any:
+        if self.json_repair_attempts <= 0:
+            return None
+        snippet = _snippet(raw, limit=int(report_defaults.DEFAULT_ERROR_SNIPPET_LIMIT_CHARS))
+        expected_label = "object" if expected == "dict" else ("array" if expected == "list" else expected)
+        repair_prompt = JSON_REPAIR_USER_PROMPT.format(
+            expected_top_level=expected_label,
+            error=error,
+            raw_snippet=snippet,
+        )
+        messages = base_messages + [{"role": "assistant", "content": str(raw or "")}, {"role": "user", "content": repair_prompt}]
+        last_raw = raw
+        for attempt in range(int(self.json_repair_attempts)):
+            last_raw = await self._call(messages, phase=f"{phase}:{attempt + 1}")
+            parsed = _safe_parse_json(last_raw, expected=expected)
+            if parsed:
+                return parsed
+            # Keep the most recent output in the repair thread.
+            messages = base_messages + [
+                {"role": "assistant", "content": str(last_raw or "")},
+                {"role": "user", "content": repair_prompt},
+            ]
+        return None
 
 
 def render_markdown_from_structured(structured: Dict[str, Any]) -> str:
@@ -747,60 +820,37 @@ def render_markdown_from_structured(structured: Dict[str, Any]) -> str:
 
 
 def _safe_parse_json(raw: str, *, expected: str) -> Any:
-    text = (raw or "").strip()
-    if not text:
+    value, _error = _try_parse_json(raw, expected=expected)
+    if value is None:
         return [] if expected == "list" else {}
-    parsed = _extract_first_json(text)
-    if parsed is None:
-        return [] if expected == "list" else {}
-    try:
-        value = json.loads(parsed)
-    except json.JSONDecodeError:
-        return [] if expected == "list" else {}
-    if expected == "list" and isinstance(value, list):
-        return value
-    if expected == "dict" and isinstance(value, dict):
-        return value
-    return [] if expected == "list" else {}
+    return value
 
 
 def _extract_first_json(text: str) -> str | None:
-    start = text.find("{")
-    start_list = text.find("[")
-    if start == -1 or (0 <= start_list < start):
-        start = start_list
-    if start == -1:
-        return None
+    return _extract_json_from_text(text)
 
-    open_brace = {"{": "}", "[": "]"}
-    opener = text[start]
-    closer = open_brace.get(opener)
-    if closer is None:
-        return None
 
-    depth = 0
-    in_string = False
-    escape = False
-    for idx in range(start, len(text)):
-        ch = text[idx]
-        if in_string:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == "\"":
-                in_string = False
-            continue
-        if ch == "\"":
-            in_string = True
-            continue
-        if ch == opener:
-            depth += 1
-        elif ch == closer:
-            depth -= 1
-            if depth == 0:
-                return text[start : idx + 1]
-    return None
+def _try_parse_json(raw: str, *, expected: str) -> tuple[Any | None, str]:
+    text = (raw or "").strip()
+    if not text:
+        return None, "empty_output"
+    extracted = _extract_json_from_text(text)
+    if extracted is None:
+        return None, "no_json_found"
+    try:
+        value = json.loads(extracted)
+    except json.JSONDecodeError as exc:
+        return None, f"json_decode_error: {exc.msg} (line {exc.lineno}, col {exc.colno})"
+    if expected == "list" and not isinstance(value, list):
+        return None, f"type_mismatch: expected list, got {type(value).__name__}"
+    if expected == "dict" and not isinstance(value, dict):
+        return None, f"type_mismatch: expected dict, got {type(value).__name__}"
+    return value, ""
+
+
+def _json_parse_error(raw: str, *, expected: str) -> str:
+    _value, error = _try_parse_json(raw, expected=expected)
+    return error or "unknown"
 
 
 def _dump_json(payload: Any) -> str:

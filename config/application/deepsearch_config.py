@@ -51,6 +51,19 @@ class PlannerRuntimeConfig(BaseModel):
         default_factory=dict,
         description="Channel-specific tool argument templates (string.Template supported).",
     )
+    tool_catalog_allowlist: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Optional allowlist of tool names shown to the planner (reduces prompt size/cognitive load). "
+            "When set, the planner catalog will include only these tools plus the graph adapter traversal primitive."
+        ),
+    )
+    tool_catalog_max_items: int = Field(
+        0,
+        ge=0,
+        le=200,
+        description="Optional hard cap on the number of tool descriptors shown to the planner (0 disables).",
+    )
     honor_planner_tool_selection: bool = Field(
         ...,
         description="When true, DeepSearchPlanner will honor explicit tool selections in plan steps (must be explicit).",

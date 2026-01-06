@@ -82,18 +82,24 @@ async def run_stdio_async() -> None:
     await mcp.run_stdio_async()
 
 
-async def run_sse_async(*, host: str = "127.0.0.1", port: int = 8785, path: str = "mcp/chat") -> None:
+async def run_sse_async(*, host: str = "127.0.0.1", port: int = 8785, path: str = "/mcp/chat") -> None:
     """Run the MCP server via SSE transport."""
 
-    await mcp.run_http_async(transport="sse", host=host, port=port, path=path)
+    normalized = (path or "").strip()
+    if normalized and not normalized.startswith("/"):
+        normalized = "/" + normalized
+    await mcp.run_http_async(transport="sse", host=host, port=port, path=normalized or None)
 
 
 async def run_streamable_http_async(
-    *, host: str = "127.0.0.1", port: int = 8785, path: str = "mcp/chat"
+    *, host: str = "127.0.0.1", port: int = 8785, path: str = "/mcp/chat"
 ) -> None:
     """Run the MCP server via streamable-http transport."""
 
-    await mcp.run_http_async(transport="streamable-http", host=host, port=port, path=path)
+    normalized = (path or "").strip()
+    if normalized and not normalized.startswith("/"):
+        normalized = "/" + normalized
+    await mcp.run_http_async(transport="streamable-http", host=host, port=port, path=normalized or None)
 
 
 def http_app(*, path: str = "/mcp/chat", transport: str = "sse"):

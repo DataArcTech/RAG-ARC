@@ -15,6 +15,7 @@ from config.core.deepsearch.reasoning_defaults import (
     TRACE_REFLECTION_DEFAULT_MAX_LINES,
     TRACE_REFLECTION_DEFAULT_NEW_EVIDENCE_ID_COUNT,
     TRACE_REFLECTION_DEFAULT_TEMPERATURE,
+    THINK_TOOL_CATALOG_ALWAYS_INCLUDE,
 )
 from encapsulation.data_model.deepsearch import (
     EvidenceChunk,
@@ -286,11 +287,16 @@ class GraphLoopRuntimeMixin:
                 registry = getattr(getattr(self.tool_manager, "local_registry", None), "tool_hint_registry", None)
             except Exception:
                 registry = None
-            tool_catalog = describe_available_tools(
+            all_hints = describe_available_tools(
                 extra_hints=[adapter_hint],
                 registry=registry,
                 include_llm_tools=bool(self._think_config["include_llm_tools"]),
-            )[:limit]
+            )
+            tool_catalog = _prioritize_tool_catalog(
+                all_hints,
+                always_include=THINK_TOOL_CATALOG_ALWAYS_INCLUDE,
+                limit=limit,
+            )
             for entry in tool_catalog:
                 if isinstance(entry, dict) and entry.get("name"):
                     available_tool_names.add(str(entry["name"]))
@@ -637,6 +643,50 @@ class GraphLoopRuntimeMixin:
                     }
                 )
         return records, {"proposed": len(proposed), "results": summary_rows}
+
+
+def _prioritize_tool_catalog(
+    hints: List[Dict[str, Any]],
+    *,
+    always_include: Sequence[str],
+    limit: int,
+) -> List[Dict[str, Any]]:
+    if limit <= 0:
+        return []
+    ordered: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    by_name: Dict[str, Dict[str, Any]] = {}
+    for hint in hints or []:
+        if not isinstance(hint, dict):
+            continue
+        name = str(hint.get("name") or "").strip()
+        if not name:
+            continue
+        by_name.setdefault(name, hint)
+
+    for name in always_include or ():
+        token = str(name or "").strip()
+        if not token or token in seen:
+            continue
+        hint = by_name.get(token)
+        if hint is None:
+            continue
+        seen.add(token)
+        ordered.append(hint)
+        if len(ordered) >= limit:
+            return ordered
+
+    for hint in hints or []:
+        if not isinstance(hint, dict):
+            continue
+        name = str(hint.get("name") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        ordered.append(hint)
+        if len(ordered) >= limit:
+            break
+    return ordered
 
 
 __all__ = ["GraphLoopRuntimeMixin"]

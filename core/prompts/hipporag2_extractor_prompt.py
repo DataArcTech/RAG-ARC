@@ -84,6 +84,18 @@ Requirements:
 - Use tab-separated format: subject\tpredicate\tobject
 """
 
+HIPPORAG2_TRIPLE_SCHEMA_HINT = """Schema guidance (predicate governance):
+- Allowed predicates (canonical tokens; choose predicates that normalize to one of these):
+{allowed_predicates}
+
+- Alias examples (raw -> canonical):
+{predicate_aliases_json}
+
+Constraints (STRICT):
+- Prefer using allowed predicates; if no good fit exists, SKIP the triple (do NOT invent new predicates).
+- Keep predicates short and unambiguous; avoid generic verbs like "related to" unless the schema allows it.
+"""
+
 HIPPORAG2_TRIPLE_ONE_SHOT_INPUT = """Paragraph:
 Radio City
 Radio City is India's first private FM radio station and was started on 3 July 2001.
@@ -219,6 +231,18 @@ HIPPORAG2_TRIPLE_SYSTEM_ZH = """你的任务是从给定的段落和命名实体
 - 如果段落中有代词或指代词(如"本书"、"他"、"它"等),必须将其替换为命名实体列表中对应的具体实体
 - 如果无法从命名实体列表中找到对应的实体,则跳过该三元组
 - 使用制表符分隔格式：主语\t谓语\t宾语
+"""
+
+HIPPORAG2_TRIPLE_SCHEMA_HINT_ZH = """Schema 约束（谓词治理）：
+- 允许的谓词（规范化后的 canonical token；请选择能规范化到下列之一的谓语）：
+{allowed_predicates}
+
+- 别名示例（raw -> canonical）：
+{predicate_aliases_json}
+
+强约束：
+- 优先使用允许的谓词；如果找不到合适的允许谓词，请跳过该三元组（不要生造谓词）。
+- 谓词尽量短且明确；避免使用无信息量的泛化动词（除非 schema 允许）。
 """
 
 HIPPORAG2_TRIPLE_ONE_SHOT_INPUT_ZH = """段落：

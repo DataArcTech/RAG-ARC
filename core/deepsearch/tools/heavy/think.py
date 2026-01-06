@@ -4,7 +4,9 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from config.core.deepsearch import tool_defaults
 from encapsulation.data_model.deepsearch import ThinkNote, GraphQueryContext
+from core.prompts.deepsearch.report import JSON_REPAIR_USER_PROMPT
 from core.prompts.deepsearch import THINK_TOOL_SYSTEM_PROMPT
 from core.deepsearch.utils.compression import compact_evidences, resolve_compaction_config
 
@@ -56,10 +58,19 @@ class GraphThinkTool(GraphTool):
         *,
         temperature: float = 0.1,
         system_prompt: str = THINK_TOOL_SYSTEM_PROMPT,
+        json_repair_attempts: int = tool_defaults.THINK_JSON_REPAIR_DEFAULT_ATTEMPTS,
+        json_repair_temperature: float = tool_defaults.THINK_JSON_REPAIR_DEFAULT_TEMPERATURE,
+        json_repair_max_raw_chars: int = tool_defaults.THINK_JSON_REPAIR_DEFAULT_MAX_RAW_CHARS,
     ):
         self.llm_connector = llm_connector
         self.temperature = temperature
         self.system_prompt = system_prompt
+        self.json_repair_attempts = max(0, int(json_repair_attempts))
+        self.json_repair_temperature = float(json_repair_temperature)
+        max_raw_chars = int(json_repair_max_raw_chars)
+        self.json_repair_max_raw_chars = (
+            max_raw_chars if max_raw_chars > 0 else tool_defaults.THINK_JSON_REPAIR_DEFAULT_MAX_RAW_CHARS
+        )
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         note = await self._build_note(request)
@@ -126,9 +137,7 @@ class GraphThinkTool(GraphTool):
         ]
         try:
             response = await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
-            parsed = safe_json_loads(response, expected="dict")
-            if not isinstance(parsed, dict):
-                raise ValueError("Think tool returned non-JSON or non-dict payload")
+            parsed = await self._parse_or_repair_json(messages=messages, raw=response)
             payload = ThinkToolResponse.model_validate(parsed)
             missing_topics = self._merge_missing_topics(
                 payload.missing_topics,
@@ -152,6 +161,40 @@ class GraphThinkTool(GraphTool):
             )
         except Exception as exc:
             raise RuntimeError(f"GraphThinkTool failed: {exc}") from exc
+
+    async def _parse_or_repair_json(self, *, messages: List[Dict[str, str]], raw: str) -> Dict[str, Any]:
+        parsed = safe_json_loads(raw, expected="dict")
+        if isinstance(parsed, dict):
+            return parsed
+        repaired = await self._attempt_json_repair(messages=messages, raw=raw, expected="dict")
+        if isinstance(repaired, dict):
+            return repaired
+        snippet = (raw or "").strip().replace("\n", "\\n")
+        if len(snippet) > self.json_repair_max_raw_chars:
+            snippet = snippet[: self.json_repair_max_raw_chars] + "…"
+        raise ValueError(f"Think tool returned non-JSON or non-dict payload. raw_snippet={snippet}")
+
+    async def _attempt_json_repair(self, *, messages: List[Dict[str, str]], raw: str, expected: str) -> Any:
+        if self.json_repair_attempts <= 0:
+            return None
+        snippet = (raw or "").strip()
+        if len(snippet) > self.json_repair_max_raw_chars:
+            snippet = snippet[: self.json_repair_max_raw_chars] + "…"
+        expected_label = "object" if expected == "dict" else ("array" if expected == "list" else expected)
+        repair_prompt = JSON_REPAIR_USER_PROMPT.format(
+            expected_top_level=expected_label,
+            error="invalid_json",
+            raw_snippet=snippet,
+        )
+        thread = messages + [{"role": "assistant", "content": str(raw or "")}, {"role": "user", "content": repair_prompt}]
+        last_raw = raw
+        for _attempt in range(self.json_repair_attempts):
+            last_raw = await call_llm_async(self.llm_connector, thread, temperature=self.json_repair_temperature)
+            parsed = safe_json_loads(last_raw, expected=expected)
+            if parsed is not None:
+                return parsed
+            thread = messages + [{"role": "assistant", "content": str(last_raw or "")}, {"role": "user", "content": repair_prompt}]
+        return None
 
     @staticmethod
     def _graph_context_snapshot(graph_context: GraphQueryContext | None) -> Dict[str, Any]:
