@@ -1,4 +1,5 @@
 """Helpers to assemble chunk, triple, and seed-entity evidence payloads."""
+import ast
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from encapsulation.data_model.schema import Chunk
@@ -28,11 +29,15 @@ def _serialize_chunks(chunks: Sequence[Chunk], limit: Optional[int]) -> List[Chu
     payload: List[ChunkEntry] = []
     for chunk in subset:
         metadata = getattr(chunk, "metadata", {}) or {}
+        # 优先使用 metadata 中的 prompt_text 或 index_text（与 module.py 中构建 LLM 消息的逻辑保持一致）
+        chunk_text = metadata.get("prompt_text") or metadata.get("index_text")
+        if not isinstance(chunk_text, str) or not chunk_text.strip():
+            chunk_text = chunk.content or ""
         payload.append(
             {
                 "id": getattr(chunk, "id", None),
                 "owner_id": getattr(chunk, "owner_id", None),
-                "content": chunk.content,
+                "content": chunk_text,
                 "score": metadata.get("score"),
                 "metadata": metadata,
             }

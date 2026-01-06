@@ -33,6 +33,7 @@ class ChatMessageResponse(BaseModel):
     user_type: Optional[int] = None
     content: dict
     source_file_ids: Optional[List[uuid.UUID]] = None
+    sources: Optional[List[dict]] = None
     subgraph_data: Optional[dict] = None
     created_at: datetime
 

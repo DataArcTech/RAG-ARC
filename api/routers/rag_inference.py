@@ -34,6 +34,10 @@ from api.routers.chatbot import (
     _sanitize_title,
     _fallback_title,
     _generate_title_messages,
+    _sse_json,
+    _sse_done,
+    _build_sources_for_frontend,
+    _filter_sources_by_sup_keys,
 )
 from encapsulation.data_model.orm_models import ChatMessage, User
 from encapsulation.data_model.schema import Chunk, GraphData
@@ -666,17 +670,55 @@ async def stream_chat_sse(
             logger.debug("SSE subgraph data: %s", json.dumps(subgraph_data, ensure_ascii=False, default=str))
 
         # Guard: LLM 有时可能返回空字符串，为了避免消息校验失败，这里使用兜底文案
+        is_fallback_response = False
         if not assistant_response or not assistant_response.strip():
             logger.warning(
                 "Assistant response is empty; using fallback message to satisfy validation (session_id=%s)",
                 session_id,
             )
             assistant_response = "当前没有找到与您问题相关的内容，请尝试换个问法或提供更多信息。"
+            is_fallback_response = True
+
+        # 构建 sources 并发送（按照文档格式，复用 chatbot.py 的逻辑）
+        max_sources = int(os.getenv("CHATBOT_TOP_SOURCES", "5"))
+        # 使用 build_chat_evidence 构建 evidence（与 chatbot.py 保持一致）
+        graph_store = None
+        try:
+            graph_store = rag_inference_handler.get_graph_store()
+        except Exception:  # noqa: BLE001
+            graph_store = None
+        evidence = build_chat_evidence(
+            chunks or [],
+            subgraph_data=subgraph_data,
+            subgraph_info=subgraph_info,
+            max_chunks=min(max_sources, CHAT_TOP_CHUNKS),
+            graph_store=graph_store,
+        )
+        evidence_chunks = evidence.get("chunks") or []
+        logger.info("SSE evidence_chunks count: %d", len(evidence_chunks))
+        if evidence_chunks:
+            first_content = str(evidence_chunks[0].get("content", ""))
+            logger.info("SSE first evidence_chunk: id=%s, content_length=%d, content_preview=%s", 
+                        evidence_chunks[0].get("id", "N/A"),
+                        len(first_content),
+                        first_content[:100] if first_content else '(empty)')
+        
+        # 使用 chatbot.py 中的函数构建 sources
+        sources_for_frontend = await get_thread_pool().run_blocking(
+            _build_sources_for_frontend,
+            evidence_chunks,
+            min(max_sources, CHAT_TOP_CHUNKS),
+        )
+        logger.info("SSE built %d sources for frontend", len(sources_for_frontend))
+        
+        # 保存 sources 到数据库（在过滤之前，保存完整的 sources 信息）
+        sources_for_storage = [s.model_dump() for s in sources_for_frontend] if sources_for_frontend else None
 
         assistant_message = ChatMessage(
             session_id=session_id,
             content={"role": "assistant", "content": assistant_response},
             source_file_ids=[chunk.id for chunk in chunks] if chunks else None,
+            sources=sources_for_storage,
             subgraph_data=subgraph_data if return_subgraph else None,
             raw_llm_response=raw_llm_response,
             raw_mindmap_response={"response": raw_mindmap_response} if raw_mindmap_response else None,
@@ -709,6 +751,34 @@ async def stream_chat_sse(
             except Exception as exc:
                 logger.warning("Failed to generate title: %s", exc)
                 # title生成失败不影响主流程，继续执行
+        if sources_for_frontend:
+            for i, source in enumerate(sources_for_frontend):
+                desc = getattr(source, 'description', '') or ''
+                logger.info("SSE source[%d]: title=%s, description_length=%d, description_preview=%s", 
+                            i,
+                            getattr(source, 'title', 'N/A') or 'N/A',
+                            len(desc),
+                            desc[:100] if desc else '(empty)')
+        
+        # 根据回答中的 <sup> 标签过滤 sources（只返回被引用的）
+        # 如果 LLM 响应为空（使用兜底消息），返回所有 sources，而不是空列表
+        if is_fallback_response:
+            logger.info("SSE using fallback response, returning all %d sources (no filtering)", len(sources_for_frontend))
+        else:
+            sources_for_frontend = _filter_sources_by_sup_keys(sources_for_frontend, assistant_response)
+            logger.info("SSE filtered to %d sources after sup tag filtering", len(sources_for_frontend))
+        
+        # 发送 sources 事件（使用统一的 StandardResponse 格式）
+        session_id_str = str(session_id)
+        yield sse_json_wrapped(
+            {
+                "type": "sources",
+                "sources": [s.model_dump() for s in sources_for_frontend],
+                "id": session_id_str
+            },
+            request_id=request_id
+        )
+        logger.info("SSE sent sources event with %d sources", len(sources_for_frontend))
 
         # Align with WebSocket behavior: always build and return a payload.
         # When evidence/subgraph is requested, include the corresponding fields.

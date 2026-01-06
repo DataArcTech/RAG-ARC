@@ -248,6 +248,9 @@ class ChatMessage(Base):
 
     # Source tracking for RAG
     source_file_ids: Mapped[Optional[list]] = mapped_column(JSON)
+    
+    # Sources for frontend (complete source information with description, file URL, etc.)
+    sources: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
 
     # Subgraph data
     subgraph_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)

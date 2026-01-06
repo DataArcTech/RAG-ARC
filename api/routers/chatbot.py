@@ -398,8 +398,24 @@ def _guess_media_type(filename: str | None, fallback: str = "application/octet-s
 
 
 def _content_disposition_inline(filename: str) -> str:
+    """Generate Content-Disposition header with proper encoding for non-ASCII filenames.
+    
+    Uses RFC 2231 format (filename*=UTF-8''encoded) for non-ASCII characters,
+    with a fallback for ASCII-only filenames.
+    """
+    from urllib.parse import quote
+    
     safe = (Path(filename).name or "file").replace('"', "")
-    return f'inline; filename="{safe}"'
+    
+    # Check if filename contains non-ASCII characters
+    try:
+        safe.encode('latin-1')
+        # ASCII-only filename, use simple format
+        return f'inline; filename="{safe}"'
+    except UnicodeEncodeError:
+        # Contains non-ASCII characters, use RFC 2231 format
+        encoded = quote(safe, safe='')
+        return f"inline; filename*=UTF-8''{encoded}"
 
 
 def _resolve_local_file_path(blob_key: str) -> Path:

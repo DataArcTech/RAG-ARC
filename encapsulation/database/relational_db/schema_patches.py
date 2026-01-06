@@ -59,6 +59,8 @@ def apply_postgres_schema_patches(engine: Engine) -> None:
         """,
         # TaskRun should not depend on user table rows existing; historical Redis task runs may reference deleted users.
         "ALTER TABLE public.task_run DROP CONSTRAINT IF EXISTS task_run_owner_id_fkey;",
+        # Add sources field to chat_message table for storing complete source information
+        "ALTER TABLE public.chat_message ADD COLUMN IF NOT EXISTS sources jsonb;",
     ]
 
     for stmt in statements:
