@@ -75,7 +75,3 @@ class ToolHintRegistry:
                 return True
         self._additional_hints.append(hint)
         return True
-
-
-DEFAULT_TOOL_HINT_REGISTRY = ToolHintRegistry()
-

@@ -13,6 +13,8 @@ from .graph_ops import (
     GraphLatestTruthTool,
     GraphNeighborsTool,
     GraphPathExistsTool,
+    GraphRelationPathExploreTool,
+    GraphRelationPathGroundTool,
     GraphRuleCheckTool,
     GraphSchemaNodesTool,
     GraphSdfChildrenTool,
@@ -40,4 +42,6 @@ __all__ = [
     "GraphSdfChildrenTool",
     "GraphSdfDependenciesTool",
     "GraphTraceToRootTool",
+    "GraphRelationPathExploreTool",
+    "GraphRelationPathGroundTool",
 ]

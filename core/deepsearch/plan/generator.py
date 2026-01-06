@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 
 from encapsulation.data_model.deepsearch import GraphQueryContext, PlanSpec
 from core.utils.json_extract import extract_last_json_array_from_text
+from core.deepsearch.utils.language_policy import infer_user_language, output_language_label
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,8 @@ class PlanGenerator:
         if context and context.seed_entities:
             context_hint = "\nKnown seed entities: " + ", ".join(context.seed_entities) + "."
         question_payload = f"{question}{context_hint}"
+        lang = infer_user_language(question)
+        output_language = output_language_label(lang)
         return [
             {"role": "system", "content": self.settings.system_prompt},
             {
@@ -124,6 +127,7 @@ class PlanGenerator:
                     question=question_payload,
                     mode=self.settings.mode,
                     max_steps=self.settings.max_steps,
+                    output_language=output_language,
                     available_tools=self.settings.available_tools_hint,
                 ),
             },

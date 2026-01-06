@@ -112,8 +112,9 @@ class DeepSearchService:
         if self.artifact_store is not None:
             try:
                 self.artifact_store.write_json(state.run_id, "plan_result.json", json_safe(plan_result))
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to persist plan_result artifact: %s", exc, exc_info=True)
+                state.append_error(f"artifact_store.write_json(plan_result.json) failed: {exc}", stage="plan")
         state.record_plan(plan_result)
         plan_payload = plan_result.get("plan") or {}
         plan_steps: Sequence[Dict[str, Any]] = plan_payload.get("steps") or []
@@ -336,8 +337,9 @@ class DeepSearchService:
                         ),
                         meta={"stage": "external_channel", "round": round_idx, "gap_result": json_safe(gap_result)},
                     )
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Failed to emit external_channel trace: %s", exc, exc_info=True)
+                    state.append_error(f"emit_trace(external_channel) failed: {exc}", stage="external_channel")
 
             report = await self._execute_stage(
                 f"report_r{round_idx}",
@@ -375,6 +377,16 @@ class DeepSearchService:
                 gap_result=final_gap,
                 round_idx=round_idx,
             )
+            if isinstance(quality_result, dict):
+                # Enforce terminal semantics: max_rounds caps iteration even when the judge asks for more.
+                if bool(quality_result.get("should_iterate")) and round_idx >= max_rounds:
+                    quality_result["should_iterate"] = False
+                    diagnostics = quality_result.get("diagnostics")
+                    if not isinstance(diagnostics, dict):
+                        diagnostics = {}
+                        quality_result["diagnostics"] = diagnostics
+                    diagnostics.setdefault("termination_reason", "max_rounds_reached")
+                    diagnostics.setdefault("max_rounds", max_rounds)
             if isinstance(report, dict):
                 report.setdefault("metadata", {}).setdefault("quality_gate", quality_result)
             state.record_quality_gate(quality_result)
@@ -445,6 +457,19 @@ class DeepSearchService:
             # Avoid transitioning state back to "reasoned" after emitting the final report.
             state.reasoning_trace = cumulative_reasoning
 
+        # Mark the run as fully completed so API progress semantics can reach 100%.
+        try:
+            state.transition_stage(
+                "done",
+                metadata={
+                    "rounds": len(quality_history) or 1,
+                    "passed": bool((quality_history[-1].get("passed")) if quality_history else True),
+                },
+            )
+        except Exception:
+            # Never allow state bookkeeping to break the main run.
+            pass
+
         snapshot = state.snapshot()
         snapshot.setdefault("plan_metadata", plan_result.get("plan"))
         if stage_timings:
@@ -452,8 +477,9 @@ class DeepSearchService:
         if self.artifact_store is not None:
             try:
                 self.artifact_store.write_json(state.run_id, "stage_timings.json", json_safe(stage_timings))
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to persist stage_timings artifact: %s", exc, exc_info=True)
+                state.append_error(f"artifact_store.write_json(stage_timings.json) failed: {exc}", stage="persist")
         self._persist_experiment_snapshot(
             question=normalized_question,
             plan=plan_result,
@@ -469,8 +495,9 @@ class DeepSearchService:
                 if isinstance(report, dict) and isinstance(report.get("answer"), str):
                     self.artifact_store.write_text(state.run_id, "report.md", report.get("answer") or "")
                 self.artifact_store.write_json(state.run_id, "state_snapshot.json", json_safe(snapshot))
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to persist DeepSearch artifacts: %s", exc, exc_info=True)
+                state.append_error(f"artifact_store persist failed: {exc}", stage="persist")
         logger.info(
             "DeepSearch run %s completed (owner=%s, timings=%s)",
             snapshot.get("run_id"),
@@ -629,8 +656,8 @@ class DeepSearchService:
             sig = inspect.signature(runner)
             if "settings_override" in sig.parameters and settings_override:
                 kwargs["settings_override"] = settings_override
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Failed to inspect graph_loop.run signature: %s", exc, exc_info=True)
         return await runner(question, plan_steps, **kwargs)
 
     def _gap_stage(self, *, reasoning_trace: Dict[str, Any]) -> Optional[Dict[str, Any]]:

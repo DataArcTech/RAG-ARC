@@ -386,7 +386,7 @@ def tool_mcp_server(
     ),
     host: str = typer.Option("127.0.0.1", help="Host for HTTP/SSE transports."),
     port: int = typer.Option(8765, help="Port for HTTP/SSE transports."),
-    path: str = typer.Option("mcp/tools", help="Path for HTTP/SSE transports."),
+    path: str = typer.Option("/mcp/tools", help="Path for HTTP/SSE transports."),
 ) -> None:
     """Launch the DeepSearch tool MCP server for external agents."""
 
@@ -394,14 +394,18 @@ def tool_mcp_server(
     configure_scope_provider()
     server = _build_tool_server_from_config()
     _print_tool_catalog(server)
+    normalized_path = (path or "").strip()
+    if normalized_path and not normalized_path.startswith("/"):
+        normalized_path = "/" + normalized_path
+
     if transport == "stdio":
         asyncio.run(server.run_stdio_async())
         return
     if transport == "sse":
-        asyncio.run(server.run_sse_async(host=host, port=port, path=path))
+        asyncio.run(server.run_sse_async(host=host, port=port, path=normalized_path))
         return
     if transport in {"streamable", "streamable-http"}:
-        asyncio.run(server.run_streamable_http_async(host=host, port=port, path=path))
+        asyncio.run(server.run_streamable_http_async(host=host, port=port, path=normalized_path))
         return
     raise typer.BadParameter("transport must be one of: stdio, sse, streamable-http")
 
@@ -414,7 +418,7 @@ def chat_mcp_server_cmd(
     ),
     host: str = typer.Option("127.0.0.1", help="Host for HTTP/SSE transports."),
     port: int = typer.Option(8785, help="Port for HTTP/SSE transports."),
-    path: str = typer.Option("mcp/chat", help="Path for HTTP/SSE transports."),
+    path: str = typer.Option("/mcp/chat", help="Path for HTTP/SSE transports."),
 ) -> None:
     """Launch the account/chat MCP server for external agents."""
 
@@ -422,14 +426,18 @@ def chat_mcp_server_cmd(
     configure_scope_provider()
     chat_server = _get_chat_mcp_server()
     _print_chat_mcp_catalog(chat_server)
+    normalized_path = (path or "").strip()
+    if normalized_path and not normalized_path.startswith("/"):
+        normalized_path = "/" + normalized_path
+
     if transport == "stdio":
         asyncio.run(chat_server.run_stdio_async())
         return
     if transport == "sse":
-        asyncio.run(chat_server.run_sse_async(host=host, port=port, path=path))
+        asyncio.run(chat_server.run_sse_async(host=host, port=port, path=normalized_path))
         return
     if transport in {"streamable", "streamable-http"}:
-        asyncio.run(chat_server.run_streamable_http_async(host=host, port=port, path=path))
+        asyncio.run(chat_server.run_streamable_http_async(host=host, port=port, path=normalized_path))
         return
     raise typer.BadParameter("transport must be one of: stdio, sse, streamable-http")
 

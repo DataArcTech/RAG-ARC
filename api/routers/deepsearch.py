@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import uuid
 from typing import Annotated, Any, Dict, Literal
@@ -21,6 +22,7 @@ from application.deepsearch.trace_emitter import make_inprocess_trace_emitter
 from application.rag_inference.module import RAGInference
 from core.deepsearch.tooling.all_tools import render_all_tools_block
 from core.deepsearch.trace import emit_trace, reset_trace_emitter, set_trace_emitter, with_trace_protocol
+from core.deepsearch.utils.progress import compute_deepsearch_progress
 from core.presentation.deepsearch_payload import trim_deepsearch_payload
 from core.utils.owner_guard import is_admin_owner
 from encapsulation.data_model.orm_models import User
@@ -29,6 +31,7 @@ from framework.register import Register
 
 router = APIRouter(prefix="/deepsearch", tags=["deepsearch"])
 registrator = Register()
+logger = logging.getLogger(__name__)
 
 # Optional override for tests that want a stable queue instance.
 TASK_QUEUE: RedisTaskQueue | None = None
@@ -100,23 +103,7 @@ def _get_graph_store() -> Any | None:
 
 
 def _stage_progress(stage: str) -> Dict[str, Any]:
-    order = [
-        "created",
-        "planned",
-        "reasoned",
-        "gap_evaluated",
-        "external_invoked",
-        "reported",
-        "failed",
-    ]
-    normalized = (stage or "").strip().lower() or "unknown"
-    try:
-        idx = order.index(normalized)
-        pct = int((idx / max(1, len(order) - 1)) * 100)
-    except ValueError:
-        idx = 0
-        pct = 0
-    return {"stage": normalized, "step_index": idx, "step_total": len(order), "percent": pct}
+    return compute_deepsearch_progress(stage)
 
 
 @router.post("/run", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
@@ -192,7 +179,11 @@ async def _schedule_deepsearch(
     await TASKS.create(run_id, owner_id=str(effective_owner))
 
     def _listener(record: Dict[str, Any], state) -> None:  # noqa: ANN001
-        progress = _stage_progress(getattr(state, "stage", "unknown"))
+        progress = compute_deepsearch_progress(
+            getattr(state, "stage", "unknown"),
+            stage_history=getattr(state, "stage_history", None),
+            stage_record=record,
+        )
         payload = with_trace_protocol(
             {
                 "run_id": run_id,
@@ -233,8 +224,8 @@ async def _schedule_deepsearch(
                     ),
                     meta={"run_id": run_id},
                 )
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Failed to emit DeepSearch all_tools trace: %s", exc, exc_info=True)
             result = await service.run(
                 request.question,
                 owner_id=str(effective_owner),
@@ -264,8 +255,8 @@ async def _schedule_deepsearch(
             report_text = report_block.get("answer") if isinstance(report_block, dict) else None
             if isinstance(report_text, str) and report_text.strip():
                 await emit_trace("write", report_text, meta={"run_id": run_id, "question": trimmed.get("question")})
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Failed to emit DeepSearch write trace: %s", exc, exc_info=True)
         await TASKS.publish(
             run_id,
             event_type="result",
@@ -339,6 +330,9 @@ async def get_progress(
         payload.setdefault("done", done)
         if task_run.get("error_message"):
             payload.setdefault("error", task_run.get("error_message"))
+        if payload.get("done") is True and not payload.get("error"):
+            payload["stage"] = "done"
+            payload["progress"] = _stage_progress("done")
         return payload
 
     info = await TASKS.get(run_id)
@@ -350,6 +344,9 @@ async def get_progress(
     payload.setdefault("done", info.done)
     if info.error:
         payload.setdefault("error", info.error)
+    if payload.get("done") is True and not payload.get("error"):
+        payload["stage"] = "done"
+        payload["progress"] = _stage_progress("done")
     return payload
 
 

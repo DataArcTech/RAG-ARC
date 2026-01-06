@@ -320,7 +320,7 @@ Location: `config/json_configs/deepsearch_service.json` → `tool_manager.enable
 | `DEEPSEARCH_TOOL_MCP_SCOPE_TYPE` | `owner` | Scope type label. |
 | `DEEPSEARCH_TOOL_MCP_SCOPE_LABELS` | `[]` | JSON list of labels for MCP scope. |
 | `DEEPSEARCH_TOOL_MCP_SCOPE_ATTRIBUTES` | `{}` | JSON dict of extra scope attributes. |
-| `DEEPSEARCH_TOOL_MCP_TOOLS` | _(empty)_ | Optional comma separated tool allowlist. |
+| `DEEPSEARCH_TOOL_MCP_TOOLS` | _(empty)_ | Optional comma separated tool allowlist; use `__all__` to expose every built-in tool. |
 | `DEEPSEARCH_ALLOW_SEMANTIC_CHANNEL` | `true` | Allow semantic traversal branch. |
 | `DEEPSEARCH_CHAIN_DEPTH` | `4` | Graph traversal depth. |
 | `DEEPSEARCH_TOOL_CONTEXT_MAX_EVIDENCES` | `5` | Max number of `context_evidences` sent to tool calls (recency retention). |

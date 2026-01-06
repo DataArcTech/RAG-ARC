@@ -7,12 +7,7 @@ from typing import Dict, Iterable, List
 
 from core.deepsearch.tools import builtin_tool_descriptors, llm_optional_tool_names, llm_required_tool_names
 
-from ._hints import (
-    clear_tool_hints,
-    register_tool_hints,
-    set_disabled_tools,
-)
-from .registry import DEFAULT_TOOL_HINT_REGISTRY, ToolHintRegistry
+from .registry import ToolHintRegistry
 __all__ = [
     "describe_available_tools",
     "register_tool_hints",
@@ -30,7 +25,7 @@ def describe_available_tools(
 ) -> List[Dict[str, str]]:
     """Return tool descriptors exposed to planner prompts."""
 
-    active_registry = registry or DEFAULT_TOOL_HINT_REGISTRY
+    active_registry = registry or ToolHintRegistry()
     base_hints: List[Dict[str, str]] = [desc.as_hint() for desc in builtin_tool_descriptors()]
     base_hints.extend(active_registry.get_registered_hints())
     if extra_hints:
@@ -48,7 +43,25 @@ def describe_available_tools(
     return base_hints
 
 
-def get_tool_hint_revision() -> int:
+def register_tool_hints(hints: Iterable[Dict[str, str]], *, registry: ToolHintRegistry) -> None:
+    """Register extra tool hints into a registry instance (planner/runtime can then pick them up)."""
+
+    registry.register_tool_hints(hints)
+
+
+def set_disabled_tools(names: Iterable[str], *, registry: ToolHintRegistry) -> None:
+    """Replace the disabled tool set in the given registry."""
+
+    registry.set_disabled_tools(names)
+
+
+def clear_tool_hints(*, registry: ToolHintRegistry) -> None:
+    """Clear registered hints + disabled set in the given registry (primarily for tests)."""
+
+    registry.clear()
+
+
+def get_tool_hint_revision(*, registry: ToolHintRegistry) -> int:
     """Expose hint revision timestamp for planner cache invalidation."""
 
-    return DEFAULT_TOOL_HINT_REGISTRY.get_revision()
+    return registry.get_revision()

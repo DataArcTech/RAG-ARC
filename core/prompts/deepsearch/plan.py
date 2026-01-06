@@ -13,9 +13,11 @@ GRAPH_PLANNER_SYSTEM_PROMPT = (
 GRAPH_PLANNER_USER_PROMPT = (
     "Question: {question}\n"
     "Mode: {mode}\n"
+    "Output language: {output_language}\n"
     "Available tools:\n{available_tools}\n"
     "Instructions:\n"
-    "- Write step descriptions in the same language as the user question.\n"
+    "- Output language policy (STRICT): write ALL step descriptions in {output_language}.\n"
+    "- Do NOT switch languages due to document titles or file names.\n"
     "- Start with a COARSE macro plan (usually 3-5 steps). For complex tasks, expand to 6-12 steps.\n"
     "- Prefer graph-first evidence collection before any synthesis.\n"
     "- By default, OMIT `tool` to keep the plan coarse. The executor will choose sensible defaults:\n"

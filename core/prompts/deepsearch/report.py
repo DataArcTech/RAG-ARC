@@ -13,10 +13,15 @@ Convert the available DeepSearch signals into a clear report outline that maximi
 
 ## Constraints
 - Write titles in the same language as the user question.
+- Avoid boilerplate templates (e.g. generic "Overview"/"Conclusion") unless they add distinct value for this question and evidence set.
+- Prefer domain-specific section titles (use product/term names and the user’s requested dimensions).
 - Do not invent facts.
 - Do not include an evidence index section (handled separately).
 - Each section must include a lightweight `section_type` tag (used by renderers to decide display shape).
 - Return ONLY valid JSON.
+- Do NOT wrap the JSON in Markdown fences (no ```json).
+- Do NOT include any extra commentary before/after the JSON.
+- Ensure all string fields are valid JSON strings (escape newlines as \\n, tabs as \\t).
 """
 
 REPORT_OUTLINE_USER_PROMPT = (
@@ -45,6 +50,7 @@ REPORT_WRITE_SYSTEM_PROMPT = """You are a research report writer producing knowl
 2. Graph insight highlighting: when referencing triples/paths, briefly explain why the relationship matters.
 3. Uncertainty acknowledgement: if evidence is insufficient or conflicting, state this explicitly in the relevant section and in Limitations.
 4. Coherent narrative: ensure smooth transitions, avoid repetition, and keep sections focused on the outline purpose.
+5. No filler: avoid generic phrases like "This report will..." or "In conclusion" unless necessary; prioritize specific, evidence-backed details (numbers/terms/conditions).
 
 ## Citation Rules (CRITICAL - MUST FOLLOW EXACTLY)
 - Use inline citations ONLY in [chunk_id] format, where chunk_id is the exact value from the evidence list.
@@ -62,6 +68,9 @@ REPORT_WRITE_SYSTEM_PROMPT = """You are a research report writer producing knowl
 ## Output Requirements
 - Return ONLY valid JSON matching the schema described in the user prompt.
 - Write in the same language as the user question.
+- Do NOT wrap the JSON in Markdown fences (no ```json).
+- Do NOT include any extra commentary before/after the JSON.
+- Ensure all string fields are valid JSON strings (escape newlines as \\n, tabs as \\t).
 """
 
 REPORT_WRITE_USER_PROMPT = (
@@ -96,6 +105,11 @@ REPORT_WRITE_USER_PROMPT = (
 )
 
 CONSISTENCY_CHECK_SYSTEM_PROMPT = """You are a strict supportiveness & contradiction checker for a cite-first research report.
+
+## Output language (STRICT)
+- Output language: {output_language}
+- All human-readable strings in the JSON output MUST be written in {output_language}.
+- Do NOT switch languages due to document titles or file names.
 
 ## Task
 You are given:
@@ -140,6 +154,7 @@ SECTION_WRITE_SYSTEM_PROMPT = """You are a research report section writer produc
 1. Evidence-based writing: every concrete factual claim must be supported by the provided evidence and cited inline.
 2. Graph insight highlighting: when referencing triples/paths, briefly explain why the relationship matters.
 3. Stay focused: write ONLY the content for this specific section as defined by the outline.
+4. No filler: avoid generic intro/outro sentences; focus on concrete, evidence-backed details relevant to the section purpose.
 
 ## Citation Rules (CRITICAL - MUST FOLLOW EXACTLY)
 - Use inline citations ONLY in [chunk_id] format, where chunk_id is the exact value from the evidence list.
@@ -155,6 +170,9 @@ SECTION_WRITE_SYSTEM_PROMPT = """You are a research report section writer produc
 ## Output Requirements
 - Return ONLY valid JSON matching the schema described in the user prompt.
 - Write in the same language as the user question.
+- Do NOT wrap the JSON in Markdown fences (no ```json).
+- Do NOT include any extra commentary before/after the JSON.
+- Ensure all string fields are valid JSON strings (escape newlines as \\n, tabs as \\t).
 """
 
 SECTION_WRITE_USER_PROMPT = (
@@ -194,10 +212,27 @@ Given a user question, a report outline, and draft section bodies (already writt
 - When making a concrete factual claim, keep it supported by evidence and use inline citations ONLY in [chunk_id] format.
 - Do NOT rewrite the full sections; they are already drafted.
 - The short_answer must contain supported inline citations for any concrete claim.
+- Keep the short_answer direct and non-templated (avoid boilerplate framing; summarize the key evidence-backed conclusion first).
 
 ## Output Requirements
 Return ONLY valid JSON matching the schema described in the user prompt.
+- Do NOT wrap the JSON in Markdown fences (no ```json).
+- Do NOT include any extra commentary before/after the JSON.
+- Ensure all string fields are valid JSON strings (escape newlines as \\n, tabs as \\t).
 """
+
+
+JSON_REPAIR_USER_PROMPT = (
+    "Your previous response was not valid JSON or did not match the expected top-level type.\n"
+    "Fix it and return ONLY valid JSON now.\n\n"
+    "Constraints (STRICT):\n"
+    "- Output ONLY JSON (no Markdown fences, no explanations).\n"
+    "- Ensure all strings are valid JSON strings (escape newlines as \\\\n).\n"
+    "- Preserve the intended content; do not invent facts.\n\n"
+    "Expected top-level type: {expected_top_level}\n"
+    "Parse/validation error: {error}\n"
+    "Previous output (snippet):\n{raw_snippet}\n"
+)
 
 PARALLEL_SYNTHESIS_USER_PROMPT = (
     "User question:\n{question}\n\n"

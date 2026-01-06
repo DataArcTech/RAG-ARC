@@ -9,6 +9,7 @@ from .graph_ops_sdf import GraphSdfChildrenTool, GraphSdfDependenciesTool
 from .graph_ops_set_difference import GraphSetDifferenceTool
 from .graph_ops_temporal import GraphLatestTruthTool
 from .graph_ops_traversal import GraphNeighborsTool, GraphPathExistsTool, GraphTraceToRootTool
+from .graph_ops_relation_paths import GraphRelationPathExploreTool, GraphRelationPathGroundTool
 
 __all__ = [
     "GraphIntersectionTool",
@@ -25,4 +26,6 @@ __all__ = [
     "GraphSdfChildrenTool",
     "GraphSdfDependenciesTool",
     "GraphTraceToRootTool",
+    "GraphRelationPathExploreTool",
+    "GraphRelationPathGroundTool",
 ]

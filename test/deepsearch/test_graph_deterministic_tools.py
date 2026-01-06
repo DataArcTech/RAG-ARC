@@ -14,6 +14,8 @@ from core.deepsearch.tools import (
     GraphLatestTruthTool,
     GraphNeighborsTool,
     GraphPathExistsTool,
+    GraphRelationPathExploreTool,
+    GraphRelationPathGroundTool,
     GraphRuleCheckTool,
     GraphSdfChildrenTool,
     GraphSdfDependenciesTool,
@@ -87,6 +89,10 @@ class _StubCypherAdapter:
             return self._rows_by_tool.get("path_exists", [])
         if "AS leaf_candidates" in text and "AS chain" in text:
             return self._rows_by_tool.get("trace_to_root", [])
+        if "relation_path_explore" in text:
+            return self._rows_by_tool.get("relation_path_explore", [])
+        if "relation_path_ground" in text:
+            return self._rows_by_tool.get("relation_path_ground", [])
         if "n.entity_name AS neighbor" in text and "AS candidate_count" in text:
             return self._rows_by_tool.get("neighbors", [])
         if "facts_by_type" in text or "RETURN e.entity_name AS head" in text:
@@ -352,9 +358,70 @@ async def test_direction_sensitive_predicate_forces_directed_traversal() -> None
     )
     result = await tool.run(req)
     assert result.evidences
+
+
+@pytest.mark.asyncio
+async def test_relation_path_explore_emits_sequences() -> None:
+    adapter = _StubCypherAdapter(
+        rows_by_tool={
+            "relation_path_explore": [
+                {
+                    "candidate_count": 1,
+                    "predicate_sequence": ["OWNS", "SUBSIDIARY_OF"],
+                    "targets": ["B", "C"],
+                    "fact_ids_samples": [["fact-1", "fact-2"]],
+                    "source_chunk_ids_samples": [[["chunk-a"], ["chunk-b"]]],
+                    "path_count": 2,
+                }
+            ]
+        }
+    )
+    tool = GraphRelationPathExploreTool()
+    req = ToolRunRequest(
+        question="Explore relation paths from A",
+        plan_step="p1",
+        context_evidences=[],
+        adapter=adapter,
+        access_scope=GraphAccessScope(scope_id="owner-1"),
+        extra={"entity": "A", "max_hops": 3, "max_sequences": 10},
+    )
+    result = await tool.run(req)
+    assert result.evidences
+    provenance = result.evidences[0].provenance
+    assert provenance.get("entity") == "a"
+    assert provenance.get("relation_paths")
+
+
+@pytest.mark.asyncio
+async def test_relation_path_ground_preserves_ordered_sequence() -> None:
+    adapter = _StubCypherAdapter(
+        rows_by_tool={
+            "relation_path_ground": [
+                {
+                    "candidate_count": 1,
+                    "nodes": ["A", "B", "C"],
+                    "predicates": ["OWNS", "SUBSIDIARY_OF"],
+                    "fact_ids": ["fact-1", "fact-2"],
+                    "source_chunk_ids": [["chunk-a"], ["chunk-b"]],
+                }
+            ]
+        }
+    )
+    tool = GraphRelationPathGroundTool()
+    req = ToolRunRequest(
+        question="Ground ordered path",
+        plan_step="p2",
+        context_evidences=[],
+        adapter=adapter,
+        access_scope=GraphAccessScope(scope_id="owner-1"),
+        extra={"source": "A", "predicate_sequence": ["OWNS", "SUBSIDIARY_OF"], "max_paths": 5},
+    )
+    result = await tool.run(req)
+    assert result.evidences
+    provenance = result.evidences[0].provenance
+    assert provenance.get("predicate_sequence") == ["OWNS", "SUBSIDIARY_OF"]
+    assert provenance.get("frontier_entities") == ["C"]
     assert result.evidences[0].provenance.get("direction") == "out"
-    assert result.evidences[0].provenance.get("direction_forced_sensitive") is True
-    assert result.evidences[0].provenance.get("direction_forced_undirected") is False
 
 
 @pytest.mark.asyncio

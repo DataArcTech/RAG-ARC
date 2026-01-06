@@ -106,8 +106,8 @@ class DeepSearchTaskRegistry:
                 resource_id=run_id,
                 payload=payload if isinstance(payload, dict) else {"payload": payload},
             )
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Failed to append DeepSearch progress event to RedisTaskQueue: %s", exc, exc_info=True)
         async with info.cond:
             info.cond.notify_all()
 

@@ -12,6 +12,7 @@ This extractor follows HippoRAG2's approach:
 
 import logging
 import json
+import os
 import re
 from pathlib import Path
 from typing import List, TYPE_CHECKING, Tuple
@@ -30,12 +31,20 @@ from core.prompts.hipporag2_extractor_prompt import (
     HIPPORAG2_NER_ONE_SHOT_INPUT, HIPPORAG2_NER_ONE_SHOT_OUTPUT,
     HIPPORAG2_NER_ONE_SHOT_INPUT_WITH_TYPES, HIPPORAG2_NER_ONE_SHOT_OUTPUT_WITH_TYPES,
     HIPPORAG2_NER_PROMPT, HIPPORAG2_NER_PROMPT_WITH_TYPES,
-    HIPPORAG2_TRIPLE_SYSTEM, HIPPORAG2_TRIPLE_ONE_SHOT_INPUT, HIPPORAG2_TRIPLE_ONE_SHOT_OUTPUT, HIPPORAG2_TRIPLE_PROMPT,
+    HIPPORAG2_TRIPLE_SYSTEM,
+    HIPPORAG2_TRIPLE_SCHEMA_HINT,
+    HIPPORAG2_TRIPLE_ONE_SHOT_INPUT,
+    HIPPORAG2_TRIPLE_ONE_SHOT_OUTPUT,
+    HIPPORAG2_TRIPLE_PROMPT,
     HIPPORAG2_NER_SYSTEM_ZH, HIPPORAG2_NER_SYSTEM_WITH_TYPES_ZH,
     HIPPORAG2_NER_ONE_SHOT_INPUT_ZH, HIPPORAG2_NER_ONE_SHOT_OUTPUT_ZH,
     HIPPORAG2_NER_ONE_SHOT_INPUT_WITH_TYPES_ZH, HIPPORAG2_NER_ONE_SHOT_OUTPUT_WITH_TYPES_ZH,
     HIPPORAG2_NER_PROMPT_ZH, HIPPORAG2_NER_PROMPT_WITH_TYPES_ZH,
-    HIPPORAG2_TRIPLE_SYSTEM_ZH, HIPPORAG2_TRIPLE_ONE_SHOT_INPUT_ZH, HIPPORAG2_TRIPLE_ONE_SHOT_OUTPUT_ZH, HIPPORAG2_TRIPLE_PROMPT_ZH,
+    HIPPORAG2_TRIPLE_SYSTEM_ZH,
+    HIPPORAG2_TRIPLE_SCHEMA_HINT_ZH,
+    HIPPORAG2_TRIPLE_ONE_SHOT_INPUT_ZH,
+    HIPPORAG2_TRIPLE_ONE_SHOT_OUTPUT_ZH,
+    HIPPORAG2_TRIPLE_PROMPT_ZH,
     HIPPORAG2_MINDMAP_SYSTEM, HIPPORAG2_MINDMAP_ONE_SHOT_INPUT, HIPPORAG2_MINDMAP_ONE_SHOT_OUTPUT, HIPPORAG2_MINDMAP_PROMPT,
     HIPPORAG2_MINDMAP_SYSTEM_ZH, HIPPORAG2_MINDMAP_ONE_SHOT_INPUT_ZH, HIPPORAG2_MINDMAP_ONE_SHOT_OUTPUT_ZH, HIPPORAG2_MINDMAP_PROMPT_ZH
 )
@@ -55,6 +64,7 @@ from core.prompts.hipporag2_temporal_prompt import (
     HIPPORAG2_TEMPORAL_SYSTEM_EN,
     HIPPORAG2_TEMPORAL_SYSTEM_ZH,
 )
+from core.knowledge_graph.schema import load_schema_from_yaml, normalize_relation_token
 from core.knowledge_graph.sdf import hs_to_sdf_schema, parse_hs_blocks
 from encapsulation.data_model.schema import Chunk, GraphData
 
@@ -80,6 +90,79 @@ class HippoRAG2Extractor(ExtractorBase):
         self.logger = logging.getLogger(__name__)
         self.entity_types = getattr(config, 'entity_types', None)  # Optional entity types to extract
         self._prompt_cache: dict[str, str] = {}
+        self._kg_schema = None
+        self._kg_domain = None
+        self._kg_domain_schema = None
+        self._schema_hint_cache: dict[str, str] = {}
+        self._load_kg_schema_for_prompting()
+
+    def _load_kg_schema_for_prompting(self) -> None:
+        cfg_flag = getattr(self.config, "schema_aware_triple_extraction", None)
+        cfg_path = str(getattr(self.config, "kg_schema_path", "") or "").strip()
+        env_path = os.getenv("KG_SCHEMA_PATH", "").strip()
+        schema_path = cfg_path or env_path
+        enabled = bool(schema_path) if cfg_flag is None else bool(cfg_flag)
+        if not enabled or not schema_path:
+            return
+        try:
+            schema = load_schema_from_yaml(schema_path)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("Failed to load KG schema for schema-aware prompting: %s", exc, exc_info=True)
+            return
+        domain_override = str(getattr(self.config, "schema_prompt_domain", "") or "").strip()
+        domain = domain_override or getattr(schema, "default_domain", None) or "default"
+        try:
+            domain_schema = schema.for_domain(domain)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("Failed to resolve KG schema domain '%s': %s", domain, exc, exc_info=True)
+            return
+        self._kg_schema = schema
+        self._kg_domain = str(domain)
+        self._kg_domain_schema = domain_schema
+
+    def _schema_hint_for_triples(self, *, language: str) -> str:
+        schema = getattr(self, "_kg_schema", None)
+        domain_schema = getattr(self, "_kg_domain_schema", None)
+        if schema is None or domain_schema is None:
+            return ""
+        max_allowed = int(getattr(self.config, "schema_prompt_max_allowed_relations", 80) or 0)
+        max_aliases = int(getattr(self.config, "schema_prompt_max_relation_aliases", 120) or 0)
+        domain = getattr(self, "_kg_domain", None) or getattr(schema, "default_domain", None) or "default"
+        cache_key = f"{language}:{domain}:{max_allowed}:{max_aliases}"
+        cache = getattr(self, "_schema_hint_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            setattr(self, "_schema_hint_cache", cache)
+        cached = cache.get(cache_key)
+        if isinstance(cached, str):
+            return cached
+
+        allowed = sorted({str(item).strip() for item in (domain_schema.allowed_relations or set()) if str(item).strip()})
+        if max_allowed > 0:
+            allowed = allowed[:max_allowed]
+        allowed_block = "\n".join(allowed) if allowed else "(none)"
+
+        alias_map: dict[str, str] = {}
+        if max_aliases != 0 and isinstance(domain_schema.relation_aliases, dict):
+            items: list[tuple[str, str]] = []
+            for raw_key, raw_value in domain_schema.relation_aliases.items():
+                key = str(raw_key or "").strip()
+                if not key:
+                    continue
+                canonical = normalize_relation_token(str(raw_value or ""))
+                if domain_schema.allowed_relations and canonical not in domain_schema.allowed_relations:
+                    continue
+                items.append((key, canonical))
+            items.sort(key=lambda pair: pair[0])
+            if max_aliases > 0:
+                items = items[:max_aliases]
+            alias_map = {k: v for k, v in items}
+        alias_json = json.dumps(alias_map, ensure_ascii=False, separators=(",", ":"), default=str) if alias_map else "{}"
+
+        template = HIPPORAG2_TRIPLE_SCHEMA_HINT_ZH if language == "zh" else HIPPORAG2_TRIPLE_SCHEMA_HINT
+        hint = template.format(allowed_predicates=allowed_block, predicate_aliases_json=alias_json).strip()
+        cache[cache_key] = hint
+        return hint
 
     def detect_language(self, text: str) -> str:
         """
@@ -254,6 +337,7 @@ class HippoRAG2Extractor(ExtractorBase):
                 entities="",
                 entity_types=", ".join(self.entity_types) if self.entity_types else "",
                 language=language,
+                schema_hint="",
             )
 
         custom_path = getattr(self.config, "ner_prompt_path", None)
@@ -265,6 +349,7 @@ class HippoRAG2Extractor(ExtractorBase):
                 entities="",
                 entity_types=", ".join(self.entity_types) if self.entity_types else "",
                 language=language,
+                schema_hint="",
             )
 
         if self.entity_types:
@@ -313,6 +398,8 @@ class HippoRAG2Extractor(ExtractorBase):
         # Detect language
         language = self.detect_language(text)
 
+        schema_hint = self._schema_hint_for_triples(language=language)
+
         custom_template = getattr(self.config, "triple_prompt", None)
         if isinstance(custom_template, str) and custom_template.strip():
             return self._render_custom_prompt(
@@ -321,6 +408,7 @@ class HippoRAG2Extractor(ExtractorBase):
                 entities=entities_str,
                 entity_types=", ".join(self.entity_types) if self.entity_types else "",
                 language=language,
+                schema_hint=schema_hint,
             )
 
         custom_path = getattr(self.config, "triple_prompt_path", None)
@@ -332,11 +420,12 @@ class HippoRAG2Extractor(ExtractorBase):
                 entities=entities_str,
                 entity_types=", ".join(self.entity_types) if self.entity_types else "",
                 language=language,
+                schema_hint=schema_hint,
             )
 
         if language == 'zh':
             return HIPPORAG2_TRIPLE_PROMPT_ZH.format(
-                system=HIPPORAG2_TRIPLE_SYSTEM_ZH,
+                system=(HIPPORAG2_TRIPLE_SYSTEM_ZH + ("\n\n" + schema_hint if schema_hint else "")).strip(),
                 example_input=HIPPORAG2_TRIPLE_ONE_SHOT_INPUT_ZH,
                 example_output=HIPPORAG2_TRIPLE_ONE_SHOT_OUTPUT_ZH,
                 passage=text,
@@ -344,7 +433,7 @@ class HippoRAG2Extractor(ExtractorBase):
             )
         else:
             return HIPPORAG2_TRIPLE_PROMPT.format(
-                system=HIPPORAG2_TRIPLE_SYSTEM,
+                system=(HIPPORAG2_TRIPLE_SYSTEM + ("\n\n" + schema_hint if schema_hint else "")).strip(),
                 example_input=HIPPORAG2_TRIPLE_ONE_SHOT_INPUT,
                 example_output=HIPPORAG2_TRIPLE_ONE_SHOT_OUTPUT,
                 passage=text,
@@ -359,6 +448,7 @@ class HippoRAG2Extractor(ExtractorBase):
         entities: str,
         entity_types: str,
         language: str,
+        schema_hint: str,
     ) -> str:
         """
         Render a custom prompt template supplied via config.
@@ -368,19 +458,21 @@ class HippoRAG2Extractor(ExtractorBase):
         - {entities}
         - {entity_types}
         - {language}
+        - {schema_hint}
 
         If formatting fails or placeholders are absent, fall back to appending the passage.
         """
         raw = str(template or "").strip()
         if not raw:
             return ""
-        if "{passage}" in raw or "{entities}" in raw or "{entity_types}" in raw or "{language}" in raw:
+        if "{passage}" in raw or "{entities}" in raw or "{entity_types}" in raw or "{language}" in raw or "{schema_hint}" in raw:
             try:
                 return raw.format(
                     passage=passage,
                     entities=entities,
                     entity_types=entity_types,
                     language=language,
+                    schema_hint=schema_hint,
                 )
             except Exception as exc:
                 logger.warning(
@@ -663,6 +755,7 @@ class HippoRAG2Extractor(ExtractorBase):
                 entities="",
                 entity_types="",
                 language=language,
+                schema_hint="",
             )
 
         custom_path = getattr(self.config, "temporal_prompt_path", None)
@@ -674,6 +767,7 @@ class HippoRAG2Extractor(ExtractorBase):
                 entities="",
                 entity_types="",
                 language=language,
+                schema_hint="",
             )
 
         if language == "zh":
@@ -695,6 +789,7 @@ class HippoRAG2Extractor(ExtractorBase):
                 entities="",
                 entity_types="",
                 language=language,
+                schema_hint="",
             )
         custom_path = getattr(self.config, "sdf_hs_prompt_path", None)
         if isinstance(custom_path, str) and custom_path.strip():
@@ -705,6 +800,7 @@ class HippoRAG2Extractor(ExtractorBase):
                 entities="",
                 entity_types="",
                 language=language,
+                schema_hint="",
             )
         if language == "zh":
             return HIPPORAG2_SDF_HS_PROMPT_ZH.format(

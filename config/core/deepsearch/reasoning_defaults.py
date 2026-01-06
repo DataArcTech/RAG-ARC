@@ -10,3 +10,6 @@ TRACE_REFLECTION_DEFAULT_NEW_EVIDENCE_ID_COUNT = 12
 TRACE_REFLECTION_DEFAULT_MAX_LINES = 10
 TRACE_REFLECTION_DEFAULT_TEMPERATURE = 0.2
 
+# Think tool catalogs are truncated for prompt budgeting; always include a minimal set of
+# high-value deterministic tools even when the catalog is long.
+THINK_TOOL_CATALOG_ALWAYS_INCLUDE: tuple[str, ...] = ("code.python",)

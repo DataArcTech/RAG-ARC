@@ -327,7 +327,10 @@ class DeepSearchToolMCPServer:
         port: int = tool_server_defaults.DEFAULT_PORT,
         path: str = tool_server_defaults.DEFAULT_SSE_PATH,
     ) -> None:
-        await self.fastmcp.run_http_async(transport="sse", host=host, port=port, path=path)
+        normalized = (path or "").strip()
+        if normalized and not normalized.startswith("/"):
+            normalized = "/" + normalized
+        await self.fastmcp.run_http_async(transport="sse", host=host, port=port, path=normalized or None)
 
     async def run_streamable_http_async(
         self,
@@ -336,7 +339,10 @@ class DeepSearchToolMCPServer:
         port: int = tool_server_defaults.DEFAULT_PORT,
         path: str = tool_server_defaults.DEFAULT_MCP_PATH,
     ) -> None:
-        await self.fastmcp.run_http_async(transport="streamable-http", host=host, port=port, path=path)
+        normalized = (path or "").strip()
+        if normalized and not normalized.startswith("/"):
+            normalized = "/" + normalized
+        await self.fastmcp.run_http_async(transport="streamable-http", host=host, port=port, path=normalized or None)
 
     def http_app(
         self,

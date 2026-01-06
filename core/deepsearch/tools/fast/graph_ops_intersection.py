@@ -149,26 +149,30 @@ class GraphIntersectionTool(GraphTool):
           WHERE COALESCE(rr.owner_id, $global_owner) = $owner_id
             AND COALESCE(t.owner_id, $global_owner) = $owner_id
           {self._predicate_filters(left_alias="lr", right_alias="rr", left_preds=left_preds, right_preds=right_preds)}
-          RETURN left_candidates AS left_candidates,
-                 right_candidates AS right_candidates,
-                 t.entity_name AS target,
+          RETURN t.entity_name AS target,
                  collect(DISTINCT lr.fact_id) AS left_fact_ids,
                  collect(DISTINCT rr.fact_id) AS right_fact_ids,
                  collect(DISTINCT lr.source_chunk_ids) AS left_source_chunk_ids,
                  collect(DISTINCT rr.source_chunk_ids) AS right_source_chunk_ids
           LIMIT $limit
+          UNION ALL
+          WITH left_candidates, right_candidates
+          WITH left_candidates, right_candidates
+          WHERE left_candidates <> 1 OR right_candidates <> 1
+          RETURN NULL AS target,
+                 [] AS left_fact_ids,
+                 [] AS right_fact_ids,
+                 [] AS left_source_chunk_ids,
+                 [] AS right_source_chunk_ids
+          LIMIT 1
         }}
-        UNION ALL
-        WITH left_candidates, right_candidates
-        WHERE left_candidates <> 1 OR right_candidates <> 1
         RETURN left_candidates AS left_candidates,
                right_candidates AS right_candidates,
-               NULL AS target,
-               [] AS left_fact_ids,
-               [] AS right_fact_ids,
-               [] AS left_source_chunk_ids,
-               [] AS right_source_chunk_ids
-        LIMIT 1
+               target AS target,
+               left_fact_ids AS left_fact_ids,
+               right_fact_ids AS right_fact_ids,
+               left_source_chunk_ids AS left_source_chunk_ids,
+               right_source_chunk_ids AS right_source_chunk_ids
         """
 
         async with adapter_locked(adapter):

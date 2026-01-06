@@ -217,7 +217,8 @@ class PrunedHippoRAGNeo4jStore(
         - Note: Facts are now stored as relationships, not nodes
         """
         with self._driver.session(database=self.database) as session:
-            for stmt in self.neo4j_schema_statements():
+            include_existence = self._supports_existence_constraints(session)
+            for stmt in self.neo4j_schema_statements(include_existence_constraints=include_existence):
                 try:
                     session.run(stmt)
                 except Exception as exc:  # noqa: BLE001
@@ -228,7 +229,7 @@ class PrunedHippoRAGNeo4jStore(
         self._migrate_source_file_id_from_metadata()
 
     @staticmethod
-    def neo4j_schema_statements() -> List[str]:
+    def neo4j_schema_statements(*, include_existence_constraints: bool = True) -> List[str]:
         """
         Return Neo4j DDL statements required by HippoRAG + DeepSearch Cypher tools.
 
@@ -237,21 +238,16 @@ class PrunedHippoRAGNeo4jStore(
           by construction (owner-scoped hash) and MERGE patterns. We still create relationship indexes
           and existence constraints for query stability and diagnostics.
         """
-        return [
+        statements = [
             # Chunk nodes
             "CREATE CONSTRAINT chunk_id_unique IF NOT EXISTS FOR (c:Chunk) REQUIRE c.chunk_id IS UNIQUE",
-            "CREATE CONSTRAINT chunk_owner_required IF NOT EXISTS FOR (c:Chunk) REQUIRE c.owner_id IS NOT NULL",
             "CREATE INDEX chunk_owner IF NOT EXISTS FOR (c:Chunk) ON (c.owner_id)",
             "CREATE INDEX chunk_source_file_id IF NOT EXISTS FOR (c:Chunk) ON (c.source_file_id)",
             # Entity nodes
             "CREATE CONSTRAINT entity_id_unique IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_id IS UNIQUE",
-            "CREATE CONSTRAINT entity_owner_required IF NOT EXISTS FOR (e:Entity) REQUIRE e.owner_id IS NOT NULL",
             # Legacy constraint (owner_id, entity_name) prevented representing same-name different-type entities.
             "DROP CONSTRAINT entity_owner_name_unique IF EXISTS",
-            "CREATE CONSTRAINT entity_type_required IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_type IS NOT NULL",
-            "CREATE CONSTRAINT entity_type_key_required IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_type_key IS NOT NULL",
             "CREATE CONSTRAINT entity_owner_name_type_unique IF NOT EXISTS FOR (e:Entity) REQUIRE (e.owner_id, e.entity_name_normalized, e.entity_type_key) IS UNIQUE",
-            "CREATE CONSTRAINT entity_name_normalized_required IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_name_normalized IS NOT NULL",
             "CREATE INDEX entity_name IF NOT EXISTS FOR (e:Entity) ON (e.entity_name)",
             "CREATE INDEX entity_owner_name IF NOT EXISTS FOR (e:Entity) ON (e.owner_id, e.entity_name)",
             "CREATE INDEX entity_owner_name_normalized IF NOT EXISTS FOR (e:Entity) ON (e.owner_id, e.entity_name_normalized)",
@@ -260,81 +256,118 @@ class PrunedHippoRAGNeo4jStore(
             "CREATE INDEX entity_owner_canonical_name IF NOT EXISTS FOR (e:Entity) ON (e.owner_id, e.entity_canonical_name)",
             "CREATE INDEX entity_owner_canonical_key IF NOT EXISTS FOR (e:Entity) ON (e.owner_id, e.entity_canonical_key)",
             # Relationships: MENTIONS
-            "CREATE CONSTRAINT mentions_owner_required IF NOT EXISTS FOR ()-[r:MENTIONS]-() REQUIRE r.owner_id IS NOT NULL",
             "CREATE INDEX mentions_owner IF NOT EXISTS FOR ()-[r:MENTIONS]-() ON (r.owner_id)",
             # Relationships: RELATES_TO (facts)
-            "CREATE CONSTRAINT relates_owner_required IF NOT EXISTS FOR ()-[r:RELATES_TO]-() REQUIRE r.owner_id IS NOT NULL",
-            "CREATE CONSTRAINT relates_fact_id_required IF NOT EXISTS FOR ()-[r:RELATES_TO]-() REQUIRE r.fact_id IS NOT NULL",
-            "CREATE CONSTRAINT relates_predicate_required IF NOT EXISTS FOR ()-[r:RELATES_TO]-() REQUIRE r.predicate IS NOT NULL",
             "CREATE INDEX relates_fact_id IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.fact_id)",
             "CREATE INDEX relates_owner_fact_id IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.owner_id, r.fact_id)",
             "CREATE INDEX relates_owner_predicate IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.owner_id, r.predicate)",
             # Relationships: SIMILAR_TO (synonymy)
-            "CREATE CONSTRAINT similar_owner_required IF NOT EXISTS FOR ()-[r:SIMILAR_TO]-() REQUIRE r.owner_id IS NOT NULL",
             "CREATE INDEX similar_owner IF NOT EXISTS FOR ()-[r:SIMILAR_TO]-() ON (r.owner_id)",
             # Nodes: KG ingest metadata (per owner).
             "CREATE CONSTRAINT kg_ingest_meta_owner_unique IF NOT EXISTS FOR (m:KGIngestMeta) REQUIRE m.owner_id IS UNIQUE",
             # Nodes: canonical entity keys (queryable alias/canonicalization layer).
             "CREATE CONSTRAINT entity_canonical_id_unique IF NOT EXISTS FOR (c:EntityCanonical) REQUIRE c.canonical_id IS UNIQUE",
-            "CREATE CONSTRAINT entity_canonical_owner_required IF NOT EXISTS FOR (c:EntityCanonical) REQUIRE c.owner_id IS NOT NULL",
-            "CREATE CONSTRAINT entity_canonical_key_required IF NOT EXISTS FOR (c:EntityCanonical) REQUIRE c.canonical_key IS NOT NULL",
             "CREATE INDEX entity_canonical_owner_key IF NOT EXISTS FOR (c:EntityCanonical) ON (c.owner_id, c.canonical_key)",
             "CREATE INDEX entity_canonical_owner_name IF NOT EXISTS FOR (c:EntityCanonical) ON (c.owner_id, c.canonical_name)",
             # Nodes: entity aliases (queryable alias resolution).
             "CREATE CONSTRAINT entity_alias_id_unique IF NOT EXISTS FOR (a:EntityAlias) REQUIRE a.alias_id IS UNIQUE",
-            "CREATE CONSTRAINT entity_alias_owner_required IF NOT EXISTS FOR (a:EntityAlias) REQUIRE a.owner_id IS NOT NULL",
-            "CREATE CONSTRAINT entity_alias_text_required IF NOT EXISTS FOR (a:EntityAlias) REQUIRE a.alias_text_normalized IS NOT NULL",
             "CREATE INDEX entity_alias_owner_text IF NOT EXISTS FOR (a:EntityAlias) ON (a.owner_id, a.alias_text_normalized)",
             # Relationships: CANONICAL_OF / ALIAS_OF.
-            "CREATE CONSTRAINT canonical_of_owner_required IF NOT EXISTS FOR ()-[r:CANONICAL_OF]-() REQUIRE r.owner_id IS NOT NULL",
             "CREATE INDEX canonical_of_owner IF NOT EXISTS FOR ()-[r:CANONICAL_OF]-() ON (r.owner_id)",
-            "CREATE CONSTRAINT alias_of_owner_required IF NOT EXISTS FOR ()-[r:ALIAS_OF]-() REQUIRE r.owner_id IS NOT NULL",
             "CREATE INDEX alias_of_owner IF NOT EXISTS FOR ()-[r:ALIAS_OF]-() ON (r.owner_id)",
         ]
+        if not include_existence_constraints:
+            return statements
 
-    def _migrate_source_file_id_from_metadata(self):
+        existence = [
+            "CREATE CONSTRAINT chunk_owner_required IF NOT EXISTS FOR (c:Chunk) REQUIRE c.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT entity_owner_required IF NOT EXISTS FOR (e:Entity) REQUIRE e.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT entity_type_required IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_type IS NOT NULL",
+            "CREATE CONSTRAINT entity_type_key_required IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_type_key IS NOT NULL",
+            "CREATE CONSTRAINT entity_name_normalized_required IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_name_normalized IS NOT NULL",
+            "CREATE CONSTRAINT mentions_owner_required IF NOT EXISTS FOR ()-[r:MENTIONS]-() REQUIRE r.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT relates_owner_required IF NOT EXISTS FOR ()-[r:RELATES_TO]-() REQUIRE r.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT relates_fact_id_required IF NOT EXISTS FOR ()-[r:RELATES_TO]-() REQUIRE r.fact_id IS NOT NULL",
+            "CREATE CONSTRAINT relates_predicate_required IF NOT EXISTS FOR ()-[r:RELATES_TO]-() REQUIRE r.predicate IS NOT NULL",
+            "CREATE CONSTRAINT similar_owner_required IF NOT EXISTS FOR ()-[r:SIMILAR_TO]-() REQUIRE r.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT entity_canonical_owner_required IF NOT EXISTS FOR (c:EntityCanonical) REQUIRE c.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT entity_canonical_key_required IF NOT EXISTS FOR (c:EntityCanonical) REQUIRE c.canonical_key IS NOT NULL",
+            "CREATE CONSTRAINT entity_alias_owner_required IF NOT EXISTS FOR (a:EntityAlias) REQUIRE a.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT entity_alias_text_required IF NOT EXISTS FOR (a:EntityAlias) REQUIRE a.alias_text_normalized IS NOT NULL",
+            "CREATE CONSTRAINT canonical_of_owner_required IF NOT EXISTS FOR ()-[r:CANONICAL_OF]-() REQUIRE r.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT alias_of_owner_required IF NOT EXISTS FOR ()-[r:ALIAS_OF]-() REQUIRE r.owner_id IS NOT NULL",
+        ]
+        return statements + existence
+
+    @staticmethod
+    def _supports_existence_constraints(session) -> bool:  # noqa: ANN001
+        """Return True when the connected Neo4j supports property existence constraints.
+
+        Neo4j Community does not support them; Enterprise does.
         """
-        Auto-migrate: Extract source_file_id from metadata JSON and set as independent property.
-        This runs once on startup to migrate existing chunks.
+
+        try:
+            records = list(session.run("CALL dbms.components() YIELD edition RETURN edition AS edition"))
+            for record in records:
+                try:
+                    edition = str(record.get("edition") or "").strip().lower()
+                except Exception:
+                    continue
+                if edition:
+                    return "enterprise" in edition
+        except Exception:
+            # Conservative default: skip existence constraints to avoid noisy warnings.
+            return False
+        return False
+
+    def _migrate_source_file_id_from_metadata(self) -> None:
+        """Auto-migrate: backfill `Chunk.source_file_id` from `Chunk.metadata` JSON.
+
+        This is best-effort and capped to avoid long startup stalls; repeated startups can gradually
+        migrate large graphs.
         """
+
         try:
             with self._driver.session(database=self.database) as session:
-                # Find chunks that have metadata but no source_file_id property
                 query = """
                 MATCH (c:Chunk)
-                WHERE c.metadata IS NOT NULL 
+                WHERE c.metadata IS NOT NULL
                   AND c.source_file_id IS NULL
                 RETURN c.chunk_id AS chunk_id, c.metadata AS metadata
                 LIMIT 1000
                 """
                 results = session.run(query)
-                chunks_to_update = []
+                chunks_to_update: list[dict[str, str]] = []
                 for record in results:
-                    chunk_id = record["chunk_id"]
-                    metadata_str = record.get("metadata")
-                    if not metadata_str:
+                    chunk_id = record.get("chunk_id")
+                    if not chunk_id:
+                        continue
+                    metadata_raw = record.get("metadata")
+                    if not metadata_raw:
                         continue
                     try:
-                        metadata = json.loads(metadata_str) if isinstance(metadata_str, str) else metadata_str
-                        source_file_id = metadata.get("source_file_id")
-                        if source_file_id:
-                            chunks_to_update.append({"chunk_id": chunk_id, "source_file_id": source_file_id})
+                        metadata = json.loads(metadata_raw) if isinstance(metadata_raw, str) else metadata_raw
                     except (json.JSONDecodeError, TypeError):
                         continue
-                
-                if chunks_to_update:
-                    # Batch update chunks with source_file_id
-                    update_query = """
-                    UNWIND $chunks AS chunk
-                    MATCH (c:Chunk {chunk_id: chunk.chunk_id})
-                    SET c.source_file_id = chunk.source_file_id
-                    """
-                    session.run(update_query, {"chunks": chunks_to_update})
-                    logger.info(f"Auto-migrated source_file_id for {len(chunks_to_update)} chunks")
-                else:
+                    if not isinstance(metadata, dict):
+                        continue
+                    source_file_id = str(metadata.get("source_file_id") or "").strip()
+                    if source_file_id:
+                        chunks_to_update.append({"chunk_id": chunk_id, "source_file_id": source_file_id})
+
+                if not chunks_to_update:
                     logger.debug("No chunks need source_file_id migration")
-        except Exception as e:
-            logger.warning(f"Failed to migrate source_file_id from metadata: {e}")
+                    return
+
+                update_query = """
+                UNWIND $chunks AS chunk
+                MATCH (c:Chunk {chunk_id: chunk.chunk_id})
+                SET c.source_file_id = chunk.source_file_id
+                """
+                session.run(update_query, {"chunks": chunks_to_update})
+                logger.info("Auto-migrated source_file_id for %d chunks", len(chunks_to_update))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to migrate source_file_id from metadata: %s", exc)
 
     def _execute_query(self, query: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """

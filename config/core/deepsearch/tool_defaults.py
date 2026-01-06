@@ -35,6 +35,13 @@ HYBRID_NEIGHBORHOOD_DEFAULT_SNIPPET_CHARS = 400
 HYBRID_NEIGHBORHOOD_DEFAULT_SUMMARY_TEMPERATURE = 0.1
 
 # -----------------------------
+# graph.think tool defaults
+# -----------------------------
+THINK_JSON_REPAIR_DEFAULT_ATTEMPTS = 1
+THINK_JSON_REPAIR_DEFAULT_TEMPERATURE = 0.0
+THINK_JSON_REPAIR_DEFAULT_MAX_RAW_CHARS = 2000
+
+# -----------------------------
 # code.python tool defaults
 # -----------------------------
 # Keep this list small and finance-focused; expand via config when needed.
