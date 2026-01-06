@@ -163,6 +163,7 @@ class OpenAIChatLLM(ChatLLMBase):
         try:
             model = kwargs.pop("model", self.model_name)
             temperature = float(kwargs.pop("temperature", self.temperature))
+            temperature = self._adjust_temperature_for_model(model, temperature)
             max_tokens = int(kwargs.pop("max_tokens", self.max_tokens))
             response = self.client.chat.completions.create(
                 model=model,
@@ -272,6 +273,7 @@ class OpenAIChatLLM(ChatLLMBase):
         try:
             model = kwargs.pop("model", self.model_name)
             temperature = float(kwargs.pop("temperature", self.temperature))
+            temperature = self._adjust_temperature_for_model(model, temperature)
             max_tokens = int(kwargs.pop("max_tokens", self.max_tokens))
             
             # Log complete API request details
@@ -601,6 +603,16 @@ class OpenAIChatLLM(ChatLLMBase):
             "class_name": self.__class__.__name__,
             "config_type": getattr(self.config, 'type', 'unknown')
         }
+
+    def _adjust_temperature_for_model(self, model: str, temperature: float) -> float:
+        """
+        Adjust temperature for models that only support specific values.
+        gpt-5 series models only support temperature=1 (default).
+        """
+        if model.startswith("gpt-5") and temperature != 1.0:
+            logger.info("gpt-5 series model detected (%s), adjusting temperature from %s to 1.0", model, temperature)
+            return 1.0
+        return temperature
 
     def _validate_messages(self, messages):
         """Validate message format"""
