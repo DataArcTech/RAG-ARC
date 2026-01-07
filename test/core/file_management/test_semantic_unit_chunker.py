@@ -262,3 +262,108 @@ def test_semantic_unit_chunker_standard_emits_math_anchor():
         and c.get("metadata", {}).get("semantic_unit_type") == "math"
     ]
     assert math_anchors, "expected a math anchor"
+
+
+def test_semantic_unit_chunker_emits_image_as_atomic_anchor():
+    chunker = SemanticUnitChunkerConfig(
+        level="basic",
+        fallback_chunker_config=TokenChunkerConfig(chunk_size=50, chunk_overlap=0),
+    ).build()
+
+    markdown = "\n".join(
+        [
+            "Intro paragraph.",
+            "",
+            "![Figure: Premium refund table](images/abc.jpg)",
+            "",
+            "Outro paragraph.",
+        ]
+    )
+
+    chunks = chunker.chunk_text(markdown, metadata={"source_file_id": "file-1"})
+    image_chunks = [
+        c
+        for c in chunks
+        if c.get("metadata", {}).get("chunk_role") == "anchor"
+        and c.get("metadata", {}).get("semantic_unit_type") == "image"
+    ]
+    assert image_chunks, "expected at least one image chunk"
+    assert "![Figure: Premium refund table](images/abc.jpg)" in (image_chunks[0].get("content") or "")
+    assert image_chunks[0]["metadata"]["is_atomic"] is True
+
+
+def test_semantic_unit_chunker_treats_html_table_as_atomic():
+    chunker = SemanticUnitChunkerConfig(
+        level="basic",
+        fallback_chunker_config=TokenChunkerConfig(chunk_size=50, chunk_overlap=0),
+    ).build()
+
+    markdown = "\n".join(
+        [
+            "Intro",
+            "<table>",
+            "<tr><th>A</th><th>B</th></tr>",
+            "<tr><td>1</td><td>2</td></tr>",
+            "</table>",
+            "Outro",
+        ]
+    )
+
+    chunks = chunker.chunk_text(markdown, metadata={"source_file_id": "file-1"})
+    table_chunks = [
+        c
+        for c in chunks
+        if c.get("metadata", {}).get("chunk_role") == "anchor"
+        and c.get("metadata", {}).get("semantic_unit_type") == "table"
+    ]
+    assert table_chunks, "expected an HTML table chunk"
+    assert table_chunks[0]["metadata"].get("is_atomic") is True
+    content = (table_chunks[0].get("content") or "")
+    # Chunker may normalize HTML tables to pipe tables for better downstream processing.
+    assert ("<table>" in content) or ("| A | B |" in content)
+
+
+def test_semantic_unit_chunker_splits_html_table_and_trailing_image():
+    chunker = SemanticUnitChunkerConfig(
+        level="basic",
+        fallback_chunker_config=TokenChunkerConfig(chunk_size=50, chunk_overlap=0),
+    ).build()
+
+    markdown = "\n".join(
+        [
+            "Intro",
+            "<table><tr><td>A</td></tr></table> ![cap](images/x.jpg)",
+            "Outro",
+        ]
+    )
+
+    chunks = chunker.chunk_text(markdown, metadata={"source_file_id": "file-1"})
+    kinds = {(c.get("metadata") or {}).get("semantic_unit_type") for c in chunks}
+    assert "table" in kinds
+    assert "image" in kinds
+
+
+def test_semantic_unit_chunker_does_not_use_html_table_line_as_image_caption():
+    chunker = SemanticUnitChunkerConfig(
+        level="basic",
+        fallback_chunker_config=TokenChunkerConfig(chunk_size=50, chunk_overlap=0),
+    ).build()
+
+    markdown = "\n".join(
+        [
+            "<table>",
+            "<tr><td>A</td></tr>",
+            "</table>",
+            "![cap](images/x.jpg)",
+        ]
+    )
+
+    chunks = chunker.chunk_text(markdown, metadata={"source_file_id": "file-1"})
+    image_chunks = [
+        c
+        for c in chunks
+        if c.get("metadata", {}).get("chunk_role") == "anchor"
+        and c.get("metadata", {}).get("semantic_unit_type") == "image"
+    ]
+    assert image_chunks, "expected an image chunk"
+    assert (image_chunks[0].get("content") or "").strip() == "![cap](images/x.jpg)"

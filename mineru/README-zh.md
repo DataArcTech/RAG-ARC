@@ -106,8 +106,15 @@ RAG-ARC 可通过 `.env` 把 PDF/图片解析切到该服务：
 
 - 设置 `PARSER_PARSE_MODE=mineru`
 - 设置 `MINERU_SERVER_URL=http://<server-ip>:8899`（可选 `MINERU_TIMEOUT_S=900`）
+- 可选页范围（0-based，结束页包含）：`MINERU_START_PAGE=0`、`MINERU_END_PAGE=1`
 
-解析产物会被镜像到 `PARSER_OUTPUT_DIR`（默认 `./data/parsed_files/mineru/...`），与 RAG-ARC 原有解析输出目录结构保持一致。
+解析产物会被镜像到 `PARSER_OUTPUT_DIR`（默认 `./data/parsed_files/mineru/<file_id>/...`），其中 `<file_id>` 是 RAG-ARC 侧的文件 ID，用于避免同名文件导致的产物覆盖/串读。
+
+### 证据资源 URL（RAG-ARC API）
+
+当 `include_evidence=true` 时，RAG-ARC 会返回：
+- `document_url`：`GET /knowledge/{file_id}/download`
+- 对 MinerU 解析产出的 Markdown，若 `chunk.content` 内有 `![...](images/xxx.jpg)` 这类相对路径图片链接，后端会改写为 `GET /knowledge/{file_id}/mineru-assets/images/...`，便于前端直接渲染（需要鉴权）。
 
 ## 通过 SSH 隧道调用（推荐）
 

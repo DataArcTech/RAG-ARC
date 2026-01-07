@@ -20,6 +20,27 @@ def _default_timeout_s() -> int:
         return 900
 
 
+def _default_start_page() -> int:
+    raw = str(os.getenv("MINERU_START_PAGE", "") or "").strip()
+    if not raw:
+        return 0
+    try:
+        return max(0, int(raw))
+    except Exception:
+        return 0
+
+
+def _default_end_page() -> Optional[int]:
+    raw = str(os.getenv("MINERU_END_PAGE", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+        return value if value >= 0 else None
+    except Exception:
+        return None
+
+
 class MinerUParserConfig(AbstractConfig):
     type: Literal["mineru_parser"] = "mineru_parser"
 
@@ -37,8 +58,8 @@ class MinerUParserConfig(AbstractConfig):
     lang: str = Field(default="ch")
     formula_enable: bool = Field(default=True)
     table_enable: bool = Field(default=True)
-    start_page: int = Field(default=0)
-    end_page: Optional[int] = Field(default=None)
+    start_page: int = Field(default_factory=_default_start_page)
+    end_page: Optional[int] = Field(default_factory=_default_end_page)
     output_format: str = Field(default="mm_md")
 
     def build(self) -> MinerUParser:

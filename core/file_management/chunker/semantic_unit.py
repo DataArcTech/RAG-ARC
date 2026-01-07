@@ -9,7 +9,10 @@ from core.file_management.atomic_units.fenced_code import (
     parse_fenced_code_block,
     split_fenced_code_blocks_with_line_spans,
 )
+from core.file_management.atomic_units.markdown_image import extract_image_alts, extract_image_urls, line_contains_image
 from core.file_management.atomic_units.markdown_table import is_markdown_table_start, parse_markdown_table
+from core.file_management.chunker.semantic_unit_table_summary import summarize_tail_percent_rows
+from core.utils.html_table import extract_html_table_rows, render_pipe_table
 
 if TYPE_CHECKING:
     from config.core.file_management.chunker.chunker_config import SemanticUnitChunkerConfig
@@ -19,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class _Segment:
-    kind: str  # "text" | "table" | "code" | "list" | "math" | "blockquote"
+    kind: str  # "text" | "table" | "code" | "list" | "math" | "blockquote" | "image"
     content: str
     caption: str = ""
     info: Dict[str, Any] = field(default_factory=dict)
@@ -48,6 +51,8 @@ class SemanticUnitChunker(AbstractChunker):
     _TASK_ITEM_RE = re.compile(r"^(\s*)([-*+])\s+\[( |x|X)\]\s+(.*)$")
     _MATH_BLOCK_START_RE = re.compile(r"^\s*(\$\$|\\\[)\s*$")
     _MATH_BLOCK_END_RE = re.compile(r"^\s*(\$\$|\\\])\s*$")
+    _HTML_TABLE_START_RE = re.compile(r"<table\b", re.IGNORECASE)
+    _HTML_TABLE_END_RE = re.compile(r"</table>", re.IGNORECASE)
 
     def __init__(self, config: "SemanticUnitChunkerConfig"):
         super().__init__(config)
@@ -80,6 +85,7 @@ class SemanticUnitChunker(AbstractChunker):
             enable_lists=enabled_units["list"],
             enable_math=enabled_units["math"],
             enable_blockquotes=enabled_units["blockquote"],
+            enable_images=True,
         )
         source_file_id = ""
         if metadata:
@@ -124,6 +130,7 @@ class SemanticUnitChunker(AbstractChunker):
         list_counter = 0
         math_counter = 0
         blockquote_counter = 0
+        image_counter = 0
 
         for segment in segments:
             if segment.kind == "text":
@@ -141,6 +148,36 @@ class SemanticUnitChunker(AbstractChunker):
             if segment.kind == "table":
                 table_counter += 1
                 semantic_unit_id = f"{source_file_id}:table:{table_counter}"
+
+                table_format = str((segment.info or {}).get("table_format") or "pipe").strip().lower()
+                if table_format == "html":
+                    html = segment.content.strip()
+                    rows = extract_html_table_rows(html)
+                    pipe_table = render_pipe_table(rows)
+                    normalized_table = pipe_table or html
+                    summary = summarize_tail_percent_rows(rows)
+                    body = f"{summary}\n\n{normalized_table}".strip() if summary else normalized_table
+                    content = self._compose_with_caption(caption, body)
+                    output.append(
+                        self._make_chunk_dict(
+                            content=content,
+                            source_metadata=metadata,
+                            metadata={
+                                "strategy": "semantic_unit",
+                                "chunk_role": "anchor",
+                                "semantic_unit_type": "table",
+                                "semantic_unit_id": semantic_unit_id,
+                                "parent_unit_id": semantic_unit_id,
+                                "table_format": "pipe" if pipe_table else "html",
+                                "index_text": content,
+                                "token_count": self._estimate_tokens(content),
+                                "anchor_is_summary": True,
+                                "is_atomic": True,
+                                "is_full_content": True,
+                            },
+                        )
+                    )
+                    continue
 
                 header, separator, rows = parse_markdown_table(segment.content)
                 table_header = "\n".join([line for line in (header, separator) if line]).strip()
@@ -233,6 +270,48 @@ class SemanticUnitChunker(AbstractChunker):
                             },
                         )
                     )
+                continue
+
+            if segment.kind == "image":
+                image_counter += 1
+                semantic_unit_id = f"{source_file_id}:image:{image_counter}"
+                content = self._compose_with_caption(caption, segment.content.strip())
+                urls: List[str] = []
+                alts: List[str] = []
+                for line in segment.content.splitlines():
+                    urls.extend(extract_image_urls(line))
+                    alts.extend(extract_image_alts(line))
+                urls = [u for u in urls if u]
+                alts = [a for a in alts if a]
+
+                index_text_parts: List[str] = []
+                if caption:
+                    index_text_parts.append(caption)
+                if alts:
+                    index_text_parts.append("; ".join(alts))
+                index_text = "\n".join(index_text_parts).strip() or "image"
+
+                output.append(
+                    self._make_chunk_dict(
+                        content=content,
+                        source_metadata=metadata,
+                        metadata={
+                            "strategy": "semantic_unit",
+                            "chunk_role": "anchor",
+                            "semantic_unit_type": "image",
+                            "semantic_unit_id": semantic_unit_id,
+                            "parent_unit_id": semantic_unit_id,
+                            "image_urls": urls,
+                            "image_alts": alts,
+                            "image_count": len(urls),
+                            "index_text": index_text,
+                            "token_count": self._estimate_tokens(index_text),
+                            "anchor_is_summary": True,
+                            "is_atomic": True,
+                            "is_full_content": True,
+                        },
+                    )
+                )
                 continue
 
             if segment.kind == "code":
@@ -526,6 +605,7 @@ class SemanticUnitChunker(AbstractChunker):
         enable_lists: bool,
         enable_math: bool,
         enable_blockquotes: bool,
+        enable_images: bool,
     ) -> List[_Segment]:
         lines = text.splitlines()
         segments: List[_Segment] = []
@@ -575,7 +655,70 @@ class SemanticUnitChunker(AbstractChunker):
                         i += 1
                     table_content = "\n".join(lines[start:i]).strip("\n")
                     caption = self._infer_block_caption(lines, start)
-                    segments.append(_Segment(kind="table", content=table_content, caption=caption))
+                    segments.append(_Segment(kind="table", content=table_content, caption=caption, info={"table_format": "pipe"}))
+                    continue
+
+                if enable_tables and self._HTML_TABLE_START_RE.search(line or ""):
+                    flush_text()
+                    start = i
+                    start_match = self._HTML_TABLE_START_RE.search(line or "")
+                    assert start_match is not None
+                    start_pos = start_match.start()
+                    prefix = (line[:start_pos] or "").strip()
+                    if prefix:
+                        segments.append(_Segment(kind="text", content=prefix))
+
+                    table_lines: List[str] = []
+                    remainder = line[start_pos:]
+                    same_line_end = self._HTML_TABLE_END_RE.search(remainder or "")
+                    if same_line_end:
+                        end_pos_abs = start_pos + same_line_end.end()
+                        table_lines.append(line[start_pos:end_pos_abs])
+                        suffix = (line[end_pos_abs:] or "").strip()
+                        if suffix:
+                            lines[i] = suffix
+                        else:
+                            i += 1
+                        table_content = "\n".join(table_lines).strip("\n")
+                        caption = self._infer_block_caption(lines, start)
+                        segments.append(
+                            _Segment(kind="table", content=table_content, caption=caption, info={"table_format": "html"})
+                        )
+                        continue
+
+                    table_lines.append(remainder)
+                    i += 1
+                    while i < span_end:
+                        candidate = lines[i]
+                        end_match = self._HTML_TABLE_END_RE.search(candidate or "")
+                        if not end_match:
+                            table_lines.append(candidate)
+                            i += 1
+                            continue
+
+                        end_pos = end_match.end()
+                        table_lines.append(candidate[:end_pos])
+                        suffix = (candidate[end_pos:] or "").strip()
+                        if suffix:
+                            lines[i] = suffix
+                        else:
+                            i += 1
+                        break
+
+                    table_content = "\n".join(table_lines).strip("\n")
+                    caption = self._infer_block_caption(lines, start)
+                    segments.append(_Segment(kind="table", content=table_content, caption=caption, info={"table_format": "html"}))
+                    continue
+
+                if enable_images and line_contains_image(line):
+                    flush_text()
+                    start = i
+                    i += 1
+                    while i < span_end and line_contains_image(lines[i]):
+                        i += 1
+                    image_content = "\n".join(lines[start:i]).strip("\n")
+                    caption = self._infer_block_caption(lines, start)
+                    segments.append(_Segment(kind="image", content=image_content, caption=caption))
                     continue
 
                 if enable_lists and self._is_list_start(line):
@@ -618,6 +761,9 @@ class SemanticUnitChunker(AbstractChunker):
                 j -= 1
                 continue
             if "|" in candidate:
+                return ""
+            lower = candidate.lower()
+            if any(tag in lower for tag in ("<table", "</table", "<tr", "</tr", "<td", "</td", "<th", "</th", "<tbody", "</tbody", "<thead", "</thead")):
                 return ""
             if is_fence_line(candidate):
                 return ""

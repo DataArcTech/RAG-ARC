@@ -7,6 +7,34 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+_SAFE_LEAF_ALLOWED = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+
+
+def safe_leaf_name(value: str, *, default: str = "document", max_len: int = 128) -> str:
+    """Convert an arbitrary token into a filesystem-safe single path component.
+
+    - Strips path separators and unsafe characters.
+    - Prevents traversal tokens like "." / "..".
+    - Bounds length to avoid pathological filenames.
+    """
+    token = str(value or "").strip()
+    if not token:
+        return default
+
+    out_chars: list[str] = []
+    for ch in token:
+        if ch in _SAFE_LEAF_ALLOWED:
+            out_chars.append(ch)
+        else:
+            out_chars.append("_")
+
+    safe = "".join(out_chars).strip(" ._")
+    if not safe or safe in {".", ".."}:
+        return default
+    if max_len > 0:
+        safe = safe[:max_len]
+    return safe
+
 
 def _test_write_access(target: Path) -> bool:
     """

@@ -423,12 +423,14 @@ class FaissVectorDB(VectorDB):
         # Check if IDs to delete exist
         missing_ids = [doc_id for doc_id in ids if doc_id not in self.docstore]
         if missing_ids:
-            logger.warning(f"IDs not found: {missing_ids}")
-            return False
+            # Idempotency: treat missing IDs as already deleted (e.g., index rebuilt / partial cleanup).
+            logger.warning("IDs not found in FAISS docstore (treating as already deleted): %s", missing_ids)
 
         with self._lock:
             # Mark chunks as deleted (soft-delete)
             for doc_id in ids:
+                if doc_id not in self.docstore:
+                    continue
                 if doc_id not in self.deleted_ids:
                     self.deleted_ids.add(doc_id)
                     logger.debug(f"Soft-deleted chunk: {doc_id}")

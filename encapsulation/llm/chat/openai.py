@@ -142,7 +142,7 @@ class OpenAIChatLLM(ChatLLMBase):
 
     def chat(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         **kwargs
     ) -> str:
         """Internal chat implementation"""
@@ -182,7 +182,7 @@ class OpenAIChatLLM(ChatLLMBase):
 
     def stream_chat(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         **kwargs
     ):
         """
@@ -497,7 +497,7 @@ class OpenAIChatLLM(ChatLLMBase):
 
     async def achat(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         **kwargs
     ) -> str:
         """
@@ -529,7 +529,7 @@ class OpenAIChatLLM(ChatLLMBase):
 
     async def astream_chat(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         **kwargs
     ) -> AsyncGenerator[str, None]:
         """
@@ -621,21 +621,49 @@ class OpenAIChatLLM(ChatLLMBase):
         for msg in messages:
             if not isinstance(msg, dict) or 'role' not in msg or 'content' not in msg:
                 raise ValueError("Message format error: must contain 'role' and 'content'")
-            if not self._validate_input(msg['content']):
-                raise ValueError(f"Message content validation failed: {msg['content']}")
+            if self.loading_method == "huggingface" and not isinstance(msg.get("content"), str):
+                raise ValueError("HuggingFace chat only supports string content (no multimodal parts).")
+            if not self._validate_input(msg.get('content')):
+                raise ValueError(f"Message content validation failed: {msg.get('content')}")
 
-    def _validate_input(self, input_text: str, max_length: Optional[int] = None) -> bool:
+    def _validate_input(self, input_text: Any, max_length: Optional[int] = None) -> bool:
         """Validate input text"""
-        if not isinstance(input_text, str):
-            logger.error("Input must be string type")
-            return False
+        if isinstance(input_text, str):
+            if not input_text.strip():
+                logger.error("Input text cannot be empty")
+                return False
+            if max_length and len(input_text) > max_length:
+                logger.error("Input text length exceeds limit: %s > %s", len(input_text), max_length)
+                return False
+            return True
 
-        if not input_text.strip():
-            logger.error("Input text cannot be empty")
-            return False
+        # OpenAI-compatible multimodal: content is a list of parts.
+        if isinstance(input_text, list):
+            if not input_text:
+                logger.error("Input parts cannot be empty")
+                return False
+            for part in input_text:
+                if not isinstance(part, dict) or "type" not in part:
+                    logger.error("Invalid multimodal part: %r", part)
+                    return False
+                part_type = part.get("type")
+                if part_type == "text":
+                    text = part.get("text")
+                    if not isinstance(text, str) or not text.strip():
+                        logger.error("Invalid text part: %r", part)
+                        return False
+                elif part_type == "image_url":
+                    image_url = part.get("image_url")
+                    url = None
+                    if isinstance(image_url, dict):
+                        url = image_url.get("url")
+                    if not isinstance(url, str) or not url.strip():
+                        logger.error("Invalid image_url part: %r", part)
+                        return False
+                else:
+                    logger.error("Unsupported multimodal part type: %s", part_type)
+                    return False
+            return True
 
-        if max_length and len(input_text) > max_length:
-            logger.error(f"Input text length exceeds limit: {len(input_text)} > {max_length}")
-            return False
-
-        return True
+        logger.error("Input must be string or multimodal part list")
+        return False

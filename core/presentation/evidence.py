@@ -1,5 +1,5 @@
 """Helpers to assemble chunk, triple, and seed-entity evidence payloads."""
-import ast
+import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from encapsulation.data_model.schema import Chunk
@@ -23,23 +23,96 @@ from encapsulation.graph_export import export_subgraph_snapshot
 ChunkEntry = Dict[str, Any]
 TripleEntry = Dict[str, Any]
 
+_MD_IMAGE_URL_RE = re.compile(r"(!\[[^\]]*]\()([^)\s]+)([^)]*\))")
+_HTML_IMG_RE = re.compile(
+    r"(<img\b[^>]*\bsrc=)(?:\"([^\"]+)\"|'([^']+)'|([^\s>]+))",
+    re.IGNORECASE,
+)
+
+
+def _document_download_url(file_id: str) -> str:
+    return f"/knowledge/{file_id}/download"
+
+
+def _mineru_asset_url(file_id: str, rel_path: str) -> str:
+    token = str(rel_path or "").lstrip("/").lstrip("\\")
+    return f"/knowledge/{file_id}/mineru-assets/{token}"
+
+
+def _is_relative_local_path(url: str) -> bool:
+    token = str(url or "").strip()
+    if not token:
+        return False
+    lower = token.lower()
+    if lower.startswith(("http://", "https://", "data:", "file:")):
+        return False
+    if token.startswith("/"):
+        return False
+    if ".." in token.split("/"):
+        return False
+    return True
+
+
+def _rewrite_image_urls_in_markdown(markdown: str, *, file_id: str | None) -> str:
+    if not file_id:
+        return markdown
+    text = str(markdown or "")
+
+    def _md_repl(match: re.Match[str]) -> str:
+        url = match.group(2)
+        if _is_relative_local_path(url):
+            resolved = _mineru_asset_url(file_id, url)
+            return f"{match.group(1)}{resolved}{match.group(3)}"
+        return match.group(0)
+
+    def _html_repl(match: re.Match[str]) -> str:
+        src = match.group(2) or match.group(3) or match.group(4) or ""
+        if _is_relative_local_path(src):
+            resolved = _mineru_asset_url(file_id, src)
+            return f'{match.group(1)}"{resolved}"'
+        return match.group(0)
+
+    text = _MD_IMAGE_URL_RE.sub(_md_repl, text)
+    text = _HTML_IMG_RE.sub(_html_repl, text)
+    return text
+
+
+def _rewrite_chunk_metadata_urls(metadata: Dict[str, Any], *, file_id: str | None) -> Dict[str, Any]:
+    if not file_id:
+        return metadata
+    updated = dict(metadata)
+
+    image_urls = updated.get("image_urls")
+    if isinstance(image_urls, list):
+        rel_urls = [str(u) for u in image_urls if isinstance(u, str)]
+        updated["image_urls_rel"] = rel_urls
+        updated["image_urls"] = [
+            _mineru_asset_url(file_id, u) if _is_relative_local_path(u) else u
+            for u in rel_urls
+        ]
+    return updated
+
 
 def _serialize_chunks(chunks: Sequence[Chunk], limit: Optional[int]) -> List[ChunkEntry]:
     subset = list(chunks[:limit]) if limit else list(chunks)
     payload: List[ChunkEntry] = []
     for chunk in subset:
         metadata = getattr(chunk, "metadata", {}) or {}
-        # 优先使用 metadata 中的 prompt_text 或 index_text（与 module.py 中构建 LLM 消息的逻辑保持一致）
+        file_id = str(metadata.get("source_file_id") or "").strip() or None
+        safe_meta = _rewrite_chunk_metadata_urls(dict(metadata), file_id=file_id)
         chunk_text = metadata.get("prompt_text") or metadata.get("index_text")
         if not isinstance(chunk_text, str) or not chunk_text.strip():
             chunk_text = chunk.content or ""
+        content = _rewrite_image_urls_in_markdown(chunk_text, file_id=file_id)
         payload.append(
             {
                 "id": getattr(chunk, "id", None),
                 "owner_id": getattr(chunk, "owner_id", None),
-                "content": chunk_text,
+                "file_id": file_id,
+                "document_url": _document_download_url(file_id) if file_id else None,
+                "content": content,
                 "score": metadata.get("score"),
-                "metadata": metadata,
+                "metadata": safe_meta,
             }
         )
     return payload
@@ -247,13 +320,27 @@ def _serialize_deepsearch_chunks(evidences: Iterable[Dict[str, Any]], limit: Opt
             break
         provenance = evidence.get("provenance") or {}
         metadata = provenance.get("metadata") or {}
+        file_id = None
+        if isinstance(metadata, dict):
+            chunk_meta = metadata.get("chunk_metadata")
+            if isinstance(chunk_meta, dict):
+                token = str(chunk_meta.get("source_file_id") or "").strip()
+                file_id = token or None
+
+        safe_meta = dict(metadata) if isinstance(metadata, dict) else {}
+        if file_id and isinstance(safe_meta.get("chunk_metadata"), dict):
+            safe_meta["chunk_metadata"] = _rewrite_chunk_metadata_urls(dict(safe_meta["chunk_metadata"]), file_id=file_id)
+
+        content = _rewrite_image_urls_in_markdown(str(evidence.get("content") or ""), file_id=file_id)
         entries.append(
             {
                 "chunk_id": evidence.get("chunk_id"),
                 "source": evidence.get("source"),
-                "content": evidence.get("content"),
+                "file_id": file_id,
+                "document_url": _document_download_url(file_id) if file_id else None,
+                "content": content,
                 "score": evidence.get("score"),
-                "metadata": metadata,
+                "metadata": safe_meta,
             }
         )
     return entries

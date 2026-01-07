@@ -3,7 +3,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 from collections import deque
 from contextlib import nullcontext
 from itertools import combinations
@@ -15,6 +14,12 @@ from encapsulation.database.utils.graph_export_utils import GraphExporter
 from encapsulation.database.utils.graph_export_utils_neo4j import GraphExporterNeo4j
 
 from config.output_limits import DEEPSEARCH_GRAPH_EXPORT_MAX_EDGES
+from config.core.deepsearch.multimodal_evidence_defaults import (
+    DEEPSEARCH_RETRIEVAL_OVERFETCH_FACTOR,
+    DEEPSEARCH_RETRIEVAL_OVERFETCH_MAX,
+    DEEPSEARCH_VISUAL_FALLBACK_MAX_IMAGE_CANDIDATES,
+    DEEPSEARCH_VISUAL_MIN_IMAGES,
+)
 from core.graph_adapter.base import (
     GraphAccessScope,
     GraphAdapterCapability,
@@ -25,7 +30,17 @@ from core.graph_adapter.cypher import assert_read_only_cypher
 from core.graph_adapter.registry import register_adapter
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 from core.deepsearch.utils.file_scope import FileScope, chunk_in_scope
-from core.prompts import build_file_scope_xlang_rewrite_prompt
+from core.graph_adapter.hipporag_scope_helpers import (
+    coerce_file_scope,
+    file_scope_xlang_retry_enabled,
+    maybe_rewrite_query_for_scope,
+)
+from core.graph_adapter.hipporag_visual_evidence_helpers import (
+    is_image_chunk,
+    merge_unique_chunks,
+    preserve_visual_evidence,
+    search_visual_image_chunks_sync,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -555,12 +570,21 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             top_k = int(self.default_top_k)
         top_k = max(1, top_k)
 
-        file_scope = self._coerce_file_scope(query_options)
+        file_scope = coerce_file_scope(query_options)
         requested_k = top_k
         fetch_k = requested_k
-        if file_scope.enabled:
-            # Over-fetch to compensate for post-filtering; keep a small cap.
-            fetch_k = min(max(requested_k * 5, requested_k), 100)
+        visual_hint = bool(isinstance(query_options, Mapping) and query_options.get("visual_evidence_hint"))
+        visual_query = ""
+        if isinstance(query_options, Mapping) and isinstance(query_options.get("visual_evidence_query"), str):
+            visual_query = str(query_options.get("visual_evidence_query") or "").strip()
+        if not visual_query:
+            visual_query = str(query or "").strip()
+        if file_scope.enabled or visual_hint:
+            # Over-fetch to compensate for post-filtering and to surface caption-only image chunks.
+            fetch_k = min(
+                max(requested_k * int(DEEPSEARCH_RETRIEVAL_OVERFETCH_FACTOR), requested_k),
+                int(DEEPSEARCH_RETRIEVAL_OVERFETCH_MAX),
+            )
 
         kwargs = {
             "k": fetch_k,
@@ -569,8 +593,27 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         }
         raw_chunks: List[Chunk] = self.retriever.invoke(query, **kwargs)
         subgraph_info = self._extract_subgraph_info(raw_chunks)
+        selected = raw_chunks
+        evidence_diag: Dict[str, Any] = {"file_scope_applied": False}
+        if visual_hint:
+            selected, diag = preserve_visual_evidence(selected, requested_k=requested_k, query=visual_query)
+            evidence_diag.update(diag)
+            if (evidence_diag.get("visual_evidence_in_topk") or 0) < int(DEEPSEARCH_VISUAL_MIN_IMAGES):
+                fallback = search_visual_image_chunks_sync(
+                    retriever=self.retriever,
+                    owner_token=owner_token,
+                    query=visual_query,
+                    file_scope=file_scope,
+                    limit=int(DEEPSEARCH_VISUAL_FALLBACK_MAX_IMAGE_CANDIDATES),
+                )
+                if fallback:
+                    merged = merge_unique_chunks(selected, fallback)
+                    selected, diag2 = preserve_visual_evidence(
+                        merged, requested_k=requested_k, query=visual_query
+                    )
+                    evidence_diag.update({"visual_evidence_fallback_added": len(fallback), **diag2})
         if not file_scope.enabled:
-            return raw_chunks[:requested_k], subgraph_info, {"file_scope_applied": False}
+            return selected[:requested_k], subgraph_info, evidence_diag
 
         filtered: List[Chunk] = []
         dropped = 0
@@ -584,8 +627,9 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         # especially for cross-language queries. In that case, attempt a single query rewrite
         # using the retriever's LLM client (when available) to bridge the language gap.
         xlang_diag: Dict[str, Any] = {}
-        if not filtered[:requested_k] and self._file_scope_xlang_retry_enabled():
-            rewritten = self._maybe_rewrite_query_for_scope(query)
+        if not filtered[:requested_k] and file_scope_xlang_retry_enabled():
+            llm = getattr(self.retriever, "llm_client", None)
+            rewritten = maybe_rewrite_query_for_scope(llm_client=llm, query=query) if llm is not None else None
             if rewritten and rewritten != query:
                 xlang_diag["xlang_retry"] = True
                 xlang_diag["rewritten_query_preview"] = rewritten[:200]
@@ -601,37 +645,113 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
                         else:
                             retry_dropped += 1
                     if retry_filtered:
+                        selected_retry = retry_filtered
+                        visual_diag: Dict[str, Any] = {}
+                        if visual_hint:
+                            selected_retry, visual_diag = preserve_visual_evidence(
+                                selected_retry, requested_k=requested_k, query=visual_query
+                            )
+                            if (visual_diag.get("visual_evidence_in_topk") or 0) < int(DEEPSEARCH_VISUAL_MIN_IMAGES):
+                                fallback = search_visual_image_chunks_sync(
+                                    retriever=self.retriever,
+                                    owner_token=owner_token,
+                                    query=visual_query,
+                                    file_scope=file_scope,
+                                    limit=int(DEEPSEARCH_VISUAL_FALLBACK_MAX_IMAGE_CANDIDATES),
+                                )
+                                if fallback:
+                                    merged = merge_unique_chunks(selected_retry, fallback)
+                                    selected_retry, diag2 = preserve_visual_evidence(
+                                        merged, requested_k=requested_k, query=visual_query
+                                    )
+                                    visual_diag.update({"visual_evidence_fallback_added": len(fallback), **diag2})
                         return (
-                            retry_filtered[:requested_k],
+                            selected_retry[:requested_k],
                             retry_info,
                             {
                                 "file_scope_applied": True,
                                 "file_scope": file_scope.as_dict(),
                                 "requested_top_k": requested_k,
                                 "fetch_top_k": fetch_k,
-                                "kept_in_scope": len(retry_filtered[:requested_k]),
+                                "kept_in_scope": len(selected_retry[:requested_k]),
                                 "dropped_out_of_scope": retry_dropped,
                                 "input_chunk_count": len(raw_retry),
+                                **visual_diag,
                                 **xlang_diag,
                             },
                         )
                     xlang_diag["xlang_retry_no_hits"] = True
                 except Exception as exc:
                     xlang_diag["xlang_retry_error"] = str(exc)
+        selected_filtered = filtered
+        visual_diag_final: Dict[str, Any] = {}
+        if visual_hint:
+            selected_filtered, visual_diag_final = preserve_visual_evidence(
+                selected_filtered, requested_k=requested_k, query=visual_query
+            )
+            if (visual_diag_final.get("visual_evidence_in_topk") or 0) < int(DEEPSEARCH_VISUAL_MIN_IMAGES):
+                fallback = search_visual_image_chunks_sync(
+                    retriever=self.retriever,
+                    owner_token=owner_token,
+                    query=visual_query,
+                    file_scope=file_scope,
+                    limit=int(DEEPSEARCH_VISUAL_FALLBACK_MAX_IMAGE_CANDIDATES),
+                )
+                if fallback:
+                    merged = merge_unique_chunks(selected_filtered, fallback)
+                    selected_filtered, diag2 = preserve_visual_evidence(
+                        merged, requested_k=requested_k, query=visual_query
+                    )
+                    visual_diag_final.update({"visual_evidence_fallback_added": len(fallback), **diag2})
         return (
-            filtered[:requested_k],
+            selected_filtered[:requested_k],
             subgraph_info,
             {
                 "file_scope_applied": True,
                 "file_scope": file_scope.as_dict(),
                 "requested_top_k": requested_k,
                 "fetch_top_k": fetch_k,
-                "kept_in_scope": len(filtered[:requested_k]),
+                "kept_in_scope": len(selected_filtered[:requested_k]),
                 "dropped_out_of_scope": dropped,
                 "input_chunk_count": len(raw_chunks),
+                **visual_diag_final,
                 **xlang_diag,
             },
         )
+
+    @staticmethod
+    def _merge_unique_chunks(primary: List[Chunk], secondary: List[Chunk]) -> List[Chunk]:
+        return merge_unique_chunks(primary, secondary)
+
+    def _search_visual_image_chunks_sync(
+        self,
+        *,
+        owner_token: str,
+        query: str,
+        file_scope: FileScope,
+        limit: int,
+    ) -> List[Chunk]:
+        return search_visual_image_chunks_sync(
+            retriever=self.retriever,
+            owner_token=owner_token,
+            query=query,
+            file_scope=file_scope,
+            limit=limit,
+        )
+
+    @staticmethod
+    def _is_image_chunk(chunk: Chunk) -> bool:
+        return is_image_chunk(chunk)
+
+    @classmethod
+    def _preserve_visual_evidence(
+        cls,
+        chunks: List[Chunk],
+        *,
+        requested_k: int,
+        query: str,
+    ) -> tuple[List[Chunk], Dict[str, Any]]:
+        return preserve_visual_evidence(chunks, requested_k=requested_k, query=query)
 
     def _build_graph_payload(
         self,
@@ -704,99 +824,6 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
             if metadata and "_subgraph_info" in metadata:
                 return metadata["_subgraph_info"]
         return None
-
-    @staticmethod
-    def _coerce_file_scope(query_options: Optional[Mapping[str, Any]]) -> FileScope:
-        if not isinstance(query_options, Mapping):
-            return FileScope()
-        raw = query_options.get("file_scope")
-        if isinstance(raw, Mapping):
-            return FileScope(
-                file_ids=frozenset(str(x).strip() for x in (raw.get("file_ids") or []) if str(x).strip()),
-                filename_contains=tuple(str(x).strip() for x in (raw.get("filename_contains") or []) if str(x).strip()),
-                source=str(raw.get("source") or "adapter_query_options").strip() or "adapter_query_options",
-            )
-        return FileScope()
-
-    @staticmethod
-    def _file_scope_xlang_retry_enabled() -> bool:
-        raw = os.getenv("DEEPSEARCH_FILE_SCOPE_XLANG_RETRY", "1")
-        return str(raw or "").strip().lower() not in {"0", "false", "no", "off"}
-
-    _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
-    _ASCII_ALPHA_RE = re.compile(r"[A-Za-z]")
-
-    def _maybe_rewrite_query_for_scope(self, query: str) -> str | None:
-        llm = getattr(self.retriever, "llm_client", None)
-        chat = getattr(llm, "chat", None)
-        if not callable(chat):
-            return None
-
-        text = str(query or "").strip()
-        if not text:
-            return None
-
-        cjk = len(self._CJK_RE.findall(text))
-        alpha = len(self._ASCII_ALPHA_RE.findall(text))
-        total = max(1, len(text))
-        cjk_ratio = cjk / total
-        alpha_ratio = alpha / total
-
-        direction: str | None = None
-        if alpha_ratio >= 0.25 and cjk_ratio < 0.05:
-            direction = "to_zh"
-        elif cjk_ratio >= 0.15 and alpha_ratio < 0.08:
-            direction = "to_en"
-        else:
-            return None
-
-        prompt = build_file_scope_xlang_rewrite_prompt(query=text)
-        try:
-            raw = chat([{"role": "user", "content": prompt}])
-        except Exception:
-            return None
-
-        payload = self._safe_json_loads(str(raw or ""))
-        if not isinstance(payload, dict):
-            return None
-
-        zh_hans = str(payload.get("zh_hans") or "").strip()
-        zh_hant = str(payload.get("zh_hant") or "").strip()
-        en = str(payload.get("en") or "").strip()
-
-        additions: List[str] = []
-        if direction == "to_zh":
-            if zh_hans:
-                additions.append(zh_hans)
-            if zh_hant and zh_hant != zh_hans:
-                additions.append(zh_hant)
-        elif direction == "to_en" and en:
-            additions.append(en)
-
-        if not additions:
-            return None
-        joined = "\n".join(additions)
-        return f"{text}\n\n{joined}"
-
-    @staticmethod
-    def _safe_json_loads(raw: str) -> Any | None:
-        text = str(raw or "").strip()
-        if not text:
-            return None
-        # Remove ```json fences when present.
-        if text.startswith("```"):
-            # Strip the leading fence.
-            if text.lower().startswith("```json"):
-                text = text[len("```json") :].strip()
-            else:
-                text = text[len("```") :].strip()
-            # Strip the trailing fence.
-            if text.endswith("```"):
-                text = text[: -len("```")].strip()
-        try:
-            return json.loads(text)
-        except Exception:
-            return None
 
     def _export_subgraph(self, subgraph_info: Dict[str, Any]) -> Dict[str, Any]:
         """Use the existing graph exporters to obtain nodes/edges for visualization."""

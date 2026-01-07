@@ -1,5 +1,6 @@
 """Configuration classes for all chunker strategies"""
 
+import os
 from framework.config import AbstractConfig
 from core.file_management.chunker.token import TokenChunker
 from core.file_management.chunker.recursive import RecursiveChunker
@@ -17,8 +18,14 @@ class TokenChunkerConfig(AbstractConfig):
     type: Literal["token_chunker"] = "token_chunker"
 
     # Core chunking parameters
-    chunk_size: int = 1000  # Maximum token count per chunk (default: 4000 in implementation)
-    chunk_overlap: int = 100  # Overlap token count between chunks (default: 200 in implementation)
+    chunk_size: int = Field(
+        default_factory=lambda: int(str(os.getenv("TOKEN_CHUNK_SIZE", "1000") or "1000")),
+        description="Maximum token count per chunk.",
+    )
+    chunk_overlap: int = Field(
+        default_factory=lambda: int(str(os.getenv("TOKEN_CHUNK_OVERLAP", "100") or "100")),
+        description="Overlap token count between chunks.",
+    )
 
     # Tokenizer configuration
     encoding_name: str = "gpt2"  # Encoder name for tiktoken (default: 'gpt2')

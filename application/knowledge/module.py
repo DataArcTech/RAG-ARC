@@ -23,6 +23,7 @@ from encapsulation.data_model.orm_models import (
     FilePermission, PermissionReceiverType, PermissionType
 )
 from core.utils.thread_pool import run_blocking, run_coroutine_in_thread
+from core.utils.http_headers import build_attachment_content_disposition
 from encapsulation.message_queue.redis_task_queue import RedisTaskQueue, TaskState
 from application.knowledge.permission_mixin import KnowledgePermissionMixin
 from config.output_limits import KNOWLEDGE_MINDMAP_EXPORT_MAX_CHUNKS
@@ -411,10 +412,7 @@ class Knowledge(KnowledgePermissionMixin, AbstractModule):
         if content is None:
             raise HTTPException(status_code=404, detail="File content not found")
 
-        download_name = Path(str(metadata.filename or "")).name or "download"
-        # Encode filename for Content-Disposition header to handle non-ASCII characters
-        encoded_filename = quote(download_name.encode('utf-8'))
-        headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"}
+        headers = {"Content-Disposition": build_attachment_content_disposition(str(metadata.filename or ""))}
         return Response(content=content, media_type=metadata.content_type, headers=headers)
 
     async def mark_file_deleted_cli(self, doc_id: str, user_id: uuid.UUID) -> Dict[str, Any]:

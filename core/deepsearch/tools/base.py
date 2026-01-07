@@ -162,7 +162,7 @@ class GraphTool(Protocol):
         """Execute the tool logic and return a structured result."""
 
 
-async def call_llm_async(llm, messages: List[Dict[str, str]], **kwargs) -> str:
+async def call_llm_async(llm, messages: List[Dict[str, Any]], **kwargs) -> str:
     """Utility to invoke sync/async LLM connectors transparently."""
 
     if llm is None:

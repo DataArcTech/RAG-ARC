@@ -117,8 +117,15 @@ RAG-ARC can route PDF/image parsing to this service:
 
 - Set `PARSER_PARSE_MODE=mineru`
 - Set `MINERU_SERVER_URL=http://<server-ip>:8899` (and optionally `MINERU_TIMEOUT_S=900`)
+- Optional page range (0-based, inclusive end): `MINERU_START_PAGE=0`, `MINERU_END_PAGE=1`
 
-Parsed outputs are mirrored under `PARSER_OUTPUT_DIR` (default `./data/parsed_files/mineru/...`) to match the existing RAG-ARC parser artifact layout.
+Parsed outputs are mirrored under `PARSER_OUTPUT_DIR` (default `./data/parsed_files/mineru/<file_id>/...`), where `<file_id>` is the RAG-ARC file ID used to avoid filename collisions.
+
+### Evidence asset URLs (RAG-ARC API)
+
+When `include_evidence=true`, RAG-ARC returns:
+- `document_url`: `GET /knowledge/{file_id}/download`
+- For MinerU-parsed Markdown image links like `![...](images/xxx.jpg)`, the backend rewrites them to `GET /knowledge/{file_id}/mineru-assets/images/...` so frontends can render images directly (auth required).
 
 ## HTTP API (Server)
 

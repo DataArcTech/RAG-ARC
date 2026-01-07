@@ -3,10 +3,8 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, TYPE_CHECKING
 
-from framework.singleton_decorator import singleton
-
 from core.file_management.parser.base import AbstractParser
-from core.utils.path_guard import require_writable_dir
+from core.utils.path_guard import require_writable_dir, safe_leaf_name
 from framework.thread_pool import get_thread_pool
 
 from encapsulation.remote_services.mineru_service_client import MinerUServiceClient
@@ -17,7 +15,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@singleton
 class MinerUParser(AbstractParser):
     """
     Remote MinerU parser via HTTP service.
@@ -46,7 +43,9 @@ class MinerUParser(AbstractParser):
         if not isinstance(output_dir, str) or not output_dir.strip():
             raise ValueError("MinerUParser requires config.output_dir (no implicit env defaults).")
         output_dir = require_writable_dir(output_dir)
-        doc_dir = Path(output_dir) / base_filename
+        source_file_id = kwargs.get("source_file_id") or kwargs.get("file_id")
+        doc_key = safe_leaf_name(str(source_file_id or ""), default=base_filename)
+        doc_dir = Path(output_dir) / doc_key
         doc_dir.mkdir(parents=True, exist_ok=True)
 
         backend = str(kwargs.get("backend") or getattr(self.config, "backend", "vlm-transformers"))
@@ -141,4 +140,3 @@ class MinerUParser(AbstractParser):
                 },
             }
         ]
-

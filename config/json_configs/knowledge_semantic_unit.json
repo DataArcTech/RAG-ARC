@@ -96,8 +96,8 @@
       "list_slice_overlap_items": "${LIST_SLICE_OVERLAP_ITEMS}",
       "fallback_chunker_config": {
         "type": "token_chunker",
-        "chunk_size": 1000,
-        "chunk_overlap": 100
+        "chunk_size": "${TOKEN_CHUNK_SIZE}",
+        "chunk_overlap": "${TOKEN_CHUNK_OVERLAP}"
       }
     },
     "indexer_configs": [
