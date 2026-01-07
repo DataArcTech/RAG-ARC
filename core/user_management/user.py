@@ -131,9 +131,15 @@ class UserStorage(AbstractModule):
         except UserValidationError:
             raise
         except Exception as e:
-            error_msg = f"User creation error: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            raise StorageOperationError(error_msg)
+            error_msg = str(e)
+            # Username already exists is a normal business scenario, log as info instead of error
+            if "already exists" in error_msg.lower():
+                logger.info(f"User registration attempt with existing username: {user_name}")
+                raise StorageOperationError(error_msg)
+            else:
+                error_msg = f"User creation error: {error_msg}"
+                logger.error(error_msg, exc_info=True)
+                raise StorageOperationError(error_msg)
 
     def get_user(
         self,

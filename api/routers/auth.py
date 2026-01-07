@@ -25,6 +25,7 @@ from app_registration import Register, initialize as app_initialize
 from application.account.user import Account
 from config.application.account_config import AccountConfig
 from api.schemas.response import StandardResponse
+from core.user_management.user import StorageOperationError
 
 
 def _get_jwt_secret_key() -> str:
@@ -515,7 +516,13 @@ async def register(user: UserCreate) -> StandardResponse[UserResponse]:
             data=UserResponse.from_user(new_user)
         )
     except IntegrityError:
-        raise HTTPException(status_code=400, detail="Username already exists")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already exists")
+    except StorageOperationError as e:
+        # Handle storage errors, especially duplicate username errors
+        error_msg = str(e)
+        if "already exists" in error_msg.lower():
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already exists")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=error_msg)
 
 @router.post("/logout")
 async def logout(

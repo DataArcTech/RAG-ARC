@@ -21,7 +21,8 @@ class _PostgreSQLUsersMixin:
                 return user.id
 
         except IntegrityError as e:
-            logger.error(f"Integrity error storing user (duplicate username?): {e}")
+            # Username already exists is a normal business scenario, log as info instead of error
+            logger.info(f"User registration attempt with existing username: {user.user_name}")
             raise ValueError(f"User with username '{user.user_name}' already exists")
         except SQLAlchemyError as e:
             logger.error(f"Database error storing user: {e}")

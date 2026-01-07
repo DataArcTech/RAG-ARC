@@ -98,7 +98,7 @@ class Account(AbstractModule):
             # 检查用户是否已存在（通过 user_name 和 type 组合）
             existing_user = self.user_storage.get_user_by_username(user_data.user_name, type=user_type)
             if existing_user:
-                raise HTTPException(status_code=400, detail="Username already exists for this type")
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already exists for this type")
             
             hashed_password = self.get_password_hash(user_data.password)
             new_user_id = self.user_storage.create_user(
