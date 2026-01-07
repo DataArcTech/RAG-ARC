@@ -247,20 +247,20 @@ class FileStorage(AbstractModule):
             if hasattr(self.metadata_store, 'SessionMaker'):
                 try:
                     with self.metadata_store.SessionMaker() as session:
-                        # Check by filename first
+                        # Check by filename first (exclude DELETED files)
                         same_name_file = session.query(FileMetadata).filter_by(
                             filename=filename,
                             owner_id=owner_id
-                        ).first()
+                        ).filter(FileMetadata.status != FileStatus.DELETED).first()
                         
                         if same_name_file:
                             raise FileValidationError(f"File with name '{filename}' already exists")
                         
-                        # Check by content hash (same content, different filename)
+                        # Check by content hash (same content, different filename, exclude DELETED files)
                         same_content_file = session.query(FileMetadata).filter_by(
                             content_hash=content_hash,
                             owner_id=owner_id
-                        ).first()
+                        ).filter(FileMetadata.status != FileStatus.DELETED).first()
                         
                         if same_content_file:
                             raise FileValidationError(f"File with same content already exists: '{same_content_file.filename}'")
