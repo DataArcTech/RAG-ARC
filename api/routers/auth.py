@@ -94,6 +94,7 @@ def get_redis_client():
         return None
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/token")
+oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="auth/token", auto_error=False)
 
 registrator = Register()
 
@@ -397,6 +398,40 @@ async def get_current_user(
     user = await get_user_async(username=token_data.username)
     if user is None:
         raise credentials_exception
+    return user
+
+async def get_current_user_optional(
+    token: Annotated[str | None, Depends(oauth2_scheme_optional)] = None,
+) -> User | None:
+    """Get current user from JWT token (optional - returns None if no token provided)"""
+    if token is None:
+        return None
+    try:
+        # Best-effort: reject tokens that were explicitly logged out (Redis blacklist).
+        try:
+            redis_client = get_redis_client()
+            if redis_client:
+                blacklist_key = f"{JWT_BLACKLIST_PREFIX}{token}"
+                exists = redis_client.exists(blacklist_key)
+                if exists:
+                    logger.info(f"Token found in blacklist, rejecting: {blacklist_key[:50]}...")
+                    return None
+            else:
+                logger.debug("Redis client not available, skipping blacklist check")
+        except Exception as e:
+            # Redis errors should not block authentication; log and continue.
+            logger.warning(f"Redis blacklist check failed: {e}")
+        
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if username is None:
+            return None
+        token_data = TokenData(username=username)
+    except (InvalidTokenError, Exception):
+        # If token is invalid, return None instead of raising exception
+        return None
+    # Use async version to avoid blocking the event loop
+    user = await get_user_async(username=token_data.username)
     return user
 
 async def ws_get_current_user(

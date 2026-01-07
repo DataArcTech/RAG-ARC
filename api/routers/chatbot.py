@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from typing import Annotated
 
 from framework.register import Register
-from api.routers.auth import get_current_user
+from api.routers.auth import get_current_user, get_current_user_optional
 from encapsulation.data_model.orm_models import User
 from core.presentation.evidence import build_chat_evidence
 from config.output_limits import CHAT_TOP_CHUNKS
@@ -508,7 +508,10 @@ def _build_sources_for_frontend(entries: List[Dict[str, Any]], max_sources: int)
 
 
 @router.get("/static/files/{file_id}")
-async def get_static_file_redirect(file_id: str):
+async def get_static_file_redirect(
+    file_id: str,
+    current_user: Annotated[User | None, Depends(get_current_user_optional)] = None,
+):
     knowledge = _get_chatbot_knowledge()
     file_storage = getattr(knowledge, "file_storage", None)
     if file_storage is None:
@@ -517,9 +520,23 @@ async def get_static_file_redirect(file_id: str):
     meta = await anyio.to_thread.run_sync(file_storage.get_file_metadata, file_id)
     if meta is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
-    shared_owner_id = _get_shared_document_owner_id()
-    if getattr(meta, "owner_id", None) != shared_owner_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
+    
+    # 临时方案：对于 type=1 的用户（chatKB），跳过权限检查，允许访问所有文件
+    user_type = getattr(current_user, "type", None) if current_user else None
+    if user_type == 1:
+        logger.info(f"File access allowed for type=1 user: file_id={file_id}, user_id={current_user.id}")
+    else:
+        # 对于非 type=1 用户或未认证用户，检查文件是否属于共享文档 owner_id
+        shared_owner_id = _get_shared_document_owner_id()
+        file_owner_id = getattr(meta, "owner_id", None)
+        if file_owner_id != shared_owner_id:
+            logger.info(
+                f"File access denied: file_id={file_id}, file_owner_id={file_owner_id}, "
+                f"shared_owner_id={shared_owner_id}, user_type={user_type}, user_id={current_user.id if current_user else None}"
+            )
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
+        else:
+            logger.info(f"File access allowed (shared document): file_id={file_id}, file_owner_id={file_owner_id}")
 
     filename = getattr(meta, "filename", None) or "file"
     safe_name = Path(filename).name
@@ -527,7 +544,11 @@ async def get_static_file_redirect(file_id: str):
 
 
 @router.get("/static/files/{file_id}/{_filename:path}")
-async def get_static_file(file_id: str, _filename: str):
+async def get_static_file(
+    file_id: str,
+    _filename: str,
+    current_user: Annotated[User | None, Depends(get_current_user_optional)] = None,
+):
     knowledge = _get_chatbot_knowledge()
     file_storage = getattr(knowledge, "file_storage", None)
     if file_storage is None:
@@ -536,12 +557,27 @@ async def get_static_file(file_id: str, _filename: str):
     meta = await anyio.to_thread.run_sync(file_storage.get_file_metadata, file_id)
     if meta is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
-    shared_owner_id = _get_shared_document_owner_id()
-    if getattr(meta, "owner_id", None) != shared_owner_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
+    
+    # 临时方案：对于 type=1 的用户（chatKB），跳过权限检查，允许访问所有文件
+    user_type = getattr(current_user, "type", None) if current_user else None
+    if user_type == 1:
+        logger.info(f"File access allowed for type=1 user: file_id={file_id}, user_id={current_user.id}")
+    else:
+        # 对于非 type=1 用户或未认证用户，检查文件是否属于共享文档 owner_id
+        shared_owner_id = _get_shared_document_owner_id()
+        file_owner_id = getattr(meta, "owner_id", None)
+        if file_owner_id != shared_owner_id:
+            logger.info(
+                f"File access denied: file_id={file_id}, file_owner_id={file_owner_id}, "
+                f"shared_owner_id={shared_owner_id}, user_type={user_type}, user_id={current_user.id if current_user else None}"
+            )
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
+        else:
+            logger.info(f"File access allowed (shared document): file_id={file_id}, file_owner_id={file_owner_id}")
 
     blob_key = getattr(meta, "blob_key", None)
     if not blob_key:
+        logger.info(f"File access failed: blob_key is None for file_id={file_id}")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
 
     filename = getattr(meta, "filename", None) or "file"
@@ -550,14 +586,23 @@ async def get_static_file(file_id: str, _filename: str):
 
     blob_store = getattr(file_storage, "blob_store", None)
     if blob_store is None:
+        logger.info(f"File access failed: blob_store not configured for file_id={file_id}")
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="blob store not configured")
 
     try:
         if blob_store.__class__.__name__ == "LocalDB":
-            path = _localdb_path_from_instance(blob_store, str(blob_key)) or _resolve_local_file_path(str(blob_key))
-            if not path.exists():
+            # 直接读取环境变量并拼接路径
+            base_path = os.getenv("LOCAL_FILE_STORAGE_PATH") or os.getenv("LOCAL_BLOB_STORE_BASE_PATH") or "./data/files"
+            base_dir = Path(base_path).expanduser().resolve()
+            safe_key = str(blob_key).replace("..", "").lstrip("/")
+            path = base_dir / safe_key
+            
+            if path.exists():
+                logger.info(f"File access: file_id={file_id}, blob_key={blob_key}, path={path}")
+                return FileResponse(path, media_type=content_type, headers=headers)
+            else:
+                logger.info(f"File access failed: path does not exist for file_id={file_id}, path={path}")
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
-            return FileResponse(path, media_type=content_type, headers=headers)
 
         if blob_store.__class__.__name__ == "MinIODB":
             return StreamingResponse(_stream_minio_object(blob_store, str(blob_key)), media_type=content_type, headers=headers)
@@ -567,7 +612,11 @@ async def get_static_file(file_id: str, _filename: str):
     except HTTPException:
         raise
     except KeyError as exc:
+        logger.info(f"File access failed: KeyError for file_id={file_id}, blob_key={blob_key}, error={exc}")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found") from exc
+    except Exception as exc:
+        logger.info(f"File access failed: unexpected error for file_id={file_id}, blob_key={blob_key}, error={exc}, error_type={type(exc).__name__}")
+        raise
 
 
 @router.get("/chatbot/bootstrap", response_model=ChatbotBootstrapResponse)
