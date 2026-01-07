@@ -4,6 +4,7 @@
 import json
 import logging
 import time
+import uuid
 from typing import Callable
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -25,21 +26,40 @@ class RequestIdResponseWrapper(BaseHTTPMiddleware):
         path = request.url.path
         client_ip = request.client.host if request.client else "unknown"
         
+        # 确保 correlation_id 上下文中有值（从请求头或 correlation_id 获取）
+        # CorrelationIdMiddleware 应该已经设置了，但为了确保日志能正确获取，这里也检查一下
+        current_correlation_id = correlation_id.get()
+        request_id_from_header = request.headers.get("X-Request-ID")
+        
+        # 如果 correlation_id 为空，尝试从请求头获取或生成新的
+        if not current_correlation_id:
+            if request_id_from_header:
+                correlation_id.set(request_id_from_header)
+            else:
+                # 如果都没有，生成一个新的（这种情况不应该发生，但作为兜底）
+                new_id = str(uuid.uuid4())
+                correlation_id.set(new_id)
+        
         # 处理请求
         response = await call_next(request)
         
         # 计算处理时间
         process_time = time.time() - start_time
         
-        # 获取 request_id
+        # 获取 request_id（优先从响应头获取，因为 CorrelationIdMiddleware 已设置）
         request_id = response.headers.get("X-Request-ID") or correlation_id.get() or "NO-ID"
+        
+        # 确保 correlation_id 上下文中有值，以便日志记录能正确获取
+        # 如果 correlation_id 为空但 request_id 有值，则设置 correlation_id
+        if request_id != "NO-ID" and not correlation_id.get():
+            correlation_id.set(request_id)
+        # 如果 request_id 是 NO-ID 但 correlation_id 有值，使用 correlation_id
+        elif request_id == "NO-ID" and correlation_id.get():
+            request_id = correlation_id.get()
         
         # 只处理 JSON 响应（检查 content-type）
         content_type = response.headers.get("content-type", "")
         if "application/json" in content_type:
-            # 获取当前请求的 correlation_id（优先从响应头获取，因为中间件已设置）
-            request_id = response.headers.get("X-Request-ID") or correlation_id.get() or "NO-ID"
-            
             # 获取原始响应体
             body = b""
             async for chunk in response.body_iterator:
