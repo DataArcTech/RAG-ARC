@@ -57,6 +57,10 @@ class RequestIdResponseWrapper(BaseHTTPMiddleware):
         elif request_id == "NO-ID" and correlation_id.get():
             request_id = correlation_id.get()
         
+        # 确保在记录日志前 correlation_id 已设置（关键修复：确保日志系统能获取到 request_id）
+        if request_id != "NO-ID":
+            correlation_id.set(request_id)
+        
         # 只处理 JSON 响应（检查 content-type）
         content_type = response.headers.get("content-type", "")
         if "application/json" in content_type:

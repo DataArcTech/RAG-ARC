@@ -154,19 +154,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="RAG-ARC HTTP Server", lifespan=lifespan)
 
-# Add Correlation ID middleware (must be first to capture all requests)
-app.add_middleware(
-    CorrelationIdMiddleware,
-    header_name="X-Request-ID",
-    update_request_header=False,
-    generator=lambda: str(uuid.uuid4()),
-    validator=is_valid_uuid4,
-)
-
-# Add Response Wrapper middleware (after CorrelationIdMiddleware to access correlation_id)
-app.add_middleware(RequestIdResponseWrapper)
-
-# Configure CORS
+# Configure CORS (add first, so it executes last in the middleware chain)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allows all origins
@@ -174,6 +162,18 @@ app.add_middleware(
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
     expose_headers=["X-Request-ID"],  # Expose request id to clients
+)
+
+# Add Response Wrapper middleware (after CorrelationIdMiddleware to access correlation_id)
+app.add_middleware(RequestIdResponseWrapper)
+
+# Add Correlation ID middleware (must be last to execute first and capture all requests including OPTIONS)
+app.add_middleware(
+    CorrelationIdMiddleware,
+    header_name="X-Request-ID",
+    update_request_header=False,
+    generator=lambda: str(uuid.uuid4()),
+    validator=is_valid_uuid4,
 )
 
 
