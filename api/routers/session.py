@@ -71,6 +71,8 @@ async def create_session(
     current_user: Annotated[User | None, Depends(get_current_user)],
 ):
     """Create a new chat session asynchronously using thread pool."""
+    if current_user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
     chat_name = f"Chat {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     return await get_thread_pool().run_blocking(
         get_session_handler().create_session,
@@ -84,6 +86,8 @@ async def list_sessions(
     current_user: Annotated[User | None, Depends(get_current_user)],
 ):
     """List user sessions asynchronously using thread pool."""
+    if current_user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
     return await get_thread_pool().run_blocking(
         get_session_handler().list_sessions_by_user,
         current_user.id
@@ -113,7 +117,7 @@ async def create_message(
         ChatMessage(
             session_id=session_id,
             user_id=current_user.id,
-            user_type=current_user.type,
+            user_type=getattr(current_user, "type", None),
             content={"role": "user", "content": message_content.content},
             created_at=datetime.now()
         )

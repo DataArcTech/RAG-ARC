@@ -7,14 +7,22 @@
 3. 验证用户只能查询自己的消息
 4. 验证按会话查询消息功能
 """
+import os
+
 import asyncio
 import json
 import httpx
 import uuid
 from typing import Dict, Any
 
+import pytest
 
-BASE_URL = "http://localhost:8001"
+
+if os.getenv("RUN_RAGARC_INTEGRATION_TESTS") != "1":
+    pytest.skip("Requires a running API server; set RUN_RAGARC_INTEGRATION_TESTS=1 to enable.", allow_module_level=True)
+
+
+BASE_URL = os.getenv("RAGARC_TEST_BASE_URL", "http://localhost:8001")
 TEST_USERNAME = "test_msg_user"
 TEST_PASSWORD = "test_password_123"
 TEST_TYPE = 1  # chatKB
@@ -500,4 +508,3 @@ if __name__ == "__main__":
             traceback.print_exc()
     
     asyncio.run(run_tests())
-

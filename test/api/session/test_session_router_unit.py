@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
 
 @pytest.fixture
@@ -96,4 +96,3 @@ def test_session_message_rejects_wrong_user(monkeypatch):
 
     resp = client.post(f"/session/{session_id}/messages", json={"content": "hi"})
     assert resp.status_code == 401
-

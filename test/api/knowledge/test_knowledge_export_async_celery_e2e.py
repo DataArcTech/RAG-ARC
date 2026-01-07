@@ -16,7 +16,7 @@ from celery.contrib.testing.worker import start_worker
 from fastapi import FastAPI
 
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
 
 def _parse_stream_id(value: str) -> tuple[int, int]:

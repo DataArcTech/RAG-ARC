@@ -125,7 +125,7 @@ def _normalize_file_id(file_id: str) -> str:
     return file_id
 @router.post(
     "",
-    status_code=status.HTTP_200_OK,
+    status_code=status.HTTP_201_CREATED,
 )
 async def upload_file(
     file: UploadFile,

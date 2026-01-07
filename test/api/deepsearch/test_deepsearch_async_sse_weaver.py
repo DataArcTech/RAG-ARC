@@ -13,7 +13,7 @@ import uvicorn
 from fastapi import FastAPI
 
 # Ensure repo root is importable for modules like `app_registration`.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
 from core.deepsearch.state import DeepSearchState
 from core.deepsearch.trace import emit_trace

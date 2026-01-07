@@ -18,7 +18,7 @@ from fastapi import FastAPI
 from core.deepsearch.state import DeepSearchState
 
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
 
 def _parse_stream_id(value: str) -> tuple[int, int]:

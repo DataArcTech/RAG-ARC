@@ -250,6 +250,7 @@ Some test suites interact with external databases or large models. Use the follo
 | `RUN_RAGARC_CHAT_STORAGE_TESTS=1` | Enable chat storage tests that touch both PostgreSQL and Redis (`test/encapsulation/test_chat_*`). |
 | `RUN_RAGARC_VECTOR_TESTS=1` | Enable Faiss/Qwen dense vector soft-delete scenarios. |
 | `RAGARC_E2E_TOKEN=<JWT>` | Bearer token used by `test/test_complete_e2e_api.py` to authenticate HTTP calls when `RUN_RAGARC_INTEGRATION_TESTS=1`. |
+| `RAGARC_TEST_BASE_URL=http://localhost:8001` | Base URL for integration tests that call a running FastAPI service (for example `test/api/session/test_message_storage_and_retrieval.py`). |
 
 Leave these empty to skip the associated suites (the default). When set, pytest will assume the required infrastructure is running locally or accessible via the connection details in `.env`.
 

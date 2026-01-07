@@ -15,7 +15,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
 
 def _seed_registry() -> None:
@@ -233,4 +233,3 @@ def test_stream_chat_default_type_uses_user_id(monkeypatch, client):
     assert resp.status_code == 200
     # 验证默认情况下使用自己的 user_id 作为 owner_id
     assert captured_owner_id == user_id
-

@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from encapsulation.data_model.schema import Chunk
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
 
 def _seed_registry() -> None:

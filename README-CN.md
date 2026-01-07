@@ -266,6 +266,7 @@ cp .env.example .env
 | `RUN_RAGARC_CHAT_STORAGE_TESTS=1` | 打开同时访问 PostgreSQL + Redis 的聊天存储测试。 |
 | `RUN_RAGARC_VECTOR_TESTS=1` | 启用 Faiss/Qwen 软删除相关测试。 |
 | `RAGARC_E2E_TOKEN=<JWT>` | 提供给 `test/test_complete_e2e_api.py` 用的 Bearer Token，用于调用 FastAPI 接口。 |
+| `RAGARC_TEST_BASE_URL=http://localhost:8001` | 运行真实 FastAPI 服务时，集成测试调用的基础地址（例如 `test/api/session/test_message_storage_and_retrieval.py`）。 |
 
 默认留空（或 0）即跳过这些测试；只有在对应服务已经部署并且希望运行完整集成用例时，才需要设置为 `1`。
 

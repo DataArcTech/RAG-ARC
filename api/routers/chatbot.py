@@ -465,8 +465,9 @@ def _build_sources_for_frontend(entries: List[Dict[str, Any]], max_sources: int)
     sources: List[ChatbotSourceItem] = []
     seen_chunk_ids: set[str] = set()
 
-    knowledge = _get_chatbot_knowledge()
-    file_storage = getattr(knowledge, "file_storage", None)
+    knowledge = None
+    file_storage = None
+    file_storage_resolved = False
 
     for entry in entries or []:
         if len(sources) >= max_sources:
@@ -485,6 +486,15 @@ def _build_sources_for_frontend(entries: List[Dict[str, Any]], max_sources: int)
             content = f"{content[:max_chars].rstrip()}..."
 
         file_url = None
+        if file_id and not file_storage_resolved:
+            file_storage_resolved = True
+            try:
+                knowledge = _get_chatbot_knowledge()
+                file_storage = getattr(knowledge, "file_storage", None)
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to resolve knowledge file_storage; skipping source file URLs")
+                file_storage = None
+
         if file_id and file_storage is not None:
             try:
                 meta = file_storage.get_file_metadata(file_id)

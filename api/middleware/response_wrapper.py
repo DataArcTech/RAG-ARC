@@ -13,6 +13,8 @@ from asgi_correlation_id import correlation_id
 
 logger = logging.getLogger(__name__)
 
+_SKIP_JSON_WRAP_PATHS = frozenset({"/openapi.json"})
+
 
 class RequestIdResponseWrapper(BaseHTTPMiddleware):
     """在所有 JSON 响应体最外层添加 request_id 字段，并记录请求日志"""
@@ -64,6 +66,12 @@ class RequestIdResponseWrapper(BaseHTTPMiddleware):
         # 只处理 JSON 响应（检查 content-type）
         content_type = response.headers.get("content-type", "")
         content_disposition = response.headers.get("content-disposition") or ""
+        if path in _SKIP_JSON_WRAP_PATHS:
+            logger.info(
+                f"{client_ip} - \"{method} {path} HTTP/1.1\" {response.status_code} "
+                f"(process_time: {process_time:.3f}s) - Response: [Skip JSON wrapping]"
+            )
+            return response
         if "application/json" in content_type and not content_disposition:
             # 获取原始响应体
             body_chunks: list[bytes] = []
