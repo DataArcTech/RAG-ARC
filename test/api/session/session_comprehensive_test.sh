@@ -39,8 +39,8 @@ else
   echo "Registration Status: $REGISTER_STATUS"
   echo "Registration Body:   $REGISTER_BODY"
 
-  if [ "$REGISTER_STATUS" != "201" ]; then
-    echo "❌ User registration failed (expected 201)"
+  if [ "$REGISTER_STATUS" != "200" ] && [ "$REGISTER_STATUS" != "201" ] && [ "$REGISTER_STATUS" != "409" ]; then
+    echo "❌ User registration failed (expected 200/201/409)"
     exit 1
   fi
   echo "✅ Test user registered successfully"
@@ -56,7 +56,6 @@ LOGIN_BODY=$(echo "$LOGIN_RESPONSE" | sed '$d')
 LOGIN_STATUS=$(echo "$LOGIN_RESPONSE" | tail -n1)
 
 echo "Status: $LOGIN_STATUS"
-echo "Body:   $LOGIN_BODY"
 
 if [ "$LOGIN_STATUS" != "200" ]; then
   echo "❌ Login failed (expected 200)"
@@ -69,7 +68,7 @@ if [ -z "$ACCESS_TOKEN" ]; then
   echo "❌ Did not receive an access token"
   exit 1
 fi
-echo "✅ Login PASS - access_token: ${ACCESS_TOKEN:0:20}..."
+echo "✅ Login PASS - access_token obtained"
 
 # 3) Create a new session
 echo -e "\n3) Create a new session:"
@@ -89,8 +88,19 @@ if [ "$CREATE_STATUS" != "200" ]; then
   exit 1
 fi
 
-# Extract session ID from response (response is just the UUID string directly)
-SESSION_ID=$(echo "$CREATE_BODY" | sed 's/"//g')
+# Extract session ID from response (supports StandardResponse wrapper).
+SESSION_ID=$(echo "$CREATE_BODY" | python3 -c "
+import json,sys
+try:
+    obj=json.load(sys.stdin)
+except Exception:
+    print(str(sys.stdin.read()).strip().strip('\"'))
+    raise SystemExit(0)
+if isinstance(obj, dict) and 'data' in obj:
+    print(str(obj.get('data') or '').strip())
+else:
+    print(str(obj).strip())
+")
 if [ -z "$SESSION_ID" ]; then
   echo "❌ Did not receive a session id"
   exit 1
@@ -114,11 +124,17 @@ if [ "$LIST_STATUS" != "200" ]; then
   exit 1
 fi
 
-# Verify our created session appears in the list
-if ! echo "$LIST_BODY" | grep -q "$SESSION_ID"; then
-  echo "❌ Created session not found in session list"
-  exit 1
-fi
+# Verify our created session appears in the list (supports StandardResponse wrapper).
+echo "$LIST_BODY" | python3 -c "
+import json,sys
+payload=json.load(sys.stdin)
+data = payload.get('data') if isinstance(payload, dict) else payload
+sessions = data if isinstance(data, list) else []
+target = '$SESSION_ID'
+ids = {str(s.get('id')) for s in sessions if isinstance(s, dict)}
+assert target in ids, f'Created session not found in session list (target={target}, ids={sorted(list(ids))[:5]})'
+print('✅ List sessions PASS')
+"
 echo "✅ List sessions PASS"
 
 # 5) Create a message in the session
@@ -140,8 +156,16 @@ if [ "$MESSAGE_STATUS" != "200" ]; then
   exit 1
 fi
 
-# Extract message ID from response (response is just the UUID string directly)
-MESSAGE_ID=$(echo "$MESSAGE_BODY" | sed 's/"//g')
+# Extract message ID from response (supports StandardResponse wrapper).
+MESSAGE_ID=$(echo "$MESSAGE_BODY" | python3 -c "
+import json,sys
+payload=json.load(sys.stdin)
+data = payload.get('data') if isinstance(payload, dict) else payload
+if isinstance(data, dict) and 'id' in data:
+    print(str(data.get('id') or '').strip())
+else:
+    print(str(data or '').strip().strip('\"'))
+")
 if [ -z "$MESSAGE_ID" ]; then
   echo "❌ Did not receive a message id"
   exit 1
@@ -165,11 +189,23 @@ if [ "$MESSAGES_STATUS" != "200" ]; then
   exit 1
 fi
 
-# Verify our created message appears in the list
-if ! echo "$MESSAGES_BODY" | grep -q "$MESSAGE_CONTENT"; then
-  echo "❌ Created message not found in message list"
-  exit 1
-fi
+# Verify our created message appears in the list (supports StandardResponse wrapper).
+echo "$MESSAGES_BODY" | python3 -c "
+import json,sys
+payload=json.load(sys.stdin)
+data = payload.get('data') if isinstance(payload, dict) else payload
+messages = data if isinstance(data, list) else []
+needle = '$MESSAGE_CONTENT'
+def text_of(msg):
+    if not isinstance(msg, dict):
+        return ''
+    content = msg.get('content')
+    if isinstance(content, dict):
+        return str(content.get('content') or '')
+    return str(content or '')
+assert any(needle in text_of(m) for m in messages), 'Created message not found in message list'
+print('✅ List messages PASS')
+"
 echo "✅ List messages PASS"
 
 # 7) Create another message to test multiple messages
@@ -209,17 +245,25 @@ if [ "$MESSAGES_2_STATUS" != "200" ]; then
   exit 1
 fi
 
-# Verify both messages appear in the list
-if ! echo "$MESSAGES_2_BODY" | grep -q "$MESSAGE_CONTENT"; then
-  echo "❌ First message not found in message list"
-  exit 1
-fi
-
-if ! echo "$MESSAGES_2_BODY" | grep -q "$MESSAGE_CONTENT_2"; then
-  echo "❌ Second message not found in message list"
-  exit 1
-fi
-echo "✅ Both messages found in session PASS"
+# Verify both messages appear in the list (supports StandardResponse wrapper).
+echo "$MESSAGES_2_BODY" | python3 -c "
+import json,sys
+payload=json.load(sys.stdin)
+data = payload.get('data') if isinstance(payload, dict) else payload
+messages = data if isinstance(data, list) else []
+needles = ['$MESSAGE_CONTENT', '$MESSAGE_CONTENT_2']
+def text_of(msg):
+    if not isinstance(msg, dict):
+        return ''
+    content = msg.get('content')
+    if isinstance(content, dict):
+        return str(content.get('content') or '')
+    return str(content or '')
+texts = [text_of(m) for m in messages]
+for needle in needles:
+    assert any(needle in t for t in texts), f'Message not found: {needle}'
+print('✅ Both messages found in session PASS')
+"
 
 # 9) Test unauthorized access (without authorization header)
 echo -e "\n9) Test unauthorized access (without authorization header):"

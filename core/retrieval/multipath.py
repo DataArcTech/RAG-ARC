@@ -85,9 +85,8 @@ class MultiPathRetriever(BaseRetriever):
                 all_results.append(chunks)
                 logger.debug(f"Retriever {type(retriever).__name__} returned {len(chunks)} results")
             except Exception as e:
-                logger.error(f"Retriever {type(retriever).__name__} failed: {e}")
-                import traceback
-                logger.error(f"Full traceback: {traceback.format_exc()}")
+                logger.error("Retriever %s failed: %s", type(retriever).__name__, e)
+                logger.debug("Retriever %s traceback", type(retriever).__name__, exc_info=True)
                 all_results.append([])
 
         if not all_results or all(len(results) == 0 for results in all_results):

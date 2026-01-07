@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-API_BASE="${API_BASE:-http://localhost:8005}"
+API_BASE="${API_BASE:-http://localhost:8000}"
 KNOWLEDGE_ENDPOINT="$API_BASE/knowledge"
 AUTH_ENDPOINT="$API_BASE/auth"
 
@@ -39,8 +39,8 @@ else
   echo "Register Status: $REGISTER_STATUS"
   echo "Register Body:   $REGISTER_BODY"
 
-  if [ "$REGISTER_STATUS" != "201" ]; then
-    echo "❌ User registration failed (expected 201, got $REGISTER_STATUS)"
+  if [ "$REGISTER_STATUS" != "200" ] && [ "$REGISTER_STATUS" != "201" ]; then
+    echo "❌ User registration failed (expected 200/201, got $REGISTER_STATUS)"
     exit 1
   else
     echo "✅ test_user successfully registered"
@@ -55,7 +55,6 @@ else
   LOGIN_STATUS=$(echo "$LOGIN_RESPONSE" | tail -n1)
 
   echo "Login Status: $LOGIN_STATUS"
-  echo "Login Body:   $LOGIN_BODY"
 
   if [ "$LOGIN_STATUS" != "200" ]; then
     echo "❌ Login failed (expected 200)"
@@ -69,13 +68,40 @@ if [ -z "$ACCESS_TOKEN" ]; then
   echo "❌ Did not receive an access token"
   exit 1
 fi
-echo "✅ Authentication PASS - access_token: ${ACCESS_TOKEN:0:20}..."
+echo "✅ Authentication PASS - access_token obtained"
 
-# 2) Use test html file for upload
-TEST_FILE="./test/test2.html"
+# Use per-run relative paths to avoid "file name already exists" dedup collisions.
+RUN_TAG=$(python3 -c "import uuid; print(uuid.uuid4().hex[:8])")
+SEARCH_TOKEN="RAGARCTESTTOKEN${RUN_TAG}"
+REL_BASE="RAG-ARC/test_artifacts/knowledge_comprehensive/${RUN_TAG}"
+REL_PATH_1="${REL_BASE}/test2.html"
+REL_PATH_2="${REL_BASE}/test_docx.docx"
+REL_PATH_3="${REL_BASE}/test.json"
+
+# Build per-run unique test files to avoid dedup-by-content collisions.
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "${TMP_DIR}"' EXIT
+
+# 2) Use test html file for upload (make content unique per run).
+TEST_FILE="${TMP_DIR}/test2_${RUN_TAG}.html"
+python3 - <<PY
+from pathlib import Path
+
+src = Path("./test/test2.html").read_text(encoding="utf-8")
+token = "${SEARCH_TOKEN}"
+
+injection = f"\\n<p>{token}</p>\\n"
+if "</body>" in src:
+    out = src.replace("</body>", injection + "</body>", 1)
+else:
+    out = src + "\\n" + token + "\\n"
+
+Path("${TEST_FILE}").write_text(out, encoding="utf-8")
+PY
 
 echo -e "\n2) Upload file: $TEST_FILE"
-UPLOAD_RESPONSE=$(curl -sS -w "\n%{http_code}" -F "file=@$TEST_FILE;type=application/json" \
+UPLOAD_RESPONSE=$(curl -sS -w "\n%{http_code}" -F "file=@$TEST_FILE;type=text/html" \
+  -F "relative_path=$REL_PATH_1" \
   -H "Authorization: Bearer $ACCESS_TOKEN" "$KNOWLEDGE_ENDPOINT")
 
 # Split body and status code
@@ -85,13 +111,23 @@ UPLOAD_STATUS=$(echo "$UPLOAD_RESPONSE" | tail -n1)
 echo "Status: $UPLOAD_STATUS"
 echo "Body:   $UPLOAD_BODY"
 
-if [ "$UPLOAD_STATUS" != "201" ]; then
-  echo "❌ Upload failed (expected 201)"
+if [ "$UPLOAD_STATUS" != "200" ] && [ "$UPLOAD_STATUS" != "201" ]; then
+  echo "❌ Upload failed (expected 200/201)"
   exit 1
 fi
 
-# Expect response body to be a UUID-like string (loose check: contains '-')
-FILE_ID=$(echo "$UPLOAD_BODY" | tr -d '"')
+# Expect response body to contain a UUID-like string (supports StandardResponse wrapper).
+FILE_ID=$(echo "$UPLOAD_BODY" | python3 -c "
+import json,sys
+raw=sys.stdin.read().strip()
+try:
+    obj=json.loads(raw)
+except Exception:
+    print(raw.strip().strip('\"'))
+    raise SystemExit(0)
+data = obj.get('data') if isinstance(obj, dict) else obj
+print(str(data or '').strip())
+")
 if ! echo "$FILE_ID" | grep -q "-"; then
   echo "❌ Did not receive a file id"
   exit 1
@@ -101,10 +137,20 @@ echo "✅ Upload PASS - file_id: $FILE_ID"
 # 3) Test list files functionality
 echo -e "\n3) Test list files functionality"
 
-# Upload a second test file for list files testing
-TEST_FILE_2="./test/test_docx.docx"
+# Upload a second test file for list files testing (generate unique docx per run)
+TEST_FILE_2="${TMP_DIR}/test_docx_${RUN_TAG}.docx"
+uv run python - <<PY
+from docx import Document
+
+doc = Document()
+doc.add_heading("RAG-ARC Test DOCX", level=1)
+doc.add_paragraph("${SEARCH_TOKEN}")
+doc.add_paragraph("This document is used by knowledge_comprehensive_test.sh")
+doc.save("${TEST_FILE_2}")
+PY
 echo "Uploading second test file: $TEST_FILE_2"
 UPLOAD_RESPONSE_2=$(curl -sS -w "\n%{http_code}" -F "file=@$TEST_FILE_2;type=application/docx" \
+  -F "relative_path=$REL_PATH_2" \
   -H "Authorization: Bearer $ACCESS_TOKEN" "$KNOWLEDGE_ENDPOINT")
 
 UPLOAD_BODY_2=$(echo "$UPLOAD_RESPONSE_2" | sed '$d')
@@ -113,12 +159,22 @@ UPLOAD_STATUS_2=$(echo "$UPLOAD_RESPONSE_2" | tail -n1)
 echo "Upload 2 Status: $UPLOAD_STATUS_2"
 echo "Upload 2 Body:   $UPLOAD_BODY_2"
 
-if [ "$UPLOAD_STATUS_2" != "201" ]; then
-  echo "❌ Second upload failed (expected 201)"
+if [ "$UPLOAD_STATUS_2" != "200" ] && [ "$UPLOAD_STATUS_2" != "201" ]; then
+  echo "❌ Second upload failed (expected 200/201)"
   exit 1
 fi
 
-FILE_ID_2=$(echo "$UPLOAD_BODY_2" | tr -d '"')
+FILE_ID_2=$(echo "$UPLOAD_BODY_2" | python3 -c "
+import json,sys
+raw=sys.stdin.read().strip()
+try:
+    obj=json.loads(raw)
+except Exception:
+    print(raw.strip().strip('\"'))
+    raise SystemExit(0)
+data = obj.get('data') if isinstance(obj, dict) else obj
+print(str(data or '').strip())
+")
 echo "✅ Second upload PASS - file_id: $FILE_ID_2"
 
 # Wait for files to be processed
@@ -144,40 +200,25 @@ fi
 
 # Validate list response structure
 echo "Validating list response structure..."
-echo "$LIST_BODY" | python3 -c "
-import sys
-import json
-
-try:
-    data = json.load(sys.stdin)
-    
-    # Check if response has expected structure
-    assert 'files' in data, 'Missing files field'
-    assert 'total' in data, 'Missing total field'
-    assert isinstance(data['files'], list), 'files should be a list'
-    assert data['total'] >= 2, f'Expected at least 2 files, got {data[\"total\"]}'
-    
-    # Check first file structure
-    if len(data['files']) > 0:
-        file = data['files'][0]
-        required_fields = ['file_id', 'filename', 'status', 'created_at', 'updated_at', 'file_size', 'content_type']
-        for field in required_fields:
-            assert field in file, f'Missing field: {field}'
-        
-        print('✅ Response structure is valid')
-        print(f'✅ Total files: {data[\"total\"]}')
-        print(f'✅ File status values: {[f[\"status\"] for f in data[\"files\"]]}')
-    else:
-        print('❌ No files returned')
-        sys.exit(1)
-        
-except AssertionError as e:
-    print(f'❌ Validation failed: {e}')
-    sys.exit(1)
-except Exception as e:
-    print(f'❌ Error: {e}')
-    sys.exit(1)
-"
+printf '%s' "$LIST_BODY" | python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+data = payload.get("data") if isinstance(payload, dict) and "data" in payload else payload
+assert isinstance(data, dict), f"Unexpected payload type: {type(data)}"
+assert "files" in data, "Missing files field"
+assert "total" in data, "Missing total field"
+assert isinstance(data["files"], list), "files should be a list"
+assert data["total"] >= 2, "Expected at least 2 files, got {}".format(data.get("total"))
+if not data["files"]:
+    raise SystemExit("❌ No files returned")
+file = data["files"][0]
+required_fields = ["file_id", "filename", "status", "created_at", "updated_at", "file_size", "content_type"]
+for field in required_fields:
+    assert field in file, f"Missing field: {field}"
+print("✅ Response structure is valid")
+print("✅ Total files:", data["total"])
+print("✅ File status values:", [f.get("status") for f in data["files"]])
+'
 
 if [ $? -ne 0 ]; then
   echo "❌ List files validation failed"
@@ -203,25 +244,19 @@ fi
 
 # Extract total counts and verify they match
 echo "Verifying total counts match between paginated and non-paginated requests..."
-TOTAL_FROM_PAGINATED=$(echo "$LIST_PAGINATED_BODY" | python3 -c "
-import sys
-import json
-try:
-    data = json.load(sys.stdin)
-    print(data.get('total', 0))
-except:
-    print(0)
-")
+TOTAL_FROM_PAGINATED=$(printf '%s' "$LIST_PAGINATED_BODY" | python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+data = payload.get("data") if isinstance(payload, dict) and "data" in payload else payload
+print(data.get("total", 0) if isinstance(data, dict) else 0)
+')
 
-TOTAL_FROM_NON_PAGINATED=$(echo "$LIST_BODY" | python3 -c "
-import sys
-import json
-try:
-    data = json.load(sys.stdin)
-    print(data.get('total', 0))
-except:
-    print(0)
-")
+TOTAL_FROM_NON_PAGINATED=$(printf '%s' "$LIST_BODY" | python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+data = payload.get("data") if isinstance(payload, dict) and "data" in payload else payload
+print(data.get("total", 0) if isinstance(data, dict) else 0)
+')
 
 echo "Total from paginated request (limit=1, offset=0): $TOTAL_FROM_PAGINATED"
 echo "Total from non-paginated request: $TOTAL_FROM_NON_PAGINATED"
@@ -238,7 +273,7 @@ echo "✅ List files functionality PASS"
 # 4) Download the file
 echo -e "\n4) Download file: $FILE_ID"
 DOWNLOAD_HEADERS=$(mktemp)
-DOWNLOAD_FILE="/tmp/downloaded.json"
+DOWNLOAD_FILE="/tmp/downloaded.html"
 
 HTTP_CODE=$(curl -sS -D "$DOWNLOAD_HEADERS" -o "$DOWNLOAD_FILE" -w "%{http_code}" \
   -H "Authorization: Bearer $ACCESS_TOKEN" "$KNOWLEDGE_ENDPOINT/$FILE_ID/download")
@@ -259,11 +294,62 @@ if ! diff -q "$TEST_FILE" "$DOWNLOAD_FILE" > /dev/null; then
 fi
 echo "✅ Download PASS"
 
+# 4.5) Trigger indexing for the uploaded files and wait for completion.
+echo -e "\n4.5) Trigger indexing for uploaded files and wait for completion"
+TRIGGER_INITIAL_RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST "$KNOWLEDGE_ENDPOINT/trigger_indexing" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -d "{\"file_ids\": [\"$FILE_ID\", \"$FILE_ID_2\"]}")
+
+TRIGGER_INITIAL_BODY=$(echo "$TRIGGER_INITIAL_RESPONSE" | sed '$d')
+TRIGGER_INITIAL_STATUS=$(echo "$TRIGGER_INITIAL_RESPONSE" | tail -n1)
+echo "Trigger Status: $TRIGGER_INITIAL_STATUS"
+if [ "$TRIGGER_INITIAL_STATUS" != "200" ]; then
+  echo "Trigger Body: $TRIGGER_INITIAL_BODY"
+  echo "❌ trigger_indexing failed (expected 200)"
+  exit 1
+fi
+
+wait_for_indexed () {
+  local file_id="$1"
+  local deadline=$(( $(date +%s) + 240 ))
+  while true; do
+    if [ "$(date +%s)" -gt "$deadline" ]; then
+      echo "❌ Timed out waiting for file indexing: $file_id"
+      return 1
+    fi
+    local resp
+    resp=$(curl -sS -X GET "$KNOWLEDGE_ENDPOINT/$file_id/task" -H "Authorization: Bearer $ACCESS_TOKEN" || true)
+    local status
+    status=$(printf '%s' "$resp" | python3 -c 'import json,sys; payload=json.load(sys.stdin); data=payload.get("data") if isinstance(payload, dict) and "data" in payload else payload; print((data or {}).get("file_status") or "")' 2>/dev/null || true)
+    if [ -z "$status" ]; then
+      status="UNKNOWN"
+    fi
+    echo "  - file_id=$file_id status=$status"
+    if [ "$status" = "INDEXED" ] || [ "$status" = "FAILED" ] || [ "$status" = "PARTIAL_INDEXED" ]; then
+      return 0
+    fi
+    sleep 2
+  done
+}
+
+wait_for_indexed "$FILE_ID"
+wait_for_indexed "$FILE_ID_2"
+
 # 5) Test bulk trigger_indexing on newly uploaded files (should index them)
 echo -e "\n5) Test bulk trigger_indexing on newly uploaded files"
 echo "Uploading a new test file for bulk indexing test..."
-TEST_FILE_3="./test/test.json"
+TEST_FILE_3="${TMP_DIR}/test_${RUN_TAG}.json"
+uv run python - <<PY
+import json
+from pathlib import Path
+
+payload = {"hello": "world", "run_tag": "${RUN_TAG}", "ts_ms": 0}
+payload["search_token"] = "${SEARCH_TOKEN}"
+Path("${TEST_FILE_3}").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+PY
 UPLOAD_RESPONSE_3=$(curl -sS -w "\n%{http_code}" -F "file=@$TEST_FILE_3;type=application/json" \
+  -F "relative_path=$REL_PATH_3" \
   -H "Authorization: Bearer $ACCESS_TOKEN" "$KNOWLEDGE_ENDPOINT")
 
 UPLOAD_BODY_3=$(echo "$UPLOAD_RESPONSE_3" | sed '$d')
@@ -272,12 +358,22 @@ UPLOAD_STATUS_3=$(echo "$UPLOAD_RESPONSE_3" | tail -n1)
 echo "Upload 3 Status: $UPLOAD_STATUS_3"
 echo "Upload 3 Body:   $UPLOAD_BODY_3"
 
-if [ "$UPLOAD_STATUS_3" != "201" ]; then
-  echo "❌ Third upload failed (expected 201)"
+if [ "$UPLOAD_STATUS_3" != "200" ] && [ "$UPLOAD_STATUS_3" != "201" ]; then
+  echo "❌ Third upload failed (expected 200/201)"
   exit 1
 fi
 
-FILE_ID_3=$(echo "$UPLOAD_BODY_3" | tr -d '"')
+FILE_ID_3=$(echo "$UPLOAD_BODY_3" | python3 -c "
+import json,sys
+raw=sys.stdin.read().strip()
+try:
+    obj=json.loads(raw)
+except Exception:
+    print(raw.strip().strip('\"'))
+    raise SystemExit(0)
+data = obj.get('data') if isinstance(obj, dict) else obj
+print(str(data or '').strip())
+")
 echo "✅ Third upload PASS - file_id: $FILE_ID_3"
 
 # Wait a short moment for file to be stored (not indexed yet)
@@ -303,13 +399,11 @@ if [ "$TRIGGER_CODE_NEW" != "200" ]; then
   exit 1
 fi
 
-TRIGGER_MESSAGE_NEW=$(echo "$TRIGGER_BODY_NEW" | python3 -c '
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    print(data.get("message", ""))
-except Exception:
-    print("")
+TRIGGER_MESSAGE_NEW=$(printf '%s' "$TRIGGER_BODY_NEW" | python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+data = payload.get("data") if isinstance(payload, dict) and "data" in payload else payload
+print((data or {}).get("message", "") if isinstance(data, dict) else "")
 ')
 
 echo "Trigger message: $TRIGGER_MESSAGE_NEW"
@@ -353,13 +447,11 @@ if [ "$TRIGGER_CODE" != "200" ]; then
   exit 1
 fi
 
-TRIGGER_MESSAGE=$(echo "$TRIGGER_BODY" | python3 -c '
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    print(data.get("message", ""))
-except Exception:
-    print("")
+TRIGGER_MESSAGE=$(printf '%s' "$TRIGGER_BODY" | python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+data = payload.get("data") if isinstance(payload, dict) and "data" in payload else payload
+print((data or {}).get("message", "") if isinstance(data, dict) else "")
 ')
 
 # When files are already indexed, the message should indicate they were skipped
@@ -372,7 +464,7 @@ echo "✅ trigger_indexing correctly skipped already indexed files"
 
 # 7) Test RAG inference chat functionality with uploaded content
 echo -e "\n7) Test RAG inference chat with uploaded content"
-SEARCH_QUERY="who is the author of Venom: The Black Suit Saga?"
+SEARCH_QUERY="${SEARCH_TOKEN}"
 echo "Searching for: '$SEARCH_QUERY'"
 
 # Test chat endpoint to verify uploaded content is searchable
@@ -385,7 +477,7 @@ CHAT_BODY=$(echo "$CHAT_RESPONSE" | sed '$d')
 CHAT_STATUS=$(echo "$CHAT_RESPONSE" | tail -n1)
 
 echo "Chat Status: $CHAT_STATUS"
-echo "Chat Response: $CHAT_BODY"
+echo "Chat response size(bytes): $(printf '%s' \"$CHAT_BODY\" | wc -c)"
 
 if [ "$CHAT_STATUS" != "200" ]; then
   echo "❌ Chat request failed (expected 200)"
@@ -398,18 +490,45 @@ if [ -z "$CHAT_BODY" ]; then
   exit 1
 fi
 
-# Check if the uploaded content appears in search results
-if ! echo "$CHAT_BODY" | grep -q "Yuxuan Zhou"; then
-  echo "❌ Uploaded file content not found in search results"
-  exit 1
-fi
-echo "✅ RAG inference chat with uploaded content PASS"
+# Check if the uploaded content appears in search results (prefer exact file_id match).
+printf '%s' "$CHAT_BODY" | python3 -c "
+import json, sys
+
+payload = json.load(sys.stdin)
+data = payload.get('data') if isinstance(payload, dict) and 'data' in payload else payload
+chunks = (data or {}).get('chunks') if isinstance(data, dict) else None
+chunks = chunks if isinstance(chunks, list) else []
+
+file_ids = {\"$FILE_ID\", \"$FILE_ID_2\"}
+needle = \"$SEARCH_TOKEN\"
+rel_base = \"$REL_BASE\"
+
+matched = []
+for chunk in chunks:
+    if not isinstance(chunk, dict):
+        continue
+    meta = chunk.get('metadata') if isinstance(chunk.get('metadata'), dict) else {}
+    source_file_id = str(meta.get('source_file_id') or meta.get('sourceFileId') or '')
+    filename = str(meta.get('filename') or '')
+    content = str(chunk.get('content') or '')
+    if source_file_id in file_ids or (rel_base and rel_base in filename):
+        if needle in content or needle in filename:
+            matched.append((source_file_id, filename))
+
+if not matched:
+    filenames = []
+    for chunk in chunks[:10]:
+        meta = chunk.get('metadata') if isinstance(chunk, dict) and isinstance(chunk.get('metadata'), dict) else {}
+        filenames.append(str(meta.get('filename') or meta.get('source_file_id') or ''))
+    raise SystemExit('❌ Uploaded file chunks not found for token=%s. Sample filenames: %s' % (needle, filenames))
+
+print('✅ RAG inference chat with uploaded content PASS')
+print('✅ Matched chunks:', matched[:3])
+"
 
 # 7.1) Test full graph export functionality
 echo -e "\n7.1) Test full graph export functionality"
 echo "Endpoint: $KNOWLEDGE_ENDPOINT/graph/export"
-echo "Token (first 20 chars): ${ACCESS_TOKEN:0:20}..."
-
 FULL_GRAPH_RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST "$KNOWLEDGE_ENDPOINT/graph/export" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
@@ -435,7 +554,8 @@ import sys
 import json
 
 try:
-    data = json.load(sys.stdin)
+    payload = json.load(sys.stdin)
+    data = payload.get('data') if isinstance(payload, dict) and 'data' in payload else payload
 
     # Check if response has expected structure
     assert 'nodes' in data, 'Missing nodes field'
@@ -520,7 +640,8 @@ import sys
 import json
 
 try:
-    data = json.load(sys.stdin)
+    payload = json.load(sys.stdin)
+    data = payload.get('data') if isinstance(payload, dict) and 'data' in payload else payload
 
     # Check if response has expected structure
     assert 'subgraph' in data, 'Missing subgraph field'
@@ -597,8 +718,9 @@ echo "$SUBGRAPH_BODY" | python3 -c "
 import sys
 import json
 
-data = json.load(sys.stdin)
-if 'subgraph' in data:
+payload = json.load(sys.stdin)
+data = payload.get('data') if isinstance(payload, dict) and 'data' in payload else payload
+if isinstance(data, dict) and 'subgraph' in data:
     with open('$SUBGRAPH_FILE', 'w') as f:
         json.dump(data['subgraph'], f, indent=2, ensure_ascii=False)
 "
@@ -620,7 +742,7 @@ MINDMAP_STATUS=$(echo "$MINDMAP_RESPONSE" | tail -n1)
 echo "Mind map Status: $MINDMAP_STATUS"
 
 if [ "$MINDMAP_STATUS" = "404" ]; then
-  DETAIL=$(echo "$MINDMAP_BODY" | python3 -c "import json,sys; print((json.load(sys.stdin) or {}).get('detail',''))" 2>/dev/null || true)
+  DETAIL=$(echo "$MINDMAP_BODY" | python3 -c "import json,sys; payload=json.load(sys.stdin); data=(payload.get('data') if isinstance(payload, dict) and 'data' in payload else payload); print((data or {}).get('detail','') if isinstance(data, dict) else '')" 2>/dev/null || true)
   if [ "$DETAIL" = "No mind map data found for this file" ]; then
     echo "⚠️  Mind map not available for this file (no extracted mind map data); skipping export validation"
   else
@@ -641,7 +763,8 @@ import sys
 import json
 
 try:
-    data = json.load(sys.stdin)
+    payload = json.load(sys.stdin)
+    data = payload.get('data') if isinstance(payload, dict) and 'data' in payload else payload
 
     assert 'tsv' in data, 'Missing tsv field'
     assert isinstance(data['tsv'], str) and data['tsv'].strip(), 'tsv should be a non-empty string'
@@ -683,7 +806,8 @@ except Exception as e:
 
   echo "$MINDMAP_BODY" | python3 -c "
 import sys, json
-data = json.load(sys.stdin)
+payload = json.load(sys.stdin)
+data = payload.get('data') if isinstance(payload, dict) and 'data' in payload else payload
 with open('$MINDMAP_TSV_FILE', 'w') as f:
     f.write(data.get('tsv', ''))
 "
@@ -696,8 +820,8 @@ echo -e "\n8) Delete file: $FILE_ID"
 DELETE_CODE=$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
   -H "Authorization: Bearer $ACCESS_TOKEN" "$KNOWLEDGE_ENDPOINT/$FILE_ID")
 echo "Status: $DELETE_CODE"
-if [ "$DELETE_CODE" != "202" ] && [ "$DELETE_CODE" != "204" ]; then
-  echo "❌ Delete failed (expected 202/204)"
+if [ "$DELETE_CODE" != "200" ] && [ "$DELETE_CODE" != "202" ] && [ "$DELETE_CODE" != "204" ]; then
+  echo "❌ Delete failed (expected 200/202/204)"
   exit 1
 fi
 echo "✅ Delete PASS"
@@ -726,8 +850,10 @@ SECOND_DELETE_CODE=$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
   -H "Authorization: Bearer $ACCESS_TOKEN" "$KNOWLEDGE_ENDPOINT/$FILE_ID")
 echo "Status: $SECOND_DELETE_CODE"
 if [ "$SECOND_DELETE_CODE" != "404" ] && [ "$SECOND_DELETE_CODE" != "202" ]; then
-  echo "❌ Expected 404/202 on second delete"
-  exit 1
+  if [ "$SECOND_DELETE_CODE" != "200" ]; then
+    echo "❌ Expected 200/202/404 on second delete"
+    exit 1
+  fi
 fi
 echo "✅ Re-delete PASS (idempotent)"
 
@@ -767,7 +893,8 @@ echo "$SEARCH_BODY" | python3 -c "
 import json, sys
 
 deleted_file_id = '$FILE_ID'
-data = json.load(sys.stdin)
+payload = json.load(sys.stdin)
+data = payload.get('data') if isinstance(payload, dict) and 'data' in payload else payload
 chunks = data.get('chunks') or []
 
 returned_file_ids = set()
@@ -796,8 +923,10 @@ DELETE_CODE_2=$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
   -H "Authorization: Bearer $ACCESS_TOKEN" "$KNOWLEDGE_ENDPOINT/$FILE_ID_2")
 echo "Delete 2 Status: $DELETE_CODE_2"
 if [ "$DELETE_CODE_2" != "202" ] && [ "$DELETE_CODE_2" != "204" ]; then
-  echo "❌ Second file delete failed (expected 202/204)"
-  exit 1
+  if [ "$DELETE_CODE_2" != "200" ]; then
+    echo "❌ Second file delete failed (expected 200/202/204)"
+    exit 1
+  fi
 fi
 echo "✅ Second file cleanup PASS"
 
@@ -806,8 +935,10 @@ DELETE_CODE_3=$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
   -H "Authorization: Bearer $ACCESS_TOKEN" "$KNOWLEDGE_ENDPOINT/$FILE_ID_3")
 echo "Delete 3 Status: $DELETE_CODE_3"
 if [ "$DELETE_CODE_3" != "202" ] && [ "$DELETE_CODE_3" != "204" ]; then
-  echo "❌ Third file delete failed (expected 202/204)"
-  exit 1
+  if [ "$DELETE_CODE_3" != "200" ]; then
+    echo "❌ Third file delete failed (expected 200/202/204)"
+    exit 1
+  fi
 fi
 echo "✅ Third file cleanup PASS"
 

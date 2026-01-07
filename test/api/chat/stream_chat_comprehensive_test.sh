@@ -33,8 +33,8 @@ else
     -d '{"name": "Test User", "user_name": "test_user", "password": "test_password"}')
 
   REGISTER_STATUS=$(echo "$REGISTER_RESPONSE" | tail -n1)
-  if [ "$REGISTER_STATUS" != "201" ]; then
-    echo "❌ User registration failed (expected 201, got $REGISTER_STATUS)"
+  if [ "$REGISTER_STATUS" != "200" ] && [ "$REGISTER_STATUS" != "201" ] && [ "$REGISTER_STATUS" != "409" ]; then
+    echo "❌ User registration failed (expected 200/201/409, got $REGISTER_STATUS)"
     exit 1
   else
     echo "✅ test_user successfully registered"
@@ -60,7 +60,13 @@ if [ -z "$ACCESS_TOKEN" ]; then
   echo "❌ Did not receive an access token"
   exit 1
 fi
-echo "✅ Login PASS - access_token: ${ACCESS_TOKEN:0:20}..."
+echo "✅ Login PASS - access_token obtained"
+
+# Use a per-run relative path to avoid dedup collisions.
+RUN_TAG=$(python3 -c "import uuid; print(uuid.uuid4().hex[:8])")
+REL_PATH="RAG-ARC/test_artifacts/stream_chat_comprehensive/${RUN_TAG}/test2.html"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "${TMP_DIR}"' EXIT
 
 # 3) Create a session (required for stream chat)
 echo -e "\n3) Create a session for stream chat:"
@@ -76,7 +82,12 @@ if [ "$CREATE_STATUS" != "200" ]; then
   exit 1
 fi
 
-SESSION_ID=$(echo "$CREATE_BODY" | tr -d '"')
+SESSION_ID=$(echo "$CREATE_BODY" | python3 -c "
+import json,sys
+payload=json.load(sys.stdin)
+data = payload.get('data') if isinstance(payload, dict) else payload
+print(str(data or '').strip())
+")
 if [ -z "$SESSION_ID" ]; then
   echo "❌ Did not receive a session id"
   exit 1
@@ -85,14 +96,19 @@ echo "✅ Create session PASS - session_id: $SESSION_ID"
 
 # 4) Upload a test file for RAG functionality
 echo -e "\n4) Upload test file for RAG functionality:"
-TEST_FILE="./test/test2.html"
-UPLOAD_RESPONSE=$(curl -sS -w "\n%{http_code}" -F "file=@$TEST_FILE;type=application/json" \
+TEST_FILE="${TMP_DIR}/test2_${RUN_TAG}.html"
+cat "./test/test2.html" > "${TEST_FILE}"
+printf "\nrun_tag=%s\n" "${RUN_TAG}" >> "${TEST_FILE}"
+UPLOAD_RESPONSE=$(curl -sS -w "\n%{http_code}" -F "file=@$TEST_FILE;type=text/html" \
+  -F "relative_path=$REL_PATH" \
   -H "Authorization: Bearer $ACCESS_TOKEN" "$KNOWLEDGE_ENDPOINT")
 
 UPLOAD_STATUS=$(echo "$UPLOAD_RESPONSE" | tail -n1)
 if [ "$UPLOAD_STATUS" != "201" ]; then
-  echo "❌ Upload failed (expected 201, got $UPLOAD_STATUS)"
-  exit 1
+  if [ "$UPLOAD_STATUS" != "200" ]; then
+    echo "❌ Upload failed (expected 200/201, got $UPLOAD_STATUS)"
+    exit 1
+  fi
 fi
 echo "✅ Upload PASS"
 
@@ -103,13 +119,13 @@ sleep 10
 echo -e "\n5) Test SSE stream chat:"
 ENC_QUERY=$(python3 -c 'import urllib.parse; print(urllib.parse.quote("Hello, this is a test message for stream chat"))')
 SSE_URL="$STREAM_CHAT_ENDPOINT/$SESSION_ID?query=$ENC_QUERY"
-SSE_RESULT=$(uv run python test/api/stream_chat_sse_comprehensive_test.py "$SSE_URL" "$ACCESS_TOKEN")
+SSE_RESULT=$(uv run python test/api/chat/stream_chat_sse_comprehensive_test.py "$SSE_URL" "$ACCESS_TOKEN")
 echo "$SSE_RESULT" | grep -q '"http_status": 200' && echo "✅ SSE stream chat test PASS" || { echo "❌ SSE stream chat test FAILED"; echo "$SSE_RESULT"; exit 1; }
 
 # 5.1) Test SSE evidence/subgraph payload tool-call
 echo -e "\n5.1) Test SSE stream chat with evidence + subgraph payload:"
 SSE_URL_EVID="$STREAM_CHAT_ENDPOINT/$SESSION_ID?query=$ENC_QUERY&include_evidence=true&return_subgraph=true"
-SSE_RESULT_EVID=$(uv run python test/api/stream_chat_sse_comprehensive_test.py "$SSE_URL_EVID" "$ACCESS_TOKEN")
+SSE_RESULT_EVID=$(uv run python test/api/chat/stream_chat_sse_comprehensive_test.py "$SSE_URL_EVID" "$ACCESS_TOKEN")
 echo "$SSE_RESULT_EVID" | grep -q '"http_status": 200' || { echo "❌ SSE (evidence) request FAILED"; echo "$SSE_RESULT_EVID"; exit 1; }
 echo "$SSE_RESULT_EVID" | python3 -c "
 import json,sys
@@ -125,7 +141,7 @@ else:
 # 6) Unauthorized SSE request should be rejected
 echo -e "\n6) Test unauthorized SSE request:"
 UNAUTH_URL="$STREAM_CHAT_ENDPOINT/$SESSION_ID?query=test"
-UNAUTH_OUT=$(uv run python test/api/stream_chat_sse_comprehensive_test.py "$UNAUTH_URL")
+UNAUTH_OUT=$(uv run python test/api/chat/stream_chat_sse_comprehensive_test.py "$UNAUTH_URL")
 echo "$UNAUTH_OUT" | grep -q '"http_status": 401' && echo "✅ Unauthorized SSE request PASS" || { echo "❌ Unauthorized SSE request FAILED"; echo "$UNAUTH_OUT"; exit 1; }
 
 echo -e "\n🎉 All Stream Chat SSE API comprehensive tests passed!"

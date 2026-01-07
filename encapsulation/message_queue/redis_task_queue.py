@@ -103,6 +103,9 @@ class RedisTaskQueueSettings:
     result_store_minio_endpoint: str | None = None
     result_store_minio_bucket: str | None = None
     stream_maxlen: int = 20000
+    progress_payload_max_string_chars: int = 4000
+    progress_payload_max_list_items: int = 200
+    progress_payload_max_depth: int = 6
 
     task_run_stream_key: str = "task_runs"
     progress_stream_key: str = "progress_events"
@@ -172,6 +175,9 @@ class RedisTaskQueue:
             result_store_minio_endpoint=os.getenv("MQ_RESULT_MINIO_ENDPOINT") or None,
             result_store_minio_bucket=os.getenv("MQ_RESULT_MINIO_BUCKET") or None,
             stream_maxlen=int(os.getenv("MQ_STREAM_MAXLEN", "20000")),
+            progress_payload_max_string_chars=int(os.getenv("MQ_PROGRESS_MAX_STRING_CHARS", "4000")),
+            progress_payload_max_list_items=int(os.getenv("MQ_PROGRESS_MAX_LIST_ITEMS", "200")),
+            progress_payload_max_depth=int(os.getenv("MQ_PROGRESS_MAX_DEPTH", "6")),
         )
         return cls(RedisConfig(), settings)
 
@@ -553,6 +559,56 @@ class RedisTaskQueue:
         if client is None:
             return None
 
+        def _trim_value(value: Any, *, depth: int) -> tuple[Any, bool]:
+            if depth <= 0:
+                return ("…", True)
+            if value is None:
+                return (None, False)
+            if isinstance(value, (bool, int, float)):
+                return (value, False)
+            if isinstance(value, str):
+                limit = max(0, int(self._settings.progress_payload_max_string_chars))
+                if limit and len(value) > limit:
+                    return (value[:limit].rstrip() + "…", True)
+                return (value, False)
+            if isinstance(value, bytes):
+                limit = max(0, int(self._settings.progress_payload_max_string_chars))
+                preview = value[:limit].decode("utf-8", errors="replace") if limit else ""
+                return (preview + ("…" if limit and len(value) > limit else ""), True)
+            if isinstance(value, dict):
+                changed_any = False
+                trimmed: Dict[str, Any] = {}
+                for k, v in value.items():
+                    item, changed = _trim_value(v, depth=depth - 1)
+                    trimmed[str(k)] = item
+                    changed_any = changed_any or changed
+                return (trimmed, changed_any)
+            if isinstance(value, (list, tuple, set)):
+                items = list(value)
+                max_items = max(0, int(self._settings.progress_payload_max_list_items))
+                if max_items:
+                    kept = items[:max_items]
+                    dropped = len(items) - len(kept)
+                else:
+                    kept = []
+                    dropped = len(items)
+                trimmed_list: list[Any] = []
+                changed_any = dropped > 0
+                for item_value in kept:
+                    item, changed = _trim_value(item_value, depth=depth - 1)
+                    trimmed_list.append(item)
+                    changed_any = changed_any or changed
+                return (trimmed_list, changed_any)
+            return (str(value), True)
+
+        payload_value: Any = payload or {}
+        trimmed_payload, payload_trimmed = _trim_value(payload_value, depth=int(self._settings.progress_payload_max_depth))
+        if payload_trimmed:
+            if isinstance(trimmed_payload, dict):
+                trimmed_payload.setdefault("_mq_truncated", True)
+            else:
+                trimmed_payload = {"payload": trimmed_payload, "_mq_truncated": True}
+
         ts_ms = _utc_now_ms()
         event: Dict[str, Any] = {
             "v": 1,
@@ -566,9 +622,28 @@ class RedisTaskQueue:
             "stage": stage,
             "status": status,
             "percent": None if percent is None else max(0, min(100, int(percent))),
-            "payload": payload or {},
+            "payload": trimmed_payload,
         }
-        event_payload = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+        event_payload = json.dumps(event, ensure_ascii=False, separators=(",", ":"), default=str)
+        max_inline = int(self._settings.result_max_inline_bytes or 0)
+        if max_inline > 0:
+            payload_size_bytes = len(event_payload.encode("utf-8"))
+            if payload_size_bytes > max_inline:
+                logger.warning(
+                    "Progress event payload too large; truncating further (flow=%s run_id=%s size_bytes=%d limit_bytes=%d)",
+                    flow,
+                    task_run_id,
+                    payload_size_bytes,
+                    max_inline,
+                )
+                event["payload"] = {
+                    "_mq_truncated": True,
+                    "_mq_original_size_bytes": payload_size_bytes,
+                    "_mq_limit_bytes": max_inline,
+                    "note": "payload truncated to protect Redis",
+                    "keys": sorted(list(payload_value.keys()))[:200] if isinstance(payload_value, dict) else None,
+                }
+                event_payload = json.dumps(event, ensure_ascii=False, separators=(",", ":"), default=str)
 
         # Fast-path: one atomic Redis roundtrip (seq increment + stream writes + seq_map + TTLs).
         try:

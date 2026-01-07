@@ -7,13 +7,17 @@ import sys
 import os
 import pytest
 
-# Add project root to path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+if os.getenv("RUN_RAGARC_INTEGRATION_TESTS") != "1":
+    pytest.skip(
+        "Requires full retriever stack; set RUN_RAGARC_INTEGRATION_TESTS=1 to run.",
+        allow_module_level=True,
+    )
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("RUN_RAGARC_INTEGRATION_TESTS") != "1",
-    reason="Requires full retriever stack; set RUN_RAGARC_INTEGRATION_TESTS=1 to run.",
-)
+# Add project root to path (repo root), but only after we decide to run.
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from encapsulation.data_model.schema import Chunk
 

@@ -67,8 +67,14 @@ class OpenAIEmbeddingConfig(AbstractConfig):
     organization: Optional[str] = None  # OpenAI organization ID (optional)
 
     # Connection configuration
-    timeout: float = 60.0  # Request timeout in seconds
-    max_retries: int = 3  # Number of retry attempts on failure
+    timeout: float = Field(
+        default_factory=lambda: float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "20")),
+        description="Request timeout in seconds (can override via EMBEDDING_TIMEOUT_SECONDS).",
+    )
+    max_retries: int = Field(
+        default_factory=lambda: int(os.getenv("EMBEDDING_MAX_RETRIES", "1")),
+        description="Retry attempts on failure (can override via EMBEDDING_MAX_RETRIES).",
+    )
 
     # Request shaping / compatibility
     request_batch_size: int = Field(
