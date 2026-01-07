@@ -591,17 +591,51 @@ async def get_static_file(
 
     try:
         if blob_store.__class__.__name__ == "LocalDB":
-            # 直接读取环境变量并拼接路径
-            base_path = os.getenv("LOCAL_FILE_STORAGE_PATH") or os.getenv("LOCAL_BLOB_STORE_BASE_PATH") or "./data/files"
-            base_dir = Path(base_path).expanduser().resolve()
-            safe_key = str(blob_key).replace("..", "").lstrip("/")
-            path = base_dir / safe_key
+            # 优先使用 LocalDB 的 _get_full_path 方法，确保与存储时使用相同的路径解析逻辑
+            # 这样可以保证存储和访问使用相同的 base_path（考虑配置中的 base_path）
+            path = await anyio.to_thread.run_sync(blob_store._get_full_path, blob_key)
             
             if path.exists():
                 logger.info(f"File access: file_id={file_id}, blob_key={blob_key}, path={path}")
                 return FileResponse(path, media_type=content_type, headers=headers)
             else:
-                logger.info(f"File access failed: path does not exist for file_id={file_id}, path={path}")
+                # 兼容性处理1：如果路径不存在，尝试使用环境变量直接拼接（兼容历史数据）
+                # 某些历史文件可能是在不同的 base_path 下存储的
+                base_path = os.getenv("LOCAL_FILE_STORAGE_PATH") or os.getenv("LOCAL_BLOB_STORE_BASE_PATH") or "./data/files"
+                base_dir = Path(base_path).expanduser().resolve()
+                safe_key = str(blob_key).replace("..", "").lstrip("/")
+                fallback_path = base_dir / safe_key
+                
+                if fallback_path.exists():
+                    logger.info(f"File access (fallback path): file_id={file_id}, blob_key={blob_key}, path={fallback_path}")
+                    return FileResponse(fallback_path, media_type=content_type, headers=headers)
+                
+                # 兼容性处理2：尝试修复 blob_key 中可能包含的重复路径
+                # blob_key 可能包含类似 "RAG-ARC/local/files_chatKB_test/文件名.pdf" 的路径
+                # 我们需要提取出实际的文件名部分
+                key_parts = safe_key.split("/")
+                if len(key_parts) >= 3:  # files/{prefix}/{file_id}/...
+                    # 尝试只使用最后一部分（文件名）
+                    file_id_part = key_parts[2] if len(key_parts) > 2 else ""
+                    filename_part = key_parts[-1] if key_parts else ""
+                    # 如果文件名部分包含路径分隔符，只取 basename
+                    if "/" in filename_part or "\\" in filename_part:
+                        filename_part = Path(filename_part).name
+                    # 重新构建 blob_key: files/{prefix}/{file_id}/{basename}
+                    if file_id_part and filename_part:
+                        fixed_key = f"files/{key_parts[1]}/{file_id_part}/{filename_part}"
+                        # 先尝试使用 LocalDB 的方法
+                        fixed_path = await anyio.to_thread.run_sync(blob_store._get_full_path, fixed_key)
+                        if fixed_path.exists():
+                            logger.info(f"File access (fixed path via LocalDB): file_id={file_id}, original_blob_key={blob_key}, fixed_blob_key={fixed_key}, path={fixed_path}")
+                            return FileResponse(fixed_path, media_type=content_type, headers=headers)
+                        # 再尝试使用环境变量直接拼接
+                        fixed_fallback_path = base_dir / fixed_key
+                        if fixed_fallback_path.exists():
+                            logger.info(f"File access (fixed path via env): file_id={file_id}, original_blob_key={blob_key}, fixed_blob_key={fixed_key}, path={fixed_fallback_path}")
+                            return FileResponse(fixed_fallback_path, media_type=content_type, headers=headers)
+                
+                logger.info(f"File access failed: path does not exist for file_id={file_id}, tried_path={path}, fallback_path={fallback_path}")
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
 
         if blob_store.__class__.__name__ == "MinIODB":

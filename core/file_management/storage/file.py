@@ -6,6 +6,7 @@ from typing import (
 )
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from pathlib import Path
 import logging
 import uuid
 import hashlib
@@ -71,9 +72,13 @@ class FileStorage(AbstractModule):
 
     def _generate_blob_key(self, file_id: str, filename: str) -> str:
         """Generate blob storage key from file ID and filename"""
-        # Create hierarchical key: files/{first-2-chars-of-id}/{file-id}/{filename}
+        # Extract only the basename to avoid path duplication
+        # filename may contain normalized path like "RAG-ARC/local/files/xxx.pdf"
+        # but blob_key should only use the actual filename
+        safe_filename = Path(filename).name
+        # Create hierarchical key: files/{first-2-chars-of-id}/{file-id}/{basename}
         prefix = file_id[:2]
-        return f"files/{prefix}/{file_id}/{filename}"
+        return f"files/{prefix}/{file_id}/{safe_filename}"
 
     def _normalize_content_hash(self, file_data: bytes, filename: str) -> str:
         """
