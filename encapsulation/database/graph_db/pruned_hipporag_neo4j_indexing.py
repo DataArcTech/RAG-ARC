@@ -141,11 +141,15 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
                 },
             )
 
+            # Extract source_file_id from metadata for independent storage
+            source_file_id = metadata.get("source_file_id")
+            
             chunk_data.append({
                 'chunk_id': chunk.id,
                 'content': chunk.content,
                 'metadata': json.dumps(metadata) if metadata else '{}',
-                'owner_id': db_owner_id
+                'owner_id': db_owner_id,
+                'source_file_id': source_file_id  # Store as independent property for filtering
             })
 
             # Process graph data
@@ -380,6 +384,7 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
                     SET c.content = chunk.content,
                         c.metadata = chunk.metadata,
                         c.owner_id = chunk.owner_id,
+                        c.source_file_id = chunk.source_file_id,
                         c.updated_at = datetime(),
                         c.created_at = COALESCE(c.created_at, datetime())
                     """

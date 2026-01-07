@@ -415,14 +415,17 @@ class RAGInference(AbstractModule):
             "Rules:\n"
             "1) If the user message is just a greeting / test / acknowledgement (e.g. '测试', 'test', 'hello', 'hi', '你好'),\n"
             "   answer briefly and DO NOT use any Sources and DO NOT include any <sup> tags.\n"
-            "2) Otherwise, if Sources are provided, ground your answer in Sources and add inline citations using HTML <sup> tags.\n"
+            "2) If Sources are provided (the list is not empty), ground your answer in Sources and add inline citations using HTML <sup> tags.\n"
             "   - Every sentence that contains factual information supported by Sources MUST end with one or more <sup>key</sup>.\n"
             "   - Cite only the minimal number of sources needed; do NOT cite all sources by default.\n"
             "   - Do NOT output a bare block/list of citations (e.g. '<sup>1</sup><sup>2</sup>...') without nearby supporting text.\n"
             "   - Do NOT cite a source you did not use.\n"
-            "3) If Sources are provided but none are relevant, say you don't know based on the provided Sources and ask a clarifying question.\n"
-            "4) Do NOT use bracket citations like [1] and do NOT add a trailing 'Sources:' section.\n"
-            "5) Output in Markdown. The only HTML allowed is <sup>...</sup>.\n"
+            "3) If NO Sources are provided (the list is empty), DO NOT use any <sup> tags in your answer.\n"
+            "   - Say you don't know or cannot answer based on the available information.\n"
+            "   - Do NOT make up citations or use <sup> tags when there are no Sources.\n"
+            "4) If Sources are provided but none are relevant, say you don't know based on the provided Sources and ask a clarifying question.\n"
+            "5) Do NOT use bracket citations like [1] and do NOT add a trailing 'Sources:' section.\n"
+            "6) Output in Markdown. The only HTML allowed is <sup>...</sup>.\n"
         )
         messages.append({"role": "system", "content": system_prompt})
         
@@ -439,14 +442,18 @@ class RAGInference(AbstractModule):
                         messages.append({"role": role, "content": content})
         
         # 使用"Source key=N"格式（与chatbot.py保持一致）
-        for i, chunk in enumerate(chunks):
-            metadata = getattr(chunk, "metadata", None) or {}
-            chunk_text = metadata.get("prompt_text") or metadata.get("index_text")
-            if not isinstance(chunk_text, str) or not chunk_text.strip():
-                chunk_text = chunk.content
-            filename = str(metadata.get("filename") or "").strip() or "source"
-            messages.append({"role": "user", "content": f"Source key={i+1} title={filename}\n{chunk_text}"})
-        messages.append({"role": "user", "content": f"Based on the above Sources, please answer question: {rewritten_query}"})
+        if chunks:
+            for i, chunk in enumerate(chunks):
+                metadata = getattr(chunk, "metadata", None) or {}
+                chunk_text = metadata.get("prompt_text") or metadata.get("index_text")
+                if not isinstance(chunk_text, str) or not chunk_text.strip():
+                    chunk_text = chunk.content
+                filename = str(metadata.get("filename") or "").strip() or "source"
+                messages.append({"role": "user", "content": f"Source key={i+1} title={filename}\n{chunk_text}"})
+            messages.append({"role": "user", "content": f"Based on the above Sources, please answer question: {rewritten_query}"})
+        else:
+            # 如果没有 Sources，直接发送问题，不要提到 Sources
+            messages.append({"role": "user", "content": rewritten_query})
         logger.info("Invoked chat with query: %s (owner_id=%s)", query, owner_id)
         logger.info("Query rewritten to: %s", rewritten_query)
         if history_text:

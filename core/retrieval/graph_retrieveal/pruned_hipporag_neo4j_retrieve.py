@@ -155,7 +155,7 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
             query = """
             MATCH (c:Chunk)
             WHERE c.chunk_id IN $chunk_ids AND c.owner_id = $owner_id
-            RETURN c.chunk_id AS chunk_id, c.content AS content, c.owner_id AS owner_id, c.metadata AS metadata
+            RETURN c.chunk_id AS chunk_id, c.content AS content, c.owner_id AS owner_id, c.metadata AS metadata, c.source_file_id AS source_file_id
             """
             results = self.graph_store._execute_query(
                 query,
@@ -168,7 +168,7 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
             query = """
             MATCH (c:Chunk)
             WHERE c.chunk_id IN $chunk_ids
-            RETURN c.chunk_id AS chunk_id, c.content AS content, c.owner_id AS owner_id, c.metadata AS metadata
+            RETURN c.chunk_id AS chunk_id, c.content AS content, c.owner_id AS owner_id, c.metadata AS metadata, c.source_file_id AS source_file_id
             """
             results = self.graph_store._execute_query(query, {"chunk_ids": chunk_ids})
 
@@ -181,6 +181,7 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
                 "content": record["content"],
                 "owner_id": owner_value,
                 "metadata": record["metadata"],
+                "source_file_id": record.get("source_file_id"),  # Get from independent property
             }
 
         # Create Chunk objects in the same order as chunk_ids
@@ -194,6 +195,11 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
                     metadata = json.loads(data["metadata"]) if data["metadata"] else {}
                 except (json.JSONDecodeError, TypeError):
                     metadata = {}
+
+                # Ensure source_file_id is in metadata (prefer independent property, fallback to metadata)
+                source_file_id = data.get("source_file_id") or metadata.get("source_file_id")
+                if source_file_id:
+                    metadata["source_file_id"] = source_file_id
 
                 # Add score to metadata
                 metadata["score"] = float(score)

@@ -79,19 +79,47 @@ class _PrunedHippoRAGNeo4jCacheMixin:
         if owner_str:
             query = """
             MATCH (c:Chunk {owner_id: $owner_id})
-            RETURN c.chunk_id AS chunk_id
+            RETURN c.chunk_id AS chunk_id, c.source_file_id AS source_file_id
             ORDER BY c.created_at
             """
             results = self.graph_store._execute_query(query, {"owner_id": owner_str})
         else:
             query = """
             MATCH (c:Chunk)
-            RETURN c.chunk_id AS chunk_id
+            RETURN c.chunk_id AS chunk_id, c.source_file_id AS source_file_id
             ORDER BY c.created_at
             """
             results = self.graph_store._execute_query(query)
 
-        self.passage_node_keys = [record["chunk_id"] for record in results]
+        # Filter out chunks from deleted files
+        chunk_ids = []
+        source_file_ids = set()
+        for record in results:
+            chunk_id = record["chunk_id"]
+            source_file_id = record.get("source_file_id")
+            if source_file_id:
+                source_file_ids.add(source_file_id)
+            chunk_ids.append((chunk_id, source_file_id))
+        
+        # Batch check file status if we have source_file_ids
+        deleted_file_ids = set()
+        if source_file_ids:
+            try:
+                from framework.register import Register
+                registrator = Register()
+                knowledge_module = registrator.get_object("knowledge")
+                if knowledge_module:
+                    for file_id in source_file_ids:
+                        if not knowledge_module.is_file_active(file_id):
+                            deleted_file_ids.add(file_id)
+            except Exception as e:
+                logger.warning(f"Failed to check file status for filtering: {e}")
+        
+        # Filter chunks: keep only those from active files or without source_file_id
+        self.passage_node_keys = [
+            chunk_id for chunk_id, source_file_id in chunk_ids
+            if not source_file_id or source_file_id not in deleted_file_ids
+        ]
 
         passage_embeddings_list = []
         embedding_dim: int | None = None

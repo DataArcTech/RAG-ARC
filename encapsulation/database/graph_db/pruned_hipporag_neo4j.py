@@ -223,6 +223,9 @@ class PrunedHippoRAGNeo4jStore(
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Failed to apply Neo4j schema statement: %s error=%s", stmt, exc)
             logger.info("Neo4j schema initialized/verified (Facts stored as relationships)")
+        
+        # Auto-migrate: extract source_file_id from metadata JSON for existing chunks
+        self._migrate_source_file_id_from_metadata()
 
     @staticmethod
     def neo4j_schema_statements() -> List[str]:
@@ -239,6 +242,7 @@ class PrunedHippoRAGNeo4jStore(
             "CREATE CONSTRAINT chunk_id_unique IF NOT EXISTS FOR (c:Chunk) REQUIRE c.chunk_id IS UNIQUE",
             "CREATE CONSTRAINT chunk_owner_required IF NOT EXISTS FOR (c:Chunk) REQUIRE c.owner_id IS NOT NULL",
             "CREATE INDEX chunk_owner IF NOT EXISTS FOR (c:Chunk) ON (c.owner_id)",
+            "CREATE INDEX chunk_source_file_id IF NOT EXISTS FOR (c:Chunk) ON (c.source_file_id)",
             # Entity nodes
             "CREATE CONSTRAINT entity_id_unique IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_id IS UNIQUE",
             "CREATE CONSTRAINT entity_owner_required IF NOT EXISTS FOR (e:Entity) REQUIRE e.owner_id IS NOT NULL",
@@ -287,6 +291,50 @@ class PrunedHippoRAGNeo4jStore(
             "CREATE CONSTRAINT alias_of_owner_required IF NOT EXISTS FOR ()-[r:ALIAS_OF]-() REQUIRE r.owner_id IS NOT NULL",
             "CREATE INDEX alias_of_owner IF NOT EXISTS FOR ()-[r:ALIAS_OF]-() ON (r.owner_id)",
         ]
+
+    def _migrate_source_file_id_from_metadata(self):
+        """
+        Auto-migrate: Extract source_file_id from metadata JSON and set as independent property.
+        This runs once on startup to migrate existing chunks.
+        """
+        try:
+            with self._driver.session(database=self.database) as session:
+                # Find chunks that have metadata but no source_file_id property
+                query = """
+                MATCH (c:Chunk)
+                WHERE c.metadata IS NOT NULL 
+                  AND c.source_file_id IS NULL
+                RETURN c.chunk_id AS chunk_id, c.metadata AS metadata
+                LIMIT 1000
+                """
+                results = session.run(query)
+                chunks_to_update = []
+                for record in results:
+                    chunk_id = record["chunk_id"]
+                    metadata_str = record.get("metadata")
+                    if not metadata_str:
+                        continue
+                    try:
+                        metadata = json.loads(metadata_str) if isinstance(metadata_str, str) else metadata_str
+                        source_file_id = metadata.get("source_file_id")
+                        if source_file_id:
+                            chunks_to_update.append({"chunk_id": chunk_id, "source_file_id": source_file_id})
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                
+                if chunks_to_update:
+                    # Batch update chunks with source_file_id
+                    update_query = """
+                    UNWIND $chunks AS chunk
+                    MATCH (c:Chunk {chunk_id: chunk.chunk_id})
+                    SET c.source_file_id = chunk.source_file_id
+                    """
+                    session.run(update_query, {"chunks": chunks_to_update})
+                    logger.info(f"Auto-migrated source_file_id for {len(chunks_to_update)} chunks")
+                else:
+                    logger.debug("No chunks need source_file_id migration")
+        except Exception as e:
+            logger.warning(f"Failed to migrate source_file_id from metadata: {e}")
 
     def _execute_query(self, query: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
