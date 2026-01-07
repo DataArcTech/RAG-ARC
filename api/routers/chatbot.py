@@ -528,44 +528,9 @@ async def get_static_file_redirect(
     
     logger.debug(f"[FILE_ACCESS_REDIRECT] File metadata found: file_id={file_id}, owner_id={getattr(meta, 'owner_id', None)}, filename={getattr(meta, 'filename', None)}")
     
-    # 临时方案：对于 type=1 的用户（chatKB），跳过权限检查，允许访问所有文件
-    user_type = getattr(current_user, "type", None) if current_user else None
-    if user_type == 1:
-        logger.info(f"[FILE_ACCESS_REDIRECT] File access allowed for type=1 user: file_id={file_id}, user_id={current_user.id}")
-    else:
-        # 对于 type=0 用户（livingKB），只需要检查文件 owner_id 是否等于用户 id
-        file_owner_id = getattr(meta, "owner_id", None)
-        
-        logger.debug(f"[FILE_ACCESS_REDIRECT] Permission check (type=0): file_id={file_id}, file_owner_id={file_owner_id}, user_type={user_type}, user_id={current_user.id if current_user else None}")
-        
-        # 如果用户已认证，检查文件是否属于该用户
-        if current_user is not None:
-            if file_owner_id == current_user.id:
-                logger.info(f"[FILE_ACCESS_REDIRECT] File access allowed (file owner): file_id={file_id}, file_owner_id={file_owner_id}, user_id={current_user.id}")
-            else:
-                # 检查是否有显式权限（通过 FilePermission）
-                try:
-                    from application.knowledge.permission_mixin import PermissionType
-                    permission_type = await anyio.to_thread.run_sync(knowledge.check_file_access, file_id, current_user.id)
-                    if permission_type is not None:
-                        logger.info(f"[FILE_ACCESS_REDIRECT] File access allowed (explicit permission): file_id={file_id}, user_id={current_user.id}, permission_type={permission_type}")
-                    else:
-                        logger.info(
-                            f"[FILE_ACCESS_REDIRECT] File access denied: file_id={file_id}, file_owner_id={file_owner_id}, "
-                            f"user_id={current_user.id}, no permission"
-                        )
-                        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
-                except HTTPException:
-                    raise
-                except Exception as exc:
-                    logger.warning(f"[FILE_ACCESS_REDIRECT] Permission check failed: file_id={file_id}, user_id={current_user.id}, error={exc}")
-                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
-        else:
-            # 未认证用户无法访问文件（需要登录）
-            logger.info(
-                f"[FILE_ACCESS_REDIRECT] File access denied (unauthenticated): file_id={file_id}, file_owner_id={file_owner_id}"
-            )
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
+    # 临时方案：暂时跳过所有权限检查，允许所有用户（包括未认证用户）访问文件
+    # TODO: 后续添加权限管理
+    logger.info(f"[FILE_ACCESS_REDIRECT] File access allowed (no permission check): file_id={file_id}, user={current_user.id if current_user else None}, user_type={getattr(current_user, 'type', None) if current_user else None}")
 
     filename = getattr(meta, "filename", None) or "file"
     safe_name = Path(filename).name
@@ -596,44 +561,9 @@ async def get_static_file(
     
     logger.debug(f"[FILE_ACCESS] File metadata found: file_id={file_id}, owner_id={getattr(meta, 'owner_id', None)}, filename={getattr(meta, 'filename', None)}, blob_key={getattr(meta, 'blob_key', None)}")
     
-    # 临时方案：对于 type=1 的用户（chatKB），跳过权限检查，允许访问所有文件
-    user_type = getattr(current_user, "type", None) if current_user else None
-    if user_type == 1:
-        logger.info(f"[FILE_ACCESS] File access allowed for type=1 user: file_id={file_id}, user_id={current_user.id}")
-    else:
-        # 对于 type=0 用户（livingKB），只需要检查文件 owner_id 是否等于用户 id
-        file_owner_id = getattr(meta, "owner_id", None)
-        
-        logger.debug(f"[FILE_ACCESS] Permission check (type=0): file_id={file_id}, file_owner_id={file_owner_id}, user_type={user_type}, user_id={current_user.id if current_user else None}")
-        
-        # 如果用户已认证，检查文件是否属于该用户
-        if current_user is not None:
-            if file_owner_id == current_user.id:
-                logger.info(f"[FILE_ACCESS] File access allowed (file owner): file_id={file_id}, file_owner_id={file_owner_id}, user_id={current_user.id}")
-            else:
-                # 检查是否有显式权限（通过 FilePermission）
-                try:
-                    from application.knowledge.permission_mixin import PermissionType
-                    permission_type = await anyio.to_thread.run_sync(knowledge.check_file_access, file_id, current_user.id)
-                    if permission_type is not None:
-                        logger.info(f"[FILE_ACCESS] File access allowed (explicit permission): file_id={file_id}, user_id={current_user.id}, permission_type={permission_type}")
-                    else:
-                        logger.info(
-                            f"[FILE_ACCESS] File access denied: file_id={file_id}, file_owner_id={file_owner_id}, "
-                            f"user_id={current_user.id}, no permission"
-                        )
-                        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
-                except HTTPException:
-                    raise
-                except Exception as exc:
-                    logger.warning(f"[FILE_ACCESS] Permission check failed: file_id={file_id}, user_id={current_user.id}, error={exc}")
-                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
-        else:
-            # 未认证用户无法访问文件（需要登录）
-            logger.info(
-                f"[FILE_ACCESS] File access denied (unauthenticated): file_id={file_id}, file_owner_id={file_owner_id}"
-            )
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
+    # 临时方案：暂时跳过所有权限检查，允许所有用户（包括未认证用户）访问文件
+    # TODO: 后续添加权限管理
+    logger.info(f"[FILE_ACCESS] File access allowed (no permission check): file_id={file_id}, user={current_user.id if current_user else None}, user_type={getattr(current_user, 'type', None) if current_user else None}")
 
     blob_key = getattr(meta, "blob_key", None)
     if not blob_key:
