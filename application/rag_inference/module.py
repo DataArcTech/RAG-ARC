@@ -1,5 +1,5 @@
 from encapsulation.data_model.schema import Chunk
-from typing import TYPE_CHECKING, Optional, Dict, Any, List, Iterator, Callable
+from typing import TYPE_CHECKING, Optional, Dict, Any, List, Iterator, Callable, Mapping
 import logging
 import time
 import uuid
@@ -538,13 +538,54 @@ class RAGInference(AbstractModule):
         if knowledge_module is None:
             return chunks
 
+        def _coerce_file_id(value: Any) -> str | None:
+            token = str(value or "").strip()
+            return token or None
+
+        def _extract_file_id(metadata: Any) -> str | None:
+            if not isinstance(metadata, Mapping):
+                return None
+
+            for key in (
+                "source_file_id",
+                "sourceFileId",
+                "file_id",
+                "fileId",
+                "document_id",
+                "documentId",
+                "doc_id",
+                "docId",
+            ):
+                token = _coerce_file_id(metadata.get(key))
+                if token:
+                    return token
+
+            nested = metadata.get("chunk_metadata") or metadata.get("chunkMetadata")
+            if isinstance(nested, Mapping):
+                for key in (
+                    "source_file_id",
+                    "sourceFileId",
+                    "file_id",
+                    "fileId",
+                    "document_id",
+                    "documentId",
+                    "doc_id",
+                    "docId",
+                ):
+                    token = _coerce_file_id(nested.get(key))
+                    if token:
+                        return token
+
+            return None
+
+        file_status_cache: dict[str, bool] = {}
         filtered_chunks: List[Chunk] = []
         for chunk in chunks:
-            file_id = None
-            if hasattr(chunk, "metadata") and chunk.metadata:
-                file_id = chunk.metadata.get("source_file_id")
+            file_id = _extract_file_id(getattr(chunk, "metadata", None))
+            if file_id and file_id not in file_status_cache:
+                file_status_cache[file_id] = knowledge_module.is_file_active(file_id)
 
-            if not file_id or knowledge_module.is_file_active(file_id):
+            if not file_id or file_status_cache.get(file_id, True):
                 filtered_chunks.append(chunk)
         if len(filtered_chunks) != len(chunks):
             logger.info(f"Filtered out {len(chunks) - len(filtered_chunks)} chunks from deleting files")

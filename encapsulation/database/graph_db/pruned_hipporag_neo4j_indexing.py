@@ -1200,7 +1200,8 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
             chunk_query = """
             MATCH (c:Chunk {chunk_id: $chunk_id})
             RETURN c.chunk_id AS chunk_id, c.content AS content,
-                   c.owner_id AS owner_id, c.metadata AS metadata
+                   c.owner_id AS owner_id, c.metadata AS metadata,
+                   c.source_file_id AS source_file_id
             """
 
             result = self._execute_query(chunk_query, {'chunk_id': chunk_id})
@@ -1210,6 +1211,11 @@ class _PrunedHippoRAGNeo4jIndexingMixin(_PrunedHippoRAGNeo4jChunkEmbeddingsMixin
                 content = record['content']
                 owner_id = record['owner_id']
                 metadata = json.loads(record['metadata']) if record['metadata'] else {}
+                source_file_id = record.get("source_file_id")
+
+                # Normalize file provenance so callers can filter deleted files consistently.
+                if isinstance(metadata, dict) and source_file_id and "source_file_id" not in metadata:
+                    metadata["source_file_id"] = source_file_id
 
                 # Get graph data
                 graph_data = self._get_graph_data(chunk_id)

@@ -351,7 +351,17 @@ class PrunedHippoRAGNeo4jStore(
                         continue
                     if not isinstance(metadata, dict):
                         continue
-                    source_file_id = str(metadata.get("source_file_id") or "").strip()
+                    source_file_id = str(
+                        metadata.get("source_file_id")
+                        or metadata.get("sourceFileId")
+                        or metadata.get("file_id")
+                        or metadata.get("fileId")
+                        or metadata.get("document_id")
+                        or metadata.get("documentId")
+                        or metadata.get("doc_id")
+                        or metadata.get("docId")
+                        or ""
+                    ).strip()
                     if source_file_id:
                         chunks_to_update.append({"chunk_id": chunk_id, "source_file_id": source_file_id})
 
