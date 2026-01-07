@@ -30,8 +30,10 @@ from application.knowledge.module import Knowledge
 from application.account.user import Account
 from core.file_management.storage.file import FileValidationError
 from core.utils.owner_guard import is_admin_owner
+from core.utils.path_guard import safe_leaf_name
 from encapsulation.message_queue.redis_task_queue import RedisTaskQueue, TaskState
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
+from pathlib import Path
 
 from application.knowledge.graph_export import export_full_graph_payload
 from application.knowledge.mindmap_export import export_file_mindmap_payload
@@ -291,6 +293,52 @@ async def download_file(file_id: str, user: Annotated[User | None, Depends(get_c
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to download file: {str(e)}",
         )
+
+
+@router.get("/{file_id}/mineru-assets/{rel_path:path}")
+async def get_mineru_asset(
+    file_id: str,
+    rel_path: str,
+    user: Annotated[User | None, Depends(get_current_user)],
+):
+    """Serve MinerU local image assets for a given knowledge file.
+
+    Only allows paths under: `${PARSER_OUTPUT_DIR}/mineru/<file_id>/images/...`
+
+    Backwards compatibility: older runs may have stored artifacts under
+    `${PARSER_OUTPUT_DIR}/mineru/<doc_stem>/images/...`.
+    """
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+
+    permission_type = await asyncio.to_thread(get_knowledge_handler().check_file_access, file_id, user.id)
+    if permission_type is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You are not allowed to access this file")
+
+    metadata = await asyncio.to_thread(get_knowledge_handler().file_storage.get_file_metadata, file_id)
+    if metadata is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+
+    token = str(rel_path or "").lstrip("/").lstrip("\\")
+    if not token.startswith("images/"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+
+    base_output = str(os.getenv("PARSER_OUTPUT_DIR", "./data/parsed_files") or "./data/parsed_files").strip()
+    base_dir = Path(base_output).expanduser().resolve()
+    file_dir = (base_dir / "mineru" / safe_leaf_name(file_id, default="document")).resolve()
+    stem = Path(str(getattr(metadata, "filename", "") or "document")).stem or "document"
+    legacy_dir = (base_dir / "mineru" / safe_leaf_name(stem, default="document")).resolve()
+
+    for doc_dir in [file_dir, legacy_dir]:
+        candidate = (doc_dir / token).resolve()
+        try:
+            candidate.relative_to(doc_dir)
+        except Exception:
+            continue
+        if candidate.exists() and candidate.is_file():
+            return FileResponse(path=str(candidate))
+
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
 
 
 @router.delete("/{file_id}", status_code=status.HTTP_200_OK)

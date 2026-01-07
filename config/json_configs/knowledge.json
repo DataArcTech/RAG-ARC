@@ -84,9 +84,13 @@
             }
         },
         "chunker_config": {
-            "type": "token_chunker",
-            "chunk_size": 2048,
-            "chunk_overlap": 100
+            "type": "semantic_unit_chunker",
+            "level": "basic",
+            "fallback_chunker_config": {
+                "type": "token_chunker",
+                "chunk_size": "${TOKEN_CHUNK_SIZE}",
+                "chunk_overlap": "${TOKEN_CHUNK_OVERLAP}"
+            }
         },
         "indexer_configs": [
             {

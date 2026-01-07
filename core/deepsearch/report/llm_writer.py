@@ -2,6 +2,7 @@
 import asyncio
 import json
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, ValidationError
@@ -13,6 +14,9 @@ from core.utils.json_extract import extract_json_from_text as _extract_json_from
 from core.utils.text_regex import CJK_DETECT_RE
 from core.utils.text_regex import INLINE_CITATION_TOKEN_RE
 from core.deepsearch.utils.language_policy import infer_user_language
+from config.output_limits import DEEPSEARCH_MAX_IMAGE_INPUTS
+from core.utils.multimodal_images import collect_image_paths_from_deepsearch_evidences
+from core.utils.multimodal_llm import call_llm_with_optional_images_async
 from core.prompts.deepsearch.report import (
     REPORT_OUTLINE_SYSTEM_PROMPT,
     REPORT_OUTLINE_USER_PROMPT,
@@ -371,9 +375,13 @@ class DeepSearchLLMReportWriter:
                 {"role": "system", "content": self._system_prompt_with_language(REPORT_WRITE_SYSTEM_PROMPT, question=question)},
                 {"role": "user", "content": user_prompt},
             ]
+            image_paths = collect_image_paths_from_deepsearch_evidences(
+                evidences if isinstance(evidences, list) else [],
+                max_images=DEEPSEARCH_MAX_IMAGE_INPUTS,
+            )
 
             try:
-                raw = await self._call(messages, phase="report")
+                raw = await self._call(messages, phase="report", image_paths=image_paths)
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 if _is_context_limit_error(exc) and attempt < budget_attempts - 1:
@@ -400,11 +408,24 @@ class DeepSearchLLMReportWriter:
 
         raise RuntimeError(f"Report writing exceeded context budget: {last_exc}") from last_exc
 
-    async def _call(self, messages: List[Dict[str, str]], *, phase: str) -> str:
+    async def _call(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        phase: str,
+        image_paths: Optional[List[Path]] = None,
+    ) -> str:
         last_exc: Exception | None = None
         for attempt in range(max(self.max_retries, 1)):
             try:
-                return await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
+                return await call_llm_with_optional_images_async(
+                    self.llm_connector,
+                    messages=messages,
+                    user_message_index=len(messages) - 1,
+                    image_paths=image_paths or [],
+                    warn_context=f"deepsearch.{phase}",
+                    temperature=self.temperature,
+                )
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 if _is_context_limit_error(exc):

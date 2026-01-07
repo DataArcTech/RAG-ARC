@@ -2,7 +2,7 @@ from typing import List, Optional, Dict, Any, TYPE_CHECKING
 import logging
 
 from .base import AbstractChunker
-from core.file_management.atomic_units.fenced_code import split_fenced_code_blocks
+from core.file_management.atomic_units.markdown_atomic import split_markdown_atomic_blocks
 
 if TYPE_CHECKING:
     from config.core.file_management.chunker.chunker_config import TokenChunkerConfig
@@ -106,8 +106,8 @@ class TokenChunker(AbstractChunker):
 
         try:
             chunk_units: List[tuple[str, str]] = []
-            for kind, segment in split_fenced_code_blocks(text):
-                if kind == "code":
+            for kind, segment in split_markdown_atomic_blocks(text):
+                if kind in {"code", "table", "image"}:
                     chunk_units.append((kind, segment))
                     continue
                 for piece in self._split_on_tokens(segment, chunk_size, chunk_overlap):
@@ -137,6 +137,7 @@ class TokenChunker(AbstractChunker):
                         'strategy': 'token',
                         'segment_type': segment_type,
                         'is_fenced_code_block': segment_type == "code",
+                        'is_atomic_block': segment_type in {"code", "table", "image"},
                     }
                 }
 

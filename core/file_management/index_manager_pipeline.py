@@ -87,10 +87,12 @@ class _IndexManagerPipelineMixin:
 
             # Step 2: Parse the file
             logger.info(f"Step 2: Parsing file {filename}")
+            parser_kwargs = dict(kwargs)
+            parser_kwargs.setdefault("source_file_id", file_id)
             parse_results = await self.parser.parse_file(
                 file_data=file_content,
                 filename=filename,
-                **kwargs,
+                **parser_kwargs,
             )
 
             if not parse_results:
@@ -141,11 +143,18 @@ class _IndexManagerPipelineMixin:
 
             # Step 3: Store parsed content (use thread pool to avoid blocking)
             logger.info(f"Step 3: Storing parsed content")
-            parser_type = getattr(self.parser, "parser", None)
-            if parser_type is not None:
-                parser_type_name = type(parser_type).__name__
-            else:
-                parser_type_name = "auto_selected"
+            parser_type_name = "auto_selected"
+            if isinstance(parse_result, dict):
+                meta = parse_result.get("metadata")
+                if isinstance(meta, dict):
+                    token = str(
+                        meta.get("parser_label")
+                        or meta.get("parser_type")
+                        or meta.get("parser_name")
+                        or ""
+                    ).strip()
+                    if token:
+                        parser_type_name = token
 
             result["metadata"]["parser_type"] = parser_type_name
 

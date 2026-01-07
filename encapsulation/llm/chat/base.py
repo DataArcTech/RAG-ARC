@@ -17,7 +17,7 @@ class ChatLLMBase(AbstractModule):
     @abstractmethod
     def chat(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         **kwargs
     ) -> str:
         """Chat completion"""
@@ -26,7 +26,7 @@ class ChatLLMBase(AbstractModule):
     @abstractmethod
     def stream_chat(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         **kwargs
     ):
         """Streaming chat completion"""
@@ -36,7 +36,7 @@ class ChatLLMBase(AbstractModule):
     @abstractmethod
     async def achat(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         **kwargs
     ) -> str:
         """Async chat completion"""
@@ -45,7 +45,7 @@ class ChatLLMBase(AbstractModule):
     @abstractmethod
     async def astream_chat(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         **kwargs
     ) -> AsyncGenerator[str, None]:
         """Async streaming chat completion"""

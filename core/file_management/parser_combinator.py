@@ -189,12 +189,54 @@ class ParserCombinator(AbstractModule):
                 filename=filename,
                 **kwargs
             )
+            self._annotate_parse_results(
+                results,
+                parser_family=parser_type,
+                parser_instance=parser,
+            )
             logger.info(f"Successfully parsed {filename} with {parser_type} parser, got {len(results)} results")
             return results
 
         except Exception as e:
             logger.error(f"Failed to parse {filename} with {parser_type} parser: {str(e)}")
             raise
+
+    @staticmethod
+    def _parser_label(parser_instance: AbstractParser) -> str:
+        """Stable parser label used for storage keys / observability."""
+        name = parser_instance.__class__.__name__
+        # Keep these labels stable for downstream storage keys and debug tooling.
+        mapping = {
+            "DotsOCRParser": "dots_ocr",
+            "VLMOcrParser": "vlm_ocr",
+            "MinerUParser": "mineru",
+            "NativeParser": "native",
+        }
+        return mapping.get(name, name.lower())
+
+    @classmethod
+    def _annotate_parse_results(
+        cls,
+        results: Any,
+        *,
+        parser_family: str,
+        parser_instance: AbstractParser,
+    ) -> None:
+        """Inject parser provenance into parse result metadata for downstream storage/debug."""
+        if not isinstance(results, list):
+            return
+        label = cls._parser_label(parser_instance)
+        parser_name = parser_instance.__class__.__name__
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            meta = item.get("metadata")
+            if not isinstance(meta, dict):
+                meta = {}
+                item["metadata"] = meta
+            meta.setdefault("parser_family", str(parser_family))
+            meta.setdefault("parser_name", str(parser_name))
+            meta.setdefault("parser_label", str(label))
 
     def get_parser_info(self) -> Dict[str, Any]:
         """

@@ -80,4 +80,7 @@ SILENT_MISSING_ENV_VARS: set[str] = {
     "OPENAI_OCR_MODEL",
     # Optional external search (only required when enabled).
     "TAVILY_API_KEY",
+    # Chunking knobs (TokenChunkerConfig has safe defaults).
+    "TOKEN_CHUNK_SIZE",
+    "TOKEN_CHUNK_OVERLAP",
 }

@@ -85,29 +85,39 @@ class NativeParser(AbstractParser):
         return ['.docx', '.xlsx', '.xls', '.csv', '.pptx', '.html', '.txt', '.md', '.pdf']
 
     def _parse_pdf(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[Dict[str, Any]]:
-        """Parse text-based PDF via PyMuPDF (no OCR)."""
+        """Parse text-based PDF without OCR (native extraction)."""
         try:
-            import fitz  # PyMuPDF
+            import io
+            from pypdf import PdfReader
 
-            doc = fitz.open(stream=file_data, filetype="pdf")
+            reader = PdfReader(io.BytesIO(file_data))
+            page_count = len(reader.pages)
             results: List[Dict[str, Any]] = []
-            for page_index in range(doc.page_count):
-                page = doc.load_page(page_index)
-                text = page.get_text("text") or ""
+            for page_index, page in enumerate(reader.pages):
+                text = page.extract_text() or ""
                 if text.strip():
                     results.append(
                         {
                             "text": text,
                             "metadata": {
                                 "page": page_index + 1,
-                                "page_count": doc.page_count,
+                                "page_count": page_count,
                                 "source_file_name": filename,
+                                "pdf_backend": "pypdf",
                             },
                         }
                     )
             if not results:
-                # Still return a single empty text payload so downstream can surface a clear error.
-                results.append({"text": "", "metadata": {"source_file_name": filename, "page_count": doc.page_count}})
+                results.append(
+                    {
+                        "text": "",
+                        "metadata": {
+                            "source_file_name": filename,
+                            "page_count": page_count,
+                            "pdf_backend": "pypdf",
+                        },
+                    }
+                )
             return results
         except Exception as e:
             logger.error(f"Failed to parse PDF {filename}: {str(e)}")

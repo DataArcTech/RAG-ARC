@@ -12,6 +12,9 @@ from core.utils.owner_guard import normalize_owner_id, is_admin_owner, get_admin
 from core.prompts import MINDMAP_GENERATION_SYSTEM_PROMPT_ZH, build_mindmap_generation_user_prompt
 from framework.register import Register
 from framework.thread_pool import get_thread_pool
+from config.output_limits import CHAT_MAX_IMAGE_INPUTS
+from core.utils.multimodal_images import collect_image_paths_from_chunk_payloads
+from core.utils.multimodal_llm import build_multimodal_user_message
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -137,15 +140,42 @@ class RAGInference(AbstractModule):
                 )
             except Exception:  # noqa: BLE001
                 pass
-
+            image_paths = collect_image_paths_from_chunk_payloads(chunks, max_images=CHAT_MAX_IMAGE_INPUTS)
             if hasattr(self.llm, 'client') and hasattr(self.llm.client, 'chat'):
                 # OpenAI 客户端
-                raw_response = self.llm.client.chat.completions.create(
-                    model=self.llm.model_name,
-                    messages=messages,
-                    max_tokens=self.llm.max_tokens,
-                    temperature=self.llm.temperature,
-                )
+                call_messages = messages
+                if image_paths:
+                    try:
+                        call_messages = [dict(m) for m in messages]
+                        user_idx = len(call_messages) - 1
+                        if user_idx >= 0 and isinstance(call_messages[user_idx].get("content"), str):
+                            call_messages[user_idx] = build_multimodal_user_message(
+                                text=call_messages[user_idx]["content"],
+                                image_paths=image_paths,
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Failed to build multimodal messages; using text-only: %s", exc)
+                        call_messages = messages
+
+                try:
+                    raw_response = self.llm.client.chat.completions.create(
+                        model=self.llm.model_name,
+                        messages=call_messages,
+                        max_tokens=self.llm.max_tokens,
+                        temperature=self.llm.temperature,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    if image_paths:
+                        logger.warning(
+                            "Model/API does not support multimodal chat inputs; continuing with text-only (captions as fallback): %s",
+                            exc,
+                        )
+                    raw_response = self.llm.client.chat.completions.create(
+                        model=self.llm.model_name,
+                        messages=messages,
+                        max_tokens=self.llm.max_tokens,
+                        temperature=self.llm.temperature,
+                    )
                 response_text = raw_response.choices[0].message.content.strip()
                 # 转换为可序列化的 dict
                 raw_dict = {
@@ -175,6 +205,10 @@ class RAGInference(AbstractModule):
                 return response_text, raw_dict
             else:
                 # 其他 LLM（HuggingFace 等），只返回文本
+                if image_paths:
+                    logger.warning(
+                        "Configured LLM does not support multimodal inputs; continuing with text-only (captions as fallback)."
+                    )
                 response_text = self.llm.chat(messages)
                 try:
                     logger.info(

@@ -26,6 +26,7 @@ from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 from core.deepsearch.utils.query_clean import clean_query
 from core.deepsearch.utils.file_scope import chunk_in_scope, resolve_file_scope
 from core.utils.json_safe import json_safe
+from config.core.deepsearch.multimodal_evidence_defaults import DEEPSEARCH_VISUAL_CUE_KEYWORDS
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,12 @@ class GraphTraversalExecutor:
             query_options: Dict[str, Any] = {}
             if file_scope.enabled:
                 query_options["file_scope"] = file_scope.as_dict()
+            # Preserve multimodal intent across planner-generated sub-queries: planner step descriptions
+            # may omit "figure/table/image" tokens even when the user explicitly asks for them.
+            # The adapter can use this hint to over-fetch and include image chunks when available.
+            if self._has_visual_cues(context.question):
+                query_options["visual_evidence_hint"] = True
+                query_options["visual_evidence_query"] = context.question
             if tool_args:
                 if "export_subgraph" in tool_args:
                     query_options["export_subgraph"] = bool(tool_args.get("export_subgraph"))
@@ -282,6 +289,20 @@ class GraphTraversalExecutor:
                 meta={"call_id": call_id, "tool_name": resolved_tool, "plan_step": step.step_id, "ok": False},
             )
         return traversal_record, reasoning_entry, evidences
+
+    @staticmethod
+    def _has_visual_cues(text: str | None) -> bool:
+        token = str(text or "").strip()
+        if not token:
+            return False
+        lowered = token.lower()
+        for keyword in DEEPSEARCH_VISUAL_CUE_KEYWORDS:
+            needle = str(keyword or "").strip()
+            if not needle:
+                continue
+            if needle.lower() in lowered:
+                return True
+        return False
 
     @staticmethod
     def _resolve_query(description: str, tool_args: Optional[Dict[str, Any]]) -> str:

@@ -18,3 +18,9 @@ from .markdown_table import (  # noqa: F401
     parse_markdown_table,
 )
 
+from .markdown_image import (  # noqa: F401
+    extract_image_alts,
+    extract_image_urls,
+    find_markdown_image_spans,
+    line_contains_image,
+)

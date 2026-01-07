@@ -421,8 +421,10 @@ class _BM25IndexBuilderIndexingMixin:
 
         try:
             deleted_count = self._delete_chunks_by_ids(unique_chunk_ids)
-            return deleted_count > 0
+            # Idempotency: treat missing IDs as already deleted.
+            if deleted_count <= 0:
+                logger.info("No chunks found to delete")
+            return True
         except Exception as e:
             logger.error(f"Error deleting chunks: {e}")
             return False
-

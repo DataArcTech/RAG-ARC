@@ -5,6 +5,9 @@ from typing import Any, Dict, List, Optional
 from encapsulation.data_model.schema import Chunk
 from core.retrieval.graph_retrieveal.base import BaseGraphRetriever
 from encapsulation.data_model.pipeline import PipelineArtifacts
+from config.output_limits import CHAT_MAX_IMAGE_INPUTS
+from core.utils.multimodal_images import collect_image_paths_from_chunk_payloads
+from core.utils.multimodal_llm import build_multimodal_user_message
 from .module import RAGInference
 
 logger = logging.getLogger(__name__)
@@ -80,7 +83,44 @@ class RAGInferenceCLIModule:
         messages = self._build_messages(reranked_chunks, rewritten_query)
         llm_response = None
         if not skip_llm:
-            llm_response = self._rag.llm.chat(messages)
+            llm = self._rag.llm
+            image_paths = collect_image_paths_from_chunk_payloads(reranked_chunks, max_images=CHAT_MAX_IMAGE_INPUTS)
+            call_messages: List[Dict[str, Any]] = messages
+
+            supports_multimodal = (
+                bool(image_paths)
+                and getattr(llm, "loading_method", None) == "openai"
+                and hasattr(llm, "client")
+                and hasattr(getattr(llm, "client", None), "chat")
+            )
+
+            if supports_multimodal:
+                try:
+                    call_messages = [dict(m) for m in messages]
+                    user_idx = len(call_messages) - 1
+                    if user_idx >= 0 and isinstance(call_messages[user_idx].get("content"), str):
+                        call_messages[user_idx] = build_multimodal_user_message(
+                            text=str(call_messages[user_idx]["content"]),
+                            image_paths=image_paths,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to build multimodal messages; continuing with text-only: %s", exc)
+                    call_messages = messages
+
+                try:
+                    llm_response = llm.chat(call_messages)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Model/API does not support multimodal inputs; continuing with text-only (captions as fallback): %s",
+                        exc,
+                    )
+                    llm_response = llm.chat(messages)
+            else:
+                if image_paths:
+                    logger.warning(
+                        "Configured LLM does not support multimodal inputs; continuing with text-only (captions as fallback)."
+                    )
+                llm_response = llm.chat(messages)
             logger.info("LLM response generated for query '%s'", rewritten_query)
         else:
             logger.info("Skipping LLM call for query '%s'", rewritten_query)
