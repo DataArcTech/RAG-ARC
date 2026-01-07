@@ -512,35 +512,66 @@ async def get_static_file_redirect(
     file_id: str,
     current_user: Annotated[User | None, Depends(get_current_user_optional)] = None,
 ):
+    logger.info(f"[FILE_ACCESS_REDIRECT] Starting file redirect: file_id={file_id}, user={current_user.id if current_user else None}, user_type={getattr(current_user, 'type', None) if current_user else None}")
+    
     knowledge = _get_chatbot_knowledge()
     file_storage = getattr(knowledge, "file_storage", None)
     if file_storage is None:
+        logger.error(f"[FILE_ACCESS_REDIRECT] File storage not configured: file_id={file_id}")
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="file storage not configured")
 
+    logger.debug(f"[FILE_ACCESS_REDIRECT] Querying file metadata: file_id={file_id}")
     meta = await anyio.to_thread.run_sync(file_storage.get_file_metadata, file_id)
     if meta is None:
+        logger.warning(f"[FILE_ACCESS_REDIRECT] File metadata not found: file_id={file_id}")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
+    
+    logger.debug(f"[FILE_ACCESS_REDIRECT] File metadata found: file_id={file_id}, owner_id={getattr(meta, 'owner_id', None)}, filename={getattr(meta, 'filename', None)}")
     
     # 临时方案：对于 type=1 的用户（chatKB），跳过权限检查，允许访问所有文件
     user_type = getattr(current_user, "type", None) if current_user else None
     if user_type == 1:
-        logger.info(f"File access allowed for type=1 user: file_id={file_id}, user_id={current_user.id}")
+        logger.info(f"[FILE_ACCESS_REDIRECT] File access allowed for type=1 user: file_id={file_id}, user_id={current_user.id}")
     else:
-        # 对于非 type=1 用户或未认证用户，检查文件是否属于共享文档 owner_id
-        shared_owner_id = _get_shared_document_owner_id()
+        # 对于 type=0 用户（livingKB），只需要检查文件 owner_id 是否等于用户 id
         file_owner_id = getattr(meta, "owner_id", None)
-        if file_owner_id != shared_owner_id:
+        
+        logger.debug(f"[FILE_ACCESS_REDIRECT] Permission check (type=0): file_id={file_id}, file_owner_id={file_owner_id}, user_type={user_type}, user_id={current_user.id if current_user else None}")
+        
+        # 如果用户已认证，检查文件是否属于该用户
+        if current_user is not None:
+            if file_owner_id == current_user.id:
+                logger.info(f"[FILE_ACCESS_REDIRECT] File access allowed (file owner): file_id={file_id}, file_owner_id={file_owner_id}, user_id={current_user.id}")
+            else:
+                # 检查是否有显式权限（通过 FilePermission）
+                try:
+                    from application.knowledge.permission_mixin import PermissionType
+                    permission_type = await anyio.to_thread.run_sync(knowledge.check_file_access, file_id, current_user.id)
+                    if permission_type is not None:
+                        logger.info(f"[FILE_ACCESS_REDIRECT] File access allowed (explicit permission): file_id={file_id}, user_id={current_user.id}, permission_type={permission_type}")
+                    else:
+                        logger.info(
+                            f"[FILE_ACCESS_REDIRECT] File access denied: file_id={file_id}, file_owner_id={file_owner_id}, "
+                            f"user_id={current_user.id}, no permission"
+                        )
+                        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
+                except HTTPException:
+                    raise
+                except Exception as exc:
+                    logger.warning(f"[FILE_ACCESS_REDIRECT] Permission check failed: file_id={file_id}, user_id={current_user.id}, error={exc}")
+                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
+        else:
+            # 未认证用户无法访问文件（需要登录）
             logger.info(
-                f"File access denied: file_id={file_id}, file_owner_id={file_owner_id}, "
-                f"shared_owner_id={shared_owner_id}, user_type={user_type}, user_id={current_user.id if current_user else None}"
+                f"[FILE_ACCESS_REDIRECT] File access denied (unauthenticated): file_id={file_id}, file_owner_id={file_owner_id}"
             )
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
-        else:
-            logger.info(f"File access allowed (shared document): file_id={file_id}, file_owner_id={file_owner_id}")
 
     filename = getattr(meta, "filename", None) or "file"
     safe_name = Path(filename).name
-    return RedirectResponse(url=f"/static/files/{file_id}/{quote(safe_name)}", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+    redirect_url = f"/static/files/{file_id}/{quote(safe_name)}"
+    logger.info(f"[FILE_ACCESS_REDIRECT] Redirecting: file_id={file_id}, filename={filename}, safe_name={safe_name}, redirect_url={redirect_url}")
+    return RedirectResponse(url=redirect_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
 
 @router.get("/static/files/{file_id}/{_filename:path}")
@@ -549,107 +580,162 @@ async def get_static_file(
     _filename: str,
     current_user: Annotated[User | None, Depends(get_current_user_optional)] = None,
 ):
+    logger.info(f"[FILE_ACCESS] Starting file access: file_id={file_id}, filename={_filename}, user={current_user.id if current_user else None}, user_type={getattr(current_user, 'type', None) if current_user else None}")
+    
     knowledge = _get_chatbot_knowledge()
     file_storage = getattr(knowledge, "file_storage", None)
     if file_storage is None:
+        logger.error(f"[FILE_ACCESS] File storage not configured: file_id={file_id}")
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="file storage not configured")
 
+    logger.debug(f"[FILE_ACCESS] Querying file metadata: file_id={file_id}")
     meta = await anyio.to_thread.run_sync(file_storage.get_file_metadata, file_id)
     if meta is None:
+        logger.warning(f"[FILE_ACCESS] File metadata not found: file_id={file_id}")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
+    
+    logger.debug(f"[FILE_ACCESS] File metadata found: file_id={file_id}, owner_id={getattr(meta, 'owner_id', None)}, filename={getattr(meta, 'filename', None)}, blob_key={getattr(meta, 'blob_key', None)}")
     
     # 临时方案：对于 type=1 的用户（chatKB），跳过权限检查，允许访问所有文件
     user_type = getattr(current_user, "type", None) if current_user else None
     if user_type == 1:
-        logger.info(f"File access allowed for type=1 user: file_id={file_id}, user_id={current_user.id}")
+        logger.info(f"[FILE_ACCESS] File access allowed for type=1 user: file_id={file_id}, user_id={current_user.id}")
     else:
-        # 对于非 type=1 用户或未认证用户，检查文件是否属于共享文档 owner_id
-        shared_owner_id = _get_shared_document_owner_id()
+        # 对于 type=0 用户（livingKB），只需要检查文件 owner_id 是否等于用户 id
         file_owner_id = getattr(meta, "owner_id", None)
-        if file_owner_id != shared_owner_id:
+        
+        logger.debug(f"[FILE_ACCESS] Permission check (type=0): file_id={file_id}, file_owner_id={file_owner_id}, user_type={user_type}, user_id={current_user.id if current_user else None}")
+        
+        # 如果用户已认证，检查文件是否属于该用户
+        if current_user is not None:
+            if file_owner_id == current_user.id:
+                logger.info(f"[FILE_ACCESS] File access allowed (file owner): file_id={file_id}, file_owner_id={file_owner_id}, user_id={current_user.id}")
+            else:
+                # 检查是否有显式权限（通过 FilePermission）
+                try:
+                    from application.knowledge.permission_mixin import PermissionType
+                    permission_type = await anyio.to_thread.run_sync(knowledge.check_file_access, file_id, current_user.id)
+                    if permission_type is not None:
+                        logger.info(f"[FILE_ACCESS] File access allowed (explicit permission): file_id={file_id}, user_id={current_user.id}, permission_type={permission_type}")
+                    else:
+                        logger.info(
+                            f"[FILE_ACCESS] File access denied: file_id={file_id}, file_owner_id={file_owner_id}, "
+                            f"user_id={current_user.id}, no permission"
+                        )
+                        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
+                except HTTPException:
+                    raise
+                except Exception as exc:
+                    logger.warning(f"[FILE_ACCESS] Permission check failed: file_id={file_id}, user_id={current_user.id}, error={exc}")
+                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
+        else:
+            # 未认证用户无法访问文件（需要登录）
             logger.info(
-                f"File access denied: file_id={file_id}, file_owner_id={file_owner_id}, "
-                f"shared_owner_id={shared_owner_id}, user_type={user_type}, user_id={current_user.id if current_user else None}"
+                f"[FILE_ACCESS] File access denied (unauthenticated): file_id={file_id}, file_owner_id={file_owner_id}"
             )
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
-        else:
-            logger.info(f"File access allowed (shared document): file_id={file_id}, file_owner_id={file_owner_id}")
 
     blob_key = getattr(meta, "blob_key", None)
     if not blob_key:
-        logger.info(f"File access failed: blob_key is None for file_id={file_id}")
+        logger.warning(f"[FILE_ACCESS] File access failed: blob_key is None for file_id={file_id}")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
+    
+    logger.debug(f"[FILE_ACCESS] Blob key retrieved: file_id={file_id}, blob_key={blob_key}")
 
     filename = getattr(meta, "filename", None) or "file"
     content_type = getattr(meta, "content_type", None) or _guess_media_type(filename)
     headers = {"Content-Disposition": _content_disposition_inline(filename)}
+    logger.debug(f"[FILE_ACCESS] File info: file_id={file_id}, filename={filename}, content_type={content_type}")
 
     blob_store = getattr(file_storage, "blob_store", None)
     if blob_store is None:
-        logger.info(f"File access failed: blob_store not configured for file_id={file_id}")
+        logger.error(f"[FILE_ACCESS] File access failed: blob_store not configured for file_id={file_id}")
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="blob store not configured")
+    
+    blob_store_type = blob_store.__class__.__name__
+    logger.debug(f"[FILE_ACCESS] Blob store type: file_id={file_id}, blob_store_type={blob_store_type}")
 
     try:
-        if blob_store.__class__.__name__ == "LocalDB":
+        if blob_store_type == "LocalDB":
+            logger.debug(f"[FILE_ACCESS] Using LocalDB for file access: file_id={file_id}, blob_key={blob_key}")
             # 优先使用 LocalDB 的 _get_full_path 方法，确保与存储时使用相同的路径解析逻辑
             # 这样可以保证存储和访问使用相同的 base_path（考虑配置中的 base_path）
             path = await anyio.to_thread.run_sync(blob_store._get_full_path, blob_key)
+            logger.debug(f"[FILE_ACCESS] Primary path resolved: file_id={file_id}, blob_key={blob_key}, path={path}, exists={path.exists()}")
             
             if path.exists():
-                logger.info(f"File access: file_id={file_id}, blob_key={blob_key}, path={path}")
+                logger.info(f"[FILE_ACCESS] File access success (primary path): file_id={file_id}, blob_key={blob_key}, path={path}")
                 return FileResponse(path, media_type=content_type, headers=headers)
             else:
+                logger.debug(f"[FILE_ACCESS] Primary path not found, trying fallback: file_id={file_id}, path={path}")
                 # 兼容性处理1：如果路径不存在，尝试使用环境变量直接拼接（兼容历史数据）
                 # 某些历史文件可能是在不同的 base_path 下存储的
                 base_path = os.getenv("LOCAL_FILE_STORAGE_PATH") or os.getenv("LOCAL_BLOB_STORE_BASE_PATH") or "./data/files"
                 base_dir = Path(base_path).expanduser().resolve()
                 safe_key = str(blob_key).replace("..", "").lstrip("/")
                 fallback_path = base_dir / safe_key
+                logger.debug(f"[FILE_ACCESS] Fallback path: file_id={file_id}, base_path={base_path}, base_dir={base_dir}, safe_key={safe_key}, fallback_path={fallback_path}, exists={fallback_path.exists()}")
                 
                 if fallback_path.exists():
-                    logger.info(f"File access (fallback path): file_id={file_id}, blob_key={blob_key}, path={fallback_path}")
+                    logger.info(f"[FILE_ACCESS] File access success (fallback path): file_id={file_id}, blob_key={blob_key}, path={fallback_path}")
                     return FileResponse(fallback_path, media_type=content_type, headers=headers)
                 
                 # 兼容性处理2：尝试修复 blob_key 中可能包含的重复路径
                 # blob_key 可能包含类似 "RAG-ARC/local/files_chatKB_test/文件名.pdf" 的路径
                 # 我们需要提取出实际的文件名部分
+                logger.debug(f"[FILE_ACCESS] Fallback path not found, trying path fix: file_id={file_id}, safe_key={safe_key}")
                 key_parts = safe_key.split("/")
+                logger.debug(f"[FILE_ACCESS] Key parts: file_id={file_id}, key_parts={key_parts}, len={len(key_parts)}")
                 if len(key_parts) >= 3:  # files/{prefix}/{file_id}/...
                     # 尝试只使用最后一部分（文件名）
                     file_id_part = key_parts[2] if len(key_parts) > 2 else ""
                     filename_part = key_parts[-1] if key_parts else ""
+                    logger.debug(f"[FILE_ACCESS] Extracted parts: file_id={file_id}, file_id_part={file_id_part}, filename_part={filename_part}")
                     # 如果文件名部分包含路径分隔符，只取 basename
                     if "/" in filename_part or "\\" in filename_part:
+                        original_filename_part = filename_part
                         filename_part = Path(filename_part).name
+                        logger.debug(f"[FILE_ACCESS] Filename contains path, extracted basename: file_id={file_id}, original={original_filename_part}, basename={filename_part}")
                     # 重新构建 blob_key: files/{prefix}/{file_id}/{basename}
                     if file_id_part and filename_part:
                         fixed_key = f"files/{key_parts[1]}/{file_id_part}/{filename_part}"
+                        logger.debug(f"[FILE_ACCESS] Fixed key generated: file_id={file_id}, original_blob_key={blob_key}, fixed_key={fixed_key}")
                         # 先尝试使用 LocalDB 的方法
                         fixed_path = await anyio.to_thread.run_sync(blob_store._get_full_path, fixed_key)
+                        logger.debug(f"[FILE_ACCESS] Fixed path via LocalDB: file_id={file_id}, fixed_key={fixed_key}, fixed_path={fixed_path}, exists={fixed_path.exists()}")
                         if fixed_path.exists():
-                            logger.info(f"File access (fixed path via LocalDB): file_id={file_id}, original_blob_key={blob_key}, fixed_blob_key={fixed_key}, path={fixed_path}")
+                            logger.info(f"[FILE_ACCESS] File access success (fixed path via LocalDB): file_id={file_id}, original_blob_key={blob_key}, fixed_blob_key={fixed_key}, path={fixed_path}")
                             return FileResponse(fixed_path, media_type=content_type, headers=headers)
                         # 再尝试使用环境变量直接拼接
                         fixed_fallback_path = base_dir / fixed_key
+                        logger.debug(f"[FILE_ACCESS] Fixed path via env: file_id={file_id}, fixed_key={fixed_key}, fixed_fallback_path={fixed_fallback_path}, exists={fixed_fallback_path.exists()}")
                         if fixed_fallback_path.exists():
-                            logger.info(f"File access (fixed path via env): file_id={file_id}, original_blob_key={blob_key}, fixed_blob_key={fixed_key}, path={fixed_fallback_path}")
+                            logger.info(f"[FILE_ACCESS] File access success (fixed path via env): file_id={file_id}, original_blob_key={blob_key}, fixed_blob_key={fixed_key}, path={fixed_fallback_path}")
                             return FileResponse(fixed_fallback_path, media_type=content_type, headers=headers)
+                    else:
+                        logger.debug(f"[FILE_ACCESS] Cannot fix key: file_id={file_id}, file_id_part={file_id_part}, filename_part={filename_part}")
+                else:
+                    logger.debug(f"[FILE_ACCESS] Key parts insufficient for fixing: file_id={file_id}, key_parts={key_parts}, len={len(key_parts)}")
                 
-                logger.info(f"File access failed: path does not exist for file_id={file_id}, tried_path={path}, fallback_path={fallback_path}")
+                logger.warning(f"[FILE_ACCESS] File access failed: all paths not found for file_id={file_id}, blob_key={blob_key}, primary_path={path}, fallback_path={fallback_path}")
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found")
 
-        if blob_store.__class__.__name__ == "MinIODB":
+        if blob_store_type == "MinIODB":
+            logger.debug(f"[FILE_ACCESS] Using MinIODB for file access: file_id={file_id}, blob_key={blob_key}")
             return StreamingResponse(_stream_minio_object(blob_store, str(blob_key)), media_type=content_type, headers=headers)
 
+        logger.debug(f"[FILE_ACCESS] Using generic blob store retrieve: file_id={file_id}, blob_key={blob_key}, blob_store_type={blob_store_type}")
         data = await anyio.to_thread.run_sync(blob_store.retrieve, str(blob_key))
+        logger.info(f"[FILE_ACCESS] File access success (generic blob store): file_id={file_id}, blob_key={blob_key}, data_size={len(data) if data else 0}")
         return Response(content=data, media_type=content_type, headers=headers)
-    except HTTPException:
+    except HTTPException as exc:
+        logger.debug(f"[FILE_ACCESS] HTTPException raised: file_id={file_id}, status_code={exc.status_code}, detail={exc.detail}")
         raise
     except KeyError as exc:
-        logger.info(f"File access failed: KeyError for file_id={file_id}, blob_key={blob_key}, error={exc}")
+        logger.warning(f"[FILE_ACCESS] File access failed: KeyError for file_id={file_id}, blob_key={blob_key}, error={exc}")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="file not found") from exc
     except Exception as exc:
-        logger.info(f"File access failed: unexpected error for file_id={file_id}, blob_key={blob_key}, error={exc}, error_type={type(exc).__name__}")
+        logger.error(f"[FILE_ACCESS] File access failed: unexpected error for file_id={file_id}, blob_key={blob_key}, error={exc}, error_type={type(exc).__name__}", exc_info=True)
         raise
 
 
