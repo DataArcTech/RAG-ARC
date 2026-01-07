@@ -206,8 +206,24 @@ async def chat(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required"
         )
-    # Use shared document owner ID for unified file retrieval across all users
-    effective_owner_id: uuid.UUID | None = _get_shared_document_owner_id()
+
+    # Guard: only livingKB users (type=0) may request subgraph/evidence generation.
+    if request.return_subgraph or request.include_evidence:
+        user_type = getattr(current_user, "type", 0)
+        if user_type != 0:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only livingKB users (type=0) can request subgraph generation"
+            )
+
+    # Determine effective owner based on user type:
+    # - type=1 (chatKB): use shared document owner ID for unified file retrieval across all users
+    # - type=0 (livingKB): use current user's ID for user isolation
+    user_type = getattr(current_user, "type", 0)
+    if user_type == 1:
+        effective_owner_id: uuid.UUID | None = _get_shared_document_owner_id()
+    else:
+        effective_owner_id: uuid.UUID | None = current_user.id
 
     if request.include_all_owners:
         if not is_admin_owner(current_user.id):
@@ -928,7 +944,11 @@ async def stream_chat_ws(
                     )
                     return
 
-            effective_owner: uuid.UUID | None = current_user.id
+            user_type = getattr(current_user, "type", 0)
+            if user_type == 1:
+                effective_owner: uuid.UUID | None = _get_shared_document_owner_id()
+            else:
+                effective_owner: uuid.UUID | None = current_user.id
             if include_all_owners:
                 if not is_admin_owner(current_user.id):
                     await websocket.close(code=status.WS_1008_POLICY_VIOLATION)

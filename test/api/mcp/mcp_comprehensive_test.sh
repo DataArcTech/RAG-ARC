@@ -28,9 +28,9 @@ REGISTER_RESPONSE=$(curl -sS -w "\n%{http_code}" "$AUTH_ENDPOINT/register" \
   }')
 
 REGISTER_STATUS=$(echo "$REGISTER_RESPONSE" | tail -n1)
-if [ "$REGISTER_STATUS" = "201" ]; then
+if [ "$REGISTER_STATUS" = "200" ] || [ "$REGISTER_STATUS" = "201" ]; then
   echo "✅ User registered successfully"
-elif [ "$REGISTER_STATUS" = "400" ]; then
+elif [ "$REGISTER_STATUS" = "400" ] || [ "$REGISTER_STATUS" = "409" ]; then
   echo "ℹ️  User already exists, continuing..."
 else
   echo "❌ User registration failed (status $REGISTER_STATUS)"
@@ -206,22 +206,51 @@ echo -e "\n6. Testing MCP retrieval functionality:"
 echo "========================================="
 
 # Upload test HTML file via REST
-TEST_FILE="./test/test2.html"
+RUN_TAG=$(python3 -c "import uuid; print(uuid.uuid4().hex[:8])")
+SEARCH_TOKEN="RAGARCTESTTOKEN${RUN_TAG}"
+REL_PATH="RAG-ARC/test_artifacts/mcp_comprehensive/${RUN_TAG}/test2.html"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "${TMP_DIR}"' EXIT
+TEST_FILE="${TMP_DIR}/test2_${RUN_TAG}.html"
+python3 - <<PY
+from pathlib import Path
+
+src = Path("./test/test2.html").read_text(encoding="utf-8")
+token = "${SEARCH_TOKEN}"
+injection = f"\\n<p>{token}</p>\\n"
+if "</body>" in src:
+    out = src.replace("</body>", injection + "</body>", 1)
+else:
+    out = src + "\\n" + token + "\\n"
+Path("${TEST_FILE}").write_text(out, encoding="utf-8")
+PY
 
 echo "Uploading test file: $TEST_FILE"
 UPLOAD_RESPONSE=$(curl -sS -w "\n%{http_code}" \
   -H "Authorization: Bearer $AUTH_TOKEN" \
-  -F "file=@$TEST_FILE" "$KNOWLEDGE_ENDPOINT")
+  -F "file=@$TEST_FILE" \
+  -F "relative_path=$REL_PATH" \
+  "$KNOWLEDGE_ENDPOINT")
 UPLOAD_BODY=$(echo "$UPLOAD_RESPONSE" | sed '$d')
 UPLOAD_STATUS=$(echo "$UPLOAD_RESPONSE" | tail -n1)
 
-if [ "$UPLOAD_STATUS" != "201" ]; then
-  echo "❌ Upload failed (status $UPLOAD_STATUS)"
+if [ "$UPLOAD_STATUS" != "200" ] && [ "$UPLOAD_STATUS" != "201" ]; then
+  echo "❌ Upload failed (expected 200/201, got $UPLOAD_STATUS)"
   echo "$UPLOAD_BODY"
   exit 1
 fi
 
-FILE_ID=$(echo "$UPLOAD_BODY" | tr -d '"')
+FILE_ID=$(echo "$UPLOAD_BODY" | python3 -c '
+import json,sys
+raw=sys.stdin.read().strip()
+try:
+    payload=json.loads(raw)
+except Exception:
+    print(raw.strip().strip("\""))
+    raise SystemExit(0)
+data = payload.get("data") if isinstance(payload, dict) else payload
+print(str(data or "").strip())
+')
 echo "✅ Uploaded file_id: $FILE_ID"
 
 # 7) Test retrieval with uploaded content
@@ -245,7 +274,7 @@ while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
     "name": "chat",
     "arguments": {
       "session_id": "$CHAT_SESSION_ID",
-      "query": "who is the author of Venom: The Black Suit Saga?",
+      "query": "In the document that contains token ${SEARCH_TOKEN}, who is the author of Venom: The Black Suit Saga?",
       "auth_token": "$AUTH_TOKEN"
     }
   }

@@ -72,6 +72,8 @@ cp .env.example .env
 | `EMBEDDING_DEVICE` | `cpu` | HuggingFace 嵌入模型运行设备（仅当 `EMBEDDING_MODEL_PROVIDER=huggingface` 时使用）。 |
 | `EMBEDDING_CACHE_FOLDER` | _(空)_ | 可选：HuggingFace 嵌入模型缓存目录。 |
 | `EMBEDDING_DIMENSIONS` | _(空)_ | 可选：嵌入向量维度覆盖。留空时系统可自动探测并缓存维度。 |
+| `EMBEDDING_TIMEOUT_SECONDS` | `20` | Embedding 请求超时（秒）。当 embedding 端点不稳定时建议调小以快速失败。 |
+| `EMBEDDING_MAX_RETRIES` | `1` | Embedding 请求重试次数（OpenAI client retries）。建议保持较小以避免检索/索引长时间卡住。 |
 | `OCR_MODEL_PROVIDER` | `openai` | OCR/VLM 提供方（`openai`、`vllm`、`dots_ocr` 等）。 |
 | `OCR_API_KEY` | _(空)_ | OCR/VLM 的 API Key（使用云端 API 时必填）。 |
 | `OCR_API_BASE_URL` | _(空)_ | OCR/VLM 的 Base URL。 |
@@ -241,6 +243,9 @@ cp .env.example .env
 | `MQ_RESULT_MINIO_ENDPOINT` | _(空)_ | `minio` 外置结果的 MinIO endpoint（TODO：尚未实现）。 |
 | `MQ_RESULT_MINIO_BUCKET` | _(空)_ | `minio` 外置结果的 bucket（TODO：尚未实现）。 |
 | `MQ_STREAM_MAXLEN` | `20000` | Redis Streams 最大长度（近似裁剪）。 |
+| `MQ_PROGRESS_MAX_STRING_CHARS` | `4000` | 写入 Redis Streams 的 progress payload 单字段最大字符数（用于防止 trace/tool 输出过长导致 Redis 卡死）。 |
+| `MQ_PROGRESS_MAX_LIST_ITEMS` | `200` | 写入 Redis Streams 的 progress payload 单列表最大元素数。 |
+| `MQ_PROGRESS_MAX_DEPTH` | `6` | progress payload 裁剪递归深度上限。 |
 | `MQ_FAILFAST_ON_REDIS_DOWN` | _(空)_ | Redis 不可用时是否 fail-fast：为空则 `celery` 模式默认 fail-fast，`inprocess` 模式默认 best-effort。 |
 | `FILE_OP_LOCK_TTL_SECONDS` | `21600` | 文件操作分布式锁 TTL（秒，索引/删除共用）。 |
 | `CELERY_TASK_MAX_RETRIES` | `3` | 任务异常时最大重试次数。 |

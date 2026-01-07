@@ -63,11 +63,13 @@ class RequestIdResponseWrapper(BaseHTTPMiddleware):
         
         # 只处理 JSON 响应（检查 content-type）
         content_type = response.headers.get("content-type", "")
-        if "application/json" in content_type:
+        content_disposition = response.headers.get("content-disposition") or ""
+        if "application/json" in content_type and not content_disposition:
             # 获取原始响应体
-            body = b""
+            body_chunks: list[bytes] = []
             async for chunk in response.body_iterator:
-                body += chunk
+                body_chunks.append(chunk)
+            body = b"".join(body_chunks)
             
             try:
                 # 解析原始 JSON
@@ -98,11 +100,18 @@ class RequestIdResponseWrapper(BaseHTTPMiddleware):
                         "request_id": request_id
                     }
                 
-                # 记录请求日志（包含完整响应内容）
-                response_json = json.dumps(wrapped_data, ensure_ascii=False)
+                # 记录请求日志（不记录 response data 以避免泄漏 token / 大块内容）
+                data_summary: str
+                data_value = wrapped_data.get("data")
+                if isinstance(data_value, dict):
+                    data_summary = f"dict(keys={sorted(list(data_value.keys()))})"
+                elif isinstance(data_value, list):
+                    data_summary = f"list(len={len(data_value)})"
+                else:
+                    data_summary = str(type(data_value).__name__)
                 logger.info(
                     f"{client_ip} - \"{method} {path} HTTP/1.1\" {response.status_code} "
-                    f"(process_time: {process_time:.3f}s) - Response: {response_json}"
+                    f"(process_time: {process_time:.3f}s) - Response: code={wrapped_data.get('code')} message={wrapped_data.get('message')} data={data_summary} request_id={request_id}"
                 )
                 
                 # 创建新的 JSON 响应（JSONResponse 会自动计算 Content-Length）
@@ -117,13 +126,19 @@ class RequestIdResponseWrapper(BaseHTTPMiddleware):
                     media_type=response.media_type
                 )
             except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
-                # 如果不是有效的 JSON，返回原始响应
-                # 记录请求日志（非 JSON 响应）
+                # 如果不是有效的 JSON（例如下载文件但 content-type=application/json），返回原始响应内容。
+                new_headers = dict(response.headers)
+                new_headers.pop("content-length", None)
                 logger.info(
                     f"{client_ip} - \"{method} {path} HTTP/1.1\" {response.status_code} "
                     f"(process_time: {process_time:.3f}s) - Response: [Non-JSON response]"
                 )
-                return response
+                return Response(
+                    content=body,
+                    status_code=response.status_code,
+                    headers=new_headers,
+                    media_type=response.media_type,
+                )
         
         # 记录请求日志（非 JSON 响应）
         logger.info(

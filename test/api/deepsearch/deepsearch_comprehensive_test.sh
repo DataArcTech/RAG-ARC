@@ -32,8 +32,8 @@ else
     -H "Content-Type: application/json" \
     -d '{"name": "DeepSearch User", "user_name": "deepsearch_user", "password": "deepsearch_password"}')
   REGISTER_STATUS=$(echo "$REGISTER_RESPONSE" | tail -n1)
-  if [ "$REGISTER_STATUS" != "201" ] && [ "$REGISTER_STATUS" != "400" ]; then
-    echo "❌ User registration failed (expected 201/400, got $REGISTER_STATUS)"
+  if [ "$REGISTER_STATUS" != "200" ] && [ "$REGISTER_STATUS" != "201" ] && [ "$REGISTER_STATUS" != "409" ] && [ "$REGISTER_STATUS" != "400" ]; then
+    echo "❌ User registration failed (expected 200/201/409/400, got $REGISTER_STATUS)"
     exit 1
   fi
   LOGIN_RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST "$AUTH_ENDPOINT/token" \
@@ -52,7 +52,7 @@ if [ -z "${ACCESS_TOKEN:-}" ]; then
   echo "❌ Did not receive an access token"
   exit 1
 fi
-echo "✅ Authentication PASS - access_token: ${ACCESS_TOKEN:0:20}..."
+echo "✅ Authentication PASS - access_token obtained"
 
 # 2) Schedule deepsearch run
 echo -e "\n2) Schedule deepsearch run_async:"

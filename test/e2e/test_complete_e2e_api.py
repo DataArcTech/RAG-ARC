@@ -15,14 +15,16 @@ import pytest
 # 设置 HuggingFace 镜像
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 
-# Add project root to path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
 AUTH_TOKEN = os.getenv("RAGARC_E2E_TOKEN")
-pytestmark = pytest.mark.skipif(
-    not AUTH_TOKEN,
-    reason="Set RAGARC_E2E_TOKEN with a valid bearer token to run this end-to-end test.",
-)
+if not AUTH_TOKEN:
+    pytest.skip(
+        "Set RAGARC_E2E_TOKEN with a valid bearer token to run this end-to-end test.",
+        allow_module_level=True,
+    )
+
+# Add project root to path (repo root), but only after we decide to run.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from fastapi.testclient import TestClient
 from main import app

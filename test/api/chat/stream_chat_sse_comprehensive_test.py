@@ -27,6 +27,8 @@ def read_stream(url: str, token: str | None) -> dict[str, object]:
             if data == "[DONE]":
                 break
             chunk = json.loads(data)
+            if isinstance(chunk, dict) and "data" in chunk and "code" in chunk:
+                chunk = chunk.get("data") or {}
             choices = chunk.get("choices") or []
             if not choices:
                 continue
@@ -68,4 +70,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

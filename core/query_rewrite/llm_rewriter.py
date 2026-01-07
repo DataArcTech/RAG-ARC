@@ -1,4 +1,5 @@
 from typing import Dict, Any, TYPE_CHECKING
+import re
 from .base import AbstractQueryRewriter
 from core.prompts.query_rewrite_prompt import QUERY_REWRITE_USER_PROMPT
 
@@ -62,6 +63,23 @@ class LLMQueryRewriter(AbstractQueryRewriter):
         """
         if not query or not query.strip():
             raise ValueError("Query cannot be empty")
+
+        query = str(query)
+        if getattr(self.config, "skip_rewrite_if_contains", None):
+            for token in list(getattr(self.config, "skip_rewrite_if_contains") or []):
+                if token and token in query:
+                    logger.info("Skipping query rewrite because query contains %r", token)
+                    return query
+        if getattr(self.config, "skip_rewrite_regexes", None):
+            for pattern in list(getattr(self.config, "skip_rewrite_regexes") or []):
+                if not pattern:
+                    continue
+                try:
+                    if re.search(pattern, query):
+                        logger.info("Skipping query rewrite because query matches pattern %r", pattern)
+                        return query
+                except re.error:
+                    logger.warning("Invalid skip rewrite regex ignored: %r", pattern)
 
         # Get instruction from config (with default value set in config)
         instruction = self.config.instruction

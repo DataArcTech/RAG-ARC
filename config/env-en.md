@@ -72,6 +72,8 @@ How secrets flow into configs:
 | `EMBEDDING_DEVICE` | `cpu` | HuggingFace embedding runtime device (used when `EMBEDDING_MODEL_PROVIDER=huggingface`). |
 | `EMBEDDING_CACHE_FOLDER` | _(empty)_ | Optional HuggingFace cache folder for embedding weights. |
 | `EMBEDDING_DIMENSIONS` | _(empty)_ | Optional override for embedding vector dimension. When empty, the system can auto-detect the dimension (and will cache it). |
+| `EMBEDDING_TIMEOUT_SECONDS` | `20` | Embedding request timeout (seconds). Lower this to fail-fast when the embedding endpoint is flaky. |
+| `EMBEDDING_MAX_RETRIES` | `1` | Embedding request retries (OpenAI client retries). Keep small to avoid long stalls in retrieval/indexing when the endpoint is down. |
 | `OCR_MODEL_PROVIDER` | `openai` | OCR/VLM provider (`openai`, `vllm`, `dots_ocr`). |
 | `OCR_API_KEY` | _(empty)_ | API key for OCR provider (required for hosted APIs). |
 | `OCR_API_BASE_URL` | _(empty)_ | Base URL for OCR provider. |
@@ -241,6 +243,9 @@ When `TASK_QUEUE_MODE=celery`, these long-running operations are executed by Cel
 | `MQ_RESULT_MINIO_ENDPOINT` | _(empty)_ | MinIO endpoint for `minio` result store (TODO implementation). |
 | `MQ_RESULT_MINIO_BUCKET` | _(empty)_ | MinIO bucket for `minio` result store (TODO implementation). |
 | `MQ_STREAM_MAXLEN` | `20000` | Max length for Redis Streams (approximate trimming). |
+| `MQ_PROGRESS_MAX_STRING_CHARS` | `4000` | Per-string truncation limit for progress event payloads stored in Redis Streams (protects Redis from huge trace/tool outputs). |
+| `MQ_PROGRESS_MAX_LIST_ITEMS` | `200` | Per-list truncation limit for progress event payloads stored in Redis Streams. |
+| `MQ_PROGRESS_MAX_DEPTH` | `6` | Max recursion depth when trimming progress event payloads before persisting to Redis Streams. |
 | `MQ_FAILFAST_ON_REDIS_DOWN` | _(empty)_ | Whether to fail-fast when Redis is unavailable: default is fail-fast in `celery` mode and best-effort in `inprocess` mode. |
 | `FILE_OP_LOCK_TTL_SECONDS` | `21600` | Distributed file-operation lock TTL (seconds; shared by index/delete). |
 | `CELERY_TASK_MAX_RETRIES` | `3` | Maximum retry attempts for task exceptions. |
