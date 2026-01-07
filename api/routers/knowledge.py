@@ -293,7 +293,7 @@ async def download_file(file_id: str, user: Annotated[User | None, Depends(get_c
         )
 
 
-@router.delete("/{file_id}", status_code=status.HTTP_202_ACCEPTED)
+@router.delete("/{file_id}", status_code=status.HTTP_200_OK)
 async def delete_file(file_id: str, user: Annotated[User | None, Depends(get_current_user)]):
     if user is None:
         raise HTTPException(
