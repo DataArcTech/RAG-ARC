@@ -386,8 +386,17 @@ async def stream_chat_sse(
     message_handler = get_message_handler()
     rag_inference_handler = get_rag_inference_handler()
 
-    # Use shared document owner ID for unified file retrieval across all users
-    effective_owner: uuid.UUID | None = _get_shared_document_owner_id()
+    # Determine effective owner based on user type:
+    # - type=1 (chatKB): use shared document owner ID for unified file retrieval across all users
+    # - type=0 (livingKB): use current user's ID for user isolation
+    user_type = getattr(current_user, "type", 0)
+    if user_type == 1:
+        # chatKB: use shared owner ID
+        effective_owner: uuid.UUID | None = _get_shared_document_owner_id()
+    else:
+        # livingKB: use current user's ID
+        effective_owner: uuid.UUID | None = current_user.id
+    
     if include_all_owners:
         if not is_admin_owner(current_user.id):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admin users can access all owners")
