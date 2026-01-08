@@ -14,6 +14,7 @@ from config.output_limits import (
     DEEPSEARCH_GRAPH_NODE_LIMIT,
     DEEPSEARCH_TOP_CHUNKS,
     DEEPSEARCH_TOP_SEED_ENTITIES,
+    DEEPSEARCH_TOP_TRIPLES,
     ENABLE_ALL_EVIDENCE,
 )
 from core.presentation.graph_chain import build_graph_chain
@@ -371,6 +372,7 @@ def build_deepsearch_evidence(
     evidence = {
         "chunks": chunk_entries,
         "seed_entities": _seed_entities_from_subgraph(graph_snapshot, DEEPSEARCH_TOP_SEED_ENTITIES),
+        "triples": _triples_from_subgraph(graph_snapshot, DEEPSEARCH_TOP_TRIPLES),
         "graph": graph_snapshot or {},
         "graph_stats": _graph_stats(graph_snapshot),
         "graph_chain": graph_chain,

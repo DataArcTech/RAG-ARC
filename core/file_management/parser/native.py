@@ -15,6 +15,93 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def extract_html_structured_content(html_content: str) -> Dict[str, Any]:
+    """Extract structured text blocks from HTML in document order.
+
+    Notes:
+    - Do not assume content is wrapped in <p>; many pages place the main body inside div/span nodes.
+    - We still keep the output schema stable for downstream markdown conversion.
+    """
+
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html_content, "html.parser")
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+
+    content: Dict[str, Any] = {
+        "title": soup.title.string if soup.title else "",
+        "headings": [],
+        "paragraphs": [],
+        "links": [],
+        "images": [],
+        "tables": [],
+        "metadata": {},
+    }
+
+    # Headings (document order).
+    for heading in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
+        text = heading.get_text(" ", strip=True)
+        if not text:
+            continue
+        content["headings"].append({"level": heading.name, "text": text})
+
+    # Paragraph-like blocks:
+    # - <p> tags
+    # - leaf <div> nodes without nested <div>/<p> (common for blog templates and knowledge-base pages)
+    seen: set[str] = set()
+
+    def _append_block(text: str) -> None:
+        token = str(text or "").strip()
+        if not token:
+            return
+        if token in seen:
+            return
+        seen.add(token)
+        content["paragraphs"].append(token)
+
+    for p in soup.find_all("p"):
+        _append_block(p.get_text(" ", strip=True))
+
+    for div in soup.find_all("div"):
+        # Avoid duplicating content already captured by <p>, and avoid large wrapper divs.
+        if div.find("p") is not None:
+            continue
+        if div.find("div") is not None:
+            continue
+        _append_block(div.get_text(" ", strip=True))
+
+    # Links.
+    for a in soup.find_all("a", href=True):
+        text = a.get_text(" ", strip=True)
+        href = str(a.get("href") or "").strip()
+        if not href:
+            continue
+        content["links"].append({"text": text, "href": href})
+
+    # Images.
+    for img in soup.find_all("img"):
+        content["images"].append(
+            {
+                "src": str(img.get("src") or ""),
+                "alt": str(img.get("alt") or ""),
+                "title": str(img.get("title") or ""),
+            }
+        )
+
+    # Tables.
+    for table in soup.find_all("table"):
+        table_data = []
+        for row in table.find_all("tr"):
+            row_data = [cell.get_text(" ", strip=True) for cell in row.find_all(["td", "th"])]
+            if row_data:
+                table_data.append(row_data)
+        if table_data:
+            content["tables"].append(table_data)
+
+    return content
+
+
 @singleton
 class NativeParser(AbstractParser):
     """
@@ -377,69 +464,15 @@ class NativeParser(AbstractParser):
     def _parse_html_content(self, html_content: str, filename: str, base_filename: str, output_dir: str) -> List[Dict[str, Any]]:
         """Parse HTML content and return structured results"""
         try:
-            from bs4 import BeautifulSoup
-
             stem = Path(filename).stem or "document"
             save_dir = os.path.join(output_dir, base_filename)
             os.makedirs(save_dir, exist_ok=True)
 
             logger.info(f"Parsing HTML: {base_filename}")
 
-            # Parse HTML
-            soup = BeautifulSoup(html_content, 'html.parser')
-
             # Extract structured content
-            content = {
-                'title': soup.title.string if soup.title else '',
-                'headings': [],
-                'paragraphs': [],
-                'links': [],
-                'images': [],
-                'tables': [],
-                'metadata': {
-                    'filename': base_filename
-                }
-            }
-
-            # Extract headings
-            for tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-                for heading in soup.find_all(tag):
-                    if heading.get_text().strip():
-                        content['headings'].append({
-                            'level': tag,
-                            'text': heading.get_text().strip()
-                        })
-
-            # Extract paragraphs
-            for p in soup.find_all('p'):
-                text = p.get_text().strip()
-                if text:
-                    content['paragraphs'].append(text)
-
-            # Extract links
-            for a in soup.find_all('a', href=True):
-                content['links'].append({
-                    'text': a.get_text().strip(),
-                    'href': a['href']
-                })
-
-            # Extract images
-            for img in soup.find_all('img'):
-                content['images'].append({
-                    'src': img.get('src', ''),
-                    'alt': img.get('alt', ''),
-                    'title': img.get('title', '')
-                })
-
-            # Extract tables
-            for table in soup.find_all('table'):
-                table_data = []
-                for row in table.find_all('tr'):
-                    row_data = [cell.get_text().strip() for cell in row.find_all(['td', 'th'])]
-                    if row_data:
-                        table_data.append(row_data)
-                if table_data:
-                    content['tables'].append(table_data)
+            content = extract_html_structured_content(html_content)
+            content["metadata"] = {"filename": base_filename}
 
             # Save results
             json_path = os.path.join(save_dir, f"{stem}.json")
