@@ -98,7 +98,7 @@ check_dependency "pkill"
 # 6. 启动和管理 Docker 容器
 # ==============================================================================
 echo -e "\n=========================================="
-echo "  RAG-ARC 启动脚本 (强制清理版)"
+echo "  RAG-ARC livingKB_test 启动脚本 (自动适配路径+PM2守护)"
 echo "=========================================="
 echo ""
 
@@ -218,11 +218,12 @@ fi
 
 echo "  ✅ 清理完成。"
 
-# 7.2 使用 PM2 启动新进程
+# 7.2 使用 PM2 启动新进程（带环境变量更新）
 echo "  🚀 正在通过 PM2 启动新的 [${PM2_APP_NAME}] 进程..."
 pm2 start "uv run uvicorn main:app --host 0.0.0.0 --port ${APP_PORT}" \
     --name "${PM2_APP_NAME}" \
     --log "${APP_LOG_FILE}" \
+    --update-env \
     --env "PYTHONUNBUFFERED=1" \
     --env "POSTGRES_HOST=${POSTGRES_HOST:-localhost}" \
     --env "POSTGRES_PORT=${POSTGRES_HOST_PORT}" \
@@ -252,34 +253,112 @@ echo "  ✅ ${PM2_APP_NAME} 应用已通过 PM2 启动！"
 echo ""
 
 # ==============================================================================
+# 7.3 启动/重启队列 Workers
+# ==============================================================================
+echo "🔄 启动/重启队列 Workers..."
+cd ${APP_DIR} || { echo "❌ 应用目录不存在: ${APP_DIR}"; exit 1; }
+
+# 停止旧的队列 workers
+MQ_PID_FILE="${APP_DIR}/log/mq_workers.pids"
+if [ -f "${MQ_PID_FILE}" ]; then
+    echo "  🛑 停止旧的队列 workers..."
+    while read -r pid name queue; do
+        if [ -z "${pid}" ]; then
+            continue
+        fi
+        if kill -0 "${pid}" >/dev/null 2>&1; then
+            echo "    停止 pid=${pid} name=${name} queue=${queue}"
+            kill -TERM -- "-${pid}" >/dev/null 2>&1 || true
+            kill -TERM "${pid}" >/dev/null 2>&1 || true
+            sleep 1
+            if kill -0 "${pid}" >/dev/null 2>&1; then
+                kill -KILL -- "-${pid}" >/dev/null 2>&1 || true
+                kill -KILL "${pid}" >/dev/null 2>&1 || true
+            fi
+        fi
+    done < "${MQ_PID_FILE}" || true
+    rm -f "${MQ_PID_FILE}"
+    echo "  ✅ 旧的队列 workers 已停止"
+fi
+
+# 清理可能残留的 celery 进程
+pkill -f "celery -A encapsulation.message_queue.celery_app worker" >/dev/null 2>&1 || true
+sleep 1
+
+# 启动新的队列 workers
+export TASK_QUEUE_MODE="${TASK_QUEUE_MODE:-celery}"
+MQ_LOG_DIR="${APP_DIR}/log/mq_workers"
+mkdir -p "${MQ_LOG_DIR}"
+
+POOL="${CELERY_WORKER_POOL:-prefork}"
+LOGLEVEL="${CELERY_LOGLEVEL:-info}"
+CONCURRENCY="${CELERY_WORKER_CONCURRENCY:-2}"
+INDEXING_QUEUE="${CELERY_QUEUE_INDEXING:-indexing}"
+DEEPSEARCH_QUEUE="${CELERY_QUEUE_DEEPSEARCH:-deepsearch}"
+EXPORT_QUEUE="${CELERY_QUEUE_EXPORT:-export}"
+
+start_worker() {
+    local queue="$1"
+    local name="$2"
+    local logfile="${MQ_LOG_DIR}/${name}.log"
+    echo "  🚀 启动 worker: name=${name} queue=${queue} pool=${POOL} concurrency=${CONCURRENCY}"
+    nohup setsid uv run celery -A encapsulation.message_queue.celery_app worker \
+        --pool "${POOL}" \
+        --loglevel "${LOGLEVEL}" \
+        --concurrency "${CONCURRENCY}" \
+        --hostname "${name}@%h" \
+        --queues "${queue}" \
+        >"${logfile}" 2>&1 &
+    echo "$! ${name} ${queue}" >> "${MQ_PID_FILE}"
+}
+
+start_worker "${INDEXING_QUEUE}" "rag-arc-indexing"
+start_worker "${DEEPSEARCH_QUEUE}" "rag-arc-deepsearch"
+start_worker "${EXPORT_QUEUE}" "rag-arc-export"
+
+echo "  ✅ 队列 Workers 已启动（PIDs 记录在 ${MQ_PID_FILE}）"
+echo ""
+
+# ==============================================================================
 # 8. 验证应用状态
 # ==============================================================================
 echo "⏳ 验证应用启动状态..."
 sleep 8
 
+# 验证 PM2 应用状态
 if pm2 list | grep -q "${PM2_APP_NAME}" && pm2 list | grep -q "online"; then
     echo "=========================================="
-    echo "  ✅ 所有服务启动/重启成功！（由 PM2 守护）"
+    echo "  ✅ livingKB_test 所有服务启动/重启成功！（由 PM2 守护）"
     echo "=========================================="
     echo ""
-    echo "📋 服务信息："
-    echo "  - PM2 应用名: ${PM2_APP_NAME}"
+    echo "📋 服务信息（自动适配路径）："
+    echo "  - PostgreSQL: ${POSTGRES_HOST:-localhost}:${POSTGRES_HOST_PORT} (容器: ${POSTGRES_CONTAINER_NAME})"
+    echo "  - Redis: ${REDIS_HOST:-localhost}:${REDIS_HOST_PORT} (容器: ${REDIS_CONTAINER_NAME})"
+    echo "  - Neo4j Web: http://localhost:${NEO4J_WEB_HOST_PORT}"
+    echo "  - Neo4j Bolt: ${NEO4J_URL:-bolt://localhost:${NEO4J_BOLT_HOST_PORT}} (容器: ${NEO4J_CONTAINER_NAME})"
     echo "  - 应用API: http://localhost:${APP_PORT}"
+    echo "  - 自动定位的代码目录: ${APP_DIR}"
     echo ""
     echo "📝 PM2 管理命令："
     echo "  - 查看状态: pm2 list"
     echo "  - 查看日志: pm2 logs ${PM2_APP_NAME}"
-    echo "  - 重启应用: pm2 restart ${PM2_APP_NAME}"
+    echo "  - 重启应用: pm2 restart ${PM2_APP_NAME} --update-env"
     echo "  - 停止应用: pm2 stop ${PM2_APP_NAME}"
+    echo "  - 开机自启: pm2 startup && pm2 save"
+    echo ""
+    echo "📝 队列 Workers 管理命令："
+    echo "  - 停止队列: bash scripts/mq_tools/stop_mq_workers_local.sh"
+    echo "  - 启动队列: MQ_WORKER_FORCE_START=1 bash scripts/mq_tools/start_mq_workers_local.sh"
+    echo "  - 查看队列日志: tail -f log/mq_workers/*.log"
     echo ""
 else
     echo "=========================================="
-    echo "  ⚠️  应用启动可能异常（请检查日志）"
+    echo "  ⚠️  livingKB_test 应用启动可能异常（请检查 PM2 日志）"
     echo "=========================================="
     echo ""
     echo "📝 快速排查："
     echo "  1. 查看 PM2 状态: pm2 list"
     echo "  2. 查看应用日志: pm2 logs ${PM2_APP_NAME}"
-    echo "  3. 检查端口占用: sudo lsof -i:${APP_PORT}"
+    echo "  3. 检查容器状态: docker ps | grep ${POSTGRES_CONTAINER_NAME}"
     echo ""
 fi

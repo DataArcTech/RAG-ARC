@@ -437,13 +437,14 @@ async def stream_chat_sse(
         progress_seq = 0
 
         # Qwen/OpenAI-compatible streams typically start with a chunk that sets role=assistant.
-        yield sse_json(
+        yield sse_json_wrapped(
             openai_chat_completion_chunk(
                 chunk_id=chunk_id,
                 model=model_name,
                 created=created,
                 delta=delta_envelope(role="assistant", content=""),
-            )
+            ),
+            request_id=request_id
         )
 
         user_message = ChatMessage(
@@ -602,13 +603,14 @@ async def stream_chat_sse(
                         },
                     }
                 ]
-                yield sse_json(
+                yield sse_json_wrapped(
                     openai_chat_completion_chunk(
                         chunk_id=chunk_id,
                         model=model_name,
                         created=created,
                         delta=delta_envelope(role=None, tool_calls=tool_calls),
-                    )
+                    ),
+                    request_id=request_id
                 )
                 continue
 
@@ -618,13 +620,14 @@ async def stream_chat_sse(
                     continue
                 for delta_piece in iter_text_deltas(piece):
                     response_parts.append(delta_piece)
-                    yield sse_json(
+                    yield sse_json_wrapped(
                         openai_chat_completion_chunk(
                             chunk_id=chunk_id,
                             model=model_name,
                             created=created,
                             delta=delta_envelope(role=None, content=delta_piece),
-                        )
+                        ),
+                        request_id=request_id
                     )
                     await asyncio.sleep(0)
                 continue
@@ -839,23 +842,25 @@ async def stream_chat_sse(
                 },
             }
         ]
-        yield sse_json(
+        yield sse_json_wrapped(
             openai_chat_completion_chunk(
                 chunk_id=chunk_id,
                 model=model_name,
                 created=created,
                 delta=delta_envelope(role=None, tool_calls=tool_calls),
-            )
+            ),
+            request_id=request_id
         )
 
-        yield sse_json(
+        yield sse_json_wrapped(
             openai_chat_completion_chunk(
                 chunk_id=chunk_id,
                 model=model_name,
                 created=created,
                 delta=delta_envelope(),
                 finish_reason="stop",
-            )
+            ),
+            request_id=request_id
         )
         yield sse_done()
 
