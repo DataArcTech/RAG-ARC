@@ -1,4 +1,5 @@
 """In-process evidence memory bank for DeepSearch."""
+import hashlib
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -32,6 +33,8 @@ class EvidenceBank:
     def __init__(self) -> None:
         self._records: Dict[str, EvidenceRecord] = {}
         self._order: List[str] = []
+        # Cache key: (evidence_id, max_chars, question_key) -> excerpt text
+        self._excerpt_cache: Dict[Tuple[str, int, str], str] = {}
 
     def add_many(self, evidences: Iterable[Dict[str, Any]]) -> None:
         for raw in evidences or []:
@@ -85,6 +88,161 @@ class EvidenceBank:
             )
         return payload
 
+    @staticmethod
+    def _question_key(question: str | None) -> str:
+        normalized = " ".join(str(question or "").split())
+        if not normalized:
+            return "no_question"
+        return hashlib.sha1(normalized.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _extract_provenance_hint(provenance: Any) -> str | None:
+        """Return a compact provenance hint string for prompts (best-effort)."""
+
+        if not isinstance(provenance, dict):
+            return None
+
+        candidates: list[str] = []
+
+        def _add(label: str, value: Any) -> None:
+            token = str(value or "").strip()
+            if not token:
+                return
+            candidates.append(f"{label}={token}")
+
+        # Common patterns seen in chunk metadata and evidence wrappers.
+        meta = provenance.get("metadata")
+        if isinstance(meta, dict):
+            _add("filename", meta.get("filename") or meta.get("source_file_name") or meta.get("source_file") or meta.get("path"))
+            _add("page", meta.get("page") or meta.get("page_number"))
+
+            chunk_meta = meta.get("chunk_metadata")
+            if isinstance(chunk_meta, dict):
+                _add(
+                    "filename",
+                    chunk_meta.get("filename")
+                    or chunk_meta.get("source_file_name")
+                    or chunk_meta.get("source_file")
+                    or chunk_meta.get("path"),
+                )
+                _add("page", chunk_meta.get("page") or chunk_meta.get("page_number"))
+
+        raw_chunk = provenance.get("raw_chunk")
+        if isinstance(raw_chunk, dict):
+            raw_meta = raw_chunk.get("metadata")
+            if isinstance(raw_meta, dict):
+                _add(
+                    "filename",
+                    raw_meta.get("filename")
+                    or raw_meta.get("source_file_name")
+                    or raw_meta.get("source_file")
+                    or raw_meta.get("path"),
+                )
+                _add("page", raw_meta.get("page") or raw_meta.get("page_number"))
+
+        if not candidates:
+            return None
+        # Keep it compact and deterministic.
+        return ", ".join(dict.fromkeys(candidates))
+
+    def excerpt_for_prompt(
+        self,
+        evidence_id: str,
+        *,
+        max_chars: int,
+        question: str | None = None,
+    ) -> str:
+        record = self.get(evidence_id)
+        if record is None:
+            return ""
+        content = (record.content or "").strip()
+        if max_chars <= 0 or len(content) <= max_chars:
+            return content
+
+        qkey = self._question_key(question)
+        cache_key = (record.evidence_id, int(max_chars), qkey)
+        cached = self._excerpt_cache.get(cache_key)
+        if isinstance(cached, str) and cached:
+            return cached
+
+        if question and str(question).strip():
+            excerpt = focused_truncate_text(
+                content,
+                max_chars=max_chars,
+                question=str(question),
+                extra=None,
+            )
+        else:
+            excerpt = content[: max(0, max_chars - 3)].rstrip() + "..."
+        self._excerpt_cache[cache_key] = excerpt
+        return excerpt
+
+    def evidence_pack_for_prompt(
+        self,
+        evidence_ids: Sequence[str],
+        *,
+        question: str | None = None,
+        max_items: int | None = None,
+        max_chars_per_evidence: int = 900,
+        max_summary_chars: int = 240,
+        title: str = "Evidence Pack",
+    ) -> str:
+        """Materialize a bounded, human-readable evidence pack for LLM prompting.
+
+        This is intentionally "document-like" (index + per-evidence sections) so models can:
+        - navigate sources via the index,
+        - quote/extract only the relevant portions from each evidence section,
+        - cite using stable [chunk_id] tokens.
+        """
+
+        ordered: List[str] = []
+        seen: set[str] = set()
+
+        def _add(eid: str) -> None:
+            token = str(eid or "").strip()
+            if not token or token in seen:
+                return
+            if token not in self._records:
+                return
+            seen.add(token)
+            ordered.append(token)
+
+        if not evidence_ids:
+            raise ValueError("evidence_ids must be a non-empty list")
+        for eid in evidence_ids:
+            _add(str(eid))
+        if max_items is not None:
+            ordered = ordered[: max(0, int(max_items))]
+
+        allowlist = ", ".join(ordered)
+        lines: List[str] = [str(title or "Evidence Pack").strip(), ""]
+        if allowlist:
+            lines.extend(["Citable chunk_id allowlist:", allowlist, ""])
+
+        lines.append("Index (id -> short summary):")
+        for eid in ordered:
+            rec = self._records[eid]
+            src = f" | source={rec.source}" if rec.source else ""
+            hint = self._extract_provenance_hint(rec.provenance)
+            hint_str = f" | {hint}" if hint else ""
+            lines.append(f"- [{rec.evidence_id}]{src}{hint_str} :: {rec.summary(max_chars=max_summary_chars)}")
+        lines.append("")
+
+        lines.append("Evidence details (use ONLY these as authoritative sources):")
+        for eid in ordered:
+            rec = self._records[eid]
+            lines.append("")
+            header = f"[{rec.evidence_id}]"
+            if rec.source:
+                header = f"{header} source={rec.source}"
+            hint = self._extract_provenance_hint(rec.provenance)
+            if hint:
+                header = f"{header} ({hint})"
+            lines.append(header)
+            lines.append(self.excerpt_for_prompt(rec.evidence_id, max_chars=max_chars_per_evidence, question=question))
+
+        return "\n".join(lines).strip()
+
     def select_evidences(
         self,
         evidence_ids: Sequence[str],
@@ -117,17 +275,7 @@ class EvidenceBank:
         payload: List[Dict[str, Any]] = []
         for eid in ordered:
             record = self._records[eid]
-            content = (record.content or "").strip()
-            if max_chars > 0 and len(content) > max_chars:
-                if question and str(question).strip():
-                    content = focused_truncate_text(
-                        content,
-                        max_chars=max_chars,
-                        question=str(question),
-                        extra=None,
-                    )
-                else:
-                    content = content[: max(0, max_chars - 3)].rstrip() + "..."
+            content = self.excerpt_for_prompt(record.evidence_id, max_chars=max_chars, question=question)
             payload.append(
                 {
                     "chunk_id": record.evidence_id,

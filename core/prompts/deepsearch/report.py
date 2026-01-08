@@ -61,8 +61,8 @@ REPORT_WRITE_SYSTEM_PROMPT = """You are a research report writer producing knowl
   - ^7 ❌ (superscript notation)
   - [7] ❌ (numeric-only without chunk_ prefix)
   - [Source 1] ❌ (descriptive labels)
-- Only cite chunk_id values that exist in the provided evidence snippets.
-- Never cite tool-generated IDs or tool names (e.g. graph.context_rollup / graph.* / tool:*). If it is not in the evidence snippets list, it is not citable.
+- Only cite chunk_id values that exist in the provided Evidence Pack.
+- Never cite tool-generated IDs or tool names (e.g. graph.context_rollup / graph.* / tool:*). If it is not in the Evidence Pack allowlist, it is not citable.
 - If you cannot support a claim with evidence, do not state it as fact.
 
 ## Output Requirements
@@ -80,7 +80,7 @@ REPORT_WRITE_USER_PROMPT = (
     "Methodology signals (plan + tool summaries):\n{method_json}\n\n"
     "Graph evidence bundle (seed entities, chain):\n{graph_evidence_json}\n\n"
     "Graph chain edges (may be incomplete):\n{graph_chain_json}\n\n"
-    "Evidence snippets (the only authoritative sources):\n{evidence_json}\n\n"
+    "Evidence Pack (the only authoritative sources):\n{evidence_pack}\n\n"
     "Coverage and gap signals:\n{coverage_json}\n\n"
     "Task:\n"
     "Return a single JSON object with:\n"
@@ -164,8 +164,8 @@ SECTION_WRITE_SYSTEM_PROMPT = """You are a research report section writer produc
   - (7) ❌ (parentheses with numbers)
   - ^7 ❌ (superscript notation)
   - [7] ❌ (numeric-only without chunk_ prefix)
-- Only cite chunk_id values that exist in the provided evidence snippets.
-- Never cite tool-generated IDs or tool names (e.g. graph.context_rollup / graph.* / tool:*). If it is not in the evidence snippets list, it is not citable.
+- Only cite chunk_id values that exist in the provided Evidence Pack.
+- Never cite tool-generated IDs or tool names (e.g. graph.context_rollup / graph.* / tool:*). If it is not in the Evidence Pack allowlist, it is not citable.
 
 ## Output Requirements
 - Return ONLY valid JSON matching the schema described in the user prompt.
@@ -181,7 +181,7 @@ SECTION_WRITE_USER_PROMPT = (
     "- Title: {section_title}\n"
     "- Type: {section_type}\n"
     "- Purpose: {section_purpose}\n\n"
-    "Evidence snippets (the only authoritative sources):\n{evidence_json}\n\n"
+    "Evidence Pack (the only authoritative sources):\n{evidence_pack}\n\n"
     "Graph chain edges (for graph-related sections):\n{graph_chain_json}\n\n"
     "Task:\n"
     "Return a single JSON object with:\n"
@@ -208,7 +208,7 @@ Given a user question, a report outline, and draft section bodies (already writt
 
 ## Constraints
 - Write in the same language as the user question.
-- Do not invent facts: only rely on the provided evidence snippets and section drafts.
+- Do not invent facts: only rely on the provided Evidence Pack and section drafts.
 - When making a concrete factual claim, keep it supported by evidence and use inline citations ONLY in [chunk_id] format.
 - Do NOT rewrite the full sections; they are already drafted.
 - The short_answer must contain supported inline citations for any concrete claim.
@@ -251,7 +251,7 @@ PARALLEL_SYNTHESIS_USER_PROMPT = (
     "User question:\n{question}\n\n"
     "Report outline (JSON):\n{outline_json}\n\n"
     "Draft section bodies (JSON):\n{sections_json}\n\n"
-    "Evidence snippets (authoritative):\n{evidence_json}\n\n"
+    "Evidence Pack (authoritative):\n{evidence_pack}\n\n"
     "Coverage and gap signals:\n{coverage_json}\n\n"
     "Task:\n"
     "Return a single JSON object with:\n"

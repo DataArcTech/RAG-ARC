@@ -362,6 +362,15 @@ class DeepSearchLLMReportWriter:
             evidence_items_limit = _apply_divisor_limit(self.max_evidence_items, budget.evidence_items_divisor)
             evidence_chars_limit = _apply_divisor_limit_required(self.max_evidence_chars, budget.evidence_chars_divisor)
             evidences = _limit_evidences(evidences_raw, evidence_items_limit, evidence_chars_limit, question=question)
+            evidence_pack = ""
+            if evidences:
+                bank = EvidenceBank()
+                bank.add_many(evidences)
+                evidence_pack = bank.evidence_pack_for_prompt(
+                    bank.ids(),
+                    question=question,
+                    max_chars_per_evidence=int(evidence_chars_limit),
+                )
 
             user_prompt = REPORT_WRITE_USER_PROMPT.format(
                 question=question,
@@ -370,7 +379,7 @@ class DeepSearchLLMReportWriter:
                 method_json=_dump_json(method),
                 graph_evidence_json=_dump_json(graph_evidence),
                 graph_chain_json=_dump_json(graph_chain),
-                evidence_json=_dump_json(evidences),
+                evidence_pack=evidence_pack,
                 coverage_json=_dump_json(coverage),
             )
             messages = [
@@ -662,14 +671,22 @@ class DeepSearchLLMReportWriter:
         outline_json = _dump_json(outline)
         sections_json = _dump_json(self._compact_sections_for_synthesis(sections, max_chars=self.synthesis_section_max_chars))
         limited_evidences = _limit_evidences(evidences, len(evidences), int(self.max_evidence_chars), question=question)
-        evidence_json = _dump_json(limited_evidences)
+        evidence_pack = ""
+        if limited_evidences:
+            bank = EvidenceBank()
+            bank.add_many(limited_evidences)
+            evidence_pack = bank.evidence_pack_for_prompt(
+                bank.ids(),
+                question=question,
+                max_chars_per_evidence=int(self.max_evidence_chars),
+            )
         coverage_json = _dump_json(_slim_coverage(coverage or {}, level=0))
 
         user_prompt = PARALLEL_SYNTHESIS_USER_PROMPT.format(
             question=question,
             outline_json=outline_json,
             sections_json=sections_json,
-            evidence_json=evidence_json,
+            evidence_pack=evidence_pack,
             coverage_json=coverage_json,
         )
         base_messages = [
@@ -757,13 +774,22 @@ class DeepSearchLLMReportWriter:
                 for item in limited_evidences
                 if isinstance(item, dict) and str(item.get("chunk_id") or "").strip()
             }
+            evidence_pack = ""
+            if limited_evidences:
+                bank = EvidenceBank()
+                bank.add_many(limited_evidences)
+                evidence_pack = bank.evidence_pack_for_prompt(
+                    bank.ids(),
+                    question=question,
+                    max_chars_per_evidence=int(max_chars),
+                )
 
             user_prompt = SECTION_WRITE_USER_PROMPT.format(
                 question=question,
                 section_title=section.get("title", ""),
                 section_type=section.get("section_type", ""),
                 section_purpose=section.get("purpose", ""),
-                evidence_json=_dump_json(limited_evidences),
+                evidence_pack=evidence_pack,
                 graph_chain_json=_dump_json(limited_chain),
             )
             base_messages = [

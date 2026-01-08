@@ -50,7 +50,7 @@ class _ChunkCitingLLM:
 ]
 """.strip()
 
-        if "Return a single JSON object with:" in user_prompt and "Evidence snippets" in user_prompt:
+        if "Return a single JSON object with:" in user_prompt and "Evidence Pack" in user_prompt:
             return """
 {
   "title": "Report",
@@ -123,4 +123,3 @@ def test_reporter_backfills_provenance_chunks_into_evidence_pool() -> None:
     evidence_ids = {ev.get("chunk_id") for ev in (result.get("evidences") or []) if isinstance(ev, dict)}
     assert "chunk_001" in evidence_ids
     assert "[chunk_001]" in (result.get("structured_report") or {}).get("short_answer", "")
-
