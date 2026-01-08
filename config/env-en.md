@@ -182,6 +182,7 @@ These knobs apply when the knowledge config selects `semantic_unit_chunker` (for
 | `DEVELOP_OWNER_USERNAME` | `dev_cli_user` | Username for the auto-created develop-mode user. |
 | `DEVELOP_OWNER_PASSWORD` | `dev-cli-password` | Password for the develop-mode user. |
 | `ADMIN_OWNER_ID` | `00000000-0000-0000-0000-00000000ABCD` | Optional admin UUID with global graph access. Leave empty to disable. |
+| `CHATBOT_SHARED_DOCUMENT_OWNER_ID` | `00000000-0000-0000-0000-000000000001` | Shared owner UUID for chatKB (`type=1`) unified retrieval; chatbot and rag_inference default to this owner when `type=1`. |
 
 ## 4. PostgreSQL
 

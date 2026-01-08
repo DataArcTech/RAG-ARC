@@ -182,6 +182,7 @@ cp .env.example .env
 | `DEVELOP_OWNER_USERNAME` | `dev_cli_user` | 自动创建的测试用户用户名。 |
 | `DEVELOP_OWNER_PASSWORD` | `dev-cli-password` | 测试用户密码。 |
 | `ADMIN_OWNER_ID` | `00000000-0000-0000-0000-00000000ABCD` | 可查看所有租户数据的管理员 UUID，留空则禁用。 |
+| `CHATBOT_SHARED_DOCUMENT_OWNER_ID` | `00000000-0000-0000-0000-000000000001` | chatKB（`type=1`）统一知识库的共享 owner id；chatbot 与 rag_inference 对 `type=1` 用户默认在该 owner 下检索。 |
 
 ## 4. PostgreSQL
 

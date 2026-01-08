@@ -24,6 +24,7 @@ from encapsulation.data_model.orm_models import User
 from core.presentation.evidence import build_chat_evidence
 from config.output_limits import CHAT_TOP_CHUNKS
 from core.utils.path_guard import ensure_writable_dir
+from api.utils.owner_scope import resolve_default_owner_id
 
 logger = logging.getLogger(__name__)
 
@@ -128,14 +129,6 @@ def _apply_browser_cookie(response: Response, browser_user_id: uuid.UUID) -> Non
         httponly=os.getenv("CHATBOT_COOKIE_HTTPONLY", "0") == "1",
         samesite="lax",
     )
-
-
-def _get_shared_document_owner_id() -> uuid.UUID:
-    raw = os.getenv("CHATBOT_SHARED_DOCUMENT_OWNER_ID", "00000000-0000-0000-0000-000000000001")
-    try:
-        return uuid.UUID(str(raw))
-    except ValueError as exc:
-        raise RuntimeError("CHATBOT_SHARED_DOCUMENT_OWNER_ID must be a valid UUID") from exc
 
 
 def _resolve_config_path(path_value: str) -> str:
@@ -722,8 +715,7 @@ async def messages(
     context_turns = int(os.getenv("CHATBOT_CONTEXT_TURNS", "5"))
     max_sources = int(os.getenv("CHATBOT_TOP_SOURCES", "5"))
 
-    # Use authenticated user's ID instead of shared owner ID
-    owner_id = current_user.id
+    owner_id = resolve_default_owner_id(current_user)
     lock = await _get_conversation_lock(_conversation_key(browser_user_id, conversation_uuid))
 
     headers = {

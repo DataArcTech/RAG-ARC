@@ -52,15 +52,7 @@ import logging
 from core.utils.owner_guard import is_admin_owner, get_admin_owner_id
 from core.presentation.evidence import build_chat_evidence
 from config.output_limits import CHAT_TOP_CHUNKS
-
-
-def _get_shared_document_owner_id() -> uuid.UUID:
-    """Get shared document owner ID from environment variable for unified file retrieval."""
-    raw = os.getenv("CHATBOT_SHARED_DOCUMENT_OWNER_ID", "00000000-0000-0000-0000-000000000001")
-    try:
-        return uuid.UUID(str(raw))
-    except ValueError as exc:
-        raise RuntimeError("CHATBOT_SHARED_DOCUMENT_OWNER_ID must be a valid UUID") from exc
+from api.utils.owner_scope import resolve_default_owner_id
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -216,14 +208,8 @@ async def chat(
                 detail="Only livingKB users (type=0) can request subgraph generation"
             )
 
-    # Determine effective owner based on user type:
-    # - type=1 (chatKB): use shared document owner ID for unified file retrieval across all users
-    # - type=0 (livingKB): use current user's ID for user isolation
-    user_type = getattr(current_user, "type", 0)
-    if user_type == 1:
-        effective_owner_id: uuid.UUID | None = _get_shared_document_owner_id()
-    else:
-        effective_owner_id: uuid.UUID | None = current_user.id
+    # Determine default owner scope based on user type (chatKB vs livingKB).
+    effective_owner_id: uuid.UUID | None = resolve_default_owner_id(current_user)
 
     if request.include_all_owners:
         if not is_admin_owner(current_user.id):
@@ -402,16 +388,8 @@ async def stream_chat_sse(
     message_handler = get_message_handler()
     rag_inference_handler = get_rag_inference_handler()
 
-    # Determine effective owner based on user type:
-    # - type=1 (chatKB): use shared document owner ID for unified file retrieval across all users
-    # - type=0 (livingKB): use current user's ID for user isolation
-    user_type = getattr(current_user, "type", 0)
-    if user_type == 1:
-        # chatKB: use shared owner ID
-        effective_owner: uuid.UUID | None = _get_shared_document_owner_id()
-    else:
-        # livingKB: use current user's ID
-        effective_owner: uuid.UUID | None = current_user.id
+    # Determine default owner scope based on user type (chatKB vs livingKB).
+    effective_owner: uuid.UUID | None = resolve_default_owner_id(current_user)
     
     if include_all_owners:
         if not is_admin_owner(current_user.id):
@@ -944,11 +922,7 @@ async def stream_chat_ws(
                     )
                     return
 
-            user_type = getattr(current_user, "type", 0)
-            if user_type == 1:
-                effective_owner: uuid.UUID | None = _get_shared_document_owner_id()
-            else:
-                effective_owner: uuid.UUID | None = current_user.id
+            effective_owner: uuid.UUID | None = resolve_default_owner_id(current_user)
             if include_all_owners:
                 if not is_admin_owner(current_user.id):
                     await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
