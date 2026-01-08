@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema, call_llm_async, safe_json_loads
+from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_CHAIN_TRAVERSE, REQUIRES_LLM, SCOPE_OWNER
 from ..fast.pattern_probe import PatternProbeTool
 from config.core.deepsearch.tool_defaults import (
     BEAM_SEARCH_DEFAULT_BEAM_SIZE,
@@ -29,7 +30,7 @@ class BeamSearchTool(GraphTool):
         "returns ranked path summaries plus supporting chunks before committing to longer reasoning chains.",
         speed="slow",
         cost="high",
-        strategy_tags=("beam_search", "tog", "graph_reasoning"),
+        strategy_tags=("beam_search", "tog", "graph_reasoning", EVIDENCE_DERIVED, SCOPE_OWNER, REQUIRES_CHAIN_TRAVERSE, REQUIRES_LLM),
         profile="H",
         determinism="llm_heavy",
         namespace="rag-arc.deepsearch.tools.heavy.beam_search",

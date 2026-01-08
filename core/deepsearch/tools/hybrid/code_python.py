@@ -27,6 +27,7 @@ from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+from ..governance_tags import EVIDENCE_DERIVED, SCOPE_OWNER
 
 
 @dataclass(frozen=True)
@@ -272,10 +273,13 @@ class CodePythonTool(GraphTool):
     descriptor = ToolDescriptor(
         name="code.python",
         channel="text",
-        description="Execute deterministic Python for math/finance verification (returns code + outputs).",
+        description=(
+            "Execute deterministic Python for math/finance verification (returns code + outputs). "
+            "Evidence: derived computation results (NOT citeable; cite underlying inputs/chunks)."
+        ),
         speed="medium",
         cost="low",
-        strategy_tags=("python", "deterministic", "finance", "verification"),
+        strategy_tags=("python", "deterministic", "finance", "verification", EVIDENCE_DERIVED, SCOPE_OWNER),
         profile="X",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.code.python",

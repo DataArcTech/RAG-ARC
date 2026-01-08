@@ -102,6 +102,18 @@ cp .env.example .env
 | `MINILM_MODEL_NAME` | `sentence-transformers/all-MiniLM-L6-v2` | `download_models.py` 下载 MiniLM 时使用的默认 repo id。 |
 | `MINILM_CACHE_FOLDER` | `./models/all-MiniLM-L6-v2` | `download_models.py` 下载 MiniLM 的缓存目录。 |
 
+## 1.2 DeepSearch：file-scope 跨语言重写（高级）
+
+这些变量用于控制：当启用了 file-scope 过滤、且查询语言与文件名语言可能不匹配时，DeepSearch 是否（以及在什么条件下）触发一次“跨语言查询重写”（通过 retriever 的 LLM 生成补充查询词）。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `DEEPSEARCH_FILE_SCOPE_XLANG_RETRY` | `1` | 是否启用跨语言重写尝试（`0/false/no/off` 关闭）。 |
+| `DEEPSEARCH_FILE_SCOPE_XLANG_ALPHA_RATIO_TO_ZH_MIN` | `0.25` | ASCII 字母占比 ≥ 此阈值且 CJK 占比 < `..._CJK_RATIO_TO_ZH_MAX` 时，判定为“英文倾向”，触发 en→zh 重写补充。 |
+| `DEEPSEARCH_FILE_SCOPE_XLANG_CJK_RATIO_TO_ZH_MAX` | `0.05` | en→zh 触发条件中的 CJK 最大占比。 |
+| `DEEPSEARCH_FILE_SCOPE_XLANG_CJK_RATIO_TO_EN_MIN` | `0.15` | CJK 占比 ≥ 此阈值且 ASCII 字母占比 < `..._ALPHA_RATIO_TO_EN_MAX` 时，判定为“中文倾向”，触发 zh→en 重写补充。 |
+| `DEEPSEARCH_FILE_SCOPE_XLANG_ALPHA_RATIO_TO_EN_MAX` | `0.08` | zh→en 触发条件中的 ASCII 字母最大占比。 |
+
 ## 1.1 索引与存储路径
 
 | 变量 | 默认值 | 说明 |

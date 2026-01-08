@@ -41,6 +41,12 @@ from core.graph_adapter.hipporag_visual_evidence_helpers import (
     preserve_visual_evidence,
     search_visual_image_chunks_sync,
 )
+from config.core.deepsearch.hipporag_adapter_defaults import (
+    HIPPORAG_ADAPTER_DEFAULT_TOP_K,
+    HIPPORAG_ADAPTER_SEMANTIC_SCORE_THRESHOLD,
+    HIPPORAG_ADAPTER_SUMMARY_CHAR_LIMIT,
+    HIPPORAG_ADAPTER_SUMMARY_MAX_CHUNKS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,10 +60,10 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         self,
         retriever,
         *,
-        default_top_k: int = 5,
-        summary_max_chunks: int = 3,
-        summary_char_limit: int = 320,
-        semantic_score_threshold: float = 0.05,
+        default_top_k: int = HIPPORAG_ADAPTER_DEFAULT_TOP_K,
+        summary_max_chunks: int = HIPPORAG_ADAPTER_SUMMARY_MAX_CHUNKS,
+        summary_char_limit: int = HIPPORAG_ADAPTER_SUMMARY_CHAR_LIMIT,
+        semantic_score_threshold: float = HIPPORAG_ADAPTER_SEMANTIC_SCORE_THRESHOLD,
         adapter_version: str = "hipporag-adapter.v1",
         extra_metadata: Optional[Dict[str, Any]] = None,
     ):
@@ -933,10 +939,10 @@ def _hipporag_factory(**kwargs: Any) -> HippoRAGGraphAdapter:
 
     return HippoRAGGraphAdapter(
         retriever=retriever,
-        default_top_k=int(kwargs.get("default_top_k", 5)),
-        summary_max_chunks=int(kwargs.get("summary_max_chunks", 3)),
-        summary_char_limit=int(kwargs.get("summary_char_limit", 320)),
-        semantic_score_threshold=float(kwargs.get("semantic_score_threshold", 0.05)),
+        default_top_k=int(kwargs.get("default_top_k", HIPPORAG_ADAPTER_DEFAULT_TOP_K)),
+        summary_max_chunks=int(kwargs.get("summary_max_chunks", HIPPORAG_ADAPTER_SUMMARY_MAX_CHUNKS)),
+        summary_char_limit=int(kwargs.get("summary_char_limit", HIPPORAG_ADAPTER_SUMMARY_CHAR_LIMIT)),
+        semantic_score_threshold=float(kwargs.get("semantic_score_threshold", HIPPORAG_ADAPTER_SEMANTIC_SCORE_THRESHOLD)),
         adapter_version=str(kwargs.get("version", "hipporag-adapter.v1")),
         extra_metadata=kwargs.get("metadata"),
     )

@@ -17,6 +17,7 @@ from core.utils.stopwords import get_stopwords
 from core.utils.text_regex import CJK_DETECT_RE, NONWORD_SPACES_RE
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+from ..governance_tags import EVIDENCE_PRIMARY, SCOPE_FILE, SCOPE_OWNER
 
 _EN_STOPWORDS = frozenset(word.lower() for word in get_stopwords("en"))
 _ZH_STOPWORDS = get_stopwords("zh")
@@ -28,10 +29,13 @@ class PatternProbeTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.pattern_scan",
         channel="graph",
-        description="Deterministic keyword probe on chunks (grep-style fast scan).",
+        description=(
+            "Deterministic keyword probe over chunk corpus (grep-style). "
+            "Evidence: primary chunks (citeable); respects file_scope when enabled."
+        ),
         speed="fast",
         cost="low",
-        strategy_tags=("rule_based", "hipporag", "chunk_triple"),
+        strategy_tags=("rule_based", "hipporag", "chunk_triple", EVIDENCE_PRIMARY, SCOPE_OWNER, SCOPE_FILE),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.fast.pattern_scan",

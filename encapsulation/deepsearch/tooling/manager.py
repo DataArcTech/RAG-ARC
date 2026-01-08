@@ -25,6 +25,7 @@ from core.utils.json_safe import json_safe
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 from core.deepsearch.utils.file_scope import filter_evidences, resolve_file_scope
 from core.deepsearch.trace import emit_trace
+from core.deepsearch.tooling.errors import ToolErrorKind, ToolInvocationError, wrap_tool_exception
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +217,17 @@ class MCPToolRouter:
             graph_context=graph_context,
             server_name=server_name,
         )
+        if getattr(outcome.result, "isError", False):
+            raise ToolInvocationError(
+                tool_name=descriptor.name,
+                kind=ToolErrorKind.PROVIDER_ERROR,
+                message=(
+                    f"MCP tool returned error: {outcome.log.response_excerpt}"
+                    if outcome.log.response_excerpt
+                    else "MCP tool returned error"
+                ),
+                route="remote",
+            )
         payload_model = self._normalize_result(descriptor, outcome.result)
         payload_model.diagnostics.setdefault("latency_ms", outcome.log.latency_ms)
         payload_model.diagnostics.setdefault("transport", outcome.log.extra.get("transport"))
@@ -469,10 +481,11 @@ class DeepSearchToolManager:
                 )
                 return result
             except Exception as exc:  # noqa: BLE001
-                remote_error = exc
-                logger.warning("Remote tool %s failed via MCP (%s)", tool_name, exc)
+                remote_error = wrap_tool_exception(tool_name, exc, route="remote")
+                logger.warning("Remote tool %s failed via MCP (%s)", tool_name, remote_error)
 
         if remote_error is not None:
+            error_kind = getattr(remote_error, "kind", None)
             await emit_trace(
                 "tool_response",
                 json.dumps(
@@ -482,6 +495,7 @@ class DeepSearchToolManager:
                             "tool_name": tool_name,
                             "route": "remote",
                             "error": str(remote_error),
+                            "error_kind": str(error_kind.value) if error_kind else None,
                         }
                     ),
                     ensure_ascii=False,
@@ -494,6 +508,7 @@ class DeepSearchToolManager:
                     "plan_step": request.plan_step,
                     "ok": False,
                     "route": "remote",
+                    "error_kind": str(error_kind.value) if error_kind else None,
                 },
             )
             raise remote_error
@@ -502,6 +517,7 @@ class DeepSearchToolManager:
             try:
                 result = await self._invoke_local(tool_name, local_tool, descriptor, request)
             except Exception as exc:  # noqa: BLE001
+                wrapped = wrap_tool_exception(tool_name, exc, route="local")
                 await emit_trace(
                     "tool_response",
                     json.dumps(
@@ -510,7 +526,8 @@ class DeepSearchToolManager:
                                 "call_id": call_id,
                                 "tool_name": tool_name,
                                 "route": "local",
-                                "error": str(exc),
+                                "error": str(wrapped),
+                                "error_kind": wrapped.kind.value,
                             }
                         ),
                         ensure_ascii=False,
@@ -523,9 +540,10 @@ class DeepSearchToolManager:
                         "plan_step": request.plan_step,
                         "ok": False,
                         "route": "local",
+                        "error_kind": wrapped.kind.value,
                     },
                 )
-                raise
+                raise wrapped from exc
 
             await emit_trace(
                 "tool_response",
@@ -552,6 +570,7 @@ class DeepSearchToolManager:
             )
             return result
 
+        error_kind = ToolErrorKind.TOOL_UNAVAILABLE
         await emit_trace(
             "tool_response",
             json.dumps(
@@ -560,13 +579,20 @@ class DeepSearchToolManager:
                         "call_id": call_id,
                         "tool_name": tool_name,
                         "error": "tool_unavailable",
+                        "error_kind": error_kind.value,
                     }
                 ),
                 ensure_ascii=False,
                 indent=2,
                 default=str,
             ),
-            meta={"call_id": call_id, "tool_name": tool_name, "plan_step": request.plan_step, "ok": False},
+            meta={
+                "call_id": call_id,
+                "tool_name": tool_name,
+                "plan_step": request.plan_step,
+                "ok": False,
+                "error_kind": error_kind.value,
+            },
         )
         raise KeyError(f"Tool '{tool_name}' is not registered locally and MCP routing is unavailable")
 
@@ -580,6 +606,11 @@ class DeepSearchToolManager:
         remote_payload = self._prepare_remote_payload(tool_name, payload, request)
         payload_model, log = await self.mcp_router.invoke(descriptor, remote_payload)  # type: ignore[arg-type]
         self._apply_file_scope_filter(payload_model, request)
+        payload_model.diagnostics.setdefault("evidence_count", len(payload_model.evidences or []))
+        payload_model.diagnostics.setdefault(
+            "result_kind",
+            "empty_hit" if not payload_model.evidences else "ok",
+        )
         self._attach_artifact_reference(tool_name, payload_model)
         self._record_remote(tool_name, log, request, payload_model, descriptor)
         return payload_model
@@ -601,6 +632,10 @@ class DeepSearchToolManager:
         self._apply_file_scope_filter(payload_model, request)
         payload_model.diagnostics.setdefault("latency_ms", latency_ms)
         payload_model.diagnostics.setdefault("evidence_count", len(payload_model.evidences or []))
+        payload_model.diagnostics.setdefault(
+            "result_kind",
+            "empty_hit" if not payload_model.evidences else "ok",
+        )
         self._attach_artifact_reference(tool_name, payload_model)
         self._record_local(tool_name, payload_model, request, latency_ms, descriptor)
         return payload_model

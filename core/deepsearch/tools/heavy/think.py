@@ -11,6 +11,7 @@ from core.prompts.deepsearch import THINK_TOOL_SYSTEM_PROMPT
 from core.deepsearch.utils.compression import compact_evidences, resolve_compaction_config
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, safe_json_loads
+from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_LLM, SCOPE_OWNER
 
 
 class ThinkToolCall(BaseModel):
@@ -36,10 +37,13 @@ class GraphThinkTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.think",
         channel="graph",
-        description="Structured pause that digests current context before the next hop.",
+        description=(
+            "Structured pause that digests current context before the next hop. "
+            "Evidence: derived think notes (NOT citeable)."
+        ),
         speed="slow",
         cost="low",
-        strategy_tags=("think", "control", "reflection"),
+        strategy_tags=("think", "control", "reflection", EVIDENCE_DERIVED, SCOPE_OWNER, REQUIRES_LLM),
         profile="H",
         determinism="llm_heavy",
         namespace="rag-arc.deepsearch.tools.heavy.think",

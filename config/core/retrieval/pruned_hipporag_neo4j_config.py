@@ -92,6 +92,13 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
         description="PPR computation backend: 'push' (fast, recommended) or 'igraph' (fallback)"
     )
 
+    ppr_push_epsilon: float = Field(
+        default=0.000001,
+        gt=0,
+        lt=1,
+        description="Convergence epsilon for push-based PPR (smaller = more precise, slower).",
+    )
+
     ppr_directed_mode: Literal["off", "auto", "on"] = Field(
         default="auto",
         description=(

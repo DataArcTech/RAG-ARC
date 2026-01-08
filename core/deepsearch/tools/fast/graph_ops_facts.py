@@ -8,6 +8,7 @@ from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+from ..governance_tags import EVIDENCE_PRIMARY, REQUIRES_CYPHER, SCOPE_OWNER
 from .graph_ops_common import (
     directionality_config,
     enforce_direction_for_sensitive_predicates,
@@ -27,11 +28,11 @@ class GraphFactsByTypeTool(GraphTool):
         channel="graph",
         description=(
             "Deterministic fact lookup for entities of a given type backed by Neo4j Cypher. "
-            "Requires `Entity.entity_type` and `RELATES_TO` fact edges."
+            "Evidence: citeable when fact edges have `fact_id/source_chunk_ids`."
         ),
         speed="fast",
         cost="low",
-        strategy_tags=("type_filter", "disambiguation", "deterministic"),
+        strategy_tags=("type_filter", "disambiguation", "deterministic", EVIDENCE_PRIMARY, SCOPE_OWNER, REQUIRES_CYPHER),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.fast.graph_facts_by_type",
@@ -49,6 +50,11 @@ class GraphFactsByTypeTool(GraphTool):
             },
             required_extra_fields=("entity_type",),
         ),
+        example_args={
+            "question": "List facts for Company entities",
+            "plan_step": "plan_02",
+            "extra": {"entity_type": "Company", "direction": "out", "limit": 20},
+        },
     )
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
@@ -177,10 +183,13 @@ class GraphExpandTermsTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.expand_terms",
         channel="graph",
-        description="Deterministic query expansion: returns related terms via predicates (e.g., tech-id IMPLEMENTS service).",
+        description=(
+            "Deterministic query expansion: returns related terms via predicates (Cypher-backed). "
+            "Evidence: citeable when the expansion edges have `source_chunk_ids`."
+        ),
         speed="fast",
         cost="low",
-        strategy_tags=("query_expansion", "ontology", "deterministic"),
+        strategy_tags=("query_expansion", "ontology", "deterministic", EVIDENCE_PRIMARY, SCOPE_OWNER, REQUIRES_CYPHER),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.fast.graph_expand_terms",
@@ -199,6 +208,11 @@ class GraphExpandTermsTool(GraphTool):
             },
             required_extra_fields=("concept",),
         ),
+        example_args={
+            "question": "Expand terms related to HippoRAG",
+            "plan_step": "plan_01",
+            "extra": {"concept": "HippoRAG", "direction": "both", "limit": 20},
+        },
     )
 
     async def run(self, request: ToolRunRequest) -> ToolResult:

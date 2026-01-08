@@ -102,6 +102,18 @@ How secrets flow into configs:
 | `MINILM_MODEL_NAME` | `sentence-transformers/all-MiniLM-L6-v2` | Default MiniLM model repo id used by `download_models.py`. |
 | `MINILM_CACHE_FOLDER` | `./models/all-MiniLM-L6-v2` | Cache folder used by `download_models.py` when downloading MiniLM. |
 
+## 1.2 DeepSearch: file-scope cross-language rewrite (advanced)
+
+These vars control when DeepSearch attempts a single query rewrite (via the retriever LLM) to bridge file-name language mismatch under file-scope filtering.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DEEPSEARCH_FILE_SCOPE_XLANG_RETRY` | `1` | Enable/disable the xlang rewrite attempt (`0/false/no/off` disables). |
+| `DEEPSEARCH_FILE_SCOPE_XLANG_ALPHA_RATIO_TO_ZH_MIN` | `0.25` | If ASCII-letter ratio ≥ this AND CJK ratio < `..._CJK_RATIO_TO_ZH_MAX`, treat query as English-like and request Chinese rewrite additions. |
+| `DEEPSEARCH_FILE_SCOPE_XLANG_CJK_RATIO_TO_ZH_MAX` | `0.05` | See above; max allowed CJK ratio for the en→zh rewrite trigger. |
+| `DEEPSEARCH_FILE_SCOPE_XLANG_CJK_RATIO_TO_EN_MIN` | `0.15` | If CJK ratio ≥ this AND ASCII-letter ratio < `..._ALPHA_RATIO_TO_EN_MAX`, treat query as Chinese-like and request English rewrite additions. |
+| `DEEPSEARCH_FILE_SCOPE_XLANG_ALPHA_RATIO_TO_EN_MAX` | `0.08` | See above; max allowed ASCII-letter ratio for the zh→en rewrite trigger. |
+
 ## 1.1 Index & Storage Paths
 
 | Variable | Default | Description |

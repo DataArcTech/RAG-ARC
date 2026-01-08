@@ -8,6 +8,7 @@ from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+from ..governance_tags import EVIDENCE_PRIMARY, REQUIRES_CYPHER, SCOPE_OWNER
 from .graph_ops_common import (
     directionality_config,
     enforce_direction_for_sensitive_predicates,
@@ -27,11 +28,11 @@ class GraphIntersectionTool(GraphTool):
         channel="graph",
         description=(
             "Deterministic intersection query (shared neighbors/targets) backed by Neo4j Cypher. "
-            "Requires `Entity.entity_name_normalized` for matching and `RELATES_TO` fact edges."
+            "Evidence: citeable when `fact_id/source_chunk_ids` are present in provenance."
         ),
         speed="fast",
         cost="low",
-        strategy_tags=("intersection", "deterministic", "cypher"),
+        strategy_tags=("intersection", "deterministic", "cypher", EVIDENCE_PRIMARY, SCOPE_OWNER, REQUIRES_CYPHER),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.fast.graph_intersection",

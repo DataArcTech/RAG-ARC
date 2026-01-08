@@ -36,7 +36,6 @@ from .hybrid import (
     ContextRollupTool,
     EvidenceCrosscheckTool,
     HybridNeighborhoodProbeTool,
-    MultiAdapterComparatorTool,
     CodePythonTool,
 )
 
@@ -73,7 +72,6 @@ __all__ = [
     "ParallelThinkTool",
     "CrossAdapterPlannerTool",
     "ContextRewriterTool",
-    "MultiAdapterComparatorTool",
     "BeamSearchTool",
     "CodePythonTool",
     "build_builtin_tools",
@@ -112,7 +110,6 @@ _BUILTIN_CLASSES = [
     ParallelThinkTool,
     CrossAdapterPlannerTool,
     ContextRewriterTool,
-    MultiAdapterComparatorTool,
     BeamSearchTool,
     CodePythonTool,
 ]

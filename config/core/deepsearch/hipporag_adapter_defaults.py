@@ -1,0 +1,7 @@
+"""Default knobs for the HippoRAG graph adapter (centralized; override via config JSON)."""
+
+HIPPORAG_ADAPTER_DEFAULT_TOP_K: int = 5
+HIPPORAG_ADAPTER_SUMMARY_MAX_CHUNKS: int = 3
+HIPPORAG_ADAPTER_SUMMARY_CHAR_LIMIT: int = 320
+HIPPORAG_ADAPTER_SEMANTIC_SCORE_THRESHOLD: float = 0.05
+

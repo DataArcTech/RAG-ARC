@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, build_input_schema, safe_json_loads
+from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_LLM, SCOPE_OWNER
 from core.prompts.deepsearch import EVIDENCE_CROSSCHECK_PROMPT
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
@@ -37,11 +38,12 @@ class EvidenceCrosscheckTool(GraphTool):
         channel="text",
         description=(
             "Cross-validates chunk/text-channel evidence against graph triples before reporting. "
+            "Evidence: derived verdicts (NOT citeable; cite underlying chunks + deterministic graph tools). "
             "Requires triples (request.extra.triples or evidence provenance) and non-empty context_evidences."
         ),
         speed="medium",
         cost="medium",
-        strategy_tags=("verification", "triple", "chunk"),
+        strategy_tags=("verification", "triple", "chunk", EVIDENCE_DERIVED, SCOPE_OWNER, REQUIRES_LLM),
         profile="X",
         determinism="hybrid",
         namespace="rag-arc.deepsearch.tools.x.evidence_crosscheck",

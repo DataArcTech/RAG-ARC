@@ -13,6 +13,7 @@ from config.core.deepsearch.tool_defaults import (
 from encapsulation.data_model.deepsearch import ThinkNote
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, safe_json_loads
+from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_LLM, SCOPE_OWNER
 from core.prompts.deepsearch import PARALLEL_THINK_SYSTEM_PROMPT
 from core.deepsearch.utils.compression import compact_evidences, resolve_compaction_config, truncate_text
 
@@ -27,7 +28,7 @@ class ParallelThinkTool(GraphTool):
         "expensive graph traversals.",
         speed="slow",
         cost="high",
-        strategy_tags=("parallel", "reflection", "llm"),
+        strategy_tags=("parallel", "reflection", "llm", EVIDENCE_DERIVED, SCOPE_OWNER, REQUIRES_LLM),
         profile="H",
         determinism="llm_heavy",
         namespace="rag-arc.deepsearch.tools.heavy.parallel_think",

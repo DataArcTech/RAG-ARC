@@ -11,6 +11,7 @@ from core.deepsearch.utils.evidence_ids import derived_chunk_id
 from core.deepsearch.utils.compression import compact_context_snippet, resolve_compaction_config
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, safe_json_loads
+from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_LLM, SCOPE_FILE, SCOPE_OWNER
 
 
 class LLMChainExplorerTool(GraphTool):
@@ -19,10 +20,13 @@ class LLMChainExplorerTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.llm_chain_explorer",
         channel="graph",
-        description="LLM-managed chain-of-exploration that decides next graph hops.",
+        description=(
+            "LLM-managed chain-of-exploration that decides next graph hops. "
+            "Evidence: derived hop summaries (NOT citeable; use deterministic graph tools for citations)."
+        ),
         speed="slow",
         cost="high",
-        strategy_tags=("llm", "chain_of_exploration", "hetero_ready"),
+        strategy_tags=("llm", "chain_of_exploration", "hetero_ready", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE, REQUIRES_LLM),
         profile="H",
         determinism="llm_heavy",
         namespace="rag-arc.deepsearch.tools.heavy.llm_chain",

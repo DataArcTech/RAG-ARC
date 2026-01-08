@@ -42,6 +42,10 @@
     "type": "graph_adapter",
     "adapter_name": "hipporag",
     "parameters": {
+      "default_top_k": 5,
+      "summary_max_chunks": 3,
+      "summary_char_limit": 320,
+      "semantic_score_threshold": 0.05,
       "retriever_config": {
         "type": "pruned_hipporag_neo4j_retrieval",
         "graph_config": {
@@ -77,7 +81,8 @@
         "max_facts_after_reranking": 5,
         "enable_llm_reranking": true,
         "damping_factor": 0.5,
-        "ppr_backend": "push"
+        "ppr_backend": "push",
+        "ppr_push_epsilon": 0.000001
       }
     }
   },

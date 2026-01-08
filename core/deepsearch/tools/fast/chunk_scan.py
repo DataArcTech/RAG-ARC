@@ -5,6 +5,7 @@ from config.core.deepsearch.tool_defaults import CHUNK_SCAN_DEFAULT_MAX_CHUNKS, 
 from encapsulation.data_model.deepsearch import EvidenceChunk
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+from ..governance_tags import EVIDENCE_PRIMARY, SCOPE_FILE, SCOPE_OWNER
 from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.query_clean import clean_query
 from core.deepsearch.utils.file_scope import chunk_in_scope, resolve_file_scope
@@ -16,10 +17,13 @@ class ChunkScanTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.chunk_scan",
         channel="graph",
-        description="Samples TF-IDF-style chunks to warm up reasoning context.",
+        description=(
+            "Deterministic fast chunk sampler (TF-IDF-style) to bootstrap evidence. "
+            "Evidence: primary chunks (citeable); respects file_scope when enabled."
+        ),
         speed="fast",
         cost="low",
-        strategy_tags=("chunk", "tfidf", "fast"),
+        strategy_tags=("chunk", "tfidf", "fast", EVIDENCE_PRIMARY, SCOPE_OWNER, SCOPE_FILE),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.fast.chunk_scan",
