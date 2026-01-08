@@ -53,12 +53,16 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
         # Rebuild node mappings for the current owner
         self._build_node_mappings(owner_id=owner_filter)
 
+        # Dense scores are needed both for provenance-groundability (optional) and passage weights in PPR.
+        # Compute once per request to avoid repeated N×D dot products for large corpora.
+        query_doc_scores = self._dense_passage_retrieval_scores(query)
+
         # Step 1: Retrieve relevant facts
-        query_fact_scores, fact_ids = self._get_fact_scores_faiss(query, owner_id=owner_filter)
+        query_fact_scores, fact_ids = self._get_fact_scores_faiss(query, owner_id=owner_filter, query_doc_scores=query_doc_scores)
 
         if query_fact_scores is None or len(query_fact_scores) == 0:
             logger.warning("No facts found, falling back to dense retrieval")
-            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter)
+            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter, query_doc_scores=query_doc_scores)
 
         # Step 2: Rerank facts (optional)
         if self.config.enable_llm_reranking and self.llm_client:
@@ -70,7 +74,7 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
 
         if not top_k_facts:
             logger.warning("No facts after reranking, falling back to dense retrieval")
-            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter)
+            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter, query_doc_scores=query_doc_scores)
 
         logger.info(f"Selected {len(top_k_facts)} facts after LLM filtering")
 
@@ -79,7 +83,7 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
 
         if not seed_entity_ids:
             logger.warning("No seed entities found, falling back to dense retrieval")
-            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter)
+            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter, query_doc_scores=query_doc_scores)
 
         logger.info(f"Extracted {len(seed_entity_ids)} seed entities from {len(top_k_facts)} facts")
 
@@ -112,6 +116,7 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
             top_k_fact_indices,
             subgraph_nodes,
             owner_id=owner_filter,
+            query_doc_scores=query_doc_scores,
         )
 
         # Step 7: Convert to Chunk objects
@@ -222,4 +227,3 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
                 chunks.append(chunk)
 
         return chunks
-

@@ -8,7 +8,13 @@ logger = logging.getLogger(__name__)
 
 
 class _PrunedHippoRAGNeo4jFactsMixin:
-    def _get_fact_scores_faiss(self, query: str, owner_id: Optional[uuid.UUID] = None) -> Tuple[np.ndarray, List[str]]:
+    def _get_fact_scores_faiss(
+        self,
+        query: str,
+        owner_id: Optional[uuid.UUID] = None,
+        *,
+        query_doc_scores: Optional[np.ndarray] = None,
+    ) -> Tuple[np.ndarray, List[str]]:
         scores, fact_ids = super()._get_fact_scores_faiss(query, owner_id=owner_id)
 
         if owner_id is None or scores is None or len(scores) == 0:
@@ -41,7 +47,52 @@ class _PrunedHippoRAGNeo4jFactsMixin:
             return np.array([]), []
 
         dtype = scores.dtype if isinstance(scores, np.ndarray) else np.float32
-        return np.array(filtered_scores, dtype=dtype), filtered_ids
+        filtered_scores_arr = np.array(filtered_scores, dtype=dtype)
+
+        cfg_obj = getattr(self, "config", None)
+        if cfg_obj is None:
+            return filtered_scores_arr, filtered_ids
+
+        if not bool(getattr(cfg_obj, "fact_groundability_enabled", False)):
+            return filtered_scores_arr, filtered_ids
+
+        from core.retrieval.graph_retrieveal.fact_groundability import FactGroundabilityConfig, apply_groundability
+
+        dense_top_k = int(getattr(cfg_obj, "fact_groundability_dense_top_k"))
+        dense_top_k = max(1, dense_top_k)
+        dense_scores = query_doc_scores if query_doc_scores is not None else self._dense_passage_retrieval_scores(query)
+        top_indices = np.argsort(dense_scores)[-dense_top_k:][::-1]
+        dense_top_chunk_ids = {
+            self.passage_node_keys[i] for i in top_indices if 0 <= int(i) < len(self.passage_node_keys)
+        }
+
+        cfg = FactGroundabilityConfig(
+            enabled=True,
+            mode=str(getattr(cfg_obj, "fact_groundability_mode")),
+            dense_top_k=dense_top_k,
+            min_overlap_count=int(getattr(cfg_obj, "fact_groundability_min_overlap_count")),
+            min_overlap_ratio=float(getattr(cfg_obj, "fact_groundability_min_overlap_ratio")),
+            soft_min_weight=float(getattr(cfg_obj, "fact_groundability_soft_min_weight")),
+            soft_gamma=float(getattr(cfg_obj, "fact_groundability_soft_gamma")),
+            keep_missing_provenance=bool(getattr(cfg_obj, "fact_groundability_keep_missing_provenance")),
+            missing_provenance_weight=float(getattr(cfg_obj, "fact_groundability_missing_provenance_weight")),
+        )
+        new_scores, new_fact_ids, meta = apply_groundability(
+            cfg=cfg,
+            scores=filtered_scores_arr,
+            fact_ids=filtered_ids,
+            docstore=self.graph_store.fact_faiss_db.docstore,
+            dense_top_chunk_ids=dense_top_chunk_ids,
+        )
+        logger.info(
+            "Fact groundability applied=%s mode=%s kept=%s dropped=%s missing=%s",
+            meta.get("applied"),
+            meta.get("mode"),
+            meta.get("kept"),
+            meta.get("dropped"),
+            meta.get("missing_provenance"),
+        )
+        return new_scores, new_fact_ids
 
     def _get_facts_by_indices(
         self,

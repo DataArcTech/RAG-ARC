@@ -68,6 +68,7 @@ dependencies = [
     "scipy>=1.10.0",
     "celery>=5.4.0",
     "stopwordsiso>=0.6.1",
+    "pypdf>=6.5.0",
 ]
 
 [project.optional-dependencies]

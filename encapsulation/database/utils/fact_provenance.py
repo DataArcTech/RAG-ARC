@@ -3,6 +3,32 @@ from typing import Any, Dict, Optional
 from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id
 
 
+def merge_provenance_into_fact_metadata(
+    metadata: Dict[str, Any],
+    *,
+    source_chunk_ids: Any,
+    source_chunk_ids_truncated: Any = None,
+) -> bool:
+    """Backfill provenance fields into fact metadata (FAISS docstore), without overwriting existing values."""
+    if not isinstance(metadata, dict):
+        raise TypeError("metadata must be a dict")
+
+    updated = False
+
+    if metadata.get("source_chunk_ids") is None and source_chunk_ids is not None:
+        if isinstance(source_chunk_ids, (list, tuple, set)):
+            metadata["source_chunk_ids"] = [str(x) for x in source_chunk_ids if x is not None]
+        else:
+            metadata["source_chunk_ids"] = [str(source_chunk_ids)]
+        updated = True
+
+    if metadata.get("source_chunk_ids_truncated") is None and source_chunk_ids_truncated is not None:
+        metadata["source_chunk_ids_truncated"] = bool(source_chunk_ids_truncated)
+        updated = True
+
+    return updated
+
+
 def _max_iso_datetime(a: Optional[str], b: Optional[str]) -> Optional[str]:
     """
     Merge ISO-8601 datetime strings by taking the later one.

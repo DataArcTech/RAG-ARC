@@ -7,13 +7,25 @@ def test_ppr_push_uses_configured_epsilon() -> None:
     captured = {}
 
     class _GraphStore:
-        def compute_ppr_push(self, *, subgraph_nodes, reset, alpha, epsilon, owner_id):  # noqa: ANN001
+        def compute_ppr_push(  # noqa: ANN001
+            self,
+            *,
+            subgraph_nodes,
+            reset,
+            alpha,
+            epsilon,
+            push_threshold_mode,
+            target_degree_penalty_gamma,
+            owner_id,
+        ):
             captured.update(
                 {
                     "subgraph_nodes": subgraph_nodes,
                     "reset": reset,
                     "alpha": alpha,
                     "epsilon": epsilon,
+                    "push_threshold_mode": push_threshold_mode,
+                    "target_degree_penalty_gamma": target_degree_penalty_gamma,
                     "owner_id": owner_id,
                 }
             )
@@ -22,7 +34,11 @@ def test_ppr_push_uses_configured_epsilon() -> None:
     class _Runner(_PrunedHippoRAGNeo4jPPRMixin):
         def __init__(self):
             self.graph_store = _GraphStore()
-            self.config = SimpleNamespace(ppr_push_epsilon=0.000123)
+            self.config = SimpleNamespace(
+                ppr_push_epsilon=0.000123,
+                ppr_push_threshold_mode="residual",
+                ppr_push_target_degree_penalty_gamma=0.5,
+            )
 
         @staticmethod
         def _owner_to_str(owner_id):  # noqa: ANN001
@@ -35,4 +51,5 @@ def test_ppr_push_uses_configured_epsilon() -> None:
     out = runner._run_ppr_push(subgraph_nodes={"n1"}, reset={"n1": 1.0}, damping=0.5, owner_id=None)
     assert out == {"chunk-x": 0.1}
     assert captured["epsilon"] == 0.000123
-
+    assert captured["push_threshold_mode"] == "residual"
+    assert captured["target_degree_penalty_gamma"] == 0.5

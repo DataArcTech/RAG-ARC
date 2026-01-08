@@ -204,6 +204,8 @@ class _PrunedHippoRAGGraphMixin:
         top_k_fact_indices: List[int],
         subgraph_nodes: Set[int],
         owner_id: Optional[uuid.UUID] = None,
+        *,
+        query_doc_scores: Optional[np.ndarray] = None,
     ) -> Tuple[List[str], List[float], np.ndarray]:
         """
         Perform graph search on the expanded subgraph using Personalized PageRank.
@@ -258,6 +260,7 @@ class _PrunedHippoRAGGraphMixin:
         node_to_idx = self.graph_store.node_to_idx
 
         # Assign weights to entity nodes based on fact scores
+        chunk_count_gamma = float(getattr(self.config, "entity_chunk_count_penalty_gamma", 1.0))
         for rank, f in enumerate(top_k_facts):
             fact_score = query_fact_scores[top_k_fact_indices[rank]] if query_fact_scores.ndim > 0 else query_fact_scores
 
@@ -271,10 +274,10 @@ class _PrunedHippoRAGGraphMixin:
                     # Normalize by chunk count (entities appearing in more chunks get lower weight)
                     chunk_count = entity_to_chunk_count.get(entity_id, 0)
                     if chunk_count != 0:
-                        phrase_weights[entity_idx] /= chunk_count
+                        phrase_weights[entity_idx] /= float(chunk_count) ** chunk_count_gamma
 
         # Assign weights to passage nodes based on dense retrieval
-        query_doc_scores = self._dense_passage_retrieval_scores(query)
+        query_doc_scores = query_doc_scores if query_doc_scores is not None else self._dense_passage_retrieval_scores(query)
 
         sorted_doc_ids = np.argsort(query_doc_scores)[::-1]
         sorted_doc_scores = query_doc_scores[sorted_doc_ids]
@@ -327,4 +330,3 @@ class _PrunedHippoRAGGraphMixin:
                 chunk_scores.append(score)
 
         return chunk_ids, chunk_scores, ppr_scores
-

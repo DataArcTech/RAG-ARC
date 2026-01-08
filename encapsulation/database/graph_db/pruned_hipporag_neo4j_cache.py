@@ -8,6 +8,30 @@ logger = logging.getLogger(__name__)
 
 class _PrunedHippoRAGNeo4jCacheMixin:
     @staticmethod
+    def _neighbor_pair(item: Any) -> Optional[Tuple[str, float]]:
+        if not isinstance(item, tuple) or len(item) < 2:
+            return None
+        node_id = str(item[0] or "").strip()
+        if not node_id:
+            return None
+        try:
+            weight = float(item[1])
+        except (TypeError, ValueError):
+            weight = 1.0
+        return node_id, weight
+
+    @staticmethod
+    def _neighbor_triple(item: Any) -> Optional[Tuple[str, float, str]]:
+        pair = _PrunedHippoRAGNeo4jCacheMixin._neighbor_pair(item)
+        if pair is None:
+            return None
+        node_id, weight = pair
+        relation_type = ""
+        if isinstance(item, tuple) and len(item) >= 3 and item[2] is not None:
+            relation_type = str(item[2])
+        return node_id, weight, relation_type
+
+    @staticmethod
     def _should_add_reverse_edge_for_predicate(
         predicate: str,
         *,
@@ -161,7 +185,11 @@ class _PrunedHippoRAGNeo4jCacheMixin:
         for node_id in normalized_ids:
             if node_id.startswith("entity-"):
                 continue
-            for neighbor_id, w in owner_cache.get(node_id, []) or []:
+            for item in owner_cache.get(node_id, []) or []:
+                pair = self._neighbor_pair(item)
+                if pair is None:
+                    continue
+                neighbor_id, w = pair
                 if not str(neighbor_id).startswith("entity-"):
                     continue
                 if neighbor_id not in node_to_idx:
@@ -188,6 +216,7 @@ class _PrunedHippoRAGNeo4jCacheMixin:
             graph.es["weight"] = [weights_by_pair[pair] for pair in weights_by_pair.keys()]
 
         return graph, node_to_idx, idx_to_node
+
     def get_neighbors_with_weights(self, node_id: str, owner_id: Optional[Any] = None) -> List[Tuple[str, float]]:
         """
         Get all neighbors of a node with their edge weights from Neo4j.
@@ -207,10 +236,18 @@ class _PrunedHippoRAGNeo4jCacheMixin:
                 if all_owners:
                     aggregated: list[tuple[str, float]] = []
                     for shard in self._graph_cache.values():
-                        aggregated.extend(shard.get(node_id, ()))
+                        for item in shard.get(node_id, ()) or ():
+                            pair = self._neighbor_pair(item)
+                            if pair is not None:
+                                aggregated.append(pair)
                     return list(aggregated)
                 owner_neighbors = self._graph_cache.get(owner_key, {})
-                return list(owner_neighbors.get(node_id, ()))
+                pairs: list[tuple[str, float]] = []
+                for item in owner_neighbors.get(node_id, ()) or ():
+                    pair = self._neighbor_pair(item)
+                    if pair is not None:
+                        pairs.append(pair)
+                return pairs
 
         # Optimized query: use single MATCH with OR condition
         if all_owners:
@@ -239,13 +276,81 @@ class _PrunedHippoRAGNeo4jCacheMixin:
 
         results = self._execute_query(query, params)
 
-        neighbors = []
-        for record in results:
-            neighbor_id = record['neighbor_id']
-            weight = record['weight'] or 1.0
-            if neighbor_id:
-                neighbors.append((neighbor_id, float(weight)))
+        neighbors: list[tuple[str, float]] = []
+        for record in results or []:
+            neighbor_id = record.get('neighbor_id')
+            if not neighbor_id:
+                continue
+            weight = record.get('weight') or 1.0
+            neighbors.append((str(neighbor_id), float(weight)))
 
+        return neighbors
+
+    def get_neighbors_with_weights_and_relations(
+        self, node_id: str, owner_id: Optional[Any] = None
+    ) -> List[Tuple[str, float, str]]:
+        """
+        Get all neighbors of a node with their edge weights and relationship types from Neo4j.
+
+        Returns:
+            List of (neighbor_id, weight, relation_type) tuples
+        """
+        all_owners = owner_id is None
+        owner_key = None if all_owners else self._owner_key(owner_id)
+
+        with self.read_lock():
+            if self._cache_loaded and self._graph_cache is not None:
+                if all_owners:
+                    aggregated: list[tuple[str, float, str]] = []
+                    for shard in self._graph_cache.values():
+                        for item in shard.get(node_id, ()) or ():
+                            triple = self._neighbor_triple(item)
+                            if triple is not None:
+                                aggregated.append(triple)
+                    return list(aggregated)
+                owner_neighbors = self._graph_cache.get(owner_key, {})
+                triples: list[tuple[str, float, str]] = []
+                for item in owner_neighbors.get(node_id, ()) or ():
+                    triple = self._neighbor_triple(item)
+                    if triple is not None:
+                        triples.append(triple)
+                return triples
+
+        if all_owners:
+            query = """
+            MATCH (n)-[r]-(neighbor)
+            WHERE (n.chunk_id = $node_id OR n.entity_id = $node_id)
+            RETURN COALESCE(neighbor.chunk_id, neighbor.entity_id) AS neighbor_id,
+                   type(r) AS relation_type,
+                   COALESCE(r.weight, r.similarity, 1.0) AS weight
+            """
+            params = {'node_id': node_id}
+        else:
+            query = """
+            MATCH (n)-[r]-(neighbor)
+            WHERE (n.chunk_id = $node_id OR n.entity_id = $node_id)
+              AND COALESCE(n.owner_id, $global_owner) = $owner_id
+              AND COALESCE(neighbor.owner_id, $global_owner) = $owner_id
+              AND COALESCE(r.owner_id, $global_owner) = $owner_id
+            RETURN COALESCE(neighbor.chunk_id, neighbor.entity_id) AS neighbor_id,
+                   type(r) AS relation_type,
+                   COALESCE(r.weight, r.similarity, 1.0) AS weight
+            """
+            params = {
+                'node_id': node_id,
+                'owner_id': owner_key,
+                'global_owner': self.OWNER_GLOBAL_KEY
+            }
+
+        results = self._execute_query(query, params)
+        neighbors: list[tuple[str, float, str]] = []
+        for record in results or []:
+            neighbor_id = record.get("neighbor_id")
+            if not neighbor_id:
+                continue
+            weight = record.get("weight") or 1.0
+            relation_type = record.get("relation_type") or ""
+            neighbors.append((str(neighbor_id), float(weight), str(relation_type)))
         return neighbors
 
     def _build_entity_chunk_count_cache(self):
@@ -274,7 +379,14 @@ class _PrunedHippoRAGNeo4jCacheMixin:
                         continue
 
                     # Count unique chunk neighbors (chunks don't start with "entity-")
-                    chunk_count = sum(1 for neighbor_id, _ in neighbors if not neighbor_id.startswith("entity-"))
+                    chunk_count = 0
+                    for item in neighbors or []:
+                        pair = self._neighbor_pair(item)
+                        if pair is None:
+                            continue
+                        neighbor_id, _w = pair
+                        if not neighbor_id.startswith("entity-"):
+                            chunk_count += 1
                     owner_counts[entity_id] = chunk_count
 
                 entity_chunk_count_cache[owner_key] = owner_counts
@@ -288,7 +400,7 @@ class _PrunedHippoRAGNeo4jCacheMixin:
 
     @staticmethod
     def _compute_entity_chunk_count_cache(
-        graph_cache: Dict[str, Dict[str, List[Tuple[str, float]]]]
+        graph_cache: Dict[str, Dict[str, List[Tuple]]]
     ) -> Dict[str, Dict[str, int]]:
         entity_chunk_count_cache: Dict[str, Dict[str, int]] = {}
         if not graph_cache:
@@ -299,7 +411,14 @@ class _PrunedHippoRAGNeo4jCacheMixin:
             for entity_id, neighbors in adjacency.items():
                 if not str(entity_id).startswith("entity-"):
                     continue
-                chunk_count = sum(1 for neighbor_id, _ in (neighbors or []) if not str(neighbor_id).startswith("entity-"))
+                chunk_count = 0
+                for item in neighbors or []:
+                    pair = _PrunedHippoRAGNeo4jCacheMixin._neighbor_pair(item)
+                    if pair is None:
+                        continue
+                    neighbor_id, _w = pair
+                    if not str(neighbor_id).startswith("entity-"):
+                        chunk_count += 1
                 owner_counts[str(entity_id)] = int(chunk_count)
             entity_chunk_count_cache[str(owner_key)] = owner_counts
         return entity_chunk_count_cache
@@ -373,9 +492,10 @@ class _PrunedHippoRAGNeo4jCacheMixin:
 
         # Query all edges in the graph
         query = """
-        MATCH (n)-[r]-(neighbor)
+        MATCH (n)-[r]->(neighbor)
         RETURN COALESCE(n.chunk_id, n.entity_id) AS node_id,
                COALESCE(neighbor.chunk_id, neighbor.entity_id) AS neighbor_id,
+               type(r) AS relation_type,
                COALESCE(r.weight, r.similarity, 1.0) AS weight,
                COALESCE(n.owner_id, $global_owner) AS node_owner_id,
                COALESCE(neighbor.owner_id, $global_owner) AS neighbor_owner_id,
@@ -385,12 +505,13 @@ class _PrunedHippoRAGNeo4jCacheMixin:
         results = self._execute_query(query, {'global_owner': self.OWNER_GLOBAL_KEY})
 
         # Build adjacency list
-        graph_cache: Dict[str, Dict[str, List[Tuple[str, float]]]] = {}
+        graph_cache: Dict[str, Dict[str, List[Tuple[str, float, str]]]] = {}
         edge_count = 0
         for record in results:
             node_id = record['node_id']
             neighbor_id = record['neighbor_id']
             weight = record['weight'] or 1.0
+            relation_type = record.get("relation_type") or ""
 
             node_owner_id = record.get('node_owner_id') or self.OWNER_GLOBAL_KEY
             neighbor_owner_id = record.get('neighbor_owner_id') or self.OWNER_GLOBAL_KEY
@@ -398,7 +519,8 @@ class _PrunedHippoRAGNeo4jCacheMixin:
 
             if node_id and neighbor_id and node_owner_id == neighbor_owner_id == relation_owner_id:
                 owner_cache = graph_cache.setdefault(node_owner_id, {})
-                owner_cache.setdefault(node_id, []).append((neighbor_id, float(weight)))
+                owner_cache.setdefault(node_id, []).append((neighbor_id, float(weight), str(relation_type)))
+                owner_cache.setdefault(neighbor_id, []).append((node_id, float(weight), str(relation_type)))
                 edge_count += 1
 
         entity_chunk_count_cache: Dict[str, Dict[str, int]] = {}
@@ -407,9 +529,15 @@ class _PrunedHippoRAGNeo4jCacheMixin:
             for entity_id, neighbors in adjacency.items():
                 if not entity_id.startswith("entity-"):
                     continue
-                owner_counts[entity_id] = sum(
-                    1 for neighbor_id, _ in neighbors if not neighbor_id.startswith("entity-")
-                )
+                chunk_count = 0
+                for item in neighbors or []:
+                    pair = self._neighbor_pair(item)
+                    if pair is None:
+                        continue
+                    neighbor_id, _w = pair
+                    if not str(neighbor_id).startswith("entity-"):
+                        chunk_count += 1
+                owner_counts[entity_id] = chunk_count
             entity_chunk_count_cache[owner_key] = owner_counts
 
         with self.write_lock():
@@ -448,6 +576,7 @@ class _PrunedHippoRAGNeo4jCacheMixin:
         WHERE n.chunk_id IN $node_ids OR n.entity_id IN $node_ids
         RETURN COALESCE(n.chunk_id, n.entity_id) AS node_id,
                COALESCE(neighbor.chunk_id, neighbor.entity_id) AS neighbor_id,
+               type(r) AS relation_type,
                COALESCE(r.weight, r.similarity, 1.0) AS weight,
                COALESCE(n.owner_id, $global_owner) AS node_owner_id,
                COALESCE(neighbor.owner_id, $global_owner) AS neighbor_owner_id,
@@ -464,6 +593,7 @@ class _PrunedHippoRAGNeo4jCacheMixin:
                 node_id = record['node_id']
                 neighbor_id = record['neighbor_id']
                 weight = record['weight'] or 1.0
+                relation_type = record.get("relation_type") or ""
 
                 node_owner_id = record.get('node_owner_id') or self.OWNER_GLOBAL_KEY
                 neighbor_owner_id = record.get('neighbor_owner_id') or self.OWNER_GLOBAL_KEY
@@ -472,13 +602,13 @@ class _PrunedHippoRAGNeo4jCacheMixin:
                 if node_id and neighbor_id and node_owner_id == neighbor_owner_id == relation_owner_id:
                     owner_cache = self._graph_cache.setdefault(node_owner_id, {})
                     node_neighbors = owner_cache.setdefault(node_id, [])
-                    if not any(n == neighbor_id for n, _ in node_neighbors):
-                        node_neighbors.append((neighbor_id, float(weight)))
+                    if not any((self._neighbor_triple(existing) or ("", 0.0, ""))[0] == neighbor_id for existing in node_neighbors):
+                        node_neighbors.append((neighbor_id, float(weight), str(relation_type)))
                         edge_count += 1
 
                     reverse_neighbors = owner_cache.setdefault(neighbor_id, [])
-                    if not any(n == node_id for n, _ in reverse_neighbors):
-                        reverse_neighbors.append((node_id, float(weight)))
+                    if not any((self._neighbor_triple(existing) or ("", 0.0, ""))[0] == node_id for existing in reverse_neighbors):
+                        reverse_neighbors.append((node_id, float(weight), str(relation_type)))
 
             self._entity_chunk_count_cache = self._compute_entity_chunk_count_cache(self._graph_cache)
 
@@ -505,16 +635,24 @@ class _PrunedHippoRAGNeo4jCacheMixin:
         # Use cache if loaded
         with self.read_lock():
             if self._cache_loaded and self._graph_cache is not None:
-                neighbors_map = {nid: [] for nid in node_ids}
+                neighbors_map: Dict[str, List[Tuple[str, float]]] = {nid: [] for nid in node_ids}
                 if all_owners:
                     for shard in self._graph_cache.values():
                         for nid in node_ids:
                             if nid in shard:
-                                neighbors_map[nid].extend(shard.get(nid, ()))
+                                for item in shard.get(nid, ()) or ():
+                                    pair = self._neighbor_pair(item)
+                                    if pair is not None:
+                                        neighbors_map[nid].append(pair)
                 else:
                     owner_neighbors = self._graph_cache.get(owner_key, {})
                     for nid in node_ids:
-                        neighbors_map[nid] = list(owner_neighbors.get(nid, ()))
+                        pairs: list[tuple[str, float]] = []
+                        for item in owner_neighbors.get(nid, ()) or ():
+                            pair = self._neighbor_pair(item)
+                            if pair is not None:
+                                pairs.append(pair)
+                        neighbors_map[nid] = pairs
                 return neighbors_map
 
         # Fallback to Neo4j query
@@ -549,14 +687,90 @@ class _PrunedHippoRAGNeo4jCacheMixin:
         results = self._execute_query(query, params)
 
         # Group by node_id
-        neighbors_map = {nid: [] for nid in node_ids}
-        for record in results:
-            node_id = record['node_id']
-            neighbor_id = record['neighbor_id']
-            weight = record['weight'] or 1.0
-            if neighbor_id and node_id in neighbors_map:
-                neighbors_map[node_id].append((neighbor_id, float(weight)))
+        neighbors_map: Dict[str, List[Tuple[str, float]]] = {nid: [] for nid in node_ids}
+        for record in results or []:
+            node_id = record.get('node_id')
+            neighbor_id = record.get('neighbor_id')
+            if not neighbor_id or node_id not in neighbors_map:
+                continue
+            weight = record.get('weight') or 1.0
+            neighbors_map[str(node_id)].append((str(neighbor_id), float(weight)))
 
+        return neighbors_map
+
+    def get_batch_neighbors_with_weights_and_relations(
+        self, node_ids: List[str], owner_id: Optional[Any] = None
+    ) -> Dict[str, List[Tuple[str, float, str]]]:
+        """
+        Batch neighbor lookup returning relation types.
+
+        Returns:
+            Dictionary mapping node_id to list of (neighbor_id, weight, relation_type) tuples
+        """
+        if not node_ids:
+            return {}
+
+        all_owners = owner_id is None
+        owner_key = None if all_owners else self._owner_key(owner_id)
+
+        with self.read_lock():
+            if self._cache_loaded and self._graph_cache is not None:
+                neighbors_map: Dict[str, List[Tuple[str, float, str]]] = {nid: [] for nid in node_ids}
+                if all_owners:
+                    for shard in self._graph_cache.values():
+                        for nid in node_ids:
+                            if nid in shard:
+                                for item in shard.get(nid, ()) or ():
+                                    triple = self._neighbor_triple(item)
+                                    if triple is not None:
+                                        neighbors_map[nid].append(triple)
+                else:
+                    owner_neighbors = self._graph_cache.get(owner_key, {})
+                    for nid in node_ids:
+                        triples: list[tuple[str, float, str]] = []
+                        for item in owner_neighbors.get(nid, ()) or ():
+                            triple = self._neighbor_triple(item)
+                            if triple is not None:
+                                triples.append(triple)
+                        neighbors_map[nid] = triples
+                return neighbors_map
+
+        if all_owners:
+            query = """
+            UNWIND $node_ids AS nid
+            MATCH (n)-[r]-(neighbor)
+            WHERE (n.chunk_id = nid OR n.entity_id = nid)
+            RETURN nid AS node_id,
+                   COALESCE(neighbor.chunk_id, neighbor.entity_id) AS neighbor_id,
+                   type(r) AS relation_type,
+                   COALESCE(r.weight, r.similarity, 1.0) AS weight
+            """
+            params = {'node_ids': node_ids}
+        else:
+            query = """
+            UNWIND $node_ids AS nid
+            MATCH (n)-[r]-(neighbor)
+            WHERE (n.chunk_id = nid OR n.entity_id = nid)
+              AND COALESCE(n.owner_id, $global_owner) = $owner_id
+              AND COALESCE(neighbor.owner_id, $global_owner) = $owner_id
+              AND COALESCE(r.owner_id, $global_owner) = $owner_id
+            RETURN nid AS node_id,
+                   COALESCE(neighbor.chunk_id, neighbor.entity_id) AS neighbor_id,
+                   type(r) AS relation_type,
+                   COALESCE(r.weight, r.similarity, 1.0) AS weight
+            """
+            params = {'node_ids': node_ids, 'owner_id': owner_key, 'global_owner': self.OWNER_GLOBAL_KEY}
+
+        results = self._execute_query(query, params)
+        neighbors_map: Dict[str, List[Tuple[str, float, str]]] = {nid: [] for nid in node_ids}
+        for record in results or []:
+            node_id = str(record.get('node_id') or '').strip()
+            neighbor_id = str(record.get('neighbor_id') or '').strip()
+            if not node_id or not neighbor_id or node_id not in neighbors_map:
+                continue
+            weight = record.get('weight') or 1.0
+            relation_type = record.get('relation_type') or ''
+            neighbors_map[node_id].append((neighbor_id, float(weight), str(relation_type)))
         return neighbors_map
 
     def extract_subgraph_from_cache(self, subgraph_node_ids: Set[str], owner_id: Optional[Any] = None) -> Tuple[ig.Graph, Dict[str, int], Dict[int, str]]:
@@ -582,7 +796,7 @@ class _PrunedHippoRAGNeo4jCacheMixin:
                 return ig.Graph(directed=False), {}, {}
 
             if owner_id is None:
-                owner_cache: Dict[str, List[Tuple[str, float]]] = {}
+                owner_cache: Dict[str, List[Tuple]] = {}
                 for shard in self._graph_cache.values():
                     for node_id, neighbors in shard.items():
                         owner_cache.setdefault(node_id, []).extend(neighbors)
@@ -607,7 +821,11 @@ class _PrunedHippoRAGNeo4jCacheMixin:
         with self.read_lock():
             for u in subgraph_node_ids:
                 neighbors = owner_cache.get(u, [])
-                for v, w in neighbors:
+                for item in neighbors or []:
+                    pair = self._neighbor_pair(item)
+                    if pair is None:
+                        continue
+                    v, w = pair
                     if v in node_to_idx and node_to_idx[u] < node_to_idx[v]:
                         # Only add each edge once (undirected graph)
                         edge_list.append((node_to_idx[u], node_to_idx[v]))
@@ -779,6 +997,8 @@ class _PrunedHippoRAGNeo4jCacheMixin:
         reset: Dict[str, float],
         alpha: float = 0.5,
         epsilon: float = 1e-6,
+        push_threshold_mode: str = "residual",
+        target_degree_penalty_gamma: float = 0.0,
         owner_id: Optional[Any] = None
     ) -> Dict[str, float]:
         """
@@ -805,7 +1025,7 @@ class _PrunedHippoRAGNeo4jCacheMixin:
 
         with self.read_lock():
             if owner_id is None:
-                owner_cache: Dict[str, List[Tuple[str, float]]] = {}
+                owner_cache: Dict[str, List[Tuple]] = {}
                 for shard in self._graph_cache.values():
                     for node_id, neighbors in shard.items():
                         owner_cache.setdefault(node_id, []).extend(neighbors)
@@ -813,15 +1033,27 @@ class _PrunedHippoRAGNeo4jCacheMixin:
                 owner_key = self._owner_key(owner_id)
                 owner_cache = self._graph_cache.get(owner_key, {})
 
+            owner_cache_pairs: Dict[str, List[Tuple[str, float]]] = {}
+            for node_id, neighbors in (owner_cache or {}).items():
+                pairs: list[tuple[str, float]] = []
+                for item in neighbors or []:
+                    pair = self._neighbor_pair(item)
+                    if pair is not None:
+                        pairs.append(pair)
+                if pairs:
+                    owner_cache_pairs[str(node_id)] = pairs
+
             # Extract subgraph adjacency from cache
-            subgraph_adj = extract_subgraph_adjacency(owner_cache, subgraph_nodes)
+            subgraph_adj = extract_subgraph_adjacency(owner_cache_pairs, subgraph_nodes)
 
         # Run push-based PPR
         ppr_scores = ppr_push(
             adjacency=subgraph_adj,
             reset=reset,
             alpha=alpha,
-            epsilon=epsilon
+            epsilon=epsilon,
+            push_threshold_mode=push_threshold_mode,
+            target_degree_penalty_gamma=target_degree_penalty_gamma,
         )
 
         return ppr_scores
@@ -850,7 +1082,14 @@ class _PrunedHippoRAGNeo4jCacheMixin:
                         owner_cache.pop(node_id, None)
 
                 for node_id, neighbors in owner_cache.items():
-                    filtered_neighbors = [(n, w) for n, w in neighbors if n not in deleted_nodes]
+                    filtered_neighbors: list[tuple] = []
+                    for item in neighbors or []:
+                        triple = self._neighbor_triple(item)
+                        if triple is None:
+                            continue
+                        n, w, t = triple
+                        if n not in deleted_nodes:
+                            filtered_neighbors.append((n, w, t))
                     if len(filtered_neighbors) != len(neighbors):
                         owner_cache[node_id] = filtered_neighbors
 

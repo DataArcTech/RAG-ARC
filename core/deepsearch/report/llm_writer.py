@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, ValidationError
 from config.core.deepsearch import report_writer_defaults as report_defaults
 from core.deepsearch.memory import EvidenceBank
 from core.deepsearch.tools.base import call_llm_async
+from core.deepsearch.utils.compression import focused_truncate_text
 from core.utils.json_extract import extract_json_from_text as _extract_json_from_text
 from core.utils.text_regex import CJK_DETECT_RE
 from core.utils.text_regex import INLINE_CITATION_TOKEN_RE
@@ -24,6 +25,7 @@ from core.prompts.deepsearch.report import (
     REPORT_WRITE_USER_PROMPT,
     PARALLEL_SYNTHESIS_SYSTEM_PROMPT,
     PARALLEL_SYNTHESIS_USER_PROMPT,
+    PARALLEL_SYNTHESIS_CITATION_REPAIR_USER_PROMPT,
     SECTION_WRITE_SYSTEM_PROMPT,
     SECTION_WRITE_USER_PROMPT,
     JSON_REPAIR_USER_PROMPT,
@@ -359,7 +361,7 @@ class DeepSearchLLMReportWriter:
 
             evidence_items_limit = _apply_divisor_limit(self.max_evidence_items, budget.evidence_items_divisor)
             evidence_chars_limit = _apply_divisor_limit_required(self.max_evidence_chars, budget.evidence_chars_divisor)
-            evidences = _limit_evidences(evidences_raw, evidence_items_limit, evidence_chars_limit)
+            evidences = _limit_evidences(evidences_raw, evidence_items_limit, evidence_chars_limit, question=question)
 
             user_prompt = REPORT_WRITE_USER_PROMPT.format(
                 question=question,
@@ -459,7 +461,7 @@ class DeepSearchLLMReportWriter:
                 evidence_ids = EvidenceBank.normalize_evidence_ids(section.get("evidence_ids"))
                 if not evidence_ids:
                     raise ValueError("Parallel section writing requires explicit evidence_ids per section.")
-                section_evidences = bank.select_evidences(evidence_ids, max_chars=self.max_evidence_chars)
+                section_evidences = bank.select_evidences(evidence_ids, max_chars=self.max_evidence_chars, question=question)
                 return await self._write_single_section(
                     question=question,
                     section=section,
@@ -493,7 +495,7 @@ class DeepSearchLLMReportWriter:
             synthesis_ids.extend(EvidenceBank.normalize_evidence_ids(section.get("evidence_ids")))
         if not synthesis_ids:
             raise ValueError("Parallel report synthesis requires evidence_ids from the outline.")
-        synthesis_evidences = bank.select_evidences(synthesis_ids, max_chars=self.max_evidence_chars)
+        synthesis_evidences = bank.select_evidences(synthesis_ids, max_chars=self.max_evidence_chars, question=question)
         synthesis = await self._synthesize_parallel_fields(
             question=question,
             outline=outline,
@@ -557,7 +559,7 @@ class DeepSearchLLMReportWriter:
             evidence_ids = EvidenceBank.normalize_evidence_ids(section.get("evidence_ids"))
             if not evidence_ids:
                 raise ValueError("Sectionwise writer requires explicit evidence_ids per section.")
-            selected = bank.select_evidences(evidence_ids, max_chars=self.max_evidence_chars)
+            selected = bank.select_evidences(evidence_ids, max_chars=self.max_evidence_chars, question=question)
             selected_ids = [
                 str(ev.get("chunk_id") or "").strip()
                 for ev in selected
@@ -567,7 +569,7 @@ class DeepSearchLLMReportWriter:
 
             retained: List[Dict[str, Any]] = []
             if retain_k > 0 and recent_ids:
-                retained = bank.select_evidences(recent_ids, max_chars=self.max_evidence_chars)
+                retained = bank.select_evidences(recent_ids, max_chars=self.max_evidence_chars, question=question)
 
             merged_evidences = list(selected)
             seen = {ev.get("chunk_id") for ev in merged_evidences if isinstance(ev, dict)}
@@ -616,7 +618,7 @@ class DeepSearchLLMReportWriter:
 
         if not used_ids_union:
             raise ValueError("Sectionwise synthesis requires at least one evidence_id.")
-        synthesis_evidences = bank.select_evidences(used_ids_union, max_chars=self.max_evidence_chars)
+        synthesis_evidences = bank.select_evidences(used_ids_union, max_chars=self.max_evidence_chars, question=question)
         synthesis = await self._synthesize_parallel_fields(
             question=question,
             outline=outline,
@@ -659,7 +661,7 @@ class DeepSearchLLMReportWriter:
 
         outline_json = _dump_json(outline)
         sections_json = _dump_json(self._compact_sections_for_synthesis(sections, max_chars=self.synthesis_section_max_chars))
-        limited_evidences = _limit_evidences(evidences, len(evidences), int(self.max_evidence_chars))
+        limited_evidences = _limit_evidences(evidences, len(evidences), int(self.max_evidence_chars), question=question)
         evidence_json = _dump_json(limited_evidences)
         coverage_json = _dump_json(_slim_coverage(coverage or {}, level=0))
 
@@ -670,34 +672,54 @@ class DeepSearchLLMReportWriter:
             evidence_json=evidence_json,
             coverage_json=coverage_json,
         )
-        messages = [
+        base_messages = [
             {"role": "system", "content": self._system_prompt_with_language(PARALLEL_SYNTHESIS_SYSTEM_PROMPT, question=question)},
             {"role": "user", "content": user_prompt},
         ]
-        raw = await self._call(messages, phase="parallel_synthesis")
-        parsed = _safe_parse_json(raw, expected="dict")
-        if not isinstance(parsed, dict) or not parsed:
-            repaired = await self._attempt_json_repair(
-                base_messages=messages,
-                raw=raw,
-                error=_json_parse_error(raw, expected="dict"),
-                phase="parallel_synthesis_repair",
-                expected="dict",
-            )
-            parsed = repaired or {}
-        if not isinstance(parsed, dict) or not parsed:
-            raise ValueError(f"Parallel synthesis returned invalid JSON. raw={_snippet(raw)}")
+
         allowed_ids = {
             str(item.get("chunk_id") or "").strip()
             for item in limited_evidences
             if isinstance(item, dict) and str(item.get("chunk_id") or "").strip()
         }
-        short_answer = str(parsed.get("short_answer") or parsed.get("summary") or "").strip()
-        if allowed_ids and short_answer and not _has_supported_inline_citation(short_answer, allowed_ids=allowed_ids):
-            raise ValueError("Synthesis short_answer is missing supported inline citations.")
-        parsed["short_answer"] = short_answer
-        parsed["summary"] = short_answer
-        return parsed
+
+        messages = list(base_messages)
+        last_raw = ""
+        for attempt in range(max(int(self.max_retries), 1)):
+            last_raw = await self._call(messages, phase=f"parallel_synthesis:{attempt + 1}")
+            parsed = _safe_parse_json(last_raw, expected="dict")
+            if not isinstance(parsed, dict) or not parsed:
+                repaired = await self._attempt_json_repair(
+                    base_messages=base_messages,
+                    raw=last_raw,
+                    error=_json_parse_error(last_raw, expected="dict"),
+                    phase="parallel_synthesis_repair",
+                    expected="dict",
+                )
+                parsed = repaired or {}
+            if not isinstance(parsed, dict) or not parsed:
+                if attempt < max(int(self.max_retries), 1) - 1:
+                    messages = list(base_messages)
+                    continue
+                raise ValueError(f"Parallel synthesis returned invalid JSON. raw={_snippet(last_raw)}")
+
+            short_answer = str(parsed.get("short_answer") or parsed.get("summary") or "").strip()
+            if allowed_ids and short_answer and not _has_supported_inline_citation(short_answer, allowed_ids=allowed_ids):
+                if attempt < max(int(self.max_retries), 1) - 1:
+                    allowed_csv = ", ".join(sorted(allowed_ids))
+                    repair_prompt = PARALLEL_SYNTHESIS_CITATION_REPAIR_USER_PROMPT.format(
+                        allowed_ids_csv=allowed_csv,
+                        raw_snippet=_snippet(last_raw, limit=int(report_defaults.DEFAULT_ERROR_SNIPPET_LIMIT_CHARS)),
+                    )
+                    messages = list(base_messages) + [{"role": "assistant", "content": str(last_raw or "")}, {"role": "user", "content": repair_prompt}]
+                    continue
+                raise ValueError("Synthesis short_answer is missing supported inline citations.")
+
+            parsed["short_answer"] = short_answer
+            parsed["summary"] = short_answer
+            return parsed
+
+        raise RuntimeError("Parallel synthesis failed after retries.")
 
     @staticmethod
     def _compact_sections_for_synthesis(sections: List[Dict[str, Any]], *, max_chars: int) -> List[Dict[str, str]]:
@@ -728,7 +750,7 @@ class DeepSearchLLMReportWriter:
         last_exc: Exception | None = None
 
         for attempt in range(max(self.max_retries, 1)):
-            limited_evidences = _limit_evidences(evidences, max_items if max_items else None, max_chars)
+            limited_evidences = _limit_evidences(evidences, max_items if max_items else None, max_chars, question=question)
             limited_chain = graph_chain[: max(0, chain_limit)] if chain_limit else []
             allowed_ids = {
                 str(item.get("chunk_id") or "").strip()
@@ -1026,7 +1048,13 @@ def _coerce_outline(raw: Any) -> List[ReportSectionSpec]:
     return sections
 
 
-def _limit_evidences(evidences: List[Dict[str, Any]], max_items: int | None, max_chars: int) -> List[Dict[str, Any]]:
+def _limit_evidences(
+    evidences: List[Dict[str, Any]],
+    max_items: int | None,
+    max_chars: int,
+    *,
+    question: str | None = None,
+) -> List[Dict[str, Any]]:
     limited: List[Dict[str, Any]] = []
     subset = list(evidences) if max_items is None else evidences[: max(max_items, 0)]
     for entry in subset:
@@ -1035,7 +1063,15 @@ def _limit_evidences(evidences: List[Dict[str, Any]], max_items: int | None, max
         chunk_id = entry.get("chunk_id")
         content = str(entry.get("content") or "")
         if max_chars > 0 and len(content) > max_chars:
-            content = content[:max_chars].rstrip() + "..."
+            if question and str(question).strip():
+                content = focused_truncate_text(
+                    content,
+                    max_chars=max_chars,
+                    question=str(question),
+                    extra=None,
+                )
+            else:
+                content = content[:max_chars].rstrip() + "..."
         limited.append(
             {
                 "chunk_id": chunk_id,

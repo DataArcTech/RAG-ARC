@@ -112,6 +112,7 @@ class NetworkXGraphQueryExecutor:
                             "neighbor_id": target_data.get("id_"),
                             "relation_type": edge_attrs.get("relation_type"),
                             "mention_count": mention_count,
+                            "similarity": edge_attrs.get("similarity") if edge_attrs.get("similarity") is not None else edge_attrs.get("weight"),
                         }
                     )
 
@@ -130,6 +131,7 @@ class NetworkXGraphQueryExecutor:
                             "neighbor_id": source_data.get("id_"),
                             "relation_type": edge_attrs.get("relation_type"),
                             "mention_count": mention_count,
+                            "similarity": edge_attrs.get("similarity") if edge_attrs.get("similarity") is not None else edge_attrs.get("weight"),
                         }
                     )
 
@@ -203,4 +205,3 @@ def build_graph_query_executor(*, graph_store: Any, graph_store_type: str) -> Gr
 
 
 __all__ = ["GraphQueryExecutor", "build_graph_query_executor"]
-

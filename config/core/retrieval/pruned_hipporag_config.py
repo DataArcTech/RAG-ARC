@@ -74,6 +74,12 @@ class PrunedHippoRAGRetrievalConfig(AbstractConfig):
         description="Weight assigned to passage nodes in PPR initialization"
     )
 
+    entity_chunk_count_penalty_gamma: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=4.0,
+        description="Exponent for dividing entity reset weights by entity->chunk count (1.0 matches legacy).",
+    )
+
     def build(self):
         return PrunedHippoRAGRetriever(config=self)
-

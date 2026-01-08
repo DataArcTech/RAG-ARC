@@ -221,6 +221,19 @@ Return ONLY valid JSON matching the schema described in the user prompt.
 - Ensure all string fields are valid JSON strings (escape newlines as \\n, tabs as \\t).
 """
 
+PARALLEL_SYNTHESIS_CITATION_REPAIR_USER_PROMPT = (
+    "Your previous response was valid JSON, but the `short_answer` is missing supported inline citations.\n"
+    "Fix the JSON and return ONLY a single JSON object now.\n\n"
+    "Rules (STRICT):\n"
+    "- Do NOT change the schema keys.\n"
+    "- Do NOT invent facts.\n"
+    "- For any concrete factual claim in `short_answer`, add inline citations ONLY in [chunk_id] format.\n"
+    "- Cite ONLY from this allowlist of chunk_id values:\n"
+    "{allowed_ids_csv}\n\n"
+    "Previous output (snippet):\n"
+    "{raw_snippet}\n"
+)
+
 
 JSON_REPAIR_USER_PROMPT = (
     "Your previous response was not valid JSON or did not match the expected top-level type.\n"

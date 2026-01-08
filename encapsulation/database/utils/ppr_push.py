@@ -27,7 +27,9 @@ def ppr_push(
     reset: Dict[str, float],
     alpha: float = 0.5,
     epsilon: float = 1e-6,
-    max_iterations: Optional[int] = None
+    max_iterations: Optional[int] = None,
+    push_threshold_mode: str = "residual",
+    target_degree_penalty_gamma: float = 0.0,
 ) -> Dict[str, float]:
     """
     Compute Personalized PageRank using push-based algorithm.
@@ -81,6 +83,14 @@ def ppr_push(
     queue = deque([node_id for node_id, res in r.items() if res > epsilon])
     
     iterations = 0
+    mode = str(push_threshold_mode or "residual").strip().lower()
+    if mode not in {"residual", "residual_over_degree", "residual_over_weighted_degree"}:
+        raise ValueError(f"Unknown push_threshold_mode: {push_threshold_mode!r}")
+
+    gamma = float(target_degree_penalty_gamma or 0.0)
+    if gamma < 0:
+        raise ValueError("target_degree_penalty_gamma must be >= 0")
+    degree_map = {node_id: len(neighbors or []) for node_id, neighbors in (adjacency or {}).items()}
     
     while queue:
         # Check max iterations
@@ -90,47 +100,60 @@ def ppr_push(
         
         # Pop node with residual to push
         u = queue.popleft()
-        
-        # Skip if residual already below threshold (may have been updated)
-        if r[u] <= epsilon:
-            continue
-        
-        # Get current residual
-        ru = r[u]
-        
-        # Add to PageRank estimate (keep (1-alpha) of residual)
-        p[u] += (1 - alpha) * ru
-        
-        # Clear residual
-        r[u] = 0.0
-        
-        # Get neighbors
+
         neighbors = adjacency.get(u, [])
-        
         if not neighbors:
-            # No neighbors, residual is absorbed
+            r[u] = 0.0
             continue
-        
-        # Compute weighted degree (sum of edge weights)
+
         weighted_degree = sum(w for _, w in neighbors)
-        
+        degree = len(neighbors)
+
+        if mode == "residual":
+            threshold = epsilon
+        elif mode == "residual_over_degree":
+            threshold = epsilon * max(1.0, float(degree))
+        else:
+            threshold = epsilon * max(1.0, float(weighted_degree))
+
+        if r[u] <= threshold:
+            continue
+
+        ru = r[u]
+        p[u] += (1 - alpha) * ru
+        r[u] = 0.0
+
         if weighted_degree == 0:
-            # All edge weights are zero, skip
             continue
         
         # Push residual to neighbors (distribute alpha * ru proportionally)
         mass_to_push = alpha * ru
-        
-        for v, edge_weight in neighbors:
-            # Proportion of mass to push to this neighbor
-            push_amount = mass_to_push * (edge_weight / weighted_degree)
-            
-            # Update neighbor's residual
-            r[v] += push_amount
-            
-            # Add to queue if residual exceeds threshold
-            if r[v] > epsilon and v not in queue:
-                queue.append(v)
+
+        if gamma <= 0:
+            for v, edge_weight in neighbors:
+                push_amount = mass_to_push * (edge_weight / weighted_degree)
+                r[v] += push_amount
+                if r[v] > epsilon and v not in queue:
+                    queue.append(v)
+        else:
+            adjusted_weights: list[tuple[str, float]] = []
+            adjusted_sum = 0.0
+            for v, edge_weight in neighbors:
+                v_degree = max(1.0, float(degree_map.get(v, 0)))
+                adjusted = float(edge_weight) / (v_degree ** gamma)
+                if adjusted <= 0:
+                    continue
+                adjusted_sum += adjusted
+                adjusted_weights.append((v, adjusted))
+
+            if adjusted_sum <= 0:
+                continue
+
+            for v, adjusted in adjusted_weights:
+                push_amount = mass_to_push * (adjusted / adjusted_sum)
+                r[v] += push_amount
+                if r[v] > epsilon and v not in queue:
+                    queue.append(v)
         
         iterations += 1
     
@@ -213,4 +236,3 @@ def extract_subgraph_adjacency(
             subgraph_adj[u] = subgraph_neighbors
     
     return subgraph_adj
-

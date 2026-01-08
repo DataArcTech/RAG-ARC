@@ -186,6 +186,100 @@ def truncate_text(value: str, *, max_chars: int) -> str:
     return text[: max(0, limit - 1)] + "…"
 
 
+def focused_truncate_text(
+    value: str,
+    *,
+    max_chars: int,
+    question: str,
+    extra: Mapping[str, Any] | None,
+    pre_context_ratio: float = 0.35,
+) -> str:
+    """Truncate text to a bounded window while trying to preserve query-matching spans.
+
+    This avoids the common failure mode where a long chunk "hits" but the report stage only sees
+    the head of the chunk (and thus misses the answer sentence located later).
+    """
+
+    raw = str(value or "")
+    limit = max(0, int(max_chars))
+    if not limit or len(raw) <= limit:
+        return raw
+
+    q = str(question or "").strip()
+    if not q:
+        return truncate_text(raw, max_chars=limit)
+
+    terms = _extract_excerpt_terms(question=q, extra=extra)
+    if not terms:
+        return truncate_text(raw, max_chars=limit)
+
+    lowered = raw.lower()
+    candidates: list[int] = []
+    for term in terms:
+        needle = str(term or "").strip().lower()
+        if not needle:
+            continue
+        idx = lowered.find(needle)
+        if idx >= 0:
+            candidates.append(idx)
+        if len(candidates) >= 32:
+            break
+
+    if not candidates:
+        return truncate_text(raw, max_chars=limit)
+
+    ratio = float(pre_context_ratio)
+    if ratio < 0.0 or ratio > 1.0:
+        ratio = 0.35
+    pre_chars = max(0, min(limit, int(limit * ratio)))
+
+    def _window_for(idx: int) -> tuple[int, int]:
+        start = max(0, idx - pre_chars)
+        end = min(len(raw), start + limit)
+        # shift start back if we're near EOF
+        start = max(0, end - limit)
+        return start, end
+
+    # Pick the best window by unique term coverage (tie: earlier start).
+    best_start, best_end = _window_for(candidates[0])
+    best_score = -1
+    unique_terms = [str(t).strip().lower() for t in terms if str(t).strip()]
+    unique_terms = [t for t in unique_terms if t]
+    for idx in candidates:
+        start, end = _window_for(idx)
+        segment_lower = lowered[start:end]
+        matched = 0
+        seen: set[str] = set()
+        for term in unique_terms:
+            if term in seen:
+                continue
+            if term in segment_lower:
+                matched += 1
+                seen.add(term)
+        score = matched
+        if score > best_score or (score == best_score and start < best_start):
+            best_score = score
+            best_start, best_end = start, end
+
+    prefix = best_start > 0
+    suffix = best_end < len(raw)
+    # Keep the final string within `limit` after adding ellipses.
+    allowance = limit - (1 if prefix else 0) - (1 if suffix else 0)
+    allowance = max(0, allowance)
+    body = raw[best_start:best_end]
+    if allowance and len(body) > allowance:
+        body = body[:allowance]
+
+    out = body
+    if prefix:
+        out = "…" + out
+    if suffix:
+        out = out + "…"
+    if len(out) > limit:
+        out = truncate_text(out, max_chars=limit)
+    return out
+
+
 def _extract_excerpt_terms(*, question: str, extra: Mapping[str, Any] | None) -> List[str]:
     q = str(question or "")
     terms: List[str] = []
@@ -329,4 +423,3 @@ def compact_context_snippet(
 
 def safe_json_dumps(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, default=str)
-

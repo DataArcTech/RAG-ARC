@@ -2,6 +2,8 @@
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from core.deepsearch.utils.compression import focused_truncate_text
+
 
 @dataclass(frozen=True)
 class EvidenceRecord:
@@ -88,6 +90,7 @@ class EvidenceBank:
         evidence_ids: Sequence[str],
         *,
         max_chars: int = 900,
+        question: str | None = None,
     ) -> List[Dict[str, Any]]:
         """Materialize a bounded evidence list for prompts.
 
@@ -116,7 +119,15 @@ class EvidenceBank:
             record = self._records[eid]
             content = (record.content or "").strip()
             if max_chars > 0 and len(content) > max_chars:
-                content = content[: max(0, max_chars - 3)].rstrip() + "..."
+                if question and str(question).strip():
+                    content = focused_truncate_text(
+                        content,
+                        max_chars=max_chars,
+                        question=str(question),
+                        extra=None,
+                    )
+                else:
+                    content = content[: max(0, max_chars - 3)].rstrip() + "..."
             payload.append(
                 {
                     "chunk_id": record.evidence_id,

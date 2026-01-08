@@ -60,8 +60,8 @@
             "type": "openai_embedding",
             "model_name": "${OPENAI_EMBEDDING_MODEL}",
             "embedding_dimensions": "${EMBEDDING_DIMENSIONS}",
-            "openai_api_key": "${OPENAI_API_KEY}",
-            "openai_base_url": "${OPENAI_BASE_URL}"
+            "openai_api_key": "${EMBEDDING_API_KEY}",
+            "openai_base_url": "${EMBEDDING_API_BASE_URL}"
           },
           "add_synonymy_edges": true,
           "synonymy_edge_topk": 100,
@@ -74,8 +74,8 @@
           "model_name": "${OPENAI_CHAT_MODEL}",
           "low_cost_model_name": "${LOW_COST_MODEL}",
           "temperature": 0.0,
-          "openai_api_key": "${OPENAI_API_KEY}",
-          "openai_base_url": "${OPENAI_BASE_URL}"
+          "openai_api_key": "${CHAT_API_KEY}",
+          "openai_base_url": "${CHAT_API_BASE_URL}"
         },
         "fact_retrieval_top_k": 10,
         "max_facts_after_reranking": 5,
@@ -245,8 +245,8 @@
     "type": "openai_chat",
     "model_name": "${OPENAI_CHAT_MODEL}",
     "low_cost_model_name": "${LOW_COST_MODEL}",
-    "openai_api_key": "${OPENAI_API_KEY}",
-    "openai_base_url": "${OPENAI_BASE_URL}"
+    "openai_api_key": "${CHAT_API_KEY}",
+    "openai_base_url": "${CHAT_API_BASE_URL}"
   },
   "telemetry_enabled": true
 }

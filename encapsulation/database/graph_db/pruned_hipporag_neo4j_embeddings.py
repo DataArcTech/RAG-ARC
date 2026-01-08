@@ -249,6 +249,8 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
                r.text AS text,
                r.predicate AS predicate,
                r.owner_id AS owner_id,
+               r.source_chunk_ids AS source_chunk_ids,
+               r.source_chunk_ids_truncated AS source_chunk_ids_truncated,
                h.entity_id AS head_id,
                t.entity_id AS tail_id,
                h.entity_name AS head_name,
@@ -259,6 +261,7 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
         facts = self._execute_query(fact_query)
 
         new_facts = []
+        updated_fact_meta = 0
         for record in facts:
             fact_id = record['fact_id']
             fact_text = record['text']
@@ -280,12 +283,34 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
                 ):
                     if record.get(key) is not None:
                         metadata[key] = record.get(key)
+                from encapsulation.database.utils.fact_provenance import merge_provenance_into_fact_metadata
+
+                merge_provenance_into_fact_metadata(
+                    metadata,
+                    source_chunk_ids=record.get("source_chunk_ids"),
+                    source_chunk_ids_truncated=record.get("source_chunk_ids_truncated"),
+                )
                 new_facts.append(Chunk(
                     id=fact_id,
                     content=fact_text,
                     owner_id=fact_owner,
                     metadata=metadata
                 ))
+            else:
+                chunk = self.fact_faiss_db.docstore.get(fact_id)
+                if not chunk:
+                    continue
+                meta = getattr(chunk, "metadata", None)
+                if not isinstance(meta, dict):
+                    continue
+                from encapsulation.database.utils.fact_provenance import merge_provenance_into_fact_metadata
+
+                if merge_provenance_into_fact_metadata(
+                    meta,
+                    source_chunk_ids=record.get("source_chunk_ids"),
+                    source_chunk_ids_truncated=record.get("source_chunk_ids_truncated"),
+                ):
+                    updated_fact_meta += 1
 
         if new_facts:
             logger.info(f"Adding {len(new_facts)} facts to FAISS Flat...")
@@ -302,6 +327,10 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
             summary["facts"] = {"attempted": len(new_facts), "embedded": len(new_facts)}
         else:
             summary["facts"] = {"attempted": 0, "embedded": 0}
+            fact_index_path = os.path.join(self.storage_path, 'fact_index')
+            if updated_fact_meta > 0:
+                self.fact_faiss_db.save_index(fact_index_path, 'index')
+                logger.info("Backfilled fact provenance for %s existing facts; saved index to %s", updated_fact_meta, fact_index_path)
 
         logger.info("Batch embedding generation completed!")
         return summary
