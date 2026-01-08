@@ -504,6 +504,14 @@ async def stream_chat_sse(
         def _run_stream() -> None:
             try:
                 _emit_progress({"stage": "prepare", "status": "start"})
+                # 从环境变量读取 USER_TYPE，用于选择对应的 prompt
+                user_type_str = os.getenv("USER_TYPE", "0")
+                try:
+                    user_type = int(user_type_str)
+                except ValueError:
+                    logger.warning("Invalid USER_TYPE environment variable: %s, defaulting to 0", user_type_str)
+                    user_type = 0
+                
                 try:
                     token_stream, chunks, subgraph_data, subgraph_info = rag_inference_handler.stream_chat(
                         query,
@@ -511,14 +519,25 @@ async def stream_chat_sse(
                         return_subgraph=(return_subgraph or include_evidence),
                         progress_callback=_emit_progress,
                         history_text=history_text if history_text else None,
+                        user_type=user_type,
                     )
                 except TypeError:
-                    # Backward compatibility: older implementations may not accept `history_text`.
-                    token_stream, chunks, subgraph_data, subgraph_info = rag_inference_handler.stream_chat(
-                        query,
-                        effective_owner,
-                        return_subgraph=(return_subgraph or include_evidence),
-                    )
+                    # Backward compatibility: older implementations may not accept `history_text` or `user_type`.
+                    try:
+                        token_stream, chunks, subgraph_data, subgraph_info = rag_inference_handler.stream_chat(
+                            query,
+                            effective_owner,
+                            return_subgraph=(return_subgraph or include_evidence),
+                            progress_callback=_emit_progress,
+                            history_text=history_text if history_text else None,
+                        )
+                    except TypeError:
+                        # Fallback to minimal signature
+                        token_stream, chunks, subgraph_data, subgraph_info = rag_inference_handler.stream_chat(
+                            query,
+                            effective_owner,
+                            return_subgraph=(return_subgraph or include_evidence),
+                        )
                 prepared["chunks"] = chunks
                 prepared["subgraph_data"] = subgraph_data
                 prepared["subgraph_info"] = subgraph_info

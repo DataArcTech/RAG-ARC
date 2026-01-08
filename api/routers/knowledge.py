@@ -125,7 +125,7 @@ def _normalize_file_id(file_id: str) -> str:
     return file_id
 @router.post(
     "",
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_200_OK,
 )
 async def upload_file(
     file: UploadFile,
@@ -684,7 +684,7 @@ async def export_file_mindmap(
 @router.post(
     "/{file_id}/permissions/grant",
     response_model=GrantPermissionResponse,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_200_OK,
 )
 async def grant_file_permission(
     file_id: str,
