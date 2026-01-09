@@ -125,9 +125,34 @@ class _PostgreSQLChatMixin:
 
     # ==================== CHAT MESSAGE MANAGEMENT ====================
 
+    def _clean_null_chars(self, obj: Any) -> Any:
+        """Recursively remove NULL characters (\u0000) from JSON-serializable objects"""
+        if isinstance(obj, str):
+            return obj.replace('\x00', '').replace('\u0000', '')
+        elif isinstance(obj, dict):
+            return {k: self._clean_null_chars(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._clean_null_chars(item) for item in obj]
+        else:
+            return obj
+
     def store_chat_message(self, message: ChatMessage, **kwargs: Any) -> Optional[ChatMessage]:
         """Store chat message metadata using SQLAlchemy ORM"""
         try:
+            # Clean NULL characters from all JSON fields before storing
+            if message.content:
+                message.content = self._clean_null_chars(message.content)
+            if message.sources:
+                message.sources = self._clean_null_chars(message.sources)
+            if message.source_file_ids:
+                message.source_file_ids = self._clean_null_chars(message.source_file_ids)
+            if message.subgraph_data:
+                message.subgraph_data = self._clean_null_chars(message.subgraph_data)
+            if message.raw_llm_response:
+                message.raw_llm_response = self._clean_null_chars(message.raw_llm_response)
+            if message.raw_mindmap_response:
+                message.raw_mindmap_response = self._clean_null_chars(message.raw_mindmap_response)
+            
             with self.SessionMaker() as db_session:
                 db_session.add(message)
                 db_session.commit()
