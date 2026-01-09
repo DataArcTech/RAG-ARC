@@ -299,7 +299,6 @@ async def download_file(file_id: str, user: Annotated[User | None, Depends(get_c
 async def get_mineru_asset(
     file_id: str,
     rel_path: str,
-    user: Annotated[User | None, Depends(get_current_user)],
 ):
     """Serve MinerU local image assets for a given knowledge file.
 
@@ -308,12 +307,6 @@ async def get_mineru_asset(
     Backwards compatibility: older runs may have stored artifacts under
     `${PARSER_OUTPUT_DIR}/mineru/<doc_stem>/images/...`.
     """
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
-
-    permission_type = await asyncio.to_thread(get_knowledge_handler().check_file_access, file_id, user.id)
-    if permission_type is None:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You are not allowed to access this file")
 
     metadata = await asyncio.to_thread(get_knowledge_handler().file_storage.get_file_metadata, file_id)
     if metadata is None:
