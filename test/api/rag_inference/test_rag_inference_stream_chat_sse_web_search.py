@@ -100,7 +100,7 @@ def test_stream_chat_sse_includes_web_search_chunks_and_progress(monkeypatch, cl
     class DummyLLM:
         def stream_chat(self, _messages):  # noqa: ANN001
             def _gen():
-                yield "assistant ok"
+                yield "assistant ok<sup>1</sup>"
 
             return _gen()
 
@@ -183,6 +183,26 @@ def test_stream_chat_sse_includes_web_search_chunks_and_progress(monkeypatch, cl
     assert "chunks" in payload and isinstance(payload["chunks"], list)
     assert len(payload["chunks"]) == 5
     assert any(((item.get("metadata") or {}).get("source") == "web.tavily") for item in payload["chunks"])
+
+    # sources event should include an external URL and keep UUID-like chunk_id for web sources
+    sources_event = None
+    for raw_line in resp.text.splitlines():
+        line = raw_line.strip("\r")
+        if not line.startswith("data:"):
+            continue
+        data = line.split(":", 1)[1].strip()
+        if data == "[DONE]":
+            break
+        chunk = json.loads(data)
+        if chunk.get("type") == "sources":
+            sources_event = chunk
+            break
+    assert sources_event is not None
+    sources = sources_event.get("sources") or []
+    assert isinstance(sources, list) and sources
+    web_sources = [s for s in sources if isinstance(s, dict) and str(s.get("file") or "").startswith("http")]
+    assert web_sources, "expected at least one web source with external URL"
+    uuid.UUID(str(web_sources[0].get("chunk_id")))
 
 
 def test_stream_chat_sse_defaults_to_no_web_search(monkeypatch, client):

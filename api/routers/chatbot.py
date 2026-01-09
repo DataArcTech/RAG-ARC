@@ -489,20 +489,16 @@ def _build_sources_for_frontend(entries: List[Dict[str, Any]], max_sources: int)
         source_title = filename
 
         if is_tavily_chunk:
-            # Tavily chunk: title 来自 content 第一行，file 来自 provenance.url
-            provenance = metadata.get("provenance") or {}
-            if isinstance(provenance, dict):
-                provenance_url = provenance.get("url")
-                if provenance_url:
-                    file_url = str(provenance_url).strip()
-            
-            # 从 content 第一行提取 title（content 格式是 "title\ncontent"）
+            provenance = metadata.get("provenance") if isinstance(metadata.get("provenance"), dict) else {}
+            url = provenance.get("url")
+            if isinstance(url, str) and url.strip().lower().startswith(("http://", "https://")):
+                file_url = url.strip()
+
             if content:
                 content_lines = content.split("\n", 1)
-                if len(content_lines) > 0 and content_lines[0].strip():
+                if content_lines and content_lines[0].strip():
                     source_title = content_lines[0].strip()
         else:
-            # 知识库 chunk: 保持原有逻辑，title 是文件名，file 是文件 URL
             if file_id and not file_storage_resolved:
                 file_storage_resolved = True
                 try:
@@ -520,6 +516,12 @@ def _build_sources_for_frontend(entries: List[Dict[str, Any]], max_sources: int)
                     file_url = f"/static/files/{file_id}/{quote(safe_name)}"
                 except Exception:  # noqa: BLE001
                     file_url = None
+
+        if not file_url:
+            provenance = metadata.get("provenance") if isinstance(metadata.get("provenance"), dict) else {}
+            url = provenance.get("url")
+            if isinstance(url, str) and url.strip().lower().startswith(("http://", "https://")):
+                file_url = url.strip()
 
         sources.append(
             ChatbotSourceItem(

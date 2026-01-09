@@ -426,10 +426,14 @@ class RAGInference(AbstractModule):
                     provenance = evidence.get("provenance") if isinstance(evidence.get("provenance"), dict) else {}
                     url = provenance.get("url")
                     title = (str(evidence.get("content") or "").split("\n", 1)[0]).strip() or "web"
-                    filename = str(url or title or "web").strip()
+                    filename = title
+                    external_chunk_id = str(evidence.get("chunk_id") or "").strip() or None
+                    if external_chunk_id:
+                        provenance = dict(provenance)
+                        provenance.setdefault("external_chunk_id", external_chunk_id)
                     web_chunks.append(
                         Chunk(
-                            id=str(evidence.get("chunk_id") or f"tavily-{web_step_id}-{uuid.uuid4().hex[:6]}"),
+                            id=str(uuid.uuid4()),
                             content=str(evidence.get("content") or ""),
                             metadata={
                                 "source": evidence.get("source") or "web.tavily",
