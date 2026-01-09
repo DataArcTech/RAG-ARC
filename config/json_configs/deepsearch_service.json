@@ -6,7 +6,7 @@
     "enable_sub_question": true,
     "persist_plan": true,
     "plan_output_dir": "${DEEPSEARCH_PLAN_OUTPUT_DIR}",
-    "allow_external_channel": false,
+    "allow_external_channel": true,
     "honor_planner_tool_selection": true,
     "graph_channel_tool": "graph_adapter.query",
     "text_channel_tool": "graph.context_rollup",
@@ -31,6 +31,7 @@
       "graph.relation_path_explore",
       "graph.relation_path_ground",
       "graph.beam_search",
+      "web.search",
       "code.python"
     ],
     "include_llm_tools_in_catalog": true,
@@ -213,9 +214,10 @@
   "external_channel": {
     "default_provider": "tavily",
     "max_rounds": 2,
-    "enabled": false,
+    "enabled": true,
     "context_window_limit": 12,
     "http_timeout": 20.0,
+    "endpoint_url": "https://api.tavily.com/search",
     "max_results": 5,
     "tool_timeout_seconds": 45.0,
     "cache_mode": "auto",

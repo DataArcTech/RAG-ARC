@@ -1783,6 +1783,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "fastmcp" },
     { name = "hnswlib" },
+    { name = "httpx" },
     { name = "huggingface-hub" },
     { name = "jieba" },
     { name = "minio" },
@@ -1827,7 +1828,6 @@ cpu = [
     { name = "faiss-cpu" },
 ]
 dev = [
-    { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
@@ -1850,7 +1850,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.104.0" },
     { name = "fastmcp", specifier = ">=0.1.0" },
     { name = "hnswlib", specifier = ">=0.7.0" },
-    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.25.0" },
+    { name = "httpx", specifier = ">=0.25.0" },
     { name = "huggingface-hub", specifier = ">=0.20.0" },
     { name = "jieba", specifier = ">=0.42.1" },
     { name = "minio", specifier = ">=7.2.7" },

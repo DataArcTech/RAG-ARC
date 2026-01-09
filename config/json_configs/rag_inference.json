@@ -89,5 +89,19 @@
     "llm_config": {
         "type": "openai_chat",
         "model_name": "${OPENAI_CHAT_MODEL}"
+    },
+    "web_search": {
+        "enabled": true,
+        "endpoint_url": "https://api.tavily.com/search",
+        "api_key": "${TAVILY_API_KEY}",
+        "search_depth": "advanced",
+        "timeout_seconds": 20.0,
+        "timeout_grace_seconds": 2.0,
+        "max_results": 5
+    },
+    "candidate_selection": {
+        "graph_candidates_k": 30,
+        "web_candidates_k": 5,
+        "rerank_keep_k": 5
     }
 }

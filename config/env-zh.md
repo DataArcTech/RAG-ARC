@@ -327,7 +327,7 @@ cp .env.example .env
 | `DEEPSEARCH_SECTIONWISE_WRITER` | `false` | 启用“分节写作 + Memory Bank 检索 + recency retain_k”模式。 |
 | `DEEPSEARCH_BUDGET_TIER` | _(空)_ | 可选的复杂度→预算覆盖开关（`low` / `default`）；为空时将基于问题内容做启发式预算分配。 |
 | `DEEPSEARCH_TELEMETRY_ENABLED` | `true` | 是否启用工具运行遥测（本地 artifacts）。 |
-| `TAVILY_API_KEY` | _(空)_ | Tavily 搜索的 Key（启用外部搜索时必填）。 |
+| `TAVILY_API_KEY` | _(空)_ | Tavily 网络搜索 Key（HippoRAG 问答与 DeepSearch 启用网络搜索时都会使用）。 |
 | `DEEPSEARCH_WEB_PROVIDER` | _(空)_ | 外部搜索路由提示（`tavily` / `tool` / `mcp`；其他值会回退到 `tavily`）。 |
 | `DEEPSEARCH_EXTERNAL_CACHE_MODE` | `auto` | 外部搜索录制/回放模式：`off` / `record` / `replay` / `auto`。 |
 | `DEEPSEARCH_EXTERNAL_CACHE_DIR` | `./local/deepsearch_artifacts/external_cache` | 外部搜索缓存目录。 |

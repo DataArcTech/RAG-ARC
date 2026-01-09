@@ -180,12 +180,13 @@ async def test_external_channel_respects_config_off():
 
 
 @pytest.mark.asyncio
-async def test_external_channel_requires_task_provider():
+async def test_external_channel_defaults_provider_from_config():
+    tool_manager = _StubToolManager()
     channel = ExternalSearchChannel(
-        tool_manager=None,
+        tool_manager=tool_manager,
         config={
             "enabled": True,
-            "default_provider": "tavily",
+            "default_provider": "tool",
             "max_rounds": 2,
             "context_window_limit": 12,
             "http_timeout": 20.0,
@@ -198,5 +199,6 @@ async def test_external_channel_requires_task_provider():
     )
     trace = _reasoning_trace()
     trace["pending_external"][0]["metadata"].pop("provider", None)
-    with pytest.raises(ValueError):
-        await channel.run(trace["pending_external"], reasoning_trace=trace, gap_result=None)
+    payload = await channel.run(trace["pending_external"], reasoning_trace=trace, gap_result=None)
+    assert tool_manager.calls and tool_manager.calls[0][0] == "web.search"
+    assert payload["evidences"]

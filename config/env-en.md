@@ -327,7 +327,7 @@ Location: `config/json_configs/deepsearch_service.json` → `tool_manager.enable
 | `DEEPSEARCH_SECTIONWISE_WRITER` | `false` | Enable section-wise report writing with Memory Bank retrieval + recency retention. |
 | `DEEPSEARCH_BUDGET_TIER` | _(empty)_ | Optional runtime override for complexity→budget scaling (`low` / `default`); when empty, DeepSearch uses a heuristic based on the question. |
 | `DEEPSEARCH_TELEMETRY_ENABLED` | `true` | Enable telemetry capture for tool runs (local artifacts). |
-| `TAVILY_API_KEY` | _(empty)_ | API key for Tavily (when external search enabled). |
+| `TAVILY_API_KEY` | _(empty)_ | API key for Tavily web search (used by both HippoRAG Q&A and DeepSearch when web search is enabled). |
 | `DEEPSEARCH_WEB_PROVIDER` | _(empty)_ | External search routing hint (`tavily` / `tool` / `mcp`; unknown values fall back to `tavily`). |
 | `DEEPSEARCH_EXTERNAL_CACHE_MODE` | `auto` | External search record/replay mode: `off` / `record` / `replay` / `auto`. |
 | `DEEPSEARCH_EXTERNAL_CACHE_DIR` | `./local/deepsearch_artifacts/external_cache` | External search cache directory. |

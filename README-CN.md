@@ -278,7 +278,7 @@ RAG-ARC使用模块化配置系统。关键配置文件位于`config/json_config
 - `knowledge.json`：知识管理配置
 - `account.json`：用户账户配置
 - `.env`：运行时参数（模型、账号、端口等）。当需要在本地直接访问容器中的 PostgreSQL / Redis / Neo4j 时，可设置 `DEVELOP_MODE=true`（等同于开启 `EXPOSE_*` 变量），上述服务会开放到 `localhost`；默认关闭以确保安全。
-- DeepSearch 外部搜索：在 `config/json_configs/deepsearch_service.json` 开启（`external_channel.enabled=true` 且 `gap_detection.enable_external_on_gap=true`），并提供 `TAVILY_API_KEY`；运行时可用 `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` 覆盖开关。
+- 网络搜索（Tavily）：DeepSearch 默认开启外部搜索（`config/json_configs/deepsearch_service.json` → `planner.allow_external_channel=true` 且 `external_channel.enabled=true`）。HippoRAG 问答支持请求级按需开启：在 `/rag_inference/stream_chat/{session_id}` 传 `enable_web_search=true`（同时要求 `config/json_configs/rag_inference*.json` → `web_search.enabled=true`）。配置 `TAVILY_API_KEY` 后即可返回搜索结果。
 
 ### 🌐 通过 `.env` 切换模型调用方式
 
@@ -440,7 +440,7 @@ import httpx
 def chat_sse(session_id: str, access_token: str):
     url = f"http://localhost:8000/rag_inference/stream_chat/{session_id}"
     headers = {"Authorization": f"Bearer {access_token}"}
-    params = {"query": "你好，RAG-ARC!", "include_evidence": "true"}
+    params = {"query": "你好，RAG-ARC!", "include_evidence": "true", "enable_web_search": "true"}  # 按需开启
 
     with httpx.stream("GET", url, headers=headers, params=params, timeout=120.0) as r:
         r.raise_for_status()
