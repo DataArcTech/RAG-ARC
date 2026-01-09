@@ -88,8 +88,8 @@ class FaissVectorDB(VectorDB):
         super().__init__(config)
         logger.info("Initializing FaissVectorDB")
 
-        # Build embedding model from config
-        self.embedding_model = self.config.embedding_config.build()
+        # Build embedding model lazily (many workflows provide precomputed embeddings).
+        self.embedding_model = None
 
         # initialize faiss attributes
         self.index = None  # faiss index
@@ -97,6 +97,10 @@ class FaissVectorDB(VectorDB):
         self.index_to_docstore_id = {}  # Mapping from index position to chunk ID
         self.deleted_ids = set()  # Set to track soft-deleted chunk IDs
         self._lock = FAISS_LOCK
+
+    def _ensure_embedding_model(self):
+        if self.embedding_model is None:
+            self.embedding_model = self.config.embedding_config.build()
 
     
     def load_index(self, path: str):
@@ -168,8 +172,7 @@ class FaissVectorDB(VectorDB):
             # Dimension validation must never require a live embedding API call. Prefer persisted dimension,
             # then config-provided `embedding_dimensions` if available.
             stored_dim = data.get("embedding_dim")
-            cfg = getattr(self.embedding_model, "config", None)
-            configured_dim = getattr(cfg, "embedding_dimensions", None) if cfg is not None else None
+            configured_dim = getattr(getattr(self.config, "embedding_config", None), "embedding_dimensions", None)
             expected_dim = stored_dim if stored_dim is not None else configured_dim
             if expected_dim is not None and self.index is not None and getattr(self.index, "d", None) is not None:
                 loaded_dim = int(self.index.d)
@@ -205,8 +208,7 @@ class FaissVectorDB(VectorDB):
             )
 
     def _infer_embedding_dim(self) -> Optional[int]:
-        cfg = getattr(self.embedding_model, "config", None)
-        candidate = getattr(cfg, "embedding_dimensions", None)
+        candidate = getattr(getattr(self.config, "embedding_config", None), "embedding_dimensions", None)
         if candidate is not None:
             try:
                 dim = int(candidate)
@@ -215,6 +217,7 @@ class FaissVectorDB(VectorDB):
             except Exception:
                 pass
         try:
+            self._ensure_embedding_model()
             probe = self.embedding_model.embed(["dimension probe"])
             if isinstance(probe, list) and probe:
                 first = probe[0]
@@ -227,8 +230,8 @@ class FaissVectorDB(VectorDB):
             return None
 
     def _embedding_fingerprint(self) -> str:
-        cfg = getattr(self.embedding_model, "config", None)
         payload: Dict[str, Any] = {}
+        cfg = getattr(self.config, "embedding_config", None)
         if cfg is not None:
             payload = {
                 "type": getattr(cfg, "type", None) or cfg.__class__.__name__,
@@ -350,6 +353,7 @@ class FaissVectorDB(VectorDB):
             rows_to_embed.append(idx)
 
         if texts_to_embed:
+            self._ensure_embedding_model()
             computed = self.embedding_model.embed(texts_to_embed)
             if isinstance(computed, list) and computed and isinstance(computed[0], (int, float)):
                 computed = [computed]
@@ -594,11 +598,6 @@ class FaissVectorDB(VectorDB):
         """
         logger.info(f"Updating index with {len(chunks)} chunks")
 
-        # Check if embedding model is available
-        if self.embedding_model is None:
-            logger.error("No embedding model available for update")
-            return []
-
         try:
             chunk_ids = self._add_chunks(chunks)
             logger.info(f"Update completed: {self.index.ntotal} total vectors")
@@ -609,6 +608,7 @@ class FaissVectorDB(VectorDB):
             if self.index is not None and chunks:
                 try:
                     probe_text = getattr(chunks[0], "content", "") or ""
+                    self._ensure_embedding_model()
                     probe_emb = self.embedding_model.embed([probe_text])[0]
                     probe_dim = int(np.array(probe_emb, dtype=np.float32).shape[0])
                     if int(getattr(self.index, "d", 0) or 0) != probe_dim:

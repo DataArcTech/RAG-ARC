@@ -3,6 +3,7 @@ import logging
 import re
 import random
 import time
+import copy
 from typing import List, Dict, Any, Optional, Sequence, Set, Tuple
 
 import numpy as np
@@ -10,11 +11,106 @@ import numpy as np
 import faiss
 
 from encapsulation.data_model.schema import Chunk
+from core.utils.path_guard import safe_leaf_name
 
 logger = logging.getLogger(__name__)
 
 
 class _PrunedHippoRAGNeo4jEmbeddingsMixin:
+    def _faiss_owner_scoped_dir(self, kind: str, *, owner_id: Optional[str]) -> str:
+        """
+        Resolve an owner-scoped on-disk directory for graph FAISS artifacts.
+
+        Layout:
+          <storage_path>/{fact_index,entity_index}/<owner_leaf>/
+
+        Notes:
+        - This avoids cross-run pollution when benchmark runs use distinct owners.
+        - `owner_id=None` is stored under `__GLOBAL__` (not a multi-owner aggregate).
+        """
+        base_dir = os.path.join(str(self.storage_path), f"{kind}_index")
+        owner_leaf = safe_leaf_name(owner_id or "__GLOBAL__", default="__GLOBAL__")
+        return os.path.join(base_dir, owner_leaf)
+
+    @staticmethod
+    def _clone_faiss_config_for_path(config: Any, *, index_path: str) -> Any:
+        """
+        Create a per-path clone of a FAISS config so @shared_module does not reuse instances.
+        """
+        if hasattr(config, "model_copy"):
+            try:
+                return config.model_copy(update={"index_path": index_path})
+            except Exception:  # noqa: BLE001
+                pass
+        cloned = copy.copy(config)
+        try:
+            setattr(cloned, "index_path", str(index_path))
+        except Exception:  # noqa: BLE001
+            # As a last resort, mutate in place (still isolates if caller passes unique config objects).
+            setattr(config, "index_path", str(index_path))
+            return config
+        return cloned
+
+    def _owner_scoped_faiss_db(self, kind: str, *, owner_id: Optional[str]):
+        """
+        Return a FaissVectorDB bound to the owner-scoped directory (lazy-load from disk).
+        """
+        cache_attr = "_owner_scoped_fact_faiss" if kind == "fact" else "_owner_scoped_entity_faiss"
+        cache: Dict[str, Any] = getattr(self, cache_attr, None) or {}
+        setattr(self, cache_attr, cache)
+
+        key = str(owner_id) if owner_id is not None else "__GLOBAL__"
+        if key in cache:
+            return cache[key]
+
+        template_db = self.fact_faiss_db if kind == "fact" else self.entity_faiss_db
+        index_dir = self._faiss_owner_scoped_dir(kind, owner_id=owner_id)
+        cfg = self._clone_faiss_config_for_path(getattr(template_db, "config", template_db), index_path=index_dir)
+
+        from encapsulation.database.vector_db.faiss import FaissVectorDB
+
+        db = FaissVectorDB(cfg)
+
+        # Load if the owner-scoped index exists on disk.
+        try:
+            pkl_path = os.path.join(index_dir, "index.pkl")
+            faiss_path = os.path.join(index_dir, "index.faiss")
+            if os.path.exists(pkl_path) and os.path.exists(faiss_path):
+                db.load_index(index_dir)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load %s FAISS index for owner=%s: %s", kind, owner_id, exc)
+
+        cache[key] = db
+        return db
+
+    def get_fact_faiss_db(self, owner_id: Optional[object]):
+        owner_str = None if owner_id is None else str(owner_id)
+        owner_norm = self._restore_owner_id(owner_str)
+        return self._owner_scoped_faiss_db("fact", owner_id=owner_norm)
+
+    def get_entity_faiss_db(self, owner_id: Optional[object]):
+        owner_str = None if owner_id is None else str(owner_id)
+        owner_norm = self._restore_owner_id(owner_str)
+        return self._owner_scoped_faiss_db("entity", owner_id=owner_norm)
+
+    def iter_owner_scoped_faiss_dbs(self, kind: str):
+        """
+        Iterate over all owner-scoped FAISS DBs present on disk for this store.
+
+        This is primarily used for admin/global retrieval where owner_id=None.
+        """
+        base_dir = os.path.join(str(self.storage_path), f"{kind}_index")
+        if not os.path.isdir(base_dir):
+            return []
+        out = []
+        for name in sorted(os.listdir(base_dir)):
+            full = os.path.join(base_dir, name)
+            if not os.path.isdir(full) or name.startswith("."):
+                continue
+            owner = None if name == "__GLOBAL__" else name
+            out.append((owner, self._owner_scoped_faiss_db(kind, owner_id=owner)))
+        return out
+
     def _graph_embedding_settings(self) -> Dict[str, float]:
         config_batch_size = getattr(getattr(self.embedding_model, "config", None), "request_batch_size", None)
         batch_size = int(os.getenv("GRAPH_INDEX_EMBED_BATCH_SIZE", str(config_batch_size or 64)))
@@ -204,42 +300,44 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
             entity_query = "MATCH (e:Entity) RETURN e.entity_id AS entity_id, e.entity_name AS entity_name, e.owner_id AS owner_id"
         entities = self._execute_query(entity_query, entity_params or None)
 
-        new_entities = []
+        owners_to_entities: Dict[Optional[str], List[Dict[str, Any]]] = {}
         for record in entities:
-            entity_id = record['entity_id']
-            entity_name = record['entity_name']
-            entity_owner = self._restore_owner_id(record.get('owner_id'))
-            # Check if already in FAISS
-            if entity_id not in self.entity_faiss_db.docstore:
-                metadata = {'type': 'entity'}
-                if entity_owner:
-                    metadata['owner_id'] = entity_owner
-                new_entities.append(Chunk(
-                    id=entity_id,
-                    content=entity_name,
-                    owner_id=entity_owner,
-                    metadata=metadata
-                ))
+            owner = self._restore_owner_id(record.get("owner_id"))
+            owners_to_entities.setdefault(owner, []).append(record)
 
-        if new_entities:
-            logger.info(f"Adding {len(new_entities)} entities to FAISS HNSW...")
+        attempted_entities = 0
+        embedded_entities = 0
+        for owner, records in owners_to_entities.items():
+            entity_db = self._owner_scoped_faiss_db("entity", owner_id=owner)
+            new_entities: List[Chunk] = []
+            for record in records:
+                entity_id = record["entity_id"]
+                entity_name = record["entity_name"]
+                if entity_id in entity_db.docstore:
+                    continue
+                metadata = {"type": "entity"}
+                if owner:
+                    metadata["owner_id"] = owner
+                new_entities.append(Chunk(id=entity_id, content=entity_name, owner_id=owner, metadata=metadata))
+
+            attempted_entities += len(new_entities)
+            if not new_entities:
+                continue
+
+            logger.info("Adding %s entities to FAISS HNSW (owner=%s)...", len(new_entities), owner)
             entity_texts = [chunk.content for chunk in new_entities]
             entity_embeddings = self._embed_texts_resilient(entity_texts, purpose="entity")
 
-            # Store embeddings in chunk metadata BEFORE adding to FAISS
             for chunk, embedding in zip(new_entities, entity_embeddings):
-                if isinstance(embedding, list):
-                    embedding = np.array(embedding)
-                chunk.metadata['embedding'] = embedding
+                chunk.metadata["embedding"] = np.array(embedding, dtype=np.float32)
 
-            # Now add to FAISS (embeddings will be regenerated, but metadata is preserved)
-            self.entity_faiss_db.update_index(new_entities)
-            entity_index_path = os.path.join(self.storage_path, 'entity_index')
-            self.entity_faiss_db.save_index(entity_index_path, 'index')
-            logger.info(f"Saved entity index to {entity_index_path}")
-            summary["entities"] = {"attempted": len(new_entities), "embedded": len(new_entities)}
-        else:
-            summary["entities"] = {"attempted": 0, "embedded": 0}
+            entity_db.update_index(new_entities)
+            entity_index_path = self._faiss_owner_scoped_dir("entity", owner_id=owner)
+            entity_db.save_index(entity_index_path, "index")
+            embedded_entities += len(new_entities)
+            logger.info("Saved owner-scoped entity index to %s", entity_index_path)
+
+        summary["entities"] = {"attempted": attempted_entities, "embedded": embedded_entities}
 
         # 3. Generate fact embeddings and add to FAISS Flat
         # Facts are stored as RELATES_TO relationships between entities
@@ -260,77 +358,90 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
         """
         facts = self._execute_query(fact_query)
 
-        new_facts = []
-        updated_fact_meta = 0
+        owners_to_facts: Dict[Optional[str], List[Dict[str, Any]]] = {}
         for record in facts:
-            fact_id = record['fact_id']
-            fact_text = record['text']
-            fact_owner = self._restore_owner_id(record.get('owner_id'))
-            if fact_id not in self.fact_faiss_db.docstore:
-                metadata = {'type': 'fact'}
-                if fact_owner:
-                    metadata['owner_id'] = fact_owner
-                # Preserve structured endpoints for downstream retrieval (avoids re-parsing text and
-                # allows representing same-name different-type entities).
-                for key in (
-                    "head_id",
-                    "tail_id",
-                    "head_name",
-                    "tail_name",
-                    "head_type",
-                    "tail_type",
-                    "predicate",
-                ):
-                    if record.get(key) is not None:
-                        metadata[key] = record.get(key)
-                from encapsulation.database.utils.fact_provenance import merge_provenance_into_fact_metadata
+            owner = self._restore_owner_id(record.get("owner_id"))
+            owners_to_facts.setdefault(owner, []).append(record)
 
-                merge_provenance_into_fact_metadata(
-                    metadata,
-                    source_chunk_ids=record.get("source_chunk_ids"),
-                    source_chunk_ids_truncated=record.get("source_chunk_ids_truncated"),
-                )
-                new_facts.append(Chunk(
-                    id=fact_id,
-                    content=fact_text,
-                    owner_id=fact_owner,
-                    metadata=metadata
-                ))
-            else:
-                chunk = self.fact_faiss_db.docstore.get(fact_id)
-                if not chunk:
-                    continue
-                meta = getattr(chunk, "metadata", None)
-                if not isinstance(meta, dict):
-                    continue
-                from encapsulation.database.utils.fact_provenance import merge_provenance_into_fact_metadata
+        attempted_facts = 0
+        embedded_facts = 0
+        updated_fact_meta_total = 0
 
-                if merge_provenance_into_fact_metadata(
-                    meta,
-                    source_chunk_ids=record.get("source_chunk_ids"),
-                    source_chunk_ids_truncated=record.get("source_chunk_ids_truncated"),
-                ):
-                    updated_fact_meta += 1
+        for owner, records in owners_to_facts.items():
+            fact_db = self._owner_scoped_faiss_db("fact", owner_id=owner)
+            new_facts: List[Chunk] = []
+            updated_fact_meta = 0
 
-        if new_facts:
-            logger.info(f"Adding {len(new_facts)} facts to FAISS Flat...")
-            fact_texts = [chunk.content for chunk in new_facts]
-            fact_embeddings = self._embed_texts_resilient(fact_texts, purpose="fact")
-            for chunk, embedding in zip(new_facts, fact_embeddings):
-                if isinstance(embedding, list):
-                    embedding = np.array(embedding)
-                chunk.metadata["embedding"] = embedding
-            self.fact_faiss_db.update_index(new_facts)
-            fact_index_path = os.path.join(self.storage_path, 'fact_index')
-            self.fact_faiss_db.save_index(fact_index_path, 'index')
-            logger.info(f"Saved fact index to {fact_index_path}")
-            summary["facts"] = {"attempted": len(new_facts), "embedded": len(new_facts)}
-        else:
-            summary["facts"] = {"attempted": 0, "embedded": 0}
-            fact_index_path = os.path.join(self.storage_path, 'fact_index')
+            for record in records:
+                fact_id = record["fact_id"]
+                fact_text = record["text"]
+
+                if fact_id not in fact_db.docstore:
+                    metadata = {"type": "fact"}
+                    if owner:
+                        metadata["owner_id"] = owner
+                    for key in (
+                        "head_id",
+                        "tail_id",
+                        "head_name",
+                        "tail_name",
+                        "head_type",
+                        "tail_type",
+                        "predicate",
+                    ):
+                        if record.get(key) is not None:
+                            metadata[key] = record.get(key)
+                    from encapsulation.database.utils.fact_provenance import merge_provenance_into_fact_metadata
+
+                    merge_provenance_into_fact_metadata(
+                        metadata,
+                        source_chunk_ids=record.get("source_chunk_ids"),
+                        source_chunk_ids_truncated=record.get("source_chunk_ids_truncated"),
+                    )
+                    new_facts.append(Chunk(id=fact_id, content=fact_text, owner_id=owner, metadata=metadata))
+                else:
+                    chunk = fact_db.docstore.get(fact_id)
+                    if not chunk:
+                        continue
+                    meta = getattr(chunk, "metadata", None)
+                    if not isinstance(meta, dict):
+                        continue
+                    from encapsulation.database.utils.fact_provenance import merge_provenance_into_fact_metadata
+
+                    if merge_provenance_into_fact_metadata(
+                        meta,
+                        source_chunk_ids=record.get("source_chunk_ids"),
+                        source_chunk_ids_truncated=record.get("source_chunk_ids_truncated"),
+                    ):
+                        updated_fact_meta += 1
+
+            attempted_facts += len(new_facts)
+
+            if new_facts:
+                logger.info("Adding %s facts to FAISS Flat (owner=%s)...", len(new_facts), owner)
+                fact_texts = [chunk.content for chunk in new_facts]
+                fact_embeddings = self._embed_texts_resilient(fact_texts, purpose="fact")
+                for chunk, embedding in zip(new_facts, fact_embeddings):
+                    chunk.metadata["embedding"] = np.array(embedding, dtype=np.float32)
+                fact_db.update_index(new_facts)
+                fact_index_path = self._faiss_owner_scoped_dir("fact", owner_id=owner)
+                fact_db.save_index(fact_index_path, "index")
+                embedded_facts += len(new_facts)
+                logger.info("Saved owner-scoped fact index to %s", fact_index_path)
+
             if updated_fact_meta > 0:
-                self.fact_faiss_db.save_index(fact_index_path, 'index')
-                logger.info("Backfilled fact provenance for %s existing facts; saved index to %s", updated_fact_meta, fact_index_path)
+                fact_index_path = self._faiss_owner_scoped_dir("fact", owner_id=owner)
+                fact_db.save_index(fact_index_path, "index")
+                logger.info(
+                    "Backfilled fact provenance for %s existing facts (owner=%s); saved index to %s",
+                    updated_fact_meta,
+                    owner,
+                    fact_index_path,
+                )
+
+            updated_fact_meta_total += updated_fact_meta
+
+        summary["facts"] = {"attempted": attempted_facts, "embedded": embedded_facts, "updated_meta": updated_fact_meta_total}
 
         logger.info("Batch embedding generation completed!")
         return summary

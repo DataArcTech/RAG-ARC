@@ -3,6 +3,8 @@ import logging
 import pickle
 from typing import List, Dict, Any
 
+from core.utils.path_guard import safe_leaf_name
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,13 +31,21 @@ class _PrunedHippoRAGNeo4jPersistenceMixin:
         logger.info(f"Saved chunk embeddings to {embeddings_path}")
 
         # 2. Save FAISS indices
-        fact_index_path = os.path.join(path, 'fact_index')
-        self.fact_faiss_db.save_index(fact_index_path, 'index')
-        logger.info(f"Saved fact index to {fact_index_path}")
+        saved = 0
+        for owner, db in self.iter_owner_scoped_faiss_dbs("fact"):
+            owner_leaf = safe_leaf_name(owner or "__GLOBAL__", default="__GLOBAL__")
+            fact_index_path = os.path.join(path, "fact_index", owner_leaf)
+            db.save_index(fact_index_path, "index")
+            saved += 1
+        logger.info("Saved %s owner-scoped fact indexes under %s", saved, os.path.join(path, "fact_index"))
 
-        entity_index_path = os.path.join(path, 'entity_index')
-        self.entity_faiss_db.save_index(entity_index_path, 'index')
-        logger.info(f"Saved entity index to {entity_index_path}")
+        saved = 0
+        for owner, db in self.iter_owner_scoped_faiss_dbs("entity"):
+            owner_leaf = safe_leaf_name(owner or "__GLOBAL__", default="__GLOBAL__")
+            entity_index_path = os.path.join(path, "entity_index", owner_leaf)
+            db.save_index(entity_index_path, "index")
+            saved += 1
+        logger.info("Saved %s owner-scoped entity indexes under %s", saved, os.path.join(path, "entity_index"))
 
         logger.info(f"Index saved to {path}")
         logger.info("Note: Neo4j data is persisted automatically in the database")
@@ -66,20 +76,42 @@ class _PrunedHippoRAGNeo4jPersistenceMixin:
         else:
             logger.warning(f"Chunk embeddings file not found: {embeddings_path}")
 
-        # 2. Load FAISS indices
-        fact_index_path = os.path.join(path, 'fact_index')
-        if os.path.exists(fact_index_path):
-            self.fact_faiss_db.load_index(fact_index_path)
-            logger.info(f"Loaded fact index from {fact_index_path}")
-        else:
-            logger.warning(f"Fact index not found: {fact_index_path}")
+        # 2. Load FAISS indices (owner-scoped directories)
+        def _load_owner_scoped(kind: str) -> int:
+            kind_root = os.path.join(path, f"{kind}_index")
+            if not os.path.exists(kind_root):
+                logger.warning("%s index not found: %s", kind, kind_root)
+                return 0
 
-        entity_index_path = os.path.join(path, 'entity_index')
-        if os.path.exists(entity_index_path):
-            self.entity_faiss_db.load_index(entity_index_path)
-            logger.info(f"Loaded entity index from {entity_index_path}")
-        else:
-            logger.warning(f"Entity index not found: {entity_index_path}")
+            # Legacy layout: files directly under kind_root.
+            legacy_pkl = os.path.join(kind_root, "index.pkl")
+            legacy_faiss = os.path.join(kind_root, "index.faiss")
+            loaded_any = 0
+            if os.path.exists(legacy_pkl) and os.path.exists(legacy_faiss):
+                owner_db = self.get_fact_faiss_db(None) if kind == "fact" else self.get_entity_faiss_db(None)
+                owner_db.load_index(kind_root)
+                dst = self._faiss_owner_scoped_dir(kind, owner_id=None)
+                owner_db.save_index(dst, "index")
+                loaded_any += 1
+
+            if not os.path.isdir(kind_root):
+                return loaded_any
+
+            for owner_leaf in sorted(os.listdir(kind_root)):
+                src = os.path.join(kind_root, owner_leaf)
+                if not os.path.isdir(src) or owner_leaf.startswith("."):
+                    continue
+                owner = None if owner_leaf == "__GLOBAL__" else owner_leaf
+                owner_db = self.get_fact_faiss_db(owner) if kind == "fact" else self.get_entity_faiss_db(owner)
+                owner_db.load_index(src)
+                dst = self._faiss_owner_scoped_dir(kind, owner_id=owner)
+                owner_db.save_index(dst, "index")
+                loaded_any += 1
+            return loaded_any
+
+        loaded_facts = _load_owner_scoped("fact")
+        loaded_entities = _load_owner_scoped("entity")
+        logger.info("Loaded %s fact indexes and %s entity indexes from %s", loaded_facts, loaded_entities, path)
 
         # 3. Reload graph cache from Neo4j (force reload)
         self._load_graph_cache(force_reload=True)
@@ -151,4 +183,3 @@ class _PrunedHippoRAGNeo4jPersistenceMixin:
         if driver:
             driver.close()
             logger.info("Neo4j driver closed")
-

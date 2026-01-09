@@ -28,12 +28,22 @@ class _PrunedHippoRAGFactsMixin:
         query_embedding = self._get_query_embedding(query)
 
         try:
+            fact_db = None
+            get_db = getattr(getattr(self, "graph_store", None), "get_fact_faiss_db", None)
+            if callable(get_db):
+                fact_db = get_db(owner_id)
+            else:
+                fact_db = getattr(self.graph_store, "fact_faiss_db", None)
+            if fact_db is None:
+                logger.warning("Fact FAISS DB is not available")
+                return np.array([]), []
+
             # Check if fact index exists and is initialized
-            if self.graph_store.fact_faiss_db.index is None:
+            if fact_db.index is None:
                 logger.warning("Fact FAISS index is not initialized")
                 return np.array([]), []
 
-            total_facts = self.graph_store.fact_faiss_db.index.ntotal
+            total_facts = fact_db.index.ntotal
             if total_facts == 0:
                 logger.warning("No facts in FAISS index")
                 return np.array([]), []
@@ -41,7 +51,7 @@ class _PrunedHippoRAGFactsMixin:
             query_vector = query_embedding.reshape(1, -1).astype(np.float32)
 
             # Normalize query vector for cosine similarity
-            if self.graph_store.fact_faiss_db.config.metric == "cosine" or self.graph_store.fact_faiss_db.config.normalize_L2:
+            if fact_db.config.metric == "cosine" or fact_db.config.normalize_L2:
                 from core.utils.faiss_lock import FAISS_LOCK
                 import faiss
 
@@ -55,16 +65,16 @@ class _PrunedHippoRAGFactsMixin:
                 from core.utils.faiss_lock import FAISS_LOCK
 
                 with FAISS_LOCK:
-                    scores_out, indices_out = self.graph_store.fact_faiss_db.index.search(query_vector, k)
+                    scores_out, indices_out = fact_db.index.search(query_vector, k)
                 return scores_out[0], indices_out[0]
 
             def _collect(scores_1d: np.ndarray, indices_1d: np.ndarray) -> tuple[np.ndarray, list[str]]:
                 fact_ids_local: list[str] = []
                 valid_scores_local: list[float] = []
                 for idx, score in zip(indices_1d, scores_1d):
-                    if idx >= 0 and idx in self.graph_store.fact_faiss_db.index_to_docstore_id:
-                        fact_id = self.graph_store.fact_faiss_db.index_to_docstore_id[idx]
-                        if fact_id not in self.graph_store.fact_faiss_db.deleted_ids:
+                    if idx >= 0 and idx in fact_db.index_to_docstore_id:
+                        fact_id = fact_db.index_to_docstore_id[idx]
+                        if fact_id not in fact_db.deleted_ids:
                             fact_ids_local.append(fact_id)
                             valid_scores_local.append(float(score))
                 if not valid_scores_local:
@@ -76,7 +86,7 @@ class _PrunedHippoRAGFactsMixin:
             # adaptively increase k so the top-k isn't dominated by other tenants' facts.
             k = min(total_facts, max(desired_owner_hits, self.config.fact_retrieval_top_k * 10))
             owner_str = self._owner_to_str(owner_id)
-            docstore = getattr(self.graph_store.fact_faiss_db, "docstore", {})
+            docstore = getattr(fact_db, "docstore", {})
 
             while True:
                 scores_1d, indices_1d = _search(k)
@@ -100,7 +110,8 @@ class _PrunedHippoRAGFactsMixin:
                         filtered_scores.append(float(score))
                         filtered_ids.append(fact_id)
 
-                if filtered_scores or k >= total_facts or len(filtered_ids) >= desired_owner_hits:
+                # Keep increasing k until we either have enough owner-scoped hits or we've exhausted the index.
+                if len(filtered_ids) >= desired_owner_hits or k >= total_facts:
                     if not filtered_scores:
                         return np.array([]), []
                     dtype = query_fact_scores.dtype if isinstance(query_fact_scores, np.ndarray) else np.float32

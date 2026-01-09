@@ -66,3 +66,47 @@ def test_fact_owner_filter_adapts_k_until_hits_found() -> None:
     assert all(runner.graph_store.fact_faiss_db.docstore[fid].owner_id == "owner-a" for fid in fact_ids)
     assert runner.graph_store.fact_faiss_db.index.calls[0] == 20  # 2*10
     assert runner.graph_store.fact_faiss_db.index.calls[-1] >= 80
+
+
+class _RunnerNeedsMoreHits(_PrunedHippoRAGFactsMixin):
+    def __init__(self):
+        self.config = SimpleNamespace(fact_retrieval_top_k=20)
+
+        docstore = {}
+        index_to_docstore_id = {}
+        # For k=200, only 5 hits belong to owner-a (non-empty but insufficient).
+        # Owner-a facts appear heavily only after rank 200.
+        for i in range(500):
+            fid = f"f{i}"
+            if i < 200:
+                owner = "owner-a" if i in {10, 50, 90, 130, 170} else "owner-b"
+            else:
+                owner = "owner-a"
+            docstore[fid] = _FakeChunk(owner_id=owner)
+            index_to_docstore_id[i] = fid
+
+        self.graph_store = SimpleNamespace(
+            fact_faiss_db=SimpleNamespace(
+                index=_FakeFaissIndex(total=2000, max_return=500),
+                config=SimpleNamespace(metric="ip", normalize_L2=False),
+                index_to_docstore_id=index_to_docstore_id,
+                deleted_ids=set(),
+                docstore=docstore,
+            )
+        )
+
+        self.embedding_model = SimpleNamespace(embed=lambda x: np.zeros(3, dtype=np.float32))
+
+    @staticmethod
+    def _owner_to_str(owner_id):  # noqa: ANN001
+        return str(owner_id) if owner_id is not None else ""
+
+
+def test_fact_owner_filter_keeps_searching_until_desired_hits() -> None:
+    runner = _RunnerNeedsMoreHits()
+    scores, fact_ids = runner._get_fact_scores_faiss("q", owner_id="owner-a")
+
+    assert len(fact_ids) >= 20
+    assert all(runner.graph_store.fact_faiss_db.docstore[fid].owner_id == "owner-a" for fid in fact_ids)
+    assert runner.graph_store.fact_faiss_db.index.calls[0] == 200  # 20*10
+    assert runner.graph_store.fact_faiss_db.index.calls[-1] > 200

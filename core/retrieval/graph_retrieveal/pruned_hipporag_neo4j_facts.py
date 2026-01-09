@@ -21,7 +21,9 @@ class _PrunedHippoRAGNeo4jFactsMixin:
             return scores, fact_ids
 
         owner_str = self._owner_to_str(owner_id)
-        docstore = self.graph_store.fact_faiss_db.docstore
+        get_db = getattr(getattr(self, "graph_store", None), "get_fact_faiss_db", None)
+        fact_db = get_db(owner_id) if callable(get_db) else self.graph_store.fact_faiss_db
+        docstore = fact_db.docstore
 
         filtered_scores = []
         filtered_ids = []
@@ -81,7 +83,7 @@ class _PrunedHippoRAGNeo4jFactsMixin:
             cfg=cfg,
             scores=filtered_scores_arr,
             fact_ids=filtered_ids,
-            docstore=self.graph_store.fact_faiss_db.docstore,
+            docstore=docstore,
             dense_top_chunk_ids=dense_top_chunk_ids,
         )
         logger.info(
@@ -116,13 +118,15 @@ class _PrunedHippoRAGNeo4jFactsMixin:
 
         facts: List[Tuple] = []
         owner_str = self._owner_to_str(owner_id)
+        get_db = getattr(getattr(self, "graph_store", None), "get_fact_faiss_db", None)
+        fact_db = get_db(owner_id) if callable(get_db) else self.graph_store.fact_faiss_db
 
         for idx in indices:
             if idx < len(fact_ids):
                 fact_id = fact_ids[idx]
                 # Retrieve fact from FAISS docstore (contains full Chunk with fact content)
-                if fact_id in self.graph_store.fact_faiss_db.docstore:
-                    chunk = self.graph_store.fact_faiss_db.docstore[fact_id]
+                if fact_id in fact_db.docstore:
+                    chunk = fact_db.docstore[fact_id]
 
                     fact_owner = getattr(chunk, "owner_id", None)
                     if fact_owner is None and chunk.metadata:
