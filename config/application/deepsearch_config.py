@@ -372,6 +372,7 @@ class ExternalChannelConfig(BaseModel):
     enabled: bool = Field(False, description="Force-enable the channel even when env flags disable it.")
     context_window_limit: int = Field(12, description="Evidence window size forwarded to external tools.")
     http_timeout: float = Field(20.0, description="Timeout applied to HTTP-based providers.")
+    endpoint_url: str = Field("https://api.tavily.com/search", description="HTTP provider endpoint (Tavily).")
     max_results: int = Field(5, description="Maximum documents returned by HTTP providers.")
     tool_timeout_seconds: float = Field(45.0, description="Timeout applied to tool_manager invocations.")
     cache_mode: str = Field("auto", description="External cache mode: off/record/replay/auto.")

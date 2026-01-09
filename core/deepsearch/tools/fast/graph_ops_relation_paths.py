@@ -6,6 +6,7 @@ from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.graph_adapter.cypher import adapter_supports_cypher
 from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
+from ..governance_tags import EVIDENCE_PRIMARY, REQUIRES_CYPHER, SCOPE_OWNER
 
 from .graph_ops_common import (
     directionality_config,
@@ -26,10 +27,13 @@ class GraphRelationPathExploreTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.relation_path_explore",
         channel="graph",
-        description="Enumerate reachable relation-path predicate sequences from a seed entity.",
+        description=(
+            "Enumerate reachable relation-path predicate sequences from a seed entity (Cypher-backed). "
+            "Evidence: citeable samples when `fact_ids/source_chunk_ids` are present in provenance."
+        ),
         speed="fast",
         cost="low",
-        strategy_tags=("path", "relation_path", "explore", "deterministic"),
+        strategy_tags=("path", "relation_path", "explore", "deterministic", EVIDENCE_PRIMARY, SCOPE_OWNER, REQUIRES_CYPHER),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.fast.graph_relation_path_explore",
@@ -46,6 +50,11 @@ class GraphRelationPathExploreTool(GraphTool):
             },
             required_extra_fields=("entity",),
         ),
+        example_args={
+            "question": "What relation patterns are reachable from OpenAI within 2 hops?",
+            "plan_step": "plan_01",
+            "extra": {"entity": "OpenAI", "max_hops": 2, "max_sequences": 20, "direction": "out"},
+        },
     )
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
@@ -190,10 +199,13 @@ class GraphRelationPathGroundTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.relation_path_ground",
         channel="graph",
-        description="Ground a predicate sequence into concrete paths + frontier entities.",
+        description=(
+            "Ground a predicate sequence into concrete paths + frontier entities (Cypher-backed). "
+            "Evidence: citeable when `fact_ids/source_chunk_ids` are present in provenance."
+        ),
         speed="fast",
         cost="low",
-        strategy_tags=("path", "relation_path", "ground", "deterministic"),
+        strategy_tags=("path", "relation_path", "ground", "deterministic", EVIDENCE_PRIMARY, SCOPE_OWNER, REQUIRES_CYPHER),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.fast.graph_relation_path_ground",
@@ -212,6 +224,11 @@ class GraphRelationPathGroundTool(GraphTool):
             },
             required_extra_fields=("source", "predicate_sequence"),
         ),
+        example_args={
+            "question": "Ground a 2-hop OWNS->OWNS path from A公司",
+            "plan_step": "plan_01",
+            "extra": {"source": "A公司", "predicate_sequence": ["OWNS", "OWNS"], "max_paths": 5, "direction": "out"},
+        },
     )
 
     async def run(self, request: ToolRunRequest) -> ToolResult:

@@ -7,6 +7,7 @@ from core.deepsearch.utils.evidence_ids import derived_chunk_id
 from core.deepsearch.utils.compression import compact_context_snippet, resolve_compaction_config, truncate_text
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async
+from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_LLM, SCOPE_OWNER
 
 
 class ContextRewriterTool(GraphTool):
@@ -19,7 +20,7 @@ class ContextRewriterTool(GraphTool):
         "relations, and follow-up questions so later tools focus on the remaining gaps.",
         speed="slow",
         cost="high",
-        strategy_tags=("rewrite", "context", "llm"),
+        strategy_tags=("rewrite", "context", "llm", EVIDENCE_DERIVED, SCOPE_OWNER, REQUIRES_LLM),
         profile="H",
         determinism="llm_heavy",
         namespace="rag-arc.deepsearch.tools.heavy.context_rewriter",

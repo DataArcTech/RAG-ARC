@@ -50,7 +50,7 @@ def test_knowledge_upload_passes_relative_path(client, tmp_path):
             files={"file": ("a.txt", f, "text/plain")},
             data={"relative_path": "docs/a.txt"},
         )
-    assert resp.status_code == 201
+    assert resp.status_code == 200
     assert resp.json() == "doc-1"
     filename, user_id, rel = client._calls["upload"]  # type: ignore[attr-defined]
     assert filename == "a.txt"

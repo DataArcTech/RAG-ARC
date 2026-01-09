@@ -15,6 +15,172 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def extract_html_structured_content(html_content: str) -> Dict[str, Any]:
+    """Extract structured text blocks from HTML in document order.
+
+    Notes:
+    - Do not assume content is wrapped in <p>; many pages place the main body inside div/span nodes.
+    - We still keep the output schema stable for downstream markdown conversion.
+    """
+
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html_content, "html.parser")
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+
+    content: Dict[str, Any] = {
+        "title": soup.title.string if soup.title else "",
+        # Ordered blocks for downstream markdown conversion + chunking.
+        # Each item is one of:
+        # - {"type": "heading", "level": "h2", "text": "..."}
+        # - {"type": "paragraph", "text": "..."}
+        # - {"type": "table", "rows": [[...], ...]}
+        "blocks": [],
+        "headings": [],
+        "paragraphs": [],
+        "links": [],
+        "images": [],
+        "tables": [],
+        "metadata": {},
+    }
+
+    root = soup.body or soup
+
+    seen_text: set[str] = set()
+
+    def _append_paragraph(text: str) -> None:
+        token = str(text or "").strip()
+        if not token or token in seen_text:
+            return
+        seen_text.add(token)
+        content["paragraphs"].append(token)
+        content["blocks"].append({"type": "paragraph", "text": token})
+
+    def _append_heading(level: str, text: str) -> None:
+        token = str(text or "").strip()
+        if not token:
+            return
+        content["headings"].append({"level": level, "text": token})
+        content["blocks"].append({"type": "heading", "level": level, "text": token})
+
+    def _append_table(rows: list[list[str]]) -> None:
+        if not rows:
+            return
+        content["tables"].append(rows)
+        content["blocks"].append({"type": "table", "rows": rows})
+
+    for element in root.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "div", "table"]):
+        name = element.name
+        if name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            _append_heading(name, element.get_text(" ", strip=True))
+            continue
+        if name == "p":
+            _append_paragraph(element.get_text(" ", strip=True))
+            continue
+        if name == "div":
+            # Avoid duplicating content already captured by <p>, and avoid large wrapper divs.
+            if element.find("p") is not None:
+                continue
+            if element.find("div") is not None:
+                continue
+            _append_paragraph(element.get_text(" ", strip=True))
+            continue
+        if name == "table":
+            table_data: list[list[str]] = []
+            for row in element.find_all("tr"):
+                row_data = [cell.get_text(" ", strip=True) for cell in row.find_all(["td", "th"])]
+                if row_data:
+                    table_data.append(row_data)
+            _append_table(table_data)
+            continue
+
+    # Links.
+    for a in soup.find_all("a", href=True):
+        text = a.get_text(" ", strip=True)
+        href = str(a.get("href") or "").strip()
+        if not href:
+            continue
+        content["links"].append({"text": text, "href": href})
+
+    # Images.
+    for img in soup.find_all("img"):
+        content["images"].append(
+            {
+                "src": str(img.get("src") or ""),
+                "alt": str(img.get("alt") or ""),
+                "title": str(img.get("title") or ""),
+            }
+        )
+
+    return content
+
+
+def html_structured_content_to_markdown(content: Dict[str, Any]) -> str:
+    """Convert HTML structured content (from extract_html_structured_content) into Markdown."""
+
+    md_lines: list[str] = []
+    title = str((content or {}).get("title") or "").strip()
+    if title:
+        md_lines.append(f"# {title}")
+        md_lines.append("")
+
+    blocks = content.get("blocks") if isinstance(content, dict) else None
+    if not isinstance(blocks, list) or not blocks:
+        # Backward compatible fallback.
+        blocks = []
+        for heading in (content.get("headings") or []) if isinstance(content, dict) else []:
+            if isinstance(heading, dict):
+                blocks.append({"type": "heading", "level": heading.get("level"), "text": heading.get("text")})
+        for paragraph in (content.get("paragraphs") or []) if isinstance(content, dict) else []:
+            blocks.append({"type": "paragraph", "text": paragraph})
+        for table in (content.get("tables") or []) if isinstance(content, dict) else []:
+            blocks.append({"type": "table", "rows": table})
+
+    table_counter = 0
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = str(block.get("type") or "").strip().lower()
+        if kind == "heading":
+            level = str(block.get("level") or "h2")
+            text = str(block.get("text") or "").strip()
+            if not text:
+                continue
+            try:
+                depth = int(level[1]) if level.startswith("h") and len(level) >= 2 else 2
+            except Exception:
+                depth = 2
+            md_lines.append("#" * max(1, min(depth, 6)) + f" {text}")
+            md_lines.append("")
+            continue
+        if kind == "paragraph":
+            text = str(block.get("text") or "").strip()
+            if not text:
+                continue
+            md_lines.append(text)
+            md_lines.append("")
+            continue
+        if kind == "table":
+            rows = block.get("rows")
+            if not isinstance(rows, list) or not rows:
+                continue
+            table_counter += 1
+            md_lines.append(f"## Table {table_counter}")
+            md_lines.append("")
+            header = rows[0] if rows and isinstance(rows[0], list) else []
+            if header:
+                md_lines.append("| " + " | ".join(str(cell) for cell in header) + " |")
+                md_lines.append("| " + " | ".join(["---"] * len(header)) + " |")
+                for row in rows[1:]:
+                    if isinstance(row, list) and row:
+                        md_lines.append("| " + " | ".join(str(cell) for cell in row) + " |")
+                md_lines.append("")
+            continue
+
+    return "\n".join(md_lines)
+
+
 @singleton
 class NativeParser(AbstractParser):
     """
@@ -377,69 +543,15 @@ class NativeParser(AbstractParser):
     def _parse_html_content(self, html_content: str, filename: str, base_filename: str, output_dir: str) -> List[Dict[str, Any]]:
         """Parse HTML content and return structured results"""
         try:
-            from bs4 import BeautifulSoup
-
             stem = Path(filename).stem or "document"
             save_dir = os.path.join(output_dir, base_filename)
             os.makedirs(save_dir, exist_ok=True)
 
             logger.info(f"Parsing HTML: {base_filename}")
 
-            # Parse HTML
-            soup = BeautifulSoup(html_content, 'html.parser')
-
             # Extract structured content
-            content = {
-                'title': soup.title.string if soup.title else '',
-                'headings': [],
-                'paragraphs': [],
-                'links': [],
-                'images': [],
-                'tables': [],
-                'metadata': {
-                    'filename': base_filename
-                }
-            }
-
-            # Extract headings
-            for tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-                for heading in soup.find_all(tag):
-                    if heading.get_text().strip():
-                        content['headings'].append({
-                            'level': tag,
-                            'text': heading.get_text().strip()
-                        })
-
-            # Extract paragraphs
-            for p in soup.find_all('p'):
-                text = p.get_text().strip()
-                if text:
-                    content['paragraphs'].append(text)
-
-            # Extract links
-            for a in soup.find_all('a', href=True):
-                content['links'].append({
-                    'text': a.get_text().strip(),
-                    'href': a['href']
-                })
-
-            # Extract images
-            for img in soup.find_all('img'):
-                content['images'].append({
-                    'src': img.get('src', ''),
-                    'alt': img.get('alt', ''),
-                    'title': img.get('title', '')
-                })
-
-            # Extract tables
-            for table in soup.find_all('table'):
-                table_data = []
-                for row in table.find_all('tr'):
-                    row_data = [cell.get_text().strip() for cell in row.find_all(['td', 'th'])]
-                    if row_data:
-                        table_data.append(row_data)
-                if table_data:
-                    content['tables'].append(table_data)
+            content = extract_html_structured_content(html_content)
+            content["metadata"] = {"filename": base_filename}
 
             # Save results
             json_path = os.path.join(save_dir, f"{stem}.json")
@@ -527,43 +639,8 @@ class NativeParser(AbstractParser):
         return '\n'.join(md_lines)
 
     def _convert_html_to_markdown(self, content: dict) -> str:
-        """Convert HTML content to Markdown"""
-        md_lines = []
-
-        if content['title']:
-            md_lines.append(f"# {content['title']}")
-            md_lines.append('')
-
-        # Add headings and paragraphs in order they appear
-        for heading in content['headings']:
-            level = int(heading['level'][1])
-            md_lines.append('#' * level + f" {heading['text']}")
-            md_lines.append('')
-
-        for paragraph in content['paragraphs']:
-            md_lines.append(paragraph)
-            md_lines.append('')
-
-        # Add tables
-        for i, table in enumerate(content['tables']):
-            md_lines.append(f"## Table {i+1}")
-            md_lines.append('')
-
-            if table and len(table) > 0:
-                # Header row
-                header = '| ' + ' | '.join(table[0]) + ' |'
-                separator = '| ' + ' | '.join(['---'] * len(table[0])) + ' |'
-                md_lines.append(header)
-                md_lines.append(separator)
-
-                # Data rows
-                for row in table[1:]:
-                    row_md = '| ' + ' | '.join(row) + ' |'
-                    md_lines.append(row_md)
-
-            md_lines.append('')
-
-        return '\n'.join(md_lines)
+        """Convert HTML content to Markdown."""
+        return html_structured_content_to_markdown(content)
 
     def _parse_txt(self, file_data: bytes, filename: str, output_dir: str, **kwargs) -> List[Dict[str, Any]]:
         """Parse plain text file from binary data and return structured results"""

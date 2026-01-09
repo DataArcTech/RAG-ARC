@@ -7,7 +7,12 @@ GRAPH_PLANNER_SYSTEM_PROMPT = (
     "Routing constraint:\n"
     "- If the question requires numeric/date/rule correctness (computable questions), ensure the plan includes at least one\n"
     "  deterministic verification step (e.g. graph.latest_truth / graph.aggregate / graph.rule_check / code.python).\n"
-    "  Do not rely on narrative synthesis alone for computable answers."
+    "  Do not rely on narrative synthesis alone for computable answers.\n"
+    "\n"
+    "Governance:\n"
+    "- Tool failures will be classified (schema_error / empty_hit / policy_reject / provider_error / timeout).\n"
+    "  Do not retry the same tool+args loop after schema_error/policy_reject; switch strategy or fix args.\n"
+    "- Do not treat derived summaries/thoughts as citeable evidence; citations must point to primary EvidenceChunk outputs."
 )
 
 GRAPH_PLANNER_USER_PROMPT = (
@@ -42,6 +47,7 @@ GRAPH_PLANNER_USER_PROMPT = (
     "- Prefer merging trivial lookups into a single step instead of emitting fillers.\n"
     "- By default steps execute sequentially. Only mark a step as parallel-safe when you are confident it is "
     "independent: set `scheduler` to 'parallel' (or `parallelizable`: true) inside the step metadata.\n"
+    "- When a previous tool run reports diagnostics.result_kind='empty_hit', switch approach (broaden scope, change tool) instead of repeating.\n"
     "\n"
     "Output:\n"
     "- Return ONLY a JSON array.\n"

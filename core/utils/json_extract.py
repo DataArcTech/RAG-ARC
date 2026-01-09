@@ -101,9 +101,71 @@ def safe_json_loads(raw: str, *, expected: str | None = None) -> Any | None:
     try:
         value = json.loads(extracted)
     except json.JSONDecodeError:
-        return None
+        repaired = _escape_unescaped_newlines_in_json_strings(extracted)
+        if repaired == extracted:
+            return None
+        try:
+            value = json.loads(repaired)
+        except json.JSONDecodeError:
+            return None
     if expected == "dict":
         return value if isinstance(value, dict) else None
     if expected == "list":
         return value if isinstance(value, list) else None
     return value
+
+
+def _escape_unescaped_newlines_in_json_strings(text: str) -> str:
+    """Escape literal newlines inside JSON string values (a common LLM formatting error).
+
+    JSON does not allow raw newline characters inside quoted strings. Some models emit multi-line
+    strings directly, which breaks `json.loads`. This helper converts those newlines into `\\n`
+    (and `\\r`, `\\t`) only when they occur inside a quoted string literal.
+    """
+
+    if not text or "\"" not in text:
+        return text
+
+    out: list[str] = []
+    in_string = False
+    escape = False
+    changed = False
+
+    for ch in text:
+        if in_string:
+            if escape:
+                out.append(ch)
+                escape = False
+                continue
+            if ch == "\\":
+                out.append(ch)
+                escape = True
+                continue
+            if ch == "\"":
+                out.append(ch)
+                in_string = False
+                continue
+            if ch == "\n":
+                out.append("\\n")
+                changed = True
+                continue
+            if ch == "\r":
+                out.append("\\r")
+                changed = True
+                continue
+            if ch == "\t":
+                out.append("\\t")
+                changed = True
+                continue
+            out.append(ch)
+            continue
+
+        if ch == "\"":
+            out.append(ch)
+            in_string = True
+            continue
+        out.append(ch)
+
+    if not changed:
+        return text
+    return "".join(out)

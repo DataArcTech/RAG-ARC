@@ -7,6 +7,7 @@ from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+from ..governance_tags import EVIDENCE_PRIMARY, REQUIRES_CYPHER, SCOPE_OWNER
 
 from .graph_ops_common import normalize_entity_name
 
@@ -20,7 +21,7 @@ class GraphSdfChildrenTool(GraphTool):
         description="Deterministic retrieval of SDF subevents (children_gate + children importance) backed by Neo4j Cypher.",
         speed="fast",
         cost="low",
-        strategy_tags=("sdf", "process_schema", "deterministic"),
+        strategy_tags=("sdf", "process_schema", "deterministic", EVIDENCE_PRIMARY, SCOPE_OWNER, REQUIRES_CYPHER),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.fast.graph_sdf_children",
@@ -33,6 +34,11 @@ class GraphSdfChildrenTool(GraphTool):
             },
             required_extra_fields=("event",),
         ),
+        example_args={
+            "question": "What are the subevents of the onboarding process?",
+            "plan_step": "plan_11",
+            "extra": {"event": "onboarding", "limit": 20},
+        },
     )
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
@@ -137,7 +143,7 @@ class GraphSdfDependenciesTool(GraphTool):
         description="Deterministic retrieval of SDF before/after neighbors backed by Neo4j Cypher.",
         speed="fast",
         cost="low",
-        strategy_tags=("sdf", "temporal", "deterministic"),
+        strategy_tags=("sdf", "temporal", "deterministic", EVIDENCE_PRIMARY, SCOPE_OWNER, REQUIRES_CYPHER),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.fast.graph_sdf_dependencies",
@@ -150,6 +156,11 @@ class GraphSdfDependenciesTool(GraphTool):
             },
             required_extra_fields=("event",),
         ),
+        example_args={
+            "question": "What must happen before KYC verification?",
+            "plan_step": "plan_12",
+            "extra": {"event": "KYC verification", "limit": 20},
+        },
     )
 
     async def run(self, request: ToolRunRequest) -> ToolResult:

@@ -11,7 +11,7 @@ This module implements a sophisticated graph-based retrieval system that combine
 Based on the design document specifications.
 """
 
-from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
+from typing import List, Dict, Any, Optional, TYPE_CHECKING
 import logging
 import json
 import numpy as np
@@ -22,6 +22,9 @@ from core.retrieval.graph_retrieveal.base import BaseGraphRetriever
 from core.retrieval.graph_retrieveal.models import CandidateResult, ChunkScore, PPRResult, SubgraphResult
 from core.retrieval.graph_retrieveal.ppr import compute_personalized_pagerank as _compute_personalized_pagerank
 from core.retrieval.graph_retrieveal.query_executor import GraphQueryExecutor, build_graph_query_executor
+from core.retrieval.graph_retrieveal.similarity_edges import filter_similarity_neighbors
+from core.retrieval.graph_retrieveal.llm_selection import parse_ranked_choice_indices
+from core.prompts.graph_retrieval import SEED_ENTITY_FILTER_USER_PROMPT
 
 if TYPE_CHECKING:
     from config.core.retrieval.graph_retrieval_config import GraphRetrievalConfig
@@ -345,9 +348,23 @@ class GraphRetrieval(BaseGraphRetriever):
 
                 # Get neighbors
                 neighbors = self.get_entity_neighbors(entity_id)
+                neighbors = filter_similarity_neighbors(
+                    neighbors,
+                    hop=hop,
+                    relation_name=getattr(self.config, "similarity_edge_relation", "SIMILAR_TO"),
+                    max_hops=int(getattr(self.config, "similarity_edge_max_hops", 1)),
+                    min_similarity=float(getattr(self.config, "similarity_edge_min_similarity", 0.0)),
+                    max_per_node=int(getattr(self.config, "similarity_edge_max_per_node", 0)),
+                )
 
                 # Add edges and collect next level candidates
-                for neighbor_id, relation_type, edge_weight in neighbors:
+                for neighbor in neighbors:
+                    if not isinstance(neighbor, dict):
+                        continue
+                    neighbor_id = neighbor.get("neighbor_id")
+                    relation_type = neighbor.get("relation_type")
+                    if not neighbor_id or not relation_type:
+                        continue
                     if neighbor_id not in visited:
                         edges.append((entity_id, relation_type, neighbor_id))
                         next_level.append(neighbor_id)
@@ -389,37 +406,20 @@ class GraphRetrieval(BaseGraphRetriever):
                     attr_text = ", ".join([f"{k}: {v}" for k, v in attributes.items()]) if attributes else "None"
 
                     entity_info.append({
-                        'index': i,
+                        'index': i + 1,
                         'entity_id': candidate['entity_id'],
                         'entity_name': candidate.get('entity_name', 'Unknown'),
                         'entity_type': candidate.get('entity_type', 'Entity'),
                         'attributes': attr_text
                     })
 
-                # Create consolidated prompt for LLM
-                prompt = f"""Given the user query: "{query}"
-
-Please select the most relevant entities from the following candidates that would be useful as seed entities for graph-based retrieval. Consider:
-1. Semantic relevance to the query
-2. Entity type and specificity
-3. Entity attributes and their relevance
-4. Potential to lead to relevant information through graph traversal
-
-Entity candidates:
-"""
-
-                for entity in entity_info:
-                    prompt += f"""
-{entity['index']}: {entity['entity_name']}
-   - Type: {entity['entity_type']}
-   - Attributes: {entity['attributes']}"""
-
-                prompt += """
-
-Please respond with only the indices (numbers) of the selected entities, separated by commas.
-Select 2-5 most relevant entities. For example: 0,2,4
-
-Selected indices:"""
+                entities_text = "\n".join(
+                    [
+                        f"{entity['index']}. {entity['entity_name']} (type={entity['entity_type']}; attributes={entity['attributes']})"
+                        for entity in entity_info
+                    ]
+                )
+                prompt = SEED_ENTITY_FILTER_USER_PROMPT.format(query=str(query), entities_text=entities_text)
 
                 # Get LLM response
                 messages = [{"role": "user", "content": prompt}]
@@ -427,38 +427,22 @@ Selected indices:"""
 
                 # Parse LLM response to get selected entity indices
                 try:
-                    import re
-                    numbers = re.findall(r'\d+', response.strip())
-
-                    # Convert to integers and filter valid indices
-                    selected_indices = []
-                    for num_str in numbers:
-                        idx = int(num_str)
-                        if 0 <= idx < len(entity_candidates):
-                            selected_indices.append(idx)
-
-                    # Remove duplicates while preserving order
-                    seen = set()
-                    unique_indices = []
-                    for idx in selected_indices:
-                        if idx not in seen:
-                            seen.add(idx)
-                            unique_indices.append(idx)
-
-                    # Ensure we have at least some entities (fallback to top 2 if parsing fails)
-                    if not unique_indices:
+                    parsed = parse_ranked_choice_indices(
+                        str(response or ""),
+                        candidate_count=len(entity_candidates),
+                        k=5,
+                        one_based=True,
+                    )
+                    if not parsed:
                         logger.warning("Failed to parse LLM response, using top 2 entities as fallback")
-                        unique_indices = [0, 1] if len(entity_candidates) >= 2 else [0] if len(entity_candidates) >= 1 else []
-
-                    # Limit to reasonable number of seed entities
-                    selected_indices = unique_indices[:5]
+                        parsed = [0, 1] if len(entity_candidates) >= 2 else ([0] if len(entity_candidates) >= 1 else [])
 
                 except Exception as e:
                     logger.warning(f"Error parsing LLM response: {e}. Using top 2 entities as fallback.")
-                    selected_indices = [0, 1] if len(entity_candidates) >= 2 else [0] if len(entity_candidates) >= 1 else []
+                    parsed = [0, 1] if len(entity_candidates) >= 2 else ([0] if len(entity_candidates) >= 1 else [])
 
                 # Convert indices to entity IDs
-                seed_entities = [entity_candidates[i]['entity_id'] for i in selected_indices]
+                seed_entities = [entity_candidates[i]['entity_id'] for i in parsed]
 
                 logger.info(f"LLM filtered {len(entity_candidates)} candidates to {len(seed_entities)} seed entities")
                 return seed_entities
@@ -508,25 +492,40 @@ Selected indices:"""
             }
         return None
 
-    def get_entity_neighbors(self, entity_id: str) -> List[Tuple[str, str, float]]:
-        """Get entity neighbors with relation types and edge weights"""
-        # Enhanced neighbor query with additional metadata for better edge weighting
+    def get_entity_neighbors(self, entity_id: str) -> List[Dict[str, Any]]:
+        """Get entity neighbors with relation types and edge metadata."""
+
         results = self._execute_graph_query("get_entity_neighbors", {'entity_id': entity_id})
-        neighbors = []
+        neighbors: List[Dict[str, Any]] = []
 
         for result in results:
-            neighbor_id = result['neighbor_id']
-            relation_type = result['relation_type']
+            neighbor_id = result.get('neighbor_id')
+            relation_type = result.get('relation_type')
+            if not neighbor_id or not relation_type:
+                continue
             mention_count = result.get('mention_count', 0)
+            similarity_raw = result.get("similarity")
+            try:
+                similarity = float(similarity_raw) if similarity_raw is not None else None
+            except Exception:
+                similarity = None
 
             # Compute edge weight based on relation type and entity importance
-            edge_weight = self.compute_edge_weight(relation_type, mention_count)
-            neighbors.append((neighbor_id, relation_type, edge_weight))
+            edge_weight = self.compute_edge_weight(relation_type, mention_count, similarity=similarity)
+            neighbors.append(
+                {
+                    "neighbor_id": neighbor_id,
+                    "relation_type": relation_type,
+                    "mention_count": mention_count,
+                    "similarity": similarity,
+                    "edge_weight": edge_weight,
+                }
+            )
 
         return neighbors
 
-    def compute_edge_weight(self, relation_type: str, mention_count: int) -> float:
-        """Compute edge weight based on relation type and entity importance"""
+    def compute_edge_weight(self, relation_type: str, mention_count: int, *, similarity: float | None = None) -> float:
+        """Compute edge weight based on relation type and entity importance."""
         # Base weight by relation type
         relation_weights = {
             'MENTIONS': 0.5,  # Chunk-entity relation (lower weight)
@@ -539,6 +538,8 @@ Selected indices:"""
         }
 
         base_weight = relation_weights.get(relation_type, 1.0)
+        if relation_type == "SIMILAR_TO" and similarity is not None:
+            base_weight *= max(0.0, min(float(similarity), 1.0))
 
         # Boost based on entity importance (mention frequency)
         importance_boost = min(math.log(mention_count + 1) / 10, 0.3)

@@ -12,6 +12,7 @@ from config.core.deepsearch.tool_defaults import (
 from encapsulation.data_model.deepsearch import EvidenceChunk
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async
+from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_CHAIN_TRAVERSE, REQUIRES_LLM, SCOPE_OWNER
 from ..fast.pattern_probe import PatternProbeTool
 from core.graph_adapter.concurrency import adapter_locked
 from core.prompts.deepsearch import HYBRID_NEIGHBORHOOD_SUMMARY_PROMPT
@@ -24,10 +25,13 @@ class HybridNeighborhoodProbeTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.hybrid_neighborhood",
         channel="graph",
-        description="Hybrid GraphRAG probe that mixes deterministic chunk filters with LLM summarisation.",
+        description=(
+            "Hybrid GraphRAG probe that mixes deterministic chunk filters with LLM summarisation. "
+            "Evidence: derived (NOT citeable; cite underlying chunks)."
+        ),
         speed="medium",
         cost="medium",
-        strategy_tags=("hybrid", "graphrag", "llm", "chunk_triple"),
+        strategy_tags=("hybrid", "graphrag", "llm", "chunk_triple", EVIDENCE_DERIVED, SCOPE_OWNER, REQUIRES_CHAIN_TRAVERSE, REQUIRES_LLM),
         profile="X",
         determinism="hybrid",
         namespace="rag-arc.deepsearch.tools.x.hybrid_neighborhood",

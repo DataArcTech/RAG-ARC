@@ -262,7 +262,7 @@ RAG-ARC uses a modular configuration system. Key configuration files are located
 - `knowledge.json`: Knowledge management configuration
 - `account.json`: User account configuration
 - `.env`: runtime knobs (providers, database credentials, etc.). Set `DEVELOP_MODE=true` when you want all Docker services (PostgreSQL/Redis/Neo4j) to expose their ports to `localhost` for debugging; it remains `false` by default for security.
-- DeepSearch external search: enable via `config/json_configs/deepsearch_service.json` (`external_channel.enabled=true`, `gap_detection.enable_external_on_gap=true`) and provide `TAVILY_API_KEY`; `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` can override enablement at runtime.
+- Web search (Tavily): DeepSearch enables external search by default (`config/json_configs/deepsearch_service.json` → `planner.allow_external_channel=true`, `external_channel.enabled=true`). HippoRAG Q&A supports request-level opt-in via `enable_web_search=true` on `/rag_inference/stream_chat/{session_id}` (requires `config/json_configs/rag_inference*.json` → `web_search.enabled=true`). Set `TAVILY_API_KEY` to activate results.
 
 ### 🌐 LLM Profiles via `.env`
 
@@ -424,7 +424,7 @@ import httpx
 def chat_sse(session_id: str, access_token: str):
     url = f"http://localhost:8000/rag_inference/stream_chat/{session_id}"
     headers = {"Authorization": f"Bearer {access_token}"}
-    params = {"query": "Hello, RAG-ARC!", "include_evidence": "true"}
+    params = {"query": "Hello, RAG-ARC!", "include_evidence": "true", "enable_web_search": "true"}  # opt-in
 
     with httpx.stream("GET", url, headers=headers, params=params, timeout=120.0) as r:
         r.raise_for_status()

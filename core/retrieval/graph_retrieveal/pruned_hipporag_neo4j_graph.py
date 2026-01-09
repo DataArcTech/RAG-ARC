@@ -4,6 +4,8 @@ from typing import List, Optional, Set, Tuple
 
 import numpy as np
 
+from core.retrieval.graph_retrieveal.similarity_edges import filter_similarity_neighbor_tuples
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,7 +64,7 @@ class _PrunedHippoRAGNeo4jGraphMixin:
         # Keep only top-k neighbors
         neighbors_with_weights = neighbors_with_weights[:max_k]
 
-        return [neighbor_id for neighbor_id, _ in neighbors_with_weights]
+        return [neighbor_id for neighbor_id, _w in neighbors_with_weights]
 
     def _expand_subgraph(
         self,
@@ -100,7 +102,7 @@ class _PrunedHippoRAGNeo4jGraphMixin:
         # Add chunks directly connected to seed entities
         for entity_id in seed_entity_ids:
             neighbors = self.graph_store.get_neighbors_with_weights(entity_id, owner_id=owner_str)
-            for neighbor_id, _ in neighbors:
+            for neighbor_id, _w in neighbors:
                 if neighbor_id in chunks_set:
                     subgraph_nodes.add(neighbor_id)
                     subgraph_chunk_ids.add(neighbor_id)
@@ -118,7 +120,16 @@ class _PrunedHippoRAGNeo4jGraphMixin:
 
             # Batch query for all nodes in current layer
             current_layer_list = list(current_layer)
-            batch_neighbors = self.graph_store.get_batch_neighbors_with_weights(current_layer_list, owner_id=owner_str)
+            if hasattr(self.graph_store, "get_batch_neighbors_with_weights_and_relations"):
+                batch_neighbors = self.graph_store.get_batch_neighbors_with_weights_and_relations(
+                    current_layer_list, owner_id=owner_str
+                )
+            else:
+                batch_pairs = self.graph_store.get_batch_neighbors_with_weights(current_layer_list, owner_id=owner_str)
+                batch_neighbors = {
+                    nid: [(neighbor_id, w, "") for neighbor_id, w in (batch_pairs.get(nid, []) or [])]
+                    for nid in current_layer_list
+                }
 
             for node_id in current_layer:
                 # Get all neighbors from batch result
@@ -128,6 +139,18 @@ class _PrunedHippoRAGNeo4jGraphMixin:
                 # Apply pruning
                 if not all_neighbors:
                     continue
+
+                # Keep only entity neighbors for expansion (chunks are handled separately).
+                all_neighbors = [n for n in all_neighbors if isinstance(n, tuple) and str(n[0] or "").startswith("entity-")]
+                # Gate synonymy/similarity edges to reduce multi-hop error amplification.
+                all_neighbors = filter_similarity_neighbor_tuples(
+                    all_neighbors,
+                    hop=hop,
+                    relation_name=getattr(self.config, "similarity_edge_relation", "SIMILAR_TO"),
+                    max_hops=int(getattr(self.config, "similarity_edge_max_hops", 1)),
+                    min_similarity=float(getattr(self.config, "similarity_edge_min_similarity", 0.0)),
+                    max_per_node=int(getattr(self.config, "similarity_edge_max_per_node", 0)),
+                )
 
                 # Sort by weight and apply query-aware pruning
                 all_neighbors.sort(key=lambda x: x[1], reverse=True)
@@ -149,22 +172,34 @@ class _PrunedHippoRAGNeo4jGraphMixin:
                 total_neighbors_after_pruning += len(pruned_neighbors)
 
                 # Process neighbors
-                for neighbor_id, _ in pruned_neighbors:
+                for neighbor_id, _w, _rel in pruned_neighbors:
                     if neighbor_id not in subgraph_nodes:
                         # Only expand to entity nodes
                         if neighbor_id.startswith("entity-"):
                             next_layer.add(neighbor_id)
                             subgraph_nodes.add(neighbor_id)
 
-            # Optionally add chunks connected to new entities (batch query)
+                # Optionally add chunks connected to new entities (batch query)
             if include_chunks and next_layer:
                 next_layer_list = list(next_layer)
-                entity_batch_neighbors = self.graph_store.get_batch_neighbors_with_weights(next_layer_list, owner_id=owner_str)
+                if hasattr(self.graph_store, "get_batch_neighbors_with_weights_and_relations"):
+                    entity_batch_neighbors = self.graph_store.get_batch_neighbors_with_weights_and_relations(
+                        next_layer_list, owner_id=owner_str
+                    )
+                else:
+                    batch_pairs = self.graph_store.get_batch_neighbors_with_weights(next_layer_list, owner_id=owner_str)
+                    entity_batch_neighbors = {
+                        nid: [(neighbor_id, w, "") for neighbor_id, w in (batch_pairs.get(nid, []) or [])]
+                        for nid in next_layer_list
+                    }
 
                 for entity_id in next_layer:
                     entity_neighbors = entity_batch_neighbors.get(entity_id, [])
-                    # Sort and prune
-                    entity_neighbors.sort(key=lambda x: x[1], reverse=True)
+                    # Prefer chunk neighbors (avoid spending budget on entity-entity edges here).
+                    chunk_neighbors = [
+                        n for n in entity_neighbors if isinstance(n, tuple) and str(n[0] or "") in chunks_set
+                    ]
+                    chunk_neighbors.sort(key=lambda x: x[1], reverse=True)
 
                     base_k = self.config.max_neighbors
                     if entity_relevance_scores and entity_id in entity_relevance_scores:
@@ -177,10 +212,9 @@ class _PrunedHippoRAGNeo4jGraphMixin:
                     else:
                         max_k = base_k
 
-                    for en_id, _ in entity_neighbors[:max_k]:
-                        if en_id in chunks_set:
-                            subgraph_nodes.add(en_id)
-                            subgraph_chunk_ids.add(en_id)
+                    for en_id, _w, _rel in chunk_neighbors[:max_k]:
+                        subgraph_nodes.add(en_id)
+                        subgraph_chunk_ids.add(en_id)
 
             logger.info(
                 f"Hop {hop}: {len(current_layer)} nodes, pruned {total_neighbors_before_pruning} → {total_neighbors_after_pruning} neighbors"
@@ -200,6 +234,8 @@ class _PrunedHippoRAGNeo4jGraphMixin:
         top_k_fact_indices: List[int],
         subgraph_nodes: Set[str],
         owner_id: Optional[uuid.UUID] = None,
+        *,
+        query_doc_scores: Optional[np.ndarray] = None,
     ) -> Tuple[List[str], List[float], dict]:
         """
         Perform graph search on the expanded subgraph using Personalized PageRank.
@@ -238,6 +274,7 @@ class _PrunedHippoRAGNeo4jGraphMixin:
         entity_to_chunk_count = self.graph_store.get_batch_entity_chunk_counts_from_cache(list(entity_ids_in_facts), owner_id=self._owner_to_str(owner_id))
 
         # Assign weights to entity nodes based on fact scores
+        chunk_count_gamma = float(getattr(self.config, "entity_chunk_count_penalty_gamma", 1.0))
         for rank, f in enumerate(top_k_facts):
             fact_score = query_fact_scores[top_k_fact_indices[rank]] if query_fact_scores.ndim > 0 else query_fact_scores
 
@@ -249,10 +286,10 @@ class _PrunedHippoRAGNeo4jGraphMixin:
                 phrase_weights[entity_id] = fact_score
                 chunk_count = entity_to_chunk_count.get(entity_id, 0)
                 if chunk_count != 0:
-                    phrase_weights[entity_id] /= chunk_count
+                    phrase_weights[entity_id] /= float(chunk_count) ** chunk_count_gamma
 
         # Assign weights to passage nodes based on dense retrieval
-        query_doc_scores = self._dense_passage_retrieval_scores(query)
+        query_doc_scores = query_doc_scores if query_doc_scores is not None else self._dense_passage_retrieval_scores(query)
 
         sorted_doc_ids = np.argsort(query_doc_scores)[::-1]
         sorted_doc_scores = query_doc_scores[sorted_doc_ids]

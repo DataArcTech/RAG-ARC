@@ -52,13 +52,27 @@ import logging
 from core.utils.owner_guard import is_admin_owner, get_admin_owner_id
 from core.presentation.evidence import build_chat_evidence
 from config.output_limits import CHAT_TOP_CHUNKS
-from api.utils.owner_scope import resolve_default_owner_id
+from api.utils.owner_scope import get_shared_document_owner_id
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
 router = APIRouter(prefix="/rag_inference", tags=["rag_inference"])
+
+def _get_shared_document_owner_id() -> uuid.UUID:
+    return get_shared_document_owner_id()
+
+
+def _resolve_default_owner_id(current_user: User) -> uuid.UUID:
+    raw_type = getattr(current_user, "type", 0)
+    try:
+        user_type = int(raw_type) if raw_type is not None else 0
+    except (TypeError, ValueError):
+        user_type = 0
+    if user_type == 1:
+        return _get_shared_document_owner_id()
+    return current_user.id
 
 
 # Title生成函数（复用chatbot.py中的函数）
@@ -123,6 +137,7 @@ class ChatRequest(BaseModel):
     target_owner_id: uuid.UUID | None = None  # Admin-only override
     include_all_owners: bool = False  # Admin-only flag for global retrieval
     include_evidence: bool = False  # Whether to include chunk/seed/triple summary
+    enable_web_search: bool = False  # Opt-in: add Tavily web results into rerank
 
 
 class StreamChatRequest(BaseModel):
@@ -132,6 +147,7 @@ class StreamChatRequest(BaseModel):
     target_owner_id: Optional[uuid.UUID] = None
     include_all_owners: bool = False
     include_evidence: bool = False
+    enable_web_search: bool = False
 
 
 class ChatResponse(BaseModel):
@@ -209,7 +225,7 @@ async def chat(
             )
 
     # Determine default owner scope based on user type (chatKB vs livingKB).
-    effective_owner_id: uuid.UUID | None = resolve_default_owner_id(current_user)
+    effective_owner_id: uuid.UUID | None = _resolve_default_owner_id(current_user)
 
     if request.include_all_owners:
         if not is_admin_owner(current_user.id):
@@ -243,12 +259,21 @@ async def chat(
     chunks: list[Chunk] = []
     subgraph_data: GraphData = None
     needs_subgraph = request.return_subgraph or request.include_evidence
-    response_text, chunks, subgraph_data, subgraph_info, raw_llm_response, raw_mindmap_response = await rag_inference_handler.chat_async(
-        request.query,
-        owner_id=effective_owner_id,
-        return_subgraph=needs_subgraph,
-        current_user_query=request.query,
-    )
+    try:
+        response_text, chunks, subgraph_data, subgraph_info, raw_llm_response, raw_mindmap_response = await rag_inference_handler.chat_async(
+            request.query,
+            owner_id=effective_owner_id,
+            return_subgraph=needs_subgraph,
+            current_user_query=request.query,
+            enable_web_search=bool(getattr(request, "enable_web_search", False)),
+        )
+    except TypeError:
+        response_text, chunks, subgraph_data, subgraph_info, raw_llm_response, raw_mindmap_response = await rag_inference_handler.chat_async(
+            request.query,
+            owner_id=effective_owner_id,
+            return_subgraph=needs_subgraph,
+            current_user_query=request.query,
+        )
     
     # Log full response details (including graph payload).
     logger.info(
@@ -364,6 +389,7 @@ async def stream_chat_sse(
     target_owner_id = request.target_owner_id
     include_all_owners = request.include_all_owners
     include_evidence = request.include_evidence
+    enable_web_search = bool(getattr(request, "enable_web_search", False))
 
     # Guard: only livingKB users (type=0) may request subgraph/evidence generation.
     if return_subgraph or include_evidence:
@@ -389,7 +415,7 @@ async def stream_chat_sse(
     rag_inference_handler = get_rag_inference_handler()
 
     # Determine default owner scope based on user type (chatKB vs livingKB).
-    effective_owner: uuid.UUID | None = resolve_default_owner_id(current_user)
+    effective_owner: uuid.UUID | None = _resolve_default_owner_id(current_user)
     
     if include_all_owners:
         if not is_admin_owner(current_user.id):
@@ -509,9 +535,12 @@ async def stream_chat_sse(
                 try:
                     user_type = int(user_type_str)
                 except ValueError:
-                    logger.warning("Invalid USER_TYPE environment variable: %s, defaulting to 0", user_type_str)
+                    logger.warning(
+                        "Invalid USER_TYPE environment variable: %s, defaulting to 0",
+                        user_type_str,
+                    )
                     user_type = 0
-                
+
                 try:
                     token_stream, chunks, subgraph_data, subgraph_info = rag_inference_handler.stream_chat(
                         query,
@@ -519,10 +548,15 @@ async def stream_chat_sse(
                         return_subgraph=(return_subgraph or include_evidence),
                         progress_callback=_emit_progress,
                         history_text=history_text if history_text else None,
+                        enable_web_search=enable_web_search,
                         user_type=user_type,
                     )
                 except TypeError:
-                    # Backward compatibility: older implementations may not accept `history_text` or `user_type`.
+                    # Backward compatibility: older implementations may not accept `history_text` / `enable_web_search` / `user_type`.
+                    logger.info(
+                        "stream_chat signature mismatch; falling back to reduced args",
+                        exc_info=True,
+                    )
                     try:
                         token_stream, chunks, subgraph_data, subgraph_info = rag_inference_handler.stream_chat(
                             query,
@@ -530,14 +564,24 @@ async def stream_chat_sse(
                             return_subgraph=(return_subgraph or include_evidence),
                             progress_callback=_emit_progress,
                             history_text=history_text if history_text else None,
+                            enable_web_search=enable_web_search,
                         )
                     except TypeError:
-                        # Fallback to minimal signature
-                        token_stream, chunks, subgraph_data, subgraph_info = rag_inference_handler.stream_chat(
-                            query,
-                            effective_owner,
-                            return_subgraph=(return_subgraph or include_evidence),
-                        )
+                        try:
+                            token_stream, chunks, subgraph_data, subgraph_info = rag_inference_handler.stream_chat(
+                                query,
+                                effective_owner,
+                                return_subgraph=(return_subgraph or include_evidence),
+                                progress_callback=_emit_progress,
+                                history_text=history_text if history_text else None,
+                                user_type=user_type,
+                            )
+                        except TypeError:
+                            token_stream, chunks, subgraph_data, subgraph_info = rag_inference_handler.stream_chat(
+                                query,
+                                effective_owner,
+                                return_subgraph=(return_subgraph or include_evidence),
+                            )
                 prepared["chunks"] = chunks
                 prepared["subgraph_data"] = subgraph_data
                 prepared["subgraph_info"] = subgraph_info
@@ -878,6 +922,7 @@ async def stream_chat_sse_get(
     target_owner_id: uuid.UUID | None = None,
     include_all_owners: bool = False,
     include_evidence: bool = False,
+    enable_web_search: bool = False,
 ):
     """Backward compatible GET variant of the SSE stream chat endpoint."""
 
@@ -887,6 +932,7 @@ async def stream_chat_sse_get(
         target_owner_id=target_owner_id,
         include_all_owners=include_all_owners,
         include_evidence=include_evidence,
+        enable_web_search=enable_web_search,
     )
     return await stream_chat_sse(session_id=session_id, request=request, current_user=current_user)
 
@@ -917,6 +963,7 @@ async def stream_chat_ws(
             target_owner_id: uuid.UUID | None = None
             include_all_owners = False
             include_evidence = False
+            enable_web_search = False
             query = message_text
 
             try:
@@ -926,6 +973,7 @@ async def stream_chat_ws(
                     return_subgraph = bool(payload.get("return_subgraph", False))
                     include_all_owners = bool(payload.get("include_all_owners", False))
                     include_evidence = bool(payload.get("include_evidence", False))
+                    enable_web_search = bool(payload.get("enable_web_search", False))
                     if payload.get("target_owner_id"):
                         target_owner_id = uuid.UUID(str(payload["target_owner_id"]))
             except Exception:  # noqa: BLE001
@@ -941,7 +989,7 @@ async def stream_chat_ws(
                     )
                     return
 
-            effective_owner: uuid.UUID | None = resolve_default_owner_id(current_user)
+            effective_owner: uuid.UUID | None = _resolve_default_owner_id(current_user)
             if include_all_owners:
                 if not is_admin_owner(current_user.id):
                     await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
@@ -978,6 +1026,7 @@ async def stream_chat_ws(
                     owner_id=effective_owner,
                     return_subgraph=return_subgraph_flag,
                     current_user_query=query,
+                    enable_web_search=enable_web_search,
                 )
             except TypeError:
                 result = await rag_inference_handler.chat_async(

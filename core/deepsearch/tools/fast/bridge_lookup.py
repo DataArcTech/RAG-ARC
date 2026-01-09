@@ -4,6 +4,7 @@ from typing import Any, Dict, Iterable, List
 from encapsulation.data_model.deepsearch import EvidenceChunk
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_CHAIN_TRAVERSE, SCOPE_OWNER
 from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
@@ -14,10 +15,13 @@ class BridgeLookupTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.bridge_lookup",
         channel="graph",
-        description="Deterministic entity→triple lookup used to stitch reasoning hops.",
+        description=(
+            "Deterministic bridge lookup over adapter chain_traverse(bridge_lookup) results. "
+            "Evidence: derived triples (NOT citeable; use chunk/cypher tools for citations)."
+        ),
         speed="fast",
         cost="low",
-        strategy_tags=("bridge", "triple", "entity"),
+        strategy_tags=("bridge", "triple", "entity", EVIDENCE_DERIVED, SCOPE_OWNER, REQUIRES_CHAIN_TRAVERSE),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.fast.bridge_lookup",

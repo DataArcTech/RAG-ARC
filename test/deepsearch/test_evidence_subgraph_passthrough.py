@@ -100,7 +100,10 @@ async def test_traversal_evidence_exposes_subgraph_info_for_presentation(monkeyp
 
     def _fake_export(subgraph_info, *, graph_store=None):
         return {
-            "nodes": [{"id": "EntityA", "name": "EntityA", "ppr_score": 0.9}],
+            "nodes": [
+                {"id": "EntityA", "name": "EntityA", "ppr_score": 0.9},
+                {"id": "EntityB", "name": "EntityB", "ppr_score": 0.8},
+            ],
             "edges": [{"source": "EntityA", "target": "EntityB", "relation": "related_to", "weight": 1.0}],
             "chunks": [],
             "metadata": {},
@@ -115,3 +118,6 @@ async def test_traversal_evidence_exposes_subgraph_info_for_presentation(monkeyp
     payload = {"reasoning": result, "report": {"evidences": []}}
     evidence_payload = build_deepsearch_evidence(payload, chunk_limit=1, graph_store=object())
     assert evidence_payload["graph_chain"] == ["EntityA -[related_to]-> EntityB"]
+    assert evidence_payload["triples"] == [
+        {"head": "EntityA", "relation": "related_to", "tail": "EntityB", "weight": 1.0}
+    ]

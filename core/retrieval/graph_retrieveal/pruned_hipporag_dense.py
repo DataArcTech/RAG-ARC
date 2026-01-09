@@ -49,7 +49,14 @@ class _PrunedHippoRAGDenseMixin:
 
         return query_doc_scores
 
-    def _dense_passage_retrieval(self, query: str, top_k: int = 10, owner_id: Optional[uuid.UUID] = None) -> List[Chunk]:
+    def _dense_passage_retrieval(
+        self,
+        query: str,
+        top_k: int = 10,
+        owner_id: Optional[uuid.UUID] = None,
+        *,
+        query_doc_scores: Optional[np.ndarray] = None,
+    ) -> List[Chunk]:
         """
         Fallback dense retrieval method (used when graph retrieval fails).
 
@@ -61,7 +68,7 @@ class _PrunedHippoRAGDenseMixin:
         Returns:
             List of retrieved Chunk objects
         """
-        query_doc_scores = self._dense_passage_retrieval_scores(query)
+        query_doc_scores = query_doc_scores if query_doc_scores is not None else self._dense_passage_retrieval_scores(query)
 
         top_k_indices = np.argsort(query_doc_scores)[-top_k:][::-1]
 
@@ -115,4 +122,3 @@ class _PrunedHippoRAGDenseMixin:
                 chunks.append(chunk)
 
         return chunks
-

@@ -6,6 +6,7 @@ from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+from ..governance_tags import EVIDENCE_PRIMARY, REQUIRES_CYPHER, SCOPE_OWNER
 from .graph_ops_common import (
     directionality_config,
     enforce_direction_for_sensitive_predicates,
@@ -23,10 +24,13 @@ class GraphAggregateTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.aggregate",
         channel="graph",
-        description="Deterministic aggregation (COUNT DISTINCT) over graph edges backed by Neo4j Cypher.",
+        description=(
+            "Deterministic aggregation (COUNT DISTINCT + examples) backed by Neo4j Cypher. "
+            "Use for metrics/counting; citeable via provenance when available."
+        ),
         speed="fast",
         cost="low",
-        strategy_tags=("aggregate", "count", "deterministic"),
+        strategy_tags=("aggregate", "count", "deterministic", EVIDENCE_PRIMARY, SCOPE_OWNER, REQUIRES_CYPHER),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.fast.graph_aggregate",
@@ -41,6 +45,11 @@ class GraphAggregateTool(GraphTool):
             },
             required_extra_fields=("entity",),
         ),
+        example_args={
+            "question": "How many suppliers does Project Zeus have?",
+            "plan_step": "plan_12",
+            "extra": {"entity": "Project Zeus", "predicate": "HAS_SUPPLIER", "direction": "out"},
+        },
     )
 
     async def run(self, request: ToolRunRequest) -> ToolResult:

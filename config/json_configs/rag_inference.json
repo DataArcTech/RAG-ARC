@@ -61,32 +61,47 @@
                 "max_facts_after_reranking": 5,
                 "enable_llm_reranking": true,
                 "damping_factor": 0.5,
-                "ppr_backend": "push"
+                "ppr_backend": "push",
+                "ppr_push_epsilon": 0.000001
             }
         ],
         "fusion_method": "rrf",
         "rrf_k": 60,
         "weights": null,
         "search_kwargs": {
-            "k": 5,
+            "k": 30,
             "with_score": true
         }
     },
     "reranker_config": {
         "type": "llm_reranker",
-        "rerank_llm_config": {
-            "type": "listwise_rerank",
-            "chat_llm_config": {
-                "type": "openai_chat",
-                "model_name": "${OPENAI_CHAT_MODEL}",
-                "temperature": 0.0,
-                "openai_api_key": "${OPENAI_API_KEY}",
-                "openai_base_url": "${OPENAI_BASE_URL}"
-            }
-        }
-    },
+	        "rerank_llm_config": {
+	            "type": "listwise_rerank",
+	            "chat_llm_config": {
+	                "type": "openai_chat",
+	                "model_name": "${OPENAI_CHAT_MODEL}",
+	                "temperature": 0.0,
+	                "openai_api_key": "${CHAT_API_KEY}",
+	                "openai_base_url": "${CHAT_API_BASE_URL}"
+	            }
+	        }
+	    },
     "llm_config": {
         "type": "openai_chat",
         "model_name": "${OPENAI_CHAT_MODEL}"
+    },
+    "web_search": {
+        "enabled": true,
+        "endpoint_url": "https://api.tavily.com/search",
+        "api_key": "${TAVILY_API_KEY}",
+        "search_depth": "advanced",
+        "timeout_seconds": 20.0,
+        "timeout_grace_seconds": 2.0,
+        "max_results": 5
+    },
+    "candidate_selection": {
+        "graph_candidates_k": 30,
+        "web_candidates_k": 5,
+        "rerank_keep_k": 5
     }
 }

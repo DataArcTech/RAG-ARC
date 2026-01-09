@@ -16,6 +16,7 @@ from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+from ..governance_tags import EVIDENCE_PRIMARY, REQUIRES_CYPHER, SCOPE_OWNER
 from .graph_ops_common import limit_int
 
 
@@ -31,7 +32,7 @@ class GraphSchemaNodesTool(GraphTool):
         ),
         speed="fast",
         cost="low",
-        strategy_tags=("schema", "mindmap", "concept", "process", "deterministic"),
+        strategy_tags=("schema", "mindmap", "concept", "process", "deterministic", EVIDENCE_PRIMARY, SCOPE_OWNER, REQUIRES_CYPHER),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.fast.graph_schema_nodes",
@@ -45,6 +46,11 @@ class GraphSchemaNodesTool(GraphTool):
             },
             required_extra_fields=(),
         ),
+        example_args={
+            "question": "What schema nodes mention 'risk'?",
+            "plan_step": "plan_08",
+            "extra": {"term": "risk", "layer": "concept", "limit": 20},
+        },
     )
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
@@ -136,4 +142,3 @@ class GraphSchemaNodesTool(GraphTool):
         if adapter is None:
             raise RuntimeError("GraphSchemaNodesTool requires a GraphDeepSearchAdapter instance")
         return adapter
-

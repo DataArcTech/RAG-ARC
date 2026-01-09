@@ -31,6 +31,30 @@ class GraphRetrievalConfig(AbstractConfig):
     # Subgraph construction parameters
     max_hops: int = Field(default=5, description="Maximum hops for subgraph expansion")
     beam_size: int = Field(default=20, description="Beam size for subgraph expansion")
+
+    # Similarity/synonymy edge guarding (HippoRAG-style SIMILAR_TO).
+    similarity_edge_relation: str = Field(
+        default="SIMILAR_TO",
+        description="Relation name used for similarity/synonymy edges.",
+    )
+    similarity_edge_max_hops: int = Field(
+        default=1,
+        ge=0,
+        le=10,
+        description="Allow similarity edges only for the first N hops (0 disables).",
+    )
+    similarity_edge_min_similarity: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+        description="Minimum similarity required to traverse a similarity edge.",
+    )
+    similarity_edge_max_per_node: int = Field(
+        default=20,
+        ge=0,
+        le=200,
+        description="Max similarity edges per node per hop (0 disables traversal).",
+    )
     
     # PPR parameters
     damping_factor: float = Field(default=0.85, description="PPR damping factor")

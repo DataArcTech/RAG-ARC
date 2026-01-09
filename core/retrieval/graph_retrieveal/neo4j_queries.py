@@ -37,13 +37,19 @@ _NEO4J_QUERIES: Dict[str, str] = {
     "get_entity_neighbors": """
         MATCH (e1:Entity {id_: $entity_id})-[r]->(e2:Entity)
         OPTIONAL MATCH (e2)<-[:MENTIONS]-(d:Chunk)
-        WITH e2, type(r) as relation_type, count(d) as mention_count
-        RETURN e2.id_ as neighbor_id, relation_type, mention_count
+        WITH e2, r, type(r) as relation_type, count(d) as mention_count
+        RETURN e2.id_ as neighbor_id,
+               relation_type,
+               mention_count,
+               CASE WHEN relation_type = 'SIMILAR_TO' THEN r.similarity ELSE NULL END AS similarity
         UNION
         MATCH (e1:Entity)-[r]->(e2:Entity {id_: $entity_id})
         OPTIONAL MATCH (e1)<-[:MENTIONS]-(d:Chunk)
-        WITH e1, type(r) as relation_type, count(d) as mention_count
-        RETURN e1.id_ as neighbor_id, relation_type, mention_count
+        WITH e1, r, type(r) as relation_type, count(d) as mention_count
+        RETURN e1.id_ as neighbor_id,
+               relation_type,
+               mention_count,
+               CASE WHEN relation_type = 'SIMILAR_TO' THEN r.similarity ELSE NULL END AS similarity
     """,
     "get_entity_degree": """
         MATCH (e:Entity {id_: $entity_id})-[r]-()
@@ -74,4 +80,3 @@ def get_neo4j_query(query_type: str) -> str:
 
 
 __all__ = ["get_neo4j_query"]
-

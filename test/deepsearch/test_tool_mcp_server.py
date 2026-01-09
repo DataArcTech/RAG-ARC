@@ -83,6 +83,7 @@ async def test_tool_mcp_server_invokes_registered_tool_with_adapter_injection(tm
     assert result["tool_name"] == "graph.bridge_lookup"
     assert result["evidences"]
     assert result["summary"]
+    assert await server.list_registered_mcp_tool_names() == server.expected_mcp_tool_names()
 
 
 @pytest.mark.asyncio

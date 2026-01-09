@@ -333,6 +333,7 @@ class OpenAIChatLLM(ChatLLMBase):
             chunk_count = 0
             total_content_length = 0
             all_chunks_detail = []
+            captured_pieces: list[str] = []
             
             try:
                 for chunk in stream:
@@ -419,6 +420,8 @@ class OpenAIChatLLM(ChatLLMBase):
                                     content_len,
                                     repr(content)[:200],
                                 )
+                            if isinstance(content, str) and content:
+                                captured_pieces.append(content)
                             yield content
                         elif chunk_count <= 5:  # Log first 5 chunks even if no content
                             logger.debug(
@@ -438,7 +441,31 @@ class OpenAIChatLLM(ChatLLMBase):
                     exc_info=True,
                 )
                 raise
-            
+
+            if chunk_count > 0 and total_content_length == 0:
+                logger.warning(
+                    "OpenAIChatLLM.stream_chat produced 0 content tokens; falling back to non-streaming completion (model=%s).",
+                    model,
+                )
+                try:
+                    text = self.chat(
+                        messages=messages,
+                        model=model,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        **kwargs,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(
+                        "OpenAIChatLLM.stream_chat fallback chat() failed: model=%s error=%s",
+                        model,
+                        exc,
+                        exc_info=True,
+                    )
+                    raise
+                if isinstance(text, str) and text:
+                    yield text
+
             # Log COMPLETE summary after streaming completes
             try:
                 summary = {

@@ -8,6 +8,7 @@ from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+from ..governance_tags import EVIDENCE_PRIMARY, REQUIRES_CYPHER, SCOPE_OWNER
 from .graph_ops_common import (
     directionality_config,
     enforce_direction_for_sensitive_predicates,
@@ -25,10 +26,13 @@ class GraphSetDifferenceTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.set_difference",
         channel="graph",
-        description="Deterministic set-difference query backed by Neo4j Cypher.",
+        description=(
+            "Deterministic set-difference (NOT / exclusion) backed by Neo4j Cypher. "
+            "Evidence: citeable via provenance when available."
+        ),
         speed="fast",
         cost="low",
-        strategy_tags=("set_ops", "difference", "deterministic"),
+        strategy_tags=("set_ops", "difference", "deterministic", EVIDENCE_PRIMARY, SCOPE_OWNER, REQUIRES_CYPHER),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.fast.graph_set_difference",
@@ -56,6 +60,11 @@ class GraphSetDifferenceTool(GraphTool):
             },
             required_extra_fields=("exclude",),
         ),
+        example_args={
+            "question": "Which products do NOT contain peanuts?",
+            "plan_step": "plan_11",
+            "extra": {"universe_type": "Product", "exclude": ["花生"], "predicates": ["CONTAINS", "TRACES_OF"]},
+        },
     )
 
     async def run(self, request: ToolRunRequest) -> ToolResult:

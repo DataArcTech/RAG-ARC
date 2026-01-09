@@ -102,6 +102,18 @@ cp .env.example .env
 | `MINILM_MODEL_NAME` | `sentence-transformers/all-MiniLM-L6-v2` | `download_models.py` 下载 MiniLM 时使用的默认 repo id。 |
 | `MINILM_CACHE_FOLDER` | `./models/all-MiniLM-L6-v2` | `download_models.py` 下载 MiniLM 的缓存目录。 |
 
+## 1.2 DeepSearch：file-scope 跨语言重写（高级）
+
+这些变量用于控制：当启用了 file-scope 过滤、且查询语言与文件名语言可能不匹配时，DeepSearch 是否（以及在什么条件下）触发一次“跨语言查询重写”（通过 retriever 的 LLM 生成补充查询词）。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `DEEPSEARCH_FILE_SCOPE_XLANG_RETRY` | `1` | 是否启用跨语言重写尝试（`0/false/no/off` 关闭）。 |
+| `DEEPSEARCH_FILE_SCOPE_XLANG_ALPHA_RATIO_TO_ZH_MIN` | `0.25` | ASCII 字母占比 ≥ 此阈值且 CJK 占比 < `..._CJK_RATIO_TO_ZH_MAX` 时，判定为“英文倾向”，触发 en→zh 重写补充。 |
+| `DEEPSEARCH_FILE_SCOPE_XLANG_CJK_RATIO_TO_ZH_MAX` | `0.05` | en→zh 触发条件中的 CJK 最大占比。 |
+| `DEEPSEARCH_FILE_SCOPE_XLANG_CJK_RATIO_TO_EN_MIN` | `0.15` | CJK 占比 ≥ 此阈值且 ASCII 字母占比 < `..._ALPHA_RATIO_TO_EN_MAX` 时，判定为“中文倾向”，触发 zh→en 重写补充。 |
+| `DEEPSEARCH_FILE_SCOPE_XLANG_ALPHA_RATIO_TO_EN_MAX` | `0.08` | zh→en 触发条件中的 ASCII 字母最大占比。 |
+
 ## 1.1 索引与存储路径
 
 | 变量 | 默认值 | 说明 |
@@ -315,7 +327,7 @@ cp .env.example .env
 | `DEEPSEARCH_SECTIONWISE_WRITER` | `false` | 启用“分节写作 + Memory Bank 检索 + recency retain_k”模式。 |
 | `DEEPSEARCH_BUDGET_TIER` | _(空)_ | 可选的复杂度→预算覆盖开关（`low` / `default`）；为空时将基于问题内容做启发式预算分配。 |
 | `DEEPSEARCH_TELEMETRY_ENABLED` | `true` | 是否启用工具运行遥测（本地 artifacts）。 |
-| `TAVILY_API_KEY` | _(空)_ | Tavily 搜索的 Key（启用外部搜索时必填）。 |
+| `TAVILY_API_KEY` | _(空)_ | Tavily 网络搜索 Key（HippoRAG 问答与 DeepSearch 启用网络搜索时都会使用）。 |
 | `DEEPSEARCH_WEB_PROVIDER` | _(空)_ | 外部搜索路由提示（`tavily` / `tool` / `mcp`；其他值会回退到 `tavily`）。 |
 | `DEEPSEARCH_EXTERNAL_CACHE_MODE` | `auto` | 外部搜索录制/回放模式：`off` / `record` / `replay` / `auto`。 |
 | `DEEPSEARCH_EXTERNAL_CACHE_DIR` | `./local/deepsearch_artifacts/external_cache` | 外部搜索缓存目录。 |

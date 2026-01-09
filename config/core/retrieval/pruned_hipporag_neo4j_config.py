@@ -63,6 +63,28 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
         default=30,
         description="Base number of neighbors to keep per node during expansion"
     )
+    similarity_edge_relation: str = Field(
+        default="SIMILAR_TO",
+        description="Relation name used for synonymy/similarity edges.",
+    )
+    similarity_edge_max_hops: int = Field(
+        default=1,
+        ge=0,
+        le=10,
+        description="Allow similarity edges only for the first N hops (0 disables).",
+    )
+    similarity_edge_min_similarity: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+        description="Minimum similarity required to traverse a similarity edge.",
+    )
+    similarity_edge_max_per_node: int = Field(
+        default=20,
+        ge=0,
+        le=200,
+        description="Max similarity edges per node per hop (0 disables traversal).",
+    )
     query_aware_multiplier: float = Field(
         default=2.0,
         description="Multiplier for increasing max_neighbors for highly relevant entities"
@@ -86,10 +108,39 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
         description="Weight assigned to passage nodes in PPR initialization"
     )
 
+    entity_chunk_count_penalty_gamma: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=4.0,
+        description="Exponent for dividing entity reset weights by entity->chunk count (1.0 matches legacy).",
+    )
+
     # PPR backend selection
     ppr_backend: Literal["push", "igraph"] = Field(
         default="push",
         description="PPR computation backend: 'push' (fast, recommended) or 'igraph' (fallback)"
+    )
+
+    ppr_push_epsilon: float = Field(
+        default=0.000001,
+        gt=0,
+        lt=1,
+        description="Convergence epsilon for push-based PPR (smaller = more precise, slower).",
+    )
+
+    ppr_push_threshold_mode: Literal["residual", "residual_over_degree", "residual_over_weighted_degree"] = Field(
+        default="residual",
+        description=(
+            "Push termination thresholding strategy for approximate PPR. "
+            "'residual' matches legacy; degree-normalized modes reduce hub bias by requiring larger residual on high-degree nodes."
+        ),
+    )
+
+    ppr_push_target_degree_penalty_gamma: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=4.0,
+        description="Target-degree penalty exponent for push-based PPR transitions (0 disables).",
     )
 
     ppr_directed_mode: Literal["off", "auto", "on"] = Field(
@@ -99,6 +150,55 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
             "'auto' enables directed PPR when kg_schema declares direction_sensitive_relations; "
             "'on' forces directed PPR; 'off' keeps legacy undirected behaviour."
         ),
+    )
+
+    fact_groundability_enabled: bool = Field(
+        default=True,
+        description="Whether to use provenance-groundability to filter/penalize retrieved facts.",
+    )
+    fact_groundability_mode: Literal["hard_filter", "soft_penalty"] = Field(
+        default="soft_penalty",
+        description="Groundability behavior: drop ungrounded facts vs downweight them.",
+    )
+    fact_groundability_dense_top_k: int = Field(
+        default=30,
+        ge=1,
+        le=200,
+        description="Top-N dense chunks used to compute provenance overlap for fact groundability.",
+    )
+    fact_groundability_min_overlap_count: int = Field(
+        default=1,
+        ge=0,
+        le=50,
+        description="Hard-filter threshold: require at least this many overlapping provenance chunks.",
+    )
+    fact_groundability_min_overlap_ratio: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Hard-filter threshold: require provenance overlap ratio >= this value.",
+    )
+    fact_groundability_soft_min_weight: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description="Soft-penalty floor weight for facts with zero/low provenance overlap.",
+    )
+    fact_groundability_soft_gamma: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=8.0,
+        description="Soft-penalty exponent applied to overlap ratio.",
+    )
+    fact_groundability_keep_missing_provenance: bool = Field(
+        default=True,
+        description="Whether to keep facts with missing provenance (source_chunk_ids).",
+    )
+    fact_groundability_missing_provenance_weight: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description="Score multiplier for facts with missing provenance (kept when allowed).",
     )
 
     def build(self):

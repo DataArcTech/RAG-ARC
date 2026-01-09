@@ -32,7 +32,8 @@ async def test_consistency_checker_retries_on_invalid_json_then_succeeds(monkeyp
     )
 
     assert result.is_consistent is True
-    assert len(calls) == 2
+    # Parsing now auto-repairs unescaped newlines inside JSON strings, so no LLM retry is required.
+    assert len(calls) == 1
 
 
 @pytest.mark.asyncio
@@ -78,4 +79,5 @@ async def test_quality_gate_llm_judge_retries_on_invalid_json_then_succeeds(monk
 
     assert result.judge is not None
     assert result.judge.passed is True
-    assert len(calls) == 2
+    # Parsing now auto-repairs unescaped newlines inside JSON strings, so no LLM retry is required.
+    assert len(calls) == 1

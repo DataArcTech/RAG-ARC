@@ -6,6 +6,8 @@ from typing import List, Optional, Set, Tuple
 import numpy as np
 
 from encapsulation.database.utils.pruned_hipporag_utils import compute_entity_id, normalize_entity_text
+from core.prompts.graph_retrieval import FACT_RERANK_USER_PROMPT
+from core.retrieval.graph_retrieveal.llm_selection import parse_ranked_choice_indices
 from core.utils.owner_guard import normalize_owner_id
 
 logger = logging.getLogger(__name__)
@@ -46,59 +48,65 @@ class _PrunedHippoRAGFactsMixin:
                 with FAISS_LOCK:
                     faiss.normalize_L2(query_vector)
 
-            # Retrieve top-k facts (with buffer for filtering)
-            k = min(total_facts, self.config.fact_retrieval_top_k * 10)
-            from core.utils.faiss_lock import FAISS_LOCK
+            desired_owner_hits = int(getattr(self.config, "fact_retrieval_top_k", 0) or 0)
+            desired_owner_hits = max(1, desired_owner_hits)
 
-            with FAISS_LOCK:
-                scores, indices = self.graph_store.fact_faiss_db.index.search(query_vector, k)
+            def _search(k: int) -> tuple[np.ndarray, np.ndarray]:
+                from core.utils.faiss_lock import FAISS_LOCK
 
-            scores = scores[0]
-            indices = indices[0]
+                with FAISS_LOCK:
+                    scores_out, indices_out = self.graph_store.fact_faiss_db.index.search(query_vector, k)
+                return scores_out[0], indices_out[0]
 
-            # Filter out deleted facts
-            fact_ids = []
-            valid_scores = []
-            for idx, score in zip(indices, scores):
-                if idx >= 0 and idx in self.graph_store.fact_faiss_db.index_to_docstore_id:
-                    fact_id = self.graph_store.fact_faiss_db.index_to_docstore_id[idx]
-                    if fact_id not in self.graph_store.fact_faiss_db.deleted_ids:
-                        fact_ids.append(fact_id)
-                        valid_scores.append(score)
+            def _collect(scores_1d: np.ndarray, indices_1d: np.ndarray) -> tuple[np.ndarray, list[str]]:
+                fact_ids_local: list[str] = []
+                valid_scores_local: list[float] = []
+                for idx, score in zip(indices_1d, scores_1d):
+                    if idx >= 0 and idx in self.graph_store.fact_faiss_db.index_to_docstore_id:
+                        fact_id = self.graph_store.fact_faiss_db.index_to_docstore_id[idx]
+                        if fact_id not in self.graph_store.fact_faiss_db.deleted_ids:
+                            fact_ids_local.append(fact_id)
+                            valid_scores_local.append(float(score))
+                if not valid_scores_local:
+                    return np.array([]), []
+                scores_arr = self._min_max_normalize(np.array(valid_scores_local))
+                return scores_arr, fact_ids_local
 
-            query_fact_scores = np.array(valid_scores)
-
-            # Normalize scores to [0, 1] range
-            if len(query_fact_scores) > 0:
-                query_fact_scores = self._min_max_normalize(query_fact_scores)
-
-            if owner_id is None or len(query_fact_scores) == 0:
-                return query_fact_scores, fact_ids
-
+            # Retrieve top-k facts (with buffer for filtering). When owner filtering is enabled,
+            # adaptively increase k so the top-k isn't dominated by other tenants' facts.
+            k = min(total_facts, max(desired_owner_hits, self.config.fact_retrieval_top_k * 10))
             owner_str = self._owner_to_str(owner_id)
-            filtered_scores = []
-            filtered_ids = []
             docstore = getattr(self.graph_store.fact_faiss_db, "docstore", {})
 
-            for score, fact_id in zip(query_fact_scores, fact_ids):
-                chunk = docstore.get(fact_id)
-                if not chunk:
-                    continue
-                fact_owner = getattr(chunk, "owner_id", None)
-                if fact_owner is None and chunk.metadata:
-                    fact_owner = chunk.metadata.get("owner_id")
+            while True:
+                scores_1d, indices_1d = _search(k)
+                query_fact_scores, fact_ids = _collect(scores_1d, indices_1d)
 
-                if fact_owner is None:
-                    continue
+                if owner_id is None or len(query_fact_scores) == 0:
+                    return query_fact_scores, fact_ids
 
-                if str(fact_owner) == owner_str:
-                    filtered_scores.append(score)
-                    filtered_ids.append(fact_id)
+                filtered_scores: list[float] = []
+                filtered_ids: list[str] = []
+                for score, fact_id in zip(query_fact_scores.tolist(), fact_ids):
+                    chunk = docstore.get(fact_id)
+                    if not chunk:
+                        continue
+                    fact_owner = getattr(chunk, "owner_id", None)
+                    if fact_owner is None and chunk.metadata:
+                        fact_owner = chunk.metadata.get("owner_id")
+                    if fact_owner is None:
+                        continue
+                    if str(fact_owner) == owner_str:
+                        filtered_scores.append(float(score))
+                        filtered_ids.append(fact_id)
 
-            if not filtered_scores:
-                return np.array([]), []
+                if filtered_scores or k >= total_facts or len(filtered_ids) >= desired_owner_hits:
+                    if not filtered_scores:
+                        return np.array([]), []
+                    dtype = query_fact_scores.dtype if isinstance(query_fact_scores, np.ndarray) else np.float32
+                    return np.array(filtered_scores, dtype=dtype), filtered_ids
 
-            return np.array(filtered_scores), filtered_ids
+                k = min(total_facts, max(k * 2, desired_owner_hits))
 
         except Exception as e:
             logger.error(f"FAISS fact retrieval failed: {e}")
@@ -295,23 +303,18 @@ class _PrunedHippoRAGFactsMixin:
         # Format facts for LLM prompt
         facts_text = "\n".join([f"{i+1}. {head} - {relation} - {tail}" for i, (head, relation, tail, *_) in enumerate(candidate_facts)])
 
-        prompt = f"""Given the query: "{query}"
-
-Select the {len_after_rerank} most relevant facts from the following list:
-
-{facts_text}
-
-Return only the numbers of the selected facts, separated by commas (e.g., "1,3,5").
-"""
+        prompt = FACT_RERANK_USER_PROMPT.format(query=query, facts_text=facts_text, k=int(len_after_rerank))
 
         messages = [{"role": "user", "content": prompt}]
         response = self.llm_client.chat(messages)
 
         try:
-            # Parse LLM response
-            selected_indices = [int(x.strip()) - 1 for x in response.split(",")]
-            selected_indices = [i for i in selected_indices if 0 <= i < len(candidate_facts)]
-
+            selected_indices = parse_ranked_choice_indices(
+                str(response or ""),
+                candidate_count=len(candidate_facts),
+                k=int(len_after_rerank),
+                one_based=True,
+            )
             if not selected_indices:
                 raise ValueError("No valid indices in LLM response")
 
@@ -324,4 +327,3 @@ Return only the numbers of the selected facts, separated by commas (e.g., "1,3,5
             logger.warning(f"Failed to parse LLM response: {e}")
             max_facts = min(len_after_rerank, len(candidate_facts))
             return candidate_facts[:max_facts], candidate_fact_indices[:max_facts]
-

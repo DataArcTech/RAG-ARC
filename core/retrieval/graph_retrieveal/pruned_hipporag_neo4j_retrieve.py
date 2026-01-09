@@ -1,7 +1,7 @@
 import json
 import logging
 import uuid
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Tuple, Dict, Any
 
 import numpy as np
 
@@ -12,6 +12,80 @@ logger = logging.getLogger(__name__)
 
 
 class _PrunedHippoRAGNeo4jRetrieveMixin:
+    @staticmethod
+    def _is_entity_node_id(node_id: object) -> bool:
+        token = str(node_id or "")
+        return token.startswith("entity-")
+
+    def _select_top_entity_chunks(
+        self,
+        *,
+        ppr_scores_dict: Dict[str, float],
+        owner_id: Optional[uuid.UUID],
+        top_k: int,
+        fallback_chunk_ids: List[str],
+    ) -> Tuple[List[str], List[float], str | None]:
+        """
+        Select chunks by:
+        1) pick the entity with highest PPR score
+        2) take its directly connected chunk neighbors
+        3) rank those chunks by PPR score and keep top_k (fill with fallback PPR chunks if needed)
+        """
+        top_k = max(1, int(top_k))
+
+        entity_scores: list[tuple[str, float]] = []
+        for node_id, score in (ppr_scores_dict or {}).items():
+            if self._is_entity_node_id(node_id):
+                try:
+                    entity_scores.append((str(node_id), float(score)))
+                except Exception:  # noqa: BLE001
+                    continue
+
+        if not entity_scores:
+            chunk_ids = list(fallback_chunk_ids[:top_k])
+            chunk_scores = [float(ppr_scores_dict.get(cid, 0.0)) for cid in chunk_ids]
+            return chunk_ids, chunk_scores, None
+
+        top_entity_id, _top_score = max(entity_scores, key=lambda item: item[1])
+
+        owner_str = self._owner_to_str(owner_id)
+        neighbors = self.graph_store.get_neighbors_with_weights(top_entity_id, owner_id=owner_str)
+        chunk_candidates: list[tuple[str, float, float]] = []
+        for neighbor_id, edge_weight in neighbors or []:
+            neighbor_token = str(neighbor_id or "")
+            if self._is_entity_node_id(neighbor_token):
+                continue
+            ppr_score = float(ppr_scores_dict.get(neighbor_token, 0.0))
+            try:
+                edge_weight_f = float(edge_weight)
+            except Exception:  # noqa: BLE001
+                edge_weight_f = 0.0
+            chunk_candidates.append((neighbor_token, ppr_score, edge_weight_f))
+
+        chunk_candidates.sort(key=lambda item: (item[1], item[2]), reverse=True)
+
+        selected: list[str] = []
+        seen: set[str] = set()
+        for chunk_id, _ppr, _w in chunk_candidates:
+            if chunk_id in seen:
+                continue
+            seen.add(chunk_id)
+            selected.append(chunk_id)
+            if len(selected) >= top_k:
+                break
+
+        if len(selected) < top_k:
+            for chunk_id in fallback_chunk_ids:
+                if chunk_id in seen:
+                    continue
+                seen.add(chunk_id)
+                selected.append(chunk_id)
+                if len(selected) >= top_k:
+                    break
+
+        scores = [float(ppr_scores_dict.get(cid, 0.0)) for cid in selected]
+        return selected, scores, top_entity_id
+
     def retrieve(self, query: str, top_k: int = 10, return_subgraph_info: bool = False, owner_id: Optional[uuid.UUID] = None) -> List[Chunk]:
         """
         Main retrieval method implementing the Pruned HippoRAG algorithm with Neo4j backend.
@@ -53,12 +127,16 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
         # Rebuild node mappings for the current owner
         self._build_node_mappings(owner_id=owner_filter)
 
+        # Dense scores are needed both for provenance-groundability (optional) and passage weights in PPR.
+        # Compute once per request to avoid repeated N×D dot products for large corpora.
+        query_doc_scores = self._dense_passage_retrieval_scores(query)
+
         # Step 1: Retrieve relevant facts
-        query_fact_scores, fact_ids = self._get_fact_scores_faiss(query, owner_id=owner_filter)
+        query_fact_scores, fact_ids = self._get_fact_scores_faiss(query, owner_id=owner_filter, query_doc_scores=query_doc_scores)
 
         if query_fact_scores is None or len(query_fact_scores) == 0:
             logger.warning("No facts found, falling back to dense retrieval")
-            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter)
+            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter, query_doc_scores=query_doc_scores)
 
         # Step 2: Rerank facts (optional)
         if self.config.enable_llm_reranking and self.llm_client:
@@ -70,7 +148,7 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
 
         if not top_k_facts:
             logger.warning("No facts after reranking, falling back to dense retrieval")
-            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter)
+            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter, query_doc_scores=query_doc_scores)
 
         logger.info(f"Selected {len(top_k_facts)} facts after LLM filtering")
 
@@ -79,7 +157,7 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
 
         if not seed_entity_ids:
             logger.warning("No seed entities found, falling back to dense retrieval")
-            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter)
+            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter, query_doc_scores=query_doc_scores)
 
         logger.info(f"Extracted {len(seed_entity_ids)} seed entities from {len(top_k_facts)} facts")
 
@@ -112,10 +190,18 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
             top_k_fact_indices,
             subgraph_nodes,
             owner_id=owner_filter,
+            query_doc_scores=query_doc_scores,
+        )
+
+        selected_chunk_ids, selected_chunk_scores, top_entity_id = self._select_top_entity_chunks(
+            ppr_scores_dict=ppr_scores_dict,
+            owner_id=owner_filter,
+            top_k=top_k,
+            fallback_chunk_ids=sorted_doc_ids,
         )
 
         # Step 7: Convert to Chunk objects
-        chunks = self._convert_to_chunks(sorted_doc_ids[:top_k], sorted_doc_scores[:top_k], owner_id=owner_filter)
+        chunks = self._convert_to_chunks(selected_chunk_ids, selected_chunk_scores, owner_id=owner_filter)
 
         # Optionally attach subgraph information for visualization
         if return_subgraph_info and chunks:
@@ -124,10 +210,12 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
             subgraph_info = {
                 "subgraph_nodes": list(subgraph_nodes),
                 "seed_entity_ids": list(seed_entity_ids),
-                "retrieved_chunk_ids": sorted_doc_ids[:top_k],
+                "retrieved_chunk_ids": selected_chunk_ids,
                 "node_ppr_scores": node_to_ppr_score,
                 "query": query,
             }
+            if top_entity_id:
+                subgraph_info["top_entity_id"] = top_entity_id
             if chunks[0].metadata is None:
                 chunks[0].metadata = {}
             chunks[0].metadata["_subgraph_info"] = subgraph_info
@@ -222,4 +310,3 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
                 chunks.append(chunk)
 
         return chunks
-

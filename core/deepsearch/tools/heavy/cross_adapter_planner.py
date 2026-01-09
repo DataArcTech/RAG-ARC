@@ -7,6 +7,7 @@ from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.prompts.deepsearch.heavy_tools import CROSS_ADAPTER_PLANNER_SYSTEM_PROMPT_V1
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, build_input_schema, safe_json_loads
+from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_LLM, SCOPE_OWNER
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 
@@ -20,7 +21,7 @@ class CrossAdapterPlannerTool(GraphTool):
         "steps know which graph adapter should handle each hop or validation task.",
         speed="slow",
         cost="high",
-        strategy_tags=("planner", "meta_reasoning", "llm"),
+        strategy_tags=("planner", "meta_reasoning", "llm", EVIDENCE_DERIVED, SCOPE_OWNER, REQUIRES_LLM),
         profile="H",
         determinism="llm_heavy",
         namespace="rag-arc.deepsearch.tools.heavy.cross_adapter_planner",

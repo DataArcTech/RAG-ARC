@@ -8,6 +8,7 @@ from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+from ..governance_tags import EVIDENCE_PRIMARY, REQUIRES_CYPHER, SCOPE_OWNER
 from .graph_ops_common import (
     directionality_config,
     enforce_direction_for_sensitive_predicates,
@@ -26,10 +27,13 @@ class GraphPathExistsTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.path_exists",
         channel="graph",
-        description="Deterministic path-existence query (shortest path) backed by Neo4j Cypher.",
+        description=(
+            "Deterministic path-existence query (shortest path) backed by Neo4j Cypher. "
+            "Evidence: citeable when `fact_ids/source_chunk_ids` are present in provenance."
+        ),
         speed="fast",
         cost="low",
-        strategy_tags=("path", "traversal", "deterministic"),
+        strategy_tags=("path", "traversal", "deterministic", EVIDENCE_PRIMARY, SCOPE_OWNER, REQUIRES_CYPHER),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.fast.graph_path_exists",
@@ -186,10 +190,13 @@ class GraphNeighborsTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.neighbors",
         channel="graph",
-        description="Deterministic 1-hop neighbor lookup backed by Neo4j Cypher.",
+        description=(
+            "Deterministic 1-hop neighbor lookup backed by Neo4j Cypher. "
+            "Evidence: citeable when `fact_id/source_chunk_ids` are present in provenance."
+        ),
         speed="fast",
         cost="low",
-        strategy_tags=("neighbors", "direction", "deterministic"),
+        strategy_tags=("neighbors", "direction", "deterministic", EVIDENCE_PRIMARY, SCOPE_OWNER, REQUIRES_CYPHER),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.fast.graph_neighbors",
@@ -204,6 +211,11 @@ class GraphNeighborsTool(GraphTool):
             },
             required_extra_fields=("entity",),
         ),
+        example_args={
+            "question": "What entities are 1-hop away from OpenAI via founded_by?",
+            "plan_step": "plan_01",
+            "extra": {"entity": "OpenAI", "predicates": ["FOUNDED_BY"], "direction": "out", "limit": 10},
+        },
     )
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
@@ -324,10 +336,13 @@ class GraphTraceToRootTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.trace_to_root",
         channel="graph",
-        description="Deterministic hierarchy tracing that returns a root-to-leaf chain backed by Neo4j Cypher.",
+        description=(
+            "Deterministic hierarchy tracing that returns a root-to-leaf chain backed by Neo4j Cypher. "
+            "Evidence: citeable when the hierarchy edges have `source_chunk_ids`."
+        ),
         speed="fast",
         cost="low",
-        strategy_tags=("hierarchy", "lineage", "deterministic"),
+        strategy_tags=("hierarchy", "lineage", "deterministic", EVIDENCE_PRIMARY, SCOPE_OWNER, REQUIRES_CYPHER),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.fast.graph_trace_to_root",
@@ -341,6 +356,11 @@ class GraphTraceToRootTool(GraphTool):
             },
             required_extra_fields=("leaf",),
         ),
+        example_args={
+            "question": "Trace OpenAI department hierarchy to the root",
+            "plan_step": "plan_06",
+            "extra": {"leaf": "OpenAI Research Team", "predicates": ["CONTAINS"], "max_hops": 6},
+        },
     )
 
     async def run(self, request: ToolRunRequest) -> ToolResult:

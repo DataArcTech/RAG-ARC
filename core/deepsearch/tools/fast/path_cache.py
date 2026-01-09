@@ -4,6 +4,7 @@ from typing import Any, Dict, Iterable, List
 from encapsulation.data_model.deepsearch import EvidenceChunk
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_CHAIN_TRAVERSE, SCOPE_OWNER
 from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
@@ -14,10 +15,13 @@ class PathCacheTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.path_cache",
         channel="graph",
-        description="Prefetches multi-hop neighborhoods using adapter cache/PPR hints.",
+        description=(
+            "Deterministic prefetch over adapter chain_traverse(ppr_prefetch) to warm caches. "
+            "Evidence: derived paths (NOT citeable)."
+        ),
         speed="fast",
         cost="medium",
-        strategy_tags=("ppr", "prefetch", "cache"),
+        strategy_tags=("ppr", "prefetch", "cache", EVIDENCE_DERIVED, SCOPE_OWNER, REQUIRES_CHAIN_TRAVERSE),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.fast.path_cache",

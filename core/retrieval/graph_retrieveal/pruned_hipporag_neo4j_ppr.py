@@ -122,11 +122,17 @@ class _PrunedHippoRAGNeo4jPPRMixin:
             Dictionary mapping node_id -> PageRank score
         """
         try:
+            cfg = getattr(self, "config", None)
+            epsilon = float(getattr(cfg, "ppr_push_epsilon"))
+            push_threshold_mode = str(getattr(cfg, "ppr_push_threshold_mode", "residual"))
+            target_degree_penalty_gamma = float(getattr(cfg, "ppr_push_target_degree_penalty_gamma", 0.0))
             ppr_scores = self.graph_store.compute_ppr_push(
                 subgraph_nodes=subgraph_nodes,
                 reset=reset,
                 alpha=damping,
-                epsilon=1e-6,
+                epsilon=epsilon,
+                push_threshold_mode=push_threshold_mode,
+                target_degree_penalty_gamma=target_degree_penalty_gamma,
                 owner_id=self._owner_to_str(owner_id),
             )
             logger.info(f"Push-based PPR completed: {len(ppr_scores)} nodes with non-zero scores")

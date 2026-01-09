@@ -77,7 +77,11 @@ def is_read_only_cypher(cypher: str) -> bool:
 
 def assert_read_only_cypher(cypher: str) -> None:
     if not is_read_only_cypher(cypher):
-        raise ValueError("Cypher query rejected: only single-statement read-only Cypher is allowed.")
+        raise CypherPolicyError("Cypher query rejected: only single-statement read-only Cypher is allowed.")
+
+
+class CypherPolicyError(ValueError):
+    """Raised when Cypher violates the read-only policy (security boundary)."""
 
 
 @runtime_checkable

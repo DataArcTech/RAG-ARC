@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from encapsulation.data_model.deepsearch import EvidenceChunk, GraphQueryContext
+from encapsulation.web_search import TavilySearchClient
 from core.deepsearch.trace import emit_trace
 from core.utils.json_safe import json_safe
 
@@ -32,6 +33,12 @@ class ExternalSearchChannel:
         self._context_limit = int(self.config["context_window_limit"])
         self._tavily_timeout = float(self.config["http_timeout"])
         self._tavily_max_results = int(self.config["max_results"])
+        self._tavily_client = TavilySearchClient(
+            api_key=self.config.get("tavily_api_key"),
+            endpoint_url=str(self.config.get("endpoint_url") or "https://api.tavily.com/search"),
+            timeout_seconds=self._tavily_timeout,
+            max_results=self._tavily_max_results,
+        )
         self._tool_timeout = max(0.0, float(self.config["tool_timeout_seconds"]))
         self._cache_mode = str(self.config["cache_mode"]).strip().lower()
         self._cache_dir = self.config.get("cache_dir")
@@ -497,25 +504,11 @@ class ExternalSearchChannel:
         api_key = self._resolve_tavily_key()
         if not api_key:
             raise RuntimeError("TAVILY_API_KEY is not configured; external search remains disabled.")
-        try:
-            import httpx
-        except ImportError as exc:  # pragma: no cover - import guard
-            raise RuntimeError("httpx is required for Tavily search; install the 'dev' extras.") from exc
 
         query = self._task_query(task)
-
-        payload = {
-            "api_key": api_key,
-            "query": query,
-            "search_depth": "advanced",
-            "max_results": self._tavily_max_results,
-        }
-        async with httpx.AsyncClient(timeout=self._tavily_timeout) as client:
-            response = await client.post("https://api.tavily.com/search", json=payload)
-            response.raise_for_status()
-            data = response.json()
-
-        evidences = self._normalize_tavily_results(task, data, query)
+        results = await self._tavily_client.asearch(query=query, max_results=self._tavily_max_results)
+        step_id = str(task.get("step_id") or "ext")
+        evidences = self._tavily_client.to_evidence_chunks(results=results, step_id=step_id, query=query)
         return evidences, {"result_count": len(evidences)}
 
     def _normalize_tavily_results(self, task: Dict[str, Any], data: Dict[str, Any], query: str) -> List[Dict[str, Any]]:
@@ -593,10 +586,16 @@ class ExternalSearchChannel:
 
     def _task_provider(self, task: Dict[str, Any]) -> str:
         metadata = task.get("metadata") or {}
-        provider = metadata.get("provider") or metadata.get("external_provider")
+        provider = (
+            metadata.get("provider")
+            or metadata.get("external_provider")
+            or task.get("provider")
+            or task.get("external_provider")
+        )
         if isinstance(provider, str) and provider.strip():
             return self._normalize_provider(provider)
-        raise ValueError("External task is missing required metadata.provider")
+        # Default to the configured provider when planner/tooling didn't annotate the task payload.
+        return self.default_provider
 
     @staticmethod
     def _normalize_provider(provider: Any) -> str:

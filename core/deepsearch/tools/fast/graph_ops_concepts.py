@@ -17,6 +17,7 @@ from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+from ..governance_tags import EVIDENCE_PRIMARY, REQUIRES_CYPHER, SCOPE_OWNER
 from .graph_ops_common import limit_int, normalize_entity_name
 
 
@@ -27,12 +28,21 @@ class GraphEntityConceptsTool(GraphTool):
         name="graph.entity_concepts",
         channel="graph",
         description=(
-            "Deterministic concept lookup over the entity canonicalization layer (EntityCanonical/EntityAlias) backed by Neo4j Cypher. "
-            "Supports resolving an Entity to its canonical concept and searching aliases by term."
+            "Deterministic concept/canonical lookup over EntityCanonical/EntityAlias (Neo4j Cypher). "
+            "Use for disambiguation + query expansion; citeable via provenance when available."
         ),
         speed="fast",
         cost="low",
-        strategy_tags=("concept", "canonicalization", "alias", "disambiguation", "deterministic"),
+        strategy_tags=(
+            "concept",
+            "canonicalization",
+            "alias",
+            "disambiguation",
+            "deterministic",
+            EVIDENCE_PRIMARY,
+            SCOPE_OWNER,
+            REQUIRES_CYPHER,
+        ),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.fast.graph_entity_concepts",
@@ -46,6 +56,11 @@ class GraphEntityConceptsTool(GraphTool):
             },
             required_extra_fields=(),
         ),
+        example_args={
+            "question": "Resolve entity aliases for disambiguation",
+            "plan_step": "plan_02",
+            "extra": {"term": "捷豹", "limit": 10},
+        },
     )
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
@@ -158,4 +173,3 @@ class GraphEntityConceptsTool(GraphTool):
         if adapter is None:
             raise RuntimeError("GraphEntityConceptsTool requires a GraphDeepSearchAdapter instance")
         return adapter
-

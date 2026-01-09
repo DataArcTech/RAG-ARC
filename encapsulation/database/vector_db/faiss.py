@@ -138,25 +138,6 @@ class FaissVectorDB(VectorDB):
                 self.index = faiss.read_index(faiss_path)
             logger.info(f"FAISS index loaded: {self.index.ntotal} vectors, dimension {self.index.d}")
 
-            expected_dim = self._infer_embedding_dim()
-            if expected_dim is not None and getattr(self.index, "d", None) is not None:
-                loaded_dim = int(self.index.d)
-                if loaded_dim != int(expected_dim):
-                    logger.warning(
-                        "FAISS index dimension mismatch: index.d=%s embedding_dim=%s. "
-                        "Ignoring loaded index and requiring a rebuild.",
-                        loaded_dim,
-                        expected_dim,
-                    )
-                    with self._lock:
-                        self.index = None
-                        self.docstore = {}
-                        self.index_to_docstore_id = {}
-                        self.deleted_ids = set()
-                    raise ValueError(
-                        f"FAISS index dimension mismatch: index.d={loaded_dim} embedding_dim={int(expected_dim)}"
-                    )
-
         # Find .pkl file
         if pkl_files:
             pkl_path = os.path.join(path, pkl_files[0])
@@ -183,6 +164,30 @@ class FaissVectorDB(VectorDB):
                     self.deleted_ids = set()
                 raise ValueError("FAISS embedding fingerprint mismatch (requires rebuild)")
             logger.info(f"Loaded {len(self.docstore)} chunks from metadata ({len(self.deleted_ids)} soft-deleted)")
+
+            # Dimension validation must never require a live embedding API call. Prefer persisted dimension,
+            # then config-provided `embedding_dimensions` if available.
+            stored_dim = data.get("embedding_dim")
+            cfg = getattr(self.embedding_model, "config", None)
+            configured_dim = getattr(cfg, "embedding_dimensions", None) if cfg is not None else None
+            expected_dim = stored_dim if stored_dim is not None else configured_dim
+            if expected_dim is not None and self.index is not None and getattr(self.index, "d", None) is not None:
+                loaded_dim = int(self.index.d)
+                if loaded_dim != int(expected_dim):
+                    logger.warning(
+                        "FAISS index dimension mismatch: index.d=%s expected_dim=%s. "
+                        "Ignoring loaded index and requiring a rebuild.",
+                        loaded_dim,
+                        expected_dim,
+                    )
+                    with self._lock:
+                        self.index = None
+                        self.docstore = {}
+                        self.index_to_docstore_id = {}
+                        self.deleted_ids = set()
+                    raise ValueError(
+                        f"FAISS index dimension mismatch: index.d={loaded_dim} expected_dim={int(expected_dim)}"
+                    )
 
             # Replay persisted index parameters so load+update stays consistent with the on-disk index.
             self.saved_index_type = data.get("index_type")
@@ -672,6 +677,7 @@ class FaissVectorDB(VectorDB):
                 "metric": getattr(self, 'saved_metric', getattr(self.config, 'metric', 'cosine')),
                 "normalize_L2": getattr(self, 'saved_normalize_L2', getattr(self.config, 'normalize_L2', False)),
                 "embedding_fingerprint": self._embedding_fingerprint(),
+                "embedding_dim": getattr(self.index, "d", None),
             }
 
             pkl_path = os.path.join(path, f"{name}.pkl")

@@ -38,6 +38,18 @@ _CHAIN_MODE_REQUIRED_TOOLS: Mapping[str, str] = {
 }
 
 
+def cypher_required_tool_names() -> set[str]:
+    """Return names of tools that require a Cypher-capable graph adapter."""
+
+    return set(_CYPHER_REQUIRED_TOOLS)
+
+
+def chain_mode_required_tool_modes() -> dict[str, str]:
+    """Return tool->required chain_of_exploration mode mappings."""
+
+    return dict(_CHAIN_MODE_REQUIRED_TOOLS)
+
+
 def _capability_index(metadata: GraphAdapterMetadata) -> dict[str, set[str]]:
     index: dict[str, set[str]] = {}
     for cap in getattr(metadata, "capabilities", ()) or ():

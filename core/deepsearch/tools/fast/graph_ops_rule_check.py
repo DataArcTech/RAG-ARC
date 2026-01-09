@@ -8,6 +8,7 @@ from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+from ..governance_tags import EVIDENCE_PRIMARY, REQUIRES_CYPHER, SCOPE_OWNER
 from .graph_ops_common import (
     directionality_config,
     enforce_direction_for_sensitive_predicates,
@@ -25,10 +26,13 @@ class GraphRuleCheckTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.rule_check",
         channel="graph",
-        description="Deterministic rule checker (AND of edge-existence predicates) backed by Neo4j Cypher.",
+        description=(
+            "Deterministic rule checker (AND of edge-existence predicates) backed by Neo4j Cypher. "
+            "Evidence: citeable when matches include `fact_id/source_chunk_ids`."
+        ),
         speed="fast",
         cost="low",
-        strategy_tags=("rules", "deterministic", "compliance"),
+        strategy_tags=("rules", "deterministic", "compliance", EVIDENCE_PRIMARY, SCOPE_OWNER, REQUIRES_CYPHER),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.fast.graph_rule_check",
@@ -55,6 +59,17 @@ class GraphRuleCheckTool(GraphTool):
             },
             required_extra_fields=("conditions",),
         ),
+        example_args={
+            "question": "Check compliance rule: A OWNS B and B OWNS C",
+            "plan_step": "plan_10",
+            "extra": {
+                "conditions": [
+                    {"head": "A公司", "predicate": "OWNS", "tail": "B公司", "direction": "out"},
+                    {"head": "B公司", "predicate": "OWNS", "tail": "C公司", "direction": "out"},
+                ],
+                "limit": 5,
+            },
+        },
     )
 
     async def run(self, request: ToolRunRequest) -> ToolResult:

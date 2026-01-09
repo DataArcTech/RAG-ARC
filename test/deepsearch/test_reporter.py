@@ -107,7 +107,7 @@ class _AliasCitingLLM:
             return (
                 """\n[\n  {\"title\": \"Findings\", \"section_type\": \"analysis\", \"purpose\": \"Summarize evidence.\", \"evidence_ids\": [\"ev1\"]}\n]\n""".strip()
             )
-        if "Return a single JSON object with:" in user_prompt and "Evidence snippets" in user_prompt:
+        if "Return a single JSON object with:" in user_prompt and "Evidence Pack" in user_prompt:
             return (
                 """\n{\n  \"title\": \"Report\",\n  \"short_answer\": \"Claim supported by evidence. [chunk_001]\",\n  \"summary\": \"Claim supported by evidence. [chunk_001]\",\n  \"sections\": [\n    {\"title\": \"Findings\", \"section_type\": \"analysis\", \"body_markdown\": \"Detail. [chunk_001]\"}\n  ],\n  \"limitations\": [],\n  \"next_steps\": [],\n  \"citations\": []\n}\n""".strip()
             )
@@ -131,7 +131,7 @@ class _AliasCitingCjkLLM:
             return (
                 """\n[\n  {\"title\": \"Findings\", \"section_type\": \"analysis\", \"purpose\": \"Summarize evidence.\", \"evidence_ids\": [\"ev1\"]}\n]\n""".strip()
             )
-        if "Return a single JSON object with:" in user_prompt and "Evidence snippets" in user_prompt:
+        if "Return a single JSON object with:" in user_prompt and "Evidence Pack" in user_prompt:
             return (
                 "{\n"
                 '  "title": "Report",\n'
@@ -165,7 +165,7 @@ class _AliasVariantCitingLLM:
             return (
                 """\n[\n  {\"title\": \"Findings\", \"section_type\": \"analysis\", \"purpose\": \"Summarize evidence.\", \"evidence_ids\": [\"ev1\"]}\n]\n""".strip()
             )
-        if "Return a single JSON object with:" in user_prompt and "Evidence snippets" in user_prompt:
+        if "Return a single JSON object with:" in user_prompt and "Evidence Pack" in user_prompt:
             return (
                 "{\n"
                 '  "title": "Report",\n'

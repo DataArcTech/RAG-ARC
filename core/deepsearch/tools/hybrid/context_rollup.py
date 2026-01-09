@@ -11,6 +11,7 @@ from core.prompts.deepsearch import CONTEXT_ROLLUP_PROMPT
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async
+from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_LLM, SCOPE_OWNER
 
 
 class ContextRollupTool(GraphTool):
@@ -19,10 +20,13 @@ class ContextRollupTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.context_rollup",
         channel="graph",
-        description="LLM rollup of active evidence to stabilise long reasoning chains.",
+        description=(
+            "LLM rollup of active evidence to stabilise long reasoning chains. "
+            "Evidence: derived summary (NOT citeable; cite underlying chunks/tools instead)."
+        ),
         speed="medium",
         cost="medium",
-        strategy_tags=("summary", "context", "llm"),
+        strategy_tags=("summary", "context", "llm", EVIDENCE_DERIVED, SCOPE_OWNER, REQUIRES_LLM),
         profile="X",
         determinism="hybrid",
         namespace="rag-arc.deepsearch.tools.x.context_rollup",

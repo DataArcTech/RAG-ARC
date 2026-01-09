@@ -111,6 +111,24 @@ class DeepSearchToolMCPServer:
         )
         self._register_tools()
 
+    def expected_mcp_tool_names(self) -> Set[str]:
+        """Return the MCP tool names that should be registered for `enabled_tools`."""
+
+        names: Set[str] = set()
+        for descriptor in builtin_tool_descriptors():
+            if descriptor.name not in self.enabled_tools:
+                continue
+            names.add(descriptor.namespace or descriptor.name)
+        return names
+
+    async def list_registered_mcp_tool_names(self) -> Set[str]:
+        """Return MCP tool names registered inside FastMCP (for governance diagnostics/tests)."""
+
+        tools = await self.fastmcp.get_tools()
+        if isinstance(tools, dict):
+            return {tool.name for tool in tools.values()}
+        return {tool.name for tool in tools}
+
     @staticmethod
     def _normalize_scope_override_policy(raw: Optional[str]) -> str:
         policy = (raw or "").strip().lower()
@@ -158,11 +176,15 @@ class DeepSearchToolMCPServer:
         return None
 
     def _register_tools(self) -> None:
+        registered_names: Set[str] = set()
         for descriptor in builtin_tool_descriptors():
             if descriptor.name not in self.enabled_tools:
                 continue
             tool_callable = self._build_callable(descriptor)
             mcp_tool_name = descriptor.namespace or descriptor.name
+            if mcp_tool_name in registered_names:
+                raise ValueError(f"Duplicate MCP tool name detected: {mcp_tool_name}")
+            registered_names.add(mcp_tool_name)
             function_tool = FunctionTool(
                 name=mcp_tool_name,
                 description=descriptor.description,

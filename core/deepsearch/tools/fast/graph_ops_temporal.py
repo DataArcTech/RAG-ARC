@@ -8,6 +8,7 @@ from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+from ..governance_tags import EVIDENCE_PRIMARY, REQUIRES_CYPHER, SCOPE_OWNER
 from .graph_ops_common import normalize_entity_name, normalize_predicates
 
 
@@ -20,10 +21,13 @@ class GraphLatestTruthTool(GraphTool):
     descriptor = ToolDescriptor(
         name="graph.latest_truth",
         channel="graph",
-        description="Deterministic latest-truth selection backed by Neo4j Cypher (orders by temporal attributes).",
+        description=(
+            "Deterministic latest-truth selection backed by Neo4j Cypher (orders by temporal attributes). "
+            "Evidence: citeable when the chosen fact includes `fact_id/source_chunk_ids`."
+        ),
         speed="fast",
         cost="low",
-        strategy_tags=("temporal", "latest_truth", "deterministic"),
+        strategy_tags=("temporal", "latest_truth", "deterministic", EVIDENCE_PRIMARY, SCOPE_OWNER, REQUIRES_CYPHER),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.fast.graph_latest_truth",
@@ -37,6 +41,11 @@ class GraphLatestTruthTool(GraphTool):
             },
             required_extra_fields=("topic",),
         ),
+        example_args={
+            "question": "What is the latest policy version for Terms of Service?",
+            "plan_step": "plan_09",
+            "extra": {"topic": "Terms of Service", "predicates": ["HAS_VERSION"], "time_property": "effective_date"},
+        },
     )
 
     async def run(self, request: ToolRunRequest) -> ToolResult:

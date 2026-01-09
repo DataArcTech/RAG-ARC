@@ -6,7 +6,7 @@
     "enable_sub_question": true,
     "persist_plan": true,
     "plan_output_dir": "${DEEPSEARCH_PLAN_OUTPUT_DIR}",
-    "allow_external_channel": false,
+    "allow_external_channel": true,
     "honor_planner_tool_selection": true,
     "graph_channel_tool": "graph_adapter.query",
     "text_channel_tool": "graph.context_rollup",
@@ -31,6 +31,7 @@
       "graph.relation_path_explore",
       "graph.relation_path_ground",
       "graph.beam_search",
+      "web.search",
       "code.python"
     ],
     "include_llm_tools_in_catalog": true,
@@ -42,6 +43,10 @@
     "type": "graph_adapter",
     "adapter_name": "hipporag",
     "parameters": {
+      "default_top_k": 5,
+      "summary_max_chunks": 3,
+      "summary_char_limit": 320,
+      "semantic_score_threshold": 0.05,
       "retriever_config": {
         "type": "pruned_hipporag_neo4j_retrieval",
         "graph_config": {
@@ -56,8 +61,8 @@
             "type": "openai_embedding",
             "model_name": "${OPENAI_EMBEDDING_MODEL}",
             "embedding_dimensions": "${EMBEDDING_DIMENSIONS}",
-            "openai_api_key": "${OPENAI_API_KEY}",
-            "openai_base_url": "${OPENAI_BASE_URL}"
+            "openai_api_key": "${EMBEDDING_API_KEY}",
+            "openai_base_url": "${EMBEDDING_API_BASE_URL}"
           },
           "add_synonymy_edges": true,
           "synonymy_edge_topk": 100,
@@ -70,14 +75,15 @@
           "model_name": "${OPENAI_CHAT_MODEL}",
           "low_cost_model_name": "${LOW_COST_MODEL}",
           "temperature": 0.0,
-          "openai_api_key": "${OPENAI_API_KEY}",
-          "openai_base_url": "${OPENAI_BASE_URL}"
+          "openai_api_key": "${CHAT_API_KEY}",
+          "openai_base_url": "${CHAT_API_BASE_URL}"
         },
         "fact_retrieval_top_k": 10,
         "max_facts_after_reranking": 5,
         "enable_llm_reranking": true,
         "damping_factor": 0.5,
-        "ppr_backend": "push"
+        "ppr_backend": "push",
+        "ppr_push_epsilon": 0.000001
       }
     }
   },
@@ -208,9 +214,10 @@
   "external_channel": {
     "default_provider": "tavily",
     "max_rounds": 2,
-    "enabled": false,
+    "enabled": true,
     "context_window_limit": 12,
     "http_timeout": 20.0,
+    "endpoint_url": "https://api.tavily.com/search",
     "max_results": 5,
     "tool_timeout_seconds": 45.0,
     "cache_mode": "auto",
@@ -240,8 +247,8 @@
     "type": "openai_chat",
     "model_name": "${OPENAI_CHAT_MODEL}",
     "low_cost_model_name": "${LOW_COST_MODEL}",
-    "openai_api_key": "${OPENAI_API_KEY}",
-    "openai_base_url": "${OPENAI_BASE_URL}"
+    "openai_api_key": "${CHAT_API_KEY}",
+    "openai_base_url": "${CHAT_API_BASE_URL}"
   },
   "telemetry_enabled": true
 }

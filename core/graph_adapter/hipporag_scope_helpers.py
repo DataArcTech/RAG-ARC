@@ -5,6 +5,7 @@ from typing import Any, List, Mapping, Optional
 from core.deepsearch.utils.file_scope import FileScope
 from core.prompts import build_file_scope_xlang_rewrite_prompt
 from core.utils.json_extract import safe_json_loads
+from config.core.deepsearch.file_scope_xlang_defaults import load_file_scope_xlang_thresholds
 
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
@@ -44,10 +45,11 @@ def maybe_rewrite_query_for_scope(*, llm_client: Any, query: str) -> str | None:
     cjk_ratio = cjk / total
     alpha_ratio = alpha / total
 
+    thresholds = load_file_scope_xlang_thresholds()
     direction: str | None = None
-    if alpha_ratio >= 0.25 and cjk_ratio < 0.05:
+    if alpha_ratio >= thresholds.alpha_ratio_to_zh_min and cjk_ratio < thresholds.cjk_ratio_to_zh_max:
         direction = "to_zh"
-    elif cjk_ratio >= 0.15 and alpha_ratio < 0.08:
+    elif cjk_ratio >= thresholds.cjk_ratio_to_en_min and alpha_ratio < thresholds.alpha_ratio_to_en_max:
         direction = "to_en"
     else:
         return None
@@ -78,4 +80,3 @@ def maybe_rewrite_query_for_scope(*, llm_client: Any, query: str) -> str | None:
     if not additions:
         return None
     return f"{text}\n\n" + "\n".join(additions)
-

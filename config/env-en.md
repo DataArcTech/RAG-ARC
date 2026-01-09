@@ -102,6 +102,18 @@ How secrets flow into configs:
 | `MINILM_MODEL_NAME` | `sentence-transformers/all-MiniLM-L6-v2` | Default MiniLM model repo id used by `download_models.py`. |
 | `MINILM_CACHE_FOLDER` | `./models/all-MiniLM-L6-v2` | Cache folder used by `download_models.py` when downloading MiniLM. |
 
+## 1.2 DeepSearch: file-scope cross-language rewrite (advanced)
+
+These vars control when DeepSearch attempts a single query rewrite (via the retriever LLM) to bridge file-name language mismatch under file-scope filtering.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DEEPSEARCH_FILE_SCOPE_XLANG_RETRY` | `1` | Enable/disable the xlang rewrite attempt (`0/false/no/off` disables). |
+| `DEEPSEARCH_FILE_SCOPE_XLANG_ALPHA_RATIO_TO_ZH_MIN` | `0.25` | If ASCII-letter ratio ≥ this AND CJK ratio < `..._CJK_RATIO_TO_ZH_MAX`, treat query as English-like and request Chinese rewrite additions. |
+| `DEEPSEARCH_FILE_SCOPE_XLANG_CJK_RATIO_TO_ZH_MAX` | `0.05` | See above; max allowed CJK ratio for the en→zh rewrite trigger. |
+| `DEEPSEARCH_FILE_SCOPE_XLANG_CJK_RATIO_TO_EN_MIN` | `0.15` | If CJK ratio ≥ this AND ASCII-letter ratio < `..._ALPHA_RATIO_TO_EN_MAX`, treat query as Chinese-like and request English rewrite additions. |
+| `DEEPSEARCH_FILE_SCOPE_XLANG_ALPHA_RATIO_TO_EN_MAX` | `0.08` | See above; max allowed ASCII-letter ratio for the zh→en rewrite trigger. |
+
 ## 1.1 Index & Storage Paths
 
 | Variable | Default | Description |
@@ -315,7 +327,7 @@ Location: `config/json_configs/deepsearch_service.json` → `tool_manager.enable
 | `DEEPSEARCH_SECTIONWISE_WRITER` | `false` | Enable section-wise report writing with Memory Bank retrieval + recency retention. |
 | `DEEPSEARCH_BUDGET_TIER` | _(empty)_ | Optional runtime override for complexity→budget scaling (`low` / `default`); when empty, DeepSearch uses a heuristic based on the question. |
 | `DEEPSEARCH_TELEMETRY_ENABLED` | `true` | Enable telemetry capture for tool runs (local artifacts). |
-| `TAVILY_API_KEY` | _(empty)_ | API key for Tavily (when external search enabled). |
+| `TAVILY_API_KEY` | _(empty)_ | API key for Tavily web search (used by both HippoRAG Q&A and DeepSearch when web search is enabled). |
 | `DEEPSEARCH_WEB_PROVIDER` | _(empty)_ | External search routing hint (`tavily` / `tool` / `mcp`; unknown values fall back to `tavily`). |
 | `DEEPSEARCH_EXTERNAL_CACHE_MODE` | `auto` | External search record/replay mode: `off` / `record` / `replay` / `auto`. |
 | `DEEPSEARCH_EXTERNAL_CACHE_DIR` | `./local/deepsearch_artifacts/external_cache` | External search cache directory. |

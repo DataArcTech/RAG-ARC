@@ -9,12 +9,17 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from framework.module import AbstractModule
 from core.utils.owner_guard import normalize_owner_id, is_admin_owner, get_admin_owner_id
-from core.prompts import MINDMAP_GENERATION_SYSTEM_PROMPT_ZH, build_mindmap_generation_user_prompt, get_rag_inference_system_prompt
+from core.prompts import (
+    MINDMAP_GENERATION_SYSTEM_PROMPT_ZH,
+    build_mindmap_generation_user_prompt,
+    get_rag_inference_system_prompt,
+)
 from framework.register import Register
 from framework.thread_pool import get_thread_pool
 from config.output_limits import CHAT_MAX_IMAGE_INPUTS
 from core.utils.multimodal_images import collect_image_paths_from_chunk_payloads
 from core.utils.multimodal_llm import build_multimodal_user_message
+from encapsulation.web_search import TavilySearchClient
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -51,6 +56,20 @@ class RAGInference(AbstractModule):
         self.llm = self.config.llm_config.build()
         logger.info("LLM built successfully")
         self._knowledge_module: Optional["Knowledge"] = None
+        self._tavily_client: TavilySearchClient | None = None
+        try:
+            web_cfg = getattr(self.config, "web_search", None)
+            if web_cfg is not None and bool(getattr(web_cfg, "enabled", False)):
+                self._tavily_client = TavilySearchClient(
+                    api_key=getattr(web_cfg, "api_key", None),
+                    endpoint_url=str(getattr(web_cfg, "endpoint_url", "") or "").strip(),
+                    timeout_seconds=float(getattr(web_cfg, "timeout_seconds")),
+                    search_depth=str(getattr(web_cfg, "search_depth") or "advanced"),
+                    max_results=int(getattr(web_cfg, "max_results")),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to initialize Tavily client (web search disabled): %s", exc)
+            self._tavily_client = None
 
     async def _run_blocking(self, func, *args, **kwargs):
         """Run a blocking function in a separate thread to avoid blocking the event loop."""
@@ -99,6 +118,7 @@ class RAGInference(AbstractModule):
         return_subgraph: bool = False,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         current_user_query: Optional[str] = None,
+        enable_web_search: bool = False,
     ) -> tuple[str, list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]], str | None]:
         """
         Chat with RAG system
@@ -120,6 +140,7 @@ class RAGInference(AbstractModule):
             owner_id=owner_id,
             return_subgraph=return_subgraph,
             progress_callback=progress_callback,
+            enable_web_search=enable_web_search,
         )
         
         # 获取原始 LLM response（用于调试）
@@ -242,6 +263,7 @@ class RAGInference(AbstractModule):
         return_subgraph: bool = False,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         history_text: Optional[str] = None,
+        enable_web_search: bool = False,
         user_type: Optional[int] = None,
     ) -> tuple[Iterator[str], list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """Stream chat completion from the configured LLM."""
@@ -252,6 +274,7 @@ class RAGInference(AbstractModule):
             return_subgraph=return_subgraph,
             progress_callback=progress_callback,
             history_text=history_text,
+            enable_web_search=enable_web_search,
             user_type=user_type,
         )
         return (self.llm.stream_chat(messages), chunks, subgraph_data, subgraph_info)
@@ -280,6 +303,7 @@ class RAGInference(AbstractModule):
         return_subgraph: bool,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         history_text: Optional[str] = None,
+        enable_web_search: bool = False,
         user_type: Optional[int] = None,
     ) -> tuple[List[Dict[str, str]], list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         def _chunk_preview(chunk: Chunk, *, max_chars: int = 160) -> str:
@@ -332,10 +356,32 @@ class RAGInference(AbstractModule):
 
         self._emit_progress(progress_callback, {"stage": "retrieve", "status": "start"})
         retrieve_start = time.perf_counter()
+        web_future = None
+        web_step_id = uuid.uuid4().hex[:8]
+        candidate_cfg = getattr(self.config, "candidate_selection")
+        graph_candidates_k = int(getattr(candidate_cfg, "graph_candidates_k"))
+        web_candidates_k = int(getattr(candidate_cfg, "web_candidates_k"))
+        rerank_keep_k = int(getattr(candidate_cfg, "rerank_keep_k"))
+
+        web_cfg = getattr(self.config, "web_search")
+        web_enabled = bool(getattr(web_cfg, "enabled"))
+        if enable_web_search and web_enabled and self._tavily_client is not None and web_candidates_k > 0:
+            self._emit_progress(
+                progress_callback,
+                {"stage": "web_search", "status": "start", "provider": "tavily", "max_results": web_candidates_k},
+            )
+
+            def _run_web_search() -> list[dict]:
+                results = self._tavily_client.search(query=rewritten_query, max_results=web_candidates_k)
+                return self._tavily_client.to_evidence_chunks(results=results, step_id=web_step_id, query=rewritten_query)
+
+            web_future = get_thread_pool().executor.submit(_run_web_search)
+
         chunks: list[Chunk] = self.retriever.invoke(
             rewritten_query,
             owner_id=owner_id,
             return_subgraph_info=return_subgraph,
+            k=graph_candidates_k,
         )
         retriever_info = None
         try:
@@ -366,13 +412,63 @@ class RAGInference(AbstractModule):
                 chunks = graph_chunks
 
         chunks = self._filter_chunks_by_file_status(chunks)
+
+        if web_future is not None:
+            web_start = time.perf_counter()
+            web_chunks: list[Chunk] = []
+            try:
+                timeout_seconds = float(getattr(web_cfg, "timeout_seconds"))
+                timeout_grace_seconds = float(getattr(web_cfg, "timeout_grace_seconds"))
+                evidences = web_future.result(timeout=timeout_seconds + timeout_grace_seconds)
+                for evidence in evidences or []:
+                    if not isinstance(evidence, dict):
+                        continue
+                    provenance = evidence.get("provenance") if isinstance(evidence.get("provenance"), dict) else {}
+                    url = provenance.get("url")
+                    title = (str(evidence.get("content") or "").split("\n", 1)[0]).strip() or "web"
+                    filename = str(url or title or "web").strip()
+                    web_chunks.append(
+                        Chunk(
+                            id=str(evidence.get("chunk_id") or f"tavily-{web_step_id}-{uuid.uuid4().hex[:6]}"),
+                            content=str(evidence.get("content") or ""),
+                            metadata={
+                                "source": evidence.get("source") or "web.tavily",
+                                "score": evidence.get("score"),
+                                "filename": filename,
+                                "provenance": provenance,
+                                "prompt_text": str(evidence.get("content") or ""),
+                            },
+                        )
+                    )
+                self._emit_progress(
+                    progress_callback,
+                    {
+                        "stage": "web_search",
+                        "status": "end",
+                        "duration_ms": int((time.perf_counter() - web_start) * 1000),
+                        "results": len(web_chunks),
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._emit_progress(
+                    progress_callback,
+                    {
+                        "stage": "web_search",
+                        "status": "error",
+                        "duration_ms": int((time.perf_counter() - web_start) * 1000),
+                        "error": str(exc) or exc.__class__.__name__,
+                    },
+                )
+            if web_chunks:
+                chunks.extend(web_chunks)
+
         subgraph_info = self._consume_subgraph_info(chunks)
         self._emit_progress(
             progress_callback,
             {"stage": "rerank", "status": "start", "chunks_in": len(chunks)},
         )
         rerank_start = time.perf_counter()
-        chunks = self.reranker.rerank(rewritten_query, chunks)
+        chunks = self.reranker.rerank(rewritten_query, chunks, top_k=rerank_keep_k)
         reranker_info = None
         try:
             reranker_info = self.reranker.get_reranker_info()
@@ -446,29 +542,7 @@ class RAGInference(AbstractModule):
         messages: List[Dict[str, str]] = []
         
         # 添加系统提示（要求使用<sup>标签引用来源）
-        # 如果指定了 user_type，使用 prompt loader 加载对应的 prompt；否则使用默认 prompt
-        if user_type is not None:
-            system_prompt = get_rag_inference_system_prompt(user_type=user_type)
-        else:
-            # 保持向后兼容：如果没有指定 user_type，使用默认的硬编码 prompt
-            system_prompt = (
-                "You are a helpful RAG assistant.\n"
-                "You may be given a list of numbered Sources (key=1..N).\n"
-                "Rules:\n"
-                "1) If the user message is just a greeting / test / acknowledgement (e.g. '测试', 'test', 'hello', 'hi', '你好'),\n"
-                "   answer briefly and DO NOT use any Sources and DO NOT include any <sup> tags.\n"
-                "2) If Sources are provided (the list is not empty), ground your answer in Sources and add inline citations using HTML <sup> tags.\n"
-                "   - Every sentence that contains factual information supported by Sources MUST end with one or more <sup>key</sup>.\n"
-                "   - Cite only the minimal number of sources needed; do NOT cite all sources by default.\n"
-                "   - Do NOT output a bare block/list of citations (e.g. '<sup>1</sup><sup>2</sup>...') without nearby supporting text.\n"
-                "   - Do NOT cite a source you did not use.\n"
-                "3) If NO Sources are provided (the list is empty), DO NOT use any <sup> tags in your answer.\n"
-                "   - Say you don't know or cannot answer based on the available information.\n"
-                "   - Do NOT make up citations or use <sup> tags when there are no Sources.\n"
-                "4) If Sources are provided but none are relevant, say you don't know based on the provided Sources and ask a clarifying question.\n"
-                "5) Do NOT use bracket citations like [1] and do NOT add a trailing 'Sources:' section.\n"
-                "6) Output in Markdown. The only HTML allowed is <sup>...</sup>.\n"
-            )
+        system_prompt = get_rag_inference_system_prompt(user_type=user_type)
         messages.append({"role": "system", "content": system_prompt})
         
         # 如果有历史对话，先添加历史消息（参考 WebSocket 的实现）
