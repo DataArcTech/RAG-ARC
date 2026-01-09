@@ -6,7 +6,7 @@ from typing import List, Optional, Set, Tuple
 import numpy as np
 
 from encapsulation.database.utils.pruned_hipporag_utils import compute_entity_id, normalize_entity_text
-from core.prompts.graph_retrieval import FACT_RERANK_USER_PROMPT
+from core.prompts.graph_retrieval import FACT_RERANK_RETRY_USER_PROMPT, FACT_RERANK_USER_PROMPT
 from core.retrieval.graph_retrieveal.llm_selection import parse_ranked_choice_indices
 from core.utils.owner_guard import normalize_owner_id
 
@@ -14,6 +14,29 @@ logger = logging.getLogger(__name__)
 
 
 class _PrunedHippoRAGFactsMixin:
+    def _llm_rerank_chat(self, messages: list[dict], *, enforce_json_object: bool) -> str:
+        """
+        Call the rerank LLM with best-effort structured output enforcement.
+
+        - For OpenAI-compatible providers/models that support it, use `response_format=json_object`.
+        - If unsupported, retry without `response_format` but keep temperature low.
+        """
+        kwargs: dict = {"temperature": 0.0, "max_tokens": 256}
+        if enforce_json_object:
+            kwargs["response_format"] = {"type": "json_object"}
+        try:
+            return str(self.llm_client.chat(messages, **kwargs) or "")
+        except Exception as exc:  # noqa: BLE001
+            if enforce_json_object:
+                logger.info("LLM rerank: response_format not supported; retrying without it. error=%s", exc)
+                try:
+                    kwargs.pop("response_format", None)
+                    return str(self.llm_client.chat(messages, **kwargs) or "")
+                except Exception:  # noqa: BLE001
+                    logger.warning("LLM rerank: retry without response_format failed", exc_info=True)
+                    raise
+            raise
+
     def _get_fact_scores_faiss(self, query: str, owner_id: Optional[uuid.UUID] = None) -> Tuple[np.ndarray, List[str]]:
         """
         Retrieve relevant facts using FAISS dense retrieval.
@@ -314,27 +337,29 @@ class _PrunedHippoRAGFactsMixin:
         # Format facts for LLM prompt
         facts_text = "\n".join([f"{i+1}. {head} - {relation} - {tail}" for i, (head, relation, tail, *_) in enumerate(candidate_facts)])
 
-        prompt = FACT_RERANK_USER_PROMPT.format(query=query, facts_text=facts_text, k=int(len_after_rerank))
+        attempts = [
+            (FACT_RERANK_USER_PROMPT, True),
+            (FACT_RERANK_RETRY_USER_PROMPT, False),
+        ]
 
-        messages = [{"role": "user", "content": prompt}]
-        response = self.llm_client.chat(messages)
+        last_response = ""
+        for template, enforce_json_object in attempts:
+            prompt = template.format(query=query, facts_text=facts_text, k=int(len_after_rerank))
+            messages = [{"role": "user", "content": prompt}]
+            last_response = self._llm_rerank_chat(messages, enforce_json_object=enforce_json_object)
 
-        try:
             selected_indices = parse_ranked_choice_indices(
-                str(response or ""),
+                last_response,
                 candidate_count=len(candidate_facts),
                 k=int(len_after_rerank),
                 one_based=True,
+                allow_fallback=False,
             )
-            if not selected_indices:
-                raise ValueError("No valid indices in LLM response")
+            if selected_indices:
+                top_k_facts = [candidate_facts[i] for i in selected_indices[:len_after_rerank]]
+                top_k_fact_indices = [candidate_fact_indices[i] for i in selected_indices[:len_after_rerank]]
+                return top_k_facts, top_k_fact_indices
 
-            top_k_facts = [candidate_facts[i] for i in selected_indices[:len_after_rerank]]
-            top_k_fact_indices = [candidate_fact_indices[i] for i in selected_indices[:len_after_rerank]]
-
-            return top_k_facts, top_k_fact_indices
-
-        except Exception as e:
-            logger.warning(f"Failed to parse LLM response: {e}")
-            max_facts = min(len_after_rerank, len(candidate_facts))
-            return candidate_facts[:max_facts], candidate_fact_indices[:max_facts]
+        logger.warning("Failed to parse LLM rerank response after retries; falling back. response=%r", last_response)
+        max_facts = min(len_after_rerank, len(candidate_facts))
+        return candidate_facts[:max_facts], candidate_fact_indices[:max_facts]
