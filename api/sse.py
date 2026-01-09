@@ -40,12 +40,14 @@ def sse_json_wrapped(payload: Any, request_id: str | None = None, code: int = 20
     """Return a single SSE `data:` event wrapped in standard response format."""
     if request_id is None:
         request_id = uuid.uuid4().hex
-    wrapped = {
+    wrapped: Dict[str, Any] = {
         "code": code,
         "message": message,
         "data": payload,
-        "request_id": request_id
+        "request_id": request_id,
     }
+    if isinstance(payload, dict):
+        wrapped.update(payload)
     return f"data: {json.dumps(wrapped, ensure_ascii=False, separators=(',', ':'))}\n\n"
 
 
