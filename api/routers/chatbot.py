@@ -382,6 +382,60 @@ def _filter_sources_by_sup_keys(sources: List[ChatbotSourceItem], answer_text: s
         return []
     return [s for s in sources if s.key in used_keys]
 
+
+def _build_sup_key_map_sorted(
+    answer_text: str,
+    *,
+    sources: List[ChatbotSourceItem] | None = None,
+) -> Dict[int, int]:
+    """Build a stable citation key remap (sorted by original key, contiguous from 1)."""
+    used_keys = set(_extract_sup_keys(answer_text))
+    if sources is not None:
+        available = {int(s.key) for s in sources if isinstance(getattr(s, "key", None), int)}
+        used_keys &= available
+    ordered = sorted(used_keys)
+    return {old: idx + 1 for idx, old in enumerate(ordered)}
+
+
+def _renumber_sup_tags(answer_text: str, key_map: Dict[int, int]) -> str:
+    if not answer_text or not key_map:
+        return answer_text or ""
+
+    def _replace(match: re.Match[str]) -> str:
+        raw = match.group("key")
+        try:
+            key = int(raw)
+        except Exception:  # noqa: BLE001
+            return match.group(0)
+        new_key = key_map.get(key)
+        if new_key is None:
+            return match.group(0)
+        return f"<sup>{new_key}</sup>"
+
+    return _SUP_KEY_RE.sub(_replace, answer_text)
+
+
+def _filter_and_renumber_sources_by_sup_keys_sorted(
+    sources: List[ChatbotSourceItem],
+    answer_text: str,
+) -> tuple[str, List[ChatbotSourceItem], Dict[int, int]]:
+    """
+    Keep only cited sources but ensure contiguous keys starting at 1.
+    Remap strategy: sort by original key ascending.
+    """
+    if not sources:
+        return (answer_text or "", [], {})
+
+    key_map = _build_sup_key_map_sorted(answer_text, sources=sources)
+    if not key_map:
+        return (answer_text or "", [], {})
+
+    filtered = [s for s in sources if s.key in key_map]
+    filtered.sort(key=lambda item: item.key)
+    renumbered_sources = [s.model_copy(update={"key": key_map[s.key]}) for s in filtered]
+    renumbered_answer = _renumber_sup_tags(answer_text, key_map)
+    return (renumbered_answer, renumbered_sources, key_map)
+
 def _guess_media_type(filename: str | None, fallback: str = "application/octet-stream") -> str:
     if filename:
         guessed, _ = mimetypes.guess_type(filename)
@@ -885,9 +939,25 @@ async def messages(
                 yield _sse_json({"type": "chunk", "content": item, "id": payload.id})
 
             full = "".join(parts).strip()
-            sources_for_frontend = _filter_sources_by_sup_keys(sources_for_frontend, full)
+            full, sources_for_frontend, citation_key_map = _filter_and_renumber_sources_by_sup_keys_sorted(
+                sources_for_frontend,
+                full,
+            )
             yield _sse_json(
-                {"type": "sources", "sources": [s.model_dump() for s in sources_for_frontend], "id": payload.id}
+                {
+                    "type": "final",
+                    "content": full,
+                    "citation_key_map": {str(k): v for k, v in (citation_key_map or {}).items()},
+                    "id": payload.id,
+                }
+            )
+            yield _sse_json(
+                {
+                    "type": "sources",
+                    "sources": [s.model_dump() for s in sources_for_frontend],
+                    "citation_key_map": {str(k): v for k, v in (citation_key_map or {}).items()},
+                    "id": payload.id,
+                }
             )
 
             if first_turn:

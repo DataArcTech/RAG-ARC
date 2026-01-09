@@ -38,7 +38,7 @@ from api.routers.chatbot import (
     _sse_json,
     _sse_done,
     _build_sources_for_frontend,
-    _filter_sources_by_sup_keys,
+    _filter_and_renumber_sources_by_sup_keys_sorted,
 )
 from encapsulation.data_model.orm_models import ChatMessage, User
 from encapsulation.data_model.schema import Chunk, GraphData
@@ -778,14 +778,30 @@ async def stream_chat_sse(
             min(max_sources, CHAT_TOP_CHUNKS),
         )
         logger.info("SSE built %d sources for frontend", len(sources_for_frontend))
-        
-        # 保存 sources 到数据库（在过滤之前，保存完整的 sources 信息）
+
+        citation_key_map: dict[int, int] = {}
+        if is_fallback_response:
+            logger.info(
+                "SSE using fallback response; skip citation-driven source filtering/renumbering (sources=%d)",
+                len(sources_for_frontend),
+            )
+        else:
+            assistant_response, sources_for_frontend, citation_key_map = _filter_and_renumber_sources_by_sup_keys_sorted(
+                sources_for_frontend,
+                assistant_response,
+            )
+            logger.info(
+                "SSE citation normalization applied: cited_sources=%d citation_key_map=%s",
+                len(sources_for_frontend),
+                citation_key_map,
+            )
+
         sources_for_storage = [s.model_dump() for s in sources_for_frontend] if sources_for_frontend else None
 
         assistant_message = ChatMessage(
             session_id=session_id,
             content={"role": "assistant", "content": assistant_response},
-            source_file_ids=[chunk.id for chunk in chunks] if chunks else None,
+            source_file_ids=[s.chunk_id for s in sources_for_frontend] if sources_for_frontend else None,
             sources=sources_for_storage,
             subgraph_data=subgraph_data if return_subgraph else None,
             raw_llm_response=raw_llm_response,
@@ -828,20 +844,13 @@ async def stream_chat_sse(
                             len(desc),
                             desc[:100] if desc else '(empty)')
         
-        # 根据回答中的 <sup> 标签过滤 sources（只返回被引用的）
-        # 如果 LLM 响应为空（使用兜底消息），返回所有 sources，而不是空列表
-        if is_fallback_response:
-            logger.info("SSE using fallback response, returning all %d sources (no filtering)", len(sources_for_frontend))
-        else:
-            sources_for_frontend = _filter_sources_by_sup_keys(sources_for_frontend, assistant_response)
-            logger.info("SSE filtered to %d sources after sup tag filtering", len(sources_for_frontend))
-        
         # 发送 sources 事件（使用统一的 StandardResponse 格式）
         session_id_str = str(session_id)
         yield sse_json_wrapped(
             {
                 "type": "sources",
                 "sources": [s.model_dump() for s in sources_for_frontend],
+                "citation_key_map": {str(k): v for k, v in (citation_key_map or {}).items()},
                 "id": session_id_str
             },
             request_id=request_id
