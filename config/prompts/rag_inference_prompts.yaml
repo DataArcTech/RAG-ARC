@@ -42,10 +42,48 @@ prompts:
          - This rule applies to EVERY sentence and paragraph that needs citation. NO EXCEPTIONS.
       3) Answer length and structure - CRITICAL: 
          - Always start with a brief, direct conclusion (1-2 sentences) that directly answers the user's question.
+         - STRUCTURE REQUIREMENT: Organize your answer with clear hierarchy using Markdown headings:
+           * Use ## (二级标题) for main sections when the answer covers multiple aspects (e.g., "## 主要区别" or "## Key Differences")
+           * Use numbered subheadings (1. 2. 3.) for main subsections under each main section
+           * Use decimal subheadings (1.1, 1.2, 2.1, 2.2, etc.) for each paragraph under numbered subsections
+           * Each sentence ending with a period (。or .) followed by <sup> tags MUST be a separate paragraph with its own decimal subheading
+           * Format: [decimal subheading] → [one sentence with citation] → [blank line] → [next decimal subheading] → [next sentence]
+           * Example structure (Chinese):
+             ## 主要区别
+             1. 保费水平
+             1.1 保费比较
+             香港保险保费通常较低。<sup>1</sup>
+             
+             1.2 保障额度
+             保障额度灵活，部分产品包含分红机制。<sup>2</sup>
+             
+             2. 保障范围
+             2.1 重大疾病种类
+             香港保险覆盖50-100多种疾病。<sup>3</sup>
+             
+             2.2 免责条款
+             香港保险免责条款较少。<sup>4</sup>
+           * Example structure (English):
+             ## Key Differences
+             1. Premium Level
+             1.1 Premium Comparison
+             Hong Kong insurance premiums are generally lower.<sup>1</sup>
+             
+             1.2 Coverage Amount
+             Coverage amounts are flexible with dividend mechanisms.<sup>2</sup>
+             
+             2. Coverage Scope
+             2.1 Critical Illness Types
+             Hong Kong insurance covers 50-100+ types of diseases.<sup>3</sup>
+             
+             2.2 Exclusion Clauses
+             Hong Kong insurance has fewer exclusion clauses.<sup>4</sup>
          - Keep your total answer SHORT and CONCISE. Target 150-300 words for most answers. Maximum 400 words for very complex questions. Longer answers risk being cut off and incomplete.
-         - If the question is simple or straightforward, provide ONLY the essential answer (2-5 sentences max). Do NOT add lengthy explanations, background, or multiple scenarios unless absolutely necessary.
+         - If the question is simple or straightforward (can be answered in 2-5 sentences), you may skip headings and provide a direct answer.
+         - If the question requires comparing multiple aspects or explaining multiple points, you MUST use the hierarchical structure: ## main title → 1. subsection → 1.1 paragraph → 1.2 paragraph → 2. subsection → 2.1 paragraph, etc.
+         - Each paragraph under a decimal subheading (1.1, 1.2, etc.) should contain ONLY ONE sentence ending with period and <sup> tags, then a blank line before the next decimal subheading.
          - When listing information from Sources, use brief phrases (1 sentence per item, maximum 3-5 items). Do NOT elaborate on each item.
-         - Use bullet points sparingly (2-4 points maximum). Avoid creating long lists or enumerating every possible scenario.
+         - Use bullet points sparingly (2-4 points maximum) only within subsections. Avoid creating long lists or enumerating every possible scenario.
          - If you need to explain multiple scenarios, summarize them in 1 sentence each instead of detailed paragraphs.
          - Do NOT repeat information. Do NOT provide extensive background unless the user explicitly asks for it.
          - When you cannot answer or Sources are not relevant: (1) State clearly you cannot answer (1 sentence), (2) Briefly list what the Sources actually cover (2-4 short points, 1 sentence each), (3) State what information is missing (1 sentence), (4) Provide a brief suggestion (1 sentence). Total: 100-200 words.
@@ -54,9 +92,11 @@ prompts:
          answer briefly and DO NOT use any Sources and DO NOT include any <sup> tags.
       5) If Sources are provided (the list is not empty), ground your answer in Sources and add inline citations using HTML <sup> tags.
          - REMINDER: Answer MUST be in the same language as the user's question (Chinese question = Chinese answer, English question = English answer).
+         - REMINDER: Follow Rule 3 for answer structure - Use ## main title → 1. subsection → 1.1 paragraph → 1.2 paragraph format. Each sentence ending with period and <sup> tags must be a separate paragraph with its own decimal subheading (1.1, 1.2, 2.1, etc.).
          - CRITICAL: Follow Rule 2 exactly - Write sentence → Add period (。or .) → Add <sup>key</sup> immediately after period. Format: "内容。<sup>1</sup>"
-         - Every sentence or paragraph that contains factual information from Sources MUST end with: [sentence][period][<sup>key</sup>] with NO space.
-         - If a paragraph has multiple sentences with citations, place <sup> tags only at the end of the paragraph after the final period.
+         - Every sentence that contains factual information from Sources MUST end with: [sentence][period][<sup>key</sup>] with NO space, then start a new paragraph with the next decimal subheading.
+         - Structure format: [decimal subheading like 1.1] → [one sentence with citation] → [blank line] → [next decimal subheading like 1.2] → [next sentence with citation]
+         - Each paragraph under a decimal subheading contains ONLY ONE sentence ending with period and <sup> tags.
          - Cite only the minimal number of sources needed; do NOT cite all sources by default.
          - Do NOT output a bare block/list of citations (e.g. '<sup>1</sup><sup>2</sup>...') without nearby supporting text.
          - Do NOT cite a source you did not use.
