@@ -66,16 +66,16 @@ async def _query_gptsapi_balance(api_key: str) -> Optional[Dict[str, Any]]:
     """
     查询 GPTsAPI 账户余额
     
-    GPTsAPI 通过 /v1/user/balance 接口返回余额信息
-    直接返回 balance 字段表示当前余额
+    GPTsAPI 通过 /user/balanceInfo 接口返回余额信息
+    使用 api2.gptsapi.net 域名
     
     Returns:
-        Dict containing: balance, raw_data
+        Dict containing: balance, total_recharge, consumed, raw_data
     """
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            # 主要接口：/v1/user/balance
-            url = "https://api.gptsapi.net/v1/user/balance"
+            # 正确的接口：/user/balanceInfo，使用 api2.gptsapi.net
+            url = "https://api2.gptsapi.net/user/balanceInfo"
             headers = {
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
@@ -86,62 +86,26 @@ async def _query_gptsapi_balance(api_key: str) -> Optional[Dict[str, Any]]:
             data = response.json()
             logger.debug(f"GPTsAPI API response: {data}")
             
-            # GPTsAPI 直接返回 balance 字段
-            balance = data.get("balance")
+            # GPTsAPI 返回的字段可能是 balance 或其他字段名
+            # 根据实际响应结构调整
+            balance = data.get("balance") or data.get("data", {}).get("balance")
+            total_recharge = data.get("total_recharge") or data.get("data", {}).get("total_recharge")
+            consumed = data.get("consumed") or data.get("data", {}).get("consumed")
+            
             if balance is not None:
                 return {
                     "balance": float(balance),
+                    "total_recharge": float(total_recharge) if total_recharge is not None else None,
+                    "consumed": float(consumed) if consumed is not None else None,
                     "raw_data": data
                 }
             
-            # 如果找不到 balance，尝试其他可能的字段
+            # 如果找不到 balance，记录完整响应以便调试
             logger.warning(f"GPTsAPI balance not found in response: {data}")
             return None
-    except httpx.HTTPStatusError as e:
-        # 如果是 404，尝试备用接口
-        if e.response.status_code == 404:
-            logger.info("GPTsAPI /v1/user/balance returned 404, trying alternative endpoints...")
-            return await _query_gptsapi_balance_alt(api_key)
-        logger.error(f"Failed to query GPTsAPI balance: {e.response.status_code} - {e.response.text}")
-        return None
     except Exception as e:
         logger.error(f"Failed to query GPTsAPI balance: {e}", exc_info=True)
         return None
-
-
-async def _query_gptsapi_balance_alt(api_key: str) -> Optional[Dict[str, Any]]:
-    """GPTsAPI 备用余额查询接口"""
-    alt_urls = [
-        "https://api.gptsapi.net/v1/account/balance",
-        "https://api.gptsapi.net/v1/api-key/info",
-        "https://api.gptsapi.net/v1/user/profile"
-    ]
-    
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    
-    for url in alt_urls:
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                response = await client.get(url, headers=headers)
-                if response.status_code == 200:
-                    data = response.json()
-                    logger.info(f"GPTsAPI balance found via alternative endpoint: {url}")
-                    # 尝试从不同可能的字段中提取余额
-                    balance = data.get("balance") or data.get("data", {}).get("balance")
-                    if balance is not None:
-                        return {
-                            "balance": float(balance),
-                            "raw_data": data
-                        }
-        except Exception as e:
-            logger.debug(f"GPTsAPI alternative endpoint {url} failed: {e}")
-            continue
-    
-    logger.warning("All GPTsAPI alternative endpoints failed")
-    return None
 
 
 @router.get("/balance", status_code=status.HTTP_200_OK)
