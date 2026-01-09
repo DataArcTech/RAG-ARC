@@ -478,31 +478,55 @@ def _build_sources_for_frontend(entries: List[Dict[str, Any]], max_sources: int)
         if max_chars > 0 and len(content) > max_chars:
             content = f"{content[:max_chars].rstrip()}..."
 
-        file_url = None
-        if file_id and not file_storage_resolved:
-            file_storage_resolved = True
-            try:
-                knowledge = _get_chatbot_knowledge()
-                file_storage = getattr(knowledge, "file_storage", None)
-            except Exception:  # noqa: BLE001
-                logger.exception("Failed to resolve knowledge file_storage; skipping source file URLs")
-                file_storage = None
+        # 判断是否是 Tavily 联网搜索的 chunk
+        is_tavily_chunk = (
+            chunk_id.startswith("tavily-")
+            or metadata.get("source") == "web.tavily"
+            or (not file_id and chunk_id and "tavily" in chunk_id.lower())
+        )
 
-        if file_id and file_storage is not None:
-            try:
-                meta = file_storage.get_file_metadata(file_id)
-                meta_filename = getattr(meta, "filename", None) if meta is not None else None
-                safe_name = Path((meta_filename or filename or "source")).name
-                file_url = f"/static/files/{file_id}/{quote(safe_name)}"
-            except Exception:  # noqa: BLE001
-                file_url = None
+        file_url = None
+        source_title = filename
+
+        if is_tavily_chunk:
+            # Tavily chunk: title 来自 content 第一行，file 来自 provenance.url
+            provenance = metadata.get("provenance") or {}
+            if isinstance(provenance, dict):
+                provenance_url = provenance.get("url")
+                if provenance_url:
+                    file_url = str(provenance_url).strip()
+            
+            # 从 content 第一行提取 title（content 格式是 "title\ncontent"）
+            if content:
+                content_lines = content.split("\n", 1)
+                if len(content_lines) > 0 and content_lines[0].strip():
+                    source_title = content_lines[0].strip()
+        else:
+            # 知识库 chunk: 保持原有逻辑，title 是文件名，file 是文件 URL
+            if file_id and not file_storage_resolved:
+                file_storage_resolved = True
+                try:
+                    knowledge = _get_chatbot_knowledge()
+                    file_storage = getattr(knowledge, "file_storage", None)
+                except Exception:  # noqa: BLE001
+                    logger.exception("Failed to resolve knowledge file_storage; skipping source file URLs")
+                    file_storage = None
+
+            if file_id and file_storage is not None:
+                try:
+                    meta = file_storage.get_file_metadata(file_id)
+                    meta_filename = getattr(meta, "filename", None) if meta is not None else None
+                    safe_name = Path((meta_filename or filename or "source")).name
+                    file_url = f"/static/files/{file_id}/{quote(safe_name)}"
+                except Exception:  # noqa: BLE001
+                    file_url = None
 
         sources.append(
             ChatbotSourceItem(
                 key=len(sources) + 1,
                 chunk_id=chunk_id,
                 file_id=file_id,
-                title=filename,
+                title=source_title,
                 file=file_url,
                 description=content,
             )

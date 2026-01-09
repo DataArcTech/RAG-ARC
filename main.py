@@ -188,6 +188,71 @@ async def health_check():
 # chatbot SSE route and had different auth expectations. Keep it disabled unless legacy clients
 # must be supported.
 
+# Add global exception handler to ensure all 500 errors are properly wrapped
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from asgi_correlation_id import correlation_id
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    """全局异常处理器，确保所有未捕获的异常都被正确封装为标准响应格式"""
+    request_id = correlation_id.get() or "NO-ID"
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    # 记录异常详细信息
+    logger.error(
+        f"Unhandled exception in {request.method} {request.url.path}: {exc}",
+        exc_info=True,
+        extra={"request_id": request_id}
+    )
+    
+    # 返回标准格式的错误响应
+    from fastapi.responses import JSONResponse
+    error_detail = str(exc) if exc else "Internal server error"
+    return JSONResponse(
+        status_code=500,
+        content={
+            "code": 500,
+            "message": error_detail,
+            "data": None,
+            "request_id": request_id
+        }
+    )
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request, exc):
+    """HTTP 异常处理器，确保 HTTPException 被正确封装"""
+    request_id = correlation_id.get() or "NO-ID"
+    
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "code": exc.status_code,
+            "message": exc.detail,
+            "data": None,
+            "request_id": request_id
+        }
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    """请求验证异常处理器，确保验证错误被正确封装"""
+    request_id = correlation_id.get() or "NO-ID"
+    
+    from fastapi.responses import JSONResponse
+    errors = exc.errors() if hasattr(exc, 'errors') else []
+    return JSONResponse(
+        status_code=422,
+        content={
+            "code": 422,
+            "message": "Validation error",
+            "data": {"errors": errors},
+            "request_id": request_id
+        }
+    )
+
 app.mount("/mcp", mcp.mcp_app)
 app.include_router(knowledge_router.router)
 app.include_router(rag_inference.router)

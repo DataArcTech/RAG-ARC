@@ -32,12 +32,37 @@ class ChatMessageResponse(BaseModel):
     user_id: Optional[uuid.UUID] = None
     user_type: Optional[int] = None
     content: dict
-    source_file_ids: Optional[List[uuid.UUID]] = None
+    # 支持 UUID 和字符串 ID（如 tavily-* 格式的 web search chunk IDs）
+    source_file_ids: Optional[List[str]] = None
     sources: Optional[List[dict]] = None
     subgraph_data: Optional[dict] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
+    
+    @classmethod
+    def model_validate_with_fallback(cls, obj: Any) -> "ChatMessageResponse":
+        """Validate model with fallback handling for source_file_ids"""
+        try:
+            return cls.model_validate(obj)
+        except Exception as e:
+            # 如果验证失败，尝试修复 source_file_ids
+            if hasattr(obj, "__dict__"):
+                obj_dict = obj.__dict__.copy()
+            elif isinstance(obj, dict):
+                obj_dict = obj.copy()
+            else:
+                obj_dict = {}
+            
+            # 修复 source_file_ids：将非字符串转换为字符串
+            if "source_file_ids" in obj_dict and obj_dict["source_file_ids"]:
+                fixed_ids = []
+                for item in obj_dict["source_file_ids"]:
+                    if item is not None:
+                        fixed_ids.append(str(item))
+                obj_dict["source_file_ids"] = fixed_ids if fixed_ids else None
+            
+            return cls.model_validate(obj_dict)
 
 router = APIRouter(prefix="/session", tags=["session"])
 
@@ -59,12 +84,60 @@ async def list_session_messages(
     session_id: uuid.UUID,
 ):
     """List session messages asynchronously using thread pool."""
-    messages = await get_thread_pool().run_blocking(
-        get_message_handler().list_messages_by_session,
-        session_id
-    )
-    # Convert SQLAlchemy models to Pydantic models to ensure proper serialization
-    return [ChatMessageResponse.model_validate(msg) for msg in messages]
+    try:
+        messages = await get_thread_pool().run_blocking(
+            get_message_handler().list_messages_by_session,
+            session_id
+        )
+        # Convert SQLAlchemy models to Pydantic models to ensure proper serialization
+        # 使用 fallback 方法处理可能的 source_file_ids 格式问题
+        result = []
+        for msg in messages:
+            try:
+                result.append(ChatMessageResponse.model_validate(msg))
+            except Exception as e:
+                # 如果标准验证失败，尝试使用 fallback 方法
+                try:
+                    result.append(ChatMessageResponse.model_validate_with_fallback(msg))
+                except Exception as fallback_error:
+                    # 如果 fallback 也失败，记录错误但尝试创建一个基本响应
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(
+                        f"Failed to validate message {getattr(msg, 'id', 'unknown')}: {fallback_error}. "
+                        f"Original error: {e}. Attempting basic conversion."
+                    )
+                    # 手动创建一个安全的响应对象
+                    if hasattr(msg, "__dict__"):
+                        msg_dict = msg.__dict__.copy()
+                    else:
+                        msg_dict = {}
+                    
+                    # 确保 source_file_ids 是字符串列表
+                    if "source_file_ids" in msg_dict and msg_dict["source_file_ids"]:
+                        msg_dict["source_file_ids"] = [
+                            str(item) if item is not None else None
+                            for item in msg_dict["source_file_ids"]
+                            if item is not None
+                        ] or None
+                    
+                    try:
+                        result.append(ChatMessageResponse.model_validate(msg_dict))
+                    except Exception as final_error:
+                        logger.error(
+                            f"Failed to create ChatMessageResponse for message {getattr(msg, 'id', 'unknown')}: {final_error}"
+                        )
+                        # 跳过这个有问题的消息，继续处理其他消息
+                        continue
+        return result
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error listing session messages for session {session_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list session messages: {str(e)}"
+        )
 
 @router.post("")
 async def create_session(
@@ -134,14 +207,59 @@ async def list_messages_by_user(
     offset: int = 0,
 ):
     """List messages by current user with pagination. Users can only query their own messages."""
-    # 用户只能查询自己的消息
-    messages = await get_thread_pool().run_blocking(
-        get_message_handler().list_messages_by_user,
-        current_user.id,
-        limit,
-        offset,
-    )
-    return [ChatMessageResponse.model_validate(msg) for msg in messages]
+    try:
+        # 用户只能查询自己的消息
+        messages = await get_thread_pool().run_blocking(
+            get_message_handler().list_messages_by_user,
+            current_user.id,
+            limit,
+            offset,
+        )
+        # 使用 fallback 方法处理可能的 source_file_ids 格式问题
+        result = []
+        for msg in messages:
+            try:
+                result.append(ChatMessageResponse.model_validate(msg))
+            except Exception as e:
+                try:
+                    result.append(ChatMessageResponse.model_validate_with_fallback(msg))
+                except Exception as fallback_error:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(
+                        f"Failed to validate message {getattr(msg, 'id', 'unknown')}: {fallback_error}. "
+                        f"Original error: {e}. Attempting basic conversion."
+                    )
+                    # 手动创建一个安全的响应对象
+                    if hasattr(msg, "__dict__"):
+                        msg_dict = msg.__dict__.copy()
+                    else:
+                        msg_dict = {}
+                    
+                    # 确保 source_file_ids 是字符串列表
+                    if "source_file_ids" in msg_dict and msg_dict["source_file_ids"]:
+                        msg_dict["source_file_ids"] = [
+                            str(item) if item is not None else None
+                            for item in msg_dict["source_file_ids"]
+                            if item is not None
+                        ] or None
+                    
+                    try:
+                        result.append(ChatMessageResponse.model_validate(msg_dict))
+                    except Exception as final_error:
+                        logger.error(
+                            f"Failed to create ChatMessageResponse for message {getattr(msg, 'id', 'unknown')}: {final_error}"
+                        )
+                        continue
+        return result
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error listing messages for user {current_user.id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list messages: {str(e)}"
+        )
 
 
 @router.get("/{session_id}/messages", response_model=List[ChatMessageResponse])
@@ -150,13 +268,25 @@ async def list_messages(
     current_user: Annotated[User | None, Depends(get_current_user)],
 ):
     """List messages asynchronously using thread pool."""
-    session = await get_thread_pool().run_blocking(
-        get_session_handler().get_session,
-        session_id
-    )
-    if session is None or not validate_user_session(session, current_user):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
-    return await list_session_messages(session_id)
+    try:
+        session = await get_thread_pool().run_blocking(
+            get_session_handler().get_session,
+            session_id
+        )
+        if session is None or not validate_user_session(session, current_user):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+        return await list_session_messages(session_id)
+    except HTTPException:
+        # 重新抛出 HTTPException，保持原有的错误响应
+        raise
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error listing messages for session {session_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list messages: {str(e)}"
+        )
 
 
 @router.delete("/{session_id}")

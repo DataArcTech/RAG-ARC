@@ -42,8 +42,40 @@ class RequestIdResponseWrapper(BaseHTTPMiddleware):
                 new_id = str(uuid.uuid4())
                 correlation_id.set(new_id)
         
-        # 处理请求
-        response = await call_next(request)
+        # 获取 request_id（用于后续的错误处理）
+        request_id = correlation_id.get() or request_id_from_header or str(uuid.uuid4())
+        
+        # 处理请求，捕获所有异常
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            # 捕获所有未处理的异常，确保返回标准格式的错误响应
+            process_time = time.time() - start_time
+            logger.error(
+                f"{client_ip} - \"{method} {path} HTTP/1.1\" 500 "
+                f"(process_time: {process_time:.3f}s) - Exception: {exc}",
+                exc_info=True
+            )
+            
+            # 返回标准格式的错误响应
+            error_detail = str(exc) if exc else "Internal server error"
+            wrapped_data = {
+                "code": 500,
+                "message": error_detail,
+                "data": None,
+                "request_id": request_id
+            }
+            
+            logger.info(
+                f"{client_ip} - \"{method} {path} HTTP/1.1\" 500 "
+                f"(process_time: {process_time:.3f}s) - Response: code=500 message={error_detail} request_id={request_id}"
+            )
+            
+            return JSONResponse(
+                content=wrapped_data,
+                status_code=500,
+                headers={"X-Request-ID": request_id}
+            )
         
         # 计算处理时间
         process_time = time.time() - start_time

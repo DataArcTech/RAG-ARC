@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from api.routers.auth import get_current_user, ws_get_current_user
 from api.routers.auth import validate_user_session
+from asgi_correlation_id import correlation_id
 from api.sse import (
     delta_envelope,
     iter_text_deltas,
@@ -437,7 +438,8 @@ async def stream_chat_sse(
     async def event_generator():
         chunk_id = new_chatcmpl_id()
         created = now_epoch_seconds()
-        request_id = uuid.uuid4().hex
+        # 使用 correlation_id 而不是生成新的，保持与日志中的 request_id 一致
+        request_id = correlation_id.get() or uuid.uuid4().hex
         progress_seq = 0
 
         # Qwen/OpenAI-compatible streams typically start with a chunk that sets role=assistant.
