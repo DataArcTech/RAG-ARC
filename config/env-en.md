@@ -27,7 +27,10 @@ Required secrets (no defaults):
 - `JWT_SECRET_KEY` (generate with `openssl rand -hex 32`)
 
 Optional feature switches (have defaults):
-- `TASK_QUEUE_MODE`, `MODEL_PROFILE`, `DEVELOP_MODE`, `ADMIN_OWNER_ID`
+- `bench_mode`, `TASK_QUEUE_MODE`, `MODEL_PROFILE`, `DEVELOP_MODE`, `ADMIN_OWNER_ID`
+
+Benchmark/experiment mode:
+- `bench_mode` (default `0`): when set to `1`, benchmark runners (see `application/rag_inference/module_bench.py`, `application/rag_inference/deepsearch/service_bench.py`) execute algorithm-only flows and return plain-text answers (no citations/reports/external web steps).
 
 Optional external web search (only if enabled in config):
 - `TAVILY_API_KEY`

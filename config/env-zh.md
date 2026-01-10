@@ -27,7 +27,10 @@ cp .env.example .env
 - `JWT_SECRET_KEY`（建议 `openssl rand -hex 32` 生成）
 
 可选功能开关（有默认值）：
-- `TASK_QUEUE_MODE`、`MODEL_PROFILE`、`DEVELOP_MODE`、`ADMIN_OWNER_ID`
+- `bench_mode`、`TASK_QUEUE_MODE`、`MODEL_PROFILE`、`DEVELOP_MODE`、`ADMIN_OWNER_ID`
+
+Benchmark/实验模式：
+- `bench_mode`（默认 `0`）：设为 `1` 时，评测专用 runner（见 `application/rag_inference/module_bench.py`、`application/rag_inference/deepsearch/service_bench.py`）会执行纯算法链路并返回纯文本答案（不生成引用/报告、不跑外部 web 步骤）。
 
 可选外部网页检索（仅在配置开启时需要）：
 - `TAVILY_API_KEY`

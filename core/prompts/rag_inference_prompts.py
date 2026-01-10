@@ -19,3 +19,8 @@ RAG_INFERENCE_CITATION_SYSTEM_PROMPT_EN: Final[str] = (
     "6) Output in Markdown. The only HTML allowed is <sup>...</sup>.\n"
 )
 
+RAG_INFERENCE_BENCH_SYSTEM_PROMPT_EN: Final[str] = (
+    "You are a helpful reading comprehension assistant.\n"
+    "Answer the user's question using the provided sources if they are available.\n"
+    "Return only the answer in plain text.\n"
+)

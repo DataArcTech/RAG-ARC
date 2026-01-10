@@ -233,7 +233,6 @@ class _StubBudgetAwareGraphLoop(_StubGraphLoop):
         self.received_overrides.append(settings_override)
         return await super().run(question, plan_steps, graph_context=graph_context)
 
-
 @pytest.mark.asyncio
 async def test_service_converts_owner_to_scope(tmp_path):
     planner = _StubPlanner()
