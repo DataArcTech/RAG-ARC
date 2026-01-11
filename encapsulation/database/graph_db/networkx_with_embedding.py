@@ -127,15 +127,25 @@ class NetworkXVectorGraphStore(NetworkXGraphStore):
         chunk_node_id = f"chunk_{chunk_id}"
         
         # Add entities with embeddings
-        entity_node_mapping = {}  # entity_name -> node_id for this chunk
+        entity_node_mapping: dict[str, str] = {}  # normalized entity_key -> node_id
         
         for entity in graph_data.entities:
-            entity_id = chunk_id + '_' + entity['id']  # Prefix with chunk_id to avoid conflicts
+            entity_name = str(entity.get("entity_name") or "").strip()
+            if not entity_name:
+                continue
+            entity_key = self._normalize_entity_key(entity_name)
+            if not entity_key:
+                continue
+
+            if self.unify_entities_by_name:
+                entity_id = self._stable_entity_id(entity_name)
+            else:
+                entity_id = chunk_id + "_" + str(entity.get("id") or "")  # Prefix with chunk_id to avoid conflicts
             entity_node_id = f"entity_{entity_id}"
             entity_type = entity.get('entity_type', 'Entity')
             
             # Generate embedding for entity
-            entity_embedding = self.generate_entity_embedding(entity)
+            entity_embedding = self.generate_entity_embedding({"entity_name": entity_name, "attributes": entity.get("attributes", {})})
             
             # Add entity node with embedding
             self.graph.add_node(
@@ -143,17 +153,19 @@ class NetworkXVectorGraphStore(NetworkXGraphStore):
                 node_type='Entity',
                 entity_subtype=entity_type,
                 id_=entity_id,
-                entity_name=entity['entity_name'],
+                entity_name=entity_name,
                 entity_type=entity_type,
-                chunk_id=chunk_id,
                 create_time=datetime.now().isoformat(),
                 update_time=datetime.now().isoformat(),
                 attributes=json.dumps(entity['attributes'], ensure_ascii=False) if entity.get('attributes') else "{}",
                 embedding=entity_embedding
             )
+
+            if not self.unify_entities_by_name:
+                self.graph.nodes[entity_node_id]["chunk_id"] = chunk_id
             
             # Store mapping for relation creation
-            entity_node_mapping[entity['entity_name']] = entity_node_id
+            entity_node_mapping[entity_key] = entity_node_id
             
             # Create Chunk-Entity relationship
             self.graph.add_edge(
@@ -169,8 +181,8 @@ class NetworkXVectorGraphStore(NetworkXGraphStore):
                 head_name, relation_type, tail_name = relation[0], relation[1], relation[2]
                 
                 # Find entity nodes by name within this chunk
-                head_node_id = entity_node_mapping.get(head_name)
-                tail_node_id = entity_node_mapping.get(tail_name)
+                head_node_id = entity_node_mapping.get(self._normalize_entity_key(head_name))
+                tail_node_id = entity_node_mapping.get(self._normalize_entity_key(tail_name))
                 
                 if head_node_id and tail_node_id:
                     # Add relationship edge
@@ -218,25 +230,41 @@ class NetworkXVectorGraphStore(NetworkXGraphStore):
         """Get graph data with entity embeddings"""
         # Get entities for this chunk with embeddings
         entities = []
-        entity_nodes = []
-        
-        for node_id, node_data in self.graph.nodes(data=True):
-            if (node_data.get('node_type') == 'Entity' and 
-                node_data.get('chunk_id') == chunk_id):
-                entity_nodes.append((node_id, node_data))
-                
-                entity = {
-                    'id': node_data.get('id_', '').replace(f"{chunk_id}_", ""),  # Remove chunk_id prefix
-                    'entity_name': node_data.get('entity_name', ''),
-                    'entity_type': node_data.get('entity_type', ''),
-                    'attributes': json.loads(node_data.get('attributes') or '{}')
-                }
-                
-                # Add embedding to attributes if available
-                if node_data.get('embedding'):
-                    entity['attributes']['embedding'] = node_data['embedding']
-                
-                entities.append(entity)
+        if not self.unify_entities_by_name:
+            for _, node_data in self.graph.nodes(data=True):
+                if (node_data.get('node_type') == 'Entity' and
+                    node_data.get('chunk_id') == chunk_id):
+                    entity = {
+                        'id': node_data.get('id_', '').replace(f"{chunk_id}_", ""),  # Remove chunk_id prefix
+                        'entity_name': node_data.get('entity_name', ''),
+                        'entity_type': node_data.get('entity_type', ''),
+                        'attributes': json.loads(node_data.get('attributes') or '{}')
+                    }
+
+                    if node_data.get('embedding'):
+                        entity['attributes']['embedding'] = node_data['embedding']
+
+                    entities.append(entity)
+        else:
+            chunk_node_id = f"chunk_{chunk_id}"
+            if self.graph.has_node(chunk_node_id):
+                for target in self.graph.successors(chunk_node_id):
+                    edge_data = self.graph.get_edge_data(chunk_node_id, target) or {}
+                    edge_attr_dicts = [edge_data] if "relation_type" in edge_data else list(edge_data.values())
+                    for edge_attrs in edge_attr_dicts:
+                        if edge_attrs.get("relation_type") != "MENTIONS":
+                            continue
+                        node_data = self.graph.nodes[target]
+                        entity = {
+                            "id": str(node_data.get("id_") or ""),
+                            "entity_name": node_data.get("entity_name", ""),
+                            "entity_type": node_data.get("entity_type", ""),
+                            "attributes": json.loads(node_data.get("attributes") or "{}"),
+                        }
+                        if node_data.get("embedding"):
+                            entity["attributes"]["embedding"] = node_data["embedding"]
+                        entities.append(entity)
+                        break
 
         # Get relations between entities in this chunk (same as parent class)
         relations = []

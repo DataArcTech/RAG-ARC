@@ -95,13 +95,15 @@ class NetworkXGraphIndexer(BaseIndexer):
             # This internally calls extract_concurrent() with proper semaphore control
             extracted_chunks = await self.extractor(chunks)
 
-            # Filter out chunks that failed extraction (empty graph data)
-            valid_chunks = []
+            if bool(getattr(self.config, "index_empty_graph_chunks", True)):
+                return extracted_chunks
+
+            valid_chunks: list[Chunk] = []
             for chunk in extracted_chunks:
                 if chunk.graph and not chunk.graph.is_empty():
                     valid_chunks.append(chunk)
                 else:
-                    logger.warning(f"Chunk {chunk.id} has empty graph data, skipping")
+                    logger.warning("Chunk %s has empty graph data, skipping", chunk.id)
 
             return valid_chunks
 
@@ -127,15 +129,15 @@ class NetworkXGraphIndexer(BaseIndexer):
             try:
                 # Add chunk to the graph store
                 self.networkx_store.add_chunk(chunk)
+                added_chunk_ids.append(chunk.id)
 
                 # Add graph data (entities and relations) to the store
                 if chunk.graph and not chunk.graph.is_empty():
                     self.networkx_store.add_graph_data(chunk.graph, chunk.id)
-                    added_chunk_ids.append(chunk.id)
                     logger.debug(f"Added chunk {chunk.id} with {len(chunk.graph.entities)} entities "
                                f"and {len(chunk.graph.relations)} relations")
                 else:
-                    logger.warning(f"Chunk {chunk.id} has no graph data to add")
+                    logger.info("Chunk %s has no graph data to add (chunk node still indexed)", chunk.id)
 
             except Exception as e:
                 logger.error(f"Failed to add chunk {chunk.id} to graph store: {e}")

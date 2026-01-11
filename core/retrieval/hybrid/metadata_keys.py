@@ -1,0 +1,4 @@
+HYBRID_RETRIEVAL_SOURCES_KEY = "hybrid_retrieval_sources"
+HYBRID_RETRIEVAL_SCORE_KEY = "hybrid_retrieval_score"
+HYBRID_RETRIEVAL_SCORE_COMPONENTS_KEY = "hybrid_retrieval_score_components"
+
