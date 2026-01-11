@@ -19,6 +19,16 @@ class GraphExtractorConfig(AbstractConfig):
     enable_cleaning: bool = Field(default=True, description="enable_cleaning")
     enable_llm_cleaning: bool = Field(default=False, description="enable_llm_cleaning")
     max_rounds: int = Field(default=3, description="max_rounds", ge=1)
+    language_detection_chinese_ratio_threshold: float = Field(
+        default=0.1,
+        ge=0.0,
+        le=1.0,
+        description="Detect zh when Chinese chars ratio exceeds this threshold.",
+    )
+    language_detection_default_language: Literal["zh", "en"] = Field(
+        default="zh",
+        description="Default language when input is empty/whitespace.",
+    )
 
     max_concurrent: int = Field(default=100, description="Maximum number of concurrent operations", ge=1)
     error_policy: Literal["attach", "raise", "empty"] = Field(

@@ -27,6 +27,17 @@ class GraphRetrievalConfig(AbstractConfig):
     # Retrieval parameters
     k1_chunks: int = Field(default=20, description="Number of chunks to retrieve in semantic search")
     k2_entities: int = Field(default=5, description="Number of entities to retrieve in semantic search")
+
+    mention_count_boost_log_divisor: float = Field(
+        default=10.0,
+        gt=0.0,
+        description="Entity popularity boost = log(mention_count+1)/divisor (before capping).",
+    )
+    mention_count_boost_max: float = Field(
+        default=0.1,
+        ge=0.0,
+        description="Max popularity boost added to entity similarity.",
+    )
     
     # Subgraph construction parameters
     max_hops: int = Field(default=5, description="Maximum hops for subgraph expansion")

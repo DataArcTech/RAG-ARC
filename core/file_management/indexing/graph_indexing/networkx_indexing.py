@@ -93,7 +93,7 @@ class NetworkXGraphIndexer(BaseIndexer):
         try:
             # Use the extractor's __call__ method which handles concurrent extraction
             # This internally calls extract_concurrent() with proper semaphore control
-            extracted_chunks = self.extractor(chunks)
+            extracted_chunks = await self.extractor(chunks)
 
             # Filter out chunks that failed extraction (empty graph data)
             valid_chunks = []

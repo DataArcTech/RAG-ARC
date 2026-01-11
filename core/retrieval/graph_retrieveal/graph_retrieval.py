@@ -20,6 +20,10 @@ import math
 from encapsulation.data_model.schema import Chunk
 from core.retrieval.graph_retrieveal.base import BaseGraphRetriever
 from core.retrieval.graph_retrieveal.models import CandidateResult, ChunkScore, PPRResult, SubgraphResult
+from core.retrieval.graph_retrieveal.metadata_keys import (
+    GRAPH_RETRIEVAL_CHUNK_SOURCE_KEY,
+    GRAPH_RETRIEVAL_FALLBACK_KEY,
+)
 from core.retrieval.graph_retrieveal.ppr import compute_personalized_pagerank as _compute_personalized_pagerank
 from core.retrieval.graph_retrieveal.query_executor import GraphQueryExecutor, build_graph_query_executor
 from core.retrieval.graph_retrieveal.similarity_edges import filter_similarity_neighbors
@@ -124,7 +128,8 @@ class GraphRetrieval(BaseGraphRetriever):
                         'score': chunk_score.final_score,
                         'graph_score': chunk_score.graph_score,
                         'embedding_score': chunk_score.embedding_score,
-                        'mentioned_entities': chunk_score.mentioned_entities
+                        'mentioned_entities': chunk_score.mentioned_entities,
+                        GRAPH_RETRIEVAL_CHUNK_SOURCE_KEY: "graph_store",
                     })
 
                     chunks.append(chunk)
@@ -137,13 +142,23 @@ class GraphRetrieval(BaseGraphRetriever):
                             'score': chunk_score.final_score,
                             'graph_score': chunk_score.graph_score,
                             'embedding_score': chunk_score.embedding_score,
-                            'mentioned_entities': chunk_score.mentioned_entities
+                            'mentioned_entities': chunk_score.mentioned_entities,
+                            GRAPH_RETRIEVAL_CHUNK_SOURCE_KEY: "chunk_score",
+                            GRAPH_RETRIEVAL_FALLBACK_KEY: {
+                                "reason": "graph_store_miss",
+                                "chunk_id": chunk_score.chunk_id,
+                            },
                         }
                     )
                     chunks.append(chunk)
 
             except Exception as e:
-                logger.warning(f"Could not retrieve chunk {chunk_score.chunk_id}: {e}")
+                logger.warning(
+                    "Could not retrieve chunk %s from graph_store.get_by_ids: %s",
+                    chunk_score.chunk_id,
+                    e,
+                    exc_info=True,
+                )
                 # Create a fallback chunk
                 chunk = Chunk(
                     id=chunk_score.chunk_id,
@@ -152,7 +167,14 @@ class GraphRetrieval(BaseGraphRetriever):
                         'score': chunk_score.final_score,
                         'graph_score': chunk_score.graph_score,
                         'embedding_score': chunk_score.embedding_score,
-                        'mentioned_entities': chunk_score.mentioned_entities
+                        'mentioned_entities': chunk_score.mentioned_entities,
+                        GRAPH_RETRIEVAL_CHUNK_SOURCE_KEY: "fallback_error",
+                        GRAPH_RETRIEVAL_FALLBACK_KEY: {
+                            "reason": "graph_store_exception",
+                            "chunk_id": chunk_score.chunk_id,
+                            "exception_type": e.__class__.__name__,
+                            "message": str(e),
+                        },
                     }
                 )
                 chunks.append(chunk)
@@ -235,7 +257,7 @@ class GraphRetrieval(BaseGraphRetriever):
                 entity_type = result.get('entity_type', 'Entity')
 
                 # Boost score based on mention frequency (popularity)
-                popularity_boost = min(math.log(mention_count + 1) / 10, 0.1)
+                popularity_boost = self._popularity_boost(int(mention_count or 0))
 
                 # Final similarity score
                 final_similarity = similarity + popularity_boost
@@ -253,6 +275,16 @@ class GraphRetrieval(BaseGraphRetriever):
         # Sort by final similarity and return top k
         candidates.sort(key=lambda x: x['similarity'], reverse=True)
         return candidates[:top_k]
+
+    def _popularity_boost(self, mention_count: int) -> float:
+        if mention_count <= 0:
+            return 0.0
+        divisor = float(getattr(self.config, "mention_count_boost_log_divisor", 10.0) or 10.0)
+        if divisor <= 0:
+            divisor = 10.0
+        cap = float(getattr(self.config, "mention_count_boost_max", 0.1) or 0.1)
+        cap = max(0.0, cap)
+        return min(math.log(mention_count + 1) / divisor, cap)
 
 
     def semantic_search_chunks(self, query_embedding: List[float], top_k: int) -> List[Dict[str, Any]]:
