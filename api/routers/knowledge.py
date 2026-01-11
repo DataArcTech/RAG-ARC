@@ -31,7 +31,7 @@ from application.account.user import Account
 from core.file_management.storage.file import FileValidationError
 from core.utils.owner_guard import is_admin_owner
 from core.utils.path_guard import safe_leaf_name
-from encapsulation.message_queue.redis_task_queue import RedisTaskQueue, TaskState
+from encapsulation.message_queue.redis_task_queue import TaskState
 from fastapi.responses import StreamingResponse, FileResponse
 from pathlib import Path
 
@@ -59,6 +59,13 @@ from api.routers.knowledge_models import (
     UserInfo,
 )
 from api.routers.knowledge_streaming import stream_events_redis
+from api.routers.knowledge_utils import (
+    assert_task_owner,
+    format_sse,
+    get_task_queue,
+    normalize_file_id,
+    use_celery,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,56 +80,6 @@ def get_account_handler() -> Account:
 def get_knowledge_handler() -> Knowledge:
     """Lazy loading function to get knowledge handler after initialization."""
     return registrator.get_object("knowledge")
-
-
-def _get_task_queue() -> RedisTaskQueue:
-    return RedisTaskQueue.from_env()
-
-
-def _use_celery() -> bool:
-    return os.getenv("TASK_QUEUE_MODE", "inprocess").strip().lower() == "celery"
-
-
-def _assert_task_owner(task_run: Dict[str, Any], *, user_id: uuid.UUID) -> None:
-    if is_admin_owner(user_id):
-        return
-    raw = task_run.get("owner_id")
-    if not raw:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to access this run_id")
-    try:
-        owner_uuid = uuid.UUID(str(raw))
-    except Exception:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to access this run_id") from None
-    if owner_uuid != user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to access this run_id")
-
-
-def _format_sse(*, event: str, data: Dict[str, Any], event_id: int | None = None) -> str:
-    payload: Dict[str, Any] = {"event": event, "data": data}
-    if event_id is not None:
-        payload["id"] = event_id
-    return sse_json(payload)
-
-
-def _normalize_file_id(file_id: str) -> str:
-    """Normalize file_id by extracting the last valid UUID if it appears to be duplicated."""
-    # Standard UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (36 chars)
-    if len(file_id) <= 36:
-        return file_id
-    # If length > 36, try to extract valid UUID from the end
-    # Try last 36 characters first (most common case)
-    if len(file_id) >= 36:
-        candidate = file_id[-36:]
-        parts = candidate.split('-')
-        if len(parts) == 5 and [len(p) for p in parts] == [8, 4, 4, 4, 12]:
-            return candidate
-    # Fallback: try from position 29 (for 72-char duplicated UUIDs)
-    if len(file_id) >= 65:
-        candidate = file_id[29:29+36]
-        parts = candidate.split('-')
-        if len(parts) == 5 and [len(p) for p in parts] == [8, 4, 4, 4, 12]:
-            return candidate
-    return file_id
 @router.post(
     "",
     status_code=status.HTTP_200_OK,
@@ -201,13 +158,13 @@ async def get_task_run(
 ):
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
-    if not _use_celery():
+    if not use_celery():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Task queue mode is not enabled")
-    task_queue = _get_task_queue()
+    task_queue = get_task_queue()
     task_run = await asyncio.to_thread(task_queue.get_task_run, run_id)
     if not task_run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run_id not found")
-    _assert_task_owner(task_run, user_id=user.id)
+    assert_task_owner(task_run, user_id=user.id)
     return TaskRunStatusResponse(
         run_id=run_id,
         task_type=task_run.get("task_type"),
@@ -226,13 +183,13 @@ async def get_task_result(
 ):
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
-    if not _use_celery():
+    if not use_celery():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Task queue mode is not enabled")
-    task_queue = _get_task_queue()
+    task_queue = get_task_queue()
     task_run = await asyncio.to_thread(task_queue.get_task_run, run_id)
     if not task_run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run_id not found")
-    _assert_task_owner(task_run, user_id=user.id)
+    assert_task_owner(task_run, user_id=user.id)
     state = str(task_run.get("state") or "")
     if state not in {TaskState.SUCCESS.value, TaskState.FAILURE.value, TaskState.CANCELED.value}:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run not finished")
@@ -250,20 +207,20 @@ async def stream_task_progress(
 ):
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
-    if not _use_celery():
+    if not use_celery():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Task queue mode is not enabled")
-    task_queue = _get_task_queue()
+    task_queue = get_task_queue()
     task_run = task_queue.get_task_run(run_id)
     if not task_run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run_id not found")
-    _assert_task_owner(task_run, user_id=user.id)
+    assert_task_owner(task_run, user_id=user.id)
     headers = {
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
     }
     return StreamingResponse(
-        stream_events_redis(task_queue, format_sse=_format_sse, run_id=run_id, last_event_id=last_event_id),
+        stream_events_redis(task_queue, format_sse=format_sse, run_id=run_id, last_event_id=last_event_id),
         media_type="text/event-stream",
         headers=headers,
     )
@@ -281,7 +238,7 @@ async def download_file(file_id: str, user: Annotated[User | None, Depends(get_c
         if len(file_id) > 36:
             logger.warning(f"Received malformed file_id (length={len(file_id)}): {file_id[:50]}...")
         # Normalize file_id to handle duplicated UUIDs in URL
-        normalized_file_id = _normalize_file_id(file_id)
+        normalized_file_id = normalize_file_id(file_id)
         if normalized_file_id != file_id:
             logger.info(f"Normalized file_id from {file_id[:50]}... to {normalized_file_id}")
         return await get_knowledge_handler().get_file(normalized_file_id, user.id)
@@ -487,11 +444,11 @@ async def export_knowledge_graph_async(
 ):
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
-    if not _use_celery():
+    if not use_celery():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Task queue mode is not enabled")
 
     run_id = uuid.uuid4().hex
-    task_queue = _get_task_queue()
+    task_queue = get_task_queue()
     task_queue.create_task_run(
         task_run_id=run_id,
         task_type="graph_export",
@@ -606,11 +563,11 @@ async def export_file_mindmap_async(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
     if not request.file_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="file_id is required")
-    if not _use_celery():
+    if not use_celery():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Task queue mode is not enabled")
 
     run_id = uuid.uuid4().hex
-    task_queue = _get_task_queue()
+    task_queue = get_task_queue()
     task_queue.create_task_run(
         task_run_id=run_id,
         task_type="mindmap_export",

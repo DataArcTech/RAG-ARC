@@ -32,9 +32,6 @@ from api.sse import (
     sse_json_wrapped,
 )
 from api.routers.chatbot import (
-    _sanitize_title,
-    _fallback_title,
-    _generate_title_messages,
     _sse_json,
     _sse_done,
     _build_sources_for_frontend,
@@ -42,157 +39,33 @@ from api.routers.chatbot import (
 )
 from encapsulation.data_model.orm_models import ChatMessage, User
 from encapsulation.data_model.schema import Chunk, GraphData
-from framework.register import Register
-from application.rag_inference.module import RAGInference
-from application.account.chat_message import ChatMessageManager
-from application.account.chat_session import ChatSessionManager
-from application.account.user import Account
 from framework.thread_pool import get_thread_pool
 import uuid
 import logging
 from core.utils.owner_guard import is_admin_owner, get_admin_owner_id
 from core.presentation.evidence import build_chat_evidence
 from config.output_limits import CHAT_TOP_CHUNKS
-from api.utils.owner_scope import get_shared_document_owner_id
+from api.routers.rag_inference_handlers import (
+    generate_title_via_llm,
+    get_account_handler,
+    get_default_owner_id,
+    get_message_handler,
+    get_rag_inference_handler,
+    get_session_handler,
+)
+from api.routers.rag_inference_models import (
+    ChatRequest,
+    ChatResponse,
+    GraphOverviewResponse,
+    StreamChatRequest,
+    build_stream_chat_payload,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
 router = APIRouter(prefix="/rag_inference", tags=["rag_inference"])
-
-def _get_shared_document_owner_id() -> uuid.UUID:
-    return get_shared_document_owner_id()
-
-
-def _resolve_default_owner_id(current_user: User) -> uuid.UUID:
-    raw_type = getattr(current_user, "type", 0)
-    try:
-        user_type = int(raw_type) if raw_type is not None else 0
-    except (TypeError, ValueError):
-        user_type = 0
-    if user_type == 1:
-        return _get_shared_document_owner_id()
-    return current_user.id
-
-
-# Title生成函数（复用chatbot.py中的函数）
-async def _generate_title_via_llm(
-    rag_inference_handler: RAGInference,
-    user_text: str,
-    assistant_text: str,
-) -> str:
-    """生成标题，复用chatbot.py中的辅助函数"""
-    llm = getattr(rag_inference_handler, "llm", None)
-    if llm is None:
-        return _fallback_title(user_text)
-
-    messages = _generate_title_messages(user_text, assistant_text)
-
-    def _run():
-        return llm.chat(messages)
-
-    try:
-        raw = await get_thread_pool().run_blocking(_run)
-    except Exception:  # noqa: BLE001
-        return _fallback_title(user_text)
-
-    title = _sanitize_title(str(raw or ""))
-    return title or _fallback_title(user_text)
-
-registrator = Register()
-
-session_handler: ChatSessionManager | None = None
-message_handler: ChatMessageManager | None = None
-rag_inference_handler: RAGInference | None = None
-
-
-def get_session_handler() -> ChatSessionManager:
-    """Lazy loading function to get session handler after initialization."""
-    global session_handler
-    if session_handler is None:
-        session_handler = registrator.get_object("chat_session")
-    return session_handler
-
-def get_message_handler() -> ChatMessageManager:
-    """Lazy loading function to get message handler after initialization."""
-    global message_handler
-    if message_handler is None:
-        message_handler = registrator.get_object("chat_message")
-    return message_handler
-
-def get_rag_inference_handler() -> RAGInference:
-    """Lazy loading function to get rag inference handler after initialization."""
-    global rag_inference_handler
-    if rag_inference_handler is None:
-        rag_inference_handler = registrator.get_object("rag_inference")
-    return rag_inference_handler
-
-def get_account_handler() -> Account:
-    """Lazy loading function to get account handler after initialization."""
-    return registrator.get_object("account")
-
-class ChatRequest(BaseModel):
-    query: str
-    return_subgraph: bool = False  # Optional parameter to request subgraph data
-    target_owner_id: uuid.UUID | None = None  # Admin-only override
-    include_all_owners: bool = False  # Admin-only flag for global retrieval
-    include_evidence: bool = False  # Whether to include chunk/seed/triple summary
-    enable_web_search: bool = False  # Opt-in: add Tavily web results into rerank
-
-
-class StreamChatRequest(BaseModel):
-    """Request model for POST SSE stream chat endpoint"""
-    query: str
-    return_subgraph: bool = False
-    target_owner_id: Optional[uuid.UUID] = None
-    include_all_owners: bool = False
-    include_evidence: bool = False
-    enable_web_search: bool = False
-
-
-class ChatResponse(BaseModel):
-    """Response model for chat endpoint"""
-    response: str
-    chunks: list | None = None
-    subgraph: dict | None = None  # Subgraph visualization data (only if requested)
-    evidence: Dict[str, Any] | None = None
-
-
-class GraphOverviewResponse(BaseModel):
-    """Response payload for the admin graph overview endpoint."""
-    chunks: List[Dict[str, Any]]
-    nodes: List[Dict[str, Any]]
-    edges: List[Dict[str, Any]]
-    metadata: Dict[str, Any]
-
-def _build_stream_chat_payload(
-    message: ChatMessage,
-    chunks: list[Chunk],
-    subgraph: dict | None = None,
-    evidence: Dict[str, Any] | None = None,
-) -> Dict[str, Any]:
-    message_dict = {
-        "id": str(message.id),
-        "session_id": str(message.session_id),
-        "content": message.content,
-        "created_at": (message.created_at.isoformat() if message.created_at else None),
-    }
-    chunks_dict = [
-        {
-            "id": str(chunk.id),
-            "content": chunk.content,
-            "metadata": chunk.metadata,
-            "graph": chunk.graph.to_dict(),
-        }
-        for chunk in chunks
-    ]
-    response_dict: Dict[str, Any] = {"message": message_dict, "chunks": chunks_dict}
-    if subgraph is not None:
-        response_dict["subgraph"] = subgraph
-    if evidence is not None:
-        response_dict["evidence"] = evidence
-    return response_dict
 
 
 # This currently only supports one round of chat, will support multiple rounds once user login is supported.
@@ -226,7 +99,7 @@ async def chat(
             )
 
     # Determine default owner scope based on user type (chatKB vs livingKB).
-    effective_owner_id: uuid.UUID | None = _resolve_default_owner_id(current_user)
+    effective_owner_id: uuid.UUID | None = get_default_owner_id(current_user)
 
     if request.include_all_owners:
         if not is_admin_owner(current_user.id):
@@ -416,7 +289,7 @@ async def stream_chat_sse(
     rag_inference_handler = get_rag_inference_handler()
 
     # Determine default owner scope based on user type (chatKB vs livingKB).
-    effective_owner: uuid.UUID | None = _resolve_default_owner_id(current_user)
+    effective_owner: uuid.UUID | None = get_default_owner_id(current_user)
     
     if include_all_owners:
         if not is_admin_owner(current_user.id):
@@ -815,7 +688,7 @@ async def stream_chat_sse(
         # 如果是第一轮对话，生成并发送title（参考chatbot.py的实现）
         if first_turn:
             try:
-                title = await _generate_title_via_llm(
+                title = await generate_title_via_llm(
                     rag_inference_handler,
                     query.strip(),
                     assistant_response.strip(),
@@ -875,7 +748,7 @@ async def stream_chat_sse(
             )
 
         # Build payload (aligned with WebSocket behavior).
-        payload = _build_stream_chat_payload(
+        payload = build_stream_chat_payload(
             assistant_message,
             chunks,
             subgraph=subgraph_data if return_subgraph else None,
@@ -1000,7 +873,7 @@ async def stream_chat_ws(
                     )
                     return
 
-            effective_owner: uuid.UUID | None = _resolve_default_owner_id(current_user)
+            effective_owner: uuid.UUID | None = get_default_owner_id(current_user)
             if include_all_owners:
                 if not is_admin_owner(current_user.id):
                     await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
@@ -1101,7 +974,7 @@ async def stream_chat_ws(
                     graph_store=graph_store,
                 )
 
-            response_payload = _build_stream_chat_payload(
+            response_payload = build_stream_chat_payload(
                 assistant_message,
                 chunks,
                 subgraph=subgraph_data if return_subgraph else None,

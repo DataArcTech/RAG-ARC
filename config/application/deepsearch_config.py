@@ -7,6 +7,12 @@ from typing import Any, Dict, Literal, Optional, List
 from pydantic import BaseModel, Field
 
 from config.core.deepsearch.computable_gate_defaults import DEFAULT_COMPUTABLE_POLICY
+from config.core.deepsearch.planner_web_policy_defaults import (
+    DEFAULT_REALTIME_WEB_INTENT_KEYWORDS,
+    DEFAULT_REALTIME_WEB_KEYWORDS,
+    DEFAULT_REALTIME_WEB_STRONG_KEYWORDS,
+    DEFAULT_REALTIME_WEB_TOPIC_KEYWORDS,
+)
 from application.rag_inference.deepsearch.service import DeepSearchService
 from config.core.deepsearch.graph_adapter_config import GraphAdapterConfig
 from config.core.deepsearch.gap_config import GapDetectionEvaluatorConfig
@@ -36,6 +42,36 @@ class PlannerRuntimeConfig(BaseModel):
     persist_plan: bool = Field(True, description="Persist plan JSON artifacts for replay/debugging.")
     plan_output_dir: str = Field("./local/deepsearch_runs", description="Directory for persisted plan artifacts.")
     allow_external_channel: bool = Field(False, description="Enable optional web/external channel steps from planner.")
+    web_step_policy: Literal["off", "realtime_required"] = Field(
+        "realtime_required",
+        description=(
+            "Policy for including at least one web search step in the plan. "
+            "'realtime_required' injects/forces a web step when the question asks for realtime/latest/current info."
+        ),
+    )
+    realtime_web_keywords: List[str] = Field(
+        default_factory=lambda: list(DEFAULT_REALTIME_WEB_KEYWORDS),
+        description=(
+            "Keyword cues (substring match) that indicate realtime/latest/current requirements. "
+            "Used only when web_step_policy='realtime_required'."
+        ),
+    )
+    realtime_web_strong_keywords: List[str] = Field(
+        default_factory=lambda: list(DEFAULT_REALTIME_WEB_STRONG_KEYWORDS),
+        description="Strong keyword cues that force a web step even without topic matching (e.g. '引用网络来源').",
+    )
+    realtime_web_intent_keywords: List[str] = Field(
+        default_factory=lambda: list(DEFAULT_REALTIME_WEB_INTENT_KEYWORDS),
+        description="Recency intent keywords; used together with realtime_web_topic_keywords.",
+    )
+    realtime_web_topic_keywords: List[str] = Field(
+        default_factory=lambda: list(DEFAULT_REALTIME_WEB_TOPIC_KEYWORDS),
+        description="Time-sensitive topic keywords; used together with realtime_web_intent_keywords.",
+    )
+    realtime_web_force_external: bool = Field(
+        True,
+        description="When true, mark the realtime web step as forced so it executes even if gap detection does not trigger.",
+    )
     graph_channel_tool: str = Field("graph_adapter.query", description="Default tool name for graph channel steps.")
     text_channel_tool: str = Field(
         "graph.context_rollup",
@@ -370,6 +406,27 @@ class ExternalChannelConfig(BaseModel):
     default_provider: Optional[str] = Field(None, description="Preferred provider identifier, e.g. tavily.")
     max_rounds: int = Field(2, description="Maximum number of tasks executed per request.")
     enabled: bool = Field(False, description="Force-enable the channel even when env flags disable it.")
+    auto_generate_task_on_gap: bool = Field(
+        True,
+        description=(
+            "When the gap detector requests external search but the plan has no explicit web tasks, "
+            "auto-generate a single web.search task to keep the behavior observable and reproducible."
+        ),
+    )
+    execute_forced_tasks_without_gap: bool = Field(
+        True,
+        description=(
+            "Execute external tasks marked as forced (e.g. realtime/latest requirements) even when "
+            "gap detection does not trigger external search."
+        ),
+    )
+    execute_pending_tasks_without_gap: bool = Field(
+        False,
+        description=(
+            "Execute any pending_external tasks even when gap detection does not trigger external search. "
+            "Prefer keeping this false; mark tasks as forced when you truly require web evidence."
+        ),
+    )
     context_window_limit: int = Field(12, description="Evidence window size forwarded to external tools.")
     http_timeout: float = Field(20.0, description="Timeout applied to HTTP-based providers.")
     endpoint_url: str = Field("https://api.tavily.com/search", description="HTTP provider endpoint (Tavily).")

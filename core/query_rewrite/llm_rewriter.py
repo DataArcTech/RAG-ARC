@@ -2,6 +2,7 @@ from typing import Dict, Any, TYPE_CHECKING
 import re
 from .base import AbstractQueryRewriter
 from core.prompts.query_rewrite_prompt import QUERY_REWRITE_USER_PROMPT
+from config.benchmark_mode import benchmark_mode_enabled
 
 import logging
 
@@ -36,6 +37,10 @@ class LLMQueryRewriter(AbstractQueryRewriter):
 
     def __init__(self, config):
         super().__init__(config)
+        # In benchmark/experiment mode, query rewrite is disabled; avoid building any LLM clients.
+        if benchmark_mode_enabled():
+            self.chat_llm = None
+            return
         # Build LLM from sub-config following framework pattern
         # Accepts any ChatLLMBase implementation (OpenAI, Qwen, HuggingFace, etc.)
         self.chat_llm = config.chat_llm_config.build()
@@ -61,6 +66,8 @@ class LLMQueryRewriter(AbstractQueryRewriter):
             ValueError: If query is empty or invalid
             Exception: If LLM call fails
         """
+        if benchmark_mode_enabled():
+            return str(query or "")
         if not query or not query.strip():
             raise ValueError("Query cannot be empty")
 

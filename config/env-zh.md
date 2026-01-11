@@ -71,7 +71,7 @@ Benchmark/实验模式：
 | `EMBEDDING_MODEL_PROVIDER` | `openai` | 嵌入模型提供方（`openai`=OpenAI 兼容 API，`huggingface`=本地 SentenceTransformers）。 |
 | `EMBEDDING_API_KEY` | _(空)_ | **必填**（当 `EMBEDDING_MODEL_PROVIDER=openai`）：嵌入模型 API Key。 |
 | `EMBEDDING_API_BASE_URL` | _(空)_ | **必填**（当 `EMBEDDING_MODEL_PROVIDER=openai`）：嵌入模型 Base URL。 |
-| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | 默认嵌入模型名称。 |
+| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI 嵌入模型名称；当 `EMBEDDING_MODEL_PROVIDER=openai` 时优先级高于 `EMBEDDING_MODEL_NAME`。 |
 | `EMBEDDING_DEVICE` | `cpu` | HuggingFace 嵌入模型运行设备（仅当 `EMBEDDING_MODEL_PROVIDER=huggingface` 时使用）。 |
 | `EMBEDDING_CACHE_FOLDER` | _(空)_ | 可选：HuggingFace 嵌入模型缓存目录。 |
 | `EMBEDDING_DIMENSIONS` | _(空)_ | 可选：嵌入向量维度覆盖。留空时系统可自动探测并缓存维度。 |
@@ -100,7 +100,7 @@ Benchmark/实验模式：
 | `OPENAI_API_KEY` | _(空)_ | 全局备用 Key（当各组件 `*_API_KEY` 为空时复用）。只要任一 OpenAI 兼容模块启用且未单独配置 `*_API_KEY`，则该项 **必填**。 |
 | `OPENAI_BASE_URL` | _(空)_ | 全局备用 Base URL（当各组件 `*_API_BASE_URL` 为空时复用）。只要任一 OpenAI 兼容模块启用且未单独配置 `*_API_BASE_URL`，则该项 **必填**。 |
 | `DEVICE` | `cpu` | 可选：共享默认设备（当各组件设备变量为空时使用）。 |
-| `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | 嵌入模型名称；当 `EMBEDDING_MODEL_PROVIDER=huggingface` 时可填写 HuggingFace repo id 或本地模型路径。 |
+| `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | 嵌入模型名称（主要用于 `EMBEDDING_MODEL_PROVIDER=huggingface`）；当 `openai` 且 `OPENAI_EMBEDDING_MODEL` 为空时才作为回退值。 |
 | `MODEL_PROFILE` | `api` | 选择配置档（`api` 或 `local`），影响默认 JSON 配置。 |
 | `MINILM_MODEL_NAME` | `sentence-transformers/all-MiniLM-L6-v2` | `download_models.py` 下载 MiniLM 时使用的默认 repo id。 |
 | `MINILM_CACHE_FOLDER` | `./models/all-MiniLM-L6-v2` | `download_models.py` 下载 MiniLM 的缓存目录。 |

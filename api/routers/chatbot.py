@@ -22,6 +22,7 @@ from framework.register import Register
 from api.routers.auth import get_current_user, get_current_user_optional
 from encapsulation.data_model.orm_models import User
 from core.presentation.evidence import build_chat_evidence
+from core.prompts.chatbot import CHATBOT_SYSTEM_PROMPT_V2
 from config.output_limits import CHAT_TOP_CHUNKS
 from core.utils.path_guard import ensure_writable_dir
 from api.utils.owner_scope import resolve_default_owner_id
@@ -37,22 +38,6 @@ _conversation_locks: Dict[str, asyncio.Lock] = {}
 _conversation_last_used: Dict[str, float] = {}
 _locks_guard = asyncio.Lock()
 _global_semaphore = asyncio.Semaphore(int(os.getenv("CHATBOT_MAX_CONCURRENCY", "8")))
-
-_CHATBOT_SYSTEM_PROMPT_V2 = (
-    "You are a helpful RAG assistant.\n"
-    "You may be given a list of numbered Sources (key=1..N).\n"
-    "Rules:\n"
-    "1) If the user message is just a greeting / test / acknowledgement (e.g. '测试', 'test', 'hello', 'hi', '你好'),\n"
-    "   answer briefly and DO NOT use any Sources and DO NOT include any <sup> tags.\n"
-    "2) Otherwise, if Sources are provided, ground your answer in Sources and add inline citations using HTML <sup> tags.\n"
-    "   - Every sentence that contains factual information supported by Sources MUST end with one or more <sup>key</sup>.\n"
-    "   - Cite only the minimal number of sources needed; do NOT cite all sources by default.\n"
-    "   - Do NOT output a bare block/list of citations (e.g. '<sup>1</sup><sup>2</sup>...') without nearby supporting text.\n"
-    "   - Do NOT cite a source you did not use.\n"
-    "3) If Sources are provided but none are relevant, say you don't know based on the provided Sources and ask a clarifying question.\n"
-    "4) Do NOT use bracket citations like [1] and do NOT add a trailing 'Sources:' section.\n"
-    "5) Output in Markdown. The only HTML allowed is <sup>...</sup>.\n"
-)
 
 
 class ChatbotBootstrapCapabilities(BaseModel):
@@ -892,7 +877,7 @@ async def messages(
             history = _normalize_history(payload.messages, turns=context_turns)
 
             llm_messages = _build_llm_messages(
-                {"role": "system", "content": _CHATBOT_SYSTEM_PROMPT_V2},
+                {"role": "system", "content": CHATBOT_SYSTEM_PROMPT_V2},
                 source_messages,
                 history,
                 payload.content.strip(),

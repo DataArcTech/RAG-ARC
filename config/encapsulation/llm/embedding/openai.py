@@ -16,9 +16,13 @@ def _resolve_embedding_provider():
 
 
 def _default_embedding_model_name() -> str:
+    # Provider-specific precedence:
+    # - For OpenAI embeddings, prefer OPENAI_EMBEDDING_MODEL to avoid accidental overrides from the
+    #   cross-provider EMBEDDING_MODEL_NAME knob (primarily used by HuggingFace embeddings).
+    # - Keep EMBEDDING_MODEL_NAME as a fallback for backward compatibility.
     return os.getenv(
-        "EMBEDDING_MODEL_NAME",
-        os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
+        "OPENAI_EMBEDDING_MODEL",
+        os.getenv("EMBEDDING_MODEL_NAME", "text-embedding-3-small"),
     )
 
 

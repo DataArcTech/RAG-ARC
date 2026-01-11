@@ -71,7 +71,7 @@ How secrets flow into configs:
 | `EMBEDDING_MODEL_PROVIDER` | `openai` | Embedding provider (`openai` = OpenAI-compatible API, `huggingface` = local SentenceTransformers). |
 | `EMBEDDING_API_KEY` | _(empty)_ | **Required** (when `EMBEDDING_MODEL_PROVIDER=openai`): API key for embedding provider. |
 | `EMBEDDING_API_BASE_URL` | _(empty)_ | **Required** (when `EMBEDDING_MODEL_PROVIDER=openai`): Base URL for OpenAI-compatible embedding endpoints. |
-| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Default embedding model name. |
+| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model name. When set, it takes precedence over `EMBEDDING_MODEL_NAME` for `EMBEDDING_MODEL_PROVIDER=openai`. |
 | `EMBEDDING_DEVICE` | `cpu` | HuggingFace embedding runtime device (used when `EMBEDDING_MODEL_PROVIDER=huggingface`). |
 | `EMBEDDING_CACHE_FOLDER` | _(empty)_ | Optional HuggingFace cache folder for embedding weights. |
 | `EMBEDDING_DIMENSIONS` | _(empty)_ | Optional override for embedding vector dimension. When empty, the system can auto-detect the dimension (and will cache it). |
@@ -100,7 +100,7 @@ How secrets flow into configs:
 | `OPENAI_API_KEY` | _(empty)_ | Shared fallback key (used when component-specific keys are empty). **Required** when any OpenAI-compatible module runs with its `*_API_KEY` unset. |
 | `OPENAI_BASE_URL` | _(empty)_ | Shared fallback base URL (used when component-specific base URLs are empty). **Required** when any OpenAI-compatible module runs with its `*_API_BASE_URL` unset. |
 | `DEVICE` | `cpu` | Optional shared default device used when component-specific device vars are empty. |
-| `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | Embedding model name. When `EMBEDDING_MODEL_PROVIDER=huggingface`, this can be a HuggingFace repo id or a local filesystem path. |
+| `EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | Embedding model name (primarily for `EMBEDDING_MODEL_PROVIDER=huggingface`). For `openai`, this is a fallback only when `OPENAI_EMBEDDING_MODEL` is empty. |
 | `MODEL_PROFILE` | `api` | Chooses config profile (`api` or `local`). Impacts default JSON configs. |
 | `MINILM_MODEL_NAME` | `sentence-transformers/all-MiniLM-L6-v2` | Default MiniLM model repo id used by `download_models.py`. |
 | `MINILM_CACHE_FOLDER` | `./models/all-MiniLM-L6-v2` | Cache folder used by `download_models.py` when downloading MiniLM. |

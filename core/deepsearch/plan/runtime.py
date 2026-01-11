@@ -16,6 +16,16 @@ from core.prompts.deepsearch import GRAPH_PLANNER_SYSTEM_PROMPT, GRAPH_PLANNER_U
 from core.deepsearch.tooling import describe_available_tools
 from core.deepsearch.tooling.registry import ToolHintRegistry
 from core.deepsearch.trace import emit_trace, with_trace_protocol
+from core.deepsearch.utils.language_policy import infer_user_language
+
+from config.core.deepsearch.planner_web_policy_defaults import (
+    DEFAULT_REALTIME_WEB_INTENT_KEYWORDS,
+    DEFAULT_REALTIME_WEB_STRONG_KEYWORDS,
+    DEFAULT_REALTIME_WEB_STEP_DESCRIPTION_EN,
+    DEFAULT_REALTIME_WEB_STEP_DESCRIPTION_ZH,
+    DEFAULT_REALTIME_WEB_TOPIC_KEYWORDS,
+)
+from config.benchmark_mode import benchmark_mode_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +77,24 @@ class DeepSearchPlanner:
         self.plan_output_dir = Path(str(plan_output_dir))
 
         self.allow_external = bool(self._config_dict["allow_external_channel"])
+        self.web_step_policy = str(self._config_dict.get("web_step_policy") or "off").strip().lower()
+        def _coerce_str_list(value: Any) -> list[str]:
+            raw = value or []
+            if not isinstance(raw, (list, tuple, set)):
+                raw = []
+            return [str(item).strip() for item in raw if str(item).strip()]
+
+        self.realtime_web_keywords = _coerce_str_list(self._config_dict.get("realtime_web_keywords"))
+        self.realtime_web_strong_keywords = _coerce_str_list(self._config_dict.get("realtime_web_strong_keywords"))
+        self.realtime_web_intent_keywords = _coerce_str_list(self._config_dict.get("realtime_web_intent_keywords"))
+        self.realtime_web_topic_keywords = _coerce_str_list(self._config_dict.get("realtime_web_topic_keywords"))
+        if not self.realtime_web_strong_keywords:
+            self.realtime_web_strong_keywords = list(DEFAULT_REALTIME_WEB_STRONG_KEYWORDS)
+        if not self.realtime_web_intent_keywords:
+            self.realtime_web_intent_keywords = list(DEFAULT_REALTIME_WEB_INTENT_KEYWORDS)
+        if not self.realtime_web_topic_keywords:
+            self.realtime_web_topic_keywords = list(DEFAULT_REALTIME_WEB_TOPIC_KEYWORDS)
+        self.realtime_web_force_external = bool(self._config_dict.get("realtime_web_force_external", True))
 
         self.graph_channel_tool = str(self._config_dict["graph_channel_tool"]).strip()
         self.text_channel_tool = str(self._config_dict["text_channel_tool"]).strip()
@@ -111,6 +139,7 @@ class DeepSearchPlanner:
 
         self._refresh_available_tools()
         plan_specs = await self._generate_plan_async(normalized_question)
+        plan_specs = self._apply_web_step_policy(question=normalized_question, plan_specs=plan_specs)
         steps_payload = [
             self._build_step_payload(spec)
             for spec in plan_specs
@@ -307,6 +336,13 @@ class DeepSearchPlanner:
             metadata.setdefault("requires_external_channel", True)
             if not self.allow_external:
                 metadata.setdefault("disabled_reason", "external_channel_disabled")
+            # Ensure web.search always receives tool_args.query; ExternalSearchChannel requires it.
+            query_value = tool_args.get("query")
+            if not isinstance(query_value, str) or not query_value.strip():
+                fallback = tool_args.get("focus_query") or spec.description
+                tool_args["query"] = str(fallback or "").strip()
+            if self.default_web_provider and not tool_args.get("provider"):
+                tool_args["provider"] = self.default_web_provider
 
         metadata["tool"] = tool_name
 
@@ -320,6 +356,82 @@ class DeepSearchPlanner:
             "requires_external": requires_external,
             "enabled": tool_enabled,
         }
+
+    def _apply_web_step_policy(self, *, question: str, plan_specs: List[PlanSpec]) -> List[PlanSpec]:
+        if benchmark_mode_enabled():
+            return plan_specs
+        if not self.allow_external:
+            return plan_specs
+        policy = (self.web_step_policy or "off").strip().lower()
+        if policy != "realtime_required":
+            return plan_specs
+        if not self._is_realtime_question(question):
+            return plan_specs
+
+        normalized = list(plan_specs or [])
+        web_steps = [idx for idx, spec in enumerate(normalized) if str(getattr(spec, "channel", "")).strip().lower() == "web"]
+        if web_steps:
+            if self.realtime_web_force_external:
+                idx = web_steps[0]
+                spec = normalized[idx]
+                meta = dict(spec.metadata or {})
+                meta.setdefault("force_external", True)
+                meta.setdefault("requires_external_reason", "realtime")
+                tool_args = meta.get("tool_args") if isinstance(meta.get("tool_args"), dict) else {}
+                tool_args = dict(tool_args or {})
+                tool_args.setdefault("query", question.strip())
+                meta["tool_args"] = tool_args
+                normalized[idx] = spec.model_copy(update={"metadata": meta})
+            return normalized
+
+        lang = infer_user_language(question)
+        desc = DEFAULT_REALTIME_WEB_STEP_DESCRIPTION_ZH if lang == "zh" else DEFAULT_REALTIME_WEB_STEP_DESCRIPTION_EN
+        injected_meta: Dict[str, Any] = {"source": "policy_injected", "tool": self.web_channel_tool, "tool_args": {"query": question.strip()}}
+        if self.realtime_web_force_external:
+            injected_meta["force_external"] = True
+            injected_meta["requires_external_reason"] = "realtime"
+        injected = PlanSpec(
+            step_id="policy_web_01",
+            description=desc,
+            channel="web",
+            metadata=injected_meta,
+        )
+
+        # Prefer inserting before the final text synthesis step when present.
+        insert_at = len(normalized)
+        for idx, spec in enumerate(normalized):
+            if str(getattr(spec, "channel", "")).strip().lower() == "text":
+                insert_at = idx
+                break
+        normalized.insert(insert_at, injected)
+        if len(normalized) > int(self.plan_generator.settings.max_steps):
+            normalized = normalized[: int(self.plan_generator.settings.max_steps)]
+        return normalized
+
+    def _is_realtime_question(self, question: str) -> bool:
+        text = (question or "").strip().lower()
+        if not text:
+            return False
+        strong = self.realtime_web_strong_keywords or []
+        for kw in strong:
+            token = (kw or "").strip().lower()
+            if token and token in text:
+                return True
+
+        intent = self.realtime_web_intent_keywords or []
+        topic = self.realtime_web_topic_keywords or []
+        if not intent or not topic:
+            # Backward-compatible fallback: treat any keyword match as realtime intent.
+            for kw in self.realtime_web_keywords:
+                token = (kw or "").strip().lower()
+                if token and token in text:
+                    return True
+            return False
+
+        has_intent = any(((kw or "").strip().lower() in text) for kw in intent if (kw or "").strip())
+        if not has_intent:
+            return False
+        return any(((kw or "").strip().lower() in text) for kw in topic if (kw or "").strip())
 
     def _resolve_tool(self, channel: str) -> str:
         if channel == "web":
