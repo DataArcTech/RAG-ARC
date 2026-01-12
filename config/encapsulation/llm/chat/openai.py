@@ -45,7 +45,7 @@ class OpenAIChatConfig(AbstractConfig):
         description="Optional cheaper model used for exploration-heavy calls (planning/reflection/quality checks).",
     )
     max_tokens: int = 2000
-    temperature: float = 0.7
+    temperature: float = 0.1
 
     # HuggingFace-only knobs (used when loading_method="huggingface")
     device: str = Field(default_factory=lambda: os.getenv("CHAT_MODEL_DEVICE", os.getenv("DEVICE", "cpu")))

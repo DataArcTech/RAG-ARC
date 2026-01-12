@@ -129,7 +129,7 @@ class OpenAILLM(LLMBase):
         # Get config values
         model_name = getattr(self.config, 'model_name', 'gpt-4o-mini')
         default_max_tokens = getattr(self.config, 'max_tokens', 2000)
-        default_temperature = getattr(self.config, 'temperature', 0.7)
+        default_temperature = getattr(self.config, 'temperature', 0.1)
         
         try:
             response = self.client.chat.completions.create(
@@ -172,7 +172,7 @@ class OpenAILLM(LLMBase):
         try:
             model_name = getattr(self.config, 'model_name', 'gpt-4o-mini')
             default_max_tokens = getattr(self.config, 'max_tokens', 2000)
-            default_temperature = getattr(self.config, 'temperature', 0.7)
+            default_temperature = getattr(self.config, 'temperature', 0.1)
             
             stream = self.client.chat.completions.create(
                 model=model_name,
@@ -224,7 +224,7 @@ class OpenAILLM(LLMBase):
         # Get config values
         model_name = getattr(self.config, 'model_name', 'gpt-4o-mini')
         default_max_tokens = getattr(self.config, 'max_tokens', 2000)
-        default_temperature = getattr(self.config, 'temperature', 0.7)
+        default_temperature = getattr(self.config, 'temperature', 0.1)
 
         try:
             response = await self.async_client.chat.completions.create(
@@ -259,7 +259,7 @@ class OpenAILLM(LLMBase):
         # Get config values
         model_name = getattr(self.config, 'model_name', 'gpt-4o-mini')
         default_max_tokens = getattr(self.config, 'max_tokens', 2000)
-        default_temperature = getattr(self.config, 'temperature', 0.7)
+        default_temperature = getattr(self.config, 'temperature', 0.1)
 
         try:
             params = {}
@@ -415,7 +415,7 @@ class OpenAILLM(LLMBase):
             "max_retries": getattr(client, 'max_retries', None) if client else None,
             "timeout": getattr(client, 'timeout', None) if client else None,
             "default_max_tokens": getattr(self.config, 'max_tokens', 2000),
-            "default_temperature": getattr(self.config, 'temperature', 0.7),
+            "default_temperature": getattr(self.config, 'temperature', 0.1),
             "embedding_dimensions": getattr(self.config, 'embedding_dimensions', None),
             "provider": "openai"
         })
