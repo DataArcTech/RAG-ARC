@@ -393,6 +393,11 @@ async def stream_chat_sse(
     include_evidence = request.include_evidence
     enable_web_search = bool(getattr(request, "enable_web_search", False))
     enable_deepsearch = bool(getattr(request, "enable_deepsearch", False))
+    
+    # 当开启 DeepSearch 时，默认开启联网搜索
+    if enable_deepsearch:
+        enable_web_search = True
+        logger.info("DeepSearch enabled, automatically enabling web search (enable_web_search=True)")
 
     # Guard: only livingKB users (type=0) may request subgraph/evidence generation.
     if return_subgraph or include_evidence:

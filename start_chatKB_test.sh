@@ -112,17 +112,19 @@ echo ""
 echo "🗄️  处理PostgreSQL容器 [${POSTGRES_CONTAINER_NAME}]..."
 if docker ps -a | grep -q "${POSTGRES_CONTAINER_NAME}"; then
     docker stop ${POSTGRES_CONTAINER_NAME} > /dev/null 2>&1 && echo "  ⏹️  已停止旧PostgreSQL容器"
-    docker start ${POSTGRES_CONTAINER_NAME} && echo "  ✅ PostgreSQL容器重启成功（保留数据）"
+    docker update --restart always ${POSTGRES_CONTAINER_NAME} > /dev/null 2>&1 && echo "  🔄 已设置自动重启策略"
+    docker start ${POSTGRES_CONTAINER_NAME} && echo "  ✅ PostgreSQL容器重启成功（保留数据，已启用自动重启）"
 else
     docker run -d \
         --name ${POSTGRES_CONTAINER_NAME} \
         --network ${NETWORK_NAME} \
+        --restart always \
         -p ${POSTGRES_HOST_PORT}:5432 \
         -e POSTGRES_USER=${POSTGRES_USER} \
         -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD} \
         -e POSTGRES_DB=${POSTGRES_DB} \
         -v rag-arc-postgres-data-chatKB_test:/var/lib/postgresql/data \
-        ${POSTGRES_IMAGE} && echo "  ✅ PostgreSQL容器已创建并启动（新数据卷）"
+        ${POSTGRES_IMAGE} && echo "  ✅ PostgreSQL容器已创建并启动（新数据卷，已启用自动重启）"
 fi
 echo ""
 
@@ -134,14 +136,16 @@ if [[ -n "${REDIS_PASSWORD}" ]]; then
 fi
 if docker ps -a | grep -q "${REDIS_CONTAINER_NAME}"; then
     docker stop ${REDIS_CONTAINER_NAME} > /dev/null 2>&1 && echo "  ⏹️  已停止旧Redis容器"
-    docker start ${REDIS_CONTAINER_NAME} && echo "  ✅ Redis容器重启成功（保留数据）"
+    docker update --restart always ${REDIS_CONTAINER_NAME} > /dev/null 2>&1 && echo "  🔄 已设置自动重启策略"
+    docker start ${REDIS_CONTAINER_NAME} && echo "  ✅ Redis容器重启成功（保留数据，已启用自动重启）"
 else
     docker run -d \
         --name ${REDIS_CONTAINER_NAME} \
         --network ${NETWORK_NAME} \
+        --restart always \
         -p ${REDIS_HOST_PORT}:6379 \
         -v rag-arc-redis-data-chatKB_test:/data \
-        ${REDIS_IMAGE} ${REDIS_CMD} && echo "  ✅ Redis容器已创建并启动（新数据卷）"
+        ${REDIS_IMAGE} ${REDIS_CMD} && echo "  ✅ Redis容器已创建并启动（新数据卷，已启用自动重启）"
 fi
 echo ""
 
@@ -149,11 +153,13 @@ echo ""
 echo "🔷 处理Neo4j容器 [${NEO4J_CONTAINER_NAME}]..."
 if docker ps -a | grep -q "${NEO4J_CONTAINER_NAME}"; then
     docker stop ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 && echo "  ⏹️  已停止旧Neo4j容器"
-    docker start ${NEO4J_CONTAINER_NAME} && echo "  ✅ Neo4j容器重启成功（保留数据）"
+    docker update --restart always ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 && echo "  🔄 已设置自动重启策略"
+    docker start ${NEO4J_CONTAINER_NAME} && echo "  ✅ Neo4j容器重启成功（保留数据，已启用自动重启）"
 else
     docker run -d \
         --name ${NEO4J_CONTAINER_NAME} \
         --network ${NETWORK_NAME} \
+        --restart always \
         -p ${NEO4J_WEB_HOST_PORT}:7474 \
         -p ${NEO4J_BOLT_HOST_PORT}:7687 \
         -e NEO4J_AUTH=${NEO4J_USERNAME}/${NEO4J_PASSWORD} \
@@ -161,7 +167,7 @@ else
         -e NEO4J_dbms_security_procedures_unrestricted=apoc.* \
         -v rag-arc-neo4j-data-chatKB_test:/data \
         -v rag-arc-neo4j-logs-chatKB_test:/logs \
-        ${NEO4J_IMAGE} && echo "  ✅ Neo4j容器已创建并启动（新数据卷）"
+        ${NEO4J_IMAGE} && echo "  ✅ Neo4j容器已创建并启动（新数据卷，已启用自动重启）"
 fi
 echo ""
 
@@ -207,119 +213,115 @@ if [ -f "pyproject.toml" ]; then
     fi
 fi
 
-# 6.1 终极健壮版：清理残留进程和端口 (已优化)
-echo "🧹 正在清理可能残留的旧应用进程和端口..."
-# 优先通过 PM2 清理
+# 6.1 【核心修改】增强版终极清理：确保 8001 端口绝对干净
+echo "🧹 正在进行增强版清理，确保端口 ${APP_PORT} 空闲..."
+
+# 步骤 1: 通过 PM2 清理
+echo "  -> 步骤 1: 通过 PM2 停止并删除旧的 [${PM2_APP_NAME}] 进程..."
 pm2 stop "${PM2_APP_NAME}" > /dev/null 2>&1 || true
 pm2 delete "${PM2_APP_NAME}" > /dev/null 2>&1 || true
-# 然后通过命令行模式清理
+
+# 步骤 2: 通过 pkill 清理 (根据命令模式)
+echo "  -> 步骤 2: 通过 pkill 强制杀死所有相关的 uvicorn 进程..."
 pkill -f "uvicorn main:app --port ${APP_PORT}" > /dev/null 2>&1 || true
-# 最后通过端口强制清理顽固进程 (已增加 sudo 和 2>/dev/null)
+
+# 步骤 3: 通过 lsof 清理 (根据端口号，最彻底)
 PID_TO_KILL=$(sudo lsof -t -i:"${APP_PORT}" 2>/dev/null || true)
 if [ -n "${PID_TO_KILL}" ]; then
-    echo "  ⚠️  发现进程 ${PID_TO_KILL} 占用端口 ${APP_PORT}，正在强制杀死..."
+    echo "  -> 步骤 3: 发现进程 ${PID_TO_KILL} 占用端口 ${APP_PORT}，正在强制杀死..."
     sudo kill -9 "${PID_TO_KILL}" > /dev/null 2>&1 || true
-    sleep 2
+    sleep 2 # 等待一下，确保进程已完全退出
 fi
+
 echo "  ✅ 清理完成。"
 
-# 6.2 使用 PM2 启动新进程
-echo "  🚀 正在通过 PM2 启动新的 ${PM2_APP_NAME} 进程..."
-POSTGRES_HOST=${POSTGRES_HOST:-localhost} \
-POSTGRES_PORT=${POSTGRES_HOST_PORT} \
-POSTGRES_USER=${POSTGRES_USER} \
-POSTGRES_PASSWORD=${POSTGRES_PASSWORD} \
-POSTGRES_DB=${POSTGRES_DB} \
-REDIS_HOST=${REDIS_HOST:-localhost} \
-REDIS_PORT=${REDIS_HOST_PORT} \
-REDIS_PASSWORD=${REDIS_PASSWORD} \
-REDIS_DB=${REDIS_DB:-0} \
-NEO4J_URL=${NEO4J_URL:-bolt://localhost:${NEO4J_BOLT_HOST_PORT}} \
-NEO4J_USERNAME=${NEO4J_USERNAME} \
-NEO4J_PASSWORD=${NEO4J_PASSWORD} \
-NEO4J_DATABASE=${NEO4J_DATABASE:-neo4j} \
-OPENAI_API_KEY=${OPENAI_API_KEY:-} \
-OPENAI_BASE_URL=${OPENAI_BASE_URL:-} \
-OPENAI_CHAT_MODEL=${OPENAI_CHAT_MODEL:-} \
-OPENAI_EMBEDDING_MODEL=${OPENAI_EMBEDDING_MODEL:-} \
-EMBEDDING_MODEL_PROVIDER=${EMBEDDING_MODEL_PROVIDER:-} \
-MODEL_PROFILE=${MODEL_PROFILE:-} \
-PARSER_OUTPUT_DIR=${PARSER_OUTPUT_DIR} \
-LOCAL_FILE_STORAGE_PATH=${LOCAL_FILE_STORAGE_PATH} \
-LOG_LEVEL=${LOG_LEVEL:-INFO} \
-JWT_SECRET_KEY=${JWT_SECRET_KEY:-} \
+# 6.2 使用 PM2 启动新进程（带环境变量更新）
+echo "  🚀 正在通过 PM2 启动新的 [${PM2_APP_NAME}] 进程..."
 pm2 start "uv run uvicorn main:app --host 0.0.0.0 --port ${APP_PORT}" \
     --name "${PM2_APP_NAME}" \
-    --log "${APP_LOG_FILE}"
+    --log "${APP_LOG_FILE}" \
+    --update-env \
+    --env "PYTHONUNBUFFERED=1" \
+    --env "POSTGRES_HOST=${POSTGRES_HOST:-localhost}" \
+    --env "POSTGRES_PORT=${POSTGRES_HOST_PORT}" \
+    --env "POSTGRES_USER=${POSTGRES_USER}" \
+    --env "POSTGRES_PASSWORD=${POSTGRES_PASSWORD}" \
+    --env "POSTGRES_DB=${POSTGRES_DB}" \
+    --env "REDIS_HOST=${REDIS_HOST:-localhost}" \
+    --env "REDIS_PORT=${REDIS_HOST_PORT}" \
+    --env "REDIS_PASSWORD=${REDIS_PASSWORD}" \
+    --env "REDIS_DB=${REDIS_DB:-0}" \
+    --env "NEO4J_URL=${NEO4J_URL:-bolt://localhost:${NEO4J_BOLT_HOST_PORT}}" \
+    --env "NEO4J_USERNAME=${NEO4J_USERNAME}" \
+    --env "NEO4J_PASSWORD=${NEO4J_PASSWORD}" \
+    --env "NEO4J_DATABASE=${NEO4J_DATABASE:-neo4j}" \
+    --env "OPENAI_API_KEY=${OPENAI_API_KEY:-}" \
+    --env "OPENAI_BASE_URL=${OPENAI_BASE_URL:-}" \
+    --env "OPENAI_CHAT_MODEL=${OPENAI_CHAT_MODEL:-}" \
+    --env "OPENAI_EMBEDDING_MODEL=${OPENAI_EMBEDDING_MODEL:-}" \
+    --env "EMBEDDING_MODEL_PROVIDER=${EMBEDDING_MODEL_PROVIDER:-}" \
+    --env "MODEL_PROFILE=${MODEL_PROFILE:-}" \
+    --env "PARSER_OUTPUT_DIR=${PARSER_OUTPUT_DIR}" \
+    --env "LOCAL_FILE_STORAGE_PATH=${LOCAL_FILE_STORAGE_PATH}" \
+    --env "LOG_LEVEL=${LOG_LEVEL:-INFO}" \
+    --env "JWT_SECRET_KEY=${JWT_SECRET_KEY:-}"
 
 echo "  ✅ ${PM2_APP_NAME} 应用已通过 PM2 启动！"
 echo ""
 
 # ==============================================================================
-# 6.3 启动/重启队列 Workers
+# 6.3 启动/重启队列 Workers (参考 start.sh 的做法，直接调用脚本)
 # ==============================================================================
 echo "🔄 启动/重启队列 Workers..."
 cd ${APP_DIR} || { echo "❌ 应用目录不存在: ${APP_DIR}"; exit 1; }
 
-# 停止旧的队列 workers
-MQ_PID_FILE="${APP_DIR}/log/mq_workers.pids"
-if [ -f "${MQ_PID_FILE}" ]; then
+# 先停止旧的队列 workers (如果存在 stop 脚本)
+if [ -f "scripts/mq_tools/stop_mq_workers_local.sh" ]; then
     echo "  🛑 停止旧的队列 workers..."
-    while read -r pid name queue; do
-        if [ -z "${pid}" ]; then
-            continue
-        fi
-        if kill -0 "${pid}" >/dev/null 2>&1; then
-            echo "    停止 pid=${pid} name=${name} queue=${queue}"
-            kill -TERM -- "-${pid}" >/dev/null 2>&1 || true
-            kill -TERM "${pid}" >/dev/null 2>&1 || true
-            sleep 1
-            if kill -0 "${pid}" >/dev/null 2>&1; then
-                kill -KILL -- "-${pid}" >/dev/null 2>&1 || true
-                kill -KILL "${pid}" >/dev/null 2>&1 || true
-            fi
-        fi
-    done < "${MQ_PID_FILE}" || true
-    rm -f "${MQ_PID_FILE}"
-    echo "  ✅ 旧的队列 workers 已停止"
+    bash "scripts/mq_tools/stop_mq_workers_local.sh" >/dev/null 2>&1 || true
 fi
 
-# 清理可能残留的 celery 进程
-pkill -f "celery -A encapsulation.message_queue.celery_app worker" >/dev/null 2>&1 || true
-sleep 1
+# 使用 start_mq_workers_local.sh 启动新的 workers (强制启动模式，因为我们已经先停止了)
+if [ -f "scripts/mq_tools/start_mq_workers_local.sh" ]; then
+    echo "  🚀 启动新的队列 workers..."
+    MQ_WORKER_FORCE_START=1 bash "scripts/mq_tools/start_mq_workers_local.sh" || true
+    
+    # 自动配置队列 Workers 的开机自启（通过 systemd service）
+    SERVICE_NAME="rag-arc-mq-workers-chatKB_test.service"
+    SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}"
+    
+    echo "  🔧 配置队列 Workers 开机自启..."
+    cat > /tmp/${SERVICE_NAME} <<EOF
+[Unit]
+Description=RAG-ARC MQ Workers (Celery Workers for chatKB_test)
+After=network.target docker.service
+Requires=docker.service
 
-# 启动新的队列 workers
-export TASK_QUEUE_MODE="${TASK_QUEUE_MODE:-celery}"
-MQ_LOG_DIR="${APP_DIR}/log/mq_workers"
-mkdir -p "${MQ_LOG_DIR}"
+[Service]
+Type=forking
+User=root
+WorkingDirectory=${APP_DIR}
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin"
+EnvironmentFile=-${APP_DIR}/.env
+ExecStart=/bin/bash scripts/mq_tools/start_mq_workers_local.sh
+ExecStop=/bin/bash scripts/mq_tools/stop_mq_workers_local.sh
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
 
-POOL="${CELERY_WORKER_POOL:-prefork}"
-LOGLEVEL="${CELERY_LOGLEVEL:-info}"
-CONCURRENCY="${CELERY_WORKER_CONCURRENCY:-2}"
-INDEXING_QUEUE="${CELERY_QUEUE_INDEXING:-indexing}"
-DEEPSEARCH_QUEUE="${CELERY_QUEUE_DEEPSEARCH:-deepsearch}"
-EXPORT_QUEUE="${CELERY_QUEUE_EXPORT:-export}"
-
-start_worker() {
-    local queue="$1"
-    local name="$2"
-    local logfile="${MQ_LOG_DIR}/${name}.log"
-    echo "  🚀 启动 worker: name=${name} queue=${queue} pool=${POOL} concurrency=${CONCURRENCY}"
-    nohup setsid uv run celery -A encapsulation.message_queue.celery_app worker \
-        --pool "${POOL}" \
-        --loglevel "${LOGLEVEL}" \
-        --concurrency "${CONCURRENCY}" \
-        --hostname "${name}@%h" \
-        --queues "${queue}" \
-        >"${logfile}" 2>&1 &
-    echo "$! ${name} ${queue}" >> "${MQ_PID_FILE}"
-}
-
-start_worker "${INDEXING_QUEUE}" "rag-arc-indexing"
-start_worker "${DEEPSEARCH_QUEUE}" "rag-arc-deepsearch"
-start_worker "${EXPORT_QUEUE}" "rag-arc-export"
-
-echo "  ✅ 队列 Workers 已启动（PIDs 记录在 ${MQ_PID_FILE}）"
+[Install]
+WantedBy=multi-user.target
+EOF
+    sudo cp /tmp/${SERVICE_NAME} ${SERVICE_FILE} && \
+    sudo systemctl daemon-reload && \
+    sudo systemctl enable ${SERVICE_NAME} >/dev/null 2>&1 && \
+    echo "  ✅ 队列 Workers 开机自启已配置（systemd service: ${SERVICE_NAME}）" || \
+    echo "  ⚠️  队列 Workers 开机自启配置失败（需要 sudo 权限）"
+    rm -f /tmp/${SERVICE_NAME}
+else
+    echo "  ⚠️  未找到 start_mq_workers_local.sh 脚本，跳过队列 workers 启动"
+fi
 echo ""
 
 # ==============================================================================
@@ -345,7 +347,7 @@ if pm2 list | grep -q "${PM2_APP_NAME}" && pm2 list | grep -q "online"; then
     echo "📝 PM2 管理命令："
     echo "  - 查看状态: pm2 list"
     echo "  - 查看日志: pm2 logs ${PM2_APP_NAME}"
-    echo "  - 重启应用: pm2 restart ${PM2_APP_NAME}"
+    echo "  - 重启应用: pm2 restart ${PM2_APP_NAME} --update-env"
     echo "  - 停止应用: pm2 stop ${PM2_APP_NAME}"
     echo "  - 开机自启: pm2 startup && pm2 save"
     echo ""
@@ -353,6 +355,8 @@ if pm2 list | grep -q "${PM2_APP_NAME}" && pm2 list | grep -q "online"; then
     echo "  - 停止队列: bash scripts/mq_tools/stop_mq_workers_local.sh"
     echo "  - 启动队列: MQ_WORKER_FORCE_START=1 bash scripts/mq_tools/start_mq_workers_local.sh"
     echo "  - 查看队列日志: tail -f log/mq_workers/*.log"
+    echo "  - 系统服务管理: sudo systemctl {start|stop|status|restart} rag-arc-mq-workers-chatKB_test.service"
+    echo "  - 开机自启: ✅ 已自动配置（通过 systemd service）"
     echo ""
 else
     echo "=========================================="
