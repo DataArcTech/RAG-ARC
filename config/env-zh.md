@@ -197,6 +197,8 @@ Benchmark/实验模式：
 | `DEVELOP_OWNER_USERNAME` | `dev_cli_user` | 自动创建的测试用户用户名。 |
 | `DEVELOP_OWNER_PASSWORD` | `dev-cli-password` | 测试用户密码。 |
 | `ADMIN_OWNER_ID` | `00000000-0000-0000-0000-00000000ABCD` | 可查看所有租户数据的管理员 UUID，留空则禁用。 |
+| `ORG_ADMIN_OWNER_IDS` | _(空)_ | 企业管理员 owner id 白名单（逗号分隔 UUID）。用于授权对企业共享知识域（`SHARE_OWNER_ID`）的文件做增删改（CRUD）。 |
+| `SHARE_OWNER_ID` | _(空)_ | 企业共享知识域（share）的 owner id（UUID）。用于算法层可见域选择（`me` / `me+share`），要求与 `ADMIN_OWNER_ID` 不同；留空则禁用 share 合并检索。 |
 | `CHATBOT_SHARED_DOCUMENT_OWNER_ID` | `00000000-0000-0000-0000-000000000001` | chatKB（`type=1`）统一知识库的共享 owner id；chatbot 与 rag_inference 对 `type=1` 用户默认在该 owner 下检索。 |
 
 ## 4. PostgreSQL
