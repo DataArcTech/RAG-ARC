@@ -387,6 +387,25 @@ class ToolManagerConfig(BaseModel):
     )
 
 
+class ToolBudgetConfig(BaseModel):
+    """Global tool-call budget per DeepSearch run (not counting graph adapter traversals)."""
+
+    enabled: bool = Field(True, description="Enable tool-call budget enforcement across tool_manager/external tools.")
+    max_calls_total: int = Field(
+        ...,
+        ge=0,
+        description="Maximum total tool invocations allowed for one DeepSearch run (0 disables tool calls).",
+    )
+    count_external_calls: bool = Field(
+        True,
+        description="When true, count external channel executions (e.g., Tavily HTTP calls) against the same budget.",
+    )
+    expose_to_llm: bool = Field(
+        True,
+        description="When true, attach remaining tool-call budget to graph_context metadata for LLM visibility.",
+    )
+
+
 class RemoteToolDescriptorConfig(BaseModel):
     """Descriptor for remote-only tools exposed via MCP."""
 
@@ -538,6 +557,7 @@ class DeepSearchServiceConfig(AbstractConfig):
     gap_detection: GapDetectionConfig
     reporter: ReporterConfig
     tool_manager: ToolManagerConfig
+    tool_budget: ToolBudgetConfig
     external_channel: ExternalChannelConfig
     quality_loop: QualityLoopConfig = Field(default_factory=QualityLoopConfig)
     deterministic_routing: DeterministicRoutingConfig = Field(default_factory=DeterministicRoutingConfig)
@@ -623,6 +643,7 @@ class DeepSearchServiceConfig(AbstractConfig):
                 "artifact_dir": self.tool_manager.artifact_dir,
                 "quality_loop": self.quality_loop.model_dump(),
                 "deterministic_routing": self.deterministic_routing.model_dump(),
+                "tool_budget": self.tool_budget.model_dump(),
                 "adapter": adapter_meta_payload,
                 "disabled_tools": sorted(tool_hint_registry.get_disabled_tool_names()),
                 "tool_names": {

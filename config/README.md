@@ -29,3 +29,8 @@ In `config/json_configs/deepsearch_service.json`:
 - `planner.web_step_policy="realtime_required"` injects/forces at least one `channel="web"` step when the question asks for realtime/latest/current info (e.g. FX rates/news).
 - `external_channel.execute_forced_tasks_without_gap=true` ensures those forced tasks execute even when gap detection thinks coverage is sufficient.
 
+## DeepSearch Tool Budget
+
+In `config/json_configs/deepsearch_service.json`:
+- `tool_budget.max_calls_total` caps total tool invocations per DeepSearch run (tool_manager + optional external calls; does not count graph adapter traversals).
+- The remaining budget is attached to `graph_context.metadata.tool_budget` for LLM visibility and is also surfaced in tool diagnostics.

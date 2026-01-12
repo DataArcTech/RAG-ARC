@@ -128,6 +128,7 @@ class GraphThinkTool(GraphTool):
             "plan_step": request.plan_step,
             "context_evidences": compacted,
             "graph_context": context_snapshot,
+            "tool_budget": (context_snapshot.get("metadata") or {}).get("tool_budget") if isinstance(context_snapshot, dict) else None,
             "coverage_metrics": coverage_snapshot,
             "extra": request.extra,
             "compression": compaction_meta,

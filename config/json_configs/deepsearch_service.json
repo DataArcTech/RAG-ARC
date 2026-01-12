@@ -213,6 +213,12 @@
     "max_remote_context_chars": 4096,
     "remote_tools": {}
   },
+  "tool_budget": {
+    "enabled": true,
+    "max_calls_total": 60,
+    "count_external_calls": true,
+    "expose_to_llm": true
+  },
   "external_channel": {
     "default_provider": "tavily",
     "max_rounds": 2,

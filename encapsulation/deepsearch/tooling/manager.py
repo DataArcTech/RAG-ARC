@@ -26,6 +26,7 @@ from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 from core.deepsearch.utils.file_scope import filter_evidences, resolve_file_scope
 from core.deepsearch.trace import emit_trace
 from core.deepsearch.tooling.errors import ToolErrorKind, ToolInvocationError, wrap_tool_exception
+from core.deepsearch.tooling.budget import ToolBudgetExceededError, attach_tool_budget_metadata, get_tool_budget
 
 logger = logging.getLogger(__name__)
 
@@ -413,11 +414,54 @@ class DeepSearchToolManager:
 
         call_id = uuid.uuid4().hex
         descriptor = self._resolve_descriptor(tool_name)
-        request = self._build_request(payload)
         local_tool = self.local_registry.resolve(tool_name) if self.local_registry else None
         local_disabled = self._prefer_remote_for(tool_name)
         if local_disabled:
             local_tool = None
+
+        can_route_remote = bool(self._can_route_remote(tool_name, descriptor))
+        has_local = bool(local_tool is not None)
+        budget_snapshot: Dict[str, int] | None = None
+        budget = get_tool_budget()
+        if budget is not None and (can_route_remote or has_local):
+            try:
+                budget_snapshot = await budget.claim(tool_name=tool_name, n=1)
+                attach_tool_budget_metadata(graph_context=payload.get("graph_context"), snapshot=budget_snapshot)
+            except ToolBudgetExceededError as exc:
+                wrapped = ToolInvocationError(
+                    tool_name=tool_name,
+                    kind=ToolErrorKind.BUDGET_EXCEEDED,
+                    message=str(exc),
+                    route=None,
+                    cause=exc,
+                )
+                await emit_trace(
+                    "tool_response",
+                    json.dumps(
+                        json_safe(
+                            {
+                                "call_id": call_id,
+                                "tool_name": tool_name,
+                                "error": str(wrapped),
+                                "error_kind": wrapped.kind.value,
+                                "tool_budget": budget.snapshot(),
+                            }
+                        ),
+                        ensure_ascii=False,
+                        indent=2,
+                        default=str,
+                    ),
+                    meta={
+                        "call_id": call_id,
+                        "tool_name": tool_name,
+                        "plan_step": payload.get("plan_step"),
+                        "ok": False,
+                        "error_kind": wrapped.kind.value,
+                    },
+                )
+                raise wrapped
+
+        request = self._build_request(payload)
 
         runtime_hint = None
         if tool_name == "code.python" and local_tool is not None:
@@ -440,11 +484,12 @@ class DeepSearchToolManager:
             "graph_context": (request.graph_context.model_dump(exclude_none=True) if request.graph_context else None),
             "runtime": runtime_hint,
             "routing": {
-                "can_route_remote": bool(self._can_route_remote(tool_name, descriptor)),
+                "can_route_remote": can_route_remote,
                 "prefer_remote": bool(local_disabled),
                 "has_local": bool(local_tool is not None),
                 "default_mcp_server": getattr(self.mcp_router, "default_server_name", None) if self.mcp_router else None,
             },
+            "tool_budget": budget_snapshot,
         }
         await emit_trace(
             "tool_call",
@@ -453,9 +498,13 @@ class DeepSearchToolManager:
         )
 
         remote_error: Exception | None = None
-        if self._can_route_remote(tool_name, descriptor):
+        if can_route_remote:
             try:
                 result = await self._invoke_remote(tool_name, descriptor, payload, request)
+                if budget is not None:
+                    current = budget.snapshot()
+                    result.diagnostics.setdefault("tool_budget", current)
+                    attach_tool_budget_metadata(graph_context=request.graph_context, snapshot=current)
                 await emit_trace(
                     "tool_response",
                     json.dumps(
@@ -516,6 +565,10 @@ class DeepSearchToolManager:
         if local_tool:
             try:
                 result = await self._invoke_local(tool_name, local_tool, descriptor, request)
+                if budget is not None:
+                    current = budget.snapshot()
+                    result.diagnostics.setdefault("tool_budget", current)
+                    attach_tool_budget_metadata(graph_context=request.graph_context, snapshot=current)
             except Exception as exc:  # noqa: BLE001
                 wrapped = wrap_tool_exception(tool_name, exc, route="local")
                 await emit_trace(
