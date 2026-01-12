@@ -514,35 +514,15 @@ async def stream_chat_sse(
                         f"{msg.content['role']}: {msg.content['content']}" for msg in history_messages
                     )
 
-        # 如果启用了 deepsearch，先执行 deepsearch 获取增强的上下文
-        enhanced_query = query
-        if enable_deepsearch:
-            logger.info("DeepSearch enabled for query: %s (owner_id=%s)", query, effective_owner)
-            try:
-                registrator = Register()
-                deepsearch_service = registrator.get_object("deepsearch_service")
-                logger.info("DeepSearch service found, running...")
-                deepsearch_result = await deepsearch_service.run(
-                    question=query,
-                    owner_id=str(effective_owner),
-                )
-                deepsearch_answer = deepsearch_result.get("answer") or deepsearch_result.get("report") or ""
-                if deepsearch_answer:
-                    enhanced_query = f"{query}\n\n[DeepSearch 增强上下文]\n{deepsearch_answer}"
-                    logger.info("DeepSearch completed successfully, enhanced query length: %d", len(enhanced_query))
-                else:
-                    logger.warning("DeepSearch completed but no answer/report found in result")
-            except KeyError as e:
-                logger.warning("DeepSearch service not available: %s", e)
-            except Exception as e:
-                logger.error("DeepSearch failed: %s", e, exc_info=True)
-
         response_parts: list[str] = []
         queue: asyncio.Queue[object | None] = asyncio.Queue()
         loop = asyncio.get_running_loop()
         stream_error: list[Exception | None] = [None]
         prepared: dict[str, Any] = {}
 
+        # 用于存储 DeepSearch 进度事件的队列（在 DeepSearch 执行期间实时发送）
+        deepsearch_progress_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        
         def _emit_progress(payload: dict[str, Any]) -> None:
             nonlocal progress_seq
             progress_seq += 1
@@ -553,6 +533,359 @@ async def stream_chat_sse(
             envelope.setdefault("request_id", request_id)
             envelope.setdefault("seq", progress_seq)
             asyncio.run_coroutine_threadsafe(queue.put({"kind": "progress", "payload": envelope}), loop)
+        
+        # 专门用于 DeepSearch 进度事件的函数（直接放入专用队列，实时发送）
+        async def _emit_deepsearch_progress(payload: dict[str, Any]) -> None:
+            """直接发送 DeepSearch 进度事件，不通过主队列"""
+            nonlocal progress_seq
+            progress_seq += 1
+            envelope = dict(payload or {})
+            envelope.setdefault("v", 1)
+            envelope.setdefault("type", "progress")
+            envelope.setdefault("ts_ms", int(time.time() * 1000))
+            envelope.setdefault("request_id", request_id)
+            envelope.setdefault("seq", progress_seq)
+            await deepsearch_progress_queue.put(envelope)
+
+        # 如果启用了 deepsearch，先执行 deepsearch 获取增强的上下文
+        enhanced_query = query
+        if enable_deepsearch:
+            logger.info("DeepSearch enabled for query: %s (owner_id=%s)", query, effective_owner)
+            try:
+                registrator = Register()
+                deepsearch_service = registrator.get_object("deepsearch_service")
+                logger.info("DeepSearch service found, running...")
+                
+                # 创建 DeepSearch 阶段监听器，用于 SSE 输出进度
+                # 根据 DeepSearch 文档，stage 顺序为：created → planned → reasoned → gap_evaluated → external_invoked → reported → quality_gated → done/failed
+                def deepsearch_stage_listener(record: dict[str, Any], state) -> None:
+                    """DeepSearch 阶段变化监听器，通过 SSE 发送进度信息（符合 DeepSearch 对接文档规范）"""
+                    try:
+                        stage = record.get("stage", "unknown")
+                        metadata = record.get("metadata", {})
+                        
+                        logger.info("DeepSearch stage listener called: stage=%s, request_id=%s", stage, request_id)
+                        
+                        # 构建进度信息（符合 legacy SSE 格式：event=progress）
+                        progress_info = {
+                            "stage": "deepsearch",
+                            "deepsearch_stage": stage,
+                            "status": "running",
+                        }
+                        
+                        # 根据文档中的 stage 名称进行匹配
+                        if stage == "planned":
+                            progress_info["message"] = "正在生成搜索计划..."
+                            # 从 metadata 中获取计划步骤数
+                            if "step_count" in metadata:
+                                progress_info["plan_steps_count"] = metadata.get("step_count")
+                            # 从 state 中获取完整的计划内容
+                            if hasattr(state, "plan_steps") and state.plan_steps:
+                                progress_info["plan_steps"] = state.plan_steps
+                                logger.info("DeepSearch plan steps: %s", state.plan_steps)
+                            if hasattr(state, "plan_metadata") and state.plan_metadata:
+                                progress_info["plan_metadata"] = state.plan_metadata
+                                logger.info("DeepSearch plan metadata: plan_id=%s, mode=%s, artifact_path=%s", 
+                                          state.plan_metadata.get("plan_id"),
+                                          state.plan_metadata.get("mode"),
+                                          state.plan_metadata.get("artifact_path"))
+                        elif stage == "reasoned":
+                            progress_info["message"] = "正在进行图谱推理..."
+                            # 从 reasoning_trace 中获取完整的推理信息
+                            if hasattr(state, "reasoning_trace") and state.reasoning_trace:
+                                progress_info["reasoning_trace"] = state.reasoning_trace
+                                
+                                # 推理步骤
+                                reasoning_steps = state.reasoning_trace.get("reasoning_steps", [])
+                                if reasoning_steps:
+                                    progress_info["reasoning_steps"] = reasoning_steps
+                                    progress_info["reasoning_steps_count"] = len(reasoning_steps)
+                                    logger.info("DeepSearch reasoning steps: count=%d, steps=%s", 
+                                              len(reasoning_steps), reasoning_steps)
+                                
+                                # 工具调用结果
+                                tool_results = state.reasoning_trace.get("tool_results", [])
+                                if tool_results:
+                                    progress_info["tool_results"] = tool_results
+                                    progress_info["tool_calls_count"] = len(tool_results)
+                                    logger.info("DeepSearch tool results: count=%d, results=%s", 
+                                              len(tool_results), tool_results)
+                                    # 获取最后一个工具调用的信息
+                                    last_tool = tool_results[-1] if tool_results else {}
+                                    if isinstance(last_tool, dict):
+                                        tool_name = last_tool.get("tool_name", "")
+                                        if tool_name:
+                                            progress_info["last_tool"] = tool_name
+                                
+                                # 证据
+                                evidences = state.reasoning_trace.get("evidences", [])
+                                if evidences:
+                                    progress_info["evidences"] = evidences
+                                    progress_info["evidence_count"] = len(evidences)
+                                    logger.info("DeepSearch evidences: count=%d", len(evidences))
+                                
+                                # 从 metadata 中获取补充信息
+                                if "evidence_count" in metadata:
+                                    progress_info["evidence_count"] = metadata.get("evidence_count")
+                                if "completed_steps" in metadata:
+                                    progress_info["completed_steps"] = metadata.get("completed_steps")
+                                    logger.info("DeepSearch completed steps: %s", metadata.get("completed_steps"))
+                        elif stage == "gap_evaluated":
+                            progress_info["message"] = "正在检测知识缺口..."
+                            # 从 state 中获取完整的缺口检测结果
+                            if hasattr(state, "gap_result") and state.gap_result:
+                                progress_info["gap_result"] = state.gap_result
+                                logger.info("DeepSearch gap result: %s", state.gap_result)
+                            
+                            # 从 metadata 中获取缺口检测结果
+                            if "should_trigger_external" in metadata:
+                                progress_info["should_trigger_external"] = metadata.get("should_trigger_external")
+                                logger.info("DeepSearch should_trigger_external: %s", metadata.get("should_trigger_external"))
+                            if "reason" in metadata:
+                                progress_info["gap_reason"] = metadata.get("reason")
+                                logger.info("DeepSearch gap reason: %s", metadata.get("reason"))
+                        elif stage == "external_invoked":
+                            progress_info["message"] = "正在进行外部搜索..."
+                            # 从 state 中获取完整的外部调用信息
+                            if hasattr(state, "external_calls") and state.external_calls:
+                                progress_info["external_calls"] = state.external_calls
+                                progress_info["external_calls_count"] = len(state.external_calls)
+                                logger.info("DeepSearch external calls: count=%d, calls=%s", 
+                                          len(state.external_calls), state.external_calls)
+                            if "total_calls" in metadata:
+                                progress_info["external_calls_count"] = metadata.get("total_calls")
+                                logger.info("DeepSearch total external calls: %s", metadata.get("total_calls"))
+                        elif stage == "reported":
+                            progress_info["message"] = "正在生成报告..."
+                            # 从 state 中获取完整的报告信息
+                            if hasattr(state, "report_payload") and state.report_payload:
+                                progress_info["report_payload"] = state.report_payload
+                                
+                                # 报告答案
+                                answer = state.report_payload.get("answer", "")
+                                if answer:
+                                    progress_info["answer"] = answer
+                                    progress_info["answer_length"] = len(answer)
+                                    logger.info("DeepSearch report answer: length=%d, preview=%s", 
+                                              len(answer), answer[:200] if len(answer) > 200 else answer)
+                                
+                                # 结构化报告
+                                structured_report = state.report_payload.get("structured_report")
+                                if structured_report:
+                                    progress_info["structured_report"] = structured_report
+                                    logger.info("DeepSearch structured report: %s", structured_report)
+                                
+                                # 引用和证据
+                                references = state.report_payload.get("references", [])
+                                if references:
+                                    progress_info["references"] = references
+                                    progress_info["references_count"] = len(references)
+                                    logger.info("DeepSearch references: count=%d", len(references))
+                            
+                            # 从 metadata 中获取报告信息
+                            if "answer_length" in metadata:
+                                progress_info["answer_length"] = metadata.get("answer_length")
+                            if "evidence_count" in metadata:
+                                progress_info["evidence_count"] = metadata.get("evidence_count")
+                                logger.info("DeepSearch evidence count: %s", metadata.get("evidence_count"))
+                        elif stage == "quality_gated":
+                            progress_info["message"] = "正在进行质量检查..."
+                            # 从 state 中获取完整的质量检查信息
+                            if hasattr(state, "quality_gates") and state.quality_gates:
+                                progress_info["quality_gates"] = state.quality_gates
+                                progress_info["quality_gates_count"] = len(state.quality_gates)
+                                logger.info("DeepSearch quality gates: count=%d, gates=%s", 
+                                          len(state.quality_gates), state.quality_gates)
+                            
+                            # 从 metadata 中获取质量检查结果
+                            if "passed" in metadata:
+                                progress_info["quality_passed"] = metadata.get("passed")
+                                logger.info("DeepSearch quality passed: %s", metadata.get("passed"))
+                            if "should_iterate" in metadata:
+                                progress_info["should_iterate"] = metadata.get("should_iterate")
+                                logger.info("DeepSearch should iterate: %s", metadata.get("should_iterate"))
+                            if "round" in metadata:
+                                progress_info["round"] = metadata.get("round")
+                                logger.info("DeepSearch quality gate round: %s", metadata.get("round"))
+                        elif stage == "done":
+                            progress_info["status"] = "completed"
+                            progress_info["message"] = "DeepSearch 完成"
+                            # 添加完成时的汇总信息
+                            if hasattr(state, "run_id"):
+                                progress_info["run_id"] = state.run_id
+                                logger.info("DeepSearch completed: run_id=%s", state.run_id)
+                            if hasattr(state, "cost_telemetry") and state.cost_telemetry:
+                                progress_info["cost_telemetry"] = state.cost_telemetry
+                                logger.info("DeepSearch cost telemetry: %s", state.cost_telemetry)
+                            if hasattr(state, "stage_history") and state.stage_history:
+                                progress_info["stage_history"] = state.stage_history
+                                logger.info("DeepSearch stage history: count=%d", len(state.stage_history))
+                        elif stage == "failed":
+                            progress_info["status"] = "failed"
+                            progress_info["message"] = "DeepSearch 执行失败"
+                            # 添加失败时的错误信息
+                            if hasattr(state, "errors") and state.errors:
+                                progress_info["errors"] = state.errors
+                                logger.error("DeepSearch errors: %s", state.errors)
+                            if hasattr(state, "run_id"):
+                                progress_info["run_id"] = state.run_id
+                                logger.error("DeepSearch failed: run_id=%s", state.run_id)
+                        elif stage == "created":
+                            progress_info["message"] = "DeepSearch 初始化..."
+                            # 添加初始化信息
+                            if hasattr(state, "run_id"):
+                                progress_info["run_id"] = state.run_id
+                                logger.info("DeepSearch initialized: run_id=%s", state.run_id)
+                            if hasattr(state, "config_fingerprint"):
+                                progress_info["config_fingerprint"] = state.config_fingerprint
+                                logger.info("DeepSearch config fingerprint: %s", state.config_fingerprint)
+                        else:
+                            # 未知阶段，但仍记录
+                            progress_info["message"] = f"DeepSearch 执行中（阶段: {stage}）..."
+                        
+                        # 添加通用的元数据信息
+                        if metadata:
+                            # 计划相关
+                            if "plan_id" in metadata:
+                                progress_info["plan_id"] = metadata.get("plan_id")
+                            
+                        # 使用专用队列直接发送，不通过主队列
+                        asyncio.run_coroutine_threadsafe(_emit_deepsearch_progress(progress_info), loop)
+                        logger.info("DeepSearch progress emitted: stage=%s, message=%s", stage, progress_info.get("message"))
+                    except Exception as e:
+                        logger.error("DeepSearch stage listener error: %s", e, exc_info=True)
+                
+                logger.info("Passing stage_listener to DeepSearch service (request_id=%s)", request_id)
+                
+                # 创建任务以并行执行 DeepSearch
+                deepsearch_task = asyncio.create_task(
+                    deepsearch_service.run(
+                        question=query,
+                        owner_id=str(effective_owner),
+                        stage_listener=deepsearch_stage_listener,
+                    )
+                )
+                
+                # 在 DeepSearch 执行期间，实时消费并发送进度事件
+                # 使用专用队列来实时发送 DeepSearch 进度
+                deepsearch_progress_task = None
+                while not deepsearch_task.done():
+                    # 如果进度队列等待任务不存在或已完成，创建新的
+                    if deepsearch_progress_task is None or deepsearch_progress_task.done():
+                        deepsearch_progress_task = asyncio.create_task(deepsearch_progress_queue.get())
+                    
+                    # 同时等待任务完成和进度队列事件
+                    done, pending = await asyncio.wait(
+                        [deepsearch_task, deepsearch_progress_task],
+                        timeout=0.1,
+                        return_when=asyncio.FIRST_COMPLETED
+                    )
+                    
+                    # 检查是否有进度队列事件
+                    if deepsearch_progress_task in done:
+                        try:
+                            progress_payload = await deepsearch_progress_task
+                            deepsearch_progress_task = None  # 重置，下次循环创建新的
+                            
+                            if progress_payload is None:
+                                # 收到结束信号，继续等待 DeepSearch 完成
+                                continue
+                            
+                            # 直接 yield DeepSearch 进度事件
+                            logger.info("Yielding DeepSearch progress SSE: stage=%s, request_id=%s", progress_payload.get("deepsearch_stage"), request_id)
+                            tool_calls = [
+                                {
+                                    "index": 0,
+                                    "id": f"call_deepsearch_progress_{uuid.uuid4().hex}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "rag_arc_progress",
+                                        "arguments": json.dumps(
+                                            progress_payload,
+                                            ensure_ascii=False,
+                                            default=str,
+                                            separators=(",", ":"),
+                                        ),
+                                    },
+                                }
+                            ]
+                            yield sse_json_wrapped(
+                                openai_chat_completion_chunk(
+                                    chunk_id=chunk_id,
+                                    model=model_name,
+                                    created=created,
+                                    delta=delta_envelope(role=None, tool_calls=tool_calls),
+                                ),
+                                request_id=request_id
+                            )
+                        except Exception as e:
+                            logger.error("Error processing DeepSearch progress: %s", e, exc_info=True)
+                            deepsearch_progress_task = None
+                    
+                    # 如果 DeepSearch 任务完成，退出循环
+                    if deepsearch_task in done:
+                        # 取消进度队列等待任务（如果还在等待）
+                        if deepsearch_progress_task and not deepsearch_progress_task.done():
+                            deepsearch_progress_task.cancel()
+                            try:
+                                await deepsearch_progress_task
+                            except asyncio.CancelledError:
+                                pass
+                        break
+                
+                # 获取 DeepSearch 结果
+                deepsearch_result = await deepsearch_task
+                logger.info("DeepSearch service returned (request_id=%s)", request_id)
+                
+                # DeepSearch 完成后，继续消费剩余的进度事件（最多等待1秒）
+                deadline = time.time() + 1.0
+                while time.time() < deadline:
+                    try:
+                        progress_payload = await asyncio.wait_for(deepsearch_progress_queue.get(), timeout=0.1)
+                        if progress_payload is None:
+                            break
+                        logger.info("Yielding remaining DeepSearch progress SSE: stage=%s, request_id=%s", progress_payload.get("deepsearch_stage"), request_id)
+                        tool_calls = [
+                            {
+                                "index": 0,
+                                "id": f"call_deepsearch_progress_{uuid.uuid4().hex}",
+                                "type": "function",
+                                "function": {
+                                    "name": "rag_arc_progress",
+                                    "arguments": json.dumps(
+                                        progress_payload,
+                                        ensure_ascii=False,
+                                        default=str,
+                                        separators=(",", ":"),
+                                    ),
+                                },
+                            }
+                        ]
+                        yield sse_json_wrapped(
+                            openai_chat_completion_chunk(
+                                chunk_id=chunk_id,
+                                model=model_name,
+                                created=created,
+                                delta=delta_envelope(role=None, tool_calls=tool_calls),
+                            ),
+                            request_id=request_id
+                        )
+                    except (asyncio.TimeoutError, asyncio.QueueEmpty):
+                        break
+                    except Exception as e:
+                        logger.error("Error consuming remaining DeepSearch progress: %s", e, exc_info=True)
+                        break
+                
+                deepsearch_answer = deepsearch_result.get("answer") or deepsearch_result.get("report") or ""
+                if deepsearch_answer:
+                    enhanced_query = f"{query}\n\n[DeepSearch 增强上下文]\n{deepsearch_answer}"
+                    logger.info("DeepSearch completed successfully, enhanced query length: %d", len(enhanced_query))
+                else:
+                    logger.warning("DeepSearch completed but no answer/report found in result")
+            except KeyError as e:
+                logger.warning("DeepSearch service not available: %s", e)
+            except Exception as e:
+                logger.error("DeepSearch failed: %s", e, exc_info=True)
 
         def _run_stream() -> None:
             try:

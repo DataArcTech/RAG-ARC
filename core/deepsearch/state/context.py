@@ -150,13 +150,19 @@ class DeepSearchState:
         self._emit_stage(record)
 
     def _emit_stage(self, record: Dict[str, Any]) -> None:
+        import logging
+        logger = logging.getLogger(__name__)
         listener = self.stage_listener
         if not callable(listener):
+            logger.debug("Stage listener is not callable: %s (type: %s)", listener, type(listener))
             return
         try:
+            logger.debug("Calling stage listener: stage=%s", record.get("stage"))
             listener(record, self)
-        except Exception:
+            logger.debug("Stage listener called successfully: stage=%s", record.get("stage"))
+        except Exception as exc:
             # Progress callbacks must never break the main pipeline
+            logger.warning("Stage listener error: %s", exc, exc_info=True)
             return
 
     def snapshot(self) -> Dict[str, Any]:
