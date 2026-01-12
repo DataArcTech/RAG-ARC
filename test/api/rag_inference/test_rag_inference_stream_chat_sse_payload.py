@@ -77,9 +77,12 @@ def test_rag_inference_stream_chat_sse_emits_payload_tool_call(monkeypatch, clie
             return (_gen(), chunks, subgraph_data, subgraph_info)
 
     evidence_payload = {"chunks": [{"id": "chunk-1"}], "summary": "evidence ok"}
-    monkeypatch.setattr(rag_router, "session_handler", FakeSessionHandler())
-    monkeypatch.setattr(rag_router, "message_handler", FakeMessageHandler())
-    monkeypatch.setattr(rag_router, "rag_inference_handler", FakeRAG())
+    session_handler = FakeSessionHandler()
+    message_handler = FakeMessageHandler()
+    rag = FakeRAG()
+    monkeypatch.setattr(rag_router, "get_session_handler", lambda: session_handler)
+    monkeypatch.setattr(rag_router, "get_message_handler", lambda: message_handler)
+    monkeypatch.setattr(rag_router, "get_rag_inference_handler", lambda: rag)
     monkeypatch.setattr(rag_router, "validate_user_session", lambda _session, _user: True)
     monkeypatch.setattr(rag_router, "build_chat_evidence", lambda *a, **k: evidence_payload)
 
@@ -169,9 +172,12 @@ def test_rag_inference_stream_chat_sse_renumbers_citations_and_sources(monkeypat
         ]
     }
 
-    monkeypatch.setattr(rag_router, "session_handler", FakeSessionHandler())
-    monkeypatch.setattr(rag_router, "message_handler", FakeMessageHandler())
-    monkeypatch.setattr(rag_router, "rag_inference_handler", FakeRAG())
+    session_handler = FakeSessionHandler()
+    message_handler = FakeMessageHandler()
+    rag = FakeRAG()
+    monkeypatch.setattr(rag_router, "get_session_handler", lambda: session_handler)
+    monkeypatch.setattr(rag_router, "get_message_handler", lambda: message_handler)
+    monkeypatch.setattr(rag_router, "get_rag_inference_handler", lambda: rag)
     monkeypatch.setattr(rag_router, "validate_user_session", lambda _session, _user: True)
     monkeypatch.setattr(rag_router, "build_chat_evidence", lambda *a, **k: evidence_payload)
 

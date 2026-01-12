@@ -135,9 +135,11 @@ def test_stream_chat_sse_includes_web_search_chunks_and_progress(monkeypatch, cl
     rag._knowledge_module = None
     rag._tavily_client = StubTavily()
 
-    monkeypatch.setattr(rag_router, "session_handler", FakeSessionHandler())
-    monkeypatch.setattr(rag_router, "message_handler", FakeMessageHandler())
-    monkeypatch.setattr(rag_router, "rag_inference_handler", rag)
+    session_handler = FakeSessionHandler()
+    message_handler = FakeMessageHandler()
+    monkeypatch.setattr(rag_router, "get_session_handler", lambda: session_handler)
+    monkeypatch.setattr(rag_router, "get_message_handler", lambda: message_handler)
+    monkeypatch.setattr(rag_router, "get_rag_inference_handler", lambda: rag)
     monkeypatch.setattr(rag_router, "validate_user_session", lambda _session, _user: True)
 
     client.app.dependency_overrides[rag_router.get_current_user] = lambda: user
@@ -296,9 +298,11 @@ def test_stream_chat_sse_defaults_to_no_web_search(monkeypatch, client):
     rag._knowledge_module = None
     rag._tavily_client = StubTavily()
 
-    monkeypatch.setattr(rag_router, "session_handler", FakeSessionHandler())
-    monkeypatch.setattr(rag_router, "message_handler", FakeMessageHandler())
-    monkeypatch.setattr(rag_router, "rag_inference_handler", rag)
+    session_handler = FakeSessionHandler()
+    message_handler = FakeMessageHandler()
+    monkeypatch.setattr(rag_router, "get_session_handler", lambda: session_handler)
+    monkeypatch.setattr(rag_router, "get_message_handler", lambda: message_handler)
+    monkeypatch.setattr(rag_router, "get_rag_inference_handler", lambda: rag)
     monkeypatch.setattr(rag_router, "validate_user_session", lambda _session, _user: True)
 
     client.app.dependency_overrides[rag_router.get_current_user] = lambda: user

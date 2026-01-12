@@ -66,9 +66,12 @@ def test_rag_inference_stream_chat_ws_sends_payload(monkeypatch, client):
             assert owner_id == user.id
             return ("assistant ok", [], {"nodes": []} if return_subgraph else None, {"meta": 1})
 
-    monkeypatch.setattr(rag_router, "session_handler", FakeSessionHandler())
-    monkeypatch.setattr(rag_router, "message_handler", FakeMessageHandler())
-    monkeypatch.setattr(rag_router, "rag_inference_handler", FakeRAG())
+    session_handler = FakeSessionHandler()
+    message_handler = FakeMessageHandler()
+    rag = FakeRAG()
+    monkeypatch.setattr(rag_router, "get_session_handler", lambda: session_handler)
+    monkeypatch.setattr(rag_router, "get_message_handler", lambda: message_handler)
+    monkeypatch.setattr(rag_router, "get_rag_inference_handler", lambda: rag)
     monkeypatch.setattr(rag_router, "validate_user_session", lambda _session, _user: True)
     monkeypatch.setattr(rag_router, "build_chat_evidence", lambda *a, **k: {"chunks": [], "summary": "ok"})
 
@@ -118,9 +121,12 @@ def test_rag_inference_stream_chat_ws_accepts_plain_text(monkeypatch, client):
             assert "user: ping" in history_text
             return ("pong", [], None, None)
 
-    monkeypatch.setattr(rag_router, "session_handler", FakeSessionHandler())
-    monkeypatch.setattr(rag_router, "message_handler", FakeMessageHandler())
-    monkeypatch.setattr(rag_router, "rag_inference_handler", FakeRAG())
+    session_handler = FakeSessionHandler()
+    message_handler = FakeMessageHandler()
+    rag = FakeRAG()
+    monkeypatch.setattr(rag_router, "get_session_handler", lambda: session_handler)
+    monkeypatch.setattr(rag_router, "get_message_handler", lambda: message_handler)
+    monkeypatch.setattr(rag_router, "get_rag_inference_handler", lambda: rag)
     monkeypatch.setattr(rag_router, "validate_user_session", lambda _session, _user: True)
 
     async def _ws_user(_websocket: WebSocket):  # noqa: ARG001
@@ -147,7 +153,8 @@ def test_rag_inference_stream_chat_ws_rejects_include_all_owners_when_not_admin(
         def get_session(self, _session_id):
             return SimpleNamespace(id=_session_id, user_id=user.id)
 
-    monkeypatch.setattr(rag_router, "session_handler", FakeSessionHandler())
+    session_handler = FakeSessionHandler()
+    monkeypatch.setattr(rag_router, "get_session_handler", lambda: session_handler)
     monkeypatch.setattr(rag_router, "validate_user_session", lambda _session, _user: True)
     monkeypatch.setattr(rag_router, "is_admin_owner", lambda _owner_id: False)
 

@@ -70,9 +70,12 @@ def test_rag_inference_stream_chat_sse_emits_message_event(monkeypatch, client):
             subgraph_info = None
             return (_gen(), chunks, subgraph_data, subgraph_info)
 
-    monkeypatch.setattr(rag_router, "session_handler", FakeSessionHandler())
-    monkeypatch.setattr(rag_router, "message_handler", FakeMessageHandler())
-    monkeypatch.setattr(rag_router, "rag_inference_handler", FakeRAG())
+    session_handler = FakeSessionHandler()
+    message_handler = FakeMessageHandler()
+    rag = FakeRAG()
+    monkeypatch.setattr(rag_router, "get_session_handler", lambda: session_handler)
+    monkeypatch.setattr(rag_router, "get_message_handler", lambda: message_handler)
+    monkeypatch.setattr(rag_router, "get_rag_inference_handler", lambda: rag)
     monkeypatch.setattr(rag_router, "validate_user_session", lambda _session, _user: True)
 
     client.app.dependency_overrides[rag_router.get_current_user] = lambda: user
