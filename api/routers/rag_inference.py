@@ -149,6 +149,7 @@ class StreamChatRequest(BaseModel):
     include_all_owners: bool = False
     include_evidence: bool = False
     enable_web_search: bool = False
+    enable_deepsearch: bool = False
 
 
 class ChatResponse(BaseModel):
@@ -391,6 +392,7 @@ async def stream_chat_sse(
     include_all_owners = request.include_all_owners
     include_evidence = request.include_evidence
     enable_web_search = bool(getattr(request, "enable_web_search", False))
+    enable_deepsearch = bool(getattr(request, "enable_deepsearch", False))
 
     # Guard: only livingKB users (type=0) may request subgraph/evidence generation.
     if return_subgraph or include_evidence:
@@ -512,6 +514,29 @@ async def stream_chat_sse(
                         f"{msg.content['role']}: {msg.content['content']}" for msg in history_messages
                     )
 
+        # 如果启用了 deepsearch，先执行 deepsearch 获取增强的上下文
+        enhanced_query = query
+        if enable_deepsearch:
+            logger.info("DeepSearch enabled for query: %s (owner_id=%s)", query, effective_owner)
+            try:
+                registrator = Register()
+                deepsearch_service = registrator.get_object("deepsearch_service")
+                logger.info("DeepSearch service found, running...")
+                deepsearch_result = await deepsearch_service.run(
+                    question=query,
+                    owner_id=str(effective_owner),
+                )
+                deepsearch_answer = deepsearch_result.get("answer") or deepsearch_result.get("report") or ""
+                if deepsearch_answer:
+                    enhanced_query = f"{query}\n\n[DeepSearch 增强上下文]\n{deepsearch_answer}"
+                    logger.info("DeepSearch completed successfully, enhanced query length: %d", len(enhanced_query))
+                else:
+                    logger.warning("DeepSearch completed but no answer/report found in result")
+            except KeyError as e:
+                logger.warning("DeepSearch service not available: %s", e)
+            except Exception as e:
+                logger.error("DeepSearch failed: %s", e, exc_info=True)
+
         response_parts: list[str] = []
         queue: asyncio.Queue[object | None] = asyncio.Queue()
         loop = asyncio.get_running_loop()
@@ -532,6 +557,7 @@ async def stream_chat_sse(
         def _run_stream() -> None:
             try:
                 _emit_progress({"stage": "prepare", "status": "start"})
+                
                 # 从环境变量读取 USER_TYPE，用于选择对应的 prompt
                 user_type_str = os.getenv("USER_TYPE", "0")
                 try:
@@ -545,7 +571,7 @@ async def stream_chat_sse(
 
                 try:
                     token_stream, chunks, subgraph_data, subgraph_info = rag_inference_handler.stream_chat(
-                        query,
+                        enhanced_query,
                         effective_owner,
                         return_subgraph=(return_subgraph or include_evidence),
                         progress_callback=_emit_progress,
@@ -561,7 +587,7 @@ async def stream_chat_sse(
                     )
                     try:
                         token_stream, chunks, subgraph_data, subgraph_info = rag_inference_handler.stream_chat(
-                            query,
+                            enhanced_query,
                             effective_owner,
                             return_subgraph=(return_subgraph or include_evidence),
                             progress_callback=_emit_progress,
@@ -571,7 +597,7 @@ async def stream_chat_sse(
                     except TypeError:
                         try:
                             token_stream, chunks, subgraph_data, subgraph_info = rag_inference_handler.stream_chat(
-                                query,
+                                enhanced_query,
                                 effective_owner,
                                 return_subgraph=(return_subgraph or include_evidence),
                                 progress_callback=_emit_progress,
@@ -580,7 +606,7 @@ async def stream_chat_sse(
                             )
                         except TypeError:
                             token_stream, chunks, subgraph_data, subgraph_info = rag_inference_handler.stream_chat(
-                                query,
+                                enhanced_query,
                                 effective_owner,
                                 return_subgraph=(return_subgraph or include_evidence),
                             )

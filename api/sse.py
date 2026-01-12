@@ -46,8 +46,6 @@ def sse_json_wrapped(payload: Any, request_id: str | None = None, code: int = 20
         "data": payload,
         "request_id": request_id,
     }
-    if isinstance(payload, dict):
-        wrapped.update(payload)
     return f"data: {json.dumps(wrapped, ensure_ascii=False, separators=(',', ':'))}\n\n"
 
 
