@@ -13,11 +13,11 @@ from pathlib import Path
 class DailySizeRotatingHandler(BaseRotatingHandler):
     """按天创建文件夹，单文件超过大小限制时创建新文件"""
     
-    def __init__(self, base_dir, maxBytes=100*1024*1024, backupCount=30, encoding='utf-8'):
+    def __init__(self, base_dir, maxBytes=10*1024*1024, backupCount=30, encoding='utf-8'):
         """
         Args:
             base_dir: 日志基础目录（如 /opt/dlami/nvme/rag-arc/log）
-            maxBytes: 单文件最大大小（默认100MB）
+            maxBytes: 单文件最大大小（默认10MB）
             backupCount: 保留天数（默认30天）
             encoding: 文件编码
         """

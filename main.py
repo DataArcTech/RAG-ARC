@@ -68,7 +68,7 @@ def _configure_logging() -> None:
     if handler is None:
         handler = DailySizeRotatingHandler(
             base_dir=str(log_dir),
-            maxBytes=100 * 1024 * 1024,
+            maxBytes=10 * 1024 * 1024,
             backupCount=30,
             encoding="utf-8",
         )
