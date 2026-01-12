@@ -62,61 +62,15 @@ async def _query_openrouter_balance(api_key: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-async def _query_gptsapi_balance(api_key: str) -> Optional[Dict[str, Any]]:
-    """
-    查询 GPTsAPI 账户余额
-    
-    GPTsAPI 通过 /user/balanceInfo 接口返回余额信息
-    使用 api2.gptsapi.net 域名
-    
-    Returns:
-        Dict containing: balance, total_recharge, consumed, raw_data
-    """
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            # 正确的接口：/user/balanceInfo，使用 api2.gptsapi.net
-            url = "https://api2.gptsapi.net/user/balanceInfo"
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            }
-            
-            response = await client.get(url, headers=headers)
-            response.raise_for_status()
-            data = response.json()
-            logger.debug(f"GPTsAPI API response: {data}")
-            
-            # GPTsAPI 返回的字段可能是 balance 或其他字段名
-            # 根据实际响应结构调整
-            balance = data.get("balance") or data.get("data", {}).get("balance")
-            total_recharge = data.get("total_recharge") or data.get("data", {}).get("total_recharge")
-            consumed = data.get("consumed") or data.get("data", {}).get("consumed")
-            
-            if balance is not None:
-                return {
-                    "balance": float(balance),
-                    "total_recharge": float(total_recharge) if total_recharge is not None else None,
-                    "consumed": float(consumed) if consumed is not None else None,
-                    "raw_data": data
-                }
-            
-            # 如果找不到 balance，记录完整响应以便调试
-            logger.warning(f"GPTsAPI balance not found in response: {data}")
-            return None
-    except Exception as e:
-        logger.error(f"Failed to query GPTsAPI balance: {e}", exc_info=True)
-        return None
-
-
 @router.get("/balance", status_code=status.HTTP_200_OK)
 async def get_balance():
     """
-    查询所有配置的 API 提供商余额
+    查询 OpenRouter 账户余额
     
     注意：此接口不需要认证，用于系统监控
     
     Returns:
-        Dict containing balance information for each provider
+        Dict containing OpenRouter balance information
     """
     
     result: Dict[str, Any] = {}
@@ -150,39 +104,6 @@ async def get_balance():
             }
     else:
         result["openrouter"] = {
-            "enabled": False,
-            "balance": None,
-            "status": "not_configured",
-        }
-    
-    # 查询 GPTsAPI 余额
-    # 根据 EMBEDDING_API_BASE_URL 或 OPENAI_BASE_URL 判断是否使用 GPTsAPI
-    embedding_base_url = os.getenv("EMBEDDING_API_BASE_URL", "")
-    openai_base_url = os.getenv("OPENAI_BASE_URL", "")
-    gptsapi_key = None
-    if "gptsapi.net" in embedding_base_url:
-        gptsapi_key = os.getenv("EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY")
-        logger.info(f"GPTsAPI detected via EMBEDDING_API_BASE_URL: {embedding_base_url}, key_prefix={gptsapi_key[:10] if gptsapi_key else None}...")
-    elif "gptsapi.net" in openai_base_url:
-        gptsapi_key = os.getenv("OPENAI_API_KEY") or os.getenv("EMBEDDING_API_KEY")
-        logger.info(f"GPTsAPI detected via OPENAI_BASE_URL: {openai_base_url}, key_prefix={gptsapi_key[:10] if gptsapi_key else None}...")
-    
-    if gptsapi_key:
-        gptsapi_data = await _query_gptsapi_balance(gptsapi_key)
-        if gptsapi_data:
-            result["gptsapi"] = {
-                "enabled": True,
-                "status": "success",
-                "balance": gptsapi_data.get("balance"),
-            }
-        else:
-            result["gptsapi"] = {
-                "enabled": True,
-                "status": "failed",
-                "balance": None,
-            }
-    else:
-        result["gptsapi"] = {
             "enabled": False,
             "balance": None,
             "status": "not_configured",
