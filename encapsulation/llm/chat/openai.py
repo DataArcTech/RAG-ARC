@@ -44,7 +44,7 @@ class OpenAIChatLLM(ChatLLMBase):
         # Cache config values to avoid repeated getattr calls
         self.model_name = getattr(self.config, 'model_name', 'gpt-4o-mini')
         self.max_tokens = getattr(self.config, 'max_tokens', 2000)
-        self.temperature = getattr(self.config, 'temperature', 0.7)
+        self.temperature = getattr(self.config, 'temperature', 0.1)
         self.loading_method = getattr(self.config, 'loading_method', 'openai')
 
         # Initialize client based on loading method
