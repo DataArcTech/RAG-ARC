@@ -6,6 +6,7 @@ from core.deepsearch.utils.file_scope import FileScope
 from core.prompts import build_file_scope_xlang_rewrite_prompt
 from core.utils.json_extract import safe_json_loads
 from config.core.deepsearch.file_scope_xlang_defaults import load_file_scope_xlang_thresholds
+from config.benchmark_mode import benchmark_mode_enabled
 
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
@@ -26,6 +27,8 @@ def coerce_file_scope(query_options: Optional[Mapping[str, Any]]) -> FileScope:
 
 
 def file_scope_xlang_retry_enabled() -> bool:
+    if benchmark_mode_enabled():
+        return False
     raw = os.getenv("DEEPSEARCH_FILE_SCOPE_XLANG_RETRY", "1")
     return str(raw or "").strip().lower() not in {"0", "false", "no", "off"}
 

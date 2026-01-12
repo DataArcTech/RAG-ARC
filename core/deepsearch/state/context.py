@@ -129,10 +129,12 @@ class DeepSearchState:
         self.errors.append(entry)
         self.transition_stage("failed", metadata=entry)
 
-    def append_error(self, message: str, *, stage: Optional[str] = None) -> None:
+    def append_error(self, message: str, *, stage: Optional[str] = None, details: Optional[Dict[str, Any]] = None) -> None:
         entry = {"message": message, "timestamp": _utc_now()}
         if stage:
             entry["stage"] = stage
+        if details:
+            entry["details"] = details
         self.errors.append(entry)
 
     def record_request_metadata(self, metadata: Optional[Dict[str, Any]]) -> None:

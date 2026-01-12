@@ -7,6 +7,8 @@
     "persist_plan": true,
     "plan_output_dir": "${DEEPSEARCH_PLAN_OUTPUT_DIR}",
     "allow_external_channel": true,
+    "web_step_policy": "realtime_required",
+    "realtime_web_force_external": true,
     "honor_planner_tool_selection": true,
     "graph_channel_tool": "graph_adapter.query",
     "text_channel_tool": "graph.context_rollup",
@@ -211,10 +213,19 @@
     "max_remote_context_chars": 4096,
     "remote_tools": {}
   },
+  "tool_budget": {
+    "enabled": true,
+    "max_calls_total": 60,
+    "count_external_calls": true,
+    "expose_to_llm": true
+  },
   "external_channel": {
     "default_provider": "tavily",
     "max_rounds": 2,
     "enabled": true,
+    "auto_generate_task_on_gap": true,
+    "execute_forced_tasks_without_gap": true,
+    "execute_pending_tasks_without_gap": false,
     "context_window_limit": 12,
     "http_timeout": 20.0,
     "endpoint_url": "https://api.tavily.com/search",

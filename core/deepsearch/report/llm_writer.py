@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field, ValidationError
 from config.core.deepsearch import report_writer_defaults as report_defaults
 from core.deepsearch.memory import EvidenceBank
 from core.deepsearch.tools.base import call_llm_async
-from core.deepsearch.utils.compression import focused_truncate_text
 from core.utils.json_extract import extract_json_from_text as _extract_json_from_text
 from core.utils.text_regex import CJK_DETECT_RE
 from core.utils.text_regex import INLINE_CITATION_TOKEN_RE
@@ -29,6 +28,14 @@ from core.prompts.deepsearch.report import (
     SECTION_WRITE_SYSTEM_PROMPT,
     SECTION_WRITE_USER_PROMPT,
     JSON_REPAIR_USER_PROMPT,
+)
+from core.deepsearch.report.llm_writer_budget import (
+    dump_json as _dump_json,
+    limit_evidences as _limit_evidences,
+    limit_highlights as _limit_highlights,
+    slim_coverage as _slim_coverage,
+    slim_graph_evidence as _slim_graph_evidence,
+    slim_methodology as _slim_methodology,
 )
 
 _CITATION_TOKEN_RE = INLINE_CITATION_TOKEN_RE
@@ -922,144 +929,6 @@ def _json_parse_error(raw: str, *, expected: str) -> str:
     return error or "unknown"
 
 
-def _dump_json(payload: Any) -> str:
-    """Token-efficient JSON rendering for prompts (no pretty indent)."""
-
-    def _default(value: Any) -> str:
-        return str(value)
-
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=_default)
-
-
-def _slim_methodology(method: Dict[str, Any], *, level: int) -> Dict[str, Any]:
-    """Shrink methodology payload for prompt budgeting."""
-
-    if not isinstance(method, dict):
-        return {}
-    normalized_level = max(0, int(level))
-
-    final_answer = method.get("final_answer")
-    plan_steps = method.get("plan_steps") if isinstance(method.get("plan_steps"), list) else []
-    reasoning_steps = method.get("reasoning_steps") if isinstance(method.get("reasoning_steps"), list) else []
-    tool_results = method.get("tool_results") if isinstance(method.get("tool_results"), list) else []
-
-    if normalized_level <= 0:
-        return method
-
-    if normalized_level == 1:
-        slim_plan = []
-        for step in plan_steps[: report_defaults.SLIM_METHOD_LEVEL_1_PLAN_STEPS]:
-            if isinstance(step, dict):
-                slim_plan.append(
-                    {
-                        "step_id": step.get("step_id"),
-                        "description": step.get("description"),
-                        "channel": step.get("channel"),
-                        "tool": step.get("tool"),
-                    }
-                )
-        slim_reasoning = []
-        for step in reasoning_steps[: report_defaults.SLIM_METHOD_LEVEL_1_REASONING_STEPS]:
-            if isinstance(step, dict):
-                slim_reasoning.append(
-                    {
-                        "step_id": step.get("step_id"),
-                        "description": step.get("description"),
-                        "status": step.get("status"),
-                        "output_summary": step.get("output_summary"),
-                        "tool": step.get("tool"),
-                    }
-                )
-        payload: Dict[str, Any] = {"plan_steps": slim_plan, "reasoning_steps": slim_reasoning}
-        if final_answer:
-            payload["final_answer"] = final_answer
-        return payload
-
-    if normalized_level == 2:
-        slim_plan = []
-        for step in plan_steps[: report_defaults.SLIM_METHOD_LEVEL_2_PLAN_STEPS]:
-            if isinstance(step, dict):
-                slim_plan.append({"step_id": step.get("step_id"), "description": step.get("description")})
-        slim_reasoning = []
-        for step in reasoning_steps[: report_defaults.SLIM_METHOD_LEVEL_2_REASONING_STEPS]:
-            if isinstance(step, dict):
-                slim_reasoning.append(
-                    {"step_id": step.get("step_id"), "output_summary": step.get("output_summary"), "tool": step.get("tool")}
-                )
-        payload = {"plan_steps": slim_plan, "reasoning_steps": slim_reasoning}
-        if final_answer:
-            payload["final_answer"] = final_answer
-        return payload
-
-    payload = {}
-    if final_answer:
-        payload["final_answer"] = final_answer
-    return payload
-
-
-def _slim_graph_evidence(graph_evidence: Any, *, level: int) -> Dict[str, Any]:
-    if not isinstance(graph_evidence, dict):
-        return {}
-    normalized_level = max(0, int(level))
-    if normalized_level <= 0:
-        return graph_evidence
-    seed_entities = graph_evidence.get("seed_entities") if isinstance(graph_evidence.get("seed_entities"), list) else []
-    graph_stats = graph_evidence.get("graph_stats") if isinstance(graph_evidence.get("graph_stats"), dict) else {}
-    if normalized_level == 1:
-        return {
-            "seed_entities": seed_entities[: report_defaults.SLIM_GRAPH_EVIDENCE_LEVEL_SEED_ENTITIES],
-            "graph_stats": graph_stats,
-        }
-    return {"seed_entities": seed_entities[: report_defaults.SLIM_GRAPH_EVIDENCE_LEVEL_SEED_ENTITIES]}
-
-
-def _slim_coverage(coverage: Any, *, level: int) -> Dict[str, Any]:
-    if not isinstance(coverage, dict):
-        return {}
-    normalized_level = max(0, int(level))
-    if normalized_level <= 0:
-        # Still strip large/potentially noisy lists to avoid accidental prompt blowups.
-        trimmed = dict(coverage)
-        pending = trimmed.get("pending_external")
-        max_pending = int(report_defaults.SLIM_COVERAGE_BASE_PENDING_EXTERNAL_MAX_ITEMS)
-        if isinstance(pending, list) and len(pending) > max_pending:
-            trimmed["pending_external"] = pending[:max_pending]
-            trimmed["pending_external_truncated"] = True
-        return trimmed
-
-    gap_result = coverage.get("gap_result") if isinstance(coverage.get("gap_result"), dict) else {}
-    metrics = coverage.get("coverage_metrics") if isinstance(coverage.get("coverage_metrics"), dict) else {}
-
-    if normalized_level == 1:
-        return {
-            "coverage_metrics": {
-                "coverage_score": metrics.get("coverage_score"),
-                "confidence_score": metrics.get("confidence_score"),
-                "coverage_ratio": metrics.get("coverage_ratio"),
-                "evidence_count": metrics.get("evidence_count"),
-                "missing_topics": metrics.get("missing_topics") or [],
-            },
-            "gap_result": {
-                "coverage_score": gap_result.get("coverage_score"),
-                "confidence_score": gap_result.get("confidence_score"),
-                "should_trigger_external": gap_result.get("should_trigger_external"),
-                "missing_topics": gap_result.get("missing_topics") or [],
-                "reason": gap_result.get("reason"),
-            },
-        }
-
-    if normalized_level == 2:
-        return {
-            "gap_result": {
-                "should_trigger_external": gap_result.get("should_trigger_external"),
-                "missing_topics": gap_result.get("missing_topics") or [],
-                "reason": gap_result.get("reason"),
-            }
-        }
-
-    return {}
-
-
 def _coerce_outline(raw: Any) -> List[ReportSectionSpec]:
     if not isinstance(raw, list):
         return []
@@ -1072,41 +941,6 @@ def _coerce_outline(raw: Any) -> List[ReportSectionSpec]:
         except ValidationError:
             continue
     return sections
-
-
-def _limit_evidences(
-    evidences: List[Dict[str, Any]],
-    max_items: int | None,
-    max_chars: int,
-    *,
-    question: str | None = None,
-) -> List[Dict[str, Any]]:
-    limited: List[Dict[str, Any]] = []
-    subset = list(evidences) if max_items is None else evidences[: max(max_items, 0)]
-    for entry in subset:
-        if not isinstance(entry, dict):
-            continue
-        chunk_id = entry.get("chunk_id")
-        content = str(entry.get("content") or "")
-        if max_chars > 0 and len(content) > max_chars:
-            if question and str(question).strip():
-                content = focused_truncate_text(
-                    content,
-                    max_chars=max_chars,
-                    question=str(question),
-                    extra=None,
-                )
-            else:
-                content = content[:max_chars].rstrip() + "..."
-        limited.append(
-            {
-                "chunk_id": chunk_id,
-                "source": entry.get("source"),
-                "content": content,
-                "score": entry.get("score"),
-            }
-        )
-    return limited
 
 
 def _snippet(raw: str, limit: int = report_defaults.DEFAULT_ERROR_SNIPPET_LIMIT_CHARS) -> str:
@@ -1126,25 +960,6 @@ def _apply_divisor_limit(value: int | None, divisor: int) -> int | None:
 def _apply_divisor_limit_required(value: int, divisor: int) -> int:
     denom = max(int(divisor), 1)
     return max(int(value // denom), 0)
-
-
-def _limit_highlights(highlights: list[Any], *, max_items: int | None, text_max_chars: int | None) -> list[dict[str, Any]]:
-    if not isinstance(highlights, list) or not highlights:
-        return []
-    subset = highlights if max_items is None else highlights[: max(int(max_items), 0)]
-    limited: list[dict[str, Any]] = []
-    for item in subset:
-        if not isinstance(item, dict):
-            continue
-        payload: dict[str, Any] = dict(item)
-        if text_max_chars is not None:
-            limit = max(int(text_max_chars), 0)
-            for key in ("summary", "content", "details", "text"):
-                value = payload.get(key)
-                if isinstance(value, str) and limit > 0 and len(value) > limit:
-                    payload[key] = value[:limit].rstrip() + "..."
-        limited.append(payload)
-    return limited
 
 
 _RATE_LIMIT_RE = re.compile(r"(rate limit|too many requests|\\b429\\b)", re.IGNORECASE)

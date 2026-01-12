@@ -100,7 +100,7 @@ def test_stream_chat_sse_includes_web_search_chunks_and_progress(monkeypatch, cl
     class DummyLLM:
         def stream_chat(self, _messages):  # noqa: ANN001
             def _gen():
-                yield "assistant ok"
+                yield "assistant ok<sup>1</sup>"
 
             return _gen()
 
@@ -135,9 +135,11 @@ def test_stream_chat_sse_includes_web_search_chunks_and_progress(monkeypatch, cl
     rag._knowledge_module = None
     rag._tavily_client = StubTavily()
 
-    monkeypatch.setattr(rag_router, "session_handler", FakeSessionHandler())
-    monkeypatch.setattr(rag_router, "message_handler", FakeMessageHandler())
-    monkeypatch.setattr(rag_router, "rag_inference_handler", rag)
+    session_handler = FakeSessionHandler()
+    message_handler = FakeMessageHandler()
+    monkeypatch.setattr(rag_router, "get_session_handler", lambda: session_handler)
+    monkeypatch.setattr(rag_router, "get_message_handler", lambda: message_handler)
+    monkeypatch.setattr(rag_router, "get_rag_inference_handler", lambda: rag)
     monkeypatch.setattr(rag_router, "validate_user_session", lambda _session, _user: True)
 
     client.app.dependency_overrides[rag_router.get_current_user] = lambda: user
@@ -183,6 +185,26 @@ def test_stream_chat_sse_includes_web_search_chunks_and_progress(monkeypatch, cl
     assert "chunks" in payload and isinstance(payload["chunks"], list)
     assert len(payload["chunks"]) == 5
     assert any(((item.get("metadata") or {}).get("source") == "web.tavily") for item in payload["chunks"])
+
+    # sources event should include an external URL and keep UUID-like chunk_id for web sources
+    sources_event = None
+    for raw_line in resp.text.splitlines():
+        line = raw_line.strip("\r")
+        if not line.startswith("data:"):
+            continue
+        data = line.split(":", 1)[1].strip()
+        if data == "[DONE]":
+            break
+        chunk = json.loads(data)
+        if chunk.get("type") == "sources":
+            sources_event = chunk
+            break
+    assert sources_event is not None
+    sources = sources_event.get("sources") or []
+    assert isinstance(sources, list) and sources
+    web_sources = [s for s in sources if isinstance(s, dict) and str(s.get("file") or "").startswith("http")]
+    assert web_sources, "expected at least one web source with external URL"
+    uuid.UUID(str(web_sources[0].get("chunk_id")))
 
 
 def test_stream_chat_sse_defaults_to_no_web_search(monkeypatch, client):
@@ -276,9 +298,11 @@ def test_stream_chat_sse_defaults_to_no_web_search(monkeypatch, client):
     rag._knowledge_module = None
     rag._tavily_client = StubTavily()
 
-    monkeypatch.setattr(rag_router, "session_handler", FakeSessionHandler())
-    monkeypatch.setattr(rag_router, "message_handler", FakeMessageHandler())
-    monkeypatch.setattr(rag_router, "rag_inference_handler", rag)
+    session_handler = FakeSessionHandler()
+    message_handler = FakeMessageHandler()
+    monkeypatch.setattr(rag_router, "get_session_handler", lambda: session_handler)
+    monkeypatch.setattr(rag_router, "get_message_handler", lambda: message_handler)
+    monkeypatch.setattr(rag_router, "get_rag_inference_handler", lambda: rag)
     monkeypatch.setattr(rag_router, "validate_user_session", lambda _session, _user: True)
 
     client.app.dependency_overrides[rag_router.get_current_user] = lambda: user

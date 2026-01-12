@@ -14,6 +14,7 @@ def parse_ranked_choice_indices(
     candidate_count: int,
     k: int,
     one_based: bool = True,
+    allow_fallback: bool = True,
 ) -> List[int]:
     """Return a validated list of unique indices into the candidate list."""
 
@@ -57,10 +58,12 @@ def parse_ranked_choice_indices(
                 if indices:
                     return indices
 
+    if not allow_fallback:
+        return []
+
     # Backward compatible fallback: parse digits from free-form text like "1,3,5".
     candidates = re.findall(r"\d+", str(raw or ""))
     return _normalize(candidates)
 
 
 __all__ = ["parse_ranked_choice_indices"]
-

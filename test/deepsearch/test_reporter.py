@@ -454,6 +454,28 @@ def test_reporter_includes_chunk_evidence_preview():
     assert "Short content." in answer
 
 
+def test_reporter_no_evidence_returns_deterministic_report_even_when_graph_viz_disabled():
+    reporter = DeepSearchReporter(
+        template_store=None,
+        config=_default_reporter_config(include_graph_viz=False),
+        llm_connector=_FakeLLM([]),
+    )
+    trace = {
+        "question": "test question",
+        "plan_steps": [],
+        "reasoning_steps": [],
+        "graph_traversals": [],
+        "evidences": [],
+        "graph_context": {"metadata": {}},
+        "coverage_metrics": {"evidence_count": 0, "coverage_ratio": 0.0},
+        "pending_external": [],
+    }
+
+    report = asyncio.run(reporter.compose(trace, external_evidence=[]))
+
+    assert report["structured_report"]["generation"]["mode"] == "deterministic_no_evidence"
+
+
 def test_reporter_comparison_avoids_false_missing_named_files_when_filename_is_nested():
     outline = """\n[\n  {\"title\": \"Findings\", \"section_type\": \"analysis\", \"purpose\": \"Compare\", \"evidence_ids\": [\"evA\", \"evB\"]}\n]\n""".strip()
     report_json = """\n{\n  \"title\": \"对比报告\",\n  \"short_answer\": \"两者均可对比。 [evA] [evB]\",\n  \"summary\": \"两者均可对比。 [evA] [evB]\",\n  \"sections\": [\n    {\"title\": \"Findings\", \"section_type\": \"analysis\", \"body_markdown\": \"对比细节。 [evA] [evB]\"}\n  ],\n  \"limitations\": [],\n  \"next_steps\": [],\n  \"citations\": [\n    {\"evidence_id\": \"evA\", \"used_for\": \"Plan A\"},\n    {\"evidence_id\": \"evB\", \"used_for\": \"Plan B\"}\n  ]\n}\n""".strip()

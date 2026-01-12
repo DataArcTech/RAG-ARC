@@ -197,9 +197,57 @@ class ParserCombinator(AbstractModule):
             logger.info(f"Successfully parsed {filename} with {parser_type} parser, got {len(results)} results")
             return results
 
-        except Exception as e:
-            logger.error(f"Failed to parse {filename} with {parser_type} parser: {str(e)}")
-            raise
+        except Exception as exc:
+            logger.error(f"Failed to parse {filename} with {parser_type} parser: {str(exc)}")
+
+            fallback = self._resolve_mineru_fallback(
+                parser_family=parser_type,
+                parser_instance=parser,
+                file_ext=file_ext,
+            )
+            if fallback is None:
+                raise
+
+            fallback_family, fallback_parser = fallback
+            logger.warning(
+                "Falling back to %s parser for %s after MinerU failure: %s",
+                fallback_family,
+                filename,
+                str(exc),
+                exc_info=True,
+            )
+            try:
+                results = await fallback_parser.parse_file(file_data=file_data, filename=filename, **kwargs)
+                self._annotate_parse_results(
+                    results,
+                    parser_family=fallback_family,
+                    parser_instance=fallback_parser,
+                )
+                self._annotate_fallback_results(
+                    results,
+                    from_parser=parser,
+                    to_parser=fallback_parser,
+                    reason=str(exc) or exc.__class__.__name__,
+                )
+                logger.info(
+                    "Fallback parse succeeded for %s (from=%s to=%s) results=%s",
+                    filename,
+                    self._parser_label(parser),
+                    self._parser_label(fallback_parser),
+                    len(results) if isinstance(results, list) else None,
+                )
+                return results
+            except Exception as fallback_exc:
+                logger.error(
+                    "Fallback parse failed for %s after MinerU failure: primary=%s fallback=%s",
+                    filename,
+                    str(exc),
+                    str(fallback_exc),
+                    exc_info=True,
+                )
+                raise RuntimeError(
+                    f"Failed to parse {filename}: mineru_error={exc!s}; fallback_error={fallback_exc!s}"
+                ) from fallback_exc
 
     @staticmethod
     def _parser_label(parser_instance: AbstractParser) -> str:
@@ -213,6 +261,60 @@ class ParserCombinator(AbstractModule):
             "NativeParser": "native",
         }
         return mapping.get(name, name.lower())
+
+    def _resolve_mineru_fallback(
+        self,
+        *,
+        parser_family: str,
+        parser_instance: AbstractParser,
+        file_ext: str,
+    ) -> Tuple[str, AbstractParser] | None:
+        """Return fallback parser when MinerU fails and fallback is enabled."""
+
+        if str(parser_family or "").strip().lower() != "ocr":
+            return None
+        enabled = bool(getattr(self.config, "mineru_fallback_to_native_on_failure", False))
+        if not enabled:
+            return None
+        if self._parser_label(parser_instance) != "mineru":
+            return None
+        native = getattr(self, "native_parser", None)
+        if native is None:
+            return None
+        try:
+            supported = set(native.get_supported_extensions() or [])
+        except Exception:
+            supported = set()
+        if file_ext not in supported:
+            return None
+        return ("native", native)
+
+    @staticmethod
+    def _annotate_fallback_results(
+        results: Any,
+        *,
+        from_parser: AbstractParser,
+        to_parser: AbstractParser,
+        reason: str,
+    ) -> None:
+        if not isinstance(results, list):
+            return
+        fallback_meta = {
+            "enabled": True,
+            "from": from_parser.__class__.__name__,
+            "from_label": ParserCombinator._parser_label(from_parser),
+            "to": to_parser.__class__.__name__,
+            "to_label": ParserCombinator._parser_label(to_parser),
+            "reason": str(reason or "").strip() or "unknown",
+        }
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            meta = item.get("metadata")
+            if not isinstance(meta, dict):
+                meta = {}
+                item["metadata"] = meta
+            meta.setdefault("parser_fallback", fallback_meta)
 
     @classmethod
     def _annotate_parse_results(

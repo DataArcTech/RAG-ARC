@@ -39,7 +39,8 @@ class ExtractorBase(AbstractModule):
 
     def __init__(self, config):
         super().__init__(config)
-        self.llm = config.llm_config.build()
+        llm_config = getattr(config, "llm_config", None)
+        self.llm = llm_config.build() if llm_config is not None else None
 
     @abstractmethod
     async def extract(self, chunk: Chunk) -> GraphData:

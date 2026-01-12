@@ -14,6 +14,7 @@ class ToolErrorKind(str, Enum):
     SCHEMA_ERROR = "schema_error"
     EMPTY_HIT = "empty_hit"
     POLICY_REJECT = "policy_reject"
+    BUDGET_EXCEEDED = "budget_exceeded"
     PROVIDER_ERROR = "provider_error"
     TIMEOUT = "timeout"
     TOOL_UNAVAILABLE = "tool_unavailable"
@@ -45,6 +46,13 @@ def classify_tool_exception(exc: Exception, *, route: Optional[str] = None) -> T
 
     if isinstance(exc, ToolInvocationError):
         return exc.kind
+    try:
+        from core.deepsearch.tooling.budget import ToolBudgetExceededError
+
+        if isinstance(exc, ToolBudgetExceededError):
+            return ToolErrorKind.BUDGET_EXCEEDED
+    except Exception:
+        pass
     if isinstance(exc, asyncio.TimeoutError):
         return ToolErrorKind.TIMEOUT
     if isinstance(exc, CypherPolicyError):
@@ -77,4 +85,3 @@ def wrap_tool_exception(
         route=route,
         cause=exc,
     )
-

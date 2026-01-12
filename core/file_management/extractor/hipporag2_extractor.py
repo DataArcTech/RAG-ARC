@@ -505,31 +505,33 @@ class HippoRAG2Extractor(ExtractorBase):
         entities = []
         in_entities_section = False
 
-        for line in response.strip().split('\n'):
-            line = line.strip()
+        for raw_line in str(response or "").splitlines():
+            line = raw_line.strip()
 
             if not line:
                 continue
 
-            if line.startswith('### ENTITIES'):
+            normalized_header = line.lstrip("#").strip().lower()
+            if normalized_header in {"entities", "entity"}:
                 in_entities_section = True
                 continue
 
-            if line.startswith('###'):
+            if line.startswith("#"):
                 in_entities_section = False
                 continue
 
             if in_entities_section and line:
                 # Parse entity\ttype format (required)
-                if '\t' in line:
-                    parts = line.split('\t')
+                candidate = line.lstrip("-•* ").strip()
+                if '\t' in candidate:
+                    parts = candidate.split('\t')
                     entity_name = parts[0].strip()
                     entity_type = parts[1].strip() if len(parts) > 1 else 'UNKNOWN'
                     entities.append((entity_name, entity_type))
                 else:
                     # Fallback: if no tab found, use UNKNOWN type
-                    self.logger.warning(f"Entity without type (missing tab): {line}")
-                    entities.append((line, 'UNKNOWN'))
+                    self.logger.warning("Entity without type (missing tab): %s", candidate)
+                    entities.append((candidate, 'UNKNOWN'))
 
         return entities
 
@@ -694,22 +696,24 @@ class HippoRAG2Extractor(ExtractorBase):
         nodes = []
         in_mindmap_section = False
         
-        for line in response.strip().split('\n'):
-            line = line.strip()
+        for raw_line in str(response or "").splitlines():
+            line = raw_line.strip()
             
             if not line:
                 continue
                 
-            if line.startswith('### MINDMAP'):
+            normalized_header = line.lstrip("#").strip().lower().replace(" ", "")
+            if normalized_header in {"mindmap", "mind-map"}:
                 in_mindmap_section = True
                 continue
             
-            if line.startswith('###'):
+            if line.startswith("#"):
                 in_mindmap_section = False
                 continue
             
             if in_mindmap_section and '\t' in line:
-                parts = line.split('\t', 1)  # Split only on first tab
+                candidate = line.lstrip("-•* ").strip()
+                parts = candidate.split('\t', 1)  # Split only on first tab
                 if len(parts) >= 2:
                     level = parts[0].strip()
                     content = parts[1].strip()

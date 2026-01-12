@@ -12,6 +12,7 @@ from encapsulation.data_model.deepsearch import EvidenceChunk, GraphQueryContext
 from .graph_loop import GraphReasoningLoop
 from core.deepsearch.tooling.protocols import ToolInvoker
 from core.deepsearch.utils.compression import compact_evidences, resolve_compaction_config
+from core.utils.json_safe import json_safe
 
 logger = logging.getLogger(__name__)
 
@@ -412,6 +413,7 @@ class MultiAgentGraphReasoningLoop:
         )
 
         probe_results: List[Dict[str, Any]] = []
+        probe_errors: List[Dict[str, Any]] = []
         if (
             not error
             and self.tool_manager
@@ -422,14 +424,14 @@ class MultiAgentGraphReasoningLoop:
             # evidence coverage is already above the stop thresholds.
             should_probe = not self._should_stop_incremental(trace, settings=self._settings())
             if should_probe:
-                probe_results = await self._run_parallel_probes(
+                probe_results, probe_errors = await self._run_parallel_probes(
                     agent_id=agent_id,
                     focus_query=focus,
                     question=worker_question,
                     graph_context=trace.get("graph_context"),
                     evidences=trace.get("evidences") or [],
                 )
-                trace = self._merge_probe_results(trace, probe_results)
+                trace = self._merge_probe_results(trace, probe_results, probe_errors=probe_errors)
         debrief = self._build_worker_debrief(trace, focus=focus, assigned_step_ids=assigned_step_ids, error=error)
 
         return {
@@ -440,12 +442,14 @@ class MultiAgentGraphReasoningLoop:
                 "session_id": spec.session_id,
                 "assigned_step_ids": assigned_step_ids,
                 "probe_tools": list(self._settings().probe_tool_names),
+                "probe_error_count": len(probe_errors),
                 "latency_ms": worker_latency_ms,
                 "error": error,
                 "debrief": debrief,
             },
             "trace": trace,
             "probe_results": probe_results,
+            "probe_errors": probe_errors,
         }
 
     @staticmethod
@@ -559,9 +563,34 @@ class MultiAgentGraphReasoningLoop:
         question: str,
         graph_context: Any,
         evidences: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         semaphore = asyncio.Semaphore(max(1, self._settings().probe_concurrency))
         bounded_evidences = self._limit_tool_context_evidences(evidences, question=question, graph_context=graph_context)
+
+        probe_errors: List[Dict[str, Any]] = []
+
+        class _ProbeInvokeError(RuntimeError):
+            def __init__(self, tool_name: str, original: BaseException):
+                super().__init__(str(original) or original.__class__.__name__)
+                self.tool_name = tool_name
+                self.original_type = original.__class__.__name__
+
+        def _replay_payload(tool_name: str) -> Dict[str, Any]:
+            # Intentionally excludes live adapter objects; replay callers can re-inject adapter by name.
+            return json_safe(
+                {
+                "tool_name": tool_name,
+                "payload": {
+                    "question": question,
+                    "plan_step": f"{agent_id}:{tool_name}",
+                    "context_evidences": bounded_evidences,
+                    "access_scope": (graph_context or {}).get("access_scope") if isinstance(graph_context, dict) else None,
+                    "extra": {"focus_query": focus_query},
+                    "graph_context": graph_context,
+                    "coverage_metrics": {},
+                },
+                }
+            )
 
         async def _invoke(tool_name: str) -> Dict[str, Any]:
             async with semaphore:
@@ -575,7 +604,10 @@ class MultiAgentGraphReasoningLoop:
                     "graph_context": graph_context,
                     "coverage_metrics": {},
                 }
-                result = await self.tool_manager.invoke(tool_name, payload=payload)  # type: ignore[union-attr]
+                try:
+                    result = await self.tool_manager.invoke(tool_name, payload=payload)  # type: ignore[union-attr]
+                except Exception as exc:  # noqa: BLE001
+                    raise _ProbeInvokeError(tool_name, exc) from exc
                 return {
                     "tool_name": tool_name,
                     "channel": result.channel,
@@ -588,8 +620,22 @@ class MultiAgentGraphReasoningLoop:
             try:
                 results.append(await task)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Probe tool failed (%s): %s", agent_id, exc)
-        return results
+                tool_name = getattr(exc, "tool_name", None) if isinstance(getattr(exc, "tool_name", None), str) else None
+                tool_name = tool_name or "unknown"
+                original_type = (
+                    getattr(exc, "original_type", None) if isinstance(getattr(exc, "original_type", None), str) else None
+                )
+                logger.warning("Probe tool failed (%s): %s", agent_id, exc, exc_info=True)
+                probe_errors.append(
+                    {
+                        "agent_id": agent_id,
+                        "tool_name": tool_name,
+                        "error": str(exc) or exc.__class__.__name__,
+                        "error_type": original_type or exc.__class__.__name__,
+                        "replay": _replay_payload(tool_name),
+                    }
+                )
+        return results, probe_errors
 
     def _dedupe_and_cap_evidences(self, evidences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Deduplicate evidences by (source, chunk_id) and cap size to avoid prompt blow-ups."""
@@ -615,8 +661,14 @@ class MultiAgentGraphReasoningLoop:
                 break
         return unique
 
-    def _merge_probe_results(self, trace: Dict[str, Any], probe_runs: List[Dict[str, Any]]) -> Dict[str, Any]:
-        if not probe_runs:
+    def _merge_probe_results(
+        self,
+        trace: Dict[str, Any],
+        probe_runs: List[Dict[str, Any]],
+        *,
+        probe_errors: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        if not probe_runs and not probe_errors:
             return trace
         merged = dict(trace)
         merged.setdefault("tool_results", [])
@@ -629,6 +681,20 @@ class MultiAgentGraphReasoningLoop:
                 if isinstance(chunk, dict):
                     evidences.append(chunk)
         merged["evidences"] = self._dedupe_and_cap_evidences(evidences)
+
+        if probe_errors:
+            merged.setdefault("coverage_metrics", {})
+            if isinstance(merged.get("coverage_metrics"), dict):
+                coverage = dict(merged.get("coverage_metrics") or {})
+                prev = coverage.get("probe_errors")
+                prev_list = prev if isinstance(prev, list) else []
+                coverage["probe_errors"] = prev_list + list(probe_errors)
+                coverage["probe_error_count"] = len([e for e in coverage["probe_errors"] if isinstance(e, dict)])
+                coverage["probe_success_count"] = int(coverage.get("probe_success_count") or 0) + int(len(probe_runs))
+                coverage["probe_total_count"] = int(coverage.get("probe_success_count") or 0) + int(
+                    coverage.get("probe_error_count") or 0
+                )
+                merged["coverage_metrics"] = coverage
         return merged
 
     def _merge_worker_traces(self, worker_outcomes: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -651,6 +717,23 @@ class MultiAgentGraphReasoningLoop:
             agent_session = outcome.get("agent_session") or {}
             agent_id = str(agent_session.get("agent_id") or "")
             trace = outcome.get("trace") or {}
+            trace_cov = trace.get("coverage_metrics")
+            if isinstance(trace_cov, dict):
+                merged_cov = merged.get("coverage_metrics")
+                if not isinstance(merged_cov, dict):
+                    merged_cov = {}
+                    merged["coverage_metrics"] = merged_cov
+                probe_errors = trace_cov.get("probe_errors")
+                if isinstance(probe_errors, list) and probe_errors:
+                    merged_cov.setdefault("probe_errors", [])
+                    merged_cov["probe_errors"] = list(merged_cov.get("probe_errors") or []) + list(probe_errors)
+                    merged_cov["probe_error_count"] = len([e for e in merged_cov["probe_errors"] if isinstance(e, dict)])
+                probe_success = trace_cov.get("probe_success_count")
+                if isinstance(probe_success, int):
+                    merged_cov["probe_success_count"] = int(merged_cov.get("probe_success_count") or 0) + int(probe_success)
+                    merged_cov["probe_total_count"] = int(merged_cov.get("probe_success_count") or 0) + int(
+                        merged_cov.get("probe_error_count") or 0
+                    )
             if merged["question"] is None:
                 merged["question"] = trace.get("question")
             if merged["graph_context"] is None:

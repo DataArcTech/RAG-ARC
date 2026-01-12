@@ -46,7 +46,7 @@ def _rank_evidences_for_question(question: str, items: List[Dict[str, Any]]) -> 
         : composer_defaults.DEFAULT_EVIDENCE_RANK_MAX_ANCHORS
     ]
 
-    def _score(ev: Dict[str, Any]) -> tuple[int, int, float, int, str]:
+    def _score(ev: Dict[str, Any]) -> tuple[int, int, int, float, int, str]:
         content = str(ev.get("content") or "")
         lowered = content.lower()
         match_count = 0
@@ -61,7 +61,9 @@ def _rank_evidences_for_question(question: str, items: List[Dict[str, Any]]) -> 
             numeric_score = 0.0
         chunk_id = str(ev.get("chunk_id") or "")
         source = str(ev.get("source") or "").strip().lower()
-        toolish_id = ":" in chunk_id or any(chunk_id.startswith(prefix) for prefix in composer_defaults.TOOLISH_CHUNK_ID_PREFIXES)
+        # NOTE: Do NOT classify ':'-containing chunk_ids as tool-generated; many primary corpus IDs (e.g. file/page/chunk)
+        # include ':' separators. Toolish IDs are identified via explicit prefixes only.
+        toolish_id = any(chunk_id.lower().startswith(prefix.lower()) for prefix in composer_defaults.TOOLISH_CHUNK_ID_PREFIXES)
         toolish_source = source in composer_defaults.TOOLISH_SOURCE_NAMES
         primary = 0 if (toolish_id or toolish_source) else 1
         # Prefer matched content, then score, then shorter snippets (for prompt efficiency).
@@ -275,7 +277,9 @@ def _is_tool_generated_evidence(evidence: Dict[str, Any], *, toolish_chunk_id_pr
     if not chunk_id:
         return False
     lowered = chunk_id.lower()
-    if ":" in chunk_id or any(lowered.startswith(prefix) for prefix in toolish_chunk_id_prefixes):
+    # Tool-generated evidences are tagged with explicit chunk_id prefixes (e.g. "graph.", "tool:") or source names.
+    # Do NOT treat ':' separators as a tool marker: many corpus chunk IDs include ':' (file/page/chunk).
+    if any(lowered.startswith(prefix.lower()) for prefix in toolish_chunk_id_prefixes):
         return True
     source = str(evidence.get("source") or "").strip().lower()
     return source in toolish_source_names
@@ -344,4 +348,3 @@ __all__ = [
     "_split_authoritative_evidences",
     "_trim_text",
 ]
-

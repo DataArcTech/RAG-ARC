@@ -167,6 +167,9 @@ class _PrunedHippoRAGNeo4jIndexingOpsMixin:
         logger.info(f"Deleting {len(chunk_ids)} chunks...")
 
         try:
+            orphan_entities: List[str] = []
+            orphan_fact_ids: List[str] = []
+
             # 1. Find entities that will become orphans
             orphan_query = """
             UNWIND $chunk_ids AS chunk_id
@@ -176,36 +179,62 @@ class _PrunedHippoRAGNeo4jIndexingOpsMixin:
             WITH e, deleted_chunks, collect(DISTINCT all_c.chunk_id) AS all_chunks
             WHERE size(all_chunks) = size(deleted_chunks)
               AND all(dc IN deleted_chunks WHERE dc IN all_chunks)
-            RETURN e.entity_id AS entity_id, e.entity_name AS entity_name
+            RETURN e.entity_id AS entity_id, e.entity_name AS entity_name, e.owner_id AS owner_id
             """
 
             orphan_results = self._execute_query(orphan_query, {'chunk_ids': chunk_ids})
-            orphan_entities = [record['entity_id'] for record in orphan_results]
-            orphan_entity_names = [record['entity_name'] for record in orphan_results]
-
-            orphan_fact_ids = []
+            orphan_by_owner: Dict[Optional[str], List[str]] = {}
+            for record in orphan_results:
+                owner = self._restore_owner_id(record.get("owner_id"))
+                orphan_by_owner.setdefault(owner, []).append(record["entity_id"])
 
             # 2. Delete orphan entities and their facts
-            if orphan_entities:
+            if orphan_by_owner:
                 # Find facts (RELATES_TO relationships) involving orphan entities
                 # Facts are stored as RELATES_TO relationships with fact_id property
                 fact_query = """
                 UNWIND $entity_ids AS entity_id
                 MATCH (e:Entity {entity_id: entity_id})-[r:RELATES_TO]-()
-                RETURN DISTINCT r.fact_id AS fact_id
+                RETURN DISTINCT r.fact_id AS fact_id, r.owner_id AS owner_id
                 """
 
+                orphan_entity_set: set[str] = set()
+                for ids in orphan_by_owner.values():
+                    for entity_id in ids:
+                        if entity_id:
+                            orphan_entity_set.add(str(entity_id))
+                orphan_entities = sorted(orphan_entity_set)
+
                 fact_results = self._execute_query(fact_query, {'entity_ids': orphan_entities})
-                orphan_fact_ids = [record['fact_id'] for record in fact_results if record['fact_id']]
+                orphan_facts_by_owner: Dict[Optional[str], List[str]] = {}
+                for record in fact_results:
+                    fid = record.get("fact_id")
+                    if not fid:
+                        continue
+                    owner = self._restore_owner_id(record.get("owner_id"))
+                    fid_str = str(fid)
+                    orphan_facts_by_owner.setdefault(owner, []).append(fid_str)
+                    orphan_fact_ids.append(fid_str)
 
                 # Delete facts from FAISS (soft-delete)
-                if orphan_fact_ids:
-                    self.fact_faiss_db.delete_index(orphan_fact_ids)
-                    logger.info(f"Soft-deleted {len(orphan_fact_ids)} orphan facts from FAISS")
+                for owner, fact_ids in orphan_facts_by_owner.items():
+                    if not fact_ids:
+                        continue
+                    fact_db = self.get_fact_faiss_db(owner)
+                    fact_db.delete_index(fact_ids)
+                    fact_index_path = self._faiss_owner_scoped_dir("fact", owner_id=owner)
+                    fact_db.save_index(fact_index_path, "index")
+                    logger.info("Soft-deleted %s orphan facts from FAISS (owner=%s)", len(fact_ids), owner)
 
                 # Delete entities from FAISS (soft-delete)
-                self.entity_faiss_db.delete_index(orphan_entities)
-                logger.info(f"Soft-deleted {len(orphan_entities)} orphan entities from FAISS")
+                for owner, entity_ids in orphan_by_owner.items():
+                    if not entity_ids:
+                        continue
+                    entity_db = self.get_entity_faiss_db(owner)
+                    entity_db.delete_index(entity_ids)
+                    entity_index_path = self._faiss_owner_scoped_dir("entity", owner_id=owner)
+                    entity_db.save_index(entity_index_path, "index")
+                    logger.info("Soft-deleted %s orphan entities from FAISS (owner=%s)", len(entity_ids), owner)
 
                 # Delete entities from Neo4j (DETACH DELETE removes all relationships including RELATES_TO)
                 delete_entities_query = """
@@ -214,7 +243,7 @@ class _PrunedHippoRAGNeo4jIndexingOpsMixin:
                 DETACH DELETE e
                 """
                 self._execute_query(delete_entities_query, {'entity_ids': orphan_entities})
-                logger.info(f"Deleted {len(orphan_entities)} orphan entities from Neo4j")
+                logger.info("Deleted %s orphan entities from Neo4j", len(orphan_entities))
 
             # 3. Delete chunks from Neo4j (DETACH DELETE removes all relationships)
             delete_chunks_query = """
@@ -422,4 +451,3 @@ class _PrunedHippoRAGNeo4jIndexingOpsMixin:
             Query results
         """
         return self._execute_query(query, params)
-

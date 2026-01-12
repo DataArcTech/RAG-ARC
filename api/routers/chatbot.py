@@ -22,6 +22,7 @@ from framework.register import Register
 from api.routers.auth import get_current_user, get_current_user_optional
 from encapsulation.data_model.orm_models import User
 from core.presentation.evidence import build_chat_evidence
+from core.prompts.chatbot import CHATBOT_SYSTEM_PROMPT_V2
 from config.output_limits import CHAT_TOP_CHUNKS
 from core.utils.path_guard import ensure_writable_dir
 from api.utils.owner_scope import resolve_default_owner_id
@@ -37,22 +38,6 @@ _conversation_locks: Dict[str, asyncio.Lock] = {}
 _conversation_last_used: Dict[str, float] = {}
 _locks_guard = asyncio.Lock()
 _global_semaphore = asyncio.Semaphore(int(os.getenv("CHATBOT_MAX_CONCURRENCY", "8")))
-
-_CHATBOT_SYSTEM_PROMPT_V2 = (
-    "You are a helpful RAG assistant.\n"
-    "You may be given a list of numbered Sources (key=1..N).\n"
-    "Rules:\n"
-    "1) If the user message is just a greeting / test / acknowledgement (e.g. '测试', 'test', 'hello', 'hi', '你好'),\n"
-    "   answer briefly and DO NOT use any Sources and DO NOT include any <sup> tags.\n"
-    "2) Otherwise, if Sources are provided, ground your answer in Sources and add inline citations using HTML <sup> tags.\n"
-    "   - Every sentence that contains factual information supported by Sources MUST end with one or more <sup>key</sup>.\n"
-    "   - Cite only the minimal number of sources needed; do NOT cite all sources by default.\n"
-    "   - Do NOT output a bare block/list of citations (e.g. '<sup>1</sup><sup>2</sup>...') without nearby supporting text.\n"
-    "   - Do NOT cite a source you did not use.\n"
-    "3) If Sources are provided but none are relevant, say you don't know based on the provided Sources and ask a clarifying question.\n"
-    "4) Do NOT use bracket citations like [1] and do NOT add a trailing 'Sources:' section.\n"
-    "5) Output in Markdown. The only HTML allowed is <sup>...</sup>.\n"
-)
 
 
 class ChatbotBootstrapCapabilities(BaseModel):
@@ -382,6 +367,60 @@ def _filter_sources_by_sup_keys(sources: List[ChatbotSourceItem], answer_text: s
         return []
     return [s for s in sources if s.key in used_keys]
 
+
+def _build_sup_key_map_sorted(
+    answer_text: str,
+    *,
+    sources: List[ChatbotSourceItem] | None = None,
+) -> Dict[int, int]:
+    """Build a stable citation key remap (sorted by original key, contiguous from 1)."""
+    used_keys = set(_extract_sup_keys(answer_text))
+    if sources is not None:
+        available = {int(s.key) for s in sources if isinstance(getattr(s, "key", None), int)}
+        used_keys &= available
+    ordered = sorted(used_keys)
+    return {old: idx + 1 for idx, old in enumerate(ordered)}
+
+
+def _renumber_sup_tags(answer_text: str, key_map: Dict[int, int]) -> str:
+    if not answer_text or not key_map:
+        return answer_text or ""
+
+    def _replace(match: re.Match[str]) -> str:
+        raw = match.group("key")
+        try:
+            key = int(raw)
+        except Exception:  # noqa: BLE001
+            return match.group(0)
+        new_key = key_map.get(key)
+        if new_key is None:
+            return match.group(0)
+        return f"<sup>{new_key}</sup>"
+
+    return _SUP_KEY_RE.sub(_replace, answer_text)
+
+
+def _filter_and_renumber_sources_by_sup_keys_sorted(
+    sources: List[ChatbotSourceItem],
+    answer_text: str,
+) -> tuple[str, List[ChatbotSourceItem], Dict[int, int]]:
+    """
+    Keep only cited sources but ensure contiguous keys starting at 1.
+    Remap strategy: sort by original key ascending.
+    """
+    if not sources:
+        return (answer_text or "", [], {})
+
+    key_map = _build_sup_key_map_sorted(answer_text, sources=sources)
+    if not key_map:
+        return (answer_text or "", [], {})
+
+    filtered = [s for s in sources if s.key in key_map]
+    filtered.sort(key=lambda item: item.key)
+    renumbered_sources = [s.model_copy(update={"key": key_map[s.key]}) for s in filtered]
+    renumbered_answer = _renumber_sup_tags(answer_text, key_map)
+    return (renumbered_answer, renumbered_sources, key_map)
+
 def _guess_media_type(filename: str | None, fallback: str = "application/octet-stream") -> str:
     if filename:
         guessed, _ = mimetypes.guess_type(filename)
@@ -489,20 +528,16 @@ def _build_sources_for_frontend(entries: List[Dict[str, Any]], max_sources: int)
         source_title = filename
 
         if is_tavily_chunk:
-            # Tavily chunk: title 来自 content 第一行，file 来自 provenance.url
-            provenance = metadata.get("provenance") or {}
-            if isinstance(provenance, dict):
-                provenance_url = provenance.get("url")
-                if provenance_url:
-                    file_url = str(provenance_url).strip()
-            
-            # 从 content 第一行提取 title（content 格式是 "title\ncontent"）
+            provenance = metadata.get("provenance") if isinstance(metadata.get("provenance"), dict) else {}
+            url = provenance.get("url")
+            if isinstance(url, str) and url.strip().lower().startswith(("http://", "https://")):
+                file_url = url.strip()
+
             if content:
                 content_lines = content.split("\n", 1)
-                if len(content_lines) > 0 and content_lines[0].strip():
+                if content_lines and content_lines[0].strip():
                     source_title = content_lines[0].strip()
         else:
-            # 知识库 chunk: 保持原有逻辑，title 是文件名，file 是文件 URL
             if file_id and not file_storage_resolved:
                 file_storage_resolved = True
                 try:
@@ -520,6 +555,12 @@ def _build_sources_for_frontend(entries: List[Dict[str, Any]], max_sources: int)
                     file_url = f"/static/files/{file_id}/{quote(safe_name)}"
                 except Exception:  # noqa: BLE001
                     file_url = None
+
+        if not file_url:
+            provenance = metadata.get("provenance") if isinstance(metadata.get("provenance"), dict) else {}
+            url = provenance.get("url")
+            if isinstance(url, str) and url.strip().lower().startswith(("http://", "https://")):
+                file_url = url.strip()
 
         sources.append(
             ChatbotSourceItem(
@@ -836,7 +877,7 @@ async def messages(
             history = _normalize_history(payload.messages, turns=context_turns)
 
             llm_messages = _build_llm_messages(
-                {"role": "system", "content": _CHATBOT_SYSTEM_PROMPT_V2},
+                {"role": "system", "content": CHATBOT_SYSTEM_PROMPT_V2},
                 source_messages,
                 history,
                 payload.content.strip(),
@@ -883,9 +924,25 @@ async def messages(
                 yield _sse_json({"type": "chunk", "content": item, "id": payload.id})
 
             full = "".join(parts).strip()
-            sources_for_frontend = _filter_sources_by_sup_keys(sources_for_frontend, full)
+            full, sources_for_frontend, citation_key_map = _filter_and_renumber_sources_by_sup_keys_sorted(
+                sources_for_frontend,
+                full,
+            )
             yield _sse_json(
-                {"type": "sources", "sources": [s.model_dump() for s in sources_for_frontend], "id": payload.id}
+                {
+                    "type": "final",
+                    "content": full,
+                    "citation_key_map": {str(k): v for k, v in (citation_key_map or {}).items()},
+                    "id": payload.id,
+                }
+            )
+            yield _sse_json(
+                {
+                    "type": "sources",
+                    "sources": [s.model_dump() for s in sources_for_frontend],
+                    "citation_key_map": {str(k): v for k, v in (citation_key_map or {}).items()},
+                    "id": payload.id,
+                }
             )
 
             if first_turn:

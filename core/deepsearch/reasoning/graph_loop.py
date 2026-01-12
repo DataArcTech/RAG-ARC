@@ -18,6 +18,7 @@ from encapsulation.data_model.deepsearch import (
 from core.deepsearch.tooling.protocols import ToolInvoker
 from core.deepsearch.trace import emit_trace
 from core.deepsearch.utils.compression import compact_evidences, resolve_compaction_config
+from core.deepsearch.tooling.budget import attach_tool_budget_metadata, get_tool_budget
 from core.graph_adapter.base import GraphAccessScope, GraphDeepSearchAdapter
 from core.graph_adapter.scope_provider import require_scope
 
@@ -463,6 +464,9 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
         coverage_hint: Dict[str, Any],
         extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        budget = get_tool_budget()
+        if budget is not None:
+            attach_tool_budget_metadata(graph_context=context, snapshot=budget.snapshot())
         return {
             "question": question,
             "plan_step": plan_step_id,

@@ -5,11 +5,29 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from mcp import StdioServerParameters
-from mcp.client.session import ClientSession
-from mcp.client.sse import sse_client
-from mcp.client.stdio import stdio_client
-from mcp.types import CallToolResult, ListToolsResult
+_MCP_IMPORT_ERROR: ModuleNotFoundError | None = None
+try:  # pragma: no cover - optional dependency
+    from mcp import StdioServerParameters
+    from mcp.client.session import ClientSession
+    from mcp.client.sse import sse_client
+    from mcp.client.stdio import stdio_client
+    from mcp.types import CallToolResult, ListToolsResult
+except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
+    _MCP_IMPORT_ERROR = exc
+    StdioServerParameters = Any  # type: ignore[assignment,misc]
+    ClientSession = Any  # type: ignore[assignment,misc]
+    CallToolResult = Any  # type: ignore[assignment,misc]
+    ListToolsResult = Any  # type: ignore[assignment,misc]
+
+    def sse_client(*args: Any, **kwargs: Any) -> Any:
+        raise ModuleNotFoundError(
+            "Optional dependency 'mcp' is required for SSE MCP transport; install the 'mcp' package."
+        ) from _MCP_IMPORT_ERROR
+
+    def stdio_client(*args: Any, **kwargs: Any) -> Any:
+        raise ModuleNotFoundError(
+            "Optional dependency 'mcp' is required for stdio MCP transport; install the 'mcp' package."
+        ) from _MCP_IMPORT_ERROR
 
 from encapsulation.data_model.deepsearch import GraphQueryContext, ToolExecutionLog
 
@@ -50,6 +68,10 @@ class MCPToolClient:
         enable_graph_context: bool = True,
         graph_context_field: str = "__graph_context__",
     ):
+        if _MCP_IMPORT_ERROR is not None:
+            raise ModuleNotFoundError(
+                "Optional dependency 'mcp' is not installed; MCPToolClient cannot be used without it."
+            ) from _MCP_IMPORT_ERROR
         self.server_uri = server_uri
         self.transport = transport
         self.headers = headers or {}

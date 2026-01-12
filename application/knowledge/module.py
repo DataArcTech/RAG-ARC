@@ -5,8 +5,6 @@ from typing import TYPE_CHECKING, List, Optional, Dict, Any
 if TYPE_CHECKING:
     from config.application.knowledge_config import KnowledgeConfig
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 import uuid
@@ -27,10 +25,12 @@ from core.utils.http_headers import build_attachment_content_disposition
 from encapsulation.message_queue.redis_task_queue import RedisTaskQueue, TaskState
 from application.knowledge.permission_mixin import KnowledgePermissionMixin
 from config.output_limits import KNOWLEDGE_MINDMAP_EXPORT_MAX_CHUNKS
+from application.knowledge.runtime_state_mixin import KnowledgeRuntimeStateMixin
 
-class Knowledge(KnowledgePermissionMixin, AbstractModule):
+class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractModule):
     def __init__(self, config: 'KnowledgeConfig'):
         super().__init__(config=config)
+        self.logger = logger
         self.file_storage = config.file_storage_config.build()
         self.file_index = config.index_manager_config.build()
         self.task_queue = RedisTaskQueue.from_env()
@@ -46,76 +46,6 @@ class Knowledge(KnowledgePermissionMixin, AbstractModule):
 
     def _use_celery(self) -> bool:
         return os.getenv("TASK_QUEUE_MODE", "inprocess").lower() == "celery"
-
-    def _track_background_task(self, doc_id: str, task: asyncio.Task) -> None:
-        """Register a background indexing task so it can be cancelled or awaited later."""
-        self._active_index_tasks[doc_id] = task
-
-        def _cleanup(fut: asyncio.Task, file_id: str = doc_id) -> None:
-            self._active_index_tasks.pop(file_id, None)
-            if fut.cancelled():
-                logger.info(f"Background indexing task cancelled for file_id: {file_id}")
-            elif fut.exception():
-                logger.error(
-                    f"Background indexing task failed for file_id {file_id}: {fut.exception()}",
-                    exc_info=True
-                )
-
-        task.add_done_callback(_cleanup)
-
-    async def _cancel_indexing_task(self, doc_id: str) -> None:
-        """Cancel an active background indexing task for the specified file."""
-        task = self._active_index_tasks.get(doc_id)
-        if not task:
-            return
-
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            logger.info(f"Cancelled indexing task awaited for file_id: {doc_id}")
-
-    def _mark_file_for_deletion(self, doc_id: str, owner_id: Optional[uuid.UUID] = None) -> None:
-        """Mark a file so background tasks can skip further processing."""
-        self._files_marked_for_deletion.add(doc_id)
-        resolved_owner = self._resolve_owner_for_file(doc_id, owner_id)
-        if resolved_owner is not None:
-            owner_set = self._files_marked_for_deletion_by_owner.setdefault(resolved_owner, set())
-            owner_set.add(doc_id)
-            self._file_owner_cache[doc_id] = resolved_owner
-
-    def _unmark_file_for_deletion(self, doc_id: str) -> None:
-        self._files_marked_for_deletion.discard(doc_id)
-        owner_id = self._file_owner_cache.pop(doc_id, None)
-        if owner_id is not None:
-            owner_set = self._files_marked_for_deletion_by_owner.get(owner_id)
-            if owner_set is not None:
-                owner_set.discard(doc_id)
-                if not owner_set:
-                    self._files_marked_for_deletion_by_owner.pop(owner_id, None)
-
-    def _is_file_marked_for_deletion(self, doc_id: str) -> bool:
-        return doc_id in self._files_marked_for_deletion
-
-    def _resolve_owner_for_file(
-        self,
-        doc_id: str,
-        explicit_owner: Optional[uuid.UUID] = None
-    ) -> Optional[uuid.UUID]:
-        if explicit_owner is not None:
-            return explicit_owner
-        cached_owner = self._file_owner_cache.get(doc_id)
-        if cached_owner is not None:
-            return cached_owner
-        try:
-            metadata = self.file_storage.get_file_metadata(doc_id)
-        except Exception:
-            metadata = None
-        if metadata and getattr(metadata, "owner_id", None) is not None:
-            owner_id = metadata.owner_id
-            self._file_owner_cache[doc_id] = owner_id
-            return owner_id
-        return None
 
     async def _run_blocking(self, func, *args, **kwargs):
         """Run a blocking function in a separate thread to avoid blocking the event loop."""

@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from encapsulation.data_model.deepsearch import EvidenceChunk, GraphQueryContext
 from encapsulation.web_search import TavilySearchClient
 from core.deepsearch.trace import emit_trace
+from core.deepsearch.tooling.budget import ToolBudgetExceededError, attach_tool_budget_metadata, get_tool_budget
 from core.utils.json_safe import json_safe
 
 
@@ -70,6 +71,16 @@ class ExternalSearchChannel:
 
         outputs: List[Dict[str, Any]] = []
         logs: List[Dict[str, Any]] = []
+        budget = get_tool_budget()
+        count_external_calls = True
+        try:
+            if graph_context is not None and isinstance(getattr(graph_context, "metadata", None), dict):
+                tb = (graph_context.metadata or {}).get("tool_budget")
+                if isinstance(tb, dict) and tb.get("count_external_calls") is False:
+                    count_external_calls = False
+        except Exception:
+            count_external_calls = True
+
         for idx, task in enumerate(tasks):
             if idx >= self.max_rounds:
                 break
@@ -159,6 +170,40 @@ class ExternalSearchChannel:
                 )
             except Exception:
                 pass
+
+            if budget is not None and count_external_calls:
+                try:
+                    snapshot = await budget.claim(tool_name=f"external:{tool_name}", n=1)
+                    attach_tool_budget_metadata(graph_context=graph_context, snapshot=snapshot)
+                    log_entry["tool_budget"] = snapshot
+                except ToolBudgetExceededError as exc:
+                    log_entry["status"] = "budget_exceeded"
+                    log_entry["error"] = str(exc)
+                    logs.append(log_entry)
+                    try:
+                        await emit_trace(
+                            "tool_response",
+                            json.dumps(
+                                json_safe(
+                                    {
+                                        "call_id": call_id,
+                                        "tool_name": tool_name,
+                                        "provider": provider,
+                                        "query": query,
+                                        "error": str(exc),
+                                        "error_kind": "budget_exceeded",
+                                        "tool_budget": budget.snapshot(),
+                                    }
+                                ),
+                                ensure_ascii=False,
+                                indent=2,
+                                default=str,
+                            ),
+                            meta={"call_id": call_id, "tool_name": tool_name, "provider": provider, "ok": False},
+                        )
+                    except Exception:
+                        pass
+                    break
             task_start = time.perf_counter()
             try:
                 chunks, diagnostics, event = await self._execute_task(

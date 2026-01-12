@@ -3,6 +3,7 @@ from datetime import datetime
 import json
 import pickle
 import os
+import hashlib
 import networkx as nx
 from pathlib import Path
 
@@ -41,6 +42,7 @@ class NetworkXGraphStore(GraphStore):
         self.auto_save = getattr(config, 'auto_save', False)
         self.storage_path = getattr(config, 'storage_path', None)
         self.index_name = getattr(config, 'index_name', 'networkx_index')
+        self.unify_entities_by_name = bool(getattr(config, "unify_entities_by_name", False))
 
         # Load existing data if storage path is provided
         if self.storage_path and os.path.exists(self.storage_path):
@@ -51,6 +53,15 @@ class NetworkXGraphStore(GraphStore):
                 logger.warning(f"Could not load existing graph: {e}")
 
         logger.info("Successfully initialized NetworkX graph store")
+
+    @staticmethod
+    def _normalize_entity_key(name: str) -> str:
+        return " ".join(str(name or "").strip().casefold().split())
+
+    def _stable_entity_id(self, name: str) -> str:
+        key = self._normalize_entity_key(name)
+        digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]  # noqa: S324 (non-crypto use)
+        return f"e_{digest}"
 
     def close(self):
         """Close graph store and auto-save if configured"""
@@ -152,10 +163,21 @@ class NetworkXGraphStore(GraphStore):
         chunk_node_id = f"chunk_{chunk_id}"
         
         # Add entities
-        entity_node_mapping = {}  # entity_name -> node_id for this chunk
+        entity_node_mapping: dict[str, str] = {}  # normalized entity_key -> node_id
         
         for entity in graph_data.entities:
-            entity_id = chunk_id + '_' + entity['id']  # Prefix with chunk_id to avoid conflicts
+            entity_name = str(entity.get("entity_name") or "").strip()
+            if not entity_name:
+                continue
+            entity_key = self._normalize_entity_key(entity_name)
+            if not entity_key:
+                continue
+
+            if self.unify_entities_by_name:
+                entity_id = self._stable_entity_id(entity_name)
+            else:
+                entity_id = chunk_id + "_" + str(entity.get("id") or "")  # Prefix with chunk_id to avoid conflicts
+
             entity_node_id = f"entity_{entity_id}"
             entity_type = entity.get('entity_type', 'Entity')
             
@@ -165,16 +187,19 @@ class NetworkXGraphStore(GraphStore):
                 node_type='Entity',
                 entity_subtype=entity_type,
                 id_=entity_id,
-                entity_name=entity['entity_name'],
+                entity_name=entity_name,
                 entity_type=entity_type,
-                chunk_id=chunk_id,
                 create_time=datetime.now().isoformat(),
                 update_time=datetime.now().isoformat(),
                 attributes=json.dumps(entity['attributes'], ensure_ascii=False) if entity.get('attributes') else "{}"
             )
+
+            # Only attach chunk_id on entity nodes when entities are chunk-scoped.
+            if not self.unify_entities_by_name:
+                self.graph.nodes[entity_node_id]["chunk_id"] = chunk_id
             
             # Store mapping for relation creation
-            entity_node_mapping[entity['entity_name']] = entity_node_id
+            entity_node_mapping[entity_key] = entity_node_id
             
             # Create Chunk-Entity relationship
             self.graph.add_edge(
@@ -190,8 +215,8 @@ class NetworkXGraphStore(GraphStore):
                 head_name, relation_type, tail_name = relation[0], relation[1], relation[2]
                 
                 # Find entity nodes by name within this chunk
-                head_node_id = entity_node_mapping.get(head_name)
-                tail_node_id = entity_node_mapping.get(tail_name)
+                head_node_id = entity_node_mapping.get(self._normalize_entity_key(head_name))
+                tail_node_id = entity_node_mapping.get(self._normalize_entity_key(tail_name))
                 
                 if head_node_id and tail_node_id:
                     # Add relationship edge
@@ -220,17 +245,33 @@ class NetworkXGraphStore(GraphStore):
             for chunk_id in unique_ids:
                 chunk_node_id = f"chunk_{chunk_id}"
 
-                # Find all entity nodes related to this chunk
-                entity_nodes_to_remove = []
-                for node_id, node_data in self.graph.nodes(data=True):
-                    if (node_data.get('node_type') == 'Entity' and 
-                        node_data.get('chunk_id') == chunk_id):
-                        entity_nodes_to_remove.append(node_id)
-                
-                # Remove entity nodes and their edges
-                for entity_node_id in entity_nodes_to_remove:
-                    if self.graph.has_node(entity_node_id):
-                        self.graph.remove_node(entity_node_id)
+                if not self.unify_entities_by_name:
+                    # Find all entity nodes related to this chunk
+                    entity_nodes_to_remove = []
+                    for node_id, node_data in self.graph.nodes(data=True):
+                        if (node_data.get('node_type') == 'Entity' and
+                            node_data.get('chunk_id') == chunk_id):
+                            entity_nodes_to_remove.append(node_id)
+
+                    # Remove entity nodes and their edges
+                    for entity_node_id in entity_nodes_to_remove:
+                        if self.graph.has_node(entity_node_id):
+                            self.graph.remove_node(entity_node_id)
+                else:
+                    # Entities are global; only remove relation edges originating from this chunk.
+                    edges_to_remove = []
+                    if isinstance(self.graph, nx.MultiDiGraph):
+                        for u, v, k, data in self.graph.edges(keys=True, data=True):
+                            if data.get("chunk_id") == chunk_id:
+                                edges_to_remove.append((u, v, k))
+                        for u, v, k in edges_to_remove:
+                            self.graph.remove_edge(u, v, k)
+                    else:
+                        for u, v, data in self.graph.edges(data=True):
+                            if data.get("chunk_id") == chunk_id:
+                                edges_to_remove.append((u, v))
+                        for u, v in edges_to_remove:
+                            self.graph.remove_edge(u, v)
                 
                 # Remove chunk node
                 if self.graph.has_node(chunk_node_id):
@@ -321,20 +362,35 @@ class NetworkXGraphStore(GraphStore):
         """Get graph data for a specific chunk"""
         # Get entities for this chunk
         entities = []
-        entity_nodes = []
-        
-        for node_id, node_data in self.graph.nodes(data=True):
-            if (node_data.get('node_type') == 'Entity' and 
-                node_data.get('chunk_id') == chunk_id):
-                entity_nodes.append((node_id, node_data))
-                
-                entity = {
-                    'id': node_data.get('id_', '').replace(f"{chunk_id}_", ""),  # Remove chunk_id prefix
-                    'entity_name': node_data.get('entity_name', ''),
-                    'entity_type': node_data.get('entity_type', ''),
-                    'attributes': json.loads(node_data.get('attributes') or '{}')
-                }
-                entities.append(entity)
+        if not self.unify_entities_by_name:
+            for _, node_data in self.graph.nodes(data=True):
+                if (node_data.get('node_type') == 'Entity' and
+                    node_data.get('chunk_id') == chunk_id):
+                    entity = {
+                        'id': node_data.get('id_', '').replace(f"{chunk_id}_", ""),  # Remove chunk_id prefix
+                        'entity_name': node_data.get('entity_name', ''),
+                        'entity_type': node_data.get('entity_type', ''),
+                        'attributes': json.loads(node_data.get('attributes') or '{}')
+                    }
+                    entities.append(entity)
+        else:
+            chunk_node_id = f"chunk_{chunk_id}"
+            if self.graph.has_node(chunk_node_id):
+                for target in self.graph.successors(chunk_node_id):
+                    edge_data = self.graph.get_edge_data(chunk_node_id, target) or {}
+                    edge_attr_dicts = [edge_data] if "relation_type" in edge_data else list(edge_data.values())
+                    for edge_attrs in edge_attr_dicts:
+                        if edge_attrs.get("relation_type") != "MENTIONS":
+                            continue
+                        node_data = self.graph.nodes[target]
+                        entity = {
+                            "id": str(node_data.get("id_") or ""),
+                            "entity_name": node_data.get("entity_name", ""),
+                            "entity_type": node_data.get("entity_type", ""),
+                            "attributes": json.loads(node_data.get("attributes") or "{}"),
+                        }
+                        entities.append(entity)
+                        break
 
         # Get relations between entities in this chunk
         relations = []

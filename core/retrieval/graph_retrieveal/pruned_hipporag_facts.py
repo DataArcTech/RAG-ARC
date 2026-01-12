@@ -6,7 +6,7 @@ from typing import List, Optional, Set, Tuple
 import numpy as np
 
 from encapsulation.database.utils.pruned_hipporag_utils import compute_entity_id, normalize_entity_text
-from core.prompts.graph_retrieval import FACT_RERANK_USER_PROMPT
+from core.prompts.graph_retrieval import FACT_RERANK_RETRY_USER_PROMPT, FACT_RERANK_USER_PROMPT
 from core.retrieval.graph_retrieveal.llm_selection import parse_ranked_choice_indices
 from core.utils.owner_guard import normalize_owner_id
 
@@ -14,6 +14,29 @@ logger = logging.getLogger(__name__)
 
 
 class _PrunedHippoRAGFactsMixin:
+    def _llm_rerank_chat(self, messages: list[dict], *, enforce_json_object: bool) -> str:
+        """
+        Call the rerank LLM with best-effort structured output enforcement.
+
+        - For OpenAI-compatible providers/models that support it, use `response_format=json_object`.
+        - If unsupported, retry without `response_format` but keep temperature low.
+        """
+        kwargs: dict = {"temperature": 0.0, "max_tokens": 256}
+        if enforce_json_object:
+            kwargs["response_format"] = {"type": "json_object"}
+        try:
+            return str(self.llm_client.chat(messages, **kwargs) or "")
+        except Exception as exc:  # noqa: BLE001
+            if enforce_json_object:
+                logger.info("LLM rerank: response_format not supported; retrying without it. error=%s", exc)
+                try:
+                    kwargs.pop("response_format", None)
+                    return str(self.llm_client.chat(messages, **kwargs) or "")
+                except Exception:  # noqa: BLE001
+                    logger.warning("LLM rerank: retry without response_format failed", exc_info=True)
+                    raise
+            raise
+
     def _get_fact_scores_faiss(self, query: str, owner_id: Optional[uuid.UUID] = None) -> Tuple[np.ndarray, List[str]]:
         """
         Retrieve relevant facts using FAISS dense retrieval.
@@ -28,12 +51,22 @@ class _PrunedHippoRAGFactsMixin:
         query_embedding = self._get_query_embedding(query)
 
         try:
+            fact_db = None
+            get_db = getattr(getattr(self, "graph_store", None), "get_fact_faiss_db", None)
+            if callable(get_db):
+                fact_db = get_db(owner_id)
+            else:
+                fact_db = getattr(self.graph_store, "fact_faiss_db", None)
+            if fact_db is None:
+                logger.warning("Fact FAISS DB is not available")
+                return np.array([]), []
+
             # Check if fact index exists and is initialized
-            if self.graph_store.fact_faiss_db.index is None:
+            if fact_db.index is None:
                 logger.warning("Fact FAISS index is not initialized")
                 return np.array([]), []
 
-            total_facts = self.graph_store.fact_faiss_db.index.ntotal
+            total_facts = fact_db.index.ntotal
             if total_facts == 0:
                 logger.warning("No facts in FAISS index")
                 return np.array([]), []
@@ -41,7 +74,7 @@ class _PrunedHippoRAGFactsMixin:
             query_vector = query_embedding.reshape(1, -1).astype(np.float32)
 
             # Normalize query vector for cosine similarity
-            if self.graph_store.fact_faiss_db.config.metric == "cosine" or self.graph_store.fact_faiss_db.config.normalize_L2:
+            if fact_db.config.metric == "cosine" or fact_db.config.normalize_L2:
                 from core.utils.faiss_lock import FAISS_LOCK
                 import faiss
 
@@ -55,16 +88,16 @@ class _PrunedHippoRAGFactsMixin:
                 from core.utils.faiss_lock import FAISS_LOCK
 
                 with FAISS_LOCK:
-                    scores_out, indices_out = self.graph_store.fact_faiss_db.index.search(query_vector, k)
+                    scores_out, indices_out = fact_db.index.search(query_vector, k)
                 return scores_out[0], indices_out[0]
 
             def _collect(scores_1d: np.ndarray, indices_1d: np.ndarray) -> tuple[np.ndarray, list[str]]:
                 fact_ids_local: list[str] = []
                 valid_scores_local: list[float] = []
                 for idx, score in zip(indices_1d, scores_1d):
-                    if idx >= 0 and idx in self.graph_store.fact_faiss_db.index_to_docstore_id:
-                        fact_id = self.graph_store.fact_faiss_db.index_to_docstore_id[idx]
-                        if fact_id not in self.graph_store.fact_faiss_db.deleted_ids:
+                    if idx >= 0 and idx in fact_db.index_to_docstore_id:
+                        fact_id = fact_db.index_to_docstore_id[idx]
+                        if fact_id not in fact_db.deleted_ids:
                             fact_ids_local.append(fact_id)
                             valid_scores_local.append(float(score))
                 if not valid_scores_local:
@@ -76,7 +109,7 @@ class _PrunedHippoRAGFactsMixin:
             # adaptively increase k so the top-k isn't dominated by other tenants' facts.
             k = min(total_facts, max(desired_owner_hits, self.config.fact_retrieval_top_k * 10))
             owner_str = self._owner_to_str(owner_id)
-            docstore = getattr(self.graph_store.fact_faiss_db, "docstore", {})
+            docstore = getattr(fact_db, "docstore", {})
 
             while True:
                 scores_1d, indices_1d = _search(k)
@@ -100,7 +133,8 @@ class _PrunedHippoRAGFactsMixin:
                         filtered_scores.append(float(score))
                         filtered_ids.append(fact_id)
 
-                if filtered_scores or k >= total_facts or len(filtered_ids) >= desired_owner_hits:
+                # Keep increasing k until we either have enough owner-scoped hits or we've exhausted the index.
+                if len(filtered_ids) >= desired_owner_hits or k >= total_facts:
                     if not filtered_scores:
                         return np.array([]), []
                     dtype = query_fact_scores.dtype if isinstance(query_fact_scores, np.ndarray) else np.float32
@@ -303,27 +337,29 @@ class _PrunedHippoRAGFactsMixin:
         # Format facts for LLM prompt
         facts_text = "\n".join([f"{i+1}. {head} - {relation} - {tail}" for i, (head, relation, tail, *_) in enumerate(candidate_facts)])
 
-        prompt = FACT_RERANK_USER_PROMPT.format(query=query, facts_text=facts_text, k=int(len_after_rerank))
+        attempts = [
+            (FACT_RERANK_USER_PROMPT, True),
+            (FACT_RERANK_RETRY_USER_PROMPT, False),
+        ]
 
-        messages = [{"role": "user", "content": prompt}]
-        response = self.llm_client.chat(messages)
+        last_response = ""
+        for template, enforce_json_object in attempts:
+            prompt = template.format(query=query, facts_text=facts_text, k=int(len_after_rerank))
+            messages = [{"role": "user", "content": prompt}]
+            last_response = self._llm_rerank_chat(messages, enforce_json_object=enforce_json_object)
 
-        try:
             selected_indices = parse_ranked_choice_indices(
-                str(response or ""),
+                last_response,
                 candidate_count=len(candidate_facts),
                 k=int(len_after_rerank),
                 one_based=True,
+                allow_fallback=False,
             )
-            if not selected_indices:
-                raise ValueError("No valid indices in LLM response")
+            if selected_indices:
+                top_k_facts = [candidate_facts[i] for i in selected_indices[:len_after_rerank]]
+                top_k_fact_indices = [candidate_fact_indices[i] for i in selected_indices[:len_after_rerank]]
+                return top_k_facts, top_k_fact_indices
 
-            top_k_facts = [candidate_facts[i] for i in selected_indices[:len_after_rerank]]
-            top_k_fact_indices = [candidate_fact_indices[i] for i in selected_indices[:len_after_rerank]]
-
-            return top_k_facts, top_k_fact_indices
-
-        except Exception as e:
-            logger.warning(f"Failed to parse LLM response: {e}")
-            max_facts = min(len_after_rerank, len(candidate_facts))
-            return candidate_facts[:max_facts], candidate_fact_indices[:max_facts]
+        logger.warning("Failed to parse LLM rerank response after retries; falling back. response=%r", last_response)
+        max_facts = min(len_after_rerank, len(candidate_facts))
+        return candidate_facts[:max_facts], candidate_fact_indices[:max_facts]

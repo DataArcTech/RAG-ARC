@@ -19,6 +19,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_LANGUAGE = "zh"
+
+
+def detect_language_from_text(
+    text: str,
+    *,
+    chinese_ratio_threshold: float,
+    default_language: str = _DEFAULT_LANGUAGE,
+) -> str:
+    chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", text))
+    total_chars = len(re.sub(r"\s", "", text))
+
+    if total_chars == 0:
+        return default_language
+
+    chinese_ratio = chinese_chars / total_chars
+    return "zh" if chinese_ratio > chinese_ratio_threshold else "en"
+
 
 class GraphExtractor(ExtractorBase):
     """Optimized GraphExtractor, supporting multi-round extraction, cleaning, and bilingual support"""
@@ -57,14 +75,11 @@ class GraphExtractor(ExtractorBase):
 
     def detect_language(self, text: str) -> str:
         """Detect text language (Chinese or English)"""
-        chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
-        total_chars = len(re.sub(r'\s', '', text))
-
-        if total_chars == 0:
-            return 'zh'  # Default Chinese
-
-        chinese_ratio = chinese_chars / total_chars
-        return 'zh' if chinese_ratio > 0.1 else 'en'
+        threshold = float(getattr(self.config, "language_detection_chinese_ratio_threshold", 0.1) or 0.1)
+        threshold = max(0.0, min(1.0, threshold))
+        default_language = str(getattr(self.config, "language_detection_default_language", _DEFAULT_LANGUAGE) or _DEFAULT_LANGUAGE)
+        default_language = default_language if default_language in {"zh", "en"} else _DEFAULT_LANGUAGE
+        return detect_language_from_text(text, chinese_ratio_threshold=threshold, default_language=default_language)
 
     def build_extraction_prompt(self, text: str, history: GraphData) -> str:
         """Build extraction prompt with user custom priority"""

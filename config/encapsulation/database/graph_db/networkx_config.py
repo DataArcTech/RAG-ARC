@@ -37,5 +37,10 @@ class NetworkXConfig(AbstractConfig):
         description="Whether to allow parallel edges between nodes"
     )
 
+    unify_entities_by_name: bool = Field(
+        default=False,
+        description="Whether to merge entity nodes across chunks by normalized entity_name (useful for corpus-level graph traversal).",
+    )
+
     def build(self):
         return NetworkXGraphStore(self)
