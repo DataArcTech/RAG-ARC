@@ -52,6 +52,30 @@ class _StubAdapter:
     def metadata(self):
         return self._metadata
 
+    async def chain_traverse(self, strategy, *, access_scope=None):  # noqa: ARG002
+        mode = (strategy or {}).get("strategy") or "unknown"
+        if mode != "beam_search":
+            return {"strategy": mode, "paths": []}
+        return {
+            "strategy": mode,
+            "paths": [
+                {
+                    "path_id": "beam-0",
+                    "nodes": ["OpenAI", "Microsoft"],
+                    "triples": [{"head": "OpenAI", "relation": "partnered_with", "tail": "Microsoft"}],
+                    "score": 0.6,
+                    "summary": "OpenAI partnered with Microsoft; Microsoft provides cloud + investment support.",
+                },
+                {
+                    "path_id": "beam-1",
+                    "nodes": ["OpenAI", "Azure"],
+                    "triples": [{"head": "OpenAI", "relation": "runs_on", "tail": "Azure"}],
+                    "score": 0.4,
+                    "summary": "OpenAI workloads run on Azure as part of the partnership.",
+                },
+            ],
+        }
+
 
 class _StubLLM:
     def __init__(self, response: str):

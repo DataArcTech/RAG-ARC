@@ -102,4 +102,8 @@ class DeepSearchServiceContextMixin:
             except Exception:
                 return False
         enabled = getattr(channel, "enabled", None)
+        if enabled is None:
+            # If a channel instance is explicitly injected but does not expose an enable flag,
+            # assume it is enabled (test stubs and custom implementations).
+            return True
         return bool(enabled)

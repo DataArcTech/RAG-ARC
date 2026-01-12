@@ -392,7 +392,7 @@ class ToolBudgetConfig(BaseModel):
 
     enabled: bool = Field(True, description="Enable tool-call budget enforcement across tool_manager/external tools.")
     max_calls_total: int = Field(
-        ...,
+        60,
         ge=0,
         description="Maximum total tool invocations allowed for one DeepSearch run (0 disables tool calls).",
     )

@@ -411,6 +411,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `DOTSOCR_OUTPUT_DIR` | _(empty)_ | Optional override for dots_ocr output directory. |
 | `VLMOCR_OUTPUT_DIR` | _(empty)_ | Optional override for VLM OCR output directory. |
 | `MINERU_SERVER_URL` | _(empty)_ | Required when `PARSER_PARSE_MODE=mineru`: MinerU server base URL (e.g. `http://127.0.0.1:8899`). |
+| `MINERU_FALLBACK_TO_NATIVE_ON_FAILURE` | `true` | When `PARSER_PARSE_MODE=mineru`, fallback to native PDF text extraction if MinerU parsing fails (e.g. service not running). Fallback is recorded in parse result metadata (`metadata.parser_fallback`). |
 | `MINERU_TIMEOUT_S` | `900` | Optional: HTTP timeout seconds for remote MinerU parsing/downloads. |
 | `MINERU_START_PAGE` | `0` | Optional: start page (0-based) for MinerU parsing. |
 | `MINERU_END_PAGE` | _(empty)_ | Optional: end page (0-based, inclusive). If empty, parse to the end. |
@@ -529,6 +530,29 @@ Set to `1` (or any non-empty value) to opt-in when the required services/models 
 | `RUN_RAGARC_VECTOR_TESTS` | _(empty)_ | Run vector-store test suites. |
 | `RUN_RAGARC_MQ_STRESS_TESTS` | _(empty)_ | Optional: run real-Redis message-queue stress smoke tests (`test/stress/test_mq_stress_real_redis.py`) when set to `1`. |
 | `RAGARC_E2E_TOKEN` | _(empty)_ | Token used by `test/test_complete_e2e_api.py` to authenticate API requests. |
+
+## 17. JSON Config Notes (non-env)
+
+RAG-ARC follows a single-source-of-truth config flow:
+
+- Runtime secrets / deployment-specific values live in environment variables (`.env`, see `.env.example`).
+- Tunable knobs (thresholds, budgets, tool selection, paths, feature gates) live in JSON under `config/json_configs/`.
+
+Entry points:
+
+- DeepSearch service: `config/json_configs/deepsearch_service.json`
+- RAG inference (HippoRAG Q&A): `config/json_configs/rag_inference.json`
+- Knowledge pipelines: `config/json_configs/knowledge.json`
+
+DeepSearch web search policy (in `config/json_configs/deepsearch_service.json`):
+
+- `planner.web_step_policy="realtime_required"` injects/forces at least one `channel="web"` step when the question asks for realtime/latest/current info (e.g. FX rates/news).
+- `external_channel.execute_forced_tasks_without_gap=true` executes those forced tasks even when gap detection thinks coverage is sufficient.
+
+DeepSearch tool budget (in `config/json_configs/deepsearch_service.json`):
+
+- `tool_budget.max_calls_total` caps total tool invocations per DeepSearch run (tool_manager + optional external calls; does not count graph adapter traversals).
+- Remaining budget is attached to `graph_context.metadata.tool_budget` for LLM visibility and also surfaced in tool diagnostics.
 
 ---
 

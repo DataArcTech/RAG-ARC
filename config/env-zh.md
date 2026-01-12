@@ -411,6 +411,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `DOTSOCR_OUTPUT_DIR` | _(空)_ | 可选：dots_ocr 输出目录覆盖。 |
 | `VLMOCR_OUTPUT_DIR` | _(空)_ | 可选：VLM OCR 输出目录覆盖。 |
 | `MINERU_SERVER_URL` | _(空)_ | 当 `PARSER_PARSE_MODE=mineru` 时必填：MinerU 服务地址（例如 `http://127.0.0.1:8899`）。 |
+| `MINERU_FALLBACK_TO_NATIVE_ON_FAILURE` | `true` | 当 `PARSER_PARSE_MODE=mineru` 时，如果 MinerU 解析失败（例如服务未启动）则回退到 native 的 PDF 文本抽取；回退信息会写入解析结果元数据（`metadata.parser_fallback`）。 |
 | `MINERU_TIMEOUT_S` | `900` | 可选：远程 MinerU 解析/下载的 HTTP 超时（秒）。 |
 | `MINERU_START_PAGE` | `0` | 可选：MinerU 解析起始页（0-based）。 |
 | `MINERU_END_PAGE` | _(空)_ | 可选：MinerU 解析结束页（0-based，包含该页）。为空表示解析到末尾。 |
@@ -529,6 +530,29 @@ MinIO 常用变量（仅在启用对象存储集成时才需要设置）：
 | `RUN_RAGARC_VECTOR_TESTS` | _(空)_ | 运行向量库相关测试套件。 |
 | `RUN_RAGARC_MQ_STRESS_TESTS` | _(空)_ | 可选：设为 `1` 时运行真实 Redis 的消息队列轻压测（`test/stress/test_mq_stress_real_redis.py`）。 |
 | `RAGARC_E2E_TOKEN` | _(空)_ | `test/test_complete_e2e_api.py` 用于 API 鉴权的 token。 |
+
+## 17. JSON 配置说明（非环境变量）
+
+RAG-ARC 采用单一可信配置流：
+
+- 运行时密钥/部署差异项放在环境变量（`.env`，参考 `.env.example`）。
+- 可调参数（阈值、预算、工具选择、路径、开关等）放在 `config/json_configs/` 的 JSON 中。
+
+入口配置：
+
+- DeepSearch 服务：`config/json_configs/deepsearch_service.json`
+- RAG 推理（HippoRAG Q&A）：`config/json_configs/rag_inference.json`
+- 知识库流水线：`config/json_configs/knowledge.json`
+
+DeepSearch Web 搜索策略（位于 `config/json_configs/deepsearch_service.json`）：
+
+- `planner.web_step_policy="realtime_required"`：当问题涉及“实时/最新/当前”信息（例如汇率/新闻）时，注入/强制至少一个 `channel="web"` 步骤。
+- `external_channel.execute_forced_tasks_without_gap=true`：即使 gap 判定“已覆盖充分”，也会执行这些被强制的外部任务。
+
+DeepSearch 工具调用预算（位于 `config/json_configs/deepsearch_service.json`）：
+
+- `tool_budget.max_calls_total`：限制每次 DeepSearch run 的工具调用总次数（tool_manager + 可选的外部调用；不计入 graph adapter traversal）。
+- 剩余预算会写入 `graph_context.metadata.tool_budget` 供模型感知，并在工具 diagnostics 中可观测。
 
 ---
 

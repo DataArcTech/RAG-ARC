@@ -14,30 +14,16 @@ logger = logging.getLogger(__name__)
 
 class DeepSearchServiceRunMixin:
     def _resolve_tool_budget_config(self) -> Dict[str, Any]:
+        from config.application.deepsearch_config import ToolBudgetConfig
+
         raw = None
         try:
             raw = (getattr(self, "config", None) or {}).get("tool_budget")
         except Exception:
             raw = None
-
-        cfg: Dict[str, Any] = dict(raw) if isinstance(raw, dict) else {}
-        enabled = bool(cfg.get("enabled", True))
-        max_calls_total = cfg.get("max_calls_total")
-        if max_calls_total is None:
-            raise ValueError("DeepSearch tool_budget.max_calls_total is required (no implicit default).")
-        try:
-            max_calls_total = int(max_calls_total)
-        except (TypeError, ValueError):
-            raise ValueError("DeepSearch tool_budget.max_calls_total must be an integer.") from None
-        if max_calls_total < 0:
-            raise ValueError("DeepSearch tool_budget.max_calls_total must be >= 0.")
-
-        return {
-            "enabled": enabled,
-            "max_calls_total": max_calls_total,
-            "count_external_calls": bool(cfg.get("count_external_calls", True)),
-            "expose_to_llm": bool(cfg.get("expose_to_llm", True)),
-        }
+        payload: Dict[str, Any] = dict(raw) if isinstance(raw, dict) else {}
+        model = ToolBudgetConfig.model_validate(payload)
+        return model.model_dump()
 
     async def run(
         self,

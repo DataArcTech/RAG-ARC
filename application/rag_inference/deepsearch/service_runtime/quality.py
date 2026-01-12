@@ -165,24 +165,41 @@ class DeepSearchServiceQualityMixin:
         if not isinstance(coverage, dict):
             return
         errors = coverage.get("worker_errors") or []
-        if not isinstance(errors, list) or not errors:
+        if isinstance(errors, list) and errors:
+            count = coverage.get("worker_error_count")
+            try:
+                count_int = int(count) if count is not None else len(errors)
+            except (TypeError, ValueError):
+                count_int = len(errors)
+            previews: list[str] = []
+            for entry in errors:
+                if len(previews) >= 3:
+                    break
+                if not isinstance(entry, dict):
+                    continue
+                agent_id = entry.get("agent_id") or "worker"
+                code = entry.get("error") or "error"
+                previews.append(f"{agent_id}={code}")
+            preview = ", ".join(previews)
+            message = f"{count_int} worker agent(s) failed"
+            if preview:
+                message = f"{message}: {preview}"
+            state.append_error(message, stage="graph_reasoning")
+
+        probe_errors = coverage.get("probe_errors") or []
+        if not isinstance(probe_errors, list) or not probe_errors:
             return
-        count = coverage.get("worker_error_count")
-        try:
-            count_int = int(count) if count is not None else len(errors)
-        except (TypeError, ValueError):
-            count_int = len(errors)
-        previews: list[str] = []
-        for entry in errors:
+        previews = []
+        for entry in probe_errors:
             if len(previews) >= 3:
                 break
             if not isinstance(entry, dict):
                 continue
-            agent_id = entry.get("agent_id") or "worker"
-            code = entry.get("error") or "error"
-            previews.append(f"{agent_id}={code}")
+            tool = entry.get("tool_name") or "probe"
+            code = entry.get("error") or entry.get("error_type") or "error"
+            previews.append(f"{tool}={code}")
         preview = ", ".join(previews)
-        message = f"{count_int} worker agent(s) failed"
+        message = f"{len(probe_errors)} probe tool(s) failed"
         if preview:
             message = f"{message}: {preview}"
-        state.append_error(message, stage="graph_reasoning")
+        state.append_error(message, stage="graph_reasoning", details={"probe_errors": probe_errors})
