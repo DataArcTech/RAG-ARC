@@ -161,6 +161,17 @@
   "tool_results": [...],
   "tool_calls_count": 3,
   "last_tool": "graph_query",
+  "think_notes": [
+    {
+      "plan_step_id": "step-1",
+      "reasoning": "思考过程的详细说明...",
+      "confidence_delta": 0.1,
+      "coverage_delta": 0.05,
+      "next_actions": ["action1", "action2"],
+      "metadata": {}
+    }
+  ],
+  "think_notes_count": 2,
   "evidences": [...],
   "evidence_count": 10,
   "completed_steps": 5,
@@ -171,6 +182,14 @@
   "seq": 3
 }
 ```
+
+**think_notes 字段说明：**
+- `plan_step_id`: 触发思考的计划步骤 ID（可选）
+- `reasoning`: 思考过程的详细说明文本
+- `confidence_delta`: 思考后置信度的变化（可选）
+- `coverage_delta`: 思考后覆盖度的变化（可选）
+- `next_actions`: 建议的后续行动列表
+- `metadata`: 额外的诊断信息
 
 #### 2.4 gap_evaluated（缺口检测）
 

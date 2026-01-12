@@ -40,6 +40,7 @@ from api.routers.chatbot import (
 from encapsulation.data_model.orm_models import ChatMessage, User
 from encapsulation.data_model.schema import Chunk, GraphData
 from framework.thread_pool import get_thread_pool
+from framework.register import Register
 import uuid
 import logging
 from core.utils.owner_guard import is_admin_owner, get_admin_owner_id
@@ -265,10 +266,12 @@ async def stream_chat_sse(
     enable_web_search = bool(getattr(request, "enable_web_search", False))
     enable_deepsearch = bool(getattr(request, "enable_deepsearch", False))
     
-    # 当开启 DeepSearch 时，默认开启联网搜索
+    # 无论 DeepSearch 是否开启，都开启联网搜索
+    enable_web_search = True
     if enable_deepsearch:
-        enable_web_search = True
-        logger.info("DeepSearch enabled, automatically enabling web search (enable_web_search=True)")
+        logger.info("DeepSearch enabled, web search is also enabled (enable_web_search=True)")
+    else:
+        logger.info("Web search enabled (enable_web_search=True)")
 
     # Guard: only livingKB users (type=0) may request subgraph/evidence generation.
     if return_subgraph or include_evidence:
@@ -1234,6 +1237,10 @@ async def stream_chat_ws(
                         target_owner_id = uuid.UUID(str(payload["target_owner_id"]))
             except Exception:  # noqa: BLE001
                 pass
+
+            # 无论 DeepSearch 是否开启，都开启联网搜索
+            enable_web_search = True
+            logger.info("Web search enabled (enable_web_search=True)")
 
             # Guard: only livingKB users (type=0) may request subgraph/evidence generation.
             if return_subgraph or include_evidence:
