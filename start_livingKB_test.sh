@@ -279,9 +279,8 @@ if [ -f "scripts/mq_tools/start_mq_workers_local.sh" ]; then
     SERVICE_NAME="rag-arc-mq-workers-livingKB_test.service"
     SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}"
     
-    if [ ! -f "${SERVICE_FILE}" ]; then
-        echo "  🔧 配置队列 Workers 开机自启..."
-        cat > /tmp/${SERVICE_NAME} <<EOF
+    echo "  🔧 配置队列 Workers 开机自启..."
+    cat > /tmp/${SERVICE_NAME} <<EOF
 [Unit]
 Description=RAG-ARC MQ Workers (Celery Workers for livingKB_test)
 After=network.target docker.service
@@ -293,8 +292,8 @@ User=root
 WorkingDirectory=${APP_DIR}
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin"
 EnvironmentFile=-${APP_DIR}/.env
-ExecStart=/bin/bash ${APP_DIR}/scripts/mq_tools/start_mq_workers_local.sh
-ExecStop=/bin/bash ${APP_DIR}/scripts/mq_tools/stop_mq_workers_local.sh
+ExecStart=/bin/bash scripts/mq_tools/start_mq_workers_local.sh
+ExecStop=/bin/bash scripts/mq_tools/stop_mq_workers_local.sh
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
@@ -303,15 +302,12 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
-        sudo cp /tmp/${SERVICE_NAME} ${SERVICE_FILE} && \
-        sudo systemctl daemon-reload && \
-        sudo systemctl enable ${SERVICE_NAME} >/dev/null 2>&1 && \
-        echo "  ✅ 队列 Workers 开机自启已配置（systemd service: ${SERVICE_NAME}）" || \
-        echo "  ⚠️  队列 Workers 开机自启配置失败（需要 sudo 权限）"
-        rm -f /tmp/${SERVICE_NAME}
-    else
-        echo "  ✅ 队列 Workers 开机自启已配置（systemd service 已存在）"
-    fi
+    sudo cp /tmp/${SERVICE_NAME} ${SERVICE_FILE} && \
+    sudo systemctl daemon-reload && \
+    sudo systemctl enable ${SERVICE_NAME} >/dev/null 2>&1 && \
+    echo "  ✅ 队列 Workers 开机自启已配置（systemd service: ${SERVICE_NAME}）" || \
+    echo "  ⚠️  队列 Workers 开机自启配置失败（需要 sudo 权限）"
+    rm -f /tmp/${SERVICE_NAME}
 else
     echo "  ⚠️  未找到 start_mq_workers_local.sh 脚本，跳过队列 workers 启动"
 fi
