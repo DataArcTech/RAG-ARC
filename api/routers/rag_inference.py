@@ -410,9 +410,19 @@ async def stream_chat_sse(
         get_session_handler().get_session,
         session_id
     )
-    if session is None or not validate_user_session(session, current_user):
-        logger.warning("Session validation failed for session %s and user %s", session_id, current_user.id)
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized")
+    if session is None:
+        logger.warning("Session not found: session_id=%s, user_id=%s", session_id, current_user.id)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail=f"Session {session_id} not found or you don't have permission to access it"
+        )
+    if not validate_user_session(session, current_user):
+        logger.warning("Session validation failed: session_id=%s, session_user_id=%s, current_user_id=%s", 
+                      session_id, session.user_id, current_user.id)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail=f"Session {session_id} does not belong to current user. Session belongs to user {session.user_id}, but current user is {current_user.id}"
+        )
 
     message_handler = get_message_handler()
     rag_inference_handler = get_rag_inference_handler()

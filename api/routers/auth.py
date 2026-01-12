@@ -377,7 +377,11 @@ async def get_current_user(
                 exists = redis_client.exists(blacklist_key)
                 if exists:
                     logger.info(f"Token found in blacklist, rejecting: {blacklist_key[:50]}...")
-                    raise credentials_exception
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="User login expired. Please login again.",
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
             else:
                 logger.debug("Redis client not available, skipping blacklist check")
         except HTTPException:
@@ -390,14 +394,40 @@ async def get_current_user(
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username = payload.get("sub")
         if username is None:
-            raise credentials_exception
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token format. Please login again.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         token_data = TokenData(username=username)
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User login expired. Please login again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     except InvalidTokenError:
-        raise credentials_exception
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token. Please login again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except Exception as e:
+        # Catch other JWT decode errors
+        logger.warning(f"JWT decode error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token. Please login again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     # Use async version to avoid blocking the event loop
     user = await get_user_async(username=token_data.username)
     if user is None:
-        raise credentials_exception
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found. Please login again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     return user
 
 async def get_current_user_optional(
