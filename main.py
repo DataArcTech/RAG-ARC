@@ -24,6 +24,7 @@ import app_registration
 app_registration.initialize()
 
 from api.middleware.response_wrapper import RequestIdResponseWrapper
+from api.routers import alerts as alerts_router
 from api.routers import auth as auth_router
 from api.routers import chatbot as chatbot_router
 from api.routers import deepsearch as deepsearch_router
@@ -254,6 +255,7 @@ async def validation_exception_handler(request, exc):
     )
 
 app.mount("/mcp", mcp.mcp_app)
+app.include_router(alerts_router.router)
 app.include_router(knowledge_router.router)
 app.include_router(rag_inference.router)
 app.include_router(deepsearch_router.router)
