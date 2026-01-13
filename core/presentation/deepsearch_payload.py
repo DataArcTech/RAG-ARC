@@ -171,38 +171,44 @@ def _trim_report_block(report_block: Optional[Dict[str, Any]], limit: Optional[i
         "metadata": _sanitize_report_metadata(report_block.get("metadata")),
     }
     structured = report_block.get("structured_report")
+    citations: list[dict[str, Any]] = []
     if isinstance(structured, dict):
         trimmed["structured_report"] = structured
         citations = structured.get("citations") if isinstance(structured.get("citations"), list) else []
-        converted, sources, citation_key_map = convert_bracket_citations_to_sup(
-            str(trimmed.get("answer") or ""),
-            citations=citations,
-            evidences=evidences if isinstance(evidences, list) else None,
-        )
-        trimmed["answer"] = converted
+
+    converted, sources, citation_key_map = convert_bracket_citations_to_sup(
+        str(trimmed.get("answer") or ""),
+        citations=citations,
+        evidences=evidences if isinstance(evidences, list) else None,
+    )
+    trimmed["answer"] = converted
+    try:
+        if isinstance(trimmed.get("structured_report"), dict) and "text" in trimmed["structured_report"]:
+            trimmed["structured_report"]["text"] = converted
+    except Exception:
+        pass
+    if sources:
+        trimmed["sources"] = sources
+    if citation_key_map:
+        trimmed["citation_key_map"] = citation_key_map
+        # Compatibility window: keep legacy reference entries for replay/debugging.
         try:
-            if isinstance(trimmed.get("structured_report"), dict) and "text" in trimmed["structured_report"]:
-                trimmed["structured_report"]["text"] = converted
+            evidence_lookup = {
+                str(item.get("chunk_id") or ""): item
+                for item in (evidences or [])
+                if isinstance(item, dict) and str(item.get("chunk_id") or "").strip()
+            }
+            ordered_ids = [ev_id for ev_id, _ in sorted(citation_key_map.items(), key=lambda kv: kv[1])]
+            refs = build_reference_entries(
+                ordered_ids=ordered_ids,
+                citations=citations,
+                evidence_lookup=evidence_lookup,
+                id_to_num=citation_key_map,
+            )
+            if refs:
+                trimmed["references"] = refs
         except Exception:
             pass
-        if sources:
-            trimmed["sources"] = sources
-        if citation_key_map:
-            trimmed["citation_key_map"] = citation_key_map
-            # Compatibility window: keep legacy reference entries for replay/debugging.
-            try:
-                evidence_lookup = {str(item.get("chunk_id") or ""): item for item in (evidences or []) if isinstance(item, dict) and str(item.get("chunk_id") or "").strip()}
-                ordered_ids = [ev_id for ev_id, _ in sorted(citation_key_map.items(), key=lambda kv: kv[1])]
-                refs = build_reference_entries(
-                    ordered_ids=ordered_ids,
-                    citations=citations if isinstance(citations, list) else [],
-                    evidence_lookup=evidence_lookup,
-                    id_to_num=citation_key_map,
-                )
-                if refs:
-                    trimmed["references"] = refs
-            except Exception:
-                pass
     return trimmed
 
 
