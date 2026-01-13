@@ -13,6 +13,7 @@ from application.account.chat_session import ChatSessionManager
 from application.account.chat_message import ChatMessageManager
 from application.account.user import Account
 from framework.thread_pool import get_thread_pool
+from api.routers.rag_inference_modules.stream_chat.deepsearch_handler import load_trace_events_from_file
 
 
 class MessageContent(BaseModel):
@@ -36,13 +37,15 @@ class ChatMessageResponse(BaseModel):
     source_file_ids: Optional[List[str]] = None
     sources: Optional[List[dict]] = None
     subgraph_data: Optional[dict] = None
+    raw_llm_response: Optional[dict] = None
+    deepsearch_trace: Optional[dict] = None  # DeepSearch trace events（如果存在）
     created_at: datetime
 
     model_config = {"from_attributes": True}
     
     @classmethod
     def model_validate_with_fallback(cls, obj: Any) -> "ChatMessageResponse":
-        """Validate model with fallback handling for source_file_ids"""
+        """Validate model with fallback handling for source_file_ids and trace events"""
         try:
             return cls.model_validate(obj)
         except Exception as e:
@@ -61,6 +64,18 @@ class ChatMessageResponse(BaseModel):
                     if item is not None:
                         fixed_ids.append(str(item))
                 obj_dict["source_file_ids"] = fixed_ids if fixed_ids else None
+            
+            # 检查是否有 DeepSearch trace file path
+            if "deepsearch_trace" not in obj_dict:
+                deepsearch_trace = None
+                if "raw_llm_response" in obj_dict and obj_dict["raw_llm_response"]:
+                    if isinstance(obj_dict["raw_llm_response"], dict):
+                        trace_file_path = obj_dict["raw_llm_response"].get("deepsearch_trace_file_path")
+                        if trace_file_path:
+                            deepsearch_trace = load_trace_events_from_file(trace_file_path)
+                
+                if deepsearch_trace:
+                    obj_dict["deepsearch_trace"] = deepsearch_trace
             
             return cls.model_validate(obj_dict)
 
@@ -94,7 +109,21 @@ async def list_session_messages(
         result = []
         for msg in messages:
             try:
-                result.append(ChatMessageResponse.model_validate(msg))
+                msg_dict = msg.__dict__.copy() if hasattr(msg, "__dict__") else {}
+                
+                # 检查是否有 DeepSearch trace file path，如果有则加载 trace events
+                deepsearch_trace = None
+                if hasattr(msg, "raw_llm_response") and msg.raw_llm_response:
+                    if isinstance(msg.raw_llm_response, dict):
+                        trace_file_path = msg.raw_llm_response.get("deepsearch_trace_file_path")
+                        if trace_file_path:
+                            deepsearch_trace = load_trace_events_from_file(trace_file_path)
+                
+                # 如果加载成功，添加到响应中
+                if deepsearch_trace:
+                    msg_dict["deepsearch_trace"] = deepsearch_trace
+                
+                result.append(ChatMessageResponse.model_validate(msg_dict))
             except Exception as e:
                 # 如果标准验证失败，尝试使用 fallback 方法
                 try:

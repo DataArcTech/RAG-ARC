@@ -323,8 +323,9 @@ async def generate_sse_events(
     
     # Process DeepSearch if enabled
     deepsearch_result = None
+    deepsearch_trace_file_path = None
     if enable_deepsearch:
-        deepsearch_result_container, deepsearch_gen = await process_deepsearch(
+        deepsearch_result_container, trace_file_path_container, deepsearch_gen = await process_deepsearch(
             query,
             str(effective_owner),
             request_id,
@@ -339,6 +340,7 @@ async def generate_sse_events(
         
         # 生成器完成后，从容器中获取结果
         deepsearch_result = deepsearch_result_container[0]
+        deepsearch_trace_file_path = trace_file_path_container[0]
         
         # 如果 DeepSearch 成功，直接使用其结果，不再调用 RAG 系统
         if deepsearch_result:
@@ -485,7 +487,8 @@ async def generate_sse_events(
         subgraph_data,
         return_subgraph,
         raw_llm_response,
-        raw_mindmap_response
+        raw_mindmap_response,
+        deepsearch_trace_file_path=deepsearch_trace_file_path if enable_deepsearch else None
     )
     
     # Generate title if first turn

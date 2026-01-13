@@ -155,7 +155,8 @@ async def create_assistant_message(
     subgraph_data: Any,
     return_subgraph: bool,
     raw_llm_response: Any,
-    raw_mindmap_response: Any
+    raw_mindmap_response: Any,
+    deepsearch_trace_file_path: str | None = None
 ) -> ChatMessage:
     """Create and save assistant message."""
     message_handler = get_message_handler()
@@ -164,6 +165,15 @@ async def create_assistant_message(
         if sources_for_frontend
         else None
     )
+    
+    # 准备 raw_llm_response，包含 trace_file_path（如果存在）
+    raw_llm_response_with_trace = raw_llm_response
+    if deepsearch_trace_file_path:
+        if raw_llm_response_with_trace is None:
+            raw_llm_response_with_trace = {}
+        if not isinstance(raw_llm_response_with_trace, dict):
+            raw_llm_response_with_trace = {"response": raw_llm_response_with_trace}
+        raw_llm_response_with_trace["deepsearch_trace_file_path"] = deepsearch_trace_file_path
     
     assistant_message = ChatMessage(
         session_id=session_id,
@@ -175,7 +185,7 @@ async def create_assistant_message(
         ),
         sources=sources_for_storage,
         subgraph_data=subgraph_data if return_subgraph else None,
-        raw_llm_response=raw_llm_response,
+        raw_llm_response=raw_llm_response_with_trace,
         raw_mindmap_response=(
             {"response": raw_mindmap_response}
             if raw_mindmap_response
