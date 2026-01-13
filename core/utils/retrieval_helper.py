@@ -145,49 +145,49 @@ class RetrievalHelper:
     ) -> List[int]:
         """
         
-        选择既与查询相关又彼此多样化的文档索引
+        Select document indices that are both relevant to the query and diverse from each other.
         
         Args:
-            query_embedding: 查询的嵌入向量
-            embedding_list: 候选文档的嵌入向量列表
-            lambda_mult: 多样性权重，0到1之间，0表示最大多样性，1表示最大相关性
-            k: 要返回的文档数量
+            query_embedding: Query embedding vector.
+            embedding_list: Candidate document embedding vectors.
+            lambda_mult: Diversity weight in [0, 1]; 0 = max diversity, 1 = max relevance.
+            k: Number of documents to return.
             
         Returns:
-            选中文档的索引列表
+            Indices of the selected documents.
         """
         if not embedding_list:
             return []
         
         import numpy as np
         
-        # 转换为numpy数组
+        # Convert to numpy arrays.
         query_vec = np.array(query_embedding)
         embeddings = np.array(embedding_list)
         
-        # 计算查询与所有文档的相似度
+        # Compute query similarity against all documents.
         query_similarities = np.dot(embeddings, query_vec)
         
-        # 初始化选中的文档索引列表
+        # Initialize selected document indices.
         selected_indices = []
         remaining_indices = list(range(len(embedding_list)))
         
-        # 选择第一个最相似的文档
+        # Pick the first (most similar) document.
         if remaining_indices:
             best_idx = remaining_indices[np.argmax(query_similarities)]
             selected_indices.append(best_idx)
             remaining_indices.remove(best_idx)
         
-        # 迭代选择剩余文档
+        # Iteratively pick the remaining documents.
         while len(selected_indices) < k and remaining_indices:
             best_score = float('-inf')
             best_idx = None
             
             for idx in remaining_indices:
-                # 计算与查询的相关性
+                # Query relevance.
                 relevance = query_similarities[idx]
                 
-                # 计算与已选文档的最大相似度（多样性惩罚）
+                # Diversity penalty: max similarity to already-selected docs.
                 if selected_indices:
                     selected_embeddings = embeddings[selected_indices]
                     similarities = np.dot(selected_embeddings, embeddings[idx])
@@ -195,7 +195,7 @@ class RetrievalHelper:
                 else:
                     max_similarity = 0
                 
-                # MMR分数：lambda_mult * 相关性 - (1 - lambda_mult) * 多样性惩罚
+                # MMR score = lambda_mult * relevance - (1 - lambda_mult) * max_similarity.
                 mmr_score = lambda_mult * relevance - (1 - lambda_mult) * max_similarity
                 
                 if mmr_score > best_score:
@@ -212,19 +212,19 @@ class RetrievalHelper:
     
     @staticmethod
     def normalize_embeddings(embeddings: List[List[float]]) -> List[List[float]]:
-        """归一化嵌入向量
+        """Normalize embedding vectors.
         
         Args:
-            embeddings: 嵌入向量列表
+            embeddings: Embedding vectors.
             
         Returns:
-            归一化后的嵌入向量列表
+            Normalized embedding vectors.
         """
         import numpy as np
         
         embeddings_array = np.array(embeddings)
         norms = np.linalg.norm(embeddings_array, axis=1, keepdims=True)
-        # 避免除零
+        # Avoid division by zero.
         norms = np.where(norms == 0, 1, norms)
         normalized = embeddings_array / norms
         return normalized.tolist()
@@ -235,15 +235,15 @@ class RetrievalHelper:
         embedding2: List[float], 
         metric: str = 'cosine'
     ) -> float:
-        """计算两个嵌入向量之间的相似度
+        """Compute similarity between two embedding vectors.
         
         Args:
-            embedding1: 第一个嵌入向量
-            embedding2: 第二个嵌入向量
-            metric: 相似度度量，支持'cosine', 'euclidean', 'dot_product'
+            embedding1: First embedding vector.
+            embedding2: Second embedding vector.
+            metric: Similarity metric: 'cosine', 'euclidean', or 'dot_product'.
             
         Returns:
-            相似度分数
+            Similarity score.
         """
         import numpy as np
         
@@ -251,7 +251,7 @@ class RetrievalHelper:
         vec2 = np.array(embedding2)
         
         if metric == 'cosine':
-            # 余弦相似度
+            # Cosine similarity.
             dot_product = np.dot(vec1, vec2)
             norm1 = np.linalg.norm(vec1)
             norm2 = np.linalg.norm(vec2)
@@ -259,11 +259,11 @@ class RetrievalHelper:
                 return 0.0
             return dot_product / (norm1 * norm2)
         elif metric == 'euclidean':
-            # 欧几里得距离（转换为相似度）
+            # Euclidean distance (converted to similarity).
             distance = np.linalg.norm(vec1 - vec2)
             return 1.0 / (1.0 + distance)
         elif metric == 'dot_product':
-            # 点积
+            # Dot product.
             return np.dot(vec1, vec2)
         else:
             raise ValueError(f"不支持的相似度度量: {metric}")

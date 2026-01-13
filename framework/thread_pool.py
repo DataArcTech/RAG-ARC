@@ -1,9 +1,9 @@
 """
-全局线程池管理器
+Global thread-pool manager.
 
-提供统一的线程池来执行阻塞操作，避免阻塞事件循环。
-确保不同功能（用户登录、上传文件、问答、图谱关系）可以并发执行，不会互相阻塞。
-支持透传 correlation_id 等 contextvars 到线程池中。
+Provides a shared thread pool for running blocking work without blocking the event loop.
+Ensures different workflows (login, file upload, Q&A, graph operations) can run concurrently.
+Propagates contextvars (e.g., correlation_id) into worker threads.
 """
 import asyncio
 import contextvars
@@ -17,10 +17,10 @@ logger = logging.getLogger(__name__)
 
 class GlobalThreadPool:
     """
-    全局线程池管理器
+    Global thread-pool manager.
     
-    使用单例模式，确保整个应用共享同一个线程池。
-    这样可以更好地控制并发数量，避免创建过多线程。
+    Uses a singleton pattern so the whole application shares one pool.
+    This helps control concurrency and avoids creating too many threads.
     """
     _instance: Optional['GlobalThreadPool'] = None
     _executor: Optional[ThreadPoolExecutor] = None
@@ -33,9 +33,9 @@ class GlobalThreadPool:
     
     def __init__(self):
         if self._executor is None:
-            # 根据CPU核心数设置线程池大小
-            # 对于I/O密集型任务，可以设置更大的线程数
-            # 默认使用 min(32, (os.cpu_count() or 1) + 4)
+            # Size the pool based on CPU cores.
+            # For I/O-bound workloads, a larger pool can be reasonable.
+            # Default: min(32, (os.cpu_count() or 1) + 4)
             import os
             max_workers = min(32, (os.cpu_count() or 1) + 4)
             self._executor = ThreadPoolExecutor(
@@ -46,27 +46,27 @@ class GlobalThreadPool:
     
     @property
     def executor(self) -> ThreadPoolExecutor:
-        """获取线程池执行器"""
+        """Return the thread pool executor."""
         if self._executor is None:
             self.__init__()
         return self._executor
     
     async def run_blocking(self, func, *args, **kwargs):
         """
-        在线程池中运行阻塞函数，自动透传 contextvars（如 correlation_id）
+        Run a blocking function in the pool, propagating contextvars (e.g., correlation_id).
         
         Args:
-            func: 要执行的阻塞函数
-            *args: 函数的位置参数
-            **kwargs: 函数的关键字参数
+            func: blocking callable
+            *args: positional args
+            **kwargs: keyword args
             
         Returns:
-            函数的返回值
+            The callable result.
         """
-        # 捕获当前 context（包含 correlation_id 等）
+        # Capture the current context (including correlation_id, etc.).
         ctx = contextvars.copy_context()
         
-        # 在线程中运行函数时使用捕获的 context
+        # Run with captured context inside the worker thread.
         def run_with_context():
             return ctx.run(partial(func, *args, **kwargs))
         
@@ -103,16 +103,16 @@ class GlobalThreadPool:
             logger.info("Global thread pool shut down")
 
 
-# 全局单例实例
+# Global singleton instance.
 _global_thread_pool: Optional[GlobalThreadPool] = None
 
 
 def get_thread_pool() -> GlobalThreadPool:
     """
-    获取全局线程池实例
+    Get the global thread pool instance.
     
     Returns:
-        GlobalThreadPool实例
+        GlobalThreadPool instance.
     """
     global _global_thread_pool
     if _global_thread_pool is None:
@@ -122,14 +122,14 @@ def get_thread_pool() -> GlobalThreadPool:
 
 async def run_blocking(func, *args, **kwargs):
     """
-    便捷函数：在线程池中运行阻塞函数
+    Convenience helper: run a blocking function in the thread pool.
     
     Args:
-        func: 要执行的阻塞函数
-        *args: 函数的位置参数
-        **kwargs: 函数的关键字参数
+        func: blocking callable
+        *args: positional args
+        **kwargs: keyword args
         
     Returns:
-        函数的返回值
+        The callable result.
     """
     return await get_thread_pool().run_blocking(func, *args, **kwargs)

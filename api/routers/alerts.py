@@ -12,10 +12,12 @@ router = APIRouter(prefix="/alerts", tags=["alerts"])
 
 async def _query_openrouter_balance(api_key: str) -> Optional[Dict[str, Any]]:
     """
-    查询 OpenRouter 账户使用量和余额信息
+    Query OpenRouter account usage and balance.
     
-    OpenRouter 通过 /v1/auth/key 接口返回 API Key 信息
-    包含：limit（总额度）、limit_remaining（剩余额度）、usage（已使用量）
+    OpenRouter returns API key information via `/v1/auth/key`, including:
+    - limit (total limit)
+    - limit_remaining (remaining limit)
+    - usage (consumed usage)
     
     Returns:
         Dict containing: used, limit, remaining, raw_data
@@ -34,15 +36,15 @@ async def _query_openrouter_balance(api_key: str) -> Optional[Dict[str, Any]]:
             data = response.json()
             logger.debug(f"OpenRouter API response: {data}")
             
-            # 从 data.data 中提取信息（实际响应结构是 {"data": {...}}）
+            # Extract info from data.data (actual response shape is {"data": {...}}).
             key_info = data.get("data", {}) if isinstance(data.get("data"), dict) else data
             
-            # OpenRouter 返回的字段：limit, limit_remaining, usage
+            # OpenRouter fields: limit, limit_remaining, usage.
             limit = key_info.get("limit")
             limit_remaining = key_info.get("limit_remaining")
             usage = key_info.get("usage", 0)
             
-            # 如果 limit_remaining 存在，直接使用；否则计算 remaining = limit - usage
+            # Prefer limit_remaining; otherwise compute remaining = limit - usage.
             if limit_remaining is not None:
                 remaining = float(limit_remaining)
             elif limit is not None:
@@ -65,9 +67,9 @@ async def _query_openrouter_balance(api_key: str) -> Optional[Dict[str, Any]]:
 @router.get("/balance", status_code=status.HTTP_200_OK)
 async def get_balance():
     """
-    查询 OpenRouter 账户余额
+    Query OpenRouter account balance.
     
-    注意：此接口不需要认证，用于系统监控
+    Note: this endpoint is unauthenticated and intended for system monitoring.
     
     Returns:
         Dict containing OpenRouter balance information
@@ -75,8 +77,8 @@ async def get_balance():
     
     result: Dict[str, Any] = {}
     
-    # 查询 OpenRouter 余额
-    # 根据 CHAT_API_BASE_URL 判断是否使用 OpenRouter
+    # Query OpenRouter balance.
+    # Determine whether OpenRouter is in use via CHAT_API_BASE_URL.
     chat_base_url = os.getenv("CHAT_API_BASE_URL", "")
     openrouter_key = None
     if "openrouter.ai" in chat_base_url:
@@ -86,7 +88,7 @@ async def get_balance():
     if openrouter_key:
         openrouter_data = await _query_openrouter_balance(openrouter_key)
         if openrouter_data:
-            # 优先使用 limit_remaining，如果不存在则使用 remaining
+            # Prefer limit_remaining; if missing, fall back to remaining.
             balance_value = openrouter_data.get("limit_remaining") or openrouter_data.get("remaining")
             result["openrouter"] = {
                 "enabled": True,
@@ -94,7 +96,7 @@ async def get_balance():
                 "used": openrouter_data.get("used"),
                 "limit": openrouter_data.get("limit"),
                 "remaining": balance_value,
-                "balance": balance_value,  # 兼容字段，使用剩余额度作为余额
+                "balance": balance_value,  # Compatibility field: use remaining limit as balance.
             }
         else:
             result["openrouter"] = {
@@ -110,4 +112,3 @@ async def get_balance():
         }
     
     return result
-

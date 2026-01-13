@@ -517,7 +517,7 @@ def _build_sources_for_frontend(entries: List[Dict[str, Any]], max_sources: int)
         if max_chars > 0 and len(content) > max_chars:
             content = f"{content[:max_chars].rstrip()}..."
 
-        # 判断是否是 Tavily 联网搜索的 chunk
+        # Detect whether this chunk comes from Tavily web search.
         is_tavily_chunk = (
             chunk_id.startswith("tavily-")
             or metadata.get("source") == "web.tavily"
@@ -596,8 +596,8 @@ async def get_static_file_redirect(
     
     logger.debug(f"[FILE_ACCESS_REDIRECT] File metadata found: file_id={file_id}, owner_id={getattr(meta, 'owner_id', None)}, filename={getattr(meta, 'filename', None)}")
     
-    # 临时方案：暂时跳过所有权限检查，允许所有用户（包括未认证用户）访问文件
-    # TODO: 后续添加权限管理
+    # Temporary: skip permission checks and allow all users (including unauthenticated users) to access files.
+    # TODO: add proper authorization checks.
     logger.info(f"[FILE_ACCESS_REDIRECT] File access allowed (no permission check): file_id={file_id}, user={current_user.id if current_user else None}, user_type={getattr(current_user, 'type', None) if current_user else None}")
 
     filename = getattr(meta, "filename", None) or "file"
@@ -629,8 +629,8 @@ async def get_static_file(
     
     logger.debug(f"[FILE_ACCESS] File metadata found: file_id={file_id}, owner_id={getattr(meta, 'owner_id', None)}, filename={getattr(meta, 'filename', None)}, blob_key={getattr(meta, 'blob_key', None)}")
     
-    # 临时方案：暂时跳过所有权限检查，允许所有用户（包括未认证用户）访问文件
-    # TODO: 后续添加权限管理
+    # Temporary: skip permission checks and allow all users (including unauthenticated users) to access files.
+    # TODO: add proper authorization checks.
     logger.info(f"[FILE_ACCESS] File access allowed (no permission check): file_id={file_id}, user={current_user.id if current_user else None}, user_type={getattr(current_user, 'type', None) if current_user else None}")
 
     blob_key = getattr(meta, "blob_key", None)
@@ -656,8 +656,8 @@ async def get_static_file(
     try:
         if blob_store_type == "LocalDB":
             logger.debug(f"[FILE_ACCESS] Using LocalDB for file access: file_id={file_id}, blob_key={blob_key}")
-            # 优先使用 LocalDB 的 _get_full_path 方法，确保与存储时使用相同的路径解析逻辑
-            # 这样可以保证存储和访问使用相同的 base_path（考虑配置中的 base_path）
+            # Prefer LocalDB._get_full_path to keep path resolution consistent with storage time.
+            # This ensures storage and access share the same base_path (respecting configured base_path).
             path = await anyio.to_thread.run_sync(blob_store._get_full_path, blob_key)
             logger.debug(f"[FILE_ACCESS] Primary path resolved: file_id={file_id}, blob_key={blob_key}, path={path}, exists={path.exists()}")
             
@@ -666,8 +666,8 @@ async def get_static_file(
                 return FileResponse(path, media_type=content_type, headers=headers)
             else:
                 logger.debug(f"[FILE_ACCESS] Primary path not found, trying fallback: file_id={file_id}, path={path}")
-                # 兼容性处理1：如果路径不存在，尝试使用环境变量直接拼接（兼容历史数据）
-                # 某些历史文件可能是在不同的 base_path 下存储的
+                # Compatibility 1: if path doesn't exist, try constructing from env base path (legacy data).
+                # Some historical files may have been stored under a different base_path.
                 base_path = os.getenv("LOCAL_FILE_STORAGE_PATH") or os.getenv("LOCAL_BLOB_STORE_BASE_PATH") or "./data/files"
                 base_dir = Path(base_path).expanduser().resolve()
                 safe_key = str(blob_key).replace("..", "").lstrip("/")
@@ -678,33 +678,33 @@ async def get_static_file(
                     logger.info(f"[FILE_ACCESS] File access success (fallback path): file_id={file_id}, blob_key={blob_key}, path={fallback_path}")
                     return FileResponse(fallback_path, media_type=content_type, headers=headers)
                 
-                # 兼容性处理2：尝试修复 blob_key 中可能包含的重复路径
-                # blob_key 可能包含类似 "RAG-ARC/local/files_chatKB_test/文件名.pdf" 的路径
-                # 我们需要提取出实际的文件名部分
+                # Compatibility 2: try repairing blob_key if it contains duplicated path segments.
+                # blob_key may include paths like "RAG-ARC/local/files_chatKB_test/<filename>.pdf".
+                # We need to extract the actual filename segment.
                 logger.debug(f"[FILE_ACCESS] Fallback path not found, trying path fix: file_id={file_id}, safe_key={safe_key}")
                 key_parts = safe_key.split("/")
                 logger.debug(f"[FILE_ACCESS] Key parts: file_id={file_id}, key_parts={key_parts}, len={len(key_parts)}")
                 if len(key_parts) >= 3:  # files/{prefix}/{file_id}/...
-                    # 尝试只使用最后一部分（文件名）
+                    # Try using only the last segment (filename).
                     file_id_part = key_parts[2] if len(key_parts) > 2 else ""
                     filename_part = key_parts[-1] if key_parts else ""
                     logger.debug(f"[FILE_ACCESS] Extracted parts: file_id={file_id}, file_id_part={file_id_part}, filename_part={filename_part}")
-                    # 如果文件名部分包含路径分隔符，只取 basename
+                    # If filename contains separators, keep basename only.
                     if "/" in filename_part or "\\" in filename_part:
                         original_filename_part = filename_part
                         filename_part = Path(filename_part).name
                         logger.debug(f"[FILE_ACCESS] Filename contains path, extracted basename: file_id={file_id}, original={original_filename_part}, basename={filename_part}")
-                    # 重新构建 blob_key: files/{prefix}/{file_id}/{basename}
+                    # Rebuild blob_key: files/{prefix}/{file_id}/{basename}
                     if file_id_part and filename_part:
                         fixed_key = f"files/{key_parts[1]}/{file_id_part}/{filename_part}"
                         logger.debug(f"[FILE_ACCESS] Fixed key generated: file_id={file_id}, original_blob_key={blob_key}, fixed_key={fixed_key}")
-                        # 先尝试使用 LocalDB 的方法
+                        # First try LocalDB resolution.
                         fixed_path = await anyio.to_thread.run_sync(blob_store._get_full_path, fixed_key)
                         logger.debug(f"[FILE_ACCESS] Fixed path via LocalDB: file_id={file_id}, fixed_key={fixed_key}, fixed_path={fixed_path}, exists={fixed_path.exists()}")
                         if fixed_path.exists():
                             logger.info(f"[FILE_ACCESS] File access success (fixed path via LocalDB): file_id={file_id}, original_blob_key={blob_key}, fixed_blob_key={fixed_key}, path={fixed_path}")
                             return FileResponse(fixed_path, media_type=content_type, headers=headers)
-                        # 再尝试使用环境变量直接拼接
+                        # Then try env base path concatenation.
                         fixed_fallback_path = base_dir / fixed_key
                         logger.debug(f"[FILE_ACCESS] Fixed path via env: file_id={file_id}, fixed_key={fixed_key}, fixed_fallback_path={fixed_fallback_path}, exists={fixed_fallback_path.exists()}")
                         if fixed_fallback_path.exists():
@@ -799,7 +799,7 @@ async def messages(
         first_turn = len(payload.messages or []) == 0
 
         def _emit_error(code: int, message: str):
-            # 使用统一的response格式
+            # Use the standard response format.
             error_response = {
                 "code": code,
                 "message": message,

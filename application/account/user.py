@@ -93,9 +93,9 @@ class Account(AbstractModule):
     def register_user(self, user_data: UserCreate):
         """Register a new user (synchronous)."""
         try:
-            # 如果 type 为 None，使用默认值 0
+            # If type is None, use the default value 0.
             user_type = user_data.type if user_data.type is not None else 0
-            # 检查用户是否已存在（通过 user_name 和 type 组合）
+            # Check whether the user already exists (by user_name + type).
             existing_user = self.user_storage.get_user_by_username(user_data.user_name, type=user_type)
             if existing_user:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already exists for this type")
@@ -107,7 +107,7 @@ class Account(AbstractModule):
                 type=user_type,
                 name=user_data.name
             )
-            # 返回创建的用户对象
+            # Return the created user object.
             new_user = self.user_storage.get_user(new_user_id)
             return new_user
         except HTTPException:

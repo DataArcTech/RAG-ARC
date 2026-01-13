@@ -29,7 +29,6 @@ from api.sse import (
     openai_chat_completion_chunk,
     sse_done,
     sse_json,
-    sse_json_wrapped,
 )
 from api.routers.chatbot import (
     _sse_json,
@@ -265,13 +264,13 @@ async def stream_chat_sse(
     include_evidence = request.include_evidence
     enable_web_search = bool(getattr(request, "enable_web_search", False))
     enable_deepsearch = bool(getattr(request, "enable_deepsearch", False))
-    
-    # 无论 DeepSearch 是否开启，都开启联网搜索
-    enable_web_search = True
-    if enable_deepsearch:
-        logger.info("DeepSearch enabled, web search is also enabled (enable_web_search=True)")
+
+    # When DeepSearch is enabled, web search must also be enabled.
+    if enable_deepsearch and not enable_web_search:
+        enable_web_search = True
+        logger.info("DeepSearch enabled; forcing web search on (enable_web_search=True)")
     else:
-        logger.info("Web search enabled (enable_web_search=True)")
+        logger.info("Web search enabled=%s", enable_web_search)
 
     # Guard: only livingKB users (type=0) may request subgraph/evidence generation.
     if return_subgraph or include_evidence:
@@ -329,19 +328,18 @@ async def stream_chat_sse(
     async def event_generator():
         chunk_id = new_chatcmpl_id()
         created = now_epoch_seconds()
-        # 使用 correlation_id 而不是生成新的，保持与日志中的 request_id 一致
+        # Use correlation_id when available so request_id stays consistent with logs.
         request_id = correlation_id.get() or uuid.uuid4().hex
         progress_seq = 0
 
         # Qwen/OpenAI-compatible streams typically start with a chunk that sets role=assistant.
-        yield sse_json_wrapped(
+        yield sse_json(
             openai_chat_completion_chunk(
                 chunk_id=chunk_id,
                 model=model_name,
                 created=created,
                 delta=delta_envelope(role="assistant", content=""),
             ),
-            request_id=request_id
         )
 
         user_message = ChatMessage(
@@ -360,7 +358,7 @@ async def stream_chat_sse(
         # Exclude the message we just created (avoid duplication).
         history_messages = [msg for msg in history_messages if msg.id != user_message.id]
         
-        # 判断是否是第一轮对话（检查是否有assistant消息）
+        # Determine whether this is the first turn (no assistant messages yet).
         first_turn = not any(
             msg.content.get("role") == "assistant" 
             for msg in history_messages 
@@ -409,7 +407,7 @@ async def stream_chat_sse(
         stream_error: list[Exception | None] = [None]
         prepared: dict[str, Any] = {}
 
-        # 用于存储 DeepSearch 进度事件的队列（在 DeepSearch 执行期间实时发送）
+        # Queue for DeepSearch progress events (streamed in real time during DeepSearch execution).
         deepsearch_progress_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         
         def _emit_progress(payload: dict[str, Any]) -> None:
@@ -423,9 +421,9 @@ async def stream_chat_sse(
             envelope.setdefault("seq", progress_seq)
             asyncio.run_coroutine_threadsafe(queue.put({"kind": "progress", "payload": envelope}), loop)
         
-        # 专门用于 DeepSearch 进度事件的函数（直接放入专用队列，实时发送）
+        # Helper for DeepSearch progress events (push to the dedicated queue for near real-time streaming).
         async def _emit_deepsearch_progress(payload: dict[str, Any]) -> None:
-            """直接发送 DeepSearch 进度事件，不通过主队列"""
+            """Emit DeepSearch progress events via the dedicated queue (bypasses the main queue)."""
             nonlocal progress_seq
             progress_seq += 1
             envelope = dict(payload or {})
@@ -436,7 +434,7 @@ async def stream_chat_sse(
             envelope.setdefault("seq", progress_seq)
             await deepsearch_progress_queue.put(envelope)
 
-        # 如果启用了 deepsearch，先执行 deepsearch 获取增强的上下文
+        # If DeepSearch is enabled, run it first to produce augmented context.
         enhanced_query = query
         if enable_deepsearch:
             logger.info("DeepSearch enabled for query: %s (owner_id=%s)", query, effective_owner)
@@ -445,30 +443,31 @@ async def stream_chat_sse(
                 deepsearch_service = registrator.get_object("deepsearch_service")
                 logger.info("DeepSearch service found, running...")
                 
-                # 创建 DeepSearch 阶段监听器，用于 SSE 输出进度
-                # 根据 DeepSearch 文档，stage 顺序为：created → planned → reasoned → gap_evaluated → external_invoked → reported → quality_gated → done/failed
+                # Create a DeepSearch stage listener to stream progress via SSE.
+                # Per DeepSearch docs, the stage order is:
+                # created → planned → reasoned → gap_evaluated → external_invoked → reported → quality_gated → done/failed
                 def deepsearch_stage_listener(record: dict[str, Any], state) -> None:
-                    """DeepSearch 阶段变化监听器，通过 SSE 发送进度信息（符合 DeepSearch 对接文档规范）"""
+                    """DeepSearch stage-change listener that emits progress events via SSE."""
                     try:
                         stage = record.get("stage", "unknown")
                         metadata = record.get("metadata", {})
                         
                         logger.info("DeepSearch stage listener called: stage=%s, request_id=%s", stage, request_id)
                         
-                        # 构建进度信息（符合 legacy SSE 格式：event=progress）
+                        # Build progress payload (legacy SSE format: event=progress).
                         progress_info = {
                             "stage": "deepsearch",
                             "deepsearch_stage": stage,
                             "status": "running",
                         }
                         
-                        # 根据文档中的 stage 名称进行匹配
+                        # Match per documented stage names.
                         if stage == "planned":
                             progress_info["message"] = "正在生成搜索计划..."
-                            # 从 metadata 中获取计划步骤数
+                            # Read plan step count from metadata.
                             if "step_count" in metadata:
                                 progress_info["plan_steps_count"] = metadata.get("step_count")
-                            # 从 state 中获取完整的计划内容
+                            # Read full plan content from state.
                             if hasattr(state, "plan_steps") and state.plan_steps:
                                 progress_info["plan_steps"] = state.plan_steps
                                 logger.info("DeepSearch plan steps: %s", state.plan_steps)
@@ -480,11 +479,11 @@ async def stream_chat_sse(
                                           state.plan_metadata.get("artifact_path"))
                         elif stage == "reasoned":
                             progress_info["message"] = "正在进行图谱推理..."
-                            # 从 reasoning_trace 中获取完整的推理信息
+                            # Read full reasoning trace from state.
                             if hasattr(state, "reasoning_trace") and state.reasoning_trace:
                                 progress_info["reasoning_trace"] = state.reasoning_trace
                                 
-                                # 推理步骤
+                                # Reasoning steps.
                                 reasoning_steps = state.reasoning_trace.get("reasoning_steps", [])
                                 if reasoning_steps:
                                     progress_info["reasoning_steps"] = reasoning_steps
@@ -492,28 +491,28 @@ async def stream_chat_sse(
                                     logger.info("DeepSearch reasoning steps: count=%d, steps=%s", 
                                               len(reasoning_steps), reasoning_steps)
                                 
-                                # 工具调用结果
+                                # Tool call results.
                                 tool_results = state.reasoning_trace.get("tool_results", [])
                                 if tool_results:
                                     progress_info["tool_results"] = tool_results
                                     progress_info["tool_calls_count"] = len(tool_results)
                                     logger.info("DeepSearch tool results: count=%d, results=%s", 
                                               len(tool_results), tool_results)
-                                    # 获取最后一个工具调用的信息
+                                    # Include the last tool call name if present.
                                     last_tool = tool_results[-1] if tool_results else {}
                                     if isinstance(last_tool, dict):
                                         tool_name = last_tool.get("tool_name", "")
                                         if tool_name:
                                             progress_info["last_tool"] = tool_name
                                 
-                                # 证据
+                                # Evidence.
                                 evidences = state.reasoning_trace.get("evidences", [])
                                 if evidences:
                                     progress_info["evidences"] = evidences
                                     progress_info["evidence_count"] = len(evidences)
                                     logger.info("DeepSearch evidences: count=%d", len(evidences))
                                 
-                                # 从 metadata 中获取补充信息
+                                # Attach supplemental metadata.
                                 if "evidence_count" in metadata:
                                     progress_info["evidence_count"] = metadata.get("evidence_count")
                                 if "completed_steps" in metadata:
@@ -521,12 +520,12 @@ async def stream_chat_sse(
                                     logger.info("DeepSearch completed steps: %s", metadata.get("completed_steps"))
                         elif stage == "gap_evaluated":
                             progress_info["message"] = "正在检测知识缺口..."
-                            # 从 state 中获取完整的缺口检测结果
+                            # Read full gap-evaluation result from state.
                             if hasattr(state, "gap_result") and state.gap_result:
                                 progress_info["gap_result"] = state.gap_result
                                 logger.info("DeepSearch gap result: %s", state.gap_result)
                             
-                            # 从 metadata 中获取缺口检测结果
+                            # Attach gap-evaluation metadata.
                             if "should_trigger_external" in metadata:
                                 progress_info["should_trigger_external"] = metadata.get("should_trigger_external")
                                 logger.info("DeepSearch should_trigger_external: %s", metadata.get("should_trigger_external"))
@@ -535,7 +534,7 @@ async def stream_chat_sse(
                                 logger.info("DeepSearch gap reason: %s", metadata.get("reason"))
                         elif stage == "external_invoked":
                             progress_info["message"] = "正在进行外部搜索..."
-                            # 从 state 中获取完整的外部调用信息
+                            # Read external invocation info from state.
                             if hasattr(state, "external_calls") and state.external_calls:
                                 progress_info["external_calls"] = state.external_calls
                                 progress_info["external_calls_count"] = len(state.external_calls)
@@ -546,11 +545,11 @@ async def stream_chat_sse(
                                 logger.info("DeepSearch total external calls: %s", metadata.get("total_calls"))
                         elif stage == "reported":
                             progress_info["message"] = "正在生成报告..."
-                            # 从 state 中获取完整的报告信息
+                            # Read report payload from state.
                             if hasattr(state, "report_payload") and state.report_payload:
                                 progress_info["report_payload"] = state.report_payload
                                 
-                                # 报告答案
+                                # Answer.
                                 answer = state.report_payload.get("answer", "")
                                 if answer:
                                     progress_info["answer"] = answer
@@ -558,20 +557,20 @@ async def stream_chat_sse(
                                     logger.info("DeepSearch report answer: length=%d, preview=%s", 
                                               len(answer), answer[:200] if len(answer) > 200 else answer)
                                 
-                                # 结构化报告
+                                # Structured report.
                                 structured_report = state.report_payload.get("structured_report")
                                 if structured_report:
                                     progress_info["structured_report"] = structured_report
                                     logger.info("DeepSearch structured report: %s", structured_report)
                                 
-                                # 引用和证据
+                                # References and evidence.
                                 references = state.report_payload.get("references", [])
                                 if references:
                                     progress_info["references"] = references
                                     progress_info["references_count"] = len(references)
                                     logger.info("DeepSearch references: count=%d", len(references))
                             
-                            # 从 metadata 中获取报告信息
+                            # Attach report metadata.
                             if "answer_length" in metadata:
                                 progress_info["answer_length"] = metadata.get("answer_length")
                             if "evidence_count" in metadata:
@@ -579,14 +578,14 @@ async def stream_chat_sse(
                                 logger.info("DeepSearch evidence count: %s", metadata.get("evidence_count"))
                         elif stage == "quality_gated":
                             progress_info["message"] = "正在进行质量检查..."
-                            # 从 state 中获取完整的质量检查信息
+                            # Read quality-gate info from state.
                             if hasattr(state, "quality_gates") and state.quality_gates:
                                 progress_info["quality_gates"] = state.quality_gates
                                 progress_info["quality_gates_count"] = len(state.quality_gates)
                                 logger.info("DeepSearch quality gates: count=%d, gates=%s", 
                                           len(state.quality_gates), state.quality_gates)
                             
-                            # 从 metadata 中获取质量检查结果
+                            # Attach quality-gate metadata.
                             if "passed" in metadata:
                                 progress_info["quality_passed"] = metadata.get("passed")
                                 logger.info("DeepSearch quality passed: %s", metadata.get("passed"))
@@ -599,7 +598,7 @@ async def stream_chat_sse(
                         elif stage == "done":
                             progress_info["status"] = "completed"
                             progress_info["message"] = "DeepSearch 完成"
-                            # 添加完成时的汇总信息
+                            # Attach completion summary.
                             if hasattr(state, "run_id"):
                                 progress_info["run_id"] = state.run_id
                                 logger.info("DeepSearch completed: run_id=%s", state.run_id)
@@ -612,7 +611,7 @@ async def stream_chat_sse(
                         elif stage == "failed":
                             progress_info["status"] = "failed"
                             progress_info["message"] = "DeepSearch 执行失败"
-                            # 添加失败时的错误信息
+                            # Attach failure details.
                             if hasattr(state, "errors") and state.errors:
                                 progress_info["errors"] = state.errors
                                 logger.error("DeepSearch errors: %s", state.errors)
@@ -621,7 +620,7 @@ async def stream_chat_sse(
                                 logger.error("DeepSearch failed: run_id=%s", state.run_id)
                         elif stage == "created":
                             progress_info["message"] = "DeepSearch 初始化..."
-                            # 添加初始化信息
+                            # Attach initialization details.
                             if hasattr(state, "run_id"):
                                 progress_info["run_id"] = state.run_id
                                 logger.info("DeepSearch initialized: run_id=%s", state.run_id)
@@ -629,16 +628,16 @@ async def stream_chat_sse(
                                 progress_info["config_fingerprint"] = state.config_fingerprint
                                 logger.info("DeepSearch config fingerprint: %s", state.config_fingerprint)
                         else:
-                            # 未知阶段，但仍记录
+                            # Unknown stage; still record it.
                             progress_info["message"] = f"DeepSearch 执行中（阶段: {stage}）..."
                         
-                        # 添加通用的元数据信息
+                        # Attach common metadata.
                         if metadata:
-                            # 计划相关
+                            # Plan metadata.
                             if "plan_id" in metadata:
                                 progress_info["plan_id"] = metadata.get("plan_id")
                             
-                        # 使用专用队列直接发送，不通过主队列
+                        # Emit via dedicated queue (bypasses the main queue).
                         asyncio.run_coroutine_threadsafe(_emit_deepsearch_progress(progress_info), loop)
                         logger.info("DeepSearch progress emitted: stage=%s, message=%s", stage, progress_info.get("message"))
                     except Exception as e:
@@ -646,7 +645,7 @@ async def stream_chat_sse(
                 
                 logger.info("Passing stage_listener to DeepSearch service (request_id=%s)", request_id)
                 
-                # 创建任务以并行执行 DeepSearch
+                # Create a task to run DeepSearch in parallel.
                 deepsearch_task = asyncio.create_task(
                     deepsearch_service.run(
                         question=query,
@@ -655,32 +654,32 @@ async def stream_chat_sse(
                     )
                 )
                 
-                # 在 DeepSearch 执行期间，实时消费并发送进度事件
-                # 使用专用队列来实时发送 DeepSearch 进度
+                # While DeepSearch is running, consume and emit progress events in real time.
+                # Use a dedicated queue so progress is not delayed by the main queue.
                 deepsearch_progress_task = None
                 while not deepsearch_task.done():
-                    # 如果进度队列等待任务不存在或已完成，创建新的
+                    # Create the queue wait task if missing or already completed.
                     if deepsearch_progress_task is None or deepsearch_progress_task.done():
                         deepsearch_progress_task = asyncio.create_task(deepsearch_progress_queue.get())
                     
-                    # 同时等待任务完成和进度队列事件
+                    # Wait on both: DeepSearch completion and the next progress event.
                     done, pending = await asyncio.wait(
                         [deepsearch_task, deepsearch_progress_task],
                         timeout=0.1,
                         return_when=asyncio.FIRST_COMPLETED
                     )
                     
-                    # 检查是否有进度队列事件
+                    # Process progress events if available.
                     if deepsearch_progress_task in done:
                         try:
                             progress_payload = await deepsearch_progress_task
-                            deepsearch_progress_task = None  # 重置，下次循环创建新的
+                            deepsearch_progress_task = None  # Reset; recreate on next iteration.
                             
                             if progress_payload is None:
-                                # 收到结束信号，继续等待 DeepSearch 完成
+                                # Received sentinel; keep waiting for DeepSearch completion.
                                 continue
                             
-                            # 直接 yield DeepSearch 进度事件
+                            # Yield the DeepSearch progress event directly.
                             logger.info("Yielding DeepSearch progress SSE: stage=%s, request_id=%s", progress_payload.get("deepsearch_stage"), request_id)
                             tool_calls = [
                                 {
@@ -698,22 +697,21 @@ async def stream_chat_sse(
                                     },
                                 }
                             ]
-                            yield sse_json_wrapped(
+                            yield sse_json(
                                 openai_chat_completion_chunk(
                                     chunk_id=chunk_id,
                                     model=model_name,
                                     created=created,
                                     delta=delta_envelope(role=None, tool_calls=tool_calls),
                                 ),
-                                request_id=request_id
                             )
                         except Exception as e:
                             logger.error("Error processing DeepSearch progress: %s", e, exc_info=True)
                             deepsearch_progress_task = None
                     
-                    # 如果 DeepSearch 任务完成，退出循环
+                    # If DeepSearch finished, exit the loop.
                     if deepsearch_task in done:
-                        # 取消进度队列等待任务（如果还在等待）
+                        # Cancel the progress wait task (if still waiting).
                         if deepsearch_progress_task and not deepsearch_progress_task.done():
                             deepsearch_progress_task.cancel()
                             try:
@@ -722,11 +720,11 @@ async def stream_chat_sse(
                                 pass
                         break
                 
-                # 获取 DeepSearch 结果
+                # Get DeepSearch result.
                 deepsearch_result = await deepsearch_task
                 logger.info("DeepSearch service returned (request_id=%s)", request_id)
                 
-                # DeepSearch 完成后，继续消费剩余的进度事件（最多等待1秒）
+                # After DeepSearch completes, drain remaining progress events (up to 1 second).
                 deadline = time.time() + 1.0
                 while time.time() < deadline:
                     try:
@@ -750,14 +748,13 @@ async def stream_chat_sse(
                                 },
                             }
                         ]
-                        yield sse_json_wrapped(
+                        yield sse_json(
                             openai_chat_completion_chunk(
                                 chunk_id=chunk_id,
                                 model=model_name,
                                 created=created,
                                 delta=delta_envelope(role=None, tool_calls=tool_calls),
                             ),
-                            request_id=request_id
                         )
                     except (asyncio.TimeoutError, asyncio.QueueEmpty):
                         break
@@ -780,7 +777,7 @@ async def stream_chat_sse(
             try:
                 _emit_progress({"stage": "prepare", "status": "start"})
                 
-                # 从环境变量读取 USER_TYPE，用于选择对应的 prompt
+                # Read USER_TYPE from environment to select the corresponding prompt.
                 user_type_str = os.getenv("USER_TYPE", "0")
                 try:
                     user_type = int(user_type_str)
@@ -894,14 +891,13 @@ async def stream_chat_sse(
                         },
                     }
                 ]
-                yield sse_json_wrapped(
+                yield sse_json(
                     openai_chat_completion_chunk(
                         chunk_id=chunk_id,
                         model=model_name,
                         created=created,
                         delta=delta_envelope(role=None, tool_calls=tool_calls),
                     ),
-                    request_id=request_id
                 )
                 continue
 
@@ -911,25 +907,19 @@ async def stream_chat_sse(
                     continue
                 for delta_piece in iter_text_deltas(piece):
                     response_parts.append(delta_piece)
-                    yield sse_json_wrapped(
+                    yield sse_json(
                         openai_chat_completion_chunk(
                             chunk_id=chunk_id,
                             model=model_name,
                             created=created,
                             delta=delta_envelope(role=None, content=delta_piece),
                         ),
-                        request_id=request_id
                     )
                     await asyncio.sleep(0)
                 continue
 
         if stream_error[0] is not None:
-            yield sse_json_wrapped(
-                {"error": {"message": str(stream_error[0])}},
-                request_id=request_id,
-                code=500,
-                message="error"
-            )
+            yield sse_json({"error": {"message": str(stream_error[0])}})
             yield sse_done()
             return
 
@@ -985,7 +975,7 @@ async def stream_chat_sse(
         if subgraph_data:
             logger.debug("SSE subgraph data: %s", json.dumps(subgraph_data, ensure_ascii=False, default=str))
 
-        # Guard: LLM 有时可能返回空字符串，为了避免消息校验失败，这里使用兜底文案
+        # Guard: the LLM may return an empty response; use a fallback to satisfy validation.
         is_fallback_response = False
         if not assistant_response or not assistant_response.strip():
             logger.warning(
@@ -995,9 +985,9 @@ async def stream_chat_sse(
             assistant_response = "当前没有找到与您问题相关的内容，请尝试换个问法或提供更多信息。"
             is_fallback_response = True
 
-        # 构建 sources 并发送（按照文档格式，复用 chatbot.py 的逻辑）
+        # Build sources and emit them (aligned with the chatbot.py behavior).
         max_sources = int(os.getenv("CHATBOT_TOP_SOURCES", "5"))
-        # 使用 build_chat_evidence 构建 evidence（与 chatbot.py 保持一致）
+        # Build evidence via build_chat_evidence (keep behavior aligned with chatbot.py).
         graph_store = None
         try:
             graph_store = rag_inference_handler.get_graph_store()
@@ -1019,7 +1009,7 @@ async def stream_chat_sse(
                         len(first_content),
                         first_content[:100] if first_content else '(empty)')
         
-        # 使用 chatbot.py 中的函数构建 sources
+        # Reuse chatbot.py helper to build sources.
         sources_for_frontend = await get_thread_pool().run_blocking(
             _build_sources_for_frontend,
             evidence_chunks,
@@ -1060,7 +1050,7 @@ async def stream_chat_sse(
             message_handler.create_message, assistant_message
         )
 
-        # 如果是第一轮对话，生成并发送title（参考chatbot.py的实现）
+        # If this is the first turn, generate and emit a title (aligned with chatbot.py).
         if first_turn:
             try:
                 title = await generate_title_via_llm(
@@ -1068,12 +1058,8 @@ async def stream_chat_sse(
                     query.strip(),
                     assistant_response.strip(),
                 )
-                # 发送title事件（使用统一的StandardResponse格式）
-                yield sse_json_wrapped(
-                    {"type": "title", "title": title},
-                    request_id=request_id
-                )
-                # 更新数据库中的session name字段
+                yield sse_json({"type": "title", "title": title})
+                # Update session name in DB.
                 await get_thread_pool().run_blocking(
                     get_session_handler().update_session,
                     session_id,
@@ -1082,7 +1068,7 @@ async def stream_chat_sse(
                 logger.info("SSE generated and updated session title: session_id=%s, title=%s", session_id, title)
             except Exception as exc:
                 logger.warning("Failed to generate title: %s", exc)
-                # title生成失败不影响主流程，继续执行
+                # Title generation failure should not break the main flow.
         if sources_for_frontend:
             for i, source in enumerate(sources_for_frontend):
                 desc = getattr(source, 'description', '') or ''
@@ -1092,16 +1078,15 @@ async def stream_chat_sse(
                             len(desc),
                             desc[:100] if desc else '(empty)')
         
-        # 发送 sources 事件（使用统一的 StandardResponse 格式）
+        # Emit the sources event (plain JSON).
         session_id_str = str(session_id)
-        yield sse_json_wrapped(
+        yield sse_json(
             {
                 "type": "sources",
                 "sources": [s.model_dump() for s in sources_for_frontend],
                 "citation_key_map": {str(k): v for k, v in (citation_key_map or {}).items()},
                 "id": session_id_str
             },
-            request_id=request_id
         )
         logger.info("SSE sent sources event with %d sources", len(sources_for_frontend))
 
@@ -1142,17 +1127,16 @@ async def stream_chat_sse(
                 },
             }
         ]
-        yield sse_json_wrapped(
+        yield sse_json(
             openai_chat_completion_chunk(
                 chunk_id=chunk_id,
                 model=model_name,
                 created=created,
                 delta=delta_envelope(role=None, tool_calls=tool_calls),
             ),
-            request_id=request_id
         )
 
-        yield sse_json_wrapped(
+        yield sse_json(
             openai_chat_completion_chunk(
                 chunk_id=chunk_id,
                 model=model_name,
@@ -1160,7 +1144,6 @@ async def stream_chat_sse(
                 delta=delta_envelope(),
                 finish_reason="stop",
             ),
-            request_id=request_id
         )
         yield sse_done()
 
@@ -1238,7 +1221,7 @@ async def stream_chat_ws(
             except Exception:  # noqa: BLE001
                 pass
 
-            # 无论 DeepSearch 是否开启，都开启联网搜索
+            # Always enable web search for WebSocket stream_chat.
             enable_web_search = True
             logger.info("Web search enabled (enable_web_search=True)")
 

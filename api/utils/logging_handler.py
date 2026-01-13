@@ -1,5 +1,5 @@
 """
-自定义日志Handler：按天文件夹 + 按大小轮转
+Custom log handler: per-day folders + size-based rotation.
 """
 import logging
 import os
@@ -11,15 +11,15 @@ from pathlib import Path
 
 
 class DailySizeRotatingHandler(BaseRotatingHandler):
-    """按天创建文件夹，单文件超过大小限制时创建新文件"""
+    """Create a folder per day, and roll files when they exceed the size limit."""
     
     def __init__(self, base_dir, maxBytes=100*1024*1024, backupCount=30, encoding='utf-8'):
         """
         Args:
-            base_dir: 日志基础目录（如 /opt/dlami/nvme/rag-arc/log）
-            maxBytes: 单文件最大大小（默认100MB）
-            backupCount: 保留天数（默认30天）
-            encoding: 文件编码
+            base_dir: Base log directory (e.g. /opt/dlami/nvme/rag-arc/log)
+            maxBytes: Max size per file (default: 100MB)
+            backupCount: Retention days (default: 30)
+            encoding: File encoding
         """
         self.base_dir = Path(base_dir)
         self.maxBytes = maxBytes
@@ -28,16 +28,16 @@ class DailySizeRotatingHandler(BaseRotatingHandler):
         self.current_file_index = 1
         self.current_file_path = None
         
-        # 初始化当前文件路径（会检查现有文件，决定是 append 还是新建）
+        # Initialize current file path (check existing files to decide append vs create).
         self._update_current_file_path()
         
-        # 确保当前日期文件夹存在
+        # Ensure today's folder exists.
         self.current_file_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # 使用当前文件路径初始化 BaseRotatingHandler（mode='a' 确保 append）
+        # Initialize BaseRotatingHandler with current path (mode='a' ensures append).
         super().__init__(filename=str(self.current_file_path), mode='a', encoding=encoding, delay=False)
         
-        # 清理旧日志
+        # Cleanup old logs.
         self._cleanup_old_logs()
     
     def _update_current_file_path(self):
@@ -46,27 +46,27 @@ class DailySizeRotatingHandler(BaseRotatingHandler):
         date_dir = self.base_dir / f"log-{date_str}"
         date_dir.mkdir(parents=True, exist_ok=True)
         
-        # 查找当前日期已有的最大序号文件
+        # Find the max index file for the current date.
         pattern = str(date_dir / f"{date_str}-*.log")
         existing_files = glob.glob(pattern)
         if existing_files:
             indices = []
             for f in existing_files:
                 try:
-                    # 从文件名提取序号：2025-12-23-01.log -> 1
+                    # Extract index from filename: 2025-12-23-01.log -> 1
                     idx = int(Path(f).stem.split('-')[-1])
                     indices.append(idx)
                 except (ValueError, IndexError):
                     continue
             if indices:
                 max_idx = max(indices)
-                # 检查最大序号文件是否超过大小限制
+                # Check whether the max-index file exceeds size limit.
                 max_file = date_dir / f"{date_str}-{max_idx:02d}.log"
                 if max_file.exists() and max_file.stat().st_size >= self.maxBytes:
-                    # 文件已满，使用新序号
+                    # File is full; use a new index.
                     self.current_file_index = max_idx + 1
                 else:
-                    # 文件未满，继续使用
+                    # File is not full; keep using it.
                     self.current_file_index = max_idx
             else:
                 self.current_file_index = 1
@@ -80,7 +80,7 @@ class DailySizeRotatingHandler(BaseRotatingHandler):
         cutoff_date = datetime.now().date() - timedelta(days=self.backupCount)
         for log_dir in self.base_dir.glob("log-*"):
             try:
-                # 从文件夹名提取日期：log-2025-12-23 -> 2025-12-23
+                # Extract date from folder name: log-2025-12-23 -> 2025-12-23
                 date_str = log_dir.name.replace("log-", "")
                 dir_date = datetime.strptime(date_str, '%Y-%m-%d').date()
                 if dir_date < cutoff_date:
@@ -90,12 +90,12 @@ class DailySizeRotatingHandler(BaseRotatingHandler):
     
     def shouldRollover(self, record):
         """判断是否需要轮转：按时间或按大小"""
-        # 检查日期是否变化
+        # Check date rollover.
         today = datetime.now().date()
         if today != self.current_date:
             return True
         
-        # 检查文件大小
+        # Check size rollover.
         if self.stream is None:
             self.stream = self._open()
         
@@ -116,7 +116,7 @@ class DailySizeRotatingHandler(BaseRotatingHandler):
         
         today = datetime.now().date()
         
-        # 日期变化：切换到新日期的文件夹
+        # Date changed: switch to a new daily folder.
         if today != self.current_date:
             self.current_date = today
             self.current_file_index = 1
@@ -124,10 +124,10 @@ class DailySizeRotatingHandler(BaseRotatingHandler):
             self.baseFilename = str(self.current_file_path)
             self._cleanup_old_logs()
         else:
-            # 文件大小超限：在同一日期文件夹创建新文件
+            # Size exceeded: create a new file within the same daily folder.
             self.current_file_index += 1
             self._update_current_file_path()
             self.baseFilename = str(self.current_file_path)
         
-        # 确保新文件目录存在
+        # Ensure the new file directory exists.
         self.current_file_path.parent.mkdir(parents=True, exist_ok=True)

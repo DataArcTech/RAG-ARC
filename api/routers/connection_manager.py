@@ -48,7 +48,7 @@ class ConnectionManager:
         if subgraph is not None:
             data_dict["subgraph"] = subgraph
         
-        # 统一格式包装
+        # Wrap into the standard response format.
         response_dict = {
             "code": 200,
             "message": "success",

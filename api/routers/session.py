@@ -20,7 +20,7 @@ class MessageContent(BaseModel):
 
 
 class MessageRequest(BaseModel):
-    """兼容 /api/messages 的请求格式（session_id 在请求体中）"""
+    """Compatibility request model for `/api/messages` (session_id is in the body)."""
     session_id: uuid.UUID
     content: str
 
@@ -32,7 +32,7 @@ class ChatMessageResponse(BaseModel):
     user_id: Optional[uuid.UUID] = None
     user_type: Optional[int] = None
     content: dict
-    # 支持 UUID 和字符串 ID（如 tavily-* 格式的 web search chunk IDs）
+    # Supports UUID and string IDs (e.g. tavily-* web-search chunk IDs).
     source_file_ids: Optional[List[str]] = None
     sources: Optional[List[dict]] = None
     subgraph_data: Optional[dict] = None
@@ -46,7 +46,7 @@ class ChatMessageResponse(BaseModel):
         try:
             return cls.model_validate(obj)
         except Exception as e:
-            # 如果验证失败，尝试修复 source_file_ids
+            # If validation fails, try to sanitize source_file_ids.
             if hasattr(obj, "__dict__"):
                 obj_dict = obj.__dict__.copy()
             elif isinstance(obj, dict):
@@ -54,7 +54,7 @@ class ChatMessageResponse(BaseModel):
             else:
                 obj_dict = {}
             
-            # 修复 source_file_ids：将非字符串转换为字符串
+            # Normalize source_file_ids: cast non-strings to strings.
             if "source_file_ids" in obj_dict and obj_dict["source_file_ids"]:
                 fixed_ids = []
                 for item in obj_dict["source_file_ids"]:
@@ -90,30 +90,30 @@ async def list_session_messages(
             session_id
         )
         # Convert SQLAlchemy models to Pydantic models to ensure proper serialization
-        # 使用 fallback 方法处理可能的 source_file_ids 格式问题
+        # Use fallback validation to handle potential source_file_ids format issues.
         result = []
         for msg in messages:
             try:
                 result.append(ChatMessageResponse.model_validate(msg))
             except Exception as e:
-                # 如果标准验证失败，尝试使用 fallback 方法
+                # If standard validation fails, try the fallback method.
                 try:
                     result.append(ChatMessageResponse.model_validate_with_fallback(msg))
                 except Exception as fallback_error:
-                    # 如果 fallback 也失败，记录错误但尝试创建一个基本响应
+                    # If fallback also fails, log the error and try a minimal safe conversion.
                     import logging
                     logger = logging.getLogger(__name__)
                     logger.warning(
                         f"Failed to validate message {getattr(msg, 'id', 'unknown')}: {fallback_error}. "
                         f"Original error: {e}. Attempting basic conversion."
                     )
-                    # 手动创建一个安全的响应对象
+                    # Build a safe response payload manually.
                     if hasattr(msg, "__dict__"):
                         msg_dict = msg.__dict__.copy()
                     else:
                         msg_dict = {}
                     
-                    # 确保 source_file_ids 是字符串列表
+                    # Ensure source_file_ids is a list of strings.
                     if "source_file_ids" in msg_dict and msg_dict["source_file_ids"]:
                         msg_dict["source_file_ids"] = [
                             str(item) if item is not None else None
@@ -127,7 +127,7 @@ async def list_session_messages(
                         logger.error(
                             f"Failed to create ChatMessageResponse for message {getattr(msg, 'id', 'unknown')}: {final_error}"
                         )
-                        # 跳过这个有问题的消息，继续处理其他消息
+                        # Skip this malformed message and continue.
                         continue
         return result
     except Exception as e:
@@ -208,14 +208,14 @@ async def list_messages_by_user(
 ):
     """List messages by current user with pagination. Users can only query their own messages."""
     try:
-        # 用户只能查询自己的消息
+        # Users can only query their own messages.
         messages = await get_thread_pool().run_blocking(
             get_message_handler().list_messages_by_user,
             current_user.id,
             limit,
             offset,
         )
-        # 使用 fallback 方法处理可能的 source_file_ids 格式问题
+        # Use fallback validation to handle potential source_file_ids format issues.
         result = []
         for msg in messages:
             try:
@@ -230,13 +230,13 @@ async def list_messages_by_user(
                         f"Failed to validate message {getattr(msg, 'id', 'unknown')}: {fallback_error}. "
                         f"Original error: {e}. Attempting basic conversion."
                     )
-                    # 手动创建一个安全的响应对象
+                    # Build a safe response payload manually.
                     if hasattr(msg, "__dict__"):
                         msg_dict = msg.__dict__.copy()
                     else:
                         msg_dict = {}
                     
-                    # 确保 source_file_ids 是字符串列表
+                    # Ensure source_file_ids is a list of strings.
                     if "source_file_ids" in msg_dict and msg_dict["source_file_ids"]:
                         msg_dict["source_file_ids"] = [
                             str(item) if item is not None else None
@@ -277,7 +277,7 @@ async def list_messages(
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
         return await list_session_messages(session_id)
     except HTTPException:
-        # 重新抛出 HTTPException，保持原有的错误响应
+        # Re-raise HTTPException to preserve the original error response.
         raise
     except Exception as e:
         import logging
@@ -295,19 +295,19 @@ async def delete_session(
     current_user: Annotated[User | None, Depends(get_current_user)],
 ):
     """Delete a session asynchronously using thread pool."""
-    # 验证用户权限
+    # Validate user permissions.
     session = await get_thread_pool().run_blocking(
         get_session_handler().get_session,
         session_id
     )
     if session is None:
-        # 不存在，返回200但提示不存在
+        # Not found: return 200 with a clear message.
         return {"message": "Session not found"}
     if not validate_user_session(session, current_user):
-        # 存在但不是当前用户的，返回401
+        # Exists but not owned by current user: return 401.
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
     
-    # 删除会话（会级联删除所有关联的消息）
+    # Delete the session (cascades to all associated messages).
     success = await get_thread_pool().run_blocking(
         get_session_handler().delete_session,
         session_id
@@ -315,5 +315,5 @@ async def delete_session(
     if not success:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete session")
     
-    # 返回明确的消息，中间件会自动包装为标准响应格式
+    # Return a clear message; middleware will wrap it into the standard response format.
     return {"message": "Session deleted successfully"}

@@ -156,7 +156,7 @@ class RAGInference(AbstractModule):
             share_owner_id=share_owner_id,
         )
         
-        # 获取原始 LLM response（用于调试）
+        # Capture raw LLM response (for debugging).
         def _chat_with_raw():
             # Debug log: show the messages we send to LLM (truncated)
             try:
@@ -176,7 +176,7 @@ class RAGInference(AbstractModule):
                 pass
             image_paths = collect_image_paths_from_chunk_payloads(chunks, max_images=CHAT_MAX_IMAGE_INPUTS)
             if hasattr(self.llm, 'client') and hasattr(self.llm.client, 'chat'):
-                # OpenAI 客户端
+                # OpenAI client.
                 call_messages = messages
                 if image_paths:
                     try:
@@ -211,7 +211,7 @@ class RAGInference(AbstractModule):
                         temperature=self.llm.temperature,
                     )
                 response_text = raw_response.choices[0].message.content.strip()
-                # 转换为可序列化的 dict
+                # Convert into a JSON-serializable dict.
                 raw_dict = {
                     'id': raw_response.id,
                     'model': raw_response.model,
@@ -238,7 +238,7 @@ class RAGInference(AbstractModule):
                     pass
                 return response_text, raw_dict
             else:
-                # 其他 LLM（HuggingFace 等），只返回文本
+                # Other LLMs (e.g., HuggingFace): return text only.
                 if image_paths:
                     logger.warning(
                         "Configured LLM does not support multimodal inputs; continuing with text-only (captions as fallback)."
@@ -257,9 +257,9 @@ class RAGInference(AbstractModule):
         response_text, raw_response = await self._run_blocking(_chat_with_raw)
 
         raw_mindmap_response = None
-        # 总是用 mindmap prompt 生成图，确保图和 chat 回答相关
+        # Always generate the mindmap using the mindmap prompt to keep it aligned with the chat answer.
         if return_subgraph:
-            # 使用当前用户问题而不是整个对话历史
+            # Use the current user question instead of the full conversation history.
             mindmap_query = current_user_query if current_user_query else query
             subgraph_data, raw_mindmap_response = await self._run_blocking(
                 self._generate_mindmap,
@@ -625,13 +625,13 @@ class RAGInference(AbstractModule):
 
         messages: List[Dict[str, str]] = []
         
-        # 添加系统提示（要求使用<sup>标签引用来源）
+        # Add system prompt (requires <sup> citations).
         system_prompt = get_rag_inference_system_prompt(user_type=user_type)
         messages.append({"role": "system", "content": system_prompt})
         
-        # 如果有历史对话，先添加历史消息（参考 WebSocket 的实现）
+        # If history exists, prepend it (aligned with WebSocket behavior).
         if history_text:
-            # 解析历史文本为消息列表
+            # Parse history text into message list.
             history_lines = history_text.strip().split("\n")
             for line in history_lines:
                 if ":" in line:
@@ -641,7 +641,7 @@ class RAGInference(AbstractModule):
                     if role in ("user", "assistant") and content:
                         messages.append({"role": role, "content": content})
         
-        # 使用"Source key=N"格式（与chatbot.py保持一致）
+        # Use "Source key=N" format (aligned with chatbot.py).
         if chunks:
             for i, chunk in enumerate(chunks):
                 metadata = getattr(chunk, "metadata", None) or {}
@@ -652,7 +652,7 @@ class RAGInference(AbstractModule):
                 messages.append({"role": "user", "content": f"Source key={i+1} title={filename}\n{chunk_text}"})
             messages.append({"role": "user", "content": f"Based on the above Sources, please answer question: {rewritten_query}"})
         else:
-            # 如果没有 Sources，直接发送问题，不要提到 Sources
+            # If there are no Sources, send the question directly (do not mention Sources).
             messages.append({"role": "user", "content": rewritten_query})
         logger.info("Invoked chat with query: %s (owner_id=%s)", query, owner_id)
         logger.info("Query rewritten to: %s", rewritten_query)
@@ -660,7 +660,7 @@ class RAGInference(AbstractModule):
             history_count = len([m for m in messages if m.get("role") in ("user", "assistant") and "Chunk" not in m.get("content", "")])
             logger.info("Including history: %d history messages", history_count)
         logger.info("Prepared %d messages for LLM", len(messages))
-        # 记录完整的 messages 内容（用于调试）
+        # Log full messages payload (debug only).
         logger.debug("Full messages sent to LLM: %s", json.dumps(messages, ensure_ascii=False, indent=2))
         return (messages, chunks, subgraph_data, subgraph_info)
 
