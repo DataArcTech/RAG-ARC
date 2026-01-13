@@ -13,11 +13,11 @@ OWNER_ID = (
 )
 
 def demo_dense_retriever():
-    """演示Dense检索器"""
+    """Demo: Dense retriever."""
     print("=== Dense检索器演示 ===")
 
     try:
-        # 1. 创建Dense检索器
+        # 1) Create a Dense retriever.
         print("1. 创建Dense检索器...")
         api.create_from_config_file(
             "dense_retriever",
@@ -25,7 +25,7 @@ def demo_dense_retriever():
         )
         print("Dense检索器创建成功")
 
-        # 2. 执行搜索
+        # 2) Execute search.
         print("\n2. 执行Dense检索...")
         queries = ["Who is the individual associated with the cryptocurrency industry facing a criminal trial on fraud and conspiracy charges, as reported by both The Verge and TechCrunch, and is accused by prosecutors of committing fraud for personal gain?", "Who is the figure associated with generative AI technology whose departure from OpenAI was considered shocking according to Fortune, and is also the subject of a prevailing theory suggesting a lack of full truthfulness with the board as reported by TechCrunch?"]
 
@@ -37,7 +37,7 @@ def demo_dense_retriever():
                 score = chunk.metadata.get('score', 'N/A') if chunk.metadata else 'N/A'
                 print(f"  {i}. [ID:{chunk.id}] {chunk.content[:60]}... (分数: {score})")
 
-        # 3. 获取检索器信息
+        # 3) Print retriever info.
         print("\n3. Dense检索器信息:")
         info = api.get_retriever_info("dense_retriever")
         print(f"  类型: {info.get('type')}")
@@ -52,11 +52,11 @@ def demo_dense_retriever():
 
 
 def demo_bm25_retriever():
-    """演示BM25检索器"""
+    """Demo: BM25 retriever."""
     print("\n=== BM25检索器演示 ===")
 
     try:
-        # 1. 创建BM25检索器
+        # 1) Create a BM25 retriever.
         print("1. 创建BM25检索器...")
         api.create_from_config_file(
             "bm25_retriever",
@@ -65,7 +65,7 @@ def demo_bm25_retriever():
         print("BM25检索器创建成功")
 
 
-        # 3. 执行搜索
+        # 2) Execute search.
         print("\n3. 执行BM25检索...")
         queries = ["Who is the individual associated with the cryptocurrency industry facing a criminal trial on fraud and conspiracy charges, as reported by both The Verge and TechCrunch, and is accused by prosecutors of committing fraud for personal gain?", "Who is the figure associated with generative AI technology whose departure from OpenAI was considered shocking according to Fortune, and is also the subject of a prevailing theory suggesting a lack of full truthfulness with the board as reported by TechCrunch?"]
 
@@ -85,7 +85,7 @@ def demo_bm25_retriever():
             except Exception as e:
                 print(f"  搜索出错: {e}")
 
-        # 4. 获取检索器信息
+        # 3) Print retriever info.
         print("\n4. BM25检索器信息:")
         info = api.get_retriever_info("bm25_retriever")
         print(f"  类型: {info.get('type')}")
@@ -100,11 +100,11 @@ def demo_bm25_retriever():
 
 
 def demo_multipath_retriever():
-    """演示MultiPath检索器"""
+    """Demo: MultiPath retriever."""
     print("\n=== MultiPath检索器演示 ===")
 
     try:
-        # 1. 创建MultiPath检索器
+        # 1) Create a MultiPath retriever.
         print("1. 创建MultiPath检索器...")
         api.create_from_config_file(
             "multipath_retriever",
@@ -112,7 +112,7 @@ def demo_multipath_retriever():
         )
         print("MultiPath检索器创建成功")
 
-        # 2. 执行搜索
+        # 2) Execute search.
         print("\n2. 执行MultiPath检索...")
         queries = ["Who is the individual associated with the cryptocurrency industry facing a criminal trial on fraud and conspiracy charges, as reported by both The Verge and TechCrunch, and is accused by prosecutors of committing fraud for personal gain?", "Who is the figure associated with generative AI technology whose departure from OpenAI was considered shocking according to Fortune, and is also the subject of a prevailing theory suggesting a lack of full truthfulness with the board as reported by TechCrunch?"]
 
@@ -124,13 +124,13 @@ def demo_multipath_retriever():
                 score = chunk.metadata.get('score', 'N/A') if chunk.metadata else 'N/A'
                 print(f"  {i}. [ID:{chunk.id}] {chunk.content[:60]}... (分数: {score})")
 
-        # 3. 获取检索器信息
+        # 3) Print retriever info.
         print("\n3. MultiPath检索器信息:")
         info = api.get_retriever_info("multipath_retriever")
         print(f"  类型: {info.get('type')}")
         print(f"  类名: {info.get('class')}")
 
-        # 4. 获取多路径详细信息
+        # 4) Print detailed multipath info.
         retriever = api.retrievers.get("multipath_retriever")
         if retriever and hasattr(retriever, 'get_multipath_info'):
             multipath_info = retriever.get_multipath_info()
@@ -147,17 +147,17 @@ def demo_multipath_retriever():
 
 
 def quick_start():
-    """快速开始示例 - 演示所有检索器类型"""
+    """Quick-start example: demonstrate all retriever types."""
     print("=== 统一检索API快速开始 ===")
     print("本示例将演示三种检索器类型：Dense、BM25和MultiPath")
 
-    # 演示Dense检索器
+    # Demo: Dense retriever.
     demo_dense_retriever()
 
-    # 演示BM25检索器
+    # Demo: BM25 retriever.
     demo_bm25_retriever()
 
-    # 演示MultiPath检索器
+    # Demo: MultiPath retriever.
     demo_multipath_retriever()
 
     print("\n所有检索器演示完成！")

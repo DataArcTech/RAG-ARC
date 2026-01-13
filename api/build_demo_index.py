@@ -9,7 +9,7 @@ from config.encapsulation.database.vector_db.faiss_config import FaissVectorDBCo
 from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
 
 def load_real_data():
-    """加载数据文件"""
+    """Load the demo data file."""
     import json
 
     data_file = "./test/test.json"
@@ -20,16 +20,16 @@ def load_real_data():
 
     chunks = []
     for i, item in enumerate(data):
-        # 创建Chunk ID
+        # Build Chunk ID.
         chunk_id = item.get('id', f"chunk_{i}")
 
-        # 获取内容
+        # Extract content.
         content = item.get('content', '')
 
-        # 创建元数据
+        # Extract metadata.
         metadata = item.get('metadata', {})
 
-        # 创建Chunk对象
+        # Build Chunk object.
         chunk = Chunk(
             id=chunk_id,
             content=content,
@@ -42,14 +42,14 @@ def load_real_data():
 
 
 def build_demo_index():
-    """构建演示用的FAISS和BM25索引"""
+    """Build FAISS and BM25 demo indices."""
     print("=== 构建演示索引 ===")
 
 
-    # 1. 加载数据
+    # 1) Load data.
     chunks = load_real_data()
 
-    # 2. 创建FAISS索引配置
+    # 2) Create FAISS index config.
     print("\n2. 创建FAISS索引配置...")
 
     embedding_config = QwenEmbeddingConfig(
@@ -64,7 +64,7 @@ def build_demo_index():
         cache_folder="./models/Qwen"
     )
 
-    # FAISS索引配置
+    # FAISS index config.
     faiss_config = FaissVectorDBConfig(
         index_path="./data/unified_faiss_index",
         metric="cosine",
@@ -75,24 +75,24 @@ def build_demo_index():
 
     print("FAISS配置创建完成")
 
-    # 3. 构建FAISS索引
+    # 3) Build FAISS index.
     print("\n3. 构建FAISS索引...")
     faiss_index = faiss_config.build()
     faiss_index.build_index(chunks)
     print("FAISS索引构建完成")
 
-    # 4. 保存FAISS索引
+    # 4) Save FAISS index.
     print("\n4. 保存FAISS索引...")
     os.makedirs("./data/unified_faiss_index", exist_ok=True)
     faiss_index.save_index("./data/unified_faiss_index", "index")
     print("FAISS索引已保存到 ./data/unified_faiss_index")
 
-    # 5. 验证FAISS索引
+    # 5) Validate FAISS index.
     print("\n5. 验证FAISS索引...")
     info = faiss_index.get_vector_db_info()
     print(info)
 
-    # 6. 创建BM25索引配置
+    # 6) Create BM25 index config.
     print("\n6. 创建BM25索引配置...")
     from config.encapsulation.database.bm25_config import BM25BuilderConfig
 
@@ -104,10 +104,10 @@ def build_demo_index():
 
     print("BM25配置创建完成")
 
-    # 7. 构建BM25索引
+    # 7) Build BM25 index.
     print("\n7. 构建BM25索引...")
 
-    # 先删除现有索引（如果存在）
+    # Delete existing index first (if any).
     import shutil
     bm25_index_path = "./data/unified_bm25_index"
     if os.path.exists(bm25_index_path):
@@ -122,7 +122,7 @@ def build_demo_index():
         print("✓ BM25索引构建完成")
     except Exception as e:
         print(f"✗ BM25索引构建失败: {e}")
-        # 尝试使用add_chunks方法
+        # Try the update_index method as a fallback.
         try:
             print("尝试使用add_chunks方法...")
             bm25_index.update_index(chunks)
@@ -131,13 +131,13 @@ def build_demo_index():
             print(f"✗ add_chunks也失败: {e2}")
             raise e
 
-    # 8. 保存BM25索引
+    # 8) Save BM25 index.
     print("\n8. 保存BM25索引...")
     os.makedirs("./data/unified_bm25_index", exist_ok=True)
     bm25_index.save_index("./data/unified_bm25_index", "index")
     print("BM25索引已保存到 ./data/unified_bm25_index")
 
-    # 9. 验证BM25索引
+    # 9) Validate BM25 index.
     print("\n9. 验证BM25索引...")
     bm25_info = bm25_index.get_vector_db_info()
     print(bm25_info)

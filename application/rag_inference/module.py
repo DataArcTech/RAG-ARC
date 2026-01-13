@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from framework.module import AbstractModule
 from core.utils.owner_guard import normalize_owner_id, is_admin_owner, get_admin_owner_id
+from application.rabc.visibility import build_owner_visibility
 from core.prompts import (
     MINDMAP_GENERATION_SYSTEM_PROMPT_ZH,
     build_mindmap_generation_user_prompt,
@@ -81,6 +82,9 @@ class RAGInference(AbstractModule):
         owner_id: uuid.UUID,
         return_subgraph: bool = False,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        *,
+        include_share: bool = False,
+        share_owner_id: uuid.UUID | None = None,
     ) -> tuple[str, list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """
         Chat with RAG system (synchronous version, kept for backward compatibility).
@@ -95,6 +99,8 @@ class RAGInference(AbstractModule):
                     owner_id,
                     return_subgraph,
                     progress_callback=progress_callback,
+                    include_share=include_share,
+                    share_owner_id=share_owner_id,
                 )
             )
 
@@ -105,6 +111,8 @@ class RAGInference(AbstractModule):
                     owner_id,
                     return_subgraph,
                     progress_callback=progress_callback,
+                    include_share=include_share,
+                    share_owner_id=share_owner_id,
                 )
             )
 
@@ -119,6 +127,9 @@ class RAGInference(AbstractModule):
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         current_user_query: Optional[str] = None,
         enable_web_search: bool = False,
+        *,
+        include_share: bool = False,
+        share_owner_id: uuid.UUID | None = None,
     ) -> tuple[str, list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]], str | None]:
         """
         Chat with RAG system
@@ -141,9 +152,11 @@ class RAGInference(AbstractModule):
             return_subgraph=return_subgraph,
             progress_callback=progress_callback,
             enable_web_search=enable_web_search,
+            include_share=include_share,
+            share_owner_id=share_owner_id,
         )
         
-        # 获取原始 LLM response（用于调试）
+        # Capture raw LLM response (for debugging).
         def _chat_with_raw():
             # Debug log: show the messages we send to LLM (truncated)
             try:
@@ -163,7 +176,7 @@ class RAGInference(AbstractModule):
                 pass
             image_paths = collect_image_paths_from_chunk_payloads(chunks, max_images=CHAT_MAX_IMAGE_INPUTS)
             if hasattr(self.llm, 'client') and hasattr(self.llm.client, 'chat'):
-                # OpenAI 客户端
+                # OpenAI client.
                 call_messages = messages
                 if image_paths:
                     try:
@@ -198,7 +211,7 @@ class RAGInference(AbstractModule):
                         temperature=self.llm.temperature,
                     )
                 response_text = raw_response.choices[0].message.content.strip()
-                # 转换为可序列化的 dict
+                # Convert into a JSON-serializable dict.
                 raw_dict = {
                     'id': raw_response.id,
                     'model': raw_response.model,
@@ -225,7 +238,7 @@ class RAGInference(AbstractModule):
                     pass
                 return response_text, raw_dict
             else:
-                # 其他 LLM（HuggingFace 等），只返回文本
+                # Other LLMs (e.g., HuggingFace): return text only.
                 if image_paths:
                     logger.warning(
                         "Configured LLM does not support multimodal inputs; continuing with text-only (captions as fallback)."
@@ -244,9 +257,9 @@ class RAGInference(AbstractModule):
         response_text, raw_response = await self._run_blocking(_chat_with_raw)
 
         raw_mindmap_response = None
-        # 总是用 mindmap prompt 生成图，确保图和 chat 回答相关
+        # Always generate the mindmap using the mindmap prompt to keep it aligned with the chat answer.
         if return_subgraph:
-            # 使用当前用户问题而不是整个对话历史
+            # Use the current user question instead of the full conversation history.
             mindmap_query = current_user_query if current_user_query else query
             subgraph_data, raw_mindmap_response = await self._run_blocking(
                 self._generate_mindmap,
@@ -305,6 +318,8 @@ class RAGInference(AbstractModule):
         history_text: Optional[str] = None,
         enable_web_search: bool = False,
         user_type: Optional[int] = None,
+        include_share: bool = False,
+        share_owner_id: uuid.UUID | None = None,
     ) -> tuple[List[Dict[str, str]], list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         def _chunk_preview(chunk: Chunk, *, max_chars: int = 160) -> str:
             metadata = getattr(chunk, "metadata", None) or {}
@@ -377,12 +392,38 @@ class RAGInference(AbstractModule):
 
             web_future = get_thread_pool().executor.submit(_run_web_search)
 
-        chunks: list[Chunk] = self.retriever.invoke(
-            rewritten_query,
-            owner_id=owner_id,
-            return_subgraph_info=return_subgraph,
-            k=graph_candidates_k,
+        visibility = build_owner_visibility(
+            primary_owner_id=owner_id,
+            include_share=bool(include_share),
+            share_owner_id=share_owner_id,
+            label=("me+share" if include_share else "me"),
         )
+        self._emit_progress(
+            progress_callback,
+            {
+                "stage": "retrieve",
+                "status": "scope",
+                "owner_visibility": {"label": visibility.label, "owner_ids": list(visibility.owner_ids)},
+            },
+        )
+
+        chunks: list[Chunk] = []
+        subgraph_infos: list[dict[str, Any]] = []
+        for owner_token in visibility.owner_ids:
+            retrieved: list[Chunk] = self.retriever.invoke(
+                rewritten_query,
+                owner_id=owner_token,
+                return_subgraph_info=return_subgraph,
+                k=graph_candidates_k,
+            )
+            per_info = self._consume_subgraph_info(retrieved)
+            if per_info:
+                try:
+                    per_info.setdefault("owner_scope", str(owner_token))
+                except Exception:  # noqa: BLE001
+                    pass
+                subgraph_infos.append(per_info)
+            chunks.extend(retrieved)
         retriever_info = None
         try:
             if hasattr(self.retriever, "get_multipath_info"):
@@ -412,6 +453,7 @@ class RAGInference(AbstractModule):
                 chunks = graph_chunks
 
         chunks = self._filter_chunks_by_file_status(chunks)
+        chunks = self._dedupe_chunks_by_id(chunks)
 
         if web_future is not None:
             web_start = time.perf_counter()
@@ -466,7 +508,13 @@ class RAGInference(AbstractModule):
             if web_chunks:
                 chunks.extend(web_chunks)
 
-        subgraph_info = self._consume_subgraph_info(chunks)
+        chunks = self._dedupe_chunks_by_id(chunks)
+        subgraph_info = None
+        if subgraph_infos:
+            if len(subgraph_infos) == 1:
+                subgraph_info = subgraph_infos[0]
+            else:
+                subgraph_info = {"_multi_owner": True, "scopes": subgraph_infos}
         self._emit_progress(
             progress_callback,
             {"stage": "rerank", "status": "start", "chunks_in": len(chunks)},
@@ -503,23 +551,55 @@ class RAGInference(AbstractModule):
                             GraphExporterNeo4j as GraphExporter,
                         )
 
-                        subgraph_data = GraphExporter.export_subgraph(
-                            graph_store=graph_store,
-                            subgraph_node_ids=set(subgraph_info["subgraph_nodes"]),
-                            seed_entity_ids=set(subgraph_info["seed_entity_ids"]),
-                            retrieved_chunk_ids=subgraph_info["retrieved_chunk_ids"],
-                            node_ppr_scores=subgraph_info.get("node_ppr_scores", {}),
-                        )
+                        if subgraph_info.get("_multi_owner"):
+                            payloads: list[dict[str, Any]] = []
+                            for info in subgraph_info.get("scopes") or []:
+                                if not isinstance(info, dict) or "subgraph_nodes" not in info:
+                                    continue
+                                payloads.append(
+                                    GraphExporter.export_subgraph(
+                                        graph_store=graph_store,
+                                        subgraph_node_ids=set(info["subgraph_nodes"]),
+                                        seed_entity_ids=set(info.get("seed_entity_ids", []) or []),
+                                        retrieved_chunk_ids=info.get("retrieved_chunk_ids", []) or [],
+                                        node_ppr_scores=info.get("node_ppr_scores", {}) or {},
+                                    )
+                                )
+                            subgraph_data = self._merge_graph_payloads(payloads)
+                        else:
+                            subgraph_data = GraphExporter.export_subgraph(
+                                graph_store=graph_store,
+                                subgraph_node_ids=set(subgraph_info["subgraph_nodes"]),
+                                seed_entity_ids=set(subgraph_info.get("seed_entity_ids", []) or []),
+                                retrieved_chunk_ids=subgraph_info.get("retrieved_chunk_ids", []) or [],
+                                node_ppr_scores=subgraph_info.get("node_ppr_scores", {}) or {},
+                            )
                     else:
                         from encapsulation.database.utils.graph_export_utils import GraphExporter
 
-                        subgraph_data = GraphExporter.export_subgraph(
-                            graph_store=graph_store,
-                            subgraph_node_indices=set(subgraph_info["subgraph_nodes"]),
-                            seed_entity_ids=set(subgraph_info["seed_entity_ids"]),
-                            retrieved_chunk_ids=subgraph_info["retrieved_chunk_ids"],
-                            node_ppr_scores=subgraph_info.get("node_ppr_scores", {}),
-                        )
+                        if subgraph_info.get("_multi_owner"):
+                            payloads = []
+                            for info in subgraph_info.get("scopes") or []:
+                                if not isinstance(info, dict) or "subgraph_nodes" not in info:
+                                    continue
+                                payloads.append(
+                                    GraphExporter.export_subgraph(
+                                        graph_store=graph_store,
+                                        subgraph_node_indices=set(info["subgraph_nodes"]),
+                                        seed_entity_ids=set(info.get("seed_entity_ids", []) or []),
+                                        retrieved_chunk_ids=info.get("retrieved_chunk_ids", []) or [],
+                                        node_ppr_scores=info.get("node_ppr_scores", {}) or {},
+                                    )
+                                )
+                            subgraph_data = self._merge_graph_payloads(payloads)
+                        else:
+                            subgraph_data = GraphExporter.export_subgraph(
+                                graph_store=graph_store,
+                                subgraph_node_indices=set(subgraph_info["subgraph_nodes"]),
+                                seed_entity_ids=set(subgraph_info.get("seed_entity_ids", []) or []),
+                                retrieved_chunk_ids=subgraph_info.get("retrieved_chunk_ids", []) or [],
+                                node_ppr_scores=subgraph_info.get("node_ppr_scores", {}) or {},
+                            )
                     if subgraph_data is not None:
                         logger.info(
                             "Exported subgraph: %d nodes, %d edges",
@@ -545,13 +625,13 @@ class RAGInference(AbstractModule):
 
         messages: List[Dict[str, str]] = []
         
-        # 添加系统提示（要求使用<sup>标签引用来源）
+        # Add system prompt (requires <sup> citations).
         system_prompt = get_rag_inference_system_prompt(user_type=user_type)
         messages.append({"role": "system", "content": system_prompt})
         
-        # 如果有历史对话，先添加历史消息（参考 WebSocket 的实现）
+        # If history exists, prepend it (aligned with WebSocket behavior).
         if history_text:
-            # 解析历史文本为消息列表
+            # Parse history text into message list.
             history_lines = history_text.strip().split("\n")
             for line in history_lines:
                 if ":" in line:
@@ -561,7 +641,7 @@ class RAGInference(AbstractModule):
                     if role in ("user", "assistant") and content:
                         messages.append({"role": role, "content": content})
         
-        # 使用"Source key=N"格式（与chatbot.py保持一致）
+        # Use "Source key=N" format (aligned with chatbot.py).
         if chunks:
             for i, chunk in enumerate(chunks):
                 metadata = getattr(chunk, "metadata", None) or {}
@@ -572,7 +652,7 @@ class RAGInference(AbstractModule):
                 messages.append({"role": "user", "content": f"Source key={i+1} title={filename}\n{chunk_text}"})
             messages.append({"role": "user", "content": f"Based on the above Sources, please answer question: {rewritten_query}"})
         else:
-            # 如果没有 Sources，直接发送问题，不要提到 Sources
+            # If there are no Sources, send the question directly (do not mention Sources).
             messages.append({"role": "user", "content": rewritten_query})
         logger.info("Invoked chat with query: %s (owner_id=%s)", query, owner_id)
         logger.info("Query rewritten to: %s", rewritten_query)
@@ -580,9 +660,71 @@ class RAGInference(AbstractModule):
             history_count = len([m for m in messages if m.get("role") in ("user", "assistant") and "Chunk" not in m.get("content", "")])
             logger.info("Including history: %d history messages", history_count)
         logger.info("Prepared %d messages for LLM", len(messages))
-        # 记录完整的 messages 内容（用于调试）
+        # Log full messages payload (debug only).
         logger.debug("Full messages sent to LLM: %s", json.dumps(messages, ensure_ascii=False, indent=2))
         return (messages, chunks, subgraph_data, subgraph_info)
+
+    @staticmethod
+    def _dedupe_chunks_by_id(chunks: List[Chunk]) -> List[Chunk]:
+        if not chunks:
+            return chunks
+        seen: set[str] = set()
+        out: list[Chunk] = []
+        for chunk in chunks:
+            cid = str(getattr(chunk, "id", "") or "").strip()
+            if not cid:
+                out.append(chunk)
+                continue
+            if cid in seen:
+                continue
+            seen.add(cid)
+            out.append(chunk)
+        return out
+
+    @staticmethod
+    def _merge_graph_payloads(payloads: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not payloads:
+            return None
+        merged_chunks_by_id: dict[str, Dict[str, Any]] = {}
+        merged_nodes_by_id: dict[str, Dict[str, Any]] = {}
+        merged_edges_by_id: dict[str, Dict[str, Any]] = {}
+        merged_metadata: dict[str, Any] = {"sources": len(payloads)}
+
+        for payload in payloads:
+            if not isinstance(payload, dict):
+                continue
+            for chunk in payload.get("chunks", []) or []:
+                cid = str(chunk.get("id") or "").strip()
+                if not cid:
+                    continue
+                merged_chunks_by_id.setdefault(cid, dict(chunk))
+            for node in payload.get("nodes", []) or []:
+                nid = str(node.get("id") or "").strip()
+                if not nid:
+                    continue
+                merged_nodes_by_id.setdefault(nid, dict(node))
+            for edge in payload.get("edges", []) or []:
+                eid = str(edge.get("id") or "").strip()
+                if not eid:
+                    src = str(edge.get("source") or "").strip()
+                    dst = str(edge.get("target") or "").strip()
+                    rel = str(edge.get("relation") or "").strip()
+                    if src and dst and rel:
+                        eid = f"{src}::{rel}::{dst}"
+                if not eid:
+                    continue
+                merged_edges_by_id.setdefault(eid, dict(edge))
+            meta = payload.get("metadata")
+            if isinstance(meta, dict):
+                merged_metadata.setdefault("categories", meta.get("categories"))
+
+        merged = {
+            "chunks": list(merged_chunks_by_id.values()),
+            "nodes": list(merged_nodes_by_id.values()),
+            "edges": list(merged_edges_by_id.values()),
+            "metadata": merged_metadata,
+        }
+        return merged
 
     def _locate_graph_store(self):
         """Locate the configured graph store if one exists."""
@@ -697,6 +839,10 @@ class RAGInference(AbstractModule):
         max_nodes: int = 1000,
         max_edges: int = 5000,
         include_node_types: Optional[List[str]] = None,
+        *,
+        include_share: bool = False,
+        share_owner_id: uuid.UUID | None = None,
+        owner_ids: Optional[List[uuid.UUID | str]] = None,
     ) -> Dict[str, Any]:
         """
         Export a graph overview for visual inspection.
@@ -725,14 +871,36 @@ class RAGInference(AbstractModule):
         else:
             from encapsulation.database.utils.graph_export_utils import GraphExporter
 
-        overview = GraphExporter.export_full_graph(
-            graph_store=graph_store,
-            max_nodes=max_nodes,
-            max_edges=max_edges,
-            include_node_types=include_node_types,
-            owner_id=normalized_owner,
-            owner_scope_label=owner_scope_label,
-        )
+        if owner_id is None:
+            overview = GraphExporter.export_full_graph(
+                graph_store=graph_store,
+                max_nodes=max_nodes,
+                max_edges=max_edges,
+                include_node_types=include_node_types,
+                owner_id=None,
+                owner_scope_label=owner_scope_label,
+            )
+        else:
+            visibility = build_owner_visibility(
+                primary_owner_id=owner_id,
+                owner_ids=owner_ids,
+                include_share=bool(include_share),
+                share_owner_id=share_owner_id,
+                label=("graph_overview" if not include_share else "graph_overview+share"),
+            )
+            payloads: list[dict[str, Any]] = []
+            for owner_token in visibility.owner_ids:
+                payloads.append(
+                    GraphExporter.export_full_graph(
+                        graph_store=graph_store,
+                        max_nodes=max_nodes,
+                        max_edges=max_edges,
+                        include_node_types=include_node_types,
+                        owner_id=str(owner_token),
+                        owner_scope_label=str(owner_token),
+                    )
+                )
+            overview = payloads[0] if len(payloads) == 1 else (self._merge_graph_payloads(payloads) or payloads[0])
         logger.info(
             "Exported graph overview (owner_scope=%s) with %d nodes and %d edges",
             normalized_owner,

@@ -1,5 +1,5 @@
 """
-响应包装器中间件：统一包装所有响应为 StandardResponse 格式
+Response wrapper middleware: normalize JSON responses into StandardResponse shape.
 """
 import json
 import logging
@@ -17,39 +17,39 @@ _SKIP_JSON_WRAP_PATHS = frozenset({"/openapi.json"})
 
 
 class RequestIdResponseWrapper(BaseHTTPMiddleware):
-    """在所有 JSON 响应体最外层添加 request_id 字段，并记录请求日志"""
+    """Add `request_id` to JSON responses and log requests."""
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        # 记录请求开始时间
+        # Record request start time.
         start_time = time.time()
         
-        # 获取请求信息
+        # Collect request info for logging.
         method = request.method
         path = request.url.path
         client_ip = request.client.host if request.client else "unknown"
         
-        # 确保 correlation_id 上下文中有值（从请求头或 correlation_id 获取）
-        # CorrelationIdMiddleware 应该已经设置了，但为了确保日志能正确获取，这里也检查一下
+        # Ensure `correlation_id` is present (from header or existing context).
+        # CorrelationIdMiddleware should set this, but we still double-check to keep logs consistent.
         current_correlation_id = correlation_id.get()
         request_id_from_header = request.headers.get("X-Request-ID")
         
-        # 如果 correlation_id 为空，尝试从请求头获取或生成新的
+        # If missing, try the request header or generate a new one.
         if not current_correlation_id:
             if request_id_from_header:
                 correlation_id.set(request_id_from_header)
             else:
-                # 如果都没有，生成一个新的（这种情况不应该发生，但作为兜底）
+                # Should be rare, but still generate a new ID as a safeguard.
                 new_id = str(uuid.uuid4())
                 correlation_id.set(new_id)
         
-        # 获取 request_id（用于后续的错误处理）
+        # Resolve request_id (used for downstream error handling).
         request_id = correlation_id.get() or request_id_from_header or str(uuid.uuid4())
         
-        # 处理请求，捕获所有异常
+        # Handle request and catch unexpected errors.
         try:
             response = await call_next(request)
         except Exception as exc:
-            # 捕获所有未处理的异常，确保返回标准格式的错误响应
+            # Catch all unhandled exceptions and return a normalized error response.
             process_time = time.time() - start_time
             logger.error(
                 f"{client_ip} - \"{method} {path} HTTP/1.1\" 500 "
@@ -57,7 +57,7 @@ class RequestIdResponseWrapper(BaseHTTPMiddleware):
                 exc_info=True
             )
             
-            # 返回标准格式的错误响应
+            # Return a standard error response.
             error_detail = str(exc) if exc else "Internal server error"
             wrapped_data = {
                 "code": 500,
@@ -77,25 +77,25 @@ class RequestIdResponseWrapper(BaseHTTPMiddleware):
                 headers={"X-Request-ID": request_id}
             )
         
-        # 计算处理时间
+        # Compute processing time.
         process_time = time.time() - start_time
         
-        # 获取 request_id（优先从响应头获取，因为 CorrelationIdMiddleware 已设置）
+        # Resolve request_id (prefer response header set by CorrelationIdMiddleware).
         request_id = response.headers.get("X-Request-ID") or correlation_id.get() or "NO-ID"
         
-        # 确保 correlation_id 上下文中有值，以便日志记录能正确获取
-        # 如果 correlation_id 为空但 request_id 有值，则设置 correlation_id
+        # Keep correlation_id in sync so log handlers can always read it.
+        # If correlation_id is empty but request_id is available, set correlation_id.
         if request_id != "NO-ID" and not correlation_id.get():
             correlation_id.set(request_id)
-        # 如果 request_id 是 NO-ID 但 correlation_id 有值，使用 correlation_id
+        # If request_id is missing but correlation_id exists, use correlation_id.
         elif request_id == "NO-ID" and correlation_id.get():
             request_id = correlation_id.get()
         
-        # 确保在记录日志前 correlation_id 已设置（关键修复：确保日志系统能获取到 request_id）
+        # Ensure correlation_id is set before logging (critical to keep request_id observable).
         if request_id != "NO-ID":
             correlation_id.set(request_id)
         
-        # 只处理 JSON 响应（检查 content-type）
+        # Only wrap JSON responses (based on content-type).
         content_type = response.headers.get("content-type", "")
         content_disposition = response.headers.get("content-disposition") or ""
         if path in _SKIP_JSON_WRAP_PATHS:
@@ -105,30 +105,30 @@ class RequestIdResponseWrapper(BaseHTTPMiddleware):
             )
             return response
         if "application/json" in content_type and not content_disposition:
-            # 获取原始响应体
+            # Read the original response body.
             body_chunks: list[bytes] = []
             async for chunk in response.body_iterator:
                 body_chunks.append(chunk)
             body = b"".join(body_chunks)
             
             try:
-                # 解析原始 JSON
+                # Parse original JSON.
                 original_data = json.loads(body.decode('utf-8'))
                 
-                # 统一包装为标准响应格式
-                # 如果已经是标准格式（有code/message/data），直接使用
+                # Normalize into standard response shape.
+                # If the payload is already in standard shape (code/message/data), reuse it.
                 if isinstance(original_data, dict) and "code" in original_data and "message" in original_data:
-                    # 已经是标准格式，只添加 request_id
+                    # Already standard; only add request_id.
                     wrapped_data = {
                         **original_data,
                         "request_id": request_id
                     }
                 else:
-                    # 包装为标准格式
-                    # 对于错误响应，尝试从 data.detail 提取 message
+                    # Wrap into standard format.
+                    # For error responses, try to extract message from `data.detail`.
                     message = "success" if response.status_code < 400 else "error"
                     if response.status_code >= 400 and isinstance(original_data, dict):
-                        # 优先使用 detail 字段作为 message
+                        # Prefer `detail` as message.
                         detail = original_data.get("detail") or original_data.get("message")
                         if detail:
                             message = detail
@@ -140,7 +140,7 @@ class RequestIdResponseWrapper(BaseHTTPMiddleware):
                         "request_id": request_id
                     }
                 
-                # 记录请求日志（不记录 response data 以避免泄漏 token / 大块内容）
+                # Log request (avoid logging response payload to prevent token leakage / huge bodies).
                 data_summary: str
                 data_value = wrapped_data.get("data")
                 if isinstance(data_value, dict):
@@ -154,9 +154,9 @@ class RequestIdResponseWrapper(BaseHTTPMiddleware):
                     f"(process_time: {process_time:.3f}s) - Response: code={wrapped_data.get('code')} message={wrapped_data.get('message')} data={data_summary} request_id={request_id}"
                 )
                 
-                # 创建新的 JSON 响应（JSONResponse 会自动计算 Content-Length）
+                # Create a new JSON response (JSONResponse recalculates Content-Length).
                 new_headers = dict(response.headers)
-                # 移除旧的 Content-Length，让 JSONResponse 重新计算
+                # Remove old Content-Length so JSONResponse can recalculate it.
                 new_headers.pop("content-length", None)
                 
                 return JSONResponse(
@@ -166,7 +166,7 @@ class RequestIdResponseWrapper(BaseHTTPMiddleware):
                     media_type=response.media_type
                 )
             except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
-                # 如果不是有效的 JSON（例如下载文件但 content-type=application/json），返回原始响应内容。
+                # If the body is not valid JSON (e.g. file download mis-labeled as JSON), return the original payload.
                 new_headers = dict(response.headers)
                 new_headers.pop("content-length", None)
                 logger.info(
@@ -180,7 +180,7 @@ class RequestIdResponseWrapper(BaseHTTPMiddleware):
                     media_type=response.media_type,
                 )
         
-        # 记录请求日志（非 JSON 响应）
+        # Log request (non-JSON response).
         logger.info(
             f"{client_ip} - \"{method} {path} HTTP/1.1\" {response.status_code} "
             f"(process_time: {process_time:.3f}s) - Response: [Non-JSON response]"

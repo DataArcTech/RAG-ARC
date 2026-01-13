@@ -23,7 +23,7 @@ class Mention(BaseModel):
     """提及模型"""
     text: str = Field(..., description="原文字符串")
     entity_name: str = Field(..., description="规范化名称")
-    # entity_type: Literal["资源", "属性", "方法", "环境"] = Field(..., description="实体类别")
+    # entity_type: Literal["Resource", "Attribute", "Method", "Environment"] = Field(..., description="Entity category")
     entity_type: Literal["题型", "考点", "解题方法", "考试模块"] = Field(..., description="实体类别")
     entity_description: Optional[str] = Field(None, description="简要描述")
     event_indices: List[int] = Field(default_factory=list, description="提及关联的事件索引")
@@ -161,20 +161,20 @@ class MentionList(BaseModel):
         return len(self.mentions)
 
 
-# 统一的格式转换工具类
+# Unified schema conversion helpers.
 class PydanticUtils:
-    """Pydantic工具类，提供统一的格式转换方法"""
+    """Pydantic helpers that provide consistent schema conversion methods."""
     
     @staticmethod
     def to_dict(obj: Union[BaseModel, Dict[str, Any], List[Any]]) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
         """
-        将Pydantic对象或包含Pydantic对象的列表转换为字典格式
+        Convert a Pydantic object (or list of Pydantic objects) into plain dicts.
         
         Args:
-            obj: Pydantic对象、字典或包含这些对象的列表
+            obj: Pydantic object, dict, or a list containing these objects.
             
         Returns:
-            转换后的字典或字典列表
+            A dict or list of dicts.
         """
         if isinstance(obj, list):
             return [PydanticUtils._convert_item(item) for item in obj]
@@ -183,7 +183,7 @@ class PydanticUtils:
     
     @staticmethod
     def _convert_item(item: Union[BaseModel, Dict[str, Any]]) -> Dict[str, Any]:
-        """转换单个项目"""
+        """Convert a single item."""
         if isinstance(item, BaseModel):
             return item.model_dump()
         elif isinstance(item, dict):
@@ -194,14 +194,14 @@ class PydanticUtils:
     @staticmethod
     def from_dict(cls: type, data: Union[Dict[str, Any], List[Dict[str, Any]]]) -> Union[BaseModel, List[BaseModel]]:
         """
-        从字典创建Pydantic对象
+        Create Pydantic object(s) from dict payload(s).
         
         Args:
-            cls: Pydantic模型类
-            data: 字典数据或字典列表
+            cls: Pydantic model class.
+            data: Dict payload or list of dict payloads.
             
         Returns:
-            Pydantic对象或对象列表
+            Pydantic object or list of objects.
         """
         if isinstance(data, list):
             return [cls(**item) for item in data]
@@ -211,15 +211,15 @@ class PydanticUtils:
     @staticmethod
     def safe_get_attr(obj: Union[BaseModel, Dict[str, Any]], attr_name: str, default: Any = None) -> Any:
         """
-        安全获取对象属性，支持Pydantic对象和字典
+        Safely get an attribute from a Pydantic object or dict.
         
         Args:
-            obj: Pydantic对象或字典
-            attr_name: 属性名
-            default: 默认值
+            obj: Pydantic object or dict.
+            attr_name: Attribute key.
+            default: Default value.
             
         Returns:
-            属性值或默认值
+            The attribute value (or default).
         """
         if isinstance(obj, BaseModel):
             return getattr(obj, attr_name, default)

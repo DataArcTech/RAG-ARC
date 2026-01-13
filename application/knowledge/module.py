@@ -26,6 +26,8 @@ from encapsulation.message_queue.redis_task_queue import RedisTaskQueue, TaskSta
 from application.knowledge.permission_mixin import KnowledgePermissionMixin
 from config.output_limits import KNOWLEDGE_MINDMAP_EXPORT_MAX_CHUNKS
 from application.knowledge.runtime_state_mixin import KnowledgeRuntimeStateMixin
+from application.rabc.visibility import build_owner_visibility
+from core.utils.owner_guard import get_share_owner_id, is_admin_owner, is_org_admin_owner, normalize_owner_id
 
 class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractModule):
     def __init__(self, config: 'KnowledgeConfig'):
@@ -82,40 +84,76 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
             logger.info(f"Cancelled deletion task awaited for file_id: {doc_id}")
     
     async def upload_file(self, file: UploadFile, user_id: uuid.UUID, *, relative_path: str | None = None) -> str:
+        return await self.upload_file_scoped(
+            file=file,
+            actor_id=user_id,
+            owner_id=user_id,
+            allow_non_owner=True,
+            relative_path=relative_path,
+        )
+
+    async def upload_file_scoped(
+        self,
+        *,
+        file: UploadFile,
+        actor_id: uuid.UUID,
+        owner_id: uuid.UUID,
+        allow_non_owner: bool = False,
+        relative_path: str | None = None,
+    ) -> str:
+        """
+        Upload a file into an explicit owner scope.
+
+        This is the algorithm-layer entry point for supporting share owner uploads
+        (e.g., org_admin → share_owner_id). API-layer RBAC should set `allow_non_owner=True`
+        only when the caller is authorized.
+        """
+        if self._is_share_owner_scope(owner_id) and not self._is_share_library_admin(actor_id):
+            raise HTTPException(status_code=403, detail="Only admins can manage shared library files")
+
+        if actor_id != owner_id and not allow_non_owner:
+            raise HTTPException(status_code=403, detail="You are not allowed to upload files into this scope")
         try:
-            # Read file data asynchronously to avoid blocking the event loop
             file_data = await self._run_blocking(file.file.read)
-            
-            # Upload file asynchronously to avoid blocking the event loop
             doc_id = await self._run_blocking(
                 self.file_storage.upload_file,
                 filename=(relative_path or file.filename),
                 file_data=file_data,
-                owner_id=user_id,
-                content_type=file.content_type
+                owner_id=owner_id,
+                content_type=file.content_type,
             )
 
             task_run_id = self.task_queue.create_task_run(
                 task_type="index_file",
-                owner_id=user_id,
+                owner_id=owner_id,
                 resource_id=doc_id,
-                metadata={"filename": relative_path or file.filename, "content_type": file.content_type},
+                metadata={"filename": relative_path or file.filename, "content_type": file.content_type, "actor_id": str(actor_id)},
             )
             if self._use_celery():
                 from application.knowledge.celery_tasks import index_file as index_file_task
 
                 queue = os.getenv("CELERY_QUEUE_INDEXING", "indexing")
                 index_file_task.apply_async(
-                    kwargs={"file_id": doc_id, "owner_id": str(user_id)},
+                    kwargs={"file_id": doc_id, "owner_id": str(owner_id)},
                     task_id=task_run_id,
                     queue=queue,
                 )
-                logger.info("File %s uploaded with ID %s, indexing enqueued (task_run_id=%s)", file.filename, doc_id, task_run_id)
+                logger.info(
+                    "File %s uploaded with ID %s, indexing enqueued (task_run_id=%s owner_id=%s)",
+                    file.filename,
+                    doc_id,
+                    task_run_id,
+                    owner_id,
+                )
             else:
-                # Start indexing in background (fire-and-forget)
                 task = asyncio.create_task(self._index_file_background(doc_id, task_run_id=task_run_id))
                 self._track_background_task(doc_id, task)
-                logger.info(f"File {file.filename} uploaded with ID {doc_id}, indexing started in background")
+                logger.info(
+                    "File %s uploaded with ID %s, indexing started in background (owner_id=%s)",
+                    file.filename,
+                    doc_id,
+                    owner_id,
+                )
             return doc_id
 
         except Exception as e:
@@ -438,6 +476,87 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
             response["previous_failure"] = failure_reason
         return response
 
+    async def delete_file_scoped(
+        self,
+        doc_id: str,
+        *,
+        actor_id: uuid.UUID,
+        owner_id: uuid.UUID,
+        allow_non_owner: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Delete a file in an explicit owner scope.
+
+        - When `allow_non_owner=False`, only the owner can delete (same as delete_file()).
+        - When `allow_non_owner=True`, callers may delete on behalf of `owner_id` (e.g., share owner cleanup),
+          but we still enforce that the file belongs to the requested owner scope.
+        """
+        if self._is_share_owner_scope(owner_id) and not self._is_share_library_admin(actor_id):
+            raise HTTPException(status_code=403, detail="Only admins can manage shared library files")
+
+        metadata = await self._run_blocking(self.file_storage.get_file_metadata, doc_id)
+        if not metadata:
+            raise HTTPException(status_code=404, detail="File not found")
+
+        if metadata.owner_id != owner_id:
+            raise HTTPException(status_code=404, detail="File not found")
+
+        if metadata.owner_id != actor_id and not allow_non_owner:
+            raise HTTPException(status_code=403, detail="You are not allowed to delete this file")
+
+        failure_reason = self._deletion_failures.get(doc_id)
+
+        if metadata.status == FileStatus.DELETED and not failure_reason:
+            logger.info("File %s already deleted (scope owner_id=%s)", doc_id, owner_id)
+            return {"status": "deleted", "file_id": doc_id}
+
+        if self._is_file_marked_for_deletion(doc_id) and not failure_reason:
+            logger.info("Deletion already scheduled for %s (scope owner_id=%s)", doc_id, owner_id)
+            return {"status": "deleting", "file_id": doc_id}
+
+        await self._cancel_indexing_task(doc_id)
+        await self._cancel_deletion_task(doc_id)
+
+        self._mark_file_for_deletion(doc_id, metadata.owner_id)
+        await self._run_blocking(self.file_storage.metadata_store.update_file_status, doc_id, FileStatus.DELETED)
+
+        if self._use_celery():
+            from application.knowledge.celery_tasks import delete_file as delete_file_task
+
+            task_run_id = self.task_queue.create_task_run(
+                task_type="delete_file",
+                owner_id=metadata.owner_id,
+                resource_id=doc_id,
+                metadata={"trigger": "scoped_delete", "actor_id": str(actor_id)},
+            )
+            queue = os.getenv("CELERY_QUEUE_INDEXING", "indexing")
+            delete_file_task.apply_async(
+                kwargs={"file_id": doc_id, "owner_id": str(metadata.owner_id), "delete_file_metadata": True},
+                task_id=task_run_id,
+                queue=queue,
+            )
+            logger.info("Deletion enqueued for file_id=%s (task_run_id=%s owner_id=%s)", doc_id, task_run_id, owner_id)
+        else:
+            delete_task = asyncio.create_task(self._delete_file_background(doc_id))
+            self._track_deletion_task(doc_id, delete_task)
+            logger.info("Deletion scheduled for file_id: %s (owner_id=%s)", doc_id, owner_id)
+
+        response = {"status": "deleting", "file_id": doc_id}
+        if failure_reason:
+            response["previous_failure"] = failure_reason
+        return response
+
+    @staticmethod
+    def _is_share_owner_scope(owner_id: uuid.UUID) -> bool:
+        share = get_share_owner_id()
+        if not share:
+            return False
+        return normalize_owner_id(owner_id) == share
+
+    @staticmethod
+    def _is_share_library_admin(actor_id: uuid.UUID) -> bool:
+        return bool(is_admin_owner(actor_id) or is_org_admin_owner(actor_id))
+
     async def _delete_file_background(self, doc_id: str) -> None:
         """Execute the deletion pipeline asynchronously."""
         logger.info(f"Background deletion started for file_id: {doc_id}")
@@ -515,6 +634,64 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
             logger.error(f"Failed to list accessible files for user {user_id}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to retrieve files: {str(e)}")
 
+    def list_visible_files(
+        self,
+        user_id: uuid.UUID,
+        *,
+        include_share: bool = False,
+        share_owner_id: uuid.UUID | None = None,
+        status: Optional[FileStatus] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> List[FileMetadata]:
+        """
+        List files visible under an explicit owner visibility scope.
+
+        Notes:
+        - This bypasses the fine-grained `file_permission` model and instead unions file listings by owner_id.
+        - Intended for algorithm-layer "me / me+share" rollout; API-layer RBAC should decide when to call it.
+        - Pagination is applied after union+sort (created_at desc).
+        """
+        visibility = build_owner_visibility(
+            primary_owner_id=user_id,
+            include_share=bool(include_share),
+            share_owner_id=share_owner_id,
+            label=("me+share" if include_share else "me"),
+        )
+
+        owner_uuids: list[uuid.UUID] = []
+        for token in visibility.owner_ids:
+            try:
+                owner_uuids.append(uuid.UUID(str(token)))
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=500, detail=f"Invalid owner_id in visibility scope: {token} ({exc})") from exc
+
+        files: list[FileMetadata] = []
+        try:
+            for oid in owner_uuids:
+                files.extend(self.file_storage.list_files(owner_id=oid, status=status, limit=None, offset=None))
+        except Exception as e:
+            logger.error("Failed to list files for visibility scope %s: %s", visibility.label, e)
+            raise HTTPException(status_code=500, detail=f"Failed to retrieve files: {str(e)}") from e
+
+        if status is None:
+            files = [
+                file for file in files
+                if self._is_active_status(file.status) and not self._is_file_marked_for_deletion(file.file_id)
+            ]
+
+        try:
+            files.sort(key=lambda f: f.created_at, reverse=True)
+        except Exception:
+            pass
+
+        start = int(offset or 0)
+        if start < 0:
+            start = 0
+        if limit is None:
+            return files[start:]
+        return files[start : start + max(int(limit), 0)]
+
     async def list_user_files_async(
         self,
         user_id: uuid.UUID,
@@ -526,6 +703,26 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
         return await self._run_blocking(
             self.list_user_files,
             user_id=user_id,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def list_visible_files_async(
+        self,
+        user_id: uuid.UUID,
+        *,
+        include_share: bool = False,
+        share_owner_id: uuid.UUID | None = None,
+        status: Optional[FileStatus] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> List[FileMetadata]:
+        return await self._run_blocking(
+            self.list_visible_files,
+            user_id=user_id,
+            include_share=include_share,
+            share_owner_id=share_owner_id,
             status=status,
             limit=limit,
             offset=offset,
@@ -559,6 +756,40 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
         except Exception as e:
             logger.error(f"Failed to count accessible files for user {user_id}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to count files: {str(e)}")
+
+    def count_visible_files(
+        self,
+        user_id: uuid.UUID,
+        *,
+        include_share: bool = False,
+        share_owner_id: uuid.UUID | None = None,
+        status: FileStatus | None = None,
+    ) -> int:
+        files = self.list_visible_files(
+            user_id,
+            include_share=include_share,
+            share_owner_id=share_owner_id,
+            status=status,
+            limit=None,
+            offset=None,
+        )
+        return len(files)
+
+    async def count_visible_files_async(
+        self,
+        user_id: uuid.UUID,
+        *,
+        include_share: bool = False,
+        share_owner_id: uuid.UUID | None = None,
+        status: FileStatus | None = None,
+    ) -> int:
+        return await self._run_blocking(
+            self.count_visible_files,
+            user_id,
+            include_share=include_share,
+            share_owner_id=share_owner_id,
+            status=status,
+        )
 
     async def count_user_files_async(
         self,

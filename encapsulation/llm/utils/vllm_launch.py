@@ -10,20 +10,20 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 def launch_vllm_server(hf_model_path="weights/DotsOCR", num_gpus="0", gpu_memory_utilization=0.95, port=8001):
-    # 1. 检查模型路径
+    # 1) Validate model path.
     model_path = Path(hf_model_path).resolve()
     if not model_path.exists():
         logger.info(f"error: 模型路径不存在: {model_path}")
         sys.exit(1)
 
-    # 2. 设置环境变量
+    # 2) Set environment variables.
     os.environ["hf_model_path"] = str(model_path)
     os.environ["PYTHONPATH"] = f"{model_path.parent}:{os.environ.get('PYTHONPATH', '')}" # 
     os.environ["CUDA_VISIBLE_DEVICES"] = num_gpus
     os.environ["OPENAI_API_BASE"] = f"http://localhost:{port}/v1"
     os.environ["OPENAI_API_KEY"] = "EMPTY"
 
-    # 3. 修改 vllm CLI 添加模型 
+    # 3) Patch vLLM CLI to import the model.
     try:
         vllm_path = subprocess.check_output(["which", "vllm"], text=True).strip()
         with open(vllm_path, "r") as f:
@@ -41,7 +41,7 @@ def launch_vllm_server(hf_model_path="weights/DotsOCR", num_gpus="0", gpu_memory
         logger.info(f"error: 获取 vllm 路径失败: {e}")
         sys.exit(1)
 
-    # 4. 启动 vllm server
+    # 4) Launch vLLM server.
     logger.info(" 正在启动 vLLM 服务...")
     cmd = [
         "vllm", "serve", str(model_path),

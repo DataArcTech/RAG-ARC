@@ -49,10 +49,10 @@ def _shutdown_executor() -> None:
 async def run_blocking(func: Callable[..., T], *args: Any, executor: Optional[ThreadPoolExecutor] = None, **kwargs: Any) -> T:
     """Run a blocking callable in the shared thread pool, preserving contextvars (e.g., correlation_id)."""
     
-    # 捕获当前 context（包含 correlation_id 等）
+    # Capture current context (including correlation_id, etc.).
     ctx = contextvars.copy_context()
     
-    # 在线程中运行函数时使用捕获的 context
+    # Run with captured context inside the worker thread.
     def run_with_context():
         return ctx.run(partial(func, *args, **kwargs))
     
@@ -67,4 +67,3 @@ async def run_coroutine_in_thread(coro_func: Callable[..., Any], *args: Any, exe
         return asyncio.run(coro_func(*args, **kwargs))
 
     return await run_blocking(_runner, executor=executor or get_shared_thread_pool())
-

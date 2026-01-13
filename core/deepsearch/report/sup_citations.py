@@ -1,14 +1,20 @@
-"""Render DeepSearch citations as compact evidence-number tags.
+"""Convert DeepSearch bracket citations into HippoRAG-compatible <sup> anchors.
 
-The internal pipeline uses bracket citations (e.g. [chunk_001]) so downstream
-components can validate coverage and consistency. This module converts those
-bracket citations into user-facing evidence-number tags (e.g. [E1]) and
-generates a compact evidence index.
+DeepSearch writers emit inline citations as bracket tokens (e.g. ``[chunk_id]`` / ``【chunk_id】``)
+to make downstream validation deterministic. This module converts those tokens into
+HippoRAG-compatible ``<sup>k</sup>`` anchors and emits a matching ``sources`` list:
+
+- The answer uses contiguous numeric superscripts starting from 1.
+- ``sources[key=k]`` maps 1:1 to ``<sup>k</sup>``.
+- ``citation_key_map`` provides ``evidence_id -> key`` for debugging/replay.
 """
 import json
 import re
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
+from config.output_limits import DEEPSEARCH_SOURCE_MAX_CHARS, DEEPSEARCH_SOURCE_TITLE_MAX_CHARS
+from core.presentation.evidence import document_download_url
 
 _BRACKET_RE = re.compile(r"\[([^\[\]]+)\]")
 _CJK_BRACKET_RE = re.compile(r"【([^【】]+)】")
@@ -16,12 +22,12 @@ _CJK_BRACKET_RE = re.compile(r"【([^【】]+)】")
 def _infer_ordered_ids_from_text(
     markdown_text: str,
     *,
-    evidence_lookup: Mapping[str, Dict[str, Any]],
+    known_ids: Iterable[str],
 ) -> List[str]:
     """Infer citation ordering directly from report text when structured citations are missing."""
 
-    known_ids = set(evidence_lookup)
-    if not known_ids:
+    known = {str(token).strip() for token in known_ids if str(token).strip()}
+    if not known:
         return []
 
     ordered: List[str] = []
@@ -29,7 +35,7 @@ def _infer_ordered_ids_from_text(
 
     def _consider(candidate: str) -> None:
         token = (candidate or "").strip()
-        if not token or token not in known_ids:
+        if not token or token not in known:
             return
         if token in seen:
             return
@@ -77,21 +83,25 @@ def convert_bracket_citations_to_sup(
     *,
     citations: Sequence[Dict[str, Any]] | None,
     evidences: Sequence[Dict[str, Any]] | None = None,
-) -> Tuple[str, List[Dict[str, Any]]]:
-    """Convert bracket citations in the markdown into evidence-number tags.
+) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
+    """Convert bracket citations in the markdown into HippoRAG-style <sup> anchors.
 
     Returns:
       - updated markdown text
-      - reference entries (ordered, 1-based numbering)
+      - sources entries (ordered, 1-based numbering; HippoRAG-compatible keys)
+      - citation_key_map (evidence_id -> key)
     """
 
     evidence_lookup = _build_evidence_lookup(evidences)
-    # Prefer the ordering implied by the rendered report text. This prevents emitting references that
-    # are not actually cited (a frequent source of "references != citations" inconsistencies).
-    text_ordered = _infer_ordered_ids_from_text(str(markdown_text or ""), evidence_lookup=evidence_lookup) if evidence_lookup else []
-    citations_ordered = _ordered_evidence_ids(citations)
 
-    synthesized_citations: List[Dict[str, Any]] | None = None
+    citations_ordered = _ordered_evidence_ids(citations)
+    for ev_id in citations_ordered:
+        evidence_lookup.setdefault(ev_id, {})
+
+    # Prefer the ordering implied by the rendered report text. This prevents emitting sources that
+    # are not actually cited (a frequent source of "sources != citations" inconsistencies).
+    known_ids = set(evidence_lookup)
+    text_ordered = _infer_ordered_ids_from_text(str(markdown_text or ""), known_ids=known_ids) if known_ids else []
     ordered_ids: List[str] = []
     if text_ordered:
         text_set = set(text_ordered)
@@ -101,23 +111,12 @@ def convert_bracket_citations_to_sup(
                 ordered_ids.append(ev_id)
     else:
         ordered_ids = list(citations_ordered)
-        if not ordered_ids and evidence_lookup:
-            ordered_ids = list(text_ordered)
-            if ordered_ids:
-                synthesized_citations = [{"evidence_id": ev_id} for ev_id in ordered_ids]
     if not ordered_ids:
-        return str(markdown_text or ""), []
+        return str(markdown_text or ""), [], {}
 
     id_to_num: Dict[str, int] = {}
     for idx, ev_id in enumerate(ordered_ids, start=1):
         id_to_num[ev_id] = idx
-
-    active_citations: Sequence[Dict[str, Any]] = citations or []
-    if synthesized_citations is not None:
-        active_citations = synthesized_citations
-    else:
-        ordered_set = set(ordered_ids)
-        active_citations = [cit for cit in active_citations if isinstance(cit, dict) and str(cit.get("evidence_id") or "").strip() in ordered_set]
 
     text = str(markdown_text or "")
     appendix_marker = "## Appendix:"
@@ -153,8 +152,8 @@ def convert_bracket_citations_to_sup(
             if num in seen_nums:
                 continue
             seen_nums.add(num)
-            parts.append(f"E{num}")
-        return "[" + ",".join(parts) + "]"
+            parts.append(f"<sup>{num}</sup>")
+        return "".join(parts)
 
     converted_prefix = _BRACKET_RE.sub(_replace, prefix)
     converted_prefix = _CJK_BRACKET_RE.sub(_replace, converted_prefix)
@@ -162,17 +161,134 @@ def convert_bracket_citations_to_sup(
     if suffix:
         updated_text = updated_text + "\n\n" + suffix.lstrip()
 
-    refs = build_reference_entries(
+    sources = build_source_entries(
         ordered_ids=ordered_ids,
-        citations=list(active_citations),
         evidence_lookup=evidence_lookup,
         id_to_num=id_to_num,
     )
-    references_markdown = render_reference_list_markdown(refs)
-    if references_markdown:
-        updated_text = (updated_text.rstrip() + "\n\n" + references_markdown.strip() + "\n").rstrip() + "\n"
+    citation_key_map = {ev_id: int(id_to_num[ev_id]) for ev_id in ordered_ids if ev_id in id_to_num}
+    return updated_text, sources, citation_key_map
 
-    return updated_text, refs
+
+def _truncate_text(text: str, *, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
+    raw = str(text or "")
+    if len(raw) <= max_chars:
+        return raw
+    return f"{raw[:max_chars].rstrip()}..."
+
+
+def _sanitize_title(text: str, *, max_chars: int) -> str:
+    compact = " ".join(str(text or "").strip().split())
+    if not compact:
+        return "source"
+    if max_chars > 0 and len(compact) > max_chars:
+        compact = compact[:max_chars].rstrip()
+    return compact
+
+
+def _extract_url_from_provenance(provenance: Mapping[str, Any]) -> str | None:
+    url = provenance.get("url")
+    if isinstance(url, str):
+        token = url.strip()
+        if token.lower().startswith(("http://", "https://")):
+            return token
+    provider = provenance.get("provider")
+    if isinstance(provider, str) and provider.strip() in {"web.tavily", "tavily"}:
+        url = provenance.get("url")
+        if isinstance(url, str):
+            token = url.strip()
+            if token.lower().startswith(("http://", "https://")):
+                return token
+    return None
+
+
+def _extract_file_meta_from_provenance(provenance: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    def _coerce_str(value: Any) -> str | None:
+        if isinstance(value, str):
+            token = value.strip()
+            return token or None
+        return None
+
+    def _maybe_apply(meta: Mapping[str, Any], current: tuple[str | None, str | None]) -> tuple[str | None, str | None]:
+        file_id, filename = current
+        chunk_meta = meta.get("chunk_metadata")
+        candidates: List[Mapping[str, Any]] = []
+        if isinstance(chunk_meta, Mapping):
+            candidates.append(chunk_meta)
+        candidates.append(meta)
+        for cand in candidates:
+            if file_id is None:
+                file_id = _coerce_str(cand.get("source_file_id"))
+            if filename is None:
+                filename = _coerce_str(cand.get("filename"))
+        return file_id, filename
+
+    file_id: str | None = None
+    filename: str | None = None
+
+    metadata = provenance.get("metadata")
+    if isinstance(metadata, Mapping):
+        file_id, filename = _maybe_apply(metadata, (file_id, filename))
+
+    filtered = provenance.get("filtered")
+    if isinstance(filtered, Mapping):
+        filtered_meta = filtered.get("metadata")
+        if isinstance(filtered_meta, Mapping):
+            file_id, filename = _maybe_apply(filtered_meta, (file_id, filename))
+
+    raw_chunk = provenance.get("raw_chunk")
+    if isinstance(raw_chunk, Mapping):
+        raw_meta = raw_chunk.get("metadata")
+        if isinstance(raw_meta, Mapping):
+            file_id, filename = _maybe_apply(raw_meta, (file_id, filename))
+
+    return file_id, filename
+
+
+def build_source_entries(
+    *,
+    ordered_ids: Sequence[str],
+    evidence_lookup: Mapping[str, Dict[str, Any]],
+    id_to_num: Mapping[str, int],
+) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    for ev_id in ordered_ids:
+        ev_token = str(ev_id or "").strip()
+        if not ev_token:
+            continue
+        key = id_to_num.get(ev_token)
+        if key is None:
+            continue
+        evidence = evidence_lookup.get(ev_token) or {}
+        provenance = evidence.get("provenance") if isinstance(evidence.get("provenance"), Mapping) else {}
+        url = _extract_url_from_provenance(provenance) if provenance else None
+        file_id, filename = _extract_file_meta_from_provenance(provenance) if provenance else (None, None)
+
+        content = str(evidence.get("content") or "")
+        description = _truncate_text(content, max_chars=DEEPSEARCH_SOURCE_MAX_CHARS)
+
+        if url:
+            title = _sanitize_title(content.splitlines()[0] if content else url, max_chars=DEEPSEARCH_SOURCE_TITLE_MAX_CHARS)
+            file_url = url
+        else:
+            safe_name = Path(filename).name if filename else ""
+            title = _sanitize_title(safe_name or ev_token, max_chars=DEEPSEARCH_SOURCE_TITLE_MAX_CHARS)
+            file_url = document_download_url(file_id) if file_id else None
+
+        entries.append(
+            {
+                "key": int(key),
+                "chunk_id": ev_token,
+                "file_id": file_id,
+                "title": title,
+                "file": file_url,
+                "description": description,
+            }
+        )
+    entries.sort(key=lambda item: int(item.get("key") or 0))
+    return entries
 
 
 def build_reference_entries(
@@ -263,6 +379,7 @@ def render_reference_list_markdown(references: Sequence[Dict[str, Any]]) -> str:
 
 __all__ = [
     "convert_bracket_citations_to_sup",
+    "build_source_entries",
     "build_reference_entries",
     "render_reference_list_markdown",
 ]

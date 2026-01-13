@@ -166,10 +166,10 @@ class RetrievalAPI:
 
     def initialize_index(self, retriever_name: str) -> None:
         """
-        初始化索引（假设索引已存在，只进行加载操作）
+        Initialize an index (assumes it already exists; only performs loading).
 
         Args:
-            retriever_name: 检索器名称
+            retriever_name: Retriever name.
         """
         if retriever_name not in self.retrievers:
             raise ValueError(f"Retriever '{retriever_name}' not found")
@@ -178,34 +178,34 @@ class RetrievalAPI:
             retriever = self.retrievers[retriever_name]
             logger.info(f"Initializing index for {retriever_name}")
 
-            # 获取索引实例
+            # Resolve underlying index instance.
             if hasattr(retriever, '_index'):
                 index_instance = retriever._index
 
-                # 如果有load_index方法，尝试加载索引
+                # If `load_index` exists, attempt to load.
                 if hasattr(index_instance, 'load_index'):
-                    # 检查是否需要加载索引
+                    # Decide whether the index needs loading.
                     needs_loading = False
 
-                    # 对于BM25索引，检查_index是否为None
+                    # BM25 index: check `_index` is None.
                     if hasattr(index_instance, '_index') and index_instance._index is None:
                         needs_loading = True
-                    # 对于FAISS索引，检查index是否为None
+                    # FAISS index: check `index` is None.
                     elif hasattr(index_instance, 'index') and index_instance.index is None:
                         needs_loading = True
-                    # 如果无法判断，默认尝试加载
+                    # Fallback: try loading if we cannot infer the state.
                     else:
                         needs_loading = True
 
                     if needs_loading:
-                        # 使用配置中的索引路径加载
+                        # Load from configured path if available.
                         if hasattr(index_instance.config, 'index_path') and index_instance.config.index_path:
                             index_instance.load_index(index_instance.config.index_path)
                         else:
                             index_instance.load_index()
                         logger.info(f"Loaded index for {retriever_name}")
 
-                    # 重新初始化搜索器
+                    # Re-initialize the searcher if supported.
                     if hasattr(retriever, 'reload_searcher'):
                         retriever.reload_searcher()
                     elif hasattr(retriever, '_ensure_searcher'):
@@ -224,11 +224,11 @@ class RetrievalAPI:
     
     def load_index(self, retriever_name: str, index_path: Optional[str] = None) -> None:
         """
-        加载索引
+        Load an index.
 
         Args:
-            retriever_name: 检索器名称
-            index_path: 索引路径（可选，如果不提供则使用配置中的路径）
+            retriever_name: Retriever name.
+            index_path: Optional index path; if omitted, uses the configured path.
         """
         if retriever_name not in self.retrievers:
             raise ValueError(f"Retriever '{retriever_name}' not found")
@@ -236,18 +236,18 @@ class RetrievalAPI:
         try:
             retriever = self.retrievers[retriever_name]
 
-            # 获取索引实例
+            # Resolve underlying index instance.
             if hasattr(retriever, '_index'):
                 index_instance = retriever._index
 
-                # 调用索引的load_index方法
+                # Call index's `load_index` method.
                 if hasattr(index_instance, 'load_index'):
-                    # 确定使用的索引路径
+                    # Determine the index path to use.
                     path_to_use = index_path
                     if not path_to_use and hasattr(index_instance.config, 'index_path'):
                         path_to_use = index_instance.config.index_path
 
-                    # 加载索引
+                    # Load the index.
                     if path_to_use:
                         index_instance.load_index(path_to_use)
                         logger.info(f"Loaded index for {retriever_name} from {path_to_use}")
@@ -255,7 +255,7 @@ class RetrievalAPI:
                         index_instance.load_index()
                         logger.info(f"Loaded index for {retriever_name}")
 
-                    # 重新初始化搜索器
+                    # Re-initialize the searcher if supported.
                     if hasattr(retriever, 'reload_searcher'):
                         retriever.reload_searcher()
                     elif hasattr(retriever, '_ensure_searcher'):
@@ -294,7 +294,7 @@ class RetrievalAPI:
             "config": self.configs.get(retriever_name, {})
         }
         
-        # 添加特定类型的信息
+        # Add type-specific info.
         if hasattr(retriever, 'get_vectorstore_info'):
             info.update(retriever.get_vectorstore_info())
         elif hasattr(retriever, 'get_multipath_info'):
@@ -321,5 +321,5 @@ class RetrievalAPI:
         return False
 
 
-# 创建全局API实例
+# Create global API instance.
 api = RetrievalAPI()
