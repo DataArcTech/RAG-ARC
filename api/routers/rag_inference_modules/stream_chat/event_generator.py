@@ -1,0 +1,471 @@
+"""SSE event generator for stream chat."""
+import json
+import uuid
+import asyncio
+import time
+import logging
+from typing import Any, AsyncGenerator
+from api.sse import (
+    delta_envelope,
+    iter_text_deltas,
+    new_chatcmpl_id,
+    now_epoch_seconds,
+    openai_chat_completion_chunk,
+    sse_done,
+    sse_json_wrapped,
+)
+from api.routers.rag_inference_models import build_stream_chat_payload
+from api.routers.rag_inference_handlers import get_rag_inference_handler
+from .history_manager import create_user_message, load_and_process_history
+from .deepsearch_handler import process_deepsearch
+from .stream_processor import start_stream_processing
+from .response_builder import (
+    generate_mindmap_if_needed,
+    ensure_non_empty_response,
+    build_sources_and_evidence,
+    create_assistant_message,
+    generate_and_update_title,
+    build_evidence_for_payload,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _create_progress_emitter(
+    request_id: str,
+    queue: asyncio.Queue,
+    loop: asyncio.AbstractEventLoop
+) -> callable:
+    """Create progress emitter function."""
+    progress_seq = 0
+    
+    def emit_progress(payload: dict[str, Any]) -> None:
+        nonlocal progress_seq
+        progress_seq += 1
+        envelope = dict(payload or {})
+        envelope.setdefault("v", 1)
+        envelope.setdefault("type", "progress")
+        envelope.setdefault("ts_ms", int(time.time() * 1000))
+        envelope.setdefault("request_id", request_id)
+        envelope.setdefault("seq", progress_seq)
+        asyncio.run_coroutine_threadsafe(
+            queue.put({"kind": "progress", "payload": envelope}),
+            loop
+        )
+    
+    return emit_progress
+
+
+async def _yield_progress_event(
+    payload: dict[str, Any],
+    chunk_id: str,
+    model_name: str,
+    created: int,
+    request_id: str
+) -> AsyncGenerator[str, None]:
+    """Yield progress event as SSE."""
+    tool_calls = [{
+        "index": 0,
+        "id": f"call_progress_{uuid.uuid4().hex}",
+        "type": "function",
+        "function": {
+            "name": "rag_arc_progress",
+            "arguments": json.dumps(
+                payload or {},
+                ensure_ascii=False,
+                default=str,
+                separators=(",", ":"),
+            ),
+        },
+    }]
+    yield sse_json_wrapped(
+        openai_chat_completion_chunk(
+            chunk_id=chunk_id,
+            model=model_name,
+            created=created,
+            delta=delta_envelope(role=None, tool_calls=tool_calls),
+        ),
+        request_id=request_id
+    )
+
+
+async def _yield_token_events(
+    text: str,
+    chunk_id: str,
+    model_name: str,
+    created: int,
+    request_id: str,
+    response_parts: list[str]
+) -> AsyncGenerator[str, None]:
+    """Yield token events as SSE."""
+    if not text:
+        return
+    
+    for delta_piece in iter_text_deltas(text):
+        response_parts.append(delta_piece)
+        yield sse_json_wrapped(
+            openai_chat_completion_chunk(
+                chunk_id=chunk_id,
+                model=model_name,
+                created=created,
+                delta=delta_envelope(role=None, content=delta_piece),
+            ),
+            request_id=request_id
+        )
+        await asyncio.sleep(0)
+
+
+async def _process_queue_events(
+    queue: asyncio.Queue,
+    chunk_id: str,
+    model_name: str,
+    created: int,
+    request_id: str,
+    response_parts: list[str],
+    stream_error: list[Exception | None]
+) -> AsyncGenerator[str, None]:
+    """Process events from queue."""
+    while True:
+        item = await queue.get()
+        if item is None:
+            break
+        
+        if isinstance(item, dict) and item.get("kind") == "progress":
+            async for event in _yield_progress_event(
+                item.get("payload") or {},
+                chunk_id,
+                model_name,
+                created,
+                request_id
+            ):
+                yield event
+            continue
+        
+        if isinstance(item, dict) and item.get("kind") == "token":
+            async for event in _yield_token_events(
+                str(item.get("text") or ""),
+                chunk_id,
+                model_name,
+                created,
+                request_id,
+                response_parts
+            ):
+                yield event
+            continue
+
+
+async def _yield_error_event(
+    error: Exception,
+    request_id: str
+) -> AsyncGenerator[str, None]:
+    """Yield error event."""
+    yield sse_json_wrapped(
+        {"error": {"message": str(error)}},
+        request_id=request_id,
+        code=500,
+        message="error"
+    )
+    yield sse_done()
+
+
+async def _yield_title_event(
+    title: str,
+    request_id: str
+) -> AsyncGenerator[str, None]:
+    """Yield title event."""
+    yield sse_json_wrapped(
+        {"type": "title", "title": title},
+        request_id=request_id
+    )
+
+
+async def _yield_sources_event(
+    sources_for_frontend: list,
+    citation_key_map: dict[int, int],
+    session_id: uuid.UUID,
+    request_id: str
+) -> AsyncGenerator[str, None]:
+    """Yield sources event."""
+    yield sse_json_wrapped(
+        {
+            "type": "sources",
+            "sources": [s.model_dump() for s in sources_for_frontend],
+            "citation_key_map": {str(k): v for k, v in citation_key_map.items()},
+            "id": str(session_id)
+        },
+        request_id=request_id
+    )
+
+
+async def _yield_payload_event(
+    assistant_message: Any,
+    chunk_id: str,
+    model_name: str,
+    created: int,
+    request_id: str
+) -> AsyncGenerator[str, None]:
+    """Yield payload event."""
+    payload = build_stream_chat_payload(
+        assistant_message,
+        assistant_message.source_file_ids or [],
+        subgraph=None,
+        evidence=None,
+    )
+    
+    tool_calls = [{
+        "index": 0,
+        "id": f"call_{assistant_message.id}",
+        "type": "function",
+        "function": {
+            "name": "rag_arc_payload",
+            "arguments": json.dumps(
+                payload,
+                ensure_ascii=False,
+                default=str,
+                separators=(",", ":")
+            ),
+        },
+    }]
+    
+    yield sse_json_wrapped(
+        openai_chat_completion_chunk(
+            chunk_id=chunk_id,
+            model=model_name,
+            created=created,
+            delta=delta_envelope(role=None, tool_calls=tool_calls),
+        ),
+        request_id=request_id
+    )
+
+
+async def _yield_finish_event(
+    chunk_id: str,
+    model_name: str,
+    created: int,
+    request_id: str
+) -> AsyncGenerator[str, None]:
+    """Yield finish event."""
+    yield sse_json_wrapped(
+        openai_chat_completion_chunk(
+            chunk_id=chunk_id,
+            model=model_name,
+            created=created,
+            delta=delta_envelope(),
+            finish_reason="stop",
+        ),
+        request_id=request_id
+    )
+    yield sse_done()
+
+
+async def generate_sse_events(
+    session_id: uuid.UUID,
+    query: str,
+    effective_owner: Any,
+    return_subgraph: bool,
+    include_evidence: bool,
+    enable_web_search: bool,
+    enable_deepsearch: bool,
+    model_name: str,
+    request_id: str
+) -> AsyncGenerator[str, None]:
+    """Generate SSE events for stream chat."""
+    chunk_id = new_chatcmpl_id()
+    created = now_epoch_seconds()
+    
+    # Initial assistant role event
+    yield sse_json_wrapped(
+        openai_chat_completion_chunk(
+            chunk_id=chunk_id,
+            model=model_name,
+            created=created,
+            delta=delta_envelope(role="assistant", content=""),
+        ),
+        request_id=request_id
+    )
+    
+    # Create user message and load history
+    user_message = await create_user_message(session_id, query)
+    history_messages, history_text, first_turn = await load_and_process_history(
+        session_id,
+        user_message.id
+    )
+    
+    # Initialize queues and state
+    response_parts: list[str] = []
+    queue: asyncio.Queue[object | None] = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+    stream_error: list[Exception | None] = [None]
+    prepared: dict[str, Any] = {}
+    
+    emit_progress = _create_progress_emitter(request_id, queue, loop)
+    
+    # Process DeepSearch if enabled
+    enhanced_query = query
+    if enable_deepsearch:
+        enhanced_query, deepsearch_gen = await process_deepsearch(
+            query,
+            str(effective_owner),
+            request_id,
+            chunk_id,
+            model_name,
+            created,
+            loop
+        )
+        async for event in deepsearch_gen:
+            yield event
+    
+    # Start stream processing
+    start_stream_processing(
+        enhanced_query,
+        effective_owner,
+        return_subgraph,
+        include_evidence,
+        history_text,
+        enable_web_search,
+        queue,
+        loop,
+        prepared,
+        stream_error,
+        emit_progress
+    )
+    
+    # Process queue events
+    async for event in _process_queue_events(
+        queue,
+        chunk_id,
+        model_name,
+        created,
+        request_id,
+        response_parts,
+        stream_error
+    ):
+        yield event
+    
+    # Handle errors
+    if stream_error[0] is not None:
+        async for event in _yield_error_event(stream_error[0], request_id):
+            yield event
+        return
+    
+    # Build response
+    assistant_response = "".join(response_parts)
+    if not assistant_response:
+        logger.warning(
+            "SSE assistant_response is empty after streaming; "
+            "query=%r owner_id=%s history_len=%d prepared_chunks=%d",
+            query,
+            str(effective_owner),
+            len(history_messages),
+            len(prepared.get("chunks") or []),
+        )
+    
+    chunks = prepared.get("chunks") or []
+    subgraph_data = prepared.get("subgraph_data")
+    subgraph_info = prepared.get("subgraph_info")
+    raw_llm_response = prepared.get("raw_llm_response")
+    raw_mindmap_response = prepared.get("raw_mindmap_response")
+    
+    rag_inference_handler = get_rag_inference_handler()
+    
+    # Generate mindmap if needed
+    if return_subgraph:
+        subgraph_data, raw_mindmap_response = await generate_mindmap_if_needed(
+            return_subgraph,
+            query,
+            assistant_response,
+            chunks,
+            rag_inference_handler
+        )
+    
+    # Ensure non-empty response
+    assistant_response, is_fallback_response = ensure_non_empty_response(assistant_response)
+    
+    # Build sources and evidence
+    sources_for_frontend, citation_key_map = await build_sources_and_evidence(
+        chunks,
+        subgraph_data,
+        subgraph_info,
+        rag_inference_handler,
+        assistant_response,
+        is_fallback_response
+    )
+    
+    # Create assistant message
+    assistant_message = await create_assistant_message(
+        session_id,
+        assistant_response,
+        sources_for_frontend,
+        subgraph_data,
+        return_subgraph,
+        raw_llm_response,
+        raw_mindmap_response
+    )
+    
+    # Generate title if first turn
+    if first_turn:
+        title = await generate_and_update_title(
+            first_turn,
+            session_id,
+            query,
+            assistant_response,
+            rag_inference_handler
+        )
+        if title:
+            async for event in _yield_title_event(title, request_id):
+                yield event
+    
+    # Yield sources event
+    async for event in _yield_sources_event(
+        sources_for_frontend,
+        citation_key_map,
+        session_id,
+        request_id
+    ):
+        yield event
+    
+    # Build evidence for payload
+    evidence = build_evidence_for_payload(
+        include_evidence,
+        chunks,
+        subgraph_data,
+        subgraph_info,
+        rag_inference_handler
+    )
+    
+    # Update payload with evidence
+    payload = build_stream_chat_payload(
+        assistant_message,
+        chunks,
+        subgraph=subgraph_data if return_subgraph else None,
+        evidence=evidence,
+    )
+    
+    # Yield payload and finish events
+    tool_calls = [{
+        "index": 0,
+        "id": f"call_{assistant_message.id}",
+        "type": "function",
+        "function": {
+            "name": "rag_arc_payload",
+            "arguments": json.dumps(
+                payload,
+                ensure_ascii=False,
+                default=str,
+                separators=(",", ":")
+            ),
+        },
+    }]
+    
+    yield sse_json_wrapped(
+        openai_chat_completion_chunk(
+            chunk_id=chunk_id,
+            model=model_name,
+            created=created,
+            delta=delta_envelope(role=None, tool_calls=tool_calls),
+        ),
+        request_id=request_id
+    )
+    
+    async for event in _yield_finish_event(chunk_id, model_name, created, request_id):
+        yield event
