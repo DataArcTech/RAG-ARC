@@ -386,6 +386,394 @@ async def _yield_trace_event(
     )
 
 
+async def _handle_deepsearch_task_completion(
+    deepsearch_task: asyncio.Task,
+    trace_emitter: InMemoryTraceEmitter,
+    deepsearch_result_container: list[dict[str, Any] | None],
+    trace_file_path_container: list[str | None],
+    run_id: str,
+    request_id: str,
+    query: str,
+    chunk_id: str,
+    model_name: str,
+    created: int,
+) -> tuple[str, AsyncGenerator[str, None]]:
+    """处理 DeepSearch 任务完成后的逻辑（成功或失败）。
+    
+    Returns:
+        Tuple of (effective_run_id, error_events_generator)
+    """
+    effective_run_id = run_id or request_id
+    result = None
+    
+    try:
+        result = await deepsearch_task
+        deepsearch_result_container[0] = result
+        
+        # 从 result 中提取 run_id（如果还没有）
+        if not run_id and isinstance(result, dict):
+            state = result.get("state") or {}
+            if isinstance(state, dict):
+                run_id = str(state.get("run_id", request_id))
+        
+        effective_run_id = run_id or request_id
+        logger.info("DeepSearch service returned (request_id=%s, run_id=%s)", request_id, effective_run_id)
+        
+        # 保存所有 trace events 到文件
+        all_trace_events = trace_emitter.get_all_events()
+        if all_trace_events:
+            saved_path = _save_trace_events_to_file(
+                all_trace_events,
+                request_id,
+                effective_run_id,
+                query,
+                result
+            )
+            if saved_path:
+                trace_file_path_container[0] = saved_path
+                logger.info("Trace events saved to: %s", saved_path)
+        
+        # 返回空的错误事件生成器（成功时没有错误）
+        async def empty_error_gen():
+            return
+            yield
+        return effective_run_id, empty_error_gen()
+        
+    except Exception as e:
+        # DeepSearch 任务失败，记录错误并设置结果为 None
+        logger.error("DeepSearch task failed (request_id=%s): %s", request_id, e, exc_info=True)
+        deepsearch_result_container[0] = None
+        
+        # 发送错误事件给前端
+        error_progress = {
+            "stage": "deepsearch",
+            "deepsearch_stage": "failed",
+            "status": "failed",
+            "message": f"DeepSearch 执行失败: {str(e)}",
+            "error": str(e),
+        }
+        
+        async def error_events_gen():
+            async for event in _yield_deepsearch_progress(
+                error_progress,
+                chunk_id,
+                model_name,
+                created,
+                request_id
+            ):
+                yield event
+        
+        effective_run_id = run_id or request_id
+        logger.warning("DeepSearch failed, will fall back to RAG system (request_id=%s)", request_id)
+        
+        # 即使失败，也保存已收集的 trace events
+        all_trace_events = trace_emitter.get_all_events()
+        if all_trace_events:
+            saved_path = _save_trace_events_to_file(
+                all_trace_events,
+                request_id,
+                effective_run_id,
+                query,
+                None  # 没有结果
+            )
+            if saved_path:
+                trace_file_path_container[0] = saved_path
+                logger.info("Trace events saved (failed run) to: %s", saved_path)
+        
+        return effective_run_id, error_events_gen()
+
+
+async def _consume_remaining_events(
+    deepsearch_progress_queue: asyncio.Queue[dict[str, Any] | None],
+    trace_queue: asyncio.Queue[TraceEvent | None],
+    chunk_id: str,
+    model_name: str,
+    created: int,
+    request_id: str,
+    effective_run_id: str,
+) -> AsyncGenerator[str, None]:
+    """消费剩余的 progress 和 trace 事件。"""
+    deadline = time.time() + 1.0
+    while time.time() < deadline:
+        try:
+            # 处理剩余的 progress 事件
+            try:
+                progress_payload = await asyncio.wait_for(
+                    deepsearch_progress_queue.get(),
+                    timeout=0.05
+                )
+                if progress_payload is not None:
+                    async for event in _yield_deepsearch_progress(
+                        progress_payload,
+                        chunk_id,
+                        model_name,
+                        created,
+                        request_id
+                    ):
+                        yield event
+            except asyncio.TimeoutError:
+                pass
+            
+            # 处理剩余的 trace 事件
+            try:
+                trace_event = await asyncio.wait_for(
+                    trace_queue.get(),
+                    timeout=0.05
+                )
+                if trace_event is not None:
+                    async for event in _yield_trace_event(
+                        trace_event,
+                        chunk_id,
+                        model_name,
+                        created,
+                        request_id,
+                        effective_run_id
+                    ):
+                        yield event
+            except asyncio.TimeoutError:
+                pass
+            
+            # 如果两个队列都为空，退出
+            if deepsearch_progress_queue.empty() and trace_queue.empty():
+                break
+                
+        except Exception as e:
+            logger.error("Error consuming remaining events: %s", e, exc_info=True)
+            break
+
+
+async def _process_event_loop(
+    deepsearch_task: asyncio.Task,
+    deepsearch_progress_queue: asyncio.Queue[dict[str, Any] | None],
+    trace_queue: asyncio.Queue[TraceEvent | None],
+    run_id: list[str],  # 使用列表以便修改
+    chunk_id: str,
+    model_name: str,
+    created: int,
+    request_id: str,
+) -> AsyncGenerator[str, None]:
+    """处理事件循环，等待并处理 progress 和 trace 事件。"""
+    deepsearch_progress_task = None
+    trace_task = None
+    
+    while not deepsearch_task.done():
+        # 处理 progress 事件
+        if deepsearch_progress_task is None or deepsearch_progress_task.done():
+            deepsearch_progress_task = asyncio.create_task(
+                deepsearch_progress_queue.get()
+            )
+        
+        # 处理 trace 事件
+        if trace_task is None or trace_task.done():
+            trace_task = asyncio.create_task(
+                trace_queue.get()
+            )
+        
+        # 等待任一任务完成
+        done, pending = await asyncio.wait(
+            [deepsearch_task, deepsearch_progress_task, trace_task],
+            timeout=0.1,
+            return_when=asyncio.FIRST_COMPLETED
+        )
+        
+        # 处理 progress 事件
+        if deepsearch_progress_task in done:
+            try:
+                progress_payload = await deepsearch_progress_task
+                deepsearch_progress_task = None
+                if progress_payload is not None:
+                    # 从 progress 中提取 run_id（如果存在）
+                    if not run_id[0] and "run_id" in progress_payload:
+                        run_id[0] = str(progress_payload.get("run_id", ""))
+                    
+                    async for event in _yield_deepsearch_progress(
+                        progress_payload,
+                        chunk_id,
+                        model_name,
+                        created,
+                        request_id
+                    ):
+                        yield event
+            except Exception as e:
+                logger.error("Error processing DeepSearch progress: %s", e, exc_info=True)
+                deepsearch_progress_task = None
+        
+        # 处理 trace 事件
+        if trace_task in done:
+            try:
+                trace_event = await trace_task
+                trace_task = None
+                if trace_event is not None:
+                    # 使用 request_id 作为 run_id（如果没有从 progress 中获取到）
+                    effective_run_id = run_id[0] or request_id
+                    async for event in _yield_trace_event(
+                        trace_event,
+                        chunk_id,
+                        model_name,
+                        created,
+                        request_id,
+                        effective_run_id
+                    ):
+                        yield event
+            except Exception as e:
+                logger.error("Error processing DeepSearch trace: %s", e, exc_info=True)
+                trace_task = None
+        
+        # 如果 DeepSearch 任务完成，退出循环
+        if deepsearch_task in done:
+            if deepsearch_progress_task and not deepsearch_progress_task.done():
+                deepsearch_progress_task.cancel()
+                try:
+                    await deepsearch_progress_task
+                except asyncio.CancelledError:
+                    pass
+            if trace_task and not trace_task.done():
+                trace_task.cancel()
+                try:
+                    await trace_task
+                except asyncio.CancelledError:
+                    pass
+            break
+
+
+def _create_empty_generator() -> AsyncGenerator[str, None]:
+    """创建空的生成器，用于错误情况。"""
+    return
+    yield
+
+
+def _handle_deepsearch_error(
+    error: Exception,
+    error_type: type,
+    trace_token: Any | None = None
+) -> tuple[list[dict[str, Any] | None], list[str | None], AsyncGenerator[str, None]]:
+    """处理 DeepSearch 初始化错误。
+    
+    Returns:
+        Tuple of (deepsearch_result_container, trace_file_path_container, empty_generator)
+    """
+    if error_type == KeyError:
+        logger.warning("DeepSearch service not available: %s", error)
+    else:
+        logger.error("DeepSearch failed: %s", error, exc_info=True)
+    
+    # 确保重置 trace emitter
+    if trace_token is not None:
+        try:
+            reset_trace_emitter(trace_token)
+        except Exception:
+            pass
+    
+    return [None], [None], _create_empty_generator()
+
+
+def _initialize_deepsearch_processing(
+    query: str,
+    effective_owner: str,
+    request_id: str,
+    loop: asyncio.AbstractEventLoop,
+    deepsearch_progress_queue: asyncio.Queue[dict[str, Any] | None],
+    trace_queue: asyncio.Queue[TraceEvent | None],
+    emit_deepsearch_progress: callable,
+) -> tuple[Any, InMemoryTraceEmitter, Any, asyncio.Task]:
+    """初始化 DeepSearch 处理环境。
+    
+    Returns:
+        Tuple of (deepsearch_service, trace_emitter, trace_token, deepsearch_task)
+    """
+    registrator = Register()
+    deepsearch_service = registrator.get_object("deepsearch_service")
+    logger.info("DeepSearch service found, running...")
+    
+    # 创建 InMemoryTraceEmitter 并设置 trace emitter
+    trace_emitter = InMemoryTraceEmitter(trace_queue)
+    trace_token = set_trace_emitter(trace_emitter)
+    
+    stage_listener = _create_stage_listener(
+        request_id,
+        loop,
+        deepsearch_progress_queue,
+        emit_deepsearch_progress
+    )
+    
+    # 启动 DeepSearch 任务
+    deepsearch_task = asyncio.create_task(
+        deepsearch_service.run(
+            question=query,
+            owner_id=str(effective_owner),
+            stage_listener=stage_listener,
+        )
+    )
+    
+    return deepsearch_service, trace_emitter, trace_token, deepsearch_task
+
+
+async def _create_progress_generator(
+    deepsearch_task: asyncio.Task,
+    deepsearch_progress_queue: asyncio.Queue[dict[str, Any] | None],
+    trace_queue: asyncio.Queue[TraceEvent | None],
+    trace_emitter: InMemoryTraceEmitter,
+    deepsearch_result_container: list[dict[str, Any] | None],
+    trace_file_path_container: list[str | None],
+    run_id_list: list[str],
+    trace_token: Any,
+    chunk_id: str,
+    model_name: str,
+    created: int,
+    request_id: str,
+    query: str,
+) -> AsyncGenerator[str, None]:
+    """创建 progress 事件生成器。"""
+    # 处理事件循环
+    async for event in _process_event_loop(
+        deepsearch_task,
+        deepsearch_progress_queue,
+        trace_queue,
+        run_id_list,
+        chunk_id,
+        model_name,
+        created,
+        request_id,
+    ):
+        yield event
+    
+    # 处理任务完成
+    effective_run_id, error_events_gen = await _handle_deepsearch_task_completion(
+        deepsearch_task,
+        trace_emitter,
+        deepsearch_result_container,
+        trace_file_path_container,
+        run_id_list[0],
+        request_id,
+        query,
+        chunk_id,
+        model_name,
+        created,
+    )
+    
+    # 发送错误事件（如果有）
+    async for event in error_events_gen:
+        yield event
+    
+    # 消费剩余事件
+    async for event in _consume_remaining_events(
+        deepsearch_progress_queue,
+        trace_queue,
+        chunk_id,
+        model_name,
+        created,
+        request_id,
+        effective_run_id,
+    ):
+        yield event
+    
+    # 重置 trace emitter
+    try:
+        reset_trace_emitter(trace_token)
+    except Exception as e:
+        logger.warning("Error resetting trace emitter: %s", e)
+
+
 async def process_deepsearch(
     query: str,
     effective_owner: str,
@@ -403,13 +791,15 @@ async def process_deepsearch(
         - trace_file_path_container: list with one element that will be set to the trace file path
         - progress_generator: async generator that yields SSE events
     """
+    # 初始化队列和容器
     deepsearch_progress_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
     trace_queue: asyncio.Queue[TraceEvent | None] = asyncio.Queue()
     progress_seq = 0
-    deepsearch_result_container: list[dict[str, Any] | None] = [None]  # 使用列表作为容器，以便在生成器内部修改
-    trace_file_path_container: list[str | None] = [None]  # 存储 trace 文件路径
-    run_id: str = ""  # 用于 trace 渲染
+    deepsearch_result_container: list[dict[str, Any] | None] = [None]
+    trace_file_path_container: list[str | None] = [None]
+    run_id_list: list[str] = [""]
     
+    # 创建 emit_deepsearch_progress 函数
     async def emit_deepsearch_progress(payload: dict[str, Any]) -> None:
         nonlocal progress_seq
         progress_seq += 1
@@ -421,263 +811,39 @@ async def process_deepsearch(
         envelope.setdefault("seq", progress_seq)
         await deepsearch_progress_queue.put(envelope)
     
+    # 初始化 DeepSearch 处理环境
+    trace_token = None
     try:
-        registrator = Register()
-        deepsearch_service = registrator.get_object("deepsearch_service")
-        logger.info("DeepSearch service found, running...")
-        
-        # 创建 InMemoryTraceEmitter 并设置 trace emitter
-        trace_emitter = InMemoryTraceEmitter(trace_queue)
-        trace_token = set_trace_emitter(trace_emitter)
-        
-        stage_listener = _create_stage_listener(
+        _, trace_emitter, trace_token, deepsearch_task = _initialize_deepsearch_processing(
+            query,
+            effective_owner,
             request_id,
             loop,
             deepsearch_progress_queue,
-            emit_deepsearch_progress
+            trace_queue,
+            emit_deepsearch_progress,
         )
         
-        # 启动 DeepSearch 任务
-        deepsearch_task = asyncio.create_task(
-            deepsearch_service.run(
-                question=query,
-                owner_id=str(effective_owner),
-                stage_listener=stage_listener,
-            )
+        # 创建并返回 progress generator
+        progress_gen = _create_progress_generator(
+            deepsearch_task,
+            deepsearch_progress_queue,
+            trace_queue,
+            trace_emitter,
+            deepsearch_result_container,
+            trace_file_path_container,
+            run_id_list,
+            trace_token,
+            chunk_id,
+            model_name,
+            created,
+            request_id,
+            query,
         )
         
-        # Process progress events during execution
-        async def progress_generator() -> AsyncGenerator[str, None]:
-            nonlocal deepsearch_result_container, run_id
-            nonlocal trace_token
-            deepsearch_progress_task = None
-            trace_task = None
-            effective_run_id = request_id  # 初始化为 request_id，确保始终有值
-            
-            while not deepsearch_task.done():
-                # 处理 progress 事件
-                if deepsearch_progress_task is None or deepsearch_progress_task.done():
-                    deepsearch_progress_task = asyncio.create_task(
-                        deepsearch_progress_queue.get()
-                    )
-                
-                # 处理 trace 事件
-                if trace_task is None or trace_task.done():
-                    trace_task = asyncio.create_task(
-                        trace_queue.get()
-                    )
-                
-                # 等待任一任务完成
-                done, pending = await asyncio.wait(
-                    [deepsearch_task, deepsearch_progress_task, trace_task],
-                    timeout=0.1,
-                    return_when=asyncio.FIRST_COMPLETED
-                )
-                
-                # 处理 progress 事件
-                if deepsearch_progress_task in done:
-                    try:
-                        progress_payload = await deepsearch_progress_task
-                        deepsearch_progress_task = None
-                        if progress_payload is not None:
-                            # 从 progress 中提取 run_id（如果存在）
-                            if not run_id and "run_id" in progress_payload:
-                                run_id = str(progress_payload.get("run_id", ""))
-                            
-                            async for event in _yield_deepsearch_progress(
-                                progress_payload,
-                                chunk_id,
-                                model_name,
-                                created,
-                                request_id
-                            ):
-                                yield event
-                    except Exception as e:
-                        logger.error("Error processing DeepSearch progress: %s", e, exc_info=True)
-                        deepsearch_progress_task = None
-                
-                # 处理 trace 事件
-                if trace_task in done:
-                    try:
-                        trace_event = await trace_task
-                        trace_task = None
-                        if trace_event is not None:
-                            # 使用 request_id 作为 run_id（如果没有从 progress 中获取到）
-                            effective_run_id = run_id or request_id
-                            async for event in _yield_trace_event(
-                                trace_event,
-                                chunk_id,
-                                model_name,
-                                created,
-                                request_id,
-                                effective_run_id
-                            ):
-                                yield event
-                    except Exception as e:
-                        logger.error("Error processing DeepSearch trace: %s", e, exc_info=True)
-                        trace_task = None
-                
-                # 如果 DeepSearch 任务完成，退出循环
-                if deepsearch_task in done:
-                    if deepsearch_progress_task and not deepsearch_progress_task.done():
-                        deepsearch_progress_task.cancel()
-                        try:
-                            await deepsearch_progress_task
-                        except asyncio.CancelledError:
-                            pass
-                    if trace_task and not trace_task.done():
-                        trace_task.cancel()
-                        try:
-                            await trace_task
-                        except asyncio.CancelledError:
-                            pass
-                    break
-            
-            # Get result and consume remaining progress and trace events
-            result = None
-            try:
-                result = await deepsearch_task
-                deepsearch_result_container[0] = result
-                
-                # 从 result 中提取 run_id（如果还没有）
-                if not run_id and isinstance(result, dict):
-                    state = result.get("state") or {}
-                    if isinstance(state, dict):
-                        run_id = str(state.get("run_id", request_id))
-                
-                effective_run_id = run_id or request_id
-                logger.info("DeepSearch service returned (request_id=%s, run_id=%s)", request_id, effective_run_id)
-                
-                # 保存所有 trace events 到文件
-                # 注意：所有事件在 emit 时就已经被 trace_emitter 收集了
-                all_trace_events = trace_emitter.get_all_events()
-                if all_trace_events:
-                    saved_path = _save_trace_events_to_file(
-                        all_trace_events,
-                        request_id,
-                        effective_run_id,
-                        query,
-                        result
-                    )
-                    if saved_path:
-                        trace_file_path_container[0] = saved_path
-                        logger.info("Trace events saved to: %s", saved_path)
-            except Exception as e:
-                # DeepSearch 任务失败，记录错误并设置结果为 None
-                logger.error("DeepSearch task failed (request_id=%s): %s", request_id, e, exc_info=True)
-                deepsearch_result_container[0] = None
-                
-                # 发送错误事件给前端
-                error_progress = {
-                    "stage": "deepsearch",
-                    "deepsearch_stage": "failed",
-                    "status": "failed",
-                    "message": f"DeepSearch 执行失败: {str(e)}",
-                    "error": str(e),
-                }
-                async for event in _yield_deepsearch_progress(
-                    error_progress,
-                    chunk_id,
-                    model_name,
-                    created,
-                    request_id
-                ):
-                    yield event
-                
-                effective_run_id = run_id or request_id
-                logger.warning("DeepSearch failed, will fall back to RAG system (request_id=%s)", request_id)
-                
-                # 即使失败，也保存已收集的 trace events
-                all_trace_events = trace_emitter.get_all_events()
-                if all_trace_events:
-                    saved_path = _save_trace_events_to_file(
-                        all_trace_events,
-                        request_id,
-                        effective_run_id,
-                        query,
-                        None  # 没有结果
-                    )
-                    if saved_path:
-                        trace_file_path_container[0] = saved_path
-                        logger.info("Trace events saved (failed run) to: %s", saved_path)
-            
-            # 消费剩余的 progress 和 trace 事件
-            deadline = time.time() + 1.0
-            while time.time() < deadline:
-                try:
-                    # 处理剩余的 progress 事件
-                    try:
-                        progress_payload = await asyncio.wait_for(
-                            deepsearch_progress_queue.get(),
-                            timeout=0.05
-                        )
-                        if progress_payload is not None:
-                            async for event in _yield_deepsearch_progress(
-                                progress_payload,
-                                chunk_id,
-                                model_name,
-                                created,
-                                request_id
-                            ):
-                                yield event
-                    except asyncio.TimeoutError:
-                        pass
-                    
-                    # 处理剩余的 trace 事件
-                    try:
-                        trace_event = await asyncio.wait_for(
-                            trace_queue.get(),
-                            timeout=0.05
-                        )
-                        if trace_event is not None:
-                            async for event in _yield_trace_event(
-                                trace_event,
-                                chunk_id,
-                                model_name,
-                                created,
-                                request_id,
-                                effective_run_id
-                            ):
-                                yield event
-                    except asyncio.TimeoutError:
-                        pass
-                    
-                    # 如果两个队列都为空，退出
-                    if deepsearch_progress_queue.empty() and trace_queue.empty():
-                        break
-                        
-                except Exception as e:
-                    logger.error("Error consuming remaining events: %s", e, exc_info=True)
-                    break
-            
-            # 重置 trace emitter
-            try:
-                reset_trace_emitter(trace_token)
-            except Exception as e:
-                logger.warning("Error resetting trace emitter: %s", e)
+        return deepsearch_result_container, trace_file_path_container, progress_gen
         
-        return deepsearch_result_container, trace_file_path_container, progress_generator()
     except KeyError as e:
-        logger.warning("DeepSearch service not available: %s", e)
-        # 确保重置 trace emitter
-        try:
-            if 'trace_token' in locals():
-                reset_trace_emitter(trace_token)
-        except Exception:
-            pass
-        async def empty_gen():
-            return
-            yield
-        return [None], [None], empty_gen()
+        return _handle_deepsearch_error(e, KeyError, trace_token)
     except Exception as e:
-        logger.error("DeepSearch failed: %s", e, exc_info=True)
-        # 确保重置 trace emitter
-        try:
-            if 'trace_token' in locals():
-                reset_trace_emitter(trace_token)
-        except Exception:
-            pass
-        async def empty_gen():
-            return
-            yield
-        return [None], [None], empty_gen()
+        return _handle_deepsearch_error(e, type(e), trace_token)
