@@ -4,8 +4,10 @@ import json
 import uuid
 import logging
 from datetime import datetime
-from typing import Any
+from typing import Any, List
 from encapsulation.data_model.orm_models import ChatMessage
+from encapsulation.data_model.schema import Chunk
+from encapsulation.data_model.deepsearch import EvidenceChunk
 from api.routers.rag_inference_handlers import (
     get_rag_inference_handler,
     get_message_handler,
@@ -21,6 +23,40 @@ from config.output_limits import CHAT_TOP_CHUNKS
 from framework.thread_pool import get_thread_pool
 
 logger = logging.getLogger(__name__)
+
+
+def convert_evidence_chunks_to_chunks(evidence_chunks: List[EvidenceChunk | dict]) -> List[Chunk]:
+    """Convert DeepSearch EvidenceChunk list (or dict list) to Chunk list."""
+    chunks = []
+    for evidence in evidence_chunks:
+        # 处理字典格式的 evidence
+        if isinstance(evidence, dict):
+            chunk = Chunk(
+                content=str(evidence.get("content") or ""),
+                id=str(evidence.get("chunk_id") or ""),
+                metadata={
+                    "source": str(evidence.get("source") or ""),
+                    "score": evidence.get("score"),
+                    **(evidence.get("provenance") or {}),
+                }
+            )
+        # 处理 EvidenceChunk 对象格式
+        elif isinstance(evidence, EvidenceChunk):
+            chunk = Chunk(
+                content=evidence.content,
+                id=evidence.chunk_id,
+                metadata={
+                    "source": evidence.source,
+                    "score": evidence.score,
+                    **evidence.provenance,
+                }
+            )
+        else:
+            # 未知格式，跳过或转换为字符串
+            logger.warning("Unknown evidence format: %s, skipping", type(evidence).__name__)
+            continue
+        chunks.append(chunk)
+    return chunks
 
 
 async def generate_mindmap_if_needed(

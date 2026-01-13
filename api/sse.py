@@ -98,15 +98,31 @@ def openai_chat_completion_chunk(
 
 
 def _has_cjk(text: str) -> bool:
-    for ch in text:
-        code = ord(ch)
-        if (
-            0x4E00 <= code <= 0x9FFF  # CJK Unified Ideographs
-            or 0x3400 <= code <= 0x4DBF  # CJK Extension A
-            or 0x3040 <= code <= 0x30FF  # Hiragana + Katakana
-            or 0xAC00 <= code <= 0xD7AF  # Hangul syllables
-        ):
-            return True
+    """Check if text contains CJK characters."""
+    if not text or not isinstance(text, str):
+        return False
+    
+    try:
+        for ch in text:
+            # 处理 Unicode 代理对和特殊字符
+            if len(ch) > 1:
+                # 如果是多字符（可能是 emoji 或代理对），跳过
+                continue
+            try:
+                code = ord(ch)
+                if (
+                    0x4E00 <= code <= 0x9FFF  # CJK Unified Ideographs
+                    or 0x3400 <= code <= 0x4DBF  # CJK Extension A
+                    or 0x3040 <= code <= 0x30FF  # Hiragana + Katakana
+                    or 0xAC00 <= code <= 0xD7AF  # Hangul syllables
+                ):
+                    return True
+            except (TypeError, ValueError):
+                # 如果 ord() 失败，跳过该字符
+                continue
+    except Exception:
+        # 如果遍历失败，返回 False
+        return False
     return False
 
 

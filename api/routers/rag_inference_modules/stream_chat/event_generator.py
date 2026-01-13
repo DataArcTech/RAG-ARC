@@ -26,6 +26,7 @@ from .response_builder import (
     create_assistant_message,
     generate_and_update_title,
     build_evidence_for_payload,
+    convert_evidence_chunks_to_chunks,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,6 +114,26 @@ async def _yield_token_events(
             request_id=request_id
         )
         await asyncio.sleep(0)
+
+
+async def _yield_deepsearch_answer_stream(
+    answer: str,
+    chunk_id: str,
+    model_name: str,
+    created: int,
+    request_id: str,
+    response_parts: list[str]
+) -> AsyncGenerator[str, None]:
+    """Yield DeepSearch answer as streaming token events."""
+    async for event in _yield_token_events(
+        answer,
+        chunk_id,
+        model_name,
+        created,
+        request_id,
+        response_parts
+    ):
+        yield event
 
 
 async def _process_queue_events(
@@ -301,9 +322,9 @@ async def generate_sse_events(
     emit_progress = _create_progress_emitter(request_id, queue, loop)
     
     # Process DeepSearch if enabled
-    enhanced_query = query
+    deepsearch_result = None
     if enable_deepsearch:
-        enhanced_query, deepsearch_gen = await process_deepsearch(
+        deepsearch_result_container, deepsearch_gen = await process_deepsearch(
             query,
             str(effective_owner),
             request_id,
@@ -312,61 +333,126 @@ async def generate_sse_events(
             created,
             loop
         )
+        # 先迭代生成器以获取进度事件，生成器完成后 deepsearch_result_container[0] 会被设置
         async for event in deepsearch_gen:
             yield event
+        
+        # 生成器完成后，从容器中获取结果
+        deepsearch_result = deepsearch_result_container[0]
+        
+        # 如果 DeepSearch 成功，直接使用其结果，不再调用 RAG 系统
+        if deepsearch_result:
+            # DeepSearch service 返回的结构是: {"plan": ..., "reasoning": ..., "report": ..., "state": ...}
+            # answer 在 report 字典中
+            report = deepsearch_result.get("report") or {}
+            if not isinstance(report, dict):
+                report = {}
+            
+            # 从 report 中提取 answer
+            raw_answer = report.get("answer") or ""
+            
+            # 确保 answer 是字符串类型
+            if not isinstance(raw_answer, str):
+                if isinstance(raw_answer, dict):
+                    # 如果是字典，尝试提取文本内容
+                    raw_answer = raw_answer.get("text") or raw_answer.get("content") or raw_answer.get("short_answer") or str(raw_answer)
+                else:
+                    raw_answer = str(raw_answer)
+            
+            deepsearch_answer = raw_answer.strip() if raw_answer else ""
+            # evidences 也在 report 中
+            deepsearch_evidences = report.get("evidences") or []
+            
+            if deepsearch_answer:
+                logger.info("DeepSearch completed, using DeepSearch answer directly (length=%d, type=%s)", 
+                          len(deepsearch_answer), type(deepsearch_answer).__name__)
+                
+                # 流式输出 DeepSearch 答案
+                async for event in _yield_deepsearch_answer_stream(
+                    deepsearch_answer,
+                    chunk_id,
+                    model_name,
+                    created,
+                    request_id,
+                    response_parts
+                ):
+                    yield event
+                
+                # 将 DeepSearch evidences 转换为 chunks
+                chunks = convert_evidence_chunks_to_chunks(deepsearch_evidences)
+                assistant_response = "".join(response_parts)
+                subgraph_data = None
+                subgraph_info = None
+                raw_llm_response = None
+                raw_mindmap_response = None
+                
+                rag_inference_handler = get_rag_inference_handler()
+                
+                # 跳过 RAG 系统的 stream_chat 调用，直接构建响应
+                # 继续执行后续的响应构建逻辑（mindmap、sources、message 等）
+                # 注意：这里直接跳转到后续的响应构建逻辑
+            else:
+                logger.warning("DeepSearch completed but no answer found, falling back to RAG system")
+                deepsearch_result = None  # 标记为失败，使用 RAG 系统
+        else:
+            logger.warning("DeepSearch failed or returned None, falling back to RAG system")
+            deepsearch_result = None
     
-    # Start stream processing
-    start_stream_processing(
-        enhanced_query,
-        effective_owner,
-        return_subgraph,
-        include_evidence,
-        history_text,
-        enable_web_search,
-        queue,
-        loop,
-        prepared,
-        stream_error,
-        emit_progress
-    )
-    
-    # Process queue events
-    async for event in _process_queue_events(
-        queue,
-        chunk_id,
-        model_name,
-        created,
-        request_id,
-        response_parts,
-        stream_error
-    ):
-        yield event
-    
-    # Handle errors
-    if stream_error[0] is not None:
-        async for event in _yield_error_event(stream_error[0], request_id):
-            yield event
-        return
-    
-    # Build response
-    assistant_response = "".join(response_parts)
-    if not assistant_response:
-        logger.warning(
-            "SSE assistant_response is empty after streaming; "
-            "query=%r owner_id=%s history_len=%d prepared_chunks=%d",
+    # 如果 DeepSearch 成功，已经设置了所有变量，直接跳转到响应构建
+    # 如果 DeepSearch 未启用或失败，使用 RAG 系统
+    if not enable_deepsearch or not deepsearch_result:
+        # Start stream processing
+        start_stream_processing(
             query,
-            str(effective_owner),
-            len(history_messages),
-            len(prepared.get("chunks") or []),
+            effective_owner,
+            return_subgraph,
+            include_evidence,
+            history_text,
+            enable_web_search,
+            queue,
+            loop,
+            prepared,
+            stream_error,
+            emit_progress
         )
-    
-    chunks = prepared.get("chunks") or []
-    subgraph_data = prepared.get("subgraph_data")
-    subgraph_info = prepared.get("subgraph_info")
-    raw_llm_response = prepared.get("raw_llm_response")
-    raw_mindmap_response = prepared.get("raw_mindmap_response")
-    
-    rag_inference_handler = get_rag_inference_handler()
+        
+        # Process queue events
+        async for event in _process_queue_events(
+            queue,
+            chunk_id,
+            model_name,
+            created,
+            request_id,
+            response_parts,
+            stream_error
+        ):
+            yield event
+        
+        # Handle errors
+        if stream_error[0] is not None:
+            async for event in _yield_error_event(stream_error[0], request_id):
+                yield event
+            return
+        
+        # Build response
+        assistant_response = "".join(response_parts)
+        if not assistant_response:
+            logger.warning(
+                "SSE assistant_response is empty after streaming; "
+                "query=%r owner_id=%s history_len=%d prepared_chunks=%d",
+                query,
+                str(effective_owner),
+                len(history_messages),
+                len(prepared.get("chunks") or []),
+            )
+        
+        chunks = prepared.get("chunks") or []
+        subgraph_data = prepared.get("subgraph_data")
+        subgraph_info = prepared.get("subgraph_info")
+        raw_llm_response = prepared.get("raw_llm_response")
+        raw_mindmap_response = prepared.get("raw_mindmap_response")
+        
+        rag_inference_handler = get_rag_inference_handler()
     
     # Generate mindmap if needed
     if return_subgraph:

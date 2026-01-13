@@ -149,15 +149,17 @@ async def process_deepsearch(
     model_name: str,
     created: int,
     loop: asyncio.AbstractEventLoop
-) -> tuple[str, AsyncGenerator[str, None]]:
+) -> tuple[list[dict[str, Any] | None], AsyncGenerator[str, None]]:
     """Process DeepSearch and yield progress events.
     
     Returns:
-        Tuple of (enhanced_query, progress_generator)
+        Tuple of (deepsearch_result_container, progress_generator)
+        deepsearch_result_container is a list with one element that will be set to the result
+        after the generator completes. Access result via container[0] after iterating the generator.
     """
-    enhanced_query = query
     deepsearch_progress_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
     progress_seq = 0
+    deepsearch_result_container: list[dict[str, Any] | None] = [None]  # 使用列表作为容器，以便在生成器内部修改
     
     async def emit_deepsearch_progress(payload: dict[str, Any]) -> None:
         nonlocal progress_seq
@@ -192,6 +194,7 @@ async def process_deepsearch(
         
         # Process progress events during execution
         async def progress_generator() -> AsyncGenerator[str, None]:
+            nonlocal deepsearch_result_container
             deepsearch_progress_task = None
             while not deepsearch_task.done():
                 if deepsearch_progress_task is None or deepsearch_progress_task.done():
@@ -232,7 +235,8 @@ async def process_deepsearch(
                     break
             
             # Get result and consume remaining progress
-            deepsearch_result = await deepsearch_task
+            result = await deepsearch_task
+            deepsearch_result_container[0] = result
             logger.info("DeepSearch service returned (request_id=%s)", request_id)
             
             deadline = time.time() + 1.0
@@ -257,27 +261,17 @@ async def process_deepsearch(
                 except Exception as e:
                     logger.error("Error consuming remaining progress: %s", e, exc_info=True)
                     break
-            
-            deepsearch_answer = (
-                deepsearch_result.get("answer") or
-                deepsearch_result.get("report") or
-                ""
-            )
-            if deepsearch_answer:
-                nonlocal enhanced_query
-                enhanced_query = f"{query}\n\n[DeepSearch 增强上下文]\n{deepsearch_answer}"
-                logger.info("DeepSearch completed, enhanced query length: %d", len(enhanced_query))
         
-        return enhanced_query, progress_generator()
+        return deepsearch_result_container, progress_generator()
     except KeyError as e:
         logger.warning("DeepSearch service not available: %s", e)
         async def empty_gen():
             return
             yield
-        return enhanced_query, empty_gen()
+        return [None], empty_gen()
     except Exception as e:
         logger.error("DeepSearch failed: %s", e, exc_info=True)
         async def empty_gen():
             return
             yield
-        return enhanced_query, empty_gen()
+        return [None], empty_gen()
