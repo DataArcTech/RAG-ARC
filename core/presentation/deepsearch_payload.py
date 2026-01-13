@@ -10,7 +10,7 @@ from config.output_limits import (
     DEEPSEARCH_TOP_SEED_ENTITIES,
     DEEPSEARCH_TOP_CHUNKS,
 )
-from core.deepsearch.report.sup_citations import convert_bracket_citations_to_sup
+from core.deepsearch.report.sup_citations import build_reference_entries, convert_bracket_citations_to_sup
 from core.presentation.evidence import build_deepsearch_evidence
 
 
@@ -174,7 +174,7 @@ def _trim_report_block(report_block: Optional[Dict[str, Any]], limit: Optional[i
     if isinstance(structured, dict):
         trimmed["structured_report"] = structured
         citations = structured.get("citations") if isinstance(structured.get("citations"), list) else []
-        converted, refs = convert_bracket_citations_to_sup(
+        converted, sources, citation_key_map = convert_bracket_citations_to_sup(
             str(trimmed.get("answer") or ""),
             citations=citations,
             evidences=evidences if isinstance(evidences, list) else None,
@@ -185,8 +185,24 @@ def _trim_report_block(report_block: Optional[Dict[str, Any]], limit: Optional[i
                 trimmed["structured_report"]["text"] = converted
         except Exception:
             pass
-        if refs:
-            trimmed["references"] = refs
+        if sources:
+            trimmed["sources"] = sources
+        if citation_key_map:
+            trimmed["citation_key_map"] = citation_key_map
+            # Compatibility window: keep legacy reference entries for replay/debugging.
+            try:
+                evidence_lookup = {str(item.get("chunk_id") or ""): item for item in (evidences or []) if isinstance(item, dict) and str(item.get("chunk_id") or "").strip()}
+                ordered_ids = [ev_id for ev_id, _ in sorted(citation_key_map.items(), key=lambda kv: kv[1])]
+                refs = build_reference_entries(
+                    ordered_ids=ordered_ids,
+                    citations=citations if isinstance(citations, list) else [],
+                    evidence_lookup=evidence_lookup,
+                    id_to_num=citation_key_map,
+                )
+                if refs:
+                    trimmed["references"] = refs
+            except Exception:
+                pass
     return trimmed
 
 

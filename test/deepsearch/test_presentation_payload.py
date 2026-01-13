@@ -124,6 +124,53 @@ def test_trim_payload_preserves_structured_report(monkeypatch):
     assert structured["summary"] == "Graph RAG is maintained by RAG-ARC."
 
 
+def test_trim_payload_emits_hipporag_style_citations_and_sources(monkeypatch):
+    def _unexpected_call(*args, **kwargs):
+        raise AssertionError("build_deepsearch_evidence should not run when include_evidence=false")
+
+    monkeypatch.setattr("core.presentation.deepsearch_payload.build_deepsearch_evidence", _unexpected_call)
+
+    payload = _sample_result()
+    payload["report"]["answer"] = "Claim A cites [rep-0]. Claim B cites [rep-1, rep-2]."
+    payload["report"]["evidences"] = [
+        {
+            "chunk_id": "rep-0",
+            "source": "hipporag",
+            "content": "Alpha evidence snippet",
+            "provenance": {"metadata": {"chunk_metadata": {"source_file_id": "file-0", "filename": "doc0.md"}}},
+        },
+        {
+            "chunk_id": "rep-1",
+            "source": "web.tavily",
+            "content": "Web Title\nWeb Body",
+            "provenance": {"url": "https://example.com/rep-1"},
+        },
+        {
+            "chunk_id": "rep-2",
+            "source": "hipporag",
+            "content": "Gamma evidence snippet",
+            "provenance": {"metadata": {"chunk_metadata": {"source_file_id": "file-2", "filename": "doc2.md"}}},
+        },
+    ]
+    payload["report"]["structured_report"]["citations"] = [
+        {"evidence_id": "rep-0", "source": "hipporag"},
+        {"evidence_id": "rep-1", "source": "web.tavily"},
+        {"evidence_id": "rep-2", "source": "hipporag"},
+    ]
+
+    trimmed = trim_deepsearch_payload(payload, include_evidence=False, chunk_limit=10)
+
+    answer = trimmed["report"]["answer"]
+    assert "<sup>1</sup>" in answer
+    assert "<sup>2</sup><sup>3</sup>" in answer
+    assert "## Evidence Index" not in answer
+
+    sources = trimmed["report"].get("sources")
+    assert sources and [s["key"] for s in sources] == [1, 2, 3]
+    assert [s["chunk_id"] for s in sources] == ["rep-0", "rep-1", "rep-2"]
+    assert trimmed["report"].get("citation_key_map") == {"rep-0": 1, "rep-1": 2, "rep-2": 3}
+
+
 def test_deepsearch_report_falls_back_to_highlights():
     payload = _sample_result()
     payload["report"]["answer"] = ""

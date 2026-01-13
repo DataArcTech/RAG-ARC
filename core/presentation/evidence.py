@@ -35,6 +35,11 @@ def _document_download_url(file_id: str) -> str:
     return f"/knowledge/{file_id}/download"
 
 
+def document_download_url(file_id: str) -> str:
+    """Public helper for building the knowledge download URL."""
+    return _document_download_url(file_id)
+
+
 def _mineru_asset_url(file_id: str, rel_path: str) -> str:
     token = str(rel_path or "").lstrip("/").lstrip("\\")
     return f"/knowledge/{file_id}/mineru-assets/{token}"

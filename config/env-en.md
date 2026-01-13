@@ -76,7 +76,10 @@ How secrets flow into configs:
 | `EMBEDDING_CACHE_FOLDER` | _(empty)_ | Optional HuggingFace cache folder for embedding weights. |
 | `EMBEDDING_DIMENSIONS` | _(empty)_ | Optional override for embedding vector dimension. When empty, the system can auto-detect the dimension (and will cache it). |
 | `EMBEDDING_TIMEOUT_SECONDS` | `20` | Embedding request timeout (seconds). Lower this to fail-fast when the embedding endpoint is flaky. |
-| `EMBEDDING_MAX_RETRIES` | `1` | Embedding request retries (OpenAI client retries). Keep small to avoid long stalls in retrieval/indexing when the endpoint is down. |
+| `EMBEDDING_MAX_RETRIES` | `0` | Embedding request retries (OpenAI SDK retries). Prefer `0` when the upstream gateway enforces long rate-limits; use `EMBEDDING_RATE_LIMIT_*` backoff instead. |
+| `EMBEDDING_RATE_LIMIT_MAX_RETRIES` | `6` | Extra retries when embeddings hit HTTP 429 rate limits. |
+| `EMBEDDING_RATE_LIMIT_DEFAULT_SLEEP_SECONDS` | `60` | Default sleep (seconds) between 429 retries when Retry-After is not available. |
+| `EMBEDDING_RATE_LIMIT_MAX_SLEEP_SECONDS` | `60` | Max sleep (seconds) between 429 retries (cap). |
 | `OCR_MODEL_PROVIDER` | `openai` | OCR/VLM provider (`openai`, `vllm`, `dots_ocr`). |
 | `OCR_API_KEY` | _(empty)_ | API key for OCR provider (required for hosted APIs). |
 | `OCR_API_BASE_URL` | _(empty)_ | Base URL for OCR provider. |
@@ -157,6 +160,8 @@ Notes:
 | `DEEPSEARCH_MAX_TOOL_METADATA` | `5` | Maximum tool metadata entries returned in DeepSearch payloads. |
 | `DEEPSEARCH_WEAVER_EVIDENCE_PREVIEW_CHARS` | `180` | Evidence preview character limit in the DeepSearch Weaver trace rendering. |
 | `DEEPSEARCH_WEAVER_EVIDENCE_SAMPLE_COUNT` | `3` | Number of evidence samples included in the DeepSearch Weaver trace rendering. |
+| `DEEPSEARCH_SOURCE_MAX_CHARS` | `1600` | Max characters included in each DeepSearch `report.sources[*].description` (HippoRAG-compatible sources payload). |
+| `DEEPSEARCH_SOURCE_TITLE_MAX_CHARS` | `80` | Max characters included in each DeepSearch `report.sources[*].title`. |
 | `DEEPSEARCH_GRAPH_EXPORT_MAX_EDGES` | `2000` | Hard cap on exported edges for DeepSearch subgraph visualization (Neo4j exporter). |
 | `KNOWLEDGE_GRAPH_EXPORT_MAX_NODES` | `1000` | Upper bound for `/knowledge/graph/export*` max_nodes to prevent expensive graph exports. |
 | `KNOWLEDGE_GRAPH_EXPORT_MAX_EDGES` | `5000` | Upper bound for `/knowledge/graph/export*` max_edges to prevent expensive graph exports. |

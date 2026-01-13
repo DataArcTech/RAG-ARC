@@ -76,8 +76,11 @@ class OpenAIEmbeddingConfig(AbstractConfig):
         description="Request timeout in seconds (can override via EMBEDDING_TIMEOUT_SECONDS).",
     )
     max_retries: int = Field(
-        default_factory=lambda: int(os.getenv("EMBEDDING_MAX_RETRIES", "1")),
-        description="Retry attempts on failure (can override via EMBEDDING_MAX_RETRIES).",
+        default_factory=lambda: int(os.getenv("EMBEDDING_MAX_RETRIES", "0")),
+        description=(
+            "OpenAI SDK retry attempts on failure (can override via EMBEDDING_MAX_RETRIES). "
+            "Keep at 0 when relying on rate-limit backoff below."
+        ),
     )
 
     # Request shaping / compatibility
@@ -91,15 +94,15 @@ class OpenAIEmbeddingConfig(AbstractConfig):
     )
 
     rate_limit_max_retries: int = Field(
-        default=6,
-        description="Extra retries for HTTP 429 rate-limit errors (in addition to OpenAI client retries).",
+        default_factory=lambda: int(os.getenv("EMBEDDING_RATE_LIMIT_MAX_RETRIES", "6")),
+        description="Extra retries for HTTP 429 rate-limit errors (independent of OpenAI SDK retries).",
     )
     rate_limit_default_sleep_seconds: float = Field(
-        default=10.0,
+        default_factory=lambda: float(os.getenv("EMBEDDING_RATE_LIMIT_DEFAULT_SLEEP_SECONDS", "60")),
         description="Fallback sleep (seconds) between retries when Retry-After is not available.",
     )
     rate_limit_max_sleep_seconds: float = Field(
-        default=60.0,
+        default_factory=lambda: float(os.getenv("EMBEDDING_RATE_LIMIT_MAX_SLEEP_SECONDS", "60")),
         description="Upper bound on sleep (seconds) between rate-limit retries.",
     )
 

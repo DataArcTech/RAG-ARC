@@ -1,7 +1,7 @@
 from core.deepsearch.report.sup_citations import convert_bracket_citations_to_sup
 
 
-def test_convert_bracket_citations_to_sup_emits_single_number_tags():
+def test_convert_bracket_citations_to_sup_emits_contiguous_sup_tags_and_sources():
     markdown = (
         "Claim A is supported [ev1]. Claim B is supported [ev2, ev3]. "
         "A markdown link should remain intact: [OpenAI](https://example.com)."
@@ -12,18 +12,41 @@ def test_convert_bracket_citations_to_sup_emits_single_number_tags():
         {"evidence_id": "ev3", "source": "graph", "used_for": "Claim B"},
     ]
     evidences = [
-        {"chunk_id": "ev1", "source": "graph", "provenance": {"path": "doc1.md"}},
-        {"chunk_id": "ev2", "source": "graph", "provenance": {"path": "doc2.md"}},
-        {"chunk_id": "ev3", "source": "graph", "provenance": {"path": "doc3.md"}},
+        {
+            "chunk_id": "ev1",
+            "source": "hipporag",
+            "content": "Chunk 1 content",
+            "provenance": {"metadata": {"chunk_metadata": {"source_file_id": "file-1", "filename": "doc1.md"}}},
+        },
+        {
+            "chunk_id": "ev2",
+            "source": "web.tavily",
+            "content": "Web title line\nWeb snippet body",
+            "provenance": {"url": "https://example.com/doc2"},
+        },
+        {
+            "chunk_id": "ev3",
+            "source": "hipporag",
+            "content": "Chunk 3 content",
+            "provenance": {"metadata": {"chunk_metadata": {"source_file_id": "file-3", "filename": "doc3.md"}}},
+        },
     ]
 
-    converted, refs = convert_bracket_citations_to_sup(markdown, citations=citations, evidences=evidences)
+    converted, sources, citation_key_map = convert_bracket_citations_to_sup(markdown, citations=citations, evidences=evidences)
 
-    assert "[E1]" in converted
-    assert "[E2,E3]" in converted
-    assert "## Evidence Index" in converted
+    assert "<sup>1</sup>" in converted
+    assert "<sup>2</sup><sup>3</sup>" in converted
+    assert "## Evidence Index" not in converted
     assert "[OpenAI](https://example.com)" in converted
-    assert refs and refs[0]["n"] == 1 and refs[0]["evidence_id"] == "ev1"
+    assert citation_key_map == {"ev1": 1, "ev2": 2, "ev3": 3}
+    assert sources and [entry["key"] for entry in sources] == [1, 2, 3]
+    assert [entry["chunk_id"] for entry in sources] == ["ev1", "ev2", "ev3"]
+    assert sources[0]["file"] == "/knowledge/file-1/download"
+    assert sources[0]["title"] == "doc1.md"
+    assert sources[1]["file"] == "https://example.com/doc2"
+    assert sources[1]["title"] == "Web title line"
+    assert sources[2]["file"] == "/knowledge/file-3/download"
+    assert sources[2]["title"] == "doc3.md"
 
 
 def test_convert_bracket_citations_to_sup_does_not_touch_appendix_sections():
@@ -36,11 +59,18 @@ def test_convert_bracket_citations_to_sup_does_not_touch_appendix_sections():
         ]
     )
     citations = [{"evidence_id": "ev1", "source": "graph"}]
-    evidences = [{"chunk_id": "ev1", "source": "graph", "provenance": {"path": "doc1.md"}}]
+    evidences = [
+        {
+            "chunk_id": "ev1",
+            "source": "hipporag",
+            "content": "Chunk 1 content",
+            "provenance": {"metadata": {"chunk_metadata": {"source_file_id": "file-1", "filename": "doc1.md"}}},
+        }
+    ]
 
-    converted, _ = convert_bracket_citations_to_sup(markdown, citations=citations, evidences=evidences)
+    converted, _, _ = convert_bracket_citations_to_sup(markdown, citations=citations, evidences=evidences)
 
-    assert "Body cites [E1]." in converted
+    assert "Body cites <sup>1</sup>." in converted
     assert "## Appendix: Chunk Evidence" in converted
     assert "- [ev1] (graph): full id should remain in appendix." in converted
 
@@ -52,33 +82,55 @@ def test_convert_bracket_citations_to_sup_supports_cjk_brackets():
         {"evidence_id": "ev2", "source": "graph", "used_for": "补充"},
     ]
     evidences = [
-        {"chunk_id": "ev1", "source": "graph", "provenance": {"path": "doc1.md"}},
-        {"chunk_id": "ev2", "source": "graph", "provenance": {"path": "doc2.md"}},
+        {
+            "chunk_id": "ev1",
+            "source": "hipporag",
+            "content": "Chunk 1 content",
+            "provenance": {"metadata": {"chunk_metadata": {"source_file_id": "file-1", "filename": "doc1.md"}}},
+        },
+        {
+            "chunk_id": "ev2",
+            "source": "hipporag",
+            "content": "Chunk 2 content",
+            "provenance": {"metadata": {"chunk_metadata": {"source_file_id": "file-2", "filename": "doc2.md"}}},
+        },
     ]
 
-    converted, refs = convert_bracket_citations_to_sup(markdown, citations=citations, evidences=evidences)
+    converted, sources, citation_key_map = convert_bracket_citations_to_sup(markdown, citations=citations, evidences=evidences)
 
     assert "【ev1】" not in converted
     assert "【ev2】" not in converted
-    assert "[E1]" in converted
-    assert "[E2]" in converted
-    assert "## Evidence Index" in converted
-    assert refs and refs[0]["n"] == 1 and refs[0]["evidence_id"] == "ev1"
+    assert "<sup>1</sup>" in converted
+    assert "<sup>2</sup>" in converted
+    assert "## Evidence Index" not in converted
+    assert citation_key_map == {"ev1": 1, "ev2": 2}
+    assert sources and sources[0]["key"] == 1 and sources[0]["chunk_id"] == "ev1"
 
 
-def test_convert_bracket_citations_to_sup_drops_unused_citations_from_references():
+def test_convert_bracket_citations_to_sup_drops_unused_citations_from_sources():
     markdown = "Only this claim is cited [ev1]."
     citations = [
         {"evidence_id": "ev1", "source": "graph"},
         {"evidence_id": "ev2", "source": "graph"},
     ]
     evidences = [
-        {"chunk_id": "ev1", "source": "graph", "provenance": {"path": "doc1.md"}},
-        {"chunk_id": "ev2", "source": "graph", "provenance": {"path": "doc2.md"}},
+        {
+            "chunk_id": "ev1",
+            "source": "hipporag",
+            "content": "Chunk 1 content",
+            "provenance": {"metadata": {"chunk_metadata": {"source_file_id": "file-1", "filename": "doc1.md"}}},
+        },
+        {
+            "chunk_id": "ev2",
+            "source": "hipporag",
+            "content": "Chunk 2 content",
+            "provenance": {"metadata": {"chunk_metadata": {"source_file_id": "file-2", "filename": "doc2.md"}}},
+        },
     ]
 
-    converted, refs = convert_bracket_citations_to_sup(markdown, citations=citations, evidences=evidences)
+    converted, sources, citation_key_map = convert_bracket_citations_to_sup(markdown, citations=citations, evidences=evidences)
 
-    assert "[E1]" in converted
+    assert "<sup>1</sup>" in converted
     assert "ev2" not in converted
-    assert refs and [ref["evidence_id"] for ref in refs] == ["ev1"]
+    assert citation_key_map == {"ev1": 1}
+    assert sources and [entry["chunk_id"] for entry in sources] == ["ev1"]

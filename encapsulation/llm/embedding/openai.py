@@ -114,7 +114,7 @@ class OpenAIEmbeddingLLM(EmbeddingLLMBase):
             embeddings: list[list[float]] = []
 
             rate_limit_max_retries = int(getattr(self.config, "rate_limit_max_retries", 6) or 6)
-            rate_limit_default_sleep = float(getattr(self.config, "rate_limit_default_sleep_seconds", 10.0) or 10.0)
+            rate_limit_default_sleep = float(getattr(self.config, "rate_limit_default_sleep_seconds", 60.0) or 60.0)
             rate_limit_max_sleep = float(getattr(self.config, "rate_limit_max_sleep_seconds", 60.0) or 60.0)
 
             def _retry_after_seconds(exc: Exception) -> float | None:
@@ -299,7 +299,7 @@ class OpenAIEmbeddingLLM(EmbeddingLLMBase):
             batch_size = max(1, batch_size)
 
             rate_limit_max_retries = int(getattr(self.config, "rate_limit_max_retries", 6) or 6)
-            rate_limit_default_sleep = float(getattr(self.config, "rate_limit_default_sleep_seconds", 10.0) or 10.0)
+            rate_limit_default_sleep = float(getattr(self.config, "rate_limit_default_sleep_seconds", 60.0) or 60.0)
             rate_limit_max_sleep = float(getattr(self.config, "rate_limit_max_sleep_seconds", 60.0) or 60.0)
 
             def _retry_after_seconds(exc: Exception) -> float | None:

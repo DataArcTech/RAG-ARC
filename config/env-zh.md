@@ -76,7 +76,10 @@ Benchmark/实验模式：
 | `EMBEDDING_CACHE_FOLDER` | _(空)_ | 可选：HuggingFace 嵌入模型缓存目录。 |
 | `EMBEDDING_DIMENSIONS` | _(空)_ | 可选：嵌入向量维度覆盖。留空时系统可自动探测并缓存维度。 |
 | `EMBEDDING_TIMEOUT_SECONDS` | `20` | Embedding 请求超时（秒）。当 embedding 端点不稳定时建议调小以快速失败。 |
-| `EMBEDDING_MAX_RETRIES` | `1` | Embedding 请求重试次数（OpenAI client retries）。建议保持较小以避免检索/索引长时间卡住。 |
+| `EMBEDDING_MAX_RETRIES` | `0` | Embedding 请求重试次数（OpenAI SDK retries）。当上游网关存在较长限流窗口时建议置 `0`，并使用下方 `EMBEDDING_RATE_LIMIT_*` 控制 429 重试退避。 |
+| `EMBEDDING_RATE_LIMIT_MAX_RETRIES` | `6` | Embedding 命中 HTTP 429 限流时的额外重试次数。 |
+| `EMBEDDING_RATE_LIMIT_DEFAULT_SLEEP_SECONDS` | `60` | 当 429 响应未提供 Retry-After 时，默认每次重试等待（秒）。 |
+| `EMBEDDING_RATE_LIMIT_MAX_SLEEP_SECONDS` | `60` | 429 重试等待上限（秒，cap）。 |
 | `OCR_MODEL_PROVIDER` | `openai` | OCR/VLM 提供方（`openai`、`vllm`、`dots_ocr` 等）。 |
 | `OCR_API_KEY` | _(空)_ | OCR/VLM 的 API Key（使用云端 API 时必填）。 |
 | `OCR_API_BASE_URL` | _(空)_ | OCR/VLM 的 Base URL。 |
