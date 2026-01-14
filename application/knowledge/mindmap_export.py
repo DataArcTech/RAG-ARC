@@ -1,5 +1,6 @@
 import hashlib
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Callable
 
 from fastapi import HTTPException, status
@@ -128,9 +129,11 @@ def convert_tsv_to_graph(tsv_text: str) -> Tuple[List[Dict[str, Any]], List[Dict
 
 
 def convert_chunks_to_frontend_format(
-    chunks: List[Dict[str, Any]], filename: str
+    chunks: List[Dict[str, Any]], filename: str, file_id: str
 ) -> List[Dict[str, Any]]:
-    """Convert chunks to frontend format with id, title, content, documentName."""
+    """Convert chunks to frontend format with id, title, content, documentName, fileId."""
+    # Extract only the filename without path prefix (e.g., "分析.png" from "RAG-ARC/分析.png")
+    document_name = Path(filename).name
     frontend_chunks = []
     for idx, chunk in enumerate(chunks, start=1):
         frontend_chunks.append(
@@ -138,21 +141,22 @@ def convert_chunks_to_frontend_format(
                 "id": f"c{idx}",
                 "title": f"片段{idx}",
                 "content": chunk.get("content", ""),
-                "documentName": filename,
+                "documentName": document_name,
+                "fileId": file_id,
             }
         )
     return frontend_chunks
 
 
 def add_chunks_to_nodes(
-    nodes: List[Dict[str, Any]], chunks: List[Dict[str, Any]], filename: str
+    nodes: List[Dict[str, Any]], chunks: List[Dict[str, Any]], filename: str, file_id: str
 ) -> List[Dict[str, Any]]:
     """Add chunks field to all nodes as source evidence for each node."""
     if not nodes:
         return nodes
 
     # Convert chunks to frontend format once
-    frontend_chunks = convert_chunks_to_frontend_format(chunks, filename)
+    frontend_chunks = convert_chunks_to_frontend_format(chunks, filename, file_id)
 
     # Add chunks to all nodes (each weight level should have chunks as source evidence)
     for node in nodes:
@@ -201,7 +205,7 @@ async def export_file_mindmap_payload(
                         progress("mindmap_export", "cache_hit", 100, {"file_id": file_id})
                     # Add chunks to all nodes for cached data
                     cached_nodes = list(cache.nodes)
-                    cached_nodes = add_chunks_to_nodes(cached_nodes, chunks, filename)
+                    cached_nodes = add_chunks_to_nodes(cached_nodes, chunks, filename, file_id)
                     return {"tsv": cache.tsv, "nodes": cached_nodes, "edges": list(cache.edges)}
         except Exception:
             pass
@@ -284,6 +288,6 @@ async def export_file_mindmap_payload(
         progress("mindmap_export", "end", 100, {"file_id": file_id})
 
     # Add chunks to all nodes as source evidence
-    nodes = add_chunks_to_nodes(nodes, chunks, filename)
+    nodes = add_chunks_to_nodes(nodes, chunks, filename, file_id)
 
     return {"tsv": merged_tsv, "nodes": nodes, "edges": edges}

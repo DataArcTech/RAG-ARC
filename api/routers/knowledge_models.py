@@ -76,6 +76,7 @@ class MindmapChunk(BaseModel):
     title: str
     content: str
     documentName: str
+    fileId: Optional[str] = None
 
 
 class MindmapNode(BaseModel):
