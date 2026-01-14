@@ -33,6 +33,12 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
         """
         top_k = max(1, int(top_k))
 
+        strategy = str(getattr(self.config, "chunk_selection_strategy", "top_entity_neighbors") or "top_entity_neighbors")
+        if strategy == "top_ppr_chunks":
+            chunk_ids = list((fallback_chunk_ids or [])[:top_k])
+            chunk_scores = [float((ppr_scores_dict or {}).get(cid, 0.0)) for cid in chunk_ids]
+            return chunk_ids, chunk_scores, None
+
         entity_scores: list[tuple[str, float]] = []
         for node_id, score in (ppr_scores_dict or {}).items():
             if self._is_entity_node_id(node_id):
@@ -205,8 +211,91 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
             fallback_chunk_ids=sorted_doc_ids,
         )
 
+        # Dense mix-in: product/file-name queries often have strong dense matches even when
+        # fact/entity expansion drifts to similar products. Mix dense top hits into the final
+        # list (configurable) to improve precision while keeping graph results.
+        dense_score_map: dict[str, float] = {}
+        try:
+            dense_mix_k = int(getattr(self.config, "dense_mix_in_top_k", 0) or 0)
+        except Exception:  # noqa: BLE001
+            dense_mix_k = 0
+        if dense_mix_k > 0:
+            try:
+                dense_sorted = np.argsort(query_doc_scores)[::-1]  # type: ignore[arg-type]
+                dense_ids: list[str] = []
+                for idx in dense_sorted[: max(dense_mix_k * 3, dense_mix_k)]:
+                    if idx < 0 or int(idx) >= len(self.passage_node_keys):
+                        continue
+                    chunk_id = self.passage_node_keys[int(idx)]
+                    if not chunk_id or chunk_id in dense_score_map:
+                        continue
+                    dense_ids.append(chunk_id)
+                    dense_score_map[chunk_id] = float(query_doc_scores[int(idx)])  # type: ignore[index]
+                    if len(dense_ids) >= dense_mix_k:
+                        break
+
+                if dense_ids:
+                    blended: list[str] = []
+                    seen: set[str] = set()
+                    for cid in dense_ids:
+                        if cid in seen:
+                            continue
+                        seen.add(cid)
+                        blended.append(cid)
+                    for cid in selected_chunk_ids:
+                        if cid in seen:
+                            continue
+                        seen.add(cid)
+                        blended.append(cid)
+                    blended = blended[: max(1, int(top_k))]
+                    if blended != selected_chunk_ids:
+                        logger.info(
+                            "Dense mix-in applied: dense_mix_k=%s injected=%s",
+                            dense_mix_k,
+                            sum(1 for cid in blended if cid in set(dense_ids)),
+                        )
+                    selected_chunk_ids = blended
+                    selected_chunk_scores = [
+                        float(ppr_scores_dict.get(cid, dense_score_map.get(cid, 0.0))) for cid in selected_chunk_ids
+                    ]
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Dense mix-in failed (continuing with graph-only selection): %s", exc)
+
         # Step 7: Convert to Chunk objects
         chunks = self._convert_to_chunks(selected_chunk_ids, selected_chunk_scores, owner_id=owner_filter)
+        selection_strategy = str(getattr(self.config, "chunk_selection_strategy", "top_entity_neighbors") or "top_entity_neighbors")
+        dense_mix_ids = set(dense_score_map.keys())
+        tls_getter = getattr(self, "_get_tls", None)
+        tls = None
+        if callable(tls_getter):
+            try:
+                tls = tls_getter()
+            except Exception:  # noqa: BLE001
+                tls = None
+        for chunk in chunks:
+            meta = getattr(chunk, "metadata", None)
+            if meta is None:
+                meta = {}
+                chunk.metadata = meta
+            cid = str(getattr(chunk, "id", "") or "")
+            meta["_hipporag_selection_strategy"] = selection_strategy
+            meta["_hipporag_dense_mix_in"] = bool(cid in dense_mix_ids and dense_mix_k > 0)
+            try:
+                meta["_hipporag_ppr_score"] = float(ppr_scores_dict.get(cid, 0.0))
+            except Exception:  # noqa: BLE001
+                meta["_hipporag_ppr_score"] = 0.0
+            if cid in dense_score_map:
+                meta["_hipporag_dense_score"] = float(dense_score_map[cid])
+            if tls is not None:
+                dense_top_file_id = getattr(tls, "dense_top_file_id", None)
+                dense_top_file_ratio = getattr(tls, "dense_top_file_ratio", None)
+                if dense_top_file_id:
+                    meta["_hipporag_dense_top_file_id"] = str(dense_top_file_id)
+                if dense_top_file_ratio is not None:
+                    try:
+                        meta["_hipporag_dense_top_file_ratio"] = float(dense_top_file_ratio)
+                    except Exception:  # noqa: BLE001
+                        pass
 
         # Optionally attach subgraph information for visualization
         if return_subgraph_info and chunks:

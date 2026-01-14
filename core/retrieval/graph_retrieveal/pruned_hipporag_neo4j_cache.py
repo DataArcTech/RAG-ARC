@@ -40,11 +40,20 @@ class _PrunedHippoRAGNeo4jCacheMixin:
     def passage_embeddings_array(self, value: Optional[np.ndarray]) -> None:
         setattr(self._get_tls(), "passage_embeddings_array", value)
 
+    @property
+    def passage_node_source_file_ids(self) -> list[Optional[str]]:
+        return getattr(self._get_tls(), "passage_node_source_file_ids", [])
+
+    @passage_node_source_file_ids.setter
+    def passage_node_source_file_ids(self, value: list[Optional[str]]) -> None:
+        setattr(self._get_tls(), "passage_node_source_file_ids", value)
+
     def invalidate_cache(self):
         """Force invalidation of all cached data."""
         self._cached_owner_id = None
         self._cached_store_version = None
         self.passage_node_keys = []
+        self.passage_node_source_file_ids = []
         self.passage_embeddings_array = None
 
     @staticmethod
@@ -107,7 +116,7 @@ class _PrunedHippoRAGNeo4jCacheMixin:
             try:
                 from framework.register import Register
                 registrator = Register()
-                knowledge_module = registrator.get_object("knowledge")
+                knowledge_module = getattr(registrator, "registrations", {}).get("knowledge")
                 if knowledge_module:
                     for file_id in source_file_ids:
                         if not knowledge_module.is_file_active(file_id):
@@ -116,10 +125,13 @@ class _PrunedHippoRAGNeo4jCacheMixin:
                 logger.warning(f"Failed to check file status for filtering: {e}")
         
         # Filter chunks: keep only those from active files or without source_file_id
-        self.passage_node_keys = [
-            chunk_id for chunk_id, source_file_id in chunk_ids
+        filtered_pairs = [
+            (chunk_id, source_file_id)
+            for chunk_id, source_file_id in chunk_ids
             if not source_file_id or source_file_id not in deleted_file_ids
         ]
+        self.passage_node_keys = [chunk_id for chunk_id, _fid in filtered_pairs]
+        self.passage_node_source_file_ids = [str(fid) if fid is not None else None for _cid, fid in filtered_pairs]
 
         passage_embeddings_list = []
         embedding_dim: int | None = None
@@ -158,4 +170,3 @@ class _PrunedHippoRAGNeo4jCacheMixin:
         self._cached_store_version = current_store_version
 
         logger.info("Built mappings for %d passage nodes", len(self.passage_node_keys))
-

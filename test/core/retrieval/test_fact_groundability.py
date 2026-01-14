@@ -89,3 +89,35 @@ def test_apply_groundability_soft_penalty_keeps_all_and_downweights():
     assert meta["dropped"] == 0
     assert meta["missing_provenance"] == 1
 
+
+def test_apply_groundability_uses_fallback_provenance_mapping():
+    scores = np.array([1.0, 0.9], dtype=np.float32)
+    fact_ids = ["f1", "f2"]
+    docstore = {
+        "f1": _FakeChunk({}),  # Missing provenance in docstore
+        "f2": _FakeChunk({"source_chunk_ids": ["c9"]}),
+    }
+    cfg = FactGroundabilityConfig(
+        enabled=True,
+        mode="hard_filter",
+        dense_top_k=30,
+        min_overlap_count=1,
+        min_overlap_ratio=0.0,
+        soft_min_weight=0.2,
+        soft_gamma=1.0,
+        keep_missing_provenance=False,
+        missing_provenance_weight=0.2,
+    )
+
+    new_scores, new_fact_ids, meta = apply_groundability(
+        cfg=cfg,
+        scores=scores,
+        fact_ids=fact_ids,
+        docstore=docstore,
+        dense_top_chunk_ids={"c1"},
+        fallback_source_chunk_ids_by_fact_id={"f1": ["c1"]},
+    )
+
+    assert new_fact_ids == ["f1"]
+    assert np.allclose(new_scores, np.array([1.0], dtype=np.float32))
+    assert meta["missing_provenance"] == 0

@@ -201,5 +201,63 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
         description="Score multiplier for facts with missing provenance (kept when allowed).",
     )
 
+    chunk_selection_strategy: Literal["top_entity_neighbors", "top_ppr_chunks"] = Field(
+        default="top_ppr_chunks",
+        description=(
+            "How to select the final top-k chunks from PPR results. "
+            "`top_entity_neighbors` selects chunks connected to the top PPR entity (legacy, can drift across similar products). "
+            "`top_ppr_chunks` returns the top PPR-ranked chunks directly (recommended for precision)."
+        ),
+    )
+
+    dense_seed_subgraph_top_k: int = Field(
+        default=30,
+        ge=0,
+        le=200,
+        description=(
+            "Inject the top-N dense chunk matches into the PPR subgraph node set before running PageRank. "
+            "This keeps the final selection PPR-based while improving recall for queries with explicit product names "
+            "that may not appear in graph facts/entities. Set to 0 to disable."
+        ),
+    )
+
+    dense_mix_in_top_k: int = Field(
+        default=0,
+        ge=0,
+        le=50,
+        description=(
+            "Always mix in the top-N dense passage matches (by chunk embeddings) into the final chunk list. "
+            "This improves precision for queries containing explicit product/file names that may not be captured "
+            "by fact/entity graph signals. Set to 0 to disable."
+        ),
+    )
+
+    dense_file_prior_enabled: bool = Field(
+        default=True,
+        description=(
+            "Whether to apply an adaptive file-level prior derived from dense top-K chunks. "
+            "When enabled and the dense top-K concentrates on a single file, the PPR reset weights of chunks "
+            "from that file are boosted (still PPR-based), improving product-specific recall."
+        ),
+    )
+    dense_file_prior_top_k: int = Field(
+        default=50,
+        ge=1,
+        le=200,
+        description="Top-N dense chunks used to estimate the dominant file for the file prior.",
+    )
+    dense_file_prior_min_ratio: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        description="Minimum dominant-file ratio in dense top-K required to activate the file prior.",
+    )
+    dense_file_prior_multiplier: float = Field(
+        default=2.5,
+        gt=0.0,
+        le=20.0,
+        description="Multiplier applied to dense-derived passage reset weights for chunks in the dominant file.",
+    )
+
     def build(self):
         return PrunedHippoRAGNeo4jRetriever(config=self)

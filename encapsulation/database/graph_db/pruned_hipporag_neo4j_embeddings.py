@@ -74,6 +74,17 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
         """
         Return a FaissVectorDB bound to the owner-scoped directory (lazy-load from disk).
         """
+        # Backward compatibility: legacy deployments stored a single shared FAISS index directly under
+        # `<storage_path>/{fact_index,entity_index}/index.{faiss,pkl}` (without owner subdirectories).
+        # Newer retrieval paths may request owner-scoped FAISS DBs; when owner-scoped artifacts are
+        # missing but legacy artifacts exist, fall back to the shared index to avoid silently disabling
+        # fact/entity retrieval for normal owner scopes.
+        template_db = self.fact_faiss_db if kind == "fact" else self.entity_faiss_db
+        base_dir = os.path.join(str(self.storage_path), f"{kind}_index")
+        owner_dir = self._faiss_owner_scoped_dir(kind, owner_id=owner_id)
+        if not self._faiss_index_artifacts_ready(owner_dir) and self._faiss_index_artifacts_ready(base_dir):
+            return template_db
+
         cache_attr = "_owner_scoped_fact_faiss" if kind == "fact" else "_owner_scoped_entity_faiss"
         lock = self._owner_scoped_faiss_lock()
         with lock:
@@ -86,7 +97,6 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
         if cached is not None:
             db = cached
         else:
-            template_db = self.fact_faiss_db if kind == "fact" else self.entity_faiss_db
             index_dir = self._faiss_owner_scoped_dir(kind, owner_id=owner_id)
             cfg = self._clone_faiss_config_for_path(getattr(template_db, "config", template_db), index_path=index_dir)
 

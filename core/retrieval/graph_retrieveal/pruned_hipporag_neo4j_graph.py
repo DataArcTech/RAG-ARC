@@ -294,6 +294,77 @@ class _PrunedHippoRAGNeo4jGraphMixin:
         sorted_doc_ids = np.argsort(query_doc_scores)[::-1]
         sorted_doc_scores = query_doc_scores[sorted_doc_ids]
 
+        dense_top_file_id: str | None = None
+        dense_top_file_ratio = 0.0
+        dense_file_prior_multiplier = 1.0
+        if bool(getattr(self.config, "dense_file_prior_enabled", False)):
+            try:
+                top_k = int(getattr(self.config, "dense_file_prior_top_k", 0) or 0)
+                min_ratio = float(getattr(self.config, "dense_file_prior_min_ratio", 0.0) or 0.0)
+                multiplier = float(getattr(self.config, "dense_file_prior_multiplier", 1.0) or 1.0)
+            except Exception:  # noqa: BLE001
+                top_k = 0
+                min_ratio = 0.0
+                multiplier = 1.0
+
+            source_file_ids = getattr(self, "passage_node_source_file_ids", None)
+            if top_k > 0 and isinstance(source_file_ids, list) and source_file_ids:
+                from core.retrieval.graph_retrieveal.dense_file_prior import pick_dense_top_file_id
+
+                ranked_file_ids: list[str | None] = []
+                for doc_idx in sorted_doc_ids[:top_k]:
+                    i = int(doc_idx)
+                    if i < 0 or i >= len(source_file_ids):
+                        ranked_file_ids.append(None)
+                    else:
+                        ranked_file_ids.append(source_file_ids[i])
+                file_id, ratio, _count = pick_dense_top_file_id(ranked_file_ids, top_k=top_k)
+                if file_id and ratio >= min_ratio:
+                    dense_top_file_id = str(file_id)
+                    dense_top_file_ratio = float(ratio)
+                    dense_file_prior_multiplier = float(multiplier)
+
+        # Optional: inject dense top-k chunks into the PPR subgraph before scoring.
+        # This is still PPR-based selection, but increases recall for product-name queries when
+        # the extracted fact/entity graph does not pull the right file into the expanded subgraph.
+        dense_seed_k_raw = getattr(self.config, "dense_seed_subgraph_top_k", 0)
+        try:
+            dense_seed_k = int(dense_seed_k_raw) if dense_seed_k_raw is not None else 0
+        except (TypeError, ValueError):
+            dense_seed_k = 0
+        dense_seed_k = max(0, dense_seed_k)
+        injected_dense_chunk_ids: list[str] = []
+        if dense_seed_k > 0:
+            for doc_idx in sorted_doc_ids[: max(dense_seed_k * 3, dense_seed_k)]:
+                if doc_idx < 0 or int(doc_idx) >= len(self.passage_node_keys):
+                    continue
+                chunk_id = self.passage_node_keys[int(doc_idx)]
+                if not chunk_id or chunk_id in subgraph_nodes:
+                    continue
+                subgraph_nodes.add(chunk_id)
+                injected_dense_chunk_ids.append(chunk_id)
+                if len(injected_dense_chunk_ids) >= dense_seed_k:
+                    break
+            if injected_dense_chunk_ids:
+                logger.info(
+                    "Injected dense chunks into PPR subgraph: dense_seed_k=%s injected=%s",
+                    dense_seed_k,
+                    len(injected_dense_chunk_ids),
+                )
+            tls_getter = getattr(self, "_get_tls", None)
+            if callable(tls_getter):
+                try:
+                    setattr(tls_getter(), "dense_seed_chunk_ids", set(injected_dense_chunk_ids))
+                except Exception:  # noqa: BLE001
+                    pass
+        else:
+            tls_getter = getattr(self, "_get_tls", None)
+            if callable(tls_getter):
+                try:
+                    setattr(tls_getter(), "dense_seed_chunk_ids", set())
+                except Exception:  # noqa: BLE001
+                    pass
+
         normalized_dpr_scores = self._min_max_normalize(sorted_doc_scores)
 
         passage_node_weight = self.config.passage_node_weight
@@ -303,6 +374,13 @@ class _PrunedHippoRAGNeo4jGraphMixin:
             if doc_id < len(self.passage_node_keys):
                 chunk_id = self.passage_node_keys[doc_id]
                 if chunk_id in subgraph_nodes:
+                    if dense_top_file_id and dense_file_prior_multiplier != 1.0:
+                        try:
+                            fid = self.passage_node_source_file_ids[int(doc_id)]
+                        except Exception:  # noqa: BLE001
+                            fid = None
+                        if fid and str(fid) == dense_top_file_id:
+                            score = float(score) * float(dense_file_prior_multiplier)
                     passage_weights[chunk_id] = score
 
         # Combine entity and passage weights
@@ -327,6 +405,15 @@ class _PrunedHippoRAGNeo4jGraphMixin:
             subgraph_nodes=subgraph_nodes,
             owner_id=owner_id,
         )
+        tls_getter = getattr(self, "_get_tls", None)
+        if callable(tls_getter):
+            try:
+                tls = tls_getter()
+                setattr(tls, "dense_top_file_id", dense_top_file_id)
+                setattr(tls, "dense_top_file_ratio", dense_top_file_ratio)
+                setattr(tls, "dense_file_prior_multiplier", dense_file_prior_multiplier)
+            except Exception:  # noqa: BLE001
+                pass
 
         # Convert to chunk IDs
         chunk_ids = []

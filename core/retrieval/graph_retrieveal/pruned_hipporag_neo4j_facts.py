@@ -1,6 +1,6 @@
 import logging
 import uuid
-from typing import List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -8,6 +8,54 @@ logger = logging.getLogger(__name__)
 
 
 class _PrunedHippoRAGNeo4jFactsMixin:
+    def _fetch_fact_provenance_from_neo4j(
+        self,
+        *,
+        fact_ids: List[str],
+        owner_id: uuid.UUID,
+    ) -> Dict[str, Any]:
+        """
+        Fetch `RELATES_TO.source_chunk_ids` from Neo4j for the given fact_ids.
+
+        This provides a robust provenance source when FAISS docstore metadata is missing/outdated.
+        """
+        if not fact_ids:
+            return {}
+
+        owner_str = self._owner_to_str(owner_id)
+        if not owner_str:
+            return {}
+
+        owner_key = owner_str
+        owner_key_fn = getattr(getattr(self, "graph_store", None), "_owner_key", None)
+        if callable(owner_key_fn):
+            try:
+                owner_key = str(owner_key_fn(owner_str))
+            except Exception:  # noqa: BLE001
+                owner_key = owner_str
+
+        query = """
+        MATCH ()-[r:RELATES_TO]->()
+        WHERE r.fact_id IN $fact_ids AND r.owner_id = $owner_id
+        RETURN r.fact_id AS fact_id, r.source_chunk_ids AS source_chunk_ids
+        """
+        try:
+            records = self.graph_store._execute_query(  # type: ignore[attr-defined]
+                query,
+                {"fact_ids": list({str(x) for x in fact_ids if str(x)}), "owner_id": owner_key},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to fetch fact provenance from Neo4j (continuing without): %s", exc)
+            return {}
+
+        out: Dict[str, Any] = {}
+        for rec in records or []:
+            fid = rec.get("fact_id")
+            if not fid:
+                continue
+            out[str(fid)] = rec.get("source_chunk_ids")
+        return out
+
     def _get_fact_scores_faiss(
         self,
         query: str,
@@ -68,6 +116,20 @@ class _PrunedHippoRAGNeo4jFactsMixin:
             self.passage_node_keys[i] for i in top_indices if 0 <= int(i) < len(self.passage_node_keys)
         }
 
+        fallback_source_chunk_ids_by_fact_id: Dict[str, Any] | None = None
+        if owner_id is not None:
+            missing_ids: List[str] = []
+            for fact_id in filtered_ids:
+                chunk = docstore.get(fact_id)
+                meta = getattr(chunk, "metadata", None)
+                if not isinstance(meta, dict) or not meta.get("source_chunk_ids"):
+                    missing_ids.append(str(fact_id))
+            if missing_ids:
+                fallback_source_chunk_ids_by_fact_id = self._fetch_fact_provenance_from_neo4j(
+                    fact_ids=missing_ids,
+                    owner_id=owner_id,
+                )
+
         cfg = FactGroundabilityConfig(
             enabled=True,
             mode=str(getattr(cfg_obj, "fact_groundability_mode")),
@@ -85,6 +147,7 @@ class _PrunedHippoRAGNeo4jFactsMixin:
             fact_ids=filtered_ids,
             docstore=docstore,
             dense_top_chunk_ids=dense_top_chunk_ids,
+            fallback_source_chunk_ids_by_fact_id=fallback_source_chunk_ids_by_fact_id,
         )
         logger.info(
             "Fact groundability applied=%s mode=%s kept=%s dropped=%s missing=%s",

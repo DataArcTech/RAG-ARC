@@ -36,12 +36,21 @@ def _coerce_str_list(value: Any) -> list[str]:
     return [s] if s else []
 
 
-def extract_fact_source_chunk_ids(*, docstore: Mapping[str, Any], fact_id: str) -> list[str]:
+def extract_fact_source_chunk_ids(
+    *,
+    docstore: Mapping[str, Any],
+    fact_id: str,
+    fallback_source_chunk_ids_by_fact_id: Mapping[str, Any] | None = None,
+) -> list[str]:
     chunk = docstore.get(fact_id)
     meta = getattr(chunk, "metadata", None)
-    if not isinstance(meta, dict):
+    if isinstance(meta, dict):
+        direct = _coerce_str_list(meta.get("source_chunk_ids"))
+        if direct:
+            return direct
+    if fallback_source_chunk_ids_by_fact_id is None:
         return []
-    return _coerce_str_list(meta.get("source_chunk_ids"))
+    return _coerce_str_list(fallback_source_chunk_ids_by_fact_id.get(str(fact_id)))
 
 
 def compute_overlap(*, source_chunk_ids: Sequence[str], retrieved_chunk_ids: set[str]) -> tuple[int, float | None]:
@@ -61,6 +70,7 @@ def apply_groundability(
     fact_ids: Sequence[str],
     docstore: Mapping[str, Any],
     dense_top_chunk_ids: set[str],
+    fallback_source_chunk_ids_by_fact_id: Mapping[str, Any] | None = None,
 ) -> tuple[np.ndarray, list[str], dict[str, Any]]:
     if not cfg.enabled or scores is None or len(scores) == 0 or not fact_ids:
         return scores, list(fact_ids), {"enabled": bool(cfg.enabled), "applied": False}
@@ -79,7 +89,11 @@ def apply_groundability(
         raise ValueError(f"Unknown fact_groundability mode: {cfg.mode!r}")
 
     for score, fact_id in zip(scores.tolist(), fact_ids):
-        source_chunk_ids = extract_fact_source_chunk_ids(docstore=docstore, fact_id=str(fact_id))
+        source_chunk_ids = extract_fact_source_chunk_ids(
+            docstore=docstore,
+            fact_id=str(fact_id),
+            fallback_source_chunk_ids_by_fact_id=fallback_source_chunk_ids_by_fact_id,
+        )
         overlap_count, overlap_ratio = compute_overlap(
             source_chunk_ids=source_chunk_ids,
             retrieved_chunk_ids=dense_top_chunk_ids,
@@ -133,4 +147,3 @@ __all__ = [
     "compute_overlap",
     "extract_fact_source_chunk_ids",
 ]
-

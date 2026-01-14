@@ -136,6 +136,7 @@ These vars control when DeepSearch attempts a single query rewrite (via the retr
 
 Notes:
 - **FAISS fingerprint guard**: the FAISS `.pkl` metadata stores an `embedding_fingerprint` (provider/model/dim). If you switch embedding models/dimensions, set a new `FAISS_INDEX_PATH` (recommended) or rebuild the index; otherwise the system will fail-fast to avoid silent corruption.
+- **Path consistency (important)**: indexing and online retrieval must use the same `GRAPH_STORAGE_PATH` / `FAISS_INDEX_PATH` / `BM25_INDEX_PATH`. If you index into directory A but serve from directory B, you may see “the target file/chunks exist in Neo4j + chunk_store, but retrieval hits unrelated files”.
 - **E2E isolation**: for real-service tests, point the path knobs above to an isolated directory (for example under `./local/e2e_*`) to avoid polluting `./data/*`.
 - **KG domain fallback**: when chunks do not provide `chunk.domain` (or `chunk.metadata["domain"]`), Neo4j indexing falls back to the loaded schema's `default_domain` (for example `finance_insurance` when using `./fin_kg_schema.yml`).
 

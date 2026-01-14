@@ -488,6 +488,7 @@ RAG-ARC implements an enhanced GraphRAG approach based on HippoRAG2 with key imp
 1. **Subgraph PPR**: Instead of computing Personalized PageRank on the entire graph, RAG-ARC computes it on relevant subgraphs for better efficiency and accuracy
 2. **Query-Aware Pruning**: Dynamically adjusts the number of neighbors retained during graph expansion based on entity relevance to the query
 3. **Incremental Updates**: Supports updating the knowledge graph without full reconstruction
+4. **Dense-seeded file prior (optional)**: When dense top-K chunks concentrate on a single file, boost that file's passage reset weights to reduce cross-product drift while keeping PPR-based ranking
 
 ### Document Processing Pipeline
 

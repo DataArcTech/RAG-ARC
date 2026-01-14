@@ -136,6 +136,7 @@ Benchmark/实验模式：
 
 补充说明：
 - **FAISS 指纹保护**：FAISS 的 `.pkl` 元数据会写入 `embedding_fingerprint`（provider/model/dim）。当切换 embedding 模型/维度时，建议设置新的 `FAISS_INDEX_PATH`（推荐）或清理重建索引；否则系统会 fail-fast，避免“静默索引污染”。
+- **路径一致性（重要）**：索引写入与在线检索必须使用同一套 `GRAPH_STORAGE_PATH` / `FAISS_INDEX_PATH` / `BM25_INDEX_PATH`。若索引写在 A 目录、检索读 B 目录，会出现“文件/Chunk 在 Neo4j 与 chunk_store 中存在，但召回命中的是错误文件”的现象。
 - **E2E 隔离**：真实服务测试建议把上述路径指向隔离目录（例如 `./local/e2e_*`），避免污染默认的 `./data/*`。
 - **KG domain 回退**：当 chunk 未提供 `chunk.domain`（或 `chunk.metadata["domain"]`）时，Neo4j 入库会回退到已加载 schema 的 `default_domain`（例如使用 `./fin_kg_schema.yml` 时为 `finance_insurance`）。
 
