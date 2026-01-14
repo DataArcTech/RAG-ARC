@@ -328,7 +328,7 @@ Benchmark/实验模式：
 | `DEEPSEARCH_PLANNER_MAX_RETRIES` | _(空)_ | 可选：规划器专用重试次数。 |
 | `DEEPSEARCH_PERSIST_PLAN` | `true` | 是否落盘保存规划。 |
 | `DEEPSEARCH_PLAN_OUTPUT_DIR` | `./local/deepsearch_runs` | 规划输出目录。 |
-| `DEEPSEARCH_ARTIFACT_DIR` | _(空)_ | 可选：DeepSearch 运行 artifacts 根目录（每次 run 会创建 `run_id/` 子目录，写入 `plan_result.json`/`reasoning.json`/`report.json`/`report.md` 等；当 `artifacts.version=2` 时会额外写入 `manifest.json`/`dev.json`/`public.json`，且 `state_snapshot.json` 将变为轻量 manifest）。 |
+| `DEEPSEARCH_ARTIFACT_DIR` | _(空)_ | 可选：DeepSearch 运行 artifacts 根目录（每次 run 会创建 `run_id/` 子目录，写入 `plan_result.json`/`reasoning.json`/`report.json`/`report.md` 等；当 `artifacts.version=2` 时会额外写入 `manifest.json`/`dev.json`/`public.json`，且 `state_snapshot.json` 将变为轻量 manifest；当启用 `artifacts.dedupe.enabled=true` 时会额外写入 `evidence_pool.json` 并将 `reasoning.json`/`report.json` 的重复大字段改为 refs）。 |
 | `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `./local/deepsearch_artifacts` | 工具执行日志/产物目录（在 `config/json_configs/deepsearch_service.json` 中也作为默认的 run artifacts 根目录使用）。 |
 | `DEEPSEARCH_ALLOW_EXTERNAL_CHANNEL` | `false` | 规划器是否允许生成 `web` 步骤（当未设置 `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` 时生效）。 |
 | `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` | `false` | 运行时覆盖外部搜索开关（默认由配置 `external_channel.enabled` + `gap_detection.enable_external_on_gap` 决定）。 |
