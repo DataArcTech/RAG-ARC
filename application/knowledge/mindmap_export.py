@@ -1,6 +1,5 @@
 import hashlib
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Callable
 
 from fastapi import HTTPException, status
@@ -8,6 +7,7 @@ from fastapi import HTTPException, status
 from encapsulation.data_model.orm_models import FileMindmapCache
 from core.prompts import MINDMAP_MERGE_SYSTEM_PROMPT_EN, build_mindmap_merge_user_prompt
 from config.output_limits import KNOWLEDGE_MINDMAP_EXPORT_SEGMENT_SNIPPET_CHARS
+from core.mindmap.utils import add_chunks_to_nodes
 
 ProgressCallback = Callable[[str, str, int | None, dict[str, Any] | None], None]
 
@@ -126,43 +126,6 @@ def convert_tsv_to_graph(tsv_text: str) -> Tuple[List[Dict[str, Any]], List[Dict
             edges.append(edge_data)
 
     return nodes, edges
-
-
-def convert_chunks_to_frontend_format(
-    chunks: List[Dict[str, Any]], filename: str, file_id: str
-) -> List[Dict[str, Any]]:
-    """Convert chunks to frontend format with id, title, content, documentName, fileId."""
-    # Extract only the filename without path prefix (e.g., "分析.png" from "RAG-ARC/分析.png")
-    document_name = Path(filename).name
-    frontend_chunks = []
-    for idx, chunk in enumerate(chunks, start=1):
-        frontend_chunks.append(
-            {
-                "id": f"c{idx}",
-                "title": f"片段{idx}",
-                "content": chunk.get("content", ""),
-                "documentName": document_name,
-                "fileId": file_id,
-            }
-        )
-    return frontend_chunks
-
-
-def add_chunks_to_nodes(
-    nodes: List[Dict[str, Any]], chunks: List[Dict[str, Any]], filename: str, file_id: str
-) -> List[Dict[str, Any]]:
-    """Add chunks field to all nodes as source evidence for each node."""
-    if not nodes:
-        return nodes
-
-    # Convert chunks to frontend format once
-    frontend_chunks = convert_chunks_to_frontend_format(chunks, filename, file_id)
-
-    # Add chunks to all nodes (each weight level should have chunks as source evidence)
-    for node in nodes:
-        node["chunks"] = frontend_chunks
-
-    return nodes
 
 
 async def export_file_mindmap_payload(

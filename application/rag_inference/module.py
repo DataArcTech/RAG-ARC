@@ -538,90 +538,10 @@ class RAGInference(AbstractModule):
             },
         )
 
+        # Note: subgraph_data is now generated in _generate_mindmap based on final answer chunks
+        # We don't export subgraph here to avoid including all retrieval-stage chunks
+        # The subgraph will be built from the reranked chunks that are actually used in the final answer
         subgraph_data = None
-        if subgraph_info and return_subgraph:
-            self._emit_progress(progress_callback, {"stage": "subgraph_export", "status": "start"})
-            export_start = time.perf_counter()
-            try:
-                graph_store = self._locate_graph_store()
-                if graph_store:
-                    graph_store_class_name = graph_store.__class__.__name__
-                    if graph_store_class_name == "PrunedHippoRAGNeo4jStore":
-                        from encapsulation.database.utils.graph_export_utils_neo4j import (
-                            GraphExporterNeo4j as GraphExporter,
-                        )
-
-                        if subgraph_info.get("_multi_owner"):
-                            payloads: list[dict[str, Any]] = []
-                            for info in subgraph_info.get("scopes") or []:
-                                if not isinstance(info, dict) or "subgraph_nodes" not in info:
-                                    continue
-                                payloads.append(
-                                    GraphExporter.export_subgraph(
-                                        graph_store=graph_store,
-                                        subgraph_node_ids=set(info["subgraph_nodes"]),
-                                        seed_entity_ids=set(info.get("seed_entity_ids", []) or []),
-                                        retrieved_chunk_ids=info.get("retrieved_chunk_ids", []) or [],
-                                        node_ppr_scores=info.get("node_ppr_scores", {}) or {},
-                                    )
-                                )
-                            subgraph_data = self._merge_graph_payloads(payloads)
-                        else:
-                            subgraph_data = GraphExporter.export_subgraph(
-                                graph_store=graph_store,
-                                subgraph_node_ids=set(subgraph_info["subgraph_nodes"]),
-                                seed_entity_ids=set(subgraph_info.get("seed_entity_ids", []) or []),
-                                retrieved_chunk_ids=subgraph_info.get("retrieved_chunk_ids", []) or [],
-                                node_ppr_scores=subgraph_info.get("node_ppr_scores", {}) or {},
-                            )
-                    else:
-                        from encapsulation.database.utils.graph_export_utils import GraphExporter
-
-                        if subgraph_info.get("_multi_owner"):
-                            payloads = []
-                            for info in subgraph_info.get("scopes") or []:
-                                if not isinstance(info, dict) or "subgraph_nodes" not in info:
-                                    continue
-                                payloads.append(
-                                    GraphExporter.export_subgraph(
-                                        graph_store=graph_store,
-                                        subgraph_node_indices=set(info["subgraph_nodes"]),
-                                        seed_entity_ids=set(info.get("seed_entity_ids", []) or []),
-                                        retrieved_chunk_ids=info.get("retrieved_chunk_ids", []) or [],
-                                        node_ppr_scores=info.get("node_ppr_scores", {}) or {},
-                                    )
-                                )
-                            subgraph_data = self._merge_graph_payloads(payloads)
-                        else:
-                            subgraph_data = GraphExporter.export_subgraph(
-                                graph_store=graph_store,
-                                subgraph_node_indices=set(subgraph_info["subgraph_nodes"]),
-                                seed_entity_ids=set(subgraph_info.get("seed_entity_ids", []) or []),
-                                retrieved_chunk_ids=subgraph_info.get("retrieved_chunk_ids", []) or [],
-                                node_ppr_scores=subgraph_info.get("node_ppr_scores", {}) or {},
-                            )
-                    if subgraph_data is not None:
-                        logger.info(
-                            "Exported subgraph: %d nodes, %d edges",
-                            len(subgraph_data.get("nodes", [])),
-                            len(subgraph_data.get("edges", [])),
-                        )
-                else:
-                    logger.warning("Graph store not found in retriever")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Failed to export subgraph: %s", exc)
-                import traceback
-                logger.debug("Traceback: %s", traceback.format_exc())
-            self._emit_progress(
-                progress_callback,
-                {
-                    "stage": "subgraph_export",
-                    "status": "end",
-                    "duration_ms": int((time.perf_counter() - export_start) * 1000),
-                    "nodes": len((subgraph_data or {}).get("nodes", []) or []),
-                    "edges": len((subgraph_data or {}).get("edges", []) or []),
-                },
-            )
 
         messages: List[Dict[str, str]] = []
         
@@ -911,56 +831,101 @@ class RAGInference(AbstractModule):
 
     def _generate_mindmap(self, query: str, response: str, chunks: list[Chunk]) -> tuple[Dict[str, Any], str | None]:
         """
-        Generate mind map data based on query, response and chunks
+        Generate mind map data based on query, response and chunks.
+        Uses TSV format (same as mindmap_export) for better reliability.
+        Only includes chunks that are actually referenced in the response (via <sup>key</sup> tags).
 
         Args:
             query: User query
             response: LLM response
-            chunks: Retrieved chunks
+            chunks: Retrieved chunks (reranked, final chunks used for answer)
 
         Returns:
             Tuple of (subgraph_data, raw_mindmap_response)
         """
         try:
-            # Prepare prompt for LLM to generate mind map structure
-            mindmap_prompt = self._build_mindmap_prompt(query, response, chunks)
+            # Use TSV format like mindmap_export for better reliability
+            from core.prompts import MINDMAP_MERGE_SYSTEM_PROMPT_EN, build_mindmap_merge_user_prompt
+            from application.knowledge.mindmap_export import extract_tsv_from_response, convert_tsv_to_graph
+            import re
+            
+            # Extract only chunks that are actually referenced in the response
+            # Chunks are indexed from 1 in the messages (Source key=1, key=2, etc.)
+            _SUP_KEY_RE = re.compile(r"<sup>\s*(?P<key>\d{1,4})\s*</sup>")
+            used_keys = set()
+            for match in _SUP_KEY_RE.finditer(response):
+                try:
+                    key = int(match.group("key"))
+                    if key > 0 and key <= len(chunks):
+                        used_keys.add(key)
+                except Exception:  # noqa: BLE001
+                    continue
+            
+            # Filter chunks to only those actually referenced in the response
+            # If no citations found, use all chunks (fallback for cases without citations)
+            if used_keys:
+                referenced_chunks = [chunks[key - 1] for key in sorted(used_keys) if 1 <= key <= len(chunks)]
+                logger.info(f"Filtered chunks: {len(chunks)} total, {len(referenced_chunks)} actually referenced in response")
+            else:
+                # Fallback: if no citations found, use all chunks (may happen if LLM doesn't use citations)
+                referenced_chunks = chunks
+                logger.info(f"No citations found in response, using all {len(chunks)} chunks")
+            
+            # Build prompt using TSV format (more reliable than JSON)
+            chunks_text = "\n\n".join([f"Chunk {i+1}:\n{chunk.content}" for i, chunk in enumerate(referenced_chunks)])
+            # Create a section-like format for the prompt
+            sections_text = f"Segment 1:\nContent summary:\n{response}\n\nRetrieved chunks:\n{chunks_text}"
+            
+            mindmap_prompt = build_mindmap_merge_user_prompt(
+                filename=f"Query: {query}",
+                sections_text=sections_text
+            )
 
-            # Call LLM to generate nodes and edges
+            # Call LLM to generate TSV mind map
             mindmap_messages = [
-                {"role": "system", "content": MINDMAP_GENERATION_SYSTEM_PROMPT_ZH},
+                {"role": "system", "content": MINDMAP_MERGE_SYSTEM_PROMPT_EN},
                 {"role": "user", "content": mindmap_prompt}
             ]
 
-            logger.info("Generating mind map structure with LLM...")
-            logger.info("Mindmap prompt: %s", mindmap_prompt)
+            logger.info("Generating mind map structure with LLM (TSV format)...")
             # Note: This is called from _run_blocking, so it's already in a thread
             mindmap_response = self.llm.chat(mindmap_messages)
 
             # Log raw mindmap response
-            logger.info("Raw mindmap response: %s", mindmap_response)
+            logger.info("Raw mindmap response (first 500 chars): %s", mindmap_response[:500] if mindmap_response else None)
 
-            # Parse LLM response to extract JSON
-            mindmap_json = self._extract_json_from_response(mindmap_response)
+            # Extract TSV from response (same logic as mindmap_export)
+            merged_tsv = extract_tsv_from_response(mindmap_response)
+            if not merged_tsv.strip():
+                logger.warning("LLM did not return valid TSV content")
+                return {"nodes": [], "edges": []}, mindmap_response
 
-            # Build final subgraph data with chunks
-            subgraph_data = self._build_subgraph_data(chunks, mindmap_json)
+            # Convert TSV to graph structure (same logic as mindmap_export)
+            nodes, edges = convert_tsv_to_graph(merged_tsv)
+            
+            logger.info(f"Converted TSV to graph: {len(nodes)} nodes, {len(edges)} edges")
 
-            logger.info(f"Generated mind map: {len(subgraph_data.get('nodes', []))} nodes, {len(subgraph_data.get('edges', []))} edges")
+            # Build final subgraph data with only referenced chunks
+            subgraph_data = self._build_subgraph_data(referenced_chunks, {"nodes": nodes, "edges": edges})
+
+            nodes_count = len(subgraph_data.get('nodes', []))
+            edges_count = len(subgraph_data.get('edges', []))
+            logger.info(f"Generated mind map: {nodes_count} nodes, {edges_count} edges")
+            
+            if nodes_count == 0:
+                logger.warning("Generated mind map has no nodes - TSV may be empty or invalid")
+            
             return subgraph_data, mindmap_response
 
         except Exception as e:
             logger.error(f"Failed to generate mind map: {e}")
             import traceback
-            logger.debug(f"Traceback: {traceback.format_exc()}")
-            return {"chunks": [], "nodes": [], "edges": []}
-
-    def _build_mindmap_prompt(self, query: str, response: str, chunks: list[Chunk]) -> str:
-        """Build prompt for LLM to generate mind map structure"""
-        chunks_text = "\n\n".join([f"Chunk {i+1}:\n{chunk.content}" for i, chunk in enumerate(chunks)])
-        return build_mindmap_generation_user_prompt(query=query, response=response, chunks_text=chunks_text)
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            # Return empty structure consistent with mindmap_export format
+            return {"nodes": [], "edges": []}, None
 
     def _extract_json_from_response(self, response: str) -> Dict[str, Any]:
-        """Extract JSON from LLM response"""
+        """Extract JSON from LLM response with error recovery"""
         try:
             # Try to find JSON block in markdown code fence
             if "```json" in response:
@@ -975,29 +940,132 @@ class RAGInference(AbstractModule):
                 # Try to parse the entire response as JSON
                 json_str = response.strip()
 
-            return json.loads(json_str)
+            # Try to parse JSON
+            try:
+                parsed = json.loads(json_str)
+            except json.JSONDecodeError as parse_error:
+                # Try to fix common JSON truncation issues
+                logger.warning(f"Initial JSON parse failed: {parse_error}, attempting repair...")
+                json_str = self._repair_truncated_json(json_str)
+                try:
+                    parsed = json.loads(json_str)
+                    logger.info("Successfully repaired truncated JSON")
+                except json.JSONDecodeError:
+                    # If repair fails, try to extract partial data
+                    logger.error(f"JSON repair failed: {parse_error}")
+                    return self._extract_partial_json(json_str)
+
+            # Validate that parsed JSON has expected structure
+            if not isinstance(parsed, dict):
+                logger.warning("LLM response is not a JSON object, got: %s", type(parsed))
+                return {"nodes": [], "edges": []}
+            
+            # Ensure nodes and edges are lists
+            nodes = parsed.get("nodes", [])
+            edges = parsed.get("edges", [])
+            if not isinstance(nodes, list) or not isinstance(edges, list):
+                logger.warning("LLM response nodes/edges are not lists: nodes=%s, edges=%s", type(nodes), type(edges))
+                return {"nodes": [], "edges": []}
+            
+            logger.info("Successfully extracted mindmap JSON: %d nodes, %d edges", len(nodes), len(edges))
+            return {"nodes": nodes, "edges": edges}
         except Exception as e:
-            logger.error(f"Failed to extract JSON from response: {e}")
-            logger.debug(f"Response: {response}")
+            logger.error(f"Unexpected error extracting JSON from response: {e}")
+            logger.debug(f"Response (first 500 chars): {response[:500]}")
             return {"nodes": [], "edges": []}
+    
+    def _repair_truncated_json(self, json_str: str) -> str:
+        """Attempt to repair truncated JSON by closing open structures"""
+        json_str = json_str.strip()
+        
+        # Count open and close braces/brackets
+        open_braces = json_str.count('{')
+        close_braces = json_str.count('}')
+        open_brackets = json_str.count('[')
+        close_brackets = json_str.count(']')
+        
+        # Remove trailing comma if present (common in truncated JSON)
+        json_str = json_str.rstrip().rstrip(',')
+        
+        # Close open arrays first (edges, nodes)
+        while close_brackets < open_brackets:
+            json_str += ']'
+            close_brackets += 1
+        
+        # Close open objects
+        while close_braces < open_braces:
+            json_str += '}'
+            close_braces += 1
+        
+        return json_str
+    
+    def _extract_partial_json(self, json_str: str) -> Dict[str, Any]:
+        """Extract partial JSON data when full parse fails"""
+        nodes = []
+        edges = []
+        
+        # Try to extract nodes using regex or string matching
+        import re
+        # Look for node objects
+        node_pattern = r'"id"\s*:\s*"([^"]+)"[^}]*"name"\s*:\s*"([^"]+)"'
+        for match in re.finditer(node_pattern, json_str):
+            node_id = match.group(1)
+            node_name = match.group(2)
+            nodes.append({
+                "id": node_id,
+                "name": node_name,
+                "category": node_name,
+                "weight": 1
+            })
+        
+        # Look for edge objects
+        edge_pattern = r'"id"\s*:\s*"([^"]+)"[^}]*"source"\s*:\s*"([^"]+)"[^}]*"target"\s*:\s*"([^"]+)"'
+        for match in re.finditer(edge_pattern, json_str):
+            edge_id = match.group(1)
+            source = match.group(2)
+            target = match.group(3)
+            edges.append({
+                "id": edge_id,
+                "source": source,
+                "target": target,
+                "relation": "contains",
+                "weight": 0.8
+            })
+        
+        if nodes or edges:
+            logger.info(f"Extracted partial JSON: {len(nodes)} nodes, {len(edges)} edges using regex fallback")
+            return {"nodes": nodes, "edges": edges}
+        
+        return {"nodes": [], "edges": []}
 
     def _build_subgraph_data(self, chunks: list[Chunk], mindmap_json: Dict[str, Any]) -> Dict[str, Any]:
         """Build final subgraph data combining chunks and mind map structure"""
-        # Build chunks data
-        chunks_data = []
-        for i, chunk in enumerate(chunks):
-            chunk_id = f"chunk-{800 + i + 1}"
-            # Try to infer chunk type from content or use default
-            chunk_type = "检索片段"
-            chunks_data.append({
-                "id": chunk_id,
-                "type": chunk_type,
-                "content": chunk.content
-            })
+        from core.mindmap.utils import add_chunks_to_nodes, ensure_mindmap_edge_relation
+        
+        # Convert Chunk objects to dictionaries for frontend formatting
+        chunks_dict = []
+        for chunk in chunks:
+            # Convert Chunk to dict format expected by add_chunks_to_nodes
+            chunk_dict = {
+                "content": chunk.content,
+                "id": chunk.id,
+                "metadata": chunk.metadata or {}
+            }
+            chunks_dict.append(chunk_dict)
+        
+        # Get nodes and edges from mindmap_json
+        nodes = mindmap_json.get("nodes", [])
+        edges = mindmap_json.get("edges", [])
+        
+        # Ensure edges have "contains" relation (for mindmap consistency)
+        edges = ensure_mindmap_edge_relation(edges, relation="contains")
+        
+        # Add chunks to all nodes (multi-file mode: chunks may come from different files)
+        # When filename/file_id are None, the function will extract from each chunk's metadata
+        nodes = add_chunks_to_nodes(nodes, chunks_dict, filename=None, file_id=None)
 
-        # Combine with mind map nodes and edges
+        # Return structure consistent with mindmap_export format
         return {
-            "chunks": chunks_data,
-            "nodes": mindmap_json.get("nodes", []),
-            "edges": mindmap_json.get("edges", [])
+            "nodes": nodes,
+            "edges": edges
         }

@@ -499,12 +499,15 @@ async def stream_chat_ws(
                     graph_store=graph_store,
                 )
 
-            response_payload = build_stream_chat_payload(
+            response_payload, subgraph_for_outer = build_stream_chat_payload(
                 assistant_message,
                 chunks,
                 subgraph=subgraph_data if return_subgraph else None,
                 evidence=evidence,
             )
+            # Add subgraph at outer level if present
+            if subgraph_for_outer is not None:
+                response_payload["subgraph"] = subgraph_for_outer
             await websocket.send_json(response_payload)
 
     except WebSocketDisconnect:

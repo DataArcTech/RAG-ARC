@@ -227,35 +227,39 @@ async def _yield_payload_event(
     request_id: str
 ) -> AsyncGenerator[str, None]:
     """Yield payload event."""
-    payload = build_stream_chat_payload(
+    payload, subgraph_for_outer = build_stream_chat_payload(
         assistant_message,
         assistant_message.source_file_ids or [],
         subgraph=None,
         evidence=None,
     )
     
-    tool_calls = [{
-        "index": 0,
-        "id": f"call_{assistant_message.id}",
-        "type": "function",
-        "function": {
-            "name": "rag_arc_payload",
-            "arguments": json.dumps(
-                payload,
-                ensure_ascii=False,
-                default=str,
-                separators=(",", ":")
-            ),
-        },
-    }]
+    chunk_data = openai_chat_completion_chunk(
+        chunk_id=chunk_id,
+        model=model_name,
+        created=created,
+        delta=delta_envelope(role=None, tool_calls=[{
+            "index": 0,
+            "id": f"call_{assistant_message.id}",
+            "type": "function",
+            "function": {
+                "name": "rag_arc_payload",
+                "arguments": json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    default=str,
+                    separators=(",", ":")
+                ),
+            },
+        }]),
+    )
+    
+    # Add subgraph at outer level if present
+    if subgraph_for_outer is not None:
+        chunk_data["subgraph"] = subgraph_for_outer
     
     yield sse_json_wrapped(
-        openai_chat_completion_chunk(
-            chunk_id=chunk_id,
-            model=model_name,
-            created=created,
-            delta=delta_envelope(role=None, tool_calls=tool_calls),
-        ),
+        chunk_data,
         request_id=request_id
     )
 
@@ -529,37 +533,41 @@ async def generate_sse_events(
         rag_inference_handler
     )
     
-    # Update payload with evidence
-    payload = build_stream_chat_payload(
+    # Update payload with evidence (subgraph is extracted separately)
+    payload, subgraph_for_outer = build_stream_chat_payload(
         assistant_message,
         chunks,
         subgraph=subgraph_data if return_subgraph else None,
         evidence=evidence,
     )
     
-    # Yield payload and finish events
-    tool_calls = [{
-        "index": 0,
-        "id": f"call_{assistant_message.id}",
-        "type": "function",
-        "function": {
-            "name": "rag_arc_payload",
-            "arguments": json.dumps(
-                payload,
-                ensure_ascii=False,
-                default=str,
-                separators=(",", ":")
-            ),
-        },
-    }]
+    # Build the chunk with tool_calls
+    chunk_data = openai_chat_completion_chunk(
+        chunk_id=chunk_id,
+        model=model_name,
+        created=created,
+        delta=delta_envelope(role=None, tool_calls=[{
+            "index": 0,
+            "id": f"call_{assistant_message.id}",
+            "type": "function",
+            "function": {
+                "name": "rag_arc_payload",
+                "arguments": json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    default=str,
+                    separators=(",", ":")
+                ),
+            },
+        }]),
+    )
+    
+    # Add subgraph at outer level (data level) if present
+    if subgraph_for_outer is not None:
+        chunk_data["subgraph"] = subgraph_for_outer
     
     yield sse_json_wrapped(
-        openai_chat_completion_chunk(
-            chunk_id=chunk_id,
-            model=model_name,
-            created=created,
-            delta=delta_envelope(role=None, tool_calls=tool_calls),
-        ),
+        chunk_data,
         request_id=request_id
     )
     
