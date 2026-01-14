@@ -5,9 +5,13 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 from encapsulation.data_model.deepsearch import GraphQueryContext
 from core.deepsearch.report import DeepSearchQualityGate, QualityGateConfig
 from core.deepsearch.state import DeepSearchState
-from core.deepsearch.trace import emit_trace
+from core.deepsearch.trace import emit_trace, reset_trace_emitter
 from core.graph_adapter.base import GraphAccessScope
 from core.utils.json_safe import json_safe
+
+from .artifact_dedupe_v2 import build_evidence_pool_v2, dedupe_reasoning_v2, dedupe_report_v2
+from .artifact_views_v2 import build_v2_artifact_documents
+from .trace_capture import attach_trace_capture
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +64,8 @@ class DeepSearchServiceRunMixin:
         )
 
         stage_timings: Dict[str, Any] = {}
+        plan_result_written = False
+        stage_timings_written = False
 
         from core.deepsearch.tooling.budget import ToolBudget, reset_tool_budget, set_tool_budget
 
@@ -69,6 +75,14 @@ class DeepSearchServiceRunMixin:
         if budget_cfg.get("enabled"):
             budget_obj = ToolBudget(max_calls_total=int(budget_cfg["max_calls_total"]))
             budget_token = set_tool_budget(budget_obj)
+
+        trace_capture_token = None
+        captured_trace_events: list[dict[str, Any]] = []
+        try:
+            trace_capture_token, captured_trace_events = attach_trace_capture(sink=captured_trace_events)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Failed to attach trace capture: %s", exc, exc_info=True)
+            trace_capture_token = None
 
         try:
             plan_result = await self._execute_stage(
@@ -82,6 +96,7 @@ class DeepSearchServiceRunMixin:
             if getattr(self, "artifact_store", None) is not None:
                 try:
                     self.artifact_store.write_json(state.run_id, "plan_result.json", json_safe(plan_result))
+                    plan_result_written = True
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Failed to persist plan_result artifact: %s", exc, exc_info=True)
                     state.append_error(f"artifact_store.write_json(plan_result.json) failed: {exc}", stage="persist")
@@ -450,6 +465,7 @@ class DeepSearchServiceRunMixin:
             if getattr(self, "artifact_store", None) is not None:
                 try:
                     self.artifact_store.write_json(state.run_id, "stage_timings.json", json_safe(stage_timings))
+                    stage_timings_written = True
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Failed to persist stage_timings artifact: %s", exc, exc_info=True)
                     state.append_error(f"artifact_store.write_json(stage_timings.json) failed: {exc}", stage="persist")
@@ -462,15 +478,124 @@ class DeepSearchServiceRunMixin:
                 stage_timings=stage_timings,
             )
             if getattr(self, "artifact_store", None) is not None:
+                artifacts_present = {
+                    "plan_result": plan_result_written,
+                    "stage_timings": stage_timings_written,
+                    "reasoning": False,
+                    "report": False,
+                    "report_md": False,
+                }
+                artifacts_cfg: Dict[str, Any] | None = None
                 try:
-                    self.artifact_store.write_json(state.run_id, "reasoning.json", json_safe(cumulative_reasoning or {}))
-                    self.artifact_store.write_json(state.run_id, "report.json", json_safe(report))
-                    if isinstance(report, dict) and isinstance(report.get("answer"), str):
-                        self.artifact_store.write_text(state.run_id, "report.md", report.get("answer") or "")
-                    self.artifact_store.write_json(state.run_id, "state_snapshot.json", json_safe(snapshot))
+                    artifacts_cfg = self._resolve_artifacts_config()
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("Failed to persist DeepSearch artifacts: %s", exc, exc_info=True)
-                    state.append_error(f"artifact_store persist failed: {exc}", stage="persist")
+                    logger.warning("Failed to resolve artifacts config: %s", exc, exc_info=True)
+                    state.append_error(f"artifacts config invalid: {exc}", stage="persist")
+                    artifacts_cfg = None
+
+                refs_enabled = True
+                dedupe_enabled = False
+                evidence_pool_filename = ""
+                artifacts_version = 0
+
+                if isinstance(artifacts_cfg, dict):
+                    try:
+                        refs_enabled = bool((artifacts_cfg.get("refs") or {}).get("enabled", True))
+                    except Exception:
+                        refs_enabled = True
+
+                    dedupe_cfg = artifacts_cfg.get("dedupe")
+                    if not isinstance(dedupe_cfg, dict):
+                        dedupe_cfg = {}
+                    dedupe_enabled = bool(dedupe_cfg.get("enabled", True))
+                    evidence_pool_filename = str(dedupe_cfg.get("evidence_pool_filename") or "evidence_pool.json").strip()
+                    try:
+                        artifacts_version = int(artifacts_cfg.get("version") or 2)
+                    except Exception:
+                        artifacts_version = 2
+
+                reasoning_to_persist: Dict[str, Any] = json_safe(cumulative_reasoning or {})
+                report_to_persist: Dict[str, Any] = json_safe(report or {})
+
+                if artifacts_version >= 2 and dedupe_enabled and evidence_pool_filename:
+                    try:
+                        pool, reasoning_evidence_ids, report_evidence_ids = build_evidence_pool_v2(
+                            reasoning=reasoning_to_persist,
+                            report=report_to_persist,
+                            artifact_version=artifacts_version,
+                        )
+                        self.artifact_store.write_json(state.run_id, evidence_pool_filename, json_safe(pool))
+                        artifacts_present["evidence_pool"] = True
+
+                        reasoning_to_persist = dedupe_reasoning_v2(
+                            reasoning=reasoning_to_persist,
+                            refs_enabled=refs_enabled,
+                            evidence_pool_filename=evidence_pool_filename,
+                            plan_filename="plan_result.json",
+                            evidence_ids=reasoning_evidence_ids,
+                        )
+                        report_to_persist = dedupe_report_v2(
+                            report=report_to_persist,
+                            refs_enabled=refs_enabled,
+                            report_markdown_filename="report.md",
+                            evidence_pool_filename=evidence_pool_filename,
+                            reasoning_filename="reasoning.json",
+                            plan_filename="plan_result.json",
+                            evidence_ids=report_evidence_ids,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Failed to dedupe DeepSearch artifacts: %s", exc, exc_info=True)
+                        state.append_error(f"artifact_store v2 dedupe failed: {exc}", stage="persist")
+
+                try:
+                    self.artifact_store.write_json(state.run_id, "reasoning.json", json_safe(reasoning_to_persist))
+                    artifacts_present["reasoning"] = True
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to persist reasoning artifact: %s", exc, exc_info=True)
+                    state.append_error(f"artifact_store.write_json(reasoning.json) failed: {exc}", stage="persist")
+
+                try:
+                    self.artifact_store.write_json(state.run_id, "report.json", json_safe(report_to_persist))
+                    artifacts_present["report"] = True
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to persist report artifact: %s", exc, exc_info=True)
+                    state.append_error(f"artifact_store.write_json(report.json) failed: {exc}", stage="persist")
+
+                if isinstance(report, dict) and isinstance(report.get("answer"), str):
+                    try:
+                        self.artifact_store.write_text(state.run_id, "report.md", report.get("answer") or "")
+                        artifacts_present["report_md"] = True
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Failed to persist report.md artifact: %s", exc, exc_info=True)
+                        state.append_error(f"artifact_store.write_text(report.md) failed: {exc}", stage="persist")
+
+                if artifacts_cfg is None:
+                    try:
+                        self.artifact_store.write_json(state.run_id, "state_snapshot.json", json_safe(snapshot))
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Failed to persist fallback state_snapshot artifact: %s", exc, exc_info=True)
+                        state.append_error(f"artifact_store.write_json(state_snapshot.json) failed: {exc}", stage="persist")
+                else:
+                    if artifacts_version >= 2:
+                        try:
+                            docs = build_v2_artifact_documents(
+                                snapshot=snapshot,
+                                stage_timings=stage_timings,
+                                artifacts_config=artifacts_cfg,
+                                artifacts_present=artifacts_present,
+                                trace_events=captured_trace_events,
+                            )
+                            for filename, payload in docs.items():
+                                self.artifact_store.write_json(state.run_id, filename, json_safe(payload))
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("Failed to persist DeepSearch v2 artifacts: %s", exc, exc_info=True)
+                            state.append_error(f"artifact_store v2 persist failed: {exc}", stage="persist")
+                    else:
+                        try:
+                            self.artifact_store.write_json(state.run_id, "state_snapshot.json", json_safe(snapshot))
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("Failed to persist legacy state_snapshot artifact: %s", exc, exc_info=True)
+                            state.append_error(f"artifact_store.write_json(state_snapshot.json) failed: {exc}", stage="persist")
             logger.info(
                 "DeepSearch run %s completed (owner=%s, timings=%s)",
                 snapshot.get("run_id"),
@@ -479,5 +604,10 @@ class DeepSearchServiceRunMixin:
             )
             return {"plan": plan_result, "reasoning": cumulative_reasoning or {}, "report": report, "state": snapshot}
         finally:
+            if trace_capture_token is not None:
+                try:
+                    reset_trace_emitter(trace_capture_token)
+                except Exception:
+                    pass
             if budget_token is not None:
                 reset_tool_budget(budget_token)

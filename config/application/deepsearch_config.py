@@ -406,6 +406,56 @@ class ToolBudgetConfig(BaseModel):
     )
 
 
+class ArtifactRefsConfig(BaseModel):
+    """Reference/pointer emission settings for persisted DeepSearch artifacts."""
+
+    enabled: bool = Field(
+        True,
+        description="When true, emit structured $ref objects instead of duplicating large payloads across files.",
+    )
+
+
+class PublicArtifactsProfileConfig(BaseModel):
+    """Public (frontend-facing) artifact trimming settings."""
+
+    include_final_report_in_json: bool = Field(
+        False,
+        description="When false, exclude the final report text from public.json (prefer SSE write stream).",
+    )
+    max_plan_steps: int = Field(12, ge=0, description="Maximum number of plan steps retained in public.json.")
+    max_stage_history: int = Field(128, ge=0, description="Maximum stage_history entries retained in public.json.")
+    max_external_calls: int = Field(12, ge=0, description="Maximum external call logs retained in public.json.")
+    max_errors: int = Field(64, ge=0, description="Maximum error entries retained in public.json.")
+
+
+class ArtifactDedupeConfig(BaseModel):
+    """Run-artifact de-duplication settings (avoid cross-file repeats via refs)."""
+
+    enabled: bool = Field(True, description="When true, persist de-duplicated reasoning/report JSON (v2 artifacts).")
+    evidence_pool_filename: str = Field(
+        "evidence_pool.json",
+        description="Filename for pooled evidences referenced by reasoning/report artifacts (relative to run dir).",
+    )
+
+
+class ArtifactsConfig(BaseModel):
+    """DeepSearch run-artifact settings (manifest + dev/public views)."""
+
+    enabled: bool = Field(True, description="When true, persist DeepSearch run artifacts to artifact_dir.")
+    version: int = Field(2, description="Artifact schema version (v2 = manifest/dev/public).")
+    profiles: List[Literal["dev", "public"]] = Field(
+        default_factory=lambda: ["dev", "public"],
+        description="Artifact views to generate for each run.",
+    )
+    state_snapshot_mode: Literal["manifest", "legacy"] = Field(
+        "manifest",
+        description="state_snapshot.json content mode: 'manifest' (v2) or 'legacy' (includes report+reasoning).",
+    )
+    refs: ArtifactRefsConfig = Field(default_factory=ArtifactRefsConfig)
+    public: PublicArtifactsProfileConfig = Field(default_factory=PublicArtifactsProfileConfig)
+    dedupe: ArtifactDedupeConfig = Field(default_factory=ArtifactDedupeConfig)
+
+
 class RemoteToolDescriptorConfig(BaseModel):
     """Descriptor for remote-only tools exposed via MCP."""
 
@@ -568,6 +618,10 @@ class DeepSearchServiceConfig(AbstractConfig):
         default=None,
         description="Optional LLM config shared across planner reasoning, graph tools, and external channels.",
     )
+    artifacts: ArtifactsConfig = Field(
+        default_factory=ArtifactsConfig,
+        description="Artifact persistence settings (manifest/dev/public).",
+    )
     telemetry_enabled: bool = Field(
         True,
         description="Enable the built-in telemetry logger to surface tool/gap/external events.",
@@ -644,6 +698,7 @@ class DeepSearchServiceConfig(AbstractConfig):
                 "quality_loop": self.quality_loop.model_dump(),
                 "deterministic_routing": self.deterministic_routing.model_dump(),
                 "tool_budget": self.tool_budget.model_dump(),
+                "artifacts": self.artifacts.model_dump(),
                 "adapter": adapter_meta_payload,
                 "disabled_tools": sorted(tool_hint_registry.get_disabled_tool_names()),
                 "tool_names": {

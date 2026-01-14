@@ -217,7 +217,54 @@ def test_save_trace_events_with_none_result(temp_trace_dir, sample_trace_events)
     # 验证 trace_events 仍然存在
     assert "trace_events" in trace_data
     assert len(trace_data["trace_events"]) == len(sample_trace_events)
-    
+
+
+def test_trace_storage_renders_sup_citations_for_user_visible_answer(temp_trace_dir, sample_trace_events):
+    """Trace file should store a rendered DeepSearch answer (sup + References) for frontend display."""
+    os.environ["DEEPSEARCH_TRACE_STORAGE_PATH"] = temp_trace_dir
+
+    request_id = str(uuid.uuid4())
+    run_id = "test_run_render_123"
+    query = "测试引用渲染"
+
+    deepsearch_result = {
+        "plan": {"plan_id": "test_plan_id", "question": "测试问题", "steps": []},
+        "report": {
+            "answer": "Alpha[ev1]。",
+            "evidences": [
+                {
+                    "chunk_id": "ev1",
+                    "source": "hipporag",
+                    "content": "Local snippet",
+                    "provenance": {"metadata": {"chunk_metadata": {"source_file_id": "file-1", "filename": "doc1.md"}}},
+                }
+            ],
+            "structured_report": {"citations": [{"evidence_id": "ev1"}]},
+        },
+        "state": {"run_id": run_id},
+    }
+
+    saved_path = _save_trace_events_to_file(
+        trace_events=sample_trace_events,
+        request_id=request_id,
+        run_id=run_id,
+        query=query,
+        deepsearch_result=deepsearch_result,
+    )
+    assert saved_path is not None and os.path.exists(saved_path)
+
+    with open(saved_path, "r", encoding="utf-8") as f:
+        trace_data = json.load(f)
+
+    stored = trace_data["deepsearch_result"]["report"]
+    assert stored["answer_raw"] == "Alpha[ev1]。"
+    assert "<sup>1</sup>" in stored["answer"]
+    assert "## References" in stored["answer"]
+    assert "(/knowledge/chunk/ev1)" in stored["answer"]
+
+    if "DEEPSEARCH_TRACE_STORAGE_PATH" in os.environ:
+        del os.environ["DEEPSEARCH_TRACE_STORAGE_PATH"]
+
     # 清理环境变量
     if "DEEPSEARCH_TRACE_STORAGE_PATH" in os.environ:
         del os.environ["DEEPSEARCH_TRACE_STORAGE_PATH"]

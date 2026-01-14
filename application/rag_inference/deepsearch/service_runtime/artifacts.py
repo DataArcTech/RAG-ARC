@@ -11,6 +11,15 @@ logger = logging.getLogger(__name__)
 
 
 class DeepSearchServiceArtifactsMixin:
+    def _resolve_artifacts_config(self) -> Dict[str, Any]:
+        from config.application.deepsearch_config import ArtifactsConfig
+
+        raw = None
+        if isinstance(self.config, dict):
+            raw = self.config.get("artifacts")
+        model = ArtifactsConfig.model_validate(raw or {})
+        return model.model_dump()
+
     def _config_fingerprint(self) -> str:
         if not isinstance(self.config, dict) or not str(self.config.get("fingerprint") or "").strip():
             raise ValueError("DeepSearchService config fingerprint is required")
@@ -43,6 +52,9 @@ class DeepSearchServiceArtifactsMixin:
     def _resolve_artifact_store(self) -> DeepSearchArtifactStore | None:
         if not isinstance(self.config, dict):
             raise ValueError("DeepSearchService config is required to resolve artifact store")
+        artifacts_cfg = self._resolve_artifacts_config()
+        if not bool(artifacts_cfg.get("enabled", True)):
+            return None
         configured = self.config.get("artifact_dir")
         if not configured:
             raise ValueError("DeepSearchService config.artifact_dir is required (no implicit env fallback).")

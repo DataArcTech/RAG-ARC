@@ -261,5 +261,25 @@
     "openai_api_key": "${CHAT_API_KEY}",
     "openai_base_url": "${CHAT_API_BASE_URL}"
   },
+  "artifacts": {
+    "enabled": true,
+    "version": 2,
+    "profiles": ["dev", "public"],
+    "state_snapshot_mode": "manifest",
+    "refs": {
+      "enabled": true
+    },
+    "dedupe": {
+      "enabled": true,
+      "evidence_pool_filename": "evidence_pool.json"
+    },
+    "public": {
+      "include_final_report_in_json": false,
+      "max_plan_steps": 12,
+      "max_stage_history": 128,
+      "max_external_calls": 12,
+      "max_errors": 64
+    }
+  },
   "telemetry_enabled": true
 }

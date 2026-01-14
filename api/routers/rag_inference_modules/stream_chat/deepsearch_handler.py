@@ -118,6 +118,37 @@ def _save_trace_events_to_file(
         filename = f"trace_{file_id}_{timestamp}.json"
         file_path = storage_dir / filename
         
+        rendered_result = deepsearch_result
+        try:
+            if isinstance(deepsearch_result, dict):
+                report = deepsearch_result.get("report")
+                if isinstance(report, dict):
+                    raw_answer = report.get("answer")
+                    if isinstance(raw_answer, str) and raw_answer.strip():
+                        from core.deepsearch.report.sup_citations import format_answer_with_references
+
+                        structured = report.get("structured_report")
+                        citations = structured.get("citations") if isinstance(structured, dict) else None
+                        evidences = report.get("evidences") if isinstance(report.get("evidences"), list) else None
+
+                        converted, sources, citation_key_map = format_answer_with_references(
+                            raw_answer,
+                            citations=citations if isinstance(citations, list) else [],
+                            evidences=evidences,
+                        )
+                        rendered_result = json.loads(json.dumps(deepsearch_result, ensure_ascii=False, default=str))
+                        rendered_report = rendered_result.get("report") if isinstance(rendered_result, dict) else None
+                        if isinstance(rendered_report, dict):
+                            rendered_report.setdefault("answer_raw", raw_answer)
+                            rendered_report["answer"] = converted
+                            if sources:
+                                rendered_report["sources"] = sources
+                            if citation_key_map:
+                                rendered_report["citation_key_map"] = citation_key_map
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to render DeepSearch answer for trace storage: %s", exc)
+            rendered_result = deepsearch_result
+
         # 准备要保存的数据
         trace_data = {
             "metadata": {
@@ -127,7 +158,7 @@ def _save_trace_events_to_file(
                 "timestamp": datetime.now().isoformat(),
                 "total_events": len(trace_events),
             },
-            "deepsearch_result": deepsearch_result,
+            "deepsearch_result": rendered_result,
             "trace_events": [
                 {
                     "tag": event.tag,
