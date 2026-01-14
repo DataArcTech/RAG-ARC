@@ -27,6 +27,7 @@ from .response_builder import (
     generate_and_update_title,
     build_evidence_for_payload,
     convert_evidence_chunks_to_chunks,
+    build_deepsearch_sources_for_frontend,
 )
 
 logger = logging.getLogger(__name__)
@@ -318,12 +319,15 @@ async def generate_sse_events(
     loop = asyncio.get_running_loop()
     stream_error: list[Exception | None] = [None]
     prepared: dict[str, Any] = {}
+    rag_inference_handler = get_rag_inference_handler()
     
     emit_progress = _create_progress_emitter(request_id, queue, loop)
     
     # Process DeepSearch if enabled
     deepsearch_result = None
     deepsearch_trace_file_path = None
+    deepsearch_sources_for_frontend = None
+    deepsearch_citation_key_map: dict[int, int] = {}
     if enable_deepsearch:
         deepsearch_result_container, trace_file_path_container, deepsearch_gen = await process_deepsearch(
             query,
@@ -344,13 +348,15 @@ async def generate_sse_events(
         
         # 如果 DeepSearch 成功，直接使用其结果，不再调用 RAG 系统
         if deepsearch_result:
-            # DeepSearch service 返回的结构是: {"plan": ..., "reasoning": ..., "report": ..., "state": ...}
-            # answer 在 report 字典中
-            report = deepsearch_result.get("report") or {}
+            from core.presentation.deepsearch_payload import trim_deepsearch_payload
+
+            trimmed = trim_deepsearch_payload(deepsearch_result, include_evidence=False)
+            report = trimmed.get("report") if isinstance(trimmed, dict) else None
             if not isinstance(report, dict):
                 report = {}
-            
-            # 从 report 中提取 answer
+
+            # DeepSearch service 返回的结构是: {"plan": ..., "reasoning": ..., "report": ..., "state": ...}
+            # answer 在 report 字典中
             raw_answer = report.get("answer") or ""
             
             # 确保 answer 是字符串类型
@@ -364,6 +370,7 @@ async def generate_sse_events(
             deepsearch_answer = raw_answer.strip() if raw_answer else ""
             # evidences 也在 report 中
             deepsearch_evidences = report.get("evidences") or []
+            deepsearch_sources_for_frontend, deepsearch_citation_key_map = build_deepsearch_sources_for_frontend(report)
             
             if deepsearch_answer:
                 logger.info("DeepSearch completed, using DeepSearch answer directly (length=%d, type=%s)", 
@@ -387,9 +394,7 @@ async def generate_sse_events(
                 subgraph_info = None
                 raw_llm_response = None
                 raw_mindmap_response = None
-                
-                rag_inference_handler = get_rag_inference_handler()
-                
+
                 # 跳过 RAG 系统的 stream_chat 调用，直接构建响应
                 # 继续执行后续的响应构建逻辑（mindmap、sources、message 等）
                 # 注意：这里直接跳转到后续的响应构建逻辑
@@ -453,11 +458,9 @@ async def generate_sse_events(
         subgraph_info = prepared.get("subgraph_info")
         raw_llm_response = prepared.get("raw_llm_response")
         raw_mindmap_response = prepared.get("raw_mindmap_response")
-        
-        rag_inference_handler = get_rag_inference_handler()
     
-    # Generate mindmap if needed
-    if return_subgraph:
+    # Generate mindmap if needed (keep upstream subgraph when already provided).
+    if return_subgraph and subgraph_data is None:
         subgraph_data, raw_mindmap_response = await generate_mindmap_if_needed(
             return_subgraph,
             query,
@@ -470,14 +473,18 @@ async def generate_sse_events(
     assistant_response, is_fallback_response = ensure_non_empty_response(assistant_response)
     
     # Build sources and evidence
-    sources_for_frontend, citation_key_map = await build_sources_and_evidence(
-        chunks,
-        subgraph_data,
-        subgraph_info,
-        rag_inference_handler,
-        assistant_response,
-        is_fallback_response
-    )
+    if enable_deepsearch and deepsearch_result and deepsearch_sources_for_frontend is not None:
+        sources_for_frontend = deepsearch_sources_for_frontend
+        citation_key_map = deepsearch_citation_key_map
+    else:
+        assistant_response, sources_for_frontend, citation_key_map = await build_sources_and_evidence(
+            chunks,
+            subgraph_data,
+            subgraph_info,
+            rag_inference_handler,
+            assistant_response,
+            is_fallback_response
+        )
     
     # Create assistant message
     assistant_message = await create_assistant_message(

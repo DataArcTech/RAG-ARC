@@ -47,6 +47,7 @@ def client(app):
 def test_stream_chat_livingkb_uses_user_id_as_owner(monkeypatch, client):
     """测试 livingKB (type=0) 用户使用自己的 user_id 作为 owner_id"""
     import api.routers.rag_inference as rag_router
+    import api.routers.rag_inference_handlers as handlers
 
     session_id = uuid.uuid4()
     user_id = uuid.uuid4()
@@ -87,12 +88,11 @@ def test_stream_chat_livingkb_uses_user_id_as_owner(monkeypatch, client):
     session_handler = FakeSessionHandler()
     message_handler = FakeMessageHandler()
     rag = FakeRAG()
-    monkeypatch.setattr(rag_router, "get_session_handler", lambda: session_handler)
-    monkeypatch.setattr(rag_router, "get_message_handler", lambda: message_handler)
-    monkeypatch.setattr(rag_router, "get_rag_inference_handler", lambda: rag)
-    monkeypatch.setattr(rag_router, "validate_user_session", lambda _session, _user: True)
-    # Mock _build_sources_for_frontend to avoid knowledge registration requirement
-    monkeypatch.setattr(rag_router, "_build_sources_for_frontend", lambda _chunks, _max_sources: [])
+    monkeypatch.setattr(handlers, "_session_handler", session_handler)
+    monkeypatch.setattr(handlers, "_message_handler", message_handler)
+    monkeypatch.setattr(handlers, "_rag_inference_handler", rag)
+    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.validators.validate_user_session", lambda *_: True)
+    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.response_builder._build_sources_for_frontend", lambda *_: [])
 
     client.app.dependency_overrides[rag_router.get_current_user] = lambda: user
     try:
@@ -111,6 +111,7 @@ def test_stream_chat_livingkb_uses_user_id_as_owner(monkeypatch, client):
 def test_stream_chat_chatkb_uses_shared_owner_id(monkeypatch, client):
     """测试 chatKB (type=1) 用户使用共享的 owner_id"""
     import api.routers.rag_inference as rag_router
+    import api.routers.rag_inference_handlers as handlers
 
     session_id = uuid.uuid4()
     user_id = uuid.uuid4()
@@ -149,20 +150,17 @@ def test_stream_chat_chatkb_uses_shared_owner_id(monkeypatch, client):
             subgraph_info = None
             return (_gen(), chunks, subgraph_data, subgraph_info)
 
-    import api.routers.rag_inference_handlers as handlers
-
     # Mock get_shared_document_owner_id to return shared owner id for chatKB users.
     monkeypatch.setattr(handlers, "get_shared_document_owner_id", lambda: shared_owner_id)
 
     session_handler = FakeSessionHandler()
     message_handler = FakeMessageHandler()
     rag = FakeRAG()
-    monkeypatch.setattr(rag_router, "get_session_handler", lambda: session_handler)
-    monkeypatch.setattr(rag_router, "get_message_handler", lambda: message_handler)
-    monkeypatch.setattr(rag_router, "get_rag_inference_handler", lambda: rag)
-    monkeypatch.setattr(rag_router, "validate_user_session", lambda _session, _user: True)
-    # Mock _build_sources_for_frontend to avoid knowledge registration requirement
-    monkeypatch.setattr(rag_router, "_build_sources_for_frontend", lambda _chunks, _max_sources: [])
+    monkeypatch.setattr(handlers, "_session_handler", session_handler)
+    monkeypatch.setattr(handlers, "_message_handler", message_handler)
+    monkeypatch.setattr(handlers, "_rag_inference_handler", rag)
+    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.validators.validate_user_session", lambda *_: True)
+    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.response_builder._build_sources_for_frontend", lambda *_: [])
 
     client.app.dependency_overrides[rag_router.get_current_user] = lambda: user
     try:
@@ -182,6 +180,7 @@ def test_stream_chat_chatkb_uses_shared_owner_id(monkeypatch, client):
 def test_stream_chat_default_type_uses_user_id(monkeypatch, client):
     """测试没有 type 属性的用户（默认 type=0）使用自己的 user_id 作为 owner_id"""
     import api.routers.rag_inference as rag_router
+    import api.routers.rag_inference_handlers as handlers
 
     session_id = uuid.uuid4()
     user_id = uuid.uuid4()
@@ -222,12 +221,11 @@ def test_stream_chat_default_type_uses_user_id(monkeypatch, client):
     session_handler = FakeSessionHandler()
     message_handler = FakeMessageHandler()
     rag = FakeRAG()
-    monkeypatch.setattr(rag_router, "get_session_handler", lambda: session_handler)
-    monkeypatch.setattr(rag_router, "get_message_handler", lambda: message_handler)
-    monkeypatch.setattr(rag_router, "get_rag_inference_handler", lambda: rag)
-    monkeypatch.setattr(rag_router, "validate_user_session", lambda _session, _user: True)
-    # Mock _build_sources_for_frontend to avoid knowledge registration requirement
-    monkeypatch.setattr(rag_router, "_build_sources_for_frontend", lambda _chunks, _max_sources: [])
+    monkeypatch.setattr(handlers, "_session_handler", session_handler)
+    monkeypatch.setattr(handlers, "_message_handler", message_handler)
+    monkeypatch.setattr(handlers, "_rag_inference_handler", rag)
+    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.validators.validate_user_session", lambda *_: True)
+    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.response_builder._build_sources_for_frontend", lambda *_: [])
 
     client.app.dependency_overrides[rag_router.get_current_user] = lambda: user
     try:

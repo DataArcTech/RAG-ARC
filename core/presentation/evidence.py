@@ -34,10 +34,17 @@ _HTML_IMG_RE = re.compile(
 def _document_download_url(file_id: str) -> str:
     return f"/knowledge/{file_id}/download"
 
+def _document_chunk_url(chunk_id: str) -> str:
+    return f"/knowledge/chunk/{chunk_id}"
+
 
 def document_download_url(file_id: str) -> str:
     """Public helper for building the knowledge download URL."""
     return _document_download_url(file_id)
+
+def document_chunk_url(chunk_id: str) -> str:
+    """Public helper for building the knowledge chunk URL."""
+    return _document_chunk_url(chunk_id)
 
 
 def _mineru_asset_url(file_id: str, rel_path: str) -> str:

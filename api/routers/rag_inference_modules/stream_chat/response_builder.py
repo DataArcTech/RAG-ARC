@@ -17,6 +17,7 @@ from api.routers.rag_inference_handlers import (
 from api.routers.chatbot import (
     _build_sources_for_frontend,
     _filter_and_renumber_sources_by_sup_keys_sorted,
+    ChatbotSourceItem,
 )
 from core.presentation.evidence import build_chat_evidence
 from config.output_limits import CHAT_TOP_CHUNKS
@@ -57,6 +58,23 @@ def convert_evidence_chunks_to_chunks(evidence_chunks: List[EvidenceChunk | dict
             continue
         chunks.append(chunk)
     return chunks
+
+
+def build_deepsearch_sources_for_frontend(report: dict[str, Any]) -> tuple[list[ChatbotSourceItem], dict[int, int]]:
+    raw_sources = report.get("sources") if isinstance(report, dict) else None
+    if not isinstance(raw_sources, list) or not raw_sources:
+        return ([], {})
+    sources: list[ChatbotSourceItem] = []
+    for entry in raw_sources:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            sources.append(ChatbotSourceItem.model_validate(entry))
+        except Exception:  # noqa: BLE001
+            continue
+    sources.sort(key=lambda item: int(item.key))
+    citation_key_map = {int(item.key): int(item.key) for item in sources}
+    return (sources, citation_key_map)
 
 
 async def generate_mindmap_if_needed(
@@ -103,7 +121,7 @@ async def build_sources_and_evidence(
     rag_inference_handler: Any,
     assistant_response: str,
     is_fallback_response: bool
-) -> tuple[list, dict[int, int]]:
+) -> tuple[str, list, dict[int, int]]:
     """Build sources and evidence for response."""
     max_sources = int(os.getenv("CHATBOT_TOP_SOURCES", "5"))
     
@@ -145,7 +163,7 @@ async def build_sources_and_evidence(
             citation_key_map,
         )
     
-    return sources_for_frontend, citation_key_map
+    return assistant_response, sources_for_frontend, citation_key_map
 
 
 async def create_assistant_message(

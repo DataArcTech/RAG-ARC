@@ -41,6 +41,7 @@ def client(app):
 
 def test_stream_chat_sse_includes_web_search_chunks_and_progress(monkeypatch, client):
     import api.routers.rag_inference as rag_router
+    import api.routers.rag_inference_handlers as handlers
     from application.rag_inference.module import RAGInference
 
     session_id = uuid.uuid4()
@@ -137,10 +138,10 @@ def test_stream_chat_sse_includes_web_search_chunks_and_progress(monkeypatch, cl
 
     session_handler = FakeSessionHandler()
     message_handler = FakeMessageHandler()
-    monkeypatch.setattr(rag_router, "get_session_handler", lambda: session_handler)
-    monkeypatch.setattr(rag_router, "get_message_handler", lambda: message_handler)
-    monkeypatch.setattr(rag_router, "get_rag_inference_handler", lambda: rag)
-    monkeypatch.setattr(rag_router, "validate_user_session", lambda _session, _user: True)
+    monkeypatch.setattr(handlers, "_session_handler", session_handler)
+    monkeypatch.setattr(handlers, "_message_handler", message_handler)
+    monkeypatch.setattr(handlers, "_rag_inference_handler", rag)
+    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.validators.validate_user_session", lambda *_: True)
 
     client.app.dependency_overrides[rag_router.get_current_user] = lambda: user
     try:
@@ -163,7 +164,10 @@ def test_stream_chat_sse_includes_web_search_chunks_and_progress(monkeypatch, cl
         data = line.split(":", 1)[1].strip()
         if data == "[DONE]":
             break
-        chunk = json.loads(data)
+        envelope = json.loads(data)
+        chunk = envelope.get("data") if isinstance(envelope, dict) else None
+        if not isinstance(chunk, dict):
+            continue
         choices = chunk.get("choices") or []
         if not choices:
             continue
@@ -195,8 +199,9 @@ def test_stream_chat_sse_includes_web_search_chunks_and_progress(monkeypatch, cl
         data = line.split(":", 1)[1].strip()
         if data == "[DONE]":
             break
-        chunk = json.loads(data)
-        if chunk.get("type") == "sources":
+        envelope = json.loads(data)
+        chunk = envelope.get("data") if isinstance(envelope, dict) else None
+        if isinstance(chunk, dict) and chunk.get("type") == "sources":
             sources_event = chunk
             break
     assert sources_event is not None
@@ -209,6 +214,7 @@ def test_stream_chat_sse_includes_web_search_chunks_and_progress(monkeypatch, cl
 
 def test_stream_chat_sse_defaults_to_no_web_search(monkeypatch, client):
     import api.routers.rag_inference as rag_router
+    import api.routers.rag_inference_handlers as handlers
     from application.rag_inference.module import RAGInference
 
     session_id = uuid.uuid4()
@@ -300,10 +306,10 @@ def test_stream_chat_sse_defaults_to_no_web_search(monkeypatch, client):
 
     session_handler = FakeSessionHandler()
     message_handler = FakeMessageHandler()
-    monkeypatch.setattr(rag_router, "get_session_handler", lambda: session_handler)
-    monkeypatch.setattr(rag_router, "get_message_handler", lambda: message_handler)
-    monkeypatch.setattr(rag_router, "get_rag_inference_handler", lambda: rag)
-    monkeypatch.setattr(rag_router, "validate_user_session", lambda _session, _user: True)
+    monkeypatch.setattr(handlers, "_session_handler", session_handler)
+    monkeypatch.setattr(handlers, "_message_handler", message_handler)
+    monkeypatch.setattr(handlers, "_rag_inference_handler", rag)
+    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.validators.validate_user_session", lambda *_: True)
 
     client.app.dependency_overrides[rag_router.get_current_user] = lambda: user
     try:
@@ -325,7 +331,10 @@ def test_stream_chat_sse_defaults_to_no_web_search(monkeypatch, client):
         data = line.split(":", 1)[1].strip()
         if data == "[DONE]":
             break
-        chunk = json.loads(data)
+        envelope = json.loads(data)
+        chunk = envelope.get("data") if isinstance(envelope, dict) else None
+        if not isinstance(chunk, dict):
+            continue
         choices = chunk.get("choices") or []
         if not choices:
             continue

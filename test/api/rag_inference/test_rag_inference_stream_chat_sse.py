@@ -39,6 +39,7 @@ def client(app):
 
 def test_rag_inference_stream_chat_sse_emits_message_event(monkeypatch, client):
     import api.routers.rag_inference as rag_router
+    import api.routers.rag_inference_handlers as handlers
 
     session_id = uuid.uuid4()
     user = SimpleNamespace(id=uuid.uuid4())
@@ -46,6 +47,9 @@ def test_rag_inference_stream_chat_sse_emits_message_event(monkeypatch, client):
     class FakeSessionHandler:
         def get_session(self, _session_id):
             return SimpleNamespace(id=_session_id, user_id=user.id)
+
+        def update_session(self, *_args, **_kwargs):  # noqa: ANN001
+            return None
 
     class FakeMessageHandler:
         def __init__(self):
@@ -73,10 +77,10 @@ def test_rag_inference_stream_chat_sse_emits_message_event(monkeypatch, client):
     session_handler = FakeSessionHandler()
     message_handler = FakeMessageHandler()
     rag = FakeRAG()
-    monkeypatch.setattr(rag_router, "get_session_handler", lambda: session_handler)
-    monkeypatch.setattr(rag_router, "get_message_handler", lambda: message_handler)
-    monkeypatch.setattr(rag_router, "get_rag_inference_handler", lambda: rag)
-    monkeypatch.setattr(rag_router, "validate_user_session", lambda _session, _user: True)
+    monkeypatch.setattr(handlers, "_session_handler", session_handler)
+    monkeypatch.setattr(handlers, "_message_handler", message_handler)
+    monkeypatch.setattr(handlers, "_rag_inference_handler", rag)
+    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.validators.validate_user_session", lambda *_: True)
 
     client.app.dependency_overrides[rag_router.get_current_user] = lambda: user
     try:
@@ -102,7 +106,10 @@ def test_rag_inference_stream_chat_sse_emits_message_event(monkeypatch, client):
         data = line.split(":", 1)[1].strip()
         if data == "[DONE]":
             break
-        chunk = json.loads(data)
+        envelope = json.loads(data)
+        chunk = envelope.get("data") if isinstance(envelope, dict) else None
+        if not isinstance(chunk, dict):
+            continue
         if first_chunk is None:
             first_chunk = chunk
         choices = chunk.get("choices") or []

@@ -191,3 +191,14 @@ class CheckAccessResponse(BaseModel):
 
 
 JsonDict = Dict[str, Any]
+
+
+class KnowledgeChunkResponse(BaseModel):
+    """Response model for retrieving a single chunk (evidence) by chunk_id."""
+
+    chunk_id: str
+    content: str
+    file_id: Optional[str] = None
+    filename: Optional[str] = None
+    document_url: Optional[str] = None
+    metadata: JsonDict = Field(default_factory=dict)

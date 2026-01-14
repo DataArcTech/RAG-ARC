@@ -14,10 +14,15 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 from config.output_limits import DEEPSEARCH_SOURCE_MAX_CHARS, DEEPSEARCH_SOURCE_TITLE_MAX_CHARS
-from core.presentation.evidence import document_download_url
+from core.presentation.evidence import document_chunk_url, document_download_url
 
 _BRACKET_RE = re.compile(r"\[([^\[\]]+)\]")
 _CJK_BRACKET_RE = re.compile(r"【([^【】]+)】")
+_SUP_RUN_BEFORE_PUNCT_RE = re.compile(r"(?P<sups>(?:<sup>\s*\d{1,4}\s*</sup>\s*)+)(?P<punc>[。\.])")
+_PUNCT_SPACE_SUP_RE = re.compile(r"(?P<punc>[。\.])\s+(?P<sup><sup>\s*\d{1,4}\s*</sup>)")
+_SPACE_BEFORE_PUNCT_SUP_RE = re.compile(r"\s+(?P<punc>[。\.])(?P<sups>(?:<sup>\s*\d{1,4}\s*</sup>)+)")
+_APPENDIX_MARKER = "## Appendix:"
+_REFERENCES_HEADING = "## References"
 
 def _infer_ordered_ids_from_text(
     markdown_text: str,
@@ -50,6 +55,75 @@ def _infer_ordered_ids_from_text(
             _consider(candidate)
 
     return ordered
+
+
+def _apply_outside_fenced_code_blocks(text: str, fn) -> str:  # noqa: ANN001
+    """Apply a text transform outside fenced code blocks (``` ... ```)."""
+    if not text:
+        return ""
+    lines = str(text).splitlines(keepends=True)
+    out: list[str] = []
+    in_fence = False
+    for line in lines:
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        out.append(line if in_fence else fn(line))
+    return "".join(out)
+
+
+def normalize_sup_punctuation(markdown_text: str) -> str:
+    """Normalize citations so they appear after sentence-ending punctuation (。 or .)."""
+    text = str(markdown_text or "")
+
+    def _normalize(line: str) -> str:
+        updated = _SUP_RUN_BEFORE_PUNCT_RE.sub(lambda m: f"{m.group('punc')}{''.join(m.group('sups').split())}", line)
+        updated = _PUNCT_SPACE_SUP_RE.sub(lambda m: f"{m.group('punc')}{''.join(m.group('sup').split())}", updated)
+        updated = _SPACE_BEFORE_PUNCT_SUP_RE.sub(lambda m: f"{m.group('punc')}{''.join(m.group('sups').split())}", updated)
+        return updated
+
+    return _apply_outside_fenced_code_blocks(text, _normalize)
+
+
+def render_references_markdown(sources: Sequence[Mapping[str, Any]]) -> str:
+    if not sources:
+        return ""
+    lines: list[str] = [_REFERENCES_HEADING]
+    for entry in sources:
+        if not isinstance(entry, Mapping):
+            continue
+        key = entry.get("key")
+        title = str(entry.get("title") or "source").strip() or "source"
+        url = entry.get("file")
+        try:
+            num = int(key)
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(url, str) and url.strip():
+            file_id = entry.get("file_id")
+            if isinstance(file_id, str) and file_id.strip() and url.strip().startswith("/knowledge/chunk/"):
+                download_url = document_download_url(file_id.strip())
+                lines.append(f"{num}. [{title}]({url.strip()}) ([file]({download_url}))")
+            else:
+                lines.append(f"{num}. [{title}]({url.strip()})")
+        else:
+            lines.append(f"{num}. {title}")
+    if len(lines) == 1:
+        return ""
+    return "\n".join(lines).strip()
+
+
+def append_references_before_appendix(markdown_text: str, references_markdown: str) -> str:
+    if not references_markdown:
+        return str(markdown_text or "")
+    text = str(markdown_text or "")
+    idx = text.find(_APPENDIX_MARKER)
+    if idx >= 0:
+        prefix = text[:idx].rstrip()
+        suffix = text[idx:].lstrip()
+        return f"{prefix}\n\n{references_markdown.strip()}\n\n{suffix}"
+    return f"{text.rstrip()}\n\n{references_markdown.strip()}\n"
 
 
 def _build_evidence_lookup(evidences: Sequence[Dict[str, Any]] | None) -> Dict[str, Dict[str, Any]]:
@@ -170,6 +244,23 @@ def convert_bracket_citations_to_sup(
     return updated_text, sources, citation_key_map
 
 
+def format_answer_with_references(
+    markdown_text: str,
+    *,
+    citations: Sequence[Dict[str, Any]] | None,
+    evidences: Sequence[Dict[str, Any]] | None = None,
+) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
+    converted, sources, citation_key_map = convert_bracket_citations_to_sup(
+        markdown_text,
+        citations=citations,
+        evidences=evidences,
+    )
+    converted = normalize_sup_punctuation(converted)
+    refs = render_references_markdown(sources)
+    converted = append_references_before_appendix(converted, refs) if refs else converted
+    return converted, sources, citation_key_map
+
+
 def _truncate_text(text: str, *, max_chars: int) -> str:
     if max_chars <= 0:
         return ""
@@ -274,8 +365,16 @@ def build_source_entries(
             file_url = url
         else:
             safe_name = Path(filename).name if filename else ""
-            title = _sanitize_title(safe_name or ev_token, max_chars=DEEPSEARCH_SOURCE_TITLE_MAX_CHARS)
-            file_url = document_download_url(file_id) if file_id else None
+            chunk_meta = provenance.get("metadata") if isinstance(provenance.get("metadata"), Mapping) else {}
+            chunk_index = None
+            if isinstance(chunk_meta, Mapping):
+                nested = chunk_meta.get("chunk_metadata") if isinstance(chunk_meta.get("chunk_metadata"), Mapping) else {}
+                raw_index = nested.get("chunk_index") if isinstance(nested, Mapping) else None
+                if isinstance(raw_index, int):
+                    chunk_index = raw_index
+            suffix = f"#chunk:{chunk_index}" if isinstance(chunk_index, int) else f"#chunk:{ev_token[:8]}"
+            title = _sanitize_title(f"{safe_name or 'source'}{suffix}", max_chars=DEEPSEARCH_SOURCE_TITLE_MAX_CHARS)
+            file_url = document_chunk_url(ev_token) if ev_token else None
 
         entries.append(
             {
@@ -379,7 +478,11 @@ def render_reference_list_markdown(references: Sequence[Dict[str, Any]]) -> str:
 
 __all__ = [
     "convert_bracket_citations_to_sup",
+    "format_answer_with_references",
     "build_source_entries",
     "build_reference_entries",
     "render_reference_list_markdown",
+    "normalize_sup_punctuation",
+    "render_references_markdown",
+    "append_references_before_appendix",
 ]

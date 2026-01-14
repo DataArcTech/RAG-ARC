@@ -48,6 +48,7 @@ from api.routers.knowledge_models import (
     GraphExportRequest,
     IndexTriggerRequest,
     IndexTriggerResponse,
+    KnowledgeChunkResponse,
     MindmapEdge,
     MindmapExportRequest,
     MindmapExportResponse,
@@ -66,6 +67,7 @@ from api.routers.knowledge_utils import (
     normalize_file_id,
     use_celery,
 )
+from core.presentation.evidence import document_download_url
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +252,68 @@ async def download_file(file_id: str, user: Annotated[User | None, Depends(get_c
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to download file: {str(e)}",
         )
+
+
+@router.get("/chunk/{chunk_id}", response_model=KnowledgeChunkResponse, status_code=status.HTTP_200_OK)
+async def get_chunk(
+    chunk_id: str,
+    user: Annotated[User | None, Depends(get_current_user)],
+):
+    """Fetch a single indexed chunk (evidence) by chunk_id for citation inspection."""
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+
+    try:
+        rag_inference = registrator.get_object("rag_inference")
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="rag_inference not initialized") from exc
+
+    graph_store = getattr(rag_inference, "get_graph_store", None)
+    graph_store = graph_store() if callable(graph_store) else None
+    if graph_store is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="graph store not available")
+
+    from framework.thread_pool import get_thread_pool
+
+    try:
+        chunks = await get_thread_pool().run_blocking(graph_store.get_by_ids, [str(chunk_id)])
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to fetch chunk: {exc}") from exc
+
+    chunk_obj = None
+    if isinstance(chunks, list) and chunks:
+        chunk_obj = chunks[0]
+    if chunk_obj is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="chunk not found")
+
+    metadata = dict(getattr(chunk_obj, "metadata", None) or {})
+    file_id = str(metadata.get("source_file_id") or "").strip() or None
+    if not file_id:
+        nested = metadata.get("chunk_metadata") if isinstance(metadata.get("chunk_metadata"), dict) else {}
+        file_id = str(nested.get("source_file_id") or "").strip() or None
+
+    if file_id and not is_admin_owner(user.id):
+        permission = get_knowledge_handler().check_file_access(file_id, user.id)
+        if permission is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You are not allowed to access this chunk")
+
+    filename = None
+    if file_id:
+        try:
+            meta = await asyncio.to_thread(get_knowledge_handler().file_storage.get_file_metadata, file_id)
+            filename = getattr(meta, "filename", None) if meta is not None else None
+        except Exception:  # noqa: BLE001
+            filename = None
+
+    content = metadata.get("prompt_text") or metadata.get("index_text") or getattr(chunk_obj, "content", "") or ""
+    return KnowledgeChunkResponse(
+        chunk_id=str(getattr(chunk_obj, "id", None) or chunk_id),
+        content=str(content),
+        file_id=file_id,
+        filename=str(filename) if filename else None,
+        document_url=document_download_url(file_id) if file_id else None,
+        metadata=metadata,
+    )
 
 
 @router.get("/{file_id}/mineru-assets/{rel_path:path}")

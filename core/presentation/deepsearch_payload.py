@@ -10,7 +10,7 @@ from config.output_limits import (
     DEEPSEARCH_TOP_SEED_ENTITIES,
     DEEPSEARCH_TOP_CHUNKS,
 )
-from core.deepsearch.report.sup_citations import build_reference_entries, convert_bracket_citations_to_sup
+from core.deepsearch.report.sup_citations import build_reference_entries, format_answer_with_references
 from core.presentation.evidence import build_deepsearch_evidence
 
 
@@ -176,7 +176,7 @@ def _trim_report_block(report_block: Optional[Dict[str, Any]], limit: Optional[i
         trimmed["structured_report"] = structured
         citations = structured.get("citations") if isinstance(structured.get("citations"), list) else []
 
-    converted, sources, citation_key_map = convert_bracket_citations_to_sup(
+    converted, sources, citation_key_map = format_answer_with_references(
         str(trimmed.get("answer") or ""),
         citations=citations,
         evidences=evidences if isinstance(evidences, list) else None,
