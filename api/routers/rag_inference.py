@@ -278,11 +278,10 @@ async def stream_chat_sse(
     enable_deepsearch = bool(getattr(request, "enable_deepsearch", False))
     enable_web_search = bool(getattr(request, "enable_web_search", False))
     
-    # 如果开启了 deepsearch，则强制开启 web 搜索
+    # DeepSearch 和 Web Search 现在互相独立
     if enable_deepsearch:
-        enable_web_search = True
-        logger.info("DeepSearch enabled, web search is also enabled (enable_web_search=True)")
-    elif enable_web_search:
+        logger.info("DeepSearch enabled (enable_deepsearch=True)")
+    if enable_web_search:
         logger.info("Web search enabled (enable_web_search=True)")
     
     logger.info("SSE stream_chat request for session_id %s by user %s", session_id, current_user.id)
