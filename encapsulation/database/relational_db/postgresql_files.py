@@ -207,7 +207,8 @@ class _PostgreSQLFilesMixin:
         user_id: uuid.UUID,
         status: Optional[FileStatus] = None,
         limit: Optional[int] = None,
-        offset: Optional[int] = None
+        offset: Optional[int] = None,
+        search: Optional[str] = None
     ) -> List[FileMetadata]:
         """
         List all files accessible to a user (owned files + files with permissions).
@@ -217,6 +218,7 @@ class _PostgreSQLFilesMixin:
             status: Optional file status filter
             limit: Maximum number of records to return
             offset: Number of records to skip
+            search: Optional search keyword for filename (fuzzy match)
 
         Returns:
             List of FileMetadata objects that the user can access (includes owned files and files with permissions)
@@ -288,6 +290,10 @@ class _PostgreSQLFilesMixin:
                 if status:
                     query = query.filter(FileMetadata.status == status.value)
 
+                # Add filename fuzzy search filter
+                if search:
+                    query = query.filter(FileMetadata.filename.ilike(f"%{search}%"))
+
                 # Add ordering
                 query = query.order_by(FileMetadata.created_at.desc())
 
@@ -310,6 +316,7 @@ class _PostgreSQLFilesMixin:
         self,
         user_id: uuid.UUID,
         status: FileStatus | None = None,
+        search: Optional[str] = None,
     ) -> int:
         """
         Count all files accessible to a user (owned files + files with permissions).
@@ -317,6 +324,7 @@ class _PostgreSQLFilesMixin:
         Args:
             user_id: UUID of the user
             status: Optional file status filter
+            search: Optional search keyword for filename (fuzzy match)
 
         Returns:
             Total count of files accessible to the user
@@ -379,6 +387,10 @@ class _PostgreSQLFilesMixin:
                 # Add status filter
                 if status:
                     query = query.filter(FileMetadata.status == status.value)
+
+                # Add filename fuzzy search filter
+                if search:
+                    query = query.filter(FileMetadata.filename.ilike(f"%{search}%"))
 
                 count = query.count()
                 logger.debug(f"Counted {count} accessible files for user {user_id}")

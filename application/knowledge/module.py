@@ -606,7 +606,8 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
         user_id: uuid.UUID,
         status: Optional[FileStatus] = None,
         limit: Optional[int] = None,
-        offset: Optional[int] = None
+        offset: Optional[int] = None,
+        search: Optional[str] = None
     ) -> List[FileMetadata]:
         """
         Get all files accessible to a specific user (files with permissions only).
@@ -616,6 +617,7 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
             status: Optional filter by file status
             limit: Maximum number of files to return
             offset: Number of files to skip (for pagination)
+            search: Optional search keyword for filename (fuzzy match)
             
         Returns:
             List of FileMetadata objects accessible to the user
@@ -626,6 +628,7 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
                 status=status,
                 limit=limit,
                 offset=offset,
+                search=search,
             )
             if status is None:
                 files = [
@@ -702,6 +705,7 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
         status: Optional[FileStatus] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
+        search: Optional[str] = None,
     ) -> List[FileMetadata]:
         """Async wrapper for list_user_files() for FastAPI handlers."""
         return await self._run_blocking(
@@ -710,6 +714,7 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
             status=status,
             limit=limit,
             offset=offset,
+            search=search,
         )
 
     async def list_visible_files_async(
@@ -735,7 +740,8 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
     def count_user_files(
         self,
         user_id: uuid.UUID,
-        status: FileStatus | None = None
+        status: FileStatus | None = None,
+        search: Optional[str] = None
     ) -> int:
         """
         Count all files accessible to a specific user (files with permissions).
@@ -743,18 +749,19 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
         Args:
             user_id: UUID of the user
             status: Optional filter by file status
+            search: Optional search keyword for filename (fuzzy match)
             
         Returns:
             Total count of files accessible to the user
         """
         try:
             if status is None:
-                total = self.file_storage.count_accessible_files(user_id=user_id)
-                deleted = self.file_storage.count_accessible_files(user_id=user_id, status=FileStatus.DELETED)
+                total = self.file_storage.count_accessible_files(user_id=user_id, search=search)
+                deleted = self.file_storage.count_accessible_files(user_id=user_id, status=FileStatus.DELETED, search=search)
                 mark_only = len(self._files_marked_for_deletion_by_owner.get(user_id, set()))
                 count = max(total - deleted - mark_only, 0)
             else:
-                count = self.file_storage.count_accessible_files(user_id=user_id, status=status)
+                count = self.file_storage.count_accessible_files(user_id=user_id, status=status, search=search)
             logger.info(f"Counted {count} accessible files for user {user_id}")
             return count
         except Exception as e:
@@ -799,9 +806,10 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
         self,
         user_id: uuid.UUID,
         status: FileStatus | None = None,
+        search: Optional[str] = None,
     ) -> int:
         """Async wrapper for count_user_files() for FastAPI handlers."""
-        return await self._run_blocking(self.count_user_files, user_id, status=status)
+        return await self._run_blocking(self.count_user_files, user_id, status=status, search=search)
 
     def _is_active_status(self, status: FileStatus) -> bool:
         return status != FileStatus.DELETED

@@ -381,8 +381,9 @@ async def delete_file(file_id: str, user: Annotated[User | None, Depends(get_cur
 )
 async def list_files(
     user: Annotated[User | None, Depends(get_current_user)],
-    limit: Optional[int] = Query(default=100, ge=1, le=1000, description="Maximum number of files to return"),
-    offset: Optional[int] = Query(default=0, ge=0, description="Number of files to skip"),
+    page: Optional[int] = Query(default=1, ge=1, description="Page number (starts from 1)"),
+    pagesize: Optional[int] = Query(default=100, ge=1, le=1000, description="Number of files per page"),
+    search: Optional[str] = Query(default=None, description="Search keyword for filename (fuzzy match)"),
 ):
     """
     Get all files accessible to the current user (files with permissions only).
@@ -398,8 +399,9 @@ async def list_files(
     
     Args:
         user: Current authenticated user (automatically injected)
-        limit: Maximum number of files to return (default: 100, max: 1000)
-        offset: Number of files to skip for pagination (default: 0)
+        page: Page number (starts from 1, default: 1)
+        pagesize: Number of files per page (default: 100, max: 1000)
+        search: Optional search keyword for filename fuzzy matching
         
     Returns:
         FileListResponse with list of files and total count
@@ -410,15 +412,19 @@ async def list_files(
             detail="Authentication required"
         )
     try:
+        # Calculate offset from page number
+        offset = (page - 1) * pagesize
+        
         # Get files for current page (async, non-blocking)
         files = await get_knowledge_handler().list_user_files_async(
             user_id=user.id,
-            limit=limit,
-            offset=offset
+            limit=pagesize,
+            offset=offset,
+            search=search
         )
         
         # Get total count of files for the user (async, non-blocking)
-        total_count = await get_knowledge_handler().count_user_files_async(user.id)
+        total_count = await get_knowledge_handler().count_user_files_async(user.id, search=search)
         
         # Convert FileMetadata objects to FileInfo response models
         file_infos = [

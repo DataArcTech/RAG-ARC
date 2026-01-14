@@ -497,7 +497,8 @@ class FileStorage(AbstractModule):
         user_id: uuid.UUID,
         status: Optional['FileStatus'] = None,
         limit: Optional[int] = None,
-        offset: Optional[int] = None
+        offset: Optional[int] = None,
+        search: Optional[str] = None
     ) -> List['FileMetadata']:
         """
         List all files accessible to a user (owned files + files with permissions).
@@ -507,6 +508,7 @@ class FileStorage(AbstractModule):
             status: Optional file status filter
             limit: Maximum number of records to return
             offset: Number of records to skip
+            search: Optional search keyword for filename (fuzzy match)
 
         Returns:
             List of FileMetadata objects accessible to the user
@@ -519,7 +521,8 @@ class FileStorage(AbstractModule):
                 user_id=user_id,
                 status=status,
                 limit=limit,
-                offset=offset
+                offset=offset,
+                search=search
             )
             logger.debug(f"Retrieved {len(files)} accessible files for user {user_id}")
             return files
@@ -530,7 +533,8 @@ class FileStorage(AbstractModule):
     def count_accessible_files(
         self,
         user_id: uuid.UUID,
-        status: Optional['FileStatus'] = None
+        status: Optional['FileStatus'] = None,
+        search: Optional[str] = None
     ) -> int:
         """
         Count all files accessible to a user (owned files + files with permissions).
@@ -538,7 +542,7 @@ class FileStorage(AbstractModule):
         Args:
             user_id: UUID of the user to check access for
             status: Optional file status filter
-            **kwargs: Additional arguments
+            search: Optional search keyword for filename (fuzzy match)
 
         Returns:
             Total count of files accessible to the user
@@ -549,7 +553,8 @@ class FileStorage(AbstractModule):
         try:
             count = self.metadata_store.count_accessible_files(
                 user_id=user_id,
-                status=status
+                status=status,
+                search=search
             )
             logger.debug(f"Counted {count} accessible files for user {user_id}")
             return count
