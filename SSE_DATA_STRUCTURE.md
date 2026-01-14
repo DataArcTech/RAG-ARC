@@ -23,6 +23,11 @@
 
 **格式：** OpenAI-compatible chat completion chunk
 
+**content 渲染约定：**
+- `choices[].delta.content` / 最终回答内容为 Markdown。
+- 除了引用标记 `<sup>...</sup>` 之外，不应包含其它 HTML 标签。
+- 为避免前端 Markdown/HTML 混合渲染异常，`<`/`>`/`&` 等字符应优先放入反引号代码片段（inline/fenced code），或使用 HTML 实体（`&lt;`/`&gt;`/`&amp;`）。
+
 ```json
 {
   "code": 200,
@@ -611,4 +616,3 @@ data: [DONE]
 3. **内容流式输出**会分多次发送，每次一小段
 4. **所有事件**都包含 `request_id` 用于追踪
 5. **序列号 `seq`** 在进度事件中递增，用于排序
-

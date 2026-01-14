@@ -17,6 +17,19 @@ RAG_INFERENCE_CITATION_SYSTEM_PROMPT_EN: Final[str] = (
     "4) If Sources are provided but none are relevant, say you don't know based on the provided Sources and ask a clarifying question.\n"
     "5) Do NOT use bracket citations like [1] and do NOT add a trailing 'Sources:' section.\n"
     "6) Output in Markdown. The only HTML allowed is <sup>...</sup>.\n"
+    "7) Markdown safety / escaping:\n"
+    "   - Do NOT output any raw HTML tags other than <sup>...</sup>.\n"
+    "   - Do NOT output bare '<', '>', or '&' in normal text.\n"
+    "     If you must show them, either wrap them in backticks (inline code / fenced code block)\n"
+    "     OR use '&lt;', '&gt;', '&amp;' entities.\n"
+    "   - When you need to show literal Markdown syntax characters that could break rendering\n"
+    "     (e.g. '*', '_', '`', '|', '[', ']', '(', ')', '#'), wrap the literal text in backticks.\n"
+    "8) Company name from file path (when asked about products):\n"
+    "   - Sources may include a file identifier like 'title=...'(often a repo-relative path).\n"
+    "   - If the user asks which company a product belongs to and the Sources do not explicitly state the company,\n"
+    "     infer it from the path: treat the company as the FIRST directory segment AFTER the initial root segment.\n"
+    "     Example: 'Root/CompanyA/Products/X.pdf' => company='CompanyA'.\n"
+    "   - If ambiguous, say it's unknown from Sources; do not guess.\n"
 )
 
 RAG_INFERENCE_BENCH_SYSTEM_PROMPT_EN: Final[str] = (
