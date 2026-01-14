@@ -229,21 +229,27 @@ async def stream_task_progress(
 
 
 @router.get("/{file_id}/download")
-async def download_file(file_id: str, user: Annotated[User | None, Depends(get_current_user)]):
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required"
-        )
+async def download_file(file_id: str):
+    """Download a file by file_id.
+    
+    Note: Authentication and permission checks are disabled for this endpoint.
+    """
+    logger.info(f"[CHATKB-DOWNLOAD] Received download request for file_id: {file_id} (length={len(file_id)})")
     try:
         # Log original file_id to debug URL construction issues
         if len(file_id) > 36:
-            logger.warning(f"Received malformed file_id (length={len(file_id)}): {file_id[:50]}...")
+            logger.warning(f"[CHATKB-DOWNLOAD] Received malformed file_id (length={len(file_id)}): {file_id[:50]}...")
         # Normalize file_id to handle duplicated UUIDs in URL
         normalized_file_id = normalize_file_id(file_id)
         if normalized_file_id != file_id:
-            logger.info(f"Normalized file_id from {file_id[:50]}... to {normalized_file_id}")
-        return await get_knowledge_handler().get_file(normalized_file_id, user.id)
+            logger.info(f"[CHATKB-DOWNLOAD] Normalized file_id from {file_id[:50]}... to {normalized_file_id}")
+        else:
+            logger.info(f"[CHATKB-DOWNLOAD] Using original file_id: {normalized_file_id}")
+        
+        logger.info(f"[CHATKB-DOWNLOAD] Calling get_file with normalized_file_id: {normalized_file_id}, user_id: None")
+        result = await get_knowledge_handler().get_file(normalized_file_id, None)
+        logger.info(f"[CHATKB-DOWNLOAD] Successfully retrieved file: {normalized_file_id}")
+        return result
     except HTTPException:
         # re-raise 404s from underlying module
         raise
@@ -257,12 +263,11 @@ async def download_file(file_id: str, user: Annotated[User | None, Depends(get_c
 @router.get("/chunk/{chunk_id}", response_model=KnowledgeChunkResponse, status_code=status.HTTP_200_OK)
 async def get_chunk(
     chunk_id: str,
-    user: Annotated[User | None, Depends(get_current_user)],
 ):
-    """Fetch a single indexed chunk (evidence) by chunk_id for citation inspection."""
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
-
+    """Fetch a single indexed chunk (evidence) by chunk_id for citation inspection.
+    
+    Note: Authentication and permission checks are disabled for this endpoint.
+    """
     try:
         rag_inference = registrator.get_object("rag_inference")
     except KeyError as exc:
@@ -292,10 +297,7 @@ async def get_chunk(
         nested = metadata.get("chunk_metadata") if isinstance(metadata.get("chunk_metadata"), dict) else {}
         file_id = str(nested.get("source_file_id") or "").strip() or None
 
-    if file_id and not is_admin_owner(user.id):
-        permission = get_knowledge_handler().check_file_access(file_id, user.id)
-        if permission is None:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You are not allowed to access this chunk")
+    # Permission check disabled - all chunks are accessible without authentication
 
     filename = None
     if file_id:
