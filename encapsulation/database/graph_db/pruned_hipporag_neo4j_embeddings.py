@@ -2,6 +2,7 @@ import os
 import logging
 import re
 import random
+import threading
 import time
 import copy
 from typing import List, Dict, Any, Optional, Sequence, Set, Tuple
@@ -17,6 +18,24 @@ logger = logging.getLogger(__name__)
 
 
 class _PrunedHippoRAGNeo4jEmbeddingsMixin:
+    def _owner_scoped_faiss_lock(self) -> threading.Lock:
+        lock = getattr(self, "_owner_scoped_faiss_lock_obj", None)
+        if lock is None:
+            lock = threading.Lock()
+            setattr(self, "_owner_scoped_faiss_lock_obj", lock)
+        return lock
+
+    def _owner_scoped_faiss_missing_warned(self) -> set[str]:
+        warned = getattr(self, "_owner_scoped_faiss_missing_warned_keys", None)
+        if warned is None:
+            warned = set()
+            setattr(self, "_owner_scoped_faiss_missing_warned_keys", warned)
+        return warned
+
+    @staticmethod
+    def _faiss_index_artifacts_ready(index_dir: str) -> bool:
+        return os.path.exists(os.path.join(index_dir, "index.pkl")) and os.path.exists(os.path.join(index_dir, "index.faiss"))
+
     def _faiss_owner_scoped_dir(self, kind: str, *, owner_id: Optional[str]) -> str:
         """
         Resolve an owner-scoped on-disk directory for graph FAISS artifacts.
@@ -56,31 +75,53 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
         Return a FaissVectorDB bound to the owner-scoped directory (lazy-load from disk).
         """
         cache_attr = "_owner_scoped_fact_faiss" if kind == "fact" else "_owner_scoped_entity_faiss"
-        cache: Dict[str, Any] = getattr(self, cache_attr, None) or {}
-        setattr(self, cache_attr, cache)
+        lock = self._owner_scoped_faiss_lock()
+        with lock:
+            cache: Dict[str, Any] = getattr(self, cache_attr, None) or {}
+            setattr(self, cache_attr, cache)
 
         key = str(owner_id) if owner_id is not None else "__GLOBAL__"
-        if key in cache:
-            return cache[key]
+        with lock:
+            cached = cache.get(key)
+        if cached is not None:
+            db = cached
+        else:
+            template_db = self.fact_faiss_db if kind == "fact" else self.entity_faiss_db
+            index_dir = self._faiss_owner_scoped_dir(kind, owner_id=owner_id)
+            cfg = self._clone_faiss_config_for_path(getattr(template_db, "config", template_db), index_path=index_dir)
 
-        template_db = self.fact_faiss_db if kind == "fact" else self.entity_faiss_db
-        index_dir = self._faiss_owner_scoped_dir(kind, owner_id=owner_id)
-        cfg = self._clone_faiss_config_for_path(getattr(template_db, "config", template_db), index_path=index_dir)
+            from encapsulation.database.vector_db.faiss import FaissVectorDB
 
-        from encapsulation.database.vector_db.faiss import FaissVectorDB
+            db = FaissVectorDB(cfg)
 
-        db = FaissVectorDB(cfg)
+            with lock:
+                cache[key] = db
 
-        # Load if the owner-scoped index exists on disk.
-        try:
-            pkl_path = os.path.join(index_dir, "index.pkl")
-            faiss_path = os.path.join(index_dir, "index.faiss")
-            if os.path.exists(pkl_path) and os.path.exists(faiss_path):
-                db.load_index(index_dir)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to load %s FAISS index for owner=%s: %s", kind, owner_id, exc)
+        index_dir = getattr(getattr(db, "config", None), "index_path", None) or self._faiss_owner_scoped_dir(kind, owner_id=owner_id)
 
-        cache[key] = db
+        # Important: index artifacts can appear after process startup (e.g. ingestion writes index files).
+        # If we cache an empty DB before both files are present, we must retry loading on later calls.
+        with lock:
+            should_attempt_load = getattr(db, "index", None) is None
+
+            if should_attempt_load and self._faiss_index_artifacts_ready(index_dir):
+                try:
+                    db.load_index(index_dir)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to load %s FAISS index for owner=%s at %s: %s", kind, owner_id, index_dir, exc)
+            elif should_attempt_load:
+                warned_key = f"{kind}:{key}"
+                warned = self._owner_scoped_faiss_missing_warned()
+                should_warn = warned_key not in warned
+                if should_warn:
+                    warned.add(warned_key)
+                    logger.warning(
+                        "%s FAISS index artifacts not found for owner=%s under %s (expected index.faiss + index.pkl)",
+                        kind,
+                        owner_id,
+                        index_dir,
+                    )
+
         return db
 
     def get_fact_faiss_db(self, owner_id: Optional[object]):

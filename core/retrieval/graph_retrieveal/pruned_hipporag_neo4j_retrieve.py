@@ -135,7 +135,12 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
         query_fact_scores, fact_ids = self._get_fact_scores_faiss(query, owner_id=owner_filter, query_doc_scores=query_doc_scores)
 
         if query_fact_scores is None or len(query_fact_scores) == 0:
-            logger.warning("No facts found, falling back to dense retrieval")
+            get_db = getattr(getattr(self, "graph_store", None), "get_fact_faiss_db", None)
+            fact_db = get_db(owner_filter) if callable(get_db) else getattr(self.graph_store, "fact_faiss_db", None)
+            if fact_db is None or getattr(fact_db, "index", None) is None:
+                logger.warning("Fact FAISS index unavailable (owner=%s); falling back to dense retrieval", owner_filter)
+            else:
+                logger.warning("No facts found, falling back to dense retrieval")
             return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter, query_doc_scores=query_doc_scores)
 
         # Step 2: Rerank facts (optional)
