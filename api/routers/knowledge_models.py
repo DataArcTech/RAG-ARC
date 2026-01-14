@@ -69,6 +69,15 @@ class GraphExportRequest(BaseModel):
     preserve_multi_edges: bool = False
 
 
+class MindmapChunk(BaseModel):
+    """Chunk information in mind map node."""
+
+    id: str
+    title: str
+    content: str
+    documentName: str
+
+
 class MindmapNode(BaseModel):
     """Mind map node structure."""
 
@@ -76,6 +85,7 @@ class MindmapNode(BaseModel):
     name: str
     category: str
     weight: int
+    chunks: List[MindmapChunk] = Field(default_factory=list)
 
 
 class MindmapEdge(BaseModel):

@@ -127,6 +127,40 @@ def convert_tsv_to_graph(tsv_text: str) -> Tuple[List[Dict[str, Any]], List[Dict
     return nodes, edges
 
 
+def convert_chunks_to_frontend_format(
+    chunks: List[Dict[str, Any]], filename: str
+) -> List[Dict[str, Any]]:
+    """Convert chunks to frontend format with id, title, content, documentName."""
+    frontend_chunks = []
+    for idx, chunk in enumerate(chunks, start=1):
+        frontend_chunks.append(
+            {
+                "id": f"c{idx}",
+                "title": f"片段{idx}",
+                "content": chunk.get("content", ""),
+                "documentName": filename,
+            }
+        )
+    return frontend_chunks
+
+
+def add_chunks_to_nodes(
+    nodes: List[Dict[str, Any]], chunks: List[Dict[str, Any]], filename: str
+) -> List[Dict[str, Any]]:
+    """Add chunks field to all nodes as source evidence for each node."""
+    if not nodes:
+        return nodes
+
+    # Convert chunks to frontend format once
+    frontend_chunks = convert_chunks_to_frontend_format(chunks, filename)
+
+    # Add chunks to all nodes (each weight level should have chunks as source evidence)
+    for node in nodes:
+        node["chunks"] = frontend_chunks
+
+    return nodes
+
+
 async def export_file_mindmap_payload(
     *,
     knowledge: Any,
@@ -155,6 +189,8 @@ async def export_file_mindmap_payload(
             detail="No mind map data found for this file",
         )
 
+    filename = file_mindmaps.get("filename") or file_id
+
     metadata_store = getattr(getattr(knowledge, "file_storage", None), "metadata_store", None)
     if metadata_store is not None and hasattr(metadata_store, "SessionMaker"):
         try:
@@ -163,11 +199,12 @@ async def export_file_mindmap_payload(
                 if cache:
                     if progress:
                         progress("mindmap_export", "cache_hit", 100, {"file_id": file_id})
-                    return {"tsv": cache.tsv, "nodes": list(cache.nodes), "edges": list(cache.edges)}
+                    # Add chunks to all nodes for cached data
+                    cached_nodes = list(cache.nodes)
+                    cached_nodes = add_chunks_to_nodes(cached_nodes, chunks, filename)
+                    return {"tsv": cache.tsv, "nodes": cached_nodes, "edges": list(cache.edges)}
         except Exception:
             pass
-
-    filename = file_mindmaps.get("filename") or file_id
     prompt = build_mindmap_merge_prompt(filename, chunks)
 
     llm = getattr(rag_inference, "llm", None)
@@ -245,5 +282,8 @@ async def export_file_mindmap_payload(
 
     if progress:
         progress("mindmap_export", "end", 100, {"file_id": file_id})
+
+    # Add chunks to all nodes as source evidence
+    nodes = add_chunks_to_nodes(nodes, chunks, filename)
 
     return {"tsv": merged_tsv, "nodes": nodes, "edges": edges}
