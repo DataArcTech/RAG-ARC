@@ -353,56 +353,36 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
                 logger.debug(f"Background indexing semaphore released for file_id: {doc_id}")
 
     async def get_file(self, doc_id: str, user_id: uuid.UUID | None = None) -> Response:
-        logger.info(f"[CHATKB-GET-FILE] Starting get_file for doc_id: {doc_id}, user_id: {user_id}")
         # Run database queries asynchronously to avoid blocking the event loop
-        logger.info(f"[CHATKB-GET-FILE] Calling file_storage.get_file_metadata for doc_id: {doc_id}")
         metadata = await self._run_blocking(
             self.file_storage.get_file_metadata,
             doc_id
         )
-        logger.info(f"[CHATKB-GET-FILE] get_file_metadata returned: {metadata is not None}")
 
         if metadata is None:
-            logger.warning(f"[CHATKB-GET-FILE] File metadata not found for file_id: {doc_id}")
+            logger.warning(f"File metadata not found for file_id: {doc_id}")
             raise HTTPException(status_code=404, detail="File not found")
-        
-        logger.info(f"[CHATKB-GET-FILE] File metadata found: file_id={doc_id}, status={metadata.status}, filename={getattr(metadata, 'filename', 'N/A')}")
-        
-        is_marked_deleted = self._is_file_marked_for_deletion(doc_id)
-        logger.info(f"[CHATKB-GET-FILE] File deletion check: status={metadata.status}, is_marked_deleted={is_marked_deleted}")
-        
-        if metadata.status == FileStatus.DELETED or is_marked_deleted:
-            logger.warning(f"[CHATKB-GET-FILE] File is deleted or marked for deletion: file_id={doc_id}, status={metadata.status}, is_marked_deleted={is_marked_deleted}")
+        if metadata.status == FileStatus.DELETED or self._is_file_marked_for_deletion(doc_id):
+            logger.warning(f"File is deleted or marked for deletion: file_id={doc_id}, status={metadata.status}")
             raise HTTPException(status_code=404, detail="File not found")
 
         # Check if user has access (owner or has VIEW/EDIT permission)
         # Skip permission check if user_id is None (authentication disabled)
         if user_id is not None:
-            logger.info(f"[CHATKB-GET-FILE] Checking file access for user_id: {user_id}")
             permission_type = await self._run_blocking(
                 self.check_file_access,
                 doc_id,
                 user_id
             )
             if permission_type is None:
-                logger.warning(f"[CHATKB-GET-FILE] Access denied for user_id: {user_id}, file_id: {doc_id}")
                 raise HTTPException(status_code=403, detail="You are not allowed to access this file")
-            logger.info(f"[CHATKB-GET-FILE] Access granted, permission_type: {permission_type}")
-        else:
-            logger.info(f"[CHATKB-GET-FILE] Skipping permission check (user_id is None)")
 
-        logger.info(f"[CHATKB-GET-FILE] Calling file_storage.get_file_content for doc_id: {doc_id}")
         content = await self._run_blocking(
             self.file_storage.get_file_content,
             doc_id
         )
-        logger.info(f"[CHATKB-GET-FILE] get_file_content returned: {content is not None} (size: {len(content) if content else 0} bytes)")
-        
         if content is None:
-            logger.warning(f"[CHATKB-GET-FILE] File content not found for file_id: {doc_id}")
             raise HTTPException(status_code=404, detail="File content not found")
-        
-        logger.info(f"[CHATKB-GET-FILE] Successfully retrieved file: {doc_id}, content_size={len(content)} bytes")
 
         headers = {"Content-Disposition": build_attachment_content_disposition(str(metadata.filename or ""))}
         return Response(content=content, media_type=metadata.content_type, headers=headers)

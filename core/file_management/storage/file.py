@@ -380,46 +380,32 @@ class FileStorage(AbstractModule):
 
     def get_file_metadata(self, file_id: str, **kwargs: Any) -> Optional['FileMetadata']:
         """Retrieve file metadata by file ID"""
-        logger.info(f"[CHATKB-FILE-STORAGE] get_file_metadata called for file_id: {file_id}")
         try:
-            result = self.metadata_store.get_file_metadata(file_id, **kwargs)
-            if result:
-                logger.info(f"[CHATKB-FILE-STORAGE] File metadata found: file_id={file_id}, filename={getattr(result, 'filename', 'N/A')}, status={getattr(result, 'status', 'N/A')}")
-            else:
-                logger.warning(f"[CHATKB-FILE-STORAGE] File metadata not found in database for file_id: {file_id}")
-            return result
+            return self.metadata_store.get_file_metadata(file_id, **kwargs)
         except Exception as e:
-            logger.error(f"[CHATKB-FILE-STORAGE] Failed to get file metadata for {file_id}: {e}", exc_info=True)
+            logger.error(f"Failed to get file metadata for {file_id}: {e}")
             raise StorageOperationError(f"Failed to retrieve file metadata: {e}")
 
     def get_file_content(self, file_id: str, **kwargs: Any) -> Optional[bytes]:
         """Retrieve file content by file ID"""
-        logger.info(f"[CHATKB-FILE-STORAGE] get_file_content called for file_id: {file_id}")
         try:
             # Get metadata to find blob key
             metadata = self.metadata_store.get_file_metadata(file_id, **kwargs)
             if not metadata:
-                logger.warning(f"[CHATKB-FILE-STORAGE] File metadata not found for file_id: {file_id}")
+                logger.warning(f"File metadata not found for file_id: {file_id}")
                 return None
-
-            blob_key = getattr(metadata, 'blob_key', None)
-            logger.info(f"[CHATKB-FILE-STORAGE] Retrieved metadata, blob_key: {blob_key}")
 
             # Retrieve blob content
             try:
-                logger.info(f"[CHATKB-FILE-STORAGE] Attempting to retrieve blob with key: {blob_key}")
-                content = self.blob_store.retrieve(blob_key, **kwargs)
-                logger.info(f"[CHATKB-FILE-STORAGE] Successfully retrieved file content for file_id: {file_id}, size: {len(content) if content else 0} bytes")
+                content = self.blob_store.retrieve(metadata.blob_key, **kwargs)
+                logger.debug(f"Retrieved file content for file_id: {file_id}")
                 return content
-            except KeyError as e:
-                logger.error(f"[CHATKB-FILE-STORAGE] Blob not found for file_id: {file_id}, blob_key: {blob_key}, error: {e}")
-                return None
-            except Exception as e:
-                logger.error(f"[CHATKB-FILE-STORAGE] Error retrieving blob for file_id: {file_id}, blob_key: {blob_key}, error: {e}", exc_info=True)
+            except KeyError:
+                logger.error(f"Blob not found for file_id: {file_id}, blob_key: {metadata.blob_key}")
                 return None
 
         except Exception as e:
-            logger.error(f"[CHATKB-FILE-STORAGE] Failed to get file content for {file_id}: {e}", exc_info=True)
+            logger.error(f"Failed to get file content for {file_id}: {e}")
             raise StorageOperationError(f"Failed to retrieve file content: {e}")
 
     def update_file_metadata(self, file_id: str, **kwargs: Any) -> bool:

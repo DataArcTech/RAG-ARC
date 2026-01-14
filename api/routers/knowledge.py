@@ -234,22 +234,15 @@ async def download_file(file_id: str):
     
     Note: Authentication and permission checks are disabled for this endpoint.
     """
-    logger.info(f"[CHATKB-DOWNLOAD] Received download request for file_id: {file_id} (length={len(file_id)})")
     try:
         # Log original file_id to debug URL construction issues
         if len(file_id) > 36:
-            logger.warning(f"[CHATKB-DOWNLOAD] Received malformed file_id (length={len(file_id)}): {file_id[:50]}...")
+            logger.warning(f"Received malformed file_id (length={len(file_id)}): {file_id[:50]}...")
         # Normalize file_id to handle duplicated UUIDs in URL
         normalized_file_id = normalize_file_id(file_id)
         if normalized_file_id != file_id:
-            logger.info(f"[CHATKB-DOWNLOAD] Normalized file_id from {file_id[:50]}... to {normalized_file_id}")
-        else:
-            logger.info(f"[CHATKB-DOWNLOAD] Using original file_id: {normalized_file_id}")
-        
-        logger.info(f"[CHATKB-DOWNLOAD] Calling get_file with normalized_file_id: {normalized_file_id}, user_id: None")
-        result = await get_knowledge_handler().get_file(normalized_file_id, None)
-        logger.info(f"[CHATKB-DOWNLOAD] Successfully retrieved file: {normalized_file_id}")
-        return result
+            logger.info(f"Normalized file_id from {file_id[:50]}... to {normalized_file_id}")
+        return await get_knowledge_handler().get_file(normalized_file_id, None)
     except HTTPException:
         # re-raise 404s from underlying module
         raise
