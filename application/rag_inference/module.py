@@ -17,7 +17,7 @@ from core.prompts import (
 )
 from framework.register import Register
 from framework.thread_pool import get_thread_pool
-from config.output_limits import CHAT_MAX_IMAGE_INPUTS
+from config.output_limits import CHAT_MAX_IMAGE_INPUTS, RAG_RETRIEVAL_OBSERVABILITY, RAG_RETRIEVAL_LOG_TOP_FILES, RAG_RETRIEVAL_LOG_TOP_CHUNKS
 from core.utils.multimodal_images import collect_image_paths_from_chunk_payloads
 from core.utils.multimodal_llm import build_multimodal_user_message
 from encapsulation.web_search import TavilySearchClient
@@ -361,12 +361,45 @@ class RAGInference(AbstractModule):
                 "chunk_role": metadata.get("chunk_role"),
                 "semantic_unit_type": metadata.get("semantic_unit_type"),
                 "filename": metadata.get("filename") or metadata.get("source_file_id"),
+                "source_file_id": metadata.get("source_file_id") or metadata.get("sourceFileId") or metadata.get("file_id"),
+                "_hipporag_ppr_score": _num(metadata.get("_hipporag_ppr_score")),
+                "_hipporag_dense_score": _num(metadata.get("_hipporag_dense_score")),
+                "_hipporag_selection_strategy": metadata.get("_hipporag_selection_strategy"),
                 "preview": _chunk_preview(chunk),
             }
 
+        def _coerce_file_id(meta: Any) -> str | None:
+            if not isinstance(meta, dict):
+                return None
+            for key in ("source_file_id", "sourceFileId", "file_id", "fileId", "document_id", "documentId"):
+                token = str(meta.get(key) or "").strip()
+                if token:
+                    return token
+            return None
+
+        def _file_distribution(chunks: list[Chunk], *, limit: int) -> list[dict[str, Any]]:
+            from collections import Counter
+
+            ctr: Counter[str] = Counter()
+            name_by_id: dict[str, str] = {}
+            for ch in chunks:
+                meta = getattr(ch, "metadata", None) or {}
+                fid = _coerce_file_id(meta)
+                if not fid:
+                    continue
+                ctr[fid] += 1
+                if fid not in name_by_id:
+                    name = str(meta.get("filename") or "").strip()
+                    if name:
+                        name_by_id[fid] = name
+            top = []
+            for fid, count in ctr.most_common(max(int(limit), 0)):
+                top.append({"source_file_id": fid, "count": int(count), "filename": name_by_id.get(fid)})
+            return top
+
         self._emit_progress(progress_callback, {"stage": "rewrite", "status": "start"})
         rewrite_start = time.perf_counter()
-        rewritten_query = self.query_rewriter.rewrite_query(query)
+        rewritten_query = self.query_rewriter.rewrite_query(query, history_text=history_text)
         self._emit_progress(
             progress_callback,
             {
@@ -462,6 +495,13 @@ class RAGInference(AbstractModule):
                 "chunks": len(chunks),
                 "retriever": retriever_info,
                 "top_chunks": [_chunk_brief(chunk) for chunk in chunks[: min(len(chunks), 10)]],
+                **(
+                    {
+                        "file_distribution": _file_distribution(chunks, limit=RAG_RETRIEVAL_LOG_TOP_FILES),
+                    }
+                    if RAG_RETRIEVAL_OBSERVABILITY
+                    else {}
+                ),
             },
         )
 
@@ -607,6 +647,14 @@ class RAGInference(AbstractModule):
                 "chunks_out": len(chunks),
                 "reranker": reranker_info,
                 "top_chunks": [_chunk_brief(chunk) for chunk in chunks[: min(len(chunks), 10)]],
+                **(
+                    {
+                        "file_distribution": _file_distribution(chunks, limit=RAG_RETRIEVAL_LOG_TOP_FILES),
+                        "chunks_preview": [_chunk_brief(chunk) for chunk in chunks[: min(len(chunks), RAG_RETRIEVAL_LOG_TOP_CHUNKS)]],
+                    }
+                    if RAG_RETRIEVAL_OBSERVABILITY
+                    else {}
+                ),
             },
         )
 
@@ -635,9 +683,13 @@ class RAGInference(AbstractModule):
         
         # Use "Source key=N" format (aligned with chatbot.py).
         if chunks:
+            # Log chunks passed to LLM for debugging key mismatch
+            chunk_ids_for_llm = [getattr(chunk, "id", None) for chunk in chunks[:10]]  # Log first 10
+            logger.info("RAGInference._build_messages_and_context: chunks passed to LLM (first 10 IDs): %s", chunk_ids_for_llm)
             for i, chunk in enumerate(chunks):
                 metadata = getattr(chunk, "metadata", None) or {}
                 filename = str(metadata.get("filename") or "").strip() or "source"
+                chunk_id = getattr(chunk, "id", None)
                 
                 # Extract chunk text from various sources
                 prompt_text = metadata.get("prompt_text")
@@ -666,13 +718,16 @@ class RAGInference(AbstractModule):
                 if not chunk_text or not chunk_text.strip():
                     logger.warning(
                         f"Skipping empty chunk: Source key={i+1}, filename={filename}, "
+                        f"chunk_id={chunk_id}, "
                         f"prompt_text={'empty' if not prompt_text else f'type={type(prompt_text).__name__}, len={len(str(prompt_text))}'}, "
                         f"index_text={'empty' if not index_text else f'type={type(index_text).__name__}, len={len(str(index_text))}'}, "
                         f"chunk.content={'empty' if not chunk_content else f'type={type(chunk_content).__name__}, value={str(chunk_content)[:100]}'}"
                     )
                     continue
-                
+
                 messages.append({"role": "user", "content": f"Source key={i+1} title={filename}\n{chunk_text}"})
+                if i < 5:  # Log first 5 for debugging
+                    logger.debug("RAGInference: LLM source key=%d chunk_id=%s filename=%s", i+1, chunk_id, filename)
             messages.append({"role": "user", "content": f"Based on the above Sources, please answer question: {rewritten_query}"})
         else:
             # If there are no Sources, send the question directly (do not mention Sources).

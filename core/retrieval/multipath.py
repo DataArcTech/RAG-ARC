@@ -12,6 +12,8 @@ from config.output_limits import (
     SEMANTIC_UNIT_MAX_MERGED_SLICE_CHARS,
     SEMANTIC_UNIT_MAX_MERGED_TOTAL_CHARS,
     TABLE_MAX_MERGED_ROWS,
+    RAG_RETRIEVAL_OBSERVABILITY,
+    RAG_RETRIEVAL_LOG_TOP_FILES,
 )
 
 if TYPE_CHECKING:
@@ -66,6 +68,41 @@ class MultiPathRetriever(BaseRetriever):
         all_results = []
         subgraph_info = None  # Store subgraph info from graph retriever
 
+        def _coerce_file_id(meta: Any) -> str | None:
+            if not isinstance(meta, dict):
+                return None
+            for key in ("source_file_id", "sourceFileId", "file_id", "fileId", "document_id", "documentId"):
+                token = str(meta.get(key) or "").strip()
+                if token:
+                    return token
+            return None
+
+        def _file_dist(chunks: list[Chunk], *, limit: int) -> list[tuple[str, int]]:
+            from collections import Counter
+
+            ctr: Counter[str] = Counter()
+            for ch in chunks:
+                meta = getattr(ch, "metadata", None) or {}
+                fid = _coerce_file_id(meta)
+                if fid:
+                    ctr[fid] += 1
+            return ctr.most_common(max(int(limit), 0))
+
+        def _log_dist(stage: str, name: str, chunks: list[Chunk]) -> None:
+            if not RAG_RETRIEVAL_OBSERVABILITY:
+                return
+            owner_scope = kwargs.get("owner_id")
+            dist = _file_dist(chunks, limit=RAG_RETRIEVAL_LOG_TOP_FILES)
+            logger.info(
+                "multipath.%s query=%r owner_id=%s retriever=%s chunks=%d top_files=%s",
+                stage,
+                (query[:240] + "…") if len(query) > 240 else query,
+                owner_scope,
+                name,
+                len(chunks),
+                dist,
+            )
+
         for retriever in self.config.built_retrievers or []:
             try:
                 chunks = retriever.invoke(query, **kwargs)
@@ -83,6 +120,7 @@ class MultiPathRetriever(BaseRetriever):
                     if 'score' not in chunk.metadata:
                         chunk.metadata['score'] = 1.0
                 all_results.append(chunks)
+                _log_dist("retriever", type(retriever).__name__, chunks)
                 logger.debug(f"Retriever {type(retriever).__name__} returned {len(chunks)} results")
             except Exception as e:
                 logger.error("Retriever %s failed: %s", type(retriever).__name__, e)
@@ -93,6 +131,7 @@ class MultiPathRetriever(BaseRetriever):
             return []
 
         fused_chunks = self.config.fusion_instance.fuse(all_results, k)
+        _log_dist("fused", type(self.config.fusion_instance).__name__, fused_chunks)
 
         fused_chunks = self._postprocess_anchor_backfill(fused_chunks, owner_id=kwargs.get("owner_id"))
 

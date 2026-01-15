@@ -146,9 +146,13 @@ Benchmark/实验模式：
 | --- | --- | --- |
 | `ENABLE_ALL_EVIDENCE` | `false` | 为 `true` 时关闭所有截断，完整返回证据。 |
 | `CHAT_TOP_CHUNKS` | `5` | Chat 证据中最多保留的 chunk 数量。 |
+| `CHATBOT_LLM_TOP_SOURCES` | `10` | Chatbot 接口用于传给 LLM 的 Sources 上限（可大于前端展示的 `CHATBOT_TOP_SOURCES`，用于提升“特点/优势/功能”等泛问覆盖度）。 |
 | `CHAT_TOP_TRIPLES` | `5` | Chat 证据中最多保留的图三元组数量。 |
 | `CHAT_TOP_SEED_ENTITIES` | `5` | Chat 证据中最多保留的种子实体数量。 |
 | `CHAT_MAX_IMAGE_INPUTS` | `4` | 当模型支持多模态输入时，单次 Chat 允许附带的本地图片最大数量（MinerU 输出的图片资产）。 |
+| `RAG_RETRIEVAL_OBSERVABILITY` | `false` | 为 `true` 时在服务日志/进度事件中输出检索可观测信息（每路召回文件分布、融合文件分布、rerank 文件分布等），用于排查“召回文件不对/追问跑偏”。 |
+| `RAG_RETRIEVAL_LOG_TOP_FILES` | `10` | 检索可观测日志中最多展示的文件分布条数（按 file_id 计数）。 |
+| `RAG_RETRIEVAL_LOG_TOP_CHUNKS` | `5` | 检索可观测日志中最多展示的 chunk 预览条数（用于快速定位命中段落）。 |
 | `DEEPSEARCH_TOP_CHUNKS` | `10` | DeepSearch 证据中最多保留的 chunk 数量，同时也是报告附录中显示原文预览（前100字符）的数量。 |
 | `DEEPSEARCH_TOP_TRIPLES` | `30` | DeepSearch 证据中最多保留的图三元组数量。 |
 | `DEEPSEARCH_TOP_SEED_ENTITIES` | `15` | DeepSearch 证据中最多保留的种子实体数量。 |

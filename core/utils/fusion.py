@@ -5,6 +5,35 @@ from collections import defaultdict
 from encapsulation.data_model.schema import Chunk
 
 
+def _coerce_file_id(metadata: dict) -> str | None:
+    for key in ("source_file_id", "sourceFileId", "file_id", "fileId", "document_id", "documentId"):
+        token = str(metadata.get(key) or "").strip()
+        if token:
+            return token
+    return None
+
+
+def _fusion_key(chunk: Chunk) -> str:
+    """
+    Stable dedupe key for fusing cross-retriever results.
+
+    Using raw `content` as the dedupe key is unsafe because many documents share identical boilerplate
+    paragraphs (e.g., disclaimers), which can cause unrelated chunks to overwrite each other during fusion.
+    """
+
+    cid = str(getattr(chunk, "id", "") or "").strip()
+    if cid:
+        return f"id:{cid}"
+    metadata = getattr(chunk, "metadata", None) or {}
+    anchor_id = str(metadata.get("anchor_chunk_id") or "").strip()
+    file_id = _coerce_file_id(metadata)
+    if file_id and anchor_id:
+        return f"anchor:{file_id}:{anchor_id}"
+    if file_id:
+        return f"file:{file_id}:{hash(chunk.content)}"
+    return f"content:{hash(chunk.content)}"
+
+
 class FusionMethod(ABC):
     """Abstract base class for fusion methods"""
     
@@ -41,18 +70,17 @@ class RRFusion(FusionMethod):
         for retriever_results in results:
             for rank, chunk in enumerate(retriever_results, 1):  # rank starts from 1
                 rrf_score = 1.0 / (self.k + rank)
-                # Use chunk content as key to deduplicate
-                content_key = chunk.content
-                rrf_scores[content_key] += rrf_score
-                chunk_map[content_key] = chunk
+                key = _fusion_key(chunk)
+                rrf_scores[key] += rrf_score
+                chunk_map[key] = chunk
         
         # Sort by RRF scores
         sorted_items = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
         
         # Build final results, put scores in chunk's metadata
         fused_chunks = []
-        for content, rrf_score in sorted_items[:top_k]:
-            chunk = chunk_map[content]
+        for key, rrf_score in sorted_items[:top_k]:
+            chunk = chunk_map[key]
             # Add RRF score to chunk's metadata
             if chunk.metadata is None:
                 chunk.metadata = {}
@@ -94,7 +122,7 @@ class WeightedSumFusion(FusionMethod):
             weight = self.weights[retriever_idx]
 
             for chunk in retriever_results:
-                content_key = chunk.content
+                content_key = _fusion_key(chunk)
                 # Get original score, use 1.0 if not present
                 original_score = chunk.metadata.get('score', 1.0) if chunk.metadata else 1.0
                 weighted_scores[content_key] += weight * original_score
@@ -130,7 +158,7 @@ class RankFusion(FusionMethod):
         for retriever_results in results:
             max_rank = len(retriever_results)
             for rank, chunk in enumerate(retriever_results):
-                content_key = chunk.content
+                content_key = _fusion_key(chunk)
                 # Rank score: highest rank gets highest score
                 rank_score = max_rank - rank
                 rank_scores[content_key] += rank_score

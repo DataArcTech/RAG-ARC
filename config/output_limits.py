@@ -54,6 +54,16 @@ CHAT_TOP_TRIPLES = _limit_or_none(_env_int("CHAT_TOP_TRIPLES", 5))
 CHAT_TOP_SEED_ENTITIES = _limit_or_none(_env_int("CHAT_TOP_SEED_ENTITIES", 5))
 CHAT_MAX_IMAGE_INPUTS = _limit_or_none(_env_int("CHAT_MAX_IMAGE_INPUTS", 4))
 
+# Chatbot-only: allow sending more sources to the LLM than the UI displays.
+# (UI uses CHATBOT_TOP_SOURCES; LLM uses this to improve coverage for broad questions like "有什么特点".)
+CHATBOT_LLM_TOP_SOURCES = _env_int("CHATBOT_LLM_TOP_SOURCES", 10)
+
+# Retrieval observability (server logs / progress payloads).
+# Default to disabled to avoid log noise; enable explicitly when debugging.
+RAG_RETRIEVAL_OBSERVABILITY = _env_bool("RAG_RETRIEVAL_OBSERVABILITY", False)
+RAG_RETRIEVAL_LOG_TOP_FILES = _env_int("RAG_RETRIEVAL_LOG_TOP_FILES", 10)
+RAG_RETRIEVAL_LOG_TOP_CHUNKS = _env_int("RAG_RETRIEVAL_LOG_TOP_CHUNKS", 5)
+
 DEEPSEARCH_TOP_CHUNKS = _limit_or_none(_env_int("DEEPSEARCH_TOP_CHUNKS", 10))
 DEEPSEARCH_TOP_TRIPLES = _limit_or_none(_env_int("DEEPSEARCH_TOP_TRIPLES", 30))
 DEEPSEARCH_TOP_SEED_ENTITIES = _limit_or_none(_env_int("DEEPSEARCH_TOP_SEED_ENTITIES", 15))

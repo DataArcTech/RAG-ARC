@@ -23,7 +23,13 @@ from api.routers.auth import get_current_user, get_current_user_optional
 from encapsulation.data_model.orm_models import User
 from core.presentation.evidence import build_chat_evidence
 from core.prompts.chatbot import CHATBOT_SYSTEM_PROMPT_V2
-from config.output_limits import CHAT_TOP_CHUNKS
+from config.output_limits import (
+    CHAT_TOP_CHUNKS,
+    CHATBOT_LLM_TOP_SOURCES,
+    RAG_RETRIEVAL_OBSERVABILITY,
+    RAG_RETRIEVAL_LOG_TOP_FILES,
+    RAG_RETRIEVAL_LOG_TOP_CHUNKS,
+)
 from core.utils.path_guard import ensure_writable_dir
 from api.utils.owner_scope import resolve_default_owner_id
 
@@ -869,7 +875,8 @@ async def messages(
     max_context_tokens = int(os.getenv("CHATBOT_MAX_CONTEXT_TOKENS", "8192"))
     threshold_fraction = float(os.getenv("CHATBOT_MAX_CONTEXT_FRACTION", "0.9"))
     context_turns = int(os.getenv("CHATBOT_CONTEXT_TURNS", "5"))
-    max_sources = int(os.getenv("CHATBOT_TOP_SOURCES", "5"))
+    max_sources = int(os.getenv("CHATBOT_TOP_SOURCES", "5"))  # UI sources
+    llm_max_sources = int(CHATBOT_LLM_TOP_SOURCES or max_sources)
 
     owner_id = resolve_default_owner_id(current_user)
     lock = await _get_conversation_lock(_conversation_key(browser_user_id, conversation_uuid))
@@ -934,11 +941,25 @@ async def messages(
             needs_subgraph = True
             retrieval_query = payload.content.strip()
 
+            history = _normalize_history(payload.messages, turns=context_turns)
+            # Build a compact "role: content" history string for history-aware query rewrite.
+            history_text_lines: list[str] = []
+            for msg in history or []:
+                role = str(msg.get("role") or "").strip()
+                content = str(msg.get("content") or "").strip()
+                if role not in ("user", "assistant") or not content:
+                    continue
+                history_text_lines.append(f"{role}: {content}")
+            # If the last user message equals the current query, drop it to avoid redundancy.
+            if history_text_lines and history_text_lines[-1] == f"user: {retrieval_query}":
+                history_text_lines.pop()
+            history_text = "\n".join(history_text_lines) if history_text_lines else None
             def _prepare():
                 return rag_inference_handler._build_messages_and_context(
                     query=retrieval_query,
                     owner_id=str(owner_id),
                     return_subgraph=needs_subgraph,
+                    history_text=history_text,
                 )
 
             _, chunks, subgraph_data, subgraph_info = await anyio.to_thread.run_sync(_prepare)
@@ -954,25 +975,61 @@ async def messages(
                 chunks or [],
                 subgraph_data=subgraph_data,
                 subgraph_info=subgraph_info,
-                max_chunks=min(max_sources, CHAT_TOP_CHUNKS),
+                # For chatbot answer generation, allow passing more Sources to the LLM than the UI shows.
+                # This does not change the frontend payload; it only affects the LLM context.
+                max_chunks=llm_max_sources,
                 graph_store=None,
             )
             evidence_chunks = evidence.get("chunks") or []
 
-            sources_for_frontend = await anyio.to_thread.run_sync(
+            sources_for_llm = await anyio.to_thread.run_sync(
                 _build_sources_for_frontend,
                 evidence_chunks,
-                min(max_sources, CHAT_TOP_CHUNKS),
+                llm_max_sources,
             )
+            sources_for_frontend = sources_for_llm[: min(max_sources, len(sources_for_llm))]
             source_messages = _build_source_messages_v2(sources_for_frontend)
-            history = _normalize_history(payload.messages, turns=context_turns)
+            # Use the same normalized history for the answer generation window.
 
             llm_messages = _build_llm_messages(
                 {"role": "system", "content": CHATBOT_SYSTEM_PROMPT_V2},
-                source_messages,
+                _build_source_messages_v2(sources_for_llm),
                 history,
                 payload.content.strip(),
             )
+
+            if RAG_RETRIEVAL_OBSERVABILITY:
+                from collections import Counter
+
+                def _file_id(meta: Any) -> str | None:
+                    if not isinstance(meta, dict):
+                        return None
+                    for key in ("source_file_id", "sourceFileId", "file_id", "fileId"):
+                        token = str(meta.get(key) or "").strip()
+                        if token:
+                            return token
+                    return None
+
+                def _dist(serialized_chunks: list[dict[str, Any]], *, limit: int) -> list[tuple[str, int]]:
+                    ctr: Counter[str] = Counter()
+                    for entry in serialized_chunks:
+                        fid = _file_id(entry.get("metadata") or {})
+                        if fid:
+                            ctr[fid] += 1
+                    return ctr.most_common(max(int(limit), 0))
+
+                logger.info(
+                    "chatbot.retrieval_observe request_id=%s conversation_id=%s query=%r history_chars=%s "
+                    "retrieved=%d evidence_llm=%d evidence_ui=%d top_files_llm=%s",
+                    request_id,
+                    str(conversation_uuid),
+                    retrieval_query,
+                    len(history_text or "") if history_text else 0,
+                    len(chunks or []),
+                    len(sources_for_llm or []),
+                    len(sources_for_frontend or []),
+                    _dist(list(evidence_chunks or []), limit=RAG_RETRIEVAL_LOG_TOP_FILES),
+                )
 
             try:
                 _ensure_context_within_limit(

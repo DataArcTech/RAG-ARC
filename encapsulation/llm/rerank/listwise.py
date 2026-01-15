@@ -194,6 +194,33 @@ class ListwiseRerankLLM(RerankLLMBase):
             # Parse ranking output
             ranked_indices = self._parse_ranking_output(output_str, len(chunks), top_k)
 
+            # Guarantee `top_k` unique indices for downstream coverage.
+            # Some LLMs may return fewer than TOPK indices even when asked; fill the remainder
+            # with the original order (excluding already chosen) to keep behavior stable and debuggable.
+            if len(ranked_indices) < top_k:
+                seen: set[int] = set()
+                deduped: list[int] = []
+                for idx in ranked_indices:
+                    if idx in seen:
+                        continue
+                    seen.add(idx)
+                    deduped.append(idx)
+                for idx in range(len(chunks)):
+                    if len(deduped) >= top_k:
+                        break
+                    if idx in seen:
+                        continue
+                    seen.add(idx)
+                    deduped.append(idx)
+                if len(deduped) != len(ranked_indices):
+                    logger.info(
+                        "Listwise rerank returned %d/%d indices from LLM; filled to %d with fallback order",
+                        len(ranked_indices),
+                        top_k,
+                        len(deduped),
+                    )
+                ranked_indices = deduped[:top_k]
+
             # Assign scores based on ranking position (higher rank = higher score)
             # Score = top_k - position (so first ranked gets highest score)
             ranked_chunks = [

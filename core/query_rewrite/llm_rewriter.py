@@ -1,7 +1,10 @@
 from typing import Dict, Any, TYPE_CHECKING
 import re
 from .base import AbstractQueryRewriter
-from core.prompts.query_rewrite_prompt import QUERY_REWRITE_USER_PROMPT
+from core.prompts.query_rewrite_prompt import (
+    QUERY_REWRITE_USER_PROMPT,
+    QUERY_REWRITE_USER_PROMPT_WITH_HISTORY,
+)
 from config.benchmark_mode import benchmark_mode_enabled
 
 import logging
@@ -48,6 +51,8 @@ class LLMQueryRewriter(AbstractQueryRewriter):
     def rewrite_query(
         self,
         query: str,
+        *,
+        history_text: str | None = None,
         **kwargs: Any
     ) -> str:
         """
@@ -92,10 +97,24 @@ class LLMQueryRewriter(AbstractQueryRewriter):
         instruction = self.config.instruction
         logger.info("Using instruction from config")
 
+        use_history = bool(getattr(self.config, "use_history_for_rewrite", False))
+        max_history_chars = int(getattr(self.config, "rewrite_history_max_chars", 0) or 0)
+        history_snippet = None
+        if use_history and history_text and max_history_chars > 0:
+            # Keep only the tail to bias toward recent turns (history is usually chronological).
+            history_snippet = str(history_text)[-max_history_chars:]
+
         # Prepare messages for LLM
         messages = [
             {"role": "system", "content": instruction},
-            {"role": "user", "content": QUERY_REWRITE_USER_PROMPT.format(query=query)}
+            {
+                "role": "user",
+                "content": (
+                    QUERY_REWRITE_USER_PROMPT_WITH_HISTORY.format(query=query, history=history_snippet)
+                    if history_snippet
+                    else QUERY_REWRITE_USER_PROMPT.format(query=query)
+                ),
+            },
         ]
 
         try:
