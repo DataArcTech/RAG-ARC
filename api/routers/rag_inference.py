@@ -287,7 +287,7 @@ async def stream_chat_sse(
     logger.info("SSE stream_chat request for session_id %s by user %s", session_id, current_user.id)
     
     # 检查是否有正在进行的任务
-    from api.routers.rag_inference_modules.stream_chat.task_registry import get_chat_task_registry
+    from api.routers.rag_inference_modules.stream_chat.task.task_registry import get_chat_task_registry
     registry = get_chat_task_registry()
     existing_task = await registry.get_by_session(session_id)
     
@@ -334,113 +334,42 @@ async def _resume_task_sse(
 ):
     """Resume a task by replaying cached events and continuing stream."""
     from fastapi.responses import StreamingResponse
-    from api.routers.rag_inference_modules.stream_chat.task_registry import get_chat_task_registry
-    from api.sse import sse_json_wrapped, sse_done
-    from api.routers.rag_inference_handlers import get_message_handler
-    from framework.thread_pool import get_thread_pool
-    from encapsulation.data_model.orm_models import ChatMessageStatus
-    import asyncio
-    
-    registry = get_chat_task_registry()
+    from api.routers.rag_inference_modules.stream_chat.task.task_resume import (
+        _yield_task_resumed_event,
+        _yield_completed_task_response,
+        _replay_cached_events,
+        _poll_task_updates,
+        _yield_task_completion_event
+    )
     
     async def event_generator():
         # 1. 发送任务恢复通知
-        yield sse_json_wrapped({
-            "type": "task_resumed",
-            "task_id": task_info.task_id,
-            "response_length": task_info.response_length,
-            "events_count": task_info.events_count
-        }, request_id)
+        async for event in _yield_task_resumed_event(task_info, request_id):
+            yield event
         
         # 2. 如果任务已完成，直接返回最终结果
         if task_info.done:
-            if task_info.error:
-                yield sse_json_wrapped(
-                    {"error": {"message": task_info.error}},
-                    request_id=request_id,
-                    code=500,
-                    message="error"
-                )
-            else:
-                # 从数据库加载完整的 assistant message
-                if task_info.assistant_message_id:
-                    assistant_msg = await get_thread_pool().run_blocking(
-                        get_message_handler().get_message,
-                        task_info.assistant_message_id
-                    )
-                    if assistant_msg:
-                        # 发送完整的响应（简化版，实际应该格式化）
-                        yield sse_json_wrapped({
-                            "type": "complete_response",
-                            "content": assistant_msg.content.get("content", "") if isinstance(assistant_msg.content, dict) else ""
-                        }, request_id)
-            yield sse_done()
+            async for event in _yield_completed_task_response(task_info, request_id):
+                yield event
             return
         
-        # 3. 如果使用 Redis 存储了完整事件，优先从 Redis 回放
-        redis_events = await registry.get_redis_events(task_info.task_id)
-        if redis_events:
-            logger.info("Replaying %d events from Redis for task %s", len(redis_events), task_info.task_id)
-            for event in redis_events:
-                yield sse_json_wrapped(event["data"], request_id)
-        elif task_info.response_text:
-            # 没有 Redis 事件，发送响应摘要
-            yield sse_json_wrapped({
-                "type": "response_summary",
-                "text": task_info.response_text,
-                "length": task_info.response_length
-            }, request_id)
+        # 3. 回放已缓存的事件
+        async for event in _replay_cached_events(task_info, request_id):
+            yield event
         
         # 4. 如果任务已完成，直接返回
         if task_info.done:
-            if task_info.error:
-                yield sse_json_wrapped(
-                    {"error": {"message": task_info.error}},
-                    request_id=request_id,
-                    code=500,
-                    message="error"
-                )
-            else:
-                yield sse_done()
+            async for event in _yield_task_completion_event(task_info, request_id):
+                yield event
             return
         
         # 5. 任务还在进行中，继续监听新事件（轮询）
-        last_length = task_info.response_length
-        while not task_info.done and not task_info.cancelled:
-            await asyncio.sleep(0.5)
-            
-            # 重新获取任务信息
-            updated_info = await registry.get(task_info.task_id)
-            if not updated_info:
-                break
-            
-            # 检查是否有新响应内容
-            if updated_info.response_length > last_length:
-                new_text = updated_info.response_text[last_length:updated_info.response_length]
-                yield sse_json_wrapped({
-                    "type": "text_delta",
-                    "content": new_text
-                }, request_id)
-                last_length = updated_info.response_length
-            
-            # 检查是否有新的 Redis 事件
-            if registry._use_redis_events:
-                new_events = await registry.get_redis_events(task_info.task_id)
-                if len(new_events) > task_info.events_count:
-                    for event in new_events[task_info.events_count:]:
-                        yield sse_json_wrapped(event["data"], request_id)
-                    task_info.events_count = len(new_events)
+        async for event in _poll_task_updates(task_info, request_id):
+            yield event
         
-        # 任务完成
-        if task_info.error:
-            yield sse_json_wrapped(
-                {"error": {"message": task_info.error}},
-                request_id=request_id,
-                code=500,
-                message="error"
-            )
-        else:
-            yield sse_done()
+        # 6. 任务完成
+        async for event in _yield_task_completion_event(task_info, request_id):
+            yield event
     
     headers = {
         "Cache-Control": "no-cache",
@@ -664,7 +593,7 @@ async def cancel_chat_task(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     
     # 获取当前任务
-    from api.routers.rag_inference_modules.stream_chat.task_registry import get_chat_task_registry
+    from api.routers.rag_inference_modules.stream_chat.task.task_registry import get_chat_task_registry
     from encapsulation.data_model.orm_models import ChatMessageStatus
     
     registry = get_chat_task_registry()
@@ -711,7 +640,7 @@ async def get_chat_task_status(
     if current_user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
     
-    from api.routers.rag_inference_modules.stream_chat.task_registry import get_chat_task_registry
+    from api.routers.rag_inference_modules.stream_chat.task.task_registry import get_chat_task_registry
     
     registry = get_chat_task_registry()
     task_info = await registry.get_by_session(session_id)

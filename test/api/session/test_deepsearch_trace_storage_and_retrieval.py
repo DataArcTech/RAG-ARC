@@ -15,7 +15,7 @@ import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
 from core.deepsearch.trace import TraceEvent
-from api.routers.rag_inference_modules.stream_chat.deepsearch_handler import (
+from api.routers.rag_inference_modules.stream_chat.deepsearch.deepsearch_handler import (
     _save_trace_events_to_file,
     load_trace_events_from_file,
 )

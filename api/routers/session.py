@@ -13,7 +13,7 @@ from application.account.chat_session import ChatSessionManager
 from application.account.chat_message import ChatMessageManager
 from application.account.user import Account
 from framework.thread_pool import get_thread_pool
-from api.routers.rag_inference_modules.stream_chat.deepsearch_handler import load_trace_events_from_file
+from api.routers.rag_inference_modules.stream_chat.deepsearch.deepsearch_handler import load_trace_events_from_file
 
 
 class MessageContent(BaseModel):
