@@ -349,7 +349,25 @@ class FaissVectorDB(VectorDB):
             index_text = metadata.get("index_text")
             if not isinstance(index_text, str) or not index_text.strip():
                 index_text = chunk.content
-            texts_to_embed.append(index_text)
+            # Optional: inject file/path context into the embedding input to disambiguate
+            # similar products across companies (configured via FaissVectorDBConfig).
+            try:
+                from encapsulation.database.utils.embedding_text import build_embedding_text, build_prefix_keys
+
+                cfg = getattr(self, "config", None)
+                prefix_keys = build_prefix_keys(getattr(cfg, "embedding_text_prefix_keys", None))
+                filename_root = getattr(cfg, "embedding_text_filename_root", None)
+                sep = getattr(cfg, "embedding_text_separator", "\n")
+                embed_text = build_embedding_text(
+                    base_text=index_text,
+                    metadata=metadata,
+                    prefix_keys=prefix_keys,
+                    filename_root=filename_root,
+                    separator=sep,
+                )
+                texts_to_embed.append(embed_text or index_text)
+            except Exception:
+                texts_to_embed.append(index_text)
             rows_to_embed.append(idx)
 
         if texts_to_embed:

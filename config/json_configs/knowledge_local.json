@@ -128,7 +128,10 @@
                     "synonymy_edge_topk": 100,
                     "synonymy_edge_sim_threshold": 0.8,
                     "use_float16_embeddings": true,
-                    "normalize_chunk_embeddings": true
+                    "normalize_chunk_embeddings": true,
+                    "chunk_embedding_text_prefix_keys": ["filename"],
+                    "chunk_embedding_filename_root": "RAG-ARC",
+                    "chunk_embedding_text_separator": "\n"
                 }
             },
             {
@@ -139,6 +142,9 @@
                     "metric": "cosine",
                     "index_type": "flat",
                     "normalize_L2": true,
+                    "embedding_text_prefix_keys": ["filename"],
+                    "embedding_text_filename_root": "RAG-ARC",
+                    "embedding_text_separator": "\n",
                     "embedding_config": {
                         "type": "qwen_embedding",
                         "model_name": "${EMBEDDING_MODEL_NAME}",
@@ -153,7 +159,10 @@
                 "type": "bm25_indexer",
                 "index_config": {
                     "type": "bm25_builder",
-                    "index_path": "${BM25_INDEX_PATH}"
+                    "index_path": "${BM25_INDEX_PATH}",
+                    "token_text_prefix_keys": ["filename"],
+                    "token_text_filename_root": "RAG-ARC",
+                    "token_text_separator": "\n"
                 }
             }
         ]

@@ -18,6 +18,9 @@
                     "metric": "cosine",
                     "index_type": "flat",
                     "normalize_L2": true,
+                    "embedding_text_prefix_keys": ["filename"],
+                    "embedding_text_filename_root": "RAG-ARC",
+                    "embedding_text_separator": "\n",
                     "embedding_config": {
                         "type": "openai_embedding",
                         "model_name": "${OPENAI_EMBEDDING_MODEL}",
@@ -25,13 +28,16 @@
                     }
                 }
             },
-            {
-                "type": "tantivy_bm25",
-                "index_config": {
-                    "type": "bm25_builder",
-                    "index_path": "${BM25_INDEX_PATH}"
-                }
-            },
+  {
+    "type": "tantivy_bm25",
+    "index_config": {
+      "type": "bm25_builder",
+      "index_path": "${BM25_INDEX_PATH}",
+      "token_text_prefix_keys": ["filename"],
+      "token_text_filename_root": "RAG-ARC",
+      "token_text_separator": "\n"
+    }
+  },
             {
                 "type": "pruned_hipporag_neo4j_retrieval",
                 "graph_config": {
@@ -51,7 +57,10 @@
                     "synonymy_edge_topk": 100,
                     "synonymy_edge_sim_threshold": 0.8,
                     "use_float16_embeddings": true,
-                    "normalize_chunk_embeddings": true
+                    "normalize_chunk_embeddings": true,
+                    "chunk_embedding_text_prefix_keys": ["filename"],
+                    "chunk_embedding_filename_root": "RAG-ARC",
+                    "chunk_embedding_text_separator": "\n"
                 },
                 "llm_config": {
                     "type": "openai_chat",
@@ -70,7 +79,7 @@
         "rrf_k": 60,
         "weights": null,
         "search_kwargs": {
-            "k": 30,
+            "k": 10,
             "with_score": true
         }
     },
@@ -101,7 +110,7 @@
         "max_results": 5
     },
     "candidate_selection": {
-        "graph_candidates_k": 30,
+        "graph_candidates_k": 10,
         "web_candidates_k": 5,
         "rerank_keep_k": 10
     }

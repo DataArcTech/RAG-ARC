@@ -1,3 +1,4 @@
+import json
 import os
 import logging
 import re
@@ -305,19 +306,56 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
         # 1. Generate chunk embeddings
         chunk_params: Dict[str, Any] = {}
         if chunk_ids:
-            chunk_query = "MATCH (c:Chunk) WHERE c.chunk_id IN $chunk_ids RETURN c.chunk_id AS chunk_id, c.content AS content"
+            chunk_query = (
+                "MATCH (c:Chunk) WHERE c.chunk_id IN $chunk_ids "
+                "RETURN c.chunk_id AS chunk_id, c.content AS content, c.metadata AS metadata, c.source_file_id AS source_file_id"
+            )
             chunk_params = {"chunk_ids": list(chunk_ids)}
         else:
-            chunk_query = "MATCH (c:Chunk) RETURN c.chunk_id AS chunk_id, c.content AS content"
+            chunk_query = (
+                "MATCH (c:Chunk) "
+                "RETURN c.chunk_id AS chunk_id, c.content AS content, c.metadata AS metadata, c.source_file_id AS source_file_id"
+            )
         chunks_data = self._execute_query(chunk_query, chunk_params or None)
 
         new_chunks = []
         new_chunk_ids = []
         for record in chunks_data:
             chunk_id = record['chunk_id']
-            content = record['content']
+            content = record.get('content')
+            raw_meta = record.get("metadata")
+            source_file_id = record.get("source_file_id")
             if chunk_id not in self.chunk_embeddings:
-                new_chunks.append(content)
+                # Prefer index_text/prompt_text for embedding (same as retrieval),
+                # and optionally prefix file/path context for disambiguation.
+                meta: Dict[str, Any] = {}
+                if raw_meta:
+                    try:
+                        meta = json.loads(raw_meta) if isinstance(raw_meta, str) else dict(raw_meta)
+                    except Exception:
+                        meta = {}
+                if source_file_id and "source_file_id" not in meta:
+                    meta["source_file_id"] = source_file_id
+
+                base_text = meta.get("index_text") or meta.get("prompt_text") or content or ""
+                try:
+                    from encapsulation.database.utils.embedding_text import build_embedding_text, build_prefix_keys
+
+                    cfg = getattr(self, "config", None)
+                    prefix_keys = build_prefix_keys(getattr(cfg, "chunk_embedding_text_prefix_keys", None))
+                    filename_root = getattr(cfg, "chunk_embedding_filename_root", None)
+                    sep = getattr(cfg, "chunk_embedding_text_separator", "\n")
+                    embed_text = build_embedding_text(
+                        base_text=str(base_text),
+                        metadata=meta,
+                        prefix_keys=prefix_keys,
+                        filename_root=filename_root,
+                        separator=sep,
+                    )
+                except Exception:
+                    embed_text = str(base_text)
+
+                new_chunks.append(embed_text)
                 new_chunk_ids.append(chunk_id)
 
         if new_chunks:

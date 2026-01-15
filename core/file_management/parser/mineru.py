@@ -48,28 +48,28 @@ class MinerUParser(AbstractParser):
         doc_dir = Path(output_dir) / doc_key
         doc_dir.mkdir(parents=True, exist_ok=True)
 
-        # If a previous MinerU run already produced local markdown for this file_id,
+        # Cache reuse: if a previous MinerU run already produced local markdown for this file_id,
         # allow re-indexing to reuse it without calling the remote MinerU service again.
         reuse_cache = bool(kwargs.get("reuse_cache", getattr(self.config, "reuse_cache", False)))
-        if reuse_cache:
-            expected_md = doc_dir / f"{base_filename}.md"
-            if expected_md.exists():
-                md_text = expected_md.read_text(encoding="utf-8", errors="ignore")
-                if md_text.strip():
-                    logger.info("Reusing cached MinerU markdown: %s", expected_md)
-                    return [
-                        {
-                            "md_content_path": str(expected_md),
-                            "text": md_text,
-                            "metadata": {
-                                "source_file_name": filename,
-                                "mineru_cache_reused": True,
-                                "output_dir": str(doc_dir),
-                            },
-                        }
-                    ]
+        md_local_path = doc_dir / f"{base_filename}.md"
+        if reuse_cache and md_local_path.exists():
+            md_text = md_local_path.read_text(encoding="utf-8", errors="ignore")
+            if md_text.strip():
+                logger.info("Reusing cached MinerU markdown: %s", md_local_path)
+                return [
+                    {
+                        "md_content_path": str(md_local_path),
+                        "text": md_text,
+                        "metadata": {
+                            "source_file_name": filename,
+                            "mineru_cache_reused": True,
+                            "output_dir": str(doc_dir),
+                        },
+                    }
+                ]
 
-            # If the filename stem changed between runs, fall back to any markdown file under doc_dir.
+        # If the filename stem changed between runs, fall back to any markdown file under doc_dir.
+        if reuse_cache and not md_local_path.exists():
             md_candidates = sorted(doc_dir.glob("*.md"))
             if md_candidates:
                 candidate = md_candidates[0]

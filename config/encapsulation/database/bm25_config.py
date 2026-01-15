@@ -1,5 +1,5 @@
 import os
-from typing import Literal, Optional, Dict, Any
+from typing import Literal, Optional, Dict, Any, List
 from pydantic import Field, field_validator
 from framework.config import AbstractConfig
 from encapsulation.database.bm25_indexer import BM25IndexBuilder
@@ -25,6 +25,25 @@ class BM25BuilderConfig(AbstractConfig):
     progress_interval: int = Field(default=500, description="progress report interval")
     enable_gc: bool = Field(default=True, description="enable garbage collection")
     queue_maxsize: int = Field(default=1000, description="queue max size")
+
+    token_text_prefix_keys: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional metadata keys (from stored chunk metadata JSON) to prefix to the BM25 token text, "
+            "e.g. ['filename']. This helps disambiguate similar products across companies by injecting file context."
+        ),
+    )
+    token_text_filename_root: str | None = Field(
+        default=None,
+        description=(
+            "If set and `filename` is used as a token text prefix key, trim the filename/path to start "
+            "from this token (e.g. 'RAG-ARC')."
+        ),
+    )
+    token_text_separator: str = Field(
+        default="\n",
+        description="Separator used when prefixing chunk metadata fields to the BM25 token text.",
+    )
 
     search_kwargs: Dict[str, Any] = Field(
         default={

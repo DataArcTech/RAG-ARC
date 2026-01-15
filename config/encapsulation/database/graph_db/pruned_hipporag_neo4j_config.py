@@ -164,6 +164,25 @@ class PrunedHippoRAGNeo4jConfig(AbstractConfig):
         description="Normalize chunk embeddings to unit vectors for cosine similarity"
     )
 
+    chunk_embedding_text_prefix_keys: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional metadata keys (from stored chunk metadata JSON) to prefix to the embedded chunk text, "
+            "e.g. ['filename']. This helps disambiguate similar products across companies by injecting file context."
+        ),
+    )
+    chunk_embedding_filename_root: str | None = Field(
+        default=None,
+        description=(
+            "If set and `filename` is used as a chunk embedding prefix key, trim the filename/path to start "
+            "from this token (e.g. 'RAG-ARC')."
+        ),
+    )
+    chunk_embedding_text_separator: str = Field(
+        default="\n",
+        description="Separator used when prefixing chunk metadata fields to the chunk embedding text.",
+    )
+
     shared_instance: bool = Field(
         default=True,
         description=(

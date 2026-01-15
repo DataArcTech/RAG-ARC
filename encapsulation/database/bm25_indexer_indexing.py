@@ -208,6 +208,24 @@ class _BM25IndexBuilderIndexingMixin:
                 token_source = chunk.content or ""
                 if isinstance(index_text, str) and index_text.strip():
                     token_source = index_text
+                # Optional: inject file/path context into BM25 token text to disambiguate
+                # similar products across companies (configured via BM25BuilderConfig).
+                try:
+                    from encapsulation.database.utils.embedding_text import build_embedding_text, build_prefix_keys
+
+                    cfg = getattr(self, "config", None)
+                    prefix_keys = build_prefix_keys(getattr(cfg, "token_text_prefix_keys", None))
+                    filename_root = getattr(cfg, "token_text_filename_root", None)
+                    sep = getattr(cfg, "token_text_separator", "\n")
+                    token_source = build_embedding_text(
+                        base_text=str(token_source),
+                        metadata=metadata,
+                        prefix_keys=prefix_keys,
+                        filename_root=filename_root,
+                        separator=sep,
+                    ) or token_source
+                except Exception:
+                    pass
                 content_tokens = self.tokenizer_manager.get_current_tokenizer()(token_source)
                 chunk_id = str(chunk.id) if chunk.id else str(uuid.uuid4())
 
