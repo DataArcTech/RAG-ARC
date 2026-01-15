@@ -502,6 +502,104 @@ async def trigger_indexing(
         )
 
 
+@router.post(
+    "/retry_indexing",
+    response_model=IndexTriggerResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def retry_indexing(
+    request: IndexTriggerRequest,
+    user: Annotated[User | None, Depends(get_current_user)],
+):
+    """
+    Retry indexing for failed files.
+
+    This endpoint is specifically designed for retrying failed file indexing.
+    It accepts a single file_id or a list of file_ids and triggers re-indexing.
+
+    Args:
+        request: IndexTriggerRequest containing list of file IDs to retry
+        user: Current authenticated user
+
+    Returns:
+        IndexTriggerResponse with retry results
+    """
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required"
+        )
+
+    if not request.file_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="file_ids list cannot be empty"
+        )
+
+    try:
+        # Use the existing trigger_indexing method which already supports FAILED files
+        result = await get_knowledge_handler().trigger_indexing(request.file_ids, user.id)
+        
+        return IndexTriggerResponse(
+            message=result
+        )
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions (404, 403)
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retry indexing: {str(e)}",
+        )
+
+
+@router.post(
+    "/{file_id}/retry_indexing",
+    response_model=IndexTriggerResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def retry_indexing_single(
+    file_id: str,
+    user: Annotated[User | None, Depends(get_current_user)],
+):
+    """
+    Retry indexing for a single failed file.
+
+    This is a convenience endpoint for retrying a single file by file_id.
+    It's equivalent to POST /retry_indexing with a single file_id in the list.
+
+    Args:
+        file_id: The file ID to retry indexing
+        user: Current authenticated user
+
+    Returns:
+        IndexTriggerResponse with retry results
+    """
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required"
+        )
+
+    try:
+        # Use the existing trigger_indexing method which already supports FAILED files
+        result = await get_knowledge_handler().trigger_indexing([file_id], user.id)
+        
+        return IndexTriggerResponse(
+            message=result
+        )
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions (404, 403)
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retry indexing: {str(e)}",
+        )
+
+
 @router.post("/graph/export_async", status_code=status.HTTP_202_ACCEPTED)
 async def export_knowledge_graph_async(
     request: GraphExportRequest,
