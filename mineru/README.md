@@ -65,6 +65,8 @@ python mineru/mineru_main.py server \
   --caption-mode content_list_then_llm
 ```
 
+Tip: use `--caption-max-images` to cap how many images are sent to the LLM for captioning; set it to `0` (or any negative value) to remove the limit.
+
 Health check:
 
 ```bash
@@ -172,7 +174,7 @@ Key options:
 - Storage: `--output-dir`, `--temp-dir`, `--modelscope-cache-dir`, `--hf-home`, `--mineru-home`
 - MinerU defaults: `--backend`, `--parse-method`, `--lang`, `--no-formula`, `--no-table`, `--model-source`, `--device`
 - vLLM knobs (vLLM backends only): `--vllm-gpu-mem-util`, `--vllm-enforce-eager`, `--vllm-max-model-len`, `--vllm-swap-space-gb`, `--vllm-cpu-offload-gb`
-- Captioning: `--caption-mode`, `--chat-api-base-url`, `--chat-api-key`, `--chat-api-key-file`, `--chat-model`, `--caption-context`, `--caption-context-file`, `--up`, `--down`
+- Captioning: `--caption-mode`, `--caption-max-images`, `--chat-api-base-url`, `--chat-api-key`, `--chat-api-key-file`, `--chat-model`, `--caption-context`, `--caption-context-file`, `--up`, `--down`
 
 ### Client CLI (simple downloader)
 

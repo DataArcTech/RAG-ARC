@@ -619,7 +619,7 @@ class GraphLoopRuntimeMixin:
         )
         records: List[ReasoningStepRecord] = []
         summary_rows: List[Dict[str, Any]] = []
-        for res in results:
+        for idx, res in enumerate(results, start=1):
             if isinstance(res, Exception):
                 records.append(
                     ReasoningStepRecord(
@@ -630,15 +630,33 @@ class GraphLoopRuntimeMixin:
                         diagnostics={"error": str(res), "reason": "think_tool_call"},
                     )
                 )
-                summary_rows.append({"status": "failed", "error": str(res)})
+                raw_call = proposed[idx - 1] if idx - 1 < len(proposed) else {}
+                summary_rows.append(
+                    {
+                        "status": "failed",
+                        "error": str(res),
+                        "tool_name": raw_call.get("tool_name") or raw_call.get("tool"),
+                        "tool_args": raw_call.get("tool_args") if isinstance(raw_call.get("tool_args"), dict) else {},
+                    }
+                )
             else:
                 records.append(res)
+                raw_call = proposed[idx - 1] if idx - 1 < len(proposed) else {}
+                tool_args = raw_call.get("tool_args") if isinstance(raw_call.get("tool_args"), dict) else {}
+                tool_name = raw_call.get("tool_name") or raw_call.get("tool")
+                output_summary = str(res.output_summary or "").strip()
+                if len(output_summary) > 400:
+                    output_summary = output_summary[:399] + "…"
                 summary_rows.append(
                     {
                         "status": res.status,
                         "step_id": res.step_id,
                         "produced_evidence_count": len(res.produced_evidence_ids or []),
-                        "tool": (res.tool_logs[-1].tool_name if res.tool_logs else None),
+                        "tool": (res.tool_logs[-1].tool_name if res.tool_logs else tool_name),
+                        "tool_name": tool_name,
+                        "tool_args": tool_args,
+                        "output_summary": output_summary or None,
+                        "failure_reason": res.diagnostics.get("reason") if isinstance(res.diagnostics, dict) else None,
                     }
                 )
         return records, {"proposed": len(proposed), "results": summary_rows}

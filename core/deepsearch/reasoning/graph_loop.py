@@ -141,7 +141,9 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                 if outcome.think_notes:
                     think_notes.extend(outcome.think_notes)
 
-                if outcome.reasoning.status == "done" and not outcome.pending_external:
+                # Treat failed internal steps as "completed" for cadence purposes so the think loop
+                # can react (retry/alternate tool) instead of getting stuck after a failure.
+                if outcome.reasoning.status in {"done", "failed"} and not outcome.pending_external:
                     completed_internal_steps += 1
 
                 coverage_metrics = self._coverage_snapshot(
@@ -247,6 +249,7 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             "tool_name": str(_get(think, "tool_name") or "").strip(),
             "cadence": int(_get(think, "every_n_steps") or 0),
             "min_coverage": float(_get(think, "min_coverage")),
+            "always_run": bool(_get(think, "always_run") or False),
             "enable_tool_calls": bool(_get(think, "enable_tool_calls")),
             "max_tool_calls": int(_get(think, "max_tool_calls")),
             "tool_call_concurrency": int(_get(think, "tool_call_concurrency")),
@@ -640,6 +643,8 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
         cadence = self._think_config["cadence"]
         if cadence <= 0 or completed_steps <= 0 or (completed_steps % cadence) != 0:
             return False
+        if bool(self._think_config.get("always_run")):
+            return True
         coverage_ratio = coverage_metrics.get("coverage_ratio") or 0.0
         return coverage_ratio < self._think_config["min_coverage"]
 

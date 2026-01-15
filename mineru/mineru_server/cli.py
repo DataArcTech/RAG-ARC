@@ -76,7 +76,12 @@ def parse_args(argv: Optional[List[str]]) -> argparse.Namespace:
     s.add_argument("--chat-api-key-file", default=None)
     s.add_argument("--chat-model", default=None)
     s.add_argument("--chat-timeout-s", type=int, default=60)
-    s.add_argument("--caption-max-images", type=int, default=32)
+    s.add_argument(
+        "--caption-max-images",
+        type=int,
+        default=32,
+        help="Max images to caption via LLM; <=0 means no limit.",
+    )
     s.add_argument("--caption-context", default=None, help="Fixed context prepended to caption prompt.")
     s.add_argument("--caption-context-file", default=None, help="Read caption context from a file.")
     s.add_argument("--up", type=int, default=500, help="Context tokens above image reference.")

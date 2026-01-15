@@ -83,6 +83,7 @@ class ServerConfig:
     chat_api_key_file: Optional[str] = None
     chat_model: str = "gemini-2.5-flash"
     chat_timeout_s: int = 60
+    # Safety knob for LLM captioning. If <= 0, treat it as "no limit".
     caption_max_images: int = 32
     caption_context: str = ""
     caption_context_file: Optional[str] = None

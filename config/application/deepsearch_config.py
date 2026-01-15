@@ -117,6 +117,10 @@ class GraphReasoningThinkConfig(BaseModel):
     tool_name: str = Field("graph.think", description="Tool used for think checkpoints.")
     every_n_steps: int = Field(0, description="Trigger periodic think after N completed graph steps (0 disables).")
     min_coverage: float = Field(0.75, description="Only run think when coverage ratio falls below this threshold.")
+    always_run: bool = Field(
+        False,
+        description="When true, run periodic think on cadence regardless of the coverage ratio.",
+    )
     enable_tool_calls: bool = Field(
         False,
         description="Allow think checkpoints to propose additional tool calls (executed immediately by the reasoning loop).",

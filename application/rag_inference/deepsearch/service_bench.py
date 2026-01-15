@@ -32,9 +32,6 @@ def _filter_bench_plan_steps(steps: Sequence[Dict[str, Any]]) -> list[Dict[str, 
             continue
         if bool(step.get("requires_external", False)):
             continue
-        tool_name = str(step.get("tool") or "").strip().lower()
-        if tool_name in {"graph.context_rewriter"}:
-            continue
         filtered.append(step)
     return filtered
 

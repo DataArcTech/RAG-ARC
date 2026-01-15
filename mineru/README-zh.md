@@ -66,6 +66,8 @@ python mineru/mineru_main.py server \
   --caption-mode content_list_then_llm
 ```
 
+提示：可用 `--caption-max-images` 限制送入 LLM 做图注的图片数量；设置为 `0`（或任意负数）表示解除限制。
+
 健康检查：
 
 ```bash
@@ -173,7 +175,7 @@ python mineru/mineru_main.py server --help
 - 存储：`--output-dir`, `--temp-dir`, `--modelscope-cache-dir`, `--hf-home`, `--mineru-home`
 - MinerU 默认参数：`--backend`, `--parse-method`, `--lang`, `--no-formula`, `--no-table`, `--model-source`, `--device`
 - vLLM（仅 vLLM backend 生效）：`--vllm-gpu-mem-util`, `--vllm-enforce-eager`, `--vllm-max-model-len`, `--vllm-swap-space-gb`, `--vllm-cpu-offload-gb`
-- 图注：`--caption-mode`, `--chat-api-base-url`, `--chat-api-key`, `--chat-api-key-file`, `--chat-model`, `--caption-context`, `--caption-context-file`, `--up`, `--down`
+- 图注：`--caption-mode`, `--caption-max-images`, `--chat-api-base-url`, `--chat-api-key`, `--chat-api-key-file`, `--chat-model`, `--caption-context`, `--caption-context-file`, `--up`, `--down`
 
 ### Client CLI
 
