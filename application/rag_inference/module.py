@@ -61,13 +61,21 @@ class RAGInference(AbstractModule):
         try:
             web_cfg = getattr(self.config, "web_search", None)
             if web_cfg is not None and bool(getattr(web_cfg, "enabled", False)):
-                self._tavily_client = TavilySearchClient(
-                    api_key=getattr(web_cfg, "api_key", None),
-                    endpoint_url=str(getattr(web_cfg, "endpoint_url", "") or "").strip(),
-                    timeout_seconds=float(getattr(web_cfg, "timeout_seconds")),
-                    search_depth=str(getattr(web_cfg, "search_depth") or "advanced"),
-                    max_results=int(getattr(web_cfg, "max_results")),
-                )
+                api_key = getattr(web_cfg, "api_key", None)
+                if not api_key or not str(api_key).strip():
+                    logger.warning("Tavily API key is empty or not configured (web search disabled)")
+                    self._tavily_client = None
+                else:
+                    self._tavily_client = TavilySearchClient(
+                        api_key=api_key,
+                        endpoint_url=str(getattr(web_cfg, "endpoint_url", "") or "").strip(),
+                        timeout_seconds=float(getattr(web_cfg, "timeout_seconds")),
+                        search_depth=str(getattr(web_cfg, "search_depth") or "advanced"),
+                        max_results=int(getattr(web_cfg, "max_results")),
+                    )
+                    logger.info("Tavily client initialized successfully (web search enabled)")
+            else:
+                logger.info("Web search disabled in config (web_search.enabled=False or web_search config missing)")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to initialize Tavily client (web search disabled): %s", exc)
             self._tavily_client = None
@@ -380,17 +388,32 @@ class RAGInference(AbstractModule):
 
         web_cfg = getattr(self.config, "web_search")
         web_enabled = bool(getattr(web_cfg, "enabled"))
+        # Debug logging for web search conditions
+        if enable_web_search:
+            logger.info(f"Web search check: enable_web_search={enable_web_search}, web_enabled={web_enabled}, "
+                       f"_tavily_client={'not None' if self._tavily_client is not None else 'None'}, "
+                       f"web_candidates_k={web_candidates_k}")
         if enable_web_search and web_enabled and self._tavily_client is not None and web_candidates_k > 0:
+            logger.info(f"Starting web search for query: {rewritten_query}")
             self._emit_progress(
                 progress_callback,
                 {"stage": "web_search", "status": "start", "provider": "tavily", "max_results": web_candidates_k},
             )
 
             def _run_web_search() -> list[dict]:
-                results = self._tavily_client.search(query=rewritten_query, max_results=web_candidates_k)
-                return self._tavily_client.to_evidence_chunks(results=results, step_id=web_step_id, query=rewritten_query)
+                try:
+                    logger.info(f"Executing Tavily search for query: {rewritten_query}")
+                    results = self._tavily_client.search(query=rewritten_query, max_results=web_candidates_k)
+                    logger.info(f"Tavily search returned {len(results)} results")
+                    evidence_chunks = self._tavily_client.to_evidence_chunks(results=results, step_id=web_step_id, query=rewritten_query)
+                    logger.info(f"Converted to {len(evidence_chunks)} evidence chunks")
+                    return evidence_chunks
+                except Exception as e:
+                    logger.error(f"Error in web search: {e}", exc_info=True)
+                    raise
 
             web_future = get_thread_pool().executor.submit(_run_web_search)
+            logger.info("Web search future submitted")
 
         visibility = build_owner_visibility(
             primary_owner_id=owner_id,
@@ -456,12 +479,29 @@ class RAGInference(AbstractModule):
         chunks = self._dedupe_chunks_by_id(chunks)
 
         if web_future is not None:
+            logger.info("Waiting for web search results...")
             web_start = time.perf_counter()
             web_chunks: list[Chunk] = []
             try:
                 timeout_seconds = float(getattr(web_cfg, "timeout_seconds"))
                 timeout_grace_seconds = float(getattr(web_cfg, "timeout_grace_seconds"))
-                evidences = web_future.result(timeout=timeout_seconds + timeout_grace_seconds)
+                total_timeout = timeout_seconds + timeout_grace_seconds
+                logger.info(f"Web search timeout: {total_timeout}s")
+                # Use done() to check if completed, avoid blocking indefinitely
+                if web_future.done():
+                    evidences = web_future.result()
+                    logger.info(f"Web search already completed, got {len(evidences) if evidences else 0} evidences")
+                else:
+                    # Wait with timeout, but don't block forever
+                    try:
+                        evidences = web_future.result(timeout=total_timeout)
+                        logger.info(f"Web search completed within timeout, got {len(evidences) if evidences else 0} evidences")
+                    except TimeoutError:
+                        logger.warning(f"Web search timed out after {total_timeout}s, continuing without web results")
+                        evidences = []
+                    except Exception as timeout_exc:
+                        logger.warning(f"Web search future error: {timeout_exc}, continuing without web results")
+                        evidences = []
                 for evidence in evidences or []:
                     if not isinstance(evidence, dict):
                         continue
@@ -496,6 +536,7 @@ class RAGInference(AbstractModule):
                     },
                 )
             except Exception as exc:  # noqa: BLE001
+                logger.error(f"Web search failed: {exc}", exc_info=True)
                 self._emit_progress(
                     progress_callback,
                     {
@@ -506,7 +547,10 @@ class RAGInference(AbstractModule):
                     },
                 )
             if web_chunks:
+                logger.info(f"Adding {len(web_chunks)} web chunks to final chunks list")
                 chunks.extend(web_chunks)
+            else:
+                logger.info("No web chunks to add")
 
         chunks = self._dedupe_chunks_by_id(chunks)
         subgraph_info = None
@@ -515,12 +559,40 @@ class RAGInference(AbstractModule):
                 subgraph_info = subgraph_infos[0]
             else:
                 subgraph_info = {"_multi_owner": True, "scopes": subgraph_infos}
+        # Track web chunks before reranking to ensure they're included
+        web_chunk_ids = set()
+        if web_future is not None:
+            for chunk in chunks:
+                metadata = getattr(chunk, "metadata", None) or {}
+                source = metadata.get("source", "")
+                if source == "web.tavily" or "tavily" in str(source).lower():
+                    web_chunk_ids.add(getattr(chunk, "id", None))
+        
         self._emit_progress(
             progress_callback,
             {"stage": "rerank", "status": "start", "chunks_in": len(chunks)},
         )
         rerank_start = time.perf_counter()
-        chunks = self.reranker.rerank(rewritten_query, chunks, top_k=rerank_keep_k)
+        reranked_chunks = self.reranker.rerank(rewritten_query, chunks, top_k=rerank_keep_k)
+        
+        # Ensure web chunks are included in final results
+        if web_chunk_ids:
+            reranked_chunk_ids = {getattr(chunk, "id", None) for chunk in reranked_chunks}
+            missing_web_chunks = []
+            for chunk in chunks:
+                chunk_id = getattr(chunk, "id", None)
+                if chunk_id in web_chunk_ids and chunk_id not in reranked_chunk_ids:
+                    missing_web_chunks.append(chunk)
+            
+            if missing_web_chunks:
+                logger.info(f"Adding {len(missing_web_chunks)} web chunks that were filtered out by reranker")
+                # Add web chunks at the beginning to give them priority
+                reranked_chunks = missing_web_chunks + reranked_chunks
+                # Trim to keep_k if needed
+                if len(reranked_chunks) > rerank_keep_k:
+                    reranked_chunks = reranked_chunks[:rerank_keep_k]
+        
+        chunks = reranked_chunks
         reranker_info = None
         try:
             reranker_info = self.reranker.get_reranker_info()
@@ -565,10 +637,41 @@ class RAGInference(AbstractModule):
         if chunks:
             for i, chunk in enumerate(chunks):
                 metadata = getattr(chunk, "metadata", None) or {}
-                chunk_text = metadata.get("prompt_text") or metadata.get("index_text")
-                if not isinstance(chunk_text, str) or not chunk_text.strip():
-                    chunk_text = chunk.content
                 filename = str(metadata.get("filename") or "").strip() or "source"
+                
+                # Extract chunk text from various sources
+                prompt_text = metadata.get("prompt_text")
+                index_text = metadata.get("index_text")
+                chunk_content = getattr(chunk, "content", None)
+                
+                # Handle different content formats
+                chunk_text = None
+                if prompt_text and isinstance(prompt_text, str) and prompt_text.strip():
+                    chunk_text = prompt_text
+                elif index_text and isinstance(index_text, str) and index_text.strip():
+                    chunk_text = index_text
+                elif chunk_content:
+                    # Handle dict content (e.g., {'text': '', 'metadata': ...})
+                    if isinstance(chunk_content, dict):
+                        chunk_text = chunk_content.get("text") or chunk_content.get("content") or ""
+                        # If still empty, try to extract from metadata
+                        if not chunk_text and isinstance(chunk_content.get("metadata"), dict):
+                            chunk_text = chunk_content["metadata"].get("text") or chunk_content["metadata"].get("content") or ""
+                    elif isinstance(chunk_content, str):
+                        chunk_text = chunk_content
+                    else:
+                        chunk_text = str(chunk_content) if chunk_content else ""
+                
+                # Log and skip empty chunks
+                if not chunk_text or not chunk_text.strip():
+                    logger.warning(
+                        f"Skipping empty chunk: Source key={i+1}, filename={filename}, "
+                        f"prompt_text={'empty' if not prompt_text else f'type={type(prompt_text).__name__}, len={len(str(prompt_text))}'}, "
+                        f"index_text={'empty' if not index_text else f'type={type(index_text).__name__}, len={len(str(index_text))}'}, "
+                        f"chunk.content={'empty' if not chunk_content else f'type={type(chunk_content).__name__}, value={str(chunk_content)[:100]}'}"
+                    )
+                    continue
+                
                 messages.append({"role": "user", "content": f"Source key={i+1} title={filename}\n{chunk_text}"})
             messages.append({"role": "user", "content": f"Based on the above Sources, please answer question: {rewritten_query}"})
         else:
