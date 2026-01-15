@@ -4,7 +4,8 @@
         "type": "llm_query_rewriter",
         "chat_llm_config": {
             "type": "openai_chat",
-            "model_name": "${OPENAI_CHAT_MODEL}"
+            "model_name": "${OPENAI_CHAT_MODEL}",
+            "temperature": 0.0
         }
     },
     "retrieval_config": {

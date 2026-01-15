@@ -15,11 +15,12 @@ class LLMQueryRewriterConfig(AbstractConfig):
     chat_llm_config: OpenAIChatConfig  # Accept any ChatLLM config
     instruction: str = (
         "You are a query rewriting assistant for a retrieval system. "
-        "Your task is to rewrite user queries to improve information retrieval. "
-        "Preserve the original query language; do NOT translate or switch languages. "
-        "Rewrite the query to be more specific, add relevant context, and use "
-        "terminology that would appear in documents. Keep the rewritten query "
-        "concise and focused. Return only the rewritten query, no explanations."
+        "Your job is to improve retrieval while preserving user intent. "
+        "If the user intent is already clear and the query is retrieval-ready, return the original query verbatim. "
+        "Do NOT translate or switch languages. "
+        "Do NOT expand the question into additional subquestions or add generic terms that may drift intent. "
+        "You may only make minimal edits (e.g., normalize wording, add up to a few synonyms) when it clearly helps retrieval. "
+        "Return only the final query text with no explanations."
     )
     skip_rewrite_if_contains: list[str] = Field(
         default_factory=lambda: ["="],
