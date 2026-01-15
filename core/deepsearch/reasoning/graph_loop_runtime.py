@@ -430,8 +430,7 @@ class GraphLoopRuntimeMixin:
 
             coverage_metrics.update(
                 self._coverage_snapshot(
-                    evidence_count=len(evidences),
-                    source_labels=[chunk.source for chunk in evidences],
+                    evidences=evidences,
                     completed_steps=completed_steps,
                     total_steps=total_steps,
                 )

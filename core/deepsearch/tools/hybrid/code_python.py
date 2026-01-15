@@ -24,6 +24,7 @@ from config.core.deepsearch.tool_defaults import (
     CODE_PYTHON_TRACEBACK_LIMIT,
 )
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
@@ -451,6 +452,7 @@ class CodePythonTool(GraphTool):
                         ),
                         source=self.descriptor.name,
                         content=evidence_text,
+                        kind=EVIDENCE_KIND_DERIVED,
                         score=None,
                         provenance={
                             "tool_name": self.descriptor.name,

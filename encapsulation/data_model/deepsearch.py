@@ -1,5 +1,5 @@
 """Pydantic models shared across DeepSearch services, API, and CLI layers."""
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -18,6 +18,14 @@ class PlanSpec(BaseModel):
 class EvidenceChunk(BaseModel):
     """Unified evidence representation shared across graph and external channels."""
 
+    # Evidence governance:
+    # - primary: source text (chunks/snippets) safe for final answers/citations.
+    # - derived: tool/LLM-produced synthesis; useful for planning but should not be cited as facts.
+    # - diagnostic: tool/runtime telemetry; never cite as factual evidence.
+    kind: Literal["primary", "derived", "diagnostic"] = Field(
+        "primary",
+        description="Evidence governance label controlling how the chunk may be used downstream.",
+    )
     chunk_id: str = Field(..., description="Stable ID so reasoning steps can reference this chunk")
     source: str = Field(..., description="Logical origin of the evidence such as graph/web")
     content: str = Field(..., description="Evidence text or compressed summary")

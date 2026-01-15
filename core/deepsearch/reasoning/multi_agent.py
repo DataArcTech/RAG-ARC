@@ -12,6 +12,7 @@ from encapsulation.data_model.deepsearch import EvidenceChunk, GraphQueryContext
 from .graph_loop import GraphReasoningLoop
 from core.deepsearch.tooling.protocols import ToolInvoker
 from core.deepsearch.utils.compression import compact_evidences, resolve_compaction_config
+from core.deepsearch.utils.evidence_kinds import count_primary_evidences
 from core.utils.json_safe import json_safe
 
 logger = logging.getLogger(__name__)
@@ -226,7 +227,7 @@ class MultiAgentGraphReasoningLoop:
             return False
 
         evidences = merged_trace.get("evidences") or []
-        evidence_count = len(evidences) if isinstance(evidences, list) else 0
+        evidence_count = count_primary_evidences(evidences) if isinstance(evidences, list) else 0
 
         coverage = merged_trace.get("coverage_metrics") or {}
         cov_ratio = None

@@ -66,6 +66,7 @@ async def test_deepsearch_bench_service_filters_web_steps_and_synthesizes_answer
     result = await bench.run("Who wrote The Hobbit?", owner_id=owner_id)
 
     assert result.answer == "bench-answer"
+    assert isinstance(result.bench_report, dict)
     assert planner.calls and planner.calls[0]["scope"] == owner_id
     assert graph_loop.calls
     used_steps = graph_loop.calls[0]["steps"]

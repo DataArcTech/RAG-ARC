@@ -6,6 +6,7 @@ from typing import Any, Dict, Literal, Optional, List
 
 from pydantic import BaseModel, Field
 
+from config.core.deepsearch import bench_answer_defaults
 from config.core.deepsearch.computable_gate_defaults import DEFAULT_COMPUTABLE_POLICY
 from config.core.deepsearch.planner_web_policy_defaults import (
     DEFAULT_REALTIME_WEB_INTENT_KEYWORDS,
@@ -195,7 +196,7 @@ class GraphReasoningStrategyConfig(BaseModel):
     )
     coverage_expected_min_chunks: int = Field(
         3,
-        description="Expected minimum evidence chunks for coverage normalization inside the reasoning loop.",
+        description="Expected minimum PRIMARY evidence chunks for coverage normalization inside the reasoning loop.",
     )
     trace_reflection_enabled: bool = Field(
         True,
@@ -267,7 +268,7 @@ class MultiAgentConfig(BaseModel):
     )
     stop_min_evidence_count: int = Field(
         ...,
-        description="Stop expanding incremental workers once evidence count reaches this threshold (<=0 disables).",
+        description="Stop expanding incremental workers once PRIMARY evidence count reaches this threshold (<=0 disables).",
     )
     stop_min_coverage_ratio: float = Field(
         ...,
@@ -282,6 +283,60 @@ class GapDetectionConfig(BaseModel):
     confidence_threshold: float = Field(0.6, description="Minimum model-reported confidence score.")
     expected_min_chunks: int = Field(3, description="Target evidence chunk count for coverage normalization.")
     enable_external_on_gap: bool = Field(True, description="Trigger external search when a gap is detected.")
+
+
+class BenchAnswerTypeConfig(BaseModel):
+    """Per-question-type settings for benchmark-mode answer synthesis."""
+
+    mode: bench_answer_defaults.BenchAnswerMode = Field(
+        "single_stage",
+        description="Answer synthesis mode: single_stage (1 call) or two_stage (extract -> answer).",
+    )
+    preference: bench_answer_defaults.BenchAnswerPreference = Field(
+        "balanced",
+        description="Optimization preference: correctness (reduce FP), coverage (reduce FN), balanced.",
+    )
+    max_evidence_items: int = Field(
+        bench_answer_defaults.DEFAULT_BENCH_MAX_EVIDENCE_ITEMS,
+        description="Max evidence snippets included in bench evidence block.",
+    )
+    max_evidence_chars: int = Field(
+        bench_answer_defaults.DEFAULT_BENCH_MAX_EVIDENCE_CHARS,
+        description="Max total characters for the bench evidence block.",
+    )
+    snippet_chars: int = Field(
+        bench_answer_defaults.DEFAULT_BENCH_SNIPPET_CHARS,
+        description="Max characters per extracted snippet before block concatenation.",
+    )
+
+
+class BenchAnswerConfig(BaseModel):
+    """Benchmark-mode answer synthesis knobs.
+
+    This config is consumed by `application.rag_inference.deepsearch.service_bench` and
+    `core.deepsearch.report.bench_answer` only (no impact on product report generation).
+    """
+
+    enabled: bool = Field(True, description="Enable benchmark-mode answer synthesis settings when bench_mode=1.")
+    allowed_evidence_kinds: List[str] = Field(
+        default_factory=lambda: list(bench_answer_defaults.DEFAULT_BENCH_ALLOWED_EVIDENCE_KINDS),
+        description="Evidence kinds allowed to enter the bench evidence block (default: primary only).",
+    )
+    heading_window_max_lines: int = Field(
+        bench_answer_defaults.DEFAULT_BENCH_HEADING_WINDOW_MAX_LINES,
+        description="When a heading line matches the question, include up to N following lines to preserve bullets.",
+    )
+    default_policy: BenchAnswerTypeConfig = Field(
+        default_factory=BenchAnswerTypeConfig,
+        description="Fallback policy when question_type is missing or unmapped.",
+    )
+    policies_by_question_type: Dict[str, BenchAnswerTypeConfig] = Field(
+        default_factory=lambda: {
+            key: BenchAnswerTypeConfig.model_validate(value)
+            for key, value in bench_answer_defaults.DEFAULT_BENCH_POLICIES_BY_QUESTION_TYPE.items()
+        },
+        description="Overrides keyed by dataset-provided question_type labels (e.g., GraphRAG-Benchmark).",
+    )
 
 
 class ReporterConfig(BaseModel):
@@ -351,6 +406,10 @@ class ReporterConfig(BaseModel):
     synthesis_section_max_chars: int = Field(
         1200,
         description="Maximum characters per section body forwarded to the parallel synthesis step.",
+    )
+    bench_answer: BenchAnswerConfig = Field(
+        default_factory=BenchAnswerConfig,
+        description="Settings for benchmark-mode answer synthesis (only used when bench_mode=1).",
     )
 
 

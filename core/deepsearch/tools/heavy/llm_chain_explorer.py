@@ -4,6 +4,7 @@ from dataclasses import asdict
 from typing import Any, Dict, List
 
 from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 from core.prompts.deepsearch import LLM_CHAIN_EXPLORER_SYSTEM_PROMPT
 from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.file_scope import resolve_file_scope
@@ -94,6 +95,7 @@ class LLMChainExplorerTool(GraphTool):
                 ),
                 source=self.descriptor.name,
                 content=summary,
+                kind=EVIDENCE_KIND_DERIVED,
                 score=spec.get("priority", 1.0),
                 provenance={
                     "llm_plan_step": spec,

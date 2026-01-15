@@ -2,6 +2,7 @@
 from typing import Any, Dict
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 
 from core.graph_adapter.cypher import adapter_supports_cypher
 from core.graph_adapter.concurrency import adapter_locked
@@ -162,6 +163,7 @@ class GraphSetDifferenceTool(GraphTool):
             chunk_id=chunk_id,
             source=self.descriptor.name,
             content=content,
+            kind=EVIDENCE_KIND_DERIVED,
             provenance={
                 "kept": kept,
                 "exclude": excludes,

@@ -2,6 +2,7 @@
 from typing import Any, Dict, List, Mapping
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DIAGNOSTIC
 
 from core.graph_adapter.cypher import adapter_supports_cypher
 from core.graph_adapter.concurrency import adapter_locked
@@ -200,6 +201,7 @@ class GraphRuleCheckTool(GraphTool):
                         chunk_id=chunk_id,
                         source=self.descriptor.name,
                         content=content,
+                        kind=EVIDENCE_KIND_DIAGNOSTIC,
                         provenance={"condition": results[-1]["condition"], "matches": rows or []},
                     )
                 )

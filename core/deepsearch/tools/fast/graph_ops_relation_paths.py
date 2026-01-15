@@ -2,6 +2,7 @@
 from typing import Any, Dict, List
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 
 from core.graph_adapter.cypher import adapter_supports_cypher
 from core.graph_adapter.concurrency import adapter_locked
@@ -171,6 +172,7 @@ class GraphRelationPathExploreTool(GraphTool):
             chunk_id=chunk_id,
             source=self.descriptor.name,
             content=content,
+            kind=EVIDENCE_KIND_DERIVED,
             provenance={
                 "entity": entity,
                 "entity_type": entity_type or None,
@@ -333,6 +335,7 @@ class GraphRelationPathGroundTool(GraphTool):
             chunk_id=chunk_id,
             source=self.descriptor.name,
             content=content,
+            kind=EVIDENCE_KIND_DERIVED,
             provenance={
                 "source": source,
                 "source_type": source_type or None,

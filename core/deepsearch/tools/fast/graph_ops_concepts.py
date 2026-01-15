@@ -11,6 +11,7 @@ canonicalization is stored in-graph (no external fact store) and is deterministi
 from typing import Any, Dict, List
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 
 from core.graph_adapter.cypher import adapter_supports_cypher
 from core.graph_adapter.concurrency import adapter_locked
@@ -165,7 +166,13 @@ class GraphEntityConceptsTool(GraphTool):
             provenance = {"term": term, "results": results}
 
         chunk_id = derived_chunk_id(tool_name=self.descriptor.name, plan_step=request.plan_step, label=label, content=summary)
-        evidence = EvidenceChunk(chunk_id=chunk_id, source=self.descriptor.name, content=summary, provenance=provenance)
+        evidence = EvidenceChunk(
+            chunk_id=chunk_id,
+            source=self.descriptor.name,
+            content=summary,
+            kind=EVIDENCE_KIND_DERIVED,
+            provenance=provenance,
+        )
         return ToolResult(summary=summary, evidences=[evidence], diagnostics=provenance)
 
     @staticmethod

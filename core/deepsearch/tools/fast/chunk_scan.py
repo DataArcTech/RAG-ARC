@@ -3,6 +3,7 @@ from typing import Any, Dict, List
 
 from config.core.deepsearch.tool_defaults import CHUNK_SCAN_DEFAULT_MAX_CHUNKS, CHUNK_SCAN_DEFAULT_QUERY_MAX_CHARS
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_PRIMARY
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from ..governance_tags import EVIDENCE_PRIMARY, SCOPE_FILE, SCOPE_OWNER
@@ -153,6 +154,7 @@ class ChunkScanTool(GraphTool):
                     chunk_id=chunk_id,
                     source=source,
                     content=str(chunk.get("content")),
+                    kind=EVIDENCE_KIND_PRIMARY,
                     score=self._extract_score(chunk),
                     provenance={
                         "metadata": chunk.get("metadata", {}),

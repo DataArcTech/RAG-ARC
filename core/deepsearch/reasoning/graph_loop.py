@@ -18,6 +18,7 @@ from encapsulation.data_model.deepsearch import (
 from core.deepsearch.tooling.protocols import ToolInvoker
 from core.deepsearch.trace import emit_trace
 from core.deepsearch.utils.compression import compact_evidences, resolve_compaction_config
+from core.deepsearch.utils.evidence_kinds import count_evidences_by_kind, is_primary_evidence
 from core.deepsearch.tooling.budget import attach_tool_budget_metadata, get_tool_budget
 from core.graph_adapter.base import GraphAccessScope, GraphDeepSearchAdapter
 from core.graph_adapter.scope_provider import require_scope
@@ -144,8 +145,7 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                     completed_internal_steps += 1
 
                 coverage_metrics = self._coverage_snapshot(
-                    evidence_count=len(evidences),
-                    source_labels=[chunk.source for chunk in evidences],
+                    evidences=evidences,
                     completed_steps=completed_internal_steps,
                     total_steps=len(normalized_steps),
                 )
@@ -600,20 +600,32 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
     def _coverage_snapshot(
         self,
         *,
-        evidence_count: int,
-        source_labels: Optional[Sequence[str]],
+        evidences: Sequence[EvidenceChunk],
         completed_steps: int,
         total_steps: int,
     ) -> Dict[str, Any]:
-        unique_sources = len({label for label in source_labels or [] if label})
+        counts = count_evidences_by_kind(evidences or [])
+        primary_count = int(counts.get("primary") or 0)
+        derived_count = int(counts.get("derived") or 0)
+        diagnostic_count = int(counts.get("diagnostic") or 0)
+        total_count = primary_count + derived_count + diagnostic_count
+
+        unique_sources = len({chunk.source for chunk in evidences or [] if getattr(chunk, "source", None)})
+        unique_primary_sources = len({chunk.source for chunk in evidences or [] if chunk.source and is_primary_evidence(chunk)})
         plan_progress_ratio = (completed_steps / total_steps) if total_steps else 0.0
         expected_min_chunks = max(1, int(self._coverage_expected_min_chunks))
-        evidence_ratio = evidence_count / max(1, expected_min_chunks)
+        evidence_ratio = primary_count / max(1, expected_min_chunks)
         coverage_score = min(1.0, evidence_ratio)
         coverage_ratio = coverage_score
         return {
-            "evidence_count": evidence_count,
+            # Back-compat: evidence_count now tracks primary (citeable) evidence only.
+            "evidence_count": primary_count,
+            "primary_evidence_count": primary_count,
+            "derived_evidence_count": derived_count,
+            "diagnostic_evidence_count": diagnostic_count,
+            "total_evidence_count": total_count,
             "unique_source_count": unique_sources,
+            "unique_primary_source_count": unique_primary_sources,
             "completed_steps": completed_steps,
             "total_steps": total_steps,
             "coverage_ratio": round(coverage_ratio, 3),
@@ -700,8 +712,7 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
         total = _RUN_TOTAL_STEPS.get() or 1
         snapshot = snapshot or []
         return self._coverage_snapshot(
-            evidence_count=len(snapshot),
-            source_labels=[chunk.source for chunk in snapshot],
+            evidences=snapshot,
             completed_steps=min(step_index, total),
             total_steps=total,
         )

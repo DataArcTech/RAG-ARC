@@ -5,6 +5,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 from pydantic import BaseModel, Field
 
 from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DIAGNOSTIC
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, build_input_schema, safe_json_loads
 from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_LLM, SCOPE_OWNER
@@ -256,6 +257,7 @@ class EvidenceCrosscheckTool(GraphTool):
                     ),
                     source="crosscheck",
                     content=content,
+                    kind=EVIDENCE_KIND_DIAGNOSTIC,
                     score=1.0,
                     provenance={"status": "confirmed", "count": len(confirmed)},
                 )
@@ -272,6 +274,7 @@ class EvidenceCrosscheckTool(GraphTool):
                     ),
                     source="crosscheck",
                     content=content,
+                    kind=EVIDENCE_KIND_DIAGNOSTIC,
                     score=0.2,
                     provenance={"status": "missing", "count": len(missing)},
                 )

@@ -4,6 +4,7 @@ import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema, call_llm_async, safe_json_loads
 from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_CHAIN_TRAVERSE, REQUIRES_LLM, SCOPE_OWNER
@@ -281,6 +282,7 @@ class BeamSearchTool(GraphTool):
                     ),
                     source=tool_name,
                     content=content,
+                    kind=EVIDENCE_KIND_DERIVED,
                     score=path.get("score"),
                     provenance={
                         "path": nodes,

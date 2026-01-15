@@ -4,6 +4,7 @@ from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, List, Mapping, Sequence
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 from core.prompts.deepsearch.heavy_tools import CROSS_ADAPTER_PLANNER_SYSTEM_PROMPT_V1
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, build_input_schema, safe_json_loads
@@ -75,6 +76,7 @@ class CrossAdapterPlannerTool(GraphTool):
                 ),
                 source=self.descriptor.name,
                 content=item,
+                kind=EVIDENCE_KIND_DERIVED,
                 provenance={"adapters": adapters},
             )
             for idx, item in enumerate(plan_items)

@@ -10,6 +10,7 @@ This tool makes the schema-layer queryable inside DeepSearch (audit/explainabili
 from typing import Any, Dict, List
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 
 from core.graph_adapter.cypher import adapter_supports_cypher
 from core.graph_adapter.concurrency import adapter_locked
@@ -133,6 +134,7 @@ class GraphSchemaNodesTool(GraphTool):
             chunk_id=chunk,
             source=self.descriptor.name,
             content=summary,
+            kind=EVIDENCE_KIND_DERIVED,
             provenance={"chunk_id": chunk_id or None, "term": term or None, "layer": layer or None, "nodes": nodes},
         )
         return ToolResult(summary=summary, evidences=[evidence], diagnostics={"count": len(nodes)})

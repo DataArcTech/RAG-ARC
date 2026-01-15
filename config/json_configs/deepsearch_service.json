@@ -185,7 +185,49 @@
     "parallel_sections": false,
     "max_parallel_sections": 4,
     "consistency_max_claims": 40,
-    "synthesis_section_max_chars": 1200
+    "synthesis_section_max_chars": 1200,
+    "bench_answer": {
+      "enabled": true,
+      "allowed_evidence_kinds": ["primary"],
+      "heading_window_max_lines": 10,
+      "default_policy": {
+        "mode": "single_stage",
+        "preference": "balanced",
+        "max_evidence_items": 24,
+        "max_evidence_chars": 12000,
+        "snippet_chars": 900
+      },
+      "policies_by_question_type": {
+        "Complex Reasoning": {
+          "mode": "two_stage",
+          "preference": "correctness",
+          "max_evidence_items": 24,
+          "max_evidence_chars": 12000,
+          "snippet_chars": 900
+        },
+        "Contextual Summarize": {
+          "mode": "single_stage",
+          "preference": "coverage",
+          "max_evidence_items": 24,
+          "max_evidence_chars": 12000,
+          "snippet_chars": 900
+        },
+        "Fact Retrieval": {
+          "mode": "single_stage",
+          "preference": "correctness",
+          "max_evidence_items": 12,
+          "max_evidence_chars": 6000,
+          "snippet_chars": 450
+        },
+        "Creative Generation": {
+          "mode": "single_stage",
+          "preference": "balanced",
+          "max_evidence_items": 24,
+          "max_evidence_chars": 12000,
+          "snippet_chars": 900
+        }
+      }
+    }
   },
   "tool_manager": {
     "enable_builtin_tools": true,

@@ -10,6 +10,7 @@ from core.utils.stopwords import get_stopwords
 
 from config.core.deepsearch import report_composer_defaults as composer_defaults
 from config.core.deepsearch.stopwords import EVIDENCE_RANK_STOPWORDS
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_PRIMARY
 from core.deepsearch.utils.file_scope import normalize_filename_token
 
 _EN_STOPWORDS = frozenset(word.lower() for word in get_stopwords("en"))
@@ -61,11 +62,16 @@ def _rank_evidences_for_question(question: str, items: List[Dict[str, Any]]) -> 
             numeric_score = 0.0
         chunk_id = str(ev.get("chunk_id") or "")
         source = str(ev.get("source") or "").strip().lower()
-        # NOTE: Do NOT classify ':'-containing chunk_ids as tool-generated; many primary corpus IDs (e.g. file/page/chunk)
-        # include ':' separators. Toolish IDs are identified via explicit prefixes only.
-        toolish_id = any(chunk_id.lower().startswith(prefix.lower()) for prefix in composer_defaults.TOOLISH_CHUNK_ID_PREFIXES)
-        toolish_source = source in composer_defaults.TOOLISH_SOURCE_NAMES
-        primary = 0 if (toolish_id or toolish_source) else 1
+        # Prefer explicit evidence governance labels when available; fall back to chunk_id/source heuristics.
+        kind = str(ev.get("kind") or "").strip().lower()
+        if kind:
+            primary = 1 if kind == EVIDENCE_KIND_PRIMARY else 0
+        else:
+            # NOTE: Do NOT classify ':'-containing chunk_ids as tool-generated; many primary corpus IDs
+            # (e.g. file/page/chunk) include ':' separators. Toolish IDs are identified via explicit prefixes only.
+            toolish_id = any(chunk_id.lower().startswith(prefix.lower()) for prefix in composer_defaults.TOOLISH_CHUNK_ID_PREFIXES)
+            toolish_source = source in composer_defaults.TOOLISH_SOURCE_NAMES
+            primary = 0 if (toolish_id or toolish_source) else 1
         # Prefer matched content, then score, then shorter snippets (for prompt efficiency).
         return (primary, 1 if match_count > 0 else 0, match_count, numeric_score, -len(content), chunk_id)
 
@@ -292,6 +298,14 @@ def _split_authoritative_evidences(evidences: List[Dict[str, Any]]) -> tuple[Lis
     generated: List[Dict[str, Any]] = []
     for ev in evidences or []:
         if not isinstance(ev, dict):
+            continue
+        # Prefer explicit evidence governance labels when available.
+        kind = str(ev.get("kind") or "").strip().lower()
+        if kind:
+            if kind == EVIDENCE_KIND_PRIMARY:
+                authoritative.append(ev)
+            else:
+                generated.append(ev)
             continue
         if _is_tool_generated_evidence(
             ev,

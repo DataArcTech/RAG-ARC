@@ -2,6 +2,7 @@
 from typing import Any, Dict, Iterable, List
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_CHAIN_TRAVERSE, SCOPE_OWNER
@@ -115,6 +116,7 @@ class PathCacheTool(GraphTool):
                     chunk_id=chunk_id,
                     source=tool_name,
                     content=content,
+                    kind=EVIDENCE_KIND_DERIVED,
                     score=path.get("score"),
                     provenance={"raw_path": path},
                 )

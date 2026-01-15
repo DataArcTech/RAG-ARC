@@ -10,6 +10,7 @@ from config.core.deepsearch.tool_defaults import (
     HYBRID_NEIGHBORHOOD_DEFAULT_TRAVERSAL_STRATEGY,
 )
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async
 from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_CHAIN_TRAVERSE, REQUIRES_LLM, SCOPE_OWNER
@@ -99,6 +100,7 @@ class HybridNeighborhoodProbeTool(GraphTool):
                         ),
                         source=self.descriptor.name,
                         content=ev.content,
+                        kind=EVIDENCE_KIND_DERIVED,
                         score=ev.score,
                         provenance={
                             "seed_chunk_id": ev.chunk_id,

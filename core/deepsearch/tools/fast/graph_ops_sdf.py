@@ -1,6 +1,7 @@
 """Deterministic tools over SDF schema nodes (Neo4j Cypher)."""
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 
 from core.graph_adapter.cypher import adapter_supports_cypher
 from core.graph_adapter.concurrency import adapter_locked
@@ -117,6 +118,7 @@ class GraphSdfChildrenTool(GraphTool):
             chunk_id=chunk_id,
             source=self.descriptor.name,
             content=summary,
+            kind=EVIDENCE_KIND_DERIVED,
             provenance={
                 "event": event,
                 "doc_namespace": doc_namespace or None,
@@ -232,6 +234,7 @@ class GraphSdfDependenciesTool(GraphTool):
             chunk_id=chunk_id,
             source=self.descriptor.name,
             content=summary,
+            kind=EVIDENCE_KIND_DERIVED,
             provenance={"event": event, "doc_namespace": doc_namespace or None, "before": before, "after": after},
         )
         return ToolResult(summary=summary, evidences=[evidence], diagnostics={"before": before, "after": after})

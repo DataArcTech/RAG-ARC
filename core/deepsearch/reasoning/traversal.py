@@ -19,6 +19,7 @@ from encapsulation.data_model.deepsearch import (
     PlanSpec,
     ReasoningStepRecord,
 )
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_PRIMARY
 from core.graph_adapter.base import GraphDeepSearchAdapter
 from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.trace import emit_trace
@@ -437,6 +438,7 @@ class GraphTraversalExecutor:
                     chunk_id=chunk_id,
                     source=source,
                     content=content,
+                    kind=EVIDENCE_KIND_PRIMARY,
                     score=score,
                     provenance={
                         "plan_step": plan_step,

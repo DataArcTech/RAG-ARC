@@ -2,6 +2,7 @@
 from typing import Any, Dict, List
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DIAGNOSTIC, EVIDENCE_KIND_DERIVED
 
 from core.graph_adapter.cypher import adapter_supports_cypher
 from core.graph_adapter.concurrency import adapter_locked
@@ -164,6 +165,7 @@ class GraphPathExistsTool(GraphTool):
             chunk_id=chunk_id,
             source=self.descriptor.name,
             content=content,
+            kind=EVIDENCE_KIND_DERIVED,
             provenance={
                 "nodes": nodes,
                 "predicates": (row0 or {}).get("predicates") or [],
@@ -304,6 +306,7 @@ class GraphNeighborsTool(GraphTool):
             chunk_id=chunk_id,
             source=self.descriptor.name,
             content=summary,
+            kind=EVIDENCE_KIND_DIAGNOSTIC,
             provenance={
                 "entity": entity,
                 "predicates": predicates,
@@ -430,7 +433,13 @@ class GraphTraceToRootTool(GraphTool):
         summary = f"trace_to_root: leaf={leaf} hops={len(chain) - 1}"
         content = "chain: " + " -> ".join(chain)
         chunk_id = derived_chunk_id(tool_name=self.descriptor.name, plan_step=request.plan_step, label="chain", content=content)
-        evidence = EvidenceChunk(chunk_id=chunk_id, source=self.descriptor.name, content=content, provenance={"leaf": leaf, "predicates": predicates, "chain": chain})
+        evidence = EvidenceChunk(
+            chunk_id=chunk_id,
+            source=self.descriptor.name,
+            content=content,
+            kind=EVIDENCE_KIND_DERIVED,
+            provenance={"leaf": leaf, "predicates": predicates, "chain": chain},
+        )
         return ToolResult(summary=summary, evidences=[evidence], diagnostics={"chain": chain})
 
     @staticmethod

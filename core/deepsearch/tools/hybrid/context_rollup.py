@@ -7,6 +7,7 @@ from config.core.deepsearch.tool_defaults import (
     CONTEXT_ROLLUP_DEFAULT_WINDOW_SIZE,
 )
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 from core.prompts.deepsearch import CONTEXT_ROLLUP_PROMPT
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
@@ -71,6 +72,7 @@ class ContextRollupTool(GraphTool):
             ),
             source="context_rollup",
             content=summary_text,
+            kind=EVIDENCE_KIND_DERIVED,
             score=1.0,
             provenance={"window_size": len(evidences)},
         )

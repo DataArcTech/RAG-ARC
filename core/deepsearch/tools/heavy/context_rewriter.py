@@ -2,6 +2,7 @@
 from typing import Any, List
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 from core.prompts.deepsearch import CONTEXT_REWRITER_PROMPT
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 from core.deepsearch.utils.compression import compact_context_snippet, resolve_compaction_config, truncate_text
@@ -54,6 +55,7 @@ class ContextRewriterTool(GraphTool):
             ),
             source="context_rewriter",
             content=rewritten,
+            kind=EVIDENCE_KIND_DERIVED,
             provenance={"window_size": len(evidences)},
         )
         diagnostics = {

@@ -8,6 +8,7 @@ from config.core.deepsearch.tool_defaults import (
     PATTERN_PROBE_DEFAULT_MIN_LATIN_LENGTH,
 )
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_PRIMARY
 from config.core.deepsearch.stopwords import PATTERN_PROBE_CJK_STOPWORDS, PATTERN_PROBE_DEFAULT_STOPWORDS
 from core.graph_adapter.base import GraphDeepSearchAdapter
 from core.graph_adapter.concurrency import adapter_locked
@@ -564,6 +565,7 @@ class PatternProbeTool(GraphTool):
                 chunk_id=chunk_id,
                 source=str(source),
                 content=content,
+                kind=EVIDENCE_KIND_PRIMARY,
                 score=score,
                 provenance={
                     "pattern": keyword,

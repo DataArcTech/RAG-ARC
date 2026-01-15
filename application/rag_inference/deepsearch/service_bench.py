@@ -19,6 +19,7 @@ class DeepSearchBenchResult:
     answer: str
     plan: Dict[str, Any]
     reasoning: Dict[str, Any]
+    bench_report: Dict[str, Any]
 
 
 def _filter_bench_plan_steps(steps: Sequence[Dict[str, Any]]) -> list[Dict[str, Any]]:
@@ -91,18 +92,39 @@ class DeepSearchBenchService:
 
         reasoning = await self._service.graph_loop.run(text, bench_steps, graph_context=graph_context)
         llm_connector = getattr(self._service.planner, "llm_connector", None) or getattr(self._service.reporter, "llm_connector", None)
-        max_items = getattr(self._service.reporter, "max_evidence_items", None)
-        max_chars = getattr(self._service.reporter, "report_max_evidence_chars", None)
+
+        reporter = getattr(self._service, "reporter", None)
+        bench_cfg = None
+        if reporter is not None:
+            cfg = getattr(reporter, "config", None)
+            if isinstance(cfg, dict):
+                bench_cfg = cfg.get("bench_answer")
+
+        question_type = None
+        if isinstance(metadata, dict):
+            question_type = metadata.get("question_type") or metadata.get("type")
+
+        # Legacy fallbacks for older configs/tests: keep using reporter budgets when bench_answer config is absent.
+        max_items = getattr(reporter, "max_evidence_items", None) if reporter is not None else None
+        max_chars = getattr(reporter, "report_max_evidence_chars", None) if reporter is not None else None
         report = await synthesize_benchmark_answer(
             llm_connector=llm_connector,
             question=text,
             reasoning_trace=reasoning,
             external_evidence=None,
+            question_type=str(question_type) if question_type else None,
+            bench_answer_config=bench_cfg if isinstance(bench_cfg, dict) else None,
             max_evidence_items=max_items if isinstance(max_items, int) else None,
             max_evidence_chars=max_chars if isinstance(max_chars, int) else None,
         )
+        try:
+            reasoning = dict(reasoning or {})
+            reasoning["bench_report"] = dict(report or {})
+        except Exception:
+            pass
         return DeepSearchBenchResult(
             answer=str((report or {}).get("answer") or "").strip(),
             plan=plan_payload,
             reasoning=reasoning,
+            bench_report=dict(report or {}),
         )
