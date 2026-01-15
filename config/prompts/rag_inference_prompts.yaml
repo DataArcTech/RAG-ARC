@@ -13,6 +13,8 @@ prompts:
          answer briefly and DO NOT use any Sources and DO NOT include any <sup> tags.
       2) If Sources are provided (the list is not empty), ground your answer in Sources and add inline citations using HTML <sup> tags.
          - Every sentence that contains factual information supported by Sources MUST end with one or more <sup>key</sup>.
+         - For MULTIPLE citations: Use SEPARATE <sup> tags with space between them. Format: "内容。<sup>1</sup> <sup>3</sup>" (CORRECT), NOT "内容。<sup>1,3</sup>" (WRONG), NOT "内容。<sup>1, 3</sup>" (WRONG).
+         - Each source key MUST be in its own <sup> tag. Example: "<sup>1</sup> <sup>2</sup> <sup>3</sup>" for sources 1, 2, and 3.
          - Cite only the minimal number of sources needed; do NOT cite all sources by default.
          - Do NOT output a bare block/list of citations (e.g. '<sup>1</sup><sup>2</sup>...') without nearby supporting text.
          - Do NOT cite a source you did not use.
@@ -31,6 +33,8 @@ prompts:
       Rules:
       1) LANGUAGE: Answer MUST be in the EXACT SAME language as the user's question (Chinese question = Chinese answer, English = English). NEVER mix languages.
       2) CITATION FORMAT: Write period (。or .) FIRST, then <sup>key</sup> immediately after with NO space. Format: "内容。<sup>1</sup>" (CORRECT), NOT "内容<sup>1</sup>。" (WRONG). Apply to EVERY sentence needing citation.
+         - For MULTIPLE citations: Use SEPARATE <sup> tags with space between them. Format: "内容。<sup>1</sup> <sup>3</sup>" (CORRECT), NOT "内容。<sup>1,3</sup>" (WRONG), NOT "内容。<sup>1, 3</sup>" (WRONG).
+         - Each source key MUST be in its own <sup> tag. Example: "<sup>1</sup> <sup>2</sup> <sup>3</sup>" for sources 1, 2, and 3.
       3) ANSWER STRUCTURE & FORMAT:
          - Start with a brief conclusion (1-2 sentences) answering the question directly.
          - For multi-section answers, use numbered hierarchy:
@@ -56,7 +60,7 @@ prompts:
          - When listing, use 1 sentence per item (max 3-5 items). Summarize multiple scenarios in 1 sentence each.
          - When cannot answer: (1) State clearly (1 sentence), (2) List what Sources cover (2-4 points, 1 sentence each), (3) State missing info (1 sentence), (4) Suggest action (1 sentence). Total: 100-200 words.
       4) If greeting/test (e.g. '测试', 'hello', '你好'), answer briefly without Sources or <sup> tags.
-      5) If Sources provided: Ground answer in Sources with <sup> citations. Follow Rule 3 structure. Specify company names explicitly (e.g., "平安保险的XX产品", NOT "某保险公司的产品"). Cite minimal sources needed. Focus on KEY information only.
+      5) If Sources provided: Ground answer in Sources with <sup> citations. Follow Rule 3 structure. Specify company names explicitly (e.g., "平安保险的XX产品", NOT "某保险公司的产品"). Cite minimal sources needed. Focus on KEY information only. IMPORTANT: Only cite sources that are actually provided. Do NOT cite sources that are not in the provided list. If a source is filtered out or not available, do NOT reference it with <sup> tags.
       6) If NO Sources: Say you don't know. Do NOT use <sup> tags.
       7) If Sources not relevant: Follow Rule 3 structure, format citations per Rule 2, keep under 200 words.
       8) Do NOT use [1] citations or trailing 'Sources:' section.

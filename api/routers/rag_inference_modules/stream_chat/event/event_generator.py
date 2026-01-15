@@ -292,15 +292,31 @@ async def _yield_sources_event(
     request_id: str
 ) -> AsyncGenerator[str, None]:
     """Yield sources event."""
-    yield sse_json_wrapped(
-        {
-            "type": "sources",
-            "sources": [s.model_dump() for s in sources_for_frontend],
-            "citation_key_map": {str(k): v for k, v in citation_key_map.items()},
-            "id": str(session_id)
-        },
-        request_id=request_id
+    sources_data = [s.model_dump() for s in sources_for_frontend]
+    payload = {
+        "type": "sources",
+        "sources": sources_data,
+        "citation_key_map": {str(k): v for k, v in citation_key_map.items()},
+        "id": str(session_id)
+    }
+    
+    # Log the complete SSE sources payload for debugging
+    logger.info(
+        "SSE sources event payload: sources_count=%d sources_keys=%s citation_key_map=%s session_id=%s",
+        len(sources_data),
+        [s.get("key") for s in sources_data],
+        payload.get("citation_key_map"),
+        str(session_id)
     )
+    
+    # Log full payload (truncated if too large)
+    payload_str = json.dumps(payload, ensure_ascii=False)
+    if len(payload_str) > 2000:
+        logger.info("SSE sources event payload (truncated): %s...", payload_str[:2000])
+    else:
+        logger.info("SSE sources event payload (full): %s", payload_str)
+    
+    yield sse_json_wrapped(payload, request_id=request_id)
 
 
 async def _yield_payload_event(

@@ -332,25 +332,34 @@ def _sse_done() -> str:
     return "data: [DONE]\n\n"
 
 
-_SUP_KEY_RE = re.compile(r"<sup>\s*(?P<key>\d{1,4})\s*</sup>")
+# Match single key: <sup>1</sup> or multiple keys: <sup>1, 2</sup> or <sup>1,2,3</sup>
+_SUP_KEY_RE = re.compile(r"<sup>\s*(?P<keys>[\d\s,]+?)\s*</sup>")
+_SINGLE_KEY_RE = re.compile(r"\d{1,4}")
 
 
 def _extract_sup_keys(text: str) -> List[int]:
-    """Extract referenced source keys in the order they appear."""
+    """Extract referenced source keys in the order they appear.
+    Supports both single key format (<sup>1</sup>) and multiple keys format (<sup>1, 2</sup>).
+    """
     if not text:
         return []
     seen: set[int] = set()
     keys: List[int] = []
     for match in _SUP_KEY_RE.finditer(text):
-        try:
-            key = int(match.group("key"))
-        except Exception:  # noqa: BLE001
+        keys_str = match.group("keys")
+        if not keys_str:
             continue
-        if key <= 0:
-            continue
-        if key not in seen:
-            seen.add(key)
-            keys.append(key)
+        # Extract all numbers from the keys string (handles "1, 2" or "1,2,3" etc.)
+        for key_match in _SINGLE_KEY_RE.finditer(keys_str):
+            try:
+                key = int(key_match.group(0))
+            except Exception:  # noqa: BLE001
+                continue
+            if key <= 0:
+                continue
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
     return keys
 
 
@@ -383,19 +392,60 @@ def _build_sup_key_map_sorted(
 
 
 def _renumber_sup_tags(answer_text: str, key_map: Dict[int, int]) -> str:
+    """Renumber <sup> tags using key_map. Supports both single and multiple key formats.
+    
+    Examples:
+    - <sup>1</sup> -> <sup>1</sup> (if 1 maps to 1)
+    - <sup>1, 2</sup> -> <sup>1, 2</sup> (if both keys exist in key_map)
+    - <sup>1, 2</sup> -> <sup>1</sup> (if only 1 exists in key_map)
+    - <sup>1, 2</sup> -> "" (if neither exists in key_map)
+    """
     if not answer_text or not key_map:
         return answer_text or ""
 
     def _replace(match: re.Match[str]) -> str:
-        raw = match.group("key")
-        try:
-            key = int(raw)
-        except Exception:  # noqa: BLE001
-            return match.group(0)
-        new_key = key_map.get(key)
-        if new_key is None:
-            return match.group(0)
-        return f"<sup>{new_key}</sup>"
+        keys_str = match.group("keys")
+        if not keys_str:
+            return ""
+        
+        # Extract all keys from the string
+        original_keys: List[int] = []
+        for key_match in _SINGLE_KEY_RE.finditer(keys_str):
+            try:
+                key = int(key_match.group(0))
+                if key > 0:
+                    original_keys.append(key)
+            except Exception:  # noqa: BLE001
+                continue
+        
+        if not original_keys:
+            return ""
+        
+        # Map each key to new key, filtering out keys not in key_map
+        new_keys: List[int] = []
+        for orig_key in original_keys:
+            new_key = key_map.get(orig_key)
+            if new_key is not None:
+                new_keys.append(new_key)
+        
+        # If no keys remain, remove the entire tag
+        if not new_keys:
+            return ""
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_new_keys = []
+        for k in new_keys:
+            if k not in seen:
+                seen.add(k)
+                unique_new_keys.append(k)
+        
+        # Sort for consistent output
+        unique_new_keys.sort()
+        
+        # Format as comma-separated list
+        keys_formatted = ", ".join(str(k) for k in unique_new_keys)
+        return f"<sup>{keys_formatted}</sup>"
 
     return _SUP_KEY_RE.sub(_replace, answer_text)
 
@@ -492,7 +542,15 @@ async def _stream_minio_object(minio_db: Any, blob_key: str, chunk_size: int = 1
                 pass
 
 
-def _build_sources_for_frontend(entries: List[Dict[str, Any]], max_sources: int) -> List[ChatbotSourceItem]:
+def _build_sources_for_frontend_with_llm_keys(
+    entries: List[Dict[str, Any]], 
+    max_sources: int,
+    llm_chunk_id_to_key: dict[str, int]
+) -> List[ChatbotSourceItem]:
+    """
+    Build sources for frontend using the same key assignment as LLM received.
+    This ensures that if LLM cites key=4, the frontend will have a source with key=4.
+    """
     max_chars = int(os.getenv("CHATBOT_SOURCE_MAX_CHARS", "1600"))
     sources: List[ChatbotSourceItem] = []
     seen_chunk_ids: set[str] = set()
@@ -502,12 +560,24 @@ def _build_sources_for_frontend(entries: List[Dict[str, Any]], max_sources: int)
     file_storage_resolved = False
 
     for entry in entries or []:
-        if len(sources) >= max_sources:
-            break
         chunk_id = str(entry.get("id") or "").strip()
-        if not chunk_id or chunk_id in seen_chunk_ids:
+        if not chunk_id:
+            continue
+        
+        # Use LLM's key if available, otherwise skip (to maintain consistency)
+        llm_key = llm_chunk_id_to_key.get(chunk_id)
+        if llm_key is None:
+            # This chunk was not passed to LLM, skip it
+            continue
+        
+        # Skip if we've already seen this chunk_id (deduplication)
+        if chunk_id in seen_chunk_ids:
             continue
         seen_chunk_ids.add(chunk_id)
+        
+        # Limit by max_sources
+        if len(sources) >= max_sources:
+            break
 
         metadata = dict(entry.get("metadata") or {})
         file_id = str(metadata.get("source_file_id") or "").strip() or None
@@ -564,7 +634,7 @@ def _build_sources_for_frontend(entries: List[Dict[str, Any]], max_sources: int)
 
         sources.append(
             ChatbotSourceItem(
-                key=len(sources) + 1,
+                key=llm_key,  # Use LLM's key instead of renumbering
                 chunk_id=chunk_id,
                 file_id=file_id,
                 title=source_title,
@@ -572,7 +642,28 @@ def _build_sources_for_frontend(entries: List[Dict[str, Any]], max_sources: int)
                 description=content,
             )
         )
+    
+    # Sort by LLM key to maintain order
+    sources.sort(key=lambda s: s.key)
     return sources
+
+
+def _build_sources_for_frontend(entries: List[Dict[str, Any]], max_sources: int) -> List[ChatbotSourceItem]:
+    max_chars = int(os.getenv("CHATBOT_SOURCE_MAX_CHARS", "1600"))
+    sources: List[ChatbotSourceItem] = []
+    seen_chunk_ids: set[str] = set()
+
+    knowledge = None
+    file_storage = None
+    file_storage_resolved = False
+
+    for entry in entries or []:
+        if len(sources) >= max_sources:
+            break
+        chunk_id = str(entry.get("id") or "").strip()
+        if not chunk_id or chunk_id in seen_chunk_ids:
+            continue
+        seen_chunk_ids.add(chunk_id)
 
 
 @router.get("/static/files/{file_id}")

@@ -16,6 +16,7 @@ from api.routers.rag_inference_handlers import (
 )
 from api.routers.chatbot import (
     _build_sources_for_frontend,
+    _build_sources_for_frontend_with_llm_keys,
     _filter_and_renumber_sources_by_sup_keys_sorted,
     ChatbotSourceItem,
 )
@@ -142,12 +143,50 @@ async def build_sources_and_evidence(
     evidence_chunks = evidence.get("chunks") or []
     logger.info("SSE evidence_chunks count: %d", len(evidence_chunks))
     
+    # Log chunk IDs to track which chunks are passed to frontend
+    chunk_ids_in_evidence = [str(c.get("id", "")) for c in evidence_chunks[:10]]  # Log first 10
+    logger.info("SSE evidence_chunks IDs (first 10): %s", chunk_ids_in_evidence)
+    
+    # Build a mapping from chunk_id to LLM key (based on chunks order passed to LLM)
+    # This ensures frontend sources use the same keys as LLM received
+    llm_chunk_id_to_key: dict[str, int] = {}
+    if chunks:
+        for i, chunk in enumerate(chunks[:min(max_sources, CHAT_TOP_CHUNKS)]):
+            chunk_id = str(getattr(chunk, "id", "") or "").strip()
+            if chunk_id:
+                # LLM received chunks with key = i+1
+                llm_chunk_id_to_key[chunk_id] = i + 1
+    
+    logger.info("SSE LLM chunk_id_to_key mapping (first 10): %s", 
+                dict(list(llm_chunk_id_to_key.items())[:10]))
+    
     sources_for_frontend = await get_thread_pool().run_blocking(
-        _build_sources_for_frontend,
+        _build_sources_for_frontend_with_llm_keys,
         evidence_chunks,
         min(max_sources, CHAT_TOP_CHUNKS),
+        llm_chunk_id_to_key,
     )
     logger.info("SSE built %d sources for frontend", len(sources_for_frontend))
+    
+    # Log sources keys and chunk_ids to debug key mismatch
+    sources_keys_and_ids = [(s.key, s.chunk_id) for s in sources_for_frontend]
+    logger.info("SSE sources_for_frontend (key, chunk_id): %s", sources_keys_and_ids)
+    
+    # Extract sup keys from assistant response to see what LLM cited
+    from api.routers.chatbot import _extract_sup_keys
+    cited_keys_in_response = _extract_sup_keys(assistant_response)
+    logger.info("SSE cited keys in assistant_response: %s", cited_keys_in_response)
+    
+    # Log full assistant response for debugging (truncated if too long)
+    response_preview = assistant_response[:500] + "...[truncated]" if len(assistant_response) > 500 else assistant_response
+    logger.info("SSE assistant_response preview (length=%d): %s", len(assistant_response), response_preview)
+    
+    # Check if there are any <sup> tags in the response (supports both single and multiple key formats)
+    import re
+    sup_tags_single = re.findall(r'<sup>\s*(\d+)\s*</sup>', assistant_response)
+    sup_tags_multiple = re.findall(r'<sup>\s*([\d\s,]+?)\s*</sup>', assistant_response)
+    logger.info("SSE <sup> tags found in assistant_response (single format): %s", sup_tags_single)
+    logger.info("SSE <sup> tags found in assistant_response (all formats): %s", sup_tags_multiple)
     
     citation_key_map: dict[int, int] = {}
     if not is_fallback_response:
@@ -162,6 +201,28 @@ async def build_sources_and_evidence(
             len(sources_for_frontend),
             citation_key_map,
         )
+    
+    # Log final SSE response content (sources and citation_key_map)
+    sources_summary = [
+        {"key": s.key, "chunk_id": s.chunk_id, "title": s.title[:50] if s.title else ""}
+        for s in sources_for_frontend
+    ]
+    logger.info(
+        "SSE final response: sources_count=%d sources=%s citation_key_map=%s assistant_response_length=%d",
+        len(sources_for_frontend),
+        sources_summary,
+        citation_key_map,
+        len(assistant_response),
+    )
+    
+    # Log the complete SSE data structure that will be sent to frontend
+    sse_data_summary = {
+        "sources_count": len(sources_for_frontend),
+        "sources_keys": [s.key for s in sources_for_frontend],
+        "citation_key_map": citation_key_map,
+        "assistant_response_has_sup_tags": "<sup>" in assistant_response,
+    }
+    logger.info("SSE complete data summary: %s", sse_data_summary)
     
     return assistant_response, sources_for_frontend, citation_key_map
 
