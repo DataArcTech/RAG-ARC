@@ -10,6 +10,10 @@ from core.file_management.parser.mineru import MinerUParser
 def _default_mineru_server_url() -> str:
     return str(os.getenv("MINERU_SERVER_URL", "") or "").strip()
 
+def _default_reuse_cache() -> bool:
+    # Default to true so re-indexing can reuse existing MinerU markdown artifacts without hitting the service.
+    return str(os.getenv("MINERU_REUSE_CACHE", "1") or "1").strip().lower() in {"1", "true", "yes", "y", "on"}
+
 def _default_timeout_s() -> int:
     raw = str(os.getenv("MINERU_TIMEOUT_S", "") or "").strip()
     if not raw:
@@ -51,6 +55,13 @@ class MinerUParserConfig(AbstractConfig):
 
     server_url: str = Field(default_factory=_default_mineru_server_url, description="MinerU server base URL.")
     timeout_s: int = Field(default_factory=_default_timeout_s, description="HTTP timeout (seconds) for remote MinerU parsing.")
+    reuse_cache: bool = Field(
+        default_factory=_default_reuse_cache,
+        description=(
+            "When true, reuse existing MinerU markdown artifacts under output_dir/<source_file_id>/ when present, "
+            "skipping remote MinerU calls. Controlled by MINERU_REUSE_CACHE=1/0."
+        ),
+    )
 
     # MinerU parse defaults (can be overridden per-call via kwargs)
     backend: str = Field(default="vlm-transformers")
