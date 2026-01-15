@@ -99,6 +99,29 @@ class ChatMessageManager(AbstractModule):
         """
         return self.message_storage.delete_message(message_id)
 
+    def update_message(
+        self,
+        message_id: uuid.UUID,
+        updates: Dict[str, Any],
+        **kwargs: Any
+    ) -> bool:
+        """
+        Update chat message metadata.
+
+        Args:
+            message_id: Message ID as UUID
+            updates: Dictionary of fields to update
+            **kwargs: Additional arguments
+
+        Returns:
+            True if update succeeded, False otherwise
+        """
+        return self.message_storage.update_message(
+            message_id=message_id,
+            updates=updates,
+            **kwargs
+        )
+
     def delete_messages_by_session(
         self,
         session_id: uuid.UUID

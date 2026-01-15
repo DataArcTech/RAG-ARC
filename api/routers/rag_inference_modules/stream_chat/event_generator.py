@@ -4,6 +4,7 @@ import uuid
 import asyncio
 import time
 import logging
+from datetime import datetime
 from typing import Any, AsyncGenerator
 from api.sse import (
     delta_envelope,
@@ -19,6 +20,10 @@ from api.routers.rag_inference_handlers import get_rag_inference_handler
 from .history_manager import create_user_message, load_and_process_history
 from .deepsearch_handler import process_deepsearch
 from .stream_processor import start_stream_processing
+from .task_registry import get_chat_task_registry
+from encapsulation.data_model.orm_models import ChatMessageStatus
+from framework.thread_pool import get_thread_pool
+from api.routers.rag_inference_handlers import get_message_handler, get_session_handler
 from .response_builder import (
     generate_mindmap_if_needed,
     ensure_non_empty_response,
@@ -97,7 +102,8 @@ async def _yield_token_events(
     model_name: str,
     created: int,
     request_id: str,
-    response_parts: list[str]
+    response_parts: list[str],
+    task_info: Any = None
 ) -> AsyncGenerator[str, None]:
     """Yield token events as SSE."""
     if not text:
@@ -105,7 +111,7 @@ async def _yield_token_events(
     
     for delta_piece in iter_text_deltas(text):
         response_parts.append(delta_piece)
-        yield sse_json_wrapped(
+        event = sse_json_wrapped(
             openai_chat_completion_chunk(
                 chunk_id=chunk_id,
                 model=model_name,
@@ -114,6 +120,19 @@ async def _yield_token_events(
             ),
             request_id=request_id
         )
+        
+        # 缓存事件到任务注册表
+        if task_info:
+            try:
+                registry = get_chat_task_registry()
+                event_data = {
+                    "delta": {"content": delta_piece}
+                }
+                await registry.append_event(task_info.task_id, event_data, event_type="data")
+            except Exception:
+                pass
+        
+        yield event
         await asyncio.sleep(0)
 
 
@@ -123,7 +142,8 @@ async def _yield_deepsearch_answer_stream(
     model_name: str,
     created: int,
     request_id: str,
-    response_parts: list[str]
+    response_parts: list[str],
+    task_info: Any = None
 ) -> AsyncGenerator[str, None]:
     """Yield DeepSearch answer as streaming token events."""
     async for event in _yield_token_events(
@@ -132,7 +152,8 @@ async def _yield_deepsearch_answer_stream(
         model_name,
         created,
         request_id,
-        response_parts
+        response_parts,
+        task_info
     ):
         yield event
 
@@ -171,6 +192,61 @@ async def _process_queue_events(
                 created,
                 request_id,
                 response_parts
+            ):
+                yield event
+            continue
+
+
+async def _process_queue_events_with_cache(
+    queue: asyncio.Queue,
+    chunk_id: str,
+    model_name: str,
+    created: int,
+    request_id: str,
+    response_parts: list[str],
+    stream_error: list[Exception | None],
+    task_info: Any
+) -> AsyncGenerator[str, None]:
+    """Process events from queue with task event caching."""
+    while True:
+        item = await queue.get()
+        if item is None:
+            break
+        
+        if isinstance(item, dict) and item.get("kind") == "progress":
+            async for event in _yield_progress_event(
+                item.get("payload") or {},
+                chunk_id,
+                model_name,
+                created,
+                request_id
+            ):
+                # 缓存进度事件
+                if task_info:
+                    try:
+                        registry = get_chat_task_registry()
+                        try:
+                            if '\n\n' in event:
+                                event_data = json.loads(event.split('\n\n', 1)[-1])
+                            else:
+                                event_data = {"raw": event}
+                        except json.JSONDecodeError:
+                            event_data = {"raw": event}
+                        await registry.append_event(task_info.task_id, event_data, event_type="progress")
+                    except Exception:
+                        pass
+                yield event
+            continue
+        
+        if isinstance(item, dict) and item.get("kind") == "token":
+            async for event in _yield_token_events(
+                str(item.get("text") or ""),
+                chunk_id,
+                model_name,
+                created,
+                request_id,
+                response_parts,
+                task_info
             ):
                 yield event
             continue
@@ -317,6 +393,52 @@ async def generate_sse_events(
         user_message.id
     )
     
+    # 创建任务并更新状态
+    registry = get_chat_task_registry()
+    task_info = None
+    try:
+        task_info = await registry.create(
+            session_id=session_id,
+            user_message_id=user_message.id,
+            query=query,
+            request_id=request_id
+        )
+        
+        # 更新数据库状态
+        await get_thread_pool().run_blocking(
+            get_message_handler().update_message,
+            user_message.id,
+            {
+                "status": ChatMessageStatus.PROCESSING,
+                "task_id": task_info.task_id,
+                "request_id": request_id
+            }
+        )
+        
+        await get_thread_pool().run_blocking(
+            get_session_handler().update_session,
+            session_id,
+            {
+                "current_task_id": task_info.task_id,
+                "current_task_status": "PROCESSING",
+                "current_task_started_at": datetime.now()
+            }
+        )
+    except ValueError as e:
+        # 已有任务在进行中，抛出异常让上层处理
+        from fastapi import HTTPException, status
+        logger.warning("Task creation failed: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "Another task is in progress",
+                "message": str(e)
+            }
+        )
+    except Exception as e:
+        logger.error("Failed to create task: %s", e)
+        # 继续执行，但不进行任务管理
+    
     # Initialize queues and state
     response_parts: list[str] = []
     queue: asyncio.Queue[object | None] = asyncio.Queue()
@@ -344,6 +466,48 @@ async def generate_sse_events(
         )
         # 先迭代生成器以获取进度事件，生成器完成后 deepsearch_result_container[0] 会被设置
         async for event in deepsearch_gen:
+            # 检查任务是否被取消
+            if task_info:
+                updated_info = await registry.get(task_info.task_id)
+                if updated_info and updated_info.cancelled:
+                    logger.info("Task cancelled during DeepSearch, stopping")
+                    await registry.mark_done(task_info.task_id, error="Task cancelled by user")
+                    await get_thread_pool().run_blocking(
+                        get_message_handler().update_message,
+                        user_message.id,
+                        {"status": ChatMessageStatus.CANCELLED}
+                    )
+                    await get_thread_pool().run_blocking(
+                        get_session_handler().update_session,
+                        session_id,
+                        {
+                            "current_task_id": None,
+                            "current_task_status": None,
+                            "current_task_started_at": None
+                        }
+                    )
+                    yield sse_json_wrapped({
+                        "type": "task_cancelled",
+                        "message": "Task cancelled by user"
+                    }, request_id)
+                    yield sse_done()
+                    return
+            
+            # 缓存 DeepSearch 事件
+            if task_info:
+                try:
+                    registry = get_chat_task_registry()
+                    # 尝试解析事件数据
+                    try:
+                        if '\n\n' in event:
+                            event_data = json.loads(event.split('\n\n', 1)[-1])
+                        else:
+                            event_data = {"raw": event}
+                    except json.JSONDecodeError:
+                        event_data = {"raw": event}
+                    await registry.append_event(task_info.task_id, event_data, event_type="progress")
+                except Exception:
+                    pass
             yield event
         
         # 生成器完成后，从容器中获取结果
@@ -387,7 +551,8 @@ async def generate_sse_events(
                     model_name,
                     created,
                     request_id,
-                    response_parts
+                    response_parts,
+                    task_info
                 ):
                     yield event
                 
@@ -412,6 +577,33 @@ async def generate_sse_events(
     # 如果 DeepSearch 成功，已经设置了所有变量，直接跳转到响应构建
     # 如果 DeepSearch 未启用或失败，使用 RAG 系统
     if not enable_deepsearch or not deepsearch_result:
+        # 检查任务是否被取消（在启动 RAG 处理前）
+        if task_info:
+            updated_info = await registry.get(task_info.task_id)
+            if updated_info and updated_info.cancelled:
+                logger.info("Task cancelled before RAG processing, stopping")
+                await registry.mark_done(task_info.task_id, error="Task cancelled by user")
+                await get_thread_pool().run_blocking(
+                    get_message_handler().update_message,
+                    user_message.id,
+                    {"status": ChatMessageStatus.CANCELLED}
+                )
+                await get_thread_pool().run_blocking(
+                    get_session_handler().update_session,
+                    session_id,
+                    {
+                        "current_task_id": None,
+                        "current_task_status": None,
+                        "current_task_started_at": None
+                    }
+                )
+                yield sse_json_wrapped({
+                    "type": "task_cancelled",
+                    "message": "Task cancelled by user"
+                }, request_id)
+                yield sse_done()
+                return
+        
         # Start stream processing
         start_stream_processing(
             query,
@@ -427,23 +619,101 @@ async def generate_sse_events(
             emit_progress
         )
         
-        # Process queue events
-        async for event in _process_queue_events(
+        # Process queue events (with task event caching)
+        async for event in _process_queue_events_with_cache(
             queue,
             chunk_id,
             model_name,
             created,
             request_id,
             response_parts,
-            stream_error
+            stream_error,
+            task_info
         ):
+            # 检查任务是否被取消
+            if task_info:
+                updated_info = await registry.get(task_info.task_id)
+                if updated_info and updated_info.cancelled:
+                    logger.info("Task cancelled during execution, stopping event processing")
+                    # 标记为完成（已取消）
+                    await registry.mark_done(task_info.task_id, error="Task cancelled by user")
+                    await get_thread_pool().run_blocking(
+                        get_message_handler().update_message,
+                        user_message.id,
+                        {"status": ChatMessageStatus.CANCELLED}
+                    )
+                    await get_thread_pool().run_blocking(
+                        get_session_handler().update_session,
+                        session_id,
+                        {
+                            "current_task_id": None,
+                            "current_task_status": None,
+                            "current_task_started_at": None
+                        }
+                    )
+                    # 发送取消事件
+                    yield sse_json_wrapped({
+                        "type": "task_cancelled",
+                        "message": "Task cancelled by user"
+                    }, request_id)
+                    yield sse_done()
+                    return
             yield event
         
         # Handle errors
         if stream_error[0] is not None:
+            # 任务失败，更新状态
+            if task_info:
+                try:
+                    error_msg = str(stream_error[0])
+                    await registry.mark_done(task_info.task_id, error=error_msg)
+                    await get_thread_pool().run_blocking(
+                        get_message_handler().update_message,
+                        user_message.id,
+                        {"status": ChatMessageStatus.FAILED}
+                    )
+                    await get_thread_pool().run_blocking(
+                        get_session_handler().update_session,
+                        session_id,
+                        {
+                            "current_task_id": None,
+                            "current_task_status": None,
+                            "current_task_started_at": None
+                        }
+                    )
+                except Exception as e:
+                    logger.warning("Failed to update task error status: %s", e)
+            
             async for event in _yield_error_event(stream_error[0], request_id):
                 yield event
             return
+        
+        # 检查任务是否被取消（在处理响应前）
+        if task_info:
+            updated_info = await registry.get(task_info.task_id)
+            if updated_info and updated_info.cancelled:
+                logger.info("Task cancelled before building response, stopping")
+                await registry.mark_done(task_info.task_id, error="Task cancelled by user")
+                await get_thread_pool().run_blocking(
+                    get_message_handler().update_message,
+                    user_message.id,
+                    {"status": ChatMessageStatus.CANCELLED}
+                )
+                await get_thread_pool().run_blocking(
+                    get_session_handler().update_session,
+                    session_id,
+                    {
+                        "current_task_id": None,
+                        "current_task_status": None,
+                        "current_task_started_at": None
+                    }
+                )
+                yield sse_json_wrapped({
+                    "type": "task_cancelled",
+                    "message": "Task cancelled by user"
+                }, request_id)
+                yield sse_done()
+                return
         
         # Build response
         assistant_response = "".join(response_parts)
@@ -462,6 +732,33 @@ async def generate_sse_events(
         subgraph_info = prepared.get("subgraph_info")
         raw_llm_response = prepared.get("raw_llm_response")
         raw_mindmap_response = prepared.get("raw_mindmap_response")
+    
+    # 检查任务是否被取消（在生成 mindmap 前）
+    if task_info:
+        updated_info = await registry.get(task_info.task_id)
+        if updated_info and updated_info.cancelled:
+            logger.info("Task cancelled before generating mindmap, stopping")
+            await registry.mark_done(task_info.task_id, error="Task cancelled by user")
+            await get_thread_pool().run_blocking(
+                get_message_handler().update_message,
+                user_message.id,
+                {"status": ChatMessageStatus.CANCELLED}
+            )
+            await get_thread_pool().run_blocking(
+                get_session_handler().update_session,
+                session_id,
+                {
+                    "current_task_id": None,
+                    "current_task_status": None,
+                    "current_task_started_at": None
+                }
+            )
+            yield sse_json_wrapped({
+                "type": "task_cancelled",
+                "message": "Task cancelled by user"
+            }, request_id)
+            yield sse_done()
+            return
     
     # Generate mindmap if needed (keep upstream subgraph when already provided).
     if return_subgraph and subgraph_data is None:
@@ -490,6 +787,33 @@ async def generate_sse_events(
             is_fallback_response
         )
     
+    # 再次检查任务是否被取消（在创建消息前）
+    if task_info:
+        updated_info = await registry.get(task_info.task_id)
+        if updated_info and updated_info.cancelled:
+            logger.info("Task cancelled before creating assistant message, stopping")
+            await registry.mark_done(task_info.task_id, error="Task cancelled by user")
+            await get_thread_pool().run_blocking(
+                get_message_handler().update_message,
+                user_message.id,
+                {"status": ChatMessageStatus.CANCELLED}
+            )
+            await get_thread_pool().run_blocking(
+                get_session_handler().update_session,
+                session_id,
+                {
+                    "current_task_id": None,
+                    "current_task_status": None,
+                    "current_task_started_at": None
+                }
+            )
+            yield sse_json_wrapped({
+                "type": "task_cancelled",
+                "message": "Task cancelled by user"
+            }, request_id)
+            yield sse_done()
+            return
+    
     # Create assistant message
     assistant_message = await create_assistant_message(
         session_id,
@@ -501,6 +825,33 @@ async def generate_sse_events(
         raw_mindmap_response,
         deepsearch_trace_file_path=deepsearch_trace_file_path if enable_deepsearch else None
     )
+    
+    # 任务完成，更新状态
+    if task_info:
+        try:
+            await registry.mark_done(
+                task_info.task_id,
+                assistant_message_id=assistant_message.id
+            )
+            
+            # 更新数据库状态
+            await get_thread_pool().run_blocking(
+                get_message_handler().update_message,
+                user_message.id,
+                {"status": ChatMessageStatus.COMPLETED}
+            )
+            
+            await get_thread_pool().run_blocking(
+                get_session_handler().update_session,
+                session_id,
+                {
+                    "current_task_id": None,
+                    "current_task_status": None,
+                    "current_task_started_at": None
+                }
+            )
+        except Exception as e:
+            logger.warning("Failed to update task completion status: %s", e)
     
     # Generate title if first turn
     if first_turn:

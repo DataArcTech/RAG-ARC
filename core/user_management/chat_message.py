@@ -512,3 +512,47 @@ class ChatMessageStorage(AbstractModule):
         except Exception as e:
             logger.error(f"Failed to delete messages for session {session_id}: {e}")
             return 0
+
+    def update_message(
+        self,
+        message_id: uuid.UUID,
+        updates: dict,
+        **kwargs: Any
+    ) -> bool:
+        """
+        Update chat message metadata.
+
+        Args:
+            message_id: Message ID as UUID
+            updates: Dictionary of fields to update
+            **kwargs: Additional arguments
+
+        Returns:
+            True if update succeeded, False otherwise
+        """
+        try:
+            logger.debug(f"Updating chat message {message_id}")
+            
+            # Update in PostgreSQL
+            success = self.metadata_store.update_chat_message(message_id, updates, **kwargs)
+            
+            if success:
+                # Invalidate Redis cache for this session (best effort)
+                try:
+                    message = self.metadata_store.get_chat_message(message_id, **kwargs)
+                    if message and self.cache_store:
+                        cache_key = self._get_cache_key(str(message.session_id))
+                        self.cache_store.delete(cache_key)
+                        logger.debug(f"Invalidated Redis cache for session {message.session_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to invalidate Redis cache: {e}")
+                
+                logger.info(f"Successfully updated chat message {message_id}")
+            else:
+                logger.warning(f"Failed to update chat message {message_id}")
+            
+            return success
+
+        except Exception as e:
+            logger.error(f"Failed to update chat message {message_id}: {e}")
+            return False

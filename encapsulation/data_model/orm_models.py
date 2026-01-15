@@ -68,6 +68,15 @@ class AuditAction(enum.Enum):
     USER_LOGOUT = "USER_LOGOUT"
 
 
+class ChatMessageStatus(enum.Enum):
+    """Chat message processing status"""
+    PENDING = "PENDING"          # 等待处理
+    PROCESSING = "PROCESSING"    # 正在处理
+    COMPLETED = "COMPLETED"      # 已完成
+    FAILED = "FAILED"            # 失败
+    CANCELLED = "CANCELLED"      # 已取消
+
+
 # ==================== DEPARTMENT ====================
 
 class Department(Base):
@@ -211,6 +220,11 @@ class ChatSession(Base):
     is_shared: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     session_metadata: Mapped[Optional[dict]] = mapped_column("session_metadata", JSON)
 
+    # Current task tracking (for task recovery)
+    current_task_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    current_task_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    current_task_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
@@ -260,6 +274,13 @@ class ChatMessage(Base):
 
     # Raw mindmap LLM response for debugging
     raw_mindmap_response: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    # Task tracking (for task recovery)
+    status: Mapped[Optional["ChatMessageStatus"]] = mapped_column(
+        SQLEnum(ChatMessageStatus), nullable=True, index=True
+    )
+    task_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    request_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     # Timestamp
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)

@@ -15,12 +15,15 @@ async def create_user_message(
     session_id: uuid.UUID,
     query: str
 ) -> ChatMessage:
-    """Create and save user message."""
+    """Create and save user message with initial status."""
+    from encapsulation.data_model.orm_models import ChatMessageStatus
+    
     message_handler = get_message_handler()
     user_message = ChatMessage(
         session_id=session_id,
         content={"role": "user", "content": query},
         created_at=datetime.now(),
+        status=ChatMessageStatus.PENDING,  # 初始状态为 PENDING
     )
     return await get_thread_pool().run_blocking(
         message_handler.create_message,

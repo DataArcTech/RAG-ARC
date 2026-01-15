@@ -61,6 +61,26 @@ def apply_postgres_schema_patches(engine: Engine) -> None:
         "ALTER TABLE public.task_run DROP CONSTRAINT IF EXISTS task_run_owner_id_fkey;",
         # Add sources field to chat_message table for storing complete source information
         "ALTER TABLE public.chat_message ADD COLUMN IF NOT EXISTS sources jsonb;",
+        # Create ChatMessageStatus enum type (if not exists)
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'chatmessagestatus') THEN
+                CREATE TYPE chatmessagestatus AS ENUM ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED', 'CANCELLED');
+            END IF;
+        END $$;
+        """,
+        # Add task tracking fields to chat_message table
+        "ALTER TABLE public.chat_message ADD COLUMN IF NOT EXISTS status chatmessagestatus;",
+        "ALTER TABLE public.chat_message ADD COLUMN IF NOT EXISTS task_id varchar(255);",
+        "ALTER TABLE public.chat_message ADD COLUMN IF NOT EXISTS request_id varchar(255);",
+        "CREATE INDEX IF NOT EXISTS ix_chat_message_status ON public.chat_message (status);",
+        "CREATE INDEX IF NOT EXISTS ix_chat_message_task_id ON public.chat_message (task_id);",
+        # Add current task tracking fields to chat_session table
+        "ALTER TABLE public.chat_session ADD COLUMN IF NOT EXISTS current_task_id varchar(255);",
+        "ALTER TABLE public.chat_session ADD COLUMN IF NOT EXISTS current_task_status varchar(50);",
+        "ALTER TABLE public.chat_session ADD COLUMN IF NOT EXISTS current_task_started_at timestamp;",
+        "CREATE INDEX IF NOT EXISTS ix_chat_session_current_task_id ON public.chat_session (current_task_id);",
     ]
 
     for stmt in statements:

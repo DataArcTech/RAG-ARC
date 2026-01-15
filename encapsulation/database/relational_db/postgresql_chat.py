@@ -246,6 +246,24 @@ class _PostgreSQLChatMixin:
             logger.error(f"Database error deleting chat messages for session {session_id}: {e}")
             raise
 
+    def update_chat_message(self, message_id: uuid.UUID, updates: dict, **kwargs: Any) -> bool:
+        """Update chat message metadata using SQLAlchemy ORM"""
+        try:
+            with self.SessionMaker() as db_session:
+                rows_updated = db_session.query(ChatMessage).filter_by(id=message_id).update(updates)
+                db_session.commit()
+
+                if rows_updated > 0:
+                    logger.debug(f"Updated chat message: {message_id}")
+                    return True
+                else:
+                    logger.warning(f"No chat message found with ID: {message_id}")
+                    return False
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error updating chat message {message_id}: {e}")
+            raise
+
     # ==================== FILE PERMISSION MANAGEMENT ====================
 
 
