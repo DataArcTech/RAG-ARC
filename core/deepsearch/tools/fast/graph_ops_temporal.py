@@ -2,7 +2,16 @@
 import re
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.entity_resolution import build_default_entity_resolver
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
+
+from config.core.deepsearch.tool_defaults import (
+    NEIGHBORS_ENTITY_RESOLUTION_AUTO_SCORE_MARGIN,
+    NEIGHBORS_ENTITY_RESOLUTION_AUTO_SCORE_MIN,
+    NEIGHBORS_ENTITY_RESOLUTION_CANDIDATE_LIMIT,
+    NEIGHBORS_ENTITY_RESOLUTION_MIN_TOKEN_HITS,
+    NEIGHBORS_ENTITY_RESOLUTION_MIN_TOKEN_LEN,
+)
 
 from core.graph_adapter.cypher import adapter_supports_cypher
 from core.graph_adapter.concurrency import adapter_locked
@@ -14,6 +23,23 @@ from .graph_ops_common import normalize_entity_name, normalize_predicates
 
 
 _SAFE_CYPHER_PROPERTY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _resolution_candidate_payload(candidate):  # noqa: ANN001
+    return {
+        "entity_id": getattr(candidate, "entity_id", None),
+        "entity_name": getattr(candidate, "entity_name", None),
+        "entity_name_normalized": getattr(candidate, "entity_name_normalized", None),
+        "entity_type": getattr(candidate, "entity_type", None),
+        "entity_type_key": getattr(candidate, "entity_type_key", None),
+        "strategy": getattr(candidate, "strategy", None),
+        "hit_count": getattr(candidate, "hit_count", None),
+        "edge_count": getattr(candidate, "edge_count", None),
+        "mention_count": getattr(candidate, "mention_count", None),
+        "faiss_score": getattr(candidate, "faiss_score", None),
+        "score": getattr(candidate, "score", None),
+        "score_breakdown": getattr(candidate, "score_breakdown", None),
+    }
 
 
 class GraphLatestTruthTool(GraphTool):
@@ -57,13 +83,15 @@ class GraphLatestTruthTool(GraphTool):
                 diagnostics={"reason": "cypher_unavailable"},
             )
 
-        topic = normalize_entity_name(request.extra.get("topic"))
+        raw_topic = str(request.extra.get("topic") or "").strip()
+        topic = normalize_entity_name(raw_topic)
         if not topic:
             return ToolResult(summary="Latest truth requires a non-empty topic.")
 
         topic_type = str(request.extra.get("topic_type") or "").strip()
         predicates = normalize_predicates(request.extra.get("predicates"))
         time_property = str(request.extra.get("time_property") or "").strip()
+        resolution_diag = None
         if time_property and not _SAFE_CYPHER_PROPERTY_RE.match(time_property):
             # Prevent Cypher injection by refusing non-identifier property names.
             time_property = ""
@@ -105,13 +133,61 @@ class GraphLatestTruthTool(GraphTool):
         row0 = (rows or [{}])[0] if isinstance(rows, list) else {}
         candidate_count = int((row0 or {}).get("candidate_count") or 1)
         if candidate_count != 1:
-            return ToolResult(
-                summary=(
-                    "Latest truth aborted due to ambiguous topic entity name. "
-                    f"candidate_count={candidate_count}. Provide topic_type to disambiguate."
-                ),
-                diagnostics={"topic": topic, "candidate_count": candidate_count, "topic_type": topic_type or None},
+            resolver = build_default_entity_resolver(
+                enabled=True,
+                candidate_limit=NEIGHBORS_ENTITY_RESOLUTION_CANDIDATE_LIMIT,
+                min_token_len=NEIGHBORS_ENTITY_RESOLUTION_MIN_TOKEN_LEN,
+                min_token_hits=NEIGHBORS_ENTITY_RESOLUTION_MIN_TOKEN_HITS,
+                auto_score_min=NEIGHBORS_ENTITY_RESOLUTION_AUTO_SCORE_MIN,
+                auto_score_margin=NEIGHBORS_ENTITY_RESOLUTION_AUTO_SCORE_MARGIN,
             )
+            res = await resolver.resolve(
+                adapter=adapter,
+                access_scope=request.access_scope,
+                raw_entity=raw_topic,
+                entity_type_hint=topic_type,
+            )
+            if res.resolved_candidate is not None:
+                resolution_diag = dict(res.diagnostics)
+                cypher2 = f"""
+                MATCH (t:Entity {{entity_id: $topic_id}})
+                WHERE COALESCE(t.owner_id, $global_owner) = $owner_id
+                MATCH (t)-[r:RELATES_TO]->(v:Entity)
+                WHERE COALESCE(r.owner_id, $global_owner) = $owner_id
+                  AND COALESCE(v.owner_id, $global_owner) = $owner_id
+                  {predicate_clause}
+                RETURN v.entity_name AS value,
+                       r.predicate AS predicate,
+                       {order_expr} AS sort_key,
+                       r.fact_id AS fact_id,
+                       r.source_chunk_ids AS source_chunk_ids
+                ORDER BY sort_key DESC
+                LIMIT 1
+                """
+                async with adapter_locked(adapter):
+                    rows2 = await adapter.acypher(
+                        cypher2,
+                        {"topic_id": res.resolved_candidate.entity_id, "predicates": predicates},
+                        access_scope=request.access_scope,
+                    )
+                row0 = (rows2 or [{}])[0] if isinstance(rows2, list) else {}
+                candidate_count = 1
+            else:
+                return ToolResult(
+                    summary=(
+                        "Latest truth aborted due to ambiguous topic entity name. "
+                        f"candidate_count={candidate_count}. Provide topic_type to disambiguate."
+                    ),
+                    diagnostics={
+                        "topic": topic,
+                        "candidate_count": candidate_count,
+                        "topic_type": topic_type or None,
+                        "resolution_candidates": [_resolution_candidate_payload(c) for c in res.candidates],
+                        "resolution_diagnostics": dict(res.diagnostics),
+                    },
+                )
+            # Resolved by entity_id -> continue with the resolved query result in row0.
+            candidate_count = 1
         value = str((row0 or {}).get("value") or "").strip()
         if not value:
             return ToolResult(summary="Latest truth query returned no candidate values.", diagnostics={"topic": topic, "predicates": predicates})
@@ -132,6 +208,7 @@ class GraphLatestTruthTool(GraphTool):
                 "fact_id": (row0 or {}).get("fact_id"),
                 "source_chunk_ids": (row0 or {}).get("source_chunk_ids") or [],
                 "time_property": time_property or None,
+                "resolution": resolution_diag,
             },
         )
         return ToolResult(summary=summary, evidences=[evidence], diagnostics={"value": value})

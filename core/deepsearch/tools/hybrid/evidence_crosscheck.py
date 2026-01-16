@@ -7,6 +7,15 @@ from pydantic import BaseModel, Field
 from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DIAGNOSTIC
 
+from config.core.deepsearch.tool_defaults import (
+    EVIDENCE_CROSSCHECK_GRAPH_BACKFILL_ENABLED,
+    EVIDENCE_CROSSCHECK_GRAPH_BACKFILL_MAX_CHUNKS,
+)
+from core.graph_adapter.cypher import adapter_supports_cypher
+from core.graph_adapter.concurrency import adapter_locked
+from core.knowledge_graph.schema import normalize_relation_token
+from core.deepsearch.tools.fast.graph_ops_common import normalize_entity_name
+
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, build_input_schema, safe_json_loads
 from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_LLM, SCOPE_OWNER
 from core.prompts.deepsearch import EVIDENCE_CROSSCHECK_PROMPT
@@ -85,11 +94,15 @@ class EvidenceCrosscheckTool(GraphTool):
         llm_connector,
         *,
         prompt_template: str = EVIDENCE_CROSSCHECK_PROMPT,
+        enable_graph_backfill: bool = EVIDENCE_CROSSCHECK_GRAPH_BACKFILL_ENABLED,
+        graph_backfill_max_chunks: int = EVIDENCE_CROSSCHECK_GRAPH_BACKFILL_MAX_CHUNKS,
     ):
         if llm_connector is None:
             raise ValueError("EvidenceCrosscheckTool requires an LLM connector (no heuristic fallback).")
         self.llm_connector = llm_connector
         self.prompt_template = prompt_template
+        self.enable_graph_backfill = bool(enable_graph_backfill)
+        self.graph_backfill_max_chunks = int(graph_backfill_max_chunks)
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         triples = self._collect_triples(request)
@@ -151,6 +164,7 @@ class EvidenceCrosscheckTool(GraphTool):
                 think_notes=[note],
             )
 
+        graph_backfill = await self._backfill_missing_chunks_from_graph(request, llm_report)
         confirmed = [entry.model_dump() for entry in llm_report.supported]
         missing = [entry.model_dump() for entry in llm_report.unsupported]
         coverage_ratio = len(confirmed) / max(1, len(confirmed) + len(missing))
@@ -160,8 +174,10 @@ class EvidenceCrosscheckTool(GraphTool):
             "confirmed": len(confirmed),
             "missing": len(missing),
             "coverage_ratio": coverage_ratio,
+            "token_breakdown": self._token_breakdown(chunk_payload, bool(self.llm_connector)),
         }
-        diagnostics["token_breakdown"] = self._token_breakdown(chunk_payload, bool(self.llm_connector))
+        if graph_backfill:
+            diagnostics["graph_backfill"] = graph_backfill
         evidences = self._build_evidence_payload(
             confirmed,
             missing,
@@ -177,6 +193,110 @@ class EvidenceCrosscheckTool(GraphTool):
             diagnostics=diagnostics,
             think_notes=think_notes,
         )
+
+    async def _backfill_missing_chunks_from_graph(self, request: ToolRunRequest, llm_report: _CrosscheckResponse) -> Dict[str, Any] | None:
+        """If LLM says `chunks: none`, try to recover provenance chunk_ids from the KG (Neo4j facts)."""
+
+        if not self.enable_graph_backfill:
+            return None
+        adapter = request.adapter
+        if adapter is None or not adapter_supports_cypher(adapter):
+            return None
+
+        max_chunks = max(0, int(self.graph_backfill_max_chunks))
+        if max_chunks <= 0:
+            return None
+
+        # Gather triples that the model couldn't associate to any retrieved chunk.
+        targets: list[dict[str, str]] = []
+        missing_by_triple: dict[str, Any] = {}
+        for entry in list(llm_report.supported) + list(llm_report.unsupported):
+            chunks = getattr(entry, "chunks", None)
+            if chunks:
+                continue
+            parsed = self._parse_triple_text(getattr(entry, "triple", ""))
+            if not parsed:
+                continue
+            head, rel, tail = parsed
+            head_norm = normalize_entity_name(head)
+            tail_norm = normalize_entity_name(tail)
+            rel_norm = normalize_relation_token(rel)
+            if not head_norm or not tail_norm or not rel_norm:
+                continue
+            triple_text = str(entry.triple)
+            missing_by_triple[triple_text] = entry
+            targets.append({"triple": triple_text, "head": head_norm, "rel": rel_norm, "tail": tail_norm})
+
+        if not targets or not missing_by_triple:
+            return None
+
+        cypher = """
+        UNWIND $triples AS row
+        MATCH (h:Entity)
+        WHERE COALESCE(h.owner_id, $global_owner) = $owner_id
+          AND h.entity_name_normalized = row.head
+        MATCH (t:Entity)
+        WHERE COALESCE(t.owner_id, $global_owner) = $owner_id
+          AND t.entity_name_normalized = row.tail
+        MATCH (h)-[r:RELATES_TO]-(t)
+        WHERE COALESCE(r.owner_id, $global_owner) = $owner_id
+          AND r.predicate = row.rel
+        RETURN row.triple AS triple,
+               r.fact_id AS fact_id,
+               r.source_chunk_ids AS source_chunk_ids
+        """
+        try:
+            async with adapter_locked(adapter):
+                rows = await adapter.acypher(cypher, {"triples": targets}, access_scope=request.access_scope)
+        except Exception as exc:  # noqa: BLE001
+            return {"attempted": len(missing_by_triple), "filled": 0, "error": str(exc), "error_type": type(exc).__name__}
+
+        filled = 0
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            triple_text = str(row.get("triple") or "")
+            entry = missing_by_triple.get(triple_text)
+            if entry is None:
+                continue
+            source_chunk_ids = row.get("source_chunk_ids") or []
+            if not isinstance(source_chunk_ids, list) or not source_chunk_ids:
+                continue
+            normalized_ids: list[str] = []
+            for cid in source_chunk_ids:
+                token = str(cid or "").strip()
+                if token:
+                    normalized_ids.append(token)
+                if len(normalized_ids) >= max_chunks:
+                    break
+            if not normalized_ids:
+                continue
+            try:
+                entry.chunks = normalized_ids  # type: ignore[assignment]
+                filled += 1
+            except Exception:
+                continue
+
+        return {"attempted": len(missing_by_triple), "filled": filled, "max_chunks": max_chunks}
+
+    @staticmethod
+    def _parse_triple_text(text: str) -> tuple[str, str, str] | None:
+        """Parse 'head -[REL]-> tail'."""
+        raw = str(text or "").strip()
+        if not raw:
+            return None
+        if "-[" not in raw or "]" not in raw:
+            return None
+        head, rest = raw.split("-[", 1)
+        rel, tail = rest.split("]", 1)
+        # Tail may start with "->" or "<-" depending on direction in text.
+        tail = tail.replace("->", "").replace("<-", "").strip()
+        head = head.strip()
+        rel = rel.strip()
+        tail = tail.strip()
+        if not head or not rel or not tail:
+            return None
+        return head, rel, tail
 
     def _collect_triples(self, request: ToolRunRequest) -> List[Dict[str, str]]:
         triples: List[Dict[str, str]] = []

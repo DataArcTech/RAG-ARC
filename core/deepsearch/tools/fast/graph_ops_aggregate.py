@@ -1,6 +1,17 @@
 """Deterministic aggregation tool backed by Neo4j Cypher."""
+from typing import Any, Dict
+
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.entity_resolution import build_default_entity_resolver
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
+
+from config.core.deepsearch.tool_defaults import (
+    NEIGHBORS_ENTITY_RESOLUTION_AUTO_SCORE_MARGIN,
+    NEIGHBORS_ENTITY_RESOLUTION_AUTO_SCORE_MIN,
+    NEIGHBORS_ENTITY_RESOLUTION_CANDIDATE_LIMIT,
+    NEIGHBORS_ENTITY_RESOLUTION_MIN_TOKEN_HITS,
+    NEIGHBORS_ENTITY_RESOLUTION_MIN_TOKEN_LEN,
+)
 
 from core.graph_adapter.cypher import adapter_supports_cypher
 from core.graph_adapter.concurrency import adapter_locked
@@ -17,6 +28,23 @@ from .graph_ops_common import (
     normalize_predicates,
     rel_pattern,
 )
+
+
+def _resolution_candidate_payload(candidate: Any) -> Dict[str, Any]:
+    return {
+        "entity_id": getattr(candidate, "entity_id", None),
+        "entity_name": getattr(candidate, "entity_name", None),
+        "entity_name_normalized": getattr(candidate, "entity_name_normalized", None),
+        "entity_type": getattr(candidate, "entity_type", None),
+        "entity_type_key": getattr(candidate, "entity_type_key", None),
+        "strategy": getattr(candidate, "strategy", None),
+        "hit_count": getattr(candidate, "hit_count", None),
+        "edge_count": getattr(candidate, "edge_count", None),
+        "mention_count": getattr(candidate, "mention_count", None),
+        "faiss_score": getattr(candidate, "faiss_score", None),
+        "score": getattr(candidate, "score", None),
+        "score_breakdown": getattr(candidate, "score_breakdown", None),
+    }
 
 
 class GraphAggregateTool(GraphTool):
@@ -61,7 +89,8 @@ class GraphAggregateTool(GraphTool):
                 diagnostics={"reason": "cypher_unavailable"},
             )
 
-        entity = normalize_entity_name(request.extra.get("entity"))
+        raw_entity = str(request.extra.get("entity") or "").strip()
+        entity = normalize_entity_name(raw_entity)
         if not entity:
             return ToolResult(summary="Aggregation requires a non-empty entity name.")
 
@@ -110,12 +139,89 @@ class GraphAggregateTool(GraphTool):
         row0 = (rows or [{}])[0] if isinstance(rows, list) else {}
         candidate_count = int((row0 or {}).get("candidate_count") or 1)
         if candidate_count != 1:
+            resolver = build_default_entity_resolver(
+                enabled=True,
+                candidate_limit=NEIGHBORS_ENTITY_RESOLUTION_CANDIDATE_LIMIT,
+                min_token_len=NEIGHBORS_ENTITY_RESOLUTION_MIN_TOKEN_LEN,
+                min_token_hits=NEIGHBORS_ENTITY_RESOLUTION_MIN_TOKEN_HITS,
+                auto_score_min=NEIGHBORS_ENTITY_RESOLUTION_AUTO_SCORE_MIN,
+                auto_score_margin=NEIGHBORS_ENTITY_RESOLUTION_AUTO_SCORE_MARGIN,
+            )
+            res = await resolver.resolve(
+                adapter=adapter,
+                access_scope=request.access_scope,
+                raw_entity=raw_entity,
+                entity_type_hint=entity_type,
+            )
+            if res.resolved_candidate is not None:
+                cypher2 = f"""
+                MATCH (e:Entity {{entity_id: $entity_id}})
+                WHERE COALESCE(e.owner_id, $global_owner) = $owner_id
+                MATCH (e){rel}(n:Entity)
+                WHERE COALESCE(rel.owner_id, $global_owner) = $owner_id
+                  AND COALESCE(n.owner_id, $global_owner) = $owner_id
+                  {pred_clause}
+                RETURN count(DISTINCT COALESCE(n.entity_canonical_key, n.entity_canonical_name, n.entity_name, n.entity_id)) AS distinct_count,
+                       collect(DISTINCT COALESCE(n.entity_canonical_name, n.entity_name))[..$limit] AS examples
+                """
+                async with adapter_locked(adapter):
+                    rows2 = await adapter.acypher(
+                        cypher2,
+                        {"entity_id": res.resolved_candidate.entity_id, "predicate": predicate, "limit": limit},
+                        access_scope=request.access_scope,
+                    )
+                row2 = (rows2 or [{}])[0] if isinstance(rows2, list) else {}
+                count2 = int((row2 or {}).get("distinct_count") or 0)
+                examples2 = (row2 or {}).get("examples") or []
+                content2 = (
+                    f"aggregate: entity={entity} predicate={predicate or '*'} "
+                    f"direction={direction} distinct_count={count2}"
+                )
+                chunk_id2 = derived_chunk_id(
+                    tool_name=self.descriptor.name,
+                    plan_step=request.plan_step,
+                    label="agg",
+                    content=content2,
+                )
+                evidence2 = EvidenceChunk(
+                    chunk_id=chunk_id2,
+                    source=self.descriptor.name,
+                    content=content2,
+                    kind=EVIDENCE_KIND_DERIVED,
+                    provenance={
+                        "distinct_count": count2,
+                        "examples": examples2,
+                        "entity": entity,
+                        "predicate": predicate,
+                        "direction": direction,
+                        "direction_forced_sensitive": forced_sensitive,
+                        "direction_forced_undirected": forced_undirected,
+                        "resolution": dict(res.diagnostics),
+                    },
+                )
+                return ToolResult(
+                    summary=content2,
+                    evidences=[evidence2],
+                    diagnostics={
+                        "distinct_count": count2,
+                        "examples": examples2,
+                        "direction_forced_sensitive": forced_sensitive,
+                        "direction_forced_undirected": forced_undirected,
+                        "resolution": dict(res.diagnostics),
+                    },
+                )
             return ToolResult(
                 summary=(
                     "Aggregation aborted due to ambiguous entity name. "
                     f"candidate_count={candidate_count}. Provide entity_type to disambiguate."
                 ),
-                diagnostics={"entity": entity, "candidate_count": candidate_count, "entity_type": entity_type or None},
+                diagnostics={
+                    "entity": entity,
+                    "candidate_count": candidate_count,
+                    "entity_type": entity_type or None,
+                    "resolution_candidates": [_resolution_candidate_payload(c) for c in res.candidates],
+                    "resolution_diagnostics": dict(res.diagnostics),
+                },
             )
         count = int((row0 or {}).get("distinct_count") or 0)
         examples = (row0 or {}).get("examples") or []

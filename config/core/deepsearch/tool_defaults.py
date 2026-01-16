@@ -35,6 +35,48 @@ HYBRID_NEIGHBORHOOD_DEFAULT_SNIPPET_CHARS = 400
 HYBRID_NEIGHBORHOOD_DEFAULT_SUMMARY_TEMPERATURE = 0.1
 
 # -----------------------------
+# graph.neighbors defaults
+# -----------------------------
+# When planners pass "messy" entity strings (aliases, abbreviations, extra tokens),
+# `graph.neighbors` may return count=0. These knobs keep the fix centralized/configurable.
+NEIGHBORS_ENTITY_RESOLUTION_ENABLED = True
+NEIGHBORS_ENTITY_RESOLUTION_CANDIDATE_LIMIT = 12
+NEIGHBORS_ENTITY_RESOLUTION_MIN_TOKEN_LEN = 3
+NEIGHBORS_ENTITY_RESOLUTION_MIN_TOKEN_HITS = 2
+# Confidence gate for auto-resolving entity_name -> best match.
+NEIGHBORS_ENTITY_RESOLUTION_AUTO_SCORE_MIN = 0.86
+NEIGHBORS_ENTITY_RESOLUTION_AUTO_SCORE_MARGIN = 0.06
+
+# -----------------------------
+# Shared graph entity resolution defaults (all graph tools)
+# -----------------------------
+# Online hybrid entity resolution is a shared capability across graph tools.
+# Defaults are intentionally conservative to minimize mismatches/noise.
+ENTITY_RESOLUTION_ENABLE_ALIAS = True
+ENTITY_RESOLUTION_ENABLE_TOKEN_OVERLAP = True
+# Embedding/entity-FAISS recall is enabled by default but only used when deterministic recall fails.
+ENTITY_RESOLUTION_ENABLE_EMBEDDING_FALLBACK = True
+ENTITY_RESOLUTION_FAISS_TOP_K = 16
+ENTITY_RESOLUTION_FAISS_MIN_SIMILARITY = None  # set a float to hard-gate FAISS candidates (cosine)
+
+# Candidate validity gate: validate edges first; fall back to chunk mentions only when needed.
+ENTITY_RESOLUTION_VALIDATE_EDGES_FIRST = True
+ENTITY_RESOLUTION_REQUIRE_MIN_EDGE_COUNT = 1
+ENTITY_RESOLUTION_ENABLE_CHUNK_VALIDATION = True
+ENTITY_RESOLUTION_REQUIRE_MIN_MENTION_COUNT = 1
+
+# Scoring weights (normalize inside resolver).
+ENTITY_RESOLUTION_SCORE_WEIGHT_TOKEN_F1 = 0.7
+ENTITY_RESOLUTION_SCORE_WEIGHT_CHAR_RATIO = 0.3
+ENTITY_RESOLUTION_ALIAS_SCORE_BONUS = 0.12
+
+# -----------------------------
+# graph.evidence_crosscheck defaults
+# -----------------------------
+EVIDENCE_CROSSCHECK_GRAPH_BACKFILL_ENABLED = True
+EVIDENCE_CROSSCHECK_GRAPH_BACKFILL_MAX_CHUNKS = 8
+
+# -----------------------------
 # graph.think tool defaults
 # -----------------------------
 THINK_JSON_REPAIR_DEFAULT_ATTEMPTS = 1

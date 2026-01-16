@@ -2,7 +2,16 @@
 from typing import Any, Dict, List, Sequence
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.entity_resolution import build_default_entity_resolver
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
+
+from config.core.deepsearch.tool_defaults import (
+    NEIGHBORS_ENTITY_RESOLUTION_AUTO_SCORE_MARGIN,
+    NEIGHBORS_ENTITY_RESOLUTION_AUTO_SCORE_MIN,
+    NEIGHBORS_ENTITY_RESOLUTION_CANDIDATE_LIMIT,
+    NEIGHBORS_ENTITY_RESOLUTION_MIN_TOKEN_HITS,
+    NEIGHBORS_ENTITY_RESOLUTION_MIN_TOKEN_LEN,
+)
 
 from core.graph_adapter.cypher import adapter_supports_cypher
 from core.graph_adapter.concurrency import adapter_locked
@@ -19,6 +28,23 @@ from .graph_ops_common import (
     normalize_predicates,
     rel_pattern,
 )
+
+
+def _resolution_candidate_payload(candidate: Any) -> Dict[str, Any]:
+    return {
+        "entity_id": getattr(candidate, "entity_id", None),
+        "entity_name": getattr(candidate, "entity_name", None),
+        "entity_name_normalized": getattr(candidate, "entity_name_normalized", None),
+        "entity_type": getattr(candidate, "entity_type", None),
+        "entity_type_key": getattr(candidate, "entity_type_key", None),
+        "strategy": getattr(candidate, "strategy", None),
+        "hit_count": getattr(candidate, "hit_count", None),
+        "edge_count": getattr(candidate, "edge_count", None),
+        "mention_count": getattr(candidate, "mention_count", None),
+        "faiss_score": getattr(candidate, "faiss_score", None),
+        "score": getattr(candidate, "score", None),
+        "score_breakdown": getattr(candidate, "score_breakdown", None),
+    }
 
 
 class GraphIntersectionTool(GraphTool):
@@ -94,8 +120,10 @@ class GraphIntersectionTool(GraphTool):
                 diagnostics={"reason": "cypher_unavailable"},
             )
 
-        left = normalize_entity_name(request.extra.get("left"))
-        right = normalize_entity_name(request.extra.get("right"))
+        raw_left = str(request.extra.get("left") or "").strip()
+        raw_right = str(request.extra.get("right") or "").strip()
+        left = normalize_entity_name(raw_left)
+        right = normalize_entity_name(raw_right)
         if not left or not right:
             return ToolResult(summary="Intersection requires non-empty left/right entity names.")
 
@@ -197,21 +225,87 @@ class GraphIntersectionTool(GraphTool):
             left_candidates = int(row0.get("left_candidates") or 1)
             right_candidates = int(row0.get("right_candidates") or 1)
             if left_candidates != 1 or right_candidates != 1:
-                return ToolResult(
-                    summary=(
-                        "Intersection aborted due to ambiguous entities. "
-                        f"left_candidates={left_candidates} right_candidates={right_candidates}. "
-                        "Provide left_type/right_type to disambiguate."
-                    ),
-                    diagnostics={
-                        "left": left,
-                        "right": right,
-                        "left_candidates": left_candidates,
-                        "right_candidates": right_candidates,
-                        "left_type": left_type or None,
-                        "right_type": right_type or None,
-                    },
+                resolver = build_default_entity_resolver(
+                    enabled=True,
+                    candidate_limit=NEIGHBORS_ENTITY_RESOLUTION_CANDIDATE_LIMIT,
+                    min_token_len=NEIGHBORS_ENTITY_RESOLUTION_MIN_TOKEN_LEN,
+                    min_token_hits=NEIGHBORS_ENTITY_RESOLUTION_MIN_TOKEN_HITS,
+                    auto_score_min=NEIGHBORS_ENTITY_RESOLUTION_AUTO_SCORE_MIN,
+                    auto_score_margin=NEIGHBORS_ENTITY_RESOLUTION_AUTO_SCORE_MARGIN,
                 )
+                left_res = await resolver.resolve(
+                    adapter=adapter,
+                    access_scope=request.access_scope,
+                    raw_entity=raw_left,
+                    entity_type_hint=left_type,
+                )
+                right_res = await resolver.resolve(
+                    adapter=adapter,
+                    access_scope=request.access_scope,
+                    raw_entity=raw_right,
+                    entity_type_hint=right_type,
+                )
+
+                if left_res.resolved_candidate is not None and right_res.resolved_candidate is not None:
+                    cypher2 = f"""
+                    MATCH (l:Entity {{entity_id: $left_id}})
+                    WHERE COALESCE(l.owner_id, $global_owner) = $owner_id
+                    MATCH (r:Entity {{entity_id: $right_id}})
+                    WHERE COALESCE(r.owner_id, $global_owner) = $owner_id
+                    MATCH (l){rel_left}(t:Entity)
+                    WHERE COALESCE(lr.owner_id, $global_owner) = $owner_id
+                      AND COALESCE(t.owner_id, $global_owner) = $owner_id
+                    MATCH (r){rel_right}(t)
+                    WHERE COALESCE(rr.owner_id, $global_owner) = $owner_id
+                      AND COALESCE(t.owner_id, $global_owner) = $owner_id
+                    {self._predicate_filters(left_alias="lr", right_alias="rr", left_preds=left_preds, right_preds=right_preds)}
+                    RETURN t.entity_name AS target,
+                           collect(DISTINCT lr.fact_id) AS left_fact_ids,
+                           collect(DISTINCT rr.fact_id) AS right_fact_ids,
+                           collect(DISTINCT lr.source_chunk_ids) AS left_source_chunk_ids,
+                           collect(DISTINCT rr.source_chunk_ids) AS right_source_chunk_ids
+                    LIMIT $limit
+                    """
+                    async with adapter_locked(adapter):
+                        rows2 = await adapter.acypher(
+                            cypher2,
+                            {
+                                "left_id": left_res.resolved_candidate.entity_id,
+                                "right_id": right_res.resolved_candidate.entity_id,
+                                "left_preds": left_preds,
+                                "right_preds": right_preds,
+                                "limit": limit,
+                            },
+                            access_scope=request.access_scope,
+                        )
+                    rows = rows2
+                else:
+                    return ToolResult(
+                        summary=(
+                            "Intersection aborted due to ambiguous entities. "
+                            f"left_candidates={left_candidates} right_candidates={right_candidates}. "
+                            "Provide left_type/right_type to disambiguate."
+                        ),
+                        diagnostics={
+                            "left": left,
+                            "right": right,
+                            "left_candidates": left_candidates,
+                            "right_candidates": right_candidates,
+                            "left_type": left_type or None,
+                            "right_type": right_type or None,
+                            "resolution_candidates": {
+                                "left": [_resolution_candidate_payload(c) for c in left_res.candidates],
+                                "right": [_resolution_candidate_payload(c) for c in right_res.candidates],
+                            },
+                            "resolution_diagnostics": {
+                                "left": dict(left_res.diagnostics),
+                                "right": dict(right_res.diagnostics),
+                            },
+                        },
+                    )
+                # Resolved both endpoints -> continue with the id-based intersection query results.
+                left_candidates = 1
+                right_candidates = 1
 
         targets = []
         evidences: List[EvidenceChunk] = []

@@ -2,7 +2,16 @@
 from typing import Any, Dict, List
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.entity_resolution import build_default_entity_resolver
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
+
+from config.core.deepsearch.tool_defaults import (
+    NEIGHBORS_ENTITY_RESOLUTION_AUTO_SCORE_MARGIN,
+    NEIGHBORS_ENTITY_RESOLUTION_AUTO_SCORE_MIN,
+    NEIGHBORS_ENTITY_RESOLUTION_CANDIDATE_LIMIT,
+    NEIGHBORS_ENTITY_RESOLUTION_MIN_TOKEN_HITS,
+    NEIGHBORS_ENTITY_RESOLUTION_MIN_TOKEN_LEN,
+)
 
 from core.graph_adapter.cypher import adapter_supports_cypher
 from core.graph_adapter.concurrency import adapter_locked
@@ -20,6 +29,23 @@ from .graph_ops_common import (
 )
 from core.knowledge_graph.schema import normalize_relation_token
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+
+
+def _resolution_candidate_payload(candidate: Any) -> Dict[str, Any]:
+    return {
+        "entity_id": getattr(candidate, "entity_id", None),
+        "entity_name": getattr(candidate, "entity_name", None),
+        "entity_name_normalized": getattr(candidate, "entity_name_normalized", None),
+        "entity_type": getattr(candidate, "entity_type", None),
+        "entity_type_key": getattr(candidate, "entity_type_key", None),
+        "strategy": getattr(candidate, "strategy", None),
+        "hit_count": getattr(candidate, "hit_count", None),
+        "edge_count": getattr(candidate, "edge_count", None),
+        "mention_count": getattr(candidate, "mention_count", None),
+        "faiss_score": getattr(candidate, "faiss_score", None),
+        "score": getattr(candidate, "score", None),
+        "score_breakdown": getattr(candidate, "score_breakdown", None),
+    }
 
 
 class GraphRelationPathExploreTool(GraphTool):
@@ -66,7 +92,8 @@ class GraphRelationPathExploreTool(GraphTool):
                 diagnostics={"reason": "cypher_unavailable"},
             )
 
-        entity = normalize_entity_name(request.extra.get("entity"))
+        raw_entity = str(request.extra.get("entity") or "").strip()
+        entity = normalize_entity_name(raw_entity)
         if not entity:
             return ToolResult(summary="relation_path_explore requires a non-empty entity name.")
 
@@ -83,6 +110,7 @@ class GraphRelationPathExploreTool(GraphTool):
         max_hops = limit_int(request.extra.get("max_hops"), 3, max_value=5)
         max_paths = limit_int(request.extra.get("max_paths"), 200, max_value=2000)
         max_sequences = limit_int(request.extra.get("max_sequences"), 40, max_value=200)
+        resolution_diag: Dict[str, Any] | None = None
 
         rel = rel_pattern_varlen(direction, rel_type="RELATES_TO", max_hops=max_hops)
         predicate_filter = (
@@ -138,13 +166,73 @@ class GraphRelationPathExploreTool(GraphTool):
         row0 = (rows or [{}])[0] if isinstance(rows, list) else {}
         candidate_count = int((row0 or {}).get("candidate_count") or 1)
         if candidate_count != 1:
-            return ToolResult(
-                summary=(
-                    "relation_path_explore aborted due to ambiguous entity. "
-                    f"candidate_count={candidate_count}. Provide entity_type to disambiguate."
-                ),
-                diagnostics={"entity": entity, "candidate_count": candidate_count, "entity_type": entity_type or None},
+            resolver = build_default_entity_resolver(
+                enabled=True,
+                candidate_limit=NEIGHBORS_ENTITY_RESOLUTION_CANDIDATE_LIMIT,
+                min_token_len=NEIGHBORS_ENTITY_RESOLUTION_MIN_TOKEN_LEN,
+                min_token_hits=NEIGHBORS_ENTITY_RESOLUTION_MIN_TOKEN_HITS,
+                auto_score_min=NEIGHBORS_ENTITY_RESOLUTION_AUTO_SCORE_MIN,
+                auto_score_margin=NEIGHBORS_ENTITY_RESOLUTION_AUTO_SCORE_MARGIN,
             )
+            res = await resolver.resolve(
+                adapter=adapter,
+                access_scope=request.access_scope,
+                raw_entity=raw_entity,
+                entity_type_hint=entity_type,
+            )
+            if res.resolved_candidate is not None:
+                resolution_diag = dict(res.diagnostics)
+                cypher2 = f"""
+                // relation_path_explore (resolved by entity_id)
+                MATCH (s:Entity {{entity_id: $entity_id}})
+                WHERE COALESCE(s.owner_id, $global_owner) = $owner_id
+                MATCH p=(s){rel}(t:Entity)
+                WHERE COALESCE(t.owner_id, $global_owner) = $owner_id
+                  AND ALL(r IN relationships(p) WHERE COALESCE(r.owner_id, $global_owner) = $owner_id)
+                  {predicate_filter}
+                WITH [r IN relationships(p) | r.predicate] AS predicate_sequence,
+                     t.entity_name AS target_entity,
+                     [r IN relationships(p) | r.fact_id] AS fact_ids,
+                     [r IN relationships(p) | r.source_chunk_ids] AS source_chunk_ids
+                LIMIT $max_paths
+                WITH predicate_sequence,
+                     collect(DISTINCT target_entity)[0..5] AS targets,
+                     collect(fact_ids)[0..3] AS fact_ids_samples,
+                     collect(source_chunk_ids)[0..3] AS source_chunk_ids_samples,
+                     count(*) AS path_count
+                RETURN predicate_sequence AS predicate_sequence,
+                       targets AS targets,
+                       fact_ids_samples AS fact_ids_samples,
+                       source_chunk_ids_samples AS source_chunk_ids_samples,
+                       path_count AS path_count
+                ORDER BY path_count DESC
+                LIMIT $max_sequences
+                """
+                params2 = {
+                    "entity_id": res.resolved_candidate.entity_id,
+                    "predicates": predicates,
+                    "max_paths": max_paths,
+                    "max_sequences": max_sequences,
+                }
+                async with adapter_locked(adapter):
+                    rows2 = await adapter.acypher(cypher2, params2, access_scope=request.access_scope)
+                rows = rows2
+            else:
+                return ToolResult(
+                    summary=(
+                        "relation_path_explore aborted due to ambiguous entity. "
+                        f"candidate_count={candidate_count}. Provide entity_type to disambiguate."
+                    ),
+                    diagnostics={
+                        "entity": entity,
+                        "candidate_count": candidate_count,
+                        "entity_type": entity_type or None,
+                        "resolution_candidates": [_resolution_candidate_payload(c) for c in res.candidates],
+                        "resolution_diagnostics": dict(res.diagnostics),
+                    },
+                )
+            # Resolved by entity_id -> continue with the resolved query results.
+            candidate_count = 1
 
         sequences: List[Dict[str, Any]] = []
         for row in rows or []:
@@ -183,6 +271,7 @@ class GraphRelationPathExploreTool(GraphTool):
                 "max_paths": max_paths,
                 "max_sequences": max_sequences,
                 "allowed_predicates": predicates,
+                "resolution": resolution_diag,
                 "relation_paths": sequences,
             },
         )
@@ -241,7 +330,8 @@ class GraphRelationPathGroundTool(GraphTool):
                 diagnostics={"reason": "cypher_unavailable"},
             )
 
-        source = normalize_entity_name(request.extra.get("source"))
+        raw_source = str(request.extra.get("source") or "").strip()
+        source = normalize_entity_name(raw_source)
         if not source:
             return ToolResult(summary="relation_path_ground requires a non-empty source entity name.")
 
@@ -261,6 +351,7 @@ class GraphRelationPathGroundTool(GraphTool):
         )
         max_paths = limit_int(request.extra.get("max_paths"), 25, max_value=200)
         hops = len(predicate_sequence)
+        resolution_diag: Dict[str, Any] | None = None
 
         rel = rel_pattern_varlen(direction, rel_type="RELATES_TO", max_hops=hops)
         cypher = f"""
@@ -299,13 +390,62 @@ class GraphRelationPathGroundTool(GraphTool):
         row0 = (rows or [{}])[0] if isinstance(rows, list) else {}
         candidate_count = int((row0 or {}).get("candidate_count") or 1)
         if candidate_count != 1:
-            return ToolResult(
-                summary=(
-                    "relation_path_ground aborted due to ambiguous source entity. "
-                    f"candidate_count={candidate_count}. Provide source_type to disambiguate."
-                ),
-                diagnostics={"source": source, "candidate_count": candidate_count, "source_type": source_type or None},
+            resolver = build_default_entity_resolver(
+                enabled=True,
+                candidate_limit=NEIGHBORS_ENTITY_RESOLUTION_CANDIDATE_LIMIT,
+                min_token_len=NEIGHBORS_ENTITY_RESOLUTION_MIN_TOKEN_LEN,
+                min_token_hits=NEIGHBORS_ENTITY_RESOLUTION_MIN_TOKEN_HITS,
+                auto_score_min=NEIGHBORS_ENTITY_RESOLUTION_AUTO_SCORE_MIN,
+                auto_score_margin=NEIGHBORS_ENTITY_RESOLUTION_AUTO_SCORE_MARGIN,
             )
+            res = await resolver.resolve(
+                adapter=adapter,
+                access_scope=request.access_scope,
+                raw_entity=raw_source,
+                entity_type_hint=source_type,
+            )
+            if res.resolved_candidate is not None:
+                resolution_diag = dict(res.diagnostics)
+                cypher2 = f"""
+                // relation_path_ground (resolved by entity_id)
+                MATCH (s:Entity {{entity_id: $source_id}})
+                WHERE COALESCE(s.owner_id, $global_owner) = $owner_id
+                MATCH p=(s){rel}(t:Entity)
+                WHERE COALESCE(t.owner_id, $global_owner) = $owner_id
+                  AND ALL(r IN relationships(p) WHERE COALESCE(r.owner_id, $global_owner) = $owner_id)
+                WITH p, relationships(p) AS rels
+                WHERE size(rels) = $hops
+                  AND all(i IN range(0, $hops - 1) WHERE rels[i].predicate = $predicates[i])
+                RETURN [n IN nodes(p) | n.entity_name] AS nodes,
+                       [r IN rels | r.predicate] AS predicates,
+                       [r IN rels | r.fact_id] AS fact_ids,
+                       [r IN rels | r.source_chunk_ids] AS source_chunk_ids
+                LIMIT $max_paths
+                """
+                params2 = {
+                    "source_id": res.resolved_candidate.entity_id,
+                    "predicates": list(predicate_sequence),
+                    "hops": hops,
+                    "max_paths": max_paths,
+                }
+                async with adapter_locked(adapter):
+                    rows2 = await adapter.acypher(cypher2, params2, access_scope=request.access_scope)
+                rows = rows2
+            else:
+                return ToolResult(
+                    summary=(
+                        "relation_path_ground aborted due to ambiguous source entity. "
+                        f"candidate_count={candidate_count}. Provide source_type to disambiguate."
+                    ),
+                    diagnostics={
+                        "source": source,
+                        "candidate_count": candidate_count,
+                        "source_type": source_type or None,
+                        "resolution_candidates": [_resolution_candidate_payload(c) for c in res.candidates],
+                        "resolution_diagnostics": dict(res.diagnostics),
+                    },
+                )
+            candidate_count = 1
 
         grounded: List[Dict[str, Any]] = []
         frontier: List[str] = []
@@ -342,6 +482,7 @@ class GraphRelationPathGroundTool(GraphTool):
                 "direction": direction,
                 "direction_forced_sensitive": forced_sensitive,
                 "direction_forced_undirected": forced_undirected,
+                "resolution": resolution_diag,
                 "predicate_sequence": list(predicate_sequence),
                 "grounded_paths": grounded,
                 "frontier_entities": frontier,
