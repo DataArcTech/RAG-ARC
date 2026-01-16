@@ -102,8 +102,9 @@ def test_rag_inference_stream_chat_deepsearch_emits_sup_citations_and_knowledge_
 
         return [deepsearch_result], [None], _empty_gen()
 
+    # DeepSearch streaming uses the handler under stream_chat.deepsearch.
     monkeypatch.setattr(
-        "api.routers.rag_inference_modules.stream_chat.event_generator.process_deepsearch",
+        "api.routers.rag_inference_modules.stream_chat.deepsearch.deepsearch_handler.process_deepsearch",
         _fake_process_deepsearch,
     )
 

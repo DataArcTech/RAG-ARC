@@ -85,7 +85,10 @@ def test_rag_inference_stream_chat_sse_emits_payload_tool_call(monkeypatch, clie
     monkeypatch.setattr(handlers, "_message_handler", message_handler)
     monkeypatch.setattr(handlers, "_rag_inference_handler", rag)
     monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.validators.validate_user_session", lambda *_: True)
-    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.response_builder.build_chat_evidence", lambda *a, **k: evidence_payload)
+    monkeypatch.setattr(
+        "api.routers.rag_inference_modules.stream_chat.response.response_builder.build_chat_evidence",
+        lambda *a, **k: evidence_payload,
+    )
 
     client.app.dependency_overrides[rag_router.get_current_user] = lambda: user
     try:
@@ -100,6 +103,7 @@ def test_rag_inference_stream_chat_sse_emits_payload_tool_call(monkeypatch, clie
     assert "data: [DONE]" in resp.text
 
     payload_args = None
+    outer_subgraph = None
     content_parts: list[str] = []
     for raw_line in resp.text.splitlines():
         line = raw_line.strip("\r")
@@ -121,12 +125,14 @@ def test_rag_inference_stream_chat_sse_emits_payload_tool_call(monkeypatch, clie
             fn = (tool_call or {}).get("function") or {}
             if fn.get("name") == "rag_arc_payload":
                 payload_args = json.loads(fn.get("arguments") or "{}")
+                outer_subgraph = chunk.get("subgraph")
                 break
 
     assert "".join(content_parts) == "hello world"
     assert payload_args is not None
     assert payload_args["evidence"] == evidence_payload
-    assert payload_args["subgraph"] == {"nodes": ["n1"]}
+    # Subgraph is carried at the outer chunk level (not inside the tool-call payload).
+    assert outer_subgraph == {"nodes": ["n1"]}
 
 
 def test_rag_inference_stream_chat_sse_renumbers_citations_and_sources(monkeypatch, client):
@@ -162,7 +168,9 @@ def test_rag_inference_stream_chat_sse_renumbers_citations_and_sources(monkeypat
             def _gen():
                 yield "answer<sup>1</sup> mid<sup>3</sup> end"
 
-            chunks = []
+            # Provide the same chunk ids that the evidence builder returns so the SSE
+            # response builder can keep LLM/source keys stable.
+            chunks = [Chunk(content=f"doc{i}", id=f"chunk-{i}") for i in range(1, 6)]
             subgraph_data = None
             subgraph_info = None
             return (_gen(), chunks, subgraph_data, subgraph_info)
@@ -184,7 +192,10 @@ def test_rag_inference_stream_chat_sse_renumbers_citations_and_sources(monkeypat
     monkeypatch.setattr(handlers, "_message_handler", message_handler)
     monkeypatch.setattr(handlers, "_rag_inference_handler", rag)
     monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.validators.validate_user_session", lambda *_: True)
-    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.response_builder.build_chat_evidence", lambda *a, **k: evidence_payload)
+    monkeypatch.setattr(
+        "api.routers.rag_inference_modules.stream_chat.response.response_builder.build_chat_evidence",
+        lambda *a, **k: evidence_payload,
+    )
 
     client.app.dependency_overrides[rag_router.get_current_user] = lambda: user
     try:

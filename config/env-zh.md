@@ -133,6 +133,8 @@ Benchmark/实验模式：
 | `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | 图索引/向量缓存落盘目录（Neo4j HippoRAG）。 |
 | `GRAPH_INDEX_NAME` | `index` | 图索引文件前缀名。 |
 | `KG_SCHEMA_PATH` | `./kg_schema.yml` | Neo4j HippoRAG 的 KG schema YAML 路径（谓词治理 + 方向敏感集合）。可选：金融/保险部署可切换到 `./fin_kg_schema.yml`。 |
+| `INDEX_TEXT_TITLE_PREFIX_ENABLED` | `true` | 是否把文件名（title）前缀注入每个 chunk 的 `metadata.index_text`（提升“产品/文档名主要在文件名里”的召回稳定性）。 |
+| `INDEX_TEXT_TITLE_MAX_CHARS` | `160` | `title=` 前缀的最大字符数（避免索引/提示词噪声过大）。 |
 
 补充说明：
 - **FAISS 指纹保护**：FAISS 的 `.pkl` 元数据会写入 `embedding_fingerprint`（provider/model/dim）。当切换 embedding 模型/维度时，建议设置新的 `FAISS_INDEX_PATH`（推荐）或清理重建索引；否则系统会 fail-fast，避免“静默索引污染”。
@@ -410,6 +412,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `LOG_LEVEL` | `INFO` | 日志等级。 |
 | `RAGARC_DEPENDENCY_CHECK_MODE` | `warn` | 应用启动依赖检查模式（Postgres/Redis/Neo4j）：`off`/`warn`/`strict`。注意：当前 API 启动在该变量未设置时默认走 `strict`。 |
 | `RAGARC_INDEXING_DEPENDENCY_CHECK_MODE` | `strict` | 知识库索引任务依赖检查模式（`/knowledge/*` 索引与 Celery 任务使用）：`off`/`warn`/`strict`。单测为保持 hermetic 默认设置为 `off`。 |
+| `KNOWLEDGE_ACTIVE_CHECK_BLOB_EXISTS` | `true` | `Knowledge.is_file_active` 是否额外校验底层 blob 是否存在（避免返回“元数据存在但文件已丢失”的引用来源，前端下载会 404）。 |
 
 ## 8. 文件/解析路径
 

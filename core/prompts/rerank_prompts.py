@@ -13,7 +13,9 @@ Ranking guidelines:
 
 First identify the essential problem in the query. Think step by step to reason about why each document is relevant or irrelevant. Rank these documents based on their relevance to the query.
 Please output the ranking result of documents as a list, where the first element is the id of the most relevant document, the second element is the id of the second most element, etc.
-Please strictly follow the format to output a list of {TOPK} ids corresponding to the most relevant {TOPK} documents, sorted from the most to least relevant document. First think step by step and write the reasoning process, then output the ranking results as a list of ids in a json format like
+Please strictly follow the format to output a list of exactly {TOPK} UNIQUE integer ids corresponding to the most relevant {TOPK} documents, sorted from the most to least relevant document.
+If you are unsure about some positions, still output your best guess to reach exactly {TOPK} ids (do NOT output fewer than {TOPK}).
+First think step by step and write the reasoning process, then output the ranking results as a list of ids in a json format like
 ```json
 [... integer ids here ...]
 ```

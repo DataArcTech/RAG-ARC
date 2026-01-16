@@ -32,15 +32,15 @@ class _StubFileStorage:
     def get_file_metadata(self, file_id: str):
         return self._metadata if file_id == self._metadata.file_id else None
 
-    def list_accessible_files(self, user_id, status=None, limit=None, offset=None):
+    def list_accessible_files(self, user_id, status=None, limit=None, offset=None, search=None):  # noqa: ANN001
         files = []
         if self._metadata.owner_id == user_id:
             if status is None or self._metadata.status == status:
                 files.append(self._metadata)
         return files
 
-    def count_accessible_files(self, user_id, status=None):
-        return len(self.list_accessible_files(user_id=user_id, status=status))
+    def count_accessible_files(self, user_id, status=None, search=None):  # noqa: ANN001
+        return len(self.list_accessible_files(user_id=user_id, status=status, search=search))
 
     def update_file_status(self, file_id: str, status: FileStatus):
         if file_id != self._metadata.file_id:
@@ -96,10 +96,10 @@ class _CountingStorage:
         self.metadata_store = self
         self._counts = counts
 
-    def count_accessible_files(self, user_id, status=None):
+    def count_accessible_files(self, user_id, status=None, search=None):  # noqa: ANN001
         return self._counts.get((user_id, status), 0)
 
-    def list_accessible_files(self, user_id, status=None, limit=None, offset=None):
+    def list_accessible_files(self, user_id, status=None, limit=None, offset=None, search=None):  # noqa: ANN001
         return []
 
     def get_file_metadata(self, file_id: str):

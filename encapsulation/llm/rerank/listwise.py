@@ -14,6 +14,100 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _normalize_ranked_indices(raw: object, *, num_chunks: int, top_k: int) -> List[int]:
+    """Return a de-duplicated, in-range index list with length == min(top_k, num_chunks)."""
+    k = min(int(top_k), int(num_chunks))
+    if k <= 0:
+        return []
+
+    out: List[int] = []
+    seen: set[int] = set()
+
+    if isinstance(raw, list):
+        for idx in raw:
+            if isinstance(idx, bool):
+                continue
+            if not isinstance(idx, int):
+                continue
+            # Convert 1-based -> 0-based (LLM convention in prompt).
+            if 1 <= idx <= num_chunks:
+                zero = idx - 1
+            elif 0 <= idx < num_chunks:
+                # Defensive: sometimes models output 0-based indices.
+                zero = idx
+            else:
+                continue
+            if zero in seen:
+                continue
+            out.append(zero)
+            seen.add(zero)
+            if len(out) >= k:
+                return out
+
+    # Fill missing slots with the original order to keep behavior deterministic.
+    if len(out) < k:
+        for zero in range(num_chunks):
+            if zero in seen:
+                continue
+            out.append(zero)
+            if len(out) >= k:
+                break
+    return out
+
+
+def _parse_ranked_indices(output_str: str, *, num_chunks: int, top_k: int) -> List[int]:
+    """Parse LLM output to ranked indices; always returns k indices (k=min(top_k,num_chunks))."""
+    k = min(int(top_k), int(num_chunks))
+    if k <= 0:
+        return []
+
+    if output_str is None or output_str == "error":
+        logger.warning("Invalid output, using default ranking")
+        return list(range(k))
+
+    try:
+        text = str(output_str)
+        # Remove thinking tags if present
+        if "</think>" in text:
+            text = text.split("</think>")[-1]
+
+        idxs_str = extract_last_json_array_from_text(text)
+        if idxs_str:
+            raw = json.loads(idxs_str)
+            unique_valid = 0
+            if isinstance(raw, list):
+                seen_tmp: set[int] = set()
+                for item in raw:
+                    if isinstance(item, bool) or not isinstance(item, int):
+                        continue
+                    if 1 <= item <= num_chunks:
+                        zero = item - 1
+                    elif 0 <= item < num_chunks:
+                        zero = item
+                    else:
+                        continue
+                    if zero in seen_tmp:
+                        continue
+                    seen_tmp.add(zero)
+                    unique_valid += 1
+            normalized = _normalize_ranked_indices(raw, num_chunks=num_chunks, top_k=top_k)
+            # If the model returned fewer ids than requested, keep it observable.
+            if unique_valid < k:
+                logger.warning(
+                    "Listwise rerank returned only %d/%d unique valid ids; filled to %d",
+                    unique_valid,
+                    k,
+                    len(normalized),
+                )
+            return normalized
+
+        logger.warning("Failed to parse ranking output: %s", text[:200])
+        return list(range(k))
+    except Exception as e:
+        logger.error("Error parsing ranking output: %s", str(e))
+        return list(range(k))
+
+
 class ListwiseRerankLLM(RerankLLMBase):
     """
     Listwise reranker model implementation using LLM for ranking.
@@ -127,36 +221,7 @@ class ListwiseRerankLLM(RerankLLMBase):
         Returns:
             List of ranked indices (1-based from LLM, converted to 0-based)
         """
-        if output_str is None or output_str == "error":
-            logger.warning("Invalid output, using default ranking")
-            return list(range(min(top_k, num_chunks)))
-
-        try:
-            # Remove thinking tags if present
-            if "</think>" in output_str:
-                output_str = output_str.split("</think>")[-1]
-
-            idxs_str = extract_last_json_array_from_text(output_str)
-            if idxs_str:
-                idxs = json.loads(idxs_str)
-                
-                # Validate indices
-                if isinstance(idxs, list) and len(idxs) > 0:
-                    # Convert 1-based to 0-based and validate range
-                    valid_idxs = []
-                    for idx in idxs:
-                        if isinstance(idx, int) and 1 <= idx <= num_chunks:
-                            valid_idxs.append(idx - 1)  # Convert to 0-based
-                    
-                    if valid_idxs:
-                        return valid_idxs[:top_k]
-            
-            logger.warning(f"Failed to parse ranking output: {output_str[:200]}")
-            return list(range(min(top_k, num_chunks)))
-
-        except Exception as e:
-            logger.error(f"Error parsing ranking output: {str(e)}")
-            return list(range(min(top_k, num_chunks)))
+        return _parse_ranked_indices(output_str, num_chunks=num_chunks, top_k=top_k)
 
     def rerank(
         self,

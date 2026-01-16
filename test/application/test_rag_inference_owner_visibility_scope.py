@@ -76,32 +76,18 @@ def test_rag_inference_retrieves_me_plus_share_when_enabled_and_exports_merged_s
     me = uuid.uuid4()
     share = uuid.uuid4()
 
-    def fake_export_subgraph(*, subgraph_node_ids, **_kwargs):  # noqa: ANN001
-        node_id = sorted(list(subgraph_node_ids))[0]
-        return {
-            "chunks": [{"id": f"chunk-for-{node_id}"}],
-            "nodes": [{"id": node_id}],
-            "edges": [{"id": f"edge-for-{node_id}", "source": node_id, "target": node_id, "relation": "self"}],
-            "metadata": {},
-        }
-
-    with patch(
-        "encapsulation.database.utils.graph_export_utils_neo4j.GraphExporterNeo4j.export_subgraph",
-        side_effect=fake_export_subgraph,
-    ) as mock_export:
-        _messages, chunks, subgraph_data, subgraph_info = rag._build_messages_and_context(
-            query="hello",
-            owner_id=me,
-            return_subgraph=True,
-            include_share=True,
-            share_owner_id=share,
-        )
+    _messages, chunks, subgraph_data, subgraph_info = rag._build_messages_and_context(
+        query="hello",
+        owner_id=me,
+        return_subgraph=True,
+        include_share=True,
+        share_owner_id=share,
+    )
 
     assert len(rag.retriever.calls) == 2
     assert {call["owner_id"] for call in rag.retriever.calls} == {str(me), str(share)}
     assert len(chunks) == 2
     assert isinstance(subgraph_info, dict) and subgraph_info.get("_multi_owner") is True
-    assert mock_export.call_count == 2
-    assert subgraph_data is not None
-    assert {node["id"] for node in subgraph_data["nodes"]} == {f"node-{me}", f"node-{share}"}
-
+    # Subgraph export is deferred to mindmap generation (based on cited chunks),
+    # so `_build_messages_and_context` returns no subgraph payload.
+    assert subgraph_data is None

@@ -21,3 +21,5 @@ def pytest_configure() -> None:
     # Knowledge indexing preflight checks attempt to connect to Postgres/Redis/Neo4j.
     # Unit tests are hermetic by default and should not require external services.
     os.environ.setdefault("RAGARC_INDEXING_DEPENDENCY_CHECK_MODE", "off")
+    # Avoid filesystem/object-store probes in unit tests unless explicitly enabled.
+    os.environ.setdefault("KNOWLEDGE_ACTIVE_CHECK_BLOB_EXISTS", "0")

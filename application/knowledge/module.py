@@ -818,6 +818,8 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
         """
         Determine if a file is still visible for retrieval/listing purposes.
         """
+        from config.knowledge_visibility import KNOWLEDGE_ACTIVE_CHECK_BLOB_EXISTS
+
         try:
             metadata = self.file_storage.get_file_metadata(file_id)
         except Exception as e:
@@ -832,6 +834,19 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
 
         if self._is_file_marked_for_deletion(file_id):
             return False
+
+        if KNOWLEDGE_ACTIVE_CHECK_BLOB_EXISTS:
+            # Defensive: hide "dangling" metadata rows that no longer have a retrievable blob.
+            # This prevents returning citations that later fail in `/static/files/*` download flows.
+            blob_key = getattr(metadata, "blob_key", None)
+            if not blob_key:
+                return False
+            try:
+                if not self.file_storage.blob_store.exists(str(blob_key)):
+                    return False
+            except Exception as e:  # noqa: BLE001
+                logger.debug("Failed to check blob existence for file %s (key=%s): %s", file_id, blob_key, e)
+                return False
 
         return True
 
@@ -880,8 +895,18 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
                         latest_run = self.task_queue.get_task_run(latest_run_id) or {}
                         latest_state = str(latest_run.get("state") or "")
                         if latest_state in {TaskState.PENDING.value, TaskState.RUNNING.value}:
-                            skipped_files.append(file_id)
-                            continue
+                            # When force=True, allow a new TaskRun to be scheduled even if the previous
+                            # run looks active. This is used for manual "reindex everything" workflows
+                            # and helps recover from stuck TaskRuns (e.g. workers restarted).
+                            if not force:
+                                skipped_files.append(file_id)
+                                continue
+                            logger.warning(
+                                "Force reindex requested while an active TaskRun exists (file_id=%s run_id=%s state=%s)",
+                                file_id,
+                                latest_run_id,
+                                latest_state,
+                            )
                 else:
                     active_task = self._active_index_tasks.get(file_id)
                     if active_task is not None and not active_task.done():

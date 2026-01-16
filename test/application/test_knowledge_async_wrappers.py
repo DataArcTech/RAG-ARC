@@ -28,15 +28,15 @@ class _StubFileStorage:
     def get_file_metadata(self, file_id: str):
         return self._metadata if file_id == self._metadata.file_id else None
 
-    def list_accessible_files(self, user_id, status=None, limit=None, offset=None):
+    def list_accessible_files(self, user_id, status=None, limit=None, offset=None, search=None):  # noqa: ANN001
         files = []
         if self._metadata.owner_id == user_id:
             if status is None or self._metadata.status == status:
                 files.append(self._metadata)
         return files
 
-    def count_accessible_files(self, user_id, status=None):
-        return len(self.list_accessible_files(user_id=user_id, status=status))
+    def count_accessible_files(self, user_id, status=None, search=None):  # noqa: ANN001
+        return len(self.list_accessible_files(user_id=user_id, status=status, search=search))
 
 
 class _StubIndexManager:
@@ -78,4 +78,3 @@ async def test_async_wrappers_match_sync_behavior_for_marked_deletion():
     count = await knowledge.count_user_files_async(owner_id)
     assert files == []
     assert count == 0
-

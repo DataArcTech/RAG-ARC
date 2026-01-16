@@ -188,7 +188,8 @@ def test_stream_chat_sse_includes_web_search_chunks_and_progress(monkeypatch, cl
     assert payload is not None
     assert "chunks" in payload and isinstance(payload["chunks"], list)
     assert len(payload["chunks"]) == 5
-    assert any(((item.get("metadata") or {}).get("source") == "web.tavily") for item in payload["chunks"])
+    # Payload chunk metadata is intentionally minimized; use content shape to detect web chunks.
+    assert any(str(item.get("content") or "").startswith("Web ") for item in payload["chunks"])
 
     # sources event should include an external URL and keep UUID-like chunk_id for web sources
     sources_event = None

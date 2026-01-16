@@ -133,6 +133,8 @@ These vars control when DeepSearch attempts a single query rewrite (via the retr
 | `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | Graph index / embedding cache directory (Neo4j HippoRAG). |
 | `GRAPH_INDEX_NAME` | `index` | Graph index file name prefix. |
 | `KG_SCHEMA_PATH` | `./kg_schema.yml` | KG schema YAML path for Neo4j HippoRAG (predicate governance + direction-sensitive set). Optional: `./fin_kg_schema.yml` for finance/insurance deployments. |
+| `INDEX_TEXT_TITLE_PREFIX_ENABLED` | `true` | Whether to inject a filename-derived `title=` prefix into each chunk’s `metadata.index_text` (improves recall when doc/product name mostly lives in the filename). |
+| `INDEX_TEXT_TITLE_MAX_CHARS` | `160` | Max character length of the injected `title=` prefix (keeps index/prompt noise bounded). |
 
 Notes:
 - **FAISS fingerprint guard**: the FAISS `.pkl` metadata stores an `embedding_fingerprint` (provider/model/dim). If you switch embedding models/dimensions, set a new `FAISS_INDEX_PATH` (recommended) or rebuild the index; otherwise the system will fail-fast to avoid silent corruption.
@@ -412,6 +414,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `LOG_LEVEL` | `INFO` | Python logging level (`DEBUG`, `INFO`, etc.). |
 | `RAGARC_DEPENDENCY_CHECK_MODE` | `warn` | Dependency check mode for app startup (Postgres/Redis/Neo4j): `off`/`warn`/`strict`. Note: the API startup currently defaults to `strict` when this env var is unset. |
 | `RAGARC_INDEXING_DEPENDENCY_CHECK_MODE` | `strict` | Dependency check mode for knowledge indexing tasks (used by `/knowledge/*` indexing and Celery tasks): `off`/`warn`/`strict`. Unit tests set this to `off` for hermetic runs. |
+| `KNOWLEDGE_ACTIVE_CHECK_BLOB_EXISTS` | `true` | Whether `Knowledge.is_file_active` also checks that the underlying blob exists (prevents returning citations that later 404 in file download flows). |
 
 ## 8. File Storage & Parser Paths
 

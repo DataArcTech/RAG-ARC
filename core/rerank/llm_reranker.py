@@ -75,6 +75,14 @@ class LLMReranker(AbstractReranker):
                 rerank_text = metadata.get("prompt_text") or metadata.get("index_text")
                 if not isinstance(rerank_text, str) or not rerank_text.strip():
                     rerank_text = chunk.content
+                # Inject a filename-derived title hint for better cross-chunk/product recall.
+                # This helps even when the existing index was built without filename tokens.
+                try:
+                    from core.utils.index_text_augmentation import prepend_title_prefix
+
+                    rerank_text = prepend_title_prefix(text=str(rerank_text or ""), filename=metadata.get("filename"))
+                except Exception:
+                    rerank_text = str(rerank_text or "")
                 rerank_inputs.append(
                     Chunk(
                         id=getattr(chunk, "id", None),

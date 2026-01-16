@@ -667,10 +667,15 @@ async def _process_event_loop(
             break
 
 
-def _create_empty_generator() -> AsyncGenerator[str, None]:
-    """创建空的生成器，用于错误情况。"""
+async def _create_empty_generator() -> AsyncGenerator[str, None]:
+    """Create an empty async generator for error paths.
+
+    `deepsearch_processor.process_deepsearch_with_events` always `async for`-iterates
+    the returned generator. Returning a sync generator here breaks SSE streaming.
+    """
+    if False:  # pragma: no cover
+        yield ""
     return
-    yield
 
 
 def _handle_deepsearch_error(

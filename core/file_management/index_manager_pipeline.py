@@ -209,6 +209,17 @@ class _IndexManagerPipelineMixin:
             if not chunks:
                 raise ValueError("Chunker returned no chunks")
 
+            # Augment index_text early so *all* indexers (dense/BM25/graph) benefit,
+            # and so stored chunk JSON remains consistent with indexed text.
+            try:
+                from core.file_management.index_text_augmentation import augment_chunk_dict_index_text
+
+                for chunk in chunks:
+                    if isinstance(chunk, dict):
+                        augment_chunk_dict_index_text(chunk)
+            except Exception as exc:
+                logger.warning("Failed to augment chunk index_text from filename: %s", exc)
+
             logger.info(f"Created {len(chunks)} chunks")
             _emit("chunked", 55, {"file_id": file_id, "num_chunks": len(chunks)})
             result["metadata"]["num_chunks"] = len(chunks)

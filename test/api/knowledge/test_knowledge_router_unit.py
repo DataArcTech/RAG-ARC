@@ -22,12 +22,12 @@ def client(monkeypatch):
             calls["upload"] = (file.filename, user_id, relative_path)
             return "doc-1"
 
-        async def list_user_files_async(self, user_id, status=None, limit=None, offset=None):  # noqa: ANN001
-            calls["list"] = (user_id, status, limit, offset)
+        async def list_user_files_async(self, user_id, status=None, limit=None, offset=None, search=None):  # noqa: ANN001
+            calls["list"] = (user_id, status, limit, offset, search)
             return []
 
-        async def count_user_files_async(self, user_id, status=None):  # noqa: ANN001
-            calls["count"] = (user_id, status)
+        async def count_user_files_async(self, user_id, status=None, search=None):  # noqa: ANN001
+            calls["count"] = (user_id, status, search)
             return 0
 
     monkeypatch.setattr(knowledge_router, "get_knowledge_handler", lambda: _StubKnowledge())
@@ -59,15 +59,16 @@ def test_knowledge_upload_passes_relative_path(client, tmp_path):
 
 
 def test_knowledge_list_uses_async_wrappers(client):
-    resp = client.get("/knowledge/list_files?limit=50&offset=0")
+    resp = client.get("/knowledge/list_files?pagesize=50&page=1")
     assert resp.status_code == 200
     assert resp.json()["files"] == []
     assert resp.json()["total"] == 0
-    user_id, status, limit, offset = client._calls["list"]  # type: ignore[attr-defined]
+    user_id, status, limit, offset, search = client._calls["list"]  # type: ignore[attr-defined]
     assert user_id == client._user.id  # type: ignore[attr-defined]
     assert status is None
     assert limit == 50
     assert offset == 0
+    assert search is None
 
 
 def test_knowledge_get_chunk_returns_chunk_content(monkeypatch):
