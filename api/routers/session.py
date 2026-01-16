@@ -88,12 +88,17 @@ def get_account_handler() -> Account:
 
 async def list_session_messages(
     session_id: uuid.UUID,
+    limit: int = 20,
+    offset: int = 0,
+    include_subgraph: bool = True,
 ):
-    """List session messages asynchronously using thread pool."""
+    """List session messages asynchronously using thread pool with pagination."""
     try:
         messages = await get_thread_pool().run_blocking(
             get_message_handler().list_messages_by_session,
-            session_id
+            session_id,
+            limit,
+            offset
         )
         # Convert SQLAlchemy models to Pydantic models to ensure proper serialization
         # Use fallback validation to handle potential source_file_ids format issues.
@@ -106,6 +111,10 @@ async def list_session_messages(
                 msg_dict.pop("deepsearch_trace", None)
                 msg_dict.pop("raw_llm_response", None)
                 
+                # 根据参数决定是否移除subgraph_data
+                if not include_subgraph:
+                    msg_dict.pop("subgraph_data", None)
+                
                 result.append(ChatMessageResponse.model_validate(msg_dict))
             except Exception as e:
                 # If standard validation fails, try the fallback method.
@@ -114,6 +123,9 @@ async def list_session_messages(
                     # 列表接口不需要返回这两个大字段，移除以减小响应体积
                     msg_dict.pop("deepsearch_trace", None)
                     msg_dict.pop("raw_llm_response", None)
+                    # 根据参数决定是否移除subgraph_data
+                    if not include_subgraph:
+                        msg_dict.pop("subgraph_data", None)
                     result.append(ChatMessageResponse.model_validate_with_fallback(msg_dict))
                 except Exception as fallback_error:
                     # If fallback also fails, log the error and try a minimal safe conversion.
@@ -132,6 +144,9 @@ async def list_session_messages(
                     # 列表接口不需要返回这两个大字段，移除以减小响应体积
                     msg_dict.pop("deepsearch_trace", None)
                     msg_dict.pop("raw_llm_response", None)
+                    # 根据参数决定是否移除subgraph_data
+                    if not include_subgraph:
+                        msg_dict.pop("subgraph_data", None)
                     
                     # Ensure source_file_ids is a list of strings.
                     if "source_file_ids" in msg_dict and msg_dict["source_file_ids"]:
@@ -177,13 +192,28 @@ async def create_session(
 @router.get("")
 async def list_sessions(
     current_user: Annotated[User | None, Depends(get_current_user)],
+    page: int = 1,
+    page_size: int = 20,
 ):
-    """List user sessions asynchronously using thread pool."""
+    """List user sessions asynchronously using thread pool with pagination."""
     if current_user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+    # 参数验证
+    if page < 1:
+        page = 1
+    if page_size < 1:
+        page_size = 20
+    if page_size > 100:
+        page_size = 100  # 限制最大页面大小
+    
+    # 转换为 offset
+    offset = (page - 1) * page_size
+    
     return await get_thread_pool().run_blocking(
         get_session_handler().list_sessions_by_user,
-        current_user.id
+        current_user.id,
+        page_size,
+        offset
     )
 
 
@@ -223,16 +253,27 @@ async def create_message(
 @router.get("/messages", response_model=List[ChatMessageResponse])
 async def list_messages_by_user(
     current_user: Annotated[User, Depends(get_current_user)],
-    limit: int = 100,
-    offset: int = 0,
+    page: int = 1,
+    page_size: int = 20,
 ):
     """List messages by current user with pagination. Users can only query their own messages."""
     try:
+        # 参数验证
+        if page < 1:
+            page = 1
+        if page_size < 1:
+            page_size = 20
+        if page_size > 100:
+            page_size = 100  # 限制最大页面大小
+        
+        # 转换为 offset
+        offset = (page - 1) * page_size
+        
         # Users can only query their own messages.
         messages = await get_thread_pool().run_blocking(
             get_message_handler().list_messages_by_user,
             current_user.id,
-            limit,
+            page_size,
             offset,
         )
         # Use fallback validation to handle potential source_file_ids format issues.
@@ -298,8 +339,11 @@ async def list_messages_by_user(
 async def list_messages(
     session_id: uuid.UUID,
     current_user: Annotated[User | None, Depends(get_current_user)],
+    page: int = 1,
+    page_size: int = 20,
+    include_subgraph: bool = True,
 ):
-    """List messages asynchronously using thread pool."""
+    """List messages asynchronously using thread pool with pagination."""
     try:
         session = await get_thread_pool().run_blocking(
             get_session_handler().get_session,
@@ -307,7 +351,19 @@ async def list_messages(
         )
         if session is None or not validate_user_session(session, current_user):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
-        return await list_session_messages(session_id)
+        
+        # 参数验证
+        if page < 1:
+            page = 1
+        if page_size < 1:
+            page_size = 20
+        if page_size > 100:
+            page_size = 100  # 限制最大页面大小
+        
+        # 转换为 offset
+        offset = (page - 1) * page_size
+        
+        return await list_session_messages(session_id, page_size, offset, include_subgraph)
     except HTTPException:
         # Re-raise HTTPException to preserve the original error response.
         raise
@@ -349,3 +405,47 @@ async def delete_session(
     
     # Return a clear message; middleware will wrap it into the standard response format.
     return {"message": "Session deleted successfully"}
+
+
+@router.get("/{session_id}/messages/{message_id}/subgraph")
+async def get_message_subgraph(
+    session_id: uuid.UUID,
+    message_id: uuid.UUID,
+    current_user: Annotated[User | None, Depends(get_current_user)],
+):
+    """Get subgraph_data for a specific message."""
+    try:
+        # 验证会话权限
+        session = await get_thread_pool().run_blocking(
+            get_session_handler().get_session,
+            session_id
+        )
+        if session is None or not validate_user_session(session, current_user):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+        
+        # 获取消息
+        message = await get_thread_pool().run_blocking(
+            get_message_handler().get_message,
+            message_id
+        )
+        
+        if message is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+        
+        # 验证消息属于该会话
+        if message.session_id != session_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Message does not belong to this session")
+        
+        # 返回subgraph_data
+        subgraph_data = getattr(message, "subgraph_data", None)
+        return {"subgraph_data": subgraph_data}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error getting message subgraph for message {message_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get message subgraph: {str(e)}"
+        )
