@@ -89,6 +89,22 @@ def _run_stream_processing(
         prepared["subgraph_info"] = subgraph_info
         prepared["raw_llm_response"] = None
         prepared["raw_mindmap_response"] = None
+        
+        # 发送chunks信息到progress事件，以便存储到Redis供恢复使用
+        if chunks:
+            chunks_info = {
+                "chunks_count": len(chunks),
+                "chunks": [
+                    {
+                        "id": str(chunk.id) if hasattr(chunk, 'id') else None,
+                        "content_preview": chunk.content[:100] if hasattr(chunk, 'content') and chunk.content else None,
+                        "metadata": chunk.metadata if hasattr(chunk, 'metadata') else None
+                    }
+                    for chunk in chunks[:10]  # 只存储前10个chunks的摘要信息
+                ]
+            }
+            emit_progress({"stage": "chunks_retrieved", "status": "completed", "chunks_info": chunks_info})
+        
         emit_progress({"stage": "prepare", "status": "end"})
         emit_progress({"stage": "generate", "status": "start"})
         
@@ -121,6 +137,14 @@ def _run_stream_processing(
         stream_error[0] = exc
     finally:
         asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+        # 任务完成，触发最终化回调（不依赖SSE连接）
+        finalization_callback = prepared.get("finalization_callback")
+        if finalization_callback and stream_error[0] is None:
+            try:
+                # 在后台线程中调用异步回调
+                asyncio.run_coroutine_threadsafe(finalization_callback(), loop)
+            except Exception as e:
+                logger.error("Failed to trigger finalization callback: %s", e, exc_info=True)
 
 
 def start_stream_processing(

@@ -5,7 +5,7 @@ import asyncio
 import time
 import logging
 from datetime import datetime
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Optional
 from api.sse import (
     delta_envelope,
     iter_text_deltas,
@@ -274,6 +274,60 @@ async def _yield_error_event(
     yield sse_done()
 
 
+async def _ensure_finalization_after_queue(
+    response_parts: list[str],
+    chunks: list,
+    subgraph_data: Optional[Any],
+    subgraph_info: Optional[Any],
+    raw_llm_response: Optional[Any],
+    raw_mindmap_response: Optional[Any],
+    enable_deepsearch: bool,
+    deepsearch_result: Optional[Any],
+    deepsearch_sources_for_frontend: Optional[Any],
+    deepsearch_citation_key_map: Optional[dict],
+    return_subgraph: bool,
+    query: str,
+    session_id: Any,
+    first_turn: bool,
+    include_evidence: bool,
+    task_info: Optional[Any],
+    user_message: Any,
+    rag_inference_handler: Any,
+    deepsearch_trace_file_path: Optional[str]
+) -> None:
+    """在队列处理完成后，确保最终化逻辑执行（后台任务）"""
+    try:
+        assistant_response = "".join(response_parts)
+        if not assistant_response:
+            return
+        
+        from ..response.response_finalizer import _ensure_finalization
+        await _ensure_finalization(
+            assistant_response=assistant_response,
+            chunks=chunks,
+            subgraph_data=subgraph_data,
+            subgraph_info=subgraph_info,
+            raw_llm_response=raw_llm_response,
+            raw_mindmap_response=raw_mindmap_response,
+            enable_deepsearch=enable_deepsearch,
+            deepsearch_result=deepsearch_result,
+            deepsearch_sources_for_frontend=deepsearch_sources_for_frontend,
+            deepsearch_citation_key_map=deepsearch_citation_key_map,
+            return_subgraph=return_subgraph,
+            query=query,
+            session_id=session_id,
+            first_turn=first_turn,
+            include_evidence=include_evidence,
+            task_info=task_info,
+            user_message=user_message,
+            rag_inference_handler=rag_inference_handler,
+            deepsearch_trace_file_path=deepsearch_trace_file_path
+        )
+        logger.info("Background finalization completed for task %s", task_info.task_id if task_info else "unknown")
+    except Exception as e:
+        logger.error("Failed to ensure finalization in background task: %s", e, exc_info=True)
+
+
 async def _yield_title_event(
     title: str,
     request_id: str
@@ -289,7 +343,8 @@ async def _yield_sources_event(
     sources_for_frontend: list,
     citation_key_map: dict[int, int],
     session_id: uuid.UUID,
-    request_id: str
+    request_id: str,
+    task_info: Any = None
 ) -> AsyncGenerator[str, None]:
     """Yield sources event."""
     sources_data = [s.model_dump() for s in sources_for_frontend]
@@ -299,6 +354,14 @@ async def _yield_sources_event(
         "citation_key_map": {str(k): v for k, v in citation_key_map.items()},
         "id": str(session_id)
     }
+    
+    # 存储sources事件到Redis，供恢复使用
+    if task_info:
+        try:
+            registry = get_chat_task_registry()
+            await registry.append_event(task_info.task_id, payload, event_type="sources")
+        except Exception as e:
+            logger.warning("Failed to store sources event to Redis: %s", e)
     
     # Log the complete SSE sources payload for debugging
     logger.info(
@@ -459,12 +522,54 @@ async def generate_sse_events(
         ):
             return  # 被取消
         
+        # 创建最终化回调函数，在后台线程完成时自动执行
+        async def finalization_callback():
+            """后台线程完成时调用的最终化函数"""
+            try:
+                # 等待一小段时间，确保所有token都已处理
+                await asyncio.sleep(0.5)
+                
+                # 检查是否有错误
+                if stream_error[0]:
+                    return
+                
+                # 检查是否有响应内容
+                if not "".join(response_parts):
+                    return
+                
+                # 从prepared中获取chunks等变量
+                final_chunks = prepared.get("chunks") or []
+                final_subgraph_data = prepared.get("subgraph_data")
+                final_subgraph_info = prepared.get("subgraph_info")
+                final_raw_llm_response = prepared.get("raw_llm_response")
+                final_raw_mindmap_response = prepared.get("raw_mindmap_response")
+                
+                # 执行最终化
+                await _ensure_finalization_after_queue(
+                    response_parts, final_chunks, final_subgraph_data, final_subgraph_info,
+                    final_raw_llm_response, final_raw_mindmap_response, enable_deepsearch,
+                    deepsearch_result, deepsearch_sources_for_frontend,
+                    deepsearch_citation_key_map, return_subgraph, query,
+                    session_id, first_turn, include_evidence, task_info,
+                    user_message, rag_inference_handler, deepsearch_trace_file_path
+                )
+                logger.info("Background finalization completed for task %s", task_info.task_id if task_info else "unknown")
+            except Exception as e:
+                logger.error("Error in finalization callback: %s", e, exc_info=True)
+        
+        # 将回调函数存储到prepared字典，供后台线程调用
+        prepared["finalization_callback"] = finalization_callback
+        
         # 处理队列事件
-        async for event in process_rag_queue_events(
-            queue, chunk_id, model_name, created, request_id, response_parts,
-            stream_error, task_info, session_id, user_message.id
-        ):
-            yield event
+        try:
+            async for event in process_rag_queue_events(
+                queue, chunk_id, model_name, created, request_id, response_parts,
+                stream_error, task_info, session_id, user_message.id
+            ):
+                yield event
+        except Exception as e:
+            # 即使客户端断开导致yield失败，后台线程也会在完成时执行最终化
+            logger.warning("Error during queue event processing (client may have disconnected): %s", e)
         
         # 处理错误
         async for event in handle_rag_streaming_error(
@@ -504,29 +609,60 @@ async def generate_sse_events(
         return
     
     # 构建最终响应
-    async for event in _build_and_yield_final_response(
-        assistant_response=assistant_response,
-        chunks=chunks,
-        subgraph_data=subgraph_data,
-        subgraph_info=subgraph_info,
-        raw_llm_response=raw_llm_response,
-        raw_mindmap_response=raw_mindmap_response,
-        enable_deepsearch=enable_deepsearch,
-        deepsearch_result=deepsearch_result,
-        deepsearch_sources_for_frontend=deepsearch_sources_for_frontend,
-        deepsearch_citation_key_map=deepsearch_citation_key_map,
-        return_subgraph=return_subgraph,
-        query=query,
-        session_id=session_id,
-        first_turn=first_turn,
-        include_evidence=include_evidence,
-        task_info=task_info,
-        user_message=user_message,
-        rag_inference_handler=rag_inference_handler,
-        chunk_id=chunk_id,
-        model_name=model_name,
-        created=created,
-        request_id=request_id,
-        deepsearch_trace_file_path=deepsearch_trace_file_path
-    ):
-        yield event
+    # 使用try-except确保即使客户端断开，最终化逻辑也能执行
+    try:
+        async for event in _build_and_yield_final_response(
+            assistant_response=assistant_response,
+            chunks=chunks,
+            subgraph_data=subgraph_data,
+            subgraph_info=subgraph_info,
+            raw_llm_response=raw_llm_response,
+            raw_mindmap_response=raw_mindmap_response,
+            enable_deepsearch=enable_deepsearch,
+            deepsearch_result=deepsearch_result,
+            deepsearch_sources_for_frontend=deepsearch_sources_for_frontend,
+            deepsearch_citation_key_map=deepsearch_citation_key_map,
+            return_subgraph=return_subgraph,
+            query=query,
+            session_id=session_id,
+            first_turn=first_turn,
+            include_evidence=include_evidence,
+            task_info=task_info,
+            user_message=user_message,
+            rag_inference_handler=rag_inference_handler,
+            chunk_id=chunk_id,
+            model_name=model_name,
+            created=created,
+            request_id=request_id,
+            deepsearch_trace_file_path=deepsearch_trace_file_path
+        ):
+            yield event
+    except Exception as e:
+        # 即使客户端断开导致yield失败，也要确保最终化逻辑执行
+        logger.warning("Error during final response building (client may have disconnected): %s", e)
+        # 直接调用最终化逻辑，不通过yield
+        try:
+            from ..response.response_finalizer import _ensure_finalization
+            await _ensure_finalization(
+                assistant_response=assistant_response,
+                chunks=chunks,
+                subgraph_data=subgraph_data,
+                subgraph_info=subgraph_info,
+                raw_llm_response=raw_llm_response,
+                raw_mindmap_response=raw_mindmap_response,
+                enable_deepsearch=enable_deepsearch,
+                deepsearch_result=deepsearch_result,
+                deepsearch_sources_for_frontend=deepsearch_sources_for_frontend,
+                deepsearch_citation_key_map=deepsearch_citation_key_map,
+                return_subgraph=return_subgraph,
+                query=query,
+                session_id=session_id,
+                first_turn=first_turn,
+                include_evidence=include_evidence,
+                task_info=task_info,
+                user_message=user_message,
+                rag_inference_handler=rag_inference_handler,
+                deepsearch_trace_file_path=deepsearch_trace_file_path
+            )
+        except Exception as finalize_error:
+            logger.error("Failed to ensure finalization: %s", finalize_error, exc_info=True)

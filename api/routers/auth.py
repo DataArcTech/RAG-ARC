@@ -542,7 +542,7 @@ async def login_for_access_token_endpoint(request: Request):
         user = await account_handler.authenticate_user_async(username, password)
 
     if not user:
-        return StandardResponse(code=200, message="Incorrect username or password", data=None)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect username or password")
 
     update_login_time = getattr(account_handler, "update_user_login_time_async", None)
     if update_login_time is not None:

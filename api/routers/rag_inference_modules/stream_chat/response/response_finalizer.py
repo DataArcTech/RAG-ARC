@@ -21,6 +21,75 @@ from ..task.task_helpers import check_and_handle_cancellation, yield_cancellatio
 logger = logging.getLogger(__name__)
 
 
+async def _ensure_finalization(
+    assistant_response: str,
+    chunks: list,
+    subgraph_data: Optional[Any],
+    subgraph_info: Optional[Any],
+    raw_llm_response: Optional[Any],
+    raw_mindmap_response: Optional[Any],
+    enable_deepsearch: bool,
+    deepsearch_result: Optional[Any],
+    deepsearch_sources_for_frontend: Optional[Any],
+    deepsearch_citation_key_map: Optional[dict],
+    return_subgraph: bool,
+    query: str,
+    session_id: Any,
+    first_turn: bool,
+    include_evidence: bool,
+    task_info: Optional[Any],
+    user_message: Any,
+    rag_inference_handler: Any,
+    deepsearch_trace_file_path: Optional[str]
+) -> None:
+    """确保最终化逻辑执行（不yield事件，用于客户端断开时）"""
+    # 检查取消
+    if await check_and_handle_cancellation(task_info, session_id, user_message.id):
+        return
+    
+    # 确保响应非空
+    assistant_response, _ = ensure_non_empty_response(assistant_response)
+    
+    # 构建 sources 和 evidence（简化版，不生成mindmap）
+    if enable_deepsearch and deepsearch_result and deepsearch_sources_for_frontend is not None:
+        sources_for_frontend = deepsearch_sources_for_frontend
+    else:
+        _, sources_for_frontend, _ = await build_sources_and_evidence(
+            chunks,
+            subgraph_data,
+            subgraph_info,
+            rag_inference_handler,
+            assistant_response,
+            False
+        )
+    
+    # 创建 assistant message
+    assistant_message = await create_assistant_message(
+        session_id,
+        assistant_response,
+        sources_for_frontend or [],
+        subgraph_data,
+        return_subgraph,
+        raw_llm_response,
+        raw_mindmap_response,
+        deepsearch_trace_file_path=deepsearch_trace_file_path if enable_deepsearch else None
+    )
+    
+    # 任务完成，更新状态
+    if task_info:
+        try:
+            await mark_task_completed(
+                task_info,
+                session_id,
+                user_message.id,
+                assistant_message_id=assistant_message.id
+            )
+            logger.info("Task %s finalization ensured: assistant_message_id=%s", 
+                       task_info.task_id, assistant_message.id)
+        except Exception as e:
+            logger.warning("Failed to update task completion status: %s", e)
+
+
 async def _build_and_yield_final_response(
     assistant_response: str,
     chunks: list,
@@ -130,7 +199,8 @@ async def _build_and_yield_final_response(
         sources_for_frontend,
         citation_key_map,
         session_id,
-        request_id
+        request_id,
+        task_info=task_info
     ):
         yield event
     

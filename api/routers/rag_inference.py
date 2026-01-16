@@ -292,7 +292,7 @@ async def stream_chat_sse(
     existing_task = await registry.get_by_session(session_id)
     
     if existing_task and not existing_task.done and not existing_task.cancelled:
-        # 有未完成的任务，恢复任务
+        # 有未完成的任务，恢复任务（不取消，因为可能是同一个请求的重连）
         logger.info("Resuming task: task_id=%s, session_id=%s", existing_task.task_id, session_id)
         return await _resume_task_sse(existing_task, request_id=correlation_id.get() or uuid.uuid4().hex)
     
@@ -334,6 +334,7 @@ async def _resume_task_sse(
 ):
     """Resume a task by replaying cached events and continuing stream."""
     from fastapi.responses import StreamingResponse
+    from api.routers.rag_inference_modules.stream_chat.task.task_registry import get_chat_task_registry
     from api.routers.rag_inference_modules.stream_chat.task.task_resume import (
         _yield_task_resumed_event,
         _yield_completed_task_response,
@@ -343,33 +344,131 @@ async def _resume_task_sse(
     )
     
     async def event_generator():
-        # 1. 发送任务恢复通知
-        async for event in _yield_task_resumed_event(task_info, request_id):
-            yield event
-        
-        # 2. 如果任务已完成，直接返回最终结果
-        if task_info.done:
-            async for event in _yield_completed_task_response(task_info, request_id):
+        try:
+            logger.info("Starting event_generator for task resume: task_id=%s, request_id=%s", task_info.task_id, request_id)
+            # 重新获取最新任务状态（因为任务可能在恢复过程中完成）
+            registry = get_chat_task_registry()
+            updated_task_info = await registry.get(task_info.task_id)
+            if not updated_task_info:
+                logger.warning("Task %s not found during resume", task_info.task_id)
+                yield sse_json_wrapped({"error": {"message": "Task not found"}}, request_id=request_id, code=404, message="error")
+                yield sse_done()
+                return
+            
+            current_task_info = updated_task_info
+            logger.info("Task %s found: done=%s, cancelled=%s, response_length=%d, assistant_message_id=%s", 
+                       current_task_info.task_id, current_task_info.done, current_task_info.cancelled, 
+                       current_task_info.response_length, current_task_info.assistant_message_id)
+            
+            # 1. 发送任务恢复通知
+            logger.info("Yielding task_resumed event for task %s", current_task_info.task_id)
+            async for event in _yield_task_resumed_event(current_task_info, request_id):
                 yield event
-            return
+            logger.info("Task_resumed event sent for task %s", current_task_info.task_id)
         
-        # 3. 回放已缓存的事件
-        async for event in _replay_cached_events(task_info, request_id):
-            yield event
-        
-        # 4. 如果任务已完成，直接返回
-        if task_info.done:
-            async for event in _yield_task_completion_event(task_info, request_id):
+            # 2. 如果任务已完成，直接返回最终结果
+            # 检查任务是否已完成：done 标志或 assistant_message_id 存在
+            is_completed = current_task_info.done or current_task_info.assistant_message_id is not None
+            if is_completed:
+                if not current_task_info.done and current_task_info.assistant_message_id:
+                    logger.info("Task %s appears completed (has assistant_message_id) but done flag not set, marking as done", 
+                               current_task_info.task_id)
+                    # 确保任务标记为完成
+                    await registry.mark_done(current_task_info.task_id, assistant_message_id=current_task_info.assistant_message_id)
+                    # 重新获取更新后的任务信息
+                    current_task_info = await registry.get(current_task_info.task_id) or current_task_info
+                
+                logger.info("Task %s is done, sending completed response", current_task_info.task_id)
+                async for event in _yield_completed_task_response(current_task_info, request_id):
+                    yield event
+                logger.info("Completed response sent for task %s", current_task_info.task_id)
+                return
+            
+            # 3. 回放已缓存的事件
+            logger.info("Replaying cached events for task %s", current_task_info.task_id)
+            try:
+                async for event in _replay_cached_events(current_task_info, request_id):
+                    yield event
+                logger.info("Cached events replayed for task %s", current_task_info.task_id)
+            except Exception as e:
+                logger.warning("Error during replay cached events for task %s: %s", current_task_info.task_id, e, exc_info=True)
+                # 即使出错，也继续执行后续逻辑
+            
+            # 4. 再次检查任务状态（可能在回放期间完成）
+            updated_task_info = await registry.get(current_task_info.task_id)
+            if updated_task_info:
+                # 检查任务是否已完成：done 标志或 assistant_message_id 存在
+                is_completed = updated_task_info.done or updated_task_info.assistant_message_id is not None
+                
+                # 如果任务有响应内容但没有assistant_message_id，检查数据库中是否有对应的assistant message
+                if not is_completed and updated_task_info.response_length > 0 and updated_task_info.user_message_id:
+                    try:
+                        from api.routers.rag_inference_handlers import get_message_handler
+                        from framework.thread_pool import get_thread_pool
+                        
+                        # 检查数据库中是否有对应的assistant message（在user_message之后创建的）
+                        message_handler = get_message_handler()
+                        messages = await get_thread_pool().run_blocking(
+                            message_handler.list_messages_by_session,
+                            updated_task_info.session_id,
+                            limit=50  # 检查最近50条消息
+                        )
+                        
+                        # 查找user_message之后的assistant message
+                        # 消息按 created_at 升序排列（oldest first），所以 assistant message 在 user_message 之后
+                        user_message_index = None
+                        for i, msg in enumerate(messages):
+                            if str(msg.id) == str(updated_task_info.user_message_id):
+                                user_message_index = i
+                                break
+                        
+                        # 如果找到user_message，检查它之后的assistant message
+                        if user_message_index is not None:
+                            # 在user_message之后（索引更大）查找assistant message
+                            for i in range(user_message_index + 1, len(messages)):
+                                msg = messages[i]
+                                if msg.content.get("role") == "assistant":
+                                    logger.info("Task %s has response but no assistant_message_id, found assistant message %s in database, marking as done", 
+                                               updated_task_info.task_id, msg.id)
+                                    await registry.mark_done(updated_task_info.task_id, assistant_message_id=msg.id)
+                                    updated_task_info = await registry.get(updated_task_info.task_id) or updated_task_info
+                                    is_completed = True
+                                    break
+                    except Exception as e:
+                        logger.warning("Failed to check database for assistant message for task %s: %s", 
+                                     updated_task_info.task_id, e)
+                
+                if is_completed:
+                    if not updated_task_info.done and updated_task_info.assistant_message_id:
+                        logger.info("Task %s appears completed (has assistant_message_id) but done flag not set, marking as done", 
+                                   updated_task_info.task_id)
+                        await registry.mark_done(updated_task_info.task_id, assistant_message_id=updated_task_info.assistant_message_id)
+                        updated_task_info = await registry.get(updated_task_info.task_id) or updated_task_info
+                    
+                    logger.info("Task %s completed during replay, sending completion event", updated_task_info.task_id)
+                    async for event in _yield_task_completion_event(updated_task_info, request_id):
+                        yield event
+                    logger.info("Completion event sent for task %s", updated_task_info.task_id)
+                    return
+                current_task_info = updated_task_info
+            
+            # 5. 任务还在进行中，继续监听新事件（轮询）
+            logger.info("Task %s still processing, polling for updates", current_task_info.task_id)
+            async for event in _poll_task_updates(current_task_info, request_id):
                 yield event
-            return
-        
-        # 5. 任务还在进行中，继续监听新事件（轮询）
-        async for event in _poll_task_updates(task_info, request_id):
-            yield event
-        
-        # 6. 任务完成
-        async for event in _yield_task_completion_event(task_info, request_id):
-            yield event
+            logger.info("Polling completed for task %s", current_task_info.task_id)
+            
+            # 6. 任务完成
+            final_task_info = await registry.get(current_task_info.task_id)
+            if final_task_info:
+                logger.info("Sending final completion event for task %s", final_task_info.task_id)
+                async for event in _yield_task_completion_event(final_task_info, request_id):
+                    yield event
+                logger.info("Final completion event sent for task %s", final_task_info.task_id)
+        except Exception as e:
+            logger.error("Error in event_generator for task resume: task_id=%s, error=%s", task_info.task_id, str(e), exc_info=True)
+            yield sse_json_wrapped({"error": {"message": f"Resume failed: {str(e)}"}}, request_id=request_id, code=500, message="error")
+            yield sse_done()
     
     headers = {
         "Cache-Control": "no-cache",
@@ -643,6 +742,8 @@ async def get_chat_task_status(
     from api.routers.rag_inference_modules.stream_chat.task.task_registry import get_chat_task_registry
     
     registry = get_chat_task_registry()
+    
+    # 快速获取当前session的任务（只返回最新的）
     task_info = await registry.get_by_session(session_id)
     
     if not task_info:
