@@ -65,6 +65,16 @@ class MultiPathRetriever(BaseRetriever):
         if not query.strip():
             return []
 
+        # Optional query variants (e.g. Hans<->Hant) to improve recall on mixed-script corpora.
+        try:
+            from core.utils.query_variants import generate_query_variants
+
+            variant_queries = generate_query_variants(query)
+        except Exception:
+            variant_queries = [query]
+        if not variant_queries:
+            return []
+
         all_results = []
         subgraph_info = None  # Store subgraph info from graph retriever
 
@@ -105,7 +115,29 @@ class MultiPathRetriever(BaseRetriever):
 
         for retriever in self.config.built_retrievers or []:
             try:
-                chunks = retriever.invoke(query, **kwargs)
+                # Union results across variants per retriever, then let fusion handle cross-retriever merging.
+                merged: list[Chunk] = []
+                seen_keys: set[str] = set()
+
+                def _chunk_key(chunk: Chunk) -> str:
+                    cid = str(getattr(chunk, "id", "") or "").strip()
+                    if cid:
+                        return f"id:{cid}"
+                    meta = getattr(chunk, "metadata", None) or {}
+                    fid = _coerce_file_id(meta)
+                    if fid:
+                        return f"file:{fid}:{hash(getattr(chunk, 'content', '') or '')}"
+                    return f"content:{hash(getattr(chunk, 'content', '') or '')}"
+
+                for qv in variant_queries:
+                    chunks = retriever.invoke(qv, **kwargs) or []
+                    for chunk in chunks:
+                        key = _chunk_key(chunk)
+                        if key in seen_keys:
+                            continue
+                        seen_keys.add(key)
+                        merged.append(chunk)
+                chunks = merged
 
                 # Check if this is a graph retriever with subgraph info
                 if chunks and hasattr(chunks[0], 'metadata') and chunks[0].metadata:
