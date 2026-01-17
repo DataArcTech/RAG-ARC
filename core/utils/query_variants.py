@@ -3,9 +3,6 @@
 Currently supported:
 - Simplified/Traditional Chinese (Hans<->Hant) via OpenCC, when enabled.
 """
-
-from __future__ import annotations
-
 import logging
 from functools import lru_cache
 

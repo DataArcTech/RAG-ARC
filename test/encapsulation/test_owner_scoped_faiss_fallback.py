@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pathlib import Path
 
 from encapsulation.database.graph_db.pruned_hipporag_neo4j_embeddings import _PrunedHippoRAGNeo4jEmbeddingsMixin

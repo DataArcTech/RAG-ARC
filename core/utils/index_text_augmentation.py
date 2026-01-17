@@ -4,9 +4,6 @@ This is intentionally domain-agnostic: it improves retrieval/rerank for any
 dataset where the document title/product name appears in the filename/path but
 not in every chunk body.
 """
-
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Optional
 

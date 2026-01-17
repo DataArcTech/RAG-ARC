@@ -139,6 +139,15 @@ class PrunedHippoRAGNeo4jConfig(AbstractConfig):
         default=0.8,
         description="Minimum cosine similarity threshold for creating synonymy edges"
     )
+    synonymy_edge_min_entity_chars: int = Field(
+        default=3,
+        ge=1,
+        le=100,
+        description=(
+            "Minimum normalized character length for an entity to be considered for synonymy edges. "
+            "Normalization removes punctuation/symbols and collapses whitespace; this works for non-Latin scripts."
+        ),
+    )
 
     # HNSW index parameters for entity embeddings
     hnsw_M: int = Field(

@@ -1,7 +1,7 @@
 import json
 import logging
 import uuid
-from typing import List, Optional, Union, Tuple, Dict, Any
+from typing import List, Optional, Union, Tuple, Dict, Any, Set
 
 import numpy as np
 
@@ -12,6 +12,87 @@ logger = logging.getLogger(__name__)
 
 
 class _PrunedHippoRAGNeo4jRetrieveMixin:
+    def _seed_entities_from_entity_nn(self, *, query: str, owner_id: uuid.UUID, top_k: int) -> List[str]:
+        """
+        Retrieve seed entity IDs from the entity FAISS index using query embedding.
+
+        This is domain-agnostic: it helps when fact retrieval or fact->entity extraction misses
+        important entities (e.g., multi-entity questions, naming variants, mixed scripts).
+        """
+        k = int(top_k or 0)
+        if k <= 0:
+            return []
+
+        graph_store = getattr(self, "graph_store", None)
+        if graph_store is None:
+            return []
+
+        get_db = getattr(graph_store, "get_entity_faiss_db", None)
+        entity_db = get_db(owner_id) if callable(get_db) else getattr(graph_store, "entity_faiss_db", None)
+        if entity_db is None or getattr(entity_db, "index", None) is None:
+            return []
+
+        try:
+            total = int(getattr(entity_db.index, "ntotal", 0) or 0)
+        except Exception:  # noqa: BLE001
+            total = 0
+        if total <= 0:
+            return []
+
+        k = min(k, total)
+
+        q = str(query or "").strip()
+        if not q:
+            return []
+
+        # Use the same embedding model as facts/passages to keep behavior consistent.
+        qemb = self._get_query_embedding(q)
+        vec = np.array([qemb], dtype=np.float32)
+
+        # Defensive: cosine indices expect normalized vectors.
+        try:
+            cfg = getattr(entity_db, "config", None)
+            metric = str(getattr(cfg, "metric", "") or "")
+            normalize = bool(getattr(cfg, "normalize_L2", False)) or metric == "cosine"
+            if normalize:
+                denom = float(np.linalg.norm(vec))
+                if denom > 0:
+                    vec = vec / denom
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            distances, indices = entity_db.index.search(vec, k)
+        except Exception:  # noqa: BLE001
+            return []
+
+        idxs = indices[0].tolist() if len(indices) else []
+        id_map = getattr(entity_db, "index_to_docstore_id", None) or {}
+
+        out: list[str] = []
+        seen: set[str] = set()
+        for idx in idxs:
+            try:
+                ent_id = id_map.get(int(idx))
+            except Exception:  # noqa: BLE001
+                ent_id = None
+            if not ent_id:
+                continue
+            token = str(ent_id)
+            if not token.startswith("entity-") or token in seen:
+                continue
+            seen.add(token)
+            out.append(token)
+
+        # Optional: filter to the current graph mapping if available.
+        node_to_idx = getattr(graph_store, "node_to_idx", None)
+        if isinstance(node_to_idx, dict) and node_to_idx:
+            out = [eid for eid in out if eid in node_to_idx]
+
+        if out:
+            logger.info("Entity NN seeds: k=%s seeds=%s owner_id=%s", k, len(out), owner_id)
+        return out
+
     @staticmethod
     def _is_entity_node_id(node_id: object) -> bool:
         token = str(node_id or "")
@@ -33,7 +114,8 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
         """
         top_k = max(1, int(top_k))
 
-        strategy = str(getattr(self.config, "chunk_selection_strategy", "top_entity_neighbors") or "top_entity_neighbors")
+        cfg = getattr(self, "config", None)
+        strategy = str(getattr(cfg, "chunk_selection_strategy", "top_entity_neighbors") or "top_entity_neighbors")
         if strategy == "top_ppr_chunks":
             chunk_ids = list((fallback_chunk_ids or [])[:top_k])
             chunk_scores = [float((ppr_scores_dict or {}).get(cid, 0.0)) for cid in chunk_ids]
@@ -140,6 +222,20 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
         # Step 1: Retrieve relevant facts
         query_fact_scores, fact_ids = self._get_fact_scores_faiss(query, owner_id=owner_filter, query_doc_scores=query_doc_scores)
 
+        entity_nn_enabled = bool(getattr(self.config, "seed_entities_from_entity_nn_enabled", False))
+        try:
+            entity_nn_top_k = int(getattr(self.config, "seed_entities_from_entity_nn_top_k", 0) or 0)
+        except Exception:  # noqa: BLE001
+            entity_nn_top_k = 0
+        try:
+            entity_nn_max_total = int(getattr(self.config, "seed_entities_from_entity_nn_max_total", 0) or 0)
+        except Exception:  # noqa: BLE001
+            entity_nn_max_total = 0
+        try:
+            entity_nn_max_extra = int(getattr(self.config, "seed_entities_from_entity_nn_max_extra", 0) or 0)
+        except Exception:  # noqa: BLE001
+            entity_nn_max_extra = 0
+
         if query_fact_scores is None or len(query_fact_scores) == 0:
             get_db = getattr(getattr(self, "graph_store", None), "get_fact_faiss_db", None)
             fact_db = get_db(owner_filter) if callable(get_db) else getattr(self.graph_store, "fact_faiss_db", None)
@@ -147,7 +243,52 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
                 logger.warning("Fact FAISS index unavailable (owner=%s); falling back to dense retrieval", owner_filter)
             else:
                 logger.warning("No facts found, falling back to dense retrieval")
-            return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter, query_doc_scores=query_doc_scores)
+            # If fact retrieval fails/empties, we can still try entity-NN seeding to run a graph walk.
+            # This keeps behavior general and improves coverage for multi-entity / naming-variant queries.
+            seed_entity_ids = set()
+            if entity_nn_enabled and entity_nn_top_k > 0 and owner_filter is not None:
+                seed_list = self._seed_entities_from_entity_nn(query=query, owner_id=owner_filter, top_k=entity_nn_top_k)
+                if entity_nn_max_total > 0:
+                    seed_list = seed_list[:entity_nn_max_total]
+                seed_entity_ids = set(seed_list)
+
+            if not seed_entity_ids:
+                return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter, query_doc_scores=query_doc_scores)
+
+            top_k_facts: List[Tuple] = []
+            top_k_fact_indices: List[int] = []
+            entity_relevance_scores = None
+            subgraph_nodes, subgraph_chunk_ids = self._expand_subgraph(seed_entity_ids, entity_relevance_scores=None, owner_id=owner_filter)
+            sorted_doc_ids, sorted_doc_scores, ppr_scores_dict = self._graph_search_on_subgraph(
+                query,
+                query_fact_scores,
+                top_k_facts,
+                top_k_fact_indices,
+                subgraph_nodes,
+                owner_id=owner_filter,
+                query_doc_scores=query_doc_scores,
+            )
+            selected_chunk_ids, selected_chunk_scores, top_entity_id = self._select_top_entity_chunks(
+                ppr_scores_dict=ppr_scores_dict,
+                owner_id=owner_filter,
+                top_k=top_k,
+                fallback_chunk_ids=sorted_doc_ids,
+            )
+            # Continue with Step 7 (chunk conversion / metadata) below by jumping to common tail.
+            return self._finalize_retrieval(
+                query=query,
+                owner_filter=owner_filter,
+                top_k=top_k,
+                selected_chunk_ids=selected_chunk_ids,
+                selected_chunk_scores=selected_chunk_scores,
+                ppr_scores_dict=ppr_scores_dict,
+                subgraph_nodes=subgraph_nodes,
+                seed_entity_ids=seed_entity_ids,
+                return_subgraph_info=return_subgraph_info,
+                top_entity_id=top_entity_id,
+                dense_score_map={},
+                dense_mix_k=0,
+            )
 
         # Step 2: Rerank facts (optional)
         if self.config.enable_llm_reranking and self.llm_client:
@@ -164,13 +305,46 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
         logger.info(f"Selected {len(top_k_facts)} facts after LLM filtering")
 
         # Step 3: Extract seed entities from facts
-        seed_entity_ids = self._extract_entity_ids_from_facts(top_k_facts)
+        fact_seed_entity_ids = self._extract_entity_ids_from_facts(top_k_facts)
+        seed_entity_ids = set(fact_seed_entity_ids)
+        if entity_nn_enabled and entity_nn_top_k > 0 and owner_filter is not None:
+            nn_candidates = self._seed_entities_from_entity_nn(query=query, owner_id=owner_filter, top_k=entity_nn_top_k)
+            added = 0
+            for eid in nn_candidates:
+                if eid in seed_entity_ids:
+                    continue
+                seed_entity_ids.add(eid)
+                added += 1
+                if entity_nn_max_extra > 0 and added >= entity_nn_max_extra:
+                    break
+
+            if entity_nn_max_total > 0 and len(seed_entity_ids) > entity_nn_max_total:
+                # Deterministic cap: keep fact-derived seeds first, then keep earliest NN candidates.
+                capped: list[str] = []
+                for eid in sorted(fact_seed_entity_ids):
+                    if eid in seed_entity_ids:
+                        capped.append(eid)
+                    if len(capped) >= entity_nn_max_total:
+                        break
+                if len(capped) < entity_nn_max_total:
+                    for eid in nn_candidates:
+                        if eid in capped or eid not in seed_entity_ids:
+                            continue
+                        capped.append(eid)
+                        if len(capped) >= entity_nn_max_total:
+                            break
+                seed_entity_ids = set(capped)
 
         if not seed_entity_ids:
             logger.warning("No seed entities found, falling back to dense retrieval")
             return self._dense_passage_retrieval(query, top_k, owner_id=owner_filter, query_doc_scores=query_doc_scores)
 
-        logger.info(f"Extracted {len(seed_entity_ids)} seed entities from {len(top_k_facts)} facts")
+        logger.info(
+            "Seed entities: from_facts=%s from_entity_nn=%s total=%s",
+            len(fact_seed_entity_ids),
+            max(0, len(seed_entity_ids) - len(set(fact_seed_entity_ids))),
+            len(seed_entity_ids),
+        )
 
         # Step 4: Compute entity relevance scores for query-aware pruning
         entity_relevance_scores = None
@@ -261,10 +435,44 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Dense mix-in failed (continuing with graph-only selection): %s", exc)
 
-        # Step 7: Convert to Chunk objects
+        return self._finalize_retrieval(
+            query=query,
+            owner_filter=owner_filter,
+            top_k=top_k,
+            selected_chunk_ids=selected_chunk_ids,
+            selected_chunk_scores=selected_chunk_scores,
+            ppr_scores_dict=ppr_scores_dict,
+            subgraph_nodes=subgraph_nodes,
+            seed_entity_ids=seed_entity_ids,
+            return_subgraph_info=return_subgraph_info,
+            top_entity_id=top_entity_id,
+            dense_score_map=dense_score_map,
+            dense_mix_k=dense_mix_k,
+        )
+
+    def _finalize_retrieval(
+        self,
+        *,
+        query: str,
+        owner_filter: Optional[uuid.UUID],
+        top_k: int,
+        selected_chunk_ids: List[str],
+        selected_chunk_scores: List[float],
+        ppr_scores_dict: Dict[str, float],
+        subgraph_nodes: Set[str],
+        seed_entity_ids: Set[str],
+        return_subgraph_info: bool,
+        top_entity_id: str | None,
+        dense_score_map: Dict[str, float],
+        dense_mix_k: int,
+    ) -> List[Chunk]:
+        """
+        Common tail for Neo4j HippoRAG: convert IDs -> chunks, attach debug metadata, optionally attach subgraph info.
+        """
         chunks = self._convert_to_chunks(selected_chunk_ids, selected_chunk_scores, owner_id=owner_filter)
         selection_strategy = str(getattr(self.config, "chunk_selection_strategy", "top_entity_neighbors") or "top_entity_neighbors")
-        dense_mix_ids = set(dense_score_map.keys())
+        dense_mix_ids = set((dense_score_map or {}).keys())
+
         tls_getter = getattr(self, "_get_tls", None)
         tls = None
         if callable(tls_getter):
@@ -272,6 +480,7 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
                 tls = tls_getter()
             except Exception:  # noqa: BLE001
                 tls = None
+
         for chunk in chunks:
             meta = getattr(chunk, "metadata", None)
             if meta is None:
@@ -279,16 +488,21 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
                 chunk.metadata = meta
             cid = str(getattr(chunk, "id", "") or "")
             meta["_hipporag_selection_strategy"] = selection_strategy
-            meta["_hipporag_dense_mix_in"] = bool(cid in dense_mix_ids and dense_mix_k > 0)
+            meta["_hipporag_dense_mix_in"] = bool(cid in dense_mix_ids and int(dense_mix_k or 0) > 0)
             try:
                 meta["_hipporag_ppr_score"] = float(ppr_scores_dict.get(cid, 0.0))
             except Exception:  # noqa: BLE001
                 meta["_hipporag_ppr_score"] = 0.0
             if cid in dense_score_map:
-                meta["_hipporag_dense_score"] = float(dense_score_map[cid])
+                try:
+                    meta["_hipporag_dense_score"] = float(dense_score_map[cid])
+                except Exception:  # noqa: BLE001
+                    pass
+
             if tls is not None:
                 dense_top_file_id = getattr(tls, "dense_top_file_id", None)
                 dense_top_file_ratio = getattr(tls, "dense_top_file_ratio", None)
+                dense_top_file_second_ratio = getattr(tls, "dense_top_file_second_ratio", None)
                 if dense_top_file_id:
                     meta["_hipporag_dense_top_file_id"] = str(dense_top_file_id)
                 if dense_top_file_ratio is not None:
@@ -296,16 +510,18 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
                         meta["_hipporag_dense_top_file_ratio"] = float(dense_top_file_ratio)
                     except Exception:  # noqa: BLE001
                         pass
+                if dense_top_file_second_ratio is not None:
+                    try:
+                        meta["_hipporag_dense_top_file_second_ratio"] = float(dense_top_file_second_ratio)
+                    except Exception:  # noqa: BLE001
+                        pass
 
-        # Optionally attach subgraph information for visualization
         if return_subgraph_info and chunks:
-            node_to_ppr_score = ppr_scores_dict  # Already a dict in Neo4j version
-
             subgraph_info = {
                 "subgraph_nodes": list(subgraph_nodes),
                 "seed_entity_ids": list(seed_entity_ids),
                 "retrieved_chunk_ids": selected_chunk_ids,
-                "node_ppr_scores": node_to_ppr_score,
+                "node_ppr_scores": ppr_scores_dict,
                 "query": query,
             }
             if top_entity_id:
@@ -314,7 +530,7 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
                 chunks[0].metadata = {}
             chunks[0].metadata["_subgraph_info"] = subgraph_info
 
-        logger.info(f"Retrieved {len(chunks)} chunks")
+        logger.info("Retrieved %s chunks", len(chunks))
         return chunks
 
     def _convert_to_chunks(self, chunk_ids: List[str], scores: List[float], owner_id: Optional[uuid.UUID] = None) -> List[Chunk]:

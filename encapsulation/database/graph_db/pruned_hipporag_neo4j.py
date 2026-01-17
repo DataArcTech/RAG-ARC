@@ -187,6 +187,7 @@ class PrunedHippoRAGNeo4jStore(
         self.add_synonymy_edges = config.add_synonymy_edges
         self.synonymy_edge_topk = config.synonymy_edge_topk
         self.synonymy_edge_sim_threshold = config.synonymy_edge_sim_threshold
+        self.synonymy_edge_min_entity_chars = config.synonymy_edge_min_entity_chars
 
         # Load graph structure into memory for fast lookups
         self._load_graph_cache()

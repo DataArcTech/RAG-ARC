@@ -2,9 +2,6 @@
 
 These are used by `Knowledge.is_file_active` and retrieval-time filtering.
 """
-
-from __future__ import annotations
-
 import logging
 import os
 

@@ -133,6 +133,9 @@ These vars control when DeepSearch attempts a single query rewrite (via the retr
 | `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | Graph index / embedding cache directory (Neo4j HippoRAG). |
 | `GRAPH_INDEX_NAME` | `index` | Graph index file name prefix. |
 | `KG_SCHEMA_PATH` | `./kg_schema.yml` | KG schema YAML path for Neo4j HippoRAG (predicate governance + direction-sensitive set). Optional: `./fin_kg_schema.yml` for finance/insurance deployments. |
+| `GRAPH_INDEX_EMBED_FAILURE_POLICY` | `zero` | Graph-index embedding failure policy: `zero` (fill a small number of failed items with zero vectors and log) / `raise` (fail the indexing task on any failure). |
+| `GRAPH_INDEX_EMBED_MAX_FAILURE_RATIO` | `0.05` | Even with `..._POLICY=zero`, fail-fast when failure ratio ≥ this threshold (avoids silently building an all-zero bad index). |
+| `GRAPH_INDEX_EMBED_MAX_FAILURE_COUNT` | `50` | Even with `..._POLICY=zero`, fail-fast when failure count ≥ this threshold. |
 | `INDEX_TEXT_TITLE_PREFIX_ENABLED` | `true` | Whether to inject a filename-derived `title=` prefix into each chunk’s `metadata.index_text` (improves recall when doc/product name mostly lives in the filename). |
 | `INDEX_TEXT_TITLE_MAX_CHARS` | `160` | Max character length of the injected `title=` prefix (keeps index/prompt noise bounded). |
 
@@ -155,6 +158,9 @@ Notes:
 | `RAG_RETRIEVAL_OBSERVABILITY` | `false` | When `true`, emit retrieval observability logs/progress (per-retriever file distribution, fused distribution, rerank distribution) to debug "wrong file recalled" and follow-up drift. |
 | `RAG_RETRIEVAL_LOG_TOP_FILES` | `10` | Max file ids shown in retrieval distribution logs (counted by file_id). |
 | `RAG_RETRIEVAL_LOG_TOP_CHUNKS` | `5` | Max chunk previews shown in retrieval observability logs. |
+| `QUERY_VARIANTS_ENABLED` | `true` | Enable retrieval-time query variants (MultiPath generates variants per retriever and unions results). Improves recall on mixed-script/variant corpora. |
+| `QUERY_VARIANTS_ZH_HANS_HANT_ENABLED` | `true` | Enable Simplified/Traditional Chinese variants (requires OpenCC). |
+| `QUERY_VARIANTS_MAX` | `3` | Max number of query variants (including the original). |
 | `DEEPSEARCH_TOP_CHUNKS` | `10` | Maximum chunks returned in DeepSearch evidence and displayed in report appendix (first 100 chars preview). |
 | `DEEPSEARCH_TOP_TRIPLES` | `30` | Maximum graph triples returned in DeepSearch evidence. |
 | `DEEPSEARCH_TOP_SEED_ENTITIES` | `15` | Maximum seed entities surfaced in DeepSearch evidence. |

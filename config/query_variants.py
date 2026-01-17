@@ -8,9 +8,6 @@ Rationale (general-domain):
   Simplified Chinese (and vice versa). Deterministic variants improve recall
   without domain-specific rules.
 """
-
-from __future__ import annotations
-
 import logging
 import os
 

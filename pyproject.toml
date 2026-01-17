@@ -70,6 +70,7 @@ dependencies = [
     "celery>=5.4.0",
     "stopwordsiso>=0.6.1",
     "pypdf>=6.5.0",
+    "opencc-python-reimplemented>=0.1.7",
 ]
 
 [project.optional-dependencies]

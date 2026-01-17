@@ -1,7 +1,4 @@
 """Chunk-level index_text augmentation for file management pipeline."""
-
-from __future__ import annotations
-
 from typing import Any, Dict, Optional
 
 from core.utils.index_text_augmentation import prepend_title_prefix

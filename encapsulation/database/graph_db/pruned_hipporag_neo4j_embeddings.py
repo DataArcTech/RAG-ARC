@@ -19,6 +19,28 @@ logger = logging.getLogger(__name__)
 
 
 class _PrunedHippoRAGNeo4jEmbeddingsMixin:
+    @staticmethod
+    def _faiss_distance_to_similarity(*, distance: float, metric: str, index_type: str | None) -> float:
+        """
+        Convert a FAISS `search()` distance into a comparable similarity score.
+
+        Notes:
+        - For `Index*IP` (used by metric='cosine' with normalized vectors, and metric='ip'), FAISS returns
+          the inner product where larger is better (already a similarity).
+        - For `IndexHNSWFlat` with `METRIC_INNER_PRODUCT` (our cosine HNSW indices), FAISS returns
+          `-||u-v||^2` where vectors are L2-normalized. For normalized vectors, `||u-v||^2 = 2 - 2*cos`,
+          so we recover cosine similarity via: `cos = 1 + distance/2`.
+        - For `Index*L2`, FAISS returns an L2 distance where smaller is better; we convert to a score by negating.
+        """
+        m = str(metric or "").strip().lower()
+        it = str(index_type or "").strip().lower()
+        if m in {"cosine", "ip"}:
+            if it == "hnsw":
+                # distance ~= -||u-v||^2 for normalized vectors (see docstring).
+                return 1.0 + (float(distance) / 2.0)
+            return float(distance)  # flat/ivf inner-product indices return IP directly
+        return -float(distance)
+
     def _owner_scoped_faiss_lock(self) -> threading.Lock:
         lock = getattr(self, "_owner_scoped_faiss_lock_obj", None)
         if lock is None:
@@ -188,6 +210,59 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
             or "ratelimit" in msg
         )
 
+    def _embedding_dimension_for_placeholders(self, *, fallback_from: Sequence[Sequence[float] | None] | None = None) -> int:
+        """
+        Resolve embedding dimension for placeholder (zero) vectors.
+
+        We avoid hardcoding a dimension. Resolution order:
+        1) infer from any successful embeddings in `fallback_from` (when present)
+        2) embedding_model.config.embedding_dimensions (if present)
+        3) embedding_model._embedding_dimension_cache (if set by prior probes)
+        4) embedding_model.get_embedding_dimension() (may issue a single probe call)
+
+        If dimension cannot be resolved, we raise with guidance to set EMBEDDING_DIMENSIONS.
+        """
+        if fallback_from:
+            for vec in fallback_from:
+                if vec is None:
+                    continue
+                try:
+                    dim = len(vec)  # type: ignore[arg-type]
+                    if dim > 0:
+                        return int(dim)
+                except Exception:
+                    continue
+
+        cfg = getattr(getattr(self, "embedding_model", None), "config", None)
+        candidate = getattr(cfg, "embedding_dimensions", None)
+        if candidate is not None:
+            try:
+                dim = int(candidate)
+                if dim > 0:
+                    return dim
+            except Exception:
+                pass
+
+        cached = getattr(getattr(self, "embedding_model", None), "_embedding_dimension_cache", None)
+        if cached is not None:
+            try:
+                dim = int(cached)
+                if dim > 0:
+                    return dim
+            except Exception:
+                pass
+
+        get_dim = getattr(getattr(self, "embedding_model", None), "get_embedding_dimension", None)
+        if callable(get_dim):
+            dim = int(get_dim())
+            if dim > 0:
+                return dim
+
+        raise RuntimeError(
+            "Failed to resolve embedding dimension for placeholder vectors. "
+            "Set EMBEDDING_DIMENSIONS (or ensure embedding_model.get_embedding_dimension() works)."
+        )
+
     def _embed_texts_resilient(self, texts: List[str], *, purpose: str) -> List[List[float]]:
         """
         Resilient embedding wrapper for graph indexing.
@@ -196,6 +271,12 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
         - Retries on rate limit errors with jittered backoff
         - If a batch fails, splits down to per-item to isolate bad inputs / backend quirks
         """
+        from config.graph_index_embedding import (
+            GRAPH_INDEX_EMBED_FAILURE_POLICY,
+            GRAPH_INDEX_EMBED_MAX_FAILURE_COUNT,
+            GRAPH_INDEX_EMBED_MAX_FAILURE_RATIO,
+        )
+
         settings = self._graph_embedding_settings()
         batch_size = int(settings["batch_size"])
         max_retries = int(settings["max_retries"])
@@ -206,17 +287,20 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
         if not texts:
             return []
 
-        normalized: List[str] = []
-        for idx, text in enumerate(texts):
-            if not isinstance(text, str):
-                raise TypeError(f"{purpose} embedding input must be str (index={idx}, type={type(text).__name__})")
-            stripped = text.strip()
-            if not stripped:
-                raise ValueError(f"{purpose} embedding input cannot be empty (index={idx})")
-            normalized.append(stripped.replace("\n", " "))
-
-        embeddings: List[List[float]] = []
+        # Keep output aligned with input to avoid partial-index corruption when a single item fails.
+        results: list[list[float] | None] = [None] * len(texts)
         failures: List[Dict[str, Any]] = []
+
+        # Normalize and pre-filter empties (they are treated as per-item failures in tolerant modes).
+        normalized_items: list[tuple[int, str]] = []
+        for idx, raw in enumerate(texts):
+            if not isinstance(raw, str):
+                raise TypeError(f"{purpose} embedding input must be str (index={idx}, type={type(raw).__name__})")
+            stripped = raw.strip()
+            if not stripped:
+                failures.append({"purpose": purpose, "error": f"empty text (index={idx})"})
+                continue
+            normalized_items.append((idx, stripped.replace("\n", " ")))
 
         def _embed_batch(batch: List[str]) -> List[List[float]]:
             out = self.embedding_model.embed(batch)
@@ -224,8 +308,25 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
                 return [out]  # type: ignore[list-item]
             return out  # type: ignore[return-value]
 
-        for start in range(0, len(normalized), batch_size):
-            batch = normalized[start:start + batch_size]
+        # Nothing to embed (all empty) -> handled by policy below.
+        if not normalized_items:
+            dim = self._embedding_dimension_for_placeholders(fallback_from=results)
+            zero = [0.0] * dim
+            if GRAPH_INDEX_EMBED_FAILURE_POLICY == "raise":
+                raise ValueError(f"Graph index embedding failed ({purpose}): all inputs were empty")
+            for i in range(len(results)):
+                if results[i] is None:
+                    results[i] = zero
+            logger.warning(
+                "Graph index embedding filled %s empty inputs with zeros (purpose=%s).",
+                len(failures),
+                purpose,
+            )
+            return [vec for vec in results if vec is not None]  # type: ignore[return-value]
+
+        for start in range(0, len(normalized_items), batch_size):
+            batch_items = normalized_items[start:start + batch_size]
+            batch = [text for _idx, text in batch_items]
             attempt = 0
             while True:
                 try:
@@ -234,7 +335,8 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
                         raise RuntimeError(
                             f"{purpose} embeddings size mismatch: got {len(batch_embeddings)} for {len(batch)} inputs"
                         )
-                    embeddings.extend(batch_embeddings)
+                    for (orig_idx, _text), emb in zip(batch_items, batch_embeddings):
+                        results[orig_idx] = emb
                     break
                 except Exception as exc:  # noqa: BLE001
                     if self._looks_like_rate_limit(exc) and attempt < max_retries:
@@ -259,30 +361,60 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
                             len(batch),
                             str(exc),
                         )
-                        for item in batch:
+                        for (orig_idx, item) in batch_items:
                             try:
                                 item_embedding = _embed_batch([item])
                                 if len(item_embedding) != 1:
                                     raise RuntimeError(
                                         f"{purpose} embeddings size mismatch: got {len(item_embedding)} for 1 input"
                                     )
-                                embeddings.extend(item_embedding)
+                                results[orig_idx] = item_embedding[0]
                             except Exception as item_exc:  # noqa: BLE001
-                                failures.append({"purpose": purpose, "error": str(item_exc)})
+                                failures.append({"purpose": purpose, "error": str(item_exc), "index": orig_idx})
                         break
 
-                    failures.append({"purpose": purpose, "error": str(exc)})
+                    # Single-item batch failure.
+                    orig_idx = batch_items[0][0] if batch_items else None
+                    failures.append({"purpose": purpose, "error": str(exc), "index": orig_idx})
                     break
 
             if sleep_between_batches > 0:
                 time.sleep(sleep_between_batches)
 
         if failures:
-            raise RuntimeError(
-                f"Graph index embedding failed ({purpose}): {len(failures)} failures; first_error={failures[0]['error']}"
+            failure_count = len(failures)
+            failure_ratio = float(failure_count) / float(max(1, len(texts)))
+            too_many = (
+                (GRAPH_INDEX_EMBED_MAX_FAILURE_COUNT > 0 and failure_count >= GRAPH_INDEX_EMBED_MAX_FAILURE_COUNT)
+                or (GRAPH_INDEX_EMBED_MAX_FAILURE_RATIO > 0 and failure_ratio >= GRAPH_INDEX_EMBED_MAX_FAILURE_RATIO)
             )
 
-        return embeddings
+            if GRAPH_INDEX_EMBED_FAILURE_POLICY == "raise" or too_many:
+                raise RuntimeError(
+                    f"Graph index embedding failed ({purpose}): failures={failure_count}/{len(texts)} "
+                    f"ratio={failure_ratio:.3f} first_error={failures[0].get('error')}"
+                )
+
+            dim = self._embedding_dimension_for_placeholders(fallback_from=results)
+            zero = [0.0] * dim
+            filled = 0
+            for i in range(len(results)):
+                if results[i] is None:
+                    results[i] = zero
+                    filled += 1
+            logger.warning(
+                "Graph index embedding had %s/%s failures (ratio=%.3f) for purpose=%s; policy=%s filled_with_zeros=%s first_error=%s",
+                failure_count,
+                len(texts),
+                failure_ratio,
+                purpose,
+                GRAPH_INDEX_EMBED_FAILURE_POLICY,
+                filled,
+                failures[0].get("error"),
+            )
+
+        # `results` is fully filled (either real embeddings or placeholder zeros).
+        return [vec for vec in results if vec is not None]  # type: ignore[return-value]
 
     def batch_generate_embeddings(
         self,
@@ -535,7 +667,7 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
         logger.info("Batch embedding generation completed!")
         return summary
 
-    def _add_synonymy_edges(self, new_entity_ids: Optional[List[str]] = None):
+    def _add_synonymy_edges(self, new_entity_ids: Optional[List[str]] = None, *, owner_id: Optional[object] = None):
         """
         Add synonymy edges between similar entities using FAISS HNSW.
 
@@ -550,12 +682,24 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
         Args:
             new_entity_ids: Optional list of new entity IDs for incremental update.
                           If None, processes all entities (full rebuild).
+            owner_id: Optional owner scope. When set, only entities/edges for that owner are processed.
         """
         if not self.add_synonymy_edges:
             logger.info("Synonymy edges disabled")
             return
 
         from tqdm import tqdm
+
+        owner_str = None if owner_id is None else str(owner_id)
+        # In this store, node/edge owner_id is stored as the real owner UUID string (or __GLOBAL__).
+        owner_filter = self._restore_owner_id(owner_str)
+
+        # IMPORTANT: synonym edges must be computed against the correct owner-scoped entity FAISS index.
+        # The store maintains per-owner entity indices on disk; using the template/global DB will silently
+        # skip most entities. When owner is provided, force-load that owner-scoped DB.
+        entity_db = self.entity_faiss_db
+        if owner_filter is not None:
+            entity_db = self.get_entity_faiss_db(owner_filter)
 
         # Determine if this is incremental or full rebuild
         if new_entity_ids:
@@ -564,14 +708,23 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
             entity_query = """
             MATCH (e:Entity)
             WHERE e.entity_id IN $entity_ids
+            """ + ("AND e.owner_id = $owner_id" if owner_filter is not None else "") + """
             RETURN e.entity_id AS entity_id, e.entity_name AS entity_name, e.owner_id AS owner_id
             """
-            entities = self._execute_query(entity_query, {'entity_ids': new_entity_ids})
+            params = {'entity_ids': new_entity_ids}
+            if owner_filter is not None:
+                params["owner_id"] = owner_filter
+            entities = self._execute_query(entity_query, params)
         else:
-            logger.info("Computing synonymy edges for all entities (full rebuild)...")
+            logger.info("Computing synonymy edges for all entities%s (full rebuild)...", f" owner={owner_filter}" if owner_filter else "")
             # Get all entities
-            entity_query = "MATCH (e:Entity) RETURN e.entity_id AS entity_id, e.entity_name AS entity_name, e.owner_id AS owner_id"
-            entities = self._execute_query(entity_query)
+            entity_query = (
+                "MATCH (e:Entity) "
+                + ("WHERE e.owner_id = $owner_id " if owner_filter is not None else "")
+                + "RETURN e.entity_id AS entity_id, e.entity_name AS entity_name, e.owner_id AS owner_id"
+            )
+            params = {"owner_id": owner_filter} if owner_filter is not None else None
+            entities = self._execute_query(entity_query, params) if params is not None else self._execute_query(entity_query)
 
         if not entities:
             logger.warning("No entities found, skipping synonymy edge addition")
@@ -589,12 +742,21 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
         # Build a set to track existing entity-entity edges (fact edges only)
         existing_entity_entity_edges = set()
 
-        # Get all RELATES_TO relationships
+        # Get existing RELATES_TO edges (owner-scoped + optional incremental restriction).
         relation_query = """
         MATCH (e1:Entity)-[r:RELATES_TO]->(e2:Entity)
+        WHERE 1=1
+        """ + ("AND r.owner_id = $owner_id AND e1.owner_id = $owner_id AND e2.owner_id = $owner_id\n" if owner_filter is not None else "") + (
+            "AND (e1.entity_id IN $entity_ids OR e2.entity_id IN $entity_ids)\n" if new_entity_ids else ""
+        ) + """
         RETURN e1.entity_id AS head_id, e2.entity_id AS tail_id
         """
-        relations = self._execute_query(relation_query)
+        rel_params: dict[str, Any] = {}
+        if owner_filter is not None:
+            rel_params["owner_id"] = owner_filter
+        if new_entity_ids:
+            rel_params["entity_ids"] = new_entity_ids
+        relations = self._execute_query(relation_query, rel_params) if rel_params else self._execute_query(relation_query)
 
         for record in relations:
             head_id = record['head_id']
@@ -618,12 +780,20 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
             entity_owner = entity_id_to_info.get(entity_id, {}).get('owner_id')
             owner_key = self._owner_key(entity_owner)
 
-            # Filter short entities (same as original)
-            if len(re.sub('[^A-Za-z0-9]', '', entity_name)) <= 2:
+            # Filter extremely short entities. Use the shared text normalization so this works for
+            # non-Latin scripts (e.g., CJK) and avoids accidentally dropping all Chinese entities.
+            from core.utils.text_processing import text_processing
+
+            normalized = text_processing(entity_name)
+            try:
+                min_chars = int(getattr(self, "synonymy_edge_min_entity_chars", 3) or 3)
+            except Exception:  # noqa: BLE001
+                min_chars = 3
+            if len(normalized.replace(" ", "")) < max(1, min_chars):
                 continue
 
             # Get entity from FAISS docstore
-            entity_chunk = self.entity_faiss_db.docstore.get(entity_id)
+            entity_chunk = entity_db.docstore.get(entity_id)
             if not entity_chunk:
                 continue
 
@@ -646,7 +816,7 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
 
         # Batch normalize embeddings
         embeddings_array = np.array(embeddings_list).astype(np.float32)
-        if self.entity_faiss_db.config.normalize_L2 or self.entity_faiss_db.config.metric == "cosine":
+        if entity_db.config.normalize_L2 or entity_db.config.metric == "cosine":
             from core.utils.faiss_lock import FAISS_LOCK
             with FAISS_LOCK:
                 faiss.normalize_L2(embeddings_array)
@@ -655,10 +825,10 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
 
         # Batch FAISS search
         logger.info("Performing batch FAISS search...")
-        k = min(self.synonymy_edge_topk, self.entity_faiss_db.index.ntotal)
+        k = min(self.synonymy_edge_topk, entity_db.index.ntotal)
         from core.utils.faiss_lock import FAISS_LOCK
         with FAISS_LOCK:
-            distances_batch, indices_batch = self.entity_faiss_db.index.search(embeddings_array, k)
+            distances_batch, indices_batch = entity_db.index.search(embeddings_array, k)
         logger.info("Batch FAISS search completed")
 
         # Process results
@@ -679,13 +849,13 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
                     continue
 
                 # Get neighbor entity ID from index
-                if idx not in self.entity_faiss_db.index_to_docstore_id:
+                if idx not in entity_db.index_to_docstore_id:
                     continue
 
-                neighbor_entity_id = self.entity_faiss_db.index_to_docstore_id[idx]
+                neighbor_entity_id = entity_db.index_to_docstore_id[idx]
 
                 # Skip deleted entities
-                if neighbor_entity_id in self.entity_faiss_db.deleted_ids:
+                if neighbor_entity_id in entity_db.deleted_ids:
                     continue
 
                 # Skip self
@@ -703,8 +873,11 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
 
                 neighbor_name = neighbor_info['name']
 
-                # FAISS with metric='cosine' returns NEGATIVE inner product
-                similarity = -float(distance)
+                similarity = self._faiss_distance_to_similarity(
+                    distance=float(distance),
+                    metric=str(entity_db.config.metric or ""),
+                    index_type=getattr(entity_db, "saved_index_type", getattr(getattr(entity_db, "config", None), "index_type", None)),
+                )
 
                 # Check threshold
                 if similarity < self.synonymy_edge_sim_threshold:
@@ -756,5 +929,18 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
             self._execute_query(batch_query, {'edges': batch_data})
 
             logger.info(f"Added {num_synonym_edges} unique synonymy edges ({len(edges_to_add)} directional edges)")
+
+            # Keep in-memory neighbor cache consistent for long-running services.
+            # Without this, newly added SIMILAR_TO edges would only take effect after a restart.
+            try:
+                load_cache = getattr(self, "_load_graph_cache", None)
+                if callable(load_cache):
+                    load_cache()
+                bump = getattr(self, "write_lock", None)
+                if callable(bump):
+                    with bump():
+                        self._cache_version += 1  # type: ignore[attr-defined]
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to refresh graph cache after adding synonymy edges: %s", exc)
         else:
             logger.info("No synonymy edges to add")

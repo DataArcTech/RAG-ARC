@@ -10,9 +10,6 @@ Why:
 - The same augmentation is reused for reranking inputs so existing indexes can
   benefit without requiring re-embedding.
 """
-
-from __future__ import annotations
-
 import logging
 import os
 
