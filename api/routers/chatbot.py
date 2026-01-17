@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -954,12 +955,31 @@ async def messages(
             if history_text_lines and history_text_lines[-1] == f"user: {retrieval_query}":
                 history_text_lines.pop()
             history_text = "\n".join(history_text_lines) if history_text_lines else None
+
             def _prepare():
+                kwargs: dict[str, Any] = {
+                    "query": retrieval_query,
+                    "owner_id": str(owner_id),
+                    "return_subgraph": needs_subgraph,
+                    "history_text": history_text,
+                }
+                try:
+                    sig = inspect.signature(rag_inference_handler._build_messages_and_context)
+                    accepts_var_kw = any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+                    )
+                    if not accepts_var_kw and "history_text" not in sig.parameters:
+                        kwargs.pop("history_text", None)
+                except Exception as exc:  # noqa: BLE001
+                    # Compatibility: some test stubs (and older handlers) do not accept history_text.
+                    logger.debug(
+                        "Failed to inspect rag_inference_handler._build_messages_and_context signature: %s",
+                        exc,
+                        exc_info=True,
+                    )
+                    kwargs.pop("history_text", None)
                 return rag_inference_handler._build_messages_and_context(
-                    query=retrieval_query,
-                    owner_id=str(owner_id),
-                    return_subgraph=needs_subgraph,
-                    history_text=history_text,
+                    **kwargs,
                 )
 
             _, chunks, subgraph_data, subgraph_info = await anyio.to_thread.run_sync(_prepare)

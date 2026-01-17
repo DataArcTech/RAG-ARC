@@ -1,3 +1,4 @@
+import inspect
 import uuid
 from datetime import datetime
 from typing import Annotated, Any, Optional, List
@@ -208,12 +209,26 @@ async def list_sessions(
     
     # 转换为 offset
     offset = (page - 1) * page_size
-    
+
+    handler = get_session_handler()
+    list_kwargs: dict[str, Any] = {}
+    try:
+        sig = inspect.signature(handler.list_sessions_by_user)
+        accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+        if accepts_var_kw or "limit" in sig.parameters:
+            list_kwargs["limit"] = page_size
+        elif accepts_var_kw or "page_size" in sig.parameters:
+            list_kwargs["page_size"] = page_size
+        if accepts_var_kw or "offset" in sig.parameters:
+            list_kwargs["offset"] = offset
+    except Exception:  # noqa: BLE001
+        # Compatibility with older handlers/test stubs that only accept user_id.
+        list_kwargs = {}
+
     return await get_thread_pool().run_blocking(
-        get_session_handler().list_sessions_by_user,
+        handler.list_sessions_by_user,
         current_user.id,
-        page_size,
-        offset
+        **list_kwargs,
     )
 
 

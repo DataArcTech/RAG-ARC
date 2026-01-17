@@ -1,5 +1,6 @@
 from encapsulation.data_model.schema import Chunk
 from typing import TYPE_CHECKING, Optional, Dict, Any, List, Iterator, Callable, Mapping
+import inspect
 import logging
 import time
 import uuid
@@ -399,7 +400,16 @@ class RAGInference(AbstractModule):
 
         self._emit_progress(progress_callback, {"stage": "rewrite", "status": "start"})
         rewrite_start = time.perf_counter()
-        rewritten_query = self.query_rewriter.rewrite_query(query, history_text=history_text)
+        rewrite_kwargs: dict[str, Any] = {}
+        try:
+            sig = inspect.signature(self.query_rewriter.rewrite_query)
+            accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+            if accepts_var_kw or "history_text" in sig.parameters:
+                # Only pass history_text when supported to keep compatibility with simple stubs/lambdas.
+                rewrite_kwargs["history_text"] = history_text
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Failed to inspect query_rewriter.rewrite_query signature: %s", exc, exc_info=True)
+        rewritten_query = self.query_rewriter.rewrite_query(query, **rewrite_kwargs)
         self._emit_progress(
             progress_callback,
             {
