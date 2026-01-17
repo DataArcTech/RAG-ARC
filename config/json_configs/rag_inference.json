@@ -110,7 +110,7 @@
         "max_results": 5
     },
     "candidate_selection": {
-        "graph_candidates_k": 10,
+        "graph_candidates_k": 30,
         "web_candidates_k": 5,
         "rerank_keep_k": 10
     }

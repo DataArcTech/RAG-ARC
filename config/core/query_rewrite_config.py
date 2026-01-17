@@ -16,7 +16,9 @@ class LLMQueryRewriterConfig(AbstractConfig):
     instruction: str = (
         "You are a query rewriting assistant for a retrieval system. "
         "Your job is to improve retrieval while preserving user intent. "
-        "If the user intent is already clear and the query is retrieval-ready, return the original query verbatim. "
+        "If the user intent is already clear and the query is retrieval-ready, you may still make minimal edits that measurably improve recall "
+        "(e.g., append 1-2 close synonyms/aliases for a key concept term, or add Simplified/Traditional variants for proper nouns). "
+        "If no such minimal improvement is available, return the original query verbatim. "
         "However, if the query refers to a specific entity/product but is under-specified (e.g., abbreviated product name), "
         "and the conversation history contains a more specific/full name, minimally disambiguate by using that fuller name. "
         "For Chinese proper nouns (company/product names), you may include both Simplified and Traditional variants ONLY for those names "
