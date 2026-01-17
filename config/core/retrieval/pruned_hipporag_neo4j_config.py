@@ -220,6 +220,47 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
             "that may not appear in graph facts/entities. Set to 0 to disable."
         ),
     )
+    dense_seed_subgraph_entity_neighbors_k: int = Field(
+        default=10,
+        ge=0,
+        le=200,
+        description=(
+            "When `dense_seed_subgraph_top_k` injects chunk nodes, also inject up to this many entity neighbors "
+            "(MENTIONS/RELATES_TO-connected entity nodes) per injected chunk into the PPR subgraph. "
+            "This keeps injected dense chunks connected to the entity graph and improves recall when product/entity "
+            "names are present in dense hits but absent from fact-derived seeds. Set to 0 to disable."
+        ),
+    )
+
+    seed_entities_from_entity_nn_enabled: bool = Field(
+        default=True,
+        description=(
+            "Whether to add additional seed entities from the entity FAISS nearest-neighbor index. "
+            "This is domain-agnostic and helps when fact retrieval or fact->entity extraction misses relevant entities "
+            "(e.g., multi-entity queries, naming variants, mixed scripts)."
+        ),
+    )
+    seed_entities_from_entity_nn_top_k: int = Field(
+        default=10,
+        ge=0,
+        le=100,
+        description="Top-N entity nearest neighbors to consider as candidate seed entities (0 disables).",
+    )
+    seed_entities_from_entity_nn_max_extra: int = Field(
+        default=3,
+        ge=0,
+        le=100,
+        description=(
+            "When fact-derived seed entities are present, add at most this many additional entity-NN seeds. "
+            "This keeps entity-NN seeding conservative and avoids drifting to unrelated entities."
+        ),
+    )
+    seed_entities_from_entity_nn_max_total: int = Field(
+        default=50,
+        ge=0,
+        le=500,
+        description="Hard cap for total seed entities after merging fact-derived seeds and entity-NN seeds (0 disables).",
+    )
 
     dense_mix_in_top_k: int = Field(
         default=0,
@@ -251,6 +292,24 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
         ge=0.0,
         le=1.0,
         description="Minimum dominant-file ratio in dense top-K required to activate the file prior.",
+    )
+    dense_file_prior_min_margin: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum (top_ratio - second_ratio) margin required to activate the file prior. "
+            "This avoids applying a single-file boost when dense evidence is split across multiple files."
+        ),
+    )
+    dense_file_prior_max_files: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        description=(
+            "Apply the dense-derived file prior to up to the top-N files (ranked by frequency in dense top-K). "
+            "Secondary files are boosted with a scaled multiplier, improving multi-file coverage without losing stability."
+        ),
     )
     dense_file_prior_multiplier: float = Field(
         default=2.5,
