@@ -102,7 +102,7 @@ class RAGInference(AbstractModule):
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(
+            result = asyncio.run(
                 self.chat_async(
                     query,
                     owner_id,
@@ -112,9 +112,13 @@ class RAGInference(AbstractModule):
                     share_owner_id=share_owner_id,
                 )
             )
+            # chat_async may return additional experimental fields; keep chat() stable.
+            if isinstance(result, tuple) and len(result) >= 4:
+                return result[0], result[1], result[2], result[3]
+            return result  # type: ignore[return-value]
 
         def _run_in_thread():
-            return asyncio.run(
+            result = asyncio.run(
                 self.chat_async(
                     query,
                     owner_id,
@@ -124,6 +128,10 @@ class RAGInference(AbstractModule):
                     share_owner_id=share_owner_id,
                 )
             )
+            # chat_async may return additional experimental fields; keep chat() stable.
+            if isinstance(result, tuple) and len(result) >= 4:
+                return result[0], result[1], result[2], result[3]
+            return result
 
         with ThreadPoolExecutor(max_workers=1) as executor:
             return executor.submit(_run_in_thread).result()
