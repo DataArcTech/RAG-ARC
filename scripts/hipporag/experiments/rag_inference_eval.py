@@ -436,6 +436,13 @@ def main() -> int:
         meta=raw_trace["meta"],
         runs_by_variant=runs_by_variant,
     )
+    try:
+        # Also emit a compact table view for fast scanning.
+        from scripts.hipporag.experiments.render_eval_table import render_table
+
+        (out_dir / "table.md").write_text(render_table(raw_trace), encoding="utf-8")
+    except Exception:
+        pass
     print(str(out_dir))
     return 0
 
