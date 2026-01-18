@@ -43,7 +43,7 @@ class MultiPathRetriever(BaseRetriever):
         """Initialize fusion method"""
         if self.config.fusion_method == "rrf":
             from core.utils.fusion import RRFusion
-            self.config.fusion_instance = RRFusion(k=self.config.rrf_k)
+            self.config.fusion_instance = RRFusion(k=self.config.rrf_k, weights=self.config.weights)
         elif self.config.fusion_method == "weighted_sum":
             from core.utils.fusion import WeightedSumFusion
             weights = self.config.weights or [1.0] * len(self.config.retrievers)
@@ -53,7 +53,7 @@ class MultiPathRetriever(BaseRetriever):
             self.config.fusion_instance = RankFusion()
         else:
             from core.utils.fusion import RRFusion
-            self.config.fusion_instance = RRFusion(k=self.config.rrf_k)
+            self.config.fusion_instance = RRFusion(k=self.config.rrf_k, weights=self.config.weights)
 
     def _get_relevant_chunks(self, query: str, **kwargs: Any) -> List[Chunk]:
         """Search relevant chunks and fuse results"""
@@ -115,9 +115,11 @@ class MultiPathRetriever(BaseRetriever):
 
         for retriever in self.config.built_retrievers or []:
             try:
-                # Union results across variants per retriever, then let fusion handle cross-retriever merging.
-                merged: list[Chunk] = []
-                seen_keys: set[str] = set()
+                # Union results across variants per retriever.
+                #
+                # Important: keep the *best* (lowest) rank of each chunk across variants.
+                # A naive append-based union would unfairly demote chunks that are only retrieved
+                # by a later variant query (e.g. Simplified/Traditional), which then breaks RRF.
 
                 def _chunk_key(chunk: Chunk) -> str:
                     cid = str(getattr(chunk, "id", "") or "").strip()
@@ -129,15 +131,19 @@ class MultiPathRetriever(BaseRetriever):
                         return f"file:{fid}:{hash(getattr(chunk, 'content', '') or '')}"
                     return f"content:{hash(getattr(chunk, 'content', '') or '')}"
 
+                best_by_key: dict[str, tuple[int, int, Chunk]] = {}
+                seq = 0
                 for qv in variant_queries:
-                    chunks = retriever.invoke(qv, **kwargs) or []
-                    for chunk in chunks:
+                    qv_chunks = retriever.invoke(qv, **kwargs) or []
+                    for rank, chunk in enumerate(qv_chunks, 1):
+                        seq += 1
                         key = _chunk_key(chunk)
-                        if key in seen_keys:
-                            continue
-                        seen_keys.add(key)
-                        merged.append(chunk)
-                chunks = merged
+                        prev = best_by_key.get(key)
+                        if prev is None or int(rank) < int(prev[0]):
+                            # (best_rank, first_seen_seq, chunk)
+                            best_by_key[key] = (int(rank), int(prev[1] if prev else seq), chunk)
+
+                chunks = [t[2] for t in sorted(best_by_key.values(), key=lambda x: (x[0], x[1]))]
 
                 # Check if this is a graph retriever with subgraph info
                 if chunks and hasattr(chunks[0], 'metadata') and chunks[0].metadata:

@@ -55,21 +55,33 @@ class FusionMethod(ABC):
 class RRFusion(FusionMethod):
     """Reciprocal Rank Fusion (RRF) method"""
     
-    def __init__(self, k: float = 60.0):
+    def __init__(self, k: float = 60.0, weights: List[float] | None = None):
         """
         Args:
             k: constant in RRF, defaults to 60.0
+            weights: optional per-retriever weights aligned with `results` order.
         """
         self.k = k
+        self.weights = list(weights) if weights else None
     
     def fuse(self, results: List[List[Chunk]], top_k: int) -> List[Chunk]:
         # Calculate RRF scores
         rrf_scores = defaultdict(float)
         chunk_map = {}
         
-        for retriever_results in results:
+        for retriever_idx, retriever_results in enumerate(results):
+            weight = 1.0
+            if self.weights is not None and retriever_idx < len(self.weights):
+                try:
+                    weight = float(self.weights[retriever_idx])
+                except Exception:
+                    weight = 1.0
+            if weight <= 0:
+                # Allow disabling a retriever via weight=0.
+                continue
+
             for rank, chunk in enumerate(retriever_results, 1):  # rank starts from 1
-                rrf_score = 1.0 / (self.k + rank)
+                rrf_score = weight / (self.k + rank)
                 key = _fusion_key(chunk)
                 rrf_scores[key] += rrf_score
                 chunk_map[key] = chunk
