@@ -10,6 +10,20 @@ logger = logging.getLogger(__name__)
 
 
 class _PrunedHippoRAGNeo4jGraphMixin:
+    def _graph_set_tls(self, **fields: object) -> None:
+        tls_getter = getattr(self, "_get_tls", None)
+        if not callable(tls_getter):
+            return
+        try:
+            tls = tls_getter()
+        except Exception:  # noqa: BLE001
+            return
+        for k, v in fields.items():
+            try:
+                setattr(tls, str(k), v)
+            except Exception:  # noqa: BLE001
+                continue
+
     def _get_pruned_neighbors_by_weight(
         self,
         node_id: str,
@@ -275,6 +289,11 @@ class _PrunedHippoRAGNeo4jGraphMixin:
 
         # Assign weights to entity nodes based on fact scores
         chunk_count_gamma = float(getattr(self.config, "entity_chunk_count_penalty_gamma", 1.0))
+        entity_weight_mode = str(getattr(self.config, "entity_reset_weight_aggregation", "overwrite") or "overwrite").strip().lower()
+        if entity_weight_mode not in {"overwrite", "sum_avg"}:
+            entity_weight_mode = "overwrite"
+
+        entity_weight_counts: dict[str, int] = {}
         for rank, f in enumerate(top_k_facts):
             fact_score = query_fact_scores[top_k_fact_indices[rank]] if query_fact_scores.ndim > 0 else query_fact_scores
 
@@ -283,10 +302,23 @@ class _PrunedHippoRAGNeo4jGraphMixin:
             for entity_id in (head_id, tail_id):
                 if not entity_id or entity_id not in subgraph_nodes:
                     continue
-                phrase_weights[entity_id] = fact_score
                 chunk_count = entity_to_chunk_count.get(entity_id, 0)
+                contrib = float(fact_score)
                 if chunk_count != 0:
-                    phrase_weights[entity_id] /= float(chunk_count) ** chunk_count_gamma
+                    contrib /= float(chunk_count) ** chunk_count_gamma
+
+                if entity_weight_mode == "sum_avg":
+                    phrase_weights[entity_id] = float(phrase_weights.get(entity_id, 0.0)) + contrib
+                    entity_weight_counts[entity_id] = int(entity_weight_counts.get(entity_id, 0)) + 1
+                else:
+                    # Legacy behavior: overwrite with the last-seen fact score.
+                    phrase_weights[entity_id] = contrib
+
+        if entity_weight_mode == "sum_avg" and entity_weight_counts:
+            for eid, total in list(phrase_weights.items()):
+                cnt = int(entity_weight_counts.get(eid, 0))
+                if cnt > 1:
+                    phrase_weights[eid] = float(total) / float(cnt)
 
         # Assign weights to passage nodes based on dense retrieval
         query_doc_scores = query_doc_scores if query_doc_scores is not None else self._dense_passage_retrieval_scores(query)
@@ -305,50 +337,156 @@ class _PrunedHippoRAGNeo4jGraphMixin:
                 min_ratio = float(getattr(self.config, "dense_file_prior_min_ratio", 0.0) or 0.0)
                 multiplier = float(getattr(self.config, "dense_file_prior_multiplier", 1.0) or 1.0)
                 min_margin = float(getattr(self.config, "dense_file_prior_min_margin", 0.0) or 0.0)
+                max_second_ratio = getattr(self.config, "dense_file_prior_max_second_ratio", None)
+                max_second_ratio = float(max_second_ratio) if max_second_ratio is not None else None
                 max_files = int(getattr(self.config, "dense_file_prior_max_files", 1) or 1)
+                lexical_enabled = bool(getattr(self.config, "dense_file_prior_lexical_enabled", False))
+                lexical_min_top_ratio = getattr(self.config, "dense_file_prior_lexical_min_top_ratio", None)
+                lexical_min_top_ratio = float(lexical_min_top_ratio) if lexical_min_top_ratio is not None else None
+                lexical_min_title_coverage = getattr(self.config, "dense_file_prior_lexical_min_title_coverage", None)
+                lexical_min_title_coverage = float(lexical_min_title_coverage) if lexical_min_title_coverage is not None else None
+                lexical_min_overlap_tokens = getattr(self.config, "dense_file_prior_lexical_min_overlap_tokens", None)
+                lexical_min_overlap_tokens = int(lexical_min_overlap_tokens) if lexical_min_overlap_tokens is not None else None
+                lexical_min_margin = getattr(self.config, "dense_file_prior_lexical_min_margin", None)
+                lexical_min_margin = float(lexical_min_margin) if lexical_min_margin is not None else None
             except Exception:  # noqa: BLE001
                 top_k = 0
                 min_ratio = 0.0
                 multiplier = 1.0
                 min_margin = 0.0
+                max_second_ratio = None
                 max_files = 1
+                lexical_enabled = False
+                lexical_min_top_ratio = None
+                lexical_min_title_coverage = None
+                lexical_min_overlap_tokens = None
+                lexical_min_margin = None
 
             source_file_ids = getattr(self, "passage_node_source_file_ids", None)
             if top_k > 0 and isinstance(source_file_ids, list) and source_file_ids:
                 from core.retrieval.graph_retrieveal.dense_file_prior import compute_dense_file_prior_multipliers
 
                 ranked_file_ids: list[str | None] = []
+                ranked_chunk_ids: list[str | None] = []
                 for doc_idx in sorted_doc_ids[:top_k]:
                     i = int(doc_idx)
                     if i < 0 or i >= len(source_file_ids):
                         ranked_file_ids.append(None)
+                        ranked_chunk_ids.append(None)
                     else:
                         ranked_file_ids.append(source_file_ids[i])
+                        if i < 0 or i >= len(self.passage_node_keys):
+                            ranked_chunk_ids.append(None)
+                        else:
+                            ranked_chunk_ids.append(self.passage_node_keys[i])
                 dense_file_prior_by_file_id, stats = compute_dense_file_prior_multipliers(
                     ranked_file_ids,
                     top_k=top_k,
                     max_files=max_files,
                     min_ratio=min_ratio,
                     min_margin=min_margin,
+                    max_second_ratio=max_second_ratio,
                     multiplier=multiplier,
                 )
+
+                # Optional lexical gate: only apply the file prior when the candidate file title is
+                # actually mentioned by the query. This avoids "confidently wrong" dense dominance
+                # dragging PPR to an unrelated file.
+                if (
+                    dense_file_prior_by_file_id
+                    and lexical_enabled
+                    and lexical_min_title_coverage is not None
+                    and lexical_min_overlap_tokens is not None
+                ):
+                    try:
+                        from core.utils.query_variants import generate_query_variants
+
+                        query_variants = generate_query_variants(query)
+                    except Exception:  # noqa: BLE001
+                        query_variants = [str(query or "").strip()]
+
+                    # Only resolve filenames for the small set of candidate files we might boost.
+                    file_ids_needed: set[str] = set()
+                    for item in (stats.get("prior_files") or []):
+                        if isinstance(item, dict):
+                            fid = str(item.get("file_id") or "").strip()
+                            if fid:
+                                file_ids_needed.add(fid)
+                    for key in ("top_file_id", "second_file_id"):
+                        fid = str(stats.get(key) or "").strip()
+                        if fid:
+                            file_ids_needed.add(fid)
+
+                    filenames_by_file_id: dict[str, str] = {}
+                    if file_ids_needed and ranked_chunk_ids:
+                        # Map candidate file_ids to a representative dense-hit chunk_id, then extract filename/path
+                        # from Chunk.metadata in Neo4j. This keeps the gate self-contained (no Postgres dependency).
+                        rep_chunk_by_file_id: dict[str, str] = {}
+                        for fid in file_ids_needed:
+                            for j, fid_j in enumerate(ranked_file_ids):
+                                if fid_j == fid and j < len(ranked_chunk_ids):
+                                    cid = ranked_chunk_ids[j]
+                                    if cid:
+                                        rep_chunk_by_file_id[fid] = str(cid)
+                                        break
+                        if rep_chunk_by_file_id:
+                            try:
+                                chunk_to_name = self.graph_store.get_batch_chunk_source_file_names(list(rep_chunk_by_file_id.values()))
+                                for fid, cid in rep_chunk_by_file_id.items():
+                                    name = str(chunk_to_name.get(cid) or "").strip()
+                                    if name:
+                                        filenames_by_file_id[fid] = name
+                            except Exception:
+                                filenames_by_file_id = {}
+
+                    dense_file_prior_by_file_id, stats = compute_dense_file_prior_multipliers(
+                        ranked_file_ids,
+                        top_k=top_k,
+                        max_files=max_files,
+                        min_ratio=min_ratio,
+                        min_margin=min_margin,
+                        max_second_ratio=max_second_ratio,
+                        multiplier=multiplier,
+                        query_variants=query_variants,
+                        filenames_by_file_id=filenames_by_file_id,
+                        lexical_min_top_ratio=lexical_min_top_ratio,
+                        lexical_min_title_coverage=lexical_min_title_coverage,
+                        lexical_min_overlap_tokens=lexical_min_overlap_tokens,
+                        lexical_min_margin=lexical_min_margin,
+                    )
+
                 dense_top_file_id = stats.get("top_file_id")
                 dense_top_file_ratio = float(stats.get("top_ratio") or 0.0)
                 dense_top_file_second_ratio = float(stats.get("second_ratio") or 0.0)
-                if dense_file_prior_by_file_id:
+                if dense_file_prior_by_file_id and bool(stats.get("applied", False)):
                     dense_file_prior_multiplier = float(multiplier)
                     logger.info(
                         "Dense file prior applied: top_k=%s max_files=%s top_ratio=%.4f second_ratio=%.4f "
-                        "min_ratio=%.4f min_margin=%.4f multiplier=%.2f top_file_id=%s prior_files=%s",
+                        "min_ratio=%.4f min_margin=%.4f max_second_ratio=%s multiplier=%.2f top_file_id=%s prior_files=%s",
                         top_k,
                         max_files,
                         dense_top_file_ratio,
                         dense_top_file_second_ratio,
                         min_ratio,
                         min_margin,
+                        max_second_ratio,
                         dense_file_prior_multiplier,
                         dense_top_file_id,
                         stats.get("prior_files"),
+                    )
+                elif isinstance(stats.get("lexical_gate"), dict) and stats.get("lexical_gate", {}).get("enabled") and not stats.get(
+                    "applied", False
+                ):
+                    lg = stats.get("lexical_gate") or {}
+                    top = lg.get("top") or {}
+                    logger.info(
+                        "Dense file prior blocked by lexical gate: top_file_id=%s title=%s coverage=%.4f overlap=%s (min_cov=%s min_overlap=%s)",
+                        top.get("file_id"),
+                        top.get("title"),
+                        float(top.get("coverage") or 0.0),
+                        top.get("overlap_tokens"),
+                        lg.get("min_title_coverage"),
+                        lg.get("min_overlap_tokens"),
                     )
 
         # Optional: inject dense top-k chunks into the PPR subgraph before scoring.
@@ -453,6 +591,81 @@ class _PrunedHippoRAGNeo4jGraphMixin:
                     setattr(tls_getter(), "dense_seed_chunk_ids", set())
                 except Exception:  # noqa: BLE001
                     pass
+
+        # Optional: dense-file closure
+        # If dense top-N chunks are highly concentrated in one file, inject that file's chunks into the
+        # PPR subgraph so the final topK can include more complete evidence without switching to full-graph PPR.
+        closure_enabled = bool(getattr(self.config, "dense_file_closure_enabled", False))
+        closure_top_k = int(getattr(self.config, "dense_file_closure_top_k", 50) or 50)
+        closure_top_k = max(1, closure_top_k)
+        closure_min_ratio = float(getattr(self.config, "dense_file_closure_min_ratio", 0.6) or 0.0)
+        closure_min_margin = float(getattr(self.config, "dense_file_closure_min_margin", 0.2) or 0.0)
+        closure_max_chunks = int(getattr(self.config, "dense_file_closure_max_chunks", 0) or 0)
+        closure_max_chunks = max(0, closure_max_chunks)
+
+        closure_applied = False
+        closure_top_file_id: str | None = None
+        closure_top_ratio = 0.0
+        closure_second_ratio = 0.0
+        closure_injected = 0
+
+        source_file_ids = getattr(self, "passage_node_source_file_ids", None)
+        if closure_enabled and isinstance(source_file_ids, list) and source_file_ids:
+            from collections import Counter
+
+            file_counts: Counter[str] = Counter()
+            for doc_idx in sorted_doc_ids[:closure_top_k]:
+                i = int(doc_idx)
+                if i < 0 or i >= len(source_file_ids):
+                    continue
+                fid = source_file_ids[i]
+                if fid:
+                    file_counts[str(fid)] += 1
+
+            if file_counts:
+                (closure_top_file_id, top_n) = file_counts.most_common(1)[0]
+                second_n = file_counts.most_common(2)[1][1] if len(file_counts) > 1 else 0
+                closure_top_ratio = float(top_n) / float(max(1, sum(file_counts.values())))
+                closure_second_ratio = float(second_n) / float(max(1, sum(file_counts.values())))
+
+                if closure_top_file_id and closure_top_ratio >= closure_min_ratio and (closure_top_ratio - closure_second_ratio) >= closure_min_margin:
+                    # Inject chunks of the top file, optionally capped.
+                    injected: list[str] = []
+                    for cid, fid in zip(self.passage_node_keys, source_file_ids):
+                        if not cid or not fid:
+                            continue
+                        if str(fid) != str(closure_top_file_id):
+                            continue
+                        token = str(cid)
+                        if token in subgraph_nodes:
+                            continue
+                        subgraph_nodes.add(token)
+                        injected.append(token)
+                        if closure_max_chunks and len(injected) >= closure_max_chunks:
+                            break
+                    closure_injected = len(injected)
+                    closure_applied = closure_injected > 0
+                    if closure_applied:
+                        logger.info(
+                            "Dense file closure applied: top_k=%s top_ratio=%.3f second_ratio=%.3f min_ratio=%.3f min_margin=%.3f file_id=%s injected=%s",
+                            closure_top_k,
+                            closure_top_ratio,
+                            closure_second_ratio,
+                            closure_min_ratio,
+                            closure_min_margin,
+                            closure_top_file_id,
+                            closure_injected,
+                        )
+
+        self._graph_set_tls(
+            entity_reset_weight_aggregation=entity_weight_mode,
+            dense_file_closure_enabled=closure_enabled,
+            dense_file_closure_applied=closure_applied,
+            dense_file_closure_top_file_id=closure_top_file_id,
+            dense_file_closure_top_ratio=closure_top_ratio,
+            dense_file_closure_second_ratio=closure_second_ratio,
+            dense_file_closure_injected=closure_injected,
+        )
 
         normalized_dpr_scores = self._min_max_normalize(sorted_doc_scores)
 

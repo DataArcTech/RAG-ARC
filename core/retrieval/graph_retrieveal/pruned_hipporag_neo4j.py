@@ -69,7 +69,8 @@ class PrunedHippoRAGNeo4jRetriever(
 
         # PPR backend selection: 'push' (default, faster) or 'igraph' (fallback)
         self.ppr_backend = getattr(config, "ppr_backend", "push")
-        self.ppr_directed_mode = getattr(config, "ppr_directed_mode", "auto")
+        # Default is undirected PPR for retrieval stability; deepsearch/fast tools can override.
+        self.ppr_directed_mode = getattr(config, "ppr_directed_mode", "off")
 
         # Build initial node mappings
         self._build_node_mappings()

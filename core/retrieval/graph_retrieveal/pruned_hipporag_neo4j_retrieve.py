@@ -217,7 +217,23 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
 
         # Dense scores are needed both for provenance-groundability (optional) and passage weights in PPR.
         # Compute once per request to avoid repeated N×D dot products for large corpora.
-        query_doc_scores = self._dense_passage_retrieval_scores(query)
+        try:
+            from core.utils.query_variants import generate_query_variants
+
+            variant_queries = generate_query_variants(query)
+        except Exception:  # noqa: BLE001
+            variant_queries = [str(query or "").strip()]
+
+        # Use a simple, general-domain aggregation: elementwise max over variant dense scores.
+        # This helps mixed-script corpora (e.g., Simplified vs Traditional Chinese) without any domain rules.
+        query_doc_scores = None
+        for qv in variant_queries:
+            if not str(qv or "").strip():
+                continue
+            scores_v = self._dense_passage_retrieval_scores(str(qv))
+            query_doc_scores = scores_v if query_doc_scores is None else np.maximum(query_doc_scores, scores_v)
+        if query_doc_scores is None:
+            query_doc_scores = self._dense_passage_retrieval_scores(query)
 
         # Step 1: Retrieve relevant facts
         query_fact_scores, fact_ids = self._get_fact_scores_faiss(query, owner_id=owner_filter, query_doc_scores=query_doc_scores)

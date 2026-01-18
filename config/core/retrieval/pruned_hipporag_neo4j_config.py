@@ -100,8 +100,11 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
 
     # PageRank parameters
     damping_factor: float = Field(
-        default=0.5,
-        description="Damping factor for Personalized PageRank (0.5 = balanced exploration)"
+        default=0.3,
+        description=(
+            "Damping factor for Personalized PageRank. Lower values make PPR more topic-sensitive and reduce diffusion drift "
+            "(default tuned from local HippoRAG recall experiments)."
+        ),
     )
     passage_node_weight: float = Field(
         default=0.05,
@@ -113,6 +116,15 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
         ge=0.0,
         le=4.0,
         description="Exponent for dividing entity reset weights by entity->chunk count (1.0 matches legacy).",
+    )
+
+    entity_reset_weight_aggregation: Literal["overwrite", "sum_avg"] = Field(
+        default="sum_avg",
+        description=(
+            "How to aggregate multiple fact-derived weights for the same entity in the PPR reset distribution. "
+            "'overwrite' keeps the last-seen fact score (legacy in this repo); "
+            "'sum_avg' accumulates per-fact contributions then averages (closer to upstream HippoRAG)."
+        ),
     )
 
     # PPR backend selection
@@ -129,7 +141,7 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
     )
 
     ppr_push_threshold_mode: Literal["residual", "residual_over_degree", "residual_over_weighted_degree"] = Field(
-        default="residual",
+        default="residual_over_degree",
         description=(
             "Push termination thresholding strategy for approximate PPR. "
             "'residual' matches legacy; degree-normalized modes reduce hub bias by requiring larger residual on high-degree nodes."
@@ -144,7 +156,7 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
     )
 
     ppr_directed_mode: Literal["off", "auto", "on"] = Field(
-        default="auto",
+        default="off",
         description=(
             "Whether to run direction-aware PPR for direction-sensitive predicates. "
             "'auto' enables directed PPR when kg_schema declares direction_sensitive_relations; "
@@ -232,6 +244,41 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
         ),
     )
 
+    dense_file_closure_enabled: bool = Field(
+        default=True,
+        description=(
+            "Whether to inject chunks from the top dense-matched file into the PPR subgraph. "
+            "This is domain-agnostic and improves completeness for single-document queries without switching to full-graph PPR. "
+            "Gated by dense file concentration (top ratio / margin)."
+        ),
+    )
+    dense_file_closure_top_k: int = Field(
+        default=50,
+        ge=1,
+        le=500,
+        description="Top-N dense chunks used to compute the dominant file ratio for dense_file_closure gating.",
+    )
+    dense_file_closure_min_ratio: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        description="Apply dense_file_closure only when the top file occupies at least this fraction of dense top_k.",
+    )
+    dense_file_closure_min_margin: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description="Apply dense_file_closure only when (top_ratio - second_ratio) >= this margin (reduces harm on multi-file queries).",
+    )
+    dense_file_closure_max_chunks: int = Field(
+        default=0,
+        ge=0,
+        le=20000,
+        description=(
+            "Cap the number of chunks injected by dense_file_closure for the dominant file (0 means inject all chunks of that file)."
+        ),
+    )
+
     seed_entities_from_entity_nn_enabled: bool = Field(
         default=True,
         description=(
@@ -302,6 +349,16 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
             "This avoids applying a single-file boost when dense evidence is split across multiple files."
         ),
     )
+    dense_file_prior_max_second_ratio: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Optional additional gate for dense_file_prior: require second_ratio <= this threshold. "
+            "When set, the prior only activates when the dense top-K is extremely concentrated on one file "
+            "(i.e., there is no strong second candidate)."
+        ),
+    )
     dense_file_prior_max_files: int = Field(
         default=2,
         ge=1,
@@ -316,6 +373,50 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
         gt=0.0,
         le=20.0,
         description="Multiplier applied to dense-derived passage reset weights for chunks in the dominant file.",
+    )
+    dense_file_prior_lexical_enabled: bool = Field(
+        default=True,
+        description=(
+            "Whether to add an extra lexical gate for dense_file_prior. "
+            "When enabled, the file prior only activates if the dominant file's filename-derived title "
+            "is sufficiently mentioned by the query (using lightweight token overlap, no domain rules)."
+        ),
+    )
+    dense_file_prior_lexical_min_top_ratio: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Apply the lexical gate only when the dense top-K is already fairly concentrated (top_ratio >= this value). "
+            "This avoids blocking the prior on mixed-intent / multi-file queries where top_ratio is low."
+        ),
+    )
+    dense_file_prior_lexical_min_title_coverage: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Lexical gate threshold for dense_file_prior: require that the query covers at least this fraction "
+            "of the dominant file's title tokens."
+        ),
+    )
+    dense_file_prior_lexical_min_overlap_tokens: int = Field(
+        default=2,
+        ge=0,
+        le=50,
+        description=(
+            "Lexical gate threshold for dense_file_prior: require at least this many overlapping tokens between "
+            "the query variants and the dominant file's title tokens."
+        ),
+    )
+    dense_file_prior_lexical_min_margin: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Optional lexical gate margin for dense_file_prior: require (top_title_coverage - second_title_coverage) "
+            ">= this value. Set to 0 to disable."
+        ),
     )
 
     def build(self):

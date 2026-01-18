@@ -8,6 +8,26 @@ logger = logging.getLogger(__name__)
 
 
 class _PrunedHippoRAGNeo4jPPRMixin:
+    def _ppr_set_tls(self, **fields: object) -> None:
+        """
+        Best-effort: record per-request PPR debug info in thread-local storage.
+
+        This is used by local debugging scripts to compare pruned vs full-graph behaviors
+        without changing return types.
+        """
+        tls_getter = getattr(self, "_get_tls", None)
+        if not callable(tls_getter):
+            return
+        try:
+            tls = tls_getter()
+        except Exception:  # noqa: BLE001
+            return
+        for k, v in fields.items():
+            try:
+                setattr(tls, str(k), v)
+            except Exception:  # noqa: BLE001
+                continue
+
     def _run_ppr_with_weights(
         self,
         node_weights: dict,
@@ -59,10 +79,17 @@ class _PrunedHippoRAGNeo4jPPRMixin:
                 )
             )
         )
+        # Record config intent + decision; the actual backend used may still differ (e.g. push fallback).
+        self._ppr_set_tls(
+            ppr_directed_mode=directed_mode,
+            ppr_use_directed=use_directed,
+            ppr_backend_config=str(getattr(self, "ppr_backend", "push") or "push"),
+        )
 
         # Choose PPR backend
         if use_directed:
             # Direction-aware PPR requires relation metadata; run via igraph+Neo4j edge extraction.
+            self._ppr_set_tls(ppr_backend_used="igraph_directed")
             effective_policy = str(directionality.get("direction_policy") or "whitelist")
             if directed_mode == "on":
                 # Forced-on should preserve direction even when schema is missing/incomplete.
@@ -78,8 +105,10 @@ class _PrunedHippoRAGNeo4jPPRMixin:
                 direction_insensitive_relations=set(directionality.get("direction_insensitive_relations") or set()),
             )
         elif self.ppr_backend == "push":
+            self._ppr_set_tls(ppr_backend_used="push")
             pagerank_scores_dict = self._run_ppr_push(subgraph_nodes, normalized_reset, damping, owner_id=owner_id)
         else:
+            self._ppr_set_tls(ppr_backend_used="igraph")
             pagerank_scores_dict = self._run_ppr_igraph(subgraph_nodes, normalized_reset, damping, owner_id=owner_id)
 
         if not pagerank_scores_dict:
@@ -139,6 +168,7 @@ class _PrunedHippoRAGNeo4jPPRMixin:
             return ppr_scores
         except Exception as e:
             logger.error(f"Push-based PPR failed: {e}, falling back to igraph")
+            self._ppr_set_tls(ppr_backend_used="igraph_fallback")
             return self._run_ppr_igraph(subgraph_nodes, reset, damping, owner_id=owner_id)
 
     def _run_ppr_igraph(
@@ -165,6 +195,14 @@ class _PrunedHippoRAGNeo4jPPRMixin:
         # Extract subgraph:
         # - default path uses the undirected cache for speed
         # - direction-aware PPR extracts edges (with predicates) from Neo4j to preserve direction semantics
+        t_extract0 = None
+        try:
+            import time as _time
+
+            t_extract0 = _time.perf_counter()
+        except Exception:  # noqa: BLE001
+            t_extract0 = None
+
         if direction_policy == "blacklist" or (directed_relations and direction_policy == "whitelist"):
             extract_cached = getattr(self.graph_store, "extract_subgraph_from_cache_for_ppr_directed", None)
             if callable(extract_cached):
@@ -189,9 +227,27 @@ class _PrunedHippoRAGNeo4jPPRMixin:
                 owner_id=self._owner_to_str(owner_id),
             )
 
+        if t_extract0 is not None:
+            try:
+                import time as _time
+
+                self._ppr_set_tls(ppr_extract_s=float(_time.perf_counter() - t_extract0))
+            except Exception:  # noqa: BLE001
+                pass
+
         if graph.vcount() == 0:
             logger.warning("Empty subgraph extracted")
             return {}
+
+        try:
+            is_directed = bool(getattr(graph, "is_directed", lambda: False)())
+        except Exception:  # noqa: BLE001
+            is_directed = False
+        self._ppr_set_tls(
+            ppr_graph_vcount=int(graph.vcount()),
+            ppr_graph_ecount=int(graph.ecount()),
+            ppr_graph_is_directed=is_directed,
+        )
 
         logger.info(f"Using igraph PPR: {graph.vcount()} nodes, {graph.ecount()} edges")
 
@@ -202,7 +258,7 @@ class _PrunedHippoRAGNeo4jPPRMixin:
             # Run PPR on subgraph
             subgraph_pagerank = graph.personalized_pagerank(
                 damping=damping,
-                directed=bool(getattr(graph, "is_directed", lambda: False)()),
+                directed=is_directed,
                 weights="weight",
                 reset=subgraph_reset,
                 implementation="prpack",

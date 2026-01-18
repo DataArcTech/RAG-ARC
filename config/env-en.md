@@ -144,6 +144,7 @@ Notes:
 - **Path consistency (important)**: indexing and online retrieval must use the same `GRAPH_STORAGE_PATH` / `FAISS_INDEX_PATH` / `BM25_INDEX_PATH`. If you index into directory A but serve from directory B, you may see “the target file/chunks exist in Neo4j + chunk_store, but retrieval hits unrelated files”.
 - **E2E isolation**: for real-service tests, point the path knobs above to an isolated directory (for example under `./local/e2e_*`) to avoid polluting `./data/*`.
 - **KG domain fallback**: when chunks do not provide `chunk.domain` (or `chunk.metadata["domain"]`), Neo4j indexing falls back to the loaded schema's `default_domain` (for example `finance_insurance` when using `./fin_kg_schema.yml`).
+- **HippoRAG PPR directionality (important)**: for general-purpose retrieval stability, `pruned_hipporag_neo4j_retrieval.ppr_directed_mode` defaults to `off` (undirected PPR). `direction_sensitive_relations` in `KG_SCHEMA_PATH` is still used by DeepSearch / fast graph tools for directional constraints and validation; to enable directed PPR at retrieval time, explicitly set `ppr_directed_mode=auto/on` in `config/json_configs/rag_inference*.json` or `config/json_configs/deepsearch_service.json` under `retriever_config`.
 
 ## 2. Evidence Output Controls
 
@@ -159,6 +160,7 @@ Notes:
 | `RAG_RETRIEVAL_LOG_TOP_FILES` | `10` | Max file ids shown in retrieval distribution logs (counted by file_id). |
 | `RAG_RETRIEVAL_LOG_TOP_CHUNKS` | `5` | Max chunk previews shown in retrieval observability logs. |
 | `QUERY_VARIANTS_ENABLED` | `true` | Enable retrieval-time query variants (MultiPath generates variants per retriever and unions results). Improves recall on mixed-script/variant corpora. |
+| `QUERY_VARIANTS_LANGS` | `zh-Hans,en,zh-Hant` | Comma-separated variant targets, in order. `zh-Hans/zh-Hant` use OpenCC conversion (when installed). `en` is best-effort ASCII token extraction (no translation). |
 | `QUERY_VARIANTS_ZH_HANS_HANT_ENABLED` | `true` | Enable Simplified/Traditional Chinese variants (requires OpenCC). |
 | `QUERY_VARIANTS_MAX` | `3` | Max number of query variants (including the original). |
 | `DEEPSEARCH_TOP_CHUNKS` | `10` | Maximum chunks returned in DeepSearch evidence and displayed in report appendix (first 100 chars preview). |

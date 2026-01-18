@@ -144,6 +144,7 @@ Benchmark/实验模式：
 - **路径一致性（重要）**：索引写入与在线检索必须使用同一套 `GRAPH_STORAGE_PATH` / `FAISS_INDEX_PATH` / `BM25_INDEX_PATH`。若索引写在 A 目录、检索读 B 目录，会出现“文件/Chunk 在 Neo4j 与 chunk_store 中存在，但召回命中的是错误文件”的现象。
 - **E2E 隔离**：真实服务测试建议把上述路径指向隔离目录（例如 `./local/e2e_*`），避免污染默认的 `./data/*`。
 - **KG domain 回退**：当 chunk 未提供 `chunk.domain`（或 `chunk.metadata["domain"]`）时，Neo4j 入库会回退到已加载 schema 的 `default_domain`（例如使用 `./fin_kg_schema.yml` 时为 `finance_insurance`）。
+- **HippoRAG PPR 方向性（重要）**：为了通用检索稳定性，`pruned_hipporag_neo4j_retrieval.ppr_directed_mode` 默认 `off`（无向 PPR）。`KG_SCHEMA_PATH` 中的 `direction_sensitive_relations` 仍会被 DeepSearch / fast graph tools 用于方向约束与校验；如需在“检索阶段”启用有向 PPR，请在 `config/json_configs/rag_inference*.json` 或 `config/json_configs/deepsearch_service.json` 的 `retriever_config` 中显式设置 `ppr_directed_mode=auto/on`。
 
 ## 2. 证据输出控制
 
@@ -159,6 +160,7 @@ Benchmark/实验模式：
 | `RAG_RETRIEVAL_LOG_TOP_FILES` | `10` | 检索可观测日志中最多展示的文件分布条数（按 file_id 计数）。 |
 | `RAG_RETRIEVAL_LOG_TOP_CHUNKS` | `5` | 检索可观测日志中最多展示的 chunk 预览条数（用于快速定位命中段落）。 |
 | `QUERY_VARIANTS_ENABLED` | `true` | 是否启用检索期 query variants（MultiPath 内部对每路检索生成变体并 union 结果）。用于提升跨脚本/跨写法的召回稳定性。 |
+| `QUERY_VARIANTS_LANGS` | `zh-Hans,en,zh-Hant` | 变体目标列表（逗号分隔、按顺序执行）。`zh-Hans/zh-Hant` 使用 OpenCC 简繁互转（需安装）。`en` 为 ASCII token 提取（不做翻译），用于命中英文/型号/编号等混合 token。 |
 | `QUERY_VARIANTS_ZH_HANS_HANT_ENABLED` | `true` | 是否启用中文简繁体互转变体（需要 OpenCC）。 |
 | `QUERY_VARIANTS_MAX` | `3` | query variants 最大数量（包含原 query）。 |
 | `DEEPSEARCH_TOP_CHUNKS` | `10` | DeepSearch 证据中最多保留的 chunk 数量，同时也是报告附录中显示原文预览（前100字符）的数量。 |

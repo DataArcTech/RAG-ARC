@@ -394,3 +394,46 @@ class PrunedHippoRAGNeo4jStore(
         with self._driver.session(database=self.database) as session:
             result = session.run(query, params or {})
             return [record.data() for record in result]
+
+    @staticmethod
+    def _coerce_source_file_name_from_metadata(metadata: Any) -> str:
+        if not metadata:
+            return ""
+        try:
+            meta = json.loads(metadata) if isinstance(metadata, str) else metadata
+        except Exception:
+            return ""
+        if not isinstance(meta, dict):
+            return ""
+        for key in ("source_file_name", "filename", "source_file", "file_path", "path"):
+            val = str(meta.get(key) or "").strip()
+            if val:
+                return val
+        return ""
+
+    def get_batch_chunk_source_file_names(self, chunk_ids: List[str]) -> Dict[str, str]:
+        """
+        Resolve `source_file_name` (or equivalent) for a set of Chunk IDs.
+
+        This is used by retrieval-time heuristics (e.g., dense_file_prior gating) and should be
+        low-latency: a single UNWIND query and lightweight metadata parsing.
+        """
+        ids = [str(cid) for cid in (chunk_ids or []) if str(cid).strip()]
+        if not ids:
+            return {}
+
+        query = """
+        UNWIND $chunk_ids AS chunk_id
+        MATCH (c:Chunk {chunk_id: chunk_id})
+        RETURN c.chunk_id AS chunk_id, c.metadata AS metadata
+        """
+        rows = self._execute_query(query, {"chunk_ids": ids}) or []
+        out: Dict[str, str] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            cid = str(row.get("chunk_id") or "").strip()
+            if not cid:
+                continue
+            out[cid] = self._coerce_source_file_name_from_metadata(row.get("metadata"))
+        return out

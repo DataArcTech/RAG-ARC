@@ -70,8 +70,13 @@
                 "fact_retrieval_top_k": 10,
                 "max_facts_after_reranking": 5,
                 "enable_llm_reranking": true,
-                "damping_factor": 0.5,
+                "damping_factor": 0.3,
                 "ppr_backend": "push",
+                "ppr_directed_mode": "off",
+                "ppr_push_threshold_mode": "residual_over_degree",
+                "ppr_push_target_degree_penalty_gamma": 0.5,
+                "entity_reset_weight_aggregation": "sum_avg",
+                "dense_file_closure_enabled": true,
                 "ppr_push_epsilon": 0.000001
             }
         ],
