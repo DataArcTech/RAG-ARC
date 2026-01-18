@@ -273,6 +273,26 @@ class RAGInference(AbstractModule):
         
         response_text, raw_response = await self._run_blocking(_chat_with_raw)
 
+        # Compact citations to the actually-used Sources, and keep returned chunks aligned with the new numbering.
+        #
+        # Motivation:
+        # - The model may cite only a subset of sources (e.g. <sup>1</sup>, <sup>3</sup>, <sup>6</sup>).
+        # - Downstream/UI expects citations to be dense (1..N) and aligned with the returned chunk list.
+        try:
+            from core.utils.citations import compact_sup_citations
+
+            rewritten, used_keys = compact_sup_citations(str(response_text or ""), max_key=len(chunks))
+            if used_keys:
+                response_text = rewritten
+                # Return only cited chunks, reindexed to match compacted citations.
+                chunks = [chunks[k - 1] for k in used_keys if 1 <= k <= len(chunks)]
+                for i, ch in enumerate(chunks, start=1):
+                    meta = getattr(ch, "metadata", None) or {}
+                    meta["_source_key"] = i
+                    ch.metadata = meta
+        except Exception:  # noqa: BLE001
+            pass
+
         raw_mindmap_response = None
         # Always generate the mindmap using the mindmap prompt to keep it aligned with the chat answer.
         if return_subgraph:
@@ -701,51 +721,74 @@ class RAGInference(AbstractModule):
         
         # Use "Source key=N" format (aligned with chatbot.py).
         if chunks:
-            # Log chunks passed to LLM for debugging key mismatch
-            chunk_ids_for_llm = [getattr(chunk, "id", None) for chunk in chunks[:10]]  # Log first 10
-            logger.info("RAGInference._build_messages_and_context: chunks passed to LLM (first 10 IDs): %s", chunk_ids_for_llm)
-            for i, chunk in enumerate(chunks):
+            # Build a contiguous, non-empty source list for the LLM.
+            # This avoids gaps in Source key numbering (which can confuse citation parsing and downstream tools).
+            source_items: list[tuple[Chunk, str, str]] = []
+            for chunk in chunks:
                 metadata = getattr(chunk, "metadata", None) or {}
                 filename = str(metadata.get("filename") or "").strip() or "source"
                 chunk_id = getattr(chunk, "id", None)
-                
-                # Extract chunk text from various sources
+
+                # Extract chunk text from various sources.
                 prompt_text = metadata.get("prompt_text")
                 index_text = metadata.get("index_text")
                 chunk_content = getattr(chunk, "content", None)
-                
-                # Handle different content formats
-                chunk_text = None
+
+                chunk_text: str | None = None
                 if prompt_text and isinstance(prompt_text, str) and prompt_text.strip():
                     chunk_text = prompt_text
                 elif index_text and isinstance(index_text, str) and index_text.strip():
                     chunk_text = index_text
                 elif chunk_content:
-                    # Handle dict content (e.g., {'text': '', 'metadata': ...})
+                    # Handle dict content (e.g. {'text': '', 'metadata': ...}).
                     if isinstance(chunk_content, dict):
-                        chunk_text = chunk_content.get("text") or chunk_content.get("content") or ""
-                        # If still empty, try to extract from metadata
+                        chunk_text = str(chunk_content.get("text") or chunk_content.get("content") or "")
                         if not chunk_text and isinstance(chunk_content.get("metadata"), dict):
-                            chunk_text = chunk_content["metadata"].get("text") or chunk_content["metadata"].get("content") or ""
+                            chunk_text = str(
+                                chunk_content["metadata"].get("text") or chunk_content["metadata"].get("content") or ""
+                            )
                     elif isinstance(chunk_content, str):
                         chunk_text = chunk_content
                     else:
                         chunk_text = str(chunk_content) if chunk_content else ""
-                
-                # Log and skip empty chunks
+
                 if not chunk_text or not chunk_text.strip():
                     logger.warning(
-                        f"Skipping empty chunk: Source key={i+1}, filename={filename}, "
-                        f"chunk_id={chunk_id}, "
-                        f"prompt_text={'empty' if not prompt_text else f'type={type(prompt_text).__name__}, len={len(str(prompt_text))}'}, "
-                        f"index_text={'empty' if not index_text else f'type={type(index_text).__name__}, len={len(str(index_text))}'}, "
-                        f"chunk.content={'empty' if not chunk_content else f'type={type(chunk_content).__name__}, value={str(chunk_content)[:100]}'}"
+                        "Skipping empty chunk for LLM sources: filename=%s chunk_id=%s "
+                        "prompt_text=%s index_text=%s chunk_content_type=%s",
+                        filename,
+                        chunk_id,
+                        ("empty" if not prompt_text else f"type={type(prompt_text).__name__} len={len(str(prompt_text))}"),
+                        ("empty" if not index_text else f"type={type(index_text).__name__} len={len(str(index_text))}"),
+                        ("empty" if not chunk_content else type(chunk_content).__name__),
                     )
                     continue
 
-                messages.append({"role": "user", "content": f"Source key={i+1} title={filename}\n{chunk_text}"})
-                if i < 5:  # Log first 5 for debugging
-                    logger.debug("RAGInference: LLM source key=%d chunk_id=%s filename=%s", i+1, chunk_id, filename)
+                source_items.append((chunk, filename, str(chunk_text).strip()))
+
+            # Replace `chunks` with the exact list used as LLM sources.
+            chunks = [item[0] for item in source_items]
+
+            chunk_ids_for_llm = [getattr(chunk, "id", None) for chunk in chunks[:10]]
+            logger.info(
+                "RAGInference._build_messages_and_context: chunks passed to LLM (first 10 IDs): %s",
+                chunk_ids_for_llm,
+            )
+
+            for i, (chunk, filename, chunk_text) in enumerate(source_items, start=1):
+                # Persist the Source key on the chunk so downstream can align citations.
+                meta = getattr(chunk, "metadata", None) or {}
+                meta["_source_key"] = i
+                chunk.metadata = meta
+
+                messages.append({"role": "user", "content": f"Source key={i} title={filename}\n{chunk_text}"})
+                if i <= 5:
+                    logger.debug(
+                        "RAGInference: LLM source key=%d chunk_id=%s filename=%s",
+                        i,
+                        getattr(chunk, "id", None),
+                        filename,
+                    )
             messages.append({"role": "user", "content": f"Based on the above Sources, please answer question: {rewritten_query}"})
         else:
             # If there are no Sources, send the question directly (do not mention Sources).
@@ -1023,19 +1066,11 @@ class RAGInference(AbstractModule):
             # Use TSV format like mindmap_export for better reliability
             from core.prompts import MINDMAP_MERGE_SYSTEM_PROMPT_EN, build_mindmap_merge_user_prompt
             from application.knowledge.mindmap_export import extract_tsv_from_response, convert_tsv_to_graph
-            import re
+            from core.utils.citations import extract_sup_keys
             
             # Extract only chunks that are actually referenced in the response
             # Chunks are indexed from 1 in the messages (Source key=1, key=2, etc.)
-            _SUP_KEY_RE = re.compile(r"<sup>\s*(?P<key>\d{1,4})\s*</sup>")
-            used_keys = set()
-            for match in _SUP_KEY_RE.finditer(response):
-                try:
-                    key = int(match.group("key"))
-                    if key > 0 and key <= len(chunks):
-                        used_keys.add(key)
-                except Exception:  # noqa: BLE001
-                    continue
+            used_keys = set(extract_sup_keys(response, max_key=len(chunks)))
             
             # Filter chunks to only those actually referenced in the response
             # If no citations found, use all chunks (fallback for cases without citations)
