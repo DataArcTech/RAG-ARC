@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-from __future__ import annotations
-
 """
 Trigger (re)indexing for all files under an owner_id.
 

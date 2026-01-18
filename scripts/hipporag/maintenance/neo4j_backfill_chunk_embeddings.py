@@ -7,9 +7,6 @@ fallback + passage-weighting signal. If Chunk nodes are recreated (new chunk_id 
 pickle isn't updated, missing chunks will be treated as zero vectors at retrieval time, which can
 destabilize dense signals and downstream graph scoring.
 """
-
-from __future__ import annotations
-
 import argparse
 import json
 import os

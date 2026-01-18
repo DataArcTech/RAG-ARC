@@ -8,9 +8,6 @@ Outputs:
 - JSON trace (machine-readable)
 - Markdown report (human-readable)
 """
-
-from __future__ import annotations
-
 import argparse
 import json
 import os

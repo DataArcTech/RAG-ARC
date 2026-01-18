@@ -13,9 +13,6 @@ referencing deleted chunk ids, which can bias downstream graph scoring and break
 
 This script audits and optionally repairs the dangling references.
 """
-
-from __future__ import annotations
-
 import argparse
 import os
 import uuid

@@ -13,9 +13,6 @@ Safety
 - default is dry-run (prints counts only)
 - `--apply` actually deletes
 """
-
-from __future__ import annotations
-
 import argparse
 import os
 import uuid
