@@ -82,9 +82,9 @@
         ],
         "fusion_method": "rrf",
         "rrf_k": 60,
-        "weights": null,
+        "weights": [1.0, 1.0, 3.0],
         "search_kwargs": {
-            "k": 10,
+            "k": 30,
             "with_score": true
         }
     },

@@ -22,3 +22,4 @@ Full env reference:
 Notes:
 - `OPENAI_EMBEDDING_MODEL` takes precedence over `EMBEDDING_MODEL_NAME` when `EMBEDDING_MODEL_PROVIDER=openai`.
 - DeepSearch web search requires `TAVILY_API_KEY` and enabling the external channel in `config/json_configs/deepsearch_service.json`.
+- For RAG inference, `retrieval_config.search_kwargs.k` (pre-rerank candidates) should generally be > `candidate_selection.rerank_keep_k` (Sources passed to LLM) to keep multi-aspect questions from collapsing to a single file.
