@@ -12,6 +12,61 @@ logger = logging.getLogger(__name__)
 class _PrunedHippoRAGNeo4jIndexingOpsMixin:
     # ========== GraphStore Interface Implementation ==========
 
+    def _cleanup_relates_to_source_chunk_ids(self, *, chunk_ids: List[str], owner_ids: List[Optional[str]]) -> int:
+        """
+        Remove deleted chunk_ids from `(:Entity)-[:RELATES_TO].source_chunk_ids` provenance lists.
+
+        Why this exists
+        ---------------
+        `RELATES_TO.source_chunk_ids` is append-only during ingest (facts accumulate multiple evidences).
+        When chunks are deleted/reindexed, if we don't clean these lists, we accumulate dangling provenance
+        that can break downstream graph rebuild/analysis (and can bias graph scoring).
+
+        Notes
+        -----
+        - This does NOT delete the `RELATES_TO` relationship itself; it only updates provenance.
+        - Owner scoping uses the same normalization as the store (None -> OWNER_GLOBAL_KEY).
+        """
+        deleted = [str(cid) for cid in (chunk_ids or []) if str(cid).strip()]
+        if not deleted:
+            return 0
+
+        owners = sorted({self._restore_owner_id(oid) for oid in (owner_ids or [])})
+        if not owners:
+            # Fallback: owner unknown; still safe to clean globally by matching chunk ids.
+            owners = [None]
+
+        updated_total = 0
+        for owner in owners:
+            owner_key = self._owner_key(owner)
+            cleanup_query = """
+            MATCH ()-[r:RELATES_TO]-()
+            WHERE coalesce(r.owner_id, $owner_key) = $owner_key
+              AND any(cid IN $deleted_chunk_ids WHERE cid IN coalesce(r.source_chunk_ids, []))
+            WITH r, [cid IN coalesce(r.source_chunk_ids, []) WHERE NOT cid IN $deleted_chunk_ids] AS filtered
+            SET r.source_chunk_ids = filtered
+            RETURN count(r) AS updated
+            """
+            try:
+                rows = self._execute_query(
+                    cleanup_query,
+                    {"owner_key": owner_key, "deleted_chunk_ids": deleted},
+                )
+                if rows and isinstance(rows, list):
+                    for rec in rows:
+                        try:
+                            updated_total += int(rec.get("updated") or 0)
+                        except Exception:
+                            continue
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to cleanup RELATES_TO.source_chunk_ids (owner=%s chunks=%s): %s",
+                    owner_key,
+                    len(deleted),
+                    exc,
+                )
+        return updated_total
+
     def build_index(self, chunks: List[Chunk]) -> None:
         """
         Build the complete graph index from a list of chunks.
@@ -82,7 +137,9 @@ class _PrunedHippoRAGNeo4jIndexingOpsMixin:
             # Step 1: Batch add chunks and graph data (OPTIMIZED)
             logger.info("Step 1: Batch adding chunks and graph data...")
             new_entity_ids = self._batch_add_chunks_and_graph_data(chunks)
-            new_chunk_ids = [chunk.id for chunk in chunks]
+            # Normalize IDs to strings: chunk.id can be UUID-like objects depending on upstream pipelines,
+            # but Neo4j stores `Chunk.chunk_id` as a string.
+            new_chunk_ids = [str(chunk.id).strip() for chunk in chunks if str(getattr(chunk, "id", "") or "").strip()]
             logger.info("Step 1 completed: All chunks and graph data added")
 
             # Step 2: Batch generate embeddings (only for new items)
@@ -167,6 +224,18 @@ class _PrunedHippoRAGNeo4jIndexingOpsMixin:
         logger.info(f"Deleting {len(chunk_ids)} chunks...")
 
         try:
+            # Capture owner_ids before deleting Chunk nodes so we can owner-scope provenance cleanup.
+            owner_query = """
+            UNWIND $chunk_ids AS chunk_id
+            MATCH (c:Chunk {chunk_id: chunk_id})
+            RETURN DISTINCT c.owner_id AS owner_id
+            """
+            owner_rows = self._execute_query(owner_query, {"chunk_ids": chunk_ids}) or []
+            owners_for_cleanup: List[Optional[str]] = []
+            for row in owner_rows:
+                if isinstance(row, dict):
+                    owners_for_cleanup.append(row.get("owner_id"))
+
             orphan_entities: List[str] = []
             orphan_fact_ids: List[str] = []
 
@@ -253,6 +322,12 @@ class _PrunedHippoRAGNeo4jIndexingOpsMixin:
             """
             self._execute_query(delete_chunks_query, {'chunk_ids': chunk_ids})
             logger.info(f"Deleted {len(chunk_ids)} chunks from Neo4j")
+
+            # 3.5 Cleanup dangling provenance in facts (RELATES_TO.source_chunk_ids).
+            # This must run after deletions, otherwise deleted chunk_ids will remain referenced forever.
+            updated = self._cleanup_relates_to_source_chunk_ids(chunk_ids=chunk_ids, owner_ids=owners_for_cleanup)
+            if updated:
+                logger.info("Cleaned RELATES_TO.source_chunk_ids: updated=%s (deleted_chunks=%s)", updated, len(chunk_ids))
 
             # 4. Delete from chunk_embeddings
             with self.write_lock():

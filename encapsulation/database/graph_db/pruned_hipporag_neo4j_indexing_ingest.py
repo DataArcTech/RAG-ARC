@@ -199,8 +199,12 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
             # Extract source_file_id from metadata for independent storage
             source_file_id = metadata.get("source_file_id")
             
+            chunk_id = str(chunk.id or "").strip()
+            if not chunk_id:
+                raise ValueError("Chunk.id is required for Neo4j ingest (got empty/None).")
+
             chunk_data.append({
-                'chunk_id': chunk.id,
+                'chunk_id': chunk_id,
                 'content': chunk.content,
                 'metadata': json.dumps(metadata) if metadata else '{}',
                 'owner_id': db_owner_id,
@@ -214,7 +218,7 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
                 nodes_raw = mindmap.get("nodes") if isinstance(mindmap, dict) else None
                 schema_nodes, schema_occurrences = build_schema_layer_payload(
                     mindmap_nodes=nodes_raw if isinstance(nodes_raw, list) else None,
-                    chunk_id=chunk.id,
+                    chunk_id=chunk_id,
                     owner_id=owner_str,
                     db_owner_id=db_owner_id,
                     max_nodes=schema_layer_max_nodes,
@@ -227,7 +231,7 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
                 sdf = metadata.get(SDF_KEY) if isinstance(metadata.get(SDF_KEY), dict) else None
                 sdf_nodes, sdf_sub_edges, sdf_before, sdf_links = build_sdf_schema_payload(
                     sdf=sdf,
-                    chunk_id=chunk.id,
+                    chunk_id=chunk_id,
                     db_owner_id=db_owner_id,
                     max_events=sdf_max_events,
                     max_relations=sdf_max_relations,
@@ -306,10 +310,10 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
                             "entity_type_key": entity_type_key,
                             "owner_id": db_owner_id,
                         }
-                    mention_key = (chunk.id, entity_id)
+                        mention_key = (chunk_id, entity_id)
                     if mention_key not in mention_keys:
                         mention_keys.add(mention_key)
-                        mention_data.append({"chunk_id": chunk.id, "entity_id": entity_id, "owner_id": db_owner_id})
+                        mention_data.append({"chunk_id": chunk_id, "entity_id": entity_id, "owner_id": db_owner_id})
 
                 # Process and normalize relation triples (schema-governed predicate normalization)
                 canonical_to_entity_keys: dict[str, set[tuple[str, str]]] = {}
@@ -433,7 +437,7 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
                         relation_type=relation_type,
                         tail_id=tail_id,
                         tail_name=tail_name,
-                        chunk_id=chunk.id,
+                        chunk_id=chunk_id,
                         owner_id=owner_str,
                         db_owner_id=db_owner_id,
                         schema_version=schema_version,

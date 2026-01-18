@@ -435,14 +435,23 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
         logger.info("Batch generating embeddings...")
         summary: Dict[str, Any] = {"chunks": {}, "entities": {}, "facts": {}}
 
+        # Normalize identifiers defensively: some upstream pipelines may pass UUID objects.
+        chunk_ids_norm: Optional[list[str]] = None
+        if chunk_ids is not None:
+            chunk_ids_norm = [str(x).strip() for x in chunk_ids if str(x or "").strip()]
+
+        entity_ids_norm: Optional[list[str]] = None
+        if entity_ids is not None:
+            entity_ids_norm = [str(x).strip() for x in entity_ids if str(x or "").strip()]
+
         # 1. Generate chunk embeddings
         chunk_params: Dict[str, Any] = {}
-        if chunk_ids:
+        if chunk_ids_norm:
             chunk_query = (
                 "MATCH (c:Chunk) WHERE c.chunk_id IN $chunk_ids "
                 "RETURN c.chunk_id AS chunk_id, c.content AS content, c.metadata AS metadata, c.source_file_id AS source_file_id"
             )
-            chunk_params = {"chunk_ids": list(chunk_ids)}
+            chunk_params = {"chunk_ids": list(chunk_ids_norm)}
         else:
             chunk_query = (
                 "MATCH (c:Chunk) "
@@ -511,12 +520,12 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
 
         # 2. Generate entity embeddings and add to FAISS HNSW
         entity_params: Dict[str, Any] = {}
-        if entity_ids:
+        if entity_ids_norm:
             entity_query = (
                 "MATCH (e:Entity) WHERE e.entity_id IN $entity_ids "
                 "RETURN e.entity_id AS entity_id, e.entity_name AS entity_name, e.owner_id AS owner_id"
             )
-            entity_params = {"entity_ids": list(entity_ids)}
+            entity_params = {"entity_ids": list(entity_ids_norm)}
         else:
             entity_query = "MATCH (e:Entity) RETURN e.entity_id AS entity_id, e.entity_name AS entity_name, e.owner_id AS owner_id"
         entities = self._execute_query(entity_query, entity_params or None)
