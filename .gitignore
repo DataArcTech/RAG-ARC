@@ -69,8 +69,9 @@ instance/
 # Scrapy stuff:
 .scrapy
 
-# Sphinx documentation
-docs/
+# Documentation
+# Track `docs/` in git (design docs / runbooks / experiment reports),
+# but ignore generated build artifacts.
 docs/_build/
 
 # PyBuilder
