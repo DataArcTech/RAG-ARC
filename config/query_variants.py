@@ -13,6 +13,8 @@ import os
 
 logger = logging.getLogger(__name__)
 
+_ALLOWED_LANGS = {"zh-hans", "zh-hant", "en"}
+
 
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
@@ -40,12 +42,46 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_csv(name: str, default: list[str]) -> list[str]:
+    raw = os.getenv(name)
+    if raw is None:
+        return list(default)
+    items = [p.strip() for p in raw.split(",")]
+    items = [p for p in items if p]
+    return items if items else list(default)
+
+
 # Enable query variant generation globally (retrieval-time; affects Dense/BM25/HippoRAG).
 QUERY_VARIANTS_ENABLED = _env_bool("QUERY_VARIANTS_ENABLED", True)
 
-# Enable Hans<->Hant conversion variants (requires `opencc` runtime).
+# Which variant "languages" to attempt, in order. This is intentionally lightweight:
+# - zh-Hans/zh-Hant are deterministic OpenCC conversions (when available).
+# - en is a best-effort ASCII token extraction (no LLM translation in core).
+#
+# Default order is chosen to match typical user input preference:
+#   Simplified Chinese -> English tokens -> Traditional Chinese
+QUERY_VARIANTS_LANGS = _env_csv("QUERY_VARIANTS_LANGS", ["zh-Hans", "en", "zh-Hant"])
+
+# Backward-compatibility knob: if users disable Hans/Hant variants explicitly, drop them from LANGS.
 QUERY_VARIANTS_ZH_HANS_HANT_ENABLED = _env_bool("QUERY_VARIANTS_ZH_HANS_HANT_ENABLED", True)
+if not QUERY_VARIANTS_ZH_HANS_HANT_ENABLED:
+    QUERY_VARIANTS_LANGS = [x for x in QUERY_VARIANTS_LANGS if str(x).strip().lower() not in {"zh-hans", "zh-hant"}]
+
+# Validate + normalize LANGS.
+_normalized_langs: list[str] = []
+for item in QUERY_VARIANTS_LANGS:
+    token = str(item or "").strip()
+    if not token:
+        continue
+    key = token.lower()
+    if key not in _ALLOWED_LANGS:
+        logger.warning("Ignoring unsupported QUERY_VARIANTS_LANGS entry: %r (allowed=%s)", token, sorted(_ALLOWED_LANGS))
+        continue
+    # Preserve canonical casing for readability in logs/debug.
+    canonical = {"zh-hans": "zh-Hans", "zh-hant": "zh-Hant", "en": "en"}[key]
+    if canonical not in _normalized_langs:
+        _normalized_langs.append(canonical)
+QUERY_VARIANTS_LANGS = _normalized_langs
 
 # Hard cap for number of unique variants (including the original query).
 QUERY_VARIANTS_MAX = max(1, _env_int("QUERY_VARIANTS_MAX", 3))
-

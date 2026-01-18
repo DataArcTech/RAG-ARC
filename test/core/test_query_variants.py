@@ -12,3 +12,11 @@ def test_query_variants_generate_hans_hant_pair_when_applicable():
     assert "計劃特點" in variants
     # No duplicates
     assert len(variants) == len(set(variants))
+
+
+def test_query_variants_extract_ascii_tokens_as_en_variant():
+    variants = generate_query_variants("中国人寿 C508A-C516A 2026_01 智裕世代")
+    # Original is preserved.
+    assert variants[0] == "中国人寿 C508A-C516A 2026_01 智裕世代"
+    # English-token variant is a best-effort extraction (no translation).
+    assert "C508A-C516A 2026_01" in variants

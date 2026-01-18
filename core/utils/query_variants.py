@@ -1,12 +1,19 @@
 """Deterministic query variants for retrieval (domain-agnostic).
 
 Currently supported:
-- Simplified/Traditional Chinese (Hans<->Hant) via OpenCC, when enabled.
+- Simplified/Traditional Chinese (Hans<->Hant) via OpenCC, when available.
+- English token variant: best-effort ASCII token extraction (no translation).
 """
 import logging
+import re
 from functools import lru_cache
 
-from config.query_variants import QUERY_VARIANTS_ENABLED, QUERY_VARIANTS_MAX, QUERY_VARIANTS_ZH_HANS_HANT_ENABLED
+from config.query_variants import (
+    QUERY_VARIANTS_ENABLED,
+    QUERY_VARIANTS_LANGS,
+    QUERY_VARIANTS_MAX,
+    QUERY_VARIANTS_ZH_HANS_HANT_ENABLED,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +50,18 @@ def _try_opencc_convert(query: str, *, converter: str) -> str | None:
         return None
 
 
+_ASCII_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*")
+
+
+def _extract_ascii_tokens(query: str) -> str | None:
+    tokens = _ASCII_TOKEN_RE.findall(str(query or ""))
+    tokens = [t.strip() for t in tokens if t and t.strip()]
+    if not tokens:
+        return None
+    out = " ".join(tokens).strip()
+    return out or None
+
+
 def generate_query_variants(query: str) -> list[str]:
     """
     Generate a small set of deterministic query variants.
@@ -58,14 +77,29 @@ def generate_query_variants(query: str) -> list[str]:
 
     variants: list[str] = [base]
 
-    if QUERY_VARIANTS_ZH_HANS_HANT_ENABLED:
-        # s2t: Simplified -> Traditional; t2s: Traditional -> Simplified
-        s2t = _try_opencc_convert(base, converter="s2t")
-        t2s = _try_opencc_convert(base, converter="t2s")
-        if s2t:
-            variants.append(s2t)
-        if t2s:
-            variants.append(t2s)
+    # Add variants in configured language order, but always keep the original query first.
+    for lang in QUERY_VARIANTS_LANGS:
+        key = str(lang or "").strip().lower()
+        if not key:
+            continue
+
+        if key in {"zh-hans", "zh-hant"}:
+            if not QUERY_VARIANTS_ZH_HANS_HANT_ENABLED:
+                continue
+            # For robustness we don't attempt to detect the input script:
+            # - t2s normalizes to Simplified
+            # - s2t normalizes to Traditional
+            converter = "t2s" if key == "zh-hans" else "s2t"
+            out = _try_opencc_convert(base, converter=converter)
+            if out:
+                variants.append(out)
+            continue
+
+        if key == "en":
+            out = _extract_ascii_tokens(base)
+            if out:
+                variants.append(out)
+            continue
 
     variants = _dedupe_preserve_order(variants)
     return variants[: int(QUERY_VARIANTS_MAX)]
