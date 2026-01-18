@@ -133,10 +133,12 @@ class _BM25IndexBuilderQueryMixin:
         if not os.path.exists(self.config.index_path):
             raise FileNotFoundError(f"Index path does not exist: {self.config.index_path}")
 
-        with os.scandir(self.config.index_path) as entries:
-            has_files = any(entries)
-        if not has_files:
-            raise FileNotFoundError(f"Index directory is empty: {self.config.index_path}")
+        # Tantivy index directories must contain a valid `meta.json`.
+        # We can end up with "half-created" folders (e.g. only `.tantivy-*.lock` files) after crashes,
+        # which should be treated as "no existing index" so callers can rebuild cleanly.
+        meta_path = os.path.join(self.config.index_path, "meta.json")
+        if not os.path.exists(meta_path):
+            raise FileNotFoundError(f"Tantivy index missing meta.json: {meta_path}")
 
         try:
             # Load existing index without dynamic fields (they're already in the schema)
@@ -374,4 +376,3 @@ class _BM25IndexBuilderQueryMixin:
         self.close()
         if exc_type is not None:
             logger.error(f"Exception in BM25IndexBuilder context: {exc_type.__name__}: {exc_val}")
-

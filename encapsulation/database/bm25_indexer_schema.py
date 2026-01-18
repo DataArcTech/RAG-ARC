@@ -10,6 +10,9 @@ logger = logging.getLogger(__name__)
 
 
 class _BM25IndexBuilderSchemaMixin:
+    def _tantivy_meta_path(self) -> str:
+        return os.path.join(self.config.index_path, "meta.json")
+
     def _extract_string_fields_from_chunks(self, chunks: List[Chunk]) -> set[str]:
         """Extract string fields from chunk metadata for dynamic schema creation
 
@@ -69,15 +72,44 @@ class _BM25IndexBuilderSchemaMixin:
             with os.scandir(self.config.index_path) as entries:
                 has_files = any(entries)
             if has_files:
-                logger.info(f"Loading existing index from: {self.config.index_path}")
-                try:
-                    self._index = Index.open(self.config.index_path)
-                    # Get schema from the loaded index
-                    self._schema = self._index.schema
-                except Exception as e:
-                    logger.error(f"Failed to load existing index at {self.config.index_path}: {str(e)}")
-                    logger.error("Please check index intergerity or delete manually")
-                    raise RuntimeError("Index corrupted or incompatible - manual intervention required")
+                # Tantivy index directories must contain `meta.json`. If it's missing, we consider the directory
+                # invalid (often only stale `.tantivy-*.lock` files after crashes) and recreate a fresh index.
+                if not os.path.exists(self._tantivy_meta_path()):
+                    logger.warning(
+                        "BM25 index dir has files but is missing meta.json; recreating empty index at: %s",
+                        self.config.index_path,
+                    )
+                    # Safety: only auto-clean if the directory only contains Tantivy lock files. Any other
+                    # unexpected files might indicate a misconfiguration; require manual intervention then.
+                    entries = list(os.scandir(self.config.index_path))
+                    unexpected = [
+                        e.name
+                        for e in entries
+                        if not (e.is_file(follow_symlinks=False) and e.name.startswith(".tantivy-") and e.name.endswith(".lock"))
+                    ]
+                    if unexpected:
+                        raise RuntimeError(
+                            "BM25 index dir is missing meta.json but contains unexpected entries; "
+                            f"refusing to auto-clean: path={self.config.index_path} unexpected={unexpected[:10]}"
+                        )
+
+                    for entry in entries:
+                        try:
+                            os.remove(entry.path)
+                        except FileNotFoundError:
+                            continue
+
+                    self._index = Index(self._schema, path=self.config.index_path)
+                else:
+                    logger.info(f"Loading existing index from: {self.config.index_path}")
+                    try:
+                        self._index = Index.open(self.config.index_path)
+                        # Get schema from the loaded index
+                        self._schema = self._index.schema
+                    except Exception as e:
+                        logger.error(f"Failed to load existing index at {self.config.index_path}: {str(e)}")
+                        logger.error("Please check index intergerity or delete manually")
+                        raise RuntimeError("Index corrupted or incompatible - manual intervention required")
             else:
                 logger.info(f"Creating new index at existing empty directory: {self.config.index_path}")
                 self._index = Index(self._schema, path=self.config.index_path)
@@ -115,4 +147,3 @@ class _BM25IndexBuilderSchemaMixin:
         except Exception as e:
             logger.error(f"Failed to register tokenizers: {e}")
             raise
-

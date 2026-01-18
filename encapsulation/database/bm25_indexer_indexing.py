@@ -69,6 +69,15 @@ class _BM25IndexBuilderIndexingMixin:
         if not chunk_ids:
             return 0
 
+        # Defensive: Tantivy-backed indices require `meta.json` on disk. If it's missing (e.g. half-created directory
+        # with only `.tantivy-*.lock` files), treat the index as empty and let callers rebuild it.
+        meta_path = os.path.join(self.config.index_path, "meta.json")
+        if self._index is not None and not os.path.exists(meta_path):
+            logger.warning("BM25 index missing meta.json; resetting in-memory index and skipping delete: %s", meta_path)
+            self._index = None
+            self._tokenizers_registered = False
+            return 0
+
         # Try to load index if not loaded
         if self._index is None:
             try:
@@ -157,14 +166,10 @@ class _BM25IndexBuilderIndexingMixin:
         if self.tokenizer_manager.custom_preprocess_func is None:
             self._set_tokenizer(chunks)
 
-        # For new indices, reinitialize with dynamic fields based on chunks
-        index_exists = False
-        if os.path.exists(self.config.index_path):
-            try:
-                with os.scandir(self.config.index_path) as entries:
-                    index_exists = any(entries)
-            except OSError:
-                index_exists = False
+        # For new indices, reinitialize with dynamic fields based on chunks.
+        # Tantivy indices require `meta.json`; lock files alone should not be treated as an existing index.
+        meta_path = os.path.join(self.config.index_path, "meta.json")
+        index_exists = os.path.exists(meta_path)
 
         if not index_exists:
             self._index = None  # Reset to force reinitialization with dynamic fields
