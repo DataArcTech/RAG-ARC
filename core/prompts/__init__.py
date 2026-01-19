@@ -7,8 +7,12 @@ from .mindmap_prompts import (
 
 from .rerank_prompts import LISTWISE_RERANK_DEFAULT_PROMPT_TEMPLATE
 from .xlang_prompts import FILE_SCOPE_XLANG_REWRITE_PROMPT_TEMPLATE, build_file_scope_xlang_rewrite_prompt
-from .rag_inference_prompt_loader import get_rag_inference_system_prompt
-from .rag_inference_prompts import RAG_INFERENCE_CITATION_SYSTEM_PROMPT_EN
+from .rag_inference_prompt_loader import get_rag_inference_system_prompt, get_rag_chat_system_prompt
+from .rag_inference_prompts import (
+    RAG_INFERENCE_CITATION_SYSTEM_PROMPT_EN,
+    RAG_CHAT_BASE_SYSTEM_PROMPT_EN,
+    RAG_CHAT_CITATION_ADDON_SYSTEM_PROMPT_EN,
+)
 
 __all__ = [
     "MINDMAP_GENERATION_SYSTEM_PROMPT_ZH",
@@ -19,5 +23,8 @@ __all__ = [
     "FILE_SCOPE_XLANG_REWRITE_PROMPT_TEMPLATE",
     "build_file_scope_xlang_rewrite_prompt",
     "get_rag_inference_system_prompt",
+    "get_rag_chat_system_prompt",
     "RAG_INFERENCE_CITATION_SYSTEM_PROMPT_EN",
+    "RAG_CHAT_BASE_SYSTEM_PROMPT_EN",
+    "RAG_CHAT_CITATION_ADDON_SYSTEM_PROMPT_EN",
 ]

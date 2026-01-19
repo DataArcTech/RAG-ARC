@@ -1,6 +1,6 @@
 import logging
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from encapsulation.data_model.schema import Chunk
 from core.retrieval.graph_retrieveal.base import BaseGraphRetriever
@@ -8,6 +8,8 @@ from encapsulation.data_model.pipeline import PipelineArtifacts
 from config.output_limits import CHAT_MAX_IMAGE_INPUTS
 from core.utils.multimodal_images import collect_image_paths_from_chunk_payloads
 from core.utils.multimodal_llm import build_multimodal_user_message
+from core.prompts import get_rag_chat_system_prompt
+from config.retrieval_routing import rag_retrieval_dynamic_quota_enabled
 from .module import RAGInference
 
 logger = logging.getLogger(__name__)
@@ -65,18 +67,40 @@ class RAGInferenceCLIModule:
         skip_llm: bool,
     ) -> PipelineArtifacts:
         original_query = query
-        rewritten_query = self._rag.query_rewriter.rewrite_query(query)
+        rewritten_query = query
+        retrieval_ratios: Dict[str, float] | None = None
+
+        # Keep rewrite+routing behavior aligned with the user-facing rag_inference pipeline.
+        if rag_retrieval_dynamic_quota_enabled() and hasattr(self._rag.query_rewriter, "rewrite_query_with_routing"):
+            try:
+                rewritten_query, retrieval_ratios = self._rag.query_rewriter.rewrite_query_with_routing(query)  # type: ignore[attr-defined]
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("rewrite_query_with_routing failed; falling back to rewrite_query: %s", exc)
+                rewritten_query = self._rag.query_rewriter.rewrite_query(query)
+                retrieval_ratios = None
+        else:
+            rewritten_query = self._rag.query_rewriter.rewrite_query(query)
+
         logger.info("Query rewritten from '%s' to '%s'", original_query, rewritten_query)
 
         chunks = retriever.invoke(
             rewritten_query,
             owner_id=owner_id,
             return_subgraph_info=return_subgraph,
+            **({"retrieval_ratios": retrieval_ratios} if retrieval_ratios else {}),
         )
         logger.info("Retriever returned %d chunks", len(chunks))
 
         subgraph_info = self._extract_subgraph_info(chunks)
-        reranked_chunks = self._rag.reranker.rerank(rewritten_query, chunks)
+        # Respect the same rerank_keep_k config as the user-facing pipeline.
+        rerank_keep_k = 10
+        try:
+            candidate_cfg = getattr(self._rag.config, "candidate_selection", None)
+            if candidate_cfg is not None:
+                rerank_keep_k = int(getattr(candidate_cfg, "rerank_keep_k", rerank_keep_k))
+        except Exception:  # noqa: BLE001
+            pass
+        reranked_chunks = self._rag.reranker.rerank(rewritten_query, chunks, top_k=rerank_keep_k)
         logger.info("Reranker produced %d chunks", len(reranked_chunks))
 
         subgraph_data = self._export_subgraph(subgraph_info) if (subgraph_info and return_subgraph) else None
@@ -173,7 +197,10 @@ class RAGInferenceCLIModule:
         return None
 
     def _build_messages(self, chunks: List[Chunk], query: str) -> List[Dict[str, str]]:
-        messages: List[Dict[str, str]] = []
+        # CLI is for debugging: use ONLY the base system prompt (no citation/style/domain addons).
+        messages: List[Dict[str, str]] = [
+            {"role": "system", "content": get_rag_chat_system_prompt(profile="cli")}
+        ]
         for idx, chunk in enumerate(chunks):
             metadata = getattr(chunk, "metadata", None) or {}
             chunk_text = metadata.get("prompt_text") or metadata.get("index_text")

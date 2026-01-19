@@ -153,6 +153,8 @@ Notes:
 | `ENABLE_ALL_EVIDENCE` | `false` | When `true`, evidence payloads skip all trimming limits. |
 | `CHAT_TOP_CHUNKS` | `5` | Maximum chunks returned in chat evidence. |
 | `CHATBOT_LLM_TOP_SOURCES` | `10` | Max Sources passed to the chatbot LLM (can be higher than UI `CHATBOT_TOP_SOURCES` to improve coverage for broad queries like "features/benefits"). |
+| `USER_TYPE` | `0` | Prompt style/domain selector used by `rag_inference` prompt layering (`config/prompts/rag_inference_prompts.yaml`). |
+| `RAG_INFERENCE_PROMPTS_YAML_PATH` | (empty) | Optional override path for `config/prompts/rag_inference_prompts.yaml`. When empty, uses the repo default. |
 | `CHAT_TOP_TRIPLES` | `5` | Maximum graph triples returned in chat evidence. |
 | `CHAT_TOP_SEED_ENTITIES` | `5` | Maximum seed entities surfaced in chat evidence. |
 | `CHAT_MAX_IMAGE_INPUTS` | `4` | Maximum local images attached to a single chat request when the model supports multimodal inputs (MinerU image assets). |

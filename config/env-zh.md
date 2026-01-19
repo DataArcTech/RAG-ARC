@@ -153,6 +153,8 @@ Benchmark/实验模式：
 | `ENABLE_ALL_EVIDENCE` | `false` | 为 `true` 时关闭所有截断，完整返回证据。 |
 | `CHAT_TOP_CHUNKS` | `5` | Chat 证据中最多保留的 chunk 数量。 |
 | `CHATBOT_LLM_TOP_SOURCES` | `10` | Chatbot 接口用于传给 LLM 的 Sources 上限（可大于前端展示的 `CHATBOT_TOP_SOURCES`，用于提升“特点/优势/功能”等泛问覆盖度）。 |
+| `USER_TYPE` | `0` | `rag_inference` 的提示词风格/领域选择开关（读取 `config/prompts/rag_inference_prompts.yaml` 做分层拼接）。 |
+| `RAG_INFERENCE_PROMPTS_YAML_PATH` | (空) | 覆盖 `config/prompts/rag_inference_prompts.yaml` 的路径；为空则使用仓库默认路径。 |
 | `CHAT_TOP_TRIPLES` | `5` | Chat 证据中最多保留的图三元组数量。 |
 | `CHAT_TOP_SEED_ENTITIES` | `5` | Chat 证据中最多保留的种子实体数量。 |
 | `CHAT_MAX_IMAGE_INPUTS` | `4` | 当模型支持多模态输入时，单次 Chat 允许附带的本地图片最大数量（MinerU 输出的图片资产）。 |
