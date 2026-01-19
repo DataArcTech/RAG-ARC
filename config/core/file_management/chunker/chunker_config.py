@@ -26,6 +26,10 @@ class TokenChunkerConfig(AbstractConfig):
         default_factory=lambda: int(str(os.getenv("TOKEN_CHUNK_OVERLAP", "100") or "100")),
         description="Overlap token count between chunks.",
     )
+    url_atomic_context_tokens: int = Field(
+        default_factory=lambda: int(str(os.getenv("TOKEN_URL_ATOMIC_CONTEXT_TOKENS", "10") or "10")),
+        description="Keep URL + surrounding tokens together when chunking.",
+    )
 
     # Tokenizer configuration
     encoding_name: str = "gpt2"  # Encoder name for tiktoken (default: 'gpt2')

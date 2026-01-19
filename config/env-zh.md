@@ -450,6 +450,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINERU_END_PAGE` | _(空)_ | 可选：MinerU 解析结束页（0-based，包含该页）。为空表示解析到末尾。 |
 | `TOKEN_CHUNK_SIZE` | `1000` | `token_chunker` 的 chunk size（同时用于 `semantic_unit_chunker.fallback_chunker_config`）。 |
 | `TOKEN_CHUNK_OVERLAP` | `100` | `token_chunker` 的 overlap（同时用于 `semantic_unit_chunker.fallback_chunker_config`）。 |
+| `TOKEN_URL_ATOMIC_CONTEXT_TOKENS` | `10` | URL 不可分割保护：URL 前后保留的 token 数（`token_chunker`/`semantic_unit_chunker` fallback 生效）。 |
 | `OCR_MODEL_NAME` | _(空)_ | 可选：历史兼容的 OCR 模型名别名。 |
 | `RAGARC_RUNTIME_DIR` | `./local/runtime` | 当首选目录不可写时的运行时兜底根目录。 |
 | `LOCAL_FILE_STORAGE_PATH` | `./data/files` | 当 JSON 未提供 `base_path` 时，`local_blob_store` 的默认根目录（相对路径按项目根目录解析）。 |

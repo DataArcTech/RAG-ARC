@@ -452,6 +452,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINERU_END_PAGE` | _(empty)_ | Optional: end page (0-based, inclusive). If empty, parse to the end. |
 | `TOKEN_CHUNK_SIZE` | `1000` | Token chunk size for `token_chunker` (also used as `semantic_unit_chunker.fallback_chunker_config`). |
 | `TOKEN_CHUNK_OVERLAP` | `100` | Token overlap for `token_chunker` (also used as `semantic_unit_chunker.fallback_chunker_config`). |
+| `TOKEN_URL_ATOMIC_CONTEXT_TOKENS` | `10` | URL atomic protection: keep this many tokens before/after each URL together (applies to `token_chunker` and semantic-unit fallback). |
 | `OCR_MODEL_NAME` | _(empty)_ | Optional backward-compatible OCR model name alias. |
 | `RAGARC_RUNTIME_DIR` | `./local/runtime` | Fallback runtime root when preferred local directories are not writable. |
 | `LOCAL_FILE_STORAGE_PATH` | `./data/files` | Default root for `local_blob_store` when JSON `base_path` is not provided (relative paths are resolved against the repo root). |

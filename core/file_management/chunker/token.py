@@ -1,5 +1,7 @@
 from typing import List, Optional, Dict, Any, TYPE_CHECKING
+from bisect import bisect_left, bisect_right
 import logging
+import re
 
 from .base import AbstractChunker
 from core.file_management.atomic_units.markdown_atomic import split_markdown_atomic_blocks
@@ -56,6 +58,9 @@ class TokenChunker(AbstractChunker):
         - Corresponding model tokenizer configuration
     """
 
+    _URL_RE = re.compile(r"https?://[^\s<>\[\]{}()\"']+", re.IGNORECASE)
+    _URL_TRAILING_PUNCT = ".,;:!?)]}\"'"
+
     def __init__(self, config: "TokenChunkerConfig"):
         """Initialize TokenChunker with tokenizer configuration"""
         super().__init__(config)
@@ -103,6 +108,10 @@ class TokenChunker(AbstractChunker):
         # Allow runtime parameter overrides
         chunk_size = kwargs.get('chunk_size', chunk_size)
         chunk_overlap = kwargs.get('chunk_overlap', chunk_overlap)
+        url_atomic_context_tokens = kwargs.get(
+            'url_atomic_context_tokens',
+            getattr(self.config, 'url_atomic_context_tokens', 10),
+        )
 
         try:
             chunk_units: List[tuple[str, str]] = []
@@ -110,7 +119,12 @@ class TokenChunker(AbstractChunker):
                 if kind in {"code", "table", "image"}:
                     chunk_units.append((kind, segment))
                     continue
-                for piece in self._split_on_tokens(segment, chunk_size, chunk_overlap):
+                for piece in self._split_on_tokens(
+                    segment,
+                    chunk_size,
+                    chunk_overlap,
+                    url_atomic_context_tokens,
+                ):
                     if piece:
                         chunk_units.append((kind, piece))
 
@@ -184,12 +198,14 @@ class TokenChunker(AbstractChunker):
                 'overlap_control',
                 'model_compatibility',
                 'fenced_code_atomic',
+                'url_atomic',
             ],
             'parameters': {
                 'chunk_size': chunk_size,
                 'chunk_overlap': chunk_overlap,
                 'encoding_name': encoding_name,
-                'model_name': model_name
+                'model_name': model_name,
+                'url_atomic_context_tokens': getattr(self.config, 'url_atomic_context_tokens', 10),
             }
         }
 
@@ -231,7 +247,13 @@ class TokenChunker(AbstractChunker):
             disallowed_special=disallowed_special,
         )
 
-    def _split_on_tokens(self, text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
+    def _split_on_tokens(
+        self,
+        text: str,
+        chunk_size: int,
+        chunk_overlap: int,
+        url_atomic_context_tokens: int,
+    ) -> List[str]:
         """
         Core logic for executing text splitting using tokenizer.
 
@@ -274,6 +296,14 @@ class TokenChunker(AbstractChunker):
             allowed_special=allowed_special,
             disallowed_special=disallowed_special,
         )
+        url_atomic_spans = self._build_url_atomic_spans(
+            text=text,
+            tokenizer=tokenizer,
+            input_ids=input_ids,
+            context_tokens=max(0, int(url_atomic_context_tokens or 0)),
+        )
+        span_starts = [start for start, _ in url_atomic_spans]
+        span_ends = [end for _, end in url_atomic_spans]
 
         def _decode_utf8_without_replacement(
             token_ids: List[int],
@@ -307,22 +337,116 @@ class TokenChunker(AbstractChunker):
             # Last resort: decode with invalid bytes ignored (still guarantees no U+FFFD).
             return _decode_utf8_without_replacement(input_ids[start:end]), start, end
 
+        def _adjust_end_for_atomic_spans(boundary: int) -> int:
+            if not url_atomic_spans:
+                return boundary
+            idx = bisect_left(span_starts, boundary) - 1
+            if idx >= 0 and span_starts[idx] < boundary <= span_ends[idx]:
+                return min(len(input_ids), span_ends[idx] + 1)
+            return boundary
+
+        def _adjust_start_for_atomic_spans(boundary: int) -> int:
+            if not url_atomic_spans:
+                return boundary
+            idx = bisect_left(span_starts, boundary) - 1
+            if idx >= 0 and span_starts[idx] < boundary <= span_ends[idx]:
+                return span_starts[idx]
+            return boundary
+
+        def _adjust_start_forward_for_atomic_spans(boundary: int) -> int:
+            if not url_atomic_spans:
+                return boundary
+            idx = bisect_left(span_starts, boundary) - 1
+            if idx >= 0 and span_starts[idx] < boundary <= span_ends[idx]:
+                return min(len(input_ids), span_ends[idx] + 1)
+            return boundary
+
         # Split tokens into chunks with overlap
         splits = []
         start_idx = 0
 
         while start_idx < len(input_ids):
             end_idx = min(start_idx + chunk_size, len(input_ids))
+            end_idx = _adjust_end_for_atomic_spans(end_idx)
             chunk_text, _, actual_end = _decode_token_window(start_idx, end_idx)
+            adjusted_end = _adjust_end_for_atomic_spans(actual_end)
+            if adjusted_end != actual_end:
+                chunk_text, _, actual_end = _decode_token_window(start_idx, adjusted_end)
             splits.append(chunk_text)
 
             if actual_end >= len(input_ids):
                 break
 
             next_start = max(0, actual_end - chunk_overlap)
+            next_start = _adjust_start_for_atomic_spans(next_start)
             if next_start <= start_idx:
-                # Safety valve to ensure forward progress even if adjustment behaved unexpectedly.
                 next_start = start_idx + max(1, chunk_size - chunk_overlap)
+                next_start = _adjust_start_forward_for_atomic_spans(next_start)
             start_idx = next_start
 
         return splits
+
+    def _build_url_atomic_spans(
+        self,
+        text: str,
+        tokenizer: Any,
+        input_ids: List[int],
+        context_tokens: int,
+    ) -> List[tuple[int, int]]:
+        if not text or not input_ids:
+            return []
+        url_spans = self._find_url_spans(text)
+        if not url_spans:
+            return []
+        token_starts, token_ends = self._token_byte_offsets(tokenizer, input_ids)
+        spans: List[tuple[int, int]] = []
+        for start_char, end_char in url_spans:
+            byte_start = len(text[:start_char].encode("utf-8"))
+            byte_end = len(text[:end_char].encode("utf-8"))
+            start_token = bisect_right(token_ends, byte_start)
+            end_token = bisect_left(token_starts, byte_end) - 1
+            if start_token < 0 or end_token < 0 or start_token > end_token:
+                continue
+            span_start = max(0, start_token - context_tokens)
+            span_end = min(len(input_ids) - 1, end_token + context_tokens)
+            spans.append((span_start, span_end))
+        return self._merge_spans(spans)
+
+    def _find_url_spans(self, text: str) -> List[tuple[int, int]]:
+        spans: List[tuple[int, int]] = []
+        for match in self._URL_RE.finditer(text):
+            start, end = match.span()
+            while end > start and text[end - 1] in self._URL_TRAILING_PUNCT:
+                end -= 1
+            if end > start:
+                spans.append((start, end))
+        return spans
+
+    def _token_byte_offsets(self, tokenizer: Any, input_ids: List[int]) -> tuple[List[int], List[int]]:
+        starts: List[int] = []
+        ends: List[int] = []
+        offset = 0
+        decode_single = getattr(tokenizer, "decode_single_token_bytes", None)
+        for token_id in input_ids:
+            if decode_single:
+                token_bytes = decode_single(token_id)
+            else:
+                token_bytes = tokenizer.decode_bytes([token_id])
+            starts.append(offset)
+            offset += len(token_bytes)
+            ends.append(offset)
+        return starts, ends
+
+    @staticmethod
+    def _merge_spans(spans: List[tuple[int, int]]) -> List[tuple[int, int]]:
+        if not spans:
+            return []
+        spans.sort()
+        merged = [list(spans[0])]
+        for start, end in spans[1:]:
+            last = merged[-1]
+            if start <= last[1] + 1:
+                last[1] = max(last[1], end)
+            else:
+                merged.append([start, end])
+        return [(start, end) for start, end in merged]
