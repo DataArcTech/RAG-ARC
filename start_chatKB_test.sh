@@ -36,7 +36,10 @@ echo "🔍 自动定位到应用目录: ${APP_DIR}"
 ENV_FILE=${ENV_FILE:-${APP_DIR}/.env}
 if [ -f "${ENV_FILE}" ]; then
     echo "🔧 加载环境配置文件: ${ENV_FILE}"
-    export $(grep -v '^#' ${ENV_FILE} | grep -v '^$' | xargs)
+    # 使用 set -a 自动导出所有变量，避免注释和空行问题
+    set -a
+    source ${ENV_FILE}
+    set +a
 else
     echo "⚠️  未找到.env文件（${ENV_FILE}），将使用脚本默认值或系统环境变量"
 fi
@@ -78,6 +81,15 @@ LOCAL_FILE_STORAGE_PATH=${LOCAL_FILE_STORAGE_PATH:-${APP_DIR}/local/files_chatKB
 
 # PM2 应用名称 (建议使用独特名称以避免冲突)
 PM2_APP_NAME="rag-app-chatKB_test"
+
+# MinerU 服务配置（客户端配置，用于连接远程 MinerU 服务）
+# 注意：此环境为客户端，MinerU 服务在远程服务器运行，不在此处启动
+MINERU_ENABLED=${MINERU_ENABLED:-false}
+MINERU_HOST=${MINERU_HOST:-0.0.0.0}
+MINERU_PORT=${MINERU_PORT:-8899}
+MINERU_OUTPUT_DIR=${MINERU_OUTPUT_DIR:-${APP_DIR}/data/mineru_outputs}
+MINERU_TEMP_DIR=${MINERU_TEMP_DIR:-/tmp/mineru_temp}
+MINERU_LOG_FILE=${MINERU_LOG_FILE:-${APP_DIR}/log/mineru.log}
 
 # ==============================================================================
 # 4. 检查核心依赖命令
@@ -341,6 +353,10 @@ if pm2 list | grep -q "${PM2_APP_NAME}" && pm2 list | grep -q "online"; then
     echo "  - Redis: ${REDIS_HOST}:${REDIS_HOST_PORT} (容器: ${REDIS_CONTAINER_NAME})"
     echo "  - Neo4j Web: http://localhost:${NEO4J_WEB_HOST_PORT}"
     echo "  - Neo4j Bolt: ${NEO4J_URL} (容器: ${NEO4J_CONTAINER_NAME})"
+    if [[ "${MINERU_ENABLED}" == "true" ]] || [[ "${PARSER_PARSE_MODE:-}" == "mineru" ]]; then
+        MINERU_SERVER_URL=${MINERU_SERVER_URL:-"http://${MINERU_HOST}:${MINERU_PORT}"}
+        echo "  - MinerU 服务（远程）: ${MINERU_SERVER_URL}"
+    fi
     echo "  - 应用API: http://localhost:${APP_PORT}"
     echo "  - 自动定位的代码目录: ${APP_DIR}"
     echo ""
