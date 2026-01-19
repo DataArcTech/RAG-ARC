@@ -22,6 +22,7 @@ from config.output_limits import CHAT_MAX_IMAGE_INPUTS, RAG_RETRIEVAL_OBSERVABIL
 from core.utils.multimodal_images import collect_image_paths_from_chunk_payloads
 from core.utils.multimodal_llm import build_multimodal_user_message
 from encapsulation.web_search import TavilySearchClient
+from config.retrieval_routing import rag_retrieval_dynamic_quota_enabled
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -429,6 +430,8 @@ class RAGInference(AbstractModule):
         self._emit_progress(progress_callback, {"stage": "rewrite", "status": "start"})
         rewrite_start = time.perf_counter()
         rewrite_kwargs: dict[str, Any] = {}
+        rewritten_query: str
+        retrieval_ratios: dict[str, float] | None = None
         try:
             sig = inspect.signature(self.query_rewriter.rewrite_query)
             accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
@@ -437,7 +440,21 @@ class RAGInference(AbstractModule):
                 rewrite_kwargs["history_text"] = history_text
         except Exception as exc:  # noqa: BLE001
             logger.debug("Failed to inspect query_rewriter.rewrite_query signature: %s", exc, exc_info=True)
-        rewritten_query = self.query_rewriter.rewrite_query(query, **rewrite_kwargs)
+        if rag_retrieval_dynamic_quota_enabled() and hasattr(self.query_rewriter, "rewrite_query_with_routing"):
+            try:
+                fn = getattr(self.query_rewriter, "rewrite_query_with_routing")
+                sig = inspect.signature(fn)
+                accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                call_kwargs = dict(rewrite_kwargs)
+                if not accepts_var_kw and "history_text" not in sig.parameters:
+                    call_kwargs.pop("history_text", None)
+                rewritten_query, retrieval_ratios = fn(query, **call_kwargs)  # type: ignore[misc]
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("rewrite_query_with_routing failed; falling back to rewrite_query: %s", exc)
+                rewritten_query = self.query_rewriter.rewrite_query(query, **rewrite_kwargs)
+                retrieval_ratios = None
+        else:
+            rewritten_query = self.query_rewriter.rewrite_query(query, **rewrite_kwargs)
         self._emit_progress(
             progress_callback,
             {
@@ -445,6 +462,7 @@ class RAGInference(AbstractModule):
                 "status": "end",
                 "duration_ms": int((time.perf_counter() - rewrite_start) * 1000),
                 "rewritten_query": rewritten_query,
+                **({"retrieval_ratios": retrieval_ratios} if retrieval_ratios else {}),
             },
         )
 
@@ -509,6 +527,7 @@ class RAGInference(AbstractModule):
                 owner_id=owner_token,
                 return_subgraph_info=return_subgraph,
                 k=graph_candidates_k,
+                **({"retrieval_ratios": retrieval_ratios} if retrieval_ratios else {}),
             )
             per_info = self._consume_subgraph_info(retrieved)
             if per_info:

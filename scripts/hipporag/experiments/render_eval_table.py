@@ -5,9 +5,6 @@ Render a compact Markdown table from a `rag_inference_eval.py` trace.json.
 The default `report.md` is verbose by design (per-variant + per-question). This script produces:
 - `table.md`: metrics table + per-question answers grouped for quick scanning.
 """
-
-from __future__ import annotations
-
 import argparse
 import json
 from pathlib import Path

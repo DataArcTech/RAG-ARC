@@ -166,6 +166,7 @@ Benchmark/实验模式：
 | `RAG_RETRIEVAL_WEIGHT_DENSE` | `1.0` | MultiPath 的 RRF 融合权重：dense 路径。 |
 | `RAG_RETRIEVAL_WEIGHT_BM25` | `1.0` | MultiPath 的 RRF 融合权重：BM25 路径。 |
 | `RAG_RETRIEVAL_WEIGHT_GRAPH` | `1.5` | MultiPath 的 RRF 融合权重：graph 路径（调低以避免在“稀有细节”问题上压制 dense/bm25）。 |
+| `RAG_RETRIEVAL_DYNAMIC_QUOTA_ENABLED` | `true` | 是否启用 LLM 动态路由比例（按 query 决定 dense/bm25/graph 的候选配额保底）。关闭后回退为静态比例（由权重推导）。 |
 | `DEEPSEARCH_TOP_CHUNKS` | `10` | DeepSearch 证据中最多保留的 chunk 数量，同时也是报告附录中显示原文预览（前100字符）的数量。 |
 | `DEEPSEARCH_TOP_TRIPLES` | `30` | DeepSearch 证据中最多保留的图三元组数量。 |
 | `DEEPSEARCH_TOP_SEED_ENTITIES` | `15` | DeepSearch 证据中最多保留的种子实体数量。 |

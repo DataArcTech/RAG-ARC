@@ -77,6 +77,61 @@ class MultiPathRetriever(BaseRetriever):
 
         all_results = []
         subgraph_info = None  # Store subgraph info from graph retriever
+        routing_ratios = kwargs.get("retrieval_ratios")
+
+        # Determine per-retriever quotas (coverage floor) based on routing ratios.
+        # - If routing_ratios is absent, fall back to the configured fusion weights.
+        # - If a retriever is effectively disabled (weight<=0), it contributes 0 quota and is not invoked.
+        try:
+            from core.utils.quota import allocate_quotas
+
+            weights = list(self.config.weights) if self.config.weights else [1.0] * len(self.config.retrievers)
+            # Ensure length matches retrievers.
+            if len(weights) < len(self.config.retrievers):
+                weights = weights + [1.0] * (len(self.config.retrievers) - len(weights))
+
+            ratio_by_key: dict[str, float] = {}
+            if isinstance(routing_ratios, dict):
+                for key in ("dense", "bm25", "graph"):
+                    val = routing_ratios.get(key)
+                    if isinstance(val, (int, float)):
+                        ratio_by_key[key] = float(val)
+                    else:
+                        try:
+                            ratio_by_key[key] = float(val)
+                        except Exception:  # noqa: BLE001
+                            pass
+
+            effective_ratios: list[float] = []
+            for idx, cfg in enumerate(self.config.retrievers or []):
+                t = str(getattr(cfg, "type", "") or "").strip()
+                w = float(weights[idx]) if idx < len(weights) else 1.0
+                if w <= 0:
+                    effective_ratios.append(0.0)
+                    continue
+                if t == "dense":
+                    effective_ratios.append(float(ratio_by_key.get("dense", w)))
+                elif t == "tantivy_bm25":
+                    effective_ratios.append(float(ratio_by_key.get("bm25", w)))
+                elif t in {"pruned_hipporag_neo4j_retrieval", "pruned_hipporag_retrieval"}:
+                    effective_ratios.append(float(ratio_by_key.get("graph", w)))
+                else:
+                    effective_ratios.append(float(w))
+
+            quota = allocate_quotas(int(k), effective_ratios)
+            quotas_by_idx = quota.quotas
+            if RAG_RETRIEVAL_OBSERVABILITY:
+                logger.info(
+                    "multipath.quota owner_id=%s query=%r k_total=%s retrieval_ratios=%s quotas=%s weights=%s",
+                    kwargs.get("owner_id"),
+                    (query[:240] + "…") if len(query) > 240 else query,
+                    int(k),
+                    {k: ratio_by_key.get(k) for k in ("dense", "bm25", "graph") if k in ratio_by_key},
+                    quotas_by_idx,
+                    weights,
+                )
+        except Exception:  # noqa: BLE001
+            quotas_by_idx = [0 for _ in (self.config.retrievers or [])]
 
         def _coerce_file_id(meta: Any) -> str | None:
             if not isinstance(meta, dict):
@@ -113,8 +168,16 @@ class MultiPathRetriever(BaseRetriever):
                 dist,
             )
 
-        for retriever in self.config.built_retrievers or []:
+        for idx, retriever in enumerate(self.config.built_retrievers or []):
             try:
+                # Allow disabling a retriever via weight=0 (skip invocation entirely).
+                if self.config.weights is not None and idx < len(self.config.weights):
+                    try:
+                        if float(self.config.weights[idx]) <= 0:
+                            all_results.append([])
+                            continue
+                    except Exception:  # noqa: BLE001
+                        pass
                 # Union results across variants per retriever.
                 #
                 # Important: keep the *best* (lowest) rank of each chunk across variants.
@@ -145,6 +208,18 @@ class MultiPathRetriever(BaseRetriever):
 
                 chunks = [t[2] for t in sorted(best_by_key.values(), key=lambda x: (x[0], x[1]))]
 
+                # Stash per-retriever top quota for later quota-guaranteed candidate assembly.
+                # We do not trim `chunks` here because fusion still needs the full ranked list.
+                if chunks:
+                    q = 0
+                    if idx < len(quotas_by_idx):
+                        q = int(quotas_by_idx[idx] or 0)
+                    if q > 0:
+                        for ch in chunks[: min(q, len(chunks))]:
+                            meta = getattr(ch, "metadata", None) or {}
+                            meta.setdefault("_multipath_quota_source", str(getattr(self.config.retrievers[idx], "type", "") or type(retriever).__name__))
+                            ch.metadata = meta
+
                 # Check if this is a graph retriever with subgraph info
                 if chunks and hasattr(chunks[0], 'metadata') and chunks[0].metadata:
                     if '_subgraph_info' in chunks[0].metadata:
@@ -170,6 +245,56 @@ class MultiPathRetriever(BaseRetriever):
 
         fused_chunks = self.config.fusion_instance.fuse(all_results, k)
         _log_dist("fused", type(self.config.fusion_instance).__name__, fused_chunks)
+
+        # Ensure each retriever contributes at least its quota into the final candidate set.
+        # This mitigates "one backend drowns out others" regressions on sparse-detail queries.
+        try:
+            from core.utils.fusion import _fusion_key as _fk  # stable key aligned with fusion
+
+            seeds: list[Chunk] = []
+            seen: set[str] = set()
+            for idx, results in enumerate(all_results):
+                q = int(quotas_by_idx[idx]) if idx < len(quotas_by_idx) else 0
+                if q <= 0:
+                    continue
+                for ch in results[: min(q, len(results))]:
+                    key = _fk(ch)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    seeds.append(ch)
+
+            if seeds:
+                fused_rank = {_fk(ch): i for i, ch in enumerate(fused_chunks)}
+
+                def _seed_sort_key(ch: Chunk) -> tuple[int, int]:
+                    key = _fk(ch)
+                    rank = fused_rank.get(key)
+                    return (rank if rank is not None else 1_000_000_000, 0)
+
+                seeds_sorted = sorted(seeds, key=_seed_sort_key)
+                merged: list[Chunk] = []
+                merged_seen: set[str] = set()
+                for ch in seeds_sorted:
+                    key = _fk(ch)
+                    if key in merged_seen:
+                        continue
+                    merged_seen.add(key)
+                    merged.append(ch)
+                    if len(merged) >= int(k):
+                        break
+                if len(merged) < int(k):
+                    for ch in fused_chunks:
+                        key = _fk(ch)
+                        if key in merged_seen:
+                            continue
+                        merged_seen.add(key)
+                        merged.append(ch)
+                        if len(merged) >= int(k):
+                            break
+                fused_chunks = merged
+        except Exception:  # noqa: BLE001
+            pass
 
         fused_chunks = self._postprocess_anchor_backfill(fused_chunks, owner_id=kwargs.get("owner_id"))
 

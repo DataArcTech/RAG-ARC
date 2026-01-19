@@ -4,8 +4,12 @@ from .base import AbstractQueryRewriter
 from core.prompts.query_rewrite_prompt import (
     QUERY_REWRITE_USER_PROMPT,
     QUERY_REWRITE_USER_PROMPT_WITH_HISTORY,
+    QUERY_REWRITE_AND_ROUTING_USER_PROMPT,
+    QUERY_REWRITE_AND_ROUTING_USER_PROMPT_WITH_HISTORY,
+    QUERY_REWRITE_ROUTING_SYSTEM_SUFFIX,
 )
 from config.benchmark_mode import benchmark_mode_enabled
+from config.retrieval_routing import rag_retrieval_dynamic_quota_enabled
 
 import logging
 
@@ -140,6 +144,103 @@ class LLMQueryRewriter(AbstractQueryRewriter):
             # Return original query as fallback
             logger.warning("Using original query as fallback")
             return query
+
+    def rewrite_query_with_routing(
+        self,
+        query: str,
+        *,
+        history_text: str | None = None,
+        **kwargs: Any,
+    ) -> tuple[str, dict[str, float] | None]:
+        """
+        Rewrite query and (optionally) return per-query retrieval ratios for MultiPath quotas.
+
+        Ratios are small non-negative numbers, e.g. {dense:1, bm25:1, graph:1.5}.
+        """
+        if benchmark_mode_enabled():
+            return str(query or ""), None
+        if not query or not query.strip():
+            raise ValueError("Query cannot be empty")
+
+        # Gate: allow disabling dynamic routing without changing JSON config.
+        if not rag_retrieval_dynamic_quota_enabled():
+            return self.rewrite_query(query, history_text=history_text, **kwargs), None
+
+        query = str(query)
+        # Keep existing skip rules for rewrite; when triggered, fall back to static routing ratios.
+        if getattr(self.config, "skip_rewrite_if_contains", None):
+            for token in list(getattr(self.config, "skip_rewrite_if_contains") or []):
+                if token and token in query:
+                    logger.info("Skipping query rewrite (routing fallback) because query contains %r", token)
+                    return query, None
+        if getattr(self.config, "skip_rewrite_regexes", None):
+            for pattern in list(getattr(self.config, "skip_rewrite_regexes") or []):
+                if not pattern:
+                    continue
+                try:
+                    if re.search(pattern, query):
+                        logger.info("Skipping query rewrite (routing fallback) because query matches pattern %r", pattern)
+                        return query, None
+                except re.error:
+                    logger.warning("Invalid skip rewrite regex ignored: %r", pattern)
+
+        instruction = str(self.config.instruction or "").rstrip() + "\n\n" + QUERY_REWRITE_ROUTING_SYSTEM_SUFFIX
+
+        use_history = bool(getattr(self.config, "use_history_for_rewrite", False))
+        max_history_chars = int(getattr(self.config, "rewrite_history_max_chars", 0) or 0)
+        history_snippet = None
+        if use_history and history_text and max_history_chars > 0:
+            history_snippet = str(history_text)[-max_history_chars:]
+
+        messages = [
+            {"role": "system", "content": instruction},
+            {
+                "role": "user",
+                "content": (
+                    QUERY_REWRITE_AND_ROUTING_USER_PROMPT_WITH_HISTORY.format(query=query, history=history_snippet)
+                    if history_snippet
+                    else QUERY_REWRITE_AND_ROUTING_USER_PROMPT.format(query=query)
+                ),
+            },
+        ]
+
+        try:
+            raw = self.chat_llm.chat(messages=messages, **kwargs)
+            text = str(raw or "").strip()
+            from core.utils.json_extract import safe_json_loads
+
+            payload = safe_json_loads(text, expected="dict")
+            if not isinstance(payload, dict):
+                # Strict contract: routing mode must return JSON.
+                # Avoid a second LLM call on failure; keep behavior deterministic.
+                logger.warning("Query rewrite routing: non-JSON response; using original query and static routing")
+                return query, None
+
+            rewritten = str(payload.get("rewritten_query") or "").strip().strip('"').strip("'")
+            if not rewritten:
+                rewritten = query
+
+            ratios_raw = payload.get("retrieval_ratios")
+            ratios: dict[str, float] = {}
+            if isinstance(ratios_raw, dict):
+                for key in ("dense", "bm25", "graph"):
+                    val = ratios_raw.get(key)
+                    try:
+                        f = float(val)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if f < 0:
+                        continue
+                    ratios[key] = f
+
+            if not ratios:
+                return rewritten, None
+
+            return rewritten, ratios
+        except Exception as exc:  # noqa: BLE001
+            # Avoid a second LLM call on errors; keep retrieval functional by falling back to the original query.
+            logger.warning("Query rewrite with routing failed; using original query and static routing: %s", exc)
+            return query, None
 
     def get_rewriter_info(self) -> Dict[str, Any]:
         """

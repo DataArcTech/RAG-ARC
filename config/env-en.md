@@ -166,6 +166,7 @@ Notes:
 | `RAG_RETRIEVAL_WEIGHT_DENSE` | `1.0` | MultiPath RRF fusion weight for the dense retriever. |
 | `RAG_RETRIEVAL_WEIGHT_BM25` | `1.0` | MultiPath RRF fusion weight for the BM25 retriever. |
 | `RAG_RETRIEVAL_WEIGHT_GRAPH` | `1.5` | MultiPath RRF fusion weight for the graph retriever (lower than before to avoid drowning out dense/bm25 on sparse detail queries). |
+| `RAG_RETRIEVAL_DYNAMIC_QUOTA_ENABLED` | `true` | Enable LLM-driven per-query routing ratios that allocate MultiPath candidate quotas across retrievers (coverage floor). Falls back to static ratios when disabled. |
 | `DEEPSEARCH_TOP_CHUNKS` | `10` | Maximum chunks returned in DeepSearch evidence and displayed in report appendix (first 100 chars preview). |
 | `DEEPSEARCH_TOP_TRIPLES` | `30` | Maximum graph triples returned in DeepSearch evidence. |
 | `DEEPSEARCH_TOP_SEED_ENTITIES` | `15` | Maximum seed entities surfaced in DeepSearch evidence. |
