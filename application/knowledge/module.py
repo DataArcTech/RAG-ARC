@@ -366,17 +366,6 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
             logger.warning(f"File is deleted or marked for deletion: file_id={doc_id}, status={metadata.status}")
             raise HTTPException(status_code=404, detail="File not found")
 
-        # Check if user has access (owner or has VIEW/EDIT permission)
-        # Skip permission check if user_id is None (authentication disabled)
-        if user_id is not None:
-            permission_type = await self._run_blocking(
-                self.check_file_access,
-                doc_id,
-                user_id
-            )
-            if permission_type is None:
-                raise HTTPException(status_code=403, detail="You are not allowed to access this file")
-
         content = await self._run_blocking(
             self.file_storage.get_file_content,
             doc_id
