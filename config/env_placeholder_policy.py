@@ -23,6 +23,11 @@ ENV_DEFAULTS: dict[str, str] = {
     "CHUNK_STORE_BASE_PATH": "./data/chunk_store",
     # Parser output root (controls native/dots_ocr/vlm_ocr/mineru subfolders).
     "PARSER_OUTPUT_DIR": "./data/parsed_files",
+    # MultiPath fusion weights (RAG inference).
+    # Order aligns with `config/json_configs/rag_inference*.json` retrievers: [dense, bm25, graph].
+    "RAG_RETRIEVAL_WEIGHT_DENSE": "1.0",
+    "RAG_RETRIEVAL_WEIGHT_BM25": "1.0",
+    "RAG_RETRIEVAL_WEIGHT_GRAPH": "1.5",
 }
 
 # Missing placeholders that should not produce warnings because downstream config has safe defaults.

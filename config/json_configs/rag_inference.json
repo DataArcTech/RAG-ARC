@@ -82,7 +82,7 @@
         ],
         "fusion_method": "rrf",
         "rrf_k": 60,
-        "weights": [1.0, 1.0, 3.0],
+        "weights": ["${RAG_RETRIEVAL_WEIGHT_DENSE}", "${RAG_RETRIEVAL_WEIGHT_BM25}", "${RAG_RETRIEVAL_WEIGHT_GRAPH}"],
         "search_kwargs": {
             "k": 30,
             "with_score": true

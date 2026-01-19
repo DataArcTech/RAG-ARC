@@ -163,6 +163,9 @@ Notes:
 | `QUERY_VARIANTS_LANGS` | `zh-Hans,en,zh-Hant` | Comma-separated variant targets, in order. `zh-Hans/zh-Hant` use OpenCC conversion (when installed). `en` is best-effort ASCII token extraction (no translation). |
 | `QUERY_VARIANTS_ZH_HANS_HANT_ENABLED` | `true` | Enable Simplified/Traditional Chinese variants (requires OpenCC). |
 | `QUERY_VARIANTS_MAX` | `3` | Max number of query variants (including the original). |
+| `RAG_RETRIEVAL_WEIGHT_DENSE` | `1.0` | MultiPath RRF fusion weight for the dense retriever. |
+| `RAG_RETRIEVAL_WEIGHT_BM25` | `1.0` | MultiPath RRF fusion weight for the BM25 retriever. |
+| `RAG_RETRIEVAL_WEIGHT_GRAPH` | `1.5` | MultiPath RRF fusion weight for the graph retriever (lower than before to avoid drowning out dense/bm25 on sparse detail queries). |
 | `DEEPSEARCH_TOP_CHUNKS` | `10` | Maximum chunks returned in DeepSearch evidence and displayed in report appendix (first 100 chars preview). |
 | `DEEPSEARCH_TOP_TRIPLES` | `30` | Maximum graph triples returned in DeepSearch evidence. |
 | `DEEPSEARCH_TOP_SEED_ENTITIES` | `15` | Maximum seed entities surfaced in DeepSearch evidence. |

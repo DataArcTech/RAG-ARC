@@ -163,6 +163,9 @@ Benchmark/实验模式：
 | `QUERY_VARIANTS_LANGS` | `zh-Hans,en,zh-Hant` | 变体目标列表（逗号分隔、按顺序执行）。`zh-Hans/zh-Hant` 使用 OpenCC 简繁互转（需安装）。`en` 为 ASCII token 提取（不做翻译），用于命中英文/型号/编号等混合 token。 |
 | `QUERY_VARIANTS_ZH_HANS_HANT_ENABLED` | `true` | 是否启用中文简繁体互转变体（需要 OpenCC）。 |
 | `QUERY_VARIANTS_MAX` | `3` | query variants 最大数量（包含原 query）。 |
+| `RAG_RETRIEVAL_WEIGHT_DENSE` | `1.0` | MultiPath 的 RRF 融合权重：dense 路径。 |
+| `RAG_RETRIEVAL_WEIGHT_BM25` | `1.0` | MultiPath 的 RRF 融合权重：BM25 路径。 |
+| `RAG_RETRIEVAL_WEIGHT_GRAPH` | `1.5` | MultiPath 的 RRF 融合权重：graph 路径（调低以避免在“稀有细节”问题上压制 dense/bm25）。 |
 | `DEEPSEARCH_TOP_CHUNKS` | `10` | DeepSearch 证据中最多保留的 chunk 数量，同时也是报告附录中显示原文预览（前100字符）的数量。 |
 | `DEEPSEARCH_TOP_TRIPLES` | `30` | DeepSearch 证据中最多保留的图三元组数量。 |
 | `DEEPSEARCH_TOP_SEED_ENTITIES` | `15` | DeepSearch 证据中最多保留的种子实体数量。 |
