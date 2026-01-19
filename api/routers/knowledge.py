@@ -15,7 +15,7 @@ import re
 import time
 import uuid
 from typing import Annotated, Optional, List, Dict, Any, Tuple, Literal
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from api.routers.auth import get_current_user
 from api.sse import sse_done, sse_json
 from encapsulation.data_model.orm_models import (
@@ -427,18 +427,37 @@ async def list_files(
         total_count = await get_knowledge_handler().count_user_files_async(user.id, search=search)
         
         # Convert FileMetadata objects to FileInfo response models
-        file_infos = [
-            FileInfo(
-                file_id=file.file_id,
-                filename=file.filename,
-                status=file.status.value,  # Convert enum to string
-                created_at=file.created_at.isoformat(),
-                updated_at=file.updated_at.isoformat(),
-                file_size=file.file_size,
-                content_type=file.content_type
+        # Database stores naive datetime in Beijing time (since we store with Beijing timezone)
+        # Just add timezone info for ISO format, no conversion needed
+        beijing_tz = timezone(timedelta(hours=8))
+        file_infos = []
+        for file in files:
+            # Database stores naive datetime in Beijing time, just add timezone info
+            if file.created_at.tzinfo is None:
+                # Naive datetime, assume it's already Beijing time, just add timezone info
+                created_at_beijing = file.created_at.replace(tzinfo=beijing_tz)
+            else:
+                # Timezone-aware datetime, convert to Beijing time
+                created_at_beijing = file.created_at.astimezone(beijing_tz)
+            
+            if file.updated_at.tzinfo is None:
+                # Naive datetime, assume it's already Beijing time, just add timezone info
+                updated_at_beijing = file.updated_at.replace(tzinfo=beijing_tz)
+            else:
+                # Timezone-aware datetime, convert to Beijing time
+                updated_at_beijing = file.updated_at.astimezone(beijing_tz)
+            
+            file_infos.append(
+                FileInfo(
+                    file_id=file.file_id,
+                    filename=file.filename,
+                    status=file.status.value,  # Convert enum to string
+                    created_at=created_at_beijing.isoformat(),
+                    updated_at=updated_at_beijing.isoformat(),
+                    file_size=file.file_size,
+                    content_type=file.content_type
+                )
             )
-            for file in files
-        ]
         
         return FileListResponse(
             files=file_infos,

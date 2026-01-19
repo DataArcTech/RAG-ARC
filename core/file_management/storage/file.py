@@ -4,7 +4,7 @@ from typing import (
     TYPE_CHECKING,
     List,
 )
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
 import logging
@@ -285,7 +285,11 @@ class FileStorage(AbstractModule):
                 file_id = self._generate_file_id()
                 blob_key = self._generate_blob_key(file_id, filename)
 
-                now = datetime.now(tz=datetime.now().astimezone().tzinfo)
+                # Use Beijing time (UTC+8) for storage, but store as naive datetime
+                # PostgreSQL DateTime type doesn't store timezone, so we store naive datetime
+                # The actual value is Beijing time, but without timezone info
+                beijing_tz = timezone(timedelta(hours=8))
+                now = datetime.now(beijing_tz).replace(tzinfo=None)
                 metadata = FileMetadata(
                     file_id=file_id,
                     owner_id=owner_id,
@@ -335,7 +339,7 @@ class FileStorage(AbstractModule):
                     {
                         'blob_key': stored_blob_key,  # Use actual stored key (may be versioned)
                         'status': FileStatus.STORED,
-                        'updated_at': datetime.now(tz=datetime.now().astimezone().tzinfo)
+                        'updated_at': datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None)  # Beijing time as naive datetime
                     },
                     **kwargs
                 )
