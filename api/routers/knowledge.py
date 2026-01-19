@@ -110,6 +110,28 @@ async def upload_file(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required"
         )
+    
+    # Validate file type
+    allowed_extensions = {'.docx', '.xlsx', '.pptx', '.pdf', '.jpg', '.jpeg', '.png', '.txt', '.html', '.md'}
+    file_ext = Path(file.filename).suffix.lower() if file.filename else ''
+    if file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"不支持的文件类型。支持的文件类型: {', '.join(sorted(allowed_extensions))}"
+        )
+    
+    # Validate file size (20MB limit)
+    max_size = 20 * 1024 * 1024  # 20MB
+    file_content = await file.read()
+    if len(file_content) > max_size:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"文件大小超过限制。最大允许大小: 20MB，当前文件大小: {len(file_content) / 1024 / 1024:.2f}MB"
+        )
+    
+    # Reset file pointer for actual upload
+    await file.seek(0)
+    
     try:
         # Convert string UUID to UUID object
         doc_id = await get_knowledge_handler().upload_file(file, user.id, relative_path=relative_path)
