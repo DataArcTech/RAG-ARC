@@ -3,8 +3,6 @@ from typing import Any, Dict, Iterable, Optional
 
 from .base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest
 from .fast import (
-    BridgeLookupTool,
-    ChunkScanTool,
     GraphAggregateTool,
     GraphEntityConceptsTool,
     GraphExpandTermsTool,
@@ -21,33 +19,23 @@ from .fast import (
     GraphSdfDependenciesTool,
     GraphSetDifferenceTool,
     GraphTraceToRootTool,
-    PathCacheTool,
-    PatternProbeTool,
+    SearchTool,
+    SearchFaissTool,
+    SearchBM25Tool,
+    SearchGraphChunkTool,
 )
 from .heavy import (
     GraphThinkTool,
     LLMChainExplorerTool,
-    ParallelThinkTool,
-    CrossAdapterPlannerTool,
-    ContextRewriterTool,
     BeamSearchTool,
 )
-from .hybrid import (
-    ContextRollupTool,
-    EvidenceCrosscheckTool,
-    HybridNeighborhoodProbeTool,
-    CodePythonTool,
-)
+from .hybrid import CodePythonTool
 
 __all__ = [
     "GraphTool",
     "ToolDescriptor",
     "ToolResult",
     "ToolRunRequest",
-    "PatternProbeTool",
-    "ChunkScanTool",
-    "BridgeLookupTool",
-    "PathCacheTool",
     "GraphIntersectionTool",
     "GraphSetDifferenceTool",
     "GraphAggregateTool",
@@ -64,14 +52,12 @@ __all__ = [
     "GraphSdfChildrenTool",
     "GraphSdfDependenciesTool",
     "GraphTraceToRootTool",
+    "SearchTool",
+    "SearchFaissTool",
+    "SearchBM25Tool",
+    "SearchGraphChunkTool",
     "LLMChainExplorerTool",
-    "HybridNeighborhoodProbeTool",
-    "ContextRollupTool",
-    "EvidenceCrosscheckTool",
     "GraphThinkTool",
-    "ParallelThinkTool",
-    "CrossAdapterPlannerTool",
-    "ContextRewriterTool",
     "BeamSearchTool",
     "CodePythonTool",
     "build_builtin_tools",
@@ -82,10 +68,6 @@ __all__ = [
 ]
 
 _BUILTIN_CLASSES = [
-    PatternProbeTool,
-    ChunkScanTool,
-    BridgeLookupTool,
-    PathCacheTool,
     GraphIntersectionTool,
     GraphSetDifferenceTool,
     GraphAggregateTool,
@@ -102,31 +84,25 @@ _BUILTIN_CLASSES = [
     GraphSdfChildrenTool,
     GraphSdfDependenciesTool,
     GraphTraceToRootTool,
+    SearchTool,
+    SearchFaissTool,
+    SearchBM25Tool,
+    SearchGraphChunkTool,
     LLMChainExplorerTool,
-    HybridNeighborhoodProbeTool,
-    ContextRollupTool,
-    EvidenceCrosscheckTool,
     GraphThinkTool,
-    ParallelThinkTool,
-    CrossAdapterPlannerTool,
-    ContextRewriterTool,
     BeamSearchTool,
     CodePythonTool,
 ]
 
 _DESCRIPTOR_MAP = {cls.descriptor.name: cls.descriptor for cls in _BUILTIN_CLASSES}
 _LLM_REQUIRED = {
+    SearchTool,
+    SearchGraphChunkTool,
     LLMChainExplorerTool,
-    HybridNeighborhoodProbeTool,
-    ContextRollupTool,
-    EvidenceCrosscheckTool,
-    ParallelThinkTool,
-    CrossAdapterPlannerTool,
-    ContextRewriterTool,
     BeamSearchTool,
+    GraphThinkTool,
 }
 _LLM_OPTIONAL = {
-    GraphThinkTool,
 }
 
 

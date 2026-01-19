@@ -27,9 +27,9 @@ def test_multi_agent_stop_counts_primary_evidence_only():
 
     merged = {
         "evidences": [
-            {"chunk_id": "d1", "source": "graph.context_rollup", "content": "x", "kind": "derived"},
+            {"chunk_id": "d1", "source": "graph.llm_chain_explorer", "content": "x", "kind": "derived"},
             {"chunk_id": "x1", "source": "graph.neighbors", "content": "x", "kind": "diagnostic"},
-            {"chunk_id": "d2", "source": "graph.context_rollup", "content": "x", "kind": "derived"},
+            {"chunk_id": "d2", "source": "graph.llm_chain_explorer", "content": "x", "kind": "derived"},
         ],
         "coverage_metrics": {"coverage_ratio": 1.0},
     }
@@ -43,4 +43,3 @@ def test_multi_agent_stop_counts_primary_evidence_only():
         ]
     )
     assert MultiAgentGraphReasoningLoop._should_stop_incremental(merged, settings=settings) is True
-

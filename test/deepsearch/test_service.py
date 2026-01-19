@@ -17,7 +17,7 @@ def _default_service_config(*, tmp_path, fingerprint: str, **overrides):  # noqa
         "coverage_expected_min_chunks": 1,
         "tool_names": {
             "graph_channel_tool": "graph_adapter.query",
-            "text_channel_tool": "graph.context_rollup",
+            "text_channel_tool": "graph.llm_chain_explorer",
             "web_channel_tool": "web.search",
             "think_tool": "graph.think",
         },

@@ -15,7 +15,7 @@ def test_missing_cypher_capability_hides_cypher_tools() -> None:
         adapter_name="stub",
         graph_type="stub",
         version="v1",
-        capabilities=(GraphAdapterCapability(name="chain_of_exploration", modes=("ppr_chain", "ppr_prefetch", "bridge_lookup")),),
+        capabilities=(GraphAdapterCapability(name="chain_of_exploration", modes=("ppr_chain", "beam_search")),),
     )
     registry = ToolHintRegistry()
     disabled = disabled_tools_for_adapter(metadata)
@@ -34,7 +34,7 @@ def test_chain_mode_gates_only_missing_modes() -> None:
         version="v1",
         capabilities=(
             GraphAdapterCapability(name="cypher_query", modes=("neo4j",)),
-            GraphAdapterCapability(name="chain_of_exploration", modes=("ppr_chain", "ppr_prefetch", "bridge_lookup")),
+            GraphAdapterCapability(name="chain_of_exploration", modes=("ppr_chain", "beam_search")),
         ),
     )
     registry = ToolHintRegistry()
@@ -42,8 +42,5 @@ def test_chain_mode_gates_only_missing_modes() -> None:
     registry.set_disabled_tools(merge_disabled_tools(disabled, []))
 
     names = _tool_names(include_llm_tools=True, registry=registry)
-    assert "graph.bridge_lookup" in names
-    assert "graph.path_cache" in names
-    assert "graph.beam_search" not in names
+    assert "graph.beam_search" in names
     assert "graph.intersection" in names
-

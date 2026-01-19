@@ -7,8 +7,8 @@ from core.graph_adapter.cypher import adapter_supports_cypher
 from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 
-from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
-from ..governance_tags import EVIDENCE_PRIMARY, REQUIRES_CYPHER, SCOPE_OWNER
+from ...base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+from ...governance_tags import EVIDENCE_PRIMARY, REQUIRES_CYPHER, SCOPE_OWNER
 
 from .graph_ops_common import normalize_entity_name
 

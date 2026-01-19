@@ -16,7 +16,7 @@ from config.core.deepsearch.tool_defaults import (
 from core.graph_adapter.cypher import adapter_supports_cypher
 from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
-from ..governance_tags import EVIDENCE_PRIMARY, REQUIRES_CYPHER, SCOPE_OWNER
+from ...governance_tags import EVIDENCE_PRIMARY, REQUIRES_CYPHER, SCOPE_OWNER
 
 from .graph_ops_common import (
     directionality_config,
@@ -28,7 +28,7 @@ from .graph_ops_common import (
     rel_pattern_varlen,
 )
 from core.knowledge_graph.schema import normalize_relation_token
-from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
+from ...base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 
 
 def _resolution_candidate_payload(candidate: Any) -> Dict[str, Any]:

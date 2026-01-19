@@ -38,7 +38,7 @@ class _StubAdapter:
 
 class _FailingProbeToolManager:
     async def invoke(self, tool_name: str, *, payload):
-        if tool_name == "graph.pattern_scan":
+        if tool_name == "search":
             raise RuntimeError("probe boom")
         chunk = EvidenceChunk(chunk_id=f"{tool_name}-ev", source=tool_name, content=f"ev::{tool_name}")
         return ToolResultPayload(
@@ -88,7 +88,7 @@ def _multi_agent_settings() -> dict:
         "max_subagents": 1,
         "subagent_concurrency": 1,
         "enable_parallel_tool_probes": True,
-        "probe_tool_names": ["graph.chunk_scan", "graph.pattern_scan"],
+        "probe_tool_names": ["search"],
         "probe_concurrency": 2,
         "lead_tool_names": [],
         "lead_tool_concurrency": 1,
@@ -134,6 +134,5 @@ async def test_probe_failures_are_recorded_in_coverage_metrics() -> None:
     assert coverage.get("probe_error_count") == 1
     errors = coverage.get("probe_errors") or []
     assert isinstance(errors, list) and errors
-    assert errors[0]["tool_name"] == "graph.pattern_scan"
+    assert errors[0]["tool_name"] == "search"
     assert "replay" in errors[0]
-

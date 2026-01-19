@@ -49,7 +49,7 @@ def test_report_context_truncates_large_methodology_fields():
         "tool_results": [
             {
                 "plan_step_id": "plan_01",
-                "tool_name": "graph.chunk_scan",
+                "tool_name": "search",
                 "channel": "graph",
                 "result": {
                     "summary": "ok",

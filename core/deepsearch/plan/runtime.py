@@ -301,13 +301,7 @@ class DeepSearchPlanner:
         # Guardrails: keep macro plans coarse; prefer graph_adapter.query for graph steps unless the
         # planner explicitly labels a step as a probe. This avoids the LLM overusing scan tools as
         # primary execution steps.
-        if (
-            channel == "graph"
-            and requested_tool in {"graph.pattern_scan", "graph.chunk_scan"}
-            and not bool(metadata.get("force_tool"))
-            and str(metadata.get("tool_intent") or "").strip().lower() != "probe"
-        ):
-            requested_tool = None
+        # Deprecated probe/scan tools removed; no special casing required here.
         if not self.honor_planner_tool_selection:
             metadata.pop("tool", None)
         tool_name = requested_tool or self._resolve_tool(channel)

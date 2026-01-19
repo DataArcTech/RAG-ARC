@@ -75,8 +75,8 @@ class PlannerRuntimeConfig(BaseModel):
     )
     graph_channel_tool: str = Field("graph_adapter.query", description="Default tool name for graph channel steps.")
     text_channel_tool: str = Field(
-        "graph.context_rollup",
-        description="Default text-channel summariser (chunk rollup).",
+        "graph.llm_chain_explorer",
+        description="Default text-channel tool (LLM chain exploration when structured text output is needed).",
     )
     web_channel_tool: str = Field("web.search", description="Default tool name for web channel steps.")
     include_llm_tools_in_catalog: bool = Field(

@@ -7,32 +7,9 @@ search parameters so they can be tuned via configuration and regression runs.
 BEAM_SEARCH_DEFAULT_BEAM_SIZE = 3
 BEAM_SEARCH_DEFAULT_MAX_DEPTH = 3
 BEAM_SEARCH_DEFAULT_TEMPERATURE = 0.2
-BEAM_SEARCH_DEFAULT_PATTERN_PROBE_MAX_TERMS = 6
-
-CHUNK_SCAN_DEFAULT_MAX_CHUNKS = 5
-CHUNK_SCAN_DEFAULT_QUERY_MAX_CHARS = 240
-
-PATTERN_PROBE_DEFAULT_MAX_TERMS = 4
-PATTERN_PROBE_DEFAULT_MIN_LATIN_LENGTH = 4
-PATTERN_PROBE_DEFAULT_MIN_CJK_LENGTH = 2
-
-CONTEXT_ROLLUP_DEFAULT_WINDOW_SIZE = 6
-CONTEXT_ROLLUP_DEFAULT_SNIPPET_CHARS = 400
-CONTEXT_ROLLUP_DEFAULT_TEMPERATURE = 0.0
-
-PARALLEL_THINK_DEFAULT_BRANCHES = 3
-PARALLEL_THINK_DEFAULT_TEMPERATURE = 0.4
-PARALLEL_THINK_DEFAULT_CONTEXT_PREVIEW_CHARS = 200
-PARALLEL_THINK_DEFAULT_CONTEXT_PREVIEW_ITEMS = 3
-PARALLEL_THINK_DEFAULT_CONFIDENCE_DELTA_PER_BRANCH = 0.1
-PARALLEL_THINK_DEFAULT_COVERAGE_DELTA_PER_BRANCH = 0.05
-
-HYBRID_NEIGHBORHOOD_DEFAULT_MAX_CHUNKS = 5
-HYBRID_NEIGHBORHOOD_DEFAULT_PATTERN_MAX_TERMS = 3
-HYBRID_NEIGHBORHOOD_DEFAULT_TRAVERSAL_STRATEGY = "ppr_chain"
-HYBRID_NEIGHBORHOOD_DEFAULT_TRAVERSAL_MAX_DEPTH = 2
-HYBRID_NEIGHBORHOOD_DEFAULT_SNIPPET_CHARS = 400
-HYBRID_NEIGHBORHOOD_DEFAULT_SUMMARY_TEMPERATURE = 0.1
+BEAM_SEARCH_DEFAULT_SEED_ENTITY_TOP_K = 6
+BEAM_SEARCH_SEED_EXTRACT_TEMPERATURE = 0.0
+BEAM_SEARCH_SEED_EXTRACT_MAX_TOKENS = 240
 
 # -----------------------------
 # graph.neighbors defaults
@@ -69,12 +46,6 @@ ENTITY_RESOLUTION_REQUIRE_MIN_MENTION_COUNT = 1
 ENTITY_RESOLUTION_SCORE_WEIGHT_TOKEN_F1 = 0.7
 ENTITY_RESOLUTION_SCORE_WEIGHT_CHAR_RATIO = 0.3
 ENTITY_RESOLUTION_ALIAS_SCORE_BONUS = 0.12
-
-# -----------------------------
-# graph.evidence_crosscheck defaults
-# -----------------------------
-EVIDENCE_CROSSCHECK_GRAPH_BACKFILL_ENABLED = True
-EVIDENCE_CROSSCHECK_GRAPH_BACKFILL_MAX_CHUNKS = 8
 
 # -----------------------------
 # graph.think tool defaults
@@ -138,3 +109,47 @@ SEARCH_GRAPH_USE_PPR_DEFAULT = False
 SEARCH_GRAPH_ENABLE_LLM_RERANK_DEFAULT = False
 SEARCH_GRAPH_ENTITY_SEED_TOP_K = 10
 SEARCH_GRAPH_ENABLE_ENTITY_FALLBACK = True
+SEARCH_ENTITY_EXTRACT_TEMPERATURE = 0.0
+SEARCH_ENTITY_EXTRACT_MAX_TOKENS = 240
+
+# Allowlist for per-request graph retrieval overrides supplied via tool_args.
+# These map to fields in `config/core/retrieval/pruned_hipporag_neo4j_config.py`.
+SEARCH_GRAPH_SAFE_OVERRIDE_KEYS = (
+    "fact_retrieval_top_k",
+    "max_facts_after_reranking",
+    "expansion_hops",
+    "include_chunk_neighbors",
+    "enable_pruning",
+    "max_neighbors",
+    "query_aware_multiplier",
+    "query_aware_min_k",
+    "query_aware_max_k",
+    "similarity_edge_max_hops",
+    "similarity_edge_min_similarity",
+    "similarity_edge_max_per_node",
+    "seed_entities_from_entity_nn_enabled",
+    "seed_entities_from_entity_nn_top_k",
+    "seed_entities_from_entity_nn_max_extra",
+    "seed_entities_from_entity_nn_max_total",
+    "damping_factor",
+    "ppr_backend",
+    "ppr_directed_mode",
+    "ppr_push_epsilon",
+    "ppr_push_threshold_mode",
+    "ppr_push_target_degree_penalty_gamma",
+    "entity_reset_weight_aggregation",
+    "entity_chunk_count_penalty_gamma",
+    "dense_seed_subgraph_top_k",
+    "dense_seed_subgraph_entity_neighbors_k",
+    "dense_mix_in_top_k",
+    "chunk_selection_strategy",
+    "fact_groundability_enabled",
+    "fact_groundability_mode",
+    "fact_groundability_dense_top_k",
+    "fact_groundability_min_overlap_count",
+    "fact_groundability_min_overlap_ratio",
+    "fact_groundability_soft_min_weight",
+    "fact_groundability_soft_gamma",
+    "fact_groundability_keep_missing_provenance",
+    "fact_groundability_missing_provenance_weight",
+)

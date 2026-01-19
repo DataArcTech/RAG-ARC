@@ -416,7 +416,7 @@ DEEPSEARCH_MCP_SERVER_URI="http://127.0.0.1:8765/mcp/tools"
 DEEPSEARCH_MCP_TRANSPORT="sse"
 DEEPSEARCH_MCP_HEADERS='{"Authorization": "Bearer your-mcp-token"}'
 # Constrain which tools the MCP server exposes (optional)
-DEEPSEARCH_TOOL_MCP_TOOLS="graph.context_rollup,graph.think"
+DEEPSEARCH_TOOL_MCP_TOOLS="search,graph.think"
 # Provide a default graph scope for the standalone MCP server
 DEEPSEARCH_TOOL_MCP_SCOPE_ID="00000000-0000-0000-0000-000000000001"
 DEEPSEARCH_TOOL_MCP_SCOPE_TYPE="owner"

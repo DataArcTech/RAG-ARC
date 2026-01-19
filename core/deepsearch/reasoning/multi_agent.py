@@ -421,7 +421,7 @@ class MultiAgentGraphReasoningLoop:
             and self._settings().enable_parallel_tool_probes
             and self._settings().probe_tool_names
         ):
-            # Budget guard: probe/scan tools are helpful for bootstrapping, but become redundant once
+            # Budget guard: lightweight search probes are helpful for bootstrapping, but become redundant once
             # evidence coverage is already above the stop thresholds.
             should_probe = not self._should_stop_incremental(trace, settings=self._settings())
             if should_probe:
@@ -788,51 +788,11 @@ class MultiAgentGraphReasoningLoop:
         graph_context = merged_trace.get("graph_context") or (base_context.model_dump(exclude_none=True) if base_context else {})
         evidences = self._limit_tool_context_evidences(full_evidences, question=question, graph_context=graph_context)
 
-        triples: List[Dict[str, str]] = []
-        for ev in full_evidences:
-            if not isinstance(ev, dict):
-                continue
-            prov = ev.get("provenance")
-            if not isinstance(prov, dict):
-                continue
-            payload = prov.get("triples") or prov.get("triple")
-            if isinstance(payload, dict):
-                payload = [payload]
-            if not isinstance(payload, list):
-                continue
-            for item in payload:
-                if not isinstance(item, dict):
-                    continue
-                head = item.get("head") or item.get("subject") or item.get("entity")
-                tail = item.get("tail") or item.get("object") or item.get("target")
-                relation = item.get("relation") or item.get("predicate") or item.get("edge")
-                if head and tail and relation:
-                    triples.append({"head": str(head), "relation": str(relation), "tail": str(tail)})
-                if len(triples) >= 24:
-                    break
-            if len(triples) >= 24:
-                break
-
-        skipped: List[Dict[str, Any]] = []
         lead_tool_names = list(self._settings().lead_tool_names)
-        filtered_lead_tools: List[str] = []
-        for tool_name in lead_tool_names:
-            if tool_name == "graph.evidence_crosscheck" and not triples:
-                skipped.append({"tool_name": tool_name, "reason": "missing_triples"})
-                continue
-            filtered_lead_tools.append(tool_name)
-
-        if skipped:
-            merged_trace.setdefault("coverage_metrics", {})
-            if isinstance(merged_trace.get("coverage_metrics"), dict):
-                merged_trace["coverage_metrics"].setdefault("lead_tools_skipped", [])
-                merged_trace["coverage_metrics"]["lead_tools_skipped"] = list(merged_trace["coverage_metrics"].get("lead_tools_skipped") or []) + skipped
 
         async def _invoke(tool_name: str) -> Dict[str, Any]:
             async with semaphore:
                 extra: Dict[str, Any] = {}
-                if tool_name == "graph.evidence_crosscheck" and triples:
-                    extra = {"triples": triples}
                 payload = {
                     "question": question,
                     "plan_step": f"lead:{tool_name}:{uuid.uuid4().hex[:6]}",
@@ -850,7 +810,7 @@ class MultiAgentGraphReasoningLoop:
                     "result": result.model_dump(),
                 }
 
-        tasks = [asyncio.create_task(_invoke(name)) for name in filtered_lead_tools]
+        tasks = [asyncio.create_task(_invoke(name)) for name in lead_tool_names]
         results: List[Dict[str, Any]] = []
         for task in asyncio.as_completed(tasks):
             try:

@@ -32,8 +32,6 @@ _CYPHER_REQUIRED_TOOLS: Set[str] = {
 }
 
 _CHAIN_MODE_REQUIRED_TOOLS: Mapping[str, str] = {
-    "graph.bridge_lookup": "bridge_lookup",
-    "graph.path_cache": "ppr_prefetch",
     "graph.beam_search": "beam_search",
 }
 

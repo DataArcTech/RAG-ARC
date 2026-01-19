@@ -1,6 +1,6 @@
 import pytest
 
-from core.deepsearch.tools.fast.graph_ops_temporal import GraphLatestTruthTool
+from core.deepsearch.tools.fast.graph_ops import GraphLatestTruthTool
 from core.deepsearch.tools import ToolRunRequest
 from core.graph_adapter.base import GraphAccessScope, GraphAdapterCapability, GraphAdapterMetadata
 
@@ -54,4 +54,3 @@ async def test_latest_truth_rejects_unsafe_time_property_for_cypher() -> None:
     assert adapter.last_cypher is not None
     assert malicious not in adapter.last_cypher
     assert "RETURN 1 AS injected" not in adapter.last_cypher
-

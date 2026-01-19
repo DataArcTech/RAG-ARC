@@ -47,7 +47,7 @@ class _TracingStubDeepSearchService:
             "tool_call",
             json.dumps(
                 {
-                    "tool_name": "graph.context_rollup",
+                    "tool_name": "graph.llm_chain_explorer",
                     "call_id": call_id,
                     "plan_step": "s1",
                     "extra": {"query": "保費繳付期與保證回報條件", "channel": "graph"},
@@ -58,7 +58,7 @@ class _TracingStubDeepSearchService:
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
-            meta={"call_id": call_id, "tool_name": "graph.context_rollup"},
+            meta={"call_id": call_id, "tool_name": "graph.llm_chain_explorer"},
         )
 
         await asyncio.sleep(0.01)
@@ -67,7 +67,7 @@ class _TracingStubDeepSearchService:
             "tool_response",
             json.dumps(
                 {
-                    "tool_name": "graph.context_rollup",
+                    "tool_name": "graph.llm_chain_explorer",
                     "call_id": call_id,
                     "ok": True,
                     "route": "local",
@@ -93,7 +93,7 @@ class _TracingStubDeepSearchService:
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
-            meta={"call_id": call_id, "tool_name": "graph.context_rollup", "ok": True},
+            meta={"call_id": call_id, "tool_name": "graph.llm_chain_explorer", "ok": True},
         )
 
         state.record_plan({"plan": {"plan_id": "p1", "steps": [{"step_id": "s1", "description": "rollup", "channel": "graph"}]}})

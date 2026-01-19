@@ -24,7 +24,7 @@ async def test_bench_answer_filters_non_primary_evidence_by_default():
         "question": "Q",
         "evidences": [
             {"chunk_id": "c1", "source": "graph_adapter.query", "content": "primary text", "kind": "primary"},
-            {"chunk_id": "d1", "source": "graph.context_rollup", "content": "derived text", "kind": "derived"},
+            {"chunk_id": "d1", "source": "graph.llm_chain_explorer", "content": "derived text", "kind": "derived"},
             {"chunk_id": "x1", "source": "graph.neighbors", "content": "neighbors count=0", "kind": "diagnostic"},
         ],
     }
@@ -106,4 +106,3 @@ async def test_bench_answer_two_stage_extract_then_answer():
     assert out.get("answer") == "final"
     assert len(llm.calls) == 2
     assert out.get("bench_extracted_points", {}).get("points")
-

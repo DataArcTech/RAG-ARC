@@ -1,6 +1,6 @@
 import pytest
 
-from core.deepsearch.tools.fast.graph_ops_schema_layer import GraphSchemaNodesTool
+from core.deepsearch.tools.fast.graph_ops import GraphSchemaNodesTool
 from core.deepsearch.tools import ToolRunRequest
 from core.graph_adapter.base import GraphAccessScope, GraphAdapterCapability, GraphAdapterMetadata
 
@@ -80,4 +80,3 @@ async def test_schema_nodes_query_by_term() -> None:
     assert adapter.last_cypher is not None
     assert "CONTAINS" in adapter.last_cypher
     assert result.evidences
-

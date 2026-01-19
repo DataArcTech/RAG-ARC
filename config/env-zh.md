@@ -414,7 +414,7 @@ DEEPSEARCH_MCP_SERVER_URI="http://127.0.0.1:8765/mcp/tools"
 DEEPSEARCH_MCP_TRANSPORT="sse"
 DEEPSEARCH_MCP_HEADERS='{"Authorization": "Bearer your-mcp-token"}'
 # 可选：限制 MCP 服务器对外暴露的工具集合
-DEEPSEARCH_TOOL_MCP_TOOLS="graph.context_rollup,graph.think"
+DEEPSEARCH_TOOL_MCP_TOOLS="search,graph.think"
 # 可选：为独立运行的 MCP 服务器注入默认图访问范围
 DEEPSEARCH_TOOL_MCP_SCOPE_ID="00000000-0000-0000-0000-000000000001"
 DEEPSEARCH_TOOL_MCP_SCOPE_TYPE="owner"

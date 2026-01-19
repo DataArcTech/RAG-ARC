@@ -1,6 +1,6 @@
 import pytest
 
-from core.deepsearch.tools.fast.graph_ops_traversal import GraphPathExistsTool
+from core.deepsearch.tools.fast.graph_ops import GraphPathExistsTool
 from core.deepsearch.tools import ToolRunRequest
 from core.graph_adapter.base import GraphAccessScope, GraphAdapterCapability, GraphAdapterMetadata
 
@@ -63,4 +63,3 @@ async def test_path_exists_does_not_use_shortestpath_to_avoid_false_negatives() 
     assert "shortestPath" not in adapter.last_cypher
     assert "ok=true" in result.summary.lower()
     assert result.evidences
-

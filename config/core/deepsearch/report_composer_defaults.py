@@ -28,10 +28,8 @@ DEFAULT_PROVENANCE_CHUNK_ATTACH_MAX = 10
 TOOLISH_CHUNK_ID_PREFIXES: tuple[str, ...] = ("graph.", "tool:")
 TOOLISH_SOURCE_NAMES: frozenset[str] = frozenset(
     {
-        "context_rollup",
-        "evidence_crosscheck",
-        "beam_search",
-        "parallel_think",
-        "think",
+        "graph.beam_search",
+        "graph.think",
+        "graph.llm_chain_explorer",
     }
 )

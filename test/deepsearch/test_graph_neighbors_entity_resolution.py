@@ -2,7 +2,7 @@ import asyncio
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.deepsearch.tools.base import ToolRunRequest
-from core.deepsearch.tools.fast.graph_ops_traversal import GraphNeighborsTool
+from core.deepsearch.tools.fast.graph_ops import GraphNeighborsTool
 from core.graph_adapter.base import GraphAccessScope
 
 

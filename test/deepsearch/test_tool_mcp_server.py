@@ -23,7 +23,7 @@ class _StubLLM:
 
 class _StubAdapter:
     def __init__(self):
-        capability = GraphAdapterCapability(name="chain_of_exploration", modes=("bridge_lookup",))
+        capability = GraphAdapterCapability(name="chain_of_exploration", modes=("beam_search",))
         self._metadata = GraphAdapterMetadata(
             adapter_name="stub_adapter",
             graph_type="stub_graph",
@@ -45,10 +45,15 @@ class _StubAdapter:
 
     async def chain_traverse(self, strategy, *, access_scope=None):
         return {
-            "strategy": strategy.get("strategy", "bridge_lookup") if isinstance(strategy, dict) else "bridge_lookup",
-            "bridges": [
-                {"head": "OpenAI", "relation": "partners_with", "tail": "Anthropic", "id": "bridge-1"},
-                {"head": "Anthropic", "relation": "researches", "tail": "Alignment", "id": "bridge-2"},
+            "strategy": strategy.get("strategy", "beam_search") if isinstance(strategy, dict) else "beam_search",
+            "paths": [
+                {
+                    "path_id": "beam-0",
+                    "nodes": ["OpenAI", "Anthropic"],
+                    "triples": [{"head": "OpenAI", "relation": "partners_with", "tail": "Anthropic"}],
+                    "score": 0.7,
+                    "summary": "OpenAI partners with Anthropic.",
+                }
             ],
         }
 
@@ -60,14 +65,14 @@ class _StubAdapter:
 async def test_tool_mcp_server_invokes_registered_tool_with_adapter_injection(tmp_path):
     server = build_tool_mcp_server(
         llm_connector=_StubLLM(),
-        enabled_tools=["graph.bridge_lookup"],
+        enabled_tools=["graph.beam_search"],
         instructions="test",
         adapter=_StubAdapter(),
         default_scope=GraphAccessScope(scope_id="stub-owner"),
         tool_manager_config={"artifact_dir": str(tmp_path)},
     )
 
-    descriptor = get_tool_descriptor("graph.bridge_lookup")
+    descriptor = get_tool_descriptor("graph.beam_search")
     assert descriptor is not None
     tool = await server.fastmcp._tool_manager.get_tool(descriptor.namespace)
     assert tool is not None
@@ -80,7 +85,7 @@ async def test_tool_mcp_server_invokes_registered_tool_with_adapter_injection(tm
         context_evidences=[],
     )
 
-    assert result["tool_name"] == "graph.bridge_lookup"
+    assert result["tool_name"] == "graph.beam_search"
     assert result["evidences"]
     assert result["summary"]
     assert await server.list_registered_mcp_tool_names() == server.expected_mcp_tool_names()
@@ -94,7 +99,7 @@ async def test_tool_server_config_loader_builds_server(tmp_path, monkeypatch):
     payload = {
         "type": "deepsearch_tool_mcp_server",
         "instructions": "Test scope ${TEST_SCOPE_ID}",
-        "enabled_tools": ["graph.bridge_lookup"],
+        "enabled_tools": ["graph.beam_search"],
         "llm_config": {
             "type": "openai_chat",
             "model_name": "gpt-4o-mini",
@@ -128,4 +133,4 @@ async def test_tool_server_config_loader_builds_server(tmp_path, monkeypatch):
 
     assert server.default_scope is not None
     assert server.default_scope.scope_id == "owner-xyz"
-    assert server.enabled_tools == {"graph.bridge_lookup"}
+    assert server.enabled_tools == {"graph.beam_search"}

@@ -11,7 +11,7 @@
     "realtime_web_force_external": true,
     "honor_planner_tool_selection": true,
     "graph_channel_tool": "graph_adapter.query",
-    "text_channel_tool": "graph.context_rollup",
+    "text_channel_tool": "graph.llm_chain_explorer",
     "web_channel_tool": "web.search",
     "tool_catalog_allowlist": null,
     "tool_catalog_max_items": 200,
@@ -120,9 +120,9 @@
     "max_subagents": 4,
     "subagent_concurrency": 4,
     "enable_parallel_tool_probes": true,
-    "probe_tool_names": ["graph.chunk_scan", "graph.pattern_scan"],
+    "probe_tool_names": ["search"],
     "probe_concurrency": 4,
-    "lead_tool_names": ["graph.context_rollup", "graph.evidence_crosscheck"],
+    "lead_tool_names": ["graph.llm_chain_explorer"],
     "lead_tool_concurrency": 2,
     "max_merge_evidences": 60,
     "worker_timeout_seconds": null,
@@ -217,7 +217,7 @@
           "beam_size": 3,
           "max_depth": 3,
           "temperature": 0.2,
-          "pattern_probe_max_terms": 6
+          "seed_entity_top_k": 6
         }
       },
       "code.python": {

@@ -134,7 +134,7 @@ async def test_graph_reasoning_combines_traversal_and_tools():
 
     plan_steps = [
         {"step_id": "plan_01", "description": "Inspect graph", "channel": "graph", "tool": "graph_adapter.query"},
-        {"step_id": "plan_02", "description": "Rollup", "channel": "text", "tool": "graph.context_rollup"},
+        {"step_id": "plan_02", "description": "Rollup", "channel": "text", "tool": "graph.llm_chain_explorer"},
         {"step_id": "plan_03", "description": "Call web", "channel": "web", "tool": "web.search", "requires_external": True},
     ]
 
@@ -142,11 +142,11 @@ async def test_graph_reasoning_combines_traversal_and_tools():
     result = await loop.run("Who founded OpenAI?", plan_steps, graph_context=context)
 
     assert result["graph_traversals"], "graph traversal should run for the first step"
-    assert any(run["tool_name"] == "graph.context_rollup" for run in result["tool_results"])
+    assert any(run["tool_name"] == "graph.llm_chain_explorer" for run in result["tool_results"])
     assert result["pending_external"] and result["pending_external"][0]["step_id"] == "plan_03"
     called = [name for name, _ in tool_manager.calls]
-    assert "graph.context_rollup" in called
-    rollup_payloads = [payload for name, payload in tool_manager.calls if name == "graph.context_rollup"]
+    assert "graph.llm_chain_explorer" in called
+    rollup_payloads = [payload for name, payload in tool_manager.calls if name == "graph.llm_chain_explorer"]
     assert rollup_payloads and rollup_payloads[0]["context_evidences"], "tool should receive evidence context"
     statuses = {step["step_id"]: step["status"] for step in result["reasoning_steps"]}
     assert statuses["plan_01"] == "done"
@@ -211,7 +211,7 @@ async def test_graph_reasoning_marks_missing_tool_manager_skips_step():
     )
 
     plan_steps = [
-        {"step_id": "plan_02", "description": "Text summary", "channel": "text", "tool": "graph.context_rollup"},
+        {"step_id": "plan_02", "description": "Text summary", "channel": "text", "tool": "graph.llm_chain_explorer"},
     ]
 
     context = GraphQueryContext(adapter_name="hipporag", question="Summarize", access_scope=GraphAccessScope(scope_id="scope-text-test"))
@@ -221,7 +221,7 @@ async def test_graph_reasoning_marks_missing_tool_manager_skips_step():
     entry = result["reasoning_steps"][0]
     assert entry["status"] == "skipped"
     assert entry["diagnostics"]["reason"] == "tool_manager_disabled"
-    assert entry["diagnostics"]["tool"] == "graph.context_rollup"
+    assert entry["diagnostics"]["tool"] == "graph.llm_chain_explorer"
 
 
 @pytest.mark.asyncio
@@ -392,7 +392,7 @@ async def test_graph_reasoning_parallelises_tool_steps_when_configured():
     )
 
     plan_steps = [
-        {"step_id": f"plan_{idx:02d}", "description": f"Rollup {idx}", "channel": "text", "tool": "graph.context_rollup"}
+        {"step_id": f"plan_{idx:02d}", "description": f"Rollup {idx}", "channel": "text", "tool": "graph.llm_chain_explorer"}
         for idx in range(1, 4)
     ]
     context = GraphQueryContext(adapter_name="hipporag", question="Parallel tools?", access_scope=GraphAccessScope(scope_id="scope-parallel"))
@@ -428,7 +428,7 @@ async def test_graph_reasoning_auto_parallel_requires_scheduler_hint():
     )
 
     plan_steps = [
-        {"step_id": f"plan_{idx:02d}", "description": f"Rollup {idx}", "channel": "text", "tool": "graph.context_rollup"}
+        {"step_id": f"plan_{idx:02d}", "description": f"Rollup {idx}", "channel": "text", "tool": "graph.llm_chain_explorer"}
         for idx in range(1, 5)
     ]
 
@@ -470,7 +470,7 @@ async def test_graph_reasoning_auto_parallel_with_scheduler_hint():
             "step_id": f"plan_{idx:02d}",
             "description": f"Rollup {idx}",
             "channel": "text",
-            "tool": "graph.context_rollup",
+            "tool": "graph.llm_chain_explorer",
             "metadata": {"scheduler": "parallel"},
         }
         for idx in range(1, 5)
@@ -518,7 +518,7 @@ async def test_graph_reasoning_marks_tool_timeout():
     )
 
     plan_steps = [
-        {"step_id": "plan_timeout", "description": "Rollup", "channel": "text", "tool": "graph.context_rollup"},
+        {"step_id": "plan_timeout", "description": "Rollup", "channel": "text", "tool": "graph.llm_chain_explorer"},
     ]
 
     context = GraphQueryContext(adapter_name="hipporag", question="Timeout?", access_scope=GraphAccessScope(scope_id="scope-timeout"))

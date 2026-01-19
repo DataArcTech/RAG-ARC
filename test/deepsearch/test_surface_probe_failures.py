@@ -9,10 +9,10 @@ def test_surface_worker_failures_includes_probe_errors() -> None:
             "probe_errors": [
                 {
                     "agent_id": "agent-1",
-                    "tool_name": "graph.pattern_scan",
+                    "tool_name": "search",
                     "error": "probe boom",
                     "error_type": "RuntimeError",
-                    "replay": {"tool_name": "graph.pattern_scan", "payload": {"question": "Q"}},
+                    "replay": {"tool_name": "search", "payload": {"question": "Q"}},
                 }
             ]
         }
@@ -23,4 +23,3 @@ def test_surface_worker_failures_includes_probe_errors() -> None:
     assert last.get("stage") == "graph_reasoning"
     assert "probe tool(s) failed" in str(last.get("message") or "")
     assert last.get("details", {}).get("probe_errors")
-

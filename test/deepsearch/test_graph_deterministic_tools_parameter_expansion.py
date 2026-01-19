@@ -1,8 +1,7 @@
 import pytest
 
 from core.deepsearch.tools import ToolRunRequest
-from core.deepsearch.tools.fast.graph_ops_facts import GraphFactsByTypeTool
-from core.deepsearch.tools.fast.graph_ops_intersection import GraphIntersectionTool
+from core.deepsearch.tools.fast.graph_ops import GraphFactsByTypeTool, GraphIntersectionTool
 from core.graph_adapter.base import GraphAccessScope, GraphAdapterCapability, GraphAdapterMetadata
 
 

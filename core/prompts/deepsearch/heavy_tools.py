@@ -9,12 +9,7 @@ from typing import Final
 
 # v1 prompts -------------------------------------------------------------
 
-CROSS_ADAPTER_PLANNER_SYSTEM_PROMPT_V1: Final[str] = (
-    "Compare adapters and output JSON with 'summary' and 'actions'."
-)
-
 BEAM_SEARCH_RERANK_SYSTEM_PROMPT_V1: Final[str] = (
     "You evaluate beam search candidates on a knowledge graph. "
     'Return JSON array [{"path_id": "...", "score": 0-1}] preferring informative paths.'
 )
-

@@ -62,7 +62,7 @@ REPORT_WRITE_SYSTEM_PROMPT = """You are a research report writer producing knowl
   - [7] ❌ (numeric-only without chunk_ prefix)
   - [Source 1] ❌ (descriptive labels)
 - Only cite chunk_id values that exist in the provided Evidence Pack.
-- Never cite tool-generated IDs or tool names (e.g. graph.context_rollup / graph.* / tool:*). If it is not in the Evidence Pack allowlist, it is not citable.
+- Never cite tool-generated IDs or tool names (e.g. graph.think / graph.* / tool:*). If it is not in the Evidence Pack allowlist, it is not citable.
 - If you cannot support a claim with evidence, do not state it as fact.
 
 ## Output Requirements
@@ -165,7 +165,7 @@ SECTION_WRITE_SYSTEM_PROMPT = """You are a research report section writer produc
   - ^7 ❌ (superscript notation)
   - [7] ❌ (numeric-only without chunk_ prefix)
 - Only cite chunk_id values that exist in the provided Evidence Pack.
-- Never cite tool-generated IDs or tool names (e.g. graph.context_rollup / graph.* / tool:*). If it is not in the Evidence Pack allowlist, it is not citable.
+- Never cite tool-generated IDs or tool names (e.g. graph.think / graph.* / tool:*). If it is not in the Evidence Pack allowlist, it is not citable.
 
 ## Output Requirements
 - Return ONLY valid JSON matching the schema described in the user prompt.

@@ -70,7 +70,7 @@ def test_report_writer_shrinks_prompts_on_context_limit():
         "methodology": {
             "plan_steps": [{"step_id": f"p{i}", "description": "z" * 2000} for i in range(20)],
             "reasoning_steps": [{"step_id": f"r{i}", "output_summary": "w" * 4000} for i in range(30)],
-            "tool_results": [{"tool_name": "graph.pattern_scan", "diagnostics": {"dump": "k" * 5000}} for _ in range(12)],
+            "tool_results": [{"tool_name": "search", "diagnostics": {"dump": "k" * 5000}} for _ in range(12)],
         },
         "graph_evidence": {"seed_entities": ["SAS"] * 50, "graph_stats": {"edges": 9999}},
         "coverage": {

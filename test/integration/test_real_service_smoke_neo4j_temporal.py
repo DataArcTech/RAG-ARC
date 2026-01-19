@@ -9,7 +9,7 @@ from config.encapsulation.database.graph_db.pruned_hipporag_neo4j_config import 
 from config.encapsulation.llm.chat.openai import OpenAIChatConfig
 from config.encapsulation.llm.embedding.openai import OpenAIEmbeddingConfig
 from core.deepsearch.tools.base import ToolRunRequest
-from core.deepsearch.tools.fast.graph_ops_temporal import GraphLatestTruthTool
+from core.deepsearch.tools.fast.graph_ops import GraphLatestTruthTool
 from core.graph_adapter.base import GraphAccessScope
 from encapsulation.data_model.schema import Chunk
 

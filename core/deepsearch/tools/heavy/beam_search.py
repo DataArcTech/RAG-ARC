@@ -1,23 +1,33 @@
 """Think-on-Graph inspired beam search tool."""
 import json
-import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 
-from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema, call_llm_async, safe_json_loads
+from ..base import (
+    GraphTool,
+    ToolDescriptor,
+    ToolResult,
+    ToolRunRequest,
+    build_input_schema,
+    call_llm_async,
+    extract_json_from_text,
+    safe_json_loads,
+)
 from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_CHAIN_TRAVERSE, REQUIRES_LLM, SCOPE_OWNER
-from ..fast.pattern_probe import PatternProbeTool
 from config.core.deepsearch.tool_defaults import (
     BEAM_SEARCH_DEFAULT_BEAM_SIZE,
     BEAM_SEARCH_DEFAULT_MAX_DEPTH,
-    BEAM_SEARCH_DEFAULT_PATTERN_PROBE_MAX_TERMS,
+    BEAM_SEARCH_DEFAULT_SEED_ENTITY_TOP_K,
     BEAM_SEARCH_DEFAULT_TEMPERATURE,
+    BEAM_SEARCH_SEED_EXTRACT_MAX_TOKENS,
+    BEAM_SEARCH_SEED_EXTRACT_TEMPERATURE,
 )
 from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 from core.deepsearch.utils.compression import truncate_text
+from core.prompts.deepsearch import SEARCH_ENTITY_EXTRACT_PROMPT
 from core.prompts.deepsearch.heavy_tools import BEAM_SEARCH_RERANK_SYSTEM_PROMPT_V1
 
 
@@ -43,6 +53,11 @@ class BeamSearchTool(GraphTool):
                     "items": {"type": "string"},
                     "description": "Optional seed entities for initializing the beam.",
                 },
+                "seed_entity_top_k": {
+                    "type": "integer",
+                    "description": "Max entities to extract with LLM when no seeds are provided.",
+                    "minimum": 0,
+                },
                 "beam_size": {"type": "integer", "description": "Override default beam size."},
                 "max_depth": {"type": "integer", "description": "Override default reasoning depth."},
             }
@@ -61,7 +76,7 @@ class BeamSearchTool(GraphTool):
         beam_size: int = BEAM_SEARCH_DEFAULT_BEAM_SIZE,
         max_depth: int = BEAM_SEARCH_DEFAULT_MAX_DEPTH,
         temperature: float = BEAM_SEARCH_DEFAULT_TEMPERATURE,
-        pattern_probe_max_terms: int = BEAM_SEARCH_DEFAULT_PATTERN_PROBE_MAX_TERMS,
+        seed_entity_top_k: int = BEAM_SEARCH_DEFAULT_SEED_ENTITY_TOP_K,
     ):
         if llm_connector is None:
             raise ValueError("BeamSearchTool requires an LLM connector (no fallback ranking).")
@@ -69,14 +84,13 @@ class BeamSearchTool(GraphTool):
         self.beam_size = max(1, beam_size)
         self.max_depth = max(1, max_depth)
         self.temperature = temperature
-        # Reuse deterministic tokenization from PatternProbe to mine candidate entities.
-        self._pattern_probe = PatternProbeTool(max_terms=int(pattern_probe_max_terms))
+        self.seed_entity_top_k = max(0, int(seed_entity_top_k))
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         adapter = self._require_adapter(request.adapter)
         beam_size = int(request.extra.get("beam_size") or self.beam_size)
         max_depth = int(request.extra.get("max_depth") or self.max_depth)
-        seeds = self._seed_entities(request)
+        seeds = await self._seed_entities(request)
 
         async with adapter_locked(adapter):
             traversal = await adapter.chain_traverse(
@@ -129,8 +143,16 @@ class BeamSearchTool(GraphTool):
             raise RuntimeError("BeamSearchTool requires a GraphDeepSearchAdapter instance")
         return adapter
 
-    def _seed_entities(self, request: ToolRunRequest) -> List[str]:
+    async def _seed_entities(self, request: ToolRunRequest) -> List[str]:
         seeds: List[str] = []
+        seed_limit = self.seed_entity_top_k
+        try:
+            override = request.extra.get("seed_entity_top_k")
+            if override is not None:
+                seed_limit = int(override)
+        except Exception:
+            seed_limit = self.seed_entity_top_k
+        seed_limit = max(0, int(seed_limit))
         extra_seeds = request.extra.get("seed_entities")
         if isinstance(extra_seeds, list):
             seeds.extend(str(entity).strip() for entity in extra_seeds if str(entity).strip())
@@ -147,16 +169,46 @@ class BeamSearchTool(GraphTool):
                 if isinstance(candidate, str) and candidate.strip():
                     seeds.append(candidate.strip())
         if not seeds:
-            seeds.extend(self._extract_question_seeds(request))
+            llm_seeds = await self._extract_seed_entities_with_llm(request.question, seed_limit)
+            seeds.extend(llm_seeds)
         return self._deduplicate(seeds)
 
-    def _extract_question_seeds(self, request: ToolRunRequest) -> List[str]:
-        extra = request.extra or {}
-        question = request.question or ""
-        keywords = self._pattern_probe._pick_keywords(question, extra)  # type: ignore[attr-defined]
-        if keywords:
-            return keywords
-        return self._extract_tokens(question)
+    async def _extract_seed_entities_with_llm(self, question: str, limit: int) -> List[str]:
+        if limit <= 0:
+            return []
+        messages = [
+            {"role": "system", "content": SEARCH_ENTITY_EXTRACT_PROMPT},
+            {"role": "user", "content": f"Query: {question}"},
+        ]
+        kwargs: Dict[str, Any] = {
+            "temperature": float(BEAM_SEARCH_SEED_EXTRACT_TEMPERATURE),
+            "max_tokens": int(BEAM_SEARCH_SEED_EXTRACT_MAX_TOKENS),
+        }
+        low_cost = self._low_cost_model_name(self.llm_connector)
+        if low_cost:
+            kwargs["model"] = low_cost
+        response = await call_llm_async(self.llm_connector, messages, **kwargs)
+        extracted = extract_json_from_text(response) or response
+        payload = safe_json_loads(extracted, expected="object") if extracted else None
+        if not isinstance(payload, dict):
+            return []
+        entities = payload.get("entities")
+        if not isinstance(entities, list):
+            return []
+        results: List[str] = []
+        for item in entities:
+            if len(results) >= int(limit):
+                break
+            if isinstance(item, str):
+                token = item.strip()
+                if token:
+                    results.append(token)
+                continue
+            if isinstance(item, dict):
+                name = str(item.get("name") or "").strip()
+                if name:
+                    results.append(name)
+        return self._deduplicate(results)
 
     async def _rank_paths(self, request: ToolRunRequest, paths: List[Dict[str, Any]], beam_size: int) -> List[Dict[str, Any]]:
         if not paths:
@@ -340,6 +392,13 @@ class BeamSearchTool(GraphTool):
         return " -> ".join(str(node) for node in nodes if str(node).strip())
 
     @staticmethod
+    def _low_cost_model_name(llm_connector) -> Optional[str]:
+        cfg = getattr(llm_connector, "config", None)
+        token = getattr(cfg, "low_cost_model_name", None) if cfg is not None else None
+        token = str(token or "").strip()
+        return token or None
+
+    @staticmethod
     def _deduplicate(items: Iterable[str]) -> List[str]:
         seen = set()
         ordered: List[str] = []
@@ -350,7 +409,3 @@ class BeamSearchTool(GraphTool):
             seen.add(token)
             ordered.append(token)
         return ordered
-
-    def _extract_tokens(self, question: str) -> List[str]:
-        tokens = re.findall(r"[A-Za-z0-9_]+", question or "")
-        return self._deduplicate(token for token in tokens if len(token) >= 3)
