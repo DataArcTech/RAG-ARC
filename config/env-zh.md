@@ -446,6 +446,8 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINERU_HEALTHCHECK_TIMEOUT_S` | `2` | 当 `PARSER_PARSE_MODE=mineru` 时，启动/索引会对 `GET $MINERU_SERVER_URL/health` 做健康检查；该变量控制超时秒数。 |
 | `MINERU_FALLBACK_TO_NATIVE_ON_FAILURE` | `true` | 当 `PARSER_PARSE_MODE=mineru` 时，如果 MinerU 解析失败（例如服务未启动）则回退到 native 的 PDF 文本抽取；回退信息会写入解析结果元数据（`metadata.parser_fallback`）。 |
 | `MINERU_TIMEOUT_S` | `900` | 可选：远程 MinerU 解析/下载的 HTTP 超时（秒）。 |
+| `MINERU_POLL_INTERVAL_S` | `5` | 可选：MinerU 异步解析状态的轮询间隔（秒）。 |
+| `MINERU_POLL_TIMEOUT_S` | `0` | 可选：等待 MinerU 解析完成的最大秒数；`0` 或负数表示不限制。 |
 | `MINERU_START_PAGE` | `0` | 可选：MinerU 解析起始页（0-based）。 |
 | `MINERU_END_PAGE` | _(空)_ | 可选：MinerU 解析结束页（0-based，包含该页）。为空表示解析到末尾。 |
 | `TOKEN_CHUNK_SIZE` | `1000` | `token_chunker` 的 chunk size（同时用于 `semantic_unit_chunker.fallback_chunker_config`）。 |

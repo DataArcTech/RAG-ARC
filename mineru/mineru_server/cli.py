@@ -79,7 +79,7 @@ def parse_args(argv: Optional[List[str]]) -> argparse.Namespace:
     s.add_argument(
         "--caption-max-images",
         type=int,
-        default=32,
+        default=0,
         help="Max images to caption via LLM; <=0 means no limit.",
     )
     s.add_argument("--caption-context", default=None, help="Fixed context prepended to caption prompt.")

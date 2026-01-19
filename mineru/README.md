@@ -66,6 +66,7 @@ python mineru/mineru_main.py server \
 ```
 
 Tip: use `--caption-max-images` to cap how many images are sent to the LLM for captioning; set it to `0` (or any negative value) to remove the limit.
+Captioning defaults to `content_list_then_llm` with no image cap (`caption_max_images=0`). Any multimodal chat model that supports image inputs can be used.
 
 Health check:
 
@@ -138,6 +139,7 @@ Base URL: `http://<host>:<port>`
 - `GET /health`: server health + effective runtime info.
 - `GET /config`: returns config (secrets redacted).
 - `POST /parse`: parse a single file (multipart upload).
+- `GET /parse/status/{task_id}`: poll parse status for async parse jobs.
 - `POST /parse/batch`: parse multiple files (multipart upload).
 - `GET /task/{task_id}/manifest`: list files under `output_dir/<task_id>/...`.
 - `GET /task/{task_id}/file/{rel_path}`: download a specific file by relative path (collision-free).
@@ -153,8 +155,9 @@ Base URL: `http://<host>:<port>`
 - `start_page`: `0`-based start page.
 - `end_page`: inclusive end page (optional).
 - `output_format`: `mm_md | md_only | content_list`.
+- `wait`: if `true`, block until parsing completes (default: `false`, returns immediately).
 
-The response includes:
+The response includes (for async, poll `GET /parse/status/{task_id}` until `status=success`):
 - `task_id`, `status`, `processing_time`
 - absolute paths (`markdown_path`, `images_dir`, ...) and **task-relative paths** (`*_rel_path`) for robust downloads
 - `images_metadata` with `task_rel_path` for each image
@@ -207,6 +210,8 @@ result = client.parse(
 task_root = client.sync_task(result["task_id"], Path("./mineru_client_outputs"))
 print(task_root)
 ```
+
+By default, the client polls `/parse/status/{task_id}` until completion. Pass `wait=False` to return immediately with a pending status.
 
 ### Download primary artifacts (md/json/images)
 

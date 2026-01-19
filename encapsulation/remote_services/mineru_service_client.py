@@ -1,4 +1,5 @@
 import io
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -7,9 +8,17 @@ from urllib.parse import urlparse, urlunparse
 
 
 class MinerUServiceClient:
-    def __init__(self, base_url: str, timeout_s: int = 600):
+    def __init__(
+        self,
+        base_url: str,
+        timeout_s: int = 600,
+        poll_interval_s: int = 5,
+        poll_timeout_s: int = 0,
+    ):
         self.base_url = str(base_url or "").rstrip("/")
         self.timeout_s = int(timeout_s)
+        self.poll_interval_s = max(1, int(poll_interval_s))
+        self.poll_timeout_s = max(0, int(poll_timeout_s))
         self.session = requests.Session()
         self._validated_base_url = False
 
@@ -125,6 +134,7 @@ class MinerUServiceClient:
             "table_enable": "true" if table_enable else "false",
             "start_page": str(int(start_page)),
             "output_format": str(output_format),
+            "wait": "false",
         }
         if end_page is not None:
             data["end_page"] = str(int(end_page))
@@ -133,7 +143,35 @@ class MinerUServiceClient:
         files = {"file": (str(filename or "document"), file_obj, "application/octet-stream")}
         resp = self.session.post(url, data=data, files=files, timeout=self.timeout_s)
         resp.raise_for_status()
+        result = resp.json()
+        status = str(result.get("status") or "").lower()
+        if status in {"success", "failed"}:
+            return result
+        task_id = str(result.get("task_id") or "").strip()
+        if not task_id:
+            return result
+        return self.wait_for_parse(task_id)
+
+    def get_parse_status(self, task_id: str) -> Dict[str, Any]:
+        if not self.base_url:
+            raise ValueError("MinerU base_url is empty (set MINERU_SERVER_URL).")
+        self._ensure_valid_base_url()
+        resp = self.session.get(f"{self.base_url}/parse/status/{task_id}", timeout=self.timeout_s)
+        resp.raise_for_status()
         return resp.json()
+
+    def wait_for_parse(self, task_id: str) -> Dict[str, Any]:
+        deadline = None
+        if self.poll_timeout_s > 0:
+            deadline = time.monotonic() + float(self.poll_timeout_s)
+        while True:
+            status_payload = self.get_parse_status(task_id)
+            status = str(status_payload.get("status") or "").lower()
+            if status in {"success", "failed"}:
+                return status_payload
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError(f"MinerU parse timed out after {self.poll_timeout_s}s (task_id={task_id})")
+            time.sleep(self.poll_interval_s)
 
     def get_manifest(self, task_id: str) -> Dict[str, Any]:
         if not self.base_url:

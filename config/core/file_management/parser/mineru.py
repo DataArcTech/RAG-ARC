@@ -24,6 +24,26 @@ def _default_timeout_s() -> int:
         return 900
 
 
+def _default_poll_interval_s() -> int:
+    raw = str(os.getenv("MINERU_POLL_INTERVAL_S", "") or "").strip()
+    if not raw:
+        return 5
+    try:
+        return max(1, int(raw))
+    except Exception:
+        return 5
+
+
+def _default_poll_timeout_s() -> int:
+    raw = str(os.getenv("MINERU_POLL_TIMEOUT_S", "") or "").strip()
+    if not raw:
+        return 0
+    try:
+        return max(0, int(raw))
+    except Exception:
+        return 0
+
+
 def _default_start_page() -> int:
     raw = str(os.getenv("MINERU_START_PAGE", "") or "").strip()
     if not raw:
@@ -55,6 +75,14 @@ class MinerUParserConfig(AbstractConfig):
 
     server_url: str = Field(default_factory=_default_mineru_server_url, description="MinerU server base URL.")
     timeout_s: int = Field(default_factory=_default_timeout_s, description="HTTP timeout (seconds) for remote MinerU parsing.")
+    poll_interval_s: int = Field(
+        default_factory=_default_poll_interval_s,
+        description="Polling interval (seconds) for MinerU async parse status.",
+    )
+    poll_timeout_s: int = Field(
+        default_factory=_default_poll_timeout_s,
+        description="Max seconds to wait for MinerU parse; <=0 means no limit.",
+    )
     reuse_cache: bool = Field(
         default_factory=_default_reuse_cache,
         description=(

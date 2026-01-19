@@ -67,6 +67,7 @@ python mineru/mineru_main.py server \
 ```
 
 提示：可用 `--caption-max-images` 限制送入 LLM 做图注的图片数量；设置为 `0`（或任意负数）表示解除限制。
+默认图注模式为 `content_list_then_llm`，且默认不限制图片数量（`caption_max_images=0`）。只要使用支持图片输入的多模态模型即可。
 
 健康检查：
 
@@ -139,6 +140,7 @@ Base URL：`http://<host>:<port>`
 - `GET /health`：健康检查 + 当前配置摘要。
 - `GET /config`：返回配置（敏感字段会脱敏）。
 - `POST /parse`：单文件解析（multipart 上传）。
+- `GET /parse/status/{task_id}`：异步解析状态轮询。
 - `POST /parse/batch`：多文件解析（multipart 上传）。
 - `GET /task/{task_id}/manifest`：列出 `output_dir/<task_id>/...` 下的文件清单。
 - `GET /task/{task_id}/file/{rel_path}`：按相对路径下载文件（推荐，避免同名冲突）。
@@ -154,8 +156,9 @@ Base URL：`http://<host>:<port>`
 - `start_page`：起始页（0-based）。
 - `end_page`：结束页（包含，选填）。
 - `output_format`：`mm_md | md_only | content_list`。
+- `wait`：是否阻塞等待解析完成（默认 `false`，立即返回）。
 
-返回体包含：
+返回体包含（异步时请轮询 `GET /parse/status/{task_id}` 直到 `status=success`）：
 - `task_id`, `status`, `processing_time`
 - 各类产物的绝对路径（`*_path`）与**任务相对路径**（`*_rel_path`，用于稳定下载）
 - `images_metadata`（每张图包含 `task_rel_path`，可直接走 `/task/.../file/...` 下载）
@@ -208,6 +211,8 @@ result = client.parse(
 task_root = client.sync_task(result["task_id"], Path("./mineru_client_outputs"))
 print(task_root)
 ```
+
+默认会轮询 `/parse/status/{task_id}` 直到完成；如需立即返回可传 `wait=False`。
 
 ### 下载主要产物（md/json/images）
 

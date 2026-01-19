@@ -18,6 +18,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from mineru_server.polling import load_polling_config
+
 LOGGER = logging.getLogger("mineru_client")
 
 
@@ -32,9 +34,14 @@ class MinerUClient:
         self,
         base_url: str,
         timeout: int = 300,
+        poll_interval_s: Optional[int] = None,
+        poll_timeout_s: Optional[int] = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        default_interval, default_timeout = load_polling_config()
+        self.poll_interval_s = max(1, int(poll_interval_s) if poll_interval_s is not None else default_interval)
+        self.poll_timeout_s = max(0, int(poll_timeout_s) if poll_timeout_s is not None else default_timeout)
         self.session = requests.Session()
         LOGGER.debug("Initialized MinerUClient base_url=%s timeout=%s", self.base_url, timeout)
 
@@ -49,6 +56,7 @@ class MinerUClient:
         start_page: int = 0,
         end_page: Optional[int] = None,
         output_format: str = "mm_md",
+        wait: bool = True,
     ) -> Dict:
         """Upload a document and trigger parsing."""
         url = f"{self.base_url}/parse"
@@ -60,6 +68,7 @@ class MinerUClient:
             "table_enable": _bool_to_form_value(table_enable),
             "start_page": str(start_page),
             "output_format": output_format,
+            "wait": "false",
         }
         if end_page is not None:
             payload["end_page"] = str(end_page)
@@ -70,13 +79,37 @@ class MinerUClient:
             response = self.session.post(url, data=payload, files=files, timeout=self.timeout)
         response.raise_for_status()
         result = response.json()
+        status = str(result.get("status") or "").lower()
+        if status not in {"success", "failed"} and wait:
+            task_id = str(result.get("task_id") or "").strip()
+            if task_id:
+                result = self.wait_for_parse(task_id)
         LOGGER.info(
-            "MinerU parse success: task_id=%s status=%s processing_time=%s",
+            "MinerU parse result: task_id=%s status=%s processing_time=%s",
             result.get("task_id"),
             result.get("status"),
             result.get("processing_time"),
         )
         return result
+
+    def get_parse_status(self, task_id: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/parse/status/{task_id}"
+        resp = self.session.get(url, timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    def wait_for_parse(self, task_id: str) -> Dict[str, Any]:
+        deadline = None
+        if self.poll_timeout_s > 0:
+            deadline = time.monotonic() + float(self.poll_timeout_s)
+        while True:
+            payload = self.get_parse_status(task_id)
+            status = str(payload.get("status") or "").lower()
+            if status in {"success", "failed"}:
+                return payload
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError(f"MinerU parse timed out after {self.poll_timeout_s}s (task_id={task_id})")
+            time.sleep(self.poll_interval_s)
 
     def download_file(self, task_id: str, filename: str, destination: Path) -> None:
         """Download a single artifact from MinerU server."""

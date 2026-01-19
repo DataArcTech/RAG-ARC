@@ -448,6 +448,8 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINERU_HEALTHCHECK_TIMEOUT_S` | `2` | Startup/indexing healthcheck timeout seconds for `GET $MINERU_SERVER_URL/health` when `PARSER_PARSE_MODE=mineru`. |
 | `MINERU_FALLBACK_TO_NATIVE_ON_FAILURE` | `true` | When `PARSER_PARSE_MODE=mineru`, fallback to native PDF text extraction if MinerU parsing fails (e.g. service not running). Fallback is recorded in parse result metadata (`metadata.parser_fallback`). |
 | `MINERU_TIMEOUT_S` | `900` | Optional: HTTP timeout seconds for remote MinerU parsing/downloads. |
+| `MINERU_POLL_INTERVAL_S` | `5` | Optional: polling interval seconds for MinerU async parse status. |
+| `MINERU_POLL_TIMEOUT_S` | `0` | Optional: max seconds to wait for MinerU parse completion; `0` or negative means no limit. |
 | `MINERU_START_PAGE` | `0` | Optional: start page (0-based) for MinerU parsing. |
 | `MINERU_END_PAGE` | _(empty)_ | Optional: end page (0-based, inclusive). If empty, parse to the end. |
 | `TOKEN_CHUNK_SIZE` | `1000` | Token chunk size for `token_chunker` (also used as `semantic_unit_chunker.fallback_chunker_config`). |
