@@ -34,24 +34,22 @@ prompts:
       2. CITATION FORMAT: Write period (。or .) FIRST, then <sup>key</sup> immediately after with NO space. Format: "内容。<sup>1</sup>" (CORRECT), NOT "内容<sup>1</sup>。" (WRONG). Apply to EVERY sentence needing citation.
         - For MULTIPLE citations: Use SEPARATE <sup> tags with space between them. Format: "内容。<sup>1</sup> <sup>3</sup>" (CORRECT), NOT "内容。<sup>1,3</sup>" (WRONG), NOT "内容。<sup>1, 3</sup>" (WRONG).
         - Each source key MUST be in its own <sup> tag. Example: "<sup>1</sup> <sup>2</sup> <sup>3</sup>" for sources 1, 2, and 3.
+        - CRITICAL: ONLY cite sources that are ACTUALLY PROVIDED in the Sources list. Do NOT cite source keys that are NOT in the provided Sources list. If a source is not available or filtered out, do NOT reference it with <sup> tags.
       3. For multi-section answers, use numbered hierarchy:
-        1. Main sections: "1. 标题" (REQUIRED), NOT "标题" or "## 标题" (FORBIDDEN)
-        2. Subheadings: "1.1 子标题" (on its own line) → [blank line] → "内容" (on next line), NOT "1.1 子标题 内容" on same line (FORBIDDEN)
+        1. Main sections: "1. 标题" (REQUIRED, start at beginning of line with NO indentation), NOT "标题" or "## 标题" (FORBIDDEN)
+        2. Subheadings: "1.1 子标题" MUST be on its own line with 2-4 spaces indentation relative to main section. Format: [blank line] → "1.1 子标题" (on its own line, indented) → [blank line] → "内容" (on next line, further indented), NOT "1.1 子标题 内容" on same line (FORBIDDEN)
         3. Numbering: After "1. 标题" use 1.1, 1.2, 1.3... (NOT standalone "2" or "3")
-        4. Each sentence with citation gets its own decimal subheading paragraph
+        4. Indentation: Subheadings (1.1, 1.2, etc.) MUST be indented (2-4 spaces) relative to main sections. Content under each subheading MUST be further indented (4-6 spaces total) relative to main sections.
+        5. Each sentence with citation gets its own decimal subheading paragraph
         - Example (CORRECT):
           1. 保费水平
-          
             1.1 保费比较
-          香港保险保费通常较低。<sup>1</sup>
-          
+              香港保险保费通常较低。<sup>1</sup>
             1.2 保障额度
-          保障额度灵活，部分产品包含分红机制。<sup>2</sup>
-          
+              保障额度灵活，部分产品包含分红机制。<sup>2</sup>
           2. 保障范围
-          
-             2.1 重大疾病种类
-          香港保险覆盖50-100多种疾病。<sup>3</sup>
+            2.1 重大疾病种类
+              香港保险覆盖50-100多种疾病。<sup>3</sup>
       4. Keep answers SHORT: 500 words (max 1000 for complex). Simple questions (2-5 sentences) may skip headings.
       5. Each decimal subheading paragraph contains ONLY ONE sentence ending with period and <sup> tags.
       6. When listing, use 1 sentence per item (max 3-5 items). Summarize multiple scenarios in 1 sentence each.
