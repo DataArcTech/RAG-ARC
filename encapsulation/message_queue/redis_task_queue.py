@@ -459,7 +459,7 @@ class RedisTaskQueue:
 
         task_run_key = self._settings.key_task_run(task_run_id)
         result_payload_inline = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
-        payload_size_bytes = len(result_payload_inline.encode("utf-8"))
+        payload_size_bytes = len(result_payload_inline.encode("utf-8", errors="replace"))
         external_ref: str | None = None
         result_payload_to_redis = result_payload_inline
         record_result_ref = result_key
@@ -468,7 +468,7 @@ class RedisTaskQueue:
                 external_ref = self._get_result_store().put_bytes(
                     namespace=self._settings.namespace,
                     run_id=task_run_id,
-                    payload=result_payload_inline.encode("utf-8"),
+                    payload=result_payload_inline.encode("utf-8", errors="replace"),
                     ttl_seconds=int(self._settings.result_ttl_seconds),
                 )
                 result_payload_to_redis = json.dumps(
@@ -627,7 +627,7 @@ class RedisTaskQueue:
         event_payload = json.dumps(event, ensure_ascii=False, separators=(",", ":"), default=str)
         max_inline = int(self._settings.result_max_inline_bytes or 0)
         if max_inline > 0:
-            payload_size_bytes = len(event_payload.encode("utf-8"))
+            payload_size_bytes = len(event_payload.encode("utf-8", errors="replace"))
             if payload_size_bytes > max_inline:
                 logger.warning(
                     "Progress event payload too large; truncating further (flow=%s run_id=%s size_bytes=%d limit_bytes=%d)",
@@ -707,7 +707,7 @@ class RedisTaskQueue:
             return
         key = self._settings.key_task_result(task_run_id)
         result_payload_inline = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
-        payload_size_bytes = len(result_payload_inline.encode("utf-8"))
+        payload_size_bytes = len(result_payload_inline.encode("utf-8", errors="replace"))
         external_ref: str | None = None
         value_to_set = result_payload_inline
         if self._should_externalize_result(payload_size_bytes=payload_size_bytes):
@@ -715,7 +715,7 @@ class RedisTaskQueue:
                 external_ref = self._get_result_store().put_bytes(
                     namespace=self._settings.namespace,
                     run_id=task_run_id,
-                    payload=result_payload_inline.encode("utf-8"),
+                    payload=result_payload_inline.encode("utf-8", errors="replace"),
                     ttl_seconds=int(self._settings.result_ttl_seconds),
                 )
                 value_to_set = json.dumps(

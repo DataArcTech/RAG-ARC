@@ -159,7 +159,8 @@ class _IndexManagerPipelineMixin:
             result["metadata"]["parser_type"] = parser_type_name
 
             # Convert parsed text to bytes for storage
-            parsed_data = parsed_text.encode("utf-8")
+            # Use errors='replace' to handle surrogate pairs and invalid Unicode characters
+            parsed_data = parsed_text.encode("utf-8", errors="replace")
 
             parsed_content_id = await get_thread_pool().run_blocking(
                 self.parsed_content_storage.store_parsed_content,
@@ -236,7 +237,8 @@ class _IndexManagerPipelineMixin:
 
                 # Convert chunk to JSON bytes for storage (use thread pool to avoid blocking)
                 try:
-                    chunk_data = json.dumps(chunk, ensure_ascii=False).encode("utf-8")
+                    # Use errors='replace' to handle surrogate pairs and invalid Unicode characters
+                    chunk_data = json.dumps(chunk, ensure_ascii=False).encode("utf-8", errors="replace")
                     chunk_id = await get_thread_pool().run_blocking(
                         self.chunk_storage.store_chunk,
                         source_parsed_content_id=parsed_content_id,
