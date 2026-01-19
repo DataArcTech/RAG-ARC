@@ -82,15 +82,6 @@ APP_LOG_FILE=${APP_LOG_FILE:-${APP_DIR}/log/app.log}
 PARSER_OUTPUT_DIR=${PARSER_OUTPUT_DIR:-${APP_DIR}/data/parsed_files}
 LOCAL_FILE_STORAGE_PATH=${LOCAL_FILE_STORAGE_PATH:-${APP_DIR}/local/files}
 
-# MinerU 服务配置
-MINERU_ENABLED=${MINERU_ENABLED:-false}
-MINERU_HOST=${MINERU_HOST:-0.0.0.0}
-MINERU_PORT=${MINERU_PORT:-8899}
-MINERU_PM2_NAME="mineru-server-livingKB_test"
-MINERU_OUTPUT_DIR=${MINERU_OUTPUT_DIR:-${APP_DIR}/data/mineru_outputs}
-MINERU_TEMP_DIR=${MINERU_TEMP_DIR:-/tmp/mineru_temp}
-MINERU_LOG_FILE=${MINERU_LOG_FILE:-${APP_DIR}/log/mineru.log}
-
 # ==============================================================================
 # 5. 检查核心依赖命令
 # ==============================================================================
@@ -195,60 +186,6 @@ echo ""
 if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
     echo "  ⚠️  PostgreSQL启动超时，但将继续尝试启动应用（请检查容器日志）"
 fi
-
-# ==============================================================================
-# 6.5 启动/管理 MinerU 服务 (可选)
-# ==============================================================================
-start_mineru_service() {
-    # 自动检测：如果 PARSER_PARSE_MODE=mineru 或 MINERU_ENABLED=true，则启动
-    local should_start=false
-    if [[ "${MINERU_ENABLED}" == "true" ]]; then
-        should_start=true
-    elif [[ "${PARSER_PARSE_MODE:-}" == "mineru" ]]; then
-        should_start=true
-        echo "  ℹ️  检测到 PARSER_PARSE_MODE=mineru，自动启用 MinerU 服务"
-    fi
-    
-    if [[ "${should_start}" != "true" ]]; then
-        echo "⏭️  跳过 MinerU 服务启动（PARSER_PARSE_MODE=${PARSER_PARSE_MODE:-native}, MINERU_ENABLED=${MINERU_ENABLED:-false}）"
-        return 0
-    fi
-
-    echo "🔧 启动/重启 MinerU 服务..."
-    mkdir -p $(dirname ${MINERU_LOG_FILE}) ${MINERU_OUTPUT_DIR} ${MINERU_TEMP_DIR}
-
-    # 清理旧的 MinerU 进程
-    pm2 stop "${MINERU_PM2_NAME}" > /dev/null 2>&1 || true
-    pm2 delete "${MINERU_PM2_NAME}" > /dev/null 2>&1 || true
-    
-    # 检查端口占用
-    MINERU_PID=$(sudo lsof -t -i:"${MINERU_PORT}" 2>/dev/null || true)
-    if [ -n "${MINERU_PID}" ]; then
-        echo "  ⚠️  发现进程 ${MINERU_PID} 占用端口 ${MINERU_PORT}，正在强制杀死..."
-        sudo kill -9 "${MINERU_PID}" > /dev/null 2>&1 || true
-        sleep 1
-    fi
-
-    # 启动 MinerU 服务（使用 uv run python 确保使用正确的虚拟环境）
-    cd ${APP_DIR} || { echo "❌ 应用目录不存在: ${APP_DIR}"; exit 1; }
-    
-    # 构建 PYTHONPATH，确保可以正确导入 mineru_server 模块
-    MINERU_PYTHONPATH="${APP_DIR}:${APP_DIR}/mineru:${PYTHONPATH:-}"
-    
-    pm2 start "uv run python mineru/mineru_main.py server --host ${MINERU_HOST} --port ${MINERU_PORT} --output-dir ${MINERU_OUTPUT_DIR} --temp-dir ${MINERU_TEMP_DIR}" \
-        --name "${MINERU_PM2_NAME}" \
-        --log "${MINERU_LOG_FILE}" \
-        --cwd "${APP_DIR}" \
-        --update-env \
-        --env "PYTHONUNBUFFERED=1" \
-        --env "LOG_LEVEL=${LOG_LEVEL:-INFO}" \
-        --env "PYTHONPATH=${MINERU_PYTHONPATH}"
-    
-    echo "  ✅ MinerU 服务已通过 PM2 启动（端口: ${MINERU_PORT}）"
-    echo ""
-}
-
-start_mineru_service
 
 # ==============================================================================
 # 7. 使用 PM2 启动/重启应用 (包含增强版清理逻辑)
@@ -396,9 +333,6 @@ if pm2 list | grep -q "${PM2_APP_NAME}" && pm2 list | grep -q "online"; then
     echo "  - Redis: ${REDIS_HOST:-localhost}:${REDIS_HOST_PORT} (容器: ${REDIS_CONTAINER_NAME})"
     echo "  - Neo4j Web: http://localhost:${NEO4J_WEB_HOST_PORT}"
     echo "  - Neo4j Bolt: ${NEO4J_URL:-bolt://localhost:${NEO4J_BOLT_HOST_PORT}} (容器: ${NEO4J_CONTAINER_NAME})"
-    if [[ "${MINERU_ENABLED}" == "true" ]]; then
-        echo "  - MinerU 服务: http://${MINERU_HOST}:${MINERU_PORT} (PM2: ${MINERU_PM2_NAME})"
-    fi
     echo "  - 应用API: http://localhost:${APP_PORT}"
     echo "  - 自动定位的代码目录: ${APP_DIR}"
     echo ""
@@ -407,10 +341,6 @@ if pm2 list | grep -q "${PM2_APP_NAME}" && pm2 list | grep -q "online"; then
     echo "  - 查看日志: pm2 logs ${PM2_APP_NAME}"
     echo "  - 重启应用: pm2 restart ${PM2_APP_NAME} --update-env"
     echo "  - 停止应用: pm2 stop ${PM2_APP_NAME}"
-    if [[ "${MINERU_ENABLED}" == "true" ]]; then
-        echo "  - MinerU 日志: pm2 logs ${MINERU_PM2_NAME}"
-        echo "  - 重启 MinerU: pm2 restart ${MINERU_PM2_NAME}"
-    fi
     echo "  - 开机自启: pm2 startup && pm2 save"
     echo ""
     echo "📝 队列 Workers 管理命令："
