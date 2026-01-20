@@ -255,12 +255,15 @@ class NativeParser(AbstractParser):
         try:
             import io
             from pypdf import PdfReader
+            from core.file_management.pdf_glyph_name_decoder import decode_pypdf_glyph_names
 
             reader = PdfReader(io.BytesIO(file_data))
             page_count = len(reader.pages)
             results: List[Dict[str, Any]] = []
             for page_index, page in enumerate(reader.pages):
                 text = page.extract_text() or ""
+                decoded = decode_pypdf_glyph_names(text)
+                text = decoded.text
                 if text.strip():
                     results.append(
                         {
@@ -270,6 +273,7 @@ class NativeParser(AbstractParser):
                                 "page_count": page_count,
                                 "source_file_name": filename,
                                 "pdf_backend": "pypdf",
+                                "pdf_glyph_names_decoded": bool(decoded.changed),
                             },
                         }
                     )
@@ -281,6 +285,7 @@ class NativeParser(AbstractParser):
                             "source_file_name": filename,
                             "page_count": page_count,
                             "pdf_backend": "pypdf",
+                            "pdf_glyph_names_decoded": False,
                         },
                     }
                 )

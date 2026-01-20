@@ -133,10 +133,11 @@ async def lifespan(app: FastAPI):
         health = check_dependencies(default_mode="strict")
         checks = health.get("checks") or {}
         logger.info(
-            "Dependency health: postgres=%s redis=%s neo4j=%s (mode=%s)",
+            "Dependency health: postgres=%s redis=%s neo4j=%s mineru=%s (mode=%s)",
             bool((checks.get("postgres") or {}).get("ok")),
             bool((checks.get("redis") or {}).get("ok")),
             bool((checks.get("neo4j") or {}).get("ok")),
+            (bool((checks.get("mineru") or {}).get("ok")) if "mineru" in checks else "n/a"),
             health.get("mode"),
         )
     except Exception as exc:  # noqa: BLE001

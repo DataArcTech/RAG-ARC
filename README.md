@@ -285,6 +285,8 @@ RAG-ARC supports switching the PDF/image parsing backend via `.env`:
 - `PARSER_PARSE_MODE=dotsocr`: local DotsOCR OCR.
 - `PARSER_PARSE_MODE=mineru` (recommended): remote MinerU service for better layout + multimodal parsing.
 
+Note: Some PDFs without a usable `ToUnicode` cmap may produce glyph-name artifacts like `/one.lf` during native extraction; RAG-ARC normalizes common digit glyphs, but `mineru` is still recommended for best quality.
+
 When using MinerU:
 
 - Set `MINERU_SERVER_URL` (e.g. `http://127.0.0.1:8899`) and optionally `MINERU_TIMEOUT_S=900`.

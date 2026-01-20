@@ -301,6 +301,8 @@ RAG-ARC 支持通过 `.env` 切换 PDF/图片解析方式：
 - `PARSER_PARSE_MODE=dotsocr`：使用本地 DotsOCR 做 OCR。
 - `PARSER_PARSE_MODE=mineru`（推荐）：使用远程 MinerU 服务进行版面/多模态解析。
 
+提示：部分 PDF 在缺少可用 `ToUnicode` 映射时，native 抽取可能出现类似 `/one.lf` 的字形名噪声；RAG-ARC 会对常见数字字形进行归一化，但仍建议使用 `mineru` 获得更稳定的解析质量。
+
 使用 MinerU 时：
 
 - 设置 `MINERU_SERVER_URL`（例如 `http://127.0.0.1:8899`），可选 `MINERU_TIMEOUT_S=900`。

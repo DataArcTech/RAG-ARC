@@ -2,6 +2,7 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
+import httpx
 from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
@@ -60,11 +61,58 @@ def check_neo4j() -> Dict[str, Any]:
         return {"ok": False, "error": str(exc)}
 
 
+def _mineru_health_url(base_url: str) -> str:
+    token = str(base_url or "").strip()
+    return token.rstrip("/") + "/health"
+
+
+def _mineru_healthcheck_timeout_s() -> float:
+    raw = str(os.getenv("MINERU_HEALTHCHECK_TIMEOUT_S", "") or "").strip()
+    if not raw:
+        return 2.0
+    try:
+        return max(0.1, float(raw))
+    except Exception:
+        return 2.0
+
+
+def check_mineru() -> Dict[str, Any]:
+    """
+    Check MinerU health endpoint when PARSER_PARSE_MODE=mineru.
+
+    Uses:
+    - MINERU_SERVER_URL: base URL, e.g. http://127.0.0.1:8899
+    - MINERU_HEALTHCHECK_TIMEOUT_S: startup healthcheck timeout seconds (default: 2)
+    """
+    base_url = str(os.getenv("MINERU_SERVER_URL", "") or "").strip()
+    if not base_url:
+        return {"ok": False, "error": "MINERU_SERVER_URL is empty (required when PARSER_PARSE_MODE=mineru)."}
+
+    url = _mineru_health_url(base_url)
+    timeout_s = _mineru_healthcheck_timeout_s()
+    try:
+        resp = httpx.get(url, timeout=timeout_s)
+        if resp.status_code != 200:
+            return {"ok": False, "error": f"GET {url} returned HTTP {resp.status_code}"}
+        try:
+            payload = resp.json()
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            status = str(payload.get("status") or "").strip().lower()
+            if status and status != "healthy":
+                return {"ok": False, "error": f"GET {url} returned status={status!r}"}
+        return {"ok": True, "url": url}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"GET {url} failed: {exc}"}
+
+
 def check_dependencies(
     *,
     include_postgres: bool = True,
     include_redis: bool = True,
     include_neo4j: bool = True,
+    include_mineru: bool | None = None,
     mode_env: str = "RAGARC_DEPENDENCY_CHECK_MODE",
     default_mode: str = "warn",
 ) -> Dict[str, Any]:
@@ -87,6 +135,10 @@ def check_dependencies(
         checks["redis"] = check_redis()
     if include_neo4j:
         checks["neo4j"] = check_neo4j()
+    if include_mineru is None:
+        include_mineru = str(os.getenv("PARSER_PARSE_MODE", "native") or "native").strip().lower() == "mineru"
+    if include_mineru:
+        checks["mineru"] = check_mineru()
 
     failed = {name: res for name, res in checks.items() if not res.get("ok")}
     ok = not failed
@@ -95,6 +147,16 @@ def check_dependencies(
         error_summary = "; ".join(f"{name}={res.get('error')}" for name, res in failed.items())
         logger.warning("Dependency health check failed: %s", error_summary)
         if mode == "strict":
+            if "mineru" in failed:
+                mineru_url = str(os.getenv("MINERU_SERVER_URL", "") or "").strip()
+                health_url = mineru_url.rstrip("/") + "/health" if mineru_url else "<empty MINERU_SERVER_URL>/health"
+                hint = (
+                    "MinerU is required but not reachable (PARSER_PARSE_MODE=mineru). "
+                    f"Start MinerU and verify `curl {health_url}` returns 200/healthy; "
+                    "otherwise the service cannot start/index. "
+                    "If you want to bypass MinerU, switch PARSER_PARSE_MODE to native/dotsocr."
+                )
+                raise RuntimeError(f"Dependency health check failed: {error_summary}. {hint}")
             raise RuntimeError(f"Dependency health check failed: {error_summary}")
 
     return {"mode": mode, "ok": ok, "checks": checks}
