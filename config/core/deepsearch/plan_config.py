@@ -4,7 +4,7 @@ from typing import Literal, Optional
 from pydantic import Field
 
 from core.deepsearch.plan import PlanGenerator, PlannerSettings
-from core.prompts.deepsearch import GRAPH_PLANNER_SYSTEM_PROMPT, GRAPH_PLANNER_USER_PROMPT
+from core.prompts.deepsearch import GRAPH_PLANNER_SYSTEM_PROMPT_EN, GRAPH_PLANNER_USER_PROMPT_EN
 from config.encapsulation.llm.chat.openai import OpenAIChatConfig
 from framework.config import AbstractConfig
 
@@ -31,8 +31,8 @@ class DeepSearchPlannerConfig(AbstractConfig):
             mode=self.mode,
             max_steps=int(self.max_steps),
             enable_sub_question=bool(self.enable_sub_question),
-            system_prompt=GRAPH_PLANNER_SYSTEM_PROMPT,
-            user_prompt_template=GRAPH_PLANNER_USER_PROMPT,
+            system_prompt=GRAPH_PLANNER_SYSTEM_PROMPT_EN,
+            user_prompt_template=GRAPH_PLANNER_USER_PROMPT_EN,
             available_tools_hint="",
         )
         return PlanGenerator(llm, settings)

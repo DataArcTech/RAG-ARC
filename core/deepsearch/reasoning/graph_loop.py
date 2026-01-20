@@ -254,6 +254,7 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             "max_tool_calls": int(_get(think, "max_tool_calls")),
             "tool_call_concurrency": int(_get(think, "tool_call_concurrency")),
             "tool_catalog_max_items": int(_get(think, "tool_catalog_max_items")),
+            "tool_catalog_allowlist": _get(think, "tool_catalog_allowlist"),
             "max_rounds_per_checkpoint": max(1, int(_get(think, "max_rounds_per_checkpoint") or 1)),
             "include_llm_tools": bool(include_llm_tools),
         }

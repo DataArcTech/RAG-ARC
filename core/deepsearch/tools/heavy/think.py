@@ -1,4 +1,4 @@
-"""Graph think tool that offers structured reasoning pauses."""
+"""Think tool that offers structured reasoning pauses."""
 import json
 from typing import Any, Dict, List, Optional
 
@@ -6,8 +6,8 @@ from pydantic import BaseModel, Field
 
 from config.core.deepsearch import tool_defaults
 from encapsulation.data_model.deepsearch import ThinkNote, GraphQueryContext
-from core.prompts.deepsearch.report import JSON_REPAIR_USER_PROMPT
-from core.prompts.deepsearch import THINK_TOOL_SYSTEM_PROMPT
+from core.prompts.deepsearch.report import JSON_REPAIR_USER_PROMPT_EN
+from core.prompts.deepsearch import THINK_TOOL_SYSTEM_PROMPT_EN
 from core.deepsearch.utils.compression import compact_evidences, resolve_compaction_config
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, safe_json_loads
@@ -31,15 +31,16 @@ class ThinkToolResponse(BaseModel):
     missing_topics: List[str] = Field(...)
 
 
-class GraphThinkTool(GraphTool):
-    """Implements Anthropic-style think windows tailored for graph reasoning."""
+class ThinkTool(GraphTool):
+    """Implements structured think windows for multi-tool reasoning."""
 
     descriptor = ToolDescriptor(
-        name="graph.think",
+        name="think",
         channel="graph",
         description=(
             "Structured pause that digests current context before the next hop. "
-            "Evidence: derived think notes (NOT citeable)."
+            "Evidence: derived think notes (NOT citeable). "
+            "Good: summarize gaps + propose next tool calls. Bad: invent facts or call think."
         ),
         speed="slow",
         cost="low",
@@ -61,7 +62,7 @@ class GraphThinkTool(GraphTool):
         llm_connector=None,
         *,
         temperature: float = 0.1,
-        system_prompt: str = THINK_TOOL_SYSTEM_PROMPT,
+        system_prompt: str = THINK_TOOL_SYSTEM_PROMPT_EN,
         json_repair_attempts: int = tool_defaults.THINK_JSON_REPAIR_DEFAULT_ATTEMPTS,
         json_repair_temperature: float = tool_defaults.THINK_JSON_REPAIR_DEFAULT_TEMPERATURE,
         json_repair_max_raw_chars: int = tool_defaults.THINK_JSON_REPAIR_DEFAULT_MAX_RAW_CHARS,
@@ -101,7 +102,7 @@ class GraphThinkTool(GraphTool):
         context_snapshot = self._graph_context_snapshot(request.graph_context)
         coverage_snapshot = request.coverage_metrics or {}
         if not self.llm_connector:
-            raise RuntimeError("GraphThinkTool requires an LLM connector")
+            raise RuntimeError("ThinkTool requires an LLM connector")
 
         cfg = resolve_compaction_config(
             branch="think",
@@ -165,7 +166,7 @@ class GraphThinkTool(GraphTool):
                 },
             )
         except Exception as exc:
-            raise RuntimeError(f"GraphThinkTool failed: {exc}") from exc
+            raise RuntimeError(f"ThinkTool failed: {exc}") from exc
 
     async def _parse_or_repair_json(self, *, messages: List[Dict[str, str]], raw: str) -> Dict[str, Any]:
         parsed = safe_json_loads(raw, expected="dict")
@@ -186,7 +187,7 @@ class GraphThinkTool(GraphTool):
         if len(snippet) > self.json_repair_max_raw_chars:
             snippet = snippet[: self.json_repair_max_raw_chars] + "…"
         expected_label = "object" if expected == "dict" else ("array" if expected == "list" else expected)
-        repair_prompt = JSON_REPAIR_USER_PROMPT.format(
+        repair_prompt = JSON_REPAIR_USER_PROMPT_EN.format(
             expected_top_level=expected_label,
             error="invalid_json",
             raw_snippet=snippet,
@@ -216,7 +217,7 @@ class GraphThinkTool(GraphTool):
 
     @staticmethod
     def _build_thought_log_entry(note: ThinkNote, coverage_snapshot: Dict[str, Any]) -> Dict[str, Any]:
-        tags = ["graph.think"]
+        tags = ["think"]
         coverage_score = coverage_snapshot.get("coverage_score")
         if isinstance(coverage_score, (int, float)) and coverage_score < 0.4:
             tags.append("coverage_gap")

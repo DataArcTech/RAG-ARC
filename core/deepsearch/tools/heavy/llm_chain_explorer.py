@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 
 from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
-from core.prompts.deepsearch import LLM_CHAIN_EXPLORER_SYSTEM_PROMPT
+from core.prompts.deepsearch import LLM_CHAIN_EXPLORER_SYSTEM_PROMPT_EN
 from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.file_scope import resolve_file_scope
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
@@ -47,7 +47,7 @@ class LLMChainExplorerTool(GraphTool):
         *,
         max_queries: int = 4,
         temperature: float = 0.2,
-        system_prompt: str = LLM_CHAIN_EXPLORER_SYSTEM_PROMPT,
+        system_prompt: str = LLM_CHAIN_EXPLORER_SYSTEM_PROMPT_EN,
     ):
         self.llm_connector = llm_connector
         self.max_queries = max_queries

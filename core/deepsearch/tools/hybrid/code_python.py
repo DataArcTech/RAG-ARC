@@ -276,7 +276,8 @@ class CodePythonTool(GraphTool):
         channel="text",
         description=(
             "Execute deterministic Python for math/finance verification (returns code + outputs). "
-            "Evidence: derived computation results (NOT citeable; cite underlying inputs/chunks)."
+            "Evidence: derived computation results (NOT citeable). "
+            "Good: provide full code + INPUTS and set result. Bad: placeholder code."
         ),
         speed="medium",
         cost="low",

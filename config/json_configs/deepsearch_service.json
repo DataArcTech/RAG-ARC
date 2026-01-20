@@ -13,8 +13,15 @@
     "graph_channel_tool": "graph_adapter.query",
     "text_channel_tool": "graph.llm_chain_explorer",
     "web_channel_tool": "web.search",
-    "tool_catalog_allowlist": null,
-    "tool_catalog_max_items": 200,
+    "tool_catalog_allowlist": [
+      "search",
+      "knowledge_base.explore",
+      "graph.ops",
+      "think",
+      "web.search",
+      "code.python"
+    ],
+    "tool_catalog_max_items": 6,
     "include_llm_tools_in_catalog": true,
     "default_web_provider": "${DEEPSEARCH_WEB_PROVIDER}",
     "graph_adapter_name": "${DEEPSEARCH_DEFAULT_ADAPTER}",
@@ -103,14 +110,22 @@
     "parallel_branches": 1,
     "tool_timeout_seconds": 45.0,
     "think": {
-      "tool_name": "graph.think",
+      "tool_name": "think",
       "every_n_steps": 1,
       "min_coverage": 0.75,
       "always_run": true,
       "enable_tool_calls": true,
       "max_tool_calls": 4,
       "tool_call_concurrency": 2,
-      "tool_catalog_max_items": 200,
+      "tool_catalog_max_items": 6,
+      "tool_catalog_allowlist": [
+        "search",
+        "knowledge_base.explore",
+        "graph.ops",
+        "think",
+        "web.search",
+        "code.python"
+      ],
       "include_llm_tools": true,
       "max_rounds_per_checkpoint": 2
     }

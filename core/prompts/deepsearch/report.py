@@ -1,6 +1,6 @@
 """Prompt templates for DeepSearch report generation."""
 
-REPORT_OUTLINE_SYSTEM_PROMPT = """You are a report planner specializing in knowledge graph-enhanced research reports.
+REPORT_OUTLINE_SYSTEM_PROMPT_EN = """You are a report planner specializing in knowledge graph-enhanced research reports.
 
 ## Goal
 Convert the available DeepSearch signals into a clear report outline that maximizes clarity and evidence utilization.
@@ -24,7 +24,7 @@ Convert the available DeepSearch signals into a clear report outline that maximi
 - Ensure all string fields are valid JSON strings (escape newlines as \\n, tabs as \\t).
 """
 
-REPORT_OUTLINE_USER_PROMPT = (
+REPORT_OUTLINE_USER_PROMPT_EN = (
     "User question:\n{question}\n\n"
     "Available materials:\n"
     "- Highlights: {highlight_count}\n"
@@ -43,7 +43,7 @@ REPORT_OUTLINE_USER_PROMPT = (
     "- Do not include an evidence index section; that is handled separately.\n"
 )
 
-REPORT_WRITE_SYSTEM_PROMPT = """You are a research report writer producing knowledge graph-enhanced reports.
+REPORT_WRITE_SYSTEM_PROMPT_EN = """You are a research report writer producing knowledge graph-enhanced reports.
 
 ## Writing Guidelines
 1. Evidence-based writing: every concrete factual claim must be supported by the provided evidence and cited inline.
@@ -62,7 +62,7 @@ REPORT_WRITE_SYSTEM_PROMPT = """You are a research report writer producing knowl
   - [7] ❌ (numeric-only without chunk_ prefix)
   - [Source 1] ❌ (descriptive labels)
 - Only cite chunk_id values that exist in the provided Evidence Pack.
-- Never cite tool-generated IDs or tool names (e.g. graph.think / graph.* / tool:*). If it is not in the Evidence Pack allowlist, it is not citable.
+- Never cite tool-generated IDs or tool names (e.g. think / graph.* / tool:*). If it is not in the Evidence Pack allowlist, it is not citable.
 - If you cannot support a claim with evidence, do not state it as fact.
 
 ## Output Requirements
@@ -73,7 +73,7 @@ REPORT_WRITE_SYSTEM_PROMPT = """You are a research report writer producing knowl
 - Ensure all string fields are valid JSON strings (escape newlines as \\n, tabs as \\t).
 """
 
-REPORT_WRITE_USER_PROMPT = (
+REPORT_WRITE_USER_PROMPT_EN = (
     "User question:\n{question}\n\n"
     "Report outline (JSON):\n{outline_json}\n\n"
     "Highlights (may be incomplete):\n{highlights_json}\n\n"
@@ -104,7 +104,7 @@ REPORT_WRITE_USER_PROMPT = (
     "- If the evidence conflicts or is too weak, say so in limitations.\n"
 )
 
-CONSISTENCY_CHECK_SYSTEM_PROMPT = """You are a strict supportiveness & contradiction checker for a cite-first research report.
+CONSISTENCY_CHECK_SYSTEM_PROMPT_EN = """You are a strict supportiveness & contradiction checker for a cite-first research report.
 
 ## Output language (STRICT)
 - Output language: {output_language}
@@ -142,13 +142,13 @@ Return ONLY valid JSON with the following schema:
 - Be conservative: if unsure, surface an issue with lower confidence.
 """
 
-CONSISTENCY_CHECK_USER_PROMPT = (
+CONSISTENCY_CHECK_USER_PROMPT_EN = (
     "User question:\n{question}\n\n"
     "Claim set (JSON):\n{claims_json}\n\n"
     "Return the JSON result now."
 )
 
-SECTION_WRITE_SYSTEM_PROMPT = """You are a research report section writer producing a single section for a knowledge graph-enhanced report.
+SECTION_WRITE_SYSTEM_PROMPT_EN = """You are a research report section writer producing a single section for a knowledge graph-enhanced report.
 
 ## Writing Guidelines
 1. Evidence-based writing: every concrete factual claim must be supported by the provided evidence and cited inline.
@@ -165,7 +165,7 @@ SECTION_WRITE_SYSTEM_PROMPT = """You are a research report section writer produc
   - ^7 ❌ (superscript notation)
   - [7] ❌ (numeric-only without chunk_ prefix)
 - Only cite chunk_id values that exist in the provided Evidence Pack.
-- Never cite tool-generated IDs or tool names (e.g. graph.think / graph.* / tool:*). If it is not in the Evidence Pack allowlist, it is not citable.
+- Never cite tool-generated IDs or tool names (e.g. think / graph.* / tool:*). If it is not in the Evidence Pack allowlist, it is not citable.
 
 ## Output Requirements
 - Return ONLY valid JSON matching the schema described in the user prompt.
@@ -175,7 +175,7 @@ SECTION_WRITE_SYSTEM_PROMPT = """You are a research report section writer produc
 - Ensure all string fields are valid JSON strings (escape newlines as \\n, tabs as \\t).
 """
 
-SECTION_WRITE_USER_PROMPT = (
+SECTION_WRITE_USER_PROMPT_EN = (
     "User question:\n{question}\n\n"
     "Section to write:\n"
     "- Title: {section_title}\n"
@@ -197,7 +197,7 @@ SECTION_WRITE_USER_PROMPT = (
     "- Add inline citations for any concrete claim.\n"
 )
 
-PARALLEL_SYNTHESIS_SYSTEM_PROMPT = """You are a report synthesizer.
+PARALLEL_SYNTHESIS_SYSTEM_PROMPT_EN = """You are a report synthesizer.
 
 ## Goal
 Given a user question, a report outline, and draft section bodies (already written), produce:
@@ -221,7 +221,7 @@ Return ONLY valid JSON matching the schema described in the user prompt.
 - Ensure all string fields are valid JSON strings (escape newlines as \\n, tabs as \\t).
 """
 
-PARALLEL_SYNTHESIS_CITATION_REPAIR_USER_PROMPT = (
+PARALLEL_SYNTHESIS_CITATION_REPAIR_USER_PROMPT_EN = (
     "Your previous response was valid JSON, but the `short_answer` is missing supported inline citations.\n"
     "Fix the JSON and return ONLY a single JSON object now.\n\n"
     "Rules (STRICT):\n"
@@ -235,7 +235,7 @@ PARALLEL_SYNTHESIS_CITATION_REPAIR_USER_PROMPT = (
 )
 
 
-JSON_REPAIR_USER_PROMPT = (
+JSON_REPAIR_USER_PROMPT_EN = (
     "Your previous response was not valid JSON or did not match the expected top-level type.\n"
     "Fix it and return ONLY valid JSON now.\n\n"
     "Constraints (STRICT):\n"
@@ -247,7 +247,7 @@ JSON_REPAIR_USER_PROMPT = (
     "Previous output (snippet):\n{raw_snippet}\n"
 )
 
-PARALLEL_SYNTHESIS_USER_PROMPT = (
+PARALLEL_SYNTHESIS_USER_PROMPT_EN = (
     "User question:\n{question}\n\n"
     "Report outline (JSON):\n{outline_json}\n\n"
     "Draft section bodies (JSON):\n{sections_json}\n\n"

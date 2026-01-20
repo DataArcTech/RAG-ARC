@@ -18,16 +18,16 @@ from config.output_limits import DEEPSEARCH_MAX_IMAGE_INPUTS
 from core.utils.multimodal_images import collect_image_paths_from_deepsearch_evidences
 from core.utils.multimodal_llm import call_llm_with_optional_images_async
 from core.prompts.deepsearch.report import (
-    REPORT_OUTLINE_SYSTEM_PROMPT,
-    REPORT_OUTLINE_USER_PROMPT,
-    REPORT_WRITE_SYSTEM_PROMPT,
-    REPORT_WRITE_USER_PROMPT,
-    PARALLEL_SYNTHESIS_SYSTEM_PROMPT,
-    PARALLEL_SYNTHESIS_USER_PROMPT,
-    PARALLEL_SYNTHESIS_CITATION_REPAIR_USER_PROMPT,
-    SECTION_WRITE_SYSTEM_PROMPT,
-    SECTION_WRITE_USER_PROMPT,
-    JSON_REPAIR_USER_PROMPT,
+    REPORT_OUTLINE_SYSTEM_PROMPT_EN,
+    REPORT_OUTLINE_USER_PROMPT_EN,
+    REPORT_WRITE_SYSTEM_PROMPT_EN,
+    REPORT_WRITE_USER_PROMPT_EN,
+    PARALLEL_SYNTHESIS_SYSTEM_PROMPT_EN,
+    PARALLEL_SYNTHESIS_USER_PROMPT_EN,
+    PARALLEL_SYNTHESIS_CITATION_REPAIR_USER_PROMPT_EN,
+    SECTION_WRITE_SYSTEM_PROMPT_EN,
+    SECTION_WRITE_USER_PROMPT_EN,
+    JSON_REPAIR_USER_PROMPT_EN,
 )
 from core.deepsearch.report.llm_writer_budget import (
     dump_json as _dump_json,
@@ -254,7 +254,7 @@ class DeepSearchLLMReportWriter:
 
         evidence_index_json = _dump_json(evidence_index)
         available_ids = _extract_evidence_ids_from_index(evidence_index)
-        user_prompt = REPORT_OUTLINE_USER_PROMPT.format(
+        user_prompt = REPORT_OUTLINE_USER_PROMPT_EN.format(
             question=question,
             highlight_count=len(highlights),
             evidence_count=len(evidences),
@@ -262,7 +262,10 @@ class DeepSearchLLMReportWriter:
             evidence_index_json=evidence_index_json,
         )
         messages = [
-            {"role": "system", "content": self._system_prompt_with_language(REPORT_OUTLINE_SYSTEM_PROMPT, question=question)},
+            {
+                "role": "system",
+                "content": self._system_prompt_with_language(REPORT_OUTLINE_SYSTEM_PROMPT_EN, question=question),
+            },
             {"role": "user", "content": user_prompt},
         ]
         last_raw: str | None = None
@@ -327,7 +330,10 @@ class DeepSearchLLMReportWriter:
                 f"Previous (invalid) output:\n{_snippet(raw, limit=int(report_defaults.DEFAULT_ERROR_SNIPPET_LIMIT_CHARS))}\n"
             )
             messages = [
-                {"role": "system", "content": self._system_prompt_with_language(REPORT_OUTLINE_SYSTEM_PROMPT, question=question)},
+                {
+                    "role": "system",
+                    "content": self._system_prompt_with_language(REPORT_OUTLINE_SYSTEM_PROMPT_EN, question=question),
+                },
                 {"role": "user", "content": repair_prompt},
             ]
         raise RuntimeError(f"Report outline generation failed after retries. raw={_snippet(last_raw or '')}")
@@ -379,7 +385,7 @@ class DeepSearchLLMReportWriter:
                     max_chars_per_evidence=int(evidence_chars_limit),
                 )
 
-            user_prompt = REPORT_WRITE_USER_PROMPT.format(
+            user_prompt = REPORT_WRITE_USER_PROMPT_EN.format(
                 question=question,
                 outline_json=outline_json,
                 highlights_json=_dump_json(highlights_limited),
@@ -390,7 +396,10 @@ class DeepSearchLLMReportWriter:
                 coverage_json=_dump_json(coverage),
             )
             messages = [
-                {"role": "system", "content": self._system_prompt_with_language(REPORT_WRITE_SYSTEM_PROMPT, question=question)},
+                {
+                    "role": "system",
+                    "content": self._system_prompt_with_language(REPORT_WRITE_SYSTEM_PROMPT_EN, question=question),
+                },
                 {"role": "user", "content": user_prompt},
             ]
             image_paths = collect_image_paths_from_deepsearch_evidences(
@@ -689,7 +698,7 @@ class DeepSearchLLMReportWriter:
             )
         coverage_json = _dump_json(_slim_coverage(coverage or {}, level=0))
 
-        user_prompt = PARALLEL_SYNTHESIS_USER_PROMPT.format(
+        user_prompt = PARALLEL_SYNTHESIS_USER_PROMPT_EN.format(
             question=question,
             outline_json=outline_json,
             sections_json=sections_json,
@@ -697,7 +706,10 @@ class DeepSearchLLMReportWriter:
             coverage_json=coverage_json,
         )
         base_messages = [
-            {"role": "system", "content": self._system_prompt_with_language(PARALLEL_SYNTHESIS_SYSTEM_PROMPT, question=question)},
+            {
+                "role": "system",
+                "content": self._system_prompt_with_language(PARALLEL_SYNTHESIS_SYSTEM_PROMPT_EN, question=question),
+            },
             {"role": "user", "content": user_prompt},
         ]
 
@@ -731,7 +743,7 @@ class DeepSearchLLMReportWriter:
             if allowed_ids and short_answer and not _has_supported_inline_citation(short_answer, allowed_ids=allowed_ids):
                 if attempt < max(int(self.max_retries), 1) - 1:
                     allowed_csv = ", ".join(sorted(allowed_ids))
-                    repair_prompt = PARALLEL_SYNTHESIS_CITATION_REPAIR_USER_PROMPT.format(
+                    repair_prompt = PARALLEL_SYNTHESIS_CITATION_REPAIR_USER_PROMPT_EN.format(
                         allowed_ids_csv=allowed_csv,
                         raw_snippet=_snippet(last_raw, limit=int(report_defaults.DEFAULT_ERROR_SNIPPET_LIMIT_CHARS)),
                     )
@@ -791,7 +803,7 @@ class DeepSearchLLMReportWriter:
                     max_chars_per_evidence=int(max_chars),
                 )
 
-            user_prompt = SECTION_WRITE_USER_PROMPT.format(
+            user_prompt = SECTION_WRITE_USER_PROMPT_EN.format(
                 question=question,
                 section_title=section.get("title", ""),
                 section_type=section.get("section_type", ""),
@@ -800,7 +812,10 @@ class DeepSearchLLMReportWriter:
                 graph_chain_json=_dump_json(limited_chain),
             )
             base_messages = [
-                {"role": "system", "content": self._system_prompt_with_language(SECTION_WRITE_SYSTEM_PROMPT, question=question)},
+                {
+                    "role": "system",
+                    "content": self._system_prompt_with_language(SECTION_WRITE_SYSTEM_PROMPT_EN, question=question),
+                },
                 {"role": "user", "content": user_prompt},
             ]
             try:
@@ -851,7 +866,7 @@ class DeepSearchLLMReportWriter:
             return None
         snippet = _snippet(raw, limit=int(report_defaults.DEFAULT_ERROR_SNIPPET_LIMIT_CHARS))
         expected_label = "object" if expected == "dict" else ("array" if expected == "list" else expected)
-        repair_prompt = JSON_REPAIR_USER_PROMPT.format(
+        repair_prompt = JSON_REPAIR_USER_PROMPT_EN.format(
             expected_top_level=expected_label,
             error=error,
             raw_snippet=snippet,

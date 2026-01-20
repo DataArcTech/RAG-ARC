@@ -11,7 +11,7 @@ from .fast import (
     SearchGraphChunkTool,
 )
 from .heavy import (
-    GraphThinkTool,
+    ThinkTool,
     LLMChainExplorerTool,
     BeamSearchTool,
 )
@@ -29,7 +29,7 @@ __all__ = [
     "SearchBM25Tool",
     "SearchGraphChunkTool",
     "LLMChainExplorerTool",
-    "GraphThinkTool",
+    "ThinkTool",
     "BeamSearchTool",
     "CodePythonTool",
     "build_builtin_tools",
@@ -47,7 +47,7 @@ _BUILTIN_CLASSES = [
     SearchBM25Tool,
     SearchGraphChunkTool,
     LLMChainExplorerTool,
-    GraphThinkTool,
+    ThinkTool,
     BeamSearchTool,
     CodePythonTool,
 ]
@@ -58,7 +58,7 @@ _LLM_REQUIRED = {
     SearchGraphChunkTool,
     LLMChainExplorerTool,
     BeamSearchTool,
-    GraphThinkTool,
+    ThinkTool,
 }
 _LLM_OPTIONAL = {
     KnowledgeBaseExploreTool,

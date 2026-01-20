@@ -12,7 +12,7 @@ from core.graph_adapter.base import GraphAccessScope
 from core.graph_adapter.scope_provider import require_scope, scope_to_dict
 
 from .generator import PlanGenerator, PlannerSettings
-from core.prompts.deepsearch import GRAPH_PLANNER_SYSTEM_PROMPT, GRAPH_PLANNER_USER_PROMPT
+from core.prompts.deepsearch import GRAPH_PLANNER_SYSTEM_PROMPT_EN, GRAPH_PLANNER_USER_PROMPT_EN
 from core.deepsearch.tooling import describe_available_tools
 from core.deepsearch.tooling.registry import ToolHintRegistry
 from core.deepsearch.trace import emit_trace, with_trace_protocol
@@ -236,8 +236,8 @@ class DeepSearchPlanner:
         mode = str(self._config_dict["mode"]).strip()
         max_steps = int(self._config_dict["max_steps"])
         enable_sub_question = bool(self._config_dict["enable_sub_question"])
-        system_prompt = self._prompt(self.PLAN_SYSTEM_PROMPT_KEY, GRAPH_PLANNER_SYSTEM_PROMPT)
-        user_prompt = self._prompt(self.PLAN_USER_PROMPT_KEY, GRAPH_PLANNER_USER_PROMPT)
+        system_prompt = self._prompt(self.PLAN_SYSTEM_PROMPT_KEY, GRAPH_PLANNER_SYSTEM_PROMPT_EN)
+        user_prompt = self._prompt(self.PLAN_USER_PROMPT_KEY, GRAPH_PLANNER_USER_PROMPT_EN)
         tool_hint = self._tool_hint_text()
         return PlannerSettings(
             mode=mode,
@@ -527,17 +527,18 @@ class DeepSearchPlanner:
             registry=self._tool_hint_registry,
             include_llm_tools=self.include_llm_tools_in_catalog,
         )
-        # Ensure graph_adapter.query is always present and prominent.
-        hints = [hint for hint in hints if isinstance(hint, dict) and hint.get("name") != graph_channel_tool]
-        hints.insert(0, adapter_hint)
 
-        # Optional: cap the planner tool catalog to reduce cognitive load / prompt size.
+        # Optional: allowlist planner catalog to reduce cognitive load.
         allowlist = self._config_dict.get("tool_catalog_allowlist")
+        allowed: set[str] | None = None
         if isinstance(allowlist, (list, tuple, set)):
             allowed = {str(name).strip() for name in allowlist if str(name).strip()}
-            # Always keep the adapter traversal primitive.
-            allowed.add(graph_channel_tool)
             hints = [hint for hint in hints if str(hint.get("name") or "").strip() in allowed]
+
+        # Ensure graph_adapter.query is present only when not explicitly excluded.
+        if allowed is None or graph_channel_tool in allowed:
+            hints = [hint for hint in hints if isinstance(hint, dict) and hint.get("name") != graph_channel_tool]
+            hints.insert(0, adapter_hint)
 
         raw_limit = self._config_dict.get("tool_catalog_max_items")
         try:

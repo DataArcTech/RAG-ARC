@@ -14,7 +14,7 @@ from core.deepsearch.utils.file_scope import resolve_file_scope
 from core.graph_adapter.base import GraphDeepSearchAdapter
 from core.graph_adapter.concurrency import adapter_locked
 from core.graph_adapter.cypher import adapter_supports_cypher
-from core.prompts.deepsearch import SEARCH_ENTITY_EXTRACT_PROMPT
+from core.prompts.deepsearch import SEARCH_ENTITY_EXTRACT_PROMPT_EN
 from core.utils.owner_guard import normalize_owner_id
 
 from ...base import (
@@ -118,7 +118,7 @@ class _GraphChunkChannel:
         if self.llm_connector is None:
             raise RuntimeError("graph_chunk entity extraction requires an LLM connector")
         messages = [
-            {"role": "system", "content": SEARCH_ENTITY_EXTRACT_PROMPT},
+            {"role": "system", "content": SEARCH_ENTITY_EXTRACT_PROMPT_EN},
             {"role": "user", "content": f"Query: {query}"},
         ]
         kwargs: Dict[str, Any] = {

@@ -28,8 +28,8 @@ from encapsulation.data_model.deepsearch import (
 from core.deepsearch.tools.base import call_llm_async
 from core.deepsearch.trace import emit_trace
 from core.prompts.deepsearch.runtime import (
-    TRACE_REFLECTION_SYSTEM_PROMPT_TEMPLATE,
-    TRACE_REFLECTION_USER_PROMPT_TEMPLATE,
+    TRACE_REFLECTION_SYSTEM_PROMPT_TEMPLATE_EN,
+    TRACE_REFLECTION_USER_PROMPT_TEMPLATE_EN,
 )
 
 from .graph_loop_state import _RUN_REFLECT_COUNT, _RUN_THINK_COUNT, _RUN_THINK_TOOL_SIGNATURES
@@ -120,8 +120,8 @@ class GraphLoopRuntimeMixin:
             "graph_context": context.model_dump(exclude_none=True),
         }
 
-        system = TRACE_REFLECTION_SYSTEM_PROMPT_TEMPLATE.format(max_lines=int(TRACE_REFLECTION_DEFAULT_MAX_LINES))
-        user = TRACE_REFLECTION_USER_PROMPT_TEMPLATE.format(
+        system = TRACE_REFLECTION_SYSTEM_PROMPT_TEMPLATE_EN.format(max_lines=int(TRACE_REFLECTION_DEFAULT_MAX_LINES))
+        user = TRACE_REFLECTION_USER_PROMPT_TEMPLATE_EN.format(
             question=str(question or "").strip(),
             payload=json.dumps(input_payload, ensure_ascii=False, indent=2, default=str),
         )
@@ -292,11 +292,19 @@ class GraphLoopRuntimeMixin:
                 registry=registry,
                 include_llm_tools=bool(self._think_config["include_llm_tools"]),
             )
+            allowlist = self._think_config.get("tool_catalog_allowlist")
+            if isinstance(allowlist, (list, tuple, set)):
+                allowed = {str(name).strip() for name in allowlist if str(name).strip()}
+                all_hints = [hint for hint in all_hints if str(hint.get("name") or "").strip() in allowed]
             tool_catalog = _prioritize_tool_catalog(
                 all_hints,
                 always_include=THINK_TOOL_CATALOG_ALWAYS_INCLUDE,
                 limit=limit,
             )
+            if self._think_config.get("tool_name"):
+                tool_catalog = [
+                    hint for hint in tool_catalog if str(hint.get("name") or "").strip() != self._think_config["tool_name"]
+                ]
             for entry in tool_catalog:
                 if isinstance(entry, dict) and entry.get("name"):
                     available_tool_names.add(str(entry["name"]))

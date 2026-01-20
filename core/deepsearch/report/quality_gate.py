@@ -13,8 +13,8 @@ from pydantic import BaseModel, Field, ValidationError
 
 from config.core.deepsearch import report_writer_defaults as report_defaults
 from core.deepsearch.tools.base import call_llm_async
-from core.prompts.deepsearch.report import JSON_REPAIR_USER_PROMPT
-from core.prompts.deepsearch.quality_gate import QUALITY_GATE_SYSTEM_PROMPT, QUALITY_GATE_USER_PROMPT
+from core.prompts.deepsearch.report import JSON_REPAIR_USER_PROMPT_EN
+from core.prompts.deepsearch.quality_gate import QUALITY_GATE_SYSTEM_PROMPT_EN, QUALITY_GATE_USER_PROMPT_EN
 from core.deepsearch.utils.language_policy import infer_user_language
 from core.utils.json_extract import safe_json_loads
 from core.utils.text_regex import BRACKET_CONTENT_RE, SENTENCE_SPLIT_RE
@@ -373,7 +373,7 @@ class DeepSearchQualityGate:
             "missing_topics": metrics.missing_topics,
             "evidence_source_ratios": metrics.evidence_source_ratios,
         }
-        user_prompt = QUALITY_GATE_USER_PROMPT.format(
+        user_prompt = QUALITY_GATE_USER_PROMPT_EN.format(
             question=question,
             summary=summary,
             sections_markdown=sections_markdown,
@@ -387,7 +387,7 @@ class DeepSearchQualityGate:
         )
         output_language = infer_user_language(question)
         messages = [
-            {"role": "system", "content": QUALITY_GATE_SYSTEM_PROMPT.replace("{output_language}", output_language)},
+            {"role": "system", "content": QUALITY_GATE_SYSTEM_PROMPT_EN.replace("{output_language}", output_language)},
             {"role": "user", "content": user_prompt},
         ]
 
@@ -409,7 +409,7 @@ class DeepSearchQualityGate:
             if parsed is None:
                 last_exc = ValueError("LLM judge did not return valid JSON.")
                 if attempt < retries - 1:
-                    repair_prompt = JSON_REPAIR_USER_PROMPT.format(
+                    repair_prompt = JSON_REPAIR_USER_PROMPT_EN.format(
                         expected_top_level="object",
                         error="invalid_json",
                         raw_snippet=_snippet(raw, limit=int(report_defaults.DEFAULT_ERROR_SNIPPET_LIMIT_CHARS)),
@@ -425,7 +425,7 @@ class DeepSearchQualityGate:
             except ValidationError as exc:
                 last_exc = exc
                 if attempt < retries - 1:
-                    repair_prompt = JSON_REPAIR_USER_PROMPT.format(
+                    repair_prompt = JSON_REPAIR_USER_PROMPT_EN.format(
                         expected_top_level="object",
                         error="schema_validation_error",
                         raw_snippet=_snippet(raw, limit=int(report_defaults.DEFAULT_ERROR_SNIPPET_LIMIT_CHARS)),

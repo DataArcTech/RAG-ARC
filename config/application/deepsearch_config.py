@@ -114,7 +114,7 @@ class PlannerRuntimeConfig(BaseModel):
 class GraphReasoningThinkConfig(BaseModel):
     """Controls think window cadence / Parallel Thinking behaviour."""
 
-    tool_name: str = Field("graph.think", description="Tool used for think checkpoints.")
+    tool_name: str = Field("think", description="Tool used for think checkpoints.")
     every_n_steps: int = Field(0, description="Trigger periodic think after N completed graph steps (0 disables).")
     min_coverage: float = Field(0.75, description="Only run think when coverage ratio falls below this threshold.")
     always_run: bool = Field(
@@ -130,6 +130,13 @@ class GraphReasoningThinkConfig(BaseModel):
     tool_catalog_max_items: int = Field(
         0,
         description="Include up to N tool descriptors in think context (0 disables the tool catalog).",
+    )
+    tool_catalog_allowlist: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Optional allowlist of tool names shown to the think tool (reduces prompt size/cognitive load). "
+            "When set, only these tools are exposed in the think tool catalog."
+        ),
     )
     include_llm_tools: bool = Field(
         ...,
@@ -175,7 +182,7 @@ class GraphReasoningCompressionConfig(BaseModel):
             excerpt_chars=900,
             retention="head",
         ),
-        description="Compaction settings applied to `graph.think` context window.",
+        description="Compaction settings applied to `think` context window.",
     )
 
 

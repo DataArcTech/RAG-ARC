@@ -15,9 +15,9 @@ from config.core.deepsearch import report_writer_defaults as report_defaults
 from core.deepsearch.tools.base import call_llm_async
 from core.deepsearch.utils.language_policy import infer_user_language
 from core.prompts.deepsearch.report import (
-    CONSISTENCY_CHECK_SYSTEM_PROMPT,
-    CONSISTENCY_CHECK_USER_PROMPT,
-    JSON_REPAIR_USER_PROMPT,
+    CONSISTENCY_CHECK_SYSTEM_PROMPT_EN,
+    CONSISTENCY_CHECK_USER_PROMPT_EN,
+    JSON_REPAIR_USER_PROMPT_EN,
 )
 from core.utils.json_extract import safe_json_loads
 
@@ -129,10 +129,12 @@ class ConsistencyChecker:
             max_evidence_chars=max_evidence_chars,
             max_claims=max_claims,
         )
-        user_prompt = CONSISTENCY_CHECK_USER_PROMPT.format(question=question, claims_json=json.dumps(claims, ensure_ascii=False, indent=2))
+        user_prompt = CONSISTENCY_CHECK_USER_PROMPT_EN.format(
+            question=question, claims_json=json.dumps(claims, ensure_ascii=False, indent=2)
+        )
         output_language = infer_user_language(question)
         messages = [
-            {"role": "system", "content": CONSISTENCY_CHECK_SYSTEM_PROMPT.replace("{output_language}", output_language)},
+            {"role": "system", "content": CONSISTENCY_CHECK_SYSTEM_PROMPT_EN.replace("{output_language}", output_language)},
             {"role": "user", "content": user_prompt},
         ]
 
@@ -154,7 +156,7 @@ class ConsistencyChecker:
             if parsed is None:
                 last_exc = ValueError("Consistency judge did not return valid JSON.")
                 if attempt < self.max_retries - 1:
-                    repair_prompt = JSON_REPAIR_USER_PROMPT.format(
+                    repair_prompt = JSON_REPAIR_USER_PROMPT_EN.format(
                         expected_top_level="object",
                         error="invalid_json",
                         raw_snippet=_snippet(raw, limit=int(report_defaults.DEFAULT_ERROR_SNIPPET_LIMIT_CHARS)),
@@ -167,7 +169,7 @@ class ConsistencyChecker:
             except ValidationError as exc:
                 last_exc = exc
                 if attempt < self.max_retries - 1:
-                    repair_prompt = JSON_REPAIR_USER_PROMPT.format(
+                    repair_prompt = JSON_REPAIR_USER_PROMPT_EN.format(
                         expected_top_level="object",
                         error="schema_validation_error",
                         raw_snippet=_snippet(raw, limit=int(report_defaults.DEFAULT_ERROR_SNIPPET_LIMIT_CHARS)),

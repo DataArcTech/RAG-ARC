@@ -22,7 +22,9 @@ class SearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
         channel="graph",
         description=(
             "Three-way fast search (faiss + bm25 + graph_chunk) for quick localization. "
-            "Evidence: primary snippets (citeable); defaults to all channels but allows per-channel selection."
+            "Evidence: primary snippets (citeable). "
+            "Good: focus_query='HippoRAG graph', channels=['faiss','bm25'], top_k=10. "
+            "Bad: empty query or repeating the same args after empty_hit."
         ),
         speed="fast",
         cost="low",

@@ -1,6 +1,6 @@
 """Prompt templates for DeepSearch quality gating and research iteration."""
 
-QUALITY_GATE_SYSTEM_PROMPT = """You are a strict research quality judge for a multi-step research agent.
+QUALITY_GATE_SYSTEM_PROMPT_EN = """You are a strict research quality judge for a multi-step research agent.
 
 ## Goal
 Evaluate whether the current report is ready to ship, using a rubric. If it is not ready, propose concrete next actions that the system can execute to improve evidence coverage and citation support.
@@ -47,7 +47,7 @@ Return ONLY valid JSON with this schema:
 - If "pass" is false, you MUST include at least one item in next_actions (e.g. graph_search and/or rewrite).
 """
 
-QUALITY_GATE_USER_PROMPT = (
+QUALITY_GATE_USER_PROMPT_EN = (
     "User question:\n{question}\n\n"
     "Report summary:\n{summary}\n\n"
     "Report sections (markdown):\n{sections_markdown}\n\n"

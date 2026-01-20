@@ -100,7 +100,7 @@ def _strategy_config(*, overrides: dict | None = None, think_overrides: dict | N
         "trace_reflection_max": 0,
         "tool_timeout_seconds": 0.0,
         "think": {
-            "tool_name": "graph.think",
+            "tool_name": "think",
             "every_n_steps": 0,
             "min_coverage": 0.0,
             "enable_tool_calls": False,
@@ -196,7 +196,7 @@ async def test_graph_reasoning_skips_periodic_think_when_coverage_is_sufficient(
 
     think_steps = [step for step in result["reasoning_steps"] if step["step_id"].startswith("think_auto_")]
     assert not think_steps
-    assert not any(call[0] == "graph.think" for call in tool_manager.calls)
+    assert not any(call[0] == "think" for call in tool_manager.calls)
 
 
 @pytest.mark.asyncio
@@ -277,8 +277,8 @@ async def test_graph_reasoning_inserts_periodic_think():
 
     think_steps = [step for step in result["reasoning_steps"] if step["step_id"].startswith("think_auto_")]
     assert think_steps, "Think checkpoint should be inserted after cadence is met"
-    assert any(call[0] == "graph.think" for call in tool_manager.calls)
-    assert any(run["tool_name"] == "graph.think" for run in result["tool_results"])
+    assert any(call[0] == "think" for call in tool_manager.calls)
+    assert any(run["tool_name"] == "think" for run in result["tool_results"])
 
 
 @pytest.mark.asyncio

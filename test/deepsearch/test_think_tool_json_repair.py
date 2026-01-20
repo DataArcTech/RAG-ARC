@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from core.deepsearch.tools import GraphThinkTool, ToolRunRequest
+from core.deepsearch.tools import ThinkTool, ToolRunRequest
 
 
 class _StubLLM:
@@ -29,7 +29,7 @@ async def test_graph_think_tool_repairs_invalid_json_output() -> None:
         "missing_topics": [],
     }
     llm = _StubLLM(["not json", json.dumps(valid)])
-    tool = GraphThinkTool(llm_connector=llm, json_repair_attempts=1, json_repair_temperature=0.0)
+    tool = ThinkTool(llm_connector=llm, json_repair_attempts=1, json_repair_temperature=0.0)
     req = ToolRunRequest(
         question="q",
         plan_step="p1",
@@ -50,7 +50,7 @@ async def test_graph_think_tool_repairs_invalid_json_output() -> None:
 @pytest.mark.asyncio
 async def test_graph_think_tool_raises_when_json_repair_disabled() -> None:
     llm = _StubLLM(["not json"])
-    tool = GraphThinkTool(llm_connector=llm, json_repair_attempts=0)
+    tool = ThinkTool(llm_connector=llm, json_repair_attempts=0)
     req = ToolRunRequest(
         question="q",
         plan_step="p1",
@@ -61,4 +61,3 @@ async def test_graph_think_tool_raises_when_json_repair_disabled() -> None:
     )
     with pytest.raises(RuntimeError, match="non-JSON"):
         await tool.run(req)
-

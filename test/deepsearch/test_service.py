@@ -19,7 +19,7 @@ def _default_service_config(*, tmp_path, fingerprint: str, **overrides):  # noqa
             "graph_channel_tool": "graph_adapter.query",
             "text_channel_tool": "graph.llm_chain_explorer",
             "web_channel_tool": "web.search",
-            "think_tool": "graph.think",
+            "think_tool": "think",
         },
         "quality_loop": {
             "enabled": False,

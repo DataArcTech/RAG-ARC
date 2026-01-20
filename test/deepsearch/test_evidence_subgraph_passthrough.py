@@ -69,7 +69,7 @@ async def test_traversal_evidence_exposes_subgraph_info_for_presentation(monkeyp
             "trace_reflection_max": 0,
             "tool_timeout_seconds": 0.0,
             "think": {
-                "tool_name": "graph.think",
+                "tool_name": "think",
                 "every_n_steps": 0,
                 "min_coverage": 0.0,
                 "enable_tool_calls": False,
