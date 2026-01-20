@@ -226,6 +226,7 @@
   },
   "tool_manager": {
     "enable_builtin_tools": true,
+    "search_retriever_config_path": "config/json_configs/rag_inference.json",
     "enabled_tools": {
       "graph.beam_search": {
         "params": {

@@ -1,7 +1,11 @@
 """Configuration entry point that wires planner, graph reasoning, gap detection, and external channels."""
 import hashlib
 import json
+import logging
+import os
+import re
 from dataclasses import asdict, is_dataclass
+from pathlib import Path
 from typing import Any, Dict, Literal, Optional, List
 
 from pydantic import BaseModel, Field
@@ -30,6 +34,153 @@ from encapsulation.deepsearch.tooling import DeepSearchToolManager
 from encapsulation.deepsearch.external import ExternalSearchChannel
 from encapsulation.deepsearch.telemetry import LoggingTelemetryClient
 from framework.config import AbstractConfig
+
+logger = logging.getLogger(__name__)
+
+_ENV_PATTERN = re.compile(r"\$\{([^}]+)\}")
+_UNRESOLVED_ENV_PLACEHOLDER = object()
+
+try:  # Keep substitution rules consistent with framework.Register
+    from config.env_placeholder_policy import ENV_DEFAULTS as _ENV_DEFAULTS
+    from config.env_placeholder_policy import SILENT_MISSING_ENV_VARS as _SILENT_MISSING_ENV_VARS
+except Exception:  # pragma: no cover - defensive for minimal runtimes
+    _ENV_DEFAULTS = {}
+    _SILENT_MISSING_ENV_VARS = set()
+
+
+def _substitute_env(obj: Any):
+    """Apply ${VAR} substitutions similar to framework.Register."""
+
+    if isinstance(obj, dict):
+        resolved: Dict[str, Any] = {}
+        for key, value in obj.items():
+            substituted = _substitute_env(value)
+            if substituted is _UNRESOLVED_ENV_PLACEHOLDER:
+                continue
+            resolved[key] = substituted
+        return resolved
+    if isinstance(obj, list):
+        items = [_substitute_env(item) for item in obj]
+        return [None if item is _UNRESOLVED_ENV_PLACEHOLDER else item for item in items]
+    if isinstance(obj, str):
+        whole = re.fullmatch(r"\$\{([^}]+)\}", obj.strip())
+        if whole:
+            var_name = whole.group(1)
+            env_value = os.getenv(var_name)
+            if not env_value:
+                default_value = _ENV_DEFAULTS.get(var_name)
+                if default_value is not None:
+                    return default_value
+                if var_name in _SILENT_MISSING_ENV_VARS:
+                    return _UNRESOLVED_ENV_PLACEHOLDER
+                return _UNRESOLVED_ENV_PLACEHOLDER
+            return env_value
+        return _ENV_PATTERN.sub(_replace_env, obj)
+    return obj
+
+
+def _replace_env(match: re.Match[str]) -> str:
+    var = match.group(1)
+    value = os.getenv(var)
+    if not value:
+        default_value = _ENV_DEFAULTS.get(var)
+        if default_value is not None:
+            return default_value
+        if var in _SILENT_MISSING_ENV_VARS:
+            return match.group(0)
+        return match.group(0)
+    return value
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _resolve_config_path(raw: str | Path) -> Path:
+    path = Path(str(raw)).expanduser()
+    if not path.is_absolute():
+        path = (_repo_root() / path).resolve()
+    return path
+
+
+def _load_search_retriever_payload(path: str | Path) -> Dict[str, Any]:
+    payload_path = _resolve_config_path(path)
+    raw_text = payload_path.read_text(encoding="utf-8")
+    data = json.loads(raw_text)
+    substituted = _substitute_env(data)
+    if not isinstance(substituted, dict):
+        raise ValueError("search retriever config must be a JSON object")
+    if isinstance(substituted.get("retrieval_config"), dict):
+        return substituted["retrieval_config"]
+    return substituted
+
+
+def _build_search_retrievers(path: str | Path) -> tuple[Any | None, Any | None]:
+    from config.core.retrieval.dense_config import DenseRetrieverConfig
+    from config.core.retrieval.tantivy_bm25_config import TantivyBM25RetrieverConfig
+
+    payload = _load_search_retriever_payload(path)
+    cfg_type = str(payload.get("type") or "").strip()
+    dense = None
+    bm25 = None
+    if cfg_type == "multipath":
+        retrievers = payload.get("retrievers")
+        if not isinstance(retrievers, list):
+            raise ValueError("multipath retriever config requires a list of retrievers")
+        for entry in retrievers:
+            if not isinstance(entry, dict):
+                continue
+            entry_type = str(entry.get("type") or "").strip()
+            if entry_type == "dense" and dense is None:
+                dense = DenseRetrieverConfig.model_validate(entry).build()
+            elif entry_type == "tantivy_bm25" and bm25 is None:
+                bm25 = TantivyBM25RetrieverConfig.model_validate(entry).build()
+    elif cfg_type == "dense":
+        dense = DenseRetrieverConfig.model_validate(payload).build()
+    elif cfg_type == "tantivy_bm25":
+        bm25 = TantivyBM25RetrieverConfig.model_validate(payload).build()
+    else:
+        raise ValueError(f"Unsupported search retriever config type: {cfg_type or 'unknown'}")
+
+    if dense is None and bm25 is None:
+        raise ValueError("search retriever config did not build dense or bm25 retrievers")
+    if dense is None:
+        logger.warning("search retriever config missing dense retriever (FAISS will be unavailable)")
+    if bm25 is None:
+        logger.warning("search retriever config missing bm25 retriever (BM25 will be unavailable)")
+    return dense, bm25
+
+
+def _inject_search_retrievers(payload: Dict[str, Any], *, dense: Any | None, bm25: Any | None) -> None:
+    if dense is None and bm25 is None:
+        return
+    enabled_tools = payload.setdefault("enabled_tools", {})
+    if not isinstance(enabled_tools, dict):
+        return
+
+    def _ensure_params(tool_name: str) -> Dict[str, Any] | None:
+        cfg = enabled_tools.get(tool_name)
+        if cfg is None:
+            cfg = {}
+            enabled_tools[tool_name] = cfg
+        if not isinstance(cfg, dict):
+            return None
+        params = cfg.get("params")
+        if params is None:
+            params = {}
+            cfg["params"] = params
+        if not isinstance(params, dict):
+            return None
+        return params
+
+    for tool_name in ("search", "search.faiss", "search.bm25", "knowledge_base.explore"):
+        params = _ensure_params(tool_name)
+        if params is None:
+            continue
+        if dense is not None and "dense_retriever" not in params:
+            params["dense_retriever"] = dense
+        if bm25 is not None and "bm25_retriever" not in params:
+            params["bm25_retriever"] = bm25
 
 
 class PlannerRuntimeConfig(BaseModel):
@@ -428,6 +579,10 @@ class ToolManagerConfig(BaseModel):
     """Declarative knobs for tool registration and auditing."""
 
     enable_builtin_tools: bool = Field(True, description="Load the built-in tool set when true.")
+    search_retriever_config_path: Optional[str] = Field(
+        None,
+        description="Optional path to a retriever config (or rag_inference.json) used to build FAISS/BM25 for search.",
+    )
     llm_connector: Optional[Any] = Field(
         None, description="LLM connector instance injected by the application layer."
     )
@@ -801,7 +956,11 @@ class DeepSearchServiceConfig(AbstractConfig):
 
     def _build_tool_manager(self, *, llm_connector, mcp_client, telemetry_client, tool_hint_registry: ToolHintRegistry):
         payload = self.tool_manager.model_dump()
+        retriever_path = payload.pop("search_retriever_config_path", None)
         payload["llm_connector"] = payload.get("llm_connector") or llm_connector
+        if retriever_path:
+            dense, bm25 = _build_search_retrievers(retriever_path)
+            _inject_search_retrievers(payload, dense=dense, bm25=bm25)
         if not payload.get("artifact_dir"):
             raise ValueError("tool_manager.artifact_dir is required (no implicit default).")
         return DeepSearchToolManager(

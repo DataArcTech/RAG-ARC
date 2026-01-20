@@ -105,12 +105,16 @@ class KnowledgeBaseExploreTool(GraphTool):
         self,
         llm_connector=None,
         *,
+        dense_retriever=None,
+        bm25_retriever=None,
         max_concurrency: int = KNOWLEDGE_BASE_EXPLORE_MAX_CONCURRENCY,
         read_max_chunks: int = KNOWLEDGE_BASE_READ_MAX_CHUNKS,
         read_max_chars: int = KNOWLEDGE_BASE_READ_MAX_CHARS,
         tool_overrides: Optional[Dict[str, GraphTool]] = None,
     ):
         self.llm_connector = llm_connector
+        self.dense_retriever = dense_retriever
+        self.bm25_retriever = bm25_retriever
         self.max_concurrency = max(1, int(max_concurrency))
         self.read_max_chunks = max(1, int(read_max_chunks))
         self.read_max_chars = max(120, int(read_max_chars))
@@ -158,11 +162,15 @@ class KnowledgeBaseExploreTool(GraphTool):
 
     def _register_builtin_tools(self) -> None:
         if "search" not in self._tools:
-            self._tools["search"] = SearchTool(llm_connector=self.llm_connector)
+            self._tools["search"] = SearchTool(
+                llm_connector=self.llm_connector,
+                dense_retriever=self.dense_retriever,
+                bm25_retriever=self.bm25_retriever,
+            )
         if "search.faiss" not in self._tools:
-            self._tools["search.faiss"] = SearchFaissTool()
+            self._tools["search.faiss"] = SearchFaissTool(dense_retriever=self.dense_retriever)
         if "search.bm25" not in self._tools:
-            self._tools["search.bm25"] = SearchBM25Tool()
+            self._tools["search.bm25"] = SearchBM25Tool(bm25_retriever=self.bm25_retriever)
         if "search.graph_chunk" not in self._tools:
             self._tools["search.graph_chunk"] = SearchGraphChunkTool(llm_connector=self.llm_connector)
         # graph.ops covers deterministic exploration; beam search is intentionally excluded here.

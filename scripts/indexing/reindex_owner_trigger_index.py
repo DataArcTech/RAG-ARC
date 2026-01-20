@@ -199,7 +199,7 @@ async def _trigger(
 
     for idx, batch in enumerate(_chunked(file_ids, batch_size), start=1):
         before = {fid: _latest_task_run_id(knowledge, fid) for fid in batch}
-        print(f\"\\n[batch {idx}] trigger_indexing files={len(batch)} (force=True, wait=False)\")
+        print(f"\n[batch {idx}] trigger_indexing files={len(batch)} (force=True, wait=False)")
         msg = await knowledge.trigger_indexing(batch, owner_id, force=True, wait=False)
         print(msg)
 
@@ -207,7 +207,7 @@ async def _trigger(
             after = {fid: _latest_task_run_id(knowledge, fid) for fid in batch}
             scheduled = [fid for fid in batch if after.get(fid) and after.get(fid) != before.get(fid)]
             if not scheduled:
-                print(\"[warn] no new TaskRuns scheduled in this batch; skipping wait.\")
+                print("[warn] no new TaskRuns scheduled in this batch; skipping wait.")
             else:
                 await _wait_for_runs(
                     knowledge,
@@ -256,4 +256,3 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-
