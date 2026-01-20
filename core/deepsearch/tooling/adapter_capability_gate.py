@@ -15,20 +15,7 @@ from core.graph_adapter.base import GraphAdapterMetadata
 
 
 _CYPHER_REQUIRED_TOOLS: Set[str] = {
-    "graph.intersection",
-    "graph.set_difference",
-    "graph.aggregate",
-    "graph.entity_concepts",
-    "graph.rule_check",
-    "graph.schema_nodes",
-    "graph.path_exists",
-    "graph.neighbors",
-    "graph.facts_by_type",
-    "graph.expand_terms",
-    "graph.latest_truth",
-    "graph.sdf_children",
-    "graph.sdf_dependencies",
-    "graph.trace_to_root",
+    "graph.ops",
 }
 
 _CHAIN_MODE_REQUIRED_TOOLS: Mapping[str, str] = {

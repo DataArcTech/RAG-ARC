@@ -6,25 +6,20 @@ via the built-in tool catalog.
 
 import pytest
 
-from core.deepsearch.tools import (
-    GraphAggregateTool,
-    GraphExpandTermsTool,
-    GraphFactsByTypeTool,
-    GraphIntersectionTool,
-    GraphLatestTruthTool,
-    GraphNeighborsTool,
-    GraphPathExistsTool,
-    GraphRelationPathExploreTool,
-    GraphRelationPathGroundTool,
-    GraphRuleCheckTool,
-    GraphSdfChildrenTool,
-    GraphSdfDependenciesTool,
-    GraphSetDifferenceTool,
-    GraphTraceToRootTool,
-    ToolRunRequest,
-)
+from core.deepsearch.tools import GraphOpsTool, ToolRunRequest
 from core.graph_adapter.base import GraphAccessScope, GraphAdapterCapability, GraphAdapterMetadata
 from core.knowledge_graph.schema import schema_from_dict
+
+
+def _graph_ops_request(*, question: str, plan_step: str, adapter, access_scope, template: str, args: dict) -> ToolRunRequest:
+    return ToolRunRequest(
+        question=question,
+        plan_step=plan_step,
+        context_evidences=[],
+        adapter=adapter,
+        access_scope=access_scope,
+        extra={"mode": "template", "template": template, "template_args": args},
+    )
 
 
 class _StubCypherAdapter:
@@ -126,48 +121,48 @@ async def test_example_07_intersection_query_ddi() -> None:
             ]
         }
     )
-    tool = GraphIntersectionTool()
-    req = ToolRunRequest(
+    tool = GraphOpsTool()
+    req = _graph_ops_request(
         question="ddi?",
         plan_step="p7",
-        context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"left": "Zenthorax", "right": "Vira-X", "left_predicates": ["INHIBITS"], "right_predicates": ["METABOLIZED_BY"]},
+        template="intersection",
+        args={"left": "Zenthorax", "right": "Vira-X", "left_predicates": ["INHIBITS"], "right_predicates": ["METABOLIZED_BY"]},
     )
     result = await tool.run(req)
-    assert "found" in result.summary.lower()
+    assert "intersection" in result.summary.lower()
     assert result.evidences
 
 
 @pytest.mark.asyncio
 async def test_example_11_set_difference_safe_products() -> None:
     adapter = _StubCypherAdapter(rows_by_tool={"set_difference": [{"entity": "可可喜悦"}]})
-    tool = GraphSetDifferenceTool()
-    req = ToolRunRequest(
+    tool = GraphOpsTool()
+    req = _graph_ops_request(
         question="which products do not contain peanuts?",
         plan_step="p11",
-        context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"universe_type": "Product", "exclude": ["花生"], "predicates": ["CONTAINS", "TRACES_OF"]},
+        template="set_difference",
+        args={"universe_type": "Product", "exclude": ["花生"], "predicates": ["CONTAINS", "TRACES_OF"]},
     )
     result = await tool.run(req)
-    assert "kept" in result.summary.lower()
+    assert "set_difference" in result.summary.lower()
     assert result.evidences
 
 
 @pytest.mark.asyncio
 async def test_example_12_aggregate_counts_distinct() -> None:
     adapter = _StubCypherAdapter(rows_by_tool={"aggregate": [{"distinct_count": 3, "examples": ["apex", "beta-tech"]}]})
-    tool = GraphAggregateTool()
-    req = ToolRunRequest(
+    tool = GraphOpsTool()
+    req = _graph_ops_request(
         question="how many suppliers?",
         plan_step="p12",
-        context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"entity": "Project Zeus", "predicate": "HAS_SUPPLIER", "direction": "out"},
+        template="aggregate",
+        args={"entity": "Project Zeus", "predicate": "HAS_SUPPLIER", "direction": "out"},
     )
     result = await tool.run(req)
     assert "distinct_count=3" in result.summary
@@ -182,14 +177,14 @@ async def test_example_10_rule_check_reports_failure() -> None:
             "rule_check:洁厕灵": [],
         }
     )
-    tool = GraphRuleCheckTool()
-    req = ToolRunRequest(
+    tool = GraphOpsTool()
+    req = _graph_ops_request(
         question="dangerous mix?",
         plan_step="p10",
-        context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={
+        template="rule_check",
+        args={
             "conditions": [
                 {"head": "84消毒液", "predicate": "HAS_INGREDIENT", "tail": "次氯酸钠", "direction": "out"},
                 {"head": "洁厕灵", "predicate": "HAS_INGREDIENT", "tail": "盐酸", "direction": "out"},
@@ -209,14 +204,14 @@ async def test_example_10_rule_check_reports_success() -> None:
             "rule_check:洁厕灵": [{"fact_id": "fact-2", "source_chunk_ids": ["chunk-b"], "text": "(洁厕灵,has,盐酸)"}],
         }
     )
-    tool = GraphRuleCheckTool()
-    req = ToolRunRequest(
+    tool = GraphOpsTool()
+    req = _graph_ops_request(
         question="dangerous mix?",
         plan_step="p10-ok",
-        context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={
+        template="rule_check",
+        args={
             "conditions": [
                 {"head": "84消毒液", "predicate": "HAS_INGREDIENT", "tail": "次氯酸钠", "direction": "out"},
                 {"head": "洁厕灵", "predicate": "HAS_INGREDIENT", "tail": "盐酸", "direction": "out"},
@@ -224,21 +219,21 @@ async def test_example_10_rule_check_reports_success() -> None:
         },
     )
     result = await tool.run(req)
-    assert "passed" in result.summary.lower()
+    assert "ok" in result.summary.lower()
     assert result.diagnostics.get("ok") is True
 
 
 @pytest.mark.asyncio
 async def test_rule_check_fails_when_no_valid_conditions() -> None:
     adapter = _StubCypherAdapter(rows_by_tool={})
-    tool = GraphRuleCheckTool()
-    req = ToolRunRequest(
+    tool = GraphOpsTool()
+    req = _graph_ops_request(
         question="noop should fail",
         plan_step="p10-noop",
-        context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"conditions": [{}, {"head": "", "predicate": "", "tail": ""}]},
+        template="rule_check",
+        args={"conditions": [{}, {"head": "", "predicate": "", "tail": ""}]},
     )
     result = await tool.run(req)
     assert "failed" in result.summary.lower()
@@ -259,14 +254,14 @@ async def test_example_01_multi_hop_path_exists() -> None:
             ]
         }
     )
-    tool = GraphPathExistsTool()
-    req = ToolRunRequest(
+    tool = GraphOpsTool()
+    req = _graph_ops_request(
         question="A 是否间接控股 C？",
         plan_step="p01",
-        context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"source": "A公司", "target": "C公司", "predicates": ["OWNS"], "direction": "out", "max_hops": 3},
+        template="path_exists",
+        args={"source": "A公司", "target": "C公司", "predicates": ["OWNS"], "direction": "out", "max_hops": 3},
     )
     result = await tool.run(req)
     assert "ok=true" in result.summary.lower()
@@ -289,14 +284,14 @@ async def test_sdf_children_returns_children() -> None:
             ]
         }
     )
-    tool = GraphSdfChildrenTool()
-    req = ToolRunRequest(
+    tool = GraphOpsTool()
+    req = _graph_ops_request(
         question="保险责任裁决流程是什么？",
         plan_step="p-sdf-children",
-        context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"event": "保险责任裁决", "doc_namespace": "doc-1", "limit": 10},
+        template="sdf_children",
+        args={"event": "保险责任裁决", "doc_namespace": "doc-1", "limit": 10},
     )
     result = await tool.run(req)
     assert "children=1" in result.summary
@@ -317,14 +312,14 @@ async def test_sdf_dependencies_returns_neighbors() -> None:
             ]
         }
     )
-    tool = GraphSdfDependenciesTool()
-    req = ToolRunRequest(
+    tool = GraphOpsTool()
+    req = _graph_ops_request(
         question="哪些步骤在除外条款校验之前/之后？",
         plan_step="p-sdf-deps",
-        context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"event": "除外条款校验", "doc_namespace": "doc-1", "limit": 10},
+        template="sdf_dependencies",
+        args={"event": "除外条款校验", "doc_namespace": "doc-1", "limit": 10},
     )
     result = await tool.run(req)
     assert "before=1" in result.summary
@@ -347,14 +342,14 @@ async def test_direction_sensitive_predicate_forces_directed_traversal() -> None
         },
         direction_sensitive_relations=["OWNS"],
     )
-    tool = GraphPathExistsTool()
-    req = ToolRunRequest(
+    tool = GraphOpsTool()
+    req = _graph_ops_request(
         question="A 是否间接控股 C？",
         plan_step="p01-both",
-        context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"source": "A公司", "target": "C公司", "predicates": ["OWNS"], "direction": "both", "max_hops": 3},
+        template="path_exists",
+        args={"source": "A公司", "target": "C公司", "predicates": ["OWNS"], "direction": "both", "max_hops": 3},
     )
     result = await tool.run(req)
     assert result.evidences
@@ -376,14 +371,14 @@ async def test_relation_path_explore_emits_sequences() -> None:
             ]
         }
     )
-    tool = GraphRelationPathExploreTool()
-    req = ToolRunRequest(
+    tool = GraphOpsTool()
+    req = _graph_ops_request(
         question="Explore relation paths from A",
         plan_step="p1",
-        context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"entity": "A", "max_hops": 3, "max_sequences": 10},
+        template="relation_path_explore",
+        args={"entity": "A", "max_hops": 3, "max_sequences": 10},
     )
     result = await tool.run(req)
     assert result.evidences
@@ -407,14 +402,14 @@ async def test_relation_path_ground_preserves_ordered_sequence() -> None:
             ]
         }
     )
-    tool = GraphRelationPathGroundTool()
-    req = ToolRunRequest(
+    tool = GraphOpsTool()
+    req = _graph_ops_request(
         question="Ground ordered path",
         plan_step="p2",
-        context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"source": "A", "predicate_sequence": ["OWNS", "SUBSIDIARY_OF"], "max_paths": 5},
+        template="relation_path_ground",
+        args={"source": "A", "predicate_sequence": ["OWNS", "SUBSIDIARY_OF"], "max_paths": 5},
     )
     result = await tool.run(req)
     assert result.evidences
@@ -439,14 +434,14 @@ async def test_example_02_entity_disambiguation_filter_by_type() -> None:
             ]
         }
     )
-    tool = GraphFactsByTypeTool()
-    req = ToolRunRequest(
+    tool = GraphOpsTool()
+    req = _graph_ops_request(
         question="捷豹在第三季度表现如何？",
         plan_step="p02",
-        context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"entity_type": "Company", "predicates": ["HAS_FACT"], "limit": 10},
+        template="facts_by_type",
+        args={"entity_type": "Company", "predicates": ["HAS_FACT"], "limit": 10},
     )
     result = await tool.run(req)
     assert "type=Company" in result.summary
@@ -484,26 +479,26 @@ async def test_example_04_directionality_neighbors_in_out() -> None:
             ]
         }
     )
-    tool = GraphNeighborsTool()
+    tool = GraphOpsTool()
     # predecessors (in)
-    req_in = ToolRunRequest(
+    req_in = _graph_ops_request(
         question="谁拥有 Stratos Global？",
         plan_step="p04-in",
-        context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"entity": "Stratos Global", "predicates": ["OWNS"], "direction": "in", "limit": 10},
+        template="neighbors",
+        args={"entity": "Stratos Global", "predicates": ["OWNS"], "direction": "in", "limit": 10},
     )
     result_in = await tool.run(req_in)
     assert "direction=in" in result_in.summary
     # successors (out)
-    req_out = ToolRunRequest(
+    req_out = _graph_ops_request(
         question="Stratos Global 拥有谁？",
         plan_step="p04-out",
-        context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"entity": "Stratos Global", "predicates": ["OWNS"], "direction": "out", "limit": 10},
+        template="neighbors",
+        args={"entity": "Stratos Global", "predicates": ["OWNS"], "direction": "out", "limit": 10},
     )
     result_out = await tool.run(req_out)
     assert "direction=out" in result_out.summary
@@ -522,14 +517,14 @@ async def test_example_05_fragmented_evidence_list_all_features() -> None:
             ]
         }
     )
-    tool = GraphNeighborsTool()
-    req = ToolRunRequest(
+    tool = GraphOpsTool()
+    req = _graph_ops_request(
         question="列出 Model-X 的全部特性",
         plan_step="p05",
-        context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"entity": "Model-X", "predicates": ["HAS_FEATURE"], "direction": "out", "limit": 20},
+        template="neighbors",
+        args={"entity": "Model-X", "predicates": ["HAS_FEATURE"], "direction": "out", "limit": 20},
     )
     result = await tool.run(req)
     neighbors = (result.diagnostics or {}).get("neighbors") or []
@@ -545,14 +540,14 @@ async def test_example_06_hierarchy_trace_to_root_returns_chain() -> None:
             ]
         }
     )
-    tool = GraphTraceToRootTool()
-    req = ToolRunRequest(
+    tool = GraphOpsTool()
+    req = _graph_ops_request(
         question="追溯 Qubit Lattice 的层级路径",
         plan_step="p06",
-        context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"leaf": "Qubit Lattice", "predicates": ["CONTAINS"], "max_hops": 6},
+        template="trace_to_root",
+        args={"leaf": "Qubit Lattice", "predicates": ["CONTAINS"], "max_hops": 6},
     )
     result = await tool.run(req)
     chain = (result.diagnostics or {}).get("chain") or []
@@ -562,14 +557,14 @@ async def test_example_06_hierarchy_trace_to_root_returns_chain() -> None:
 @pytest.mark.asyncio
 async def test_example_08_ontology_mapping_query_expansion() -> None:
     adapter = _StubCypherAdapter(rows_by_tool={"expand_terms": [{"term": "Cart-Flow-V2"}]})
-    tool = GraphExpandTermsTool()
-    req = ToolRunRequest(
+    tool = GraphOpsTool()
+    req = _graph_ops_request(
         question="结账服务错误率怎么样？",
         plan_step="p08",
-        context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"concept": "结账服务", "predicates": ["IMPLEMENTS"], "direction": "in", "limit": 10},
+        template="expand_terms",
+        args={"concept": "结账服务", "predicates": ["IMPLEMENTS"], "direction": "in", "limit": 10},
     )
     result = await tool.run(req)
     terms = (result.diagnostics or {}).get("terms") or []
@@ -591,14 +586,14 @@ async def test_example_09_temporal_conflict_latest_truth() -> None:
             ]
         }
     )
-    tool = GraphLatestTruthTool()
-    req = ToolRunRequest(
+    tool = GraphOpsTool()
+    req = _graph_ops_request(
         question="每周可远程办公几天？",
         plan_step="p09",
-        context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"topic": "远程办公政策", "predicates": ["HAS_POLICY"]},
+        template="latest_truth",
+        args={"topic": "远程办公政策", "predicates": ["HAS_POLICY"]},
     )
     result = await tool.run(req)
     assert "value=0 天/周" in result.summary

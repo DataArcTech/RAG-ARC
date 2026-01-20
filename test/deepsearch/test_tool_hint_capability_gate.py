@@ -22,9 +22,7 @@ def test_missing_cypher_capability_hides_cypher_tools() -> None:
     registry.set_disabled_tools(disabled)
 
     names = _tool_names(include_llm_tools=True, registry=registry)
-    assert "graph.intersection" not in names
-    assert "graph.aggregate" not in names
-    assert "graph.path_exists" not in names
+    assert "graph.ops" not in names
 
 
 def test_chain_mode_gates_only_missing_modes() -> None:
@@ -43,4 +41,4 @@ def test_chain_mode_gates_only_missing_modes() -> None:
 
     names = _tool_names(include_llm_tools=True, registry=registry)
     assert "graph.beam_search" in names
-    assert "graph.intersection" in names
+    assert "graph.ops" in names

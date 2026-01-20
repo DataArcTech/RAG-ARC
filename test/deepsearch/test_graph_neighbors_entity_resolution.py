@@ -1,8 +1,8 @@
 import asyncio
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from core.deepsearch.tools import GraphOpsTool
 from core.deepsearch.tools.base import ToolRunRequest
-from core.deepsearch.tools.fast.graph_ops import GraphNeighborsTool
 from core.graph_adapter.base import GraphAccessScope
 
 
@@ -45,11 +45,15 @@ class _StubAdapter:
 
 def test_graph_neighbors_auto_resolves_messy_entity_name() -> None:
     adapter = _StubAdapter()
-    tool = GraphNeighborsTool()
+    tool = GraphOpsTool()
     req = ToolRunRequest(
         question="probe",
         plan_step="probe_01",
-        extra={"entity": "Singapore American School (SAS)", "direction": "both", "limit": 10},
+        extra={
+            "mode": "template",
+            "template": "neighbors",
+            "template_args": {"entity": "Singapore American School (SAS)", "direction": "both", "limit": 10},
+        },
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-x"),
         context_evidences=[],
@@ -64,11 +68,20 @@ def test_graph_neighbors_auto_resolves_messy_entity_name() -> None:
 
 def test_graph_neighbors_resolution_can_be_forced_off_by_threshold() -> None:
     adapter = _StubAdapter()
-    tool = GraphNeighborsTool(auto_resolve_min_score=0.99)  # force low-confidence path
+    tool = GraphOpsTool()
     req = ToolRunRequest(
         question="probe",
         plan_step="probe_01",
-        extra={"entity": "Singapore American School (SAS)", "direction": "both", "limit": 10},
+        extra={
+            "mode": "template",
+            "template": "neighbors",
+            "template_args": {
+                "entity": "Singapore American School (SAS)",
+                "direction": "both",
+                "limit": 10,
+                "resolution": {"auto_score_min": 0.99},
+            },
+        },
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-x"),
         context_evidences=[],

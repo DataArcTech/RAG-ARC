@@ -1,7 +1,6 @@
 import pytest
 
-from core.deepsearch.tools import ToolRunRequest
-from core.deepsearch.tools.fast.graph_ops import GraphFactsByTypeTool, GraphIntersectionTool
+from core.deepsearch.tools import GraphOpsTool, ToolRunRequest
 from core.graph_adapter.base import GraphAccessScope, GraphAdapterCapability, GraphAdapterMetadata
 
 
@@ -54,7 +53,7 @@ async def test_intersection_supports_left_right_direction_params() -> None:
             }
         ]
     )
-    tool = GraphIntersectionTool()
+    tool = GraphOpsTool()
     req = ToolRunRequest(
         question="intersection direction test",
         plan_step="p",
@@ -62,12 +61,16 @@ async def test_intersection_supports_left_right_direction_params() -> None:
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
         extra={
-            "left": "A公司",
-            "right": "B公司",
-            "left_predicates": ["OWNS"],
-            "right_predicates": ["OWNS"],
-            "left_direction": "out",
-            "right_direction": "in",
+            "mode": "template",
+            "template": "intersection",
+            "template_args": {
+                "left": "A公司",
+                "right": "B公司",
+                "left_predicates": ["OWNS"],
+                "right_predicates": ["OWNS"],
+                "left_direction": "out",
+                "right_direction": "in",
+            },
         },
     )
     result = await tool.run(req)
@@ -91,14 +94,18 @@ async def test_facts_by_type_supports_direction_in_param() -> None:
             }
         ]
     )
-    tool = GraphFactsByTypeTool()
+    tool = GraphOpsTool()
     req = ToolRunRequest(
         question="facts_by_type direction test",
         plan_step="p",
         context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"entity_type": "Service", "predicates": ["DEPENDS_ON"], "direction": "in", "limit": 5},
+        extra={
+            "mode": "template",
+            "template": "facts_by_type",
+            "template_args": {"entity_type": "Service", "predicates": ["DEPENDS_ON"], "direction": "in", "limit": 5},
+        },
     )
     result = await tool.run(req)
     assert result.evidences
