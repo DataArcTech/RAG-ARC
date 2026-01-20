@@ -2,6 +2,7 @@
 from typing import Any, Iterable, List
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
+from config.core.deepsearch.evidence_defaults import EVIDENCE_CLASS_GRAPH_INFERENCE
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED, EvidenceKind
 from core.knowledge_graph.schema import normalize_relation_token
@@ -15,7 +16,12 @@ def build_derived_evidence(
     content: str,
     provenance: dict[str, Any],
     kind: EvidenceKind = EVIDENCE_KIND_DERIVED,
+    evidence_class: str | None = None,
 ) -> EvidenceChunk:
+    if evidence_class:
+        provenance.setdefault("evidence_class", evidence_class)
+    else:
+        provenance.setdefault("evidence_class", EVIDENCE_CLASS_GRAPH_INFERENCE)
     chunk_id = derived_chunk_id(tool_name=tool_name, plan_step=plan_step, label=label, content=content)
     return EvidenceChunk(
         chunk_id=chunk_id,

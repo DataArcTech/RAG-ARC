@@ -9,12 +9,9 @@ from .fast import (
     SearchFaissTool,
     SearchBM25Tool,
     SearchGraphChunkTool,
+    WebSearchTool,
 )
-from .heavy import (
-    ThinkTool,
-    LLMChainExplorerTool,
-    BeamSearchTool,
-)
+from .heavy import BeamSearchTool, ThinkTool
 from .hybrid import CodePythonTool
 
 __all__ = [
@@ -28,10 +25,10 @@ __all__ = [
     "SearchFaissTool",
     "SearchBM25Tool",
     "SearchGraphChunkTool",
-    "LLMChainExplorerTool",
     "ThinkTool",
     "BeamSearchTool",
     "CodePythonTool",
+    "WebSearchTool",
     "build_builtin_tools",
     "builtin_tool_descriptors",
     "get_tool_descriptor",
@@ -46,19 +43,18 @@ _BUILTIN_CLASSES = [
     SearchFaissTool,
     SearchBM25Tool,
     SearchGraphChunkTool,
-    LLMChainExplorerTool,
     ThinkTool,
-    BeamSearchTool,
     CodePythonTool,
+    WebSearchTool,
+    BeamSearchTool,
 ]
 
 _DESCRIPTOR_MAP = {cls.descriptor.name: cls.descriptor for cls in _BUILTIN_CLASSES}
 _LLM_REQUIRED = {
     SearchTool,
     SearchGraphChunkTool,
-    LLMChainExplorerTool,
-    BeamSearchTool,
     ThinkTool,
+    BeamSearchTool,
 }
 _LLM_OPTIONAL = {
     KnowledgeBaseExploreTool,

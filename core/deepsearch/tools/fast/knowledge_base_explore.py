@@ -12,6 +12,7 @@ from config.core.deepsearch.tool_defaults import (
     KNOWLEDGE_BASE_READ_MAX_CHARS,
     KNOWLEDGE_BASE_READ_MAX_CHUNKS,
 )
+from config.core.deepsearch.evidence_defaults import EVIDENCE_CLASS_SOURCE_TEXT
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_PRIMARY
 from core.graph_adapter.cypher import adapter_supports_cypher
 
@@ -337,6 +338,7 @@ class KnowledgeBaseExploreTool(GraphTool):
                 provenance={
                     "goal": goal,
                     "chunk_id": chunk_id,
+                    "evidence_class": EVIDENCE_CLASS_SOURCE_TEXT,
                     "metadata": metadata,
                 },
                 score=None,

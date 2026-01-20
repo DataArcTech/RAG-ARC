@@ -23,6 +23,7 @@ from config.core.deepsearch.tool_defaults import (
     CODE_PYTHON_SUMMARY_PREVIEW_CHARS,
     CODE_PYTHON_TRACEBACK_LIMIT,
 )
+from config.core.deepsearch.evidence_defaults import EVIDENCE_CLASS_TOOL_OUTPUT
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
@@ -459,6 +460,7 @@ class CodePythonTool(GraphTool):
                             "tool_name": self.descriptor.name,
                             "plan_step": request.plan_step,
                             "exec_status": exec_status,
+                            "evidence_class": EVIDENCE_CLASS_TOOL_OUTPUT,
                         },
                     )
                 )

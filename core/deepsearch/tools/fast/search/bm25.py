@@ -4,6 +4,7 @@ import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from config.core.deepsearch import tool_defaults
+from config.core.deepsearch.evidence_defaults import EVIDENCE_CLASS_SOURCE_TEXT
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from encapsulation.data_model.schema import Chunk
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_PRIMARY
@@ -137,6 +138,7 @@ class _Bm25Channel:
                     "rank": idx,
                     "file_name": file_name,
                     "matched_token": matched,
+                    "evidence_class": EVIDENCE_CLASS_SOURCE_TEXT,
                     "metadata": meta,
                 },
             )

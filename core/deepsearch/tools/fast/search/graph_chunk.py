@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 from config.core.deepsearch import tool_defaults
+from config.core.deepsearch.evidence_defaults import EVIDENCE_CLASS_GRAPH_CHUNK
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from encapsulation.data_model.schema import Chunk
 from core.deepsearch.entity_resolution import build_default_entity_resolver
@@ -530,6 +531,7 @@ class _GraphChunkChannel:
                     "channel": "graph_chunk",
                     "rank": idx,
                     "file_name": file_name,
+                    "evidence_class": EVIDENCE_CLASS_GRAPH_CHUNK,
                     "metadata": meta,
                 },
             )

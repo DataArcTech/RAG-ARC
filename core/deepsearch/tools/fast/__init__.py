@@ -3,6 +3,7 @@
 from .search import SearchTool, SearchFaissTool, SearchBM25Tool, SearchGraphChunkTool
 from .knowledge_base_explore import KnowledgeBaseExploreTool
 from .graph_ops import GraphOpsTool
+from .web_search import WebSearchTool
 
 __all__ = [
     "SearchTool",
@@ -11,4 +12,5 @@ __all__ = [
     "SearchGraphChunkTool",
     "KnowledgeBaseExploreTool",
     "GraphOpsTool",
+    "WebSearchTool",
 ]
