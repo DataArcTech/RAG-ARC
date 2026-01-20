@@ -468,7 +468,6 @@ def test_reporter_no_evidence_returns_deterministic_report_even_when_graph_viz_d
         "evidences": [],
         "graph_context": {"metadata": {}},
         "coverage_metrics": {"evidence_count": 0, "coverage_ratio": 0.0},
-        "pending_external": [],
     }
 
     report = asyncio.run(reporter.compose(trace, external_evidence=[]))

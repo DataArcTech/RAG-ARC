@@ -17,7 +17,7 @@ def _default_service_config(*, tmp_path, fingerprint: str, **overrides):  # noqa
         "coverage_expected_min_chunks": 1,
         "tool_names": {
             "graph_channel_tool": "graph_adapter.query",
-            "text_channel_tool": "graph.llm_chain_explorer",
+            "text_channel_tool": "search",
             "web_channel_tool": "web.search",
             "think_tool": "think",
         },
@@ -33,7 +33,6 @@ def _default_service_config(*, tmp_path, fingerprint: str, **overrides):  # noqa
             "judge_max_retries": 1,
             "judge_max_evidence_items": 1,
             "judge_max_evidence_chars": 200,
-            "trigger_external_on_quality_failure": False,
         },
     }
     base.update(overrides)
@@ -91,13 +90,6 @@ class _StubGraphLoop:
             "reasoning_steps": [],
             "evidences": [],
             "tool_results": [],
-            "pending_external": [
-                {
-                    "step_id": "gap_web_01",
-                    "metadata": {"query": question},
-                    "tool_args": {"query": question},
-                }
-            ],
             "think_notes": [],
             "coverage_metrics": {},
         }
@@ -111,18 +103,6 @@ class _StubGraphLoopWithWorkerError(_StubGraphLoop):
             "worker_errors": [{"agent_id": "worker_01", "error": "worker_timeout"}],
         }
         return trace
-
-
-class _StubGapDetector:
-    def evaluate(self, reasoning_trace: Dict[str, Any]):
-        return {
-            "coverage_score": 1.0,
-            "confidence_score": 1.0,
-            "should_trigger_external": False,
-            "reason": "sufficient",
-            "missing_topics": [],
-            "diagnostics": {},
-        }
 
 
 class _StubReporter:
@@ -189,34 +169,6 @@ class _StubToolManager:
     pass
 
 
-class _TriggerGapDetector:
-    def evaluate(self, reasoning_trace: Dict[str, Any]):
-        return {
-            "coverage_score": 0.2,
-            "confidence_score": 0.3,
-            "should_trigger_external": True,
-            "reason": "coverage",
-            "missing_topics": ["timeline"],
-            "diagnostics": {},
-        }
-
-
-class _StubExternalChannel:
-    def __init__(self):
-        self.calls: List[List[Dict[str, Any]]] = []
-
-    async def run(self, tasks, **kwargs):
-        self.calls.append(tasks)
-        return {
-            "evidences": [
-                {"chunk_id": "ext-1", "source": "web.stub", "content": "external evidence"},
-            ],
-            "logs": [
-                {"step_id": tasks[0]["step_id"], "provider": "stub", "status": "ok"},
-            ],
-        }
-
-
 class _StubBudgetAwareGraphLoop(_StubGraphLoop):
     def __init__(self):
         super().__init__()
@@ -240,7 +192,6 @@ async def test_service_converts_owner_to_scope(tmp_path):
     service = DeepSearchService(
         planner=planner,
         graph_loop=graph_loop,
-        gap_detector=_StubGapDetector(),
         reporter=_StubReporter(),
         tool_manager=_StubToolManager(),
         config=_default_service_config(tmp_path=tmp_path, fingerprint="service-test"),
@@ -270,7 +221,6 @@ async def test_service_persists_experiment_snapshot(tmp_path):
     service = DeepSearchService(
         planner=planner,
         graph_loop=graph_loop,
-        gap_detector=_StubGapDetector(),
         reporter=_StubReporter(),
         tool_manager=_StubToolManager(),
         config=_default_service_config(tmp_path=tmp_path, fingerprint="experiment-test", experiment_output_dir=str(tmp_path)),
@@ -286,38 +236,12 @@ async def test_service_persists_experiment_snapshot(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_service_creates_external_task_when_gap_detected(tmp_path):
-    planner = _StubPlanner()
-    graph_loop = _StubGraphLoop()
-    external_channel = _StubExternalChannel()
-    service = DeepSearchService(
-        planner=planner,
-        graph_loop=graph_loop,
-        gap_detector=_TriggerGapDetector(),
-        reporter=_StubReporter(),
-        tool_manager=_StubToolManager(),
-        external_channel=external_channel,
-        config=_default_service_config(tmp_path=tmp_path, fingerprint="service-gap"),
-    )
-
-    result = await service.run("Need more info", owner_id="tenant-gap")
-
-    assert external_channel.calls, "external channel should be invoked when gap is detected"
-    synthesized = external_channel.calls[0]
-    assert synthesized and synthesized[0]["step_id"].startswith("gap_web_")
-    assert result["report"]["evidences"], "external evidences should feed into report output"
-    snapshot = result["state"]
-    assert snapshot["external_calls"], "state snapshot should contain external call logs"
-
-
-@pytest.mark.asyncio
 async def test_service_surfaces_worker_failures_into_state_errors(tmp_path):
     planner = _StubPlanner()
     graph_loop = _StubGraphLoopWithWorkerError()
     service = DeepSearchService(
         planner=planner,
         graph_loop=graph_loop,
-        gap_detector=_StubGapDetector(),
         reporter=_StubReporter(),
         tool_manager=_StubToolManager(),
         config=_default_service_config(tmp_path=tmp_path, fingerprint="service-worker-errors"),
@@ -337,7 +261,6 @@ async def test_service_does_not_inject_budget_overrides_by_default(tmp_path):
     service = DeepSearchService(
         planner=planner,
         graph_loop=graph_loop,
-        gap_detector=_StubGapDetector(),
         reporter=_StubReporter(),
         tool_manager=_StubToolManager(),
         config=_default_service_config(tmp_path=tmp_path, fingerprint="service-budget"),
@@ -354,7 +277,6 @@ async def test_service_keeps_default_budget_for_complex_questions(tmp_path):
     service = DeepSearchService(
         planner=planner,
         graph_loop=graph_loop,
-        gap_detector=_StubGapDetector(),
         reporter=_StubReporter(),
         tool_manager=_StubToolManager(),
         config=_default_service_config(tmp_path=tmp_path, fingerprint="service-budget"),
@@ -391,7 +313,6 @@ class _GraphLoopTwoPasses:
             "reasoning_steps": [],
             "evidences": evidences,
             "tool_results": [],
-            "pending_external": [],
             "think_notes": [],
             "coverage_metrics": {},
         }
@@ -455,7 +376,6 @@ async def test_service_quality_loop_triggers_followup_round(tmp_path):
     service = DeepSearchService(
         planner=planner,
         graph_loop=graph_loop,
-        gap_detector=_StubGapDetector(),
         reporter=reporter,
         tool_manager=_StubToolManager(),
         config=_default_service_config(
@@ -473,7 +393,6 @@ async def test_service_quality_loop_triggers_followup_round(tmp_path):
                 "judge_max_retries": 1,
                 "judge_max_evidence_items": 5,
                 "judge_max_evidence_chars": 200,
-                "trigger_external_on_quality_failure": False,
             },
         ),
     )
@@ -547,7 +466,6 @@ async def test_service_quality_loop_caps_should_iterate_when_max_rounds_reached(
     service = DeepSearchService(
         planner=planner,
         graph_loop=graph_loop,
-        gap_detector=_StubGapDetector(),
         reporter=reporter,
         tool_manager=_StubToolManager(),
         config=_default_service_config(
@@ -565,7 +483,6 @@ async def test_service_quality_loop_caps_should_iterate_when_max_rounds_reached(
                 "judge_max_retries": 1,
                 "judge_max_evidence_items": 5,
                 "judge_max_evidence_chars": 200,
-                "trigger_external_on_quality_failure": False,
             },
         ),
     )

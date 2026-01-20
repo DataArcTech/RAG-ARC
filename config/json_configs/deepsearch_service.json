@@ -6,12 +6,10 @@
     "enable_sub_question": true,
     "persist_plan": true,
     "plan_output_dir": "${DEEPSEARCH_PLAN_OUTPUT_DIR}",
-    "allow_external_channel": true,
     "web_step_policy": "realtime_required",
-    "realtime_web_force_external": true,
     "honor_planner_tool_selection": true,
     "graph_channel_tool": "graph_adapter.query",
-    "text_channel_tool": "graph.llm_chain_explorer",
+    "text_channel_tool": "search",
     "web_channel_tool": "web.search",
     "tool_catalog_allowlist": [
       "search",
@@ -23,7 +21,6 @@
     ],
     "tool_catalog_max_items": 6,
     "include_llm_tools_in_catalog": true,
-    "default_web_provider": "${DEEPSEARCH_WEB_PROVIDER}",
     "graph_adapter_name": "${DEEPSEARCH_DEFAULT_ADAPTER}",
     "tool_arg_templates": {}
   },
@@ -76,7 +73,7 @@
         "ppr_push_target_degree_penalty_gamma": 0.5,
         "entity_reset_weight_aggregation": "sum_avg",
         "dense_file_closure_enabled": true,
-        "ppr_push_epsilon": 0.000001
+        "ppr_push_epsilon": 1e-06
       }
     }
   },
@@ -135,9 +132,13 @@
     "max_subagents": 4,
     "subagent_concurrency": 4,
     "enable_parallel_tool_probes": true,
-    "probe_tool_names": ["search"],
+    "probe_tool_names": [
+      "search"
+    ],
     "probe_concurrency": 4,
-    "lead_tool_names": ["graph.llm_chain_explorer"],
+    "lead_tool_names": [
+      "search"
+    ],
     "lead_tool_concurrency": 2,
     "max_merge_evidences": 60,
     "worker_timeout_seconds": null,
@@ -147,12 +148,6 @@
     "initial_worker_count": 1,
     "stop_min_evidence_count": 3,
     "stop_min_coverage_ratio": 0.85
-  },
-  "gap_detection": {
-    "coverage_threshold": 0.7,
-    "confidence_threshold": 0.6,
-    "expected_min_chunks": 3,
-    "enable_external_on_gap": true
   },
   "reporter": {
     "max_highlights": 6,
@@ -183,7 +178,9 @@
     "synthesis_section_max_chars": 1200,
     "bench_answer": {
       "enabled": true,
-      "allowed_evidence_kinds": ["primary"],
+      "allowed_evidence_kinds": [
+        "primary"
+      ],
       "heading_window_max_lines": 10,
       "default_policy": {
         "mode": "single_stage",
@@ -238,7 +235,17 @@
       },
       "code.python": {
         "params": {
-          "allowed_imports": ["json", "math", "decimal", "fractions", "statistics", "datetime", "numpy", "pandas", "scipy"],
+          "allowed_imports": [
+            "json",
+            "math",
+            "decimal",
+            "fractions",
+            "statistics",
+            "datetime",
+            "numpy",
+            "pandas",
+            "scipy"
+          ],
           "timeout_seconds": 6.0,
           "max_code_chars": 12000,
           "max_stdout_chars": 8000,
@@ -259,24 +266,7 @@
   "tool_budget": {
     "enabled": true,
     "max_calls_total": 60,
-    "count_external_calls": true,
     "expose_to_llm": true
-  },
-  "external_channel": {
-    "default_provider": "tavily",
-    "max_rounds": 2,
-    "enabled": true,
-    "auto_generate_task_on_gap": true,
-    "execute_forced_tasks_without_gap": true,
-    "execute_pending_tasks_without_gap": false,
-    "context_window_limit": 12,
-    "http_timeout": 20.0,
-    "endpoint_url": "https://api.tavily.com/search",
-    "max_results": 5,
-    "tool_timeout_seconds": 45.0,
-    "cache_mode": "auto",
-    "cache_dir": "${DEEPSEARCH_EXTERNAL_CACHE_DIR}",
-    "tavily_api_key": "${TAVILY_API_KEY}"
   },
   "quality_loop": {
     "enabled": true
@@ -307,7 +297,10 @@
   "artifacts": {
     "enabled": true,
     "version": 2,
-    "profiles": ["dev", "public"],
+    "profiles": [
+      "dev",
+      "public"
+    ],
     "state_snapshot_mode": "manifest",
     "refs": {
       "enabled": true
@@ -320,7 +313,6 @@
       "include_final_report_in_json": false,
       "max_plan_steps": 12,
       "max_stage_history": 128,
-      "max_external_calls": 12,
       "max_errors": 64
     }
   },

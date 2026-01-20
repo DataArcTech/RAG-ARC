@@ -99,7 +99,6 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
         evidence_lock = asyncio.Lock()
         tool_runs: List[Dict[str, Any]] = []
         think_notes: List[Dict[str, Any]] = []
-        pending_external: List[Dict[str, Any]] = []
         reasoning_results: Dict[int, ReasoningStepRecord] = {}
         aux_reasoning: List[ReasoningStepRecord] = []
         completed_internal_steps = 0
@@ -132,8 +131,6 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                 reasoning_results[idx] = outcome.reasoning
                 if outcome.traversal:
                     traversals.append(outcome.traversal)
-                if outcome.pending_external:
-                    pending_external.append(outcome.pending_external)
                 if outcome.evidences:
                     await self._extend_shared_evidences(outcome.evidences)
                 if outcome.tool_runs:
@@ -143,7 +140,7 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
 
                 # Treat failed internal steps as "completed" for cadence purposes so the think loop
                 # can react (retry/alternate tool) instead of getting stuck after a failure.
-                if outcome.reasoning.status in {"done", "failed"} and not outcome.pending_external:
+                if outcome.reasoning.status in {"done", "failed"}:
                     completed_internal_steps += 1
 
                 coverage_metrics = self._coverage_snapshot(
@@ -200,7 +197,6 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             "reasoning_steps": [record.model_dump() for record in combined_reasoning],
             "evidences": [chunk.model_dump() for chunk in evidences],
             "tool_results": tool_runs,
-            "pending_external": pending_external,
             "think_notes": think_notes,
             "coverage_metrics": coverage_metrics,
         }
@@ -400,27 +396,15 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             tool = raw_dict.get("tool") or spec.metadata.get("tool")
             tool_args = raw_dict.get("tool_args") or spec.metadata.get("tool_args") or {}
             enabled = raw_dict.get("enabled")
-            requires_external = raw_dict.get("requires_external") or spec.metadata.get("requires_external")
             channel = (spec.channel or "graph").lower()
-            requires_external = bool(requires_external or channel == "web")
-            run_with_adapter = bool(
-                not requires_external
-                and (channel == "graph")
-                and (not tool or tool == self.graph_channel_tool)
-            )
-            should_invoke_tool = bool(
-                not requires_external
-                and channel in {"graph", "text"}
-                and tool
-                and tool != self.graph_channel_tool
-            )
+            run_with_adapter = bool(channel == "graph" and (not tool or tool == self.graph_channel_tool))
+            should_invoke_tool = bool(channel in {"graph", "text", "web"} and tool and tool != self.graph_channel_tool)
             normalized.append(
                 {
                     "spec": spec,
                     "tool": tool,
                     "tool_args": tool_args if isinstance(tool_args, dict) else {},
                     "enabled": True if enabled is None else bool(enabled),
-                    "requires_external": requires_external,
                     "run_with_adapter": run_with_adapter,
                     "should_invoke_tool": should_invoke_tool,
                     "channel": channel,
@@ -588,18 +572,6 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             channel=spec.channel,
             status="pending",
         )
-
-    @staticmethod
-    def _pending_external_payload(entry: Dict[str, Any]) -> Dict[str, Any]:
-        spec: PlanSpec = entry["spec"]
-        return {
-            "step_id": spec.step_id,
-            "description": spec.description,
-            "channel": spec.channel,
-            "tool": entry["tool"],
-            "tool_args": entry["tool_args"],
-            "metadata": spec.metadata,
-        }
 
     def _coverage_snapshot(
         self,

@@ -1,4 +1,4 @@
-"""Configuration entry point that wires planner, graph reasoning, gap detection, and external channels."""
+"""Configuration entry point that wires planner, graph reasoning, and reporting."""
 import hashlib
 import json
 import logging
@@ -20,18 +20,14 @@ from config.core.deepsearch.planner_web_policy_defaults import (
 )
 from application.rag_inference.deepsearch.service import DeepSearchService
 from config.core.deepsearch.graph_adapter_config import GraphAdapterConfig
-from config.core.deepsearch.gap_config import GapDetectionEvaluatorConfig
 from config.encapsulation.mcp.client_config import MCPClientConfig
 from config.encapsulation.llm.chat.openai import OpenAIChatConfig
 from core.deepsearch.plan import DeepSearchPlanner
-from core.deepsearch.reasoning import GraphReasoningLoop
 from core.deepsearch.reasoning import MultiAgentGraphReasoningLoop
-from core.deepsearch.gap import GapDetectionEngine
 from core.deepsearch.report import DeepSearchReporter
 from core.deepsearch.tooling.registry import ToolHintRegistry
 from core.deepsearch.tooling.adapter_capability_gate import disabled_tools_for_adapter, merge_disabled_tools
 from encapsulation.deepsearch.tooling import DeepSearchToolManager
-from encapsulation.deepsearch.external import ExternalSearchChannel
 from encapsulation.deepsearch.telemetry import LoggingTelemetryClient
 from framework.config import AbstractConfig
 
@@ -193,7 +189,6 @@ class PlannerRuntimeConfig(BaseModel):
     enable_sub_question: bool = Field(True, description="Allow heuristic sub-question expansion.")
     persist_plan: bool = Field(True, description="Persist plan JSON artifacts for replay/debugging.")
     plan_output_dir: str = Field("./local/deepsearch_runs", description="Directory for persisted plan artifacts.")
-    allow_external_channel: bool = Field(False, description="Enable optional web/external channel steps from planner.")
     web_step_policy: Literal["off", "realtime_required"] = Field(
         "realtime_required",
         description=(
@@ -220,21 +215,16 @@ class PlannerRuntimeConfig(BaseModel):
         default_factory=lambda: list(DEFAULT_REALTIME_WEB_TOPIC_KEYWORDS),
         description="Time-sensitive topic keywords; used together with realtime_web_intent_keywords.",
     )
-    realtime_web_force_external: bool = Field(
-        True,
-        description="When true, mark the realtime web step as forced so it executes even if gap detection does not trigger.",
-    )
     graph_channel_tool: str = Field("graph_adapter.query", description="Default tool name for graph channel steps.")
     text_channel_tool: str = Field(
-        "graph.llm_chain_explorer",
-        description="Default text-channel tool (LLM chain exploration when structured text output is needed).",
+        "search",
+        description="Default text-channel tool (fallback to search when text-only steps are needed).",
     )
     web_channel_tool: str = Field("web.search", description="Default tool name for web channel steps.")
     include_llm_tools_in_catalog: bool = Field(
         ...,
         description="Whether to include LLM-dependent tools in the planner tool catalog (must be explicit; no env heuristics).",
     )
-    default_web_provider: Optional[str] = Field(None, description="Fallback provider for web/search tools.")
     tool_arg_templates: Dict[str, Dict[str, str]] = Field(
         default_factory=dict,
         description="Channel-specific tool argument templates (string.Template supported).",
@@ -438,15 +428,6 @@ class MultiAgentConfig(BaseModel):
     )
 
 
-class GapDetectionConfig(BaseModel):
-    """Threshold tuning for the gap evaluator."""
-
-    coverage_threshold: float = Field(0.7, description="Minimum coverage score before treating the answer as complete.")
-    confidence_threshold: float = Field(0.6, description="Minimum model-reported confidence score.")
-    expected_min_chunks: int = Field(3, description="Target evidence chunk count for coverage normalization.")
-    enable_external_on_gap: bool = Field(True, description="Trigger external search when a gap is detected.")
-
-
 class BenchAnswerTypeConfig(BaseModel):
     """Per-question-type settings for benchmark-mode answer synthesis."""
 
@@ -615,15 +596,11 @@ class ToolManagerConfig(BaseModel):
 class ToolBudgetConfig(BaseModel):
     """Global tool-call budget per DeepSearch run (not counting graph adapter traversals)."""
 
-    enabled: bool = Field(True, description="Enable tool-call budget enforcement across tool_manager/external tools.")
+    enabled: bool = Field(True, description="Enable tool-call budget enforcement across tool_manager tools.")
     max_calls_total: int = Field(
         60,
         ge=0,
         description="Maximum total tool invocations allowed for one DeepSearch run (0 disables tool calls).",
-    )
-    count_external_calls: bool = Field(
-        True,
-        description="When true, count external channel executions (e.g., Tavily HTTP calls) against the same budget.",
     )
     expose_to_llm: bool = Field(
         True,
@@ -649,7 +626,6 @@ class PublicArtifactsProfileConfig(BaseModel):
     )
     max_plan_steps: int = Field(12, ge=0, description="Maximum number of plan steps retained in public.json.")
     max_stage_history: int = Field(128, ge=0, description="Maximum stage_history entries retained in public.json.")
-    max_external_calls: int = Field(12, ge=0, description="Maximum external call logs retained in public.json.")
     max_errors: int = Field(64, ge=0, description="Maximum error entries retained in public.json.")
 
 
@@ -694,46 +670,6 @@ class RemoteToolDescriptorConfig(BaseModel):
     strategy_tags: List[str] = Field(default_factory=list, description="Optional strategy hints for the planner.")
 
 
-class ExternalChannelConfig(BaseModel):
-    """Runtime constraints for the optional external search channel."""
-
-    default_provider: Optional[str] = Field(None, description="Preferred provider identifier, e.g. tavily.")
-    max_rounds: int = Field(2, description="Maximum number of tasks executed per request.")
-    enabled: bool = Field(False, description="Force-enable the channel even when env flags disable it.")
-    auto_generate_task_on_gap: bool = Field(
-        True,
-        description=(
-            "When the gap detector requests external search but the plan has no explicit web tasks, "
-            "auto-generate a single web.search task to keep the behavior observable and reproducible."
-        ),
-    )
-    execute_forced_tasks_without_gap: bool = Field(
-        True,
-        description=(
-            "Execute external tasks marked as forced (e.g. realtime/latest requirements) even when "
-            "gap detection does not trigger external search."
-        ),
-    )
-    execute_pending_tasks_without_gap: bool = Field(
-        False,
-        description=(
-            "Execute any pending_external tasks even when gap detection does not trigger external search. "
-            "Prefer keeping this false; mark tasks as forced when you truly require web evidence."
-        ),
-    )
-    context_window_limit: int = Field(12, description="Evidence window size forwarded to external tools.")
-    http_timeout: float = Field(20.0, description="Timeout applied to HTTP-based providers.")
-    endpoint_url: str = Field("https://api.tavily.com/search", description="HTTP provider endpoint (Tavily).")
-    max_results: int = Field(5, description="Maximum documents returned by HTTP providers.")
-    tool_timeout_seconds: float = Field(45.0, description="Timeout applied to tool_manager invocations.")
-    cache_mode: str = Field("auto", description="External cache mode: off/record/replay/auto.")
-    cache_dir: Optional[str] = Field(
-        "./local/deepsearch_artifacts/external_cache",
-        description="Directory for external cache files.",
-    )
-    tavily_api_key: Optional[str] = Field(None, description="Optional Tavily API key used by the provider implementation.")
-
-
 class QualityLoopConfig(BaseModel):
     """Quality gate settings powering research→verify→iterate loops."""
 
@@ -757,10 +693,6 @@ class QualityLoopConfig(BaseModel):
     enable_llm_judge: bool = Field(True, description="Use an LLM rubric judge for gate scoring + actions.")
     judge_temperature: float = Field(0.0, description="Sampling temperature for the quality judge.")
     judge_max_retries: int = Field(1, description="Retry attempts for the quality judge call.")
-    trigger_external_on_quality_failure: bool = Field(
-        True,
-        description="Allow the quality gate to request external search when enabled.",
-    )
 
 
 class DeterministicRoutingConfig(BaseModel):
@@ -829,11 +761,9 @@ class DeepSearchServiceConfig(AbstractConfig):
     graph_adapter: GraphAdapterConfig
     graph_reasoning: GraphReasoningStrategyConfig
     multi_agent: MultiAgentConfig
-    gap_detection: GapDetectionConfig
     reporter: ReporterConfig
     tool_manager: ToolManagerConfig
     tool_budget: ToolBudgetConfig
-    external_channel: ExternalChannelConfig
     quality_loop: QualityLoopConfig = Field(default_factory=QualityLoopConfig)
     deterministic_routing: DeterministicRoutingConfig = Field(default_factory=DeterministicRoutingConfig)
     mcp_client: Optional[MCPClientConfig] = Field(
@@ -841,7 +771,7 @@ class DeepSearchServiceConfig(AbstractConfig):
     )
     llm: Optional[OpenAIChatConfig] = Field(
         default=None,
-        description="Optional LLM config shared across planner reasoning, graph tools, and external channels.",
+        description="Optional LLM config shared across planner reasoning and graph/tools.",
     )
     artifacts: ArtifactsConfig = Field(
         default_factory=ArtifactsConfig,
@@ -849,7 +779,7 @@ class DeepSearchServiceConfig(AbstractConfig):
     )
     telemetry_enabled: bool = Field(
         True,
-        description="Enable the built-in telemetry logger to surface tool/gap/external events.",
+        description="Enable the built-in telemetry logger to surface tool events.",
     )
 
     def build(self) -> DeepSearchService:
@@ -887,18 +817,12 @@ class DeepSearchServiceConfig(AbstractConfig):
             settings=self.multi_agent.model_dump(),
             graph_channel_tool=self.planner.graph_channel_tool,
         )
-        gap_detector = self._build_gap_detector(telemetry_client=telemetry_client)
         graph_store = self._resolve_graph_store(adapter)
         reporter = DeepSearchReporter(
             template_store=None,
             config=self.reporter.model_dump(),
             llm_connector=llm_connector,
             graph_store=graph_store,
-        )
-        external_channel = ExternalSearchChannel(
-            tool_manager=tool_manager,
-            config=self.external_channel,
-            telemetry_client=telemetry_client,
         )
         adapter_meta_payload: Any | None = adapter_meta
         if adapter_meta is not None:
@@ -912,10 +836,8 @@ class DeepSearchServiceConfig(AbstractConfig):
         return DeepSearchService(
             planner=planner,
             graph_loop=graph_loop,
-            gap_detector=gap_detector,
             reporter=reporter,
             tool_manager=tool_manager,
-            external_channel=external_channel,
             config={
                 "name": "deepsearch-service",
                 "fingerprint": self._fingerprint(),
@@ -968,21 +890,6 @@ class DeepSearchServiceConfig(AbstractConfig):
             telemetry_client=telemetry_client,
             mcp_client=mcp_client,
             tool_hint_registry=tool_hint_registry,
-        )
-
-    def _build_gap_detector(self, *, telemetry_client) -> GapDetectionEngine:
-        evaluator_config = GapDetectionEvaluatorConfig(
-            coverage_threshold=self.gap_detection.coverage_threshold,
-            confidence_threshold=self.gap_detection.confidence_threshold,
-            expected_min_chunks=self.gap_detection.expected_min_chunks,
-        )
-        evaluator = evaluator_config.build()
-        gap_config = self.gap_detection.model_dump()
-        gap_config["external_channel_enabled"] = bool(self.external_channel.enabled)
-        return GapDetectionEngine(
-            evaluator,
-            telemetry_client=telemetry_client,
-            config=gap_config,
         )
 
     @staticmethod

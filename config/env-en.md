@@ -30,9 +30,9 @@ Optional feature switches (have defaults):
 - `bench_mode`, `TASK_QUEUE_MODE`, `MODEL_PROFILE`, `DEVELOP_MODE`, `ADMIN_OWNER_ID`
 
 Benchmark/experiment mode:
-- `bench_mode` (default `0`): when set to `1`, benchmark runners (see `application/rag_inference/module_bench.py`, `application/rag_inference/deepsearch/service_bench.py`) execute algorithm-only flows and return plain-text answers (no citations/reports/external web steps).
+- `bench_mode` (default `0`): when set to `1`, benchmark runners (see `application/rag_inference/module_bench.py`, `application/rag_inference/deepsearch/service_bench.py`) execute algorithm-only flows and return plain-text answers (no citations/reports/web.search steps).
 
-Optional external web search (only if enabled in config):
+Optional web search (only if enabled in config):
 - `TAVILY_API_KEY`
 
 Optional infrastructure overrides (defaults work for local/Docker; set only when needed):
@@ -182,7 +182,6 @@ Notes:
 | `DEEPSEARCH_GRAPH_EDGE_LIMIT` | `200` | Cap for DeepSearch edge exports between the retained nodes. |
 | `DEEPSEARCH_MAX_REASONING_STEPS` | `32` | Maximum reasoning steps returned in DeepSearch payloads. |
 | `DEEPSEARCH_MAX_STAGE_HISTORY` | `10` | Maximum stage history entries returned in DeepSearch payloads. |
-| `DEEPSEARCH_MAX_EXTERNAL_CALLS` | `5` | Maximum external call entries returned in DeepSearch payloads. |
 | `DEEPSEARCH_MAX_TOOL_METADATA` | `5` | Maximum tool metadata entries returned in DeepSearch payloads. |
 | `DEEPSEARCH_WEAVER_EVIDENCE_PREVIEW_CHARS` | `180` | Evidence preview character limit in the DeepSearch Weaver trace rendering. |
 | `DEEPSEARCH_WEAVER_EVIDENCE_SAMPLE_COUNT` | `3` | Number of evidence samples included in the DeepSearch Weaver trace rendering. |
@@ -358,15 +357,10 @@ Location: `config/json_configs/deepsearch_service.json` → `tool_manager.enable
 | `DEEPSEARCH_PLAN_OUTPUT_DIR` | `./local/deepsearch_runs` | Folder for persisted plans. |
 | `DEEPSEARCH_ARTIFACT_DIR` | _(empty)_ | Optional: per-run DeepSearch artifact root (writes `run_id/plan_result.json`, `reasoning.json`, `report.json`, `report.md`, and snapshot/manifest JSON; when `artifacts.version=2`, also writes `manifest.json`, `dev.json`, `public.json`, and `state_snapshot.json` becomes a lightweight manifest; when `artifacts.dedupe.enabled=true`, also writes `evidence_pool.json` and replaces duplicated large blocks in `reasoning.json`/`report.json` with refs). |
 | `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `./local/deepsearch_artifacts` | Output directory for tool telemetry/artifacts (also used as the default run artifact root in `config/json_configs/deepsearch_service.json`). |
-| `DEEPSEARCH_ALLOW_EXTERNAL_CHANNEL` | `false` | Planner-only flag for emitting `web` steps (used when `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` is not set). |
-| `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` | `false` | Runtime override for external search enablement (config SoT: `external_channel.enabled` + `gap_detection.enable_external_on_gap`). |
 | `DEEPSEARCH_SECTIONWISE_WRITER` | `false` | Enable section-wise report writing with Memory Bank retrieval + recency retention. |
 | `DEEPSEARCH_BUDGET_TIER` | _(empty)_ | Optional runtime override for complexity→budget scaling (`low` / `default`); when empty, DeepSearch uses a heuristic based on the question. |
 | `DEEPSEARCH_TELEMETRY_ENABLED` | `true` | Enable telemetry capture for tool runs (local artifacts). |
 | `TAVILY_API_KEY` | _(empty)_ | API key for Tavily web search (used by both HippoRAG Q&A and DeepSearch when web search is enabled). |
-| `DEEPSEARCH_WEB_PROVIDER` | _(empty)_ | External search routing hint (`tavily` / `tool` / `mcp`; unknown values fall back to `tavily`). |
-| `DEEPSEARCH_EXTERNAL_CACHE_MODE` | `auto` | External search record/replay mode: `off` / `record` / `replay` / `auto`. |
-| `DEEPSEARCH_EXTERNAL_CACHE_DIR` | `./local/deepsearch_artifacts/external_cache` | External search cache directory. |
 | `DEEPSEARCH_TOOL_HINTS` | _(empty)_ | JSON list to override planner tool hints. |
 | `DEEPSEARCH_TOOL_MCP_CONFIG_PATH` | _(empty)_ | Custom JSON config for tool MCP server. |
 | `DEEPSEARCH_TOOL_MCP_ADAPTER_CONFIG` | _(empty)_ | JSON file describing adapter overrides. |
@@ -392,9 +386,6 @@ Location: `config/json_configs/deepsearch_service.json` → `tool_manager.enable
 | `DEEPSEARCH_MCP_PERSISTENT_SESSION` | `true` | Reuse MCP HTTP sessions. |
 | `DEEPSEARCH_MCP_ENABLE_GRAPH_CONTEXT` | `true` | Attach graph context to MCP requests. |
 | `DEEPSEARCH_MCP_GRAPH_CONTEXT_FIELD` | `__graph_context__` | Field name for graph context injection. |
-| `DEEPSEARCH_GAP_COVERAGE_THRESHOLD` | `0.7` | Coverage threshold for gap detection. |
-| `DEEPSEARCH_GAP_CONFIDENCE_THRESHOLD` | `0.6` | Confidence threshold for gap detection. |
-| `DEEPSEARCH_GAP_EXPECTED_MIN_CHUNKS` | `3` | Minimum expected chunk count before triggering external search. |
 | `DEEPSEARCH_CONSISTENCY_CHECK` | `true` | Enable LLM-based consistency check to validate report claims against evidence. |
 | `DEEPSEARCH_PARALLEL_SECTIONS` | `false` | Generate report sections in parallel (faster but uses more API calls). |
 | `DEEPSEARCH_QUALITY_LOOP_ENABLED` | `false` | Enable iterative quality gating (research → verify → iterate). |
@@ -406,7 +397,6 @@ Location: `config/json_configs/deepsearch_service.json` → `tool_manager.enable
 | `DEEPSEARCH_QUALITY_LOOP_ENABLE_LLM_JUDGE` | `true` | Enable the rubric-based LLM judge (called only when deterministic checks fail or gaps exist). |
 | `DEEPSEARCH_QUALITY_LOOP_JUDGE_TEMPERATURE` | `0.0` | Temperature for the quality judge. |
 | `DEEPSEARCH_QUALITY_LOOP_JUDGE_MAX_RETRIES` | `1` | Retry attempts for the quality judge call. |
-| `DEEPSEARCH_QUALITY_LOOP_TRIGGER_EXTERNAL_ON_FAILURE` | `true` | Allow the quality gate to request external search actions (still requires external search to be enabled). |
 
 ### Example: enabling MCP routing for remote tools
 
@@ -585,11 +575,10 @@ Entry points:
 DeepSearch web search policy (in `config/json_configs/deepsearch_service.json`):
 
 - `planner.web_step_policy="realtime_required"` injects/forces at least one `channel="web"` step when the question asks for realtime/latest/current info (e.g. FX rates/news).
-- `external_channel.execute_forced_tasks_without_gap=true` executes those forced tasks even when gap detection thinks coverage is sufficient.
 
 DeepSearch tool budget (in `config/json_configs/deepsearch_service.json`):
 
-- `tool_budget.max_calls_total` caps total tool invocations per DeepSearch run (tool_manager + optional external calls; does not count graph adapter traversals).
+- `tool_budget.max_calls_total` caps total tool invocations per DeepSearch run (tool_manager; does not count graph adapter traversals).
 - Remaining budget is attached to `graph_context.metadata.tool_budget` for LLM visibility and also surfaced in tool diagnostics.
 
 ---

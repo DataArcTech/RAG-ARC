@@ -100,7 +100,6 @@ class _TracingStubDeepSearchService:
         await asyncio.sleep(0.01)
         state.record_reasoning({"reasoning_steps": [{"step_id": "s1", "status": "done"}], "evidences": []})
         await asyncio.sleep(0.01)
-        state.record_gap_result({"should_trigger_external": False, "reason": "ok"})
         await asyncio.sleep(0.01)
         state.record_report(
             {

@@ -544,7 +544,6 @@ class MultiAgentGraphReasoningLoop:
             if isinstance(step, dict):
                 status = str(step.get("status") or "").strip() or "unknown"
                 status_counts[status] = status_counts.get(status, 0) + 1
-        pending_external = trace.get("pending_external") or []
         return {
             "focus": focus,
             "assigned_step_ids": assigned_step_ids,
@@ -553,7 +552,6 @@ class MultiAgentGraphReasoningLoop:
             "evidence_ids": evidence_ids[:12],
             "unique_sources": sorted({s for s in sources if s})[:12],
             "reasoning_status_counts": status_counts,
-            "pending_external_count": len(pending_external) if isinstance(pending_external, list) else 0,
         }
 
     async def _run_parallel_probes(
@@ -708,7 +706,6 @@ class MultiAgentGraphReasoningLoop:
             "reasoning_steps": [],
             "evidences": [],
             "tool_results": [],
-            "pending_external": [],
             "think_notes": [],
             "coverage_metrics": {},
         }
@@ -750,7 +747,6 @@ class MultiAgentGraphReasoningLoop:
                     diagnostics.setdefault("agent_id", agent_id)
                 merged["reasoning_steps"].append(step)
             merged["tool_results"].extend(list(trace.get("tool_results") or []))
-            merged["pending_external"].extend(list(trace.get("pending_external") or []))
             merged["think_notes"].extend(list(trace.get("think_notes") or []))
 
             for ev in trace.get("evidences") or []:

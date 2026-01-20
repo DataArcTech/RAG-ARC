@@ -278,7 +278,7 @@ RAG-ARC使用模块化配置系统。关键配置文件位于`config/json_config
 - `knowledge.json`：知识管理配置
 - `account.json`：用户账户配置
 - `.env`：运行时参数（模型、账号、端口等）。当需要在本地直接访问容器中的 PostgreSQL / Redis / Neo4j 时，可设置 `DEVELOP_MODE=true`（等同于开启 `EXPOSE_*` 变量），上述服务会开放到 `localhost`；默认关闭以确保安全。
-- 网络搜索（Tavily）：DeepSearch 默认开启外部搜索（`config/json_configs/deepsearch_service.json` → `planner.allow_external_channel=true` 且 `external_channel.enabled=true`）。HippoRAG 问答支持请求级按需开启：在 `/rag_inference/stream_chat/{session_id}` 传 `enable_web_search=true`（同时要求 `config/json_configs/rag_inference*.json` → `web_search.enabled=true`）。配置 `TAVILY_API_KEY` 后即可返回搜索结果。
+- 网络搜索（Tavily）：DeepSearch 通过 `web.search` 作为普通工具暴露（graph-first，仅在需要实时/最新信息时使用）。HippoRAG 问答支持请求级按需开启：在 `/rag_inference/stream_chat/{session_id}` 传 `enable_web_search=true`（同时要求 `config/json_configs/rag_inference*.json` → `web_search.enabled=true`）。配置 `TAVILY_API_KEY` 后即可返回搜索结果。
 
 ### 🌐 通过 `.env` 切换模型调用方式
 

@@ -2,7 +2,7 @@
 Graph traversal executor used by DeepSearch.
 
 Runs planner steps through GraphDeepSearchAdapter (prepare → query → filter → summarize → chain traversal)
-and returns traversal/evidence/reasoning records for downstream gap detection and reporting.
+and returns traversal/evidence/reasoning records for downstream reporting.
 Keeps the adapter abstraction swappable so semantic or relational strategies can be configured per run.
 """
 import logging
@@ -20,6 +20,7 @@ from encapsulation.data_model.deepsearch import (
     ReasoningStepRecord,
 )
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_PRIMARY
+from config.core.deepsearch.evidence_defaults import EVIDENCE_CLASS_GRAPH_CHUNK
 from core.graph_adapter.base import GraphDeepSearchAdapter
 from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.trace import emit_trace
@@ -444,6 +445,7 @@ class GraphTraversalExecutor:
                         "plan_step": plan_step,
                         "query": query,
                         "triples": triples,
+                        "evidence_class": EVIDENCE_CLASS_GRAPH_CHUNK,
                         "metadata": {
                             "_subgraph_info": subgraph_info,
                             "filter_type": filter_type,

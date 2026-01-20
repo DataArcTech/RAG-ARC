@@ -134,24 +134,23 @@ async def test_graph_reasoning_combines_traversal_and_tools():
 
     plan_steps = [
         {"step_id": "plan_01", "description": "Inspect graph", "channel": "graph", "tool": "graph_adapter.query"},
-        {"step_id": "plan_02", "description": "Rollup", "channel": "text", "tool": "graph.llm_chain_explorer"},
-        {"step_id": "plan_03", "description": "Call web", "channel": "web", "tool": "web.search", "requires_external": True},
+        {"step_id": "plan_02", "description": "Text search", "channel": "text", "tool": "search"},
+        {"step_id": "plan_03", "description": "Call web", "channel": "web", "tool": "web.search"},
     ]
 
     context = GraphQueryContext(adapter_name="hipporag", question="Who founded OpenAI?", access_scope=GraphAccessScope(scope_id="scope-graph-test"))
     result = await loop.run("Who founded OpenAI?", plan_steps, graph_context=context)
 
     assert result["graph_traversals"], "graph traversal should run for the first step"
-    assert any(run["tool_name"] == "graph.llm_chain_explorer" for run in result["tool_results"])
-    assert result["pending_external"] and result["pending_external"][0]["step_id"] == "plan_03"
+    assert any(run["tool_name"] == "search" for run in result["tool_results"])
     called = [name for name, _ in tool_manager.calls]
-    assert "graph.llm_chain_explorer" in called
-    rollup_payloads = [payload for name, payload in tool_manager.calls if name == "graph.llm_chain_explorer"]
+    assert "search" in called
+    rollup_payloads = [payload for name, payload in tool_manager.calls if name == "search"]
     assert rollup_payloads and rollup_payloads[0]["context_evidences"], "tool should receive evidence context"
     statuses = {step["step_id"]: step["status"] for step in result["reasoning_steps"]}
     assert statuses["plan_01"] == "done"
     assert statuses["plan_02"] == "done"
-    assert statuses["plan_03"] == "pending_external"
+    assert statuses["plan_03"] == "done"
     coverage = result.get("coverage_metrics") or {}
     assert "coverage_ratio" in coverage
     assert "coverage_score" in coverage

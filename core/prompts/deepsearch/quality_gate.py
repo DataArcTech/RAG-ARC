@@ -32,7 +32,7 @@ Return ONLY valid JSON with this schema:
   "missing_claims": [string],
   "next_actions": [
     {
-      "action": "graph_search" | "external_search" | "rewrite",
+      "action": "graph_search" | "rewrite",
       "query": string | null,
       "rationale": string,
       "priority": integer
@@ -43,7 +43,6 @@ Return ONLY valid JSON with this schema:
 ## Constraints
 - Use ONLY the provided evidence list; do not assume outside facts.
 - Be conservative: if evidence is insufficient, fail with actionable next actions.
-- Prefer graph_search for internal sources; only propose external_search if allowed.
 - If "pass" is false, you MUST include at least one item in next_actions (e.g. graph_search and/or rewrite).
 """
 
@@ -53,7 +52,5 @@ QUALITY_GATE_USER_PROMPT_EN = (
     "Report sections (markdown):\n{sections_markdown}\n\n"
     "Citation and consistency signals:\n{signals_json}\n\n"
     "Evidence snippets (authoritative; chunk_id is the only citation token):\n{evidence_json}\n\n"
-    "Constraints:\n"
-    "- external_allowed: {external_allowed}\n\n"
     "Return the JSON result now."
 )

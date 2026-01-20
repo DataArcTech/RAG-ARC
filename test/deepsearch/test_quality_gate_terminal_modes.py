@@ -19,7 +19,6 @@ async def test_quality_gate_allows_terminal_no_evidence_mode_without_llm():
             "judge_max_retries": 1,
             "judge_max_evidence_items": 5,
             "judge_max_evidence_chars": 200,
-            "trigger_external_on_quality_failure": False,
         },
     )
 
@@ -27,8 +26,6 @@ async def test_quality_gate_allows_terminal_no_evidence_mode_without_llm():
         question="Only use 《missing》",
         structured_report={"generation": {"mode": "deterministic_no_evidence"}, "summary": "No evidence."},
         evidences=[],
-        gap_result={"missing_topics": ["x"]},
-        external_allowed=False,
     )
 
     assert result.enabled is True
@@ -36,4 +33,3 @@ async def test_quality_gate_allows_terminal_no_evidence_mode_without_llm():
     assert result.should_iterate is False
     assert result.actions == []
     assert result.diagnostics.get("terminal_mode") == "deterministic_no_evidence"
-

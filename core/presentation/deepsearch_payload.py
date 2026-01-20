@@ -3,7 +3,6 @@ from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
 from config.output_limits import (
-    DEEPSEARCH_MAX_EXTERNAL_CALLS,
     DEEPSEARCH_MAX_REASONING_STEPS,
     DEEPSEARCH_MAX_STAGE_HISTORY,
     DEEPSEARCH_MAX_TOOL_METADATA,
@@ -151,7 +150,6 @@ def _trim_reasoning_block(reasoning_block: Optional[Dict[str, Any]]) -> Dict[str
         "question": reasoning_block.get("question"),
         "reasoning_steps": _summarize_reasoning_steps(reasoning_block),
         "coverage_metrics": reasoning_block.get("coverage_metrics") or {},
-        "gap_result": reasoning_block.get("gap_result"),
         "think_notes": list(reasoning_block.get("think_notes") or []),
     }
 
@@ -209,9 +207,6 @@ def _trim_state_block(state_block: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "plan_metadata": state_block.get("plan_metadata") or {},
         "cost_telemetry": {"stage_timings": telemetry},
     }
-    external_calls = state_block.get("external_calls") or []
-    if external_calls:
-        payload["external_calls"] = _head(external_calls, DEEPSEARCH_MAX_EXTERNAL_CALLS)
     if state_block.get("request_metadata"):
         payload["request_metadata"] = state_block["request_metadata"]
     return payload
@@ -229,7 +224,6 @@ def _sanitize_report_metadata(metadata: Optional[Dict[str, Any]]) -> Optional[Di
         "graph_summary",
         "plan",
         "coverage_metrics",
-        "pending_external",
         "request_context",
         "report_profile",
     }

@@ -273,17 +273,6 @@ def _build_progress_info(stage: str, metadata: dict, state: Any, request_id: str
             if tool_results:
                 progress_info["tool_results"] = tool_results
                 progress_info["tool_calls_count"] = len(tool_results)
-    elif stage == "gap_evaluated":
-        progress_info["message"] = "正在检测知识缺口..."
-        if hasattr(state, "gap_result") and state.gap_result:
-            progress_info["gap_result"] = state.gap_result
-        if "should_trigger_external" in metadata:
-            progress_info["should_trigger_external"] = metadata.get("should_trigger_external")
-    elif stage == "external_invoked":
-        progress_info["message"] = "正在进行外部搜索..."
-        if hasattr(state, "external_calls") and state.external_calls:
-            progress_info["external_calls"] = state.external_calls
-            progress_info["external_calls_count"] = len(state.external_calls)
     elif stage == "reported":
         progress_info["message"] = "正在生成报告..."
         if hasattr(state, "report_payload") and state.report_payload:

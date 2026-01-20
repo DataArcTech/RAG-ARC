@@ -11,7 +11,6 @@ def _sample_snapshot() -> dict:
         "plan_steps": [{"step_id": "s1"}, {"step_id": "s2"}],
         "reasoning_trace": {"tool_results": [{"x": "y"}], "reasoning_steps": [{"status": "done"}]},
         "report": {"answer": "final answer", "evidences": [{"chunk_id": "c1"}]},
-        "external_calls": [{"tool": "web.search"}],
         "cost_telemetry": {"stage_timings": {"plan_ms": 1}},
         "quality_gates": [],
         "errors": [{"stage": "persist", "message": "x"}],
@@ -34,7 +33,6 @@ def test_deepsearch_v2_artifacts_state_snapshot_is_manifest():
             "include_final_report_in_json": False,
             "max_plan_steps": 12,
             "max_stage_history": 128,
-            "max_external_calls": 12,
             "max_errors": 64,
         },
     }

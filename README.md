@@ -262,7 +262,7 @@ RAG-ARC uses a modular configuration system. Key configuration files are located
 - `knowledge.json`: Knowledge management configuration
 - `account.json`: User account configuration
 - `.env`: runtime knobs (providers, database credentials, etc.). Set `DEVELOP_MODE=true` when you want all Docker services (PostgreSQL/Redis/Neo4j) to expose their ports to `localhost` for debugging; it remains `false` by default for security.
-- Web search (Tavily): DeepSearch enables external search by default (`config/json_configs/deepsearch_service.json` → `planner.allow_external_channel=true`, `external_channel.enabled=true`). HippoRAG Q&A supports request-level opt-in via `enable_web_search=true` on `/rag_inference/stream_chat/{session_id}` (requires `config/json_configs/rag_inference*.json` → `web_search.enabled=true`). Set `TAVILY_API_KEY` to activate results.
+- Web search (Tavily): DeepSearch exposes `web.search` as a normal tool (graph-first; use when realtime/current info is required). HippoRAG Q&A supports request-level opt-in via `enable_web_search=true` on `/rag_inference/stream_chat/{session_id}` (requires `config/json_configs/rag_inference*.json` → `web_search.enabled=true`). Set `TAVILY_API_KEY` to activate results.
 
 ### 🌐 LLM Profiles via `.env`
 

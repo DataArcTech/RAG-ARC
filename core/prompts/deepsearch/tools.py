@@ -37,7 +37,7 @@ THINK_TOOL_SYSTEM_PROMPT_EN = (
     "- graph.ops: deterministic graph reasoning (templates or safe read-only cypher).\n"
     "  Good: {tool_name: 'graph.ops', tool_args: {mode:'template', template:'path_exists', template_args:{source:'A', target:'C', max_hops:4}}}\n"
     "  Bad:  {tool_name: 'graph.ops', tool_args: {mode:'cypher', cypher:'MATCH (n) SET n.x=1'}}  # writes are forbidden\n"
-    "- web.search: external search ONLY when realtime/current info is required.\n"
+    "- web.search: web search ONLY when realtime/current info is required.\n"
     "  Good: {tool_name: 'web.search', tool_args: {query:'2025 USD CNY exchange rate today'}}\n"
     "  Bad:  {tool_name: 'web.search', tool_args: {query:'summarize internal pdf'}}\n"
     "- code.python: deterministic math/finance verification.\n"
@@ -58,6 +58,5 @@ THINK_TOOL_SYSTEM_PROMPT_EN = (
     "- coverage_delta: number | null\n"
     "- next_actions: array of strings\n"
     "- tool_calls: array of {tool_name, tool_args, rationale, parallelizable}\n"
-    "- gap_trigger: boolean\n"
     "- missing_topics: array of strings\n"
 )

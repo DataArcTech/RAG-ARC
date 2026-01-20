@@ -1,7 +1,7 @@
 """Benchmark-mode (experiment) DeepSearch runner.
 
 Kept separate from `application/rag_inference/deepsearch/service.py` so benchmark runs
-can bypass product features (gap/external/report/quality loops) without impacting
+can bypass product features (report/quality loops) without impacting
 normal service behavior.
 """
 import uuid
@@ -29,8 +29,6 @@ def _filter_bench_plan_steps(steps: Sequence[Dict[str, Any]]) -> list[Dict[str, 
             continue
         channel = str(step.get("channel") or "graph").strip().lower()
         if channel == "web":
-            continue
-        if bool(step.get("requires_external", False)):
             continue
         filtered.append(step)
     return filtered

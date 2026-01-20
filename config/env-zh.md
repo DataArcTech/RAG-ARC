@@ -30,9 +30,9 @@ cp .env.example .env
 - `bench_mode`、`TASK_QUEUE_MODE`、`MODEL_PROFILE`、`DEVELOP_MODE`、`ADMIN_OWNER_ID`
 
 Benchmark/实验模式：
-- `bench_mode`（默认 `0`）：设为 `1` 时，评测专用 runner（见 `application/rag_inference/module_bench.py`、`application/rag_inference/deepsearch/service_bench.py`）会执行纯算法链路并返回纯文本答案（不生成引用/报告、不跑外部 web 步骤）。
+- `bench_mode`（默认 `0`）：设为 `1` 时，评测专用 runner（见 `application/rag_inference/module_bench.py`、`application/rag_inference/deepsearch/service_bench.py`）会执行纯算法链路并返回纯文本答案（不生成引用/报告、不跑 web.search 步骤）。
 
-可选外部网页检索（仅在配置开启时需要）：
+可选网页检索（仅在配置开启时需要）：
 - `TAVILY_API_KEY`
 
 可选基础设施连接信息（本地/Docker 默认值可用；仅在需要连接远端服务时配置）：
@@ -182,7 +182,6 @@ Benchmark/实验模式：
 | `DEEPSEARCH_GRAPH_EDGE_LIMIT` | `200` | DeepSearch 图快照中最多保留的边数量。 |
 | `DEEPSEARCH_MAX_REASONING_STEPS` | `32` | DeepSearch payload 中最多保留的 reasoning steps 数量。 |
 | `DEEPSEARCH_MAX_STAGE_HISTORY` | `10` | DeepSearch payload 中最多保留的 stage_history 条数。 |
-| `DEEPSEARCH_MAX_EXTERNAL_CALLS` | `5` | DeepSearch payload 中最多保留的 external_calls 条数。 |
 | `DEEPSEARCH_MAX_TOOL_METADATA` | `5` | DeepSearch payload 中最多保留的 tool_results 条数。 |
 | `DEEPSEARCH_WEAVER_EVIDENCE_PREVIEW_CHARS` | `180` | DeepSearch Weaver trace 渲染时的证据预览字符上限。 |
 | `DEEPSEARCH_WEAVER_EVIDENCE_SAMPLE_COUNT` | `3` | DeepSearch Weaver trace 渲染时展示的证据样本数量。 |
@@ -356,15 +355,10 @@ Benchmark/实验模式：
 | `DEEPSEARCH_PLAN_OUTPUT_DIR` | `./local/deepsearch_runs` | 规划输出目录。 |
 | `DEEPSEARCH_ARTIFACT_DIR` | _(空)_ | 可选：DeepSearch 运行 artifacts 根目录（每次 run 会创建 `run_id/` 子目录，写入 `plan_result.json`/`reasoning.json`/`report.json`/`report.md` 等；当 `artifacts.version=2` 时会额外写入 `manifest.json`/`dev.json`/`public.json`，且 `state_snapshot.json` 将变为轻量 manifest；当启用 `artifacts.dedupe.enabled=true` 时会额外写入 `evidence_pool.json` 并将 `reasoning.json`/`report.json` 的重复大字段改为 refs）。 |
 | `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `./local/deepsearch_artifacts` | 工具执行日志/产物目录（在 `config/json_configs/deepsearch_service.json` 中也作为默认的 run artifacts 根目录使用）。 |
-| `DEEPSEARCH_ALLOW_EXTERNAL_CHANNEL` | `false` | 规划器是否允许生成 `web` 步骤（当未设置 `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` 时生效）。 |
-| `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` | `false` | 运行时覆盖外部搜索开关（默认由配置 `external_channel.enabled` + `gap_detection.enable_external_on_gap` 决定）。 |
 | `DEEPSEARCH_SECTIONWISE_WRITER` | `false` | 启用“分节写作 + Memory Bank 检索 + recency retain_k”模式。 |
 | `DEEPSEARCH_BUDGET_TIER` | _(空)_ | 可选的复杂度→预算覆盖开关（`low` / `default`）；为空时将基于问题内容做启发式预算分配。 |
 | `DEEPSEARCH_TELEMETRY_ENABLED` | `true` | 是否启用工具运行遥测（本地 artifacts）。 |
 | `TAVILY_API_KEY` | _(空)_ | Tavily 网络搜索 Key（HippoRAG 问答与 DeepSearch 启用网络搜索时都会使用）。 |
-| `DEEPSEARCH_WEB_PROVIDER` | _(空)_ | 外部搜索路由提示（`tavily` / `tool` / `mcp`；其他值会回退到 `tavily`）。 |
-| `DEEPSEARCH_EXTERNAL_CACHE_MODE` | `auto` | 外部搜索录制/回放模式：`off` / `record` / `replay` / `auto`。 |
-| `DEEPSEARCH_EXTERNAL_CACHE_DIR` | `./local/deepsearch_artifacts/external_cache` | 外部搜索缓存目录。 |
 | `DEEPSEARCH_TOOL_HINTS` | _(空)_ | JSON 字符串，覆盖规划器的工具提示。 |
 | `DEEPSEARCH_TOOL_MCP_CONFIG_PATH` | _(空)_ | MCP 服务器 JSON 配置路径。 |
 | `DEEPSEARCH_TOOL_MCP_ADAPTER_CONFIG` | _(空)_ | 适配器配置 JSON。 |
@@ -390,9 +384,6 @@ Benchmark/实验模式：
 | `DEEPSEARCH_MCP_PERSISTENT_SESSION` | `true` | 是否复用 HTTP 会话。 |
 | `DEEPSEARCH_MCP_ENABLE_GRAPH_CONTEXT` | `true` | 是否附带图上下文。 |
 | `DEEPSEARCH_MCP_GRAPH_CONTEXT_FIELD` | `__graph_context__` | MCP 请求中的上下文字段。 |
-| `DEEPSEARCH_GAP_COVERAGE_THRESHOLD` | `0.7` | 覆盖率阈值，用于触发外部搜索。 |
-| `DEEPSEARCH_GAP_CONFIDENCE_THRESHOLD` | `0.6` | 置信度阈值。 |
-| `DEEPSEARCH_GAP_EXPECTED_MIN_CHUNKS` | `3` | 期望的最少证据数量。 |
 | `DEEPSEARCH_CONSISTENCY_CHECK` | `true` | 启用 LLM 一致性检查，验证报告内容与证据是否一致。 |
 | `DEEPSEARCH_PARALLEL_SECTIONS` | `false` | 并行生成报告章节（更快但消耗更多 API 调用）。 |
 | `DEEPSEARCH_QUALITY_LOOP_ENABLED` | `false` | 启用“研究 → 质量门槛 → 迭代”闭环（会在报告后进行质量评估并触发补证据/重写）。 |
@@ -404,7 +395,6 @@ Benchmark/实验模式：
 | `DEEPSEARCH_QUALITY_LOOP_ENABLE_LLM_JUDGE` | `true` | 启用基于 Rubric 的 LLM Judge（仅在确定性检查失败或存在缺口时调用）。 |
 | `DEEPSEARCH_QUALITY_LOOP_JUDGE_TEMPERATURE` | `0.0` | Judge 的 temperature。 |
 | `DEEPSEARCH_QUALITY_LOOP_JUDGE_MAX_RETRIES` | `1` | Judge 调用的重试次数。 |
-| `DEEPSEARCH_QUALITY_LOOP_TRIGGER_EXTERNAL_ON_FAILURE` | `true` | 允许质量门槛在失败时请求外部搜索动作（仍需外部搜索开关开启）。 |
 
 ### MCP 配置示例
 
@@ -583,11 +573,10 @@ RAG-ARC 采用单一可信配置流：
 DeepSearch Web 搜索策略（位于 `config/json_configs/deepsearch_service.json`）：
 
 - `planner.web_step_policy="realtime_required"`：当问题涉及“实时/最新/当前”信息（例如汇率/新闻）时，注入/强制至少一个 `channel="web"` 步骤。
-- `external_channel.execute_forced_tasks_without_gap=true`：即使 gap 判定“已覆盖充分”，也会执行这些被强制的外部任务。
 
 DeepSearch 工具调用预算（位于 `config/json_configs/deepsearch_service.json`）：
 
-- `tool_budget.max_calls_total`：限制每次 DeepSearch run 的工具调用总次数（tool_manager + 可选的外部调用；不计入 graph adapter traversal）。
+- `tool_budget.max_calls_total`：限制每次 DeepSearch run 的工具调用总次数（tool_manager；不计入 graph adapter traversal）。
 - 剩余预算会写入 `graph_context.metadata.tool_budget` 供模型感知，并在工具 diagnostics 中可观测。
 
 ---

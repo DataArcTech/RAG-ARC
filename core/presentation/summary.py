@@ -120,7 +120,6 @@ class DeepSearchReport:
     plan_steps: List[PlanStepSummary]
     top_chunks: List[EvidencePreview]
     coverage: Dict[str, Any]
-    gap_decision: Optional[str]
     stage_timings: Dict[str, Any]
     graph_chain: List[str]
     evidence: Optional[Dict[str, Any]] = None
@@ -226,7 +225,6 @@ class DeepSearchReport:
                     break
 
         coverage = reasoning_block.get("coverage_metrics") or {}
-        gap_result = reasoning_block.get("gap_result") or {}
         stage_timings = ((payload.get("state") or {}).get("cost_telemetry") or {}).get("stage_timings") or {}
 
         raw_answer = (report_block.get("answer") or "").strip()
@@ -250,7 +248,6 @@ class DeepSearchReport:
             plan_steps=summaries,
             top_chunks=top_chunks,
             coverage=coverage,
-            gap_decision=_summarize_gap_result(gap_result),
             stage_timings=stage_timings,
             graph_chain=best_chain,
             evidence=evidence_payload if evidence_payload else None,
@@ -263,11 +260,3 @@ def _truncate_text(text: str, max_chars: int) -> str:
         return sanitized
     return f"{sanitized[:max_chars].rstrip()}..."
 
-
-def _summarize_gap_result(result: Optional[Dict[str, Any]]) -> Optional[str]:
-    if not result:
-        return None
-    reason = result.get("reason") or ""
-    if result.get("should_trigger_external"):
-        return f"triggered ({reason or 'gap detected'})"
-    return f"skipped ({reason or 'sufficient coverage'})"

@@ -32,15 +32,12 @@ class DeepSearchServiceQualityMixin:
         question: str,
         structured_report: Optional[Dict[str, Any]],
         evidences: Sequence[Dict[str, Any]],
-        gap_result: Optional[Dict[str, Any]],
         round_idx: int,
     ) -> Dict[str, Any]:
         result = await gate.evaluate(
             question=question,
             structured_report=structured_report,
             evidences=evidences,
-            gap_result=gap_result,
-            external_allowed=self._external_allowed_flag(),
         )
         payload = result.model_dump()
         payload["round"] = round_idx
@@ -74,50 +71,10 @@ class DeepSearchServiceQualityMixin:
             )
         return steps
 
-    def _build_external_tasks_from_actions(
-        self,
-        *,
-        actions: Sequence[Dict[str, Any]],
-        round_idx: int,
-        question: str,
-    ) -> List[Dict[str, Any]]:
-        if not actions:
-            return []
-        web_tool = self._tool_names()["web_channel_tool"]
-        tasks: List[Dict[str, Any]] = []
-        external_channel = getattr(self, "external_channel", None)
-        for idx, action in enumerate(actions, start=1):
-            if not isinstance(action, dict):
-                continue
-            if action.get("action") != "external_search":
-                continue
-            query = str(action.get("query") or "").strip()
-            if not query:
-                continue
-            step_id = f"quality_web_r{round_idx + 1}_{idx:02d}"
-            tasks.append(
-                {
-                    "step_id": step_id,
-                    "description": str(action.get("rationale") or "Quality follow-up external search"),
-                    "channel": "web",
-                    "tool": web_tool,
-                    "metadata": {
-                        "provider": getattr(external_channel, "default_provider", None) if external_channel else None,
-                        "query": query,
-                        "source": "quality_gate",
-                        "round": round_idx + 1,
-                        "question": question,
-                    },
-                    "tool_args": {"query": query, "reason": "quality_gate"},
-                    "requires_external": True,
-                }
-            )
-        return tasks
-
     @staticmethod
     def _merge_reasoning_traces(base: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
         merged: Dict[str, Any] = dict(base or {})
-        for key in ("graph_traversals", "reasoning_steps", "tool_results", "think_notes", "pending_external"):
+        for key in ("graph_traversals", "reasoning_steps", "tool_results", "think_notes"):
             merged_list = list(merged.get(key) or [])
             add_list = list(incoming.get(key) or [])
             merged[key] = merged_list + add_list

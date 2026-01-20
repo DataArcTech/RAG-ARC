@@ -25,7 +25,6 @@ async def test_graph_think_tool_repairs_invalid_json_output() -> None:
         "coverage_delta": None,
         "next_actions": ["a"],
         "tool_calls": [],
-        "gap_trigger": False,
         "missing_topics": [],
     }
     llm = _StubLLM(["not json", json.dumps(valid)])

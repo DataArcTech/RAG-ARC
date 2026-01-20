@@ -18,8 +18,6 @@ def test_deepsearch_artifact_dedupe_v2_builds_evidence_pool_and_refs():
         "reasoning_steps": [{"status": "done"}],
         "think_notes": [{"note": "x"}],
         "coverage_metrics": {"coverage_ratio": 0.5},
-        "gap_result": {"missing": ["y"]},
-        "pending_external": [{"tool": "web.search"}],
         "graph_traversals": [{"node": "n1"}],
     }
 
@@ -33,8 +31,6 @@ def test_deepsearch_artifact_dedupe_v2_builds_evidence_pool_and_refs():
             "reasoning_steps": reasoning["reasoning_steps"],
             "think_notes": reasoning["think_notes"],
             "coverage_metrics": reasoning["coverage_metrics"],
-            "gap_result": reasoning["gap_result"],
-            "pending_external": reasoning["pending_external"],
             "graph_visualization": reasoning["graph_traversals"],
             "plan": {"steps": [{"step_id": "s1"}]},
             "structured_report": {"text": "final answer"},
@@ -86,9 +82,6 @@ def test_deepsearch_artifact_dedupe_v2_builds_evidence_pool_and_refs():
     assert meta["reasoning_steps_ref"]["$ref"] == {"file": "reasoning.json", "json_pointer": "/reasoning_steps"}
     assert meta["think_notes_ref"]["$ref"] == {"file": "reasoning.json", "json_pointer": "/think_notes"}
     assert meta["coverage_metrics_ref"]["$ref"] == {"file": "reasoning.json", "json_pointer": "/coverage_metrics"}
-    assert meta["gap_result_ref"]["$ref"] == {"file": "reasoning.json", "json_pointer": "/gap_result"}
-    assert meta["pending_external_ref"]["$ref"] == {"file": "reasoning.json", "json_pointer": "/pending_external"}
     assert meta["graph_visualization_ref"]["$ref"] == {"file": "reasoning.json", "json_pointer": "/graph_traversals"}
     assert meta["plan_ref"]["$ref"] == {"file": "plan_result.json", "json_pointer": "/plan"}
     assert meta["reasoning_ref"]["$ref"]["file"] == "reasoning.json"
-

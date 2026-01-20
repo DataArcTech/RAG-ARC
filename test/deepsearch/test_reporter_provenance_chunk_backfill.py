@@ -116,7 +116,6 @@ def test_reporter_backfills_provenance_chunks_into_evidence_pool() -> None:
         "reasoning_steps": [],
         "tool_results": [],
         "coverage_metrics": {},
-        "pending_external": [],
     }
 
     result = asyncio.run(reporter.compose(trace, external_evidence=[]))

@@ -292,7 +292,6 @@ async def test_graph_reasoning_think_can_call_code_python_and_next_think_sees_re
                     "parallelizable": False,
                 }
             ],
-            "gap_trigger": False,
             "missing_topics": [],
         },
         ensure_ascii=False,
@@ -304,7 +303,6 @@ async def test_graph_reasoning_think_can_call_code_python_and_next_think_sees_re
             "coverage_delta": None,
             "next_actions": [],
             "tool_calls": [],
-            "gap_trigger": False,
             "missing_topics": [],
         },
         ensure_ascii=False,

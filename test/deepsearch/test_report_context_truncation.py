@@ -61,7 +61,6 @@ def test_report_context_truncates_large_methodology_fields():
                 },
             }
         ],
-        "pending_external": [],
     }
 
     context = reporter._build_llm_context(
@@ -69,7 +68,6 @@ def test_report_context_truncates_large_methodology_fields():
         highlights=[],
         evidences=[],
         coverage={},
-        gap_result={},
         request_context={},
     )
 

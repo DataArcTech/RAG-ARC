@@ -38,13 +38,10 @@ class QualityGateConfig(BaseModel):
     judge_max_retries: int = Field(1, ge=0, le=5)
     judge_max_evidence_items: int = Field(20, ge=1, le=80, description="Max evidence snippets forwarded to the LLM judge.")
     judge_max_evidence_chars: int = Field(900, ge=100, le=5000, description="Max characters per snippet for the LLM judge.")
-    trigger_external_on_quality_failure: bool = Field(
-        True, description="Allow the gate to request external search even if gap detection did not trigger it."
-    )
 
 
 class QualityGateAction(BaseModel):
-    action: Literal["graph_search", "external_search", "rewrite"]
+    action: Literal["graph_search", "rewrite"]
     query: Optional[str] = None
     rationale: str = Field(..., min_length=1)
     priority: int = Field(1, ge=1, le=5)
@@ -105,8 +102,6 @@ class DeepSearchQualityGate:
         question: str,
         structured_report: Mapping[str, Any] | None,
         evidences: Sequence[Dict[str, Any]],
-        gap_result: Optional[Dict[str, Any]] = None,
-        external_allowed: bool = False,
     ) -> QualityGateResult:
         cfg = self.config
         if not cfg.enabled:
@@ -136,7 +131,6 @@ class DeepSearchQualityGate:
         )
 
         source_counts, source_ratios = _evidence_source_stats(evidences)
-        missing_topics = _coerce_topics((gap_result or {}).get("missing_topics")) if gap_result else []
 
         consistency_ok, consistency_issue_count = _coerce_consistency(sr.get("consistency_check"))
         mismatch_count, mismatch_samples = _citation_integrity_checks(
@@ -156,7 +150,7 @@ class DeepSearchQualityGate:
             evidence_source_ratios=source_ratios,
             consistency_ok=consistency_ok,
             consistency_issue_count=consistency_issue_count,
-            missing_topics=missing_topics,
+            missing_topics=[],
             citation_mismatch_count=mismatch_count,
             citation_mismatch_samples=mismatch_samples,
         )
@@ -194,7 +188,6 @@ class DeepSearchQualityGate:
                 diagnostics={
                     "terminal_mode": generation_mode,
                     "deterministic_reasons": reasons,
-                    "external_allowed": external_allowed,
                 },
             )
 
@@ -209,7 +202,6 @@ class DeepSearchQualityGate:
                     sr=sr,
                     evidences=evidences,
                     metrics=metrics,
-                    external_allowed=external_allowed,
                     cfg=cfg,
                 )
                 actions = list(judge.next_actions if judge else [])
@@ -224,7 +216,6 @@ class DeepSearchQualityGate:
                     actions=_synthesize_followups(
                         question=question,
                         metrics=metrics,
-                        external_allowed=external_allowed,
                         cfg=cfg,
                     )
                     if should_iterate
@@ -232,7 +223,6 @@ class DeepSearchQualityGate:
                     judge=None,
                     diagnostics={
                         "deterministic_reasons": reasons,
-                        "external_allowed": external_allowed,
                         "judge_error": str(exc) or exc.__class__.__name__,
                     },
                 )
@@ -241,16 +231,11 @@ class DeepSearchQualityGate:
                 actions = _synthesize_followups(
                     question=question,
                     metrics=metrics,
-                    external_allowed=external_allowed,
                     cfg=cfg,
                 )
 
         passed = bool(deterministic_pass and (judge.passed if judge else True))
         should_iterate = (not passed) and cfg.max_rounds > 1
-        if not cfg.trigger_external_on_quality_failure:
-            actions = [a for a in actions if a.action != "external_search"]
-        if not external_allowed:
-            actions = [a for a in actions if a.action != "external_search"]
         normalized: List[QualityGateAction] = []
         seen: set[tuple[str, str]] = set()
         for action in actions:
@@ -266,7 +251,6 @@ class DeepSearchQualityGate:
             actions = _synthesize_followups(
                 question=question,
                 metrics=metrics,
-                external_allowed=external_allowed,
                 cfg=cfg,
             )
         if should_iterate and actions:
@@ -275,7 +259,6 @@ class DeepSearchQualityGate:
                 extra = _synthesize_followups(
                     question=question,
                     metrics=metrics,
-                    external_allowed=external_allowed,
                     cfg=cfg,
                 )
                 for action in extra:
@@ -296,7 +279,7 @@ class DeepSearchQualityGate:
             metrics=metrics,
             actions=actions,
             judge=judge,
-            diagnostics={"deterministic_reasons": reasons, "external_allowed": external_allowed},
+            diagnostics={"deterministic_reasons": reasons},
         )
 
     # ------------------------------------------------------------------
@@ -340,7 +323,6 @@ class DeepSearchQualityGate:
         sr: Mapping[str, Any],
         evidences: Sequence[Dict[str, Any]],
         metrics: QualityGateMetrics,
-        external_allowed: bool,
         cfg: QualityGateConfig,
     ) -> QualityGateJudgeResult:
         if not cfg.enable_llm_judge or self.llm_connector is None:
@@ -383,7 +365,6 @@ class DeepSearchQualityGate:
                 ensure_ascii=False,
                 indent=2,
             ),
-            external_allowed=str(bool(external_allowed)).lower(),
         )
         output_language = infer_user_language(question)
         messages = [
@@ -687,7 +668,6 @@ def _synthesize_followups(
     *,
     question: str,
     metrics: QualityGateMetrics,
-    external_allowed: bool,
     cfg: QualityGateConfig,
 ) -> List[QualityGateAction]:
     """Fallback follow-ups that guarantee the loop executes more retrieval before rewriting."""
@@ -754,16 +734,6 @@ def _synthesize_followups(
             )
         )
         priority = min(5, priority + 1)
-
-    if external_allowed and len(actions) < max_actions:
-        _append(
-            QualityGateAction(
-                action="external_search",
-                query=question[:220],
-                rationale="Internal sources appear insufficient; broaden search externally.",
-                priority=min(5, priority),
-            )
-        )
 
     if len(actions) < max_actions:
         _append(

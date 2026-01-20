@@ -212,7 +212,7 @@ async def _schedule_deepsearch(
             await emit_trace(
                 "think",
                 f"Received question. Starting graph-first DeepSearch run.\nrun_id={run_id}",
-                meta={"run_id": run_id, "external_allowed": False},
+                meta={"run_id": run_id},
             )
             try:
                 planner = getattr(service, "planner", None)

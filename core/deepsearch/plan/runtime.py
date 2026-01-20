@@ -35,7 +35,7 @@ class DeepSearchPlanner:
 
     Goals for this stage:
     1. Pull prompt templates from the shared prompt_store rather than hard-coding strings.
-    2. Honor configuration/.env flags that gate web/external channels.
+    2. Keep web search as an explicit, graph-last tool choice (no external channel gating).
     3. Emit JSON artifacts annotated with MCP tool metadata so downstream loops can replay steps.
     """
 
@@ -76,7 +76,6 @@ class DeepSearchPlanner:
             raise ValueError("planner.plan_output_dir is required (no implicit default).")
         self.plan_output_dir = Path(str(plan_output_dir))
 
-        self.allow_external = bool(self._config_dict["allow_external_channel"])
         self.web_step_policy = str(self._config_dict.get("web_step_policy") or "off").strip().lower()
         def _coerce_str_list(value: Any) -> list[str]:
             raw = value or []
@@ -94,12 +93,9 @@ class DeepSearchPlanner:
             self.realtime_web_intent_keywords = list(DEFAULT_REALTIME_WEB_INTENT_KEYWORDS)
         if not self.realtime_web_topic_keywords:
             self.realtime_web_topic_keywords = list(DEFAULT_REALTIME_WEB_TOPIC_KEYWORDS)
-        self.realtime_web_force_external = bool(self._config_dict.get("realtime_web_force_external", True))
-
         self.graph_channel_tool = str(self._config_dict["graph_channel_tool"]).strip()
         self.text_channel_tool = str(self._config_dict["text_channel_tool"]).strip()
         self.web_channel_tool = str(self._config_dict["web_channel_tool"]).strip()
-        self.default_web_provider = self._config_dict.get("default_web_provider")
         self.graph_adapter_name = str(self._config_dict["graph_adapter_name"]).strip()
         self.tool_arg_templates: Mapping[str, Mapping[str, str]] = self._config_dict.get("tool_arg_templates") or {}
         self.honor_planner_tool_selection = bool(self._config_dict["honor_planner_tool_selection"])
@@ -112,7 +108,7 @@ class DeepSearchPlanner:
         *,
         access_scope: GraphAccessScope | None = None,
     ) -> Dict[str, Any]:
-        """Produce a structured plan containing graph-first steps plus optional external channels."""
+        """Produce a structured plan containing graph-first steps plus optional web search."""
 
         normalized_question = (question or "").strip()
         if not normalized_question:
@@ -126,14 +122,12 @@ class DeepSearchPlanner:
                     "Planning the research workflow.",
                     f"mode={self.plan_generator.settings.mode}",
                     f"max_steps={self.plan_generator.settings.max_steps}",
-                    f"external_channel_allowed={bool(self.allow_external)}",
                 ]
             ),
             meta={
                 "stage": "plan",
                 "mode": self.plan_generator.settings.mode,
                 "max_steps": self.plan_generator.settings.max_steps,
-                "external_channel_allowed": bool(self.allow_external),
             },
         )
 
@@ -162,7 +156,6 @@ class DeepSearchPlanner:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "config": {
                 "max_steps": self.plan_generator.settings.max_steps,
-                "allow_external_channel": self.allow_external,
                 "persist_plan": self.persist_plan,
             },
             "steps": steps_payload,
@@ -179,7 +172,6 @@ class DeepSearchPlanner:
         plan_lines.append(f"Plan ID: {plan_id}")
         plan_lines.append(f"Question: {normalized_question}")
         plan_lines.append(f"Mode: {self.plan_generator.settings.mode}")
-        plan_lines.append(f"External allowed: {bool(self.allow_external)}")
         plan_lines.append("Note: coarse macro plan; tool selection happens during execution.")
         plan_lines.append("Steps:")
         for idx, step in enumerate(steps_payload, start=1):
@@ -189,8 +181,7 @@ class DeepSearchPlanner:
             channel = str(step.get("channel") or "graph")
             description = str(step.get("description") or "")
             enabled = bool(step.get("enabled", True))
-            requires_external = bool(step.get("requires_external", False))
-            line = f"{idx}. {step_id} [{channel}] enabled={enabled} requires_external={requires_external}"
+            line = f"{idx}. {step_id} [{channel}] enabled={enabled}"
             if description:
                 line += f"\n   {description}"
             plan_lines.append(line)
@@ -305,8 +296,8 @@ class DeepSearchPlanner:
         if not self.honor_planner_tool_selection:
             metadata.pop("tool", None)
         tool_name = requested_tool or self._resolve_tool(channel)
-        requires_external = channel == "web"
-        tool_enabled = not requires_external or self.allow_external
+        requires_web = channel == "web"
+        tool_enabled = True
 
         requested_tool_args = metadata.get("tool_args") if isinstance(metadata.get("tool_args"), dict) else None
         if requested_tool_args is not None:
@@ -326,17 +317,12 @@ class DeepSearchPlanner:
             tool_args = dict(requested_tool_args or {})
             tool_args.setdefault("focus_query", spec.description.strip())
 
-        if requires_external:
-            metadata.setdefault("requires_external_channel", True)
-            if not self.allow_external:
-                metadata.setdefault("disabled_reason", "external_channel_disabled")
-            # Ensure web.search always receives tool_args.query; ExternalSearchChannel requires it.
+        if requires_web:
+            # Ensure web.search always receives tool_args.query.
             query_value = tool_args.get("query")
             if not isinstance(query_value, str) or not query_value.strip():
                 fallback = tool_args.get("focus_query") or spec.description
                 tool_args["query"] = str(fallback or "").strip()
-            if self.default_web_provider and not tool_args.get("provider"):
-                tool_args["provider"] = self.default_web_provider
 
         metadata["tool"] = tool_name
 
@@ -347,14 +333,11 @@ class DeepSearchPlanner:
             "metadata": metadata,
             "tool": tool_name,
             "tool_args": tool_args,
-            "requires_external": requires_external,
             "enabled": tool_enabled,
         }
 
     def _apply_web_step_policy(self, *, question: str, plan_specs: List[PlanSpec]) -> List[PlanSpec]:
         if benchmark_mode_enabled():
-            return plan_specs
-        if not self.allow_external:
             return plan_specs
         policy = (self.web_step_policy or "off").strip().lower()
         if policy != "realtime_required":
@@ -365,25 +348,23 @@ class DeepSearchPlanner:
         normalized = list(plan_specs or [])
         web_steps = [idx for idx, spec in enumerate(normalized) if str(getattr(spec, "channel", "")).strip().lower() == "web"]
         if web_steps:
-            if self.realtime_web_force_external:
-                idx = web_steps[0]
-                spec = normalized[idx]
-                meta = dict(spec.metadata or {})
-                meta.setdefault("force_external", True)
-                meta.setdefault("requires_external_reason", "realtime")
-                tool_args = meta.get("tool_args") if isinstance(meta.get("tool_args"), dict) else {}
-                tool_args = dict(tool_args or {})
-                tool_args.setdefault("query", question.strip())
-                meta["tool_args"] = tool_args
-                normalized[idx] = spec.model_copy(update={"metadata": meta})
+            idx = web_steps[0]
+            spec = normalized[idx]
+            meta = dict(spec.metadata or {})
+            tool_args = meta.get("tool_args") if isinstance(meta.get("tool_args"), dict) else {}
+            tool_args = dict(tool_args or {})
+            tool_args.setdefault("query", question.strip())
+            meta["tool_args"] = tool_args
+            normalized[idx] = spec.model_copy(update={"metadata": meta})
             return normalized
 
         lang = infer_user_language(question)
         desc = DEFAULT_REALTIME_WEB_STEP_DESCRIPTION_ZH if lang == "zh" else DEFAULT_REALTIME_WEB_STEP_DESCRIPTION_EN
-        injected_meta: Dict[str, Any] = {"source": "policy_injected", "tool": self.web_channel_tool, "tool_args": {"query": question.strip()}}
-        if self.realtime_web_force_external:
-            injected_meta["force_external"] = True
-            injected_meta["requires_external_reason"] = "realtime"
+        injected_meta: Dict[str, Any] = {
+            "source": "policy_injected",
+            "tool": self.web_channel_tool,
+            "tool_args": {"query": question.strip()},
+        }
         injected = PlanSpec(
             step_id="policy_web_01",
             description=desc,

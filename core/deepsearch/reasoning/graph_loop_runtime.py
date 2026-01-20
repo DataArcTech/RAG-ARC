@@ -158,20 +158,13 @@ class GraphLoopRuntimeMixin:
         new_evidences: List[EvidenceChunk] = []
         tool_runs: List[Dict[str, Any]] = []
         think_notes: List[Dict[str, Any]] = []
-        pending_external_payload: Dict[str, Any] | None = None
 
         record.diagnostics.setdefault("sub_agent", f"sub_agent_{step_index + 1:02d}")
 
         if not entry["enabled"]:
             record.status = "skipped"
             record.diagnostics.setdefault("reason", "disabled_by_planner")
-            return SubAgentOutcome(step_index, record, None, [], [], [], None)
-
-        if entry["requires_external"]:
-            record.status = "pending_external"
-            record.diagnostics.setdefault("reason", "requires_external_channel")
-            pending_external_payload = self._pending_external_payload(entry)
-            return SubAgentOutcome(step_index, record, None, [], [], [], pending_external_payload)
+            return SubAgentOutcome(step_index, record, None, [], [], [])
 
         if entry["run_with_adapter"]:
             traversal_record, reasoning_record, new_evidences = await self.traversal_executor.run_step(
@@ -181,13 +174,13 @@ class GraphLoopRuntimeMixin:
                 tool_name=self.graph_channel_tool,
             )
             reasoning_record.diagnostics.setdefault("tool", entry["tool"] or self.graph_channel_tool)
-            return SubAgentOutcome(step_index, reasoning_record, traversal_record, new_evidences, [], [], None)
+            return SubAgentOutcome(step_index, reasoning_record, traversal_record, new_evidences, [], [])
 
         if entry["should_invoke_tool"] and not self.tool_manager:
             record.status = "skipped"
             record.diagnostics.setdefault("reason", "tool_manager_disabled")
             record.diagnostics.setdefault("tool", entry["tool"])
-            return SubAgentOutcome(step_index, record, None, [], [], [], None)
+            return SubAgentOutcome(step_index, record, None, [], [], [])
 
         if entry["should_invoke_tool"]:
             evidence_snapshot = await self._snapshot_evidences()
@@ -206,13 +199,13 @@ class GraphLoopRuntimeMixin:
                 record.status = "failed"
                 record.diagnostics.setdefault("reason", "tool_timeout")
                 record.diagnostics.setdefault("latency_ms", int(self._tool_timeout * 1000) if self._tool_timeout else None)
-                return SubAgentOutcome(step_index, record, None, [], [], [], None)
+                return SubAgentOutcome(step_index, record, None, [], [], [])
             except Exception as exc:  # pragma: no cover - defensive guardrails
                 logger.warning("Tool %s failed for %s: %s", entry["tool"], spec.step_id, exc)
                 record.status = "failed"
                 record.diagnostics.setdefault("error", str(exc))
                 record.diagnostics.setdefault("reason", "tool_failure")
-                return SubAgentOutcome(step_index, record, None, [], [], [], None)
+                return SubAgentOutcome(step_index, record, None, [], [], [])
 
             new_evidences = list(result.evidences)
             record.status = "done"
@@ -244,11 +237,11 @@ class GraphLoopRuntimeMixin:
             )
             for note in result.think_notes:
                 think_notes.append(note.model_dump(exclude_none=True))
-            return SubAgentOutcome(step_index, record, None, new_evidences, tool_runs, think_notes, None)
+            return SubAgentOutcome(step_index, record, None, new_evidences, tool_runs, think_notes)
 
         record.status = "skipped"
         record.diagnostics.setdefault("reason", "no_tool_available")
-        return SubAgentOutcome(step_index, record, None, [], [], [], None)
+        return SubAgentOutcome(step_index, record, None, [], [], [])
 
     async def _maybe_run_periodic_think(
         self,

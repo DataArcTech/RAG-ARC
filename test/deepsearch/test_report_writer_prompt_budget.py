@@ -75,8 +75,6 @@ def test_report_writer_shrinks_prompts_on_context_limit():
         "graph_evidence": {"seed_entities": ["SAS"] * 50, "graph_stats": {"edges": 9999}},
         "coverage": {
             "coverage_metrics": {"evidence_count": 999, "missing_topics": ["x"] * 50},
-            "gap_result": {"should_trigger_external": False, "missing_topics": ["x"] * 50},
-            "pending_external": [{"task": "t", "payload": "p" * 2000} for _ in range(200)],
         },
         "evidences": evidences,
         "graph_chain": graph_chain,

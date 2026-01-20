@@ -354,8 +354,6 @@ def build_dev_view_v2(
         "stage": snapshot.get("stage"),
         "stage_history": list(snapshot.get("stage_history") or []),
         "plan_summary": {"plan_id": plan_id, "step_count": step_count},
-        "gap_result": snapshot.get("gap_result"),
-        "external_calls": list(snapshot.get("external_calls") or []),
         "cost_telemetry": dict(snapshot.get("cost_telemetry") or {}),
         "quality_gates": list(snapshot.get("quality_gates") or []),
         "errors": list(snapshot.get("errors") or []),

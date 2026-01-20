@@ -66,15 +66,12 @@ async def test_quality_gate_llm_judge_retries_on_invalid_json_then_succeeds(monk
             "judge_max_retries": 2,
             "judge_max_evidence_items": 5,
             "judge_max_evidence_chars": 200,
-            "trigger_external_on_quality_failure": False,
         },
     )
     result = await gate.evaluate(
         question="What is the guaranteed preferential interest rate?",
         structured_report={"summary": "Guaranteed preferential interest rate is 3%.[chunk_001]"},
         evidences=[{"chunk_id": "chunk_001", "content": "Guaranteed Preferential Interest Rate: 3%"}],
-        gap_result=None,
-        external_allowed=False,
     )
 
     assert result.judge is not None

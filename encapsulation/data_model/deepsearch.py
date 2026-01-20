@@ -85,17 +85,6 @@ class ToolExecutionLog(BaseModel):
     extra: Dict[str, Any] = Field(default_factory=dict, description="Additional diagnostics or metrics")
 
 
-class GapDetectionResult(BaseModel):
-    """Represents coverage analysis used to decide whether external channels must run."""
-
-    coverage_score: float = Field(..., description="Estimated portion of the question covered by current evidence")
-    confidence_score: float = Field(..., description="Model-estimated confidence in the intermediate answer")
-    should_trigger_external: bool = Field(..., description="Whether to invoke web/code channels to fill gaps")
-    reason: Optional[str] = Field(None, description="Human-readable reason for the decision")
-    missing_topics: List[str] = Field(default_factory=list, description="Topics still uncovered by the graph search")
-    diagnostics: Dict[str, Any] = Field(default_factory=dict, description="Raw metrics for logging and debugging")
-
-
 class GraphTraversalRecord(BaseModel):
     """Captures one traversal attempt executed by the GraphReasoningLoop."""
 
@@ -130,8 +119,6 @@ class DeepSearchTrace(BaseModel):
     reasoning_steps: List[ReasoningStepRecord] = Field(default_factory=list, description="Executed reasoning steps")
     traversals: List[GraphTraversalRecord] = Field(default_factory=list, description="Graph traversal records")
     evidences: List[EvidenceChunk] = Field(default_factory=list, description="All evidence chunks accumulated")
-    gap_result: Optional[GapDetectionResult] = Field(None, description="Gap detection outcome for this run")
-    external_calls: List[ToolExecutionLog] = Field(default_factory=list, description="External tool invocations")
     final_answer: Optional[str] = Field(None, description="LLM answer before formatting")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Run-level telemetry such as config fingerprint")
 

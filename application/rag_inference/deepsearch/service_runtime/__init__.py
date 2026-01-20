@@ -1,6 +1,5 @@
 from .artifacts import DeepSearchServiceArtifactsMixin
 from .context import DeepSearchServiceContextMixin
-from .external import DeepSearchServiceExternalMixin
 from .initial_think import DeepSearchServiceInitialThinkMixin
 from .pipeline import DeepSearchServicePipelineMixin
 from .quality import DeepSearchServiceQualityMixin
@@ -11,7 +10,6 @@ from .stages import DeepSearchServiceStageMixin
 __all__ = [
     "DeepSearchServiceArtifactsMixin",
     "DeepSearchServiceContextMixin",
-    "DeepSearchServiceExternalMixin",
     "DeepSearchServiceInitialThinkMixin",
     "DeepSearchServicePipelineMixin",
     "DeepSearchServiceQualityMixin",

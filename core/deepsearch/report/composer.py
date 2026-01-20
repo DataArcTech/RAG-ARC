@@ -126,7 +126,6 @@ class DeepSearchReporter:
                     "completed": sum(1 for step in ((trace.get("reasoning_steps") or []) or []) if isinstance(step, dict) and step.get("status") == "done"),
                 },
                 "coverage_metrics": trace.get("coverage_metrics") or {},
-                "pending_external": trace.get("pending_external") or [],
                 "parallel_thinking_runs": int(self.config["parallel_thinking_runs"]),
                 "report_profile": {
                     "include_graph_viz": bool(self.config["include_graph_viz"]),
@@ -243,7 +242,6 @@ class DeepSearchReporter:
                         "completed": sum(1 for step in (trace.get("reasoning_steps") or []) if isinstance(step, dict) and step.get("status") == "done"),
                     },
                     "coverage_metrics": trace.get("coverage_metrics") or {},
-                    "pending_external": trace.get("pending_external") or [],
                     "parallel_thinking_runs": int(self.config["parallel_thinking_runs"]),
                     "report_profile": {
                         "include_graph_viz": bool(self.config["include_graph_viz"]),
@@ -299,7 +297,6 @@ class DeepSearchReporter:
         reasoning_steps = trace.get("reasoning_steps") or []
         highlights = self._build_highlights(reasoning_steps)
         coverage_metrics = trace.get("coverage_metrics") or {}
-        gap_result = trace.get("gap_result") or {}
         request_context = self._extract_request_context(trace)
 
         metadata: Dict[str, Any] = {
@@ -314,8 +311,6 @@ class DeepSearchReporter:
             "think_notes": trace.get("think_notes") or [],
             "tool_results": trace.get("tool_results") or [],
             "coverage_metrics": coverage_metrics,
-            "gap_result": gap_result,
-            "pending_external": trace.get("pending_external") or [],
             "parallel_thinking_runs": int(self.config["parallel_thinking_runs"]),
             "report_profile": {
                 "include_graph_viz": bool(self.config["include_graph_viz"]),
@@ -347,7 +342,6 @@ class DeepSearchReporter:
             highlights=highlights,
             evidences=llm_evidences,
             coverage=coverage_metrics,
-            gap_result=gap_result,
             request_context=request_context,
         )
         writer = DeepSearchLLMReportWriter(
@@ -642,13 +636,11 @@ class DeepSearchReporter:
         highlights: List[Dict[str, Any]],
         evidences: List[Dict[str, Any]],
         coverage: Dict[str, Any],
-        gap_result: Dict[str, Any],
         request_context: Dict[str, Any],
     ) -> Dict[str, Any]:
         plan_steps = trace.get("plan_steps") or []
         reasoning_steps = trace.get("reasoning_steps") or []
         tool_results = list(trace.get("tool_results") or [])
-        pending_external = trace.get("pending_external") or []
 
         methodology_summary_chars = int(self.config["methodology_summary_chars"])
         keep_tool_results = int(self.config["keep_tool_results"])
@@ -687,11 +679,7 @@ class DeepSearchReporter:
             ],
         }
 
-        coverage_bundle = {
-            "coverage_metrics": coverage,
-            "gap_result": gap_result,
-            "pending_external": pending_external,
-        }
+        coverage_bundle = {"coverage_metrics": coverage}
 
         graph_evidence_full = self._build_graph_evidence(trace, evidences)
         graph_evidence_llm = self._slim_graph_evidence_for_llm(graph_evidence_full)

@@ -40,7 +40,7 @@ class DeepSearchServiceRunMixin:
         run_id: Optional[str] = None,
         stage_listener: Optional[Callable[[Dict[str, Any], DeepSearchState], None]] = None,
     ) -> Dict[str, Any]:
-        """Plan → (Iterative) Graph reasoning → Gap/External → Report → Quality gate → Iterate."""
+        """Plan → Graph reasoning → Report → Quality gate → Iterate."""
 
         normalized_question = (question or "").strip()
         if not normalized_question:
@@ -112,7 +112,6 @@ class DeepSearchServiceRunMixin:
                 reasoning_context,
                 run_id=state.run_id,
                 metadata=metadata,
-                external_allowed=self._external_allowed_flag(),
                 artifact_dir=artifact_dir,
             )
             reasoning_context = self._attach_file_scope_hints(
@@ -126,7 +125,6 @@ class DeepSearchServiceRunMixin:
                         "max_calls_total": int(budget_cfg["max_calls_total"]),
                         "used_calls": 0,
                         "remaining_calls": int(budget_cfg["max_calls_total"]),
-                        "count_external_calls": bool(budget_cfg.get("count_external_calls", True)),
                     },
                 )
 
@@ -172,7 +170,6 @@ class DeepSearchServiceRunMixin:
                     "judge_max_retries",
                     "judge_max_evidence_items",
                     "judge_max_evidence_chars",
-                    "trigger_external_on_quality_failure",
                 }
                 merged = quality_cfg.model_dump()
                 for key, value in raw_overrides.items():
@@ -185,9 +182,7 @@ class DeepSearchServiceRunMixin:
             )
 
             cumulative_reasoning: Dict[str, Any] | None = None
-            external_evidences_all: List[Dict[str, Any]] = []
             final_report: Dict[str, Any] | None = None
-            final_gap: Optional[Dict[str, Any]] = None
             quality_history: List[Dict[str, Any]] = []
 
             followup_steps: List[Dict[str, Any]] = []
@@ -245,101 +240,13 @@ class DeepSearchServiceRunMixin:
                     final_report = gated_report
                     break
 
-                gap_result = await self._execute_stage(
-                    f"gap_detection_r{round_idx}",
-                    self._gap_stage,
-                    state=state,
-                    stage_timings=stage_timings,
-                    reasoning_trace=cumulative_reasoning,
-                )
-                if gap_result:
-                    final_gap = gap_result
-                    state.record_gap_result(gap_result)
-                    cumulative_reasoning["gap_result"] = gap_result
-                    await emit_trace(
-                        "progress",
-                        "\n".join(
-                            [
-                                f"Gap detection round {round_idx}.",
-                                f"coverage_score={gap_result.get('coverage_score')}",
-                                f"confidence_score={gap_result.get('confidence_score')}",
-                                f"should_trigger_external={gap_result.get('should_trigger_external')}",
-                                f"reason={gap_result.get('reason')}",
-                                f"external_allowed={(gap_result.get('diagnostics') or {}).get('external_allowed')}",
-                                f"external_decision_source={((gap_result.get('diagnostics') or {}).get('external_decision') or {}).get('source')}",
-                                f"missing_topics={json.dumps(gap_result.get('missing_topics') or [], ensure_ascii=False)}",
-                            ]
-                        ),
-                        meta={"stage": "gap_detection", "round": round_idx, "gap_result": json_safe(gap_result)},
-                    )
-
-                external_payload = await self._execute_stage(
-                    f"external_channel_r{round_idx}",
-                    self._run_external_if_needed,
-                    state=state,
-                    stage_timings=stage_timings,
-                    gap_result=gap_result,
-                    reasoning_trace=cumulative_reasoning,
-                )
-                external_logs: Sequence[Dict[str, Any]] = []
-                external_evidences: Sequence[Dict[str, Any]] = []
-                if external_payload:
-                    external_logs = external_payload.get("logs") or []
-                    external_evidences = external_payload.get("evidences") or []
-                if external_logs:
-                    state.extend_external_calls(list(external_logs))
-                if external_evidences:
-                    external_evidences_all.extend([dict(item) for item in external_evidences if isinstance(item, dict)])
-                    await emit_trace(
-                        "progress",
-                        "\n".join(
-                            [
-                                f"External channel produced evidence (round {round_idx}).",
-                                f"external_evidence_count={len(external_evidences)}",
-                            ]
-                        ),
-                        meta={
-                            "stage": "external_channel",
-                            "round": round_idx,
-                            "external_evidence_count": len(external_evidences),
-                            "external_logs": json_safe(list(external_logs)),
-                        },
-                    )
-                elif gap_result and gap_result.get("reason") == "external_disabled":
-                    await emit_trace(
-                        "progress",
-                        "\n".join(
-                            [
-                                f"External channel was requested but is disabled (round {round_idx}).",
-                                "No external tools were executed.",
-                            ]
-                        ),
-                        meta={"stage": "external_channel", "round": round_idx, "blocked": True, "gap_result": json_safe(gap_result)},
-                    )
-                elif gap_result and gap_result.get("should_trigger_external") is False:
-                    try:
-                        await emit_trace(
-                            "progress",
-                            "\n".join(
-                                [
-                                    f"External channel not triggered (round {round_idx}).",
-                                    f"external_allowed={(gap_result.get('diagnostics') or {}).get('external_allowed')}",
-                                    f"reason={gap_result.get('reason')}",
-                                ]
-                            ),
-                            meta={"stage": "external_channel", "round": round_idx, "gap_result": json_safe(gap_result)},
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        logger.debug("Failed to emit external_channel trace: %s", exc, exc_info=True)
-                        state.append_error(f"emit_trace(external_channel) failed: {exc}", stage="external_channel")
-
                 report = await self._execute_stage(
                     f"report_r{round_idx}",
                     self._report_stage,
                     state=state,
                     stage_timings=stage_timings,
                     reasoning_trace=cumulative_reasoning,
-                    external_logs=external_evidences_all,
+                    external_logs=None,
                 )
                 final_report = report
                 state.record_report(report)
@@ -366,7 +273,6 @@ class DeepSearchServiceRunMixin:
                     question=normalized_question,
                     structured_report=structured_report,
                     evidences=evidences_for_gate,
-                    gap_result=final_gap,
                     round_idx=round_idx,
                 )
                 if isinstance(quality_result, dict):
@@ -416,35 +322,12 @@ class DeepSearchServiceRunMixin:
                         ),
                         meta={"stage": "plan_update", "round": round_idx + 1, "followup_steps": json_safe(followup_steps)},
                     )
-                extra_external_tasks = self._build_external_tasks_from_actions(
-                    actions=quality_result.get("actions") or [],
-                    round_idx=round_idx,
-                    question=normalized_question,
-                )
-                if extra_external_tasks:
-                    extra_payload = await self._execute_stage(
-                        f"external_channel_post_gate_r{round_idx}",
-                        self._run_external_tasks_direct,
-                        state=state,
-                        stage_timings=stage_timings,
-                        tasks=extra_external_tasks,
-                        reasoning_trace=cumulative_reasoning,
-                        gap_result=final_gap,
-                    )
-                    if extra_payload:
-                        extra_logs = extra_payload.get("logs") or []
-                        extra_evs = extra_payload.get("evidences") or []
-                        if extra_logs:
-                            state.extend_external_calls(list(extra_logs))
-                        if extra_evs:
-                            external_evidences_all.extend([dict(item) for item in extra_evs if isinstance(item, dict)])
 
             if final_report is None:
                 raise RuntimeError("DeepSearch did not produce a report")
             report = final_report
             if cumulative_reasoning is not None:
                 cumulative_reasoning.setdefault("quality_loop", {})["quality_gate_history"] = quality_history
-                cumulative_reasoning.setdefault("quality_loop", {})["external_evidence_count"] = len(external_evidences_all)
                 state.reasoning_trace = cumulative_reasoning
 
             try:

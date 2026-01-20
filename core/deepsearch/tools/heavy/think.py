@@ -27,7 +27,6 @@ class ThinkToolResponse(BaseModel):
     coverage_delta: float | None = Field(...)
     next_actions: List[str] = Field(...)
     tool_calls: List[ThinkToolCall] = Field(...)
-    gap_trigger: bool = Field(...)
     missing_topics: List[str] = Field(...)
 
 
@@ -159,7 +158,6 @@ class ThinkTool(GraphTool):
                     "raw": parsed,
                     "graph_context": context_snapshot,
                     "coverage_metrics": coverage_snapshot,
-                    "gap_trigger": bool(payload.gap_trigger),
                     "missing_topics": missing_topics,
                     "tool_calls": [call.model_dump() for call in payload.tool_calls],
                     "compression": compaction_meta,

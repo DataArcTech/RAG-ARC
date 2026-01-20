@@ -196,54 +196,7 @@
 - `next_actions`: 建议的后续行动列表
 - `metadata`: 额外的诊断信息
 
-#### 2.4 gap_evaluated（缺口检测）
-
-```json
-{
-  "stage": "deepsearch",
-  "deepsearch_stage": "gap_evaluated",
-  "status": "running",
-  "message": "正在检测知识缺口...",
-  "gap_result": {
-    "should_trigger_external": true,
-    "reason": "缺少实时信息"
-  },
-  "should_trigger_external": true,
-  "gap_reason": "缺少实时信息",
-  "v": 1,
-  "type": "progress",
-  "ts_ms": 1234567890,
-  "request_id": "xxx",
-  "seq": 4
-}
-```
-
-#### 2.5 external_invoked（外部搜索）
-
-```json
-{
-  "stage": "deepsearch",
-  "deepsearch_stage": "external_invoked",
-  "status": "running",
-  "message": "正在进行外部搜索...",
-  "external_calls": [
-    {
-      "provider": "tavily",
-      "query": "搜索查询",
-      "results": [...]
-    }
-  ],
-  "external_calls_count": 2,
-  "total_calls": 2,
-  "v": 1,
-  "type": "progress",
-  "ts_ms": 1234567890,
-  "request_id": "xxx",
-  "seq": 5
-}
-```
-
-#### 2.6 reported（报告生成）
+#### 2.4 reported（报告生成）
 
 ```json
 {
@@ -594,19 +547,17 @@ data: [DONE]
 2. **DeepSearch created** - DeepSearch 初始化
 3. **DeepSearch planned** - 计划生成
 4. **DeepSearch reasoned** - 图谱推理（可能多次）
-5. **DeepSearch gap_evaluated** - 缺口检测
-6. **DeepSearch external_invoked** - 外部搜索（如果触发）
-7. **DeepSearch reported** - 报告生成
-8. **DeepSearch quality_gated** - 质量检查
-9. **DeepSearch done** - DeepSearch 完成
-10. **RAG prepare** - RAG 准备阶段
-11. **RAG web_search** - 联网搜索（如果启用）
-12. **RAG generate** - 生成阶段
-13. **Content chunks** - 内容流式输出（多次）
-14. **Title event** - 标题生成
-15. **Sources event** - 来源信息
-16. **Final payload** - 最终负载
-17. **Final chunk** - 结束标记
+5. **DeepSearch reported** - 报告生成
+6. **DeepSearch quality_gated** - 质量检查
+7. **DeepSearch done** - DeepSearch 完成
+8. **RAG prepare** - RAG 准备阶段
+9. **RAG web_search** - 联网搜索（如果启用）
+10. **RAG generate** - 生成阶段
+11. **Content chunks** - 内容流式输出（多次）
+12. **Title event** - 标题生成
+13. **Sources event** - 来源信息
+14. **Final payload** - 最终负载
+15. **Final chunk** - 结束标记
 18. **[DONE]** - SSE 结束
 
 ---
