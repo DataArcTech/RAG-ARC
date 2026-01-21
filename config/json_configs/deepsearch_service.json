@@ -124,6 +124,8 @@
         "code.python"
       ],
       "include_llm_tools": true,
+      "recent_tool_runs_max": 3,
+      "recent_tool_run_summary_max_chars": 320,
       "max_rounds_per_checkpoint": 2
     }
   },

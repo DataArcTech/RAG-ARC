@@ -320,6 +320,11 @@ class GraphLoopRuntimeMixin:
             checkpoint_records.append(record)
 
             think_evidences = list(evidences) if evidences else []
+            recent_tool_runs = self._summarize_recent_tool_runs(
+                tool_runs,
+                max_items=int(self._think_config.get("recent_tool_runs_max") or 0),
+                max_chars=int(self._think_config.get("recent_tool_run_summary_max_chars") or 0),
+            )
             payload = self._build_tool_payload(
                 plan_step_id=think_step_id,
                 question=question,
@@ -334,6 +339,7 @@ class GraphLoopRuntimeMixin:
                     "context_window": {"evidence_items": len(think_evidences)},
                     "available_tools": tool_catalog,
                     "previous_tool_call_results": previous_tool_call_results,
+                    "recent_tool_runs": recent_tool_runs,
                 },
             )
             try:
@@ -661,6 +667,41 @@ class GraphLoopRuntimeMixin:
                     }
                 )
         return records, {"proposed": len(proposed), "results": summary_rows}
+
+    @staticmethod
+    def _summarize_recent_tool_runs(
+        tool_runs: Sequence[Dict[str, Any]],
+        *,
+        max_items: int,
+        max_chars: int,
+    ) -> List[Dict[str, Any]]:
+        if max_items <= 0 or not tool_runs:
+            return []
+        summaries: List[Dict[str, Any]] = []
+        for run in tool_runs[-max_items:]:
+            if not isinstance(run, dict):
+                continue
+            result = run.get("result") if isinstance(run.get("result"), dict) else {}
+            summary = str(result.get("summary") or "").strip()
+            if max_chars > 0 and len(summary) > max_chars:
+                summary = summary[: max_chars - 3].rstrip() + "..."
+            evidences = result.get("evidences")
+            evidence_count = len(evidences) if isinstance(evidences, list) else 0
+            diagnostics = result.get("diagnostics") if isinstance(result, dict) else None
+            failure_reason = None
+            if isinstance(diagnostics, dict):
+                failure_reason = diagnostics.get("reason") or diagnostics.get("error")
+            summaries.append(
+                {
+                    "plan_step_id": run.get("plan_step_id"),
+                    "tool_name": run.get("tool_name"),
+                    "channel": run.get("channel"),
+                    "summary": summary or None,
+                    "evidence_count": evidence_count,
+                    "failure_reason": failure_reason,
+                }
+            )
+        return summaries
 
 
 def _prioritize_tool_catalog(

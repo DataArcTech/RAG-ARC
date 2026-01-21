@@ -283,6 +283,14 @@ class GraphReasoningThinkConfig(BaseModel):
         ...,
         description="Whether to include LLM-dependent tools in the think tool catalog (must be explicit; no env heuristics).",
     )
+    recent_tool_runs_max: int = Field(
+        3,
+        description="Max recent tool run summaries included in think payload (0 disables).",
+    )
+    recent_tool_run_summary_max_chars: int = Field(
+        320,
+        description="Max characters per recent tool run summary in think payload.",
+    )
     max_rounds_per_checkpoint: int = Field(
         1,
         description="Maximum think→tool_calls→think iterations per periodic checkpoint (>=1).",

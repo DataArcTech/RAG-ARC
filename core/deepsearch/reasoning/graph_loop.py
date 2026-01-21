@@ -20,6 +20,10 @@ from core.deepsearch.trace import emit_trace
 from core.deepsearch.utils.compression import compact_evidences, resolve_compaction_config
 from core.deepsearch.utils.evidence_kinds import count_evidences_by_kind, is_primary_evidence
 from core.deepsearch.tooling.budget import attach_tool_budget_metadata, get_tool_budget
+from config.core.deepsearch.reasoning_defaults import (
+    THINK_RECENT_TOOL_RUNS_MAX,
+    THINK_RECENT_TOOL_RUN_SUMMARY_MAX_CHARS,
+)
 from core.graph_adapter.base import GraphAccessScope, GraphDeepSearchAdapter
 from core.graph_adapter.scope_provider import require_scope
 
@@ -241,6 +245,13 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
         if include_llm_tools is None:
             raise ValueError("think.include_llm_tools is required for GraphReasoningLoop")
 
+        recent_tool_runs_max = _get(think, "recent_tool_runs_max")
+        if recent_tool_runs_max is None:
+            recent_tool_runs_max = THINK_RECENT_TOOL_RUNS_MAX
+        recent_tool_run_summary_max_chars = _get(think, "recent_tool_run_summary_max_chars")
+        if recent_tool_run_summary_max_chars is None:
+            recent_tool_run_summary_max_chars = THINK_RECENT_TOOL_RUN_SUMMARY_MAX_CHARS
+
         cfg = {
             "tool_name": str(_get(think, "tool_name") or "").strip(),
             "cadence": int(_get(think, "every_n_steps") or 0),
@@ -251,6 +262,8 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             "tool_call_concurrency": int(_get(think, "tool_call_concurrency")),
             "tool_catalog_max_items": int(_get(think, "tool_catalog_max_items")),
             "tool_catalog_allowlist": _get(think, "tool_catalog_allowlist"),
+            "recent_tool_runs_max": max(0, int(recent_tool_runs_max)),
+            "recent_tool_run_summary_max_chars": max(0, int(recent_tool_run_summary_max_chars)),
             "max_rounds_per_checkpoint": max(1, int(_get(think, "max_rounds_per_checkpoint") or 1)),
             "include_llm_tools": bool(include_llm_tools),
         }

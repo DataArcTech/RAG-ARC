@@ -21,11 +21,7 @@ class _StubLLM:
 async def test_graph_think_tool_repairs_invalid_json_output() -> None:
     valid = {
         "reasoning": "ok",
-        "confidence_delta": None,
-        "coverage_delta": None,
-        "next_actions": ["a"],
         "tool_calls": [],
-        "missing_topics": [],
     }
     llm = _StubLLM(["not json", json.dumps(valid)])
     tool = ThinkTool(llm_connector=llm, json_repair_attempts=1, json_repair_temperature=0.0)

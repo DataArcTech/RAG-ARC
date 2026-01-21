@@ -278,9 +278,6 @@ async def test_graph_reasoning_think_can_call_code_python_and_next_think_sees_re
     think_round_1 = json.dumps(
         {
             "reasoning": "Need deterministic verification.",
-            "confidence_delta": None,
-            "coverage_delta": None,
-            "next_actions": ["Run Python to verify math."],
             "tool_calls": [
                 {
                     "tool_name": "code.python",
@@ -292,18 +289,13 @@ async def test_graph_reasoning_think_can_call_code_python_and_next_think_sees_re
                     "parallelizable": False,
                 }
             ],
-            "missing_topics": [],
         },
         ensure_ascii=False,
     )
     think_round_2 = json.dumps(
         {
             "reasoning": "Result observed; continue DeepSearch.",
-            "confidence_delta": None,
-            "coverage_delta": None,
-            "next_actions": [],
             "tool_calls": [],
-            "missing_topics": [],
         },
         ensure_ascii=False,
     )

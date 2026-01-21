@@ -14,9 +14,7 @@ class _StubLLM:
         return json.dumps(
             {
                 "reasoning": "stub reasoning",
-                "confidence_delta": 0.1,
-                "coverage_delta": 0.2,
-                "next_actions": [],
+                "tool_calls": [],
             }
         )
 

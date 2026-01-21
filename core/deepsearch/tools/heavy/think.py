@@ -23,11 +23,7 @@ class ThinkToolCall(BaseModel):
 
 class ThinkToolResponse(BaseModel):
     reasoning: str = Field(..., min_length=1)
-    confidence_delta: float | None = Field(...)
-    coverage_delta: float | None = Field(...)
-    next_actions: List[str] = Field(...)
-    tool_calls: List[ThinkToolCall] = Field(...)
-    missing_topics: List[str] = Field(...)
+    tool_calls: List[ThinkToolCall] = Field(default_factory=list)
 
 
 class ThinkTool(GraphTool):
@@ -123,6 +119,7 @@ class ThinkTool(GraphTool):
             extra=(request.extra or {}),
             include_triple_count=True,
         )
+        extra = request.extra or {}
         prompt_payload = {
             "question": request.question,
             "plan_step": request.plan_step,
@@ -130,7 +127,10 @@ class ThinkTool(GraphTool):
             "graph_context": context_snapshot,
             "tool_budget": (context_snapshot.get("metadata") or {}).get("tool_budget") if isinstance(context_snapshot, dict) else None,
             "coverage_metrics": coverage_snapshot,
-            "extra": request.extra,
+            "available_tools": extra.get("available_tools"),
+            "previous_tool_call_results": extra.get("previous_tool_call_results"),
+            "recent_tool_runs": extra.get("recent_tool_runs"),
+            "extra": extra,
             "compression": compaction_meta,
         }
         messages = [
@@ -144,21 +144,16 @@ class ThinkTool(GraphTool):
             response = await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
             parsed = await self._parse_or_repair_json(messages=messages, raw=response)
             payload = ThinkToolResponse.model_validate(parsed)
-            missing_topics = self._merge_missing_topics(
-                payload.missing_topics,
-                coverage_snapshot.get("missing_topics"),
-            )
             return ThinkNote(
                 plan_step_id=request.plan_step,
                 reasoning=payload.reasoning,
-                confidence_delta=payload.confidence_delta,
-                coverage_delta=payload.coverage_delta,
-                next_actions=[str(item) for item in payload.next_actions],
+                confidence_delta=None,
+                coverage_delta=None,
+                next_actions=[],
                 metadata={
                     "raw": parsed,
                     "graph_context": context_snapshot,
                     "coverage_metrics": coverage_snapshot,
-                    "missing_topics": missing_topics,
                     "tool_calls": [call.model_dump() for call in payload.tool_calls],
                     "compression": compaction_meta,
                 },
@@ -228,16 +223,3 @@ class ThinkTool(GraphTool):
             "latency_ms": coverage_snapshot.get("latency_ms", 0),
         }
         return entry
-
-    @staticmethod
-    def _merge_missing_topics(*payloads: Any) -> List[str]:
-        merged: List[str] = []
-        seen: set[str] = set()
-        for payload in payloads:
-            if isinstance(payload, list):
-                for item in payload:
-                    token = str(item).strip()
-                    if token and token not in seen:
-                        seen.add(token)
-                        merged.append(token)
-        return merged
