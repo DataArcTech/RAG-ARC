@@ -7,9 +7,17 @@ from core.prompts.query_rewrite_prompt import (
     QUERY_REWRITE_AND_ROUTING_USER_PROMPT,
     QUERY_REWRITE_AND_ROUTING_USER_PROMPT_WITH_HISTORY,
     QUERY_REWRITE_ROUTING_SYSTEM_SUFFIX,
+    QUERY_REWRITE_INTENT_SYSTEM_SUFFIX,
+    QUERY_REWRITE_AND_INTENT_USER_PROMPT,
+    QUERY_REWRITE_AND_INTENT_USER_PROMPT_WITH_HISTORY,
 )
 from config.benchmark_mode import benchmark_mode_enabled
 from config.retrieval_routing import rag_retrieval_dynamic_quota_enabled
+from config.rag_intent_routing import (
+    rag_intent_routing_enabled,
+    rag_rewrite_history_user_only,
+    rag_rewrite_history_most_recent_first,
+)
 
 import logging
 
@@ -17,6 +25,38 @@ if TYPE_CHECKING:
     from config.core.query_rewrite_config import LLMQueryRewriterConfig
 
 logger = logging.getLogger(__name__)
+
+_ALLOWED_INTENTS = {"RAG_REQUIRED", "CLARIFICATION", "CORRECTION", "CHITCHAT_ACK", "TOPIC_SWITCH"}
+
+
+def _history_for_rewrite(history_text: str | None, *, max_chars: int) -> str | None:
+    if not history_text:
+        return None
+    try:
+        from core.conversation.history import parse_role_prefixed_history, build_history_text
+
+        msgs = parse_role_prefixed_history(history_text)
+        return build_history_text(
+            msgs,
+            user_only=rag_rewrite_history_user_only(),
+            most_recent_first=rag_rewrite_history_most_recent_first(),
+            max_chars=int(max_chars),
+        )
+    except Exception:
+        # Keep it non-fatal: call sites already tolerate missing history.
+        text = str(history_text or "").strip()
+        if not text:
+            return None
+        if max_chars > 0 and len(text) > max_chars:
+            text = text[-max_chars:]
+        return text or None
+
+
+def _coerce_intent(value: object) -> str:
+    token = str(value or "").strip().upper()
+    if token in _ALLOWED_INTENTS:
+        return token
+    return "RAG_REQUIRED"
 
 
 class LLMQueryRewriter(AbstractQueryRewriter):
@@ -103,10 +143,7 @@ class LLMQueryRewriter(AbstractQueryRewriter):
 
         use_history = bool(getattr(self.config, "use_history_for_rewrite", False))
         max_history_chars = int(getattr(self.config, "rewrite_history_max_chars", 0) or 0)
-        history_snippet = None
-        if use_history and history_text and max_history_chars > 0:
-            # Keep only the tail to bias toward recent turns (history is usually chronological).
-            history_snippet = str(history_text)[-max_history_chars:]
+        history_snippet = _history_for_rewrite(history_text, max_chars=max_history_chars) if use_history else None
 
         # Prepare messages for LLM
         messages = [
@@ -144,6 +181,87 @@ class LLMQueryRewriter(AbstractQueryRewriter):
             # Return original query as fallback
             logger.warning("Using original query as fallback")
             return query
+
+    def rewrite_query_with_intent(
+        self,
+        query: str,
+        *,
+        history_text: str | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """
+        Intent-aware rewrite for multi-turn conversations (opt-in via env).
+
+        Returns a dict:
+          - intent: one of _ALLOWED_INTENTS
+          - rewritten_query: str
+          - anchors: list[str]
+          - reason: str (optional)
+
+        This method is intentionally conservative:
+        - If intent routing is disabled, it falls back to rewrite_query() and returns intent=RAG_REQUIRED.
+        - On parsing errors, it returns the original query with intent=RAG_REQUIRED (observable via logs).
+        """
+        if benchmark_mode_enabled():
+            return {"intent": "RAG_REQUIRED", "rewritten_query": str(query or ""), "anchors": []}
+        if not query or not query.strip():
+            raise ValueError("Query cannot be empty")
+        if not rag_intent_routing_enabled():
+            return {"intent": "RAG_REQUIRED", "rewritten_query": self.rewrite_query(query, history_text=history_text, **kwargs), "anchors": []}
+
+        instruction = str(self.config.instruction or "").rstrip() + "\n\n" + QUERY_REWRITE_INTENT_SYSTEM_SUFFIX
+        use_history = bool(getattr(self.config, "use_history_for_rewrite", False))
+        max_history_chars = int(getattr(self.config, "rewrite_history_max_chars", 0) or 0)
+        history_snippet = _history_for_rewrite(history_text, max_chars=max_history_chars) if use_history else None
+
+        messages = [
+            {"role": "system", "content": instruction},
+            {
+                "role": "user",
+                "content": (
+                    QUERY_REWRITE_AND_INTENT_USER_PROMPT_WITH_HISTORY.format(query=str(query), history=history_snippet)
+                    if history_snippet
+                    else QUERY_REWRITE_AND_INTENT_USER_PROMPT.format(query=str(query))
+                ),
+            },
+        ]
+
+        try:
+            raw = self.chat_llm.chat(messages=messages, **kwargs)
+            text = str(raw or "").strip()
+            from core.utils.json_extract import safe_json_loads
+
+            payload = safe_json_loads(text, expected="dict")
+            if not isinstance(payload, dict):
+                logger.warning("rewrite_query_with_intent: non-JSON response; fallback to original query")
+                return {"intent": "RAG_REQUIRED", "rewritten_query": str(query), "anchors": []}
+
+            intent = _coerce_intent(payload.get("intent"))
+            rewritten = str(payload.get("rewritten_query") or "").strip().strip('"').strip("'") or str(query)
+            anchors_raw = payload.get("anchors")
+            anchors: list[str] = []
+            if isinstance(anchors_raw, list):
+                for a in anchors_raw:
+                    s = str(a or "").strip()
+                    if s and s not in anchors:
+                        anchors.append(s)
+            # Keep anchors aligned with rewritten query to avoid including both "intended" and "mistaken" subjects
+            # on CORRECTION-like turns (domain-agnostic; no hardcoded keyword lists).
+            if anchors and rewritten:
+                try:
+                    from core.utils.anchor_consistency import prune_anchors_by_query_text
+
+                    anchors = prune_anchors_by_query_text(anchors=anchors, rewritten_query=rewritten)
+                except Exception:  # noqa: BLE001
+                    pass
+            reason = str(payload.get("reason") or "").strip()
+            out: dict[str, Any] = {"intent": intent, "rewritten_query": rewritten, "anchors": anchors}
+            if reason:
+                out["reason"] = reason
+            return out
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("rewrite_query_with_intent failed; using original query: %s", exc)
+            return {"intent": "RAG_REQUIRED", "rewritten_query": str(query), "anchors": []}
 
     def rewrite_query_with_routing(
         self,
@@ -188,9 +306,7 @@ class LLMQueryRewriter(AbstractQueryRewriter):
 
         use_history = bool(getattr(self.config, "use_history_for_rewrite", False))
         max_history_chars = int(getattr(self.config, "rewrite_history_max_chars", 0) or 0)
-        history_snippet = None
-        if use_history and history_text and max_history_chars > 0:
-            history_snippet = str(history_text)[-max_history_chars:]
+        history_snippet = _history_for_rewrite(history_text, max_chars=max_history_chars) if use_history else None
 
         messages = [
             {"role": "system", "content": instruction},

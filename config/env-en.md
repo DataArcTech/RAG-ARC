@@ -169,6 +169,11 @@ Notes:
 | `RAG_RETRIEVAL_WEIGHT_BM25` | `1.0` | MultiPath RRF fusion weight for the BM25 retriever. |
 | `RAG_RETRIEVAL_WEIGHT_GRAPH` | `1.5` | MultiPath RRF fusion weight for the graph retriever (lower than before to avoid drowning out dense/bm25 on sparse detail queries). |
 | `RAG_RETRIEVAL_DYNAMIC_QUOTA_ENABLED` | `true` | Enable LLM-driven per-query routing ratios that allocate MultiPath candidate quotas across retrievers (coverage floor). Falls back to static ratios when disabled. |
+| `RAG_INTENT_ROUTING_ENABLED` | `false` | Enable intent classification + intent-aware query rewrite (single LLM call returns JSON: intent/anchors/rewritten_query). Helps multi-turn chats avoid unnecessary retrieval and drift. |
+| `RAG_REWRITE_HISTORY_USER_ONLY` | `true` | Feed only USER turns into the rewrite context (exclude assistant) to reduce assistant-poisoning effects. |
+| `RAG_REWRITE_HISTORY_MOST_RECENT_FIRST` | `true` |Order rewrite history context as most-recent-first (aligned with rewrite prompt wording). |
+| `RAG_EVIDENCE_CONSISTENCY_ENABLED` | `false` | Enable evidence consistency filtering: use rewrite-produced anchors to keep retrieval evidence within the same company/product file set (reduces cross-product mixing). |
+| `RAG_EVIDENCE_MIN_KEEP` | `5` | Minimum number of chunks to keep after evidence consistency filtering; if not met, the filter is skipped and diagnostics are emitted. |
 | `DEEPSEARCH_TOP_CHUNKS` | `10` | Maximum chunks returned in DeepSearch evidence and displayed in report appendix (first 100 chars preview). |
 | `DEEPSEARCH_TOP_TRIPLES` | `30` | Maximum graph triples returned in DeepSearch evidence. |
 | `DEEPSEARCH_TOP_SEED_ENTITIES` | `15` | Maximum seed entities surfaced in DeepSearch evidence. |

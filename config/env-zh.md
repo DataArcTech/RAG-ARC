@@ -169,6 +169,11 @@ Benchmark/实验模式：
 | `RAG_RETRIEVAL_WEIGHT_BM25` | `1.0` | MultiPath 的 RRF 融合权重：BM25 路径。 |
 | `RAG_RETRIEVAL_WEIGHT_GRAPH` | `1.5` | MultiPath 的 RRF 融合权重：graph 路径（调低以避免在“稀有细节”问题上压制 dense/bm25）。 |
 | `RAG_RETRIEVAL_DYNAMIC_QUOTA_ENABLED` | `true` | 是否启用 LLM 动态路由比例（按 query 决定 dense/bm25/graph 的候选配额保底）。关闭后回退为静态比例（由权重推导）。 |
+| `RAG_INTENT_ROUTING_ENABLED` | `false` | 启用意图识别 + 意图感知的 query rewrite（同一次 LLM 调用输出 JSON：intent/anchors/rewritten_query）。用于多轮对话中识别“澄清/纠错/闲聊”等，减少不必要检索与跑偏。 |
+| `RAG_REWRITE_HISTORY_USER_ONLY` | `true` | rewrite 阶段只向模型提供 user 历史（不包含 assistant），降低错误回答污染后续 rewrite（assistant poisoning）。 |
+| `RAG_REWRITE_HISTORY_MOST_RECENT_FIRST` | `true` | rewrite 的 history context 按“最近在前”排序（与 rewrite prompt 保持一致）。 |
+| `RAG_EVIDENCE_CONSISTENCY_ENABLED` | `false` | 启用 evidence 一致性过滤：基于 rewrite 产出的 anchors，将召回结果收敛到同一公司/产品文件集合，降低跨产品证据混入导致的回答偏移。 |
+| `RAG_EVIDENCE_MIN_KEEP` | `5` | evidence 一致性过滤后至少保留的 chunks 数；不足时会放弃过滤并在进度事件中标记。 |
 | `DEEPSEARCH_TOP_CHUNKS` | `10` | DeepSearch 证据中最多保留的 chunk 数量，同时也是报告附录中显示原文预览（前100字符）的数量。 |
 | `DEEPSEARCH_TOP_TRIPLES` | `30` | DeepSearch 证据中最多保留的图三元组数量。 |
 | `DEEPSEARCH_TOP_SEED_ENTITIES` | `15` | DeepSearch 证据中最多保留的种子实体数量。 |

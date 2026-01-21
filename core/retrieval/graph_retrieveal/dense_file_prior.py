@@ -208,7 +208,7 @@ def compute_dense_file_prior_multipliers(
     max_files: int,
     min_ratio: float,
     min_margin: float,
-    max_second_ratio: float | None,
+    max_second_ratio: float | None = None,
     multiplier: float,
     # Optional: extra gate using query<->filename lexical consistency to avoid "confidently wrong" priors.
     query_variants: Sequence[str] | None = None,

@@ -15,6 +15,8 @@ from core.prompts import (
     MINDMAP_GENERATION_SYSTEM_PROMPT_ZH,
     build_mindmap_generation_user_prompt,
     get_rag_inference_system_prompt,
+    get_rag_chat_system_prompt,
+    build_intent_context_system_prompt,
 )
 from framework.register import Register
 from framework.thread_pool import get_thread_pool
@@ -23,6 +25,11 @@ from core.utils.multimodal_images import collect_image_paths_from_chunk_payloads
 from core.utils.multimodal_llm import build_multimodal_user_message
 from encapsulation.web_search import TavilySearchClient
 from config.retrieval_routing import rag_retrieval_dynamic_quota_enabled
+from config.rag_intent_routing import (
+    rag_intent_routing_enabled,
+    rag_evidence_consistency_enabled,
+    rag_evidence_min_keep,
+)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -432,6 +439,10 @@ class RAGInference(AbstractModule):
         rewrite_kwargs: dict[str, Any] = {}
         rewritten_query: str
         retrieval_ratios: dict[str, float] | None = None
+        rewrite_intent: str | None = None
+        rewrite_anchors: list[str] = []
+        rewrite_reason: str | None = None
+        skip_retrieval = False
         try:
             sig = inspect.signature(self.query_rewriter.rewrite_query)
             accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
@@ -440,7 +451,46 @@ class RAGInference(AbstractModule):
                 rewrite_kwargs["history_text"] = history_text
         except Exception as exc:  # noqa: BLE001
             logger.debug("Failed to inspect query_rewriter.rewrite_query signature: %s", exc, exc_info=True)
-        if rag_retrieval_dynamic_quota_enabled() and hasattr(self.query_rewriter, "rewrite_query_with_routing"):
+
+        # Intent-aware rewrite (opt-in): single LLM call can classify intent and return anchors.
+        if rag_intent_routing_enabled() and hasattr(self.query_rewriter, "rewrite_query_with_intent"):
+            try:
+                fn = getattr(self.query_rewriter, "rewrite_query_with_intent")
+                sig = inspect.signature(fn)
+                accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                call_kwargs = dict(rewrite_kwargs)
+                if not accepts_var_kw and "history_text" not in sig.parameters:
+                    call_kwargs.pop("history_text", None)
+                payload = fn(query, **call_kwargs)  # type: ignore[misc]
+                if isinstance(payload, dict):
+                    rewrite_intent = str(payload.get("intent") or "").strip() or None
+                    rewrite_reason = str(payload.get("reason") or "").strip() or None
+                    anchors = payload.get("anchors")
+                    if isinstance(anchors, list):
+                        rewrite_anchors = [str(a or "").strip() for a in anchors if str(a or "").strip()]
+                    rewritten_query = str(payload.get("rewritten_query") or "").strip() or query
+                else:
+                    rewritten_query = self.query_rewriter.rewrite_query(query, **rewrite_kwargs)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("rewrite_query_with_intent failed; falling back to rewrite_query: %s", exc)
+                rewritten_query = self.query_rewriter.rewrite_query(query, **rewrite_kwargs)
+
+            # Self-consistency: keep anchors aligned to rewritten_query (reduces "CORRECTION mentions both A and B" drift).
+            if rewrite_anchors and rewritten_query:
+                try:
+                    from core.utils.anchor_consistency import prune_anchors_by_query_text
+
+                    rewrite_anchors = prune_anchors_by_query_text(
+                        anchors=rewrite_anchors,
+                        rewritten_query=rewritten_query,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+            # Routing decision: for pure acknowledgement/clarification, do not retrieve.
+            if rewrite_intent in {"CHITCHAT_ACK", "CLARIFICATION"}:
+                skip_retrieval = True
+        elif rag_retrieval_dynamic_quota_enabled() and hasattr(self.query_rewriter, "rewrite_query_with_routing"):
             try:
                 fn = getattr(self.query_rewriter, "rewrite_query_with_routing")
                 sig = inspect.signature(fn)
@@ -462,9 +512,44 @@ class RAGInference(AbstractModule):
                 "status": "end",
                 "duration_ms": int((time.perf_counter() - rewrite_start) * 1000),
                 "rewritten_query": rewritten_query,
+                **({"intent": rewrite_intent} if rewrite_intent else {}),
+                **({"anchors": rewrite_anchors} if rewrite_anchors else {}),
+                **({"reason": rewrite_reason} if rewrite_reason else {}),
                 **({"retrieval_ratios": retrieval_ratios} if retrieval_ratios else {}),
             },
         )
+
+        if skip_retrieval:
+            # Conversation-only mode: we still build messages (using history), but avoid retrieval/rerank.
+            chunks = []
+            subgraph_info = None
+            messages: List[Dict[str, str]] = []
+            system_prompt = get_rag_chat_system_prompt(profile="cli", user_type=user_type)
+            messages.append({"role": "system", "content": system_prompt})
+            # Add a small, centralized guardrail so answers respect CORRECTION/TOPIC_SWITCH constraints even without retrieval.
+            if rewrite_intent or rewrite_anchors or rewrite_reason:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": build_intent_context_system_prompt(
+                            intent=rewrite_intent,
+                            anchors=rewrite_anchors,
+                            reason=rewrite_reason,
+                        ),
+                    }
+                )
+            if history_text:
+                history_lines = history_text.strip().split("\n")
+                for line in history_lines:
+                    if ":" not in line:
+                        continue
+                    role, content = line.split(":", 1)
+                    role = role.strip()
+                    content = content.strip()
+                    if role in ("user", "assistant") and content:
+                        messages.append({"role": role, "content": content})
+            messages.append({"role": "user", "content": str(query or "").strip()})
+            return (messages, chunks, None, subgraph_info)
 
         self._emit_progress(progress_callback, {"stage": "retrieve", "status": "start"})
         retrieve_start = time.perf_counter()
@@ -574,6 +659,34 @@ class RAGInference(AbstractModule):
 
         chunks = self._filter_chunks_by_file_status(chunks)
         chunks = self._dedupe_chunks_by_id(chunks)
+
+        # Evidence consistency filtering (opt-in): keep chunks aligned to anchors to reduce drift.
+        if rag_evidence_consistency_enabled() and rewrite_anchors:
+            try:
+                from core.utils.evidence_consistency import filter_chunks_by_anchors
+
+                self._emit_progress(progress_callback, {"stage": "evidence_filter", "status": "start"})
+                before = len(chunks)
+                chunks, info = filter_chunks_by_anchors(
+                    chunks=chunks,
+                    anchors=rewrite_anchors,
+                    min_keep=rag_evidence_min_keep(),
+                )
+                after = len(chunks)
+                self._emit_progress(
+                    progress_callback,
+                    {
+                        "stage": "evidence_filter",
+                        "status": "end",
+                        "chunks_in": before,
+                        "chunks_out": after,
+                        "passed": bool(getattr(info, "passed", True)),
+                        "matched_by_filename": getattr(info, "matched_by_filename", None),
+                        "matched_by_content": getattr(info, "matched_by_content", None),
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Evidence consistency filter failed (ignored): %s", exc)
 
         if web_future is not None:
             logger.info("Waiting for web search results...")
@@ -725,6 +838,18 @@ class RAGInference(AbstractModule):
         # Add system prompt (requires <sup> citations).
         system_prompt = get_rag_inference_system_prompt(user_type=user_type)
         messages.append({"role": "system", "content": system_prompt})
+        # Provide intent/anchors to generation as constraints (kept domain-agnostic; centrally managed prompt).
+        if rewrite_intent or rewrite_anchors or rewrite_reason:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": build_intent_context_system_prompt(
+                        intent=rewrite_intent,
+                        anchors=rewrite_anchors,
+                        reason=rewrite_reason,
+                    ),
+                }
+            )
         
         # If history exists, prepend it (aligned with WebSocket behavior).
         if history_text:
