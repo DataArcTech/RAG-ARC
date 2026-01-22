@@ -7,6 +7,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from core.graph_adapter.scope_provider import configure_scope_provider
 from framework.runtime_warnings import configure_runtime_warnings
@@ -256,6 +257,31 @@ async def validation_exception_handler(request, exc):
     )
 
 app.mount("/mcp", mcp.mcp_app)
+# Mount static file service for parsed files
+try:
+    import os
+    parser_output_dir = os.getenv("PARSER_OUTPUT_DIR", "./data/parsed_files")
+    parsed_files_dir = Path(parser_output_dir).resolve()
+    if parsed_files_dir.exists():
+        # Extract the relative path from PARSER_OUTPUT_DIR for mounting
+        # e.g., /root/project/chatKB/backend/RAG-ARC/data/parsed_files_chatKB_test -> data/parsed_files_chatKB_test
+        mount_path = f"/{parsed_files_dir.name}" if parsed_files_dir.name == "parsed_files_chatKB_test" else f"/data/{parsed_files_dir.name}"
+        # Use the full path structure from PARSER_OUTPUT_DIR
+        if "parsed_files_chatKB_test" in str(parsed_files_dir):
+            mount_path = "/data/parsed_files_chatKB_test"
+        elif "parsed_files" in str(parsed_files_dir):
+            mount_path = "/data/parsed_files"
+        else:
+            # Fallback: use the directory name
+            mount_path = f"/data/{parsed_files_dir.name}"
+        
+        app.mount(mount_path, StaticFiles(directory=str(parsed_files_dir)), name="parsed_files")
+        logger.info(f"Mounted static file service at {mount_path} -> {parsed_files_dir}")
+    else:
+        logger.warning(f"Parsed files directory not found: {parsed_files_dir}")
+except Exception as e:
+    logger.warning(f"Failed to mount static file service for parsed files: {e}")
+
 app.include_router(alerts_router.router)
 app.include_router(knowledge_router.router)
 app.include_router(rag_inference.router)
