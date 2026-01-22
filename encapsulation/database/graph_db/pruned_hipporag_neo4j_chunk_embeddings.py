@@ -29,14 +29,17 @@ class _PrunedHippoRAGNeo4jChunkEmbeddingsMixin:
                         expected_dim = int(candidate)
                     except Exception:
                         expected_dim = None
-                if expected_dim is None:
-                    try:
-                        probe = self.embedding_model.embed(["dimension probe"])
-                        if isinstance(probe, list) and probe:
-                            first = probe[0]
-                            expected_dim = len(first) if isinstance(first, list) else len(probe)  # type: ignore[arg-type]
-                    except Exception:
-                        expected_dim = None
+                if expected_dim is None and isinstance(loaded, dict) and loaded:
+                    for value in loaded.values():
+                        if value is None:
+                            continue
+                        try:
+                            arr = np.array(value, dtype=np.float32)
+                        except Exception:
+                            continue
+                        if arr.ndim == 1 and arr.shape[0] > 0:
+                            expected_dim = int(arr.shape[0])
+                            break
 
                 filtered = {}
                 dropped = 0
@@ -228,4 +231,3 @@ class _PrunedHippoRAGNeo4jChunkEmbeddingsMixin:
                 f"Chunk embeddings array built ({dtype_str}): {len(kept_chunk_ids)} chunks, "
                 f"memory: {new_array.nbytes / 1024 / 1024:.2f} MB"
             )
-
