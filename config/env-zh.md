@@ -48,7 +48,7 @@ Benchmark/实验模式：
 
 - `config/json_configs/rag_inference*.json`：聊天/RAG 主流程、检索器、重排器、模型选择等。
 - `config/json_configs/knowledge*.json`：解析、分块、索引/建图流程等。
-- `config/json_configs/deepsearch_service.json`：DeepSearch 的 tools/think/report/quality gate 等。
+- `config/json_configs/deepsearch_service.json`：DeepSearch 的 tools/think/report 等。
 - `config/output_limits.py`：API 返回裁剪与证据上限（payload 限制）。
 - `config/core/deepsearch/*_defaults.py`：DeepSearch 的 loop/tool/report 默认参数（运行时读取）。
 
@@ -66,7 +66,7 @@ Benchmark/实验模式：
 | `CHAT_API_KEY` | _(空)_ | **必填**（当 `CHAT_MODEL_PROVIDER=openai`）：对话模型 API Key。 |
 | `CHAT_API_BASE_URL` | _(空)_ | **必填**（当 `CHAT_MODEL_PROVIDER=openai`）：OpenAI 兼容 API Base URL（例如 `https://api.openai.com/v1`）。 |
 | `OPENAI_CHAT_MODEL` | `gpt-4o-mini` | 兼容/默认的对话模型名（当 `CHAT_MODEL_NAME` 为空时使用）。 |
-| `LOW_COST_MODEL` | _(空)_ | 可选：更便宜的模型，用于探索型/多次调用的场景（planning/reflection/quality checks）。留空则复用主对话模型。 |
+| `LOW_COST_MODEL` | _(空)_ | 可选：更便宜的模型，用于探索型/多次调用的场景（planning/reflection）。留空则复用主对话模型。 |
 | `OPENAI_API_BASE` | _(空)_ | 可选：历史兼容的 OpenAI Base URL 别名。 |
 | `EMBEDDING_MODEL_PROVIDER` | `openai` | 嵌入模型提供方（`openai`=OpenAI 兼容 API，`huggingface`=本地 SentenceTransformers）。 |
 | `EMBEDDING_API_KEY` | _(空)_ | **必填**（当 `EMBEDDING_MODEL_PROVIDER=openai`）：嵌入模型 API Key。 |
@@ -369,17 +369,7 @@ Benchmark/实验模式：
 | `DEEPSEARCH_MCP_PERSISTENT_SESSION` | `true` | 是否复用 HTTP 会话。 |
 | `DEEPSEARCH_MCP_ENABLE_GRAPH_CONTEXT` | `true` | 是否附带图上下文。 |
 | `DEEPSEARCH_MCP_GRAPH_CONTEXT_FIELD` | `__graph_context__` | MCP 请求中的上下文字段。 |
-| `DEEPSEARCH_CONSISTENCY_CHECK` | `true` | 启用 LLM 一致性检查，验证报告内容与证据是否一致。 |
 | `DEEPSEARCH_PARALLEL_SECTIONS` | `false` | 并行生成报告章节（更快但消耗更多 API 调用）。 |
-| `DEEPSEARCH_QUALITY_LOOP_ENABLED` | `false` | 启用“研究 → 质量门槛 → 迭代”闭环（会在报告后进行质量评估并触发补证据/重写）。 |
-| `DEEPSEARCH_QUALITY_LOOP_MAX_ROUNDS` | `2` | 质量闭环最多迭代轮数（包含首次）。 |
-| `DEEPSEARCH_QUALITY_LOOP_MIN_CITATION_SENTENCE_COVERAGE` | `0.6` | 报告句子中必须包含有效引用的最低比例。 |
-| `DEEPSEARCH_QUALITY_LOOP_REQUIRE_CONSISTENCY` | `true` | 当一致性检查出现问题时是否直接判定未通过。 |
-| `DEEPSEARCH_QUALITY_LOOP_MAX_UNCITED_SENTENCES` | `6` | 最多输出多少条“缺引用句子”作为修复目标（用于驱动补检索/重写）。 |
-| `DEEPSEARCH_QUALITY_LOOP_MAX_ACTIONS` | `6` | 质量门槛最多产出的后续动作数量。 |
-| `DEEPSEARCH_QUALITY_LOOP_ENABLE_LLM_JUDGE` | `true` | 启用基于 Rubric 的 LLM Judge（仅在确定性检查失败或存在缺口时调用）。 |
-| `DEEPSEARCH_QUALITY_LOOP_JUDGE_TEMPERATURE` | `0.0` | Judge 的 temperature。 |
-| `DEEPSEARCH_QUALITY_LOOP_JUDGE_MAX_RETRIES` | `1` | Judge 调用的重试次数。 |
 
 ### MCP 配置示例
 

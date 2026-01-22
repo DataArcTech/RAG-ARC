@@ -355,7 +355,6 @@ def build_dev_view_v2(
         "stage_history": list(snapshot.get("stage_history") or []),
         "plan_summary": {"plan_id": plan_id, "step_count": step_count},
         "cost_telemetry": dict(snapshot.get("cost_telemetry") or {}),
-        "quality_gates": list(snapshot.get("quality_gates") or []),
         "errors": list(snapshot.get("errors") or []),
         "request_metadata": dict(snapshot.get("request_metadata") or {}),
         "kpis": dict(snapshot.get("kpis") or {}),

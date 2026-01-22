@@ -102,7 +102,7 @@ def test_deepsearch_run_async_exposes_progress_and_result():
                     if result.status_code == 200:
                         payload = result.json()
                         assert payload.get("state", {}).get("run_id") == run_id
-                        assert payload.get("state", {}).get("stage") in {"reported", "quality_gated", "done", "failed"}
+                        assert payload.get("state", {}).get("stage") in {"reported", "done", "failed"}
                         return
                     assert result.status_code in {409, 404}
                     await asyncio.sleep(0.05)
@@ -221,85 +221,3 @@ def test_deepsearch_stream_openai_format_emits_tool_calls():
 
     asyncio.run(_run())
 
-
-def test_deepsearch_progress_reports_quality_gate_stage_and_reaches_100_percent():
-    class _StubAccount:
-        def get_user_by_username(self, username: str):
-            return None
-
-    class _StubDeepSearchServiceWithQualityGate:
-        async def run(self, question: str, *, metadata=None, run_id=None, stage_listener=None, **kwargs):
-            state = DeepSearchState(
-                config_fingerprint="test",
-                run_id=run_id or uuid.uuid4().hex,
-                stage_listener=stage_listener,
-            )
-            state.record_plan({"plan": {"plan_id": "p1", "steps": []}})
-            await asyncio.sleep(0.01)
-            state.record_reasoning({"reasoning_steps": [], "evidences": []})
-            await asyncio.sleep(0.01)
-            state.record_report({"question": question, "answer": "stub", "evidences": [], "highlights": []})
-            await asyncio.sleep(0.01)
-            state.record_quality_gate({"round": 1, "enabled": True, "passed": False, "should_iterate": True})
-            # Keep the run alive briefly so the progress endpoint can observe the quality gate stage.
-            await asyncio.sleep(0.2)
-            state.record_report({"question": question, "answer": "stub2", "evidences": [], "highlights": []})
-            return {
-                "plan": {"plan": {"question": question, "steps": []}},
-                "reasoning": {"reasoning_steps": [], "evidences": [], "coverage_metrics": {}},
-                "report": {"question": question, "answer": "stub2", "evidences": [], "highlights": []},
-                "state": state.snapshot(),
-            }
-
-    registrator = Register()
-    registrator.registrations["account"] = _StubAccount()
-    registrator.registrations["deepsearch_service"] = _StubDeepSearchServiceWithQualityGate()
-    registrator.registrations["rag_inference"] = _StubRagInference()
-
-    from api.routers import deepsearch as deepsearch_router
-    from api.routers.auth import get_current_user
-
-    app = FastAPI()
-    app.include_router(deepsearch_router.router)
-    user_id = uuid.uuid4()
-    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=user_id)
-
-    async def _run():
-        async with _serve_app(app) as (host, port):
-            base = f"http://{host}:{port}"
-            async with httpx.AsyncClient(base_url=base, timeout=5.0) as client:
-                resp = await client.post("/deepsearch/run_async", json={"question": "hello"})
-                assert resp.status_code == 202
-                run_id = resp.json()["run_id"]
-
-                saw_quality_gate = False
-                deadline = time.time() + 2.0
-                while time.time() < deadline:
-                    progress = await client.get(f"/deepsearch/progress/{run_id}")
-                    assert progress.status_code == 200
-                    payload = progress.json()
-                    stage_record = payload.get("stage_record") or {}
-                    if stage_record.get("stage") == "quality_gated":
-                        saw_quality_gate = True
-                        break
-                    await asyncio.sleep(0.02)
-
-                assert saw_quality_gate is True
-
-                # Wait for completion.
-                deadline = time.time() + 3.0
-                while time.time() < deadline:
-                    result = await client.get(f"/deepsearch/result/{run_id}")
-                    if result.status_code == 200:
-                        break
-                    assert result.status_code in {409, 404}
-                    await asyncio.sleep(0.05)
-
-                final_progress = await client.get(f"/deepsearch/progress/{run_id}")
-                assert final_progress.status_code == 200
-                final_payload = final_progress.json()
-                assert final_payload.get("done") is True
-                progress_block = final_payload.get("progress") or {}
-                assert progress_block.get("percent") == 100
-
-    asyncio.run(_run())

@@ -9,7 +9,6 @@ STAGE_ORDER: tuple[str, ...] = (
     "planned",
     "reasoned",
     "reported",
-    "quality_gated",
     "done",
     "failed",
 )
@@ -22,7 +21,6 @@ STAGE_PERCENT_BASE: dict[str, int] = {
     # Fallback stays at this value to avoid UI regressions.
     "reasoned": 40,
     "reported": 80,
-    "quality_gated": 90,
     "done": 100,
     "failed": 100,
 }

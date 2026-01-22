@@ -25,7 +25,6 @@ class DeepSearchState:
     reasoning_trace: Dict[str, Any] = field(default_factory=dict)
     cost_telemetry: Dict[str, Any] = field(default_factory=dict)
     report_payload: Optional[Dict[str, Any]] = None
-    quality_gates: List[Dict[str, Any]] = field(default_factory=list)
     errors: List[Dict[str, Any]] = field(default_factory=list)
     request_metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -78,20 +77,6 @@ class DeepSearchState:
             metadata={
                 "answer_length": len((self.report_payload.get("answer") or "")),
                 "evidence_count": len(self.report_payload.get("evidences") or []),
-            },
-        )
-
-    def record_quality_gate(self, payload: Dict[str, Any]) -> None:
-        if not payload:
-            return
-        self.quality_gates.append(payload)
-        self.transition_stage(
-            "quality_gated",
-            metadata={
-                "round": payload.get("round"),
-                "passed": payload.get("passed"),
-                "should_iterate": payload.get("should_iterate"),
-                "enabled": payload.get("enabled"),
             },
         )
 
@@ -151,7 +136,6 @@ class DeepSearchState:
             "reasoning_trace": self.reasoning_trace,
             "cost_telemetry": self.cost_telemetry,
             "report": self.report_payload,
-            "quality_gates": list(self.quality_gates),
             "errors": self.errors,
             "request_metadata": self.request_metadata,
         }

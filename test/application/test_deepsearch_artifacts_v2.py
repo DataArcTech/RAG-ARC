@@ -12,7 +12,6 @@ def _sample_snapshot() -> dict:
         "reasoning_trace": {"tool_results": [{"x": "y"}], "reasoning_steps": [{"status": "done"}]},
         "report": {"answer": "final answer", "evidences": [{"chunk_id": "c1"}]},
         "cost_telemetry": {"stage_timings": {"plan_ms": 1}},
-        "quality_gates": [],
         "errors": [{"stage": "persist", "message": "x"}],
         "request_metadata": {"owner_id": "owner"},
         "kpis": {"evidence_count": 1},

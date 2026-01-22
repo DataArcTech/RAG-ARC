@@ -3,7 +3,6 @@ import logging
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from encapsulation.data_model.deepsearch import EvidenceChunk, GraphQueryContext
-from core.deepsearch.report import DeepSearchQualityGate, QualityGateConfig
 from core.deepsearch.state import DeepSearchState
 from core.deepsearch.trace import emit_trace, reset_trace_emitter
 from core.graph_adapter.base import GraphAccessScope
@@ -255,212 +254,93 @@ class DeepSearchServiceRunMixin:
 
             if plan_state is not None:
                 reasoning_context.metadata["runtime_plan"] = list(getattr(plan_state, "items", []) or [])
-
-            quality_cfg = self._resolve_quality_gate_config()
-            if isinstance(metadata, dict):
-                raw_overrides = metadata.get("quality_loop")
-            else:
-                raw_overrides = None
-            if isinstance(raw_overrides, dict) and raw_overrides:
-                allowed = {
-                    "enabled",
-                    "max_rounds",
-                    "min_citation_sentence_coverage",
-                    "require_consistency",
-                    "max_uncited_sentences",
-                    "max_actions",
-                    "enable_llm_judge",
-                    "judge_temperature",
-                    "judge_max_retries",
-                    "judge_max_evidence_items",
-                    "judge_max_evidence_chars",
-                }
-                merged = quality_cfg.model_dump()
-                for key, value in raw_overrides.items():
-                    if key in allowed:
-                        merged[key] = value
-                quality_cfg = QualityGateConfig.model_validate(merged)
-            quality_gate = DeepSearchQualityGate(
-                getattr(getattr(self, "reporter", None), "llm_connector", None),
-                config=quality_cfg.model_dump(),
+            round_trace = await self._execute_stage(
+                "graph_reasoning",
+                self._think_loop_stage,
+                state=state,
+                stage_timings=stage_timings,
+                question=normalized_question,
+                reasoning_context=reasoning_context,
+                initial_think_notes=initial_think.get("think_notes_obj"),
+                seed_evidences=None,
+                plan_items=list(getattr(plan_state, "items", []) or []),
+            )
+            state.record_reasoning(round_trace)
+            self._surface_worker_failures(state, round_trace)
+            try:
+                evidence_count = len(round_trace.get("evidences") or [])
+            except Exception:
+                evidence_count = 0
+            await emit_trace(
+                "progress",
+                "\n".join(
+                    [
+                        "Completed graph reasoning.",
+                        f"evidence_count={evidence_count}",
+                    ]
+                ),
+                meta={"stage": "graph_reasoning", "evidence_count": evidence_count},
             )
 
-            cumulative_reasoning: Dict[str, Any] | None = None
-            final_report: Dict[str, Any] | None = None
-            quality_history: List[Dict[str, Any]] = []
-
-            followup_notes: List[Any] = []
-            max_rounds = max(1, int(quality_cfg.max_rounds))
-            for round_idx in range(1, max_rounds + 1):
-                initial_notes = initial_think.get("think_notes_obj") if round_idx == 1 else followup_notes
-                seed_evidences = None
-                if round_idx > 1 and isinstance(cumulative_reasoning, dict):
-                    seed_evidences = self._coerce_evidence_chunks(cumulative_reasoning.get("evidences") or [])
-                round_trace = await self._execute_stage(
-                    f"graph_reasoning_r{round_idx}",
-                    self._think_loop_stage,
-                    state=state,
-                    stage_timings=stage_timings,
-                    question=normalized_question,
-                    reasoning_context=reasoning_context,
-                    initial_think_notes=initial_notes,
-                    seed_evidences=seed_evidences,
-                    plan_items=list(getattr(plan_state, "items", []) or []),
-                )
-                if cumulative_reasoning is None:
-                    cumulative_reasoning = round_trace
-                    cumulative_reasoning["quality_loop"] = {"rounds": []}
-                else:
-                    cumulative_reasoning = self._merge_reasoning_traces(cumulative_reasoning, round_trace)
-                cumulative_reasoning.setdefault("quality_loop", {}).setdefault("rounds", []).append(
-                    {"round": round_idx, "plan_steps": []}
-                )
-                state.record_reasoning(cumulative_reasoning)
-                self._surface_worker_failures(state, round_trace)
-                try:
-                    evidence_count = len(cumulative_reasoning.get("evidences") or [])
-                except Exception:
-                    evidence_count = 0
-                await emit_trace(
-                    "progress",
-                    "\n".join(
-                        [
-                            f"Completed graph reasoning round {round_idx}.",
-                            f"evidence_count={evidence_count}",
-                        ]
-                    ),
-                    meta={"stage": "graph_reasoning", "round": round_idx, "evidence_count": evidence_count},
-                )
-
-                if cumulative_reasoning is None:
-                    raise RuntimeError("DeepSearch reasoning did not produce a trace")
-
-                gated_report = self._maybe_hard_gate_computable_question(
-                    question=normalized_question,
-                    reasoning_trace=cumulative_reasoning,
-                    classification=classification,
-                    routing_cfg=routing_cfg,
-                )
-                if gated_report is not None:
-                    final_report = gated_report
-                    break
-
+            gated_report = self._maybe_hard_gate_computable_question(
+                question=normalized_question,
+                reasoning_trace=round_trace,
+                classification=classification,
+                routing_cfg=routing_cfg,
+            )
+            if gated_report is not None:
+                report = gated_report
+                state.record_report(report)
+            else:
                 final_think = await self._execute_stage(
-                    f"final_think_r{round_idx}",
+                    "final_think",
                     self._run_final_think,
                     state=state,
                     stage_timings=stage_timings,
                     question=normalized_question,
                     scope=scope,
                     reasoning_context=reasoning_context,
-                    evidences=cumulative_reasoning.get("evidences") if isinstance(cumulative_reasoning, dict) else [],
-                    coverage_metrics=cumulative_reasoning.get("coverage_metrics") if isinstance(cumulative_reasoning, dict) else {},
-                    plan_items=(cumulative_reasoning.get("runtime_plan") or {}).get("items")
-                    if isinstance(cumulative_reasoning, dict)
+                    evidences=round_trace.get("evidences") if isinstance(round_trace, dict) else [],
+                    coverage_metrics=round_trace.get("coverage_metrics") if isinstance(round_trace, dict) else {},
+                    plan_items=(round_trace.get("runtime_plan") or {}).get("items")
+                    if isinstance(round_trace, dict)
                     else None,
                     report_needed=True,
                     final_answer_mode="summary",
                 )
-                if isinstance(cumulative_reasoning, dict) and isinstance(final_think, dict):
-                    cumulative_reasoning.setdefault("think_notes", []).extend(final_think.get("think_notes") or [])
-                    cumulative_reasoning["final_think"] = final_think.get("raw") or {}
+                if isinstance(round_trace, dict) and isinstance(final_think, dict):
+                    round_trace.setdefault("think_notes", []).extend(final_think.get("think_notes") or [])
+                    round_trace["final_think"] = final_think.get("raw") or {}
+                    state.record_reasoning(round_trace)
 
                 report = await self._execute_stage(
-                    f"report_r{round_idx}",
+                    "report",
                     self._report_stage,
                     state=state,
                     stage_timings=stage_timings,
-                    reasoning_trace=cumulative_reasoning,
+                    reasoning_trace=round_trace,
                     external_logs=None,
                 )
-                final_report = report
                 state.record_report(report)
                 await emit_trace(
                     "progress",
                     "\n".join(
                         [
-                            f"Draft report generated (round {round_idx}).",
+                            "Draft report generated.",
                             f"answer_length={len((report.get('answer') or '') if isinstance(report, dict) else '')}",
                             f"evidence_count={len((report.get('evidences') or []) if isinstance(report, dict) else [])}",
                         ]
                     ),
-                    meta={"stage": "report", "round": round_idx},
+                    meta={"stage": "report"},
                 )
 
-                structured_report = report.get("structured_report") if isinstance(report, dict) else None
-                evidences_for_gate = list(report.get("evidences") or []) if isinstance(report, dict) else []
-                quality_result = await self._execute_stage(
-                    f"quality_gate_r{round_idx}",
-                    self._quality_gate_stage,
-                    state=state,
-                    stage_timings=stage_timings,
-                    gate=quality_gate,
-                    question=normalized_question,
-                    structured_report=structured_report,
-                    evidences=evidences_for_gate,
-                    round_idx=round_idx,
-                )
-                if isinstance(quality_result, dict):
-                    if bool(quality_result.get("should_iterate")) and round_idx >= max_rounds:
-                        quality_result["should_iterate"] = False
-                        diagnostics = quality_result.get("diagnostics")
-                        if not isinstance(diagnostics, dict):
-                            diagnostics = {}
-                            quality_result["diagnostics"] = diagnostics
-                        diagnostics.setdefault("termination_reason", "max_rounds_reached")
-                        diagnostics.setdefault("max_rounds", max_rounds)
-                if isinstance(report, dict):
-                    report.setdefault("metadata", {}).setdefault("quality_gate", quality_result)
-                state.record_quality_gate(quality_result)
-                quality_history.append(quality_result)
-                await emit_trace(
-                    "progress",
-                    "\n".join(
-                        [
-                            f"Quality gate round {round_idx}.",
-                            f"passed={quality_result.get('passed')}",
-                            f"should_iterate={quality_result.get('should_iterate')}",
-                            f"actions={json.dumps(quality_result.get('actions') or [], ensure_ascii=False)}",
-                        ]
-                    ),
-                    meta={"stage": "quality_gate", "round": round_idx, "quality_result": json_safe(quality_result)},
-                )
-
-                passed = bool(quality_result.get("passed"))
-                should_iterate = bool(quality_result.get("should_iterate")) and round_idx < max_rounds
-                if passed or not should_iterate:
-                    break
-
-                followup_notes = self._build_followup_think_notes(
-                    actions=quality_result.get("actions") or [],
-                    round_idx=round_idx,
-                )
-                if not followup_notes:
-                    break
-                await emit_trace(
-                    "write_outline",
-                    "\n".join(
-                        [
-                            f"Plan update from quality gate (round {round_idx + 1}).",
-                            json.dumps(json_safe(quality_result.get("actions") or []), ensure_ascii=False, indent=2, default=str),
-                        ]
-                    ),
-                    meta={"stage": "plan_update", "round": round_idx + 1, "actions": json_safe(quality_result.get("actions") or [])},
-                )
-
-            if final_report is None:
-                raise RuntimeError("DeepSearch did not produce a report")
-            report = final_report
-            if cumulative_reasoning is not None:
-                cumulative_reasoning.setdefault("quality_loop", {})["quality_gate_history"] = quality_history
-                state.reasoning_trace = cumulative_reasoning
+            state.reasoning_trace = round_trace
 
             try:
                 state.transition_stage(
                     "done",
                     metadata={
-                        "rounds": len(quality_history) or 1,
-                        "passed": bool((quality_history[-1].get("passed")) if quality_history else True),
+                        "rounds": 1,
                     },
                 )
             except Exception:
@@ -480,7 +360,7 @@ class DeepSearchServiceRunMixin:
             self._persist_experiment_snapshot(
                 question=normalized_question,
                 plan=plan_result,
-                reasoning=cumulative_reasoning or {},
+                reasoning=round_trace or {},
                 report=report,
                 snapshot=snapshot,
                 stage_timings=stage_timings,
@@ -522,7 +402,7 @@ class DeepSearchServiceRunMixin:
                     except Exception:
                         artifacts_version = 2
 
-                reasoning_to_persist: Dict[str, Any] = json_safe(cumulative_reasoning or {})
+                reasoning_to_persist: Dict[str, Any] = json_safe(round_trace or {})
                 report_to_persist: Dict[str, Any] = json_safe(report or {})
 
                 if artifacts_version >= 2 and dedupe_enabled and evidence_pool_filename:
@@ -610,7 +490,7 @@ class DeepSearchServiceRunMixin:
                 owner_id,
                 stage_timings,
             )
-            return {"plan": plan_result, "reasoning": cumulative_reasoning or {}, "report": report, "state": snapshot}
+            return {"plan": plan_result, "reasoning": round_trace or {}, "report": report, "state": snapshot}
         finally:
             if trace_capture_token is not None:
                 try:
@@ -619,3 +499,50 @@ class DeepSearchServiceRunMixin:
                     pass
             if budget_token is not None:
                 reset_tool_budget(budget_token)
+
+    @staticmethod
+    def _surface_worker_failures(state: DeepSearchState, reasoning_trace: Dict[str, Any]) -> None:
+        if not isinstance(reasoning_trace, dict):
+            return
+        coverage = reasoning_trace.get("coverage_metrics") or {}
+        if not isinstance(coverage, dict):
+            return
+        errors = coverage.get("worker_errors") or []
+        if isinstance(errors, list) and errors:
+            count = coverage.get("worker_error_count")
+            try:
+                count_int = int(count) if count is not None else len(errors)
+            except (TypeError, ValueError):
+                count_int = len(errors)
+            previews: list[str] = []
+            for entry in errors:
+                if len(previews) >= 3:
+                    break
+                if not isinstance(entry, dict):
+                    continue
+                agent_id = entry.get("agent_id") or "worker"
+                code = entry.get("error") or "error"
+                previews.append(f"{agent_id}={code}")
+            preview = ", ".join(previews)
+            message = f"{count_int} worker agent(s) failed"
+            if preview:
+                message = f"{message}: {preview}"
+            state.append_error(message, stage="graph_reasoning")
+
+        probe_errors = coverage.get("probe_errors") or []
+        if not isinstance(probe_errors, list) or not probe_errors:
+            return
+        previews = []
+        for entry in probe_errors:
+            if len(previews) >= 3:
+                break
+            if not isinstance(entry, dict):
+                continue
+            tool = entry.get("tool_name") or "probe"
+            code = entry.get("error") or entry.get("error_type") or "error"
+            previews.append(f"{tool}={code}")
+        preview = ", ".join(previews)
+        message = f"{len(probe_errors)} probe tool(s) failed"
+        if preview:
+            message = f"{message}: {preview}"
+        state.append_error(message, stage="graph_reasoning", details={"probe_errors": probe_errors})

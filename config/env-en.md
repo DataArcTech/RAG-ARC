@@ -48,7 +48,7 @@ Recommended places to tune parameters:
 
 - `config/json_configs/rag_inference*.json`: chat pipeline, retrievers, rerankers, model selection.
 - `config/json_configs/knowledge*.json`: parsing, chunking, indexing/graph build.
-- `config/json_configs/deepsearch_service.json`: DeepSearch tools/think/report/quality gates.
+- `config/json_configs/deepsearch_service.json`: DeepSearch tools/think/report.
 - `config/output_limits.py`: response trimming / evidence caps.
 - `config/core/deepsearch/*_defaults.py`: DeepSearch loop/tool/report defaults used at runtime.
 
@@ -66,7 +66,7 @@ How secrets flow into configs:
 | `CHAT_API_KEY` | _(empty)_ | **Required** (when `CHAT_MODEL_PROVIDER=openai`): API key for chat provider. |
 | `CHAT_API_BASE_URL` | _(empty)_ | **Required** (when `CHAT_MODEL_PROVIDER=openai`): Base URL for OpenAI-compatible chat endpoints (e.g. `https://api.openai.com/v1`). |
 | `OPENAI_CHAT_MODEL` | `gpt-4o-mini` | Legacy/default chat model name used when `CHAT_MODEL_NAME` is empty. |
-| `LOW_COST_MODEL` | _(empty)_ | Optional: cheaper model used for exploration-heavy calls (planning/reflection/quality checks). When empty, the system reuses the main chat model. |
+| `LOW_COST_MODEL` | _(empty)_ | Optional: cheaper model used for exploration-heavy calls (planning/reflection). When empty, the system reuses the main chat model. |
 | `OPENAI_API_BASE` | _(empty)_ | Optional legacy alias for OpenAI-compatible base URL. |
 | `EMBEDDING_MODEL_PROVIDER` | `openai` | Embedding provider (`openai` = OpenAI-compatible API, `huggingface` = local SentenceTransformers). |
 | `EMBEDDING_API_KEY` | _(empty)_ | **Required** (when `EMBEDDING_MODEL_PROVIDER=openai`): API key for embedding provider. |
@@ -371,17 +371,7 @@ Location: `config/json_configs/deepsearch_service.json` → `tool_manager.enable
 | `DEEPSEARCH_MCP_PERSISTENT_SESSION` | `true` | Reuse MCP HTTP sessions. |
 | `DEEPSEARCH_MCP_ENABLE_GRAPH_CONTEXT` | `true` | Attach graph context to MCP requests. |
 | `DEEPSEARCH_MCP_GRAPH_CONTEXT_FIELD` | `__graph_context__` | Field name for graph context injection. |
-| `DEEPSEARCH_CONSISTENCY_CHECK` | `true` | Enable LLM-based consistency check to validate report claims against evidence. |
 | `DEEPSEARCH_PARALLEL_SECTIONS` | `false` | Generate report sections in parallel (faster but uses more API calls). |
-| `DEEPSEARCH_QUALITY_LOOP_ENABLED` | `false` | Enable iterative quality gating (research → verify → iterate). |
-| `DEEPSEARCH_QUALITY_LOOP_MAX_ROUNDS` | `2` | Maximum rounds (initial + follow-ups) for the quality loop. |
-| `DEEPSEARCH_QUALITY_LOOP_MIN_CITATION_SENTENCE_COVERAGE` | `0.6` | Minimum fraction of report sentences that must include at least one valid citation. |
-| `DEEPSEARCH_QUALITY_LOOP_REQUIRE_CONSISTENCY` | `true` | Fail the quality gate when consistency checking reports issues. |
-| `DEEPSEARCH_QUALITY_LOOP_MAX_UNCITED_SENTENCES` | `6` | Maximum uncited sentences surfaced as repair targets (used to drive follow-up retrieval/rewrite). |
-| `DEEPSEARCH_QUALITY_LOOP_MAX_ACTIONS` | `6` | Maximum follow-up actions produced by the quality gate. |
-| `DEEPSEARCH_QUALITY_LOOP_ENABLE_LLM_JUDGE` | `true` | Enable the rubric-based LLM judge (called only when deterministic checks fail or gaps exist). |
-| `DEEPSEARCH_QUALITY_LOOP_JUDGE_TEMPERATURE` | `0.0` | Temperature for the quality judge. |
-| `DEEPSEARCH_QUALITY_LOOP_JUDGE_MAX_RETRIES` | `1` | Retry attempts for the quality judge call. |
 
 ### Example: enabling MCP routing for remote tools
 

@@ -332,15 +332,6 @@ class ReporterConfig(BaseModel):
         15,
         description="Maximum number of seed entities listed in the report appendix.",
     )
-    enable_consistency_check: bool = Field(
-        True, description="Run a consistency check against the evidence after report generation."
-    )
-    consistency_temperature: float = Field(0.0, description="Sampling temperature for the consistency checker.")
-    consistency_max_retries: int = Field(2, description="Max retry attempts for the consistency checker LLM call.")
-    consistency_max_claims: int = Field(
-        40,
-        description="Maximum number of cited claim sentences checked for supportiveness/contradictions.",
-    )
     enable_citation_agent: bool = Field(
         True, description="Post-process inline citations and build a structured evidence index."
     )
@@ -494,31 +485,6 @@ class RemoteToolDescriptorConfig(BaseModel):
     strategy_tags: List[str] = Field(default_factory=list, description="Optional strategy hints for the tool catalog.")
 
 
-class QualityLoopConfig(BaseModel):
-    """Quality gate settings powering research→verify→iterate loops."""
-
-    enabled: bool = Field(
-        False,
-        description="Enable report quality gate and allow iterative follow-up retrieval when gates fail.",
-    )
-    max_rounds: int = Field(2, description="Maximum total rounds (initial + follow-ups).")
-    min_citation_sentence_coverage: float = Field(
-        0.6, description="Minimum fraction of report sentences that include valid citations."
-    )
-    require_consistency: bool = Field(
-        True,
-        description="Fail the quality gate when the consistency checker reports issues.",
-    )
-    max_uncited_sentences: int = Field(
-        6,
-        description="Maximum uncited sentences to surface as repair targets.",
-    )
-    max_actions: int = Field(6, description="Maximum follow-up actions returned by the quality gate.")
-    enable_llm_judge: bool = Field(True, description="Use an LLM rubric judge for gate scoring + actions.")
-    judge_temperature: float = Field(0.0, description="Sampling temperature for the quality judge.")
-    judge_max_retries: int = Field(1, description="Retry attempts for the quality judge call.")
-
-
 class DeterministicRoutingConfig(BaseModel):
     """Application-layer routing + gates for 'computable' questions."""
 
@@ -586,7 +552,6 @@ class DeepSearchServiceConfig(AbstractConfig):
     reporter: ReporterConfig
     tool_manager: ToolManagerConfig
     tool_budget: ToolBudgetConfig
-    quality_loop: QualityLoopConfig = Field(default_factory=QualityLoopConfig)
     deterministic_routing: DeterministicRoutingConfig = Field(default_factory=DeterministicRoutingConfig)
     mcp_client: Optional[MCPClientConfig] = Field(
         default=None, description="Optional MCP client config used for remote tools."
@@ -654,7 +619,6 @@ class DeepSearchServiceConfig(AbstractConfig):
                 "name": "deepsearch-service",
                 "fingerprint": self._fingerprint(),
                 "artifact_dir": self.tool_manager.artifact_dir,
-                "quality_loop": self.quality_loop.model_dump(),
                 "deterministic_routing": self.deterministic_routing.model_dump(),
                 "tool_budget": self.tool_budget.model_dump(),
                 "artifacts": self.artifacts.model_dump(),

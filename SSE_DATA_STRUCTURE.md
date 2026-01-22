@@ -225,28 +225,7 @@
 }
 ```
 
-#### 2.7 quality_gated（质量检查）
-
-```json
-{
-  "stage": "deepsearch",
-  "deepsearch_stage": "quality_gated",
-  "status": "running",
-  "message": "正在进行质量检查...",
-  "quality_gates": [...],
-  "quality_gates_count": 2,
-  "quality_passed": true,
-  "should_iterate": false,
-  "round": 1,
-  "v": 1,
-  "type": "progress",
-  "ts_ms": 1234567890,
-  "request_id": "xxx",
-  "seq": 7
-}
-```
-
-#### 2.8 done（完成）
+#### 2.7 done（完成）
 
 ```json
 {
@@ -548,17 +527,16 @@ data: [DONE]
 3. **DeepSearch planned** - 计划生成
 4. **DeepSearch reasoned** - 图谱推理（可能多次）
 5. **DeepSearch reported** - 报告生成
-6. **DeepSearch quality_gated** - 质量检查
-7. **DeepSearch done** - DeepSearch 完成
-8. **RAG prepare** - RAG 准备阶段
-9. **RAG web_search** - 联网搜索（如果启用）
-10. **RAG generate** - 生成阶段
-11. **Content chunks** - 内容流式输出（多次）
-12. **Title event** - 标题生成
-13. **Sources event** - 来源信息
-14. **Final payload** - 最终负载
-15. **Final chunk** - 结束标记
-18. **[DONE]** - SSE 结束
+6. **DeepSearch done** - DeepSearch 完成
+7. **RAG prepare** - RAG 准备阶段
+8. **RAG web_search** - 联网搜索（如果启用）
+9. **RAG generate** - 生成阶段
+10. **Content chunks** - 内容流式输出（多次）
+11. **Title event** - 标题生成
+12. **Sources event** - 来源信息
+13. **Final payload** - 最终负载
+14. **Final chunk** - 结束标记
+15. **[DONE]** - SSE 结束
 
 ---
 

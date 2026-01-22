@@ -13,7 +13,6 @@ from .service_runtime import (
     DeepSearchServiceContextMixin,
     DeepSearchServiceInitialThinkMixin,
     DeepSearchServicePipelineMixin,
-    DeepSearchServiceQualityMixin,
     DeepSearchServiceRoutingMixin,
     DeepSearchServiceRunMixin,
     DeepSearchServiceStageMixin,
@@ -29,7 +28,6 @@ class DeepSearchService(
     DeepSearchServiceContextMixin,
     DeepSearchServiceArtifactsMixin,
     DeepSearchServiceRoutingMixin,
-    DeepSearchServiceQualityMixin,
     DeepSearchServiceInitialThinkMixin,
 ):
     """Application-layer facade with a shared async run() entry point for FastAPI/CLI/MCP."""
