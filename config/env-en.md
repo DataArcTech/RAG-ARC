@@ -30,7 +30,7 @@ Optional feature switches (have defaults):
 - `bench_mode`, `TASK_QUEUE_MODE`, `MODEL_PROFILE`, `DEVELOP_MODE`, `ADMIN_OWNER_ID`
 
 Benchmark/experiment mode:
-- `bench_mode` (default `0`): when set to `1`, benchmark runners (see `application/rag_inference/module_bench.py`, `application/rag_inference/deepsearch/service_bench.py`) execute algorithm-only flows and return plain-text answers (no citations/reports/web.search steps).
+- `bench_mode` (default `0`): when set to `1`, benchmark runners (see `application/rag_inference/module_bench.py`) execute algorithm-only flows and return plain-text answers (no citations/reports/web.search steps).
 
 Optional web search (only if enabled in config):
 - `TAVILY_API_KEY`
@@ -48,7 +48,7 @@ Recommended places to tune parameters:
 
 - `config/json_configs/rag_inference*.json`: chat pipeline, retrievers, rerankers, model selection.
 - `config/json_configs/knowledge*.json`: parsing, chunking, indexing/graph build.
-- `config/json_configs/deepsearch_service.json`: DeepSearch planner/tools/report/quality gates.
+- `config/json_configs/deepsearch_service.json`: DeepSearch tools/think/report/quality gates.
 - `config/output_limits.py`: response trimming / evidence caps.
 - `config/core/deepsearch/*_defaults.py`: DeepSearch loop/tool/report defaults used at runtime.
 
@@ -316,7 +316,7 @@ When `TASK_QUEUE_MODE=celery`, these long-running operations are executed by Cel
 
 ## 6. DeepSearch Defaults
 
-Planner/graph defaults. Leave as-is unless customizing behavior.
+DeepSearch defaults. Leave as-is unless customizing behavior.
 
 Note: DeepSearch tool parameters (including the deterministic `code.python` math/finance verification tool) are configured via `config/json_configs/deepsearch_service.json` → `tool_manager.enabled_tools[...]` rather than individual environment variables.
 
@@ -339,29 +339,14 @@ Location: `config/json_configs/deepsearch_service.json` → `tool_manager.enable
 | Variable | Default | Description |
 | --- | --- | --- |
 | `DEEPSEARCH_DEFAULT_ADAPTER` | `hipporag` | Graph adapter registered in the registry. |
-| `DEEPSEARCH_PLANNER_MODE` | `react` | Planner runtime (`react`, `iter_research`, `parallel_thinking`). |
 | `DEEPSEARCH_GRAPH_STRATEGY` | `ppr_chain` | Graph reasoning strategy label. |
-| `DEEPSEARCH_PLANNER_MAX_STEPS` | `6` | Max reasoning steps per plan. |
-| `DEEPSEARCH_PLANNER_ENABLE_SUBQUESTION` | `true` | Allow planner to spawn sub-questions. |
-| `DEEPSEARCH_PLANNER_DISABLE_LLM` | `false` | Force planner to run without LLM (for tests). |
-| `DEEPSEARCH_PLANNER_LLM_PROVIDER` | _(empty)_ | Optional: planner-specific LLM provider (leave empty to reuse global chat config). |
-| `DEEPSEARCH_PLANNER_MODEL_NAME` | _(empty)_ | Optional: planner-specific model name. |
-| `DEEPSEARCH_PLANNER_MAX_TOKENS` | _(empty)_ | Optional: planner-specific max tokens override. |
-| `DEEPSEARCH_PLANNER_TEMPERATURE` | _(empty)_ | Optional: planner-specific temperature override. |
-| `DEEPSEARCH_PLANNER_API_KEY` | _(empty)_ | Optional: planner-specific API key override. |
-| `DEEPSEARCH_PLANNER_BASE_URL` | _(empty)_ | Optional: planner-specific base URL override. |
-| `DEEPSEARCH_PLANNER_ORGANIZATION` | _(empty)_ | Optional: planner-specific organization override. |
-| `DEEPSEARCH_PLANNER_TIMEOUT` | _(empty)_ | Optional: planner-specific request timeout. |
-| `DEEPSEARCH_PLANNER_MAX_RETRIES` | _(empty)_ | Optional: planner-specific retry count. |
-| `DEEPSEARCH_PERSIST_PLAN` | `true` | Persist plan JSON to disk. |
-| `DEEPSEARCH_PLAN_OUTPUT_DIR` | `./local/deepsearch_runs` | Folder for persisted plans. |
 | `DEEPSEARCH_ARTIFACT_DIR` | _(empty)_ | Optional: per-run DeepSearch artifact root (writes `run_id/plan_result.json`, `reasoning.json`, `report.json`, `report.md`, and snapshot/manifest JSON; when `artifacts.version=2`, also writes `manifest.json`, `dev.json`, `public.json`, and `state_snapshot.json` becomes a lightweight manifest; when `artifacts.dedupe.enabled=true`, also writes `evidence_pool.json` and replaces duplicated large blocks in `reasoning.json`/`report.json` with refs). |
 | `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `./local/deepsearch_artifacts` | Output directory for tool telemetry/artifacts (also used as the default run artifact root in `config/json_configs/deepsearch_service.json`). |
 | `DEEPSEARCH_SECTIONWISE_WRITER` | `false` | Enable section-wise report writing with Memory Bank retrieval + recency retention. |
 | `DEEPSEARCH_BUDGET_TIER` | _(empty)_ | Optional runtime override for complexity→budget scaling (`low` / `default`); when empty, DeepSearch uses a heuristic based on the question. |
 | `DEEPSEARCH_TELEMETRY_ENABLED` | `true` | Enable telemetry capture for tool runs (local artifacts). |
 | `TAVILY_API_KEY` | _(empty)_ | API key for Tavily web search (used by both HippoRAG Q&A and DeepSearch when web search is enabled). |
-| `DEEPSEARCH_TOOL_HINTS` | _(empty)_ | JSON list to override planner tool hints. |
+| `DEEPSEARCH_TOOL_HINTS` | _(empty)_ | JSON list to override tool hints in the think catalog. |
 | `DEEPSEARCH_TOOL_MCP_CONFIG_PATH` | _(empty)_ | Custom JSON config for tool MCP server. |
 | `DEEPSEARCH_TOOL_MCP_ADAPTER_CONFIG` | _(empty)_ | JSON file describing adapter overrides. |
 | `DEEPSEARCH_TOOL_MCP_ADAPTER_NAME` | _(empty)_ | Adapter name when not using config path. |
@@ -504,7 +489,7 @@ These are not required for the default local/Docker setup.
 | `DEEPSEARCH_CITATION_ALIASES` | _(empty)_ | Optional: JSON mapping for citation aliases. |
 | `DEEPSEARCH_TOOL_AUDIT_LABEL` | _(empty)_ | Optional: label attached to tool audit records. |
 | `DEEPSEARCH_TOOL_MCP_AUDIT_LABEL` | _(empty)_ | Optional: label attached to MCP tool audit records. |
-| `DEEPSEARCH_TOOL_MCP_INSTRUCTIONS` | _(empty)_ | Optional: extra planner instructions for MCP tool usage. |
+| `DEEPSEARCH_TOOL_MCP_INSTRUCTIONS` | _(empty)_ | Optional: extra tool instructions for MCP usage. |
 | `DEEPSEARCH_TOOL_MCP_SCOPE_OVERRIDE_POLICY` | _(empty)_ | Optional: policy controlling when MCP scope is overridden. |
 | `DEEPSEARCH_TOOL_MCP_SCOPE_OVERRIDE_TOKEN` | _(empty)_ | Optional: token used to authorize MCP scope overrides. |
 | `DEEPSEARCH_RUN_LLM_INTEGRATION_TESTS` | `0` | Optional: run DeepSearch LLM integration tests when set to `1`. |
@@ -574,7 +559,6 @@ Entry points:
 
 DeepSearch web search policy (in `config/json_configs/deepsearch_service.json`):
 
-- `planner.web_step_policy="realtime_required"` injects/forces at least one `channel="web"` step when the question asks for realtime/latest/current info (e.g. FX rates/news).
 
 DeepSearch tool budget (in `config/json_configs/deepsearch_service.json`):
 

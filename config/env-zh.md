@@ -30,7 +30,7 @@ cp .env.example .env
 - `bench_mode`、`TASK_QUEUE_MODE`、`MODEL_PROFILE`、`DEVELOP_MODE`、`ADMIN_OWNER_ID`
 
 Benchmark/实验模式：
-- `bench_mode`（默认 `0`）：设为 `1` 时，评测专用 runner（见 `application/rag_inference/module_bench.py`、`application/rag_inference/deepsearch/service_bench.py`）会执行纯算法链路并返回纯文本答案（不生成引用/报告、不跑 web.search 步骤）。
+- `bench_mode`（默认 `0`）：设为 `1` 时，评测专用 runner（见 `application/rag_inference/module_bench.py`）会执行纯算法链路并返回纯文本答案（不生成引用/报告、不跑 web.search 步骤）。
 
 可选网页检索（仅在配置开启时需要）：
 - `TAVILY_API_KEY`
@@ -48,7 +48,7 @@ Benchmark/实验模式：
 
 - `config/json_configs/rag_inference*.json`：聊天/RAG 主流程、检索器、重排器、模型选择等。
 - `config/json_configs/knowledge*.json`：解析、分块、索引/建图流程等。
-- `config/json_configs/deepsearch_service.json`：DeepSearch 的 planner/tools/report/quality gate 等。
+- `config/json_configs/deepsearch_service.json`：DeepSearch 的 tools/think/report/quality gate 等。
 - `config/output_limits.py`：API 返回裁剪与证据上限（payload 限制）。
 - `config/core/deepsearch/*_defaults.py`：DeepSearch 的 loop/tool/report 默认参数（运行时读取）。
 
@@ -337,29 +337,14 @@ Benchmark/实验模式：
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `DEEPSEARCH_DEFAULT_ADAPTER` | `hipporag` | 图适配器名称。 |
-| `DEEPSEARCH_PLANNER_MODE` | `react` | 规划器模式。 |
 | `DEEPSEARCH_GRAPH_STRATEGY` | `ppr_chain` | 图推理策略。 |
-| `DEEPSEARCH_PLANNER_MAX_STEPS` | `6` | 规划器最大步数。 |
-| `DEEPSEARCH_PLANNER_ENABLE_SUBQUESTION` | `true` | 是否允许拆分子问题。 |
-| `DEEPSEARCH_PLANNER_DISABLE_LLM` | `false` | 禁用规划器 LLM（调试用）。 |
-| `DEEPSEARCH_PLANNER_LLM_PROVIDER` | _(空)_ | 可选：规划器专用 LLM Provider（留空则复用全局对话配置）。 |
-| `DEEPSEARCH_PLANNER_MODEL_NAME` | _(空)_ | 可选：规划器专用模型名。 |
-| `DEEPSEARCH_PLANNER_MAX_TOKENS` | _(空)_ | 可选：规划器专用 max tokens。 |
-| `DEEPSEARCH_PLANNER_TEMPERATURE` | _(空)_ | 可选：规划器专用 temperature。 |
-| `DEEPSEARCH_PLANNER_API_KEY` | _(空)_ | 可选：规划器专用 API Key。 |
-| `DEEPSEARCH_PLANNER_BASE_URL` | _(空)_ | 可选：规划器专用 Base URL。 |
-| `DEEPSEARCH_PLANNER_ORGANIZATION` | _(空)_ | 可选：规划器专用 organization。 |
-| `DEEPSEARCH_PLANNER_TIMEOUT` | _(空)_ | 可选：规划器专用请求超时。 |
-| `DEEPSEARCH_PLANNER_MAX_RETRIES` | _(空)_ | 可选：规划器专用重试次数。 |
-| `DEEPSEARCH_PERSIST_PLAN` | `true` | 是否落盘保存规划。 |
-| `DEEPSEARCH_PLAN_OUTPUT_DIR` | `./local/deepsearch_runs` | 规划输出目录。 |
 | `DEEPSEARCH_ARTIFACT_DIR` | _(空)_ | 可选：DeepSearch 运行 artifacts 根目录（每次 run 会创建 `run_id/` 子目录，写入 `plan_result.json`/`reasoning.json`/`report.json`/`report.md` 等；当 `artifacts.version=2` 时会额外写入 `manifest.json`/`dev.json`/`public.json`，且 `state_snapshot.json` 将变为轻量 manifest；当启用 `artifacts.dedupe.enabled=true` 时会额外写入 `evidence_pool.json` 并将 `reasoning.json`/`report.json` 的重复大字段改为 refs）。 |
 | `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `./local/deepsearch_artifacts` | 工具执行日志/产物目录（在 `config/json_configs/deepsearch_service.json` 中也作为默认的 run artifacts 根目录使用）。 |
 | `DEEPSEARCH_SECTIONWISE_WRITER` | `false` | 启用“分节写作 + Memory Bank 检索 + recency retain_k”模式。 |
 | `DEEPSEARCH_BUDGET_TIER` | _(空)_ | 可选的复杂度→预算覆盖开关（`low` / `default`）；为空时将基于问题内容做启发式预算分配。 |
 | `DEEPSEARCH_TELEMETRY_ENABLED` | `true` | 是否启用工具运行遥测（本地 artifacts）。 |
 | `TAVILY_API_KEY` | _(空)_ | Tavily 网络搜索 Key（HippoRAG 问答与 DeepSearch 启用网络搜索时都会使用）。 |
-| `DEEPSEARCH_TOOL_HINTS` | _(空)_ | JSON 字符串，覆盖规划器的工具提示。 |
+| `DEEPSEARCH_TOOL_HINTS` | _(空)_ | JSON 字符串，覆盖 think 工具目录中的工具提示。 |
 | `DEEPSEARCH_TOOL_MCP_CONFIG_PATH` | _(空)_ | MCP 服务器 JSON 配置路径。 |
 | `DEEPSEARCH_TOOL_MCP_ADAPTER_CONFIG` | _(空)_ | 适配器配置 JSON。 |
 | `DEEPSEARCH_TOOL_MCP_ADAPTER_NAME` | _(空)_ | 使用默认配置时指定 adapter 名称。 |
@@ -502,7 +487,7 @@ MinIO 常用变量（仅在启用对象存储集成时才需要设置）：
 | `DEEPSEARCH_CITATION_ALIASES` | _(空)_ | 可选：引用别名映射（JSON）。 |
 | `DEEPSEARCH_TOOL_AUDIT_LABEL` | _(空)_ | 可选：工具审计记录标签。 |
 | `DEEPSEARCH_TOOL_MCP_AUDIT_LABEL` | _(空)_ | 可选：MCP 工具审计记录标签。 |
-| `DEEPSEARCH_TOOL_MCP_INSTRUCTIONS` | _(空)_ | 可选：Planner 的 MCP 工具额外指令。 |
+| `DEEPSEARCH_TOOL_MCP_INSTRUCTIONS` | _(空)_ | 可选：DeepSearch MCP 工具额外指令。 |
 | `DEEPSEARCH_TOOL_MCP_SCOPE_OVERRIDE_POLICY` | _(空)_ | 可选：控制 MCP scope 覆盖时机的策略。 |
 | `DEEPSEARCH_TOOL_MCP_SCOPE_OVERRIDE_TOKEN` | _(空)_ | 可选：授权 MCP scope 覆盖的 token。 |
 | `DEEPSEARCH_RUN_LLM_INTEGRATION_TESTS` | `0` | 可选：设为 `1` 时运行 DeepSearch LLM 集成测试。 |
@@ -572,7 +557,6 @@ RAG-ARC 采用单一可信配置流：
 
 DeepSearch Web 搜索策略（位于 `config/json_configs/deepsearch_service.json`）：
 
-- `planner.web_step_policy="realtime_required"`：当问题涉及“实时/最新/当前”信息（例如汇率/新闻）时，注入/强制至少一个 `channel="web"` 步骤。
 
 DeepSearch 工具调用预算（位于 `config/json_configs/deepsearch_service.json`）：
 
