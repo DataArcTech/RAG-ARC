@@ -260,25 +260,44 @@ app.mount("/mcp", mcp.mcp_app)
 # Mount static file service for parsed files
 try:
     import os
-    parser_output_dir = os.getenv("PARSER_OUTPUT_DIR", "./data/parsed_files")
-    parsed_files_dir = Path(parser_output_dir).resolve()
-    if parsed_files_dir.exists():
-        # Extract the relative path from PARSER_OUTPUT_DIR for mounting
-        # e.g., /root/project/chatKB/backend/RAG-ARC/data/parsed_files_chatKB_test -> data/parsed_files_chatKB_test
-        mount_path = f"/{parsed_files_dir.name}" if parsed_files_dir.name == "parsed_files_chatKB_test" else f"/data/{parsed_files_dir.name}"
-        # Use the full path structure from PARSER_OUTPUT_DIR
-        if "parsed_files_chatKB_test" in str(parsed_files_dir):
-            mount_path = "/data/parsed_files_chatKB_test"
-        elif "parsed_files" in str(parsed_files_dir):
-            mount_path = "/data/parsed_files"
-        else:
-            # Fallback: use the directory name
-            mount_path = f"/data/{parsed_files_dir.name}"
-        
-        app.mount(mount_path, StaticFiles(directory=str(parsed_files_dir)), name="parsed_files")
-        logger.info(f"Mounted static file service at {mount_path} -> {parsed_files_dir}")
+    # Get project root directory (where main.py is located)
+    project_root = Path(__file__).parent.resolve()
+    # Get PARSER_OUTPUT_DIR from environment variable (required, no default)
+    parser_output_dir = os.getenv("PARSER_OUTPUT_DIR")
+    if not parser_output_dir:
+        logger.warning("PARSER_OUTPUT_DIR environment variable not set, skipping static file mount")
     else:
-        logger.warning(f"Parsed files directory not found: {parsed_files_dir}")
+        parsed_files_dir = Path(parser_output_dir).resolve()
+        if parsed_files_dir.exists():
+            # Calculate relative path from project root
+            try:
+                relative_path = parsed_files_dir.relative_to(project_root)
+                # Build mount path from relative path
+                mount_path = "/" + str(relative_path).replace("\\", "/")
+            except ValueError:
+                # If parsed_files_dir is not under project_root, find common path segments
+                project_parts = project_root.parts
+                parsed_parts = parsed_files_dir.parts
+                # Find where they diverge
+                common_len = 0
+                for i in range(min(len(project_parts), len(parsed_parts))):
+                    if project_parts[i] == parsed_parts[i]:
+                        common_len += 1
+                    else:
+                        break
+                # Build relative path from divergence point
+                if common_len > 0:
+                    relative_parts = parsed_parts[common_len:]
+                    mount_path = "/" + "/".join(relative_parts)
+                else:
+                    # Fallback: use the full absolute path structure
+                    # Extract path segments and build URL path
+                    mount_path = "/" + "/".join(parsed_parts)
+            
+            app.mount(mount_path, StaticFiles(directory=str(parsed_files_dir)), name="parsed_files")
+            logger.info(f"Mounted static file service at {mount_path} -> {parsed_files_dir}")
+        else:
+            logger.warning(f"Parsed files directory not found: {parsed_files_dir}")
 except Exception as e:
     logger.warning(f"Failed to mount static file service for parsed files: {e}")
 
