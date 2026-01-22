@@ -107,6 +107,16 @@ def test_rag_inference_stream_chat_deepsearch_emits_sup_citations_and_knowledge_
         "api.routers.rag_inference_modules.stream_chat.deepsearch.deepsearch_handler.process_deepsearch",
         _fake_process_deepsearch,
     )
+    # deepsearch_processor imports process_deepsearch by name; patch it to avoid calling real DeepSearch.
+    monkeypatch.setattr(
+        "api.routers.rag_inference_modules.stream_chat.deepsearch.deepsearch_processor.process_deepsearch",
+        _fake_process_deepsearch,
+    )
+    # stream_chat.event.event_generator imports process_deepsearch by name, so patch it too.
+    monkeypatch.setattr(
+        "api.routers.rag_inference_modules.stream_chat.event.event_generator.process_deepsearch",
+        _fake_process_deepsearch,
+    )
 
     client.app.dependency_overrides[rag_router.get_current_user] = lambda: user
     try:
@@ -149,14 +159,14 @@ def test_rag_inference_stream_chat_deepsearch_emits_sup_citations_and_knowledge_
     assert "[rep-1]" not in rendered
     assert "Alpha.<sup>1</sup>" in rendered
     assert "Beta。<sup>2</sup>" in rendered
-    assert "## References" in rendered
-    assert "(/knowledge/chunk/rep-0)" in rendered
-    assert "([file](/knowledge/file-0/download))" in rendered
-    assert "(https://example.com/rep-1)" in rendered
+    assert "## References" not in rendered
+    assert "(/knowledge/chunk/rep-0)" not in rendered
+    assert "(https://example.com/rep-1)" not in rendered
 
     assert payload_args is not None
     payload_text = ((payload_args.get("message") or {}).get("content") or {}).get("content")
     assert payload_text and "<sup>1</sup>" in payload_text
+    assert "## References" not in payload_text
 
     assert sources_event is not None
     sources = sources_event.get("sources") or []

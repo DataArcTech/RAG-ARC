@@ -125,17 +125,24 @@ def _save_trace_events_to_file(
                 if isinstance(report, dict):
                     raw_answer = report.get("answer")
                     if isinstance(raw_answer, str) and raw_answer.strip():
-                        from core.deepsearch.report.sup_citations import format_answer_with_references
+                        # Keep DeepSearch citations consistent with the rag_inference chain:
+                        # convert bracket ids -> <sup>k</sup> and emit `sources` mapping,
+                        # but do NOT append an in-text "## References" section.
+                        from core.deepsearch.report.sup_citations import (
+                            convert_bracket_citations_to_sup,
+                            normalize_sup_punctuation,
+                        )
 
                         structured = report.get("structured_report")
                         citations = structured.get("citations") if isinstance(structured, dict) else None
                         evidences = report.get("evidences") if isinstance(report.get("evidences"), list) else None
 
-                        converted, sources, citation_key_map = format_answer_with_references(
+                        converted, sources, citation_key_map = convert_bracket_citations_to_sup(
                             raw_answer,
                             citations=citations if isinstance(citations, list) else [],
                             evidences=evidences,
                         )
+                        converted = normalize_sup_punctuation(converted)
                         rendered_result = json.loads(json.dumps(deepsearch_result, ensure_ascii=False, default=str))
                         rendered_report = rendered_result.get("report") if isinstance(rendered_result, dict) else None
                         if isinstance(rendered_report, dict):

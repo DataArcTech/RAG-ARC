@@ -254,13 +254,15 @@
   "report_payload": {
     "answer": "完整的报告答案...",
     "structured_report": {...},
-    "references": [...]
+    "sources": [...],
+    "citation_key_map": {...}
   },
   "answer": "完整的报告答案...",
   "answer_length": 5000,
   "structured_report": {...},
-  "references": [...],
-  "references_count": 5,
+  "sources": [...],
+  "sources_count": 5,
+  "citation_key_map": {...},
   "evidence_count": 10,
   "v": 1,
   "type": "progress",

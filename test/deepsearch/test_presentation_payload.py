@@ -164,14 +164,16 @@ def test_trim_payload_emits_hipporag_style_citations_and_sources(monkeypatch):
     assert "<sup>1</sup>" in answer
     assert "<sup>2</sup><sup>3</sup>" in answer
     assert "## Evidence Index" not in answer
-    assert "## References" in answer
-    assert "(/knowledge/chunk/rep-0)" in answer
-    assert "([file](/knowledge/file-0/download))" in answer
-    assert "(https://example.com/rep-1)" in answer
+    assert "## References" not in answer
+    assert "(/knowledge/chunk/rep-0)" not in answer
+    assert "(https://example.com/rep-1)" not in answer
 
     sources = trimmed["report"].get("sources")
     assert sources and [s["key"] for s in sources] == [1, 2, 3]
     assert [s["chunk_id"] for s in sources] == ["rep-0", "rep-1", "rep-2"]
+    assert sources[0].get("file") == "/knowledge/chunk/rep-0"
+    assert sources[0].get("file_id") == "file-0"
+    assert sources[1].get("file") == "https://example.com/rep-1"
     assert trimmed["report"].get("citation_key_map") == {"rep-0": 1, "rep-1": 2, "rep-2": 3}
 
 

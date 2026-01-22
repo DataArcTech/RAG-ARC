@@ -220,7 +220,7 @@ def test_save_trace_events_with_none_result(temp_trace_dir, sample_trace_events)
 
 
 def test_trace_storage_renders_sup_citations_for_user_visible_answer(temp_trace_dir, sample_trace_events):
-    """Trace file should store a rendered DeepSearch answer (sup + References) for frontend display."""
+    """Trace file should store a rendered DeepSearch answer (sup, no in-text References section)."""
     os.environ["DEEPSEARCH_TRACE_STORAGE_PATH"] = temp_trace_dir
 
     request_id = str(uuid.uuid4())
@@ -259,8 +259,8 @@ def test_trace_storage_renders_sup_citations_for_user_visible_answer(temp_trace_
     stored = trace_data["deepsearch_result"]["report"]
     assert stored["answer_raw"] == "Alpha[ev1]。"
     assert "<sup>1</sup>" in stored["answer"]
-    assert "## References" in stored["answer"]
-    assert "(/knowledge/chunk/ev1)" in stored["answer"]
+    assert "## References" not in stored["answer"]
+    assert stored.get("sources") and stored["sources"][0]["file"] == "/knowledge/chunk/ev1"
 
     if "DEEPSEARCH_TRACE_STORAGE_PATH" in os.environ:
         del os.environ["DEEPSEARCH_TRACE_STORAGE_PATH"]
