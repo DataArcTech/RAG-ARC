@@ -43,7 +43,7 @@ def test_report_context_truncates_large_methodology_fields():
                 "channel": "graph",
                 "status": "done",
                 "output_summary": "x" * 2000,
-                "diagnostics": {"tool": "graph_adapter.query"},
+                "diagnostics": {"tool": "graph.ops"},
             }
         ],
         "tool_results": [

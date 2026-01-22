@@ -4,7 +4,7 @@ import pytest
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.deepsearch.tools import ToolDescriptor, ToolResult, ToolRunRequest
-from core.deepsearch.tools.fast.knowledge_base_explore import KnowledgeBaseExploreTool
+from core.deepsearch.tools.explore import ExploreTool
 from core.deepsearch.tools.governance_tags import EVIDENCE_PRIMARY, SCOPE_OWNER
 from core.graph_adapter.base import GraphAccessScope
 
@@ -46,8 +46,8 @@ class FakeAdapter:
 
 
 @pytest.mark.asyncio
-async def test_knowledge_base_explore_runs_actions() -> None:
-    tool = KnowledgeBaseExploreTool(
+async def test_explore_runs_actions() -> None:
+    tool = ExploreTool(
         tool_overrides={
             "search": DummyTool("search", "search ok", "s1"),
             "graph.ops": DummyTool("graph.ops", "path ok", "g1"),
@@ -68,14 +68,14 @@ async def test_knowledge_base_explore_runs_actions() -> None:
     )
     result = await tool.run(request)
     assert len(result.evidences) == 2
-    assert "knowledge_base.explore completed" in result.summary
+    assert "explore completed" in result.summary
     assert result.diagnostics["actions"][0]["tool"] == "search"
     assert result.diagnostics["actions"][1]["tool"] == "graph.ops"
 
 
 @pytest.mark.asyncio
-async def test_knowledge_base_explore_read_chunks() -> None:
-    tool = KnowledgeBaseExploreTool()
+async def test_explore_read_chunk() -> None:
+    tool = ExploreTool()
     request = ToolRunRequest(
         question="Q",
         plan_step="plan_02",
@@ -84,7 +84,7 @@ async def test_knowledge_base_explore_read_chunks() -> None:
         access_scope=GraphAccessScope(scope_id="owner"),
         extra={
             "actions": [
-                {"tool": "read_chunks", "args": {"chunk_ids": ["c1"], "goal": "validate evidence"}},
+                {"tool": "read.chunk", "args": {"chunk_ids": ["c1"], "goal": "validate evidence"}},
             ],
         },
     )
@@ -92,5 +92,5 @@ async def test_knowledge_base_explore_read_chunks() -> None:
     assert len(result.evidences) == 1
     evidence = result.evidences[0]
     assert evidence.chunk_id == "c1"
-    assert evidence.source == "knowledge_base.read_chunks"
+    assert evidence.source == "explore.read.chunk"
     assert evidence.provenance.get("goal") == "validate evidence"

@@ -11,7 +11,7 @@ def test_deepsearch_artifact_dedupe_v2_builds_evidence_pool_and_refs():
         "evidences": [{"chunk_id": "c1", "text": "t1"}, {"chunk_id": "c2", "text": "t2"}],
         "tool_results": [
             {
-                "tool_name": "graph_adapter.query",
+                "tool_name": "graph.ops",
                 "result": {"evidences": [{"chunk_id": "c1", "text": "t1"}]},
             }
         ],

@@ -33,40 +33,6 @@ def test_report_writer_language_enforcement_uses_inferred_user_language():
     assert "Write ALL fields in Simplified Chinese" in sys_prompt2
 
 
-@pytest.mark.parametrize(
-    "question, expected",
-    [
-        ("What is the schedule?\nFiles:\n- 文件.pdf\n", "English"),
-        ("请问保费回赠是什么？", "Chinese (Simplified)"),
-    ],
-)
-def test_plan_generator_includes_output_language_policy(question, expected):
-    from core.deepsearch.plan.generator import PlanGenerator, PlannerSettings
-
-    class _StubLLM:
-        def __init__(self):
-            self.last_messages = None
-
-        def chat(self, messages, **kwargs):  # noqa: ANN001
-            self.last_messages = messages
-            return "[]"
-
-    llm = _StubLLM()
-    settings = PlannerSettings(
-        mode="react",
-        max_steps=3,
-        enable_sub_question=False,
-        system_prompt="SYS",
-        user_prompt_template="Question: {question}\nOutput language: {output_language}\n{available_tools}",
-        available_tools_hint="tools",
-    )
-    gen = PlanGenerator(llm, settings)
-    with pytest.raises(RuntimeError):
-        gen.generate_plan(question)
-    assert llm.last_messages is not None
-    assert f"Output language: {expected}" in llm.last_messages[1]["content"]
-
-
 def test_infer_user_language_ignores_split_filename_cjk_prefix():
     from core.deepsearch.utils.language_policy import infer_user_language
 

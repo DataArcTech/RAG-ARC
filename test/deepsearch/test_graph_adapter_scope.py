@@ -1,109 +1,77 @@
-import asyncio
-
 import pytest
 
-from encapsulation.data_model.deepsearch import GraphQueryContext, PlanSpec
-from encapsulation.data_model.schema import Chunk
+from core.deepsearch.tools import GraphOpsTool, ToolRunRequest
 from core.graph_adapter.base import GraphAccessScope
-from core.graph_adapter.hipporag import HippoRAGGraphAdapter
-from core.deepsearch.reasoning.traversal import GraphTraversalExecutor, GraphTraversalSettings
 
 
-class _DummyRetriever:
-    """Minimal retriever stub that records the arguments passed in by the adapter."""
-
+class _StubAdapter:
     def __init__(self):
-        self.calls = []
+        self.last_scope = None
+        self.rows = [{"id": "n1"}]
 
-    def invoke(self, query: str, **kwargs):
-        self.calls.append((query, kwargs))
-        chunk = Chunk(
-            content=f"Answer for {query}",
-            metadata={
-                "_subgraph_info": {
-                    "subgraph_nodes": [],
-                    "seed_entity_ids": [],
-                    "retrieved_chunk_ids": [],
-                    "node_ppr_scores": {},
-                }
-            },
-        )
-        return [chunk]
+    async def acypher(self, cypher, params=None, *, access_scope=None):  # noqa: ANN001, ARG002
+        self.last_scope = access_scope
+        return list(self.rows)
+
+    def cypher_capable(self) -> bool:
+        return True
 
 
-async def _run_executor(context: GraphQueryContext, retriever: _DummyRetriever):
-    adapter = HippoRAGGraphAdapter(retriever=retriever, default_top_k=1, summary_max_chunks=1)
-    executor = GraphTraversalExecutor(
+@pytest.mark.asyncio
+async def test_graph_ops_passes_access_scope() -> None:
+    adapter = _StubAdapter()
+    tool = GraphOpsTool()
+    request = ToolRunRequest(
+        question="Q",
+        plan_step="plan_01",
+        context_evidences=[],
         adapter=adapter,
-        settings=GraphTraversalSettings(
-            strategy_name="ppr_chain",
-            allow_semantic_channel=True,
-            chain_depth=1,
-            parallel_branches=1,
-            step_summary_max_chars=2000,
-        ),
+        access_scope=GraphAccessScope(scope_id="tenant-1", scope_type="tenant"),
+        extra={
+            "mode": "cypher",
+            "cypher": "MATCH (n) WHERE COALESCE(n.owner_id, $global_owner) = $owner_id RETURN n LIMIT 1",
+        },
     )
-    plan = [
-        PlanSpec(
-            step_id="plan_01",
-            description="Inspect graph evidence",
-            channel="graph",
-            metadata={},
-        )
-    ]
-    await executor.run(plan, context, tool_name="graph_adapter.query")
+
+    result = await tool.run(request)
+    assert result.evidences
+    assert adapter.last_scope is not None
+    assert adapter.last_scope.scope_id == "tenant-1"
 
 
 @pytest.mark.asyncio
-async def test_adapter_uses_owner_scope_for_retrieval():
-    retriever = _DummyRetriever()
-    context = GraphQueryContext(adapter_name="hipporag", owner_id="user-123", question="foo")
-
-    await _run_executor(context, retriever)
-
-    assert retriever.calls, "retriever should be invoked once"
-    _, kwargs = retriever.calls[0]
-    assert kwargs["owner_id"] == "user-123"
-    assert kwargs["return_subgraph_info"] is True
-
-
-@pytest.mark.asyncio
-async def test_adapter_isolated_for_multiple_owners():
-    retriever = _DummyRetriever()
-    adapter = HippoRAGGraphAdapter(retriever=retriever, default_top_k=1, summary_max_chunks=1)
-    executor = GraphTraversalExecutor(
+async def test_graph_ops_rejects_missing_owner_filter() -> None:
+    adapter = _StubAdapter()
+    tool = GraphOpsTool()
+    request = ToolRunRequest(
+        question="Q",
+        plan_step="plan_02",
+        context_evidences=[],
         adapter=adapter,
-        settings=GraphTraversalSettings(
-            strategy_name="ppr_chain",
-            allow_semantic_channel=True,
-            chain_depth=1,
-            parallel_branches=1,
-            step_summary_max_chars=2000,
-        ),
+        access_scope=GraphAccessScope(scope_id="owner-1"),
+        extra={"mode": "cypher", "cypher": "MATCH (n) RETURN n LIMIT 1"},
     )
-    plan = [
-        PlanSpec(step_id="plan_01", description="hop one", channel="graph", metadata={}),
-    ]
 
-    ctx_a = GraphQueryContext(adapter_name="hipporag", owner_id="alice", question="Q1")
-    ctx_b = GraphQueryContext(adapter_name="hipporag", owner_id="bob", question="Q2")
-
-    await executor.run(plan, ctx_a, tool_name="graph_adapter.query")
-    await executor.run(plan, ctx_b, tool_name="graph_adapter.query")
-
-    assert len(retriever.calls) == 2
-    owners = [kwargs["owner_id"] for _, kwargs in retriever.calls]
-    assert owners == ["alice", "bob"]
+    result = await tool.run(request)
+    assert "owner" in result.summary.lower()
+    assert result.diagnostics.get("reason") == "owner_filter_missing"
 
 
 @pytest.mark.asyncio
-async def test_access_scope_decouples_from_owner_id():
-    retriever = _DummyRetriever()
-    scope = GraphAccessScope(scope_id="tenant-alpha", scope_type="tenant")
-    context = GraphQueryContext(adapter_name="hipporag", owner_id=None, question="bar", access_scope=scope)
+async def test_graph_ops_rejects_write_cypher() -> None:
+    adapter = _StubAdapter()
+    tool = GraphOpsTool()
+    request = ToolRunRequest(
+        question="Q",
+        plan_step="plan_03",
+        context_evidences=[],
+        adapter=adapter,
+        access_scope=GraphAccessScope(scope_id="owner-1"),
+        extra={
+            "mode": "cypher",
+            "cypher": "MATCH (n) WHERE COALESCE(n.owner_id, $global_owner) = $owner_id CREATE (m) RETURN m",
+        },
+    )
 
-    await _run_executor(context, retriever)
-
-    assert retriever.calls, "retriever should be invoked with explicit scope"
-    _, kwargs = retriever.calls[0]
-    assert kwargs["owner_id"] == "tenant-alpha"
+    with pytest.raises(ValueError, match="read-only"):
+        await tool.run(request)

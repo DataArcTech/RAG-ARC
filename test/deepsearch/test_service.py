@@ -15,12 +15,7 @@ def _default_service_config(*, tmp_path, fingerprint: str, **overrides):  # noqa
         "artifact_dir": str(tmp_path / "artifacts"),
         "experiment_output_dir": None,
         "coverage_expected_min_chunks": 1,
-        "tool_names": {
-            "graph_channel_tool": "graph_adapter.query",
-            "text_channel_tool": "search",
-            "web_channel_tool": "web.search",
-            "think_tool": "think",
-        },
+        "think_tool": "think",
         "quality_loop": {
             "enabled": False,
             "max_rounds": 1,
@@ -39,45 +34,18 @@ def _default_service_config(*, tmp_path, fingerprint: str, **overrides):  # noqa
     return base
 
 
-class _StubPlanner:
-    def __init__(self):
-        self.scopes: List[GraphAccessScope] = []
-
-    async def build_plan(self, question: str, *, access_scope: GraphAccessScope):
-        self.scopes.append(access_scope)
-        context = GraphQueryContext(
-            adapter_name="hipporag",
-            question=question,
-            access_scope=access_scope,
-        )
-        return {
-            "plan_id": "plan-test",
-            "plan": {
-                "plan_id": "plan-test",
-                "question": question,
-                "steps": [
-                    {
-                        "step_id": "plan_01",
-                        "description": "Collect evidence",
-                        "channel": "graph",
-                        "metadata": {},
-                    }
-                ],
-                "graph_context": context.model_dump(exclude_none=True),
-            },
-        }
-
-
 class _StubGraphLoop:
     def __init__(self):
         self.calls: List[str] = []
 
-    async def run(
+    async def run_think_loop(
         self,
         question: str,
-        plan_steps: Sequence[Dict[str, Any]],
         *,
         graph_context: GraphQueryContext,
+        initial_think_notes=None,
+        seed_evidences=None,
+        plan_items=None,
     ):
         scope = graph_context.resolve_scope()
         self.calls.append(scope.scope_id if scope else "missing")
@@ -85,19 +53,34 @@ class _StubGraphLoop:
             "question": question,
             "graph_context": graph_context.model_dump(exclude_none=True),
             "adapter_metadata": {},
-            "plan_steps": list(plan_steps),
+            "plan_steps": [],
             "graph_traversals": [],
             "reasoning_steps": [],
             "evidences": [],
             "tool_results": [],
             "think_notes": [],
             "coverage_metrics": {},
+            "runtime_plan": {"items": list(plan_items or []), "markdown": "", "version": 0},
         }
 
 
 class _StubGraphLoopWithWorkerError(_StubGraphLoop):
-    async def run(self, question: str, plan_steps: Sequence[Dict[str, Any]], *, graph_context: GraphQueryContext):
-        trace = await super().run(question, plan_steps, graph_context=graph_context)
+    async def run_think_loop(
+        self,
+        question: str,
+        *,
+        graph_context: GraphQueryContext,
+        initial_think_notes=None,
+        seed_evidences=None,
+        plan_items=None,
+    ):
+        trace = await super().run_think_loop(
+            question,
+            graph_context=graph_context,
+            initial_think_notes=initial_think_notes,
+            seed_evidences=seed_evidences,
+            plan_items=plan_items,
+        )
         trace["coverage_metrics"] = {
             "worker_error_count": 1,
             "worker_errors": [{"agent_id": "worker_01", "error": "worker_timeout"}],
@@ -169,28 +152,10 @@ class _StubToolManager:
     pass
 
 
-class _StubBudgetAwareGraphLoop(_StubGraphLoop):
-    def __init__(self):
-        super().__init__()
-        self.received_overrides: List[Dict[str, Any] | None] = []
-
-    async def run(
-        self,
-        question: str,
-        plan_steps: Sequence[Dict[str, Any]],
-        *,
-        graph_context: GraphQueryContext,
-        settings_override: Dict[str, Any] | None = None,
-    ):
-        self.received_overrides.append(settings_override)
-        return await super().run(question, plan_steps, graph_context=graph_context)
-
 @pytest.mark.asyncio
 async def test_service_converts_owner_to_scope(tmp_path):
-    planner = _StubPlanner()
     graph_loop = _StubGraphLoop()
     service = DeepSearchService(
-        planner=planner,
         graph_loop=graph_loop,
         reporter=_StubReporter(),
         tool_manager=_StubToolManager(),
@@ -200,7 +165,6 @@ async def test_service_converts_owner_to_scope(tmp_path):
     metadata = {"priority": "urgent"}
     result = await service.run("Explain HippoRAG impact", owner_id="tenant-123", metadata=metadata)
 
-    assert planner.scopes and planner.scopes[0].scope_id == "tenant-123"
     assert graph_loop.calls == ["tenant-123"]
     reasoning_scope = (
         result["reasoning"]["graph_context"].get("access_scope", {}).get("scope_id")
@@ -216,10 +180,8 @@ async def test_service_converts_owner_to_scope(tmp_path):
 
 @pytest.mark.asyncio
 async def test_service_persists_experiment_snapshot(tmp_path):
-    planner = _StubPlanner()
     graph_loop = _StubGraphLoop()
     service = DeepSearchService(
-        planner=planner,
         graph_loop=graph_loop,
         reporter=_StubReporter(),
         tool_manager=_StubToolManager(),
@@ -232,15 +194,13 @@ async def test_service_persists_experiment_snapshot(tmp_path):
     assert files, "Experiment snapshot should be persisted"
     payload = json.loads(files[0].read_text(encoding="utf-8"))
     assert payload["question"] == "Run experiment"
-    assert payload["plan_id"] == "plan-test"
+    assert payload.get("plan_id") is None
 
 
 @pytest.mark.asyncio
 async def test_service_surfaces_worker_failures_into_state_errors(tmp_path):
-    planner = _StubPlanner()
     graph_loop = _StubGraphLoopWithWorkerError()
     service = DeepSearchService(
-        planner=planner,
         graph_loop=graph_loop,
         reporter=_StubReporter(),
         tool_manager=_StubToolManager(),
@@ -254,49 +214,20 @@ async def test_service_surfaces_worker_failures_into_state_errors(tmp_path):
     assert any(entry.get("stage") == "graph_reasoning" for entry in errors if isinstance(entry, dict))
 
 
-@pytest.mark.asyncio
-async def test_service_does_not_inject_budget_overrides_by_default(tmp_path):
-    planner = _StubPlanner()
-    graph_loop = _StubBudgetAwareGraphLoop()
-    service = DeepSearchService(
-        planner=planner,
-        graph_loop=graph_loop,
-        reporter=_StubReporter(),
-        tool_manager=_StubToolManager(),
-        config=_default_service_config(tmp_path=tmp_path, fingerprint="service-budget"),
-    )
-
-    await service.run("Hello", owner_id="tenant-123")
-    assert graph_loop.received_overrides == [None]
-
-
-@pytest.mark.asyncio
-async def test_service_keeps_default_budget_for_complex_questions(tmp_path):
-    planner = _StubPlanner()
-    graph_loop = _StubBudgetAwareGraphLoop()
-    service = DeepSearchService(
-        planner=planner,
-        graph_loop=graph_loop,
-        reporter=_StubReporter(),
-        tool_manager=_StubToolManager(),
-        config=_default_service_config(tmp_path=tmp_path, fingerprint="service-budget"),
-    )
-
-    await service.run("Compare approaches and provide citations", owner_id="tenant-123")
-    assert graph_loop.received_overrides == [None]
-
 class _GraphLoopTwoPasses:
     def __init__(self):
         self.calls: List[Sequence[Dict[str, Any]]] = []
 
-    async def run(
+    async def run_think_loop(
         self,
         question: str,
-        plan_steps: Sequence[Dict[str, Any]],
         *,
         graph_context: GraphQueryContext,
+        initial_think_notes=None,
+        seed_evidences=None,
+        plan_items=None,
     ):
-        self.calls.append(list(plan_steps))
+        self.calls.append(list(initial_think_notes or []))
         if len(self.calls) == 1:
             evidences = [{"chunk_id": "ev1", "source": "hipporag", "content": "evidence one"}]
         else:
@@ -308,13 +239,14 @@ class _GraphLoopTwoPasses:
             "question": question,
             "graph_context": graph_context.model_dump(exclude_none=True),
             "adapter_metadata": {},
-            "plan_steps": list(plan_steps),
+            "plan_steps": [],
             "graph_traversals": [],
             "reasoning_steps": [],
             "evidences": evidences,
             "tool_results": [],
             "think_notes": [],
             "coverage_metrics": {},
+            "runtime_plan": {"items": list(plan_items or []), "markdown": "", "version": 0},
         }
 
 
@@ -369,12 +301,10 @@ async def test_service_quality_loop_triggers_followup_round(tmp_path):
                 ensure_ascii=False,
             )
 
-    planner = _StubPlanner()
     graph_loop = _GraphLoopTwoPasses()
     llm = _QualityGateLLM()
     reporter = _QualityLoopReporter(llm_connector=llm)
     service = DeepSearchService(
-        planner=planner,
         graph_loop=graph_loop,
         reporter=reporter,
         tool_manager=_StubToolManager(),
@@ -459,12 +389,10 @@ async def test_service_quality_loop_caps_should_iterate_when_max_rounds_reached(
                 "metadata": {},
             }
 
-    planner = _StubPlanner()
     graph_loop = _GraphLoopTwoPasses()
     llm = _QualityGateLLMAlwaysFail()
     reporter = _ReporterAlwaysUncited(llm_connector=llm)
     service = DeepSearchService(
-        planner=planner,
         graph_loop=graph_loop,
         reporter=reporter,
         tool_manager=_StubToolManager(),

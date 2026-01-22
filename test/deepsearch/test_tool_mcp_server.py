@@ -15,6 +15,7 @@ class _StubLLM:
             {
                 "reasoning": "stub reasoning",
                 "tool_calls": [],
+                "plan": [],
             }
         )
 

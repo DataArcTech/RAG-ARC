@@ -289,6 +289,7 @@ async def test_graph_reasoning_think_can_call_code_python_and_next_think_sees_re
                     "parallelizable": False,
                 }
             ],
+            "plan": [{"text": "Verify computation", "checked": False}],
         },
         ensure_ascii=False,
     )
@@ -296,6 +297,7 @@ async def test_graph_reasoning_think_can_call_code_python_and_next_think_sees_re
         {
             "reasoning": "Result observed; continue DeepSearch.",
             "tool_calls": [],
+            "plan": [{"text": "Verify computation", "checked": True}],
         },
         ensure_ascii=False,
     )
@@ -319,13 +321,13 @@ async def test_graph_reasoning_think_can_call_code_python_and_next_think_sees_re
                 "enable_tool_calls": True,
                 "max_tool_calls": 1,
                 "tool_call_concurrency": 1,
-                "tool_catalog_max_items": 30,
+                "tool_catalog_max_items": 6,
+                "tool_catalog_allowlist": ["explore", "code.python"],
                 "include_llm_tools": True,
                 "max_rounds_per_checkpoint": 2,
             }
         ),
         tool_manager=tool_manager,
-        graph_channel_tool="graph_adapter.query",
     )
     context = GraphQueryContext(
         adapter_name="hipporag",
@@ -334,9 +336,8 @@ async def test_graph_reasoning_think_can_call_code_python_and_next_think_sees_re
         metadata={},
         seed_entities=[],
     )
-    result = await loop.run(
+    result = await loop.run_think_loop(
         "Need compute verification",
-        [{"step_id": "plan_01", "description": "Get evidence", "channel": "graph", "tool": "graph_adapter.query"}],
         graph_context=context,
     )
 

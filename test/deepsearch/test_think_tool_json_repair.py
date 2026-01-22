@@ -18,10 +18,11 @@ class _StubLLM:
 
 
 @pytest.mark.asyncio
-async def test_graph_think_tool_repairs_invalid_json_output() -> None:
+async def test_think_tool_repairs_invalid_json_output() -> None:
     valid = {
         "reasoning": "ok",
         "tool_calls": [],
+        "plan": [],
     }
     llm = _StubLLM(["not json", json.dumps(valid)])
     tool = ThinkTool(llm_connector=llm, json_repair_attempts=1, json_repair_temperature=0.0)
@@ -43,7 +44,7 @@ async def test_graph_think_tool_repairs_invalid_json_output() -> None:
 
 
 @pytest.mark.asyncio
-async def test_graph_think_tool_raises_when_json_repair_disabled() -> None:
+async def test_think_tool_raises_when_json_repair_disabled() -> None:
     llm = _StubLLM(["not json"])
     tool = ThinkTool(llm_connector=llm, json_repair_attempts=0)
     req = ToolRunRequest(
