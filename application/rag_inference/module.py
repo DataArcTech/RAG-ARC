@@ -23,6 +23,7 @@ from framework.thread_pool import get_thread_pool
 from config.output_limits import CHAT_MAX_IMAGE_INPUTS, RAG_RETRIEVAL_OBSERVABILITY, RAG_RETRIEVAL_LOG_TOP_FILES, RAG_RETRIEVAL_LOG_TOP_CHUNKS
 from core.utils.multimodal_images import collect_image_paths_from_chunk_payloads
 from core.utils.multimodal_llm import build_multimodal_user_message
+from core.utils.chunk_dedupe import dedupe_chunks
 from encapsulation.web_search import TavilySearchClient
 from config.retrieval_routing import rag_retrieval_dynamic_quota_enabled
 from config.rag_intent_routing import (
@@ -658,7 +659,10 @@ class RAGInference(AbstractModule):
                 chunks = graph_chunks
 
         chunks = self._filter_chunks_by_file_status(chunks)
-        chunks = self._dedupe_chunks_by_id(chunks)
+        before = len(chunks)
+        chunks = dedupe_chunks(chunks)
+        if len(chunks) != before:
+            logger.info("Deduped retrieved chunks: %d -> %d", before, len(chunks))
 
         # Evidence consistency filtering (opt-in): keep chunks aligned to anchors to reduce drift.
         if rag_evidence_consistency_enabled() and rewrite_anchors:
@@ -762,7 +766,10 @@ class RAGInference(AbstractModule):
             else:
                 logger.info("No web chunks to add")
 
-        chunks = self._dedupe_chunks_by_id(chunks)
+        before = len(chunks)
+        chunks = dedupe_chunks(chunks)
+        if len(chunks) != before:
+            logger.info("Deduped chunks after web merge: %d -> %d", before, len(chunks))
         subgraph_info = None
         if subgraph_infos:
             if len(subgraph_infos) == 1:
@@ -803,6 +810,10 @@ class RAGInference(AbstractModule):
                     reranked_chunks = reranked_chunks[:rerank_keep_k]
         
         chunks = reranked_chunks
+        before = len(chunks)
+        chunks = dedupe_chunks(chunks)
+        if len(chunks) != before:
+            logger.info("Deduped chunks after rerank: %d -> %d", before, len(chunks))
         reranker_info = None
         try:
             reranker_info = self.reranker.get_reranker_info()
@@ -949,20 +960,8 @@ class RAGInference(AbstractModule):
 
     @staticmethod
     def _dedupe_chunks_by_id(chunks: List[Chunk]) -> List[Chunk]:
-        if not chunks:
-            return chunks
-        seen: set[str] = set()
-        out: list[Chunk] = []
-        for chunk in chunks:
-            cid = str(getattr(chunk, "id", "") or "").strip()
-            if not cid:
-                out.append(chunk)
-                continue
-            if cid in seen:
-                continue
-            seen.add(cid)
-            out.append(chunk)
-        return out
+        # Backward-compatible wrapper; prefer `core.utils.chunk_dedupe.dedupe_chunks`.
+        return dedupe_chunks(chunks)
 
     @staticmethod
     def _merge_graph_payloads(payloads: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

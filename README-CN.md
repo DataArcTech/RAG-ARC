@@ -470,7 +470,7 @@ def chat_sse(session_id: str, access_token: str):
 chat_sse("YOUR_SESSION_ID", "YOUR_ACCESS_TOKEN")
 ```
 
-> 证据包：`POST /rag_inference/chat` 会直接返回完整的 `evidence`。对 SSE 流式而言，当 `include_evidence=true`（和/或 `return_subgraph=true`）时，服务端会在结束前发送一条 OpenAI 兼容的 chunk，其 `delta.tool_calls[].function.name == "rag_arc_payload"`，并在 `function.arguments`（JSON 字符串）中携带同样的 payload。为了改善前端体验，流中还会在改写/检索/重排阶段额外发送进度 tool-call：`delta.tool_calls[].function.name == "rag_arc_progress"`（同样通过 `function.arguments` 传 JSON 字符串，采用可扩展 envelope：`v=1`、`type=\"progress\"`，并带 `request_id`/`seq` 便于排序与聚合）。
+> 证据包：`POST /rag_inference/chat` 会直接返回完整的 `evidence`。对 SSE 流式而言，当 `include_evidence=true`（和/或 `return_subgraph=true`）时，服务端会在结束前发送一条 OpenAI 兼容的 chunk，其 `delta.tool_calls[].function.name == "rag_arc_payload"`，并在 `function.arguments`（JSON 字符串）中携带同样的 payload。为了改善前端体验，流中还会在改写/检索/重排阶段额外发送进度 tool-call：`delta.tool_calls[].function.name == "rag_arc_progress"`（同样通过 `function.arguments` 传 JSON 字符串，采用可扩展 envelope：`v=1`、`type=\"progress\"`，并带 `request_id`/`seq` 便于排序与聚合）。返回的 `chunks` 会按稳定的文件/偏移标识进行去重，避免引用重复。
 
 ## 🛠️ 技术栈
 
