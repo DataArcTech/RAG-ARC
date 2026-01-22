@@ -23,6 +23,21 @@ SEARCH_ENTITY_EXTRACT_PROMPT_EN = (
     "}\n"
 )
 
+LOGIC_CHECK_SYSTEM_PROMPT_EN = (
+    "You are the DeepSearch logic.check tool. Your job is to review the reasoning DAG and spot logic errors.\n"
+    "Focus on: evidence gaps, contradictory branches, plan coverage gaps, and missing deterministic tools.\n"
+    "Do NOT gather new evidence, rewrite answers, or judge report quality.\n"
+    "Base your review ONLY on the provided runtime snapshot and evidence.\n"
+    "\n"
+    "Return ONLY valid JSON with keys:\n"
+    "- summary: short string\n"
+    "- ok: boolean\n"
+    "- issues: array of {issue_type, severity, message, evidence_ids, related_steps, suggested_fix}\n"
+    "\n"
+    "Allowed issue_type values: evidence_gap, conflict, plan_gap, computable_without_code, reasoning_jump, other.\n"
+    "Allowed severity values: low, medium, high.\n"
+)
+
 THINK_TOOL_SYSTEM_PROMPT_EN = (
     "You are the DeepSearch think tool. Your job is to reflect on the latest evidence and decide the next actions.\n"
     "Write like you are thinking aloud to a user: clear, human, and compact. Do not invent facts.\n"
@@ -40,6 +55,9 @@ THINK_TOOL_SYSTEM_PROMPT_EN = (
     "  Concurrency: actions run in parallel; include multiple search actions with different queries.\n"
     "  Good: {tool_name: 'explore', tool_args: {actions: [{tool:'search', args:{focus_query:'A vs B'}},{tool:'search', args:{focus_query:'A market share'}},{tool:'graph.ops', args:{mode:'template', template:'path_exists', template_args:{source:'A', target:'C'}}},{tool:'read.chunk', args:{chunk_ids:['c1'], goal:'verify claim'}}]}}\n"
     "  Bad:  {tool_name: 'explore', tool_args: {actions: []}}\n"
+    "- logic.check: review the reasoning DAG for logic errors (no new evidence).\n"
+    "  Good: {tool_name: 'logic.check', tool_args: {assertions: [{key:'claim_a', value:'A->C', polarity:'affirm', evidence_ids:['graph.ops:plan_02:path_exists:abc123']}], max_issues: 5}}\n"
+    "  Bad:  {tool_name: 'logic.check', tool_args: {assertions: []}}\n"
     "- code.python: deterministic math/finance verification.\n"
     "  Good: {tool_name: 'code.python', tool_args: {code:'x=INPUTS[\"a\"]; y=INPUTS[\"b\"]; result=x+y', inputs:{a:1,b:2}}}\n"
     "  Bad:  {tool_name: 'code.python', tool_args: {code:'TODO'}}\n"
@@ -48,7 +66,7 @@ THINK_TOOL_SYSTEM_PROMPT_EN = (
     "Guidelines:\n"
     "- Use recent_tool_runs and previous_tool_call_results to avoid repeating the same tool+args after failures.\n"
     "- If recent_tool_runs shows zero evidence, adjust the query or switch tools.\n"
-    "- Only call explore or code.python; other tools are internal explore actions.\n"
+    "- Only call explore, logic.check, or code.python; other tools are internal explore actions.\n"
     "- Plan output must be a JSON list of items with: {text, checked}.\n"
     "- Return the full plan list every time (even if unchanged). Use checked=true when done.\n"
     "- If think_mode=initial: include report_needed (boolean). If report_needed=false, keep plan empty and tool_calls=[].\n"

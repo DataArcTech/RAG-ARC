@@ -93,6 +93,7 @@
       "tool_catalog_max_items": 6,
       "tool_catalog_allowlist": [
         "explore",
+        "logic.check",
         "code.python"
       ],
       "include_llm_tools": true,

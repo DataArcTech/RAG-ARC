@@ -120,6 +120,19 @@ THINK_JSON_REPAIR_DEFAULT_TEMPERATURE = 0.0
 THINK_JSON_REPAIR_DEFAULT_MAX_RAW_CHARS = 2000
 
 # -----------------------------
+# logic.check defaults
+# -----------------------------
+LOGIC_CHECK_DEFAULT_TEMPERATURE = 0.1
+LOGIC_CHECK_JSON_REPAIR_DEFAULT_ATTEMPTS = 1
+LOGIC_CHECK_JSON_REPAIR_DEFAULT_TEMPERATURE = 0.0
+LOGIC_CHECK_JSON_REPAIR_DEFAULT_MAX_RAW_CHARS = 2000
+LOGIC_CHECK_MAX_ASSERTIONS = 12
+LOGIC_CHECK_MAX_ISSUES = 8
+LOGIC_CHECK_RECENT_TOOL_RUNS_MAX = 10
+LOGIC_CHECK_RECENT_TOOL_RUNS_MAX_CHARS = 320
+LOGIC_CHECK_EVIDENCE_ID_MAX = 200
+
+# -----------------------------
 # code.python tool defaults
 # -----------------------------
 # Keep this list small and finance-focused; expand via config when needed.

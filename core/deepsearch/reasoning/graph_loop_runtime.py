@@ -14,6 +14,7 @@ from encapsulation.data_model.deepsearch import (
 )
 from core.deepsearch.memory.plan_state import update_plan_from_think_notes
 from core.deepsearch.trace import emit_trace
+from config.core.deepsearch import tool_defaults
 
 from .graph_loop_state import _RUN_THINK_COUNT, _RUN_THINK_TOOL_SIGNATURES, _run_plan_state
 
@@ -116,6 +117,13 @@ class GraphLoopRuntimeMixin:
                 status="running",
             )
             async with semaphore:
+                if tool_name == "logic.check":
+                    plan_state = _run_plan_state()
+                    tool_args = dict(tool_args)
+                    tool_args["runtime_snapshot"] = self._build_logic_check_snapshot(
+                        tool_runs=tool_runs,
+                        plan_state=plan_state,
+                    )
                 payload = self._build_tool_payload(
                     plan_step_id=plan_step_id,
                     question=question,
@@ -251,6 +259,66 @@ class GraphLoopRuntimeMixin:
                 }
             )
         return summaries
+
+    def _build_logic_check_snapshot(
+        self,
+        *,
+        tool_runs: Sequence[Dict[str, Any]],
+        plan_state: Any,
+    ) -> Dict[str, Any]:
+        max_items = int(tool_defaults.LOGIC_CHECK_RECENT_TOOL_RUNS_MAX)
+        max_chars = int(tool_defaults.LOGIC_CHECK_RECENT_TOOL_RUNS_MAX_CHARS)
+        recent = self._summarize_recent_tool_runs(tool_runs, max_items=max_items, max_chars=max_chars)
+        evidence_ids = self._collect_evidence_ids_from_runs(
+            tool_runs,
+            limit=int(tool_defaults.LOGIC_CHECK_EVIDENCE_ID_MAX),
+        )
+        tool_names = self._collect_tool_names_from_runs(tool_runs)
+        return {
+            "plan": list(getattr(plan_state, "items", []) or []),
+            "recent_tool_runs": recent,
+            "tool_names": sorted(tool_names),
+            "evidence_ids": evidence_ids,
+            "tool_run_count": len(tool_runs),
+        }
+
+    @staticmethod
+    def _collect_tool_names_from_runs(tool_runs: Sequence[Dict[str, Any]]) -> Set[str]:
+        names: Set[str] = set()
+        for run in tool_runs:
+            if not isinstance(run, dict):
+                continue
+            name = str(run.get("tool_name") or "").strip()
+            if name:
+                names.add(name)
+        return names
+
+    @staticmethod
+    def _collect_evidence_ids_from_runs(
+        tool_runs: Sequence[Dict[str, Any]],
+        *,
+        limit: int,
+    ) -> List[str]:
+        collected: List[str] = []
+        seen: Set[str] = set()
+        for run in tool_runs:
+            if not isinstance(run, dict):
+                continue
+            result = run.get("result") if isinstance(run.get("result"), dict) else None
+            evidences = result.get("evidences") if isinstance(result, dict) else None
+            if not isinstance(evidences, list):
+                continue
+            for item in evidences:
+                if not isinstance(item, dict):
+                    continue
+                chunk_id = str(item.get("chunk_id") or "").strip()
+                if not chunk_id or chunk_id in seen:
+                    continue
+                seen.add(chunk_id)
+                collected.append(chunk_id)
+                if len(collected) >= max(0, limit):
+                    return collected
+        return collected
 
 
 def _prioritize_tool_catalog(

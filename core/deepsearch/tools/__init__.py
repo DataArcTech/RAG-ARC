@@ -13,6 +13,7 @@ from .explore import (
     BeamSearchTool,
     LLMChainExplorerTool,
 )
+from .check import LogicCheckTool
 from .think import ThinkTool
 from .code import CodePythonTool
 
@@ -28,6 +29,7 @@ __all__ = [
     "SearchBM25Tool",
     "SearchGraphChunkTool",
     "ThinkTool",
+    "LogicCheckTool",
     "BeamSearchTool",
     "LLMChainExplorerTool",
     "CodePythonTool",
@@ -46,6 +48,7 @@ _BUILTIN_CLASSES = [
     SearchFaissTool,
     SearchBM25Tool,
     SearchGraphChunkTool,
+    LogicCheckTool,
     ThinkTool,
     CodePythonTool,
     WebSearchTool,
@@ -58,6 +61,7 @@ _LLM_REQUIRED = {
     SearchTool,
     SearchGraphChunkTool,
     ThinkTool,
+    LogicCheckTool,
     BeamSearchTool,
     LLMChainExplorerTool,
 }
