@@ -1,8 +1,7 @@
-"""Convert DeepSearch bracket citations into HippoRAG-compatible <sup> anchors.
+"""Legacy conversion helpers for bracket-style citations into HippoRAG-compatible <sup> anchors.
 
-DeepSearch writers emit inline citations as bracket tokens (e.g. ``[chunk_id]`` / ``【chunk_id】``)
-to make downstream validation deterministic. This module converts those tokens into
-HippoRAG-compatible ``<sup>k</sup>`` anchors and emits a matching ``sources`` list:
+DeepSearch reports now emit <sup>k</sup> directly, but these helpers remain for
+backward compatibility with older bracket-style outputs.
 
 - The answer uses contiguous numeric superscripts starting from 1.
 - ``sources[key=k]`` maps 1:1 to ``<sup>k</sup>``.

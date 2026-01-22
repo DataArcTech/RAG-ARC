@@ -98,6 +98,12 @@ class DeepSearchServiceInitialThinkMixin:
         report_needed = raw.get("report_needed")
         if report_needed is None:
             raise RuntimeError("Initial think missing report_needed")
+        report_style_raw = raw.get("report_style")
+        report_style = str(report_style_raw or "").strip().lower() if report_style_raw is not None else ""
+        if report_style not in {"deepsearch", "research"}:
+            report_style = "deepsearch"
+        if isinstance(reasoning_context.metadata, dict):
+            reasoning_context.metadata["report_style"] = report_style
 
         if update_plan_from_think_notes(plan_state, think_notes=notes):
             reasoning_context.metadata["runtime_plan"] = list(plan_state.items)
@@ -131,6 +137,7 @@ class DeepSearchServiceInitialThinkMixin:
         note_payloads = [note.model_dump(exclude_none=True) for note in notes]
         return {
             "report_needed": bool(report_needed),
+            "report_style": report_style,
             "plan_state": plan_state,
             "think_notes": note_payloads,
             "think_notes_obj": list(notes),

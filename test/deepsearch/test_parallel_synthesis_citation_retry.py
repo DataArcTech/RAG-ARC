@@ -23,7 +23,7 @@ class _SynthesisLLM:
         return json.dumps(
             {
                 "title": "T",
-                "short_answer": "The answer is supported by evidence.[ev1]",
+                "short_answer": "The answer is supported by evidence. <sup>1</sup>",
                 "limitations": [],
                 "next_steps": [],
             },
@@ -41,12 +41,13 @@ def test_parallel_synthesis_retries_when_short_answer_missing_citations():
         result = await writer._synthesize_parallel_fields(
             question="Q",
             outline=[{"title": "S", "purpose": "p", "evidence_ids": ["ev1"]}],
-            sections=[{"title": "S", "section_type": "narrative", "body_markdown": "Body[ev1]"}],
+            sections=[{"title": "S", "section_type": "narrative", "body_markdown": "Body. <sup>1</sup>"}],
             evidences=[{"chunk_id": "ev1", "source": "local", "content": "Evidence", "score": 1.0}],
+            source_key_map={"1": "ev1"},
             coverage={},
+            context={},
         )
         assert llm.calls == 2
-        assert "[ev1]" in str(result.get("short_answer") or "")
+        assert "<sup>1</sup>" in str(result.get("short_answer") or "")
 
     asyncio.run(_run())
-

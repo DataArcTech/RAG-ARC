@@ -12,7 +12,7 @@ def test_compact_sup_citations_reorders_adjacent_groups() -> None:
     text = "x<sup>2</sup> <sup>1</sup>y"
     rewritten, used_keys = compact_sup_citations(text, max_key=2)
     assert used_keys == [1, 2]
-    assert rewritten == "x<sup>1</sup> <sup>2</sup>y"
+    assert rewritten == "x<sup>1</sup><sup>2</sup>y"
 
 
 def test_compact_sup_citations_dense_remap_and_dedupe() -> None:
@@ -20,7 +20,7 @@ def test_compact_sup_citations_dense_remap_and_dedupe() -> None:
     rewritten, used_keys = compact_sup_citations(text, max_key=10)
     assert used_keys == [1, 3]
     # After compaction, old 1->1, old 3->2; adjacent group is sorted and de-duped.
-    assert rewritten == "x<sup>1</sup> <sup>2</sup>y"
+    assert rewritten == "x<sup>1</sup><sup>2</sup>y"
 
 
 def test_compact_sup_citations_noop_when_no_citations() -> None:

@@ -55,7 +55,7 @@ def test_convert_bracket_citations_to_sup_does_not_touch_appendix_sections():
             "Body cites [ev1].",
             "",
             "## Appendix: Chunk Evidence",
-            "- [ev1] (graph): full id should remain in appendix.",
+            "- `ev1` (graph): full id should remain in appendix.",
         ]
     )
     citations = [{"evidence_id": "ev1", "source": "graph"}]
@@ -72,7 +72,7 @@ def test_convert_bracket_citations_to_sup_does_not_touch_appendix_sections():
 
     assert "Body cites <sup>1</sup>." in converted
     assert "## Appendix: Chunk Evidence" in converted
-    assert "- [ev1] (graph): full id should remain in appendix." in converted
+    assert "- `ev1` (graph): full id should remain in appendix." in converted
 
 
 def test_convert_bracket_citations_to_sup_supports_cjk_brackets():

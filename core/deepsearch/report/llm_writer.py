@@ -3,7 +3,7 @@ import asyncio
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -12,7 +12,7 @@ from core.deepsearch.memory import EvidenceBank
 from core.deepsearch.tools.base import call_llm_async
 from core.utils.json_extract import extract_json_from_text as _extract_json_from_text
 from core.utils.text_regex import CJK_DETECT_RE
-from core.utils.text_regex import INLINE_CITATION_TOKEN_RE
+from core.utils.citations import extract_sup_keys
 from core.deepsearch.utils.language_policy import infer_user_language
 from config.output_limits import DEEPSEARCH_MAX_IMAGE_INPUTS
 from core.utils.multimodal_images import collect_image_paths_from_deepsearch_evidences
@@ -22,6 +22,7 @@ from core.prompts.deepsearch.report import (
     REPORT_OUTLINE_USER_PROMPT_EN,
     REPORT_WRITE_SYSTEM_PROMPT_EN,
     REPORT_WRITE_USER_PROMPT_EN,
+    REPORT_STYLE_RESEARCH_HINT_EN,
     PARALLEL_SYNTHESIS_SYSTEM_PROMPT_EN,
     PARALLEL_SYNTHESIS_USER_PROMPT_EN,
     PARALLEL_SYNTHESIS_CITATION_REPAIR_USER_PROMPT_EN,
@@ -38,21 +39,13 @@ from core.deepsearch.report.llm_writer_budget import (
     slim_methodology as _slim_methodology,
 )
 
-_CITATION_TOKEN_RE = INLINE_CITATION_TOKEN_RE
-
-
-def _has_supported_inline_citation(text: str, *, allowed_ids: set[str]) -> bool:
-    if not text or not allowed_ids:
+def _has_supported_inline_citation(text: str, *, allowed_keys: set[int]) -> bool:
+    if not text or not allowed_keys:
         return False
-    for match in _CITATION_TOKEN_RE.finditer(text):
-        token = (match.group("bracket") or match.group("cjk") or "").strip()
-        if not token:
-            continue
-        candidates = re.split(r"[,\s]+", token)
-        for candidate in candidates:
-            cand = candidate.strip()
-            if cand and cand in allowed_ids:
-                return True
+    max_key = max(allowed_keys) if allowed_keys else None
+    for key in extract_sup_keys(text, max_key=max_key):
+        if key in allowed_keys:
+            return True
     return False
 
 
@@ -71,6 +64,29 @@ def _extract_evidence_ids_from_index(evidence_index: Any) -> List[str]:
         seen.add(token)
         ordered.append(token)
     return ordered
+
+
+def _allowed_keys_for_evidence_ids(
+    evidence_ids: Sequence[str],
+    *,
+    source_key_map: Dict[str, str],
+) -> set[int]:
+    reverse: Dict[str, int] = {}
+    for key, ev_id in source_key_map.items():
+        try:
+            key_num = int(str(key).strip())
+        except Exception:  # noqa: BLE001
+            continue
+        token = str(ev_id or "").strip()
+        if token:
+            reverse[token] = key_num
+    allowed: set[int] = set()
+    for ev_id in evidence_ids:
+        token = str(ev_id or "").strip()
+        key_num = reverse.get(token)
+        if key_num is not None:
+            allowed.add(int(key_num))
+    return allowed
 
 
 def _fallback_outline(question: str, *, evidence_index: Any) -> List[Dict[str, Any]]:
@@ -187,6 +203,11 @@ class DeepSearchLLMReportWriter:
     """Generate report outlines and full reports using an LLM connector."""
 
     @staticmethod
+    def _resolve_report_style(context: Dict[str, Any] | None) -> str:
+        token = str((context or {}).get("report_style") or "").strip().lower()
+        return token if token in {"deepsearch", "research"} else "deepsearch"
+
+    @staticmethod
     def _language_enforcement_prompt(question: str) -> str | None:
         q = str(question or "").strip()
         if not q:
@@ -214,6 +235,13 @@ class DeepSearchLLMReportWriter:
         if not hint:
             return base_prompt
         return f"{base_prompt.rstrip()}\n\n{hint.strip()}\n"
+
+    @classmethod
+    def _system_prompt_with_style(cls, base_prompt: str, *, question: str, context: Dict[str, Any]) -> str:
+        prompt = cls._system_prompt_with_language(base_prompt, question=question)
+        if cls._resolve_report_style(context) != "research":
+            return prompt
+        return f"{prompt.rstrip()}\n\n{REPORT_STYLE_RESEARCH_HINT_EN.strip()}\n"
 
     def __init__(
         self,
@@ -264,7 +292,11 @@ class DeepSearchLLMReportWriter:
         messages = [
             {
                 "role": "system",
-                "content": self._system_prompt_with_language(REPORT_OUTLINE_SYSTEM_PROMPT_EN, question=question),
+                "content": self._system_prompt_with_style(
+                    REPORT_OUTLINE_SYSTEM_PROMPT_EN,
+                    question=question,
+                    context=context,
+                ),
             },
             {"role": "user", "content": user_prompt},
         ]
@@ -325,14 +357,18 @@ class DeepSearchLLMReportWriter:
                 "- Every section MUST have a non-empty evidence_ids list.\n"
                 "- Use ONLY chunk_id values from the evidence index.\n"
                 "- If a section cannot be supported by the provided evidence index, REMOVE that section.\n\n"
-                "Evidence index (id + short summary; cite these ids in the outline):\n"
+                "Evidence index (chunk_id + short summary; use these ids in the outline):\n"
                 f"{evidence_index_json}\n\n"
                 f"Previous (invalid) output:\n{_snippet(raw, limit=int(report_defaults.DEFAULT_ERROR_SNIPPET_LIMIT_CHARS))}\n"
             )
             messages = [
                 {
                     "role": "system",
-                    "content": self._system_prompt_with_language(REPORT_OUTLINE_SYSTEM_PROMPT_EN, question=question),
+                    "content": self._system_prompt_with_style(
+                        REPORT_OUTLINE_SYSTEM_PROMPT_EN,
+                        question=question,
+                        context=context,
+                    ),
                 },
                 {"role": "user", "content": repair_prompt},
             ]
@@ -376,11 +412,14 @@ class DeepSearchLLMReportWriter:
             evidence_chars_limit = _apply_divisor_limit_required(self.max_evidence_chars, budget.evidence_chars_divisor)
             evidences = _limit_evidences(evidences_raw, evidence_items_limit, evidence_chars_limit, question=question)
             evidence_pack = ""
+            source_key_map: Dict[str, str] = {}
             if evidences:
                 bank = EvidenceBank()
                 bank.add_many(evidences)
+                source_key_map = bank.source_key_map_for_prompt(bank.ids())
                 evidence_pack = bank.evidence_pack_for_prompt(
                     bank.ids(),
+                    source_key_map=source_key_map,
                     question=question,
                     max_chars_per_evidence=int(evidence_chars_limit),
                 )
@@ -398,7 +437,11 @@ class DeepSearchLLMReportWriter:
             messages = [
                 {
                     "role": "system",
-                    "content": self._system_prompt_with_language(REPORT_WRITE_SYSTEM_PROMPT_EN, question=question),
+                    "content": self._system_prompt_with_style(
+                        REPORT_WRITE_SYSTEM_PROMPT_EN,
+                        question=question,
+                        context=context,
+                    ),
                 },
                 {"role": "user", "content": user_prompt},
             ]
@@ -431,7 +474,10 @@ class DeepSearchLLMReportWriter:
                 report = LLMStructuredReport.model_validate(data)
             except ValidationError as exc:
                 raise ValueError(f"Report writing returned an invalid schema. raw={_snippet(raw)}") from exc
-            return report.model_dump()
+            payload = report.model_dump()
+            if source_key_map:
+                payload["source_key_map"] = source_key_map
+            return payload
 
         raise RuntimeError(f"Report writing exceeded context budget: {last_exc}") from last_exc
 
@@ -474,10 +520,19 @@ class DeepSearchLLMReportWriter:
         bank = EvidenceBank()
         raw_evidences = context.get("evidences") or []
         if isinstance(raw_evidences, list):
-            bank.add_many(raw_evidences)
+            limited_evidences = _limit_evidences(
+                raw_evidences,
+                self.max_evidence_items,
+                int(self.max_evidence_chars),
+                question=question,
+            )
+            bank.add_many(limited_evidences)
+        else:
+            limited_evidences = []
         graph_chain = list(context.get("graph_chain") or [])
         if self.max_graph_chain_items is not None:
             graph_chain = graph_chain[: max(self.max_graph_chain_items, 0)]
+        source_key_map = bank.source_key_map_for_prompt(bank.ids())
 
         semaphore = asyncio.Semaphore(self.max_parallel_sections)
 
@@ -486,12 +541,20 @@ class DeepSearchLLMReportWriter:
                 evidence_ids = EvidenceBank.normalize_evidence_ids(section.get("evidence_ids"))
                 if not evidence_ids:
                     raise ValueError("Parallel section writing requires explicit evidence_ids per section.")
-                section_evidences = bank.select_evidences(evidence_ids, max_chars=self.max_evidence_chars, question=question)
+                evidence_pack = bank.evidence_pack_for_prompt(
+                    evidence_ids,
+                    source_key_map=source_key_map,
+                    question=question,
+                    max_chars_per_evidence=int(self.max_evidence_chars),
+                )
+                allowed_keys = _allowed_keys_for_evidence_ids(evidence_ids, source_key_map=source_key_map)
                 return await self._write_single_section(
                     question=question,
                     section=section,
-                    evidences=section_evidences,
+                    evidence_pack=evidence_pack,
+                    allowed_keys=allowed_keys,
                     graph_chain=graph_chain,
+                    context=context,
                 )
 
         tasks = [write_section_with_limit(section) for section in outline]
@@ -526,7 +589,9 @@ class DeepSearchLLMReportWriter:
             outline=outline,
             sections=sections,
             evidences=synthesis_evidences,
+            source_key_map=source_key_map,
             coverage=context.get("coverage") or {},
+            context=context,
         )
         if synthesis:
             title = synthesis.get("title") or title
@@ -550,6 +615,7 @@ class DeepSearchLLMReportWriter:
             "limitations": [str(item) for item in limitations if str(item).strip()],
             "next_steps": [str(item) for item in next_steps if str(item).strip()],
             "citations": all_citations,
+            "source_key_map": source_key_map,
         }
 
     async def write_report_sectionwise(
@@ -569,7 +635,16 @@ class DeepSearchLLMReportWriter:
         bank = EvidenceBank()
         raw_evidences = context.get("evidences") or []
         if isinstance(raw_evidences, list):
-            bank.add_many(raw_evidences)
+            limited_evidences = _limit_evidences(
+                raw_evidences,
+                self.max_evidence_items,
+                int(self.max_evidence_chars),
+                question=question,
+            )
+            bank.add_many(limited_evidences)
+        else:
+            limited_evidences = []
+        source_key_map = bank.source_key_map_for_prompt(bank.ids())
 
         graph_chain = list(context.get("graph_chain") or [])
         if self.max_graph_chain_items is not None:
@@ -584,27 +659,19 @@ class DeepSearchLLMReportWriter:
             evidence_ids = EvidenceBank.normalize_evidence_ids(section.get("evidence_ids"))
             if not evidence_ids:
                 raise ValueError("Sectionwise writer requires explicit evidence_ids per section.")
-            selected = bank.select_evidences(evidence_ids, max_chars=self.max_evidence_chars, question=question)
             selected_ids = [
-                str(ev.get("chunk_id") or "").strip()
-                for ev in selected
-                if isinstance(ev, dict) and str(ev.get("chunk_id") or "").strip()
+                str(ev_id or "").strip()
+                for ev_id in EvidenceBank.normalize_evidence_ids(evidence_ids)
+                if str(ev_id or "").strip()
             ]
             used_ids_union.extend(selected_ids)
 
-            retained: List[Dict[str, Any]] = []
+            merged_ids = list(selected_ids)
             if retain_k > 0 and recent_ids:
-                retained = bank.select_evidences(recent_ids, max_chars=self.max_evidence_chars, question=question)
-
-            merged_evidences = list(selected)
-            seen = {ev.get("chunk_id") for ev in merged_evidences if isinstance(ev, dict)}
-            for ev in retained:
-                cid = ev.get("chunk_id") if isinstance(ev, dict) else None
-                if cid and cid in seen:
-                    continue
-                merged_evidences.append(ev)
-                if cid:
-                    seen.add(cid)
+                for cid in recent_ids:
+                    token = str(cid or "").strip()
+                    if token and token not in merged_ids:
+                        merged_ids.append(token)
 
             purpose = str(section.get("purpose") or "").strip()
             if sections:
@@ -621,11 +688,20 @@ class DeepSearchLLMReportWriter:
             if recent_ids:
                 purpose = "\n\n".join([purpose, "Recency-retained evidence_ids: " + ", ".join(recent_ids)]).strip()
 
+            evidence_pack = bank.evidence_pack_for_prompt(
+                merged_ids,
+                source_key_map=source_key_map,
+                question=question,
+                max_chars_per_evidence=int(self.max_evidence_chars),
+            )
+            allowed_keys = _allowed_keys_for_evidence_ids(merged_ids, source_key_map=source_key_map)
             section_result = await self._write_single_section(
                 question=question,
                 section={**section, "purpose": purpose},
-                evidences=merged_evidences,
+                evidence_pack=evidence_pack,
+                allowed_keys=allowed_keys,
                 graph_chain=graph_chain,
+                context=context,
             )
             sections.append(
                 {
@@ -649,7 +725,9 @@ class DeepSearchLLMReportWriter:
             outline=outline,
             sections=sections,
             evidences=synthesis_evidences,
+            source_key_map=source_key_map,
             coverage=context.get("coverage") or {},
+            context=context,
         )
         title_limit = int(report_defaults.DEFAULT_PARALLEL_TITLE_MAX_CHARS)
         title = (synthesis.get("title") if synthesis else None) or (
@@ -671,6 +749,7 @@ class DeepSearchLLMReportWriter:
             "limitations": [str(item) for item in limitations if str(item).strip()],
             "next_steps": [str(item) for item in next_steps if str(item).strip()],
             "citations": all_citations,
+            "source_key_map": source_key_map,
         }
 
     async def _synthesize_parallel_fields(
@@ -680,7 +759,9 @@ class DeepSearchLLMReportWriter:
         outline: List[Dict[str, Any]],
         sections: List[Dict[str, Any]],
         evidences: List[Dict[str, Any]],
+        source_key_map: Dict[str, str],
         coverage: Dict[str, Any],
+        context: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Synthesize title/short_answer/limitations/next_steps after parallel section drafting."""
 
@@ -691,8 +772,14 @@ class DeepSearchLLMReportWriter:
         if limited_evidences:
             bank = EvidenceBank()
             bank.add_many(limited_evidences)
+            evidence_ids = [
+                str(item.get("chunk_id") or "").strip()
+                for item in limited_evidences
+                if isinstance(item, dict) and str(item.get("chunk_id") or "").strip()
+            ]
             evidence_pack = bank.evidence_pack_for_prompt(
-                bank.ids(),
+                evidence_ids,
+                source_key_map=source_key_map,
                 question=question,
                 max_chars_per_evidence=int(self.max_evidence_chars),
             )
@@ -708,16 +795,23 @@ class DeepSearchLLMReportWriter:
         base_messages = [
             {
                 "role": "system",
-                "content": self._system_prompt_with_language(PARALLEL_SYNTHESIS_SYSTEM_PROMPT_EN, question=question),
+                "content": self._system_prompt_with_style(
+                    PARALLEL_SYNTHESIS_SYSTEM_PROMPT_EN,
+                    question=question,
+                    context=context,
+                ),
             },
             {"role": "user", "content": user_prompt},
         ]
 
-        allowed_ids = {
-            str(item.get("chunk_id") or "").strip()
-            for item in limited_evidences
-            if isinstance(item, dict) and str(item.get("chunk_id") or "").strip()
-        }
+        allowed_keys = _allowed_keys_for_evidence_ids(
+            [
+                str(item.get("chunk_id") or "").strip()
+                for item in limited_evidences
+                if isinstance(item, dict) and str(item.get("chunk_id") or "").strip()
+            ],
+            source_key_map=source_key_map,
+        )
 
         messages = list(base_messages)
         last_raw = ""
@@ -740,9 +834,9 @@ class DeepSearchLLMReportWriter:
                 raise ValueError(f"Parallel synthesis returned invalid JSON. raw={_snippet(last_raw)}")
 
             short_answer = str(parsed.get("short_answer") or parsed.get("summary") or "").strip()
-            if allowed_ids and short_answer and not _has_supported_inline_citation(short_answer, allowed_ids=allowed_ids):
+            if allowed_keys and short_answer and not _has_supported_inline_citation(short_answer, allowed_keys=allowed_keys):
                 if attempt < max(int(self.max_retries), 1) - 1:
-                    allowed_csv = ", ".join(sorted(allowed_ids))
+                    allowed_csv = ", ".join(str(key) for key in sorted(allowed_keys))
                     repair_prompt = PARALLEL_SYNTHESIS_CITATION_REPAIR_USER_PROMPT_EN.format(
                         allowed_ids_csv=allowed_csv,
                         raw_snippet=_snippet(last_raw, limit=int(report_defaults.DEFAULT_ERROR_SNIPPET_LIMIT_CHARS)),
@@ -776,32 +870,17 @@ class DeepSearchLLMReportWriter:
         *,
         question: str,
         section: Dict[str, Any],
-        evidences: List[Dict[str, Any]],
+        evidence_pack: str,
+        allowed_keys: set[int],
         graph_chain: List[str],
+        context: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Generate a single section using the section-specific prompt."""
-        max_items = min(max(1, self.max_section_evidence_items), len(evidences) or 0) if evidences else 0
-        max_chars = int(self.max_evidence_chars)
         chain_limit = len(graph_chain)
         last_exc: Exception | None = None
 
         for attempt in range(max(self.max_retries, 1)):
-            limited_evidences = _limit_evidences(evidences, max_items if max_items else None, max_chars, question=question)
             limited_chain = graph_chain[: max(0, chain_limit)] if chain_limit else []
-            allowed_ids = {
-                str(item.get("chunk_id") or "").strip()
-                for item in limited_evidences
-                if isinstance(item, dict) and str(item.get("chunk_id") or "").strip()
-            }
-            evidence_pack = ""
-            if limited_evidences:
-                bank = EvidenceBank()
-                bank.add_many(limited_evidences)
-                evidence_pack = bank.evidence_pack_for_prompt(
-                    bank.ids(),
-                    question=question,
-                    max_chars_per_evidence=int(max_chars),
-                )
 
             user_prompt = SECTION_WRITE_USER_PROMPT_EN.format(
                 question=question,
@@ -814,7 +893,11 @@ class DeepSearchLLMReportWriter:
             base_messages = [
                 {
                     "role": "system",
-                    "content": self._system_prompt_with_language(SECTION_WRITE_SYSTEM_PROMPT_EN, question=question),
+                    "content": self._system_prompt_with_style(
+                        SECTION_WRITE_SYSTEM_PROMPT_EN,
+                        question=question,
+                        context=context,
+                    ),
                 },
                 {"role": "user", "content": user_prompt},
             ]
@@ -840,7 +923,7 @@ class DeepSearchLLMReportWriter:
                     continue
                 break
             body = str(data.get("body_markdown") or "").strip()
-            if allowed_ids and body and not _has_supported_inline_citation(body, allowed_ids=allowed_ids):
+            if allowed_keys and body and not _has_supported_inline_citation(body, allowed_keys=allowed_keys):
                 last_exc = ValueError("Section body is missing supported inline citations.")
                 if attempt < self.max_retries - 1:
                     continue

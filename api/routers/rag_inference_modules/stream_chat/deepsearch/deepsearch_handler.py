@@ -135,32 +135,53 @@ def _save_trace_events_to_file(
                     raw_answer = report.get("answer")
                     if isinstance(raw_answer, str) and raw_answer.strip():
                         # Keep DeepSearch citations consistent with the rag_inference chain:
-                        # convert bracket ids -> <sup>k</sup> and emit `sources` mapping,
-                        # but do NOT append an in-text "## References" section.
+                        # answer already uses <sup>k</sup>; we just normalize punctuation and emit sources mapping.
                         from core.deepsearch.report.sup_citations import (
-                            convert_bracket_citations_to_sup,
+                            build_source_entries,
                             normalize_sup_punctuation,
                         )
 
                         structured = report.get("structured_report")
-                        citations = structured.get("citations") if isinstance(structured, dict) else None
+                        source_key_map = structured.get("source_key_map") if isinstance(structured, dict) else None
                         evidences = report.get("evidences") if isinstance(report.get("evidences"), list) else None
 
-                        converted, sources, citation_key_map = convert_bracket_citations_to_sup(
-                            raw_answer,
-                            citations=citations if isinstance(citations, list) else [],
-                            evidences=evidences,
-                        )
-                        converted = normalize_sup_punctuation(converted)
+                        normalized = normalize_sup_punctuation(raw_answer)
                         rendered_result = json.loads(json.dumps(deepsearch_result, ensure_ascii=False, default=str))
                         rendered_report = rendered_result.get("report") if isinstance(rendered_result, dict) else None
                         if isinstance(rendered_report, dict):
                             rendered_report.setdefault("answer_raw", raw_answer)
-                            rendered_report["answer"] = converted
-                            if sources:
-                                rendered_report["sources"] = sources
-                            if citation_key_map:
-                                rendered_report["citation_key_map"] = citation_key_map
+                            rendered_report["answer"] = normalized
+                            if isinstance(source_key_map, dict) and source_key_map:
+                                pairs = []
+                                for key, ev_id in source_key_map.items():
+                                    try:
+                                        num = int(str(key).strip())
+                                    except ValueError:
+                                        continue
+                                    ev_id = str(ev_id).strip()
+                                    if not ev_id:
+                                        continue
+                                    pairs.append((num, ev_id))
+                                if pairs:
+                                    pairs.sort(key=lambda item: item[0])
+                                    ordered_ids = [ev_id for _, ev_id in pairs]
+                                    id_to_num = {ev_id: num for num, ev_id in pairs}
+                                    evidence_lookup = {}
+                                    for item in evidences or []:
+                                        if not isinstance(item, dict):
+                                            continue
+                                        chunk_id = str(item.get("chunk_id") or "").strip()
+                                        if not chunk_id:
+                                            continue
+                                        evidence_lookup[chunk_id] = item
+                                    sources = build_source_entries(
+                                        ordered_ids=ordered_ids,
+                                        evidence_lookup=evidence_lookup,
+                                        id_to_num=id_to_num,
+                                    )
+                                    if sources:
+                                        rendered_report["sources"] = sources
+                                    rendered_report["citation_key_map"] = id_to_num
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to render DeepSearch answer for trace storage: %s", exc)
             rendered_result = deepsearch_result
@@ -286,11 +307,6 @@ def _build_progress_info(stage: str, metadata: dict, state: Any, request_id: str
         progress_info["message"] = "正在生成报告..."
         if hasattr(state, "report_payload") and state.report_payload:
             progress_info["report_payload"] = state.report_payload
-    elif stage == "quality_gated":
-        progress_info["message"] = "正在进行质量检查..."
-        if hasattr(state, "quality_gates") and state.quality_gates:
-            progress_info["quality_gates"] = state.quality_gates
-            progress_info["quality_gates_count"] = len(state.quality_gates)
     elif stage == "done":
         progress_info["status"] = "completed"
         progress_info["message"] = "DeepSearch 完成"

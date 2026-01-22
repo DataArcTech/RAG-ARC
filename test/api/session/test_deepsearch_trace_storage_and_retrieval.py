@@ -230,7 +230,7 @@ def test_trace_storage_renders_sup_citations_for_user_visible_answer(temp_trace_
     deepsearch_result = {
         "plan": {"plan_id": "test_plan_id", "question": "测试问题", "steps": []},
         "report": {
-            "answer": "Alpha[ev1]。",
+            "answer": "Alpha。<sup>1</sup>",
             "evidences": [
                 {
                     "chunk_id": "ev1",
@@ -239,7 +239,7 @@ def test_trace_storage_renders_sup_citations_for_user_visible_answer(temp_trace_
                     "provenance": {"metadata": {"chunk_metadata": {"source_file_id": "file-1", "filename": "doc1.md"}}},
                 }
             ],
-            "structured_report": {"citations": [{"evidence_id": "ev1"}]},
+            "structured_report": {"citations": [{"evidence_id": "ev1"}], "source_key_map": {"1": "ev1"}},
         },
         "state": {"run_id": run_id},
     }
@@ -257,7 +257,7 @@ def test_trace_storage_renders_sup_citations_for_user_visible_answer(temp_trace_
         trace_data = json.load(f)
 
     stored = trace_data["deepsearch_result"]["report"]
-    assert stored["answer_raw"] == "Alpha[ev1]。"
+    assert stored["answer_raw"] == "Alpha。<sup>1</sup>"
     assert "<sup>1</sup>" in stored["answer"]
     assert "## References" not in stored["answer"]
     assert stored.get("sources") and stored["sources"][0]["file"] == "/knowledge/chunk/ev1"

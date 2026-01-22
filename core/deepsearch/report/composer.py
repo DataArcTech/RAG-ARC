@@ -9,7 +9,6 @@ from typing import Any, Dict, Iterable, List, Optional
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 
-from core.deepsearch.report.consistency_checker import ConsistencyChecker
 from core.deepsearch.report.citation_agent import CitationAgent
 from core.deepsearch.report.llm_writer import DeepSearchLLMReportWriter, render_markdown_from_structured
 from core.deepsearch.trace import emit_trace
@@ -17,6 +16,7 @@ from core.presentation.evidence import build_deepsearch_evidence
 from core.deepsearch.memory import EvidenceBank
 from config.core.deepsearch import report_composer_defaults as composer_defaults
 from core.deepsearch.report.provenance_backfill import attach_provenance_chunk_evidence
+from core.utils.citations import extract_sup_keys
 from core.utils.json_extract import safe_json_loads
 from core.deepsearch.utils.file_scope import (
     extract_titles_from_question,
@@ -59,14 +59,12 @@ class DeepSearchReporter:
         self.report_max_graph_chain_items = int(self.config["report_max_graph_chain_items"])
         self.report_max_seed_entities = int(self.config["report_max_seed_entities"])
         self.enable_llm_report = bool(self.config["enable_llm_report"])
-        self.enable_consistency_check = bool(self.config["enable_consistency_check"])
-        self.consistency_temperature = float(self.config["consistency_temperature"])
         self.enable_citation_agent = bool(self.config["enable_citation_agent"])
+        self.citation_aliases = bool(self.config.get("citation_aliases", False))
         self.parallel_sections = bool(self.config["parallel_sections"])
         self.max_parallel_sections = int(self.config["max_parallel_sections"])
         self.sectionwise_writer = bool(self.config["sectionwise_writer"])
         self.sectionwise_retain_k = int(self.config["sectionwise_retain_k"])
-        self.citation_aliases = bool(self.config["citation_aliases"])
         self.include_appendices_in_answer = bool(self.config.get("include_appendices_in_answer", False))
         self.provenance_chunk_attach_max = int(
             self.config.get("provenance_chunk_attach_max", composer_defaults.DEFAULT_PROVENANCE_CHUNK_ATTACH_MAX)
@@ -371,8 +369,15 @@ class DeepSearchReporter:
             if alias_diag:
                 metadata["citation_alias_rewrite"] = alias_diag
         summary_text = structured_llm.get("short_answer") or structured_llm.get("summary")
+        source_key_map = structured_llm.get("source_key_map") if isinstance(structured_llm, dict) else None
         if isinstance(summary_text, str) and summary_text.strip() and authoritative_evidences:
-            if not re.search(r"(?:\[[^\[\]]+\]|【[^【】]+】)", summary_text):
+            max_key = None
+            if isinstance(source_key_map, dict) and source_key_map:
+                try:
+                    max_key = max(int(k) for k in source_key_map.keys())
+                except Exception:  # noqa: BLE001
+                    max_key = None
+            if not extract_sup_keys(summary_text, max_key=max_key):
                 raise ValueError("short_answer is missing inline citations (cite-first hard gate).")
         if self.enable_citation_agent:
             structured_llm, audit = CitationAgent().process(
@@ -381,6 +386,7 @@ class DeepSearchReporter:
                 graph_evidence=context.get("graph_evidence") or {},
                 max_chunk_index_items=self.max_evidence_items,
                 citation_aliases=(alias_bundle.get("alias_to_original") if alias_bundle else None),
+                source_key_map=source_key_map if isinstance(source_key_map, dict) else None,
             )
             metadata["citation_audit"] = audit
         markdown_text = render_markdown_from_structured(structured_llm)
@@ -412,29 +418,12 @@ class DeepSearchReporter:
             "next_steps": structured_llm.get("next_steps") or [],
             "citations": structured_llm.get("citations") or [],
             "evidence_index": structured_llm.get("evidence_index") or [],
+            "source_key_map": structured_llm.get("source_key_map") or {},
             "graph_evidence": context.get("graph_evidence") or {},
             "text": markdown_text,
             "context": request_context or {},
             "generation": {"mode": "llm"},
         }
-
-        if self.enable_consistency_check and authoritative_evidences:
-            checker = ConsistencyChecker(
-                self.llm_connector,
-                temperature=self.consistency_temperature,
-                max_retries=int(self.config["consistency_max_retries"]),
-            )
-            result = await checker.check(
-                question=question,
-                report_markdown=markdown_text,
-                evidences=authoritative_evidences,
-                structured_report=structured_report,
-                max_evidence_chars=self.report_max_evidence_chars,
-                max_claims=int(self.config["consistency_max_claims"]),
-            )
-            structured_report["consistency_check"] = result.model_dump()
-            if not result.is_consistent:
-                metadata["quality_warnings"] = [issue.model_dump() for issue in result.issues]
 
         metadata["structured_report"] = {key: structured_report[key] for key in structured_report if key != "text"}
 
@@ -452,7 +441,7 @@ class DeepSearchReporter:
         """Replace long chunk IDs with stable short aliases for LLM prompting.
 
         The alias is treated as the chunk_id inside prompts, then rewritten back to the original
-        chunk_id before running CitationAgent / ConsistencyChecker.
+        chunk_id before running CitationAgent.
         """
 
         alias_to_original: Dict[str, str] = {}
@@ -690,6 +679,13 @@ class DeepSearchReporter:
             max_items=outline_index_limit,
             max_summary_chars=int(self.config["outline_evidence_summary_chars"]),
         )
+        graph_context = trace.get("graph_context") if isinstance(trace.get("graph_context"), dict) else {}
+        context_meta = graph_context.get("metadata") if isinstance(graph_context, dict) else {}
+        report_style = None
+        if isinstance(context_meta, dict):
+            token = str(context_meta.get("report_style") or "").strip().lower()
+            if token in {"deepsearch", "research"}:
+                report_style = token
 
         return {
             "question": trace.get("question") or "",
@@ -702,6 +698,7 @@ class DeepSearchReporter:
             "methodology": methodology,
             "coverage": coverage_bundle,
             "request_context": request_context,
+            "report_style": report_style or "deepsearch",
         }
 
     def _merge_evidences(
@@ -902,7 +899,7 @@ def _append_chunk_evidence(
         if len(content) > preview_length:
             preview += "..."
         source_tag = f" ({source})" if source else ""
-        blocks.append(f"- [{chunk_id}]{source_tag}: {preview}")
+        blocks.append(f"- `{chunk_id}`{source_tag}: {preview}")
 
     return (markdown_text or "").rstrip() + "\n" + "\n".join(blocks).rstrip() + "\n"
 
@@ -939,7 +936,7 @@ def _append_tool_evidence(
         if len(content) > preview_length:
             preview += "..."
         source_tag = f" ({source})" if source else ""
-        blocks.append(f"- [{chunk_id}]{source_tag}: {preview}")
+        blocks.append(f"- `{chunk_id}`{source_tag}: {preview}")
 
     return (markdown_text or "").rstrip() + "\n" + "\n".join(blocks).rstrip() + "\n"
 

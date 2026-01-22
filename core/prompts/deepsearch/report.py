@@ -30,7 +30,7 @@ REPORT_OUTLINE_USER_PROMPT_EN = (
     "- Highlights: {highlight_count}\n"
     "- Evidence snippets: {evidence_count}\n"
     "- Graph chain edges: {graph_chain_count}\n\n"
-    "Evidence index (id + short summary; cite these ids in the outline):\n{evidence_index_json}\n\n"
+    "Evidence index (chunk_id + short summary; use these ids only in the outline):\n{evidence_index_json}\n\n"
     "Task:\n"
     "Return a JSON array of sections (typically 5-8; use fewer if evidence is scarce). Each item must be an object with:\n"
     "- title: string\n"
@@ -51,17 +51,21 @@ REPORT_WRITE_SYSTEM_PROMPT_EN = """You are a research report writer producing kn
 3. Uncertainty acknowledgement: if evidence is insufficient or conflicting, state this explicitly in the relevant section and in Limitations.
 4. Coherent narrative: ensure smooth transitions, avoid repetition, and keep sections focused on the outline purpose.
 5. No filler: avoid generic phrases like "This report will..." or "In conclusion" unless necessary; prioritize specific, evidence-backed details (numbers/terms/conditions).
+6. Conclusion-first preference: when appropriate, state the key conclusion early, then expand with supporting reasoning.
 
 ## Citation Rules (CRITICAL - MUST FOLLOW EXACTLY)
-- Use inline citations ONLY in [chunk_id] format, where chunk_id is the exact value from the evidence list.
-- Example: "学校成立于1956年[chunk_001]，采用美国学制[chunk_002]。"
+- Use inline citations ONLY in <sup>k</sup> format, where k is a Source key from the Evidence Pack.
+- Place <sup>k</sup> ONLY after sentence-ending punctuation ('.' or '。').
+- Each <sup> tag must contain exactly one number. Use multiple citations as consecutive tags: <sup>1</sup><sup>3</sup>.
+- Example (Chinese): "学校成立于1956年。<sup>1</sup>采用美国学制。<sup>2</sup>"
+- Example (English): "The system launched in 1956. <sup>1</sup>"
 - NEVER use other citation formats such as:
-  - 【7】 ❌ (Chinese brackets with numbers)
-  - (7) ❌ (parentheses with numbers)
-  - ^7 ❌ (superscript notation)
-  - [7] ❌ (numeric-only without chunk_ prefix)
-  - [Source 1] ❌ (descriptive labels)
-- Only cite chunk_id values that exist in the provided Evidence Pack.
+  - [1] ❌
+  - 【7】 ❌
+  - (7) ❌
+  - ^7 ❌
+  - <sup>1,3</sup> ❌
+- Only cite Source keys that exist in the Evidence Pack allowlist.
 - Never cite tool-generated IDs or tool names (e.g. think / graph.* / tool:*). If it is not in the Evidence Pack allowlist, it is not citable.
 - If you cannot support a claim with evidence, do not state it as fact.
 
@@ -104,49 +108,6 @@ REPORT_WRITE_USER_PROMPT_EN = (
     "- If the evidence conflicts or is too weak, say so in limitations.\n"
 )
 
-CONSISTENCY_CHECK_SYSTEM_PROMPT_EN = """You are a strict supportiveness & contradiction checker for a cite-first research report.
-
-## Output language (STRICT)
-- Output language: {output_language}
-- All human-readable strings in the JSON output MUST be written in {output_language}.
-- Do NOT switch languages due to document titles or file names.
-
-## Task
-You are given:
-- a user question
-- a list of extracted claim sentences from the report (each includes its inline citations)
-- the evidence snippets referenced by those citations
-
-Verify that:
-1) Each claim is supported by its cited evidence snippets.
-2) Citations reference evidence that actually supports the nearby claim (no mis-citations/misquotes).
-3) Claims do not contradict the evidence or each other.
-
-## Output
-Return ONLY valid JSON with the following schema:
-{
-  "is_consistent": boolean,
-  "confidence": number (0.0-1.0),
-  "issues": [
-    {
-      "issue_type": "unsupported_claim" | "misquote" | "contradiction" | "unknown_citation",
-      "location": string,
-      "description": string,
-      "suggested_fix": string | null
-    }
-  ]
-}
-
-## Constraints
-- Use ONLY the provided evidence snippets as ground truth.
-- Be conservative: if unsure, surface an issue with lower confidence.
-"""
-
-CONSISTENCY_CHECK_USER_PROMPT_EN = (
-    "User question:\n{question}\n\n"
-    "Claim set (JSON):\n{claims_json}\n\n"
-    "Return the JSON result now."
-)
 
 SECTION_WRITE_SYSTEM_PROMPT_EN = """You are a research report section writer producing a single section for a knowledge graph-enhanced report.
 
@@ -157,14 +118,18 @@ SECTION_WRITE_SYSTEM_PROMPT_EN = """You are a research report section writer pro
 4. No filler: avoid generic intro/outro sentences; focus on concrete, evidence-backed details relevant to the section purpose.
 
 ## Citation Rules (CRITICAL - MUST FOLLOW EXACTLY)
-- Use inline citations ONLY in [chunk_id] format, where chunk_id is the exact value from the evidence list.
-- Example: "学校成立于1956年[chunk_001]，采用美国学制[chunk_002]。"
+- Use inline citations ONLY in <sup>k</sup> format, where k is a Source key from the Evidence Pack.
+- Place <sup>k</sup> ONLY after sentence-ending punctuation ('.' or '。').
+- Each <sup> tag must contain exactly one number. Use multiple citations as consecutive tags: <sup>1</sup><sup>3</sup>.
+- Example (Chinese): "学校成立于1956年。<sup>1</sup>采用美国学制。<sup>2</sup>"
+- Example (English): "The system launched in 1956. <sup>1</sup>"
 - NEVER use other citation formats such as:
-  - 【7】 ❌ (Chinese brackets with numbers)
-  - (7) ❌ (parentheses with numbers)
-  - ^7 ❌ (superscript notation)
-  - [7] ❌ (numeric-only without chunk_ prefix)
-- Only cite chunk_id values that exist in the provided Evidence Pack.
+  - [1] ❌
+  - 【7】 ❌
+  - (7) ❌
+  - ^7 ❌
+  - <sup>1,3</sup> ❌
+- Only cite Source keys that exist in the Evidence Pack allowlist.
 - Never cite tool-generated IDs or tool names (e.g. think / graph.* / tool:*). If it is not in the Evidence Pack allowlist, it is not citable.
 
 ## Output Requirements
@@ -197,6 +162,17 @@ SECTION_WRITE_USER_PROMPT_EN = (
     "- Add inline citations for any concrete claim.\n"
 )
 
+REPORT_STYLE_RESEARCH_HINT_EN = """## Research Report Style
+- Treat the task as exploratory research, not just Q&A.
+- Prefer a conclusion-first framing, then explain evidence clustering and cross-source agreement/disagreement.
+- Highlight uncertainty, assumptions, and gaps explicitly (do not over-claim).
+- Emphasize evidence triangulation and why certain sources are more reliable.
+- End with focused next-steps or verification suggestions when evidence is thin.
+- Use numbered headings:
+  - Top-level section titles must start with "1.", "2.", "3.", ...
+  - Inside each section, use subheadings like "1.1", "1.2", "2.1" as Markdown headings (e.g., "### 1.1 Subtopic").
+"""
+
 PARALLEL_SYNTHESIS_SYSTEM_PROMPT_EN = """You are a report synthesizer.
 
 ## Goal
@@ -209,7 +185,7 @@ Given a user question, a report outline, and draft section bodies (already writt
 ## Constraints
 - Write in the same language as the user question.
 - Do not invent facts: only rely on the provided Evidence Pack and section drafts.
-- When making a concrete factual claim, keep it supported by evidence and use inline citations ONLY in [chunk_id] format.
+- When making a concrete factual claim, keep it supported by evidence and use inline citations ONLY in <sup>k</sup> format.
 - Do NOT rewrite the full sections; they are already drafted.
 - The short_answer must contain supported inline citations for any concrete claim.
 - Keep the short_answer direct and non-templated (avoid boilerplate framing; summarize the key evidence-backed conclusion first).
@@ -227,8 +203,10 @@ PARALLEL_SYNTHESIS_CITATION_REPAIR_USER_PROMPT_EN = (
     "Rules (STRICT):\n"
     "- Do NOT change the schema keys.\n"
     "- Do NOT invent facts.\n"
-    "- For any concrete factual claim in `short_answer`, add inline citations ONLY in [chunk_id] format.\n"
-    "- Cite ONLY from this allowlist of chunk_id values:\n"
+    "- For any concrete factual claim in `short_answer`, add inline citations ONLY in <sup>k</sup> format.\n"
+    "- Place <sup>k</sup> ONLY after sentence-ending punctuation ('.' or '。').\n"
+    "- Each <sup> tag must contain exactly one number.\n"
+    "- Cite ONLY from this allowlist of Source keys:\n"
     "{allowed_ids_csv}\n\n"
     "Previous output (snippet):\n"
     "{raw_snippet}\n"

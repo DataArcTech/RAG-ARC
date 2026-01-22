@@ -29,6 +29,7 @@ class ThinkToolResponse(BaseModel):
     tool_calls: List[ThinkToolCall] = Field(default_factory=list)
     plan: List[PlanItem] = Field(...)
     report_needed: Optional[bool] = None
+    report_style: Optional[str] = None
     is_final: Optional[bool] = None
 
 
@@ -165,6 +166,7 @@ class ThinkTool(GraphTool):
                     "tool_calls": [call.model_dump() for call in payload.tool_calls],
                     "plan": [item.model_dump() for item in payload.plan],
                     "report_needed": payload.report_needed,
+                    "report_style": payload.report_style,
                     "is_final": payload.is_final,
                     "compression": compaction_meta,
                 },
@@ -241,6 +243,10 @@ class ThinkTool(GraphTool):
         if mode == initial_mode.MODE:
             if payload.report_needed is None:
                 raise ValueError("think_mode=initial requires report_needed")
+            if payload.report_style is not None:
+                style = str(payload.report_style or "").strip().lower()
+                if style not in {"deepsearch", "research"}:
+                    raise ValueError("think_mode=initial report_style must be deepsearch or research")
             return
         if mode == final_mode.MODE:
             if payload.is_final is not True:

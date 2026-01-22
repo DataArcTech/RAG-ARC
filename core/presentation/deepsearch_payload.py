@@ -9,7 +9,12 @@ from config.output_limits import (
     DEEPSEARCH_TOP_SEED_ENTITIES,
     DEEPSEARCH_TOP_CHUNKS,
 )
-from core.deepsearch.report.sup_citations import convert_bracket_citations_to_sup, normalize_sup_punctuation
+from core.deepsearch.report.sup_citations import (
+    build_source_entries,
+    convert_bracket_citations_to_sup,
+    normalize_sup_punctuation,
+)
+from core.utils.citations import compact_sup_citations
 from core.presentation.evidence import build_deepsearch_evidence
 
 
@@ -175,17 +180,48 @@ def _trim_report_block(report_block: Optional[Dict[str, Any]], limit: Optional[i
     }
     structured = report_block.get("structured_report")
     citations: list[dict[str, Any]] = []
+    source_key_map: dict[str, str] = {}
     if isinstance(structured, dict):
         trimmed["structured_report"] = structured
         citations = structured.get("citations") if isinstance(structured.get("citations"), list) else []
+        if isinstance(structured.get("source_key_map"), dict):
+            source_key_map = structured.get("source_key_map") or {}
 
     # Product behavior: keep <sup> anchors + sources mapping, but do not append an in-text
     # "## References" section (frontend uses sup -> chunk jump UX).
-    converted, sources, citation_key_map = convert_bracket_citations_to_sup(
-        str(trimmed.get("answer") or ""),
-        citations=citations,
-        evidences=evidences if isinstance(evidences, list) else None,
-    )
+    converted = str(trimmed.get("answer") or "")
+    sources: list[dict[str, Any]] = []
+    citation_key_map: dict[str, int] = {}
+    if source_key_map:
+        max_key = None
+        try:
+            max_key = max(int(k) for k in source_key_map.keys())
+        except Exception:
+            max_key = None
+        converted, used_keys = compact_sup_citations(converted, max_key=max_key or 0)
+        ordered_ids: list[str] = []
+        for key in used_keys:
+            ev_id = str(source_key_map.get(str(key)) or "").strip()
+            if ev_id:
+                ordered_ids.append(ev_id)
+        evidence_lookup = {
+            str(ev.get("chunk_id") or "").strip(): ev
+            for ev in (evidences if isinstance(evidences, list) else [])
+            if isinstance(ev, dict) and str(ev.get("chunk_id") or "").strip()
+        }
+        id_to_num = {ev_id: idx for idx, ev_id in enumerate(ordered_ids, start=1)}
+        sources = build_source_entries(
+            ordered_ids=ordered_ids,
+            evidence_lookup=evidence_lookup,
+            id_to_num=id_to_num,
+        )
+        citation_key_map = dict(id_to_num)
+    elif citations:
+        converted, sources, citation_key_map = convert_bracket_citations_to_sup(
+            converted,
+            citations=citations,
+            evidences=evidences,
+        )
     converted = normalize_sup_punctuation(converted)
     trimmed["answer"] = converted
     try:

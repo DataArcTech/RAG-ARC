@@ -20,9 +20,6 @@ def _default_reporter_config(**overrides):  # noqa: ANN001
         "max_evidence_items": 10,
         "report_max_graph_chain_items": 200,
         "report_max_seed_entities": 15,
-        "enable_consistency_check": False,
-        "consistency_temperature": 0.0,
-        "consistency_max_retries": 2,
         "sectionwise_writer": False,
         "sectionwise_retain_k": 5,
         "citation_aliases": False,
@@ -32,7 +29,6 @@ def _default_reporter_config(**overrides):  # noqa: ANN001
         "enable_citation_agent": False,
         "parallel_sections": False,
         "max_parallel_sections": 4,
-        "consistency_max_claims": 40,
         "synthesis_section_max_chars": 1200,
     }
     config.update(overrides)
@@ -73,7 +69,7 @@ class _PromptAwareLLM:
                 "{\n"
                 f'  "title": "{title}",\n'
                 '  "section_type": "analysis",\n'
-                f'  "body_markdown": "Draft for {title}. [ev1]",\n'
+                f'  "body_markdown": "Draft for {title}. <sup>1</sup>",\n'
                 '  "citations": [{"evidence_id": "ev1", "used_for": "supporting detail"}]\n'
                 "}\n"
             )
@@ -82,104 +78,14 @@ class _PromptAwareLLM:
             return """
 {
   "title": "Who partnered with OpenAI?",
-  "short_answer": "Microsoft partnered with OpenAI. [ev1]",
-  "summary": "Microsoft partnered with OpenAI. [ev1]",
+  "short_answer": "Microsoft partnered with OpenAI. <sup>1</sup>",
+  "summary": "Microsoft partnered with OpenAI. <sup>1</sup>",
   "limitations": ["Draft synthesized from limited evidence."],
   "next_steps": ["Collect additional sources and verify timeline details."]
 }
 """.strip()
 
         raise RuntimeError(f"Unrecognized prompt for fake LLM: {user_prompt[:120]}")
-
-
-class _AliasCitingLLM:
-    def __init__(self):
-        self.calls = 0
-
-    def chat(self, messages, **kwargs):  # noqa: ANN001
-        self.calls += 1
-        user_prompt = ""
-        for message in reversed(messages):
-            if message.get("role") == "user":
-                user_prompt = str(message.get("content") or "")
-                break
-        if "Return a JSON array of sections" in user_prompt:
-            return (
-                """\n[\n  {\"title\": \"Findings\", \"section_type\": \"analysis\", \"purpose\": \"Summarize evidence.\", \"evidence_ids\": [\"ev1\"]}\n]\n""".strip()
-            )
-        if "Return a single JSON object with:" in user_prompt and "Evidence Pack" in user_prompt:
-            return (
-                """\n{\n  \"title\": \"Report\",\n  \"short_answer\": \"Claim supported by evidence. [chunk_001]\",\n  \"summary\": \"Claim supported by evidence. [chunk_001]\",\n  \"sections\": [\n    {\"title\": \"Findings\", \"section_type\": \"analysis\", \"body_markdown\": \"Detail. [chunk_001]\"}\n  ],\n  \"limitations\": [],\n  \"next_steps\": [],\n  \"citations\": []\n}\n""".strip()
-            )
-        if "Return the JSON result now." in user_prompt:
-            return """\n{\"is_consistent\": true, \"confidence\": 0.9, \"issues\": []}\n""".strip()
-        raise RuntimeError(f"Unexpected prompt: {user_prompt[:80]}")
-
-
-class _AliasCitingCjkLLM:
-    def __init__(self):
-        self.calls = 0
-
-    def chat(self, messages, **kwargs):  # noqa: ANN001
-        self.calls += 1
-        user_prompt = ""
-        for message in reversed(messages):
-            if message.get("role") == "user":
-                user_prompt = str(message.get("content") or "")
-                break
-        if "Return a JSON array of sections" in user_prompt:
-            return (
-                """\n[\n  {\"title\": \"Findings\", \"section_type\": \"analysis\", \"purpose\": \"Summarize evidence.\", \"evidence_ids\": [\"ev1\"]}\n]\n""".strip()
-            )
-        if "Return a single JSON object with:" in user_prompt and "Evidence Pack" in user_prompt:
-            return (
-                "{\n"
-                '  "title": "Report",\n'
-                '  "short_answer": "Claim supported by evidence. 【chunk_001】",\n'
-                '  "summary": "Claim supported by evidence. 【chunk_001】",\n'
-                '  "sections": [\n'
-                '    {"title": "Findings", "section_type": "analysis", "body_markdown": "Detail. 【chunk_001】"}\n'
-                "  ],\n"
-                '  "limitations": [],\n'
-                '  "next_steps": [],\n'
-                '  "citations": []\n'
-                "}\n"
-            )
-        if "Return the JSON result now." in user_prompt:
-            return """\n{\"is_consistent\": true, \"confidence\": 0.9, \"issues\": []}\n""".strip()
-        raise RuntimeError(f"Unexpected prompt: {user_prompt[:80]}")
-
-
-class _AliasVariantCitingLLM:
-    def __init__(self):
-        self.calls = 0
-
-    def chat(self, messages, **kwargs):  # noqa: ANN001
-        self.calls += 1
-        user_prompt = ""
-        for message in reversed(messages):
-            if message.get("role") == "user":
-                user_prompt = str(message.get("content") or "")
-                break
-        if "Return a JSON array of sections" in user_prompt:
-            return (
-                """\n[\n  {\"title\": \"Findings\", \"section_type\": \"analysis\", \"purpose\": \"Summarize evidence.\", \"evidence_ids\": [\"ev1\"]}\n]\n""".strip()
-            )
-        if "Return a single JSON object with:" in user_prompt and "Evidence Pack" in user_prompt:
-            return (
-                "{\n"
-                '  "title": "Report",\n'
-                '  "short_answer": "Claim supported by evidence. [chunk 1] [chunk_1] [chunk_001, chunk 1]",\n'
-                '  "summary": "Claim supported by evidence. [chunk 1] [chunk_1] [chunk_001, chunk 1]",\n'
-                '  "sections": [\n'
-                '    {"title": "Findings", "section_type": "analysis", "body_markdown": "Detail. [CHUNK_001]"}\n'
-                "  ],\n"
-                '  "limitations": [],\n'
-                '  "next_steps": [],\n'
-                '  "citations": [{"evidence_id": "chunk 1", "used_for": "support"}]\n'
-                "}\n"
-            )
-        raise RuntimeError(f"Unexpected prompt: {user_prompt[:80]}")
 
 
 def _build_trace(include_final_answer: bool = True):
@@ -242,13 +148,13 @@ def test_reporter_prefers_final_answer_and_merges_evidence():
     report_json = """
 {
   "title": "Who partnered with OpenAI?",
-  "short_answer": "Microsoft partnered with OpenAI and provides key infrastructure support. [ev1] [ev2]",
-  "summary": "Microsoft partnered with OpenAI and provides key infrastructure support. [ev1] [ev2]",
+  "short_answer": "Microsoft partnered with OpenAI and provides key infrastructure support. <sup>1</sup><sup>2</sup>",
+  "summary": "Microsoft partnered with OpenAI and provides key infrastructure support. <sup>1</sup><sup>2</sup>",
   "sections": [
     {
       "title": "Evidence-Based Findings",
       "section_type": "analysis",
-      "body_markdown": "- Microsoft formed a strategic partnership with OpenAI in 2019. [ev1]\\n- Azure hosts OpenAI services. [ev2]"
+      "body_markdown": "- Microsoft formed a strategic partnership with OpenAI in 2019. <sup>1</sup>\\n- Azure hosts OpenAI services. <sup>2</sup>"
     }
   ],
   "limitations": ["The trace contains limited evidence coverage beyond partnership and hosting."],
@@ -278,52 +184,6 @@ def test_reporter_prefers_final_answer_and_merges_evidence():
     assert report["metadata"]["request_context"]["conversation_id"] == "conv-123"
 
 
-def test_reporter_runs_consistency_check_when_enabled():
-    outline = """
-[
-  {"title": "Executive Summary", "section_type": "summary", "purpose": "State the answer succinctly.", "evidence_ids": ["ev1"]},
-  {"title": "Evidence-Based Findings", "section_type": "analysis", "purpose": "Explain what the evidence supports.", "evidence_ids": ["ev1"]},
-  {"title": "Limitations", "section_type": "limitations", "purpose": "Clarify what cannot be concluded.", "evidence_ids": ["ev1"]}
-]
-""".strip()
-    report_json = """
-{
-  "title": "Who partnered with OpenAI?",
-  "short_answer": "Microsoft partnered with OpenAI in 2019. [ev1]",
-  "summary": "Microsoft partnered with OpenAI in 2019. [ev1]",
-  "sections": [
-    {
-      "title": "Evidence-Based Findings",
-      "section_type": "analysis",
-      "body_markdown": "Microsoft formed a strategic partnership with OpenAI in 2019. [ev1]"
-    }
-  ],
-  "limitations": [],
-  "next_steps": [],
-  "citations": [
-    {"evidence_id": "ev1", "source": "hipporag", "used_for": "Partnership fact"}
-  ]
-}
-""".strip()
-    consistency_json = """
-{
-  "is_consistent": true,
-  "confidence": 0.9,
-  "issues": []
-}
-""".strip()
-    reporter = DeepSearchReporter(
-        template_store=None,
-        config=_default_reporter_config(enable_consistency_check=True),
-        llm_connector=_FakeLLM([outline, report_json, consistency_json]),
-    )
-    trace = _build_trace(include_final_answer=False)
-
-    report = asyncio.run(reporter.compose(trace, external_evidence=[]))
-
-    assert report["structured_report"]["consistency_check"]["is_consistent"] is True
-
-
 def test_reporter_raises_when_short_answer_missing_citations():
     outline = """
 [
@@ -339,7 +199,7 @@ def test_reporter_raises_when_short_answer_missing_citations():
     {
       "title": "Evidence-Based Findings",
       "section_type": "analysis",
-      "body_markdown": "Microsoft formed a strategic partnership with OpenAI in 2019. [ev1]"
+      "body_markdown": "Microsoft formed a strategic partnership with OpenAI in 2019. <sup>1</sup>"
     }
   ],
   "limitations": [],
@@ -349,7 +209,7 @@ def test_reporter_raises_when_short_answer_missing_citations():
 """.strip()
     reporter = DeepSearchReporter(
         template_store=None,
-        config=_default_reporter_config(enable_consistency_check=False),
+        config=_default_reporter_config(),
         llm_connector=_FakeLLM([outline, report_json]),
     )
     trace = _build_trace(include_final_answer=False)
@@ -366,13 +226,13 @@ def test_reporter_citation_agent_fills_missing_citations():
     report_json = """
 {
   "title": "Who partnered with OpenAI?",
-  "short_answer": "Microsoft partnered with OpenAI in 2019. [ev1]",
-  "summary": "Microsoft partnered with OpenAI in 2019. [ev1]",
+  "short_answer": "Microsoft partnered with OpenAI in 2019. <sup>1</sup>",
+  "summary": "Microsoft partnered with OpenAI in 2019. <sup>1</sup>",
   "sections": [
     {
       "title": "Findings",
       "section_type": "analysis",
-      "body_markdown": "The evidence supports a partnership with Microsoft. [ev1]"
+      "body_markdown": "The evidence supports a partnership with Microsoft. <sup>1</sup>"
     }
   ],
   "limitations": [],
@@ -422,7 +282,7 @@ def test_reporter_raises_when_llm_output_invalid():
 def test_reporter_includes_chunk_evidence_preview():
     """Verify the markdown output includes chunk evidence preview section."""
     outline = """\n[\n  {\"title\": \"Findings\", \"section_type\": \"analysis\", \"purpose\": \"Show evidence\", \"evidence_ids\": [\"chunk_abc123\"]}\n]\n""".strip()
-    report_json = """\n{\n  \"title\": \"Report\",\n  \"short_answer\": \"ok [chunk_abc123]\",\n  \"summary\": \"ok [chunk_abc123]\",\n  \"sections\": [\n    {\"title\": \"Findings\", \"section_type\": \"analysis\", \"body_markdown\": \"Detail. [chunk_abc123]\"}\n  ],\n  \"limitations\": [],\n  \"next_steps\": [],\n  \"citations\": []\n}\n""".strip()
+    report_json = """\n{\n  \"title\": \"Report\",\n  \"short_answer\": \"ok. <sup>1</sup>\",\n  \"summary\": \"ok. <sup>1</sup>\",\n  \"sections\": [\n    {\"title\": \"Findings\", \"section_type\": \"analysis\", \"body_markdown\": \"Detail. <sup>1</sup>\"}\n  ],\n  \"limitations\": [],\n  \"next_steps\": [],\n  \"citations\": []\n}\n""".strip()
     reporter = DeepSearchReporter(
         template_store=None,
         config=_default_reporter_config(include_appendices_in_answer=True),
@@ -446,11 +306,11 @@ def test_reporter_includes_chunk_evidence_preview():
 
     answer = report["answer"]
     assert "## Appendix: Chunk Evidence" in answer
-    assert "[chunk_abc123]" in answer
+    assert "`chunk_abc123`" in answer
     assert "(test-doc.pdf)" in answer
     assert "This is a long piece of content that should be truncated to show only the first 100 characters" in answer
     assert "..." in answer
-    assert "[chunk_def456]" in answer
+    assert "`chunk_def456`" in answer
     assert "Short content." in answer
 
 
@@ -477,10 +337,10 @@ def test_reporter_no_evidence_returns_deterministic_report_even_when_graph_viz_d
 
 def test_reporter_comparison_avoids_false_missing_named_files_when_filename_is_nested():
     outline = """\n[\n  {\"title\": \"Findings\", \"section_type\": \"analysis\", \"purpose\": \"Compare\", \"evidence_ids\": [\"evA\", \"evB\"]}\n]\n""".strip()
-    report_json = """\n{\n  \"title\": \"对比报告\",\n  \"short_answer\": \"两者均可对比。 [evA] [evB]\",\n  \"summary\": \"两者均可对比。 [evA] [evB]\",\n  \"sections\": [\n    {\"title\": \"Findings\", \"section_type\": \"analysis\", \"body_markdown\": \"对比细节。 [evA] [evB]\"}\n  ],\n  \"limitations\": [],\n  \"next_steps\": [],\n  \"citations\": [\n    {\"evidence_id\": \"evA\", \"used_for\": \"Plan A\"},\n    {\"evidence_id\": \"evB\", \"used_for\": \"Plan B\"}\n  ]\n}\n""".strip()
+    report_json = """\n{\n  \"title\": \"对比报告\",\n  \"short_answer\": \"两者均可对比。<sup>1</sup><sup>2</sup>\",\n  \"summary\": \"两者均可对比。<sup>1</sup><sup>2</sup>\",\n  \"sections\": [\n    {\"title\": \"Findings\", \"section_type\": \"analysis\", \"body_markdown\": \"对比细节。<sup>1</sup><sup>2</sup>\"}\n  ],\n  \"limitations\": [],\n  \"next_steps\": [],\n  \"citations\": [\n    {\"evidence_id\": \"evA\", \"used_for\": \"Plan A\"},\n    {\"evidence_id\": \"evB\", \"used_for\": \"Plan B\"}\n  ]\n}\n""".strip()
     reporter = DeepSearchReporter(
         template_store=None,
-        config=_default_reporter_config(enable_consistency_check=False),
+        config=_default_reporter_config(),
         llm_connector=_FakeLLM([outline, report_json]),
     )
     trace = {
@@ -530,59 +390,12 @@ def test_reporter_parallel_sections_synthesizes_summary():
     assert structured["next_steps"], "Parallel writer should synthesize next steps"
 
 
-def test_reporter_rewrites_alias_citations_to_original_ids():
-    reporter = DeepSearchReporter(
-        template_store=None,
-        config=_default_reporter_config(enable_consistency_check=True, enable_citation_agent=False, citation_aliases=True),
-        llm_connector=_AliasCitingLLM(),
-    )
-    trace = _build_trace(include_final_answer=False)
-
-    report = asyncio.run(reporter.compose(trace, external_evidence=[]))
-
-    answer = report["answer"]
-    assert "[chunk_001]" not in answer, "Alias citations should be rewritten before returning markdown"
-    assert "[ev1]" in answer, "Alias should be rewritten back to original chunk IDs"
-
-
-def test_reporter_rewrites_alias_citations_with_cjk_brackets():
-    reporter = DeepSearchReporter(
-        template_store=None,
-        config=_default_reporter_config(enable_consistency_check=True, enable_citation_agent=False, citation_aliases=True),
-        llm_connector=_AliasCitingCjkLLM(),
-    )
-    trace = _build_trace(include_final_answer=False)
-
-    report = asyncio.run(reporter.compose(trace, external_evidence=[]))
-
-    answer = report["answer"]
-    assert "【chunk_001】" not in answer
-    assert "[chunk_001]" not in answer
-    assert "[ev1]" in answer
-
-
-def test_reporter_rewrites_alias_citation_variants():
-    reporter = DeepSearchReporter(
-        template_store=None,
-        config=_default_reporter_config(enable_consistency_check=False, citation_aliases=True),
-        llm_connector=_AliasVariantCitingLLM(),
-    )
-    trace = _build_trace(include_final_answer=False)
-
-    report = asyncio.run(reporter.compose(trace, external_evidence=[]))
-
-    answer = report["answer"]
-    assert "chunk_001" not in answer.lower()
-    assert "chunk 1" not in answer.lower()
-    assert "[ev1]" in answer
-
-
 def test_reporter_includes_external_evidence_even_when_internal_is_full():
     outline = """\n[\n  {\"title\": \"Findings\", \"section_type\": \"analysis\", \"purpose\": \"Answer\", \"evidence_ids\": [\"ev00\"]}\n]\n""".strip()
-    report_json = """\n{\n  \"title\": \"Q\",\n  \"short_answer\": \"A [ev00]\",\n  \"summary\": \"A [ev00]\",\n  \"sections\": [\n    {\"title\": \"Findings\", \"section_type\": \"analysis\", \"body_markdown\": \"Detail [ev00]\"}\n  ],\n  \"limitations\": [],\n  \"next_steps\": [],\n  \"citations\": []\n}\n""".strip()
+    report_json = """\n{\n  \"title\": \"Q\",\n  \"short_answer\": \"A. <sup>1</sup>\",\n  \"summary\": \"A. <sup>1</sup>\",\n  \"sections\": [\n    {\"title\": \"Findings\", \"section_type\": \"analysis\", \"body_markdown\": \"Detail. <sup>1</sup>\"}\n  ],\n  \"limitations\": [],\n  \"next_steps\": [],\n  \"citations\": []\n}\n""".strip()
     reporter = DeepSearchReporter(
         template_store=None,
-        config=_default_reporter_config(enable_consistency_check=False, max_evidence_items=10),
+        config=_default_reporter_config(max_evidence_items=10),
         llm_connector=_FakeLLM([outline, report_json]),
     )
     trace = {
