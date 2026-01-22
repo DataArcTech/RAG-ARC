@@ -24,6 +24,7 @@ from encapsulation.data_model.orm_models import (
     FilePermission,
     PermissionReceiverType,
     PermissionType,
+    FileStatus,
 )
 from framework.register import Register
 from application.knowledge.module import Knowledge
@@ -406,6 +407,7 @@ async def list_files(
     page: Optional[int] = Query(default=1, ge=1, description="Page number (starts from 1)"),
     pagesize: Optional[int] = Query(default=100, ge=1, le=1000, description="Number of files per page"),
     search: Optional[str] = Query(default=None, description="Search keyword for filename (fuzzy match)"),
+    status: Optional[str] = Query(default=None, description="Filter by file status (STORED, PARSED, CHUNKED, PARTIAL_INDEXED, INDEXED, FAILED, DELETED)"),
 ):
     """
     Get all files accessible to the current user (files with permissions only).
@@ -424,6 +426,7 @@ async def list_files(
         page: Page number (starts from 1, default: 1)
         pagesize: Number of files per page (default: 100, max: 1000)
         search: Optional search keyword for filename fuzzy matching
+        status: Optional filter by file status (STORED, PARSED, CHUNKED, PARTIAL_INDEXED, INDEXED, FAILED, DELETED)
         
     Returns:
         FileListResponse with list of files and total count
@@ -434,6 +437,17 @@ async def list_files(
             detail="Authentication required"
         )
     try:
+        # Parse status parameter if provided
+        status_enum = None
+        if status:
+            try:
+                status_enum = FileStatus[status.upper()]
+            except KeyError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid status value: {status}. Valid values are: STORED, PARSED, CHUNKED, PARTIAL_INDEXED, INDEXED, FAILED, DELETED"
+                )
+        
         # Calculate offset from page number
         offset = (page - 1) * pagesize
         
@@ -442,11 +456,12 @@ async def list_files(
             user_id=user.id,
             limit=pagesize,
             offset=offset,
-            search=search
+            search=search,
+            status=status_enum
         )
         
         # Get total count of files for the user (async, non-blocking)
-        total_count = await get_knowledge_handler().count_user_files_async(user.id, search=search)
+        total_count = await get_knowledge_handler().count_user_files_async(user.id, search=search, status=status_enum)
         
         # Convert FileMetadata objects to FileInfo response models
         # Database stores naive datetime in Beijing time (since we store with Beijing timezone)
