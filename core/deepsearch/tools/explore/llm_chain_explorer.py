@@ -30,7 +30,7 @@ class LLMChainExplorerTool(GraphTool):
         strategy_tags=("llm", "chain_of_exploration", "hetero_ready", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE, REQUIRES_LLM),
         profile="H",
         determinism="llm_heavy",
-        namespace="rag-arc.deepsearch.tools.heavy.llm_chain",
+        namespace="rag-arc.deepsearch.tools.explore.llm_chain",
         mcp_callable=True,
         example_args={
             "question": "Explain OpenAI's origin",

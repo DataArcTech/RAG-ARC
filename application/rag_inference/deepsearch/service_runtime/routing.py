@@ -22,7 +22,9 @@ class DeepSearchServiceRoutingMixin:
     async def _classify_question(self, *, question: str, routing_cfg: Dict[str, Any]) -> Dict[str, Any]:
         mode = str(routing_cfg.get("classifier") or "llm").strip().lower()
         fail_on_error = bool(routing_cfg.get("fail_on_classifier_error"))
-        llm = getattr(getattr(self, "planner", None), "llm_connector", None)
+        llm = getattr(getattr(self, "graph_loop", None), "llm_connector", None)
+        if llm is None:
+            llm = getattr(getattr(self, "reporter", None), "llm_connector", None)
         llm_model = str(routing_cfg.get("llm_model_name") or "").strip() or None
         if llm_model is None and llm is not None:
             llm_cfg = getattr(llm, "config", None)
@@ -145,4 +147,3 @@ class DeepSearchServiceRoutingMixin:
                 }
             },
         }
-

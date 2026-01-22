@@ -6,8 +6,8 @@ DeepSearch ships with a mixed tool catalog:
 - LLM-heavy tools that may depend on adapter traversal outputs
 
 To avoid "configured/enabled but not actually supported" breakage, we compute a
-disabled-tool set from adapter metadata and feed it into ToolHintRegistry so
-planner prompts only advertise tools that are expected to work.
+    disabled-tool set from adapter metadata and feed it into ToolHintRegistry so
+    think prompts only advertise tools that are expected to work.
 """
 from typing import Iterable, Mapping, Set
 

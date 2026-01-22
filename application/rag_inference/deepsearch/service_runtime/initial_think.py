@@ -1,35 +1,50 @@
 from typing import Any, Dict, List, Sequence
 
 from core.deepsearch.trace import emit_trace
+from core.deepsearch.memory.plan_state import PlanState, update_plan_from_think_notes
 from core.graph_adapter.base import GraphAccessScope
 from encapsulation.data_model.deepsearch import GraphQueryContext
 
 
 class DeepSearchServiceInitialThinkMixin:
-    async def _emit_initial_think(
+    def _think_tool_name(self) -> str:
+        if not isinstance(self.config, dict):
+            raise ValueError("DeepSearchService config must be a dict")
+        tool_name = str(self.config.get("think_tool") or "").strip()
+        if not tool_name:
+            raise ValueError("DeepSearchService config.think_tool is required")
+        return tool_name
+
+    async def _run_initial_think(
         self,
         *,
         question: str,
         scope: GraphAccessScope,
         reasoning_context: GraphQueryContext,
-        plan_steps: Sequence[Dict[str, Any]],
-    ) -> None:
+        plan_steps: Sequence[Dict[str, Any]] | None = None,
+    ) -> Dict[str, Any]:
         tool_manager = getattr(self, "tool_manager", None)
         if not tool_manager:
-            return
+            return {"report_needed": True, "plan_state": PlanState(), "think_notes": [], "think_notes_obj": []}
 
-        try:
-            total_steps = len(plan_steps) if plan_steps is not None else 0
-        except Exception:
-            total_steps = 0
+        steps = list(plan_steps or [])
+        total_steps = len(steps)
 
+        plan_state = PlanState()
+        if isinstance(reasoning_context.metadata, dict):
+            plan_state.update(reasoning_context.metadata.get("runtime_plan"))
         payload = {
             "question": question,
             "plan_step": "think_init",
             "context_evidences": [],
             "adapter": getattr(getattr(self, "graph_loop", None), "adapter", None),
             "access_scope": scope,
-            "extra": {"trigger": "initial_think", "plan_steps": list(plan_steps)},
+            "extra": {
+                "trigger": "initial_think",
+                "plan_steps": steps,
+                "current_plan": list(plan_state.items),
+                "think_mode": "initial",
+            },
             "graph_context": reasoning_context.model_dump(exclude_none=True),
             "coverage_metrics": {
                 "evidence_count": 0,
@@ -45,13 +60,37 @@ class DeepSearchServiceInitialThinkMixin:
             },
         }
         try:
-            result = await tool_manager.invoke(self._tool_names()["think_tool"], payload=payload)
+            result = await tool_manager.invoke(self._think_tool_name(), payload=payload)
         except Exception:
-            return
+            return {"report_needed": True, "plan_state": plan_state, "think_notes": [], "think_notes_obj": []}
 
         notes = getattr(result, "think_notes", None)
         if not notes:
-            return
+            return {"report_needed": True, "plan_state": plan_state, "think_notes": [], "think_notes_obj": []}
+
+        raw = None
+        for note in reversed(list(notes)):
+            raw = note.metadata.get("raw") if isinstance(note.metadata, dict) else None
+            if isinstance(raw, dict):
+                break
+        if not isinstance(raw, dict):
+            raise RuntimeError("Initial think returned no structured payload")
+        report_needed = raw.get("report_needed")
+        if report_needed is None:
+            raise RuntimeError("Initial think missing report_needed")
+
+        if update_plan_from_think_notes(plan_state, think_notes=notes):
+            reasoning_context.metadata["runtime_plan"] = list(plan_state.items)
+            await emit_trace(
+                "write_outline",
+                plan_state.markdown,
+                meta={
+                    "stage": "think_init",
+                    "plan_step_id": "think_init",
+                    "plan_version": plan_state.version,
+                    "plan_items": list(plan_state.items),
+                },
+            )
 
         lines: List[str] = ["Initial think checkpoint (before execution)."]
         for idx, note in enumerate(notes, start=1):
@@ -69,4 +108,84 @@ class DeepSearchServiceInitialThinkMixin:
                 lines.append(f"note_{idx}. missing_topics={missing}")
 
         await emit_trace("think", "\n".join(lines), meta={"stage": "think_init", "plan_step": "think_init"})
+        note_payloads = [note.model_dump(exclude_none=True) for note in notes]
+        return {
+            "report_needed": bool(report_needed),
+            "plan_state": plan_state,
+            "think_notes": note_payloads,
+            "think_notes_obj": list(notes),
+            "raw": raw,
+        }
 
+    async def _run_final_think(
+        self,
+        *,
+        question: str,
+        scope: GraphAccessScope,
+        reasoning_context: GraphQueryContext,
+        evidences: Sequence[Dict[str, Any]] | None,
+        coverage_metrics: Dict[str, Any] | None,
+        plan_items: Sequence[Dict[str, Any]] | None,
+        report_needed: bool | None = None,
+        final_answer_mode: str | None = None,
+    ) -> Dict[str, Any]:
+        tool_manager = getattr(self, "tool_manager", None)
+        if not tool_manager:
+            return {"think_notes": [], "plan_state": PlanState(), "raw": {}}
+
+        plan_state = PlanState()
+        plan_state.update(plan_items or [])
+        extra = {
+            "trigger": "final_think",
+            "current_plan": list(plan_state.items),
+            "think_mode": "final",
+        }
+        if report_needed is not None:
+            extra["report_needed"] = bool(report_needed)
+        if final_answer_mode:
+            extra["final_answer_mode"] = str(final_answer_mode)
+        payload = {
+            "question": question,
+            "plan_step": "think_final",
+            "context_evidences": list(evidences or []),
+            "adapter": getattr(getattr(self, "graph_loop", None), "adapter", None),
+            "access_scope": scope,
+            "extra": extra,
+            "graph_context": reasoning_context.model_dump(exclude_none=True),
+            "coverage_metrics": coverage_metrics or {},
+        }
+        try:
+            result = await tool_manager.invoke(self._think_tool_name(), payload=payload)
+        except Exception:
+            return {"think_notes": [], "plan_state": plan_state, "raw": {}}
+
+        notes = getattr(result, "think_notes", None) or []
+        raw = None
+        for note in reversed(list(notes)):
+            raw = note.metadata.get("raw") if isinstance(note.metadata, dict) else None
+            if isinstance(raw, dict):
+                break
+        raw = raw if isinstance(raw, dict) else {}
+
+        if notes and update_plan_from_think_notes(plan_state, think_notes=notes):
+            await emit_trace(
+                "write_outline",
+                plan_state.markdown,
+                meta={
+                    "stage": "final_think",
+                    "plan_step_id": "think_final",
+                    "plan_version": plan_state.version,
+                    "plan_items": list(plan_state.items),
+                },
+            )
+
+        lines: List[str] = ["Final think checkpoint."]
+        for idx, note in enumerate(notes, start=1):
+            lines.append(f"note_{idx}. reasoning={note.reasoning}")
+        await emit_trace("think", "\n".join(lines), meta={"stage": "final_think", "plan_step": "think_final"})
+        note_payloads = [note.model_dump(exclude_none=True) for note in notes]
+        return {
+            "think_notes": note_payloads,
+            "plan_state": plan_state,
+            "raw": raw,
+        }

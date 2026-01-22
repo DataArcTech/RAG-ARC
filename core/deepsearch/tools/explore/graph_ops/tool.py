@@ -53,7 +53,7 @@ class GraphOpsTool(GraphTool):
         strategy_tags=("graph_ops", "cypher", "deterministic", EVIDENCE_PRIMARY, SCOPE_OWNER, REQUIRES_CYPHER),
         profile="F",
         determinism="deterministic",
-        namespace="rag-arc.deepsearch.tools.fast.graph_ops",
+        namespace="rag-arc.deepsearch.tools.explore.graph_ops",
         mcp_callable=True,
         input_schema=build_input_schema(
             extra_properties={

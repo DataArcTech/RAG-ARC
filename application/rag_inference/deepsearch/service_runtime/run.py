@@ -2,7 +2,7 @@ import json
 import logging
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from encapsulation.data_model.deepsearch import GraphQueryContext
+from encapsulation.data_model.deepsearch import EvidenceChunk, GraphQueryContext
 from core.deepsearch.report import DeepSearchQualityGate, QualityGateConfig
 from core.deepsearch.state import DeepSearchState
 from core.deepsearch.trace import emit_trace, reset_trace_emitter
@@ -17,6 +17,21 @@ logger = logging.getLogger(__name__)
 
 
 class DeepSearchServiceRunMixin:
+    @staticmethod
+    def _coerce_evidence_chunks(raw: Sequence[Dict[str, Any]] | None) -> List[EvidenceChunk]:
+        items = raw or []
+        out: List[EvidenceChunk] = []
+        for item in items:
+            if isinstance(item, EvidenceChunk):
+                out.append(item)
+                continue
+            if isinstance(item, dict):
+                try:
+                    out.append(EvidenceChunk.model_validate(item))
+                except Exception:
+                    continue
+        return out
+
     def _resolve_tool_budget_config(self) -> Dict[str, Any]:
         from config.application.deepsearch_config import ToolBudgetConfig
 
@@ -85,14 +100,113 @@ class DeepSearchServiceRunMixin:
             trace_capture_token = None
 
         try:
-            plan_result = await self._execute_stage(
-                "plan",
-                self._plan_stage,
+            bootstrap_context = graph_context or self._bootstrap_graph_context(
+                question=normalized_question,
+                scope=scope,
+            )
+            bootstrap_context = self._attach_run_metadata(
+                bootstrap_context,
+                run_id=state.run_id,
+                metadata=metadata,
+                artifact_dir=artifact_dir,
+            )
+            bootstrap_context = self._attach_file_scope_hints(
+                bootstrap_context,
+                question=normalized_question,
+            )
+            initial_think = await self._execute_stage(
+                "initial_think",
+                self._run_initial_think,
                 state=state,
                 stage_timings=stage_timings,
                 question=normalized_question,
                 scope=scope,
+                reasoning_context=bootstrap_context,
+                plan_steps=[],
             )
+            report_needed = bool(initial_think.get("report_needed", True)) if isinstance(initial_think, dict) else True
+            plan_state = initial_think.get("plan_state") if isinstance(initial_think, dict) else None
+            if not report_needed:
+                final_think = await self._execute_stage(
+                    "final_think",
+                    self._run_final_think,
+                    state=state,
+                    stage_timings=stage_timings,
+                    question=normalized_question,
+                    scope=scope,
+                    reasoning_context=bootstrap_context,
+                    evidences=[],
+                    coverage_metrics={},
+                    plan_items=getattr(plan_state, "items", None),
+                    report_needed=False,
+                    final_answer_mode="direct",
+                )
+                final_raw = final_think.get("raw") if isinstance(final_think, dict) else {}
+                answer = ""
+                if isinstance(final_raw, dict):
+                    answer = str(final_raw.get("reasoning") or "")
+                plan_result = {
+                    "plan": {
+                        "plan_id": None,
+                        "question": normalized_question,
+                        "mode": "initial_think",
+                        "steps": [],
+                    }
+                }
+                try:
+                    state.record_plan(plan_result)
+                except Exception:
+                    pass
+                runtime_plan = getattr(plan_state, "to_payload", lambda: {"items": [], "markdown": "", "version": 0})()
+                reasoning_trace = {
+                    "question": normalized_question,
+                    "graph_context": bootstrap_context.model_dump(exclude_none=True),
+                    "adapter_metadata": {},
+                    "plan_steps": [],
+                    "graph_traversals": [],
+                    "reasoning_steps": [],
+                    "evidences": [],
+                    "tool_results": [],
+                    "think_notes": (initial_think.get("think_notes") if isinstance(initial_think, dict) else [])
+                    + (final_think.get("think_notes") if isinstance(final_think, dict) else []),
+                    "runtime_plan": runtime_plan,
+                    "final_think": final_raw,
+                    "coverage_metrics": {
+                        "evidence_count": 0,
+                        "primary_evidence_count": 0,
+                        "derived_evidence_count": 0,
+                        "diagnostic_evidence_count": 0,
+                        "total_evidence_count": 0,
+                        "completed_steps": 0,
+                        "total_steps": 0,
+                        "coverage_ratio": 0.0,
+                        "plan_progress_ratio": 0.0,
+                        "expected_min_chunks": 0,
+                        "coverage_score": 0.0,
+                        "confidence_score": None,
+                        "missing_topics": [],
+                    },
+                }
+                state.record_reasoning(reasoning_trace)
+                report = {
+                    "question": normalized_question,
+                    "answer": answer,
+                    "evidences": [],
+                    "metadata": {"report_generated": False, "source": "final_think"},
+                }
+                state.record_report(report)
+                snapshot = state.snapshot()
+                return {"plan": plan_result, "reasoning": reasoning_trace, "report": report, "state": snapshot}
+
+            plan_result = {
+                "plan": {
+                    "plan_id": None,
+                    "question": normalized_question,
+                    "mode": "initial_think",
+                    "steps": [],
+                },
+                "plan_items": list(getattr(plan_state, "items", []) or []),
+            }
             if getattr(self, "artifact_store", None) is not None:
                 try:
                     self.artifact_store.write_json(state.run_id, "plan_result.json", json_safe(plan_result))
@@ -102,14 +216,8 @@ class DeepSearchServiceRunMixin:
                     state.append_error(f"artifact_store.write_json(plan_result.json) failed: {exc}", stage="persist")
             state.record_plan(plan_result)
 
-            plan_payload = plan_result.get("plan") or {}
-            plan_steps = plan_payload.get("steps") or []
-            if not isinstance(plan_steps, list) or not plan_steps:
-                raise RuntimeError("Planner returned an empty plan (no fallback execution allowed).")
-            graph_context_payload = plan_payload.get("graph_context") or {}
-            reasoning_context = GraphQueryContext(**graph_context_payload)
             reasoning_context = self._attach_run_metadata(
-                reasoning_context,
+                bootstrap_context,
                 run_id=state.run_id,
                 metadata=metadata,
                 artifact_dir=artifact_dir,
@@ -145,12 +253,8 @@ class DeepSearchServiceRunMixin:
                         meta={"stage": "question_classification", "classification": json_safe(classification)},
                     )
 
-            await self._emit_initial_think(
-                question=normalized_question,
-                scope=scope,
-                reasoning_context=reasoning_context,
-                plan_steps=plan_steps,
-            )
+            if plan_state is not None:
+                reasoning_context.metadata["runtime_plan"] = list(getattr(plan_state, "items", []) or [])
 
             quality_cfg = self._resolve_quality_gate_config()
             if isinstance(metadata, dict):
@@ -185,47 +289,48 @@ class DeepSearchServiceRunMixin:
             final_report: Dict[str, Any] | None = None
             quality_history: List[Dict[str, Any]] = []
 
-            followup_steps: List[Dict[str, Any]] = []
-            pending_rewrite_only = False
+            followup_notes: List[Any] = []
             max_rounds = max(1, int(quality_cfg.max_rounds))
             for round_idx in range(1, max_rounds + 1):
-                active_steps = plan_steps if round_idx == 1 else followup_steps
-                do_reasoning = bool(active_steps) and not pending_rewrite_only
-
-                if do_reasoning:
-                    round_trace = await self._execute_stage(
-                        f"graph_reasoning_r{round_idx}",
-                        self._reasoning_stage,
-                        state=state,
-                        stage_timings=stage_timings,
-                        question=normalized_question,
-                        plan_steps=active_steps,
-                        reasoning_context=reasoning_context,
-                    )
-                    if cumulative_reasoning is None:
-                        cumulative_reasoning = round_trace
-                        cumulative_reasoning["quality_loop"] = {"rounds": []}
-                    else:
-                        cumulative_reasoning = self._merge_reasoning_traces(cumulative_reasoning, round_trace)
-                    cumulative_reasoning.setdefault("quality_loop", {}).setdefault("rounds", []).append(
-                        {"round": round_idx, "plan_steps": list(active_steps)}
-                    )
-                    state.record_reasoning(cumulative_reasoning)
-                    self._surface_worker_failures(state, round_trace)
-                    try:
-                        evidence_count = len(cumulative_reasoning.get("evidences") or [])
-                    except Exception:
-                        evidence_count = 0
-                    await emit_trace(
-                        "progress",
-                        "\n".join(
-                            [
-                                f"Completed graph reasoning round {round_idx}.",
-                                f"evidence_count={evidence_count}",
-                            ]
-                        ),
-                        meta={"stage": "graph_reasoning", "round": round_idx, "evidence_count": evidence_count},
-                    )
+                initial_notes = initial_think.get("think_notes_obj") if round_idx == 1 else followup_notes
+                seed_evidences = None
+                if round_idx > 1 and isinstance(cumulative_reasoning, dict):
+                    seed_evidences = self._coerce_evidence_chunks(cumulative_reasoning.get("evidences") or [])
+                round_trace = await self._execute_stage(
+                    f"graph_reasoning_r{round_idx}",
+                    self._think_loop_stage,
+                    state=state,
+                    stage_timings=stage_timings,
+                    question=normalized_question,
+                    reasoning_context=reasoning_context,
+                    initial_think_notes=initial_notes,
+                    seed_evidences=seed_evidences,
+                    plan_items=list(getattr(plan_state, "items", []) or []),
+                )
+                if cumulative_reasoning is None:
+                    cumulative_reasoning = round_trace
+                    cumulative_reasoning["quality_loop"] = {"rounds": []}
+                else:
+                    cumulative_reasoning = self._merge_reasoning_traces(cumulative_reasoning, round_trace)
+                cumulative_reasoning.setdefault("quality_loop", {}).setdefault("rounds", []).append(
+                    {"round": round_idx, "plan_steps": []}
+                )
+                state.record_reasoning(cumulative_reasoning)
+                self._surface_worker_failures(state, round_trace)
+                try:
+                    evidence_count = len(cumulative_reasoning.get("evidences") or [])
+                except Exception:
+                    evidence_count = 0
+                await emit_trace(
+                    "progress",
+                    "\n".join(
+                        [
+                            f"Completed graph reasoning round {round_idx}.",
+                            f"evidence_count={evidence_count}",
+                        ]
+                    ),
+                    meta={"stage": "graph_reasoning", "round": round_idx, "evidence_count": evidence_count},
+                )
 
                 if cumulative_reasoning is None:
                     raise RuntimeError("DeepSearch reasoning did not produce a trace")
@@ -239,6 +344,26 @@ class DeepSearchServiceRunMixin:
                 if gated_report is not None:
                     final_report = gated_report
                     break
+
+                final_think = await self._execute_stage(
+                    f"final_think_r{round_idx}",
+                    self._run_final_think,
+                    state=state,
+                    stage_timings=stage_timings,
+                    question=normalized_question,
+                    scope=scope,
+                    reasoning_context=reasoning_context,
+                    evidences=cumulative_reasoning.get("evidences") if isinstance(cumulative_reasoning, dict) else [],
+                    coverage_metrics=cumulative_reasoning.get("coverage_metrics") if isinstance(cumulative_reasoning, dict) else {},
+                    plan_items=(cumulative_reasoning.get("runtime_plan") or {}).get("items")
+                    if isinstance(cumulative_reasoning, dict)
+                    else None,
+                    report_needed=True,
+                    final_answer_mode="summary",
+                )
+                if isinstance(cumulative_reasoning, dict) and isinstance(final_think, dict):
+                    cumulative_reasoning.setdefault("think_notes", []).extend(final_think.get("think_notes") or [])
+                    cumulative_reasoning["final_think"] = final_think.get("raw") or {}
 
                 report = await self._execute_stage(
                     f"report_r{round_idx}",
@@ -306,22 +431,22 @@ class DeepSearchServiceRunMixin:
                 if passed or not should_iterate:
                     break
 
-                followup_steps = self._build_followup_plan_steps(
+                followup_notes = self._build_followup_think_notes(
                     actions=quality_result.get("actions") or [],
                     round_idx=round_idx,
                 )
-                pending_rewrite_only = not bool(followup_steps)
-                if followup_steps:
-                    await emit_trace(
-                        "write_outline",
-                        "\n".join(
-                            [
-                                f"Plan update from quality gate (round {round_idx + 1}).",
-                                json.dumps(json_safe(followup_steps), ensure_ascii=False, indent=2, default=str),
-                            ]
-                        ),
-                        meta={"stage": "plan_update", "round": round_idx + 1, "followup_steps": json_safe(followup_steps)},
-                    )
+                if not followup_notes:
+                    break
+                await emit_trace(
+                    "write_outline",
+                    "\n".join(
+                        [
+                            f"Plan update from quality gate (round {round_idx + 1}).",
+                            json.dumps(json_safe(quality_result.get("actions") or []), ensure_ascii=False, indent=2, default=str),
+                        ]
+                    ),
+                    meta={"stage": "plan_update", "round": round_idx + 1, "actions": json_safe(quality_result.get("actions") or [])},
+                )
 
             if final_report is None:
                 raise RuntimeError("DeepSearch did not produce a report")

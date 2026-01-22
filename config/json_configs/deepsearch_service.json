@@ -1,29 +1,5 @@
 {
   "type": "deepsearch_service",
-  "planner": {
-    "mode": "react",
-    "max_steps": 8,
-    "enable_sub_question": true,
-    "persist_plan": true,
-    "plan_output_dir": "${DEEPSEARCH_PLAN_OUTPUT_DIR}",
-    "web_step_policy": "realtime_required",
-    "honor_planner_tool_selection": true,
-    "graph_channel_tool": "graph_adapter.query",
-    "text_channel_tool": "search",
-    "web_channel_tool": "web.search",
-    "tool_catalog_allowlist": [
-      "search",
-      "knowledge_base.explore",
-      "graph.ops",
-      "think",
-      "web.search",
-      "code.python"
-    ],
-    "tool_catalog_max_items": 6,
-    "include_llm_tools_in_catalog": true,
-    "graph_adapter_name": "${DEEPSEARCH_DEFAULT_ADAPTER}",
-    "tool_arg_templates": {}
-  },
   "graph_adapter": {
     "type": "graph_adapter",
     "adapter_name": "hipporag",
@@ -116,11 +92,7 @@
       "tool_call_concurrency": 2,
       "tool_catalog_max_items": 6,
       "tool_catalog_allowlist": [
-        "search",
-        "knowledge_base.explore",
-        "graph.ops",
-        "think",
-        "web.search",
+        "explore",
         "code.python"
       ],
       "include_llm_tools": true,
@@ -128,28 +100,6 @@
       "recent_tool_run_summary_max_chars": 320,
       "max_rounds_per_checkpoint": 2
     }
-  },
-  "multi_agent": {
-    "enabled": true,
-    "max_subagents": 4,
-    "subagent_concurrency": 4,
-    "enable_parallel_tool_probes": true,
-    "probe_tool_names": [
-      "search"
-    ],
-    "probe_concurrency": 4,
-    "lead_tool_names": [
-      "search"
-    ],
-    "lead_tool_concurrency": 2,
-    "max_merge_evidences": 60,
-    "worker_timeout_seconds": null,
-    "worker_retry_attempts": 0,
-    "fail_fast": false,
-    "incremental_parallelism": true,
-    "initial_worker_count": 1,
-    "stop_min_evidence_count": 3,
-    "stop_min_coverage_ratio": 0.85
   },
   "reporter": {
     "max_highlights": 6,
@@ -177,64 +127,12 @@
     "parallel_sections": false,
     "max_parallel_sections": 4,
     "consistency_max_claims": 40,
-    "synthesis_section_max_chars": 1200,
-    "bench_answer": {
-      "enabled": true,
-      "allowed_evidence_kinds": [
-        "primary"
-      ],
-      "heading_window_max_lines": 10,
-      "default_policy": {
-        "mode": "single_stage",
-        "preference": "balanced",
-        "max_evidence_items": 24,
-        "max_evidence_chars": 12000,
-        "snippet_chars": 900
-      },
-      "policies_by_question_type": {
-        "Complex Reasoning": {
-          "mode": "two_stage",
-          "preference": "correctness",
-          "max_evidence_items": 24,
-          "max_evidence_chars": 12000,
-          "snippet_chars": 900
-        },
-        "Contextual Summarize": {
-          "mode": "single_stage",
-          "preference": "coverage",
-          "max_evidence_items": 24,
-          "max_evidence_chars": 12000,
-          "snippet_chars": 900
-        },
-        "Fact Retrieval": {
-          "mode": "single_stage",
-          "preference": "correctness",
-          "max_evidence_items": 12,
-          "max_evidence_chars": 6000,
-          "snippet_chars": 450
-        },
-        "Creative Generation": {
-          "mode": "single_stage",
-          "preference": "balanced",
-          "max_evidence_items": 24,
-          "max_evidence_chars": 12000,
-          "snippet_chars": 900
-        }
-      }
-    }
+    "synthesis_section_max_chars": 1200
   },
   "tool_manager": {
     "enable_builtin_tools": true,
     "search_retriever_config_path": "config/json_configs/rag_inference.json",
     "enabled_tools": {
-      "graph.beam_search": {
-        "params": {
-          "beam_size": 3,
-          "max_depth": 3,
-          "temperature": 0.2,
-          "seed_entity_top_k": 6
-        }
-      },
       "code.python": {
         "params": {
           "allowed_imports": [

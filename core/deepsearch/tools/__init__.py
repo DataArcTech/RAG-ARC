@@ -2,31 +2,34 @@
 from typing import Any, Dict, Iterable, Optional
 
 from .base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest
-from .fast import (
+from .explore import (
+    ExploreTool,
     GraphOpsTool,
-    KnowledgeBaseExploreTool,
     SearchTool,
     SearchFaissTool,
     SearchBM25Tool,
     SearchGraphChunkTool,
     WebSearchTool,
+    BeamSearchTool,
+    LLMChainExplorerTool,
 )
-from .heavy import BeamSearchTool, ThinkTool
-from .hybrid import CodePythonTool
+from .think import ThinkTool
+from .code import CodePythonTool
 
 __all__ = [
     "GraphTool",
     "ToolDescriptor",
     "ToolResult",
     "ToolRunRequest",
+    "ExploreTool",
     "GraphOpsTool",
-    "KnowledgeBaseExploreTool",
     "SearchTool",
     "SearchFaissTool",
     "SearchBM25Tool",
     "SearchGraphChunkTool",
     "ThinkTool",
     "BeamSearchTool",
+    "LLMChainExplorerTool",
     "CodePythonTool",
     "WebSearchTool",
     "build_builtin_tools",
@@ -38,7 +41,7 @@ __all__ = [
 
 _BUILTIN_CLASSES = [
     GraphOpsTool,
-    KnowledgeBaseExploreTool,
+    ExploreTool,
     SearchTool,
     SearchFaissTool,
     SearchBM25Tool,
@@ -47,6 +50,7 @@ _BUILTIN_CLASSES = [
     CodePythonTool,
     WebSearchTool,
     BeamSearchTool,
+    LLMChainExplorerTool,
 ]
 
 _DESCRIPTOR_MAP = {cls.descriptor.name: cls.descriptor for cls in _BUILTIN_CLASSES}
@@ -55,9 +59,10 @@ _LLM_REQUIRED = {
     SearchGraphChunkTool,
     ThinkTool,
     BeamSearchTool,
+    LLMChainExplorerTool,
 }
 _LLM_OPTIONAL = {
-    KnowledgeBaseExploreTool,
+    ExploreTool,
 }
 
 
@@ -79,9 +84,9 @@ def build_builtin_tools(llm_connector=None, overrides: Optional[Dict[str, Dict[s
 
 
 def builtin_tool_descriptors() -> Iterable[ToolDescriptor]:
-    """Expose tool descriptors for planner hints."""
+    """Expose tool descriptors for think hints."""
 
-    return list(_DESCRIPTOR_MAP.values())
+    return [cls.descriptor for cls in _BUILTIN_CLASSES]
 
 
 def get_tool_descriptor(tool_name: str) -> Optional[ToolDescriptor]:

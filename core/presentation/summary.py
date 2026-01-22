@@ -89,7 +89,7 @@ class PipelineSummary:
 
 @dataclass
 class PlanStepSummary:
-    """Concise summary of a DeepSearch planner step and its execution outcome."""
+    """Concise summary of a DeepSearch reasoning step and its execution outcome."""
 
     step_id: str
     description: str
@@ -259,4 +259,3 @@ def _truncate_text(text: str, max_chars: int) -> str:
     if len(sanitized) <= max_chars:
         return sanitized
     return f"{sanitized[:max_chars].rstrip()}..."
-

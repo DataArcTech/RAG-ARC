@@ -14,7 +14,7 @@ BEAM_SEARCH_SEED_EXTRACT_MAX_TOKENS = 240
 # -----------------------------
 # graph.neighbors defaults
 # -----------------------------
-# When planners pass "messy" entity strings (aliases, abbreviations, extra tokens),
+# When tools pass "messy" entity strings (aliases, abbreviations, extra tokens),
 # `graph.neighbors` may return count=0. These knobs keep the fix centralized/configurable.
 NEIGHBORS_ENTITY_RESOLUTION_ENABLED = True
 NEIGHBORS_ENTITY_RESOLUTION_CANDIDATE_LIMIT = 12
@@ -220,8 +220,8 @@ SEARCH_GRAPH_SAFE_OVERRIDE_KEYS = (
 )
 
 # -----------------------------
-# knowledge_base.explore defaults
+# explore defaults
 # -----------------------------
-KNOWLEDGE_BASE_EXPLORE_MAX_CONCURRENCY = 4
-KNOWLEDGE_BASE_READ_MAX_CHUNKS = 12
-KNOWLEDGE_BASE_READ_MAX_CHARS = 6000
+EXPLORE_MAX_CONCURRENCY = 4
+EXPLORE_READ_MAX_CHUNKS = 12
+EXPLORE_READ_MAX_CHARS = 6000

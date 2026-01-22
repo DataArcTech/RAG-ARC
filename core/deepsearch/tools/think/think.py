@@ -5,13 +5,16 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from config.core.deepsearch import tool_defaults
-from encapsulation.data_model.deepsearch import ThinkNote, GraphQueryContext
+from encapsulation.data_model.deepsearch import ThinkNote, GraphQueryContext, PlanItem
 from core.prompts.deepsearch.report import JSON_REPAIR_USER_PROMPT_EN
 from core.prompts.deepsearch import THINK_TOOL_SYSTEM_PROMPT_EN
 from core.deepsearch.utils.compression import compact_evidences, resolve_compaction_config
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, safe_json_loads
 from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_LLM, SCOPE_OWNER
+from . import final as final_mode
+from . import initial as initial_mode
+from . import normal as normal_mode
 
 
 class ThinkToolCall(BaseModel):
@@ -24,6 +27,9 @@ class ThinkToolCall(BaseModel):
 class ThinkToolResponse(BaseModel):
     reasoning: str = Field(..., min_length=1)
     tool_calls: List[ThinkToolCall] = Field(default_factory=list)
+    plan: List[PlanItem] = Field(...)
+    report_needed: Optional[bool] = None
+    is_final: Optional[bool] = None
 
 
 class ThinkTool(GraphTool):
@@ -42,7 +48,7 @@ class ThinkTool(GraphTool):
         strategy_tags=("think", "control", "reflection", EVIDENCE_DERIVED, SCOPE_OWNER, REQUIRES_LLM),
         profile="H",
         determinism="llm_heavy",
-        namespace="rag-arc.deepsearch.tools.heavy.think",
+        namespace="rag-arc.deepsearch.tools.think",
         mcp_callable=True,
         example_args={
             "question": "What gaps remain?",
@@ -130,6 +136,7 @@ class ThinkTool(GraphTool):
             "available_tools": extra.get("available_tools"),
             "previous_tool_call_results": extra.get("previous_tool_call_results"),
             "recent_tool_runs": extra.get("recent_tool_runs"),
+            "current_plan": extra.get("current_plan"),
             "extra": extra,
             "compression": compaction_meta,
         }
@@ -144,6 +151,7 @@ class ThinkTool(GraphTool):
             response = await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
             parsed = await self._parse_or_repair_json(messages=messages, raw=response)
             payload = ThinkToolResponse.model_validate(parsed)
+            self._validate_mode(payload, extra)
             return ThinkNote(
                 plan_step_id=request.plan_step,
                 reasoning=payload.reasoning,
@@ -155,6 +163,9 @@ class ThinkTool(GraphTool):
                     "graph_context": context_snapshot,
                     "coverage_metrics": coverage_snapshot,
                     "tool_calls": [call.model_dump() for call in payload.tool_calls],
+                    "plan": [item.model_dump() for item in payload.plan],
+                    "report_needed": payload.report_needed,
+                    "is_final": payload.is_final,
                     "compression": compaction_meta,
                 },
             )
@@ -223,3 +234,16 @@ class ThinkTool(GraphTool):
             "latency_ms": coverage_snapshot.get("latency_ms", 0),
         }
         return entry
+
+    @staticmethod
+    def _validate_mode(payload: ThinkToolResponse, extra: Dict[str, Any]) -> None:
+        mode = str((extra or {}).get("think_mode") or normal_mode.MODE).strip().lower()
+        if mode == initial_mode.MODE:
+            if payload.report_needed is None:
+                raise ValueError("think_mode=initial requires report_needed")
+            return
+        if mode == final_mode.MODE:
+            if payload.is_final is not True:
+                raise ValueError("think_mode=final requires is_final=true")
+            if payload.tool_calls:
+                raise ValueError("think_mode=final must not include tool_calls")

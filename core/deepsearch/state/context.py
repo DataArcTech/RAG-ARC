@@ -11,7 +11,7 @@ def _utc_now() -> str:
 
 @dataclass
 class DeepSearchState:
-    """Track planner output, reasoning traces, and reports for one run."""
+    """Track reasoning traces and reports for one run."""
 
     config_fingerprint: str
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex)

@@ -1,8 +1,8 @@
 """DeepSearch progress semantics shared across API and Celery.
 
 Progress is intentionally coarse: stage transitions are discrete, while the `reasoned`
-stage interpolates based on planner step_count and completed_steps emitted by the
-graph reasoning loop.
+stage interpolates based on step_count and completed_steps emitted by the
+graph reasoning loop when available.
 """
 STAGE_ORDER: tuple[str, ...] = (
     "created",

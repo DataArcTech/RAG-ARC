@@ -44,7 +44,7 @@ class BeamSearchTool(GraphTool):
         strategy_tags=("beam_search", "tog", "graph_reasoning", EVIDENCE_DERIVED, SCOPE_OWNER, REQUIRES_CHAIN_TRAVERSE, REQUIRES_LLM),
         profile="H",
         determinism="llm_heavy",
-        namespace="rag-arc.deepsearch.tools.heavy.beam_search",
+        namespace="rag-arc.deepsearch.tools.explore.beam_search",
         mcp_callable=True,
         input_schema=build_input_schema(
             extra_properties={

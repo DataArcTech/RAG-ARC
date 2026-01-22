@@ -1,7 +1,7 @@
 """Online entity/name resolution utilities for DeepSearch graph tools.
 
 This module is intentionally framework-agnostic and avoids hidden global state.
-Tools can use it to resolve noisy planner-provided strings (aliases, suffixes,
+Tools can use it to resolve noisy tool-provided strings (aliases, suffixes,
 abbreviations) into canonical graph nodes in a conservative, observable way.
 """
 

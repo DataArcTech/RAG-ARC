@@ -1,4 +1,4 @@
-"""Knowledge-base exploration tool (graph-first, chunk-aware)."""
+"""Explore tool (graph-first, chunk-aware orchestration)."""
 import asyncio
 import json
 import time
@@ -7,11 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
 
-from config.core.deepsearch.tool_defaults import (
-    KNOWLEDGE_BASE_EXPLORE_MAX_CONCURRENCY,
-    KNOWLEDGE_BASE_READ_MAX_CHARS,
-    KNOWLEDGE_BASE_READ_MAX_CHUNKS,
-)
+from config.core.deepsearch.tool_defaults import EXPLORE_MAX_CONCURRENCY, EXPLORE_READ_MAX_CHARS, EXPLORE_READ_MAX_CHUNKS
 from config.core.deepsearch.evidence_defaults import EVIDENCE_CLASS_SOURCE_TEXT
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_PRIMARY
 from core.graph_adapter.cypher import adapter_supports_cypher
@@ -20,6 +16,9 @@ from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_
 from ..governance_tags import EVIDENCE_PRIMARY, REQUIRES_LLM, SCOPE_FILE, SCOPE_OWNER
 from .graph_ops import GraphOpsTool
 from .search import SearchBM25Tool, SearchFaissTool, SearchGraphChunkTool, SearchTool
+from .web_search import WebSearchTool
+from .beam_search import BeamSearchTool
+from .llm_chain_explorer import LLMChainExplorerTool
 
 
 _ALLOWED_TOOL_NAMES = {
@@ -28,10 +27,13 @@ _ALLOWED_TOOL_NAMES = {
     "search.bm25",
     "search.graph_chunk",
     "graph.ops",
-    "read_chunks",
+    "graph.beam_search",
+    "graph.llm_chain_explorer",
+    "web.search",
+    "read.chunk",
 }
 
-_LLM_REQUIRED_ACTIONS = {"search.graph_chunk"}
+_LLM_REQUIRED_ACTIONS = {"search.graph_chunk", "graph.beam_search", "graph.llm_chain_explorer"}
 
 
 @dataclass
@@ -45,24 +47,24 @@ class _ActionResult:
     error: Optional[str] = None
 
 
-class KnowledgeBaseExploreTool(GraphTool):
-    """Orchestrate graph-first exploration actions (graph.ops + search + chunk read)."""
+class ExploreTool(GraphTool):
+    """Orchestrate graph-first exploration actions (graph.ops + search + read.chunk)."""
 
     descriptor = ToolDescriptor(
-        name="knowledge_base.explore",
+        name="explore",
         channel="graph",
         description=(
             "Graph-first exploration orchestrator. Runs action lists in parallel: "
-            "graph.ops (safe Cypher + templates), search, and read_chunks "
+            "graph.ops (safe Cypher + templates), search, web.search, and read.chunk "
             "(full chunk read by chunk_id + goal). "
-            "Good: actions with graph.ops + read_chunks. Bad: empty action list."
+            "Good: actions with graph.ops + read.chunk. Bad: empty action list."
         ),
         speed="medium",
         cost="medium",
         strategy_tags=("explore", "graph_first", EVIDENCE_PRIMARY, SCOPE_OWNER, SCOPE_FILE, REQUIRES_LLM),
         profile="X",
         determinism="hybrid",
-        namespace="rag-arc.deepsearch.tools.knowledge_base_explore",
+        namespace="rag-arc.deepsearch.tools.explore",
         mcp_callable=True,
         input_schema=build_input_schema(
             extra_properties={
@@ -72,7 +74,7 @@ class KnowledgeBaseExploreTool(GraphTool):
                         "type": "object",
                         "properties": {
                             "id": {"type": "string", "description": "Optional action id for tracking."},
-                            "tool": {"type": "string", "description": "Tool name (search/graph.ops/read_chunks)."},
+                            "tool": {"type": "string", "description": "Tool name (search/graph.ops/read.chunk)."},
                             "args": {"type": "object", "description": "Tool-specific args (passed as extra)."},
                         },
                         "required": ["tool"],
@@ -97,6 +99,7 @@ class KnowledgeBaseExploreTool(GraphTool):
                         "tool": "graph.ops",
                         "args": {"mode": "template", "template": "path_exists", "template_args": {"source": "Company A", "target": "Company C", "max_hops": 4}},
                     },
+                    {"id": "r1", "tool": "read.chunk", "args": {"chunk_ids": ["c1"], "goal": "verify ownership"}},
                 ]
             },
         },
@@ -108,9 +111,9 @@ class KnowledgeBaseExploreTool(GraphTool):
         *,
         dense_retriever=None,
         bm25_retriever=None,
-        max_concurrency: int = KNOWLEDGE_BASE_EXPLORE_MAX_CONCURRENCY,
-        read_max_chunks: int = KNOWLEDGE_BASE_READ_MAX_CHUNKS,
-        read_max_chars: int = KNOWLEDGE_BASE_READ_MAX_CHARS,
+        max_concurrency: int = EXPLORE_MAX_CONCURRENCY,
+        read_max_chunks: int = EXPLORE_READ_MAX_CHUNKS,
+        read_max_chars: int = EXPLORE_READ_MAX_CHARS,
         tool_overrides: Optional[Dict[str, GraphTool]] = None,
     ):
         self.llm_connector = llm_connector
@@ -128,12 +131,12 @@ class KnowledgeBaseExploreTool(GraphTool):
         actions = self._normalize_actions(request.extra.get("actions"))
         if not actions:
             return ToolResult(
-                summary="knowledge_base.explore skipped: no actions provided.",
+                summary="explore skipped: no actions provided.",
                 diagnostics={"actions": [], "errors": ["missing_actions"]},
             )
 
         if self.llm_connector is None and self._requires_llm(actions):
-            raise RuntimeError("knowledge_base.explore requires an LLM connector for requested actions.")
+            raise RuntimeError("explore requires an LLM connector for requested actions.")
 
         max_concurrency = self._resolve_concurrency(request.extra.get("max_concurrency"))
         semaphore = asyncio.Semaphore(max_concurrency)
@@ -174,10 +177,14 @@ class KnowledgeBaseExploreTool(GraphTool):
             self._tools["search.bm25"] = SearchBM25Tool(bm25_retriever=self.bm25_retriever)
         if "search.graph_chunk" not in self._tools:
             self._tools["search.graph_chunk"] = SearchGraphChunkTool(llm_connector=self.llm_connector)
-        # graph.ops covers deterministic exploration; beam search is intentionally excluded here.
-
         if "graph.ops" not in self._tools:
             self._tools["graph.ops"] = GraphOpsTool()
+        if "graph.beam_search" not in self._tools and self.llm_connector is not None:
+            self._tools["graph.beam_search"] = BeamSearchTool(llm_connector=self.llm_connector)
+        if "graph.llm_chain_explorer" not in self._tools and self.llm_connector is not None:
+            self._tools["graph.llm_chain_explorer"] = LLMChainExplorerTool(llm_connector=self.llm_connector)
+        if "web.search" not in self._tools:
+            self._tools["web.search"] = WebSearchTool()
 
     async def _run_action(
         self,
@@ -203,8 +210,8 @@ class KnowledgeBaseExploreTool(GraphTool):
 
         async with semaphore:
             start = time.perf_counter()
-            if tool_name == "read_chunks":
-                result = await self._read_chunks(action_id=action_id, args=args, request=request)
+            if tool_name == "read.chunk":
+                result = await self._read_chunk(action_id=action_id, args=args, request=request)
             else:
                 result = await self._delegate_tool(action_id=action_id, tool_name=tool_name, args=args, request=request)
             latency_ms = int((time.perf_counter() - start) * 1000)
@@ -262,7 +269,7 @@ class KnowledgeBaseExploreTool(GraphTool):
             diagnostics=tool_result.diagnostics,
         )
 
-    async def _read_chunks(
+    async def _read_chunk(
         self,
         *,
         action_id: str,
@@ -272,32 +279,32 @@ class KnowledgeBaseExploreTool(GraphTool):
         if request.adapter is None:
             return _ActionResult(
                 action_id=action_id,
-                tool="read_chunks",
+                tool="read.chunk",
                 status="failed",
-                summary="read_chunks failed: adapter missing.",
+                summary="read.chunk failed: adapter missing.",
                 evidences=[],
                 diagnostics={"reason": "adapter_missing"},
-                error="read_chunks: adapter_missing",
+                error="read.chunk: adapter_missing",
             )
 
         if not adapter_supports_cypher(request.adapter):
             return _ActionResult(
                 action_id=action_id,
-                tool="read_chunks",
+                tool="read.chunk",
                 status="failed",
-                summary="read_chunks failed: Cypher unavailable.",
+                summary="read.chunk failed: Cypher unavailable.",
                 evidences=[],
                 diagnostics={"reason": "cypher_unavailable"},
-                error="read_chunks: cypher_unavailable",
+                error="read.chunk: cypher_unavailable",
             )
 
         chunk_ids = self._normalize_chunk_ids(args.get("chunk_ids"))
         if not chunk_ids:
             return _ActionResult(
                 action_id=action_id,
-                tool="read_chunks",
+                tool="read.chunk",
                 status="skipped",
-                summary="read_chunks skipped: no chunk_ids.",
+                summary="read.chunk skipped: no chunk_ids.",
                 evidences=[],
                 diagnostics={"reason": "empty_chunk_ids"},
             )
@@ -332,7 +339,7 @@ class KnowledgeBaseExploreTool(GraphTool):
                 metadata["source_file_id"] = source_file_id
             evidence = EvidenceChunk(
                 chunk_id=chunk_id,
-                source="knowledge_base.read_chunks",
+                source="explore.read.chunk",
                 content=content,
                 kind=EVIDENCE_KIND_PRIMARY,
                 provenance={
@@ -345,11 +352,11 @@ class KnowledgeBaseExploreTool(GraphTool):
             )
             evidences.append(evidence)
 
-        summary = f"read_chunks returned {len(evidences)} chunks." if evidences else "read_chunks returned no chunks."
+        summary = f"read.chunk returned {len(evidences)} chunks." if evidences else "read.chunk returned no chunks."
         diagnostics = {"requested": len(chunk_ids), "returned": len(evidences), "goal": goal}
         return _ActionResult(
             action_id=action_id,
-            tool="read_chunks",
+            tool="read.chunk",
             status="ok",
             summary=summary,
             evidences=evidences,
@@ -454,5 +461,5 @@ class KnowledgeBaseExploreTool(GraphTool):
         ok = sum(1 for res in results if res.status == "ok")
         total = len(results)
         if summaries:
-            return f"knowledge_base.explore completed {ok}/{total} actions. " + " ".join(summaries)
-        return f"knowledge_base.explore completed {ok}/{total} actions."
+            return f"explore completed {ok}/{total} actions. " + " ".join(summaries)
+        return f"explore completed {ok}/{total} actions."

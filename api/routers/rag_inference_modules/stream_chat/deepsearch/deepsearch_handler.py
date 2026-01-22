@@ -47,20 +47,23 @@ def _generate_trace_message(trace_event: TraceEvent) -> str:
         plan_step = meta.get("plan_step", "")
         
         # 简化工具名称显示
-        if tool_name == "graph.think":
-            return "正在进行图谱推理..."
-        elif tool_name == "graph_adapter.query":
-            return "正在查询知识图谱..."
-        elif tool_name.startswith("graph"):
+        if tool_name == "think":
+            return "正在思考..."
+        if tool_name == "explore":
+            return "正在探索知识库..."
+        if tool_name == "code.python":
+            return "正在进行计算验证..."
+        if tool_name == "read.chunk":
+            return "正在精读证据..."
+        if tool_name.startswith("graph."):
             return "正在执行图谱操作..."
-        elif tool_name.startswith("web") or tool_name.startswith("search"):
+        if tool_name.startswith("search"):
+            return "正在检索知识库..."
+        if tool_name.startswith("web"):
             return "正在进行网络搜索..."
-        elif tool_name.startswith("text"):
-            return "正在处理文本..."
-        else:
-            if plan_step:
-                return f"正在执行步骤 {plan_step}..."
-            return f"正在调用工具 {tool_name}..."
+        if plan_step:
+            return f"正在执行步骤 {plan_step}..."
+        return f"正在调用工具 {tool_name}..."
     
     elif tag == "tool_response":
         tool_name = meta.get("tool_name", "")
@@ -69,15 +72,21 @@ def _generate_trace_message(trace_event: TraceEvent) -> str:
         if not ok:
             return f"工具 {tool_name} 调用失败"
         
-        if tool_name == "graph_adapter.query":
-            evidence_count = meta.get("evidence_count", 0)
-            return f"已从知识图谱获取 {evidence_count} 条证据"
-        elif tool_name.startswith("graph"):
+        if tool_name == "think":
+            return "思考完成"
+        if tool_name == "explore":
+            return "探索完成"
+        if tool_name == "code.python":
+            return "计算完成"
+        if tool_name == "read.chunk":
+            return "精读完成"
+        if tool_name.startswith("graph."):
             return "图谱操作完成"
-        elif tool_name.startswith("web") or tool_name.startswith("search"):
+        if tool_name.startswith("search"):
+            return "检索完成"
+        if tool_name.startswith("web"):
             return "网络搜索完成"
-        else:
-            return f"工具 {tool_name} 调用完成"
+        return f"工具 {tool_name} 调用完成"
     
     elif tag == "write":
         return "正在写入内容..."

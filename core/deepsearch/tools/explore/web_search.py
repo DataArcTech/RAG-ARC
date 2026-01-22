@@ -28,7 +28,7 @@ class WebSearchTool(GraphTool):
         strategy_tags=("web", "search", EVIDENCE_PRIMARY, SCOPE_OWNER),
         profile="X",
         determinism="stochastic",
-        namespace="rag-arc.deepsearch.tools.web.search",
+        namespace="rag-arc.deepsearch.tools.explore.web.search",
         mcp_callable=False,
         input_schema=build_input_schema(
             extra_properties={

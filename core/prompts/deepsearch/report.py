@@ -1,6 +1,6 @@
 """Prompt templates for DeepSearch report generation."""
 
-REPORT_OUTLINE_SYSTEM_PROMPT_EN = """You are a report planner specializing in knowledge graph-enhanced research reports.
+REPORT_OUTLINE_SYSTEM_PROMPT_EN = """You are a report writer specializing in knowledge graph-enhanced research reports.
 
 ## Goal
 Convert the available DeepSearch signals into a clear report outline that maximizes clarity and evidence utilization.

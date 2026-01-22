@@ -1,4 +1,4 @@
-"""Configuration entry point that wires planner, graph reasoning, and reporting."""
+"""Configuration entry point that wires reasoning and reporting."""
 import hashlib
 import json
 import logging
@@ -10,20 +10,12 @@ from typing import Any, Dict, Literal, Optional, List
 
 from pydantic import BaseModel, Field
 
-from config.core.deepsearch import bench_answer_defaults
 from config.core.deepsearch.computable_gate_defaults import DEFAULT_COMPUTABLE_POLICY
-from config.core.deepsearch.planner_web_policy_defaults import (
-    DEFAULT_REALTIME_WEB_INTENT_KEYWORDS,
-    DEFAULT_REALTIME_WEB_KEYWORDS,
-    DEFAULT_REALTIME_WEB_STRONG_KEYWORDS,
-    DEFAULT_REALTIME_WEB_TOPIC_KEYWORDS,
-)
 from application.rag_inference.deepsearch.service import DeepSearchService
 from config.core.deepsearch.graph_adapter_config import GraphAdapterConfig
 from config.encapsulation.mcp.client_config import MCPClientConfig
 from config.encapsulation.llm.chat.openai import OpenAIChatConfig
-from core.deepsearch.plan import DeepSearchPlanner
-from core.deepsearch.reasoning import MultiAgentGraphReasoningLoop
+from core.deepsearch.reasoning import GraphReasoningLoop
 from core.deepsearch.report import DeepSearchReporter
 from core.deepsearch.tooling.registry import ToolHintRegistry
 from core.deepsearch.tooling.adapter_capability_gate import disabled_tools_for_adapter, merge_disabled_tools
@@ -169,7 +161,7 @@ def _inject_search_retrievers(payload: Dict[str, Any], *, dense: Any | None, bm2
             return None
         return params
 
-    for tool_name in ("search", "search.faiss", "search.bm25", "knowledge_base.explore"):
+    for tool_name in ("search", "search.faiss", "search.bm25", "explore"):
         params = _ensure_params(tool_name)
         if params is None:
             continue
@@ -178,78 +170,6 @@ def _inject_search_retrievers(payload: Dict[str, Any], *, dense: Any | None, bm2
         if bm25 is not None and "bm25_retriever" not in params:
             params["bm25_retriever"] = bm25
 
-
-class PlannerRuntimeConfig(BaseModel):
-    """Planner runtime knobs controlling ReAct/IterResearch/Parallel-Thinking."""
-
-    mode: Literal["react", "iter_research", "parallel_thinking"] = Field(
-        "react", description="Default lightweight mode; switch to iter_research/parallel_thinking when needed."
-    )
-    max_steps: int = Field(8, description="Maximum planner steps per question.")
-    enable_sub_question: bool = Field(True, description="Allow heuristic sub-question expansion.")
-    persist_plan: bool = Field(True, description="Persist plan JSON artifacts for replay/debugging.")
-    plan_output_dir: str = Field("./local/deepsearch_runs", description="Directory for persisted plan artifacts.")
-    web_step_policy: Literal["off", "realtime_required"] = Field(
-        "realtime_required",
-        description=(
-            "Policy for including at least one web search step in the plan. "
-            "'realtime_required' injects/forces a web step when the question asks for realtime/latest/current info."
-        ),
-    )
-    realtime_web_keywords: List[str] = Field(
-        default_factory=lambda: list(DEFAULT_REALTIME_WEB_KEYWORDS),
-        description=(
-            "Keyword cues (substring match) that indicate realtime/latest/current requirements. "
-            "Used only when web_step_policy='realtime_required'."
-        ),
-    )
-    realtime_web_strong_keywords: List[str] = Field(
-        default_factory=lambda: list(DEFAULT_REALTIME_WEB_STRONG_KEYWORDS),
-        description="Strong keyword cues that force a web step even without topic matching (e.g. '引用网络来源').",
-    )
-    realtime_web_intent_keywords: List[str] = Field(
-        default_factory=lambda: list(DEFAULT_REALTIME_WEB_INTENT_KEYWORDS),
-        description="Recency intent keywords; used together with realtime_web_topic_keywords.",
-    )
-    realtime_web_topic_keywords: List[str] = Field(
-        default_factory=lambda: list(DEFAULT_REALTIME_WEB_TOPIC_KEYWORDS),
-        description="Time-sensitive topic keywords; used together with realtime_web_intent_keywords.",
-    )
-    graph_channel_tool: str = Field("graph_adapter.query", description="Default tool name for graph channel steps.")
-    text_channel_tool: str = Field(
-        "search",
-        description="Default text-channel tool (fallback to search when text-only steps are needed).",
-    )
-    web_channel_tool: str = Field("web.search", description="Default tool name for web channel steps.")
-    include_llm_tools_in_catalog: bool = Field(
-        ...,
-        description="Whether to include LLM-dependent tools in the planner tool catalog (must be explicit; no env heuristics).",
-    )
-    tool_arg_templates: Dict[str, Dict[str, str]] = Field(
-        default_factory=dict,
-        description="Channel-specific tool argument templates (string.Template supported).",
-    )
-    tool_catalog_allowlist: Optional[List[str]] = Field(
-        default=None,
-        description=(
-            "Optional allowlist of tool names shown to the planner (reduces prompt size/cognitive load). "
-            "When set, the planner catalog will include only these tools plus the graph adapter traversal primitive."
-        ),
-    )
-    tool_catalog_max_items: int = Field(
-        0,
-        ge=0,
-        le=200,
-        description="Optional hard cap on the number of tool descriptors shown to the planner (0 disables).",
-    )
-    honor_planner_tool_selection: bool = Field(
-        ...,
-        description="When true, DeepSearchPlanner will honor explicit tool selections in plan steps (must be explicit).",
-    )
-    graph_adapter_name: str = Field(
-        "hipporag",
-        description="Default graph adapter name used in plan artifacts (must match a registered adapter).",
-    )
 
 
 class GraphReasoningThinkConfig(BaseModel):
@@ -388,106 +308,6 @@ class GraphReasoningStrategyConfig(BaseModel):
     )
 
 
-class MultiAgentConfig(BaseModel):
-    """Lead/worker orchestration knobs for DeepSearch reasoning."""
-
-    enabled: bool = Field(..., description="Enable the lead/worker orchestrator for graph reasoning.")
-    max_subagents: int = Field(..., description="Maximum number of worker agents spawned per request.")
-    subagent_concurrency: int = Field(..., description="Max concurrent worker agents.")
-    enable_parallel_tool_probes: bool = Field(..., description="Run fast probe tools in parallel inside each worker.")
-    probe_tool_names: List[str] = Field(
-        ...,
-        description="Fast probe tools executed by each worker (invoked concurrently).",
-    )
-    probe_concurrency: int = Field(..., description="Max concurrent probe tool invocations per worker.")
-    lead_tool_names: List[str] = Field(
-        ...,
-        description="Optional tools invoked by the lead agent after merging worker evidence.",
-    )
-    lead_tool_concurrency: int = Field(..., description="Max concurrent tool invocations for lead post-processing.")
-    max_merge_evidences: int = Field(
-        ...,
-        description="Cap the merged evidence list size (after dedupe) to prevent prompt blow-ups.",
-    )
-    worker_timeout_seconds: Optional[float] = Field(
-        ...,
-        description="Optional per-worker timeout (seconds). When null, rely on underlying tool timeouts.",
-    )
-    worker_retry_attempts: int = Field(..., description="Retry attempts per worker session (0 disables retries).")
-    fail_fast: bool = Field(
-        ...,
-        description="Fail the whole request when any worker/probe/lead tool fails.",
-    )
-    incremental_parallelism: bool = Field(
-        ...,
-        description="When true, launch a small worker batch first and expand if evidence coverage is insufficient.",
-    )
-    initial_worker_count: int = Field(
-        ...,
-        description="Initial number of workers to run when incremental_parallelism is enabled (>=1).",
-    )
-    stop_min_evidence_count: int = Field(
-        ...,
-        description="Stop expanding incremental workers once PRIMARY evidence count reaches this threshold (<=0 disables).",
-    )
-    stop_min_coverage_ratio: float = Field(
-        ...,
-        description="Stop expanding incremental workers once coverage_ratio reaches this threshold (<=0 disables).",
-    )
-
-
-class BenchAnswerTypeConfig(BaseModel):
-    """Per-question-type settings for benchmark-mode answer synthesis."""
-
-    mode: bench_answer_defaults.BenchAnswerMode = Field(
-        "single_stage",
-        description="Answer synthesis mode: single_stage (1 call) or two_stage (extract -> answer).",
-    )
-    preference: bench_answer_defaults.BenchAnswerPreference = Field(
-        "balanced",
-        description="Optimization preference: correctness (reduce FP), coverage (reduce FN), balanced.",
-    )
-    max_evidence_items: int = Field(
-        bench_answer_defaults.DEFAULT_BENCH_MAX_EVIDENCE_ITEMS,
-        description="Max evidence snippets included in bench evidence block.",
-    )
-    max_evidence_chars: int = Field(
-        bench_answer_defaults.DEFAULT_BENCH_MAX_EVIDENCE_CHARS,
-        description="Max total characters for the bench evidence block.",
-    )
-    snippet_chars: int = Field(
-        bench_answer_defaults.DEFAULT_BENCH_SNIPPET_CHARS,
-        description="Max characters per extracted snippet before block concatenation.",
-    )
-
-
-class BenchAnswerConfig(BaseModel):
-    """Benchmark-mode answer synthesis knobs.
-
-    This config is consumed by `application.rag_inference.deepsearch.service_bench` and
-    `core.deepsearch.report.bench_answer` only (no impact on product report generation).
-    """
-
-    enabled: bool = Field(True, description="Enable benchmark-mode answer synthesis settings when bench_mode=1.")
-    allowed_evidence_kinds: List[str] = Field(
-        default_factory=lambda: list(bench_answer_defaults.DEFAULT_BENCH_ALLOWED_EVIDENCE_KINDS),
-        description="Evidence kinds allowed to enter the bench evidence block (default: primary only).",
-    )
-    heading_window_max_lines: int = Field(
-        bench_answer_defaults.DEFAULT_BENCH_HEADING_WINDOW_MAX_LINES,
-        description="When a heading line matches the question, include up to N following lines to preserve bullets.",
-    )
-    default_policy: BenchAnswerTypeConfig = Field(
-        default_factory=BenchAnswerTypeConfig,
-        description="Fallback policy when question_type is missing or unmapped.",
-    )
-    policies_by_question_type: Dict[str, BenchAnswerTypeConfig] = Field(
-        default_factory=lambda: {
-            key: BenchAnswerTypeConfig.model_validate(value)
-            for key, value in bench_answer_defaults.DEFAULT_BENCH_POLICIES_BY_QUESTION_TYPE.items()
-        },
-        description="Overrides keyed by dataset-provided question_type labels (e.g., GraphRAG-Benchmark).",
-    )
 
 
 class ReporterConfig(BaseModel):
@@ -544,7 +364,7 @@ class ReporterConfig(BaseModel):
     )
     outline_evidence_summary_chars: int = Field(
         240,
-        description="Characters per evidence index summary forwarded to the outline planner.",
+        description="Characters per evidence index summary forwarded to the report outline writer.",
     )
     methodology_summary_chars: int = Field(
         1200,
@@ -557,10 +377,6 @@ class ReporterConfig(BaseModel):
     synthesis_section_max_chars: int = Field(
         1200,
         description="Maximum characters per section body forwarded to the parallel synthesis step.",
-    )
-    bench_answer: BenchAnswerConfig = Field(
-        default_factory=BenchAnswerConfig,
-        description="Settings for benchmark-mode answer synthesis (only used when bench_mode=1).",
     )
 
 
@@ -669,13 +485,13 @@ class RemoteToolDescriptorConfig(BaseModel):
     """Descriptor for remote-only tools exposed via MCP."""
 
     description: str = Field(..., description="Human-readable tool summary.")
-    channel: str = Field("graph", description="Channel label used by the planner.")
+    channel: str = Field("graph", description="Channel label used by the tool catalog.")
     namespace: str = Field(..., description="MCP namespace for remote invocation.")
-    profile: str = Field("F", description="Planner profile tag (F/H/X).")
-    determinism: str = Field("deterministic", description="Determinism label shown to the planner.")
+    profile: str = Field("F", description="Profile tag (F/H/X).")
+    determinism: str = Field("deterministic", description="Determinism label shown in tool metadata.")
     speed: str = Field("medium", description="Speed hint (fast/medium/slow).")
     cost: str = Field("medium", description="Cost hint (low/medium/high).")
-    strategy_tags: List[str] = Field(default_factory=list, description="Optional strategy hints for the planner.")
+    strategy_tags: List[str] = Field(default_factory=list, description="Optional strategy hints for the tool catalog.")
 
 
 class QualityLoopConfig(BaseModel):
@@ -762,13 +578,11 @@ class DeterministicRoutingConfig(BaseModel):
 
 
 class DeepSearchServiceConfig(AbstractConfig):
-    """Application-layer builder that assembles all DeepSearch components."""
+    """Application-layer builder that assembles DeepSearch components."""
 
     type: Literal["deepsearch_service"] = "deepsearch_service"
-    planner: PlannerRuntimeConfig
     graph_adapter: GraphAdapterConfig
     graph_reasoning: GraphReasoningStrategyConfig
-    multi_agent: MultiAgentConfig
     reporter: ReporterConfig
     tool_manager: ToolManagerConfig
     tool_budget: ToolBudgetConfig
@@ -779,7 +593,7 @@ class DeepSearchServiceConfig(AbstractConfig):
     )
     llm: Optional[OpenAIChatConfig] = Field(
         default=None,
-        description="Optional LLM config shared across planner reasoning and graph/tools.",
+        description="Optional LLM config shared across reasoning and tools.",
     )
     artifacts: ArtifactsConfig = Field(
         default_factory=ArtifactsConfig,
@@ -810,20 +624,11 @@ class DeepSearchServiceConfig(AbstractConfig):
         tool_hint_registry.set_disabled_tools(
             merge_disabled_tools(tool_hint_registry.get_disabled_tool_names(), adapter_disabled)
         )
-        planner = DeepSearchPlanner(
-            prompt_store=None,
-            llm_connector=llm_connector,
-            config=self.planner,
-            tool_hint_registry=tool_hint_registry,
-        )
-        
-        graph_loop = MultiAgentGraphReasoningLoop(
+        graph_loop = GraphReasoningLoop(
             adapter=adapter,
             llm_connector=llm_connector,
             strategy_config=self.graph_reasoning,
             tool_manager=tool_manager,
-            settings=self.multi_agent.model_dump(),
-            graph_channel_tool=self.planner.graph_channel_tool,
         )
         graph_store = self._resolve_graph_store(adapter)
         reporter = DeepSearchReporter(
@@ -842,7 +647,6 @@ class DeepSearchServiceConfig(AbstractConfig):
             elif is_dataclass(adapter_meta):
                 adapter_meta_payload = asdict(adapter_meta)
         return DeepSearchService(
-            planner=planner,
             graph_loop=graph_loop,
             reporter=reporter,
             tool_manager=tool_manager,
@@ -856,12 +660,7 @@ class DeepSearchServiceConfig(AbstractConfig):
                 "artifacts": self.artifacts.model_dump(),
                 "adapter": adapter_meta_payload,
                 "disabled_tools": sorted(tool_hint_registry.get_disabled_tool_names()),
-                "tool_names": {
-                    "graph_channel_tool": self.planner.graph_channel_tool,
-                    "text_channel_tool": self.planner.text_channel_tool,
-                    "web_channel_tool": self.planner.web_channel_tool,
-                    "think_tool": self.graph_reasoning.think.tool_name,
-                },
+                "think_tool": self.graph_reasoning.think.tool_name,
                 "coverage_expected_min_chunks": self.graph_reasoning.coverage_expected_min_chunks,
             },
         )

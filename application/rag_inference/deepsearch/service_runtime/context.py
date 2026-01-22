@@ -10,6 +10,28 @@ logger = logging.getLogger(__name__)
 
 
 class DeepSearchServiceContextMixin:
+    def _bootstrap_graph_context(
+        self,
+        *,
+        question: str,
+        scope: GraphAccessScope,
+    ) -> GraphQueryContext:
+        adapter = getattr(getattr(self, "graph_loop", None), "adapter", None)
+        adapter_name = "graph_adapter"
+        try:
+            meta = adapter.metadata() if callable(getattr(adapter, "metadata", None)) else None
+        except Exception:
+            meta = None
+        if meta is not None:
+            adapter_name = str(getattr(meta, "adapter_name", None) or adapter_name)
+        elif adapter is not None:
+            adapter_name = str(getattr(adapter, "name", adapter_name) or adapter_name)
+        return GraphQueryContext(
+            adapter_name=adapter_name,
+            question=str(question or "").strip(),
+            access_scope=scope,
+            metadata={},
+        )
     def _build_state(
         self,
         *,

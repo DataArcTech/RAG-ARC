@@ -146,12 +146,17 @@ def _trim_plan_block(plan_block: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 def _trim_reasoning_block(reasoning_block: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not isinstance(reasoning_block, dict):
         return {"reasoning_steps": [], "think_notes": []}
-    return {
+    trimmed = {
         "question": reasoning_block.get("question"),
         "reasoning_steps": _summarize_reasoning_steps(reasoning_block),
         "coverage_metrics": reasoning_block.get("coverage_metrics") or {},
         "think_notes": list(reasoning_block.get("think_notes") or []),
     }
+    if "runtime_plan" in reasoning_block:
+        trimmed["runtime_plan"] = reasoning_block.get("runtime_plan")
+    if "final_think" in reasoning_block:
+        trimmed["final_think"] = reasoning_block.get("final_think")
+    return trimmed
 
 
 def _trim_report_block(report_block: Optional[Dict[str, Any]], limit: Optional[int]) -> Dict[str, Any]:

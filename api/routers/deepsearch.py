@@ -215,13 +215,18 @@ async def _schedule_deepsearch(
                 meta={"run_id": run_id},
             )
             try:
-                planner = getattr(service, "planner", None)
+                include_llm_tools = True
+                think_cfg = getattr(getattr(service, "graph_loop", None), "_think_config", None)
+                if isinstance(think_cfg, dict) and "include_llm_tools" in think_cfg:
+                    include_llm_tools = bool(think_cfg.get("include_llm_tools"))
+                registry = None
+                try:
+                    registry = getattr(getattr(getattr(service, "tool_manager", None), "local_registry", None), "tool_hint_registry", None)
+                except Exception:
+                    registry = None
                 await emit_trace(
                     "all_tools",
-                    render_all_tools_block(
-                        include_llm_tools=bool(getattr(planner, "include_llm_tools_in_catalog", False)),
-                        registry=getattr(planner, "_tool_hint_registry", None),
-                    ),
+                    render_all_tools_block(include_llm_tools=include_llm_tools, registry=registry),
                     meta={"run_id": run_id},
                 )
             except Exception as exc:  # noqa: BLE001

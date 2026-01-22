@@ -2,6 +2,7 @@ import logging
 from typing import Any, Dict, List, Optional, Sequence
 
 from core.deepsearch.report import DeepSearchQualityGate, QualityGateConfig
+from encapsulation.data_model.deepsearch import ThinkNote
 from core.deepsearch.state import DeepSearchState
 
 logger = logging.getLogger(__name__)
@@ -12,18 +13,6 @@ class DeepSearchServiceQualityMixin:
         if not isinstance(self.config, dict) or not isinstance(self.config.get("quality_loop"), dict):
             raise ValueError("DeepSearchService missing required config.quality_loop")
         return QualityGateConfig.model_validate(self.config["quality_loop"])
-
-    def _tool_names(self) -> Dict[str, str]:
-        if not isinstance(self.config, dict):
-            raise ValueError("DeepSearchService config must be a dict")
-        names = self.config.get("tool_names")
-        if not isinstance(names, dict):
-            raise ValueError("DeepSearchService config.tool_names is required")
-        required = ("graph_channel_tool", "web_channel_tool", "text_channel_tool", "think_tool")
-        missing = [key for key in required if not str(names.get(key) or "").strip()]
-        if missing:
-            raise ValueError(f"DeepSearchService config.tool_names missing: {missing}")
-        return {k: str(names[k]).strip() for k in required}
 
     async def _quality_gate_stage(
         self,
@@ -43,10 +32,9 @@ class DeepSearchServiceQualityMixin:
         payload["round"] = round_idx
         return payload
 
-    def _build_followup_plan_steps(self, *, actions: Sequence[Dict[str, Any]], round_idx: int) -> List[Dict[str, Any]]:
-        steps: List[Dict[str, Any]] = []
-        counter = 0
-        graph_tool = self._tool_names()["graph_channel_tool"]
+    @staticmethod
+    def _build_followup_think_notes(*, actions: Sequence[Dict[str, Any]], round_idx: int) -> List[ThinkNote]:
+        tool_calls: List[Dict[str, Any]] = []
         for action in actions:
             if not isinstance(action, dict):
                 continue
@@ -55,21 +43,24 @@ class DeepSearchServiceQualityMixin:
             query = str(action.get("query") or "").strip()
             if not query:
                 continue
-            counter += 1
-            step_id = f"quality_graph_r{round_idx + 1}_{counter:02d}"
-            steps.append(
+            tool_calls.append(
                 {
-                    "step_id": step_id,
-                    "description": f"Quality follow-up graph search: {query}",
-                    "channel": "graph",
-                    "metadata": {"source": "quality_gate", "round": round_idx + 1},
-                    "tool": graph_tool,
-                    "tool_args": {"query": query},
-                    "requires_external": False,
-                    "enabled": True,
+                    "tool_name": "explore",
+                    "tool_args": {"actions": [{"tool": "search", "args": {"focus_query": query}}]},
+                    "rationale": f"Quality gate follow-up: {query}",
+                    "parallelizable": True,
                 }
             )
-        return steps
+
+        if not tool_calls:
+            return []
+        return [
+            ThinkNote(
+                plan_step_id=f"quality_followup_r{round_idx + 1}",
+                reasoning="Quality gate follow-up actions.",
+                metadata={"raw": {"tool_calls": tool_calls}},
+            )
+        ]
 
     @staticmethod
     def _merge_reasoning_traces(base: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
@@ -112,6 +103,8 @@ class DeepSearchServiceQualityMixin:
         cov.update(inc_cov or {})
         cov.setdefault("evidence_count", len(merged.get("evidences") or []))
         merged["coverage_metrics"] = cov
+        if "runtime_plan" in incoming:
+            merged["runtime_plan"] = incoming.get("runtime_plan")
         return merged
 
     @staticmethod

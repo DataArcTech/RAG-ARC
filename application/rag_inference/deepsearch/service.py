@@ -1,9 +1,8 @@
-"""Service façade wiring DeepSearch planner, reasoning loop, and reporting."""
+"""Service façade wiring DeepSearch reasoning loop and reporting."""
 
 import logging
 from typing import Any, Dict, Type
 
-from core.deepsearch.plan import DeepSearchPlanner
 from core.deepsearch.reasoning import GraphReasoningLoop
 from core.deepsearch.report import DeepSearchReporter
 from core.deepsearch.state import DeepSearchState
@@ -37,7 +36,6 @@ class DeepSearchService(
 
     def __init__(
         self,
-        planner: DeepSearchPlanner,
         graph_loop: GraphReasoningLoop,
         reporter: DeepSearchReporter,
         tool_manager: ToolInvoker,
@@ -45,7 +43,6 @@ class DeepSearchService(
         state_cls: Type[DeepSearchState] = DeepSearchState,
         config: Dict[str, Any] | None = None,
     ):
-        self.planner = planner
         self.graph_loop = graph_loop
         self.reporter = reporter
         self.tool_manager = tool_manager
