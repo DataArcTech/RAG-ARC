@@ -1,8 +1,12 @@
 import hashlib
+import logging
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Callable
 
 from fastapi import HTTPException, status
+
+logger = logging.getLogger(__name__)
 
 from encapsulation.data_model.orm_models import FileMindmapCache
 from core.prompts import MINDMAP_MERGE_SYSTEM_PROMPT_EN, build_mindmap_merge_user_prompt
@@ -65,26 +69,185 @@ def extract_tsv_from_response(response: str) -> str:
     return response.strip()
 
 
+def extract_relations_from_chunks(
+    chunks: List[Dict[str, Any]], 
+    nodes: List[Dict[str, Any]],
+    knowledge: Any
+) -> List[Dict[str, Any]]:
+    """
+    从 chunks 的 graph 数据中提取关系，并转换为 edges。
+    
+    Args:
+        chunks: Chunk 字典列表，包含 chunk_id
+        nodes: 已创建的节点列表，用于匹配实体名称
+        knowledge: Knowledge 模块实例，用于获取 graph_store
+    
+    Returns:
+        关系 edges 列表
+    """
+    relations_edges: List[Dict[str, Any]] = []
+    
+    # 获取 graph_store
+    graph_store = None
+    if hasattr(knowledge, "file_index"):
+        for indexer in getattr(knowledge.file_index, "indexers", []):
+            if hasattr(indexer, "graph_store"):
+                graph_store = indexer.graph_store
+                break
+    
+    if graph_store is None:
+        return relations_edges
+    
+    # 构建节点名称到节点ID的映射（用于匹配实体）
+    # 支持精确匹配和部分匹配
+    node_name_to_id: Dict[str, str] = {}
+    node_name_parts: List[Tuple[str, str]] = []  # (节点名称片段, 节点ID)
+    for node in nodes:
+        node_name = node.get("name", "").strip()
+        if node_name:
+            node_name_to_id[node_name] = node.get("id", "")
+            # 提取节点名称的关键部分（去除冒号后的描述等）
+            # 例如："公司名称: 数创弧光智能科技有限公司" -> "数创弧光智能科技有限公司"
+            name_parts = node_name.split(":")
+            if len(name_parts) > 1:
+                key_part = name_parts[-1].strip()
+                if key_part:
+                    node_name_parts.append((key_part, node.get("id", "")))
+            # 提取括号中的内容
+            if "(" in node_name and ")" in node_name:
+                bracket_content = re.findall(r'\(([^)]+)\)', node_name)
+                for content in bracket_content:
+                    node_name_parts.append((content.strip(), node.get("id", "")))
+    
+    # 从每个 chunk 的 graph 数据中提取关系
+    chunk_ids = [chunk.get("chunk_id", "") for chunk in chunks if chunk.get("chunk_id")]
+    if not chunk_ids:
+        return relations_edges
+    
+    try:
+        # 获取 chunks 的 graph 数据
+        chunk_objects = graph_store.get_by_ids(chunk_ids)
+        
+        edge_counter = 0
+        for chunk in chunk_objects:
+            if not chunk or not hasattr(chunk, "graph") or not chunk.graph:
+                continue
+            
+            graph_data = chunk.graph
+            if not hasattr(graph_data, "relations"):
+                continue
+            
+            # 处理每个关系
+            for relation in graph_data.relations:
+                if not isinstance(relation, list) or len(relation) < 3:
+                    continue
+                
+                head_name = str(relation[0]).strip()
+                relation_type = str(relation[1]).strip() if len(relation) > 1 else ""
+                tail_name = str(relation[2]).strip() if len(relation) > 2 else ""
+                
+                if not relation_type or not head_name or not tail_name:
+                    continue
+                
+                # 跳过 contains 关系（已由 TSV 层级结构处理）
+                if relation_type.lower() in ("contains", "包含", "none", ""):
+                    continue
+                
+                # 查找对应的节点ID（支持精确匹配和部分匹配）
+                head_node_id = node_name_to_id.get(head_name)
+                tail_node_id = node_name_to_id.get(tail_name)
+                
+                # 如果精确匹配失败，尝试部分匹配
+                if not head_node_id:
+                    for part, nid in node_name_parts:
+                        if head_name in part or part in head_name:
+                            head_node_id = nid
+                            break
+                    # 如果还是找不到，尝试在完整节点名称中查找
+                    if not head_node_id:
+                        for node_name, nid in node_name_to_id.items():
+                            if head_name in node_name or node_name in head_name:
+                                head_node_id = nid
+                                break
+                
+                if not tail_node_id:
+                    for part, nid in node_name_parts:
+                        if tail_name in part or part in tail_name:
+                            tail_node_id = nid
+                            break
+                    if not tail_node_id:
+                        for node_name, nid in node_name_to_id.items():
+                            if tail_name in node_name or node_name in tail_name:
+                                tail_node_id = nid
+                                break
+                
+                # 如果实体名称在节点中存在，创建关系 edge
+                if head_node_id and tail_node_id:
+                    edge_counter += 1
+                    relations_edges.append({
+                        "id": f"relation-{edge_counter:03d}",
+                        "source": head_node_id,
+                        "target": tail_node_id,
+                        "relation": relation_type,
+                        "weight": 0.7,  # 关系边的默认权重
+                    })
+                # 如果实体不在节点中，但关系类型重要，可以考虑创建新节点
+                # 这里为了最小代价，暂时跳过
+                
+    except Exception as e:
+        # 静默失败，不影响主流程
+        logger.warning(f"Failed to extract relations from chunks: {e}")
+    
+    return relations_edges
+
+
 def convert_tsv_to_graph(tsv_text: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    entries: List[Tuple[str, str]] = []
+    entries: List[Tuple[str, str, Optional[str], Optional[str]]] = []  # (level, head, relation, tail)
     for line in tsv_text.strip().splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
         if "\t" not in stripped:
             continue
-        level, content = stripped.split("\t", 1)
-        level = level.strip()
-        content = content.strip()
-        if not level or not content:
+        parts = [p.strip() for p in stripped.split("\t")]
+        level = parts[0]
+        if not level:
             continue
-        entries.append((level, content))
+        
+        # 解析不同格式：
+        # 格式1: 编号\t内容 (2列)
+        # 格式2: 编号\t内容\t关系 (3列，关系可能是 contains)
+        # 格式3: 编号\t实体1\t关系\t实体2 (4列，三元组)
+        # 格式4: 编号\t实体1\t关系1\t实体2\t关系2\t实体3... (多列)
+        
+        if len(parts) == 2:
+            # 格式1: 只有编号和内容
+            entries.append((level, parts[1], None, None))
+        elif len(parts) == 3:
+            # 格式2: 编号\t内容\t关系
+            entries.append((level, parts[1], parts[2], None))
+        elif len(parts) >= 4:
+            # 格式3/4: 三元组或多列关系
+            # 取前两个实体和第一个关系作为主要关系
+            head = parts[1]
+            relation = parts[2]
+            tail = "\t".join(parts[3:])  # 合并后面的所有列作为尾实体
+            entries.append((level, head, relation, tail))
+        else:
+            continue
 
     nodes: List[Dict[str, Any]] = []
     edges: List[Dict[str, Any]] = []
     node_lookup: Dict[str, Dict[str, Any]] = {}
+    entity_node_map: Dict[str, str] = {}  # 实体名称 -> 节点ID映射
 
-    for level, content in entries:
+    for entry in entries:
+        level, head, relation, tail = entry
+        # 构建节点显示内容
+        if tail:
+            content = f"{head}\t{relation}\t{tail}"
+        else:
+            content = head
         depth = len(level.split(".")) if level else 1
         node_id = f"{level} {content}"
         parent_level = ".".join(level.split(".")[:-1]) if depth > 1 else None
@@ -98,14 +261,25 @@ def convert_tsv_to_graph(tsv_text: str) -> Tuple[List[Dict[str, Any]], List[Dict
             second_level_info = node_lookup.get(second_level) if second_level else None
             category = second_level_info["name"] if second_level_info else content
 
+        # 提取节点名称（使用头实体作为主要名称）
+        node_name = head.strip() if head else content.split("\t")[0].strip()
+        if not node_name:
+            node_name = content
+        
         node_data = {
             "id": node_id,
-            "name": content,
+            "name": node_name,
             "category": category,
             "weight": depth,
         }
         nodes.append(node_data)
-        node_lookup[level] = {"id": node_id, "name": content}
+        node_lookup[level] = {"id": node_id, "name": node_name}
+        
+        # 记录实体到节点的映射（用于关系匹配）
+        if head:
+            entity_node_map[head.strip()] = node_id
+        if tail:
+            entity_node_map[tail.strip()] = node_id
 
         if parent_info:
             parent_id = parent_info["id"]
@@ -116,14 +290,51 @@ def convert_tsv_to_graph(tsv_text: str) -> Tuple[List[Dict[str, Any]], List[Dict
             else:
                 edge_weight = 0.75
 
+            # 如果有明确的关系类型且不是 contains，使用该关系；否则使用 contains
+            edge_relation = relation if relation and relation.lower() not in ("contains", "包含") else "contains"
+            
             edge_data = {
                 "id": f"edge-{len(edges) + 1:03d}",
                 "source": parent_id,
                 "target": node_id,
-                "relation": "contains",
+                "relation": edge_relation,
                 "weight": edge_weight,
             }
             edges.append(edge_data)
+        
+        # 如果是三元组格式（有 tail），创建额外的关系 edge
+        if tail and relation and relation.lower() not in ("contains", "包含"):
+            head_entity = head.strip()
+            tail_entity = tail.strip()
+            rel_type = relation.strip()
+            
+            # 查找头实体和尾实体对应的节点
+            head_node_id = entity_node_map.get(head_entity)
+            tail_node_id = entity_node_map.get(tail_entity)
+            
+            # 如果找不到，尝试在当前节点中查找（部分匹配）
+            if not head_node_id:
+                for n in nodes:
+                    n_name = n.get("name", "")
+                    if head_entity in n_name or n_name in head_entity or head_entity == n_name:
+                        head_node_id = n.get("id")
+                        break
+            if not tail_node_id:
+                for n in nodes:
+                    n_name = n.get("name", "")
+                    if tail_entity in n_name or n_name in tail_entity or tail_entity == n_name:
+                        tail_node_id = n.get("id")
+                        break
+            
+            # 如果找到两个不同的节点，创建关系 edge
+            if head_node_id and tail_node_id and head_node_id != tail_node_id and rel_type:
+                edges.append({
+                    "id": f"relation-{len(edges) + 1:03d}",
+                    "source": head_node_id,
+                    "target": tail_node_id,
+                    "relation": rel_type,
+                    "weight": 0.7,
+                })
 
     return nodes, edges
 
@@ -208,6 +419,10 @@ async def export_file_mindmap_payload(
         )
 
     nodes, edges = convert_tsv_to_graph(merged_tsv)
+    
+    # 从 chunks 的 graph 数据中提取关系并添加到 edges
+    relation_edges = extract_relations_from_chunks(chunks, nodes, knowledge)
+    edges.extend(relation_edges)
 
     if metadata_store is not None and hasattr(metadata_store, "SessionMaker"):
         try:

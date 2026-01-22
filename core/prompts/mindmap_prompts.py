@@ -68,7 +68,10 @@ Each segment provides a content summary and may also include a partial mind map 
 
 Output requirements:
 1) Use numbering like 1, 1.1, 1.1.1 to represent hierarchy; numbering must be consistent.
-2) Output TSV only. Each line must be: '<number>\\t<content>'. Do not add any extra explanation.
+2) Output TSV only. Each line must be: '<number>\\t<content>\\t<relation_type>'. 
+   - For hierarchical parent-child relationships, use "contains"
+   - For other semantic relationships (e.g., "主要客户", "参与", "发布", "采用", "指导"), extract from the content
+   - If no specific relation is mentioned, use "contains" as default
 3) The root node (1) should summarize the entire document at a high level.
 4) Lower-level nodes should cover key information concisely and accurately.
 5) If there are duplicates or conflicts, reconcile them and keep the structure coherent.
