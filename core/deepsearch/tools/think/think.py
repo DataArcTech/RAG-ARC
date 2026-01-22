@@ -21,7 +21,7 @@ class ThinkToolCall(BaseModel):
     tool_name: str = Field(..., min_length=1)
     tool_args: Dict[str, Any] = Field(default_factory=dict)
     rationale: str = Field(..., min_length=1)
-    parallelizable: bool = Field(...)
+    parallelizable: bool = Field(default=False)
 
 
 class ThinkToolResponse(BaseModel):

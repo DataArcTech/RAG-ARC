@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any, Dict, List, Sequence
 
 from core.deepsearch.trace import emit_trace
@@ -7,6 +8,23 @@ from encapsulation.data_model.deepsearch import GraphQueryContext
 
 
 class DeepSearchServiceInitialThinkMixin:
+    def _resolve_tool_timeout_seconds(self) -> float | None:
+        cfg = None
+        try:
+            cfg = (getattr(self, "config", None) or {}).get("graph_reasoning")
+        except Exception:
+            cfg = None
+        if isinstance(cfg, dict):
+            raw = cfg.get("tool_timeout_seconds")
+        else:
+            raw = None
+        if raw is None:
+            return None
+        value = float(raw)
+        if value < 0:
+            raise ValueError("graph_reasoning.tool_timeout_seconds must be >= 0")
+        return value
+
     def _think_tool_name(self) -> str:
         if not isinstance(self.config, dict):
             raise ValueError("DeepSearchService config must be a dict")
@@ -25,7 +43,7 @@ class DeepSearchServiceInitialThinkMixin:
     ) -> Dict[str, Any]:
         tool_manager = getattr(self, "tool_manager", None)
         if not tool_manager:
-            return {"report_needed": True, "plan_state": PlanState(), "think_notes": [], "think_notes_obj": []}
+            raise RuntimeError("DeepSearchService requires a tool_manager for initial_think")
 
         steps = list(plan_steps or [])
         total_steps = len(steps)
@@ -59,14 +77,16 @@ class DeepSearchServiceInitialThinkMixin:
                 "missing_topics": [],
             },
         }
-        try:
-            result = await tool_manager.invoke(self._think_tool_name(), payload=payload)
-        except Exception:
-            return {"report_needed": True, "plan_state": plan_state, "think_notes": [], "think_notes_obj": []}
+        timeout = self._resolve_tool_timeout_seconds()
+        invocation = tool_manager.invoke(self._think_tool_name(), payload=payload)
+        if timeout is not None and timeout > 0:
+            result = await asyncio.wait_for(invocation, timeout=timeout)
+        else:
+            result = await invocation
 
         notes = getattr(result, "think_notes", None)
         if not notes:
-            return {"report_needed": True, "plan_state": plan_state, "think_notes": [], "think_notes_obj": []}
+            raise RuntimeError("Initial think returned no think_notes")
 
         raw = None
         for note in reversed(list(notes)):
@@ -131,7 +151,7 @@ class DeepSearchServiceInitialThinkMixin:
     ) -> Dict[str, Any]:
         tool_manager = getattr(self, "tool_manager", None)
         if not tool_manager:
-            return {"think_notes": [], "plan_state": PlanState(), "raw": {}}
+            raise RuntimeError("DeepSearchService requires a tool_manager for final_think")
 
         plan_state = PlanState()
         plan_state.update(plan_items or [])
@@ -154,10 +174,12 @@ class DeepSearchServiceInitialThinkMixin:
             "graph_context": reasoning_context.model_dump(exclude_none=True),
             "coverage_metrics": coverage_metrics or {},
         }
-        try:
-            result = await tool_manager.invoke(self._think_tool_name(), payload=payload)
-        except Exception:
-            return {"think_notes": [], "plan_state": plan_state, "raw": {}}
+        timeout = self._resolve_tool_timeout_seconds()
+        invocation = tool_manager.invoke(self._think_tool_name(), payload=payload)
+        if timeout is not None and timeout > 0:
+            result = await asyncio.wait_for(invocation, timeout=timeout)
+        else:
+            result = await invocation
 
         notes = getattr(result, "think_notes", None) or []
         raw = None

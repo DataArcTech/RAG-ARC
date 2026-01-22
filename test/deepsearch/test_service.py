@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Sequence
 import pytest
 
 from application.rag_inference.deepsearch.service import DeepSearchService
-from encapsulation.data_model.deepsearch import GraphQueryContext
+from encapsulation.data_model.deepsearch import GraphQueryContext, ThinkNote, ToolResultPayload
 from core.graph_adapter.base import GraphAccessScope
 
 
@@ -149,7 +149,30 @@ class _QualityLoopReporter:
 
 
 class _StubToolManager:
-    pass
+    async def invoke(self, tool_name: str, *, payload: Dict[str, Any]):  # noqa: ANN001
+        note = ThinkNote(
+            plan_step_id=payload.get("plan_step"),
+            reasoning="initial think stub",
+            metadata={
+                "raw": {
+                    "reasoning": "initial think stub",
+                    "tool_calls": [],
+                    "plan": [],
+                    "report_needed": True,
+                }
+            },
+        )
+        return ToolResultPayload(
+            tool_name=tool_name,
+            namespace="stub::think",
+            channel="graph",
+            profile="H",
+            determinism="llm_heavy",
+            summary="initial think stub",
+            evidences=[],
+            diagnostics={},
+            think_notes=[note],
+        )
 
 
 @pytest.mark.asyncio
