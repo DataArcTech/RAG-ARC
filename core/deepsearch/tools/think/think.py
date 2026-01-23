@@ -151,7 +151,7 @@ class ThinkTool(GraphTool):
         try:
             response = await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
             parsed = await self._parse_or_repair_json(messages=messages, raw=response)
-            payload = ThinkToolResponse.model_validate(parsed)
+            payload = ThinkToolResponse.model_validate(self._normalize_payload(parsed))
             self._validate_mode(payload, extra)
             return ThinkNote(
                 plan_step_id=request.plan_step,
@@ -173,6 +173,43 @@ class ThinkTool(GraphTool):
             )
         except Exception as exc:
             raise RuntimeError(f"ThinkTool failed: {exc}") from exc
+
+    @staticmethod
+    def _normalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return payload
+        if not str(payload.get("reasoning") or "").strip():
+            for key in ("thought", "summary", "analysis"):
+                candidate = payload.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    updated = dict(payload)
+                    updated["reasoning"] = candidate.strip()
+                    return updated
+            tool_calls = payload.get("tool_calls")
+            if isinstance(tool_calls, list):
+                rationales = []
+                for call in tool_calls:
+                    if isinstance(call, dict):
+                        rationale = call.get("rationale")
+                        if isinstance(rationale, str) and rationale.strip():
+                            rationales.append(rationale.strip())
+                if rationales:
+                    updated = dict(payload)
+                    updated["reasoning"] = " ".join(rationales)
+                    return updated
+            plan = payload.get("plan")
+            if isinstance(plan, list):
+                plan_texts = []
+                for item in plan:
+                    if isinstance(item, dict):
+                        text = item.get("text")
+                        if isinstance(text, str) and text.strip():
+                            plan_texts.append(text.strip())
+                if plan_texts:
+                    updated = dict(payload)
+                    updated["reasoning"] = " ".join(plan_texts)
+                    return updated
+        return payload
 
     async def _parse_or_repair_json(self, *, messages: List[Dict[str, str]], raw: str) -> Dict[str, Any]:
         parsed = safe_json_loads(raw, expected="dict")
