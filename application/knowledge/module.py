@@ -612,20 +612,82 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
             List of FileMetadata objects accessible to the user
         """
         try:
-            files = self.file_storage.list_accessible_files(
-                user_id=user_id,
-                status=status,
-                limit=limit,
-                offset=offset,
-                search=search,
-            )
+            # When status is None, we need to filter out deleted files in application layer.
+            # To ensure correct pagination, we must filter first, then apply limit/offset.
             if status is None:
+                # Get all files without pagination first
+                all_files_from_db = self.file_storage.list_accessible_files(
+                    user_id=user_id,
+                    status=status,
+                    limit=None,
+                    offset=None,
+                    search=search,
+                )
+                logger.info(f"Retrieved {len(all_files_from_db)} files from database for user {user_id} (before filtering, status={status})")
+                
+                # Filter out deleted files and files marked for deletion
                 files = [
-                    file for file in files
+                    file for file in all_files_from_db
                     if self._is_active_status(file.status) and not self._is_file_marked_for_deletion(file.file_id)
                 ]
-            logger.info(f"Retrieved {len(files)} accessible files for user {user_id}")
-            return files
+                removed_count = len(all_files_from_db) - len(files)
+                logger.info(f"After filtering: {len(files)} active files (removed {removed_count} deleted/marked files)")
+                
+                # Log status distribution for debugging
+                if removed_count > 0:
+                    status_dist = {}
+                    for file in all_files_from_db:
+                        status_val = file.status.value if hasattr(file.status, 'value') else str(file.status)
+                        status_dist[status_val] = status_dist.get(status_val, 0) + 1
+                    logger.info(f"File status distribution before filtering: {status_dist}")
+                
+                # Ensure files are sorted by created_at DESC (same as database order)
+                # This is critical for consistent pagination
+                files.sort(key=lambda f: f.created_at, reverse=True)
+                
+                # Apply pagination after filtering and sorting
+                # offset: number of items to skip (0-based)
+                # limit: maximum number of items to return
+                offset_val = int(offset or 0)
+                if offset_val < 0:
+                    offset_val = 0
+                
+                limit_val = int(limit) if limit is not None else None
+                
+                # Calculate slice indices
+                start_idx = offset_val
+                if limit_val is None:
+                    result = files[start_idx:]
+                else:
+                    end_idx = start_idx + limit_val
+                    result = files[start_idx:end_idx]
+                
+                logger.info(
+                    f"Pagination result: retrieved {len(result)} files for user {user_id} "
+                    f"(offset={offset_val}, limit={limit_val}, total_filtered={len(files)}, "
+                    f"requested_range=[{start_idx}:{start_idx + (limit_val or len(files))}], "
+                    f"actual_slice=[{start_idx}:{min(start_idx + (limit_val or len(files)), len(files))}])"
+                )
+                
+                # Additional validation logging
+                if limit_val and len(result) < limit_val and start_idx + limit_val <= len(files):
+                    logger.warning(
+                        f"Pagination warning: requested {limit_val} files starting from offset {offset_val}, "
+                        f"but only got {len(result)} files. Total filtered files: {len(files)}"
+                    )
+                
+                return result
+            else:
+                # When status is specified, database already filters correctly, so we can use limit/offset directly
+                files = self.file_storage.list_accessible_files(
+                    user_id=user_id,
+                    status=status,
+                    limit=limit,
+                    offset=offset,
+                    search=search,
+                )
+                logger.info(f"Retrieved {len(files)} accessible files for user {user_id}")
+                return files
         except Exception as e:
             logger.error(f"Failed to list accessible files for user {user_id}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to retrieve files: {str(e)}")

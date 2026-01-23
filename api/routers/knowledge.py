@@ -449,7 +449,14 @@ async def list_files(
                 )
         
         # Calculate offset from page number
+        # page starts from 1, so:
+        # page=1 → offset=0 (first page)
+        # page=2 → offset=pagesize (second page)
+        # page=3 → offset=2*pagesize (third page)
         offset = (page - 1) * pagesize
+        
+        # Log pagination parameters for debugging
+        logger.debug(f"List files pagination: page={page}, pagesize={pagesize}, offset={offset}, status={status}")
         
         # Get files for current page (async, non-blocking)
         files = await get_knowledge_handler().list_user_files_async(
@@ -462,6 +469,9 @@ async def list_files(
         
         # Get total count of files for the user (async, non-blocking)
         total_count = await get_knowledge_handler().count_user_files_async(user.id, search=search, status=status_enum)
+        
+        # Log results for debugging
+        logger.debug(f"List files result: returned {len(files)} files, total_count={total_count}, page={page}, pagesize={pagesize}")
         
         # Convert FileMetadata objects to FileInfo response models
         # Database stores naive datetime in Beijing time (since we store with Beijing timezone)
