@@ -364,15 +364,7 @@ def build_source_entries(
             file_url = url
         else:
             safe_name = Path(filename).name if filename else ""
-            chunk_meta = provenance.get("metadata") if isinstance(provenance.get("metadata"), Mapping) else {}
-            chunk_index = None
-            if isinstance(chunk_meta, Mapping):
-                nested = chunk_meta.get("chunk_metadata") if isinstance(chunk_meta.get("chunk_metadata"), Mapping) else {}
-                raw_index = nested.get("chunk_index") if isinstance(nested, Mapping) else None
-                if isinstance(raw_index, int):
-                    chunk_index = raw_index
-            suffix = f"#chunk:{chunk_index}" if isinstance(chunk_index, int) else f"#chunk:{ev_token[:8]}"
-            title = _sanitize_title(f"{safe_name or 'source'}{suffix}", max_chars=DEEPSEARCH_SOURCE_TITLE_MAX_CHARS)
+            title = _sanitize_title(safe_name or "source", max_chars=DEEPSEARCH_SOURCE_TITLE_MAX_CHARS)
             file_url = document_preview_url(file_id, filename) if file_id else None
 
         entries.append(
