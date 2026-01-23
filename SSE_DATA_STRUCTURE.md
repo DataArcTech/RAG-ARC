@@ -225,6 +225,17 @@
 }
 ```
 
+**structured_report 最小字段：**
+```json
+{
+  "format_version": "2.0",
+  "text": "报告正文（Markdown，仅允许 <sup> 引用标签）",
+  "citations": [],
+  "evidence_index": [],
+  "source_key_map": {}
+}
+```
+
 #### 2.7 done（完成）
 
 ```json
