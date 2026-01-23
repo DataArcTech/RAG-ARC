@@ -48,25 +48,9 @@ def document_chunk_url(chunk_id: str) -> str:
 
 
 def _mineru_asset_url(file_id: str, rel_path: str) -> str:
-    import os
-    from pathlib import Path
     token = str(rel_path or "").lstrip("/").lstrip("\\")
-    # Build path from PARSER_OUTPUT_DIR environment variable
-    parser_output_dir = os.getenv("PARSER_OUTPUT_DIR", "./data/parsed_files")
-    parser_path = Path(parser_output_dir).resolve()
-    # Extract relative path from absolute path for URL
-    # e.g., /root/project/chatKB/backend/RAG-ARC/data/parsed_files_chatKB_test -> /data/parsed_files_chatKB_test
-    # Find the "data" directory in the path and use everything from "data" onwards
-    parts = parser_path.parts
-    try:
-        data_idx = parts.index("data")
-        # Build URL path from "data" onwards
-        base_url = "/" + "/".join(parts[data_idx:])
-    except ValueError:
-        # If "data" not found, use the directory name as fallback
-        base_url = f"/data/{parser_path.name}"
-    # Build full path: /data/parsed_files_chatKB_test/mineru/{file_id}/images/xxx.jpg
-    return f"{base_url}/mineru/{file_id}/{token}"
+    # Route through the knowledge API so deployments don't rely on static mounts or local paths.
+    return f"/knowledge/{file_id}/mineru-assets/{token}"
 
 
 def _is_relative_local_path(url: str) -> bool:
