@@ -1,7 +1,7 @@
 """最终响应构建函数"""
 import json
 import logging
-from typing import Any, Optional, AsyncGenerator
+from typing import Any, Optional, AsyncGenerator, Tuple
 from .response_builder import (
     generate_mindmap_if_needed,
     ensure_non_empty_response,
@@ -17,8 +17,77 @@ from api.sse import (
     sse_json_wrapped,
 )
 from ..task.task_helpers import check_and_handle_cancellation, yield_cancellation_event, mark_task_completed
+from ..task.task_registry import get_chat_task_registry
+from api.routers.rag_inference_handlers import get_message_handler
+from framework.thread_pool import get_thread_pool
 
 logger = logging.getLogger(__name__)
+
+async def _get_or_create_final_assistant_message(
+    *,
+    session_id: Any,
+    assistant_response: str,
+    sources_for_frontend: list,
+    subgraph_data: Optional[Any],
+    return_subgraph: bool,
+    raw_llm_response: Optional[Any],
+    raw_mindmap_response: Optional[Any],
+    task_info: Optional[Any],
+    user_message: Any,
+    deepsearch_trace_file_path: Optional[str],
+) -> Tuple[Any, bool]:
+    """Create the assistant message exactly once per task_id and return (message, created_now)."""
+    if not task_info:
+        msg = await create_assistant_message(
+            session_id,
+            assistant_response,
+            sources_for_frontend,
+            subgraph_data,
+            return_subgraph,
+            raw_llm_response,
+            raw_mindmap_response,
+            deepsearch_trace_file_path=deepsearch_trace_file_path,
+        )
+        return msg, True
+
+    registry = get_chat_task_registry()
+    lock = await registry.get_finalization_lock(task_info.task_id)
+    async with lock:
+        latest = await registry.get(task_info.task_id) or task_info
+
+        # If another coroutine already finalized, reuse it.
+        existing_id = getattr(latest, "assistant_message_id", None)
+        if existing_id is not None:
+            existing = await get_thread_pool().run_blocking(get_message_handler().get_message, existing_id)
+            if existing is not None:
+                # Ensure task is marked done (avoid "stuck processing" sessions).
+                if not getattr(latest, "done", False):
+                    await mark_task_completed(
+                        latest,
+                        session_id,
+                        user_message.id,
+                        assistant_message_id=existing.id,
+                    )
+                return existing, False
+
+        # Create + mark done under lock to prevent duplicates.
+        msg = await create_assistant_message(
+            session_id,
+            assistant_response,
+            sources_for_frontend,
+            subgraph_data,
+            return_subgraph,
+            raw_llm_response,
+            raw_mindmap_response,
+            deepsearch_trace_file_path=deepsearch_trace_file_path,
+        )
+        await mark_task_completed(
+            latest,
+            session_id,
+            user_message.id,
+            assistant_message_id=msg.id,
+        )
+        return msg, True
 
 
 async def _ensure_finalization(
@@ -54,7 +123,7 @@ async def _ensure_finalization(
     if enable_deepsearch and deepsearch_result and deepsearch_sources_for_frontend is not None:
         sources_for_frontend = deepsearch_sources_for_frontend
     else:
-        _, sources_for_frontend, _ = await build_sources_and_evidence(
+        assistant_response, sources_for_frontend, _ = await build_sources_and_evidence(
             chunks,
             subgraph_data,
             subgraph_info,
@@ -63,31 +132,26 @@ async def _ensure_finalization(
             False
         )
     
-    # 创建 assistant message
-    assistant_message = await create_assistant_message(
-        session_id,
-        assistant_response,
-        sources_for_frontend or [],
-        subgraph_data,
-        return_subgraph,
-        raw_llm_response,
-        raw_mindmap_response,
-        deepsearch_trace_file_path=deepsearch_trace_file_path if enable_deepsearch else None
+    # Create the assistant message exactly once per task_id.
+    deepsearch_trace = deepsearch_trace_file_path if enable_deepsearch else None
+    assistant_message, created_now = await _get_or_create_final_assistant_message(
+        session_id=session_id,
+        assistant_response=assistant_response,
+        sources_for_frontend=sources_for_frontend or [],
+        subgraph_data=subgraph_data,
+        return_subgraph=return_subgraph,
+        raw_llm_response=raw_llm_response,
+        raw_mindmap_response=raw_mindmap_response,
+        task_info=task_info,
+        user_message=user_message,
+        deepsearch_trace_file_path=deepsearch_trace,
     )
-    
-    # 任务完成，更新状态
-    if task_info:
-        try:
-            await mark_task_completed(
-                task_info,
-                session_id,
-                user_message.id,
-                assistant_message_id=assistant_message.id
-            )
-            logger.info("Task %s finalization ensured: assistant_message_id=%s", 
-                       task_info.task_id, assistant_message.id)
-        except Exception as e:
-            logger.warning("Failed to update task completion status: %s", e)
+    if task_info and created_now:
+        logger.info(
+            "Task %s finalization ensured: assistant_message_id=%s",
+            task_info.task_id,
+            assistant_message.id,
+        )
 
 
 async def _build_and_yield_final_response(
@@ -154,30 +218,33 @@ async def _build_and_yield_final_response(
         async for cancel_event in yield_cancellation_event(request_id):
             yield cancel_event
         return
-    
-    # 创建 assistant message
-    assistant_message = await create_assistant_message(
-        session_id,
-        assistant_response,
-        sources_for_frontend,
-        subgraph_data,
-        return_subgraph,
-        raw_llm_response,
-        raw_mindmap_response,
-        deepsearch_trace_file_path=deepsearch_trace_file_path if enable_deepsearch else None
+
+    # Emit a "final_text" event so the frontend can replace the streamed text.
+    # This is necessary because citation normalization/renumbering happens after streaming.
+    yield sse_json_wrapped(
+        {
+            "type": "final_text",
+            "content": assistant_response,
+            "citation_key_map": {str(k): v for k, v in (citation_key_map or {}).items()},
+            "id": str(session_id),
+        },
+        request_id=request_id,
     )
     
-    # 任务完成，更新状态
-    if task_info:
-        try:
-            await mark_task_completed(
-                task_info,
-                session_id,
-                user_message.id,
-                assistant_message_id=assistant_message.id
-            )
-        except Exception as e:
-            logger.warning("Failed to update task completion status: %s", e)
+    # Create the assistant message exactly once per task_id (even if the background callback runs).
+    deepsearch_trace = deepsearch_trace_file_path if enable_deepsearch else None
+    assistant_message, _created_now = await _get_or_create_final_assistant_message(
+        session_id=session_id,
+        assistant_response=assistant_response,
+        sources_for_frontend=sources_for_frontend,
+        subgraph_data=subgraph_data,
+        return_subgraph=return_subgraph,
+        raw_llm_response=raw_llm_response,
+        raw_mindmap_response=raw_mindmap_response,
+        task_info=task_info,
+        user_message=user_message,
+        deepsearch_trace_file_path=deepsearch_trace,
+    )
     
     # 生成标题（如果是第一轮）
     if first_turn:

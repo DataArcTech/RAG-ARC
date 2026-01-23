@@ -396,7 +396,34 @@
 
 ---
 
-### 6. 来源事件（Sources Event）
+### 6. 最终文本事件（Final Text Event）
+
+当后端在生成完成后，会对引用标记 `<sup>...</sup>` 做一次“过滤 + 重编号”（保证来源编号连续且与 sources 列表一致）。
+
+由于该过程发生在流式输出之后，前端需要用该事件的 `content` 覆盖/替换当前展示的流式文本，否则会出现：
+- 流式文本里出现 `<sup>7</sup>` 但 sources 只有 1..N 的情况
+- 引用编号与 sources 面板对不上（“编号不存在”）
+
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "type": "final_text",
+    "content": "最终渲染用的回答（已做引用过滤与重编号）",
+    "citation_key_map": {
+      "1": 1,
+      "4": 2
+    },
+    "id": "session-id"
+  },
+  "request_id": "uuid-string"
+}
+```
+
+---
+
+### 7. 来源事件（Sources Event）
 
 ```json
 {
@@ -406,13 +433,18 @@
     "type": "sources",
     "sources": [
       {
-        "id": "chunk-id",
-        "title": "文档标题",
-        "description": "文档描述",
-        "url": "文档URL（如果有）",
-        "score": 0.95
+        "key": 1,
+        "chunk_id": "chunk-id",
+        "file_id": "file-id-or-null",
+        "title": "source title",
+        "file": "/static/files/{file_id}/{filename}",
+        "description": "chunk preview"
       }
     ],
+    "citation_key_map": {
+      "1": 1,
+      "2": 2
+    },
     "id": "session-id"
   },
   "request_id": "uuid-string"
@@ -421,7 +453,7 @@
 
 ---
 
-### 7. 最终负载事件（Final Payload Event）
+### 8. 最终负载事件（Final Payload Event）
 
 **事件类型：** `tool_calls` with `rag_arc_payload`
 
@@ -493,7 +525,7 @@
 
 ---
 
-### 8. 结束事件（Final Chunk）
+### 9. 结束事件（Final Chunk）
 
 ```json
 {
@@ -522,7 +554,7 @@
 
 ---
 
-### 9. SSE 结束标记
+### 10. SSE 结束标记
 
 ```
 data: [DONE]
@@ -543,11 +575,12 @@ data: [DONE]
 8. **RAG web_search** - 联网搜索（如果启用）
 9. **RAG generate** - 生成阶段
 10. **Content chunks** - 内容流式输出（多次）
-11. **Title event** - 标题生成
-12. **Sources event** - 来源信息
-13. **Final payload** - 最终负载
-14. **Final chunk** - 结束标记
-15. **[DONE]** - SSE 结束
+11. **Final text event** - 最终文本（引用过滤与重编号，前端应覆盖流式文本）
+12. **Title event** - 标题生成（仅第一轮）
+13. **Sources event** - 来源信息
+14. **Final payload** - 最终负载
+15. **Final chunk** - 结束标记
+16. **[DONE]** - SSE 结束
 
 ---
 

@@ -59,9 +59,22 @@ class ChatTaskRegistry:
         self._items: Dict[str, ChatTaskInfo] = {}
         self._session_tasks: Dict[uuid.UUID, str] = {}
         self._lock = asyncio.Lock()
+        # Finalization must be exactly-once per task_id (even if both the main coroutine and
+        # the background callback attempt to finalize concurrently).
+        self._finalization_locks: Dict[str, asyncio.Lock] = {}
         
         self._redis_client = redis_client
         self._use_redis_events = use_redis_events
+
+    async def get_finalization_lock(self, task_id: str) -> asyncio.Lock:
+        """Return a per-task lock used to guard final message creation and completion marking."""
+        await self._cleanup()
+        async with self._lock:
+            lock = self._finalization_locks.get(task_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._finalization_locks[task_id] = lock
+            return lock
     
     async def create(
         self, 
@@ -200,6 +213,8 @@ class ChatTaskRegistry:
         async with self._lock:
             if self._session_tasks.get(info.session_id) == task_id:
                 del self._session_tasks[info.session_id]
+            # Task completion: drop the finalization lock to avoid unbounded growth.
+            self._finalization_locks.pop(task_id, None)
     
     async def cancel(self, task_id: str, reason: str = "User cancelled") -> bool:
         """Cancel a task and clean up Redis cache."""
@@ -227,6 +242,8 @@ class ChatTaskRegistry:
         async with self._lock:
             if self._session_tasks.get(info.session_id) == task_id:
                 del self._session_tasks[info.session_id]
+            # Task cancellation: drop the finalization lock to avoid unbounded growth.
+            self._finalization_locks.pop(task_id, None)
         
         return True
     
@@ -266,6 +283,7 @@ class ChatTaskRegistry:
                 info = self._items.pop(task_id, None)
                 if info:
                     self._session_tasks.pop(info.session_id, None)
+                    self._finalization_locks.pop(task_id, None)
                     if info.redis_events_key and self._redis_client:
                         try:
                             self._redis_client.delete(info.redis_events_key)
