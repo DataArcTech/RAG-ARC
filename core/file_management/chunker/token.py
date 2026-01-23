@@ -302,8 +302,14 @@ class TokenChunker(AbstractChunker):
             input_ids=input_ids,
             context_tokens=max(0, int(url_atomic_context_tokens or 0)),
         )
-        span_starts = [start for start, _ in url_atomic_spans]
-        span_ends = [end for _, end in url_atomic_spans]
+        math_atomic_spans = self._build_inline_math_atomic_spans(
+            text=text,
+            tokenizer=tokenizer,
+            input_ids=input_ids,
+        )
+        atomic_spans = self._merge_spans(url_atomic_spans + math_atomic_spans)
+        span_starts = [start for start, _ in atomic_spans]
+        span_ends = [end for _, end in atomic_spans]
 
         def _decode_utf8_without_replacement(
             token_ids: List[int],
@@ -338,7 +344,7 @@ class TokenChunker(AbstractChunker):
             return _decode_utf8_without_replacement(input_ids[start:end]), start, end
 
         def _adjust_end_for_atomic_spans(boundary: int) -> int:
-            if not url_atomic_spans:
+            if not atomic_spans:
                 return boundary
             idx = bisect_left(span_starts, boundary) - 1
             if idx >= 0 and span_starts[idx] < boundary <= span_ends[idx]:
@@ -346,7 +352,7 @@ class TokenChunker(AbstractChunker):
             return boundary
 
         def _adjust_start_for_atomic_spans(boundary: int) -> int:
-            if not url_atomic_spans:
+            if not atomic_spans:
                 return boundary
             idx = bisect_left(span_starts, boundary) - 1
             if idx >= 0 and span_starts[idx] < boundary <= span_ends[idx]:
@@ -354,7 +360,7 @@ class TokenChunker(AbstractChunker):
             return boundary
 
         def _adjust_start_forward_for_atomic_spans(boundary: int) -> int:
-            if not url_atomic_spans:
+            if not atomic_spans:
                 return boundary
             idx = bisect_left(span_starts, boundary) - 1
             if idx >= 0 and span_starts[idx] < boundary <= span_ends[idx]:
@@ -412,6 +418,29 @@ class TokenChunker(AbstractChunker):
             spans.append((span_start, span_end))
         return self._merge_spans(spans)
 
+    def _build_inline_math_atomic_spans(
+        self,
+        text: str,
+        tokenizer: Any,
+        input_ids: List[int],
+    ) -> List[tuple[int, int]]:
+        if not text or not input_ids:
+            return []
+        math_spans = self._find_inline_math_spans(text)
+        if not math_spans:
+            return []
+        token_starts, token_ends = self._token_byte_offsets(tokenizer, input_ids)
+        spans: List[tuple[int, int]] = []
+        for start_char, end_char in math_spans:
+            byte_start = len(text[:start_char].encode("utf-8"))
+            byte_end = len(text[:end_char].encode("utf-8"))
+            start_token = bisect_right(token_ends, byte_start)
+            end_token = bisect_left(token_starts, byte_end) - 1
+            if start_token < 0 or end_token < 0 or start_token > end_token:
+                continue
+            spans.append((start_token, end_token))
+        return self._merge_spans(spans)
+
     def _find_url_spans(self, text: str) -> List[tuple[int, int]]:
         spans: List[tuple[int, int]] = []
         for match in self._URL_RE.finditer(text):
@@ -421,6 +450,75 @@ class TokenChunker(AbstractChunker):
             if end > start:
                 spans.append((start, end))
         return spans
+
+    def _find_inline_math_spans(self, text: str) -> List[tuple[int, int]]:
+        if not text:
+            return []
+        spans: List[tuple[int, int]] = []
+        i = 0
+        while i < len(text):
+            ch = text[i]
+            if ch == "\\":
+                if i + 1 < len(text) and text[i + 1] == "(":
+                    end = self._find_math_paren_end(text, i + 2)
+                    if end is not None:
+                        spans.append((i, end))
+                        i = end
+                        continue
+                i += 2
+                continue
+            if ch == "$":
+                if i + 1 < len(text) and text[i + 1] == "$":
+                    end = self._find_double_dollar_end(text, i + 2)
+                    if end is not None:
+                        spans.append((i, end))
+                        i = end
+                        continue
+                    i += 2
+                    continue
+                end = self._find_single_dollar_end(text, i + 1)
+                if end is not None:
+                    spans.append((i, end))
+                    i = end
+                    continue
+            i += 1
+        return spans
+
+    @staticmethod
+    def _find_single_dollar_end(text: str, start: int) -> Optional[int]:
+        i = start
+        while i < len(text):
+            if text[i] == "\\":
+                i += 2
+                continue
+            if text[i] == "$":
+                return i + 1
+            i += 1
+        return None
+
+    @staticmethod
+    def _find_double_dollar_end(text: str, start: int) -> Optional[int]:
+        i = start
+        while i + 1 < len(text):
+            if text[i] == "\\":
+                i += 2
+                continue
+            if text[i] == "$" and text[i + 1] == "$":
+                return i + 2
+            i += 1
+        return None
+
+    @staticmethod
+    def _find_math_paren_end(text: str, start: int) -> Optional[int]:
+        i = start
+        while i + 1 < len(text):
+            if text[i] == "\\":
+                if text[i + 1] == ")":
+                    return i + 2
+                i += 2
+                continue
+            i += 1
+        return None
 
     def _token_byte_offsets(self, tokenizer: Any, input_ids: List[int]) -> tuple[List[int], List[int]]:
         starts: List[int] = []

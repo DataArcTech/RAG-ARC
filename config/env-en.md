@@ -207,7 +207,7 @@ These knobs apply when the knowledge config selects `semantic_unit_chunker` (for
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `SEMANTIC_CHUNKING_LEVEL` | `basic` | Semantic unit chunking level: `disabled`/`basic`/`standard`/`advanced`. |
+| `SEMANTIC_CHUNKING_LEVEL` | `standard` | Semantic unit chunking level: `disabled` (fallback only) / `basic` (tables) / `standard` (tables + fenced code + lists + math blocks) / `advanced` (standard + blockquotes). |
 | `TABLE_SMALL_MAX_TOKENS` | _(empty)_ | Override table small/large threshold (leave empty to use code defaults). |
 | `TABLE_SLICE_MAX_TOKENS` | _(empty)_ | Override target token budget for table slices. |
 | `TABLE_SLICE_OVERLAP_ROWS` | _(empty)_ | Override overlap rows for table slices. |

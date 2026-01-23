@@ -205,7 +205,7 @@ Benchmark/实验模式：
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `SEMANTIC_CHUNKING_LEVEL` | `basic` | 分块级别：`disabled`/`basic`/`standard`/`advanced`。 |
+| `SEMANTIC_CHUNKING_LEVEL` | `standard` | 分块级别：`disabled`（关闭语义单元，走 fallback）/`basic`（仅表格）/`standard`（表格 + fenced code + 列表 + 公式块）/`advanced`（standard + 引用块）。 |
 | `TABLE_SMALL_MAX_TOKENS` | _(空)_ | 表格大小阈值覆盖（留空则使用代码默认值）。 |
 | `TABLE_SLICE_MAX_TOKENS` | _(空)_ | 表格 slice 目标 token 上限覆盖。 |
 | `TABLE_SLICE_OVERLAP_ROWS` | _(空)_ | 表格 slice 行 overlap 覆盖。 |
