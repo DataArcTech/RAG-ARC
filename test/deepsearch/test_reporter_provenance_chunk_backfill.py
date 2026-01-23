@@ -15,9 +15,6 @@ def _default_reporter_config(**overrides):  # noqa: ANN001
         "max_evidence_items": 10,
         "report_max_graph_chain_items": 50,
         "report_max_seed_entities": 10,
-        "enable_consistency_check": False,
-        "consistency_temperature": 0.0,
-        "consistency_max_retries": 1,
         "sectionwise_writer": False,
         "sectionwise_retain_k": 3,
         "citation_aliases": False,
@@ -27,7 +24,6 @@ def _default_reporter_config(**overrides):  # noqa: ANN001
         "enable_citation_agent": False,
         "parallel_sections": False,
         "max_parallel_sections": 2,
-        "consistency_max_claims": 10,
         "synthesis_section_max_chars": 800,
         "provenance_chunk_attach_max": 5,
     }
@@ -53,15 +49,7 @@ class _ChunkCitingLLM:
         if "Return a single JSON object with:" in user_prompt and "Evidence Pack" in user_prompt:
             return """
 {
-  "title": "Report",
-  "short_answer": "Supported by the policy text. [chunk_001]",
-  "summary": "Supported by the policy text. [chunk_001]",
-  "sections": [
-    {"title": "Answer", "section_type": "analysis", "body_markdown": "Details. [chunk_001]"}
-  ],
-  "limitations": [],
-  "next_steps": [],
-  "citations": []
+  "text": "# Report\\n\\n## Answer\\nDetails. <sup>1</sup>"
 }
 """.strip()
 
@@ -116,10 +104,9 @@ def test_reporter_backfills_provenance_chunks_into_evidence_pool() -> None:
         "reasoning_steps": [],
         "tool_results": [],
         "coverage_metrics": {},
-        "pending_external": [],
     }
 
     result = asyncio.run(reporter.compose(trace, external_evidence=[]))
     evidence_ids = {ev.get("chunk_id") for ev in (result.get("evidences") or []) if isinstance(ev, dict)}
     assert "chunk_001" in evidence_ids
-    assert "[chunk_001]" in (result.get("structured_report") or {}).get("short_answer", "")
+    assert "<sup>1</sup>" in (result.get("structured_report") or {}).get("text", "")

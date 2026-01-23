@@ -28,12 +28,11 @@ def render_all_tools_block(*, include_llm_tools: bool, registry: ToolHintRegistr
             if profile not in profiles:
                 continue
             profiles[profile] += 1
-        total = 1 + len(descriptors)  # includes graph_adapter.query
+        total = len(descriptors)
         disabled_text = f"disabled_tools: {len(disabled)}" if disabled else "disabled_tools: 0"
         return "\n".join(
             [
                 "available_tools:",
-                f" - graph_adapter.query (adapter traversal primitive)",
                 f" - builtin_tools: {len(descriptors)} total={total}",
                 f"profiles: F={profiles['F']} X={profiles['X']} H={profiles['H']}",
                 disabled_text,
@@ -43,9 +42,6 @@ def render_all_tools_block(*, include_llm_tools: bool, registry: ToolHintRegistr
 
     lines: list[str] = []
     lines.append("available_tools:")
-    lines.append(
-        " - graph_adapter.query profile=X determinism=adapter: Primary graph traversal via the configured graph adapter (prepare→query→filter→summarize→chain_traverse)."
-    )
     for desc in sorted(descriptors, key=lambda d: str(d.name)):
         hint = hint_map.get(desc.name) or {}
         profile = (hint.get("profile") or desc.profile or "").strip()

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import time
 import uuid
@@ -15,6 +16,7 @@ from pydantic import BaseModel, Field
 from mineru_server.captioning import build_captioner
 from mineru_server.config import (
     DEFAULT_CONFIG_PATH,
+    PARSE_STATUS_FILENAME,
     ServerConfig,
     apply_runtime_environment,
     copy_upload_to_temp,
@@ -109,6 +111,36 @@ def build_app(cfg: ServerConfig) -> FastAPI:
         except Exception:
             return None
 
+    def _status_path(task_root: Path) -> Path:
+        return task_root / PARSE_STATUS_FILENAME
+
+    def _write_status(task_root: Path, payload: Dict[str, Any]) -> None:
+        path = _status_path(task_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(path)
+
+    def _make_status_result(
+        *,
+        task_id: str,
+        doc_name: str,
+        original_filename: str,
+        task_root: Path,
+        status: str,
+        error: Optional[str] = None,
+        processing_time: float = 0.0,
+    ) -> ParseResult:
+        return ParseResult(
+            task_id=task_id,
+            filename=doc_name,
+            original_filename=original_filename,
+            status=status,
+            task_root=str(task_root),
+            error=error,
+            processing_time=processing_time,
+        )
+
     async def parse_one(
         *,
         temp_file: Path,
@@ -193,6 +225,45 @@ def build_app(cfg: ServerConfig) -> FastAPI:
         finally:
             parse_semaphore.release()
 
+    async def _run_parse_job(
+        *,
+        temp_file: Path,
+        doc_name: str,
+        options: ParseOptions,
+        task_id: str,
+        original_filename: str,
+        task_root: Path,
+    ) -> None:
+        try:
+            running = _make_status_result(
+                task_id=task_id,
+                doc_name=doc_name,
+                original_filename=original_filename,
+                task_root=task_root,
+                status="running",
+            )
+            _write_status(task_root, running.model_dump())
+            result = await parse_one(
+                temp_file=temp_file,
+                doc_name=doc_name,
+                options=options,
+                task_id=task_id,
+                original_filename=original_filename,
+            )
+            _write_status(task_root, result.model_dump())
+        except Exception as exc:
+            failed = _make_status_result(
+                task_id=task_id,
+                doc_name=doc_name,
+                original_filename=original_filename,
+                task_root=task_root,
+                status="failed",
+                error=str(exc),
+            )
+            _write_status(task_root, failed.model_dump())
+        finally:
+            temp_file.unlink(missing_ok=True)
+
     @app.get("/health")
     async def health() -> Dict[str, Any]:
         return {
@@ -224,6 +295,7 @@ def build_app(cfg: ServerConfig) -> FastAPI:
         start_page: int = Form(default=0),
         end_page: Optional[int] = Form(default=None),
         output_format: str = Form(default="mm_md"),
+        wait: bool = Form(default=False, description="If true, wait for parsing to finish before returning."),
     ) -> ParseResult:
         task_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         from mineru_server.config import secure_filename
@@ -231,6 +303,8 @@ def build_app(cfg: ServerConfig) -> FastAPI:
         safe_name, safe_stem = secure_filename(file.filename)
         temp_file = temp_root / task_id / safe_name
         copy_upload_to_temp(file.file, temp_file)
+        task_root = output_root / task_id
+        task_root.mkdir(parents=True, exist_ok=True)
         try:
             options = ParseOptions(
                 backend=backend or cfg.backend,
@@ -242,15 +316,39 @@ def build_app(cfg: ServerConfig) -> FastAPI:
                 end_page=int(end_page) if end_page is not None else None,
                 output_format=str(output_format),
             )
-            return await parse_one(
-                temp_file=temp_file,
-                doc_name=safe_stem,
-                options=options,
+            pending = _make_status_result(
                 task_id=task_id,
+                doc_name=safe_stem,
                 original_filename=file.filename,
+                task_root=task_root,
+                status="pending",
             )
-        finally:
+            _write_status(task_root, pending.model_dump())
+            if wait:
+                result = await parse_one(
+                    temp_file=temp_file,
+                    doc_name=safe_stem,
+                    options=options,
+                    task_id=task_id,
+                    original_filename=file.filename,
+                )
+                _write_status(task_root, result.model_dump())
+                temp_file.unlink(missing_ok=True)
+                return result
+            asyncio.create_task(
+                _run_parse_job(
+                    temp_file=temp_file,
+                    doc_name=safe_stem,
+                    options=options,
+                    task_id=task_id,
+                    original_filename=file.filename,
+                    task_root=task_root,
+                )
+            )
+            return pending
+        except Exception:
             temp_file.unlink(missing_ok=True)
+            raise
 
     @app.post("/parse/batch", response_model=BatchParseResult)
     async def parse_batch(
@@ -308,6 +406,20 @@ def build_app(cfg: ServerConfig) -> FastAPI:
         finally:
             for temp_file, *_ in temp_entries:
                 temp_file.unlink(missing_ok=True)
+
+    @app.get("/parse/status/{task_id}", response_model=ParseResult)
+    async def parse_status(task_id: str) -> ParseResult:
+        task_root = output_root / task_id
+        status_path = _status_path(task_root)
+        if not status_path.exists():
+            raise HTTPException(status_code=404, detail="Task not found")
+        try:
+            payload = json.loads(status_path.read_text(encoding="utf-8"))
+            return ParseResult.model_validate(payload)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to read parse status: {exc}")
 
     @app.get("/task/{task_id}/manifest")
     async def task_manifest(task_id: str) -> Dict[str, Any]:

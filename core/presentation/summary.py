@@ -89,7 +89,7 @@ class PipelineSummary:
 
 @dataclass
 class PlanStepSummary:
-    """Concise summary of a DeepSearch planner step and its execution outcome."""
+    """Concise summary of a DeepSearch reasoning step and its execution outcome."""
 
     step_id: str
     description: str
@@ -120,7 +120,6 @@ class DeepSearchReport:
     plan_steps: List[PlanStepSummary]
     top_chunks: List[EvidencePreview]
     coverage: Dict[str, Any]
-    gap_decision: Optional[str]
     stage_timings: Dict[str, Any]
     graph_chain: List[str]
     evidence: Optional[Dict[str, Any]] = None
@@ -226,23 +225,18 @@ class DeepSearchReport:
                     break
 
         coverage = reasoning_block.get("coverage_metrics") or {}
-        gap_result = reasoning_block.get("gap_result") or {}
         stage_timings = ((payload.get("state") or {}).get("cost_telemetry") or {}).get("stage_timings") or {}
 
         raw_answer = (report_block.get("answer") or "").strip()
         if not raw_answer:
             raw_answer = (reasoning_block.get("final_answer") or "").strip()
         if not raw_answer:
-            rollup = next(
-                (
-                    item
-                    for item in sorted_evidences
-                    if (item.get("source") or "").lower() in {"graph.context_rollup", "context_rollup"}
-                ),
-                None,
-            )
-            if rollup:
-                raw_answer = (rollup.get("content") or "").strip()
+            for candidate in sorted_evidences:
+                if str(candidate.get("source") or "").strip() == "graph.llm_chain_explorer":
+                    content = str(candidate.get("content") or "").strip()
+                    if content:
+                        raw_answer = content
+                        break
         if not raw_answer and fallback_highlights:
             enumerated = [f"{idx}. {text}" for idx, text in enumerate(fallback_highlights[:5], start=1)]
             raw_answer = "Key findings from graph reasoning:\n" + "\n".join(enumerated)
@@ -254,7 +248,6 @@ class DeepSearchReport:
             plan_steps=summaries,
             top_chunks=top_chunks,
             coverage=coverage,
-            gap_decision=_summarize_gap_result(gap_result),
             stage_timings=stage_timings,
             graph_chain=best_chain,
             evidence=evidence_payload if evidence_payload else None,
@@ -266,12 +259,3 @@ def _truncate_text(text: str, max_chars: int) -> str:
     if len(sanitized) <= max_chars:
         return sanitized
     return f"{sanitized[:max_chars].rstrip()}..."
-
-
-def _summarize_gap_result(result: Optional[Dict[str, Any]]) -> Optional[str]:
-    if not result:
-        return None
-    reason = result.get("reason") or ""
-    if result.get("should_trigger_external"):
-        return f"triggered ({reason or 'gap detected'})"
-    return f"skipped ({reason or 'sufficient coverage'})"

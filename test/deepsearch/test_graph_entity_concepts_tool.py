@@ -1,6 +1,6 @@
 import pytest
 
-from core.deepsearch.tools import GraphEntityConceptsTool, ToolRunRequest
+from core.deepsearch.tools import GraphOpsTool, ToolRunRequest
 from core.graph_adapter.base import GraphAccessScope, GraphAdapterCapability, GraphAdapterMetadata
 
 
@@ -46,17 +46,21 @@ async def test_entity_concepts_resolves_entity() -> None:
             ]
         }
     )
-    tool = GraphEntityConceptsTool()
+    tool = GraphOpsTool()
     req = ToolRunRequest(
         question="who is AXA?",
         plan_step="p1",
         context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"entity": "AXA", "entity_type": "ORG", "limit": 10},
+        extra={
+            "mode": "template",
+            "template": "entity_concepts",
+            "template_args": {"entity": "AXA", "entity_type": "ORG", "limit": 10},
+        },
     )
     result = await tool.run(req)
-    assert "entity_concept" in result.summary
+    assert "entity_concepts" in result.summary
     assert result.evidences
     assert result.diagnostics.get("result", {}).get("canonical_name") == "axa"
 
@@ -64,14 +68,18 @@ async def test_entity_concepts_resolves_entity() -> None:
 @pytest.mark.asyncio
 async def test_entity_concepts_aborts_on_ambiguous_entity() -> None:
     adapter = _StubCypherAdapter(rows_by_mode={"entity": [{"candidate_count": 2}]})
-    tool = GraphEntityConceptsTool()
+    tool = GraphOpsTool()
     req = ToolRunRequest(
         question="who is AXA?",
         plan_step="p1",
         context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"entity": "AXA", "limit": 10},
+        extra={
+            "mode": "template",
+            "template": "entity_concepts",
+            "template_args": {"entity": "AXA", "limit": 10},
+        },
     )
     result = await tool.run(req)
     assert "aborted" in result.summary.lower()
@@ -89,17 +97,20 @@ async def test_entity_concepts_search_aliases_by_term() -> None:
             ]
         }
     )
-    tool = GraphEntityConceptsTool()
+    tool = GraphOpsTool()
     req = ToolRunRequest(
         question="find AXA aliases",
         plan_step="p1",
         context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"term": "axa", "limit": 10},
+        extra={
+            "mode": "template",
+            "template": "entity_concepts",
+            "template_args": {"term": "axa", "limit": 10},
+        },
     )
     result = await tool.run(req)
     assert "entity_concepts" in result.summary
     assert result.evidences
     assert result.diagnostics.get("term") == "axa"
-

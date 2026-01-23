@@ -1,4 +1,4 @@
-"""Tool hint registry for DeepSearch planner prompts.
+"""Tool hint registry for DeepSearch think prompts.
 
 Avoid module-level mutable globals so multiple DeepSearchService instances (API/MCP/CLI)
 can coexist in the same process with different configurations.

@@ -14,7 +14,7 @@ def compute_deepsearch_progress(
 
     Rules:
     - `done` always maps to 100% (API/UI fallback).
-    - `reasoned` interpolates percent using planner step_count + completed_steps when available.
+    - `reasoned` interpolates percent using step_count + completed_steps when available.
     - Other stages use stable base percentages from config.
     """
 
@@ -95,7 +95,7 @@ def _extract_plan_counts(
             return None
         return numeric
 
-    # Prefer planned.stage metadata for step_count (planner knows how many steps are needed for the question).
+    # Prefer planned.stage metadata for step_count when present.
     for entry in reversed(history):
         if not isinstance(entry, dict):
             continue
@@ -128,4 +128,3 @@ def _extract_plan_counts(
     if plan_total is not None and plan_done is not None:
         plan_done = min(plan_done, plan_total)
     return plan_total, plan_done
-

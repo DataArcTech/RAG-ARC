@@ -1,445 +1,41 @@
-"""Shared runtime methods for the DeepSearch graph reasoning loop.
-
-This module hosts heavier orchestration methods split out from `graph_loop.py` for
-maintainability and unit-level testing.
-"""
+"""Shared runtime helpers for the think-driven DeepSearch loop."""
 import asyncio
 import json
 import logging
 import time
-from typing import Any, Dict, List, Optional, Sequence, Set
+from typing import Any, Dict, List, Sequence, Set
 
-from config.core.deepsearch.reasoning_defaults import (
-    TRACE_REFLECTION_DEFAULT_EVIDENCE_PREVIEW_CHARS,
-    TRACE_REFLECTION_DEFAULT_EVIDENCE_SAMPLE_COUNT,
-    TRACE_REFLECTION_DEFAULT_MAX_LINES,
-    TRACE_REFLECTION_DEFAULT_NEW_EVIDENCE_ID_COUNT,
-    TRACE_REFLECTION_DEFAULT_TEMPERATURE,
-    THINK_TOOL_CATALOG_ALWAYS_INCLUDE,
-)
 from encapsulation.data_model.deepsearch import (
     EvidenceChunk,
     GraphQueryContext,
-    GraphTraversalRecord,
     ReasoningStepRecord,
     ThinkNote,
     ToolExecutionLog,
 )
-from core.deepsearch.tools.base import call_llm_async
+from core.deepsearch.memory.plan_state import update_plan_from_think_notes
 from core.deepsearch.trace import emit_trace
-from core.prompts.deepsearch.runtime import (
-    TRACE_REFLECTION_SYSTEM_PROMPT_TEMPLATE,
-    TRACE_REFLECTION_USER_PROMPT_TEMPLATE,
-)
+from config.core.deepsearch import tool_defaults
 
-from .graph_loop_state import _RUN_REFLECT_COUNT, _RUN_THINK_COUNT, _RUN_THINK_TOOL_SIGNATURES
-from .subagent import SubAgentOutcome
+from .graph_loop_state import _RUN_THINK_COUNT, _RUN_THINK_TOOL_SIGNATURES, _run_plan_state
 
 logger = logging.getLogger(__name__)
 
 
 class GraphLoopRuntimeMixin:
-    async def _emit_trace_reflection(
-        self,
-        *,
-        question: str,
-        context: GraphQueryContext,
-        outcome: SubAgentOutcome,
-        accumulated_evidences: List[EvidenceChunk],
-        coverage_metrics: Dict[str, Any],
-    ) -> None:
-        """Emit a user-visible reflection after a step completes.
-
-        This is intentionally short and action-oriented (not chain-of-thought).
-        """
-
-        if not self._trace_reflection_enabled:
-            return
-        if self.llm_connector is None:
-            return
-        if self._trace_reflection_max <= 0:
-            return
-        next_count = _RUN_REFLECT_COUNT.get() + 1
-        if next_count > self._trace_reflection_max:
-            return
-        _RUN_REFLECT_COUNT.set(next_count)
-
-        reasoning = outcome.reasoning
-        step_id = reasoning.step_id
-        tool_name = None
-        tool_logs = reasoning.tool_logs or []
-        if tool_logs:
-            tool_name = tool_logs[-1].tool_name
-        if not tool_name and reasoning.diagnostics.get("tool"):
-            tool_name = str(reasoning.diagnostics.get("tool"))
-        tool_name = tool_name or (self.graph_channel_tool if outcome.traversal else "unknown")
-
-        new_evidences = list(outcome.evidences or [])
-        ev_samples: List[Dict[str, Any]] = []
-        sample_count = int(TRACE_REFLECTION_DEFAULT_EVIDENCE_SAMPLE_COUNT)
-        preview_chars = int(TRACE_REFLECTION_DEFAULT_EVIDENCE_PREVIEW_CHARS)
-        for ev in (new_evidences[:sample_count] if new_evidences else accumulated_evidences[:sample_count]):
-            try:
-                ev_samples.append(
-                    {
-                        "chunk_id": ev.chunk_id,
-                        "source": ev.source,
-                        "score": ev.score,
-                        "preview": (ev.content or "")[:preview_chars],
-                    }
-                )
-            except Exception:
-                continue
-
-        traversal = outcome.traversal.model_dump(exclude_none=True) if outcome.traversal else None
-        input_payload = {
-            "step": {
-                "step_id": step_id,
-                "description": reasoning.description,
-                "channel": reasoning.channel,
-                "status": reasoning.status,
-                "tool": tool_name,
-                "output_summary": reasoning.output_summary,
-                "produced_evidence_ids": reasoning.produced_evidence_ids,
-            },
-            "evidence_delta": {
-                "new_evidence_count": len(new_evidences),
-                "new_evidence_ids": [
-                    ev.chunk_id for ev in new_evidences[: int(TRACE_REFLECTION_DEFAULT_NEW_EVIDENCE_ID_COUNT)]
-                ],
-                "samples": ev_samples,
-            },
-            "traversal": traversal,
-            "coverage": {
-                "evidence_count": coverage_metrics.get("evidence_count"),
-                "coverage_ratio": coverage_metrics.get("coverage_ratio"),
-                "coverage_score": coverage_metrics.get("coverage_score"),
-                "completed_steps": coverage_metrics.get("completed_steps"),
-                "total_steps": coverage_metrics.get("total_steps"),
-            },
-            "graph_context": context.model_dump(exclude_none=True),
-        }
-
-        system = TRACE_REFLECTION_SYSTEM_PROMPT_TEMPLATE.format(max_lines=int(TRACE_REFLECTION_DEFAULT_MAX_LINES))
-        user = TRACE_REFLECTION_USER_PROMPT_TEMPLATE.format(
-            question=str(question or "").strip(),
-            payload=json.dumps(input_payload, ensure_ascii=False, indent=2, default=str),
-        )
-        text = await call_llm_async(
-            self.llm_connector,
-            [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            temperature=float(TRACE_REFLECTION_DEFAULT_TEMPERATURE),
-        )
-        rendered = (text or "").strip()
-        if not rendered:
+    async def _emit_plan_update(self, *, plan_state, stage: str, plan_step_id: str | None = None) -> None:
+        markdown = str(getattr(plan_state, "markdown", "") or "").strip()
+        if not markdown:
             return
         await emit_trace(
-            "think",
-            rendered,
+            "write_outline",
+            markdown,
             meta={
-                "stage": "reflection",
-                "step_id": step_id,
-                "tool": tool_name,
-                "reflection_index": next_count,
+                "stage": stage,
+                "plan_step_id": plan_step_id,
+                "plan_version": getattr(plan_state, "version", None),
+                "plan_items": list(getattr(plan_state, "items", []) or []),
             },
         )
-
-    async def _execute_plan_entry(
-        self,
-        *,
-        step_index: int,
-        entry: Dict[str, Any],
-        question: str,
-        context: GraphQueryContext,
-    ) -> SubAgentOutcome:
-        spec = entry["spec"]
-        record = self._empty_record(spec)
-        traversal_record: GraphTraversalRecord | None = None
-        new_evidences: List[EvidenceChunk] = []
-        tool_runs: List[Dict[str, Any]] = []
-        think_notes: List[Dict[str, Any]] = []
-        pending_external_payload: Dict[str, Any] | None = None
-
-        record.diagnostics.setdefault("sub_agent", f"sub_agent_{step_index + 1:02d}")
-
-        if not entry["enabled"]:
-            record.status = "skipped"
-            record.diagnostics.setdefault("reason", "disabled_by_planner")
-            return SubAgentOutcome(step_index, record, None, [], [], [], None)
-
-        if entry["requires_external"]:
-            record.status = "pending_external"
-            record.diagnostics.setdefault("reason", "requires_external_channel")
-            pending_external_payload = self._pending_external_payload(entry)
-            return SubAgentOutcome(step_index, record, None, [], [], [], pending_external_payload)
-
-        if entry["run_with_adapter"]:
-            traversal_record, reasoning_record, new_evidences = await self.traversal_executor.run_step(
-                spec,
-                context,
-                tool_args=entry["tool_args"],
-                tool_name=self.graph_channel_tool,
-            )
-            reasoning_record.diagnostics.setdefault("tool", entry["tool"] or self.graph_channel_tool)
-            return SubAgentOutcome(step_index, reasoning_record, traversal_record, new_evidences, [], [], None)
-
-        if entry["should_invoke_tool"] and not self.tool_manager:
-            record.status = "skipped"
-            record.diagnostics.setdefault("reason", "tool_manager_disabled")
-            record.diagnostics.setdefault("tool", entry["tool"])
-            return SubAgentOutcome(step_index, record, None, [], [], [], None)
-
-        if entry["should_invoke_tool"]:
-            evidence_snapshot = await self._snapshot_evidences()
-            coverage_hint = self._coverage_hint_for_step(step_index, evidence_snapshot)
-            try:
-                result, latency_ms = await self._invoke_tool(
-                    tool_name=entry["tool"],
-                    step=entry,
-                    context=context,
-                    question=question,
-                    accumulated_evidence=evidence_snapshot,
-                    coverage_hint=coverage_hint,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("Tool %s timed out for %s", entry["tool"], spec.step_id)
-                record.status = "failed"
-                record.diagnostics.setdefault("reason", "tool_timeout")
-                record.diagnostics.setdefault("latency_ms", int(self._tool_timeout * 1000) if self._tool_timeout else None)
-                return SubAgentOutcome(step_index, record, None, [], [], [], None)
-            except Exception as exc:  # pragma: no cover - defensive guardrails
-                logger.warning("Tool %s failed for %s: %s", entry["tool"], spec.step_id, exc)
-                record.status = "failed"
-                record.diagnostics.setdefault("error", str(exc))
-                record.diagnostics.setdefault("reason", "tool_failure")
-                return SubAgentOutcome(step_index, record, None, [], [], [], None)
-
-            new_evidences = list(result.evidences)
-            record.status = "done"
-            record.output_summary = result.summary
-            record.produced_evidence_ids = [chunk.chunk_id for chunk in result.evidences]
-            record.diagnostics.setdefault("tool", entry["tool"])
-            record.diagnostics.setdefault("latency_ms", latency_ms)
-            log_entry = ToolExecutionLog(
-                tool_name=result.tool_name,
-                server_name=None,
-                arguments_snapshot=entry["tool_args"],
-                response_excerpt=result.summary if result.summary else None,
-                latency_ms=latency_ms,
-                graph_context=context,
-                extra={
-                    "channel": spec.channel,
-                    "profile": result.profile,
-                    "determinism": result.determinism,
-                },
-            )
-            record.tool_logs.append(log_entry)
-            tool_runs.append(
-                {
-                    "plan_step_id": spec.step_id,
-                    "tool_name": result.tool_name,
-                    "channel": spec.channel,
-                    "result": result.model_dump(),
-                }
-            )
-            for note in result.think_notes:
-                think_notes.append(note.model_dump(exclude_none=True))
-            return SubAgentOutcome(step_index, record, None, new_evidences, tool_runs, think_notes, None)
-
-        record.status = "skipped"
-        record.diagnostics.setdefault("reason", "no_tool_available")
-        return SubAgentOutcome(step_index, record, None, [], [], [], None)
-
-    async def _maybe_run_periodic_think(
-        self,
-        *,
-        question: str,
-        context: GraphQueryContext,
-        evidences: List[EvidenceChunk],
-        reasoning_log: List[ReasoningStepRecord],
-        tool_runs: List[Dict[str, Any]],
-        think_notes: List[Dict[str, Any]],
-        coverage_metrics: Dict[str, Any],
-        completed_steps: int,
-        total_steps: int,
-    ) -> Optional[List[ReasoningStepRecord]]:
-        if not self._should_run_think(completed_steps, coverage_metrics):
-            return None
-        if not self.tool_manager or not self._think_config["tool_name"]:
-            return None
-
-        tool_catalog: List[Dict[str, Any]] = []
-        available_tool_names: set[str] = set()
-        limit = max(0, int(self._think_config.get("tool_catalog_max_items") or 0))
-        if limit:
-            from core.deepsearch.tooling import describe_available_tools
-
-            adapter_hint = {
-                "name": self.graph_channel_tool,
-                "channel": "graph",
-                "description": "Primary graph traversal via the configured graph adapter (prepare→query→filter→summarize→chain_traverse).",
-                "profile": "X",
-                "determinism": "adapter",
-                "strategy_tags": ["graph", "adapter", "traversal"],
-            }
-            registry = None
-            try:
-                registry = getattr(getattr(self.tool_manager, "local_registry", None), "tool_hint_registry", None)
-            except Exception:
-                registry = None
-            all_hints = describe_available_tools(
-                extra_hints=[adapter_hint],
-                registry=registry,
-                include_llm_tools=bool(self._think_config["include_llm_tools"]),
-            )
-            tool_catalog = _prioritize_tool_catalog(
-                all_hints,
-                always_include=THINK_TOOL_CATALOG_ALWAYS_INCLUDE,
-                limit=limit,
-            )
-            for entry in tool_catalog:
-                if isinstance(entry, dict) and entry.get("name"):
-                    available_tool_names.add(str(entry["name"]))
-
-        max_rounds = max(1, int(self._think_config.get("max_rounds_per_checkpoint") or 1))
-        checkpoint_records: List[ReasoningStepRecord] = []
-        previous_tool_call_results: List[Dict[str, Any]] = []
-
-        for round_idx in range(1, max_rounds + 1):
-            next_count = _RUN_THINK_COUNT.get() + 1
-            _RUN_THINK_COUNT.set(next_count)
-            think_step_id = f"think_auto_{next_count:02d}"
-            record = ReasoningStepRecord(
-                step_id=think_step_id,
-                description="Periodic think checkpoint" if round_idx == 1 else "Periodic think checkpoint (iterated)",
-                channel="graph",
-                status="running",
-            )
-            reasoning_log.append(record)
-            checkpoint_records.append(record)
-
-            think_evidences = list(evidences) if evidences else []
-            payload = self._build_tool_payload(
-                plan_step_id=think_step_id,
-                question=question,
-                context=context,
-                evidences=think_evidences,
-                coverage_hint=coverage_metrics,
-                extra={
-                    "trigger": "periodic_think",
-                    "round": round_idx,
-                    "completed_steps": completed_steps,
-                    "total_steps": total_steps,
-                    "context_window": {"evidence_items": len(think_evidences)},
-                    "available_tools": tool_catalog,
-                    "previous_tool_call_results": previous_tool_call_results,
-                },
-            )
-            try:
-                start = time.perf_counter()
-                invocation = self.tool_manager.invoke(self._think_config["tool_name"], payload=payload)
-                if self._tool_timeout and self._tool_timeout > 0:
-                    result = await asyncio.wait_for(invocation, timeout=self._tool_timeout)
-                else:
-                    result = await invocation
-                latency_ms = int((time.perf_counter() - start) * 1000)
-            except asyncio.TimeoutError:
-                record.status = "failed"
-                record.diagnostics.setdefault("reason", "tool_timeout")
-                record.diagnostics.setdefault("trigger", "periodic_think")
-                break
-            except Exception as exc:  # pragma: no cover - defensive guardrail
-                record.status = "failed"
-                record.diagnostics.setdefault("error", str(exc))
-                record.diagnostics.setdefault("reason", "periodic_think")
-                break
-
-            await self._extend_shared_evidences(result.evidences)
-            record.status = "done"
-            record.output_summary = result.summary
-            record.produced_evidence_ids = [chunk.chunk_id for chunk in result.evidences]
-            record.diagnostics.setdefault("reason", "periodic_think")
-            record.diagnostics.setdefault("latency_ms", latency_ms)
-            record.tool_logs.append(
-                ToolExecutionLog(
-                    tool_name=result.tool_name,
-                    server_name=None,
-                    arguments_snapshot={"trigger": "periodic_think", "round": round_idx},
-                    response_excerpt=result.summary if result.summary else None,
-                    latency_ms=latency_ms,
-                    graph_context=context,
-                    extra={
-                        "channel": "graph",
-                        "profile": result.profile,
-                        "determinism": result.determinism,
-                        "trigger": "periodic_think",
-                        "round": round_idx,
-                    },
-                )
-            )
-            tool_runs.append(
-                {
-                    "plan_step_id": think_step_id,
-                    "tool_name": result.tool_name,
-                    "channel": "graph",
-                    "result": result.model_dump(),
-                }
-            )
-            for note in result.think_notes:
-                think_notes.append(note.model_dump(exclude_none=True))
-
-            if result.think_notes:
-                lines: List[str] = []
-                lines.append(f"Think checkpoint: {think_step_id}")
-                for idx, note in enumerate(result.think_notes, start=1):
-                    prefix = f"note_{idx}"
-                    lines.append(f"{prefix}. reasoning={note.reasoning}")
-                    if note.next_actions:
-                        lines.append(f"{prefix}. next_actions={note.next_actions}")
-                    if note.coverage_delta is not None:
-                        lines.append(f"{prefix}. coverage_delta={note.coverage_delta}")
-                    if note.confidence_delta is not None:
-                        lines.append(f"{prefix}. confidence_delta={note.confidence_delta}")
-                    missing = None
-                    if isinstance(note.metadata, dict):
-                        missing = note.metadata.get("missing_topics")
-                    if isinstance(missing, list) and missing:
-                        lines.append(f"{prefix}. missing_topics={missing}")
-                await emit_trace(
-                    "think",
-                    "\n".join(lines),
-                    meta={"stage": "think", "think_step_id": think_step_id, "tool_name": result.tool_name},
-                )
-
-            if not self._think_config.get("enable_tool_calls"):
-                break
-            tool_call_records, tool_call_summary = await self._execute_tool_calls_from_think(
-                think_step_id=think_step_id,
-                question=question,
-                context=context,
-                evidences=evidences,
-                coverage_metrics=coverage_metrics,
-                think_notes=result.think_notes or [],
-                tool_runs=tool_runs,
-                think_notes_out=think_notes,
-                available_tool_names=available_tool_names,
-            )
-            checkpoint_records.extend(tool_call_records)
-            proposed = int(tool_call_summary.get("proposed") or 0)
-            previous_tool_call_results = list(tool_call_summary.get("results") or [])
-
-            coverage_metrics.update(
-                self._coverage_snapshot(
-                    evidence_count=len(evidences),
-                    source_labels=[chunk.source for chunk in evidences],
-                    completed_steps=completed_steps,
-                    total_steps=total_steps,
-                )
-            )
-            if proposed <= 0:
-                break
-
-        return checkpoint_records or None
 
     async def _execute_tool_calls_from_think(
         self,
@@ -498,7 +94,6 @@ class GraphLoopRuntimeMixin:
                 )
             plan_step_id = f"{think_step_id}_call_{idx:02d}"
 
-            # Dedupe repeated think-proposed tool calls within the same run.
             signatures = _RUN_THINK_TOOL_SIGNATURES.get()
             if signatures is not None:
                 try:
@@ -522,47 +117,13 @@ class GraphLoopRuntimeMixin:
                 status="running",
             )
             async with semaphore:
-                if tool_name == self.graph_channel_tool:
-                    # Allow think tool to trigger the primary graph adapter traversal.
-                    # This unlocks non-scan deepsearch actions directly from think checkpoints.
-                    from encapsulation.data_model.deepsearch import PlanSpec
-
-                    query = str(tool_args.get("query") or tool_args.get("focus_query") or "").strip()
-                    if not query:
-                        query = str(call.get("rationale") or "Graph adapter query").strip()
-                    spec = PlanSpec(
-                        step_id=plan_step_id,
-                        description=query,
-                        channel="graph",
-                        metadata={"source": "think_tool_call"},
+                if tool_name == "logic.check":
+                    plan_state = _run_plan_state()
+                    tool_args = dict(tool_args)
+                    tool_args["runtime_snapshot"] = self._build_logic_check_snapshot(
+                        tool_runs=tool_runs,
+                        plan_state=plan_state,
                     )
-                    start = time.perf_counter()
-                    traversal_record, reasoning_record, new_evidences = await self.traversal_executor.run_step(
-                        spec,
-                        context,
-                        tool_args=tool_args,
-                        tool_name=self.graph_channel_tool,
-                    )
-                    latency_ms = int((time.perf_counter() - start) * 1000)
-                    reasoning_record.diagnostics.setdefault("reason", "think_tool_call")
-                    reasoning_record.diagnostics.setdefault("latency_ms", latency_ms)
-                    if new_evidences:
-                        await self._extend_shared_evidences(new_evidences)
-                    tool_runs.append(
-                        {
-                            "plan_step_id": plan_step_id,
-                            "tool_name": self.graph_channel_tool,
-                            "channel": "graph",
-                            "result": {
-                                "summary": reasoning_record.output_summary,
-                                "evidence_ids": [ev.chunk_id for ev in new_evidences],
-                                "latency_ms": latency_ms,
-                                "traversal": traversal_record.model_dump(exclude_none=True) if traversal_record else None,
-                            },
-                        }
-                    )
-                    return reasoning_record
-
                 payload = self._build_tool_payload(
                     plan_step_id=plan_step_id,
                     question=question,
@@ -612,6 +173,14 @@ class GraphLoopRuntimeMixin:
             )
             for note in result.think_notes:
                 think_notes_out.append(note.model_dump(exclude_none=True))
+            if result.think_notes:
+                plan_state = _run_plan_state()
+                if plan_state is not None and update_plan_from_think_notes(plan_state, think_notes=result.think_notes):
+                    await self._emit_plan_update(
+                        plan_state=plan_state,
+                        stage="think_tool_call",
+                        plan_step_id=plan_step_id,
+                    )
             return record
 
         results = await asyncio.gather(
@@ -620,7 +189,7 @@ class GraphLoopRuntimeMixin:
         )
         records: List[ReasoningStepRecord] = []
         summary_rows: List[Dict[str, Any]] = []
-        for res in results:
+        for idx, res in enumerate(results, start=1):
             if isinstance(res, Exception):
                 records.append(
                     ReasoningStepRecord(
@@ -628,21 +197,128 @@ class GraphLoopRuntimeMixin:
                         description="Think-proposed tool call failed",
                         channel="graph",
                         status="failed",
-                        diagnostics={"error": str(res), "reason": "think_tool_call"},
+                        diagnostics={"reason": "exception", "error": str(res)},
                     )
                 )
-                summary_rows.append({"status": "failed", "error": str(res)})
-            else:
-                records.append(res)
-                summary_rows.append(
-                    {
-                        "status": res.status,
-                        "step_id": res.step_id,
-                        "produced_evidence_count": len(res.produced_evidence_ids or []),
-                        "tool": (res.tool_logs[-1].tool_name if res.tool_logs else None),
-                    }
-                )
+                summary_rows.append({"status": "failed", "step_id": f"{think_step_id}_call_{idx:02d}"})
+                continue
+            records.append(res)
+            tool_name = None
+            tool_args = None
+            if res.tool_logs:
+                tool_name = res.tool_logs[-1].tool_name
+                tool_args = res.tool_logs[-1].arguments_snapshot
+            output_summary = str(res.output_summary or "").strip()
+            if len(output_summary) > 400:
+                output_summary = output_summary[:399] + "…"
+            summary_rows.append(
+                {
+                    "status": res.status,
+                    "step_id": res.step_id,
+                    "produced_evidence_count": len(res.produced_evidence_ids or []),
+                    "tool": (res.tool_logs[-1].tool_name if res.tool_logs else tool_name),
+                    "tool_name": tool_name,
+                    "tool_args": tool_args,
+                    "output_summary": output_summary or None,
+                    "failure_reason": res.diagnostics.get("reason") if isinstance(res.diagnostics, dict) else None,
+                }
+            )
         return records, {"proposed": len(proposed), "results": summary_rows}
+
+    @staticmethod
+    def _summarize_recent_tool_runs(
+        tool_runs: Sequence[Dict[str, Any]],
+        *,
+        max_items: int,
+        max_chars: int,
+    ) -> List[Dict[str, Any]]:
+        if max_items <= 0 or not tool_runs:
+            return []
+        summaries: List[Dict[str, Any]] = []
+        for run in tool_runs[-max_items:]:
+            if not isinstance(run, dict):
+                continue
+            result = run.get("result") if isinstance(run.get("result"), dict) else {}
+            summary = str(result.get("summary") or "").strip()
+            if max_chars > 0 and len(summary) > max_chars:
+                summary = summary[: max_chars - 3].rstrip() + "..."
+            evidences = result.get("evidences")
+            evidence_count = len(evidences) if isinstance(evidences, list) else 0
+            diagnostics = result.get("diagnostics") if isinstance(result, dict) else None
+            failure_reason = None
+            if isinstance(diagnostics, dict):
+                failure_reason = diagnostics.get("reason") or diagnostics.get("error")
+            summaries.append(
+                {
+                    "plan_step_id": run.get("plan_step_id"),
+                    "tool_name": run.get("tool_name"),
+                    "channel": run.get("channel"),
+                    "summary": summary or None,
+                    "evidence_count": evidence_count,
+                    "failure_reason": failure_reason,
+                }
+            )
+        return summaries
+
+    def _build_logic_check_snapshot(
+        self,
+        *,
+        tool_runs: Sequence[Dict[str, Any]],
+        plan_state: Any,
+    ) -> Dict[str, Any]:
+        max_items = int(tool_defaults.LOGIC_CHECK_RECENT_TOOL_RUNS_MAX)
+        max_chars = int(tool_defaults.LOGIC_CHECK_RECENT_TOOL_RUNS_MAX_CHARS)
+        recent = self._summarize_recent_tool_runs(tool_runs, max_items=max_items, max_chars=max_chars)
+        evidence_ids = self._collect_evidence_ids_from_runs(
+            tool_runs,
+            limit=int(tool_defaults.LOGIC_CHECK_EVIDENCE_ID_MAX),
+        )
+        tool_names = self._collect_tool_names_from_runs(tool_runs)
+        return {
+            "plan": list(getattr(plan_state, "items", []) or []),
+            "recent_tool_runs": recent,
+            "tool_names": sorted(tool_names),
+            "evidence_ids": evidence_ids,
+            "tool_run_count": len(tool_runs),
+        }
+
+    @staticmethod
+    def _collect_tool_names_from_runs(tool_runs: Sequence[Dict[str, Any]]) -> Set[str]:
+        names: Set[str] = set()
+        for run in tool_runs:
+            if not isinstance(run, dict):
+                continue
+            name = str(run.get("tool_name") or "").strip()
+            if name:
+                names.add(name)
+        return names
+
+    @staticmethod
+    def _collect_evidence_ids_from_runs(
+        tool_runs: Sequence[Dict[str, Any]],
+        *,
+        limit: int,
+    ) -> List[str]:
+        collected: List[str] = []
+        seen: Set[str] = set()
+        for run in tool_runs:
+            if not isinstance(run, dict):
+                continue
+            result = run.get("result") if isinstance(run.get("result"), dict) else None
+            evidences = result.get("evidences") if isinstance(result, dict) else None
+            if not isinstance(evidences, list):
+                continue
+            for item in evidences:
+                if not isinstance(item, dict):
+                    continue
+                chunk_id = str(item.get("chunk_id") or "").strip()
+                if not chunk_id or chunk_id in seen:
+                    continue
+                seen.add(chunk_id)
+                collected.append(chunk_id)
+                if len(collected) >= max(0, limit):
+                    return collected
+        return collected
 
 
 def _prioritize_tool_catalog(

@@ -12,8 +12,8 @@ def test_save_trace_events_to_file_does_not_append_references_section(tmp_path, 
 
     deepsearch_result = {
         "report": {
-            "answer": "Body cites [ev1].",
-            "structured_report": {"citations": [{"evidence_id": "ev1"}]},
+            "answer": "Body cites ev1. <sup>1</sup>",
+            "structured_report": {"citations": [{"evidence_id": "ev1"}], "source_key_map": {"1": "ev1"}},
             "evidences": [
                 {
                     "chunk_id": "ev1",
@@ -41,4 +41,3 @@ def test_save_trace_events_to_file_does_not_append_references_section(tmp_path, 
     # Product requirement: rely on <sup> anchors + sources mapping; avoid dumping a "References" section into text.
     assert "<sup>1</sup>" in answer
     assert "## References" not in answer
-

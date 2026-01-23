@@ -54,8 +54,8 @@ def _normalize_adjacent_sup_groups(text: str) -> str:
         if not keys:
             return group
         uniq_sorted = sorted(set(keys))
-        # Join with a single space to keep output readable and predictable.
-        return " ".join(f"<sup>{k}</sup>" for k in uniq_sorted)
+        # Join without spaces to satisfy DeepSearch citation rules.
+        return "".join(f"<sup>{k}</sup>" for k in uniq_sorted)
 
     return group_re.sub(_repl, str(text or ""))
 
@@ -96,4 +96,3 @@ def compact_sup_citations(text: str, *, max_key: int) -> Tuple[str, List[int]]:
     rewritten = _SUP_RE.sub(_replace, raw)
     rewritten = _normalize_adjacent_sup_groups(rewritten)
     return rewritten, used_keys
-

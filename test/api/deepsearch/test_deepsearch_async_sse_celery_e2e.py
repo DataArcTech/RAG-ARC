@@ -155,7 +155,6 @@ class _StubDeepSearchService:
         await asyncio.sleep(0.01)
         state.record_reasoning({"question": question, "reasoning_steps": [], "evidences": []})
         await asyncio.sleep(0.01)
-        state.record_gap_result({"should_trigger_external": False, "reason": "ok"})
         await asyncio.sleep(0.01)
         state.record_report({"question": question, "answer": "stub", "evidences": [], "highlights": []})
         return {

@@ -172,5 +172,5 @@ def test_rag_inference_stream_chat_deepsearch_emits_sup_citations_and_knowledge_
     sources = sources_event.get("sources") or []
     assert [s.get("key") for s in sources] == [1, 2]
     assert [s.get("chunk_id") for s in sources] == ["rep-0", "rep-1"]
-    assert sources[0].get("file") == "/knowledge/chunk/rep-0"
+    assert sources[0].get("file") == "/static/files/file-0/doc0.md"
     assert sources[1].get("file") == "https://example.com/rep-1"

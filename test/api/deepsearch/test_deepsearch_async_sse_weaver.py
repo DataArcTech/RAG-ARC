@@ -29,14 +29,14 @@ class _StubDeepSearchServiceWithTrace:
         state.record_plan({"plan": {"plan_id": "p1", "steps": [{"step_id": "plan_01", "description": "probe", "channel": "graph"}]}})
         await emit_trace(
             "tool_call",
-            json.dumps({"call_id": "c1", "tool_name": "graph.chunk_scan", "plan_step": "plan_01", "extra": {"query": "test"}}),
+            json.dumps({"call_id": "c1", "tool_name": "search", "plan_step": "plan_01", "extra": {"query": "test"}}),
         )
         await emit_trace(
             "tool_response",
             json.dumps(
                 {
                     "call_id": "c1",
-                    "tool_name": "graph.chunk_scan",
+                    "tool_name": "search",
                     "result": {
                         "summary": "ok",
                         "evidences": [{"chunk_id": "ev1", "source": "graph", "content": "hello world", "score": 1.0}],

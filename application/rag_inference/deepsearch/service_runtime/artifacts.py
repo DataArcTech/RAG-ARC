@@ -87,8 +87,6 @@ class DeepSearchServiceArtifactsMixin:
             "config_fingerprint": snapshot.get("config_fingerprint"),
             "stage_timings": stage_timings,
             "coverage_metrics": reasoning.get("coverage_metrics"),
-            "gap_result": reasoning.get("gap_result") or snapshot.get("gap_result"),
-            "quality_gates": snapshot.get("quality_gates") or [],
             "plan_steps": plan_payload.get("steps") or [],
             "reasoning_steps": reasoning_steps,
             "think_notes": reasoning.get("think_notes") or [],

@@ -27,10 +27,10 @@ def test_evidence_pack_is_deterministic_and_bounded() -> None:
         max_summary_chars=20,
     )
     assert "Evidence Pack" in pack
-    assert "Citable chunk_id allowlist:" in pack
-    assert "chunk_001, chunk_002" in pack
-    assert "- [chunk_001]" in pack
-    assert "- [chunk_002]" in pack
+    assert "Citable Source key allowlist:" in pack
+    assert "1, 2" in pack
+    assert "Source key=1 id=chunk_001" in pack
+    assert "Source key=2 id=chunk_002" in pack
     assert "filename=policy.pdf" in pack
     assert "page=3" in pack
     assert "filename=brochure.pdf" in pack
@@ -41,4 +41,3 @@ def test_evidence_pack_is_deterministic_and_bounded() -> None:
 
     pack_one = bank.evidence_pack_for_prompt(["chunk_001", "chunk_002"], max_items=1, max_chars_per_evidence=40)
     assert "chunk_002" not in pack_one
-

@@ -10,6 +10,28 @@ logger = logging.getLogger(__name__)
 
 
 class DeepSearchServiceContextMixin:
+    def _bootstrap_graph_context(
+        self,
+        *,
+        question: str,
+        scope: GraphAccessScope,
+    ) -> GraphQueryContext:
+        adapter = getattr(getattr(self, "graph_loop", None), "adapter", None)
+        adapter_name = "graph_adapter"
+        try:
+            meta = adapter.metadata() if callable(getattr(adapter, "metadata", None)) else None
+        except Exception:
+            meta = None
+        if meta is not None:
+            adapter_name = str(getattr(meta, "adapter_name", None) or adapter_name)
+        elif adapter is not None:
+            adapter_name = str(getattr(adapter, "name", adapter_name) or adapter_name)
+        return GraphQueryContext(
+            adapter_name=adapter_name,
+            question=str(question or "").strip(),
+            access_scope=scope,
+            metadata={},
+        )
     def _build_state(
         self,
         *,
@@ -45,15 +67,12 @@ class DeepSearchServiceContextMixin:
         *,
         run_id: str,
         metadata: Optional[Dict[str, Any]],
-        external_allowed: Optional[bool] = None,
         artifact_dir: Optional[str] = None,
     ) -> GraphQueryContext:
         base = dict(context.metadata or {})
         base["run_id"] = run_id
         if artifact_dir:
             base["artifact_dir"] = str(artifact_dir)
-        if external_allowed is not None:
-            base["external_allowed"] = bool(external_allowed)
         if metadata:
             request_bucket = base.setdefault("request_metadata", {})
             if isinstance(request_bucket, dict):
@@ -90,20 +109,3 @@ class DeepSearchServiceContextMixin:
             payload = context.model_dump(exclude_none=True)
             payload["metadata"] = metadata
             return GraphQueryContext(**payload)
-
-    def _external_allowed_flag(self) -> bool:
-        channel = getattr(self, "external_channel", None)
-        if channel is None:
-            return False
-        checker = getattr(channel, "_is_enabled", None)
-        if callable(checker):
-            try:
-                return bool(checker())
-            except Exception:
-                return False
-        enabled = getattr(channel, "enabled", None)
-        if enabled is None:
-            # If a channel instance is explicitly injected but does not expose an enable flag,
-            # assume it is enabled (test stubs and custom implementations).
-            return True
-        return bool(enabled)

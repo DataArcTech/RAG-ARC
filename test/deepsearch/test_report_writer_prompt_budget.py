@@ -29,13 +29,7 @@ class _BudgetLLM:
         if "Return a single JSON object with" in (messages[1] or {}).get("content", ""):
             return json.dumps(
                 {
-                    "title": "Test Report",
-                    "short_answer": "ok[ev1]",
-                    "summary": "ok[ev1]",
-                    "sections": [{"title": "Body", "section_type": "analysis", "body_markdown": "Answer[ev1]."}],
-                    "limitations": [],
-                    "next_steps": [],
-                    "citations": [],
+                    "text": "# Test Report\n\n## Body\nAnswer. <sup>1</sup>",
                 },
                 ensure_ascii=False,
             )
@@ -70,13 +64,11 @@ def test_report_writer_shrinks_prompts_on_context_limit():
         "methodology": {
             "plan_steps": [{"step_id": f"p{i}", "description": "z" * 2000} for i in range(20)],
             "reasoning_steps": [{"step_id": f"r{i}", "output_summary": "w" * 4000} for i in range(30)],
-            "tool_results": [{"tool_name": "graph.pattern_scan", "diagnostics": {"dump": "k" * 5000}} for _ in range(12)],
+            "tool_results": [{"tool_name": "search", "diagnostics": {"dump": "k" * 5000}} for _ in range(12)],
         },
         "graph_evidence": {"seed_entities": ["SAS"] * 50, "graph_stats": {"edges": 9999}},
         "coverage": {
             "coverage_metrics": {"evidence_count": 999, "missing_topics": ["x"] * 50},
-            "gap_result": {"should_trigger_external": False, "missing_topics": ["x"] * 50},
-            "pending_external": [{"task": "t", "payload": "p" * 2000} for _ in range(200)],
         },
         "evidences": evidences,
         "graph_chain": graph_chain,
@@ -86,8 +78,7 @@ def test_report_writer_shrinks_prompts_on_context_limit():
 
     async def _run():
         result = await writer.write_report(question="Q", outline=outline, context=context)
-        assert result["title"]
-        assert result["sections"]
+        assert result["text"]
         assert len(llm.calls) >= 2
         assert llm.calls[-1]["total_chars"] <= llm.max_chars
 

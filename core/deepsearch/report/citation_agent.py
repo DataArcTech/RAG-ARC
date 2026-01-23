@@ -1,20 +1,16 @@
 """Citation post-processing for DeepSearch reports.
 
 This module decouples citation/index generation from report writing by scanning
-the generated report for inline evidence references (e.g. [ev1]) and producing a
-structured evidence index that is consistent with the provided evidence bundle.
+the generated report for inline evidence references (e.g. <sup>1</sup>) and producing
+a structured evidence index that is consistent with the provided evidence bundle.
 """
-import re
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
-from core.utils.text_regex import BRACKET_CONTENT_RE, CJK_BRACKET_CONTENT_RE
+from core.utils.citations import extract_sup_keys
 
 
 class CitationAgent:
     """Normalize citations and build an evidence index after report generation."""
-
-    _BRACKET_RE = BRACKET_CONTENT_RE
-    _CJK_BRACKET_RE = CJK_BRACKET_CONTENT_RE
 
     def process(
         self,
@@ -24,14 +20,25 @@ class CitationAgent:
         graph_evidence: Mapping[str, Any] | None = None,
         max_chunk_index_items: int | None = None,
         citation_aliases: Mapping[str, str] | None = None,
+        source_key_map: Mapping[str, str] | None = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         evidence_lookup = _build_chunk_lookup(evidences)
         known_chunk_ids = set(evidence_lookup)
 
         citation_hints = structured_report.get("citations") or []
-        used_for_lookup, source_lookup = _coerce_citation_hints(citation_hints, citation_aliases=citation_aliases, known_ids=known_chunk_ids)
+        used_for_lookup, source_lookup = _coerce_citation_hints(
+            citation_hints,
+            citation_aliases=citation_aliases,
+            known_ids=known_chunk_ids,
+            source_key_map=source_key_map,
+        )
 
-        ordered_ids, locations = _extract_inline_citations(structured_report, known_chunk_ids, citation_aliases=citation_aliases)
+        ordered_ids, locations = _extract_inline_citations(
+            structured_report,
+            known_chunk_ids,
+            citation_aliases=citation_aliases,
+            source_key_map=source_key_map,
+        )
         for ev_id in known_chunk_ids:
             if ev_id in used_for_lookup and ev_id not in locations:
                 locations[ev_id] = ["evidence_index"]
@@ -89,16 +96,22 @@ def _coerce_citation_hints(
     *,
     citation_aliases: Mapping[str, str] | None,
     known_ids: set[str],
+    source_key_map: Mapping[str, str] | None,
 ) -> Tuple[Dict[str, str], Dict[str, str]]:
     used_for: Dict[str, str] = {}
     source: Dict[str, str] = {}
     alias_map = {(str(key).strip().lower()): str(value) for key, value in (citation_aliases or {}).items() if str(key).strip()}
+    key_map = {(str(key).strip()): str(value).strip() for key, value in (source_key_map or {}).items() if str(key).strip()}
     for entry in citations:
         if not isinstance(entry, dict):
             continue
         ev_id = str(entry.get("evidence_id") or "").strip()
         if not ev_id:
             continue
+        if ev_id not in known_ids and key_map and ev_id.isdigit():
+            mapped = key_map.get(ev_id)
+            if mapped:
+                ev_id = mapped
         if ev_id not in known_ids and alias_map:
             mapped = alias_map.get(ev_id.lower())
             if mapped and mapped in known_ids:
@@ -117,16 +130,28 @@ def _extract_inline_citations(
     known_ids: set[str],
     *,
     citation_aliases: Mapping[str, str] | None,
+    source_key_map: Mapping[str, str] | None,
 ) -> Tuple[List[str], Dict[str, List[str]]]:
     ordered: List[str] = []
     seen: set[str] = set()
     locations: Dict[str, List[str]] = {}
     alias_map = {(str(key).strip().lower()): str(value) for key, value in (citation_aliases or {}).items() if str(key).strip()}
+    key_map = {(str(key).strip()): str(value).strip() for key, value in (source_key_map or {}).items() if str(key).strip()}
+    max_key = None
+    if key_map:
+        try:
+            max_key = max(int(k) for k in key_map.keys())
+        except Exception:  # noqa: BLE001
+            max_key = None
 
     def _resolve(token: str) -> str | None:
         candidate = token.strip()
         if not candidate:
             return None
+        if candidate.isdigit() and key_map:
+            mapped = key_map.get(candidate)
+            if mapped and mapped in known_ids:
+                return mapped
         if candidate in known_ids:
             return candidate
         if alias_map:
@@ -136,35 +161,19 @@ def _extract_inline_citations(
         return None
 
     def _scan(text: str, location: str) -> None:
-        raw_tokens: List[str] = []
-        raw_tokens.extend(CitationAgent._BRACKET_RE.findall(text or ""))
-        raw_tokens.extend(CitationAgent._CJK_BRACKET_RE.findall(text or ""))
-        for raw in raw_tokens:
-            candidates = re.split(r"[,\s]+", raw.strip())
-            for candidate in candidates:
-                token = _resolve(candidate)
-                if not token:
-                    continue
-                locations.setdefault(token, []).append(location)
-                if token in seen:
-                    continue
-                seen.add(token)
-                ordered.append(token)
-
-    summary = structured_report.get("summary")
-    if isinstance(summary, str) and summary:
-        _scan(summary, "summary")
-
-    sections = structured_report.get("sections") or []
-    if isinstance(sections, list):
-        for idx, section in enumerate(sections, start=1):
-            if not isinstance(section, dict):
+        for key in extract_sup_keys(text or "", max_key=max_key):
+            token = _resolve(str(key))
+            if not token:
                 continue
-            title = str(section.get("title") or "").strip()
-            body = str(section.get("body_markdown") or "").strip()
-            label = f"section:{idx}" if not title else f"section:{idx}:{title}"
-            if body:
-                _scan(body, label)
+            locations.setdefault(token, []).append(location)
+            if token in seen:
+                continue
+            seen.add(token)
+            ordered.append(token)
+
+    text = structured_report.get("text")
+    if isinstance(text, str) and text:
+        _scan(text, "text")
 
     return ordered, locations
 

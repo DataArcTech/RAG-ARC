@@ -30,9 +30,9 @@ Optional feature switches (have defaults):
 - `bench_mode`, `TASK_QUEUE_MODE`, `MODEL_PROFILE`, `DEVELOP_MODE`, `ADMIN_OWNER_ID`
 
 Benchmark/experiment mode:
-- `bench_mode` (default `0`): when set to `1`, benchmark runners (see `application/rag_inference/module_bench.py`, `application/rag_inference/deepsearch/service_bench.py`) execute algorithm-only flows and return plain-text answers (no citations/reports/external web steps).
+- `bench_mode` (default `0`): when set to `1`, benchmark runners (see `application/rag_inference/module_bench.py`) execute algorithm-only flows and return plain-text answers (no citations/reports/web.search steps).
 
-Optional external web search (only if enabled in config):
+Optional web search (only if enabled in config):
 - `TAVILY_API_KEY`
 
 Optional infrastructure overrides (defaults work for local/Docker; set only when needed):
@@ -48,7 +48,7 @@ Recommended places to tune parameters:
 
 - `config/json_configs/rag_inference*.json`: chat pipeline, retrievers, rerankers, model selection.
 - `config/json_configs/knowledge*.json`: parsing, chunking, indexing/graph build.
-- `config/json_configs/deepsearch_service.json`: DeepSearch planner/tools/report/quality gates.
+- `config/json_configs/deepsearch_service.json`: DeepSearch tools/think/report.
 - `config/output_limits.py`: response trimming / evidence caps.
 - `config/core/deepsearch/*_defaults.py`: DeepSearch loop/tool/report defaults used at runtime.
 
@@ -66,7 +66,7 @@ How secrets flow into configs:
 | `CHAT_API_KEY` | _(empty)_ | **Required** (when `CHAT_MODEL_PROVIDER=openai`): API key for chat provider. |
 | `CHAT_API_BASE_URL` | _(empty)_ | **Required** (when `CHAT_MODEL_PROVIDER=openai`): Base URL for OpenAI-compatible chat endpoints (e.g. `https://api.openai.com/v1`). |
 | `OPENAI_CHAT_MODEL` | `gpt-4o-mini` | Legacy/default chat model name used when `CHAT_MODEL_NAME` is empty. |
-| `LOW_COST_MODEL` | _(empty)_ | Optional: cheaper model used for exploration-heavy calls (planning/reflection/quality checks). When empty, the system reuses the main chat model. |
+| `LOW_COST_MODEL` | _(empty)_ | Optional: cheaper model used for exploration-heavy calls (planning/reflection). When empty, the system reuses the main chat model. |
 | `OPENAI_API_BASE` | _(empty)_ | Optional legacy alias for OpenAI-compatible base URL. |
 | `EMBEDDING_MODEL_PROVIDER` | `openai` | Embedding provider (`openai` = OpenAI-compatible API, `huggingface` = local SentenceTransformers). |
 | `EMBEDDING_API_KEY` | _(empty)_ | **Required** (when `EMBEDDING_MODEL_PROVIDER=openai`): API key for embedding provider. |
@@ -157,7 +157,7 @@ Notes:
 | `RAG_INFERENCE_PROMPTS_YAML_PATH` | (empty) | Optional override path for `config/prompts/rag_inference_prompts.yaml`. When empty, uses the repo default. |
 | `CHAT_TOP_TRIPLES` | `5` | Maximum graph triples returned in chat evidence. |
 | `CHAT_TOP_SEED_ENTITIES` | `5` | Maximum seed entities surfaced in chat evidence. |
-| `CHAT_MAX_IMAGE_INPUTS` | `4` | Maximum local images attached to a single chat request when the model supports multimodal inputs (MinerU image assets). |
+| `CHAT_MAX_IMAGE_INPUTS` | `4` | Maximum local images attached to a single chat request when the model supports multimodal inputs (MinerU image assets). Set to `0` (or any negative value) to remove the limit. |
 | `RAG_RETRIEVAL_OBSERVABILITY` | `false` | When `true`, emit retrieval observability logs/progress (per-retriever file distribution, fused distribution, rerank distribution) to debug "wrong file recalled" and follow-up drift. |
 | `RAG_RETRIEVAL_LOG_TOP_FILES` | `10` | Max file ids shown in retrieval distribution logs (counted by file_id). |
 | `RAG_RETRIEVAL_LOG_TOP_CHUNKS` | `5` | Max chunk previews shown in retrieval observability logs. |
@@ -177,12 +177,11 @@ Notes:
 | `DEEPSEARCH_TOP_CHUNKS` | `10` | Maximum chunks returned in DeepSearch evidence and displayed in report appendix (first 100 chars preview). |
 | `DEEPSEARCH_TOP_TRIPLES` | `30` | Maximum graph triples returned in DeepSearch evidence. |
 | `DEEPSEARCH_TOP_SEED_ENTITIES` | `15` | Maximum seed entities surfaced in DeepSearch evidence. |
-| `DEEPSEARCH_MAX_IMAGE_INPUTS` | `6` | Maximum local images attached to DeepSearch report generation when the model supports multimodal inputs (MinerU image assets). |
+| `DEEPSEARCH_MAX_IMAGE_INPUTS` | `6` | Maximum local images attached to DeepSearch report generation when the model supports multimodal inputs (MinerU image assets). Set to `0` (or any negative value) to remove the limit. |
 | `DEEPSEARCH_GRAPH_NODE_LIMIT` | `75` | Cap for DeepSearch graph snapshots (entity + chunk nodes). |
 | `DEEPSEARCH_GRAPH_EDGE_LIMIT` | `200` | Cap for DeepSearch edge exports between the retained nodes. |
 | `DEEPSEARCH_MAX_REASONING_STEPS` | `32` | Maximum reasoning steps returned in DeepSearch payloads. |
 | `DEEPSEARCH_MAX_STAGE_HISTORY` | `10` | Maximum stage history entries returned in DeepSearch payloads. |
-| `DEEPSEARCH_MAX_EXTERNAL_CALLS` | `5` | Maximum external call entries returned in DeepSearch payloads. |
 | `DEEPSEARCH_MAX_TOOL_METADATA` | `5` | Maximum tool metadata entries returned in DeepSearch payloads. |
 | `DEEPSEARCH_WEAVER_EVIDENCE_PREVIEW_CHARS` | `180` | Evidence preview character limit in the DeepSearch Weaver trace rendering. |
 | `DEEPSEARCH_WEAVER_EVIDENCE_SAMPLE_COUNT` | `3` | Number of evidence samples included in the DeepSearch Weaver trace rendering. |
@@ -208,7 +207,7 @@ These knobs apply when the knowledge config selects `semantic_unit_chunker` (for
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `SEMANTIC_CHUNKING_LEVEL` | `basic` | Semantic unit chunking level: `disabled`/`basic`/`standard`/`advanced`. |
+| `SEMANTIC_CHUNKING_LEVEL` | `standard` | Semantic unit chunking level: `disabled` (fallback only) / `basic` (tables) / `standard` (tables + fenced code + lists + math blocks) / `advanced` (standard + blockquotes). |
 | `TABLE_SMALL_MAX_TOKENS` | _(empty)_ | Override table small/large threshold (leave empty to use code defaults). |
 | `TABLE_SLICE_MAX_TOKENS` | _(empty)_ | Override target token budget for table slices. |
 | `TABLE_SLICE_OVERLAP_ROWS` | _(empty)_ | Override overlap rows for table slices. |
@@ -317,7 +316,7 @@ When `TASK_QUEUE_MODE=celery`, these long-running operations are executed by Cel
 
 ## 6. DeepSearch Defaults
 
-Planner/graph defaults. Leave as-is unless customizing behavior.
+DeepSearch defaults. Leave as-is unless customizing behavior.
 
 Note: DeepSearch tool parameters (including the deterministic `code.python` math/finance verification tool) are configured via `config/json_configs/deepsearch_service.json` → `tool_manager.enabled_tools[...]` rather than individual environment variables.
 
@@ -340,34 +339,14 @@ Location: `config/json_configs/deepsearch_service.json` → `tool_manager.enable
 | Variable | Default | Description |
 | --- | --- | --- |
 | `DEEPSEARCH_DEFAULT_ADAPTER` | `hipporag` | Graph adapter registered in the registry. |
-| `DEEPSEARCH_PLANNER_MODE` | `react` | Planner runtime (`react`, `iter_research`, `parallel_thinking`). |
 | `DEEPSEARCH_GRAPH_STRATEGY` | `ppr_chain` | Graph reasoning strategy label. |
-| `DEEPSEARCH_PLANNER_MAX_STEPS` | `6` | Max reasoning steps per plan. |
-| `DEEPSEARCH_PLANNER_ENABLE_SUBQUESTION` | `true` | Allow planner to spawn sub-questions. |
-| `DEEPSEARCH_PLANNER_DISABLE_LLM` | `false` | Force planner to run without LLM (for tests). |
-| `DEEPSEARCH_PLANNER_LLM_PROVIDER` | _(empty)_ | Optional: planner-specific LLM provider (leave empty to reuse global chat config). |
-| `DEEPSEARCH_PLANNER_MODEL_NAME` | _(empty)_ | Optional: planner-specific model name. |
-| `DEEPSEARCH_PLANNER_MAX_TOKENS` | _(empty)_ | Optional: planner-specific max tokens override. |
-| `DEEPSEARCH_PLANNER_TEMPERATURE` | _(empty)_ | Optional: planner-specific temperature override. |
-| `DEEPSEARCH_PLANNER_API_KEY` | _(empty)_ | Optional: planner-specific API key override. |
-| `DEEPSEARCH_PLANNER_BASE_URL` | _(empty)_ | Optional: planner-specific base URL override. |
-| `DEEPSEARCH_PLANNER_ORGANIZATION` | _(empty)_ | Optional: planner-specific organization override. |
-| `DEEPSEARCH_PLANNER_TIMEOUT` | _(empty)_ | Optional: planner-specific request timeout. |
-| `DEEPSEARCH_PLANNER_MAX_RETRIES` | _(empty)_ | Optional: planner-specific retry count. |
-| `DEEPSEARCH_PERSIST_PLAN` | `true` | Persist plan JSON to disk. |
-| `DEEPSEARCH_PLAN_OUTPUT_DIR` | `./local/deepsearch_runs` | Folder for persisted plans. |
 | `DEEPSEARCH_ARTIFACT_DIR` | _(empty)_ | Optional: per-run DeepSearch artifact root (writes `run_id/plan_result.json`, `reasoning.json`, `report.json`, `report.md`, and snapshot/manifest JSON; when `artifacts.version=2`, also writes `manifest.json`, `dev.json`, `public.json`, and `state_snapshot.json` becomes a lightweight manifest; when `artifacts.dedupe.enabled=true`, also writes `evidence_pool.json` and replaces duplicated large blocks in `reasoning.json`/`report.json` with refs). |
 | `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `./local/deepsearch_artifacts` | Output directory for tool telemetry/artifacts (also used as the default run artifact root in `config/json_configs/deepsearch_service.json`). |
-| `DEEPSEARCH_ALLOW_EXTERNAL_CHANNEL` | `false` | Planner-only flag for emitting `web` steps (used when `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` is not set). |
-| `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` | `false` | Runtime override for external search enablement (config SoT: `external_channel.enabled` + `gap_detection.enable_external_on_gap`). |
 | `DEEPSEARCH_SECTIONWISE_WRITER` | `false` | Enable section-wise report writing with Memory Bank retrieval + recency retention. |
 | `DEEPSEARCH_BUDGET_TIER` | _(empty)_ | Optional runtime override for complexity→budget scaling (`low` / `default`); when empty, DeepSearch uses a heuristic based on the question. |
 | `DEEPSEARCH_TELEMETRY_ENABLED` | `true` | Enable telemetry capture for tool runs (local artifacts). |
 | `TAVILY_API_KEY` | _(empty)_ | API key for Tavily web search (used by both HippoRAG Q&A and DeepSearch when web search is enabled). |
-| `DEEPSEARCH_WEB_PROVIDER` | _(empty)_ | External search routing hint (`tavily` / `tool` / `mcp`; unknown values fall back to `tavily`). |
-| `DEEPSEARCH_EXTERNAL_CACHE_MODE` | `auto` | External search record/replay mode: `off` / `record` / `replay` / `auto`. |
-| `DEEPSEARCH_EXTERNAL_CACHE_DIR` | `./local/deepsearch_artifacts/external_cache` | External search cache directory. |
-| `DEEPSEARCH_TOOL_HINTS` | _(empty)_ | JSON list to override planner tool hints. |
+| `DEEPSEARCH_TOOL_HINTS` | _(empty)_ | JSON list to override tool hints in the think catalog. |
 | `DEEPSEARCH_TOOL_MCP_CONFIG_PATH` | _(empty)_ | Custom JSON config for tool MCP server. |
 | `DEEPSEARCH_TOOL_MCP_ADAPTER_CONFIG` | _(empty)_ | JSON file describing adapter overrides. |
 | `DEEPSEARCH_TOOL_MCP_ADAPTER_NAME` | _(empty)_ | Adapter name when not using config path. |
@@ -392,21 +371,7 @@ Location: `config/json_configs/deepsearch_service.json` → `tool_manager.enable
 | `DEEPSEARCH_MCP_PERSISTENT_SESSION` | `true` | Reuse MCP HTTP sessions. |
 | `DEEPSEARCH_MCP_ENABLE_GRAPH_CONTEXT` | `true` | Attach graph context to MCP requests. |
 | `DEEPSEARCH_MCP_GRAPH_CONTEXT_FIELD` | `__graph_context__` | Field name for graph context injection. |
-| `DEEPSEARCH_GAP_COVERAGE_THRESHOLD` | `0.7` | Coverage threshold for gap detection. |
-| `DEEPSEARCH_GAP_CONFIDENCE_THRESHOLD` | `0.6` | Confidence threshold for gap detection. |
-| `DEEPSEARCH_GAP_EXPECTED_MIN_CHUNKS` | `3` | Minimum expected chunk count before triggering external search. |
-| `DEEPSEARCH_CONSISTENCY_CHECK` | `true` | Enable LLM-based consistency check to validate report claims against evidence. |
 | `DEEPSEARCH_PARALLEL_SECTIONS` | `false` | Generate report sections in parallel (faster but uses more API calls). |
-| `DEEPSEARCH_QUALITY_LOOP_ENABLED` | `false` | Enable iterative quality gating (research → verify → iterate). |
-| `DEEPSEARCH_QUALITY_LOOP_MAX_ROUNDS` | `2` | Maximum rounds (initial + follow-ups) for the quality loop. |
-| `DEEPSEARCH_QUALITY_LOOP_MIN_CITATION_SENTENCE_COVERAGE` | `0.6` | Minimum fraction of report sentences that must include at least one valid citation. |
-| `DEEPSEARCH_QUALITY_LOOP_REQUIRE_CONSISTENCY` | `true` | Fail the quality gate when consistency checking reports issues. |
-| `DEEPSEARCH_QUALITY_LOOP_MAX_UNCITED_SENTENCES` | `6` | Maximum uncited sentences surfaced as repair targets (used to drive follow-up retrieval/rewrite). |
-| `DEEPSEARCH_QUALITY_LOOP_MAX_ACTIONS` | `6` | Maximum follow-up actions produced by the quality gate. |
-| `DEEPSEARCH_QUALITY_LOOP_ENABLE_LLM_JUDGE` | `true` | Enable the rubric-based LLM judge (called only when deterministic checks fail or gaps exist). |
-| `DEEPSEARCH_QUALITY_LOOP_JUDGE_TEMPERATURE` | `0.0` | Temperature for the quality judge. |
-| `DEEPSEARCH_QUALITY_LOOP_JUDGE_MAX_RETRIES` | `1` | Retry attempts for the quality judge call. |
-| `DEEPSEARCH_QUALITY_LOOP_TRIGGER_EXTERNAL_ON_FAILURE` | `true` | Allow the quality gate to request external search actions (still requires external search to be enabled). |
 
 ### Example: enabling MCP routing for remote tools
 
@@ -416,7 +381,7 @@ DEEPSEARCH_MCP_SERVER_URI="http://127.0.0.1:8765/mcp/tools"
 DEEPSEARCH_MCP_TRANSPORT="sse"
 DEEPSEARCH_MCP_HEADERS='{"Authorization": "Bearer your-mcp-token"}'
 # Constrain which tools the MCP server exposes (optional)
-DEEPSEARCH_TOOL_MCP_TOOLS="graph.context_rollup,graph.think"
+DEEPSEARCH_TOOL_MCP_TOOLS="search,think"
 # Provide a default graph scope for the standalone MCP server
 DEEPSEARCH_TOOL_MCP_SCOPE_ID="00000000-0000-0000-0000-000000000001"
 DEEPSEARCH_TOOL_MCP_SCOPE_TYPE="owner"
@@ -448,10 +413,13 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINERU_HEALTHCHECK_TIMEOUT_S` | `2` | Startup/indexing healthcheck timeout seconds for `GET $MINERU_SERVER_URL/health` when `PARSER_PARSE_MODE=mineru`. |
 | `MINERU_FALLBACK_TO_NATIVE_ON_FAILURE` | `true` | When `PARSER_PARSE_MODE=mineru`, fallback to native PDF text extraction if MinerU parsing fails (e.g. service not running). Fallback is recorded in parse result metadata (`metadata.parser_fallback`). |
 | `MINERU_TIMEOUT_S` | `900` | Optional: HTTP timeout seconds for remote MinerU parsing/downloads. |
+| `MINERU_POLL_INTERVAL_S` | `5` | Optional: polling interval seconds for MinerU async parse status. |
+| `MINERU_POLL_TIMEOUT_S` | `0` | Optional: max seconds to wait for MinerU parse completion; `0` or negative means no limit. |
 | `MINERU_START_PAGE` | `0` | Optional: start page (0-based) for MinerU parsing. |
 | `MINERU_END_PAGE` | _(empty)_ | Optional: end page (0-based, inclusive). If empty, parse to the end. |
 | `TOKEN_CHUNK_SIZE` | `1000` | Token chunk size for `token_chunker` (also used as `semantic_unit_chunker.fallback_chunker_config`). |
 | `TOKEN_CHUNK_OVERLAP` | `100` | Token overlap for `token_chunker` (also used as `semantic_unit_chunker.fallback_chunker_config`). |
+| `TOKEN_URL_ATOMIC_CONTEXT_TOKENS` | `10` | URL atomic protection: keep this many tokens before/after each URL together (applies to `token_chunker` and semantic-unit fallback). |
 | `OCR_MODEL_NAME` | _(empty)_ | Optional backward-compatible OCR model name alias. |
 | `RAGARC_RUNTIME_DIR` | `./local/runtime` | Fallback runtime root when preferred local directories are not writable. |
 | `LOCAL_FILE_STORAGE_PATH` | `./data/files` | Default root for `local_blob_store` when JSON `base_path` is not provided (relative paths are resolved against the repo root). |
@@ -511,7 +479,7 @@ These are not required for the default local/Docker setup.
 | `DEEPSEARCH_CITATION_ALIASES` | _(empty)_ | Optional: JSON mapping for citation aliases. |
 | `DEEPSEARCH_TOOL_AUDIT_LABEL` | _(empty)_ | Optional: label attached to tool audit records. |
 | `DEEPSEARCH_TOOL_MCP_AUDIT_LABEL` | _(empty)_ | Optional: label attached to MCP tool audit records. |
-| `DEEPSEARCH_TOOL_MCP_INSTRUCTIONS` | _(empty)_ | Optional: extra planner instructions for MCP tool usage. |
+| `DEEPSEARCH_TOOL_MCP_INSTRUCTIONS` | _(empty)_ | Optional: extra tool instructions for MCP usage. |
 | `DEEPSEARCH_TOOL_MCP_SCOPE_OVERRIDE_POLICY` | _(empty)_ | Optional: policy controlling when MCP scope is overridden. |
 | `DEEPSEARCH_TOOL_MCP_SCOPE_OVERRIDE_TOKEN` | _(empty)_ | Optional: token used to authorize MCP scope overrides. |
 | `DEEPSEARCH_RUN_LLM_INTEGRATION_TESTS` | `0` | Optional: run DeepSearch LLM integration tests when set to `1`. |
@@ -581,12 +549,10 @@ Entry points:
 
 DeepSearch web search policy (in `config/json_configs/deepsearch_service.json`):
 
-- `planner.web_step_policy="realtime_required"` injects/forces at least one `channel="web"` step when the question asks for realtime/latest/current info (e.g. FX rates/news).
-- `external_channel.execute_forced_tasks_without_gap=true` executes those forced tasks even when gap detection thinks coverage is sufficient.
 
 DeepSearch tool budget (in `config/json_configs/deepsearch_service.json`):
 
-- `tool_budget.max_calls_total` caps total tool invocations per DeepSearch run (tool_manager + optional external calls; does not count graph adapter traversals).
+- `tool_budget.max_calls_total` caps total tool invocations per DeepSearch run (tool_manager; does not count graph adapter traversals).
 - Remaining budget is attached to `graph_context.metadata.tool_budget` for LLM visibility and also surfaced in tool diagnostics.
 
 ---

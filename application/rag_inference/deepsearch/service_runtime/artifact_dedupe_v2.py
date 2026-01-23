@@ -172,12 +172,6 @@ def dedupe_report_v2(
         if "coverage_metrics" in meta_copy:
             meta_copy.pop("coverage_metrics", None)
             meta_copy["coverage_metrics_ref"] = _ref(file=reasoning_filename, json_pointer="/coverage_metrics", enabled=refs_enabled)
-        if "gap_result" in meta_copy:
-            meta_copy.pop("gap_result", None)
-            meta_copy["gap_result_ref"] = _ref(file=reasoning_filename, json_pointer="/gap_result", enabled=refs_enabled)
-        if "pending_external" in meta_copy:
-            meta_copy.pop("pending_external", None)
-            meta_copy["pending_external_ref"] = _ref(file=reasoning_filename, json_pointer="/pending_external", enabled=refs_enabled)
         if "graph_visualization" in meta_copy:
             meta_copy.pop("graph_visualization", None)
             meta_copy["graph_visualization_ref"] = _ref(file=reasoning_filename, json_pointer="/graph_traversals", enabled=refs_enabled)

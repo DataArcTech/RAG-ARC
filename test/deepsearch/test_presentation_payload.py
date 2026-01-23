@@ -15,7 +15,7 @@ def _sample_result():
                     "channel": "graph",
                     "status": "done",
                     "output_summary": "Plan step completed.",
-                    "diagnostics": {"tool": "graph.pattern_scan", "confidence": 0.72, "latency_ms": 120},
+                    "diagnostics": {"tool": "search", "confidence": 0.72, "latency_ms": 120},
                     "produced_evidence_ids": ["rep-0"],
                 }
             ],
@@ -25,7 +25,7 @@ def _sample_result():
             "tool_results": [
                 {
                     "plan_step_id": "plan_01",
-                    "tool_name": "graph.pattern_scan",
+                    "tool_name": "search",
                     "channel": "graph",
                     "result": {
                         "summary": "Plan step completed.",
@@ -40,12 +40,10 @@ def _sample_result():
             "evidences": [{"chunk_id": f"rep-{idx}", "content": f"content {idx}"} for idx in range(6)],
             "highlights": [{"summary": "Highlight A"}, {"summary": "Highlight B"}],
             "structured_report": {
-                "title": "Who runs RAG-ARC?",
-                "summary": "Graph RAG is maintained by RAG-ARC.",
-                "sections": [
-                    {"title": "Summary", "body": "Graph RAG is maintained by RAG-ARC."},
-                ],
+                "text": "Graph RAG is maintained by RAG-ARC.",
                 "citations": [],
+                "source_key_map": {},
+                "evidence_index": [],
             },
         },
         "state": {"request_metadata": {"priority": "high"}},
@@ -76,7 +74,7 @@ def test_trim_payload_attaches_evidence(monkeypatch):
     assert payload["reasoning"]["think_notes"]
     assert payload["question"] == "Who runs RAG-ARC?"
     assert payload["tool_runs"]
-    assert payload["tool_runs"][0]["tool_name"] == "graph.pattern_scan"
+    assert payload["tool_runs"][0]["tool_name"] == "search"
     assert payload["request_metadata"] == {"priority": "high"}
     assert payload["overview"]["has_think_notes"] is True
     assert calls and calls[0][1] == 2
@@ -106,9 +104,9 @@ def test_trim_payload_includes_reasoning_summaries(monkeypatch):
 
     assert payload["reasoning"]["reasoning_steps"]
     step = payload["reasoning"]["reasoning_steps"][0]
-    assert step["tool"] == "graph.pattern_scan"
+    assert step["tool"] == "search"
     assert step["output_summary"] == "Plan step completed."
-    assert step["diagnostics"] == {"confidence": 0.72, "latency_ms": 120, "tool": "graph.pattern_scan"}
+    assert step["diagnostics"] == {"confidence": 0.72, "latency_ms": 120, "tool": "search"}
 
 
 def test_trim_payload_preserves_structured_report(monkeypatch):
@@ -121,7 +119,7 @@ def test_trim_payload_preserves_structured_report(monkeypatch):
 
     structured = payload["report"].get("structured_report")
     assert structured
-    assert structured["summary"] == "Graph RAG is maintained by RAG-ARC."
+    assert structured["text"] == "Graph RAG is maintained by RAG-ARC."
 
 
 def test_trim_payload_emits_hipporag_style_citations_and_sources(monkeypatch):
@@ -131,7 +129,7 @@ def test_trim_payload_emits_hipporag_style_citations_and_sources(monkeypatch):
     monkeypatch.setattr("core.presentation.deepsearch_payload.build_deepsearch_evidence", _unexpected_call)
 
     payload = _sample_result()
-    payload["report"]["answer"] = "Claim A cites [rep-0]. Claim B cites [rep-1, rep-2]."
+    payload["report"]["answer"] = "Claim A cites rep-0. <sup>1</sup> Claim B cites rep-1 and rep-2. <sup>2</sup><sup>3</sup>"
     payload["report"]["evidences"] = [
         {
             "chunk_id": "rep-0",
@@ -157,6 +155,11 @@ def test_trim_payload_emits_hipporag_style_citations_and_sources(monkeypatch):
         {"evidence_id": "rep-1", "source": "web.tavily"},
         {"evidence_id": "rep-2", "source": "hipporag"},
     ]
+    payload["report"]["structured_report"]["source_key_map"] = {
+        "1": "rep-0",
+        "2": "rep-1",
+        "3": "rep-2",
+    }
 
     trimmed = trim_deepsearch_payload(payload, include_evidence=False, chunk_limit=10)
 
@@ -171,47 +174,10 @@ def test_trim_payload_emits_hipporag_style_citations_and_sources(monkeypatch):
     sources = trimmed["report"].get("sources")
     assert sources and [s["key"] for s in sources] == [1, 2, 3]
     assert [s["chunk_id"] for s in sources] == ["rep-0", "rep-1", "rep-2"]
-    assert sources[0].get("file") == "/knowledge/chunk/rep-0"
+    assert sources[0].get("file") == "/static/files/file-0/doc0.md"
     assert sources[0].get("file_id") == "file-0"
     assert sources[1].get("file") == "https://example.com/rep-1"
     assert trimmed["report"].get("citation_key_map") == {"rep-0": 1, "rep-1": 2, "rep-2": 3}
-
-
-def test_trim_payload_converts_citations_without_structured_report(monkeypatch):
-    def _unexpected_call(*args, **kwargs):
-        raise AssertionError("build_deepsearch_evidence should not run when include_evidence=false")
-
-    monkeypatch.setattr("core.presentation.deepsearch_payload.build_deepsearch_evidence", _unexpected_call)
-
-    payload = _sample_result()
-    payload["report"]["answer"] = "Claim A cites [rep-0]. Claim B cites 【rep-1】."
-    payload["report"]["evidences"] = [
-        {
-            "chunk_id": "rep-0",
-            "source": "hipporag",
-            "content": "Alpha evidence snippet",
-            "provenance": {"metadata": {"chunk_metadata": {"source_file_id": "file-0", "filename": "doc0.md"}}},
-        },
-        {
-            "chunk_id": "rep-1",
-            "source": "hipporag",
-            "content": "Beta evidence snippet",
-            "provenance": {"metadata": {"chunk_metadata": {"source_file_id": "file-1", "filename": "doc1.md"}}},
-        },
-    ]
-    payload["report"].pop("structured_report", None)
-
-    trimmed = trim_deepsearch_payload(payload, include_evidence=False, chunk_limit=10)
-
-    answer = trimmed["report"]["answer"]
-    assert "[rep-0]" not in answer
-    assert "【rep-1】" not in answer
-    assert "<sup>1</sup>" in answer
-    assert "<sup>2</sup>" in answer
-
-    sources = trimmed["report"].get("sources")
-    assert sources and [s["key"] for s in sources] == [1, 2]
-    assert [s["chunk_id"] for s in sources] == ["rep-0", "rep-1"]
 
 
 def test_deepsearch_report_falls_back_to_highlights():
@@ -234,11 +200,11 @@ def test_deepsearch_report_prefers_reasoning_answer():
     assert report.final_answer == "Graph RAG is managed by the RAG-ARC core team."
 
 
-def test_deepsearch_report_uses_context_rollup_when_available():
+def test_deepsearch_report_uses_llm_chain_explorer_when_available():
     payload = _sample_result()
     payload["report"]["answer"] = ""
     payload["reasoning"]["final_answer"] = ""
-    payload["report"]["evidences"][0]["source"] = "context_rollup"
+    payload["report"]["evidences"][0]["source"] = "graph.llm_chain_explorer"
     payload["report"]["evidences"][0]["content"] = "SAS 提供完善的 AP 课程与课外活动。"
 
     report = DeepSearchReport.from_payload(payload, graph_chain_builder=None)

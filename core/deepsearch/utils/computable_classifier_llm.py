@@ -8,8 +8,8 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, ValidationError
 
 from core.prompts.deepsearch.computable_classifier import (
-    COMPUTABLE_CLASSIFIER_SYSTEM_PROMPT_V1,
-    COMPUTABLE_CLASSIFIER_USER_PROMPT_V1,
+    COMPUTABLE_CLASSIFIER_SYSTEM_PROMPT_V1_EN,
+    COMPUTABLE_CLASSIFIER_USER_PROMPT_V1_EN,
 )
 from core.utils.json_extract import safe_json_loads
 
@@ -37,8 +37,8 @@ async def aclassify_computable_question(
         return ComputableLLMClassification(is_computable=False, reasons=["empty_question"], suggested_tools=[])
 
     messages = [
-        {"role": "system", "content": COMPUTABLE_CLASSIFIER_SYSTEM_PROMPT_V1},
-        {"role": "user", "content": COMPUTABLE_CLASSIFIER_USER_PROMPT_V1.format(question=normalized)},
+        {"role": "system", "content": COMPUTABLE_CLASSIFIER_SYSTEM_PROMPT_V1_EN},
+        {"role": "user", "content": COMPUTABLE_CLASSIFIER_USER_PROMPT_V1_EN.format(question=normalized)},
     ]
 
     async_chat = getattr(llm, "achat", None)
@@ -57,4 +57,3 @@ async def aclassify_computable_question(
         return ComputableLLMClassification.model_validate(payload)
     except ValidationError as exc:
         raise ValueError(f"Invalid computable classifier payload: {exc}") from exc
-

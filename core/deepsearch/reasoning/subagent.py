@@ -15,7 +15,6 @@ class SubAgentOutcome:
     evidences: List[EvidenceChunk]
     tool_runs: List[Dict[str, Any]]
     think_notes: List[Dict[str, Any]]
-    pending_external: Optional[Dict[str, Any]]
 
 
 class PlanSubAgent:

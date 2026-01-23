@@ -1,4 +1,4 @@
-"""Tool hint/catalog utilities consumed by the DeepSearch planner.
+"""Tool hint/catalog utilities consumed by DeepSearch think prompts.
 
 Note: Infrastructure implementations (local tool registry, MCP routing, tool manager) live under
 `encapsulation/deepsearch/tooling` to keep `core/` focused on algorithms and contracts.
@@ -23,7 +23,7 @@ def describe_available_tools(
     registry: ToolHintRegistry | None = None,
     include_llm_tools: bool,
 ) -> List[Dict[str, str]]:
-    """Return tool descriptors exposed to planner prompts."""
+    """Return tool descriptors exposed to think prompts."""
 
     active_registry = registry or ToolHintRegistry()
     base_hints: List[Dict[str, str]] = [desc.as_hint() for desc in builtin_tool_descriptors()]
@@ -44,7 +44,7 @@ def describe_available_tools(
 
 
 def register_tool_hints(hints: Iterable[Dict[str, str]], *, registry: ToolHintRegistry) -> None:
-    """Register extra tool hints into a registry instance (planner/runtime can then pick them up)."""
+    """Register extra tool hints into a registry instance (think/runtime can then pick them up)."""
 
     registry.register_tool_hints(hints)
 
@@ -62,6 +62,6 @@ def clear_tool_hints(*, registry: ToolHintRegistry) -> None:
 
 
 def get_tool_hint_revision(*, registry: ToolHintRegistry) -> int:
-    """Expose hint revision timestamp for planner cache invalidation."""
+    """Expose hint revision timestamp for tool catalog cache invalidation."""
 
     return registry.get_revision()

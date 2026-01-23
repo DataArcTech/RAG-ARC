@@ -33,11 +33,6 @@ def test_state_tracks_plan_reasoning_and_report():
     assert state.stage == "reasoned"
     assert state.reasoning_trace["evidences"][0]["chunk_id"] == "ev1"
 
-    gap_payload = {"coverage_score": 0.5, "should_trigger_external": False}
-    state.record_gap_result(gap_payload)
-    assert state.stage == "gap_evaluated"
-    assert state.reasoning_trace["gap_result"] == gap_payload
-
     report = {
         "answer": "Graph summary",
         "evidences": reasoning_trace["evidences"],
@@ -49,12 +44,8 @@ def test_state_tracks_plan_reasoning_and_report():
     assert snapshot["stage_history"][-1]["stage"] == "reported"
 
 
-def test_state_handles_external_calls_and_errors():
+def test_state_handles_errors():
     state = DeepSearchState(config_fingerprint="cfg")
-    state.record_external_call({"tool": "web.search", "latency_ms": 1200})
-    assert state.stage == "external_invoked"
-    assert state.external_calls[0]["tool"] == "web.search"
-
     state.append_error("missing chunk", stage="reasoned")
     state.mark_failed("gap timeout", details={"timeout_ms": 5000})
     assert state.stage == "failed"
@@ -62,7 +53,6 @@ def test_state_handles_external_calls_and_errors():
     assert state.errors[-1]["reason"] == "gap timeout"
 
     snapshot = state.snapshot()
-    assert snapshot["external_calls"][0]["latency_ms"] == 1200
     assert snapshot["errors"][-1]["reason"] == "gap timeout"
     assert "kpis" in snapshot
     assert "error_summary" in snapshot

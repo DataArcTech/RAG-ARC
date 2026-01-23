@@ -60,22 +60,22 @@ async def _serve_mcp_app(app):
 
 @pytest.mark.asyncio
 async def test_mcp_tool_naming_and_scope_override_default_ignored(tmp_path):
-    descriptor = get_tool_descriptor("graph.think")
+    descriptor = get_tool_descriptor("think")
     assert descriptor is not None
     server_scope = GraphAccessScope(scope_id="server-owner", scope_type="owner")
 
     server = build_tool_mcp_server(
         llm_connector=object(),
-        enabled_tools=["graph.think"],
+        enabled_tools=["think"],
         instructions="test",
         adapter=_StubAdapter(),
         default_scope=server_scope,
         tool_manager_config={
             "enable_builtin_tools": False,
-            "enabled_tools": {"graph.think": {"enabled": True}},
+            "enabled_tools": {"think": {"enabled": True}},
             "artifact_dir": str(tmp_path),
         },
-        local_tools={"graph.think": _ScopeEchoTool(descriptor)},
+        local_tools={"think": _ScopeEchoTool(descriptor)},
     )
 
     app = server.http_app(path="/mcp", transport="sse")
@@ -89,7 +89,7 @@ async def test_mcp_tool_naming_and_scope_override_default_ignored(tmp_path):
         manager = DeepSearchToolManager(
             tool_configs={
                 "enable_builtin_tools": False,
-                "enabled_tools": {"graph.think": {"mcp_only": True}},
+                "enabled_tools": {"think": {"mcp_only": True}},
                 "artifact_dir": str(tmp_path),
                 "max_remote_evidences": 32,
                 "max_remote_context_chars": 4096,
@@ -98,7 +98,7 @@ async def test_mcp_tool_naming_and_scope_override_default_ignored(tmp_path):
             mcp_client=mcp_client,
         )
         result = await manager.invoke(
-            "graph.think",
+            "think",
             payload={
                 "question": "scope test",
                 "context_evidences": [],
@@ -110,22 +110,22 @@ async def test_mcp_tool_naming_and_scope_override_default_ignored(tmp_path):
 
 @pytest.mark.asyncio
 async def test_mcp_tool_scope_override_trusted_token_allows_override(tmp_path):
-    descriptor = get_tool_descriptor("graph.think")
+    descriptor = get_tool_descriptor("think")
     assert descriptor is not None
     server_scope = GraphAccessScope(scope_id="server-owner", scope_type="owner")
 
     server = build_tool_mcp_server(
         llm_connector=object(),
-        enabled_tools=["graph.think"],
+        enabled_tools=["think"],
         instructions="test",
         adapter=_StubAdapter(),
         default_scope=server_scope,
         tool_manager_config={
             "enable_builtin_tools": False,
-            "enabled_tools": {"graph.think": {"enabled": True}},
+            "enabled_tools": {"think": {"enabled": True}},
             "artifact_dir": str(tmp_path),
         },
-        local_tools={"graph.think": _ScopeEchoTool(descriptor)},
+        local_tools={"think": _ScopeEchoTool(descriptor)},
         scope_override_policy="allow_trusted",
         scope_override_token="test-secret",
     )
@@ -138,7 +138,7 @@ async def test_mcp_tool_scope_override_trusted_token_allows_override(tmp_path):
         manager = DeepSearchToolManager(
             tool_configs={
                 "enable_builtin_tools": False,
-                "enabled_tools": {"graph.think": {"mcp_only": True}},
+                "enabled_tools": {"think": {"mcp_only": True}},
                 "artifact_dir": str(tmp_path),
                 "max_remote_evidences": 32,
                 "max_remote_context_chars": 4096,
@@ -147,7 +147,7 @@ async def test_mcp_tool_scope_override_trusted_token_allows_override(tmp_path):
             mcp_client=mcp_client,
         )
         result = await manager.invoke(
-            "graph.think",
+            "think",
             payload={
                 "question": "scope test",
                 "context_evidences": [],

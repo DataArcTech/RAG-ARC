@@ -30,9 +30,9 @@ cp .env.example .env
 - `bench_mode`、`TASK_QUEUE_MODE`、`MODEL_PROFILE`、`DEVELOP_MODE`、`ADMIN_OWNER_ID`
 
 Benchmark/实验模式：
-- `bench_mode`（默认 `0`）：设为 `1` 时，评测专用 runner（见 `application/rag_inference/module_bench.py`、`application/rag_inference/deepsearch/service_bench.py`）会执行纯算法链路并返回纯文本答案（不生成引用/报告、不跑外部 web 步骤）。
+- `bench_mode`（默认 `0`）：设为 `1` 时，评测专用 runner（见 `application/rag_inference/module_bench.py`）会执行纯算法链路并返回纯文本答案（不生成引用/报告、不跑 web.search 步骤）。
 
-可选外部网页检索（仅在配置开启时需要）：
+可选网页检索（仅在配置开启时需要）：
 - `TAVILY_API_KEY`
 
 可选基础设施连接信息（本地/Docker 默认值可用；仅在需要连接远端服务时配置）：
@@ -48,7 +48,7 @@ Benchmark/实验模式：
 
 - `config/json_configs/rag_inference*.json`：聊天/RAG 主流程、检索器、重排器、模型选择等。
 - `config/json_configs/knowledge*.json`：解析、分块、索引/建图流程等。
-- `config/json_configs/deepsearch_service.json`：DeepSearch 的 planner/tools/report/quality gate 等。
+- `config/json_configs/deepsearch_service.json`：DeepSearch 的 tools/think/report 等。
 - `config/output_limits.py`：API 返回裁剪与证据上限（payload 限制）。
 - `config/core/deepsearch/*_defaults.py`：DeepSearch 的 loop/tool/report 默认参数（运行时读取）。
 
@@ -66,7 +66,7 @@ Benchmark/实验模式：
 | `CHAT_API_KEY` | _(空)_ | **必填**（当 `CHAT_MODEL_PROVIDER=openai`）：对话模型 API Key。 |
 | `CHAT_API_BASE_URL` | _(空)_ | **必填**（当 `CHAT_MODEL_PROVIDER=openai`）：OpenAI 兼容 API Base URL（例如 `https://api.openai.com/v1`）。 |
 | `OPENAI_CHAT_MODEL` | `gpt-4o-mini` | 兼容/默认的对话模型名（当 `CHAT_MODEL_NAME` 为空时使用）。 |
-| `LOW_COST_MODEL` | _(空)_ | 可选：更便宜的模型，用于探索型/多次调用的场景（planning/reflection/quality checks）。留空则复用主对话模型。 |
+| `LOW_COST_MODEL` | _(空)_ | 可选：更便宜的模型，用于探索型/多次调用的场景（planning/reflection）。留空则复用主对话模型。 |
 | `OPENAI_API_BASE` | _(空)_ | 可选：历史兼容的 OpenAI Base URL 别名。 |
 | `EMBEDDING_MODEL_PROVIDER` | `openai` | 嵌入模型提供方（`openai`=OpenAI 兼容 API，`huggingface`=本地 SentenceTransformers）。 |
 | `EMBEDDING_API_KEY` | _(空)_ | **必填**（当 `EMBEDDING_MODEL_PROVIDER=openai`）：嵌入模型 API Key。 |
@@ -157,7 +157,7 @@ Benchmark/实验模式：
 | `RAG_INFERENCE_PROMPTS_YAML_PATH` | (空) | 覆盖 `config/prompts/rag_inference_prompts.yaml` 的路径；为空则使用仓库默认路径。 |
 | `CHAT_TOP_TRIPLES` | `5` | Chat 证据中最多保留的图三元组数量。 |
 | `CHAT_TOP_SEED_ENTITIES` | `5` | Chat 证据中最多保留的种子实体数量。 |
-| `CHAT_MAX_IMAGE_INPUTS` | `4` | 当模型支持多模态输入时，单次 Chat 允许附带的本地图片最大数量（MinerU 输出的图片资产）。 |
+| `CHAT_MAX_IMAGE_INPUTS` | `4` | 当模型支持多模态输入时，单次 Chat 允许附带的本地图片最大数量（MinerU 输出的图片资产）。设置为 `0`（或任意负数）表示解除限制。 |
 | `RAG_RETRIEVAL_OBSERVABILITY` | `false` | 为 `true` 时在服务日志/进度事件中输出检索可观测信息（每路召回文件分布、融合文件分布、rerank 文件分布等），用于排查“召回文件不对/追问跑偏”。 |
 | `RAG_RETRIEVAL_LOG_TOP_FILES` | `10` | 检索可观测日志中最多展示的文件分布条数（按 file_id 计数）。 |
 | `RAG_RETRIEVAL_LOG_TOP_CHUNKS` | `5` | 检索可观测日志中最多展示的 chunk 预览条数（用于快速定位命中段落）。 |
@@ -177,12 +177,11 @@ Benchmark/实验模式：
 | `DEEPSEARCH_TOP_CHUNKS` | `10` | DeepSearch 证据中最多保留的 chunk 数量，同时也是报告附录中显示原文预览（前100字符）的数量。 |
 | `DEEPSEARCH_TOP_TRIPLES` | `30` | DeepSearch 证据中最多保留的图三元组数量。 |
 | `DEEPSEARCH_TOP_SEED_ENTITIES` | `15` | DeepSearch 证据中最多保留的种子实体数量。 |
-| `DEEPSEARCH_MAX_IMAGE_INPUTS` | `6` | 当模型支持多模态输入时，DeepSearch 报告生成阶段允许附带的本地图片最大数量（MinerU 输出的图片资产）。 |
+| `DEEPSEARCH_MAX_IMAGE_INPUTS` | `6` | 当模型支持多模态输入时，DeepSearch 报告生成阶段允许附带的本地图片最大数量（MinerU 输出的图片资产）。设置为 `0`（或任意负数）表示解除限制。 |
 | `DEEPSEARCH_GRAPH_NODE_LIMIT` | `75` | DeepSearch 图快照（实体 + chunk）的节点上限。 |
 | `DEEPSEARCH_GRAPH_EDGE_LIMIT` | `200` | DeepSearch 图快照中最多保留的边数量。 |
 | `DEEPSEARCH_MAX_REASONING_STEPS` | `32` | DeepSearch payload 中最多保留的 reasoning steps 数量。 |
 | `DEEPSEARCH_MAX_STAGE_HISTORY` | `10` | DeepSearch payload 中最多保留的 stage_history 条数。 |
-| `DEEPSEARCH_MAX_EXTERNAL_CALLS` | `5` | DeepSearch payload 中最多保留的 external_calls 条数。 |
 | `DEEPSEARCH_MAX_TOOL_METADATA` | `5` | DeepSearch payload 中最多保留的 tool_results 条数。 |
 | `DEEPSEARCH_WEAVER_EVIDENCE_PREVIEW_CHARS` | `180` | DeepSearch Weaver trace 渲染时的证据预览字符上限。 |
 | `DEEPSEARCH_WEAVER_EVIDENCE_SAMPLE_COUNT` | `3` | DeepSearch Weaver trace 渲染时展示的证据样本数量。 |
@@ -206,7 +205,7 @@ Benchmark/实验模式：
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `SEMANTIC_CHUNKING_LEVEL` | `basic` | 分块级别：`disabled`/`basic`/`standard`/`advanced`。 |
+| `SEMANTIC_CHUNKING_LEVEL` | `standard` | 分块级别：`disabled`（关闭语义单元，走 fallback）/`basic`（仅表格）/`standard`（表格 + fenced code + 列表 + 公式块）/`advanced`（standard + 引用块）。 |
 | `TABLE_SMALL_MAX_TOKENS` | _(空)_ | 表格大小阈值覆盖（留空则使用代码默认值）。 |
 | `TABLE_SLICE_MAX_TOKENS` | _(空)_ | 表格 slice 目标 token 上限覆盖。 |
 | `TABLE_SLICE_OVERLAP_ROWS` | _(空)_ | 表格 slice 行 overlap 覆盖。 |
@@ -338,34 +337,14 @@ Benchmark/实验模式：
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `DEEPSEARCH_DEFAULT_ADAPTER` | `hipporag` | 图适配器名称。 |
-| `DEEPSEARCH_PLANNER_MODE` | `react` | 规划器模式。 |
 | `DEEPSEARCH_GRAPH_STRATEGY` | `ppr_chain` | 图推理策略。 |
-| `DEEPSEARCH_PLANNER_MAX_STEPS` | `6` | 规划器最大步数。 |
-| `DEEPSEARCH_PLANNER_ENABLE_SUBQUESTION` | `true` | 是否允许拆分子问题。 |
-| `DEEPSEARCH_PLANNER_DISABLE_LLM` | `false` | 禁用规划器 LLM（调试用）。 |
-| `DEEPSEARCH_PLANNER_LLM_PROVIDER` | _(空)_ | 可选：规划器专用 LLM Provider（留空则复用全局对话配置）。 |
-| `DEEPSEARCH_PLANNER_MODEL_NAME` | _(空)_ | 可选：规划器专用模型名。 |
-| `DEEPSEARCH_PLANNER_MAX_TOKENS` | _(空)_ | 可选：规划器专用 max tokens。 |
-| `DEEPSEARCH_PLANNER_TEMPERATURE` | _(空)_ | 可选：规划器专用 temperature。 |
-| `DEEPSEARCH_PLANNER_API_KEY` | _(空)_ | 可选：规划器专用 API Key。 |
-| `DEEPSEARCH_PLANNER_BASE_URL` | _(空)_ | 可选：规划器专用 Base URL。 |
-| `DEEPSEARCH_PLANNER_ORGANIZATION` | _(空)_ | 可选：规划器专用 organization。 |
-| `DEEPSEARCH_PLANNER_TIMEOUT` | _(空)_ | 可选：规划器专用请求超时。 |
-| `DEEPSEARCH_PLANNER_MAX_RETRIES` | _(空)_ | 可选：规划器专用重试次数。 |
-| `DEEPSEARCH_PERSIST_PLAN` | `true` | 是否落盘保存规划。 |
-| `DEEPSEARCH_PLAN_OUTPUT_DIR` | `./local/deepsearch_runs` | 规划输出目录。 |
 | `DEEPSEARCH_ARTIFACT_DIR` | _(空)_ | 可选：DeepSearch 运行 artifacts 根目录（每次 run 会创建 `run_id/` 子目录，写入 `plan_result.json`/`reasoning.json`/`report.json`/`report.md` 等；当 `artifacts.version=2` 时会额外写入 `manifest.json`/`dev.json`/`public.json`，且 `state_snapshot.json` 将变为轻量 manifest；当启用 `artifacts.dedupe.enabled=true` 时会额外写入 `evidence_pool.json` 并将 `reasoning.json`/`report.json` 的重复大字段改为 refs）。 |
 | `DEEPSEARCH_TOOL_ARTIFACT_DIR` | `./local/deepsearch_artifacts` | 工具执行日志/产物目录（在 `config/json_configs/deepsearch_service.json` 中也作为默认的 run artifacts 根目录使用）。 |
-| `DEEPSEARCH_ALLOW_EXTERNAL_CHANNEL` | `false` | 规划器是否允许生成 `web` 步骤（当未设置 `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` 时生效）。 |
-| `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED` | `false` | 运行时覆盖外部搜索开关（默认由配置 `external_channel.enabled` + `gap_detection.enable_external_on_gap` 决定）。 |
 | `DEEPSEARCH_SECTIONWISE_WRITER` | `false` | 启用“分节写作 + Memory Bank 检索 + recency retain_k”模式。 |
 | `DEEPSEARCH_BUDGET_TIER` | _(空)_ | 可选的复杂度→预算覆盖开关（`low` / `default`）；为空时将基于问题内容做启发式预算分配。 |
 | `DEEPSEARCH_TELEMETRY_ENABLED` | `true` | 是否启用工具运行遥测（本地 artifacts）。 |
 | `TAVILY_API_KEY` | _(空)_ | Tavily 网络搜索 Key（HippoRAG 问答与 DeepSearch 启用网络搜索时都会使用）。 |
-| `DEEPSEARCH_WEB_PROVIDER` | _(空)_ | 外部搜索路由提示（`tavily` / `tool` / `mcp`；其他值会回退到 `tavily`）。 |
-| `DEEPSEARCH_EXTERNAL_CACHE_MODE` | `auto` | 外部搜索录制/回放模式：`off` / `record` / `replay` / `auto`。 |
-| `DEEPSEARCH_EXTERNAL_CACHE_DIR` | `./local/deepsearch_artifacts/external_cache` | 外部搜索缓存目录。 |
-| `DEEPSEARCH_TOOL_HINTS` | _(空)_ | JSON 字符串，覆盖规划器的工具提示。 |
+| `DEEPSEARCH_TOOL_HINTS` | _(空)_ | JSON 字符串，覆盖 think 工具目录中的工具提示。 |
 | `DEEPSEARCH_TOOL_MCP_CONFIG_PATH` | _(空)_ | MCP 服务器 JSON 配置路径。 |
 | `DEEPSEARCH_TOOL_MCP_ADAPTER_CONFIG` | _(空)_ | 适配器配置 JSON。 |
 | `DEEPSEARCH_TOOL_MCP_ADAPTER_NAME` | _(空)_ | 使用默认配置时指定 adapter 名称。 |
@@ -390,21 +369,7 @@ Benchmark/实验模式：
 | `DEEPSEARCH_MCP_PERSISTENT_SESSION` | `true` | 是否复用 HTTP 会话。 |
 | `DEEPSEARCH_MCP_ENABLE_GRAPH_CONTEXT` | `true` | 是否附带图上下文。 |
 | `DEEPSEARCH_MCP_GRAPH_CONTEXT_FIELD` | `__graph_context__` | MCP 请求中的上下文字段。 |
-| `DEEPSEARCH_GAP_COVERAGE_THRESHOLD` | `0.7` | 覆盖率阈值，用于触发外部搜索。 |
-| `DEEPSEARCH_GAP_CONFIDENCE_THRESHOLD` | `0.6` | 置信度阈值。 |
-| `DEEPSEARCH_GAP_EXPECTED_MIN_CHUNKS` | `3` | 期望的最少证据数量。 |
-| `DEEPSEARCH_CONSISTENCY_CHECK` | `true` | 启用 LLM 一致性检查，验证报告内容与证据是否一致。 |
 | `DEEPSEARCH_PARALLEL_SECTIONS` | `false` | 并行生成报告章节（更快但消耗更多 API 调用）。 |
-| `DEEPSEARCH_QUALITY_LOOP_ENABLED` | `false` | 启用“研究 → 质量门槛 → 迭代”闭环（会在报告后进行质量评估并触发补证据/重写）。 |
-| `DEEPSEARCH_QUALITY_LOOP_MAX_ROUNDS` | `2` | 质量闭环最多迭代轮数（包含首次）。 |
-| `DEEPSEARCH_QUALITY_LOOP_MIN_CITATION_SENTENCE_COVERAGE` | `0.6` | 报告句子中必须包含有效引用的最低比例。 |
-| `DEEPSEARCH_QUALITY_LOOP_REQUIRE_CONSISTENCY` | `true` | 当一致性检查出现问题时是否直接判定未通过。 |
-| `DEEPSEARCH_QUALITY_LOOP_MAX_UNCITED_SENTENCES` | `6` | 最多输出多少条“缺引用句子”作为修复目标（用于驱动补检索/重写）。 |
-| `DEEPSEARCH_QUALITY_LOOP_MAX_ACTIONS` | `6` | 质量门槛最多产出的后续动作数量。 |
-| `DEEPSEARCH_QUALITY_LOOP_ENABLE_LLM_JUDGE` | `true` | 启用基于 Rubric 的 LLM Judge（仅在确定性检查失败或存在缺口时调用）。 |
-| `DEEPSEARCH_QUALITY_LOOP_JUDGE_TEMPERATURE` | `0.0` | Judge 的 temperature。 |
-| `DEEPSEARCH_QUALITY_LOOP_JUDGE_MAX_RETRIES` | `1` | Judge 调用的重试次数。 |
-| `DEEPSEARCH_QUALITY_LOOP_TRIGGER_EXTERNAL_ON_FAILURE` | `true` | 允许质量门槛在失败时请求外部搜索动作（仍需外部搜索开关开启）。 |
 
 ### MCP 配置示例
 
@@ -414,7 +379,7 @@ DEEPSEARCH_MCP_SERVER_URI="http://127.0.0.1:8765/mcp/tools"
 DEEPSEARCH_MCP_TRANSPORT="sse"
 DEEPSEARCH_MCP_HEADERS='{"Authorization": "Bearer your-mcp-token"}'
 # 可选：限制 MCP 服务器对外暴露的工具集合
-DEEPSEARCH_TOOL_MCP_TOOLS="graph.context_rollup,graph.think"
+DEEPSEARCH_TOOL_MCP_TOOLS="search,think"
 # 可选：为独立运行的 MCP 服务器注入默认图访问范围
 DEEPSEARCH_TOOL_MCP_SCOPE_ID="00000000-0000-0000-0000-000000000001"
 DEEPSEARCH_TOOL_MCP_SCOPE_TYPE="owner"
@@ -446,10 +411,13 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINERU_HEALTHCHECK_TIMEOUT_S` | `2` | 当 `PARSER_PARSE_MODE=mineru` 时，启动/索引会对 `GET $MINERU_SERVER_URL/health` 做健康检查；该变量控制超时秒数。 |
 | `MINERU_FALLBACK_TO_NATIVE_ON_FAILURE` | `true` | 当 `PARSER_PARSE_MODE=mineru` 时，如果 MinerU 解析失败（例如服务未启动）则回退到 native 的 PDF 文本抽取；回退信息会写入解析结果元数据（`metadata.parser_fallback`）。 |
 | `MINERU_TIMEOUT_S` | `900` | 可选：远程 MinerU 解析/下载的 HTTP 超时（秒）。 |
+| `MINERU_POLL_INTERVAL_S` | `5` | 可选：MinerU 异步解析状态的轮询间隔（秒）。 |
+| `MINERU_POLL_TIMEOUT_S` | `0` | 可选：等待 MinerU 解析完成的最大秒数；`0` 或负数表示不限制。 |
 | `MINERU_START_PAGE` | `0` | 可选：MinerU 解析起始页（0-based）。 |
 | `MINERU_END_PAGE` | _(空)_ | 可选：MinerU 解析结束页（0-based，包含该页）。为空表示解析到末尾。 |
 | `TOKEN_CHUNK_SIZE` | `1000` | `token_chunker` 的 chunk size（同时用于 `semantic_unit_chunker.fallback_chunker_config`）。 |
 | `TOKEN_CHUNK_OVERLAP` | `100` | `token_chunker` 的 overlap（同时用于 `semantic_unit_chunker.fallback_chunker_config`）。 |
+| `TOKEN_URL_ATOMIC_CONTEXT_TOKENS` | `10` | URL 不可分割保护：URL 前后保留的 token 数（`token_chunker`/`semantic_unit_chunker` fallback 生效）。 |
 | `OCR_MODEL_NAME` | _(空)_ | 可选：历史兼容的 OCR 模型名别名。 |
 | `RAGARC_RUNTIME_DIR` | `./local/runtime` | 当首选目录不可写时的运行时兜底根目录。 |
 | `LOCAL_FILE_STORAGE_PATH` | `./data/files` | 当 JSON 未提供 `base_path` 时，`local_blob_store` 的默认根目录（相对路径按项目根目录解析）。 |
@@ -509,7 +477,7 @@ MinIO 常用变量（仅在启用对象存储集成时才需要设置）：
 | `DEEPSEARCH_CITATION_ALIASES` | _(空)_ | 可选：引用别名映射（JSON）。 |
 | `DEEPSEARCH_TOOL_AUDIT_LABEL` | _(空)_ | 可选：工具审计记录标签。 |
 | `DEEPSEARCH_TOOL_MCP_AUDIT_LABEL` | _(空)_ | 可选：MCP 工具审计记录标签。 |
-| `DEEPSEARCH_TOOL_MCP_INSTRUCTIONS` | _(空)_ | 可选：Planner 的 MCP 工具额外指令。 |
+| `DEEPSEARCH_TOOL_MCP_INSTRUCTIONS` | _(空)_ | 可选：DeepSearch MCP 工具额外指令。 |
 | `DEEPSEARCH_TOOL_MCP_SCOPE_OVERRIDE_POLICY` | _(空)_ | 可选：控制 MCP scope 覆盖时机的策略。 |
 | `DEEPSEARCH_TOOL_MCP_SCOPE_OVERRIDE_TOKEN` | _(空)_ | 可选：授权 MCP scope 覆盖的 token。 |
 | `DEEPSEARCH_RUN_LLM_INTEGRATION_TESTS` | `0` | 可选：设为 `1` 时运行 DeepSearch LLM 集成测试。 |
@@ -579,12 +547,10 @@ RAG-ARC 采用单一可信配置流：
 
 DeepSearch Web 搜索策略（位于 `config/json_configs/deepsearch_service.json`）：
 
-- `planner.web_step_policy="realtime_required"`：当问题涉及“实时/最新/当前”信息（例如汇率/新闻）时，注入/强制至少一个 `channel="web"` 步骤。
-- `external_channel.execute_forced_tasks_without_gap=true`：即使 gap 判定“已覆盖充分”，也会执行这些被强制的外部任务。
 
 DeepSearch 工具调用预算（位于 `config/json_configs/deepsearch_service.json`）：
 
-- `tool_budget.max_calls_total`：限制每次 DeepSearch run 的工具调用总次数（tool_manager + 可选的外部调用；不计入 graph adapter traversal）。
+- `tool_budget.max_calls_total`：限制每次 DeepSearch run 的工具调用总次数（tool_manager；不计入 graph adapter traversal）。
 - 剩余预算会写入 `graph_context.metadata.tool_budget` 供模型感知，并在工具 diagnostics 中可观测。
 
 ---

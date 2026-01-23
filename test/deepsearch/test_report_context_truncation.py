@@ -12,10 +12,6 @@ def test_report_context_truncates_large_methodology_fields():
             "report_max_graph_chain_items": 200,
             "report_max_seed_entities": 15,
             "enable_llm_report": False,
-            "enable_consistency_check": False,
-            "consistency_temperature": 0.0,
-            "consistency_max_retries": 0,
-            "consistency_max_claims": 0,
             "enable_citation_agent": False,
             "parallel_sections": False,
             "max_parallel_sections": 1,
@@ -43,13 +39,13 @@ def test_report_context_truncates_large_methodology_fields():
                 "channel": "graph",
                 "status": "done",
                 "output_summary": "x" * 2000,
-                "diagnostics": {"tool": "graph_adapter.query"},
+                "diagnostics": {"tool": "graph.ops"},
             }
         ],
         "tool_results": [
             {
                 "plan_step_id": "plan_01",
-                "tool_name": "graph.chunk_scan",
+                "tool_name": "search",
                 "channel": "graph",
                 "result": {
                     "summary": "ok",
@@ -61,7 +57,6 @@ def test_report_context_truncates_large_methodology_fields():
                 },
             }
         ],
-        "pending_external": [],
     }
 
     context = reporter._build_llm_context(
@@ -69,7 +64,6 @@ def test_report_context_truncates_large_methodology_fields():
         highlights=[],
         evidences=[],
         coverage={},
-        gap_result={},
         request_context={},
     )
 

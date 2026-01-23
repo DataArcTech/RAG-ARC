@@ -1,13 +1,13 @@
 """Pydantic models shared across DeepSearch services, API, and CLI layers."""
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 from core.graph_adapter.base import GraphAccessScope
 
 
 class PlanSpec(BaseModel):
-    """Single step emitted by the planner and replayed by the reasoning loop."""
+    """Legacy plan step retained for backward compatibility."""
 
     step_id: str = Field(..., description="Deterministic identifier shared with execution logs")
     description: str = Field(..., description="Human-readable plan instruction")
@@ -15,9 +15,43 @@ class PlanSpec(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional parameters for executors")
 
 
+class PlanItem(BaseModel):
+    """User-facing plan item emitted by think tools."""
+
+    text: str = Field(..., min_length=1, description="Plan item text")
+    checked: bool = Field(False, description="Whether the item is completed")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_checked(cls, values: Any):
+        if not isinstance(values, dict):
+            return values
+        if "checked" in values:
+            return values
+        status = values.get("status")
+        if isinstance(status, str):
+            token = status.strip().lower()
+            if token == "done":
+                values["checked"] = True
+            elif token == "todo":
+                values["checked"] = False
+        done = values.get("done")
+        if isinstance(done, bool):
+            values["checked"] = done
+        return values
+
+
 class EvidenceChunk(BaseModel):
     """Unified evidence representation shared across graph and external channels."""
 
+    # Evidence governance:
+    # - primary: source text (chunks/snippets) safe for final answers/citations.
+    # - derived: tool/LLM-produced synthesis; useful for planning but should not be cited as facts.
+    # - diagnostic: tool/runtime telemetry; never cite as factual evidence.
+    kind: Literal["primary", "derived", "diagnostic"] = Field(
+        "primary",
+        description="Evidence governance label controlling how the chunk may be used downstream.",
+    )
     chunk_id: str = Field(..., description="Stable ID so reasoning steps can reference this chunk")
     source: str = Field(..., description="Logical origin of the evidence such as graph/web")
     content: str = Field(..., description="Evidence text or compressed summary")
@@ -77,17 +111,6 @@ class ToolExecutionLog(BaseModel):
     extra: Dict[str, Any] = Field(default_factory=dict, description="Additional diagnostics or metrics")
 
 
-class GapDetectionResult(BaseModel):
-    """Represents coverage analysis used to decide whether external channels must run."""
-
-    coverage_score: float = Field(..., description="Estimated portion of the question covered by current evidence")
-    confidence_score: float = Field(..., description="Model-estimated confidence in the intermediate answer")
-    should_trigger_external: bool = Field(..., description="Whether to invoke web/code channels to fill gaps")
-    reason: Optional[str] = Field(None, description="Human-readable reason for the decision")
-    missing_topics: List[str] = Field(default_factory=list, description="Topics still uncovered by the graph search")
-    diagnostics: Dict[str, Any] = Field(default_factory=dict, description="Raw metrics for logging and debugging")
-
-
 class GraphTraversalRecord(BaseModel):
     """Captures one traversal attempt executed by the GraphReasoningLoop."""
 
@@ -102,7 +125,7 @@ class GraphTraversalRecord(BaseModel):
 
 
 class ReasoningStepRecord(BaseModel):
-    """Detailed reasoning step emitted by Planner/GraphReasoningLoop."""
+    """Detailed reasoning step emitted by GraphReasoningLoop."""
 
     step_id: str = Field(..., description="Unique identifier for correlating plan and execution")
     description: str = Field(..., description="Human-readable explanation of the step intent")
@@ -116,14 +139,12 @@ class ReasoningStepRecord(BaseModel):
 
 
 class DeepSearchTrace(BaseModel):
-    """Top-level trace tying together plan, execution, evidence, and decisions."""
+    """Top-level trace tying together execution, evidence, and decisions."""
 
-    plan_steps: List[PlanSpec] = Field(default_factory=list, description="Plan emitted by the planner")
+    plan_steps: List[PlanSpec] = Field(default_factory=list, description="Legacy plan steps (kept for compatibility)")
     reasoning_steps: List[ReasoningStepRecord] = Field(default_factory=list, description="Executed reasoning steps")
     traversals: List[GraphTraversalRecord] = Field(default_factory=list, description="Graph traversal records")
     evidences: List[EvidenceChunk] = Field(default_factory=list, description="All evidence chunks accumulated")
-    gap_result: Optional[GapDetectionResult] = Field(None, description="Gap detection outcome for this run")
-    external_calls: List[ToolExecutionLog] = Field(default_factory=list, description="External tool invocations")
     final_answer: Optional[str] = Field(None, description="LLM answer before formatting")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Run-level telemetry such as config fingerprint")
 
@@ -142,7 +163,7 @@ class ThinkNote(BaseModel):
         None, description="Relative change in estimated coverage after the reasoning pause"
     )
     next_actions: List[str] = Field(
-        default_factory=list, description="Suggested follow-up actions for the planner or reasoning loop"
+        default_factory=list, description="Suggested follow-up actions for the reasoning loop"
     )
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Free-form diagnostics for telemetry")
 
@@ -153,7 +174,7 @@ class ToolResultPayload(BaseModel):
     tool_name: str = Field(..., description="Logical DeepSearch tool identifier")
     namespace: str = Field(..., description="MCP-compatible namespace for remote routing")
     channel: str = Field(..., description="Channel label such as graph/text/web")
-    profile: str = Field(..., description="Tool profile category (F/H/X) used by planners")
+    profile: str = Field(..., description="Tool profile category (F/H/X) used by the tool catalog")
     determinism: str = Field(..., description="Determinism label for cost/quality routing decisions")
     summary: str = Field(..., description="Human-readable text describing the outcome")
     evidences: List[EvidenceChunk] = Field(default_factory=list, description="Evidence objects produced by the tool")
