@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 from config.output_limits import DEEPSEARCH_SOURCE_MAX_CHARS, DEEPSEARCH_SOURCE_TITLE_MAX_CHARS
-from core.presentation.evidence import document_chunk_url, document_download_url
+from core.presentation.evidence import document_download_url, document_preview_url
 
 _BRACKET_RE = re.compile(r"\[([^\[\]]+)\]")
 _CJK_BRACKET_RE = re.compile(r"【([^【】]+)】")
@@ -373,7 +373,7 @@ def build_source_entries(
                     chunk_index = raw_index
             suffix = f"#chunk:{chunk_index}" if isinstance(chunk_index, int) else f"#chunk:{ev_token[:8]}"
             title = _sanitize_title(f"{safe_name or 'source'}{suffix}", max_chars=DEEPSEARCH_SOURCE_TITLE_MAX_CHARS)
-            file_url = document_chunk_url(ev_token) if ev_token else None
+            file_url = document_preview_url(file_id, filename) if file_id else None
 
         entries.append(
             {

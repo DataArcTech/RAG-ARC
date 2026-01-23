@@ -49,15 +49,7 @@ class _ChunkCitingLLM:
         if "Return a single JSON object with:" in user_prompt and "Evidence Pack" in user_prompt:
             return """
 {
-  "title": "Report",
-  "short_answer": "Supported by the policy text. <sup>1</sup>",
-  "summary": "Supported by the policy text. <sup>1</sup>",
-  "sections": [
-    {"title": "Answer", "section_type": "analysis", "body_markdown": "Details. <sup>1</sup>"}
-  ],
-  "limitations": [],
-  "next_steps": [],
-  "citations": []
+  "text": "# Report\\n\\n## Answer\\nDetails. <sup>1</sup>"
 }
 """.strip()
 
@@ -117,4 +109,4 @@ def test_reporter_backfills_provenance_chunks_into_evidence_pool() -> None:
     result = asyncio.run(reporter.compose(trace, external_evidence=[]))
     evidence_ids = {ev.get("chunk_id") for ev in (result.get("evidences") or []) if isinstance(ev, dict)}
     assert "chunk_001" in evidence_ids
-    assert "<sup>1</sup>" in (result.get("structured_report") or {}).get("short_answer", "")
+    assert "<sup>1</sup>" in (result.get("structured_report") or {}).get("text", "")

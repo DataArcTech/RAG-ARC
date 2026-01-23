@@ -29,13 +29,7 @@ class _BudgetLLM:
         if "Return a single JSON object with" in (messages[1] or {}).get("content", ""):
             return json.dumps(
                 {
-                    "title": "Test Report",
-                    "short_answer": "ok. <sup>1</sup>",
-                    "summary": "ok. <sup>1</sup>",
-                    "sections": [{"title": "Body", "section_type": "analysis", "body_markdown": "Answer. <sup>1</sup>"}],
-                    "limitations": [],
-                    "next_steps": [],
-                    "citations": [],
+                    "text": "# Test Report\n\n## Body\nAnswer. <sup>1</sup>",
                 },
                 ensure_ascii=False,
             )
@@ -84,8 +78,7 @@ def test_report_writer_shrinks_prompts_on_context_limit():
 
     async def _run():
         result = await writer.write_report(question="Q", outline=outline, context=context)
-        assert result["title"]
-        assert result["sections"]
+        assert result["text"]
         assert len(llm.calls) >= 2
         assert llm.calls[-1]["total_chars"] <= llm.max_chars
 

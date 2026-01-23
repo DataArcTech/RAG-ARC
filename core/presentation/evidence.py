@@ -1,5 +1,7 @@
 """Helpers to assemble chunk, triple, and seed-entity evidence payloads."""
 import re
+from pathlib import Path
+from urllib.parse import quote
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from encapsulation.data_model.schema import Chunk
@@ -45,6 +47,11 @@ def document_download_url(file_id: str) -> str:
 def document_chunk_url(chunk_id: str) -> str:
     """Public helper for building the knowledge chunk URL."""
     return _document_chunk_url(chunk_id)
+
+def document_preview_url(file_id: str, filename: str | None = None) -> str:
+    """Public helper for building the knowledge preview URL."""
+    safe_name = Path(filename or "file").name
+    return f"/static/files/{file_id}/{quote(safe_name)}"
 
 
 def _mineru_asset_url(file_id: str, rel_path: str) -> str:

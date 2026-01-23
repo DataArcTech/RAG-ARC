@@ -260,7 +260,7 @@ def test_trace_storage_renders_sup_citations_for_user_visible_answer(temp_trace_
     assert stored["answer_raw"] == "Alpha。<sup>1</sup>"
     assert "<sup>1</sup>" in stored["answer"]
     assert "## References" not in stored["answer"]
-    assert stored.get("sources") and stored["sources"][0]["file"] == "/knowledge/chunk/ev1"
+    assert stored.get("sources") and stored["sources"][0]["file"] == "/static/files/file-1/doc1.md"
 
     if "DEEPSEARCH_TRACE_STORAGE_PATH" in os.environ:
         del os.environ["DEEPSEARCH_TRACE_STORAGE_PATH"]

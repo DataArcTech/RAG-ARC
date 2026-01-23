@@ -63,7 +63,7 @@ class _PromptAwareLLM:
 """.strip()
 
         if "Section to write:" in user_prompt:
-            match = re.search(r"- Title:\\s*(.+)", user_prompt)
+            match = re.search(r"- Title:\s*(.+)", user_prompt)
             title = match.group(1).strip() if match else "Section"
             return (
                 "{\n"
@@ -74,14 +74,10 @@ class _PromptAwareLLM:
                 "}\n"
             )
 
-        if "Draft section bodies (JSON):" in user_prompt:
+        if "Return a single JSON object with:" in user_prompt and '"text"' in user_prompt:
             return """
 {
-  "title": "Who partnered with OpenAI?",
-  "short_answer": "Microsoft partnered with OpenAI. <sup>1</sup>",
-  "summary": "Microsoft partnered with OpenAI. <sup>1</sup>",
-  "limitations": ["Draft synthesized from limited evidence."],
-  "next_steps": ["Collect additional sources and verify timeline details."]
+  "text": "# Who partnered with OpenAI?\\n\\n## Evidence-Based Findings\\nMicrosoft partnered with OpenAI. <sup>1</sup>\\n\\n## Next Steps\\nCollect additional sources and verify timeline details. <sup>1</sup>"
 }
 """.strip()
 
@@ -147,22 +143,7 @@ def test_reporter_prefers_final_answer_and_merges_evidence():
 """.strip()
     report_json = """
 {
-  "title": "Who partnered with OpenAI?",
-  "short_answer": "Microsoft partnered with OpenAI and provides key infrastructure support. <sup>1</sup><sup>2</sup>",
-  "summary": "Microsoft partnered with OpenAI and provides key infrastructure support. <sup>1</sup><sup>2</sup>",
-  "sections": [
-    {
-      "title": "Evidence-Based Findings",
-      "section_type": "analysis",
-      "body_markdown": "- Microsoft formed a strategic partnership with OpenAI in 2019. <sup>1</sup>\\n- Azure hosts OpenAI services. <sup>2</sup>"
-    }
-  ],
-  "limitations": ["The trace contains limited evidence coverage beyond partnership and hosting."],
-  "next_steps": ["Gather additional sources on partnership scope, timeline, and commercial terms."],
-  "citations": [
-    {"evidence_id": "ev1", "source": "hipporag", "used_for": "Partnership fact"},
-    {"evidence_id": "ev2", "source": "press", "used_for": "Hosting detail"}
-  ]
+  "text": "# Who partnered with OpenAI?\\n\\n## Evidence-Based Findings\\nMicrosoft partnered with OpenAI and provides key infrastructure support. <sup>1</sup><sup>2</sup>"
 }
 """.strip()
     reporter = DeepSearchReporter(
@@ -176,7 +157,7 @@ def test_reporter_prefers_final_answer_and_merges_evidence():
     report = asyncio.run(reporter.compose(trace, external))
 
     assert report["answer"].startswith("# Who partnered with OpenAI?")
-    assert "Microsoft partnered with OpenAI" in report["structured_report"]["summary"]
+    assert "Microsoft partnered with OpenAI" in report["structured_report"]["text"]
     assert len(report["evidences"]) == 2
     assert report["metadata"]["plan"]["completed"] == 1
     assert report["metadata"]["graph_summary"]["unique_nodes"] == 2
@@ -184,7 +165,7 @@ def test_reporter_prefers_final_answer_and_merges_evidence():
     assert report["metadata"]["request_context"]["conversation_id"] == "conv-123"
 
 
-def test_reporter_raises_when_short_answer_missing_citations():
+def test_reporter_raises_when_report_text_missing_citations():
     outline = """
 [
   {"title": "Evidence-Based Findings", "section_type": "analysis", "purpose": "Explain what the evidence supports.", "evidence_ids": ["ev1"]}
@@ -192,19 +173,7 @@ def test_reporter_raises_when_short_answer_missing_citations():
 """.strip()
     report_json = """
 {
-  "title": "Who partnered with OpenAI?",
-  "short_answer": "Microsoft partnered with OpenAI in 2019.",
-  "summary": "Microsoft partnered with OpenAI in 2019.",
-  "sections": [
-    {
-      "title": "Evidence-Based Findings",
-      "section_type": "analysis",
-      "body_markdown": "Microsoft formed a strategic partnership with OpenAI in 2019. <sup>1</sup>"
-    }
-  ],
-  "limitations": [],
-  "next_steps": [],
-  "citations": []
+  "text": "# Who partnered with OpenAI?\\n\\n## Evidence-Based Findings\\nMicrosoft partnered with OpenAI in 2019."
 }
 """.strip()
     reporter = DeepSearchReporter(
@@ -225,19 +194,7 @@ def test_reporter_citation_agent_fills_missing_citations():
 """.strip()
     report_json = """
 {
-  "title": "Who partnered with OpenAI?",
-  "short_answer": "Microsoft partnered with OpenAI in 2019. <sup>1</sup>",
-  "summary": "Microsoft partnered with OpenAI in 2019. <sup>1</sup>",
-  "sections": [
-    {
-      "title": "Findings",
-      "section_type": "analysis",
-      "body_markdown": "The evidence supports a partnership with Microsoft. <sup>1</sup>"
-    }
-  ],
-  "limitations": [],
-  "next_steps": [],
-  "citations": []
+  "text": "# Who partnered with OpenAI?\\n\\n## Findings\\nThe evidence supports a partnership with Microsoft. <sup>1</sup>"
 }
 """.strip()
     reporter = DeepSearchReporter(
@@ -282,7 +239,7 @@ def test_reporter_raises_when_llm_output_invalid():
 def test_reporter_includes_chunk_evidence_preview():
     """Verify the markdown output includes chunk evidence preview section."""
     outline = """\n[\n  {\"title\": \"Findings\", \"section_type\": \"analysis\", \"purpose\": \"Show evidence\", \"evidence_ids\": [\"chunk_abc123\"]}\n]\n""".strip()
-    report_json = """\n{\n  \"title\": \"Report\",\n  \"short_answer\": \"ok. <sup>1</sup>\",\n  \"summary\": \"ok. <sup>1</sup>\",\n  \"sections\": [\n    {\"title\": \"Findings\", \"section_type\": \"analysis\", \"body_markdown\": \"Detail. <sup>1</sup>\"}\n  ],\n  \"limitations\": [],\n  \"next_steps\": [],\n  \"citations\": []\n}\n""".strip()
+    report_json = """\n{\n  \"text\": \"# Report\\n\\n## Findings\\nDetail. <sup>1</sup>\"\n}\n""".strip()
     reporter = DeepSearchReporter(
         template_store=None,
         config=_default_reporter_config(include_appendices_in_answer=True),
@@ -332,12 +289,12 @@ def test_reporter_no_evidence_returns_deterministic_report_even_when_graph_viz_d
 
     report = asyncio.run(reporter.compose(trace, external_evidence=[]))
 
-    assert report["structured_report"]["generation"]["mode"] == "deterministic_no_evidence"
+    assert "No reliable evidence" in report["structured_report"]["text"]
 
 
 def test_reporter_comparison_avoids_false_missing_named_files_when_filename_is_nested():
     outline = """\n[\n  {\"title\": \"Findings\", \"section_type\": \"analysis\", \"purpose\": \"Compare\", \"evidence_ids\": [\"evA\", \"evB\"]}\n]\n""".strip()
-    report_json = """\n{\n  \"title\": \"对比报告\",\n  \"short_answer\": \"两者均可对比。<sup>1</sup><sup>2</sup>\",\n  \"summary\": \"两者均可对比。<sup>1</sup><sup>2</sup>\",\n  \"sections\": [\n    {\"title\": \"Findings\", \"section_type\": \"analysis\", \"body_markdown\": \"对比细节。<sup>1</sup><sup>2</sup>\"}\n  ],\n  \"limitations\": [],\n  \"next_steps\": [],\n  \"citations\": [\n    {\"evidence_id\": \"evA\", \"used_for\": \"Plan A\"},\n    {\"evidence_id\": \"evB\", \"used_for\": \"Plan B\"}\n  ]\n}\n""".strip()
+    report_json = """\n{\n  \"text\": \"# 对比报告\\n\\n## Findings\\n对比细节。<sup>1</sup><sup>2</sup>\"\n}\n""".strip()
     reporter = DeepSearchReporter(
         template_store=None,
         config=_default_reporter_config(),
@@ -371,7 +328,7 @@ def test_reporter_comparison_avoids_false_missing_named_files_when_filename_is_n
     report = asyncio.run(reporter.compose(trace, external_evidence=[]))
 
     assert "Unable to complete the comparison" not in report["answer"]
-    assert report["structured_report"]["generation"]["mode"] == "llm"
+    assert report["structured_report"].get("format_version")
 
 
 def test_reporter_parallel_sections_synthesizes_summary():
@@ -385,14 +342,13 @@ def test_reporter_parallel_sections_synthesizes_summary():
     report = asyncio.run(reporter.compose(trace, external_evidence=[]))
 
     structured = report["structured_report"]
-    assert structured["summary"], "Parallel writer should synthesize a non-empty summary"
-    assert structured["limitations"], "Parallel writer should synthesize limitations"
-    assert structured["next_steps"], "Parallel writer should synthesize next steps"
+    assert structured["text"], "Parallel writer should produce report text"
+    assert "Draft for Executive Summary" in structured["text"]
 
 
 def test_reporter_includes_external_evidence_even_when_internal_is_full():
     outline = """\n[\n  {\"title\": \"Findings\", \"section_type\": \"analysis\", \"purpose\": \"Answer\", \"evidence_ids\": [\"ev00\"]}\n]\n""".strip()
-    report_json = """\n{\n  \"title\": \"Q\",\n  \"short_answer\": \"A. <sup>1</sup>\",\n  \"summary\": \"A. <sup>1</sup>\",\n  \"sections\": [\n    {\"title\": \"Findings\", \"section_type\": \"analysis\", \"body_markdown\": \"Detail. <sup>1</sup>\"}\n  ],\n  \"limitations\": [],\n  \"next_steps\": [],\n  \"citations\": []\n}\n""".strip()
+    report_json = """\n{\n  \"text\": \"# Q\\n\\n## Findings\\nDetail. <sup>1</sup>\"\n}\n""".strip()
     reporter = DeepSearchReporter(
         template_store=None,
         config=_default_reporter_config(max_evidence_items=10),

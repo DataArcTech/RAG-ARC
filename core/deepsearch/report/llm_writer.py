@@ -9,9 +9,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from config.core.deepsearch import report_writer_defaults as report_defaults
 from core.deepsearch.memory import EvidenceBank
-from core.deepsearch.tools.base import call_llm_async
 from core.utils.json_extract import extract_json_from_text as _extract_json_from_text
-from core.utils.text_regex import CJK_DETECT_RE
 from core.utils.citations import extract_sup_keys
 from core.deepsearch.utils.language_policy import infer_user_language
 from config.output_limits import DEEPSEARCH_MAX_IMAGE_INPUTS
@@ -23,9 +21,6 @@ from core.prompts.deepsearch.report import (
     REPORT_WRITE_SYSTEM_PROMPT_EN,
     REPORT_WRITE_USER_PROMPT_EN,
     REPORT_STYLE_RESEARCH_HINT_EN,
-    PARALLEL_SYNTHESIS_SYSTEM_PROMPT_EN,
-    PARALLEL_SYNTHESIS_USER_PROMPT_EN,
-    PARALLEL_SYNTHESIS_CITATION_REPAIR_USER_PROMPT_EN,
     SECTION_WRITE_SYSTEM_PROMPT_EN,
     SECTION_WRITE_USER_PROMPT_EN,
     JSON_REPAIR_USER_PROMPT_EN,
@@ -167,36 +162,10 @@ class ReportSectionSpec(BaseModel):
     evidence_ids: List[str] = Field(default_factory=list)
 
 
-class ReportSectionDraft(BaseModel):
-    """A single report section draft produced by the writing step."""
+class ReportTextPayload(BaseModel):
+    """Minimal report payload produced by the report-writing LLM step."""
 
-    title: str = Field(..., min_length=1)
-    section_type: str = Field(..., min_length=1)
-    body_markdown: str = Field(..., min_length=1)
-
-
-class ReportCitation(BaseModel):
-    """A citation entry linking an evidence ID to a usage rationale."""
-
-    evidence_id: str = Field(..., min_length=1)
-    source_type: Optional[str] = None
-    source: Optional[str] = None
-    used_for: str = Field(default="")
-    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
-    location_in_report: Optional[str] = None
-
-
-class LLMStructuredReport(BaseModel):
-    """A structured report produced by the report-writing LLM step."""
-
-    title: str = Field(..., min_length=1)
-    short_answer: str = Field(..., min_length=1)
-    # Backward-compat shim: some callers may still look for `summary`.
-    summary: Optional[str] = None
-    sections: List[ReportSectionDraft] = Field(default_factory=list)
-    limitations: List[str] = Field(default_factory=list)
-    next_steps: List[str] = Field(default_factory=list)
-    citations: List[ReportCitation] = Field(default_factory=list)
+    text: str = Field(..., min_length=1)
 
 
 class DeepSearchLLMReportWriter:
@@ -216,14 +185,14 @@ class DeepSearchLLMReportWriter:
         if lang == "en":
             return (
                 "Output language policy (STRICT): The user question is in English.\n"
-                "- Write ALL fields in English (title, short_answer, sections, limitations, next_steps).\n"
+                "- Write ALL fields in English.\n"
                 "- If evidence snippets are non-English, translate them into English in your writing.\n"
                 "- Do NOT output Simplified/Traditional Chinese.\n"
             )
         if lang == "zh":
             return (
                 "Output language policy (STRICT): The user question is in Chinese.\n"
-                "- Write ALL fields in Simplified Chinese (title, short_answer, sections, limitations, next_steps).\n"
+                "- Write ALL fields in Simplified Chinese.\n"
                 "- If evidence snippets are non-Chinese, translate them into Chinese in your writing.\n"
                 "- Do NOT switch languages due to file names or document titles.\n"
             )
@@ -471,7 +440,7 @@ class DeepSearchLLMReportWriter:
             if not data:
                 raise ValueError(f"Report writing returned invalid JSON. raw={_snippet(raw)}")
             try:
-                report = LLMStructuredReport.model_validate(data)
+                report = ReportTextPayload.model_validate(data)
             except ValidationError as exc:
                 raise ValueError(f"Report writing returned an invalid schema. raw={_snippet(raw)}") from exc
             payload = report.model_dump()
@@ -508,6 +477,21 @@ class DeepSearchLLMReportWriter:
                 else:
                     await asyncio.sleep(min(2.0, 0.25 * (attempt + 1)))
         raise RuntimeError(f"Report LLM call failed during {phase}: {last_exc}") from last_exc
+
+    @staticmethod
+    def _render_sections_markdown(*, title: str, sections: List[Dict[str, Any]]) -> str:
+        blocks: List[str] = []
+        title = str(title or "").strip()
+        if title:
+            blocks.append(f"# {title}")
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            section_title = str(section.get("title") or "").strip()
+            body = str(section.get("body_markdown") or "").strip()
+            if section_title and body:
+                blocks.extend(["", f"## {section_title}", body])
+        return "\n".join(blocks).strip()
 
     async def write_report_parallel(
         self, *, question: str, outline: List[Dict[str, Any]], context: Dict[str, Any]
@@ -578,42 +562,9 @@ class DeepSearchLLMReportWriter:
 
         title_limit = int(report_defaults.DEFAULT_PARALLEL_TITLE_MAX_CHARS)
         title = question[:title_limit] + ("..." if len(question) > title_limit else "")
-        synthesis_ids: list[str] = []
-        for section in outline:
-            synthesis_ids.extend(EvidenceBank.normalize_evidence_ids(section.get("evidence_ids")))
-        if not synthesis_ids:
-            raise ValueError("Parallel report synthesis requires evidence_ids from the outline.")
-        synthesis_evidences = bank.select_evidences(synthesis_ids, max_chars=self.max_evidence_chars, question=question)
-        synthesis = await self._synthesize_parallel_fields(
-            question=question,
-            outline=outline,
-            sections=sections,
-            evidences=synthesis_evidences,
-            source_key_map=source_key_map,
-            coverage=context.get("coverage") or {},
-            context=context,
-        )
-        if synthesis:
-            title = synthesis.get("title") or title
-            short_answer = str(synthesis.get("short_answer") or synthesis.get("summary") or "").strip()
-            limitations = synthesis.get("limitations") or []
-            next_steps = synthesis.get("next_steps") or []
-        else:
-            short_answer = ""
-            limitations = []
-            next_steps = []
-        if not isinstance(limitations, list):
-            limitations = []
-        if not isinstance(next_steps, list):
-            next_steps = []
-        summary_text = str(short_answer or "").strip()
+        text = self._render_sections_markdown(title=title, sections=sections)
         return {
-            "title": title,
-            "short_answer": summary_text,
-            "summary": summary_text,
-            "sections": sections,
-            "limitations": [str(item) for item in limitations if str(item).strip()],
-            "next_steps": [str(item) for item in next_steps if str(item).strip()],
+            "text": text,
             "citations": all_citations,
             "source_key_map": source_key_map,
         }
@@ -719,151 +670,15 @@ class DeepSearchLLMReportWriter:
 
         if not used_ids_union:
             raise ValueError("Sectionwise synthesis requires at least one evidence_id.")
-        synthesis_evidences = bank.select_evidences(used_ids_union, max_chars=self.max_evidence_chars, question=question)
-        synthesis = await self._synthesize_parallel_fields(
-            question=question,
-            outline=outline,
-            sections=sections,
-            evidences=synthesis_evidences,
-            source_key_map=source_key_map,
-            coverage=context.get("coverage") or {},
-            context=context,
-        )
         title_limit = int(report_defaults.DEFAULT_PARALLEL_TITLE_MAX_CHARS)
-        title = (synthesis.get("title") if synthesis else None) or (
-            question[:title_limit] + ("..." if len(question) > title_limit else "")
-        )
-        short_answer = str((synthesis.get("short_answer") if synthesis else None) or (synthesis.get("summary") if synthesis else None) or "").strip()
-        limitations = (synthesis.get("limitations") if synthesis else None) or []
-        next_steps = (synthesis.get("next_steps") if synthesis else None) or []
-        if not isinstance(limitations, list):
-            limitations = []
-        if not isinstance(next_steps, list):
-            next_steps = []
+        title = question[:title_limit] + ("..." if len(question) > title_limit else "")
+        text = self._render_sections_markdown(title=title, sections=sections)
 
         return {
-            "title": title,
-            "short_answer": short_answer,
-            "summary": short_answer,
-            "sections": sections,
-            "limitations": [str(item) for item in limitations if str(item).strip()],
-            "next_steps": [str(item) for item in next_steps if str(item).strip()],
+            "text": text,
             "citations": all_citations,
             "source_key_map": source_key_map,
         }
-
-    async def _synthesize_parallel_fields(
-        self,
-        *,
-        question: str,
-        outline: List[Dict[str, Any]],
-        sections: List[Dict[str, Any]],
-        evidences: List[Dict[str, Any]],
-        source_key_map: Dict[str, str],
-        coverage: Dict[str, Any],
-        context: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Synthesize title/short_answer/limitations/next_steps after parallel section drafting."""
-
-        outline_json = _dump_json(outline)
-        sections_json = _dump_json(self._compact_sections_for_synthesis(sections, max_chars=self.synthesis_section_max_chars))
-        limited_evidences = _limit_evidences(evidences, len(evidences), int(self.max_evidence_chars), question=question)
-        evidence_pack = ""
-        if limited_evidences:
-            bank = EvidenceBank()
-            bank.add_many(limited_evidences)
-            evidence_ids = [
-                str(item.get("chunk_id") or "").strip()
-                for item in limited_evidences
-                if isinstance(item, dict) and str(item.get("chunk_id") or "").strip()
-            ]
-            evidence_pack = bank.evidence_pack_for_prompt(
-                evidence_ids,
-                source_key_map=source_key_map,
-                question=question,
-                max_chars_per_evidence=int(self.max_evidence_chars),
-            )
-        coverage_json = _dump_json(_slim_coverage(coverage or {}, level=0))
-
-        user_prompt = PARALLEL_SYNTHESIS_USER_PROMPT_EN.format(
-            question=question,
-            outline_json=outline_json,
-            sections_json=sections_json,
-            evidence_pack=evidence_pack,
-            coverage_json=coverage_json,
-        )
-        base_messages = [
-            {
-                "role": "system",
-                "content": self._system_prompt_with_style(
-                    PARALLEL_SYNTHESIS_SYSTEM_PROMPT_EN,
-                    question=question,
-                    context=context,
-                ),
-            },
-            {"role": "user", "content": user_prompt},
-        ]
-
-        allowed_keys = _allowed_keys_for_evidence_ids(
-            [
-                str(item.get("chunk_id") or "").strip()
-                for item in limited_evidences
-                if isinstance(item, dict) and str(item.get("chunk_id") or "").strip()
-            ],
-            source_key_map=source_key_map,
-        )
-
-        messages = list(base_messages)
-        last_raw = ""
-        for attempt in range(max(int(self.max_retries), 1)):
-            last_raw = await self._call(messages, phase=f"parallel_synthesis:{attempt + 1}")
-            parsed = _safe_parse_json(last_raw, expected="dict")
-            if not isinstance(parsed, dict) or not parsed:
-                repaired = await self._attempt_json_repair(
-                    base_messages=base_messages,
-                    raw=last_raw,
-                    error=_json_parse_error(last_raw, expected="dict"),
-                    phase="parallel_synthesis_repair",
-                    expected="dict",
-                )
-                parsed = repaired or {}
-            if not isinstance(parsed, dict) or not parsed:
-                if attempt < max(int(self.max_retries), 1) - 1:
-                    messages = list(base_messages)
-                    continue
-                raise ValueError(f"Parallel synthesis returned invalid JSON. raw={_snippet(last_raw)}")
-
-            short_answer = str(parsed.get("short_answer") or parsed.get("summary") or "").strip()
-            if allowed_keys and short_answer and not _has_supported_inline_citation(short_answer, allowed_keys=allowed_keys):
-                if attempt < max(int(self.max_retries), 1) - 1:
-                    allowed_csv = ", ".join(str(key) for key in sorted(allowed_keys))
-                    repair_prompt = PARALLEL_SYNTHESIS_CITATION_REPAIR_USER_PROMPT_EN.format(
-                        allowed_ids_csv=allowed_csv,
-                        raw_snippet=_snippet(last_raw, limit=int(report_defaults.DEFAULT_ERROR_SNIPPET_LIMIT_CHARS)),
-                    )
-                    messages = list(base_messages) + [{"role": "assistant", "content": str(last_raw or "")}, {"role": "user", "content": repair_prompt}]
-                    continue
-                raise ValueError("Synthesis short_answer is missing supported inline citations.")
-
-            parsed["short_answer"] = short_answer
-            parsed["summary"] = short_answer
-            return parsed
-
-        raise RuntimeError("Parallel synthesis failed after retries.")
-
-    @staticmethod
-    def _compact_sections_for_synthesis(sections: List[Dict[str, Any]], *, max_chars: int) -> List[Dict[str, str]]:
-        payload: List[Dict[str, str]] = []
-        for section in sections:
-            if not isinstance(section, dict):
-                continue
-            title = str(section.get("title") or "").strip()
-            body = str(section.get("body_markdown") or "").strip()
-            if max_chars > 0 and len(body) > max_chars:
-                body = body[:max_chars].rstrip() + "..."
-            if title or body:
-                payload.append({"title": title, "body_markdown": body})
-        return payload
 
     async def _write_single_section(
         self,
@@ -971,6 +786,10 @@ class DeepSearchLLMReportWriter:
 
 def render_markdown_from_structured(structured: Dict[str, Any]) -> str:
     """Render a Markdown report from a structured report dict."""
+
+    text = structured.get("text")
+    if isinstance(text, str) and text.strip():
+        return text.strip()
 
     title = str(structured.get("title") or "DeepSearch Report").strip()
     summary = str(structured.get("short_answer") or structured.get("summary") or "").strip()

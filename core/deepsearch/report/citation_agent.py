@@ -171,20 +171,9 @@ def _extract_inline_citations(
             seen.add(token)
             ordered.append(token)
 
-    summary = structured_report.get("summary")
-    if isinstance(summary, str) and summary:
-        _scan(summary, "summary")
-
-    sections = structured_report.get("sections") or []
-    if isinstance(sections, list):
-        for idx, section in enumerate(sections, start=1):
-            if not isinstance(section, dict):
-                continue
-            title = str(section.get("title") or "").strip()
-            body = str(section.get("body_markdown") or "").strip()
-            label = f"section:{idx}" if not title else f"section:{idx}:{title}"
-            if body:
-                _scan(body, label)
+    text = structured_report.get("text")
+    if isinstance(text, str) and text:
+        _scan(text, "text")
 
     return ordered, locations
 

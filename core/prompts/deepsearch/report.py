@@ -48,7 +48,7 @@ REPORT_WRITE_SYSTEM_PROMPT_EN = """You are a research report writer producing kn
 ## Writing Guidelines
 1. Evidence-based writing: every concrete factual claim must be supported by the provided evidence and cited inline.
 2. Graph insight highlighting: when referencing triples/paths, briefly explain why the relationship matters.
-3. Uncertainty acknowledgement: if evidence is insufficient or conflicting, state this explicitly in the relevant section and in Limitations.
+3. Uncertainty acknowledgement: if evidence is insufficient or conflicting, state this explicitly in the relevant section.
 4. Coherent narrative: ensure smooth transitions, avoid repetition, and keep sections focused on the outline purpose.
 5. No filler: avoid generic phrases like "This report will..." or "In conclusion" unless necessary; prioritize specific, evidence-backed details (numbers/terms/conditions).
 6. Conclusion-first preference: when appropriate, state the key conclusion early, then expand with supporting reasoning.
@@ -88,24 +88,13 @@ REPORT_WRITE_USER_PROMPT_EN = (
     "Coverage signals:\n{coverage_json}\n\n"
     "Task:\n"
     "Return a single JSON object with:\n"
-    "- title: string\n"
-    "- short_answer: string (3-6 sentences; keep it punchy, not template-like)\n"
-    "- sections: array of objects with keys: title, section_type, body_markdown\n"
-    "- limitations: array of strings\n"
-    "- next_steps: array of strings\n"
-    "- citations: array of objects (may be empty) with:\n"
-    "  - evidence_id: string\n"
-    "  - source_type: string (use 'chunk')\n"
-    "  - source: string | null\n"
-    "  - used_for: string | ''\n"
-    "  - confidence: number 0.0-1.0\n"
-    "  - location_in_report: string | null\n\n"
+    "- text: string (full report in Markdown; start with a top-level title '# ...' and follow the outline for section headings)\n\n"
     "Constraints:\n"
     "- Write in the same language as the user question.\n"
     "- Use only the evidence provided; do not introduce facts not supported by evidence.\n"
-    "- Add inline citations in the short_answer and section bodies for any concrete claim.\n"
-    "- Include at least one section that explicitly summarizes graph-derived facts (seed entities and graph chain).\n"
-    "- If the evidence conflicts or is too weak, say so in limitations.\n"
+    "- Add inline citations in the report text for any concrete claim.\n"
+    "- Follow the outline to structure sections and headings (use '##' for section titles).\n"
+    "- If the evidence conflicts or is too weak, state this explicitly in the relevant section.\n"
 )
 
 
@@ -173,46 +162,6 @@ REPORT_STYLE_RESEARCH_HINT_EN = """## Research Report Style
   - Inside each section, use subheadings like "1.1", "1.2", "2.1" as Markdown headings (e.g., "### 1.1 Subtopic").
 """
 
-PARALLEL_SYNTHESIS_SYSTEM_PROMPT_EN = """You are a report synthesizer.
-
-## Goal
-Given a user question, a report outline, and draft section bodies (already written), produce:
-- a concise report title,
-- a 3-6 sentence short_answer,
-- limitations,
-- next steps.
-
-## Constraints
-- Write in the same language as the user question.
-- Do not invent facts: only rely on the provided Evidence Pack and section drafts.
-- When making a concrete factual claim, keep it supported by evidence and use inline citations ONLY in <sup>k</sup> format.
-- Do NOT rewrite the full sections; they are already drafted.
-- The short_answer must contain supported inline citations for any concrete claim.
-- Keep the short_answer direct and non-templated (avoid boilerplate framing; summarize the key evidence-backed conclusion first).
-
-## Output Requirements
-Return ONLY valid JSON matching the schema described in the user prompt.
-- Do NOT wrap the JSON in Markdown fences (no ```json).
-- Do NOT include any extra commentary before/after the JSON.
-- Ensure all string fields are valid JSON strings (escape newlines as \\n, tabs as \\t).
-"""
-
-PARALLEL_SYNTHESIS_CITATION_REPAIR_USER_PROMPT_EN = (
-    "Your previous response was valid JSON, but the `short_answer` is missing supported inline citations.\n"
-    "Fix the JSON and return ONLY a single JSON object now.\n\n"
-    "Rules (STRICT):\n"
-    "- Do NOT change the schema keys.\n"
-    "- Do NOT invent facts.\n"
-    "- For any concrete factual claim in `short_answer`, add inline citations ONLY in <sup>k</sup> format.\n"
-    "- Place <sup>k</sup> ONLY after sentence-ending punctuation ('.' or '。').\n"
-    "- Each <sup> tag must contain exactly one number.\n"
-    "- Cite ONLY from this allowlist of Source keys:\n"
-    "{allowed_ids_csv}\n\n"
-    "Previous output (snippet):\n"
-    "{raw_snippet}\n"
-)
-
-
 JSON_REPAIR_USER_PROMPT_EN = (
     "Your previous response was not valid JSON or did not match the expected top-level type.\n"
     "Fix it and return ONLY valid JSON now.\n\n"
@@ -223,18 +172,4 @@ JSON_REPAIR_USER_PROMPT_EN = (
     "Expected top-level type: {expected_top_level}\n"
     "Parse/validation error: {error}\n"
     "Previous output (snippet):\n{raw_snippet}\n"
-)
-
-PARALLEL_SYNTHESIS_USER_PROMPT_EN = (
-    "User question:\n{question}\n\n"
-    "Report outline (JSON):\n{outline_json}\n\n"
-    "Draft section bodies (JSON):\n{sections_json}\n\n"
-    "Evidence Pack (authoritative):\n{evidence_pack}\n\n"
-    "Coverage signals:\n{coverage_json}\n\n"
-    "Task:\n"
-    "Return a single JSON object with:\n"
-    "- title: string\n"
-    "- short_answer: string (3-6 sentences)\n"
-    "- limitations: array of strings\n"
-    "- next_steps: array of strings\n"
 )

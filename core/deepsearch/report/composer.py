@@ -146,23 +146,10 @@ class DeepSearchReporter:
 
             structured_report = {
                 "format_version": self.STRUCTURED_REPORT_VERSION,
-                "title": question,
-                "short_answer": msg,
-                "summary": msg,
-                "sections": [],
-                "limitations": [
-                    "Insufficient evidence is available to produce verifiable, citation-backed conclusions; to avoid mis-citations, report generation was stopped.",
-                ],
-                "next_steps": [
-                    "Confirm the target file(s) are indexed successfully and visible under the current user/tenant scope.",
-                    "Rewrite the query with more specific clause/page/table keywords or provide more context hints.",
-                ],
                 "citations": [],
                 "evidence_index": [],
-                "graph_evidence": {},
+                "source_key_map": {},
                 "text": msg,
-                "context": request_context or {},
-                "generation": {"mode": "deterministic_no_evidence"},
             }
             return {
                 "question": question,
@@ -262,23 +249,10 @@ class DeepSearchReporter:
 
                 structured_report = {
                     "format_version": self.STRUCTURED_REPORT_VERSION,
-                    "title": question,
-                    "short_answer": msg,
-                    "summary": msg,
-                    "sections": [],
-                    "limitations": [
-                        "A comparison requires verifiable evidence for each named file; to avoid cross-file mis-citations, the comparison was not generated.",
-                    ],
-                    "next_steps": [
-                        "Confirm the missing file(s) are indexed successfully and visible under the current user/tenant scope.",
-                        "Split the comparison into two single-file questions and merge the results after manual verification.",
-                    ],
                     "citations": [],
                     "evidence_index": [],
-                    "graph_evidence": {},
+                    "source_key_map": {},
                     "text": msg,
-                    "context": request_context or {},
-                    "generation": {"mode": "deterministic_missing_named_files"},
                 }
                 return {
                     "question": question,
@@ -368,17 +342,17 @@ class DeepSearchReporter:
             structured_llm, alias_diag = self._rewrite_citation_aliases(structured_llm, alias_bundle)
             if alias_diag:
                 metadata["citation_alias_rewrite"] = alias_diag
-        summary_text = structured_llm.get("short_answer") or structured_llm.get("summary")
+        report_text = structured_llm.get("text") if isinstance(structured_llm, dict) else None
         source_key_map = structured_llm.get("source_key_map") if isinstance(structured_llm, dict) else None
-        if isinstance(summary_text, str) and summary_text.strip() and authoritative_evidences:
+        if isinstance(report_text, str) and report_text.strip() and authoritative_evidences:
             max_key = None
             if isinstance(source_key_map, dict) and source_key_map:
                 try:
                     max_key = max(int(k) for k in source_key_map.keys())
                 except Exception:  # noqa: BLE001
                     max_key = None
-            if not extract_sup_keys(summary_text, max_key=max_key):
-                raise ValueError("short_answer is missing inline citations (cite-first hard gate).")
+            if not extract_sup_keys(report_text, max_key=max_key):
+                raise ValueError("report text is missing inline citations (cite-first hard gate).")
         if self.enable_citation_agent:
             structured_llm, audit = CitationAgent().process(
                 structured_report=structured_llm,
@@ -410,19 +384,10 @@ class DeepSearchReporter:
 
         structured_report = {
             "format_version": self.STRUCTURED_REPORT_VERSION,
-            "title": structured_llm.get("title") or question,
-            "short_answer": structured_llm.get("short_answer") or structured_llm.get("summary") or "",
-            "summary": structured_llm.get("short_answer") or structured_llm.get("summary") or "",
-            "sections": structured_llm.get("sections") or [],
-            "limitations": structured_llm.get("limitations") or [],
-            "next_steps": structured_llm.get("next_steps") or [],
+            "text": markdown_text,
             "citations": structured_llm.get("citations") or [],
             "evidence_index": structured_llm.get("evidence_index") or [],
             "source_key_map": structured_llm.get("source_key_map") or {},
-            "graph_evidence": context.get("graph_evidence") or {},
-            "text": markdown_text,
-            "context": request_context or {},
-            "generation": {"mode": "llm"},
         }
 
         metadata["structured_report"] = {key: structured_report[key] for key in structured_report if key != "text"}
@@ -577,25 +542,8 @@ class DeepSearchReporter:
             return self._CITATION_RE.sub(_sub, text)
 
         rewritten = dict(structured)
-        for key in ("short_answer", "summary", "title"):
-            if isinstance(rewritten.get(key), str):
-                rewritten[key] = _rewrite_text(rewritten[key])
-        sections = rewritten.get("sections")
-        if isinstance(sections, list):
-            new_sections: List[Dict[str, Any]] = []
-            for section in sections:
-                if not isinstance(section, dict):
-                    continue
-                updated = dict(section)
-                body = updated.get("body_markdown")
-                if isinstance(body, str):
-                    updated["body_markdown"] = _rewrite_text(body)
-                new_sections.append(updated)
-            rewritten["sections"] = new_sections
-        for list_key in ("limitations", "next_steps"):
-            items = rewritten.get(list_key)
-            if isinstance(items, list):
-                rewritten[list_key] = [_rewrite_text(str(item)) if isinstance(item, str) else item for item in items]
+        if isinstance(rewritten.get("text"), str):
+            rewritten["text"] = _rewrite_text(rewritten["text"])
         citations = rewritten.get("citations")
         if isinstance(citations, list):
             new_citations: List[Dict[str, Any]] = []

@@ -115,23 +115,10 @@ class DeepSearchServiceRoutingMixin:
         msg = COMPUTABLE_HARD_GATE_MESSAGE
         structured_report = {
             "format_version": str(getattr(getattr(self, "reporter", None), "STRUCTURED_REPORT_VERSION", "2.0")),
-            "title": question,
-            "short_answer": msg,
-            "summary": msg,
-            "sections": [],
-            "limitations": [
-                "Computable-question hard gate: no deterministic tool evidence was produced for this run.",
-            ],
-            "next_steps": [
-                "If you expect a numeric/time answer, ensure the underlying facts carry temporal/value properties and rerun.",
-                "Rewrite the question to include explicit entities and predicates (e.g. policy name + 'effective date').",
-            ],
             "citations": [],
             "evidence_index": [],
-            "graph_evidence": {},
             "text": msg,
-            "context": {},
-            "generation": {"mode": GENERATION_MODE_MISSING_DETERMINISTIC_TOOLS},
+            "source_key_map": {},
         }
         return {
             "question": question,

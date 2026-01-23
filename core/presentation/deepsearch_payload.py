@@ -225,7 +225,11 @@ def _trim_report_block(report_block: Optional[Dict[str, Any]], limit: Optional[i
     converted = normalize_sup_punctuation(converted)
     trimmed["answer"] = converted
     try:
-        if isinstance(trimmed.get("structured_report"), dict) and "text" in trimmed["structured_report"]:
+        if (
+            converted
+            and isinstance(trimmed.get("structured_report"), dict)
+            and "text" in trimmed["structured_report"]
+        ):
             trimmed["structured_report"]["text"] = converted
     except Exception:
         pass

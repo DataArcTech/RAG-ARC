@@ -40,13 +40,10 @@ def _sample_result():
             "evidences": [{"chunk_id": f"rep-{idx}", "content": f"content {idx}"} for idx in range(6)],
             "highlights": [{"summary": "Highlight A"}, {"summary": "Highlight B"}],
             "structured_report": {
-                "title": "Who runs RAG-ARC?",
-                "summary": "Graph RAG is maintained by RAG-ARC.",
-                "sections": [
-                    {"title": "Summary", "body": "Graph RAG is maintained by RAG-ARC."},
-                ],
+                "text": "Graph RAG is maintained by RAG-ARC.",
                 "citations": [],
                 "source_key_map": {},
+                "evidence_index": [],
             },
         },
         "state": {"request_metadata": {"priority": "high"}},
@@ -122,7 +119,7 @@ def test_trim_payload_preserves_structured_report(monkeypatch):
 
     structured = payload["report"].get("structured_report")
     assert structured
-    assert structured["summary"] == "Graph RAG is maintained by RAG-ARC."
+    assert structured["text"] == "Graph RAG is maintained by RAG-ARC."
 
 
 def test_trim_payload_emits_hipporag_style_citations_and_sources(monkeypatch):
@@ -177,7 +174,7 @@ def test_trim_payload_emits_hipporag_style_citations_and_sources(monkeypatch):
     sources = trimmed["report"].get("sources")
     assert sources and [s["key"] for s in sources] == [1, 2, 3]
     assert [s["chunk_id"] for s in sources] == ["rep-0", "rep-1", "rep-2"]
-    assert sources[0].get("file") == "/knowledge/chunk/rep-0"
+    assert sources[0].get("file") == "/static/files/file-0/doc0.md"
     assert sources[0].get("file_id") == "file-0"
     assert sources[1].get("file") == "https://example.com/rep-1"
     assert trimmed["report"].get("citation_key_map") == {"rep-0": 1, "rep-1": 2, "rep-2": 3}
