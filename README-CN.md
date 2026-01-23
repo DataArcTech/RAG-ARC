@@ -278,7 +278,7 @@ RAG-ARC使用模块化配置系统。关键配置文件位于`config/json_config
 - `knowledge.json`：知识管理配置
 - `account.json`：用户账户配置
 - `.env`：运行时参数（模型、账号、端口等）。当需要在本地直接访问容器中的 PostgreSQL / Redis / Neo4j 时，可设置 `DEVELOP_MODE=true`（等同于开启 `EXPOSE_*` 变量），上述服务会开放到 `localhost`；默认关闭以确保安全。
-- 网络搜索（Tavily）：DeepSearch 默认开启外部搜索（`config/json_configs/deepsearch_service.json` → `planner.allow_external_channel=true` 且 `external_channel.enabled=true`）。HippoRAG 问答支持请求级按需开启：在 `/rag_inference/stream_chat/{session_id}` 传 `enable_web_search=true`（同时要求 `config/json_configs/rag_inference*.json` → `web_search.enabled=true`）。配置 `TAVILY_API_KEY` 后即可返回搜索结果。
+- 网络搜索（Tavily）：DeepSearch 通过 `web.search` 作为普通工具暴露（graph-first，仅在需要实时/最新信息时使用）。HippoRAG 问答支持请求级按需开启：在 `/rag_inference/stream_chat/{session_id}` 传 `enable_web_search=true`（同时要求 `config/json_configs/rag_inference*.json` → `web_search.enabled=true`）。配置 `TAVILY_API_KEY` 后即可返回搜索结果。
 
 ### 🌐 通过 `.env` 切换模型调用方式
 
@@ -376,7 +376,7 @@ CLI 仍会连接 `.env` 中配置的 PostgreSQL / Redis / Neo4j / MinIO 等基�
 - **ToolManager 默认直接在本地进程中执行所有内建工具**，只有当配置了 `mcp_client`、在某个工具上设置 `mcp_only/mcp_fallback`，或通过 `remote_tools` 注册外部描述符时，才会把调用通过 MCP server 转发出去。因此 MCP 服务器不是必需组件，仅在需要远程托管/复用工具时才需要提前启动。
 - DeepSearch 内置确定性计算工具 `code.python`，用于数学/金融计算验算；Weaver trace 的 `<tool_response>` 会始终包含 ```python``` 代码块与 stdout/result。可在 `config/json_configs/deepsearch_service.json` 的 `tool_manager.enabled_tools["code.python"]` 中调整 `allowed_imports`、超时与输出/内存上限。
 - JSON 配置中的 `tool_manager` 字段遵循 `config/application/deepsearch_config.py` 的同一结构，可在此关闭/调整单个工具或注入远程 MCP 描述符，避免重复粘贴环境变量。
-- 需要覆盖默认暴露工具集合时设置 `DEEPSEARCH_TOOL_MCP_TOOLS`（逗号分隔）；留空时，服务器会从 `DEEPSEARCH_SERVICE_CONFIG_PATH` 派生一组“精简默认工具集”（planner allowlist + think tool）。如需暴露全部内建工具可设置 `DEEPSEARCH_TOOL_MCP_TOOLS=__all__`。
+- 需要覆盖默认暴露工具集合时设置 `DEEPSEARCH_TOOL_MCP_TOOLS`（逗号分隔）；留空时，服务器会从 `DEEPSEARCH_SERVICE_CONFIG_PATH` 派生一组“精简默认工具集”（think allowlist + think tool）。如需暴露全部内建工具可设置 `DEEPSEARCH_TOOL_MCP_TOOLS=__all__`。
 - HTTP、CLI、MCP 的 DeepSearch/Chat 响应现在都会输出统一的 `evidence` 字段（chunk、三元组、种子实体、图统计）。HTTP 端通过 `include_evidence=true`（可配合 `return_subgraph=true`）启用，CLI 使用 `--with-evidence`，MCP 接口默认携带该信息。
 - 可通过 `ENABLE_ALL_EVIDENCE`、`CHAT_TOP_CHUNKS`、`CHAT_TOP_TRIPLES`、`CHAT_TOP_SEED_ENTITIES`、`DEEPSEARCH_TOP_CHUNKS`、`DEEPSEARCH_TOP_TRIPLES` 等环境变量限制证据负载大小；开启 `ENABLE_ALL_EVIDENCE=true` 时不再截断。
 
@@ -591,9 +591,6 @@ uv sync --extra dev
 
 # 运行所有测试
 uv run pytest
-
-# 运行特定测试文件
-uv run pytest test/deepsearch/test_planner.py
 
 # 运行测试并显示详细输出
 uv run pytest -v

@@ -71,7 +71,7 @@ def build_input_schema(
 
 @dataclass(frozen=True)
 class ToolDescriptor:
-    """Metadata describing a tool for planner hints and observability."""
+    """Metadata describing a tool for think hints and observability."""
 
     name: str
     channel: str
@@ -87,7 +87,7 @@ class ToolDescriptor:
     example_args: Optional[Dict[str, Any]] = None
 
     def as_hint(self) -> Dict[str, str]:
-        """Return a dict representation consumed by planner prompts."""
+        """Return a dict representation consumed by think prompts."""
 
         return {
             "name": self.name,

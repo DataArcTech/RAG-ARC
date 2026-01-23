@@ -37,7 +37,7 @@ uv run rag-arc export-graph --output graph.json --owner-id <UUID>
 uv run pytest
 
 # Run specific test file
-uv run pytest test/deepsearch/test_planner.py
+uv run pytest test/deepsearch/test_service.py
 
 # Run with verbose output
 uv run pytest -v
@@ -131,17 +131,13 @@ Graph retriever captures subgraph metadata in chunk metadata (`_subgraph_info`) 
 To add a new graph backend, implement `GraphAdapter` and register it via the registry.
 
 ### DeepSearch on Graph
-DeepSearch (`application/rag_inference/deepsearch/service.py`) implements multi-stage reasoning:
-1. **Planner**: Breaks down complex queries into sub-tasks
-2. **Graph Adapter**: Executes graph-based retrieval and exploration
-3. **Tool Manager**: Coordinates deterministic tools (Fast), LLM-heavy tools (Heavy), and hybrid tools
-4. **Gap Detection**: Identifies knowledge gaps and triggers external search (optional, requires `DEEPSEARCH_EXTERNAL_SEARCH_ENABLED=true`)
-5. **Report Composer**: Synthesizes evidence into structured reports
+DeepSearch (`application/rag_inference/deepsearch/service.py`) implements a think-driven loop:
+1. **Think**: Intent detection + plan update + decide next tool calls.
+2. **Explore**: Graph-first orchestration (parallel actions: search/graph.ops/read.chunk/web.search).
+3. **Code**: Deterministic math/finance verification (`code.python`).
+4. **Report Composer**: Synthesizes evidence into structured reports.
 
-Tool categorization (see `docs-proj/deepsearch_on_graph_execution.md`):
-- **F-Tools (Fast Deterministic)**: Sub-millisecond pattern/chunk scans
-- **H-Tools (Heavy Cognitive)**: LLM-driven chain exploration with "think" windows
-- **X-Tools (Hybrid Bridge)**: Deterministic context + LLM explanation
+Only three tools are exposed to the LLM (`think`, `explore`, `code.python`); all other actions are internal explore subtools.
 
 ### Document Processing Pipeline
 `core/file_management/index_manager.py` coordinates:
@@ -257,7 +253,7 @@ test/
 │   ├── retrieval/          # Retrieval tests (multipath, graph, BM25, FAISS)
 │   └── file_management/    # Parsing, chunking tests
 ├── encapsulation/          # Database, LLM abstraction tests
-├── deepsearch/             # DeepSearch planner, tool tests
+├── deepsearch/             # DeepSearch think/explore tool tests
 └── test_complete_e2e_api.py  # End-to-end HTTP API tests
 ```
 

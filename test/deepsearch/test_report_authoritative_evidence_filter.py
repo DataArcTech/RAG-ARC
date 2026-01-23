@@ -4,8 +4,8 @@ from core.deepsearch.report.composer import _split_authoritative_evidences
 def test_report_filters_tool_generated_evidence_from_authoritative_bundle():
     evidences = [
         {
-            "chunk_id": "graph.context_rollup:plan_01:rollup:abc123",
-            "source": "context_rollup",
+            "chunk_id": "graph.llm_chain_explorer:plan_01:rollup:abc123",
+            "source": "graph.llm_chain_explorer",
             "content": "LLM rollup output that should not be citable.",
         },
         {
@@ -26,5 +26,4 @@ def test_report_filters_tool_generated_evidence_from_authoritative_bundle():
         "1a9a49a1-8193-4608-8938-250e62731697",
         "ext-1",
     ]
-    assert [ev["chunk_id"] for ev in tool_generated] == ["graph.context_rollup:plan_01:rollup:abc123"]
-
+    assert [ev["chunk_id"] for ev in tool_generated] == ["graph.llm_chain_explorer:plan_01:rollup:abc123"]

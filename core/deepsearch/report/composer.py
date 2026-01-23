@@ -9,7 +9,6 @@ from typing import Any, Dict, Iterable, List, Optional
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 
-from core.deepsearch.report.consistency_checker import ConsistencyChecker
 from core.deepsearch.report.citation_agent import CitationAgent
 from core.deepsearch.report.llm_writer import DeepSearchLLMReportWriter, render_markdown_from_structured
 from core.deepsearch.trace import emit_trace
@@ -17,6 +16,7 @@ from core.presentation.evidence import build_deepsearch_evidence
 from core.deepsearch.memory import EvidenceBank
 from config.core.deepsearch import report_composer_defaults as composer_defaults
 from core.deepsearch.report.provenance_backfill import attach_provenance_chunk_evidence
+from core.utils.citations import extract_sup_keys
 from core.utils.json_extract import safe_json_loads
 from core.deepsearch.utils.file_scope import (
     extract_titles_from_question,
@@ -59,14 +59,12 @@ class DeepSearchReporter:
         self.report_max_graph_chain_items = int(self.config["report_max_graph_chain_items"])
         self.report_max_seed_entities = int(self.config["report_max_seed_entities"])
         self.enable_llm_report = bool(self.config["enable_llm_report"])
-        self.enable_consistency_check = bool(self.config["enable_consistency_check"])
-        self.consistency_temperature = float(self.config["consistency_temperature"])
         self.enable_citation_agent = bool(self.config["enable_citation_agent"])
+        self.citation_aliases = bool(self.config.get("citation_aliases", False))
         self.parallel_sections = bool(self.config["parallel_sections"])
         self.max_parallel_sections = int(self.config["max_parallel_sections"])
         self.sectionwise_writer = bool(self.config["sectionwise_writer"])
         self.sectionwise_retain_k = int(self.config["sectionwise_retain_k"])
-        self.citation_aliases = bool(self.config["citation_aliases"])
         self.include_appendices_in_answer = bool(self.config.get("include_appendices_in_answer", False))
         self.provenance_chunk_attach_max = int(
             self.config.get("provenance_chunk_attach_max", composer_defaults.DEFAULT_PROVENANCE_CHUNK_ATTACH_MAX)
@@ -126,7 +124,6 @@ class DeepSearchReporter:
                     "completed": sum(1 for step in ((trace.get("reasoning_steps") or []) or []) if isinstance(step, dict) and step.get("status") == "done"),
                 },
                 "coverage_metrics": trace.get("coverage_metrics") or {},
-                "pending_external": trace.get("pending_external") or [],
                 "parallel_thinking_runs": int(self.config["parallel_thinking_runs"]),
                 "report_profile": {
                     "include_graph_viz": bool(self.config["include_graph_viz"]),
@@ -149,23 +146,10 @@ class DeepSearchReporter:
 
             structured_report = {
                 "format_version": self.STRUCTURED_REPORT_VERSION,
-                "title": question,
-                "short_answer": msg,
-                "summary": msg,
-                "sections": [],
-                "limitations": [
-                    "Insufficient evidence is available to produce verifiable, citation-backed conclusions; to avoid mis-citations, report generation was stopped.",
-                ],
-                "next_steps": [
-                    "Confirm the target file(s) are indexed successfully and visible under the current user/tenant scope.",
-                    "Rewrite the query with more specific clause/page/table keywords or provide more context hints.",
-                ],
                 "citations": [],
                 "evidence_index": [],
-                "graph_evidence": {},
+                "source_key_map": {},
                 "text": msg,
-                "context": request_context or {},
-                "generation": {"mode": "deterministic_no_evidence"},
             }
             return {
                 "question": question,
@@ -243,7 +227,6 @@ class DeepSearchReporter:
                         "completed": sum(1 for step in (trace.get("reasoning_steps") or []) if isinstance(step, dict) and step.get("status") == "done"),
                     },
                     "coverage_metrics": trace.get("coverage_metrics") or {},
-                    "pending_external": trace.get("pending_external") or [],
                     "parallel_thinking_runs": int(self.config["parallel_thinking_runs"]),
                     "report_profile": {
                         "include_graph_viz": bool(self.config["include_graph_viz"]),
@@ -266,23 +249,10 @@ class DeepSearchReporter:
 
                 structured_report = {
                     "format_version": self.STRUCTURED_REPORT_VERSION,
-                    "title": question,
-                    "short_answer": msg,
-                    "summary": msg,
-                    "sections": [],
-                    "limitations": [
-                        "A comparison requires verifiable evidence for each named file; to avoid cross-file mis-citations, the comparison was not generated.",
-                    ],
-                    "next_steps": [
-                        "Confirm the missing file(s) are indexed successfully and visible under the current user/tenant scope.",
-                        "Split the comparison into two single-file questions and merge the results after manual verification.",
-                    ],
                     "citations": [],
                     "evidence_index": [],
-                    "graph_evidence": {},
+                    "source_key_map": {},
                     "text": msg,
-                    "context": request_context or {},
-                    "generation": {"mode": "deterministic_missing_named_files"},
                 }
                 return {
                     "question": question,
@@ -299,7 +269,6 @@ class DeepSearchReporter:
         reasoning_steps = trace.get("reasoning_steps") or []
         highlights = self._build_highlights(reasoning_steps)
         coverage_metrics = trace.get("coverage_metrics") or {}
-        gap_result = trace.get("gap_result") or {}
         request_context = self._extract_request_context(trace)
 
         metadata: Dict[str, Any] = {
@@ -314,8 +283,6 @@ class DeepSearchReporter:
             "think_notes": trace.get("think_notes") or [],
             "tool_results": trace.get("tool_results") or [],
             "coverage_metrics": coverage_metrics,
-            "gap_result": gap_result,
-            "pending_external": trace.get("pending_external") or [],
             "parallel_thinking_runs": int(self.config["parallel_thinking_runs"]),
             "report_profile": {
                 "include_graph_viz": bool(self.config["include_graph_viz"]),
@@ -347,7 +314,6 @@ class DeepSearchReporter:
             highlights=highlights,
             evidences=llm_evidences,
             coverage=coverage_metrics,
-            gap_result=gap_result,
             request_context=request_context,
         )
         writer = DeepSearchLLMReportWriter(
@@ -376,10 +342,17 @@ class DeepSearchReporter:
             structured_llm, alias_diag = self._rewrite_citation_aliases(structured_llm, alias_bundle)
             if alias_diag:
                 metadata["citation_alias_rewrite"] = alias_diag
-        summary_text = structured_llm.get("short_answer") or structured_llm.get("summary")
-        if isinstance(summary_text, str) and summary_text.strip() and authoritative_evidences:
-            if not re.search(r"(?:\[[^\[\]]+\]|【[^【】]+】)", summary_text):
-                raise ValueError("short_answer is missing inline citations (cite-first hard gate).")
+        report_text = structured_llm.get("text") if isinstance(structured_llm, dict) else None
+        source_key_map = structured_llm.get("source_key_map") if isinstance(structured_llm, dict) else None
+        if isinstance(report_text, str) and report_text.strip() and authoritative_evidences:
+            max_key = None
+            if isinstance(source_key_map, dict) and source_key_map:
+                try:
+                    max_key = max(int(k) for k in source_key_map.keys())
+                except Exception:  # noqa: BLE001
+                    max_key = None
+            if not extract_sup_keys(report_text, max_key=max_key):
+                raise ValueError("report text is missing inline citations (cite-first hard gate).")
         if self.enable_citation_agent:
             structured_llm, audit = CitationAgent().process(
                 structured_report=structured_llm,
@@ -387,6 +360,7 @@ class DeepSearchReporter:
                 graph_evidence=context.get("graph_evidence") or {},
                 max_chunk_index_items=self.max_evidence_items,
                 citation_aliases=(alias_bundle.get("alias_to_original") if alias_bundle else None),
+                source_key_map=source_key_map if isinstance(source_key_map, dict) else None,
             )
             metadata["citation_audit"] = audit
         markdown_text = render_markdown_from_structured(structured_llm)
@@ -410,37 +384,11 @@ class DeepSearchReporter:
 
         structured_report = {
             "format_version": self.STRUCTURED_REPORT_VERSION,
-            "title": structured_llm.get("title") or question,
-            "short_answer": structured_llm.get("short_answer") or structured_llm.get("summary") or "",
-            "summary": structured_llm.get("short_answer") or structured_llm.get("summary") or "",
-            "sections": structured_llm.get("sections") or [],
-            "limitations": structured_llm.get("limitations") or [],
-            "next_steps": structured_llm.get("next_steps") or [],
+            "text": markdown_text,
             "citations": structured_llm.get("citations") or [],
             "evidence_index": structured_llm.get("evidence_index") or [],
-            "graph_evidence": context.get("graph_evidence") or {},
-            "text": markdown_text,
-            "context": request_context or {},
-            "generation": {"mode": "llm"},
+            "source_key_map": structured_llm.get("source_key_map") or {},
         }
-
-        if self.enable_consistency_check and authoritative_evidences:
-            checker = ConsistencyChecker(
-                self.llm_connector,
-                temperature=self.consistency_temperature,
-                max_retries=int(self.config["consistency_max_retries"]),
-            )
-            result = await checker.check(
-                question=question,
-                report_markdown=markdown_text,
-                evidences=authoritative_evidences,
-                structured_report=structured_report,
-                max_evidence_chars=self.report_max_evidence_chars,
-                max_claims=int(self.config["consistency_max_claims"]),
-            )
-            structured_report["consistency_check"] = result.model_dump()
-            if not result.is_consistent:
-                metadata["quality_warnings"] = [issue.model_dump() for issue in result.issues]
 
         metadata["structured_report"] = {key: structured_report[key] for key in structured_report if key != "text"}
 
@@ -458,7 +406,7 @@ class DeepSearchReporter:
         """Replace long chunk IDs with stable short aliases for LLM prompting.
 
         The alias is treated as the chunk_id inside prompts, then rewritten back to the original
-        chunk_id before running CitationAgent / ConsistencyChecker.
+        chunk_id before running CitationAgent.
         """
 
         alias_to_original: Dict[str, str] = {}
@@ -594,25 +542,8 @@ class DeepSearchReporter:
             return self._CITATION_RE.sub(_sub, text)
 
         rewritten = dict(structured)
-        for key in ("short_answer", "summary", "title"):
-            if isinstance(rewritten.get(key), str):
-                rewritten[key] = _rewrite_text(rewritten[key])
-        sections = rewritten.get("sections")
-        if isinstance(sections, list):
-            new_sections: List[Dict[str, Any]] = []
-            for section in sections:
-                if not isinstance(section, dict):
-                    continue
-                updated = dict(section)
-                body = updated.get("body_markdown")
-                if isinstance(body, str):
-                    updated["body_markdown"] = _rewrite_text(body)
-                new_sections.append(updated)
-            rewritten["sections"] = new_sections
-        for list_key in ("limitations", "next_steps"):
-            items = rewritten.get(list_key)
-            if isinstance(items, list):
-                rewritten[list_key] = [_rewrite_text(str(item)) if isinstance(item, str) else item for item in items]
+        if isinstance(rewritten.get("text"), str):
+            rewritten["text"] = _rewrite_text(rewritten["text"])
         citations = rewritten.get("citations")
         if isinstance(citations, list):
             new_citations: List[Dict[str, Any]] = []
@@ -642,13 +573,11 @@ class DeepSearchReporter:
         highlights: List[Dict[str, Any]],
         evidences: List[Dict[str, Any]],
         coverage: Dict[str, Any],
-        gap_result: Dict[str, Any],
         request_context: Dict[str, Any],
     ) -> Dict[str, Any]:
         plan_steps = trace.get("plan_steps") or []
         reasoning_steps = trace.get("reasoning_steps") or []
         tool_results = list(trace.get("tool_results") or [])
-        pending_external = trace.get("pending_external") or []
 
         methodology_summary_chars = int(self.config["methodology_summary_chars"])
         keep_tool_results = int(self.config["keep_tool_results"])
@@ -687,11 +616,7 @@ class DeepSearchReporter:
             ],
         }
 
-        coverage_bundle = {
-            "coverage_metrics": coverage,
-            "gap_result": gap_result,
-            "pending_external": pending_external,
-        }
+        coverage_bundle = {"coverage_metrics": coverage}
 
         graph_evidence_full = self._build_graph_evidence(trace, evidences)
         graph_evidence_llm = self._slim_graph_evidence_for_llm(graph_evidence_full)
@@ -702,6 +627,13 @@ class DeepSearchReporter:
             max_items=outline_index_limit,
             max_summary_chars=int(self.config["outline_evidence_summary_chars"]),
         )
+        graph_context = trace.get("graph_context") if isinstance(trace.get("graph_context"), dict) else {}
+        context_meta = graph_context.get("metadata") if isinstance(graph_context, dict) else {}
+        report_style = None
+        if isinstance(context_meta, dict):
+            token = str(context_meta.get("report_style") or "").strip().lower()
+            if token in {"deepsearch", "research"}:
+                report_style = token
 
         return {
             "question": trace.get("question") or "",
@@ -714,6 +646,7 @@ class DeepSearchReporter:
             "methodology": methodology,
             "coverage": coverage_bundle,
             "request_context": request_context,
+            "report_style": report_style or "deepsearch",
         }
 
     def _merge_evidences(
@@ -914,7 +847,7 @@ def _append_chunk_evidence(
         if len(content) > preview_length:
             preview += "..."
         source_tag = f" ({source})" if source else ""
-        blocks.append(f"- [{chunk_id}]{source_tag}: {preview}")
+        blocks.append(f"- `{chunk_id}`{source_tag}: {preview}")
 
     return (markdown_text or "").rstrip() + "\n" + "\n".join(blocks).rstrip() + "\n"
 
@@ -951,7 +884,7 @@ def _append_tool_evidence(
         if len(content) > preview_length:
             preview += "..."
         source_tag = f" ({source})" if source else ""
-        blocks.append(f"- [{chunk_id}]{source_tag}: {preview}")
+        blocks.append(f"- `{chunk_id}`{source_tag}: {preview}")
 
     return (markdown_text or "").rstrip() + "\n" + "\n".join(blocks).rstrip() + "\n"
 

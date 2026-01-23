@@ -6,8 +6,8 @@ DeepSearch ships with a mixed tool catalog:
 - LLM-heavy tools that may depend on adapter traversal outputs
 
 To avoid "configured/enabled but not actually supported" breakage, we compute a
-disabled-tool set from adapter metadata and feed it into ToolHintRegistry so
-planner prompts only advertise tools that are expected to work.
+    disabled-tool set from adapter metadata and feed it into ToolHintRegistry so
+    think prompts only advertise tools that are expected to work.
 """
 from typing import Iterable, Mapping, Set
 
@@ -15,25 +15,10 @@ from core.graph_adapter.base import GraphAdapterMetadata
 
 
 _CYPHER_REQUIRED_TOOLS: Set[str] = {
-    "graph.intersection",
-    "graph.set_difference",
-    "graph.aggregate",
-    "graph.entity_concepts",
-    "graph.rule_check",
-    "graph.schema_nodes",
-    "graph.path_exists",
-    "graph.neighbors",
-    "graph.facts_by_type",
-    "graph.expand_terms",
-    "graph.latest_truth",
-    "graph.sdf_children",
-    "graph.sdf_dependencies",
-    "graph.trace_to_root",
+    "graph.ops",
 }
 
 _CHAIN_MODE_REQUIRED_TOOLS: Mapping[str, str] = {
-    "graph.bridge_lookup": "bridge_lookup",
-    "graph.path_cache": "ppr_prefetch",
     "graph.beam_search": "beam_search",
 }
 

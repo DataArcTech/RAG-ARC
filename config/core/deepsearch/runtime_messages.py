@@ -13,6 +13,5 @@ COMPUTABLE_HARD_GATE_MESSAGE: Final[str] = (
     "This question looks computable (numbers/dates/thresholds), but the run produced no deterministic tool evidence. "
     "To avoid returning an unverifiable numeric/time answer, execution was stopped. "
     "Enable deterministic routing (probe/lead tools) or refine the query with explicit entities/predicates so "
-    "deterministic tools like graph.latest_truth / graph.aggregate can be applied."
+    "deterministic tools like graph.ops templates (latest_truth / aggregate) can be applied."
 )
-

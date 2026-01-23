@@ -4,7 +4,7 @@ We need a robust "user language" signal that is not polluted by:
 - file paths / bullet file lists
 - document titles embedded in brackets (e.g. 《...》)
 
-This signal is used to enforce output language across planner/report stages.
+This signal is used to enforce output language across think/report stages.
 """
 import re
 from typing import Literal

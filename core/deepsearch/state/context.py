@@ -11,7 +11,7 @@ def _utc_now() -> str:
 
 @dataclass
 class DeepSearchState:
-    """Track planner output, reasoning traces, gap decisions, and reports for one run."""
+    """Track reasoning traces and reports for one run."""
 
     config_fingerprint: str
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -23,11 +23,8 @@ class DeepSearchState:
     plan_metadata: Dict[str, Any] = field(default_factory=dict)
     plan_steps: List[Dict[str, Any]] = field(default_factory=list)
     reasoning_trace: Dict[str, Any] = field(default_factory=dict)
-    gap_result: Optional[Dict[str, Any]] = None
-    external_calls: List[Dict[str, Any]] = field(default_factory=list)
     cost_telemetry: Dict[str, Any] = field(default_factory=dict)
     report_payload: Optional[Dict[str, Any]] = None
-    quality_gates: List[Dict[str, Any]] = field(default_factory=list)
     errors: List[Dict[str, Any]] = field(default_factory=list)
     request_metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -67,31 +64,6 @@ class DeepSearchState:
             },
         )
 
-    def record_gap_result(self, gap_payload: Dict[str, Any]) -> None:
-        self.gap_result = gap_payload or {}
-        if self.reasoning_trace is not None:
-            self.reasoning_trace["gap_result"] = self.gap_result
-        self.transition_stage(
-            "gap_evaluated",
-            metadata={
-                "should_trigger_external": bool(self.gap_result.get("should_trigger_external")),
-                "reason": self.gap_result.get("reason"),
-            },
-        )
-
-    def record_external_call(self, call_log: Dict[str, Any]) -> None:
-        if not call_log:
-            return
-        self.external_calls.append(call_log)
-        self.transition_stage(
-            "external_invoked",
-            metadata={"total_calls": len(self.external_calls)},
-        )
-
-    def extend_external_calls(self, call_logs: List[Dict[str, Any]]) -> None:
-        for log in call_logs:
-            self.record_external_call(log)
-
     def record_cost(self, label: str, payload: Dict[str, Any]) -> None:
         if not label:
             return
@@ -105,20 +77,6 @@ class DeepSearchState:
             metadata={
                 "answer_length": len((self.report_payload.get("answer") or "")),
                 "evidence_count": len(self.report_payload.get("evidences") or []),
-            },
-        )
-
-    def record_quality_gate(self, payload: Dict[str, Any]) -> None:
-        if not payload:
-            return
-        self.quality_gates.append(payload)
-        self.transition_stage(
-            "quality_gated",
-            metadata={
-                "round": payload.get("round"),
-                "passed": payload.get("passed"),
-                "should_iterate": payload.get("should_iterate"),
-                "enabled": payload.get("enabled"),
             },
         )
 
@@ -176,11 +134,8 @@ class DeepSearchState:
             "plan_metadata": self.plan_metadata,
             "plan_steps": self.plan_steps,
             "reasoning_trace": self.reasoning_trace,
-            "gap_result": self.gap_result,
-            "external_calls": self.external_calls,
             "cost_telemetry": self.cost_telemetry,
             "report": self.report_payload,
-            "quality_gates": list(self.quality_gates),
             "errors": self.errors,
             "request_metadata": self.request_metadata,
         }
@@ -242,7 +197,6 @@ class DeepSearchState:
             "tool_timeout_steps": tool_timeouts,
             "deterministic_tool_run_count": deterministic_tool_runs,
             "remote_fallback_count": remote_fallbacks,
-            "external_call_count": len(self.external_calls or []),
             "worker_error_count": worker_errors,
         }
 

@@ -114,6 +114,7 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
         """
         top_k = max(1, int(top_k))
 
+        # Unit tests may call this mixin helper with a lightweight stub that does not carry full config.
         cfg = getattr(self, "config", None)
         strategy = str(getattr(cfg, "chunk_selection_strategy", "top_entity_neighbors") or "top_entity_neighbors")
         if strategy == "top_ppr_chunks":

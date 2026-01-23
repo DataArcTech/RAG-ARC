@@ -1,7 +1,7 @@
 """In-process evidence memory bank for DeepSearch."""
 import hashlib
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from core.deepsearch.utils.compression import focused_truncate_text
 
@@ -181,6 +181,7 @@ class EvidenceBank:
         self,
         evidence_ids: Sequence[str],
         *,
+        source_key_map: Mapping[str, str] | None = None,
         question: str | None = None,
         max_items: int | None = None,
         max_chars_per_evidence: int = 900,
@@ -192,47 +193,81 @@ class EvidenceBank:
         This is intentionally "document-like" (index + per-evidence sections) so models can:
         - navigate sources via the index,
         - quote/extract only the relevant portions from each evidence section,
-        - cite using stable [chunk_id] tokens.
+        - cite using stable Source keys in <sup>k</sup> format.
         """
 
+        source_key_map = dict(source_key_map or {})
         ordered: List[str] = []
-        seen: set[str] = set()
+        ordered_keys: List[int] = []
 
-        def _add(eid: str) -> None:
-            token = str(eid or "").strip()
-            if not token or token in seen:
-                return
-            if token not in self._records:
-                return
-            seen.add(token)
-            ordered.append(token)
+        if source_key_map:
+            for key, ev_id in source_key_map.items():
+                try:
+                    key_num = int(str(key).strip())
+                except Exception:  # noqa: BLE001
+                    continue
+                token = str(ev_id or "").strip()
+                if not token or token not in self._records:
+                    continue
+                ordered_keys.append(key_num)
+            ordered_keys = sorted(set(ordered_keys))
+            for key_num in ordered_keys:
+                token = str(source_key_map.get(str(key_num)) or "").strip()
+                if token and token not in ordered and token in self._records:
+                    ordered.append(token)
+            if max_items is not None:
+                ordered_keys = ordered_keys[: max(0, int(max_items))]
+                allowed_ids = {str(source_key_map.get(str(k)) or "").strip() for k in ordered_keys}
+                ordered = [eid for eid in ordered if eid in allowed_ids]
+        else:
+            ordered = []
+            seen: set[str] = set()
 
-        if not evidence_ids:
-            raise ValueError("evidence_ids must be a non-empty list")
-        for eid in evidence_ids:
-            _add(str(eid))
-        if max_items is not None:
-            ordered = ordered[: max(0, int(max_items))]
+            def _add(eid: str) -> None:
+                token = str(eid or "").strip()
+                if not token or token in seen:
+                    return
+                if token not in self._records:
+                    return
+                seen.add(token)
+                ordered.append(token)
 
-        allowlist = ", ".join(ordered)
+            if not evidence_ids:
+                raise ValueError("evidence_ids must be a non-empty list")
+            for eid in evidence_ids:
+                _add(str(eid))
+            if max_items is not None:
+                ordered = ordered[: max(0, int(max_items))]
+            source_key_map = self.source_key_map_for_prompt(ordered)
+            ordered_keys = sorted(int(k) for k in source_key_map.keys())
+
+        allowlist = ", ".join(str(k) for k in ordered_keys)
         lines: List[str] = [str(title or "Evidence Pack").strip(), ""]
         if allowlist:
-            lines.extend(["Citable chunk_id allowlist:", allowlist, ""])
+            lines.extend(["Citable Source key allowlist:", allowlist, ""])
 
-        lines.append("Index (id -> short summary):")
-        for eid in ordered:
+        lines.append("Index (Source key -> short summary):")
+        for key_num in ordered_keys:
+            eid = str(source_key_map.get(str(key_num)) or "").strip()
+            if not eid:
+                continue
             rec = self._records[eid]
             src = f" | source={rec.source}" if rec.source else ""
             hint = self._extract_provenance_hint(rec.provenance)
             hint_str = f" | {hint}" if hint else ""
-            lines.append(f"- [{rec.evidence_id}]{src}{hint_str} :: {rec.summary(max_chars=max_summary_chars)}")
+            lines.append(
+                f"- Source key={key_num} id={rec.evidence_id}{src}{hint_str} :: {rec.summary(max_chars=max_summary_chars)}"
+            )
         lines.append("")
 
         lines.append("Evidence details (use ONLY these as authoritative sources):")
-        for eid in ordered:
+        for key_num in ordered_keys:
+            eid = str(source_key_map.get(str(key_num)) or "").strip()
+            if not eid:
+                continue
             rec = self._records[eid]
             lines.append("")
-            header = f"[{rec.evidence_id}]"
+            header = f"Source key={key_num} id={rec.evidence_id}"
             if rec.source:
                 header = f"{header} source={rec.source}"
             hint = self._extract_provenance_hint(rec.provenance)
@@ -242,6 +277,24 @@ class EvidenceBank:
             lines.append(self.excerpt_for_prompt(rec.evidence_id, max_chars=max_chars_per_evidence, question=question))
 
         return "\n".join(lines).strip()
+
+    @staticmethod
+    def source_key_map_for_prompt(
+        evidence_ids: Sequence[str],
+        *,
+        max_items: int | None = None,
+    ) -> Dict[str, str]:
+        ordered: List[str] = []
+        seen: set[str] = set()
+        for eid in evidence_ids or []:
+            token = str(eid or "").strip()
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            ordered.append(token)
+        if max_items is not None:
+            ordered = ordered[: max(0, int(max_items))]
+        return {str(idx): eid for idx, eid in enumerate(ordered, start=1)}
 
     def select_evidences(
         self,

@@ -1,17 +1,14 @@
 """DeepSearch progress semantics shared across API and Celery.
 
 Progress is intentionally coarse: stage transitions are discrete, while the `reasoned`
-stage interpolates based on planner step_count and completed_steps emitted by the
-graph reasoning loop.
+stage interpolates based on step_count and completed_steps emitted by the
+graph reasoning loop when available.
 """
 STAGE_ORDER: tuple[str, ...] = (
     "created",
     "planned",
     "reasoned",
-    "gap_evaluated",
-    "external_invoked",
     "reported",
-    "quality_gated",
     "done",
     "failed",
 )
@@ -20,16 +17,13 @@ STAGE_ORDER: tuple[str, ...] = (
 STAGE_PERCENT_BASE: dict[str, int] = {
     "created": 0,
     "planned": 10,
-    # `reasoned` uses interpolation between planned and gap_evaluated when counts are available.
+    # `reasoned` uses interpolation between planned and reported when counts are available.
     # Fallback stays at this value to avoid UI regressions.
     "reasoned": 40,
-    "gap_evaluated": 55,
-    "external_invoked": 65,
     "reported": 80,
-    "quality_gated": 90,
     "done": 100,
     "failed": 100,
 }
 
 REASONED_START_PERCENT: int = STAGE_PERCENT_BASE["planned"]
-REASONED_END_PERCENT: int = STAGE_PERCENT_BASE["gap_evaluated"]
+REASONED_END_PERCENT: int = STAGE_PERCENT_BASE["reported"]

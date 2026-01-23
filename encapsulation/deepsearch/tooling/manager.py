@@ -890,7 +890,6 @@ class DeepSearchToolManager:
             "evidence_count": len(result.evidences or []),
             "adapter_metadata": self._adapter_metadata(request.adapter),
             "tool_namespace": descriptor.namespace if descriptor else None,
-            "external_allowed": self._extract_external_allowed(request),
         }
         if self.llm_fingerprint:
             payload["llm_fingerprint"] = self.llm_fingerprint
@@ -920,7 +919,6 @@ class DeepSearchToolManager:
             adapter_meta = self._adapter_metadata(request.adapter)
             if adapter_meta:
                 log.extra.setdefault("adapter_metadata", adapter_meta)
-            log.extra.setdefault("external_allowed", self._extract_external_allowed(request))
         if self.llm_fingerprint:
             log.extra.setdefault("llm_fingerprint", self.llm_fingerprint)
         if descriptor:
@@ -940,16 +938,6 @@ class DeepSearchToolManager:
             return None
         value = metadata.get("run_id") or (metadata.get("request_metadata") or {}).get("run_id")
         return str(value) if value else None
-
-    @staticmethod
-    def _extract_external_allowed(request: ToolRunRequest | None) -> Optional[bool]:
-        if not request or not request.graph_context:
-            return None
-        metadata = request.graph_context.metadata or {}
-        if not isinstance(metadata, dict):
-            return None
-        value = metadata.get("external_allowed")
-        return bool(value) if isinstance(value, bool) else None
 
     def _serialize_context_window(self, request: ToolRunRequest) -> List[Dict[str, Any]]:
         if not request.context_evidences:

@@ -9,7 +9,7 @@ from config.encapsulation.database.graph_db.pruned_hipporag_neo4j_config import 
 from config.encapsulation.llm.chat.openai import OpenAIChatConfig
 from config.encapsulation.llm.embedding.openai import OpenAIEmbeddingConfig
 from core.deepsearch.tools.base import ToolRunRequest
-from core.deepsearch.tools.fast.graph_ops_temporal import GraphLatestTruthTool
+from core.deepsearch.tools import GraphOpsTool
 from core.graph_adapter.base import GraphAccessScope
 from encapsulation.data_model.schema import Chunk
 
@@ -84,7 +84,7 @@ async def test_real_service_smoke_latest_truth_neo4j():  # pragma: no cover - op
 
     await indexer.update_index(chunks)
     adapter = _Neo4jCypherAdapter(indexer.graph_store)
-    tool = GraphLatestTruthTool()
+    tool = GraphOpsTool()
 
     result = await tool.run(
         ToolRunRequest(
@@ -93,7 +93,11 @@ async def test_real_service_smoke_latest_truth_neo4j():  # pragma: no cover - op
             context_evidences=[],
             adapter=adapter,
             access_scope=GraphAccessScope(scope_id=owner_id),
-            extra={"topic": "远程办公政策", "predicates": ["HAS_POLICY"]},
+            extra={
+                "mode": "template",
+                "template": "latest_truth",
+                "template_args": {"topic": "远程办公政策", "predicates": ["HAS_POLICY"]},
+            },
         )
     )
     assert "latest_truth" in result.summary

@@ -1,46 +1,5 @@
 {
   "type": "deepsearch_service",
-  "planner": {
-    "mode": "react",
-    "max_steps": 8,
-    "enable_sub_question": true,
-    "persist_plan": true,
-    "plan_output_dir": "${DEEPSEARCH_PLAN_OUTPUT_DIR}",
-    "allow_external_channel": true,
-    "web_step_policy": "realtime_required",
-    "realtime_web_force_external": true,
-    "honor_planner_tool_selection": true,
-    "graph_channel_tool": "graph_adapter.query",
-    "text_channel_tool": "graph.context_rollup",
-    "web_channel_tool": "web.search",
-    "tool_catalog_allowlist": [
-      "graph_adapter.query",
-      "graph.context_rollup",
-      "graph.evidence_crosscheck",
-      "graph.chunk_scan",
-      "graph.pattern_scan",
-      "graph.aggregate",
-      "graph.intersection",
-      "graph.set_difference",
-      "graph.rule_check",
-      "graph.path_exists",
-      "graph.neighbors",
-      "graph.entity_concepts",
-      "graph.expand_terms",
-      "graph.facts_by_type",
-      "graph.latest_truth",
-      "graph.schema_nodes",
-      "graph.relation_path_explore",
-      "graph.relation_path_ground",
-      "graph.beam_search",
-      "web.search",
-      "code.python"
-    ],
-    "include_llm_tools_in_catalog": true,
-    "default_web_provider": "${DEEPSEARCH_WEB_PROVIDER}",
-    "graph_adapter_name": "${DEEPSEARCH_DEFAULT_ADAPTER}",
-    "tool_arg_templates": {}
-  },
   "graph_adapter": {
     "type": "graph_adapter",
     "adapter_name": "hipporag",
@@ -90,7 +49,7 @@
         "ppr_push_target_degree_penalty_gamma": 0.5,
         "entity_reset_weight_aggregation": "sum_avg",
         "dense_file_closure_enabled": true,
-        "ppr_push_epsilon": 0.000001
+        "ppr_push_epsilon": 1e-06
       }
     }
   },
@@ -124,40 +83,24 @@
     "parallel_branches": 1,
     "tool_timeout_seconds": 45.0,
     "think": {
-      "tool_name": "graph.think",
-      "every_n_steps": 2,
+      "tool_name": "think",
+      "every_n_steps": 1,
       "min_coverage": 0.75,
+      "always_run": true,
       "enable_tool_calls": true,
       "max_tool_calls": 4,
       "tool_call_concurrency": 2,
-      "tool_catalog_max_items": 30,
+      "tool_catalog_max_items": 6,
+      "tool_catalog_allowlist": [
+        "explore",
+        "logic.check",
+        "code.python"
+      ],
       "include_llm_tools": true,
+      "recent_tool_runs_max": 3,
+      "recent_tool_run_summary_max_chars": 320,
       "max_rounds_per_checkpoint": 2
     }
-  },
-  "multi_agent": {
-    "enabled": true,
-    "max_subagents": 4,
-    "subagent_concurrency": 4,
-    "enable_parallel_tool_probes": true,
-    "probe_tool_names": ["graph.chunk_scan", "graph.pattern_scan"],
-    "probe_concurrency": 4,
-    "lead_tool_names": ["graph.context_rollup", "graph.evidence_crosscheck"],
-    "lead_tool_concurrency": 2,
-    "max_merge_evidences": 60,
-    "worker_timeout_seconds": null,
-    "worker_retry_attempts": 0,
-    "fail_fast": false,
-    "incremental_parallelism": true,
-    "initial_worker_count": 1,
-    "stop_min_evidence_count": 3,
-    "stop_min_coverage_ratio": 0.85
-  },
-  "gap_detection": {
-    "coverage_threshold": 0.7,
-    "confidence_threshold": 0.6,
-    "expected_min_chunks": 3,
-    "enable_external_on_gap": true
   },
   "reporter": {
     "max_highlights": 6,
@@ -172,9 +115,6 @@
     "provenance_chunk_attach_max": 10,
     "report_max_graph_chain_items": 200,
     "report_max_seed_entities": 15,
-    "enable_consistency_check": true,
-    "consistency_temperature": 0.0,
-    "consistency_max_retries": 2,
     "sectionwise_writer": true,
     "sectionwise_retain_k": 5,
     "citation_aliases": true,
@@ -184,23 +124,25 @@
     "enable_citation_agent": true,
     "parallel_sections": false,
     "max_parallel_sections": 4,
-    "consistency_max_claims": 40,
     "synthesis_section_max_chars": 1200
   },
   "tool_manager": {
     "enable_builtin_tools": true,
+    "search_retriever_config_path": "config/json_configs/rag_inference.json",
     "enabled_tools": {
-      "graph.beam_search": {
-        "params": {
-          "beam_size": 3,
-          "max_depth": 3,
-          "temperature": 0.2,
-          "pattern_probe_max_terms": 6
-        }
-      },
       "code.python": {
         "params": {
-          "allowed_imports": ["json", "math", "decimal", "fractions", "statistics", "datetime", "numpy", "pandas", "scipy"],
+          "allowed_imports": [
+            "json",
+            "math",
+            "decimal",
+            "fractions",
+            "statistics",
+            "datetime",
+            "numpy",
+            "pandas",
+            "scipy"
+          ],
           "timeout_seconds": 6.0,
           "max_code_chars": 12000,
           "max_stdout_chars": 8000,
@@ -221,27 +163,7 @@
   "tool_budget": {
     "enabled": true,
     "max_calls_total": 60,
-    "count_external_calls": true,
     "expose_to_llm": true
-  },
-  "external_channel": {
-    "default_provider": "tavily",
-    "max_rounds": 2,
-    "enabled": true,
-    "auto_generate_task_on_gap": true,
-    "execute_forced_tasks_without_gap": true,
-    "execute_pending_tasks_without_gap": false,
-    "context_window_limit": 12,
-    "http_timeout": 20.0,
-    "endpoint_url": "https://api.tavily.com/search",
-    "max_results": 5,
-    "tool_timeout_seconds": 45.0,
-    "cache_mode": "auto",
-    "cache_dir": "${DEEPSEARCH_EXTERNAL_CACHE_DIR}",
-    "tavily_api_key": "${TAVILY_API_KEY}"
-  },
-  "quality_loop": {
-    "enabled": true
   },
   "deterministic_routing": {
     "enabled": true,
@@ -269,7 +191,10 @@
   "artifacts": {
     "enabled": true,
     "version": 2,
-    "profiles": ["dev", "public"],
+    "profiles": [
+      "dev",
+      "public"
+    ],
     "state_snapshot_mode": "manifest",
     "refs": {
       "enabled": true
@@ -282,7 +207,6 @@
       "include_final_report_in_json": false,
       "max_plan_steps": 12,
       "max_stage_history": 128,
-      "max_external_calls": 12,
       "max_errors": 64
     }
   },

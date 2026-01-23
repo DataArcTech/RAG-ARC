@@ -14,6 +14,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]  # MinerU/
 DEFAULT_OUTPUT_DIR = SERVER_DIR / "mineru_outputs"
 DEFAULT_TEMP_DIR = SERVER_DIR / ".tmp" / "mineru_temp"
 DEFAULT_CONFIG_PATH = SERVER_DIR / ".tmp" / "mineru_server_config.json"
+PARSE_STATUS_FILENAME = "parse_status.json"
 
 
 def _default_cache_root() -> Path:
@@ -83,7 +84,8 @@ class ServerConfig:
     chat_api_key_file: Optional[str] = None
     chat_model: str = "gemini-2.5-flash"
     chat_timeout_s: int = 60
-    caption_max_images: int = 32
+    # Safety knob for LLM captioning. If <= 0, treat it as "no limit".
+    caption_max_images: int = 0
     caption_context: str = ""
     caption_context_file: Optional[str] = None
     caption_up_tokens: int = 500

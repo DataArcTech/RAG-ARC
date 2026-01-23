@@ -75,23 +75,17 @@ class _BM25IndexBuilderSchemaMixin:
                 # Tantivy index directories must contain `meta.json`. If it's missing, we consider the directory
                 # invalid (often only stale `.tantivy-*.lock` files after crashes) and recreate a fresh index.
                 if not os.path.exists(self._tantivy_meta_path()):
-                    logger.warning(
-                        "BM25 index dir has files but is missing meta.json; recreating empty index at: %s",
-                        self.config.index_path,
-                    )
-                    # Safety: only auto-clean if the directory only contains Tantivy lock files. Any other
-                    # unexpected files might indicate a misconfiguration; require manual intervention then.
                     entries = list(os.scandir(self.config.index_path))
                     unexpected = [
                         e.name
                         for e in entries
                         if not (e.is_file(follow_symlinks=False) and e.name.startswith(".tantivy-") and e.name.endswith(".lock"))
                     ]
-                    if unexpected:
-                        raise RuntimeError(
-                            "BM25 index dir is missing meta.json but contains unexpected entries; "
-                            f"refusing to auto-clean: path={self.config.index_path} unexpected={unexpected[:10]}"
-                        )
+                    logger.warning(
+                        "BM25 index dir missing meta.json; rebuilding index and cleaning existing files: %s (unexpected=%s)",
+                        self.config.index_path,
+                        unexpected[:10],
+                    )
 
                     for entry in entries:
                         try:

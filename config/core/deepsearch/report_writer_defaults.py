@@ -38,8 +38,6 @@ SLIM_METHOD_LEVEL_2_TOOL_RESULTS = 6
 
 SLIM_GRAPH_EVIDENCE_LEVEL_SEED_ENTITIES = 12
 
-SLIM_COVERAGE_BASE_PENDING_EXTERNAL_MAX_ITEMS = 6
-
 
 @dataclass(frozen=True, slots=True)
 class ReportWritePromptBudgetLevel:

@@ -1,7 +1,6 @@
 import pytest
 
-from core.deepsearch.tools.fast.graph_ops_schema_layer import GraphSchemaNodesTool
-from core.deepsearch.tools import ToolRunRequest
+from core.deepsearch.tools import GraphOpsTool, ToolRunRequest
 from core.graph_adapter.base import GraphAccessScope, GraphAdapterCapability, GraphAdapterMetadata
 
 
@@ -45,14 +44,18 @@ async def test_schema_nodes_query_by_chunk_id() -> None:
             {"schema_id": "schema-1", "layer": "concept", "text": "免赔额", "text_normalized": "免赔额", "level": "1.1"},
         ]
     )
-    tool = GraphSchemaNodesTool()
+    tool = GraphOpsTool()
     req = ToolRunRequest(
         question="show schema nodes",
         plan_step="p",
         context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"chunk_id": "chunk_001", "layer": "concept", "limit": 10},
+        extra={
+            "mode": "template",
+            "template": "schema_nodes",
+            "template_args": {"chunk_id": "chunk_001", "layer": "concept", "limit": 10},
+        },
     )
     result = await tool.run(req)
     assert adapter.last_cypher is not None
@@ -67,17 +70,20 @@ async def test_schema_nodes_query_by_term() -> None:
             {"schema_id": "schema-2", "layer": "process", "text": "生效期", "text_normalized": "生效期", "level": None},
         ]
     )
-    tool = GraphSchemaNodesTool()
+    tool = GraphOpsTool()
     req = ToolRunRequest(
         question="search schema nodes",
         plan_step="p",
         context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"term": "生效", "layer": "process", "limit": 10},
+        extra={
+            "mode": "template",
+            "template": "schema_nodes",
+            "template_args": {"term": "生效", "layer": "process", "limit": 10},
+        },
     )
     result = await tool.run(req)
     assert adapter.last_cypher is not None
     assert "CONTAINS" in adapter.last_cypher
     assert result.evidences
-

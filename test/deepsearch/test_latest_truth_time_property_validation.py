@@ -1,7 +1,6 @@
 import pytest
 
-from core.deepsearch.tools.fast.graph_ops_temporal import GraphLatestTruthTool
-from core.deepsearch.tools import ToolRunRequest
+from core.deepsearch.tools import GraphOpsTool, ToolRunRequest
 from core.graph_adapter.base import GraphAccessScope, GraphAdapterCapability, GraphAdapterMetadata
 
 
@@ -40,7 +39,7 @@ class _CaptureCypherAdapter:
 @pytest.mark.asyncio
 async def test_latest_truth_rejects_unsafe_time_property_for_cypher() -> None:
     adapter = _CaptureCypherAdapter()
-    tool = GraphLatestTruthTool()
+    tool = GraphOpsTool()
     malicious = "updated_at) RETURN 1 AS injected //"
     req = ToolRunRequest(
         question="repro cypher injection",
@@ -48,10 +47,13 @@ async def test_latest_truth_rejects_unsafe_time_property_for_cypher() -> None:
         context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"topic": "远程办公政策", "predicates": ["HAS_POLICY"], "time_property": malicious},
+        extra={
+            "mode": "template",
+            "template": "latest_truth",
+            "template_args": {"topic": "远程办公政策", "predicates": ["HAS_POLICY"], "time_property": malicious},
+        },
     )
     await tool.run(req)
     assert adapter.last_cypher is not None
     assert malicious not in adapter.last_cypher
     assert "RETURN 1 AS injected" not in adapter.last_cypher
-

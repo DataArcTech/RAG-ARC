@@ -27,7 +27,14 @@ class MinerUParser(AbstractParser):
         super().__init__(config)
         server_url = str(getattr(self.config, "server_url", "") or "").strip()
         timeout_s = int(getattr(self.config, "timeout_s", 900) or 900)
-        self.client = MinerUServiceClient(base_url=server_url, timeout_s=timeout_s)
+        poll_interval_s = int(getattr(self.config, "poll_interval_s"))
+        poll_timeout_s = int(getattr(self.config, "poll_timeout_s"))
+        self.client = MinerUServiceClient(
+            base_url=server_url,
+            timeout_s=timeout_s,
+            poll_interval_s=poll_interval_s,
+            poll_timeout_s=poll_timeout_s,
+        )
 
     def get_supported_extensions(self) -> List[str]:
         return [".pdf", ".jpg", ".jpeg", ".png"]

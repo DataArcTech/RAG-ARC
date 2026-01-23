@@ -100,14 +100,8 @@ def slim_coverage(coverage: Any, *, level: int) -> Dict[str, Any]:
         return {}
     normalized_level = max(0, int(level))
 
-    gap_result = coverage.get("gap_result") if isinstance(coverage.get("gap_result"), dict) else {}
     if normalized_level <= 0:
-        pending = coverage.get("pending_external")
-        max_pending = int(report_defaults.SLIM_COVERAGE_BASE_PENDING_EXTERNAL_MAX_ITEMS)
         out = dict(coverage)
-        if isinstance(pending, list) and len(pending) > max_pending:
-            out["pending_external"] = pending[:max_pending]
-            out["pending_external_truncated"] = True
         return {
             "evidence_count": out.get("evidence_count"),
             "unique_source_count": out.get("unique_source_count"),
@@ -119,24 +113,10 @@ def slim_coverage(coverage: Any, *, level: int) -> Dict[str, Any]:
             "coverage_score": out.get("coverage_score"),
             "confidence_score": out.get("confidence_score"),
             "missing_topics": out.get("missing_topics") or [],
-            "pending_external": out.get("pending_external") or [],
-            "gap_result": {
-                "coverage_score": gap_result.get("coverage_score"),
-                "confidence_score": gap_result.get("confidence_score"),
-                "should_trigger_external": gap_result.get("should_trigger_external"),
-                "missing_topics": gap_result.get("missing_topics") or [],
-                "reason": gap_result.get("reason"),
-            },
         }
 
     if normalized_level == 2:
-        return {
-            "gap_result": {
-                "should_trigger_external": gap_result.get("should_trigger_external"),
-                "missing_topics": gap_result.get("missing_topics") or [],
-                "reason": gap_result.get("reason"),
-            }
-        }
+        return {}
 
     return {}
 
@@ -193,4 +173,3 @@ def limit_highlights(
                     payload[key] = value[:limit].rstrip() + "..."
         limited.append(payload)
     return limited
-

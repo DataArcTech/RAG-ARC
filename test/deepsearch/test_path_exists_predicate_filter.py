@@ -1,7 +1,6 @@
 import pytest
 
-from core.deepsearch.tools.fast.graph_ops_traversal import GraphPathExistsTool
-from core.deepsearch.tools import ToolRunRequest
+from core.deepsearch.tools import GraphOpsTool, ToolRunRequest
 from core.graph_adapter.base import GraphAccessScope, GraphAdapterCapability, GraphAdapterMetadata
 
 
@@ -49,18 +48,21 @@ class _ShortestPathTrapAdapter:
 @pytest.mark.asyncio
 async def test_path_exists_does_not_use_shortestpath_to_avoid_false_negatives() -> None:
     adapter = _ShortestPathTrapAdapter()
-    tool = GraphPathExistsTool()
+    tool = GraphOpsTool()
     req = ToolRunRequest(
         question="A 是否通过 OWNS 到达 B？",
         plan_step="p",
         context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"source": "A公司", "target": "B公司", "predicates": ["OWNS"], "direction": "out", "max_hops": 5},
+        extra={
+            "mode": "template",
+            "template": "path_exists",
+            "template_args": {"source": "A公司", "target": "B公司", "predicates": ["OWNS"], "direction": "out", "max_hops": 5},
+        },
     )
     result = await tool.run(req)
     assert adapter.last_cypher is not None
     assert "shortestPath" not in adapter.last_cypher
     assert "ok=true" in result.summary.lower()
     assert result.evidences
-

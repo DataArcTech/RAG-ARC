@@ -243,7 +243,7 @@ def _resolve_enabled_tools(
         else:
             allowlist = None
             if service_config is not None:
-                allowlist = getattr(service_config.planner, "tool_catalog_allowlist", None)
+                allowlist = getattr(getattr(service_config.graph_reasoning, "think", None), "tool_catalog_allowlist", None)
             tokens = [str(name).strip() for name in (allowlist or []) if str(name).strip()]
             think_tool = None
             if service_config is not None:

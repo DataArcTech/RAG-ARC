@@ -264,7 +264,11 @@ class AssetPostProcessor:
                     continue
                 pending.append(entry)
 
-        pending = pending[: max(0, int(self.caption_max_images))]
+        # `caption_max_images` is a safety knob for LLM captioning.
+        # If <= 0, treat it as "no limit" (caption all pending images).
+        limit = int(self.caption_max_images)
+        if limit > 0:
+            pending = pending[:limit]
         if wants_llm and pending:
             for entry in pending:
                 filename = str(entry["filename"])

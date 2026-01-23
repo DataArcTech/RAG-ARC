@@ -41,12 +41,12 @@ def test_convert_bracket_citations_to_sup_emits_contiguous_sup_tags_and_sources(
     assert citation_key_map == {"ev1": 1, "ev2": 2, "ev3": 3}
     assert sources and [entry["key"] for entry in sources] == [1, 2, 3]
     assert [entry["chunk_id"] for entry in sources] == ["ev1", "ev2", "ev3"]
-    assert sources[0]["file"] == "/knowledge/chunk/ev1"
-    assert sources[0]["title"].startswith("doc1.md#chunk:")
+    assert sources[0]["file"] == "/static/files/file-1/doc1.md"
+    assert sources[0]["title"] == "doc1.md"
     assert sources[1]["file"] == "https://example.com/doc2"
     assert sources[1]["title"] == "Web title line"
-    assert sources[2]["file"] == "/knowledge/chunk/ev3"
-    assert sources[2]["title"].startswith("doc3.md#chunk:")
+    assert sources[2]["file"] == "/static/files/file-3/doc3.md"
+    assert sources[2]["title"] == "doc3.md"
 
 
 def test_convert_bracket_citations_to_sup_does_not_touch_appendix_sections():
@@ -55,7 +55,7 @@ def test_convert_bracket_citations_to_sup_does_not_touch_appendix_sections():
             "Body cites [ev1].",
             "",
             "## Appendix: Chunk Evidence",
-            "- [ev1] (graph): full id should remain in appendix.",
+            "- `ev1` (graph): full id should remain in appendix.",
         ]
     )
     citations = [{"evidence_id": "ev1", "source": "graph"}]
@@ -72,7 +72,7 @@ def test_convert_bracket_citations_to_sup_does_not_touch_appendix_sections():
 
     assert "Body cites <sup>1</sup>." in converted
     assert "## Appendix: Chunk Evidence" in converted
-    assert "- [ev1] (graph): full id should remain in appendix." in converted
+    assert "- `ev1` (graph): full id should remain in appendix." in converted
 
 
 def test_convert_bracket_citations_to_sup_supports_cjk_brackets():

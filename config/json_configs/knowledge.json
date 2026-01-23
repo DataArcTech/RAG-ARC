@@ -85,7 +85,7 @@
         },
         "chunker_config": {
             "type": "semantic_unit_chunker",
-            "level": "basic",
+            "level": "standard",
             "fallback_chunker_config": {
                 "type": "token_chunker",
                 "chunk_size": "${TOKEN_CHUNK_SIZE}",

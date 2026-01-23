@@ -2,78 +2,38 @@
 from typing import Any, Dict, Iterable, Optional
 
 from .base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest
-from .fast import (
-    BridgeLookupTool,
-    ChunkScanTool,
-    GraphAggregateTool,
-    GraphEntityConceptsTool,
-    GraphExpandTermsTool,
-    GraphFactsByTypeTool,
-    GraphIntersectionTool,
-    GraphLatestTruthTool,
-    GraphNeighborsTool,
-    GraphPathExistsTool,
-    GraphRelationPathExploreTool,
-    GraphRelationPathGroundTool,
-    GraphRuleCheckTool,
-    GraphSchemaNodesTool,
-    GraphSdfChildrenTool,
-    GraphSdfDependenciesTool,
-    GraphSetDifferenceTool,
-    GraphTraceToRootTool,
-    PathCacheTool,
-    PatternProbeTool,
-)
-from .heavy import (
-    GraphThinkTool,
-    LLMChainExplorerTool,
-    ParallelThinkTool,
-    CrossAdapterPlannerTool,
-    ContextRewriterTool,
+from .explore import (
+    ExploreTool,
+    GraphOpsTool,
+    SearchTool,
+    SearchFaissTool,
+    SearchBM25Tool,
+    SearchGraphChunkTool,
+    WebSearchTool,
     BeamSearchTool,
+    LLMChainExplorerTool,
 )
-from .hybrid import (
-    ContextRollupTool,
-    EvidenceCrosscheckTool,
-    HybridNeighborhoodProbeTool,
-    CodePythonTool,
-)
+from .check import LogicCheckTool
+from .think import ThinkTool
+from .code import CodePythonTool
 
 __all__ = [
     "GraphTool",
     "ToolDescriptor",
     "ToolResult",
     "ToolRunRequest",
-    "PatternProbeTool",
-    "ChunkScanTool",
-    "BridgeLookupTool",
-    "PathCacheTool",
-    "GraphIntersectionTool",
-    "GraphSetDifferenceTool",
-    "GraphAggregateTool",
-    "GraphEntityConceptsTool",
-    "GraphRuleCheckTool",
-    "GraphPathExistsTool",
-    "GraphNeighborsTool",
-    "GraphRelationPathExploreTool",
-    "GraphRelationPathGroundTool",
-    "GraphFactsByTypeTool",
-    "GraphExpandTermsTool",
-    "GraphLatestTruthTool",
-    "GraphSchemaNodesTool",
-    "GraphSdfChildrenTool",
-    "GraphSdfDependenciesTool",
-    "GraphTraceToRootTool",
-    "LLMChainExplorerTool",
-    "HybridNeighborhoodProbeTool",
-    "ContextRollupTool",
-    "EvidenceCrosscheckTool",
-    "GraphThinkTool",
-    "ParallelThinkTool",
-    "CrossAdapterPlannerTool",
-    "ContextRewriterTool",
+    "ExploreTool",
+    "GraphOpsTool",
+    "SearchTool",
+    "SearchFaissTool",
+    "SearchBM25Tool",
+    "SearchGraphChunkTool",
+    "ThinkTool",
+    "LogicCheckTool",
     "BeamSearchTool",
+    "LLMChainExplorerTool",
     "CodePythonTool",
+    "WebSearchTool",
     "build_builtin_tools",
     "builtin_tool_descriptors",
     "get_tool_descriptor",
@@ -82,51 +42,31 @@ __all__ = [
 ]
 
 _BUILTIN_CLASSES = [
-    PatternProbeTool,
-    ChunkScanTool,
-    BridgeLookupTool,
-    PathCacheTool,
-    GraphIntersectionTool,
-    GraphSetDifferenceTool,
-    GraphAggregateTool,
-    GraphEntityConceptsTool,
-    GraphRuleCheckTool,
-    GraphPathExistsTool,
-    GraphNeighborsTool,
-    GraphRelationPathExploreTool,
-    GraphRelationPathGroundTool,
-    GraphFactsByTypeTool,
-    GraphExpandTermsTool,
-    GraphLatestTruthTool,
-    GraphSchemaNodesTool,
-    GraphSdfChildrenTool,
-    GraphSdfDependenciesTool,
-    GraphTraceToRootTool,
-    LLMChainExplorerTool,
-    HybridNeighborhoodProbeTool,
-    ContextRollupTool,
-    EvidenceCrosscheckTool,
-    GraphThinkTool,
-    ParallelThinkTool,
-    CrossAdapterPlannerTool,
-    ContextRewriterTool,
-    BeamSearchTool,
+    GraphOpsTool,
+    ExploreTool,
+    SearchTool,
+    SearchFaissTool,
+    SearchBM25Tool,
+    SearchGraphChunkTool,
+    LogicCheckTool,
+    ThinkTool,
     CodePythonTool,
+    WebSearchTool,
+    BeamSearchTool,
+    LLMChainExplorerTool,
 ]
 
 _DESCRIPTOR_MAP = {cls.descriptor.name: cls.descriptor for cls in _BUILTIN_CLASSES}
 _LLM_REQUIRED = {
-    LLMChainExplorerTool,
-    HybridNeighborhoodProbeTool,
-    ContextRollupTool,
-    EvidenceCrosscheckTool,
-    ParallelThinkTool,
-    CrossAdapterPlannerTool,
-    ContextRewriterTool,
+    SearchTool,
+    SearchGraphChunkTool,
+    ThinkTool,
+    LogicCheckTool,
     BeamSearchTool,
+    LLMChainExplorerTool,
 }
 _LLM_OPTIONAL = {
-    GraphThinkTool,
+    ExploreTool,
 }
 
 
@@ -148,9 +88,9 @@ def build_builtin_tools(llm_connector=None, overrides: Optional[Dict[str, Dict[s
 
 
 def builtin_tool_descriptors() -> Iterable[ToolDescriptor]:
-    """Expose tool descriptors for planner hints."""
+    """Expose tool descriptors for think hints."""
 
-    return list(_DESCRIPTOR_MAP.values())
+    return [cls.descriptor for cls in _BUILTIN_CLASSES]
 
 
 def get_tool_descriptor(tool_name: str) -> Optional[ToolDescriptor]:

@@ -262,7 +262,7 @@ RAG-ARC uses a modular configuration system. Key configuration files are located
 - `knowledge.json`: Knowledge management configuration
 - `account.json`: User account configuration
 - `.env`: runtime knobs (providers, database credentials, etc.). Set `DEVELOP_MODE=true` when you want all Docker services (PostgreSQL/Redis/Neo4j) to expose their ports to `localhost` for debugging; it remains `false` by default for security.
-- Web search (Tavily): DeepSearch enables external search by default (`config/json_configs/deepsearch_service.json` → `planner.allow_external_channel=true`, `external_channel.enabled=true`). HippoRAG Q&A supports request-level opt-in via `enable_web_search=true` on `/rag_inference/stream_chat/{session_id}` (requires `config/json_configs/rag_inference*.json` → `web_search.enabled=true`). Set `TAVILY_API_KEY` to activate results.
+- Web search (Tavily): DeepSearch exposes `web.search` as a normal tool (graph-first; use when realtime/current info is required). HippoRAG Q&A supports request-level opt-in via `enable_web_search=true` on `/rag_inference/stream_chat/{session_id}` (requires `config/json_configs/rag_inference*.json` → `web_search.enabled=true`). Set `TAVILY_API_KEY` to activate results.
 
 ### 🌐 LLM Profiles via `.env`
 
@@ -360,7 +360,7 @@ The CLI still connects to the same PostgreSQL/Redis/Neo4j/MinIO services defined
 - **ToolManager executes all built-in tools locally by default.** MCP routing only kicks in when you configure an `mcp_client`, mark a tool as `mcp_only`/`mcp_fallback`, or register remote tool descriptors. Start the MCP tool server only if you need to proxy tools through FastMCP or expose them to other agents; otherwise DeepSearch runs entirely in-process.
 - DeepSearch includes a deterministic `code.python` tool for math/finance verification. Weaver traces always include the executed code as a ```python``` block plus stdout/result in `<tool_response>`; tune `allowed_imports`/timeouts/limits via `config/json_configs/deepsearch_service.json` → `tool_manager.enabled_tools["code.python"]`.
 - Keep the JSON config in sync with your environment files to avoid drift. The `tool_manager` block accepts the same structure described in `config/application/deepsearch_config.py`.
-- Use `DEEPSEARCH_TOOL_MCP_TOOLS` (comma-separated list) when you need to override which tools are exposed. When empty, the server derives a curated default set from `DEEPSEARCH_SERVICE_CONFIG_PATH` (planner allowlist + think tool); use `DEEPSEARCH_TOOL_MCP_TOOLS=__all__` to expose every built-in tool.
+- Use `DEEPSEARCH_TOOL_MCP_TOOLS` (comma-separated list) when you need to override which tools are exposed. When empty, the server derives a curated default set from `DEEPSEARCH_SERVICE_CONFIG_PATH` (think allowlist + think tool); use `DEEPSEARCH_TOOL_MCP_TOOLS=__all__` to expose every built-in tool.
 - HTTP, CLI, and MCP responses expose a consistent `evidence` bundle (chunks, triples, seed entities, graph metadata). Pass `include_evidence=true` on the HTTP endpoints or `--with-evidence` on the CLI to opt in; MCP DeepSearch runs include the bundle automatically.
 - Tune payload size via environment variables: `ENABLE_ALL_EVIDENCE`, `CHAT_TOP_CHUNKS`, `CHAT_TOP_TRIPLES`, `CHAT_TOP_SEED_ENTITIES`, `DEEPSEARCH_TOP_CHUNKS`, and `DEEPSEARCH_TOP_TRIPLES` govern how much data is serialized; when `ENABLE_ALL_EVIDENCE=true` no trimming is applied.
 
@@ -575,9 +575,6 @@ uv sync --extra dev
 
 # Run all tests
 uv run pytest
-
-# Run specific test file
-uv run pytest test/deepsearch/test_planner.py
 
 # Run tests with verbose output
 uv run pytest -v
