@@ -141,6 +141,40 @@ class _IndexManagerPipelineMixin:
             logger.info(f"Extracted {len(parsed_text)} characters of text content")
             _emit("parsed", 25, {"file_id": file_id, "filename": filename, "chars": len(parsed_text)})
 
+            pageindex_context = None
+            pageindex_info: Dict[str, Any] = {}
+            if getattr(self, "pageindex_service", None) is not None:
+                try:
+                    from config import pageindex as pageindex_cfg
+
+                    if pageindex_cfg.pageindex_enabled():
+                        md_path = None
+                        output_dir = None
+                        if isinstance(parse_result, dict):
+                            md_path = parse_result.get("md_content_path")
+                            output_paths = parse_result.get("output_paths")
+                            if isinstance(output_paths, dict):
+                                md_path = md_path or output_paths.get("markdown")
+                            meta = parse_result.get("metadata")
+                            if isinstance(meta, dict):
+                                output_dir = meta.get("output_dir")
+
+                        pageindex_context = self.pageindex_service.build_context(
+                            file_id=file_id,
+                            filename=filename,
+                            markdown=parsed_text,
+                            md_path=str(md_path) if md_path else None,
+                            output_dir=str(output_dir) if output_dir else None,
+                        )
+                        pageindex_info = {
+                            "sections": len(pageindex_context.tree.nodes),
+                            "level_conflict_ratio": pageindex_context.tree.level_conflict_ratio,
+                            "uniform_level_flattened": pageindex_context.tree.uniform_level_flattened,
+                        }
+                except Exception as exc:
+                    logger.warning("PageIndex tree build failed for %s: %s", file_id, exc)
+                    pageindex_info = {"error": str(exc)}
+
             # Step 3: Store parsed content (use thread pool to avoid blocking)
             logger.info(f"Step 3: Storing parsed content")
             parser_type_name = "auto_selected"
@@ -221,6 +255,17 @@ class _IndexManagerPipelineMixin:
             except Exception as exc:
                 logger.warning("Failed to augment chunk index_text from filename: %s", exc)
 
+            if pageindex_context is not None:
+                try:
+                    enrichment = self.pageindex_service.enrich_chunks(
+                        context=pageindex_context,
+                        chunks=chunks,
+                    )
+                    pageindex_info["chunk_enrichment"] = enrichment
+                except Exception as exc:
+                    logger.warning("PageIndex chunk enrichment failed for %s: %s", file_id, exc)
+                    pageindex_info["chunk_enrichment_error"] = str(exc)
+
             logger.info(f"Created {len(chunks)} chunks")
             _emit("chunked", 55, {"file_id": file_id, "num_chunks": len(chunks)})
             result["metadata"]["num_chunks"] = len(chunks)
@@ -285,6 +330,35 @@ class _IndexManagerPipelineMixin:
                 self._persist_backfilled_anchor_chunk_ids(self.chunk_storage, stored_chunks, chunk_ids)
             except Exception as backfill_error:
                 logger.warning(f"Failed to backfill anchor_chunk_id metadata: {backfill_error}")
+
+            if pageindex_context is not None:
+                try:
+                    summary_info = await self.pageindex_service.summarize_sections(
+                        context=pageindex_context,
+                        chunks=stored_chunks,
+                    )
+                    pageindex_info["summaries"] = summary_info
+                    doc_desc = await self.pageindex_service.build_doc_description(context=pageindex_context)
+                    if doc_desc is not None:
+                        pageindex_info["doc_description"] = {"enabled": True}
+                except Exception as exc:
+                    logger.warning("PageIndex summaries failed for %s: %s", file_id, exc)
+                    pageindex_info["summary_error"] = str(exc)
+
+                try:
+                    pageindex_indexing = await self.pageindex_service.build_indexes(
+                        context=pageindex_context,
+                        owner_id=str(file_metadata.owner_id) if file_metadata else None,
+                        base_indexers=self.indexers,
+                    )
+                    if pageindex_indexing:
+                        pageindex_info["indexing"] = pageindex_indexing
+                except Exception as exc:
+                    logger.warning("PageIndex indexing failed for %s: %s", file_id, exc)
+                    pageindex_info["indexing_error"] = str(exc)
+
+            if pageindex_info:
+                result["metadata"]["pageindex"] = pageindex_info
 
             # Step 6: Index the chunks (if indexers are configured)
             if self.indexers:

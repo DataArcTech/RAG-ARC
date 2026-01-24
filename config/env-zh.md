@@ -146,6 +146,45 @@ Benchmark/实验模式：
 - **KG domain 回退**：当 chunk 未提供 `chunk.domain`（或 `chunk.metadata["domain"]`）时，Neo4j 入库会回退到已加载 schema 的 `default_domain`（例如使用 `./fin_kg_schema.yml` 时为 `finance_insurance`）。
 - **HippoRAG PPR 方向性（重要）**：为了通用检索稳定性，`pruned_hipporag_neo4j_retrieval.ppr_directed_mode` 默认 `off`（无向 PPR）。`KG_SCHEMA_PATH` 中的 `direction_sensitive_relations` 仍会被 DeepSearch / fast graph tools 用于方向约束与校验；如需在“检索阶段”启用有向 PPR，请在 `config/json_configs/rag_inference*.json` 或 `config/json_configs/deepsearch_service.json` 的 `retriever_config` 中显式设置 `ppr_directed_mode=auto/on`。
 
+## 1.2 PageIndex 章节树与路由索引（离线生成）
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `PAGEINDEX_ENABLED` | `true` | 是否启用 PageIndex 章节树构建与检索过滤（离线 ingest 生成）。 |
+| `SECTION_INDEX_ENABLED` | `true` | 是否启用章节索引（section index）入库。 |
+| `SECTION_FAISS_INDEX_PATH` | `./data/section_faiss_index` | 章节向量索引目录（独立于主 FAISS）。 |
+| `SECTION_BM25_INDEX_PATH` | `./data/section_bm25_index` | 章节 BM25 索引目录（独立于主 BM25）。 |
+| `DOC_ROUTING_ENABLED` | `false` | 是否启用文档级描述 + doc routing 预筛。 |
+| `DOC_ROUTING_FAISS_INDEX_PATH` | `./data/doc_routing_faiss_index` | doc routing 向量索引目录。 |
+| `DOC_ROUTING_BM25_INDEX_PATH` | `./data/doc_routing_bm25_index` | doc routing BM25 索引目录。 |
+| `SECTION_SUMMARY_ENABLED` | `true` | 是否生成章节摘要（用于 section index 与 doc routing）。 |
+| `SECTION_SUMMARY_MODEL` | _(空)_ | 章节摘要模型；为空则优先使用 `LOW_COST_MODEL`，再回退主聊天模型。 |
+| `SECTION_SUMMARY_MAX_TOKENS` | `800` | 章节摘要输入最大 token 预算（超出会截断）。 |
+| `SECTION_SUMMARY_TOP_K` | `5` | 叶子章节汇总时采样的 chunk 数量。 |
+| `SECTION_SUMMARY_MAX_CONCURRENCY` | `6` | 章节摘要并发上限（离线 ingest）。 |
+| `SECTION_SUMMARY_LEAF_CHUNK_MAX_CHARS` | `1200` | 叶子摘要拼接时每个 chunk 的最大字符数。 |
+| `DOC_DESC_MODEL` | _(空)_ | 文档描述模型；为空则优先 `LOW_COST_MODEL`。 |
+| `DOC_DESC_MAX_TOKENS` | `400` | 文档描述输入最大 token 预算。 |
+| `SECTION_TOP_K` | `6` | 在线检索保留的章节数量（Top-K sections）。 |
+| `SECTION_RETRIEVE_CANDIDATES_K` | `20` | 章节检索阶段每路（dense/BM25）的候选数量。 |
+| `SECTION_RRF_K` | `60` | 章节检索的 RRF 融合系数。 |
+| `SECTION_SCORE_WEIGHT` | `0.1` | 章节命中对 chunk score 的加权系数。 |
+| `SECTION_MIN_KEEP` | `5` | 章节过滤后最少保留的 chunk 数；不足则回退全量。 |
+| `DOC_TOP_K` | `5` | doc routing 返回的文档数量。 |
+| `DOC_RETRIEVE_CANDIDATES_K` | `10` | doc routing 每路检索候选数量。 |
+| `DOC_RRF_K` | `60` | doc routing 的 RRF 融合系数。 |
+| `SECTION_LEVEL_CONFLICT_RATIO` | `0.4` | 标题层级信号冲突比例超过该值时强制平坦化为一级。 |
+| `SECTION_LEVEL_FORCE_FLAT_IF_UNIFORM` | `true` | 当所有标题同级且非一级时，强制降级为一级。 |
+| `SECTION_LEVEL_MAX` | `6` | 章节层级最大深度。 |
+| `SECTION_NUMBERING_ENABLED` | `true` | 是否启用编号层级解析（如 6 / 6.1 / 6.1.1）。 |
+| `SECTION_NUMBERING_MAX_LEVEL` | `6` | 编号层级最大深度。 |
+| `SECTION_CHUNK_MATCH_SNIPPET_CHARS` | `200` | chunk→章节定位的文本片段长度（字符）。 |
+| `SECTION_PAGE_MATCH_SNIPPET_CHARS` | `160` | chunk→页码匹配的文本片段长度（字符）。 |
+| `SECTION_PAGE_MATCH_MAX_PAGES` | `20` | 页码匹配时最多扫描的页数（离线）。 |
+| `PAGEINDEX_TREE_FILENAME` | `pageindex_tree.json` | 章节树 JSON 文件名。 |
+| `PAGEINDEX_NODES_FILENAME` | `pageindex_nodes.jsonl` | 章节节点 JSONL 文件名。 |
+| `PAGEINDEX_DOC_FILENAME` | `pageindex_doc.json` | 文档描述 JSON 文件名。 |
+
 ## 2. 证据输出控制
 
 | 变量 | 默认值 | 说明 |

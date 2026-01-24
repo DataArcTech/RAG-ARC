@@ -146,6 +146,45 @@ Notes:
 - **KG domain fallback**: when chunks do not provide `chunk.domain` (or `chunk.metadata["domain"]`), Neo4j indexing falls back to the loaded schema's `default_domain` (for example `finance_insurance` when using `./fin_kg_schema.yml`).
 - **HippoRAG PPR directionality (important)**: for general-purpose retrieval stability, `pruned_hipporag_neo4j_retrieval.ppr_directed_mode` defaults to `off` (undirected PPR). `direction_sensitive_relations` in `KG_SCHEMA_PATH` is still used by DeepSearch / fast graph tools for directional constraints and validation; to enable directed PPR at retrieval time, explicitly set `ppr_directed_mode=auto/on` in `config/json_configs/rag_inference*.json` or `config/json_configs/deepsearch_service.json` under `retriever_config`.
 
+## 1.2 PageIndex Section Tree & Doc Routing (offline ingest)
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PAGEINDEX_ENABLED` | `true` | Enable PageIndex section tree build and retrieval filtering (offline ingest). |
+| `SECTION_INDEX_ENABLED` | `true` | Enable section index ingestion. |
+| `SECTION_FAISS_INDEX_PATH` | `./data/section_faiss_index` | Section FAISS index path (separate from main FAISS). |
+| `SECTION_BM25_INDEX_PATH` | `./data/section_bm25_index` | Section BM25 index path (separate from main BM25). |
+| `DOC_ROUTING_ENABLED` | `false` | Enable doc descriptions + doc routing prefilter. |
+| `DOC_ROUTING_FAISS_INDEX_PATH` | `./data/doc_routing_faiss_index` | Doc routing FAISS index path. |
+| `DOC_ROUTING_BM25_INDEX_PATH` | `./data/doc_routing_bm25_index` | Doc routing BM25 index path. |
+| `SECTION_SUMMARY_ENABLED` | `true` | Generate section summaries (used by section index and doc routing). |
+| `SECTION_SUMMARY_MODEL` | _(empty)_ | Summary model override; falls back to `LOW_COST_MODEL` then chat model. |
+| `SECTION_SUMMARY_MAX_TOKENS` | `800` | Max input token budget for section summaries (truncate beyond). |
+| `SECTION_SUMMARY_TOP_K` | `5` | Number of leaf chunks to sample for leaf summaries. |
+| `SECTION_SUMMARY_MAX_CONCURRENCY` | `6` | Max concurrent section summaries (offline). |
+| `SECTION_SUMMARY_LEAF_CHUNK_MAX_CHARS` | `1200` | Per-chunk max chars when assembling leaf summary input. |
+| `DOC_DESC_MODEL` | _(empty)_ | Doc description model override; falls back to `LOW_COST_MODEL`. |
+| `DOC_DESC_MAX_TOKENS` | `400` | Max input token budget for doc descriptions. |
+| `SECTION_TOP_K` | `6` | Online top-K sections to keep. |
+| `SECTION_RETRIEVE_CANDIDATES_K` | `20` | Section retrieval candidates per channel (dense/BM25). |
+| `SECTION_RRF_K` | `60` | RRF k for section fusion. |
+| `SECTION_SCORE_WEIGHT` | `0.1` | Section score boost weight applied to chunk scores. |
+| `SECTION_MIN_KEEP` | `5` | Minimum chunks to keep after section filter; fallback to full set when below. |
+| `DOC_TOP_K` | `5` | Doc routing top-K documents. |
+| `DOC_RETRIEVE_CANDIDATES_K` | `10` | Doc routing candidates per channel. |
+| `DOC_RRF_K` | `60` | RRF k for doc routing fusion. |
+| `SECTION_LEVEL_CONFLICT_RATIO` | `0.4` | Flatten to level-1 when heading-level signals conflict above this ratio. |
+| `SECTION_LEVEL_FORCE_FLAT_IF_UNIFORM` | `true` | Flatten to level-1 when all headings share the same non-1 level. |
+| `SECTION_LEVEL_MAX` | `6` | Maximum section depth. |
+| `SECTION_NUMBERING_ENABLED` | `true` | Enable numbering-based level inference (e.g., 6 / 6.1 / 6.1.1). |
+| `SECTION_NUMBERING_MAX_LEVEL` | `6` | Maximum numbering depth. |
+| `SECTION_CHUNK_MATCH_SNIPPET_CHARS` | `200` | Chunk→section locator snippet length (chars). |
+| `SECTION_PAGE_MATCH_SNIPPET_CHARS` | `160` | Chunk→page matcher snippet length (chars). |
+| `SECTION_PAGE_MATCH_MAX_PAGES` | `20` | Max pages scanned during page matching (offline). |
+| `PAGEINDEX_TREE_FILENAME` | `pageindex_tree.json` | Section tree JSON filename. |
+| `PAGEINDEX_NODES_FILENAME` | `pageindex_nodes.jsonl` | Section node JSONL filename. |
+| `PAGEINDEX_DOC_FILENAME` | `pageindex_doc.json` | Doc description JSON filename. |
+
 ## 2. Evidence Output Controls
 
 | Variable | Default | Description |

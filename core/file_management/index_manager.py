@@ -49,6 +49,23 @@ class IndexManager(_IndexManagerPipelineMixin, _IndexManagerStatusMixin, _IndexM
 
         logger.info(f"IndexManager initialized with {len(self.indexers)} indexers")
 
+        self.pageindex_service = None
+        try:
+            from config import pageindex as pageindex_cfg
+            from config.encapsulation.llm.chat.openai import OpenAIChatConfig
+            from core.file_management.pageindex import PageIndexService
+
+            if pageindex_cfg.pageindex_enabled():
+                llm = None
+                if pageindex_cfg.section_summary_enabled() or pageindex_cfg.doc_routing_enabled():
+                    try:
+                        llm = OpenAIChatConfig().build()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("PageIndex LLM unavailable: %s", exc)
+                self.pageindex_service = PageIndexService(llm)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to initialize PageIndex service: %s", exc)
+
     async def index_file(self, file_id: str, **kwargs: Any) -> Dict[str, Any]:
         """
         Async method for indexing a file by file_id.
@@ -73,4 +90,3 @@ class IndexManager(_IndexManagerPipelineMixin, _IndexManagerStatusMixin, _IndexM
             }
 
         return await self.process_file(file_id, **kwargs)
-

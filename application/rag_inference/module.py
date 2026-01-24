@@ -31,6 +31,8 @@ from config.rag_intent_routing import (
     rag_evidence_consistency_enabled,
     rag_evidence_min_keep,
 )
+from config import pageindex as pageindex_cfg
+from core.retrieval.pageindex_retriever import PageIndexRetriever
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -68,6 +70,14 @@ class RAGInference(AbstractModule):
         logger.info("LLM built successfully")
         self._knowledge_module: Optional["Knowledge"] = None
         self._tavily_client: TavilySearchClient | None = None
+        self.pageindex_retriever: PageIndexRetriever | None = None
+        if pageindex_cfg.pageindex_enabled():
+            try:
+                self.pageindex_retriever = PageIndexRetriever()
+                logger.info("PageIndex retriever initialized")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("PageIndex retriever init failed: %s", exc)
+                self.pageindex_retriever = None
         try:
             web_cfg = getattr(self.config, "web_search", None)
             if web_cfg is not None and bool(getattr(web_cfg, "enabled", False)):
@@ -605,6 +615,45 @@ class RAGInference(AbstractModule):
             },
         )
 
+        pageindex_doc_ids: List[str] = []
+        pageindex_doc_ids_by_owner: Dict[str, List[str]] = {}
+        pageindex_section_scores: Dict[str, float] = {}
+        if self.pageindex_retriever is not None and pageindex_cfg.pageindex_enabled():
+            try:
+                for owner_token in visibility.owner_ids:
+                    doc_ids: List[str] = []
+                    if pageindex_cfg.doc_routing_enabled():
+                        doc_ids = self.pageindex_retriever.retrieve_docs(
+                            rewritten_query,
+                            owner_id=str(owner_token),
+                        )
+                        if doc_ids:
+                            pageindex_doc_ids_by_owner[str(owner_token)] = doc_ids
+                    section_hits = self.pageindex_retriever.retrieve_sections(
+                        rewritten_query,
+                        owner_id=str(owner_token),
+                        file_ids=doc_ids or None,
+                    )
+                    for hit in section_hits:
+                        meta = getattr(hit, "metadata", None) or {}
+                        section_id = str(meta.get("section_id") or getattr(hit, "id", "") or "").strip()
+                        if not section_id:
+                            continue
+                        score = meta.get("score")
+                        if not isinstance(score, (int, float)):
+                            score = 0.0
+                        existing = pageindex_section_scores.get(section_id, None)
+                        if existing is None or score > existing:
+                            pageindex_section_scores[section_id] = float(score)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("PageIndex retrieval failed: %s", exc)
+
+        if len(visibility.owner_ids) == 1 and pageindex_doc_ids_by_owner:
+            owner_key = str(next(iter(visibility.owner_ids)))
+            pageindex_doc_ids = pageindex_doc_ids_by_owner.get(owner_key, [])
+            if pageindex_doc_ids:
+                pageindex_doc_ids = list(dict.fromkeys(pageindex_doc_ids))
+
         chunks: list[Chunk] = []
         subgraph_infos: list[dict[str, Any]] = []
         for owner_token in visibility.owner_ids:
@@ -663,6 +712,23 @@ class RAGInference(AbstractModule):
         chunks = dedupe_chunks(chunks)
         if len(chunks) != before:
             logger.info("Deduped retrieved chunks: %d -> %d", before, len(chunks))
+
+        if pageindex_doc_ids:
+            chunks, info = self._filter_chunks_by_doc_ids(
+                chunks,
+                doc_ids=pageindex_doc_ids,
+                min_keep=pageindex_cfg.section_min_keep(),
+            )
+            logger.info("PageIndex doc filter: %s", info)
+
+        if pageindex_section_scores:
+            chunks, info = self._filter_chunks_by_section_scores(
+                chunks,
+                section_scores=pageindex_section_scores,
+                min_keep=pageindex_cfg.section_min_keep(),
+                score_weight=pageindex_cfg.section_score_weight(),
+            )
+            logger.info("PageIndex section filter: %s", info)
 
         # Evidence consistency filtering (opt-in): keep chunks aligned to anchors to reduce drift.
         if rag_evidence_consistency_enabled() and rewrite_anchors:
@@ -1102,6 +1168,95 @@ class RAGInference(AbstractModule):
         if len(filtered_chunks) != len(chunks):
             logger.info(f"Filtered out {len(chunks) - len(filtered_chunks)} chunks from deleting files")
         return filtered_chunks
+
+    @staticmethod
+    def _extract_section_id(chunk: Chunk) -> str | None:
+        metadata = getattr(chunk, "metadata", None) or {}
+        token = str(metadata.get("section_id") or metadata.get("sectionId") or "").strip()
+        if token:
+            return token
+        chunk_id = str(getattr(chunk, "id", "") or "").strip()
+        return chunk_id or None
+
+    def _filter_chunks_by_section_scores(
+        self,
+        chunks: List[Chunk],
+        *,
+        section_scores: Dict[str, float],
+        min_keep: int,
+        score_weight: float,
+    ) -> tuple[List[Chunk], Dict[str, Any]]:
+        info: Dict[str, Any] = {"sections": len(section_scores)}
+        if not section_scores:
+            info["filtered"] = False
+            return chunks, info
+
+        filtered: List[Chunk] = []
+        for chunk in chunks:
+            section_id = self._extract_section_id(chunk)
+            if not section_id or section_id not in section_scores:
+                continue
+            filtered.append(chunk)
+            if score_weight <= 0:
+                continue
+            meta = getattr(chunk, "metadata", None) or {}
+            base_score = meta.get("score")
+            if not isinstance(base_score, (int, float)):
+                base_score = 0.0
+            section_score = float(section_scores.get(section_id, 0.0))
+            meta["section_score"] = section_score
+            meta["score"] = float(base_score) + section_score * score_weight
+            chunk.metadata = meta
+
+        info["filtered"] = True
+        info["chunks_in"] = len(chunks)
+        info["chunks_out"] = len(filtered)
+        if min_keep > 0 and len(filtered) < min_keep:
+            info["fallback"] = True
+            return chunks, info
+        info["fallback"] = False
+        return filtered, info
+
+    @staticmethod
+    def _filter_chunks_by_doc_ids(
+        chunks: List[Chunk],
+        *,
+        doc_ids: List[str],
+        min_keep: int,
+    ) -> tuple[List[Chunk], Dict[str, Any]]:
+        info: Dict[str, Any] = {"docs": len(doc_ids)}
+        if not doc_ids:
+            info["filtered"] = False
+            return chunks, info
+
+        allowed = {str(doc_id) for doc_id in doc_ids if str(doc_id)}
+        if not allowed:
+            info["filtered"] = False
+            return chunks, info
+
+        def _coerce_file_id(meta: Any) -> str | None:
+            token = str(meta or "").strip()
+            return token or None
+
+        filtered: List[Chunk] = []
+        for chunk in chunks:
+            meta = getattr(chunk, "metadata", None) or {}
+            file_id = None
+            for key in ("source_file_id", "file_id", "document_id", "doc_id"):
+                file_id = _coerce_file_id(meta.get(key))
+                if file_id:
+                    break
+            if file_id and file_id in allowed:
+                filtered.append(chunk)
+
+        info["filtered"] = True
+        info["chunks_in"] = len(chunks)
+        info["chunks_out"] = len(filtered)
+        if min_keep > 0 and len(filtered) < min_keep:
+            info["fallback"] = True
+            return chunks, info
+        info["fallback"] = False
+        return filtered, info
 
     @staticmethod
     def _consume_subgraph_info(chunks: List[Chunk]) -> Optional[Dict[str, Any]]:
