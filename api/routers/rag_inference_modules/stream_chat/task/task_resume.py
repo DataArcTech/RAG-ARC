@@ -4,7 +4,7 @@ import logging
 from typing import Any, AsyncGenerator
 from fastapi.responses import StreamingResponse
 from .task_registry import ChatTaskInfo, get_chat_task_registry
-from api.sse import sse_json_wrapped, sse_done
+from api.sse import sse_done, sse_json_wrapped
 from api.routers.rag_inference_handlers import get_message_handler
 from framework.thread_pool import get_thread_pool
 
@@ -40,40 +40,82 @@ async def _yield_completed_task_response(
             code=500,
             message="error"
         )
-    else:
-        if task_info.assistant_message_id:
-            assistant_msg = await get_thread_pool().run_blocking(
-                get_message_handler().get_message,
-                task_info.assistant_message_id
+        yield sse_done()
+        return
+
+    if task_info.assistant_message_id:
+        assistant_msg = await get_thread_pool().run_blocking(
+            get_message_handler().get_message,
+            task_info.assistant_message_id
+        )
+        if assistant_msg:
+            content = assistant_msg.content.get("content", "") if isinstance(assistant_msg.content, dict) else ""
+            sources = assistant_msg.sources or []
+            keys: list[int] = []
+            for item in sources:
+                if isinstance(item, dict) and "key" in item:
+                    try:
+                        keys.append(int(item["key"]))
+                    except Exception:  # noqa: BLE001
+                        continue
+            citation_key_map = {str(k): k for k in sorted(set(keys))}
+
+            # For resume, send the same "final_text" + "sources" structure as the normal SSE flow
+            # so the frontend can render citations consistently.
+            yield sse_json_wrapped(
+                {
+                    "type": "final_text",
+                    "content": content,
+                    "citation_key_map": citation_key_map,
+                    "id": str(task_info.session_id),
+                },
+                request_id=request_id,
             )
-            if assistant_msg:
-                content = assistant_msg.content.get("content", "") if isinstance(assistant_msg.content, dict) else ""
-                logger.info("Sending complete_response for task %s, content_length=%d", 
-                            task_info.task_id, len(content))
-                yield sse_json_wrapped({
-                    "type": "complete_response",
-                    "content": content
-                }, request_id)
-            else:
-                logger.warning("Assistant message %s not found for completed task %s", 
-                              task_info.assistant_message_id, task_info.task_id)
-                # 如果没有找到消息，发送响应摘要
-                if task_info.response_text:
-                    yield sse_json_wrapped({
+            yield sse_json_wrapped(
+                {
+                    "type": "sources",
+                    "sources": sources,
+                    "citation_key_map": citation_key_map,
+                    "id": str(task_info.session_id),
+                },
+                request_id=request_id,
+            )
+
+            # If the normal streaming flow already cached the final payload chunk, replay it here
+            # to support clients that only consume tool_calls (optional).
+            payload_chunk = None
+            for ev in reversed(task_info.key_events or []):
+                if ev.get("type") == "payload_chunk" and isinstance(ev.get("data"), dict):
+                    payload_chunk = ev["data"]
+                    break
+            if payload_chunk is not None:
+                yield sse_json_wrapped(payload_chunk, request_id=request_id)
+        else:
+            logger.warning(
+                "Assistant message %s not found for completed task %s",
+                task_info.assistant_message_id,
+                task_info.task_id,
+            )
+            if task_info.response_text:
+                yield sse_json_wrapped(
+                    {
                         "type": "response_summary",
                         "text": task_info.response_text,
-                        "length": task_info.response_length
-                    }, request_id)
-        else:
-            logger.warning("Task %s completed but no assistant_message_id, sending response_summary", 
-                          task_info.task_id)
-            # 如果没有 assistant_message_id，发送响应摘要
-            if task_info.response_text:
-                yield sse_json_wrapped({
+                        "length": task_info.response_length,
+                    },
+                    request_id=request_id,
+                )
+    else:
+        logger.warning("Task %s completed but no assistant_message_id, sending response_summary", task_info.task_id)
+        if task_info.response_text:
+            yield sse_json_wrapped(
+                {
                     "type": "response_summary",
                     "text": task_info.response_text,
-                    "length": task_info.response_length
-                }, request_id)
+                    "length": task_info.response_length,
+                },
+                request_id=request_id,
+            )
     yield sse_done()
 
 
@@ -91,7 +133,22 @@ async def _replay_cached_events(
         logger.info("Replaying %d events from Redis for task %s", len(redis_events), task_info.task_id)
         for event in redis_events:
             yield sse_json_wrapped(event["data"], request_id)
-    elif task_info.response_text:
+    else:
+        # When Redis event storage is disabled, fall back to the in-memory key events.
+        # Only replay events that matter for correct rendering (citations/sources + payload).
+        key_events = sorted(task_info.key_events or [], key=lambda e: int(e.get("timestamp_ms") or 0))
+        replay_types = {"final_text", "sources", "payload_chunk"}
+        replayed = False
+        for ev in key_events:
+            if ev.get("type") not in replay_types:
+                continue
+            data = ev.get("data")
+            if isinstance(data, dict):
+                yield sse_json_wrapped(data, request_id)
+                replayed = True
+        if replayed:
+            return
+    if task_info.response_text:
         # 发送响应摘要
         # 如果任务已完成，尝试从数据库获取完整的响应文本
         response_text = task_info.response_text
@@ -109,6 +166,7 @@ async def _replay_cached_events(
                     task_info.session_id,
                     limit=50
                 )
+                found_assistant_message_id = None
                 
                 # 查找user_message之后的assistant message
                 # 消息按 created_at 升序排列（oldest first），所以 assistant message 在 user_message 之后
@@ -123,6 +181,7 @@ async def _replay_cached_events(
                     for i in range(user_message_index + 1, len(messages)):
                         msg = messages[i]
                         if msg.content.get("role") == "assistant":
+                            found_assistant_message_id = getattr(msg, "id", None)
                             # 使用数据库中的完整响应文本
                             db_response_text = msg.content.get("content", "")
                             if db_response_text and len(db_response_text) > len(response_text):
@@ -131,6 +190,11 @@ async def _replay_cached_events(
                                 response_text = db_response_text
                                 response_length = len(db_response_text)
                             break
+
+                # If the assistant message already exists in DB, never create a new one during resume.
+                if found_assistant_message_id and not task_info.assistant_message_id:
+                    await registry.mark_done(task_info.task_id, assistant_message_id=found_assistant_message_id)
+                    task_info = await registry.get(task_info.task_id) or task_info
             except Exception as e:
                 logger.warning("Failed to get complete response from database for task %s: %s", 
                              task_info.task_id, e)
@@ -377,12 +441,7 @@ async def _yield_task_completion_event(
     request_id: str
 ) -> Any:
     """发送任务完成事件"""
-    if task_info.error:
-        yield sse_json_wrapped(
-            {"error": {"message": task_info.error}},
-            request_id=request_id,
-            code=500,
-            message="error"
-        )
-    else:
-        yield sse_done()
+    # For reconnect/resume, emit the same final events as the normal SSE flow
+    # (final_text + sources + rag_arc_payload) so the frontend can render consistently.
+    async for event in _yield_completed_task_response(task_info, request_id):
+        yield event

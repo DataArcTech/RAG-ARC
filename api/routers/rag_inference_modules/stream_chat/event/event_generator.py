@@ -293,11 +293,12 @@ async def _ensure_finalization_after_queue(
     task_info: Optional[Any],
     user_message: Any,
     rag_inference_handler: Any,
-    deepsearch_trace_file_path: Optional[str]
+    deepsearch_trace_file_path: Optional[str],
+    assistant_response_override: Optional[str] = None,
 ) -> None:
     """在队列处理完成后，确保最终化逻辑执行（后台任务）"""
     try:
-        assistant_response = "".join(response_parts)
+        assistant_response = assistant_response_override or "".join(response_parts)
         if not assistant_response:
             return
         
@@ -534,7 +535,8 @@ async def generate_sse_events(
                     return
                 
                 # 检查是否有响应内容
-                if not "".join(response_parts):
+                assistant_response_override = prepared.get("assistant_response")
+                if not (assistant_response_override or "".join(response_parts)):
                     return
                 
                 # 从prepared中获取chunks等变量
@@ -551,7 +553,10 @@ async def generate_sse_events(
                     deepsearch_result, deepsearch_sources_for_frontend,
                     deepsearch_citation_key_map, return_subgraph, query,
                     session_id, first_turn, include_evidence, task_info,
-                    user_message, rag_inference_handler, deepsearch_trace_file_path
+                    user_message,
+                    rag_inference_handler,
+                    deepsearch_trace_file_path,
+                    assistant_response_override=assistant_response_override,
                 )
                 logger.info("Background finalization completed for task %s", task_info.task_id if task_info else "unknown")
             except Exception as e:

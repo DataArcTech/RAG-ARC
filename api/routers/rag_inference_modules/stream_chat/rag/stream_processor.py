@@ -110,10 +110,13 @@ def _run_stream_processing(
         
         token_count = 0
         total_token_length = 0
+        collected_parts: list[str] = []
         for chunk in token_stream:
             token_count += 1
             chunk_str = str(chunk) if chunk else ""
             total_token_length += len(chunk_str)
+            if chunk_str:
+                collected_parts.append(chunk_str)
             if token_count <= 5:
                 logger.debug(
                     "SSE token_stream chunk %d: chunk_type=%s chunk_length=%d chunk_preview=%s",
@@ -126,6 +129,9 @@ def _run_stream_processing(
                 queue.put({"kind": "token", "text": chunk}),
                 loop
             )
+        # Persist the full assistant response into the shared `prepared` dict so that
+        # background finalization does not depend on the SSE consumer accumulating `response_parts`.
+        prepared["assistant_response"] = "".join(collected_parts)
         
         logger.info(
             "SSE token_stream collection completed: total_tokens=%d total_length=%d",

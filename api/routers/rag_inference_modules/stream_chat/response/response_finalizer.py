@@ -221,15 +221,20 @@ async def _build_and_yield_final_response(
 
     # Emit a "final_text" event so the frontend can replace the streamed text.
     # This is necessary because citation normalization/renumbering happens after streaming.
-    yield sse_json_wrapped(
-        {
-            "type": "final_text",
-            "content": assistant_response,
-            "citation_key_map": {str(k): v for k, v in (citation_key_map or {}).items()},
-            "id": str(session_id),
-        },
-        request_id=request_id,
-    )
+    final_text_payload = {
+        "type": "final_text",
+        "content": assistant_response,
+        "citation_key_map": {str(k): v for k, v in (citation_key_map or {}).items()},
+        "id": str(session_id),
+    }
+    if task_info:
+        # Cache for task-resume so reconnects can always receive the normalized text.
+        try:
+            registry = get_chat_task_registry()
+            await registry.append_event(task_info.task_id, final_text_payload, event_type="final_text")
+        except Exception:  # noqa: BLE001
+            pass
+    yield sse_json_wrapped(final_text_payload, request_id=request_id)
     
     # Create the assistant message exactly once per task_id (even if the background callback runs).
     deepsearch_trace = deepsearch_trace_file_path if enable_deepsearch else None
@@ -310,7 +315,15 @@ async def _build_and_yield_final_response(
     
     if subgraph_for_outer is not None:
         chunk_data["subgraph"] = subgraph_for_outer
-    
+
+    if task_info:
+        # Cache for task-resume so reconnects can receive the final payload consistently.
+        try:
+            registry = get_chat_task_registry()
+            await registry.append_event(task_info.task_id, chunk_data, event_type="payload_chunk")
+        except Exception:  # noqa: BLE001
+            pass
+
     yield sse_json_wrapped(chunk_data, request_id=request_id)
     
     # 发送完成事件

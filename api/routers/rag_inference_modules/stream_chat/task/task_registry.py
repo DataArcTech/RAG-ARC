@@ -47,7 +47,22 @@ class ChatTaskInfo:
 
 class ChatTaskRegistry:
     """Process-local task store for chat tasks with recovery support and Redis integration."""
-    
+
+    # Event types that must always be retained for task-resume UX even if the in-memory
+    # key-event ring buffer is full (e.g. citations/sources alignment events).
+    _ALWAYS_CACHE_EVENT_TYPES = frozenset(
+        {
+            "initial",
+            "error",
+            "done",
+            "progress",
+            "sources",
+            "final_text",
+            "payload_chunk",
+        }
+    )
+    _MAX_KEY_EVENTS = 20
+
     def __init__(
         self, 
         *, 
@@ -148,15 +163,19 @@ class ChatTaskRegistry:
                 info.response_text += text_content
                 info.response_length = len(info.response_text)
         
-        # 缓存关键事件
-        if event_type in ("initial", "error", "done", "progress") or len(info.key_events) < 10:
+        # 缓存关键事件（用于断线重连 / 任务恢复）
+        should_cache = (
+            event_type in self._ALWAYS_CACHE_EVENT_TYPES
+            or len(info.key_events) < self._MAX_KEY_EVENTS
+        )
+        if should_cache:
             info.key_events.append({
                 "id": len(info.key_events),
                 "type": event_type,
                 "timestamp_ms": now_ms,
                 "data": event
             })
-            if len(info.key_events) > 10:
+            if len(info.key_events) > self._MAX_KEY_EVENTS:
                 info.key_events.pop(0)
         
         # 存储到 Redis（如果启用）
