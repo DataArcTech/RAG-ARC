@@ -48,9 +48,12 @@ echo "🔍 自动定位到应用目录: ${APP_DIR}"
 ENV_FILE=${ENV_FILE:-${APP_DIR}/.env} # 线上环境直接使用 .env 文件
 if [ -f "${ENV_FILE}" ]; then
     echo "🔧 加载环境配置文件: ${ENV_FILE}"
-    export $(grep -v '^#' ${ENV_FILE} | grep -v '^$' | xargs)
+    # 使用 set -a 自动导出所有变量，避免注释和空行问题
+    set -a
+    source ${ENV_FILE}
+    set +a
 else
-    echo "⚠️  未找到.env文件（${ENV_FILE}），将使用脚本默认值"
+    echo "⚠️  未找到.env文件（${ENV_FILE}），将使用脚本默认值或系统环境变量"
 fi
 
 # ==============================================================================
@@ -90,6 +93,15 @@ APP_LOG_FILE=${APP_LOG_FILE:-${APP_DIR}/log/app_${ENV_ID}.log}
 PARSER_OUTPUT_DIR=${PARSER_OUTPUT_DIR:-${APP_DIR}/data/parsed_files_${ENV_ID}}
 LOCAL_FILE_STORAGE_PATH=${LOCAL_FILE_STORAGE_PATH:-${APP_DIR}/local/files_${ENV_ID}}
 
+# 6. MinerU 服务配置（客户端配置，用于连接远程 MinerU 服务）
+# 注意：此环境为客户端，MinerU 服务在远程服务器运行，不在此处启动
+MINERU_ENABLED=${MINERU_ENABLED:-false}
+MINERU_HOST=${MINERU_HOST:-0.0.0.0}
+MINERU_PORT=${MINERU_PORT:-8899}
+MINERU_OUTPUT_DIR=${MINERU_OUTPUT_DIR:-${APP_DIR}/data/mineru_outputs}
+MINERU_TEMP_DIR=${MINERU_TEMP_DIR:-/tmp/mineru_temp}
+MINERU_LOG_FILE=${MINERU_LOG_FILE:-${APP_DIR}/log/mineru.log}
+
 # ==============================================================================
 # 依赖检查
 # ==============================================================================
@@ -122,17 +134,19 @@ echo ""
 echo "🗄️  处理PostgreSQL容器 [${POSTGRES_CONTAINER_NAME}]..."
 if docker ps -a | grep -q "${POSTGRES_CONTAINER_NAME}"; then
     docker stop ${POSTGRES_CONTAINER_NAME} > /dev/null 2>&1 && echo "  ⏹️  已停止旧PostgreSQL容器"
-    docker start ${POSTGRES_CONTAINER_NAME} && echo "  ✅ PostgreSQL容器重启成功（保留数据）"
+    docker update --restart always ${POSTGRES_CONTAINER_NAME} > /dev/null 2>&1 && echo "  🔄 已设置自动重启策略"
+    docker start ${POSTGRES_CONTAINER_NAME} && echo "  ✅ PostgreSQL容器重启成功（保留数据，已启用自动重启）"
 else
     docker run -d \
         --name ${POSTGRES_CONTAINER_NAME} \
         --network ${NETWORK_NAME} \
+        --restart always \
         -p ${POSTGRES_HOST_PORT}:5432 \
         -e POSTGRES_USER=${POSTGRES_USER} \
         -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD} \
         -e POSTGRES_DB=${POSTGRES_DB} \
         -v "${POSTGRES_CONTAINER_NAME}-data:/var/lib/postgresql/data" \
-        ${POSTGRES_IMAGE} && echo "  ✅ PostgreSQL容器已创建并启动（新数据卷）"
+        ${POSTGRES_IMAGE} && echo "  ✅ PostgreSQL容器已创建并启动（新数据卷，已启用自动重启）"
 fi
 echo ""
 
@@ -144,32 +158,30 @@ if [[ -n "${REDIS_PASSWORD}" ]]; then
 fi
 if docker ps -a | grep -q "${REDIS_CONTAINER_NAME}"; then
     docker stop ${REDIS_CONTAINER_NAME} > /dev/null 2>&1 && echo "  ⏹️  已停止旧Redis容器"
-    docker start ${REDIS_CONTAINER_NAME} && echo "  ✅ Redis容器重启成功（保留数据）"
+    docker update --restart always ${REDIS_CONTAINER_NAME} > /dev/null 2>&1 && echo "  🔄 已设置自动重启策略"
+    docker start ${REDIS_CONTAINER_NAME} && echo "  ✅ Redis容器重启成功（保留数据，已启用自动重启）"
 else
     docker run -d \
         --name ${REDIS_CONTAINER_NAME} \
         --network ${NETWORK_NAME} \
+        --restart always \
         -p ${REDIS_HOST_PORT}:6379 \
         -v "${REDIS_CONTAINER_NAME}-data:/data" \
-        ${REDIS_IMAGE} ${REDIS_CMD} && echo "  ✅ Redis容器已创建并启动（新数据卷）"
+        ${REDIS_IMAGE} ${REDIS_CMD} && echo "  ✅ Redis容器已创建并启动（新数据卷，已启用自动重启）"
 fi
 echo ""
 
 # 4. 处理Neo4j
 echo "🔷 处理Neo4j容器 [${NEO4J_CONTAINER_NAME}]..."
-# 检查容器是否存在
 if docker ps -a | grep -q "${NEO4J_CONTAINER_NAME}"; then
-    # 容器存在，直接重启
-    echo "  ⏹️  已停止旧Neo4j容器"
-    docker stop ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1
-    echo "  ✅ Neo4j容器重启成功（保留数据）"
-    docker start ${NEO4J_CONTAINER_NAME}
+    docker stop ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 && echo "  ⏹️  已停止旧Neo4j容器"
+    docker update --restart always ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 && echo "  🔄 已设置自动重启策略"
+    docker start ${NEO4J_CONTAINER_NAME} && echo "  ✅ Neo4j容器重启成功（保留数据，已启用自动重启）"
 else
-    # 容器不存在，创建新容器
-    echo "  ✅ Neo4j容器已创建并启动（新数据卷）"
     docker run -d \
         --name ${NEO4J_CONTAINER_NAME} \
         --network ${NETWORK_NAME} \
+        --restart always \
         -p ${NEO4J_WEB_HOST_PORT}:7474 \
         -p ${NEO4J_BOLT_HOST_PORT}:7687 \
         -e NEO4J_AUTH=${NEO4J_USERNAME}/${NEO4J_PASSWORD} \
@@ -177,7 +189,7 @@ else
         -e NEO4J_dbms_security_procedures_unrestricted=apoc.* \
         -v "${NEO4J_CONTAINER_NAME}-data:/data" \
         -v "${NEO4J_CONTAINER_NAME}-logs:/logs" \
-        ${NEO4J_IMAGE}
+        ${NEO4J_IMAGE} && echo "  ✅ Neo4j容器已创建并启动（新数据卷，已启用自动重启）"
 fi
 echo ""
 
@@ -195,39 +207,62 @@ while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
     echo -n "."
     sleep 1
 done
-echo "" 
+echo ""
+if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+    echo "  ⚠️  PostgreSQL启动超时，但将继续尝试启动应用（请检查容器日志）"
+fi 
 
 # ==============================================================================
 # 第四步：使用PM2启动/重启应用
 # ==============================================================================
-echo "🚀 使用PM2启动/重启应用 [${PM2_APP_NAME}]..."
+echo "🚀 启动/重启应用 [${APP_DIR}]..."
 mkdir -p ${PARSER_OUTPUT_DIR} ${LOCAL_FILE_STORAGE_PATH} $(dirname ${APP_LOG_FILE})
 
-cd ${APP_DIR} || { echo "  ❌ 应用目录不存在: ${APP_DIR}"; exit 1; }
+# 确保 uv 命令在 PATH 中
+if [ -f "$HOME/.local/bin/env" ]; then
+    source "$HOME/.local/bin/env" 2>/dev/null || true
+fi
+export PATH="$HOME/.local/bin:$PATH"
+
+cd ${APP_DIR} || { echo "❌ 应用目录不存在: ${APP_DIR}"; exit 1; }
 
 if [ -f "pyproject.toml" ]; then
     echo "  📦 同步项目依赖..."
-    uv sync --quiet && echo "  ✅ 依赖同步完成" || echo "  ⚠️  依赖同步失败，尝试继续启动..."
+    if uv sync --quiet; then
+        echo "  ✅ 依赖同步完成"
+    else
+        echo "  ⚠️  依赖同步失败，尝试继续启动..."
+    fi
 fi
 
-# 终极健壮版清理
-echo "🧹 正在清理可能残留的旧应用进程和端口..."
+# 4.1 【核心修改】增强版终极清理：确保端口绝对干净
+echo "🧹 正在进行增强版清理，确保端口 ${APP_PORT} 空闲..."
+
+# 步骤 1: 通过 PM2 清理
+echo "  -> 步骤 1: 通过 PM2 停止并删除旧的 [${PM2_APP_NAME}] 进程..."
 pm2 stop "${PM2_APP_NAME}" > /dev/null 2>&1 || true
 pm2 delete "${PM2_APP_NAME}" > /dev/null 2>&1 || true
+
+# 步骤 2: 通过 pkill 清理 (根据命令模式)
+echo "  -> 步骤 2: 通过 pkill 强制杀死所有相关的 uvicorn 进程..."
 pkill -f "uvicorn main:app --port ${APP_PORT}" > /dev/null 2>&1 || true
+
+# 步骤 3: 通过 lsof 清理 (根据端口号，最彻底)
 PID_TO_KILL=$(sudo lsof -t -i:"${APP_PORT}" 2>/dev/null || true)
 if [ -n "${PID_TO_KILL}" ]; then
-    echo "  ⚠️  发现进程 ${PID_TO_KILL} 占用端口 ${APP_PORT}，正在强制杀死..."
+    echo "  -> 步骤 3: 发现进程 ${PID_TO_KILL} 占用端口 ${APP_PORT}，正在强制杀死..."
     sudo kill -9 "${PID_TO_KILL}" > /dev/null 2>&1 || true
-    sleep 2
+    sleep 2 # 等待一下，确保进程已完全退出
 fi
+
 echo "  ✅ 清理完成。"
 
-# 使用PM2启动应用
-echo "  🚀 正在通过PM2启动新的 ${PM2_APP_NAME} 进程..."
+# 4.2 使用 PM2 启动新进程（带环境变量更新）
+echo "  🚀 正在通过 PM2 启动新的 [${PM2_APP_NAME}] 进程..."
 pm2 start "uv run uvicorn main:app --host 0.0.0.0 --port ${APP_PORT}" \
     --name "${PM2_APP_NAME}" \
     --log "${APP_LOG_FILE}" \
+    --update-env \
     --env "PYTHONUNBUFFERED=1" \
     --env "POSTGRES_HOST=${POSTGRES_HOST:-localhost}" \
     --env "POSTGRES_PORT=${POSTGRES_HOST_PORT}" \
@@ -253,39 +288,109 @@ pm2 start "uv run uvicorn main:app --host 0.0.0.0 --port ${APP_PORT}" \
     --env "LOG_LEVEL=${LOG_LEVEL:-INFO}" \
     --env "JWT_SECRET_KEY=${JWT_SECRET_KEY:-}"
 
-echo "  ✅ 应用已通过PM2启动！"
+echo "  ✅ ${PM2_APP_NAME} 应用已通过 PM2 启动！"
+echo ""
+
+# ==============================================================================
+# 4.3 启动/重启队列 Workers (参考 start.sh 的做法，直接调用脚本)
+# ==============================================================================
+echo "🔄 启动/重启队列 Workers..."
+cd ${APP_DIR} || { echo "❌ 应用目录不存在: ${APP_DIR}"; exit 1; }
+
+# 先停止旧的队列 workers (如果存在 stop 脚本)
+if [ -f "scripts/mq_tools/stop_mq_workers_local.sh" ]; then
+    echo "  🛑 停止旧的队列 workers..."
+    bash "scripts/mq_tools/stop_mq_workers_local.sh" >/dev/null 2>&1 || true
+fi
+
+# 使用 start_mq_workers_local.sh 启动新的 workers (强制启动模式，因为我们已经先停止了)
+if [ -f "scripts/mq_tools/start_mq_workers_local.sh" ]; then
+    echo "  🚀 启动新的队列 workers..."
+    MQ_WORKER_FORCE_START=1 bash "scripts/mq_tools/start_mq_workers_local.sh" || true
+    
+    # 自动配置队列 Workers 的开机自启（通过 systemd service）
+    SERVICE_NAME="rag-arc-mq-workers-chatKB_online.service"
+    SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}"
+    
+    echo "  🔧 配置队列 Workers 开机自启..."
+    cat > /tmp/${SERVICE_NAME} <<EOF
+[Unit]
+Description=RAG-ARC MQ Workers (Celery Workers for chatKB_online)
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=forking
+User=root
+WorkingDirectory=${APP_DIR}
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin"
+EnvironmentFile=-${APP_DIR}/.env
+ExecStart=/bin/bash scripts/mq_tools/start_mq_workers_local.sh
+ExecStop=/bin/bash scripts/mq_tools/stop_mq_workers_local.sh
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    sudo cp /tmp/${SERVICE_NAME} ${SERVICE_FILE} && \
+    sudo systemctl daemon-reload && \
+    sudo systemctl enable ${SERVICE_NAME} >/dev/null 2>&1 && \
+    echo "  ✅ 队列 Workers 开机自启已配置（systemd service: ${SERVICE_NAME}）" || \
+    echo "  ⚠️  队列 Workers 开机自启配置失败（需要 sudo 权限）"
+    rm -f /tmp/${SERVICE_NAME}
+else
+    echo "  ⚠️  未找到 start_mq_workers_local.sh 脚本，跳过队列 workers 启动"
+fi
 echo ""
 
 # ==============================================================================
 # 第五步：验证应用状态
 # ==============================================================================
 echo "⏳ 验证应用启动状态..."
-sleep 5
+sleep 8
 
+# 验证 PM2 应用状态
 if pm2 list | grep -q "${PM2_APP_NAME}" && pm2 list | grep -q "online"; then
     echo "=========================================="
-    echo "  ✅ ${APP_ID} ${ENV_ID} 环境所有服务启动/重启成功！"
+    echo "  ✅ ${APP_ID} ${ENV_ID} 所有服务启动/重启成功！（由 PM2 守护）"
     echo "=========================================="
     echo ""
-    echo "📋 服务信息："
-    echo "  - PM2应用名: ${PM2_APP_NAME}"
+    echo "📋 服务信息（自动适配路径）："
+    echo "  - PostgreSQL: ${POSTGRES_HOST:-localhost}:${POSTGRES_HOST_PORT} (容器: ${POSTGRES_CONTAINER_NAME})"
+    echo "  - Redis: ${REDIS_HOST:-localhost}:${REDIS_HOST_PORT} (容器: ${REDIS_CONTAINER_NAME})"
+    echo "  - Neo4j Web: http://localhost:${NEO4J_WEB_HOST_PORT}"
+    echo "  - Neo4j Bolt: ${NEO4J_URL:-bolt://localhost:${NEO4J_BOLT_HOST_PORT}} (容器: ${NEO4J_CONTAINER_NAME})"
+    if [[ "${MINERU_ENABLED}" == "true" ]] || [[ "${PARSER_PARSE_MODE:-}" == "mineru" ]]; then
+        MINERU_SERVER_URL=${MINERU_SERVER_URL:-"http://${MINERU_HOST}:${MINERU_PORT}"}
+        echo "  - MinerU 服务（远程）: ${MINERU_SERVER_URL}"
+    fi
     echo "  - 应用API: http://localhost:${APP_PORT}"
-    echo "  - Docker网络: ${NETWORK_NAME}"
+    echo "  - 自动定位的代码目录: ${APP_DIR}"
     echo ""
-    echo "📝 PM2管理命令："
-    echo "  - 查看状态: pm2 status"
+    echo "📝 PM2 管理命令："
+    echo "  - 查看状态: pm2 list"
     echo "  - 查看日志: pm2 logs ${PM2_APP_NAME}"
-    echo "  - 重启应用: pm2 restart ${PM2_APP_NAME}"
+    echo "  - 重启应用: pm2 restart ${PM2_APP_NAME} --update-env"
     echo "  - 停止应用: pm2 stop ${PM2_APP_NAME}"
-    echo "  - 删除应用: pm2 delete ${PM2_APP_NAME}"
+    echo "  - 开机自启: pm2 startup && pm2 save"
+    echo ""
+    echo "📝 队列 Workers 管理命令："
+    echo "  - 停止队列: bash scripts/mq_tools/stop_mq_workers_local.sh"
+    echo "  - 启动队列: MQ_WORKER_FORCE_START=1 bash scripts/mq_tools/start_mq_workers_local.sh"
+    echo "  - 查看队列日志: tail -f log/mq_workers/*.log"
+    echo "  - 系统服务管理: sudo systemctl {start|stop|status|restart} rag-arc-mq-workers-chatKB_online.service"
+    echo "  - 开机自启: ✅ 已自动配置（通过 systemd service）"
     echo ""
 else
     echo "=========================================="
-    echo "  ⚠️  应用启动可能异常（请检查日志）"
+    echo "  ⚠️  ${APP_ID} ${ENV_ID} 应用启动可能异常（请检查 PM2 日志）"
     echo "=========================================="
     echo ""
     echo "📝 快速排查："
-    echo "  1. 查看PM2状态: pm2 list"
+    echo "  1. 查看 PM2 状态: pm2 list"
     echo "  2. 查看应用日志: pm2 logs ${PM2_APP_NAME}"
     echo "  3. 检查容器状态: docker ps | grep ${APP_ID}-${ENV_ID}"
     echo ""
