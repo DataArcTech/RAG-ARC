@@ -127,7 +127,7 @@ async def upload_file(
     if len(file_content) > max_size:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"文件大小超过限制。最大允许大小: 10MB，当前文件大小: {len(file_content) / 1024 / 1024:.2f}MB"
+            detail="该文件超过10MB，请检查后重新上传！"
         )
     
     # Reset file pointer for actual upload

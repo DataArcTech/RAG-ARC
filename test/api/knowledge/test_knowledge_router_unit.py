@@ -201,5 +201,4 @@ def test_knowledge_upload_file_validation(monkeypatch):
         files={"file": ("test_large.txt", large_file_content, "text/plain")},
     )
     assert resp.status_code == 400, f"大于10MB的文件应该失败，但返回了 {resp.status_code}"
-    assert "文件大小超过限制" in resp.json()["detail"], "错误消息应该包含'文件大小超过限制'"
-    assert "10MB" in resp.json()["detail"], "错误消息应该包含'10MB'"
+    assert "该文件超过10MB，请检查后重新上传！" == resp.json()["detail"], f"错误消息应该是'该文件超过10MB，请检查后重新上传！'，但得到: {resp.json()['detail']}"
