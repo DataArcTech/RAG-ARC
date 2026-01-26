@@ -120,7 +120,7 @@ def section_bm25_index_path(default: str = "./data/section_bm25_index") -> str:
 
 
 def doc_routing_enabled() -> bool:
-    return _env_bool("DOC_ROUTING_ENABLED", False)
+    return _env_bool("DOC_ROUTING_ENABLED", True)
 
 
 def doc_desc_model_name() -> Optional[str]:

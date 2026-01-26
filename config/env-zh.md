@@ -154,7 +154,7 @@ Benchmark/实验模式：
 | `SECTION_INDEX_ENABLED` | `true` | 是否启用章节索引（section index）入库。 |
 | `SECTION_FAISS_INDEX_PATH` | `./data/section_faiss_index` | 章节向量索引目录（独立于主 FAISS）。 |
 | `SECTION_BM25_INDEX_PATH` | `./data/section_bm25_index` | 章节 BM25 索引目录（独立于主 BM25）。 |
-| `DOC_ROUTING_ENABLED` | `false` | 是否启用文档级描述 + doc routing 预筛。 |
+| `DOC_ROUTING_ENABLED` | `true` | 是否启用文档级描述 + doc routing 预筛。 |
 | `DOC_ROUTING_FAISS_INDEX_PATH` | `./data/doc_routing_faiss_index` | doc routing 向量索引目录。 |
 | `DOC_ROUTING_BM25_INDEX_PATH` | `./data/doc_routing_bm25_index` | doc routing BM25 索引目录。 |
 | `SECTION_SUMMARY_ENABLED` | `true` | 是否生成章节摘要（用于 section index 与 doc routing）。 |

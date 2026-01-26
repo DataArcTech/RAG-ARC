@@ -154,7 +154,7 @@ Notes:
 | `SECTION_INDEX_ENABLED` | `true` | Enable section index ingestion. |
 | `SECTION_FAISS_INDEX_PATH` | `./data/section_faiss_index` | Section FAISS index path (separate from main FAISS). |
 | `SECTION_BM25_INDEX_PATH` | `./data/section_bm25_index` | Section BM25 index path (separate from main BM25). |
-| `DOC_ROUTING_ENABLED` | `false` | Enable doc descriptions + doc routing prefilter. |
+| `DOC_ROUTING_ENABLED` | `true` | Enable doc descriptions + doc routing prefilter. |
 | `DOC_ROUTING_FAISS_INDEX_PATH` | `./data/doc_routing_faiss_index` | Doc routing FAISS index path. |
 | `DOC_ROUTING_BM25_INDEX_PATH` | `./data/doc_routing_bm25_index` | Doc routing BM25 index path. |
 | `SECTION_SUMMARY_ENABLED` | `true` | Generate section summaries (used by section index and doc routing). |
