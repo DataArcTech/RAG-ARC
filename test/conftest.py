@@ -1,4 +1,6 @@
 import os
+import sys
+from pathlib import Path
 
 from framework.runtime_warnings import configure_runtime_warnings
 
@@ -16,6 +18,10 @@ def pytest_configure() -> None:
     """
 
     configure_runtime_warnings()
+    # Ensure the repo root is importable even when pytest adds `test/` ahead of it.
+    repo_root = Path(__file__).resolve().parents[1]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
     os.environ.setdefault("TASK_QUEUE_MODE", "inprocess")
     os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret")
     # Knowledge indexing preflight checks attempt to connect to Postgres/Redis/Neo4j.
