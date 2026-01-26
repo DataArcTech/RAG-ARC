@@ -17,36 +17,25 @@ from api.sse import (
     sse_json_wrapped,
 )
 from api.routers.rag_inference_models import build_stream_chat_payload
-from api.routers.rag_inference_handlers import get_rag_inference_handler
 from config.output_limits import CITATION_STREAM_MODE, CHAT_TOP_CHUNKS
-from ..utils.history_manager import create_user_message, load_and_process_history
-from ..deepsearch.deepsearch_handler import process_deepsearch
-from ..rag.stream_processor import start_stream_processing
 from ..task.task_registry import get_chat_task_registry
 from ..task.task_helpers import (
-    create_and_register_task,
     check_and_handle_cancellation,
     yield_cancellation_event,
-    mark_task_completed,
-    cache_deepsearch_event
 )
 from ..response.response_finalizer import _build_and_yield_final_response
-from encapsulation.data_model.orm_models import ChatMessageStatus
-from framework.thread_pool import get_thread_pool
-from api.routers.rag_inference_handlers import get_message_handler, get_session_handler
-from ..response.response_builder import (
-    generate_mindmap_if_needed,
-    ensure_non_empty_response,
-    build_sources_and_evidence,
-    create_assistant_message,
-    generate_and_update_title,
-    build_evidence_for_payload,
-    convert_evidence_chunks_to_chunks,
-    build_deepsearch_sources_for_frontend,
-)
 from ..utils.citation_stream import CitationStreamRenumberer
 
 logger = logging.getLogger(__name__)
+
+# Backward-compatible hook for tests (and any external callers) that monkeypatch
+# `event_generator.process_deepsearch`. The event generator currently delegates deepsearch
+# to `deepsearch_processor.process_deepsearch_with_events`, but some tests patch a symbol
+# named `process_deepsearch` here.
+async def process_deepsearch(*args: Any, **kwargs: Any):  # noqa: ANN401
+    from ..deepsearch.deepsearch_handler import process_deepsearch as _impl
+
+    return await _impl(*args, **kwargs)
 
 
 def _create_progress_emitter(

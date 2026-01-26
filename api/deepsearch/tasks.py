@@ -1,5 +1,6 @@
 """Async DeepSearch task registry for SSE progress streaming."""
 import asyncio
+import logging
 import os
 import time
 import uuid
@@ -9,6 +10,8 @@ from typing import Any, Dict, List, Optional
 from api.sse import sse_json
 from core.deepsearch.trace import with_trace_protocol
 from encapsulation.message_queue.redis_task_queue import RedisTaskQueue
+
+logger = logging.getLogger(__name__)
 
 def new_run_id() -> str:
     return uuid.uuid4().hex

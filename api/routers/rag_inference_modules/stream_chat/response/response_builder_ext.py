@@ -1,23 +1,19 @@
 """响应构建辅助函数"""
 import logging
+import json
 from typing import Any, Optional, Tuple
 from .response_builder import (
     generate_mindmap_if_needed,
-    ensure_non_empty_response,
     build_sources_and_evidence,
-    create_assistant_message,
-    generate_and_update_title,
     build_evidence_for_payload,
-    convert_evidence_chunks_to_chunks,
 )
 from api.routers.rag_inference_models import build_stream_chat_payload
 from api.sse import (
     openai_chat_completion_chunk,
     delta_envelope,
     sse_json_wrapped,
-    _yield_finish_event,
 )
-from ..task.task_helpers import check_and_handle_cancellation, yield_cancellation_event
+from ..event.event_generator import _yield_finish_event
 
 logger = logging.getLogger(__name__)
 

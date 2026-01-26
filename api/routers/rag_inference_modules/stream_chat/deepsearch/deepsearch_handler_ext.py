@@ -1,12 +1,8 @@
 """DeepSearch 处理辅助函数"""
-import json
 import logging
-from typing import Any, AsyncGenerator, Optional, Tuple
+from typing import Any, Optional, Tuple
 from core.presentation.deepsearch_payload import trim_deepsearch_payload
-from ..task.task_registry import ChatTaskInfo
-from ..response.response_builder import build_deepsearch_sources_for_frontend, convert_evidence_chunks_to_chunks
-from .deepsearch_handler import process_deepsearch
-from api.sse import sse_json_wrapped
+from ..response.response_builder import build_deepsearch_sources_for_frontend
 
 logger = logging.getLogger(__name__)
 

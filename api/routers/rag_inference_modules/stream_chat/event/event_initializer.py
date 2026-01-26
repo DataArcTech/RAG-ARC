@@ -3,8 +3,6 @@ import asyncio
 from typing import Any, AsyncGenerator
 from api.sse import (
     delta_envelope,
-    new_chatcmpl_id,
-    now_epoch_seconds,
     openai_chat_completion_chunk,
     sse_json_wrapped,
 )
