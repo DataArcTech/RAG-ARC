@@ -121,13 +121,13 @@ async def upload_file(
             detail=f"不支持的文件类型。支持的文件类型: {', '.join(sorted(allowed_extensions))}"
         )
     
-    # Validate file size (20MB limit)
-    max_size = 20 * 1024 * 1024  # 20MB
+    # Validate file size (10MB limit)
+    max_size = 10 * 1024 * 1024  # 10MB
     file_content = await file.read()
     if len(file_content) > max_size:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"文件大小超过限制。最大允许大小: 20MB，当前文件大小: {len(file_content) / 1024 / 1024:.2f}MB"
+            detail=f"文件大小超过限制。最大允许大小: 10MB，当前文件大小: {len(file_content) / 1024 / 1024:.2f}MB"
         )
     
     # Reset file pointer for actual upload
