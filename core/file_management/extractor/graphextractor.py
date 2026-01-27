@@ -1,17 +1,38 @@
-"""
-Multi-round extraction: in each round, the results extracted from the previous round are added to the context, continuing until the maximum number of rounds is reached or no new entities or relations can be extracted.
-The multi-round extraction process is sequential, with each extraction depending on the results of the previous round.
-"""
+"""GraphExtractor (JSON-only).
 
+This extractor is used by NetworkXGraphIndexer. We intentionally remove TSV/multi-round/cleaning
+logic and switch to the same two-stage structured extraction as HippoRAG2Extractor:
+1) Entities (JSON; Pydantic-validated)
+2) Edges referencing entity IDs (JSON; Pydantic-validated)
+"""
+import json
 import logging
+import os
 import re
-from typing import Dict, List, TYPE_CHECKING
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from core.file_management.extractor.base import ExtractorBase
-from core.prompts.extractor_prompt import (
-    EXTRACTION_PROMPT, CLEANING_PROMPT, EXTRACTION_PROMPT_EN, CLEANING_PROMPT_EN,
-    EXTRACTION_PROMPT_SIMPLE, EXTRACTION_PROMPT_SIMPLE_EN
+from core.knowledge_graph.extraction_models import ExtractedEntities, ExtractedEdges, ExtractedEntity
+from core.knowledge_graph.schema import load_schema_from_yaml, normalize_relation_token
+from core.prompts.hipporag2_extractor_prompt_json import (
+    HIPPORAG2_EDGE_JSON_PROMPT_EN,
+    HIPPORAG2_EDGE_JSON_PROMPT_ZH,
+    HIPPORAG2_EDGE_JSON_SYSTEM_EN,
+    HIPPORAG2_EDGE_JSON_SYSTEM_ZH,
+    HIPPORAG2_EDGE_SCHEMA_HINT_EN,
+    HIPPORAG2_EDGE_SCHEMA_HINT_ZH,
+    HIPPORAG2_NER_JSON_ONE_SHOT_INPUT_EN,
+    HIPPORAG2_NER_JSON_ONE_SHOT_INPUT_ZH,
+    HIPPORAG2_NER_JSON_ONE_SHOT_OUTPUT_EN,
+    HIPPORAG2_NER_JSON_ONE_SHOT_OUTPUT_ZH,
+    HIPPORAG2_NER_JSON_PROMPT_EN,
+    HIPPORAG2_NER_JSON_PROMPT_ZH,
+    HIPPORAG2_NER_JSON_SYSTEM_EN,
+    HIPPORAG2_NER_JSON_SYSTEM_ZH,
 )
+from core.utils.structured_output import StructuredOutputError, parse_pydantic_json_from_llm_text
 from encapsulation.data_model.schema import Chunk, GraphData
 
 if TYPE_CHECKING:
@@ -19,461 +40,220 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_LANGUAGE = "zh"
+
+def _detect_language(text: str, *, chinese_ratio_threshold: float, default_language: str) -> str:
+    chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", text or ""))
+    total_chars = len(re.sub(r"\s", "", text or ""))
+    if total_chars == 0:
+        return default_language
+    return "zh" if (chinese_chars / total_chars) > chinese_ratio_threshold else "en"
 
 
 def detect_language_from_text(
     text: str,
     *,
     chinese_ratio_threshold: float,
-    default_language: str = _DEFAULT_LANGUAGE,
+    default_language: str = "zh",
 ) -> str:
-    chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", text))
-    total_chars = len(re.sub(r"\s", "", text))
-
-    if total_chars == 0:
-        return default_language
-
-    chinese_ratio = chinese_chars / total_chars
-    return "zh" if chinese_ratio > chinese_ratio_threshold else "en"
+    """Backward-compatible helper used by tests/config validation."""
+    return _detect_language(text, chinese_ratio_threshold=chinese_ratio_threshold, default_language=default_language)
 
 
 class GraphExtractor(ExtractorBase):
-    """Optimized GraphExtractor, supporting multi-round extraction, cleaning, and bilingual support"""
+    """NetworkX-path graph extractor (JSON-only)."""
 
     def __init__(self, config: "GraphExtractorConfig"):
         super().__init__(config)
-        self.logger = logging.getLogger(__name__)
+        self._kg_schema = None
+        self._kg_domain = None
+        self._kg_domain_schema = None
+        self._load_kg_schema()
+
+    def _load_kg_schema(self) -> None:
+        cfg_path = str(getattr(self.config, "kg_schema_path", "") or "").strip()
+        env_path = os.getenv("KG_SCHEMA_PATH", "").strip()
+        schema_path = cfg_path or env_path
+        if not schema_path:
+            return
+        try:
+            schema = load_schema_from_yaml(schema_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load KG schema for GraphExtractor: %s", exc, exc_info=True)
+            return
+        domain_override = str(getattr(self.config, "schema_prompt_domain", "") or "").strip()
+        domain = domain_override or getattr(schema, "default_domain", None) or "default"
+        try:
+            domain_schema = schema.for_domain(domain)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to resolve KG schema domain '%s' for GraphExtractor: %s", domain, exc, exc_info=True)
+            return
+        self._kg_schema = schema
+        self._kg_domain = str(domain)
+        self._kg_domain_schema = domain_schema
+
+    def detect_language(self, text: str) -> str:
+        threshold = float(getattr(self.config, "language_detection_chinese_ratio_threshold", 0.1) or 0.1)
+        threshold = max(0.0, min(1.0, threshold))
+        default_language = str(getattr(self.config, "language_detection_default_language", "zh") or "zh")
+        default_language = default_language if default_language in {"zh", "en"} else "zh"
+        return _detect_language(text, chinese_ratio_threshold=threshold, default_language=default_language)
+
+    def _edge_reference_time(self) -> str:
+        override = str(getattr(self.config, "edge_reference_time_override", "") or "").strip()
+        if override:
+            return override
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     async def extract(self, chunk: Chunk) -> GraphData:
-        """Main extraction method: automatically supports single-round or multi-round extraction based on max_rounds"""
         if not chunk.content:
             return GraphData()
 
-        accumulated_graph = GraphData()
+        entities_model = await self.extract_entities_json(chunk.content)
+        edges_model: ExtractedEdges | None = None
+        edge_reference_time: str | None = None
+        if entities_model.extracted_entities:
+            edges_model, edge_reference_time = await self.extract_edges_json(chunk.content, entities_model)
+        else:
+            logger.info("No entities extracted (json), skipping edge extraction")
 
-        # Extraction loop driven by max_rounds (1 round = single-round extraction, >1 round = multi-round extraction)
-        for round_num in range(self.config.max_rounds):
-            # Build prompt (supporting bilingual support)
-            prompt = self.build_extraction_prompt(chunk.content, accumulated_graph)
-            response = await self.llm.achat([{"role": "user", "content": prompt}])
-            new_graph = self.parse_tsv_response(response)
+        graph = self.build_graph_data_from_structured(
+            entities_model,
+            edges_model,
+            edge_reference_time=edge_reference_time,
+        )
+        return graph
 
-            # If there are no new extraction results, end early
-            if not new_graph.entities and not new_graph.relations:
-                break
-
-            # Merge results
-            accumulated_graph = self.merge_graph_data(accumulated_graph, new_graph)
-
-        # Clean data if enabled
-        if self.config.enable_cleaning:
-            accumulated_graph = await self.clean_graph_data(accumulated_graph, chunk)
-
-        # Convert IDs to entity names for final output
-        return self.convert_final_output_to_names(accumulated_graph)
-
-    def detect_language(self, text: str) -> str:
-        """Detect text language (Chinese or English)"""
-        threshold = float(getattr(self.config, "language_detection_chinese_ratio_threshold", 0.1) or 0.1)
-        threshold = max(0.0, min(1.0, threshold))
-        default_language = str(getattr(self.config, "language_detection_default_language", _DEFAULT_LANGUAGE) or _DEFAULT_LANGUAGE)
-        default_language = default_language if default_language in {"zh", "en"} else _DEFAULT_LANGUAGE
-        return detect_language_from_text(text, chinese_ratio_threshold=threshold, default_language=default_language)
-
-    def build_extraction_prompt(self, text: str, history: GraphData) -> str:
-        """Build extraction prompt with user custom priority"""
+    async def extract_entities_json(self, text: str) -> ExtractedEntities:
         language = self.detect_language(text)
+        type_constraint = ""
+        entity_types = getattr(self.config, "entity_types", None)
+        if isinstance(entity_types, list) and entity_types:
+            joined = ", ".join([str(t).strip() for t in entity_types if str(t).strip()])
+            if joined:
+                type_constraint = (
+                    f"\nOnly extract entities of the following types: {joined}\n"
+                    if language != "zh"
+                    else f"\n仅抽取以下类型的实体：{joined}\n"
+                )
+        prompt = (HIPPORAG2_NER_JSON_PROMPT_ZH if language == "zh" else HIPPORAG2_NER_JSON_PROMPT_EN).format(
+            system=((HIPPORAG2_NER_JSON_SYSTEM_ZH if language == "zh" else HIPPORAG2_NER_JSON_SYSTEM_EN) + type_constraint).strip(),
+            example_input=HIPPORAG2_NER_JSON_ONE_SHOT_INPUT_ZH if language == "zh" else HIPPORAG2_NER_JSON_ONE_SHOT_INPUT_EN,
+            example_output=HIPPORAG2_NER_JSON_ONE_SHOT_OUTPUT_ZH if language == "zh" else HIPPORAG2_NER_JSON_ONE_SHOT_OUTPUT_EN,
+            passage=text,
+        )
+        response = await self.llm.achat([{"role": "user", "content": prompt}])
+        try:
+            return parse_pydantic_json_from_llm_text(response, ExtractedEntities)
+        except StructuredOutputError as exc:
+            raise ValueError(f"GraphExtractor NER(JSON) structured output invalid: {exc}") from exc
 
-        # Use simplified prompt for single-round extraction (max_rounds == 1)
-        if self.config.max_rounds == 1:
-            if self.config.extraction_prompt:
-                template = self.config.extraction_prompt
-            else:
-                if language == 'en':
-                    template = EXTRACTION_PROMPT_SIMPLE_EN
-                else:
-                    template = EXTRACTION_PROMPT_SIMPLE
+    async def extract_edges_json(self, text: str, entities: ExtractedEntities) -> tuple[ExtractedEdges, str]:
+        language = self.detect_language(text)
+        entities_payload = [{"id": e.id, "name": e.name, "entity_type": e.entity_type} for e in entities.extracted_entities]
+        reference_time = self._edge_reference_time()
 
-            # For single-round extraction, we don't need history
-            schema_str = self.generate_schema_string(language=language)
-            examples_str = self.generate_examples_string(language=language)
+        prompt = (HIPPORAG2_EDGE_JSON_PROMPT_ZH if language == "zh" else HIPPORAG2_EDGE_JSON_PROMPT_EN).format(
+            system=HIPPORAG2_EDGE_JSON_SYSTEM_ZH if language == "zh" else HIPPORAG2_EDGE_JSON_SYSTEM_EN,
+            edge_types=self._schema_hint_for_edges(language=language) or "",
+            entities_json=json.dumps(entities_payload, ensure_ascii=False, separators=(",", ":"), default=str),
+            reference_time=reference_time,
+            passage=text,
+        )
+        response = await self.llm.achat([{"role": "user", "content": prompt}])
+        try:
+            model = parse_pydantic_json_from_llm_text(response, ExtractedEdges)
+        except StructuredOutputError as exc:
+            raise ValueError(f"GraphExtractor edges(JSON) structured output invalid: {exc}") from exc
+        return model, reference_time
 
-            return template.format(
-                text=text,
-                schema=schema_str,
-                examples=examples_str
-            )
-
-        # Use full prompt for multi-round extraction (max_rounds > 1)
-        else:
-            if self.config.extraction_prompt:
-                template = self.config.extraction_prompt
-            else:
-                if language == 'en':
-                    template = EXTRACTION_PROMPT_EN
-                else:
-                    template = EXTRACTION_PROMPT
-
-            schema_str = self.generate_schema_string(language=language)
-            history_str = self.build_history_string(history, language=language)
-            examples_str = self.generate_examples_string(language=language)
-
-            return template.format(
-                text=text,
-                schema=schema_str,
-                history=history_str,
-                examples=examples_str
-            )
-
-    def generate_schema_string(self, language: str = 'zh') -> str:
-        """Generate schema string (supporting bilingual support)"""
-        parts = []
-
-        if self.config.entity_types:
-            entity_types = ", ".join(self.config.entity_types)
-            if language == 'en':
-                parts.append(f"**Entity Types**: {entity_types}")
-            else:
-                parts.append(f"**实体类型**: {entity_types}")
-
-        if self.config.relation_types:
-            relation_types = ", ".join(self.config.relation_types)
-            if language == 'en':
-                parts.append(f"**Relation Types**: {relation_types}")
-            else:
-                parts.append(f"**关系类型**: {relation_types}")
-
-        return "\n".join(parts)
-
-    def generate_examples_string(self, language: str = 'zh') -> str:
-        """Generate example string (supporting bilingual support)"""
-        parts = []
-
-        if self.config.entity_examples:
-            if language == 'en':
-                parts.append("**Entity Examples**:")
-            else:
-                parts.append("**实体示例**:")
-            parts.append("### ENTITIES")
-            parts.append("id\tname\ttype\tattributes")
-            for i, example in enumerate(self.config.entity_examples):
-                attr_str = self.format_attributes_string(example.get('attributes', {}))
-                parts.append(f"e{i+1}\t{example['name']}\t{example['type']}\t{attr_str}")
-
-        if self.config.relation_examples:
-            if parts:
-                parts.append("")
-            if language == 'en':
-                parts.append("**Relation Examples**:")
-            else:
-                parts.append("**关系示例**:")
-            parts.append("### RELATIONS")
-            parts.append("head_id\ttype\ttail_id")
-            for example in self.config.relation_examples:
-                parts.append(f"{example[0]}\t{example[1]}\t{example[2]}")
-
-        return "\n".join(parts)
-
-    def parse_tsv_response(self, response_text: str) -> GraphData:
-        """Parse TSV format response from LLM"""
-        entities, relations = [], []
-        current_section = None
-
-        for line in response_text.strip().split('\n'):
-            line = line.strip()
-            if not line or line.startswith('...'):
-                continue
-
-            if line.startswith('### ENTITIES'):
-                current_section = 'entities'
-                continue
-            elif line.startswith('### RELATIONS'):
-                current_section = 'relations'
-                continue
-            elif line.startswith(('id\t', 'head_id\t')):
-                continue  # Skip header
-
-            # Only process lines containing tabs
-            if '\t' not in line:
-                continue
-
-            parts = [p.strip() for p in line.split('\t')]
-            if len(parts) < 3:
-                continue
-
-            try:
-                if current_section == 'entities':
-                    attr_str = parts[3] if len(parts) > 3 else ''
-                    entities.append({
-                        'id': parts[0],
-                        'entity_name': parts[1],
-                        'entity_type': parts[2],
-                        'attributes': self.parse_attributes_string(attr_str)
-                    })
-                elif current_section == 'relations':
-                    relations.append(parts[:3])
-            except Exception as e:
-                logger.warning(f"Failed to parse line '{line}': {e}")
-
-        return GraphData(entities=entities, relations=relations)
-
-    def build_history_string(self, history: GraphData, language: str = 'zh') -> str:
-        """Build history data string"""
-        if history.is_empty():
+    def _schema_hint_for_edges(self, *, language: str) -> str:
+        domain_schema = getattr(self, "_kg_domain_schema", None)
+        if domain_schema is None:
             return ""
+        max_allowed = int(getattr(self.config, "schema_prompt_max_allowed_relations", 80) or 0)
+        max_aliases = int(getattr(self.config, "schema_prompt_max_relation_aliases", 120) or 0)
 
-        history_parts = []
+        allowed = sorted({str(item).strip() for item in (domain_schema.allowed_relations or set()) if str(item).strip()})
+        if max_allowed > 0:
+            allowed = allowed[:max_allowed]
+        allowed_block = "\n".join(allowed) if allowed else "(none)"
 
-        # Build entity part
-        if history.entities:
-            if language == 'en':
-                history_parts.extend([
-                    "Previous extracted data:",
-                    "### ENTITIES",
-                    "id\tname\ttype\tattributes"
-                ])
-            else:
-                history_parts.extend([
-                    "Previous extracted data:",
-                    "### ENTITIES",
-                    "id\tname\ttype\tattributes"
-                ])
-            for entity in history.entities:
-                entity_id = entity.get('id', '')
-                entity_name = entity.get('entity_name', '')
-                entity_type = entity.get('entity_type', '')
-                attr_str = self.format_attributes_string(entity.get('attributes', {}))
-                history_parts.append(f"{entity_id}\t{entity_name}\t{entity_type}\t{attr_str}")
-
-        # Build relation part
-        if history.relations:
-            if not history.entities:
-                history_parts.append("Previous extracted data:")
-            history_parts.extend(["", "### RELATIONS", "head_id\ttype\ttail_id"])
-
-            for relation in history.relations:
-                if isinstance(relation, list) and len(relation) >= 3:
-                    history_parts.append(f"{relation[0]}\t{relation[1]}\t{relation[2]}")
-
-        return "\n".join(history_parts)
-
-    def parse_attributes_string(self, attr_str: str) -> Dict:
-        """Parse attribute string: key1|->|value1|#|key2|->|value2"""
-        if not attr_str.strip():
-            return {}
-
-        attributes = {}
-        for part in attr_str.split('|#|'):
-            if '|->|' in part:
-                try:
-                    key, value = part.split('|->|', 1)
-                    key, value = key.strip(), value.strip()
-                    if key:
-                        attributes[key] = value
-                except ValueError:
+        alias_map: dict[str, str] = {}
+        if max_aliases != 0 and isinstance(domain_schema.relation_aliases, dict):
+            items: list[tuple[str, str]] = []
+            for raw_key, raw_value in domain_schema.relation_aliases.items():
+                key = str(raw_key or "").strip()
+                if not key:
                     continue
-        return attributes
+                canonical = normalize_relation_token(str(raw_value or ""))
+                if domain_schema.allowed_relations and canonical not in domain_schema.allowed_relations:
+                    continue
+                items.append((key, canonical))
+            items.sort(key=lambda pair: pair[0])
+            if max_aliases > 0:
+                items = items[:max_aliases]
+            alias_map = {k: v for k, v in items}
+        alias_json = json.dumps(alias_map, ensure_ascii=False, separators=(",", ":"), default=str) if alias_map else "{}"
 
-    def format_attributes_string(self, attributes: Dict) -> str:
-        """Format attributes dictionary to string"""
-        if not isinstance(attributes, dict):
-            return ''
-        return '|#|'.join(f'{k}|->|{v}' for k, v in attributes.items() if k and v is not None)
+        template = HIPPORAG2_EDGE_SCHEMA_HINT_ZH if language == "zh" else HIPPORAG2_EDGE_SCHEMA_HINT_EN
+        return template.format(allowed_relations=allowed_block, relation_aliases_json=alias_json).strip()
 
-    async def clean_graph_data(self, graph_data: GraphData, chunk: Chunk) -> GraphData:
-        """Clean graph data"""
-        try:
-            # Basic cleaning
-            cleaned_entities = self.clean_entities(graph_data.entities)
-            cleaned_relations = self.clean_relations(graph_data.relations, cleaned_entities)
+    def build_graph_data_from_structured(
+        self, entities: ExtractedEntities, edges: ExtractedEdges | None, *, edge_reference_time: str | None
+    ) -> GraphData:
+        entity_list: list[dict] = []
+        id_to_entity: dict[int, ExtractedEntity] = {}
+        for ent in sorted(entities.extracted_entities, key=lambda e: e.id):
+            id_to_entity[ent.id] = ent
+            entity_list.append(
+                {
+                    "id": f"e{ent.id}",
+                    "entity_name": ent.name,
+                    "entity_type": ent.entity_type,
+                    "attributes": {},
+                }
+            )
 
-            # LLM-assisted cleaning (optional)
-            if self.config.enable_llm_cleaning:
-                return await self.llm_clean(GraphData(cleaned_entities, cleaned_relations), chunk)
+        domain_schema = getattr(self, "_kg_domain_schema", None)
 
-            return GraphData(cleaned_entities, cleaned_relations)
-        except Exception as e:
-            self.logger.error(f"Error during cleaning: {e}")
-            return graph_data
+        relations: list[list] = []
+        dropped_invalid = 0
+        dropped_self = 0
+        dropped_schema = 0
+        if edges is not None:
+            for edge in edges.edges:
+                if edge.source_entity_id == edge.target_entity_id:
+                    dropped_self += 1
+                    continue
+                src = id_to_entity.get(edge.source_entity_id)
+                dst = id_to_entity.get(edge.target_entity_id)
+                if src is None or dst is None:
+                    dropped_invalid += 1
+                    continue
 
-    def clean_entities(self, entities: List[Dict]) -> List[Dict]:
-        cleaned = []
-        seen = set()
+                raw_rel = edge.relation_type
+                if domain_schema is not None:
+                    norm = domain_schema.normalize_predicate_with_meta(raw_rel)
+                    if norm.canonical_predicate is None:
+                        dropped_schema += 1
+                        continue
+                    rel_type = norm.canonical_predicate
+                else:
+                    rel_type = normalize_relation_token(raw_rel)
 
-        for entity in entities:
-            name = entity.get('entity_name', '').strip()
-            entity_type = entity.get('entity_type', '').strip()
+                rel: list = [src.name, rel_type, dst.name]
+                if edge.valid_at is not None or edge.invalid_at is not None or edge.fact is not None:
+                    rel.extend([edge.valid_at, edge.invalid_at, edge.fact])
+                relations.append(rel)
 
-            # Deduplicate
-            key = (name.lower(), entity_type.lower())
-            if key in seen:
-                continue
-            seen.add(key)
-
-            # Format check
-            if self.is_valid_entity(name):
-                cleaned.append(entity)
-
-        return cleaned
-
-    def clean_relations(self, relations: List[List], entities: List[Dict]) -> List[List]:
-        entity_names = {e.get('entity_name', '').strip().lower() for e in entities}
-        entity_ids = {str(e.get('id', '')).strip() for e in entities if e.get('id')}
-
-        cleaned = []
-        seen = set()
-
-        for relation in relations:
-            if len(relation) < 3:
-                continue
-
-            head, rel_type, tail = str(relation[0]).strip(), str(relation[1]).strip(), str(relation[2]).strip()
-
-            head_valid = head.lower() in entity_names or head in entity_ids
-            tail_valid = tail.lower() in entity_names or tail in entity_ids
-
-            if not (head_valid and tail_valid):
-                continue
-
-            if head.lower() == tail.lower():
-                continue
-
-            key = (head.lower(), rel_type.lower(), tail.lower())
-            if key in seen:
-                continue
-            seen.add(key)
-
-            cleaned.append([head, rel_type, tail])
-
-        return cleaned
-
-    def is_valid_entity(self, name: str) -> bool:
-        """Check if entity name is valid"""
-        if not name or len(name.strip()) < 2:
-            return False
-
-        # Filter pure numbers
-        if re.match(r'^\d+$', name) or re.match(r'^[\d\s\.,;:!?()\[\]{}""''\\-_]+$', name):
-            return False
-
-        return True
-
-    def merge_graph_data(self, history: GraphData, new_extraction: GraphData) -> GraphData:
-        """Merge history data and new extraction results"""
-        merged_entities = list(history.entities)
-        merged_relations = list(history.relations)
-
-        # Merge entities
-        entity_keys = {(e.get('entity_name', ''), e.get('entity_type', '')) for e in merged_entities}
-        for entity in new_extraction.entities:
-            key = (entity.get('entity_name', ''), entity.get('entity_type', ''))
-            if key not in entity_keys:
-                merged_entities.append(entity)
-                entity_keys.add(key)
-
-        # Merge relations
-        relation_keys = {(str(r[0]), str(r[1]), str(r[2])) for r in merged_relations if len(r) >= 3}
-        for relation in new_extraction.relations:
-            if len(relation) >= 3:
-                key = (str(relation[0]), str(relation[1]), str(relation[2]))
-                if key not in relation_keys:
-                    merged_relations.append(relation)
-                    relation_keys.add(key)
-
-        return GraphData(entities=merged_entities, relations=merged_relations)
-
-    async def llm_clean(self, graph_data: GraphData, chunk: Chunk) -> GraphData:
-        """LLM-assisted graph data cleaning"""
-        try:
-            language = self.detect_language(chunk.content)
-            prompt = self.build_cleaning_prompt(chunk.content, graph_data, language)
-            response = await self.llm.achat([{"role": "user", "content": prompt}])
-            cleaned_graph = self.parse_tsv_response(response)
-
-            if cleaned_graph.is_empty():
-                self.logger.warning("LLM cleaning returned empty result, using basic cleaning result")
-                return graph_data
-
-            return cleaned_graph
-
-        except Exception as e:
-            self.logger.error(f"LLM cleaning failed: {e}")
-            return graph_data
-
-    def build_cleaning_prompt(self, text: str, graph_data: GraphData, language: str = 'zh') -> str:
-        """Build cleaning prompt with user custom priority"""
-        graph_data_str = self.format_graph_for_cleaning(graph_data)
-
-        if self.config.cleaning_prompt:
-            template = self.config.cleaning_prompt
-        else:
-            if language == 'en':
-                template = CLEANING_PROMPT_EN
-            else:
-                template = CLEANING_PROMPT
-
-        return template.format(
-            text=text,
-            graph_data=graph_data_str
-        )
-
-    def format_graph_for_cleaning(self, graph_data: GraphData) -> str:
-        """Format graph data as string for cleaning prompt"""
-        parts = []
-
-        # Format entities
-        if graph_data.entities:
-            parts.extend([
-                "### ENTITIES",
-                "id\tname\ttype\tattributes"
-            ])
-            for entity in graph_data.entities:
-                entity_id = entity.get('id', '')
-                entity_name = entity.get('entity_name', '')
-                entity_type = entity.get('entity_type', '')
-                attr_str = self.format_attributes_string(entity.get('attributes', {}))
-                parts.append(f"{entity_id}\t{entity_name}\t{entity_type}\t{attr_str}")
-
-        # Format relations
-        if graph_data.relations:
-            if parts:
-                parts.append("")
-            parts.extend([
-                "### RELATIONS",
-                "head_id\ttype\ttail_id"
-            ])
-            for relation in graph_data.relations:
-                if isinstance(relation, list) and len(relation) >= 3:
-                    parts.append(f"{relation[0]}\t{relation[1]}\t{relation[2]}")
-
-        return "\n".join(parts)
-
-
-    def convert_final_output_to_names(self, graph_data: GraphData) -> GraphData:
-        """Convert IDs in final output relationships to entity names"""
-        # Create ID to name mapping
-        id_to_name = {}
-        for entity in graph_data.entities:
-            entity_id = entity.get('id', '')
-            entity_name = entity.get('entity_name', '')
-            if entity_id and entity_name:
-                id_to_name[entity_id] = entity_name
-
-        # Convert IDs in relationships to names
-        converted_relations = []
-        for relation in graph_data.relations:
-            if isinstance(relation, list) and len(relation) >= 3:
-                head_id, rel_type, tail_id = relation[0], relation[1], relation[2]
-                head_name = id_to_name.get(head_id, head_id)
-                tail_name = id_to_name.get(tail_id, tail_id)
-                converted_relations.append([head_name, rel_type, tail_name])
-            else:
-                converted_relations.append(relation)
-
-        # Return final output format graph data
-        return GraphData(
-            entities=graph_data.entities,     # Entities remain unchanged
-            relations=converted_relations,    # Relationships use entity names
-            metadata=graph_data.metadata
-        )
+        graph = GraphData(entities=entity_list, relations=relations, metadata={})
+        graph.metadata["graph_output_format"] = "json"
+        if edge_reference_time:
+            graph.metadata["edge_reference_time"] = edge_reference_time
+        if dropped_invalid or dropped_self or dropped_schema:
+            graph.metadata["edge_filter_stats"] = {
+                "dropped_invalid_entity_ids": dropped_invalid,
+                "dropped_self_loops": dropped_self,
+                "dropped_schema_rejected": dropped_schema,
+            }
+        return graph

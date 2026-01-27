@@ -40,8 +40,8 @@ class _StubConfig:
 async def test_temporal_extraction_attaches_business_time_to_chunk_and_graph():
     llm = _StubLLM(
         outputs=[
-            "### ENTITIES\n平安保险\tCompany\n",
-            "### TRIPLES\n平安保险\tHAS_POLICY\t每周可远程办公2天\n",
+            '{"extracted_entities":[{"id":1,"name":"远程办公政策","entity_type":"POLICY"},{"id":2,"name":"2024年6月1日","entity_type":"DATE"}]}',
+            '{"edges":[{"relation_type":"EFFECTIVE_AT","source_entity_id":1,"target_entity_id":2}]}',
             '{"effective_date":"2024-06-01T00:00:00+00:00","valid_from":"2024-06-01T00:00:00+00:00","valid_to":null,"confidence":0.9}',
         ]
     )

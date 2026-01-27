@@ -39,8 +39,8 @@ class _StubConfig:
 async def test_mindmap_extraction_is_disabled_by_default() -> None:
     llm = _StubLLM(
         outputs=[
-            "### ENTITIES\n平安保险\tCompany\n",
-            "### TRIPLES\n平安保险\tHAS_POLICY\t条款\n",
+            '{"extracted_entities":[{"id":1,"name":"平安保险","entity_type":"COMPANY"},{"id":2,"name":"条款","entity_type":"CONCEPT"}]}',
+            '{"edges":[{"relation_type":"HAS_POLICY","source_entity_id":1,"target_entity_id":2}]}',
         ]
     )
     extractor = HippoRAG2Extractor(_StubConfig(llm, enable_mindmap_extraction=False))
@@ -54,9 +54,9 @@ async def test_mindmap_extraction_is_disabled_by_default() -> None:
 async def test_mindmap_extraction_can_be_enabled() -> None:
     llm = _StubLLM(
         outputs=[
-            "### ENTITIES\n平安保险\tCompany\n",
-            "### TRIPLES\n平安保险\tHAS_POLICY\t条款\n",
-            "### MINDMAP\n1\t[concept]\t条款\n",
+            '{"extracted_entities":[{"id":1,"name":"平安保险","entity_type":"COMPANY"},{"id":2,"name":"条款","entity_type":"CONCEPT"}]}',
+            '{"edges":[{"relation_type":"HAS_POLICY","source_entity_id":1,"target_entity_id":2}]}',
+            "### MINDMAP\n1\t[concept] 条款\n",
         ]
     )
     extractor = HippoRAG2Extractor(_StubConfig(llm, enable_mindmap_extraction=True))
@@ -64,4 +64,3 @@ async def test_mindmap_extraction_can_be_enabled() -> None:
     await extractor.extract_two_stage(chunk)
     assert isinstance(chunk.metadata.get("mindmap"), dict)
     assert llm.calls == 3
-

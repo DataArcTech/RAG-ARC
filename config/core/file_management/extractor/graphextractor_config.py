@@ -1,24 +1,49 @@
+import os
+
 from framework.config import AbstractConfig
-from typing import List, Dict, Optional, Literal
+from typing import List, Optional, Literal
 from pydantic import Field
 from core.file_management.extractor.graphextractor import GraphExtractor
 from config.encapsulation.llm.chat.openai import OpenAIChatConfig
 
 
 class GraphExtractorConfig(AbstractConfig):
-    """GraphExtractor configuration"""
+    """GraphExtractor configuration (JSON-only)"""
     type: Literal['graph_extractor'] = 'graph_extractor'
 
-    entity_types: Optional[List[str]] = Field(default=None, description="entity_types")
-    relation_types: Optional[List[str]] = Field(default=None, description="relation_types")
-    extraction_prompt: Optional[str] = Field(default=None, description="extraction_prompt")
-    cleaning_prompt: Optional[str] = Field(default=None, description="cleaning_prompt")
-    entity_examples: Optional[List[Dict]] = Field(default=None, description="entity_examples")
-    relation_examples: Optional[List[List]] = Field(default=None, description="relation_examples")
+    entity_types: Optional[List[str]] = Field(
+        default=None,
+        description="Optional entity types filter (soft constraint for the model).",
+    )
 
-    enable_cleaning: bool = Field(default=True, description="enable_cleaning")
-    enable_llm_cleaning: bool = Field(default=False, description="enable_llm_cleaning")
-    max_rounds: int = Field(default=3, description="max_rounds", ge=1)
+    kg_schema_path: Optional[str] = Field(
+        default_factory=lambda: os.getenv("KG_SCHEMA_PATH", "").strip() or None,
+        description="Optional KG schema YAML path (relation aliases/allowlist/unknown policy).",
+    )
+
+    schema_prompt_domain: Optional[str] = Field(
+        default=None,
+        description="Optional KG schema domain key (defaults to schema.default_domain).",
+    )
+
+    schema_prompt_max_allowed_relations: int = Field(
+        default=80,
+        ge=0,
+        le=500,
+        description="Max allowed relations to include in schema hint.",
+    )
+
+    schema_prompt_max_relation_aliases: int = Field(
+        default=120,
+        ge=0,
+        le=800,
+        description="Max alias entries to include in schema hint.",
+    )
+
+    edge_reference_time_override: Optional[str] = Field(
+        default_factory=lambda: os.getenv("KG_EDGE_REFERENCE_TIME", "").strip() or None,
+        description="Optional ISO-8601 UTC reference time for resolving relative time mentions.",
+    )
     language_detection_chinese_ratio_threshold: float = Field(
         default=0.1,
         ge=0.0,

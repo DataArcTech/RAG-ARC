@@ -54,10 +54,7 @@ async def test_networkx_indexing():
         extractor_config = GraphExtractorConfig(
             type="graph_extractor",
             llm_config=llm_config,
-            enable_cleaning=True,
-            enable_llm_cleaning=False,
-            max_rounds=1,
-            max_concurrent=10
+            max_concurrent=10,
         )
         
         # 4. Configure NetworkX Vector Graph Store

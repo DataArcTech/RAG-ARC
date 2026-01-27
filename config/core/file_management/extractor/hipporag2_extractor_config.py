@@ -1,8 +1,6 @@
-"""
-HippoRAG2 Graph Extractor Configuration
+"""HippoRAG2 Graph Extractor Configuration (JSON-only)."""
 
-Optimized for minimal token usage with TSV format
-"""
+import os
 
 from framework.config import AbstractConfig
 from typing import Literal, Optional, List
@@ -26,6 +24,14 @@ class HippoRAG2ExtractorConfig(AbstractConfig):
     entity_types: Optional[List[str]] = Field(
         default=None,
         description="List of entity types to extract. If None, LLM will freely determine entity types"
+    )
+
+    edge_reference_time_override: Optional[str] = Field(
+        default_factory=lambda: os.getenv("KG_EDGE_REFERENCE_TIME", "").strip() or None,
+        description=(
+            "Optional ISO-8601 UTC timestamp used as REFERENCE_TIME when extracting edges (for resolving relative time). "
+            "If unset, the extractor uses the current UTC time and records it in graph metadata."
+        ),
     )
 
     # Concurrency control
@@ -124,27 +130,6 @@ class HippoRAG2ExtractorConfig(AbstractConfig):
         description="Max HS event blocks to accept per chunk when SDF extraction is enabled.",
     )
 
-    # Optional custom prompts (if user wants to override defaults)
-    ner_prompt: Optional[str] = Field(
-        default=None,
-        description="Custom NER prompt (overrides default)"
-    )
-
-    ner_prompt_path: Optional[str] = Field(
-        default=None,
-        description="Optional file path for the custom NER prompt template (overrides default).",
-    )
-
-    triple_prompt: Optional[str] = Field(
-        default=None,
-        description="Custom triple extraction prompt (overrides default)"
-    )
-
-    triple_prompt_path: Optional[str] = Field(
-        default=None,
-        description="Optional file path for the custom triple extraction prompt template (overrides default).",
-    )
-
     kg_schema_path: Optional[str] = Field(
         default=None,
         description=(
@@ -200,8 +185,6 @@ class HippoRAG2ExtractorConfig(AbstractConfig):
 
         self._validate_optional_path(self.temporal_prompt_path, field_name="temporal_prompt_path")
         self._validate_optional_path(self.sdf_hs_prompt_path, field_name="sdf_hs_prompt_path")
-        self._validate_optional_path(self.ner_prompt_path, field_name="ner_prompt_path")
-        self._validate_optional_path(self.triple_prompt_path, field_name="triple_prompt_path")
         self._validate_optional_path(self.kg_schema_path, field_name="kg_schema_path")
 
         if self.retry_attempts is not None:

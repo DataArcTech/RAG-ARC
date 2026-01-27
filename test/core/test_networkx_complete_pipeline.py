@@ -71,10 +71,7 @@ def create_networkx_configs(temp_dir: str) -> Dict[str, Any]:
     extractor_config = GraphExtractorConfig(
         type="graph_extractor",
         llm_config=llm_config,
-        enable_cleaning=True,
-        max_concurrent=100
-        # enable_llm_cleaning=True,
-        # max_rounds=2
+        max_concurrent=100,
     )
     
     # Graph retrieval configuration optimized for NetworkX
