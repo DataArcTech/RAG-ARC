@@ -84,7 +84,7 @@ def test_rag_inference_stream_chat_sse_emits_payload_tool_call(monkeypatch, clie
     monkeypatch.setattr(handlers, "_session_handler", session_handler)
     monkeypatch.setattr(handlers, "_message_handler", message_handler)
     monkeypatch.setattr(handlers, "_rag_inference_handler", rag)
-    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.validators.validate_user_session", lambda *_: True)
+    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.utils.validators.validate_user_session", lambda *_: True)
     monkeypatch.setattr(
         "api.routers.rag_inference_modules.stream_chat.response.response_builder.build_chat_evidence",
         lambda *a, **k: evidence_payload,
@@ -191,7 +191,7 @@ def test_rag_inference_stream_chat_sse_renumbers_citations_and_sources(monkeypat
     monkeypatch.setattr(handlers, "_session_handler", session_handler)
     monkeypatch.setattr(handlers, "_message_handler", message_handler)
     monkeypatch.setattr(handlers, "_rag_inference_handler", rag)
-    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.validators.validate_user_session", lambda *_: True)
+    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.utils.validators.validate_user_session", lambda *_: True)
     monkeypatch.setattr(
         "api.routers.rag_inference_modules.stream_chat.response.response_builder.build_chat_evidence",
         lambda *a, **k: evidence_payload,

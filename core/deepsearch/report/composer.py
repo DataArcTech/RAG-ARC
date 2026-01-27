@@ -544,6 +544,23 @@ class DeepSearchReporter:
         rewritten = dict(structured)
         if isinstance(rewritten.get("text"), str):
             rewritten["text"] = _rewrite_text(rewritten["text"])
+
+        # Rewrite the structured `source_key_map` so downstream consumers (and our own
+        # post-processors) consistently reference original chunk ids.
+        source_key_map = rewritten.get("source_key_map")
+        if isinstance(source_key_map, dict):
+            new_map: Dict[str, Any] = {}
+            for raw_key, raw_val in source_key_map.items():
+                key = str(raw_key)
+                val = raw_val
+                if isinstance(raw_val, str):
+                    mapped = _normalize_token(raw_val)
+                    if mapped:
+                        val = mapped
+                        replaced += 1
+                new_map[key] = val
+            rewritten["source_key_map"] = new_map
+
         citations = rewritten.get("citations")
         if isinstance(citations, list):
             new_citations: List[Dict[str, Any]] = []

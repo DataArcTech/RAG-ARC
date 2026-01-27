@@ -618,18 +618,21 @@ class RAGInference(AbstractModule):
         pageindex_doc_ids: List[str] = []
         pageindex_doc_ids_by_owner: Dict[str, List[str]] = {}
         pageindex_section_scores: Dict[str, float] = {}
-        if self.pageindex_retriever is not None and pageindex_cfg.pageindex_enabled():
+        # Some tests construct RAGInference via object.__new__ (bypassing __init__),
+        # so guard against missing attributes.
+        pageindex_retriever = getattr(self, "pageindex_retriever", None)
+        if pageindex_retriever is not None and pageindex_cfg.pageindex_enabled():
             try:
                 for owner_token in visibility.owner_ids:
                     doc_ids: List[str] = []
                     if pageindex_cfg.doc_routing_enabled():
-                        doc_ids = self.pageindex_retriever.retrieve_docs(
+                        doc_ids = pageindex_retriever.retrieve_docs(
                             rewritten_query,
                             owner_id=str(owner_token),
                         )
                         if doc_ids:
                             pageindex_doc_ids_by_owner[str(owner_token)] = doc_ids
-                    section_hits = self.pageindex_retriever.retrieve_sections(
+                    section_hits = pageindex_retriever.retrieve_sections(
                         rewritten_query,
                         owner_id=str(owner_token),
                         file_ids=doc_ids or None,
