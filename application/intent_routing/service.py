@@ -226,6 +226,48 @@ class IntentRoutingService:
         scoped_history = history_text
         topic_sel: TopicSelection | None = None
 
+        # Topic stack + topic-scoped history is session-only.
+        #
+        # Pre-pass before intent classification:
+        # - ensure cached topic state exists (rebuild if needed)
+        # - optionally scope history by the *current* topic from cached state
+        #
+        # We then apply intent-specific update rules after classification (e.g. ANSWER_DISSATISFIED forces same_topic).
+        last_users: list[str] | None = None
+        last_embeds: list[list[float]] | None = None
+        cur_embed: list[float] | None = None
+        topic_state: dict[str, Any] | None = None
+        if session_id and self._topic_mgr is not None and self._cfg.topic_stack.enabled and parsed:
+            max_n = int(self._cfg.topic_stack.max_user_messages)
+            last_users = _extract_last_user_messages(parsed, max_n=max_n, exclude_text=user_query)
+            if last_users:
+                embeds = self._embedder.embed(last_users + [user_query])
+                last_embeds = embeds[:-1]
+                cur_embed = embeds[-1]
+
+                topic_state = self._topic_mgr.load(str(session_id))
+                if topic_state is None:
+                    topic_state = self._topic_mgr.rebuild_from_user_messages(
+                        session_id=str(session_id),
+                        user_messages=last_users,
+                        embeddings=last_embeds,
+                    )
+                    self._topic_mgr.save(str(session_id), topic_state)
+
+                if self._cfg.topic_stack.history_mode == "topic_scoped":
+                    current_topic = str(topic_state.get("current_topic_id") or "topic_0")
+                    _topics, assigned = self._topic_mgr.assign_topics(user_messages=last_users, embeddings=last_embeds)
+                    user_indices = [i for i, (role, _) in enumerate(parsed) if role == "user"]
+                    last_user_indices = (
+                        user_indices[-len(last_users) :] if len(user_indices) >= len(last_users) else user_indices
+                    )
+                    scoped = _topic_scoped_history(
+                        parsed,
+                        last_user_indices=last_user_indices,
+                        assigned_topic_ids=assigned[-len(last_user_indices) :],
+                        target_topic_id=current_topic,
+                    )
+                    scoped_history = scoped if scoped.strip() else (history_text or "")
         # Without prior user history, do NOT consider follow-up routes.
         # This is semantic-router's official `route_filter` best practice.
         route_filter: list[str] | None = None
@@ -249,54 +291,44 @@ class IntentRoutingService:
 
         decision: IntentDecision = self._router.classify(user_query, route_filter=route_filter)
 
-        # Topic stack + topic-scoped history is session-only.
-        # We run it AFTER intent classification so we can apply intent-specific topic rules
-        # (e.g. "answer dissatisfaction" should not trigger a topic switch).
-        if session_id and self._topic_mgr is not None and self._cfg.topic_stack.enabled and parsed:
-            max_n = int(self._cfg.topic_stack.max_user_messages)
-            last_users = _extract_last_user_messages(parsed, max_n=max_n, exclude_text=user_query)
-            if last_users:
-                embeds = self._embedder.embed(last_users + [user_query])
-                last_embeds = embeds[:-1]
-                cur_embed = embeds[-1]
+        # Apply intent-specific topic update rules after classification.
+        if (
+            session_id
+            and self._topic_mgr is not None
+            and self._cfg.topic_stack.enabled
+            and parsed
+            and last_users
+            and last_embeds is not None
+            and cur_embed is not None
+            and topic_state is not None
+        ):
+            if str(decision.intent).upper() == "ANSWER_DISSATISFIED":
+                # Refresh TTL without mutating topics using the "feedback" message.
+                self._topic_mgr.save(str(session_id), topic_state)
+                current_topic = str(topic_state.get("current_topic_id") or "topic_0")
+                topic_sel = TopicSelection(topic_id=current_topic, action="same_topic", similarity=1.0)
+            else:
+                topic_state, topic_sel = self._topic_mgr.update_with_current_user_message(
+                    session_id=str(session_id),
+                    state=topic_state,
+                    user_message=user_query,
+                    embedding=cur_embed,
+                )
 
-                state = self._topic_mgr.load(str(session_id))
-                if state is None:
-                    state = self._topic_mgr.rebuild_from_user_messages(
-                        session_id=str(session_id),
-                        user_messages=last_users,
-                        embeddings=last_embeds,
-                    )
-                    self._topic_mgr.save(str(session_id), state)
-
-                # For dissatisfaction feedback, force same-topic to keep continuity and avoid spurious switches.
-                if str(decision.intent).upper() == "ANSWER_DISSATISFIED":
-                    # Refresh TTL without mutating topics using the "feedback" message.
-                    self._topic_mgr.save(str(session_id), state)
-                    current_topic = str(state.get("current_topic_id") or "topic_0")
-                    topic_sel = TopicSelection(topic_id=current_topic, action="same_topic", similarity=1.0)
-                else:
-                    _new_state, topic_sel = self._topic_mgr.update_with_current_user_message(
-                        session_id=str(session_id),
-                        state=state,
-                        user_message=user_query,
-                        embedding=cur_embed,
-                    )
-
-                if self._cfg.topic_stack.history_mode == "topic_scoped" and topic_sel is not None:
-                    # Derive topic assignment for the last N user messages for history slicing.
-                    _topics, assigned = self._topic_mgr.assign_topics(user_messages=last_users, embeddings=last_embeds)
-                    user_indices = [i for i, (role, _) in enumerate(parsed) if role == "user"]
-                    last_user_indices = user_indices[-len(last_users) :] if len(user_indices) >= len(last_users) else user_indices
-                    scoped_history = _topic_scoped_history(
-                        parsed,
-                        last_user_indices=last_user_indices,
-                        assigned_topic_ids=assigned[-len(last_user_indices) :],
-                        target_topic_id=topic_sel.topic_id,
-                    )
-                    if not scoped_history.strip():
-                        scoped_history = history_text or ""
-
+            if self._cfg.topic_stack.history_mode == "topic_scoped" and topic_sel is not None:
+                _topics, assigned = self._topic_mgr.assign_topics(user_messages=last_users, embeddings=last_embeds)
+                user_indices = [i for i, (role, _) in enumerate(parsed) if role == "user"]
+                last_user_indices = (
+                    user_indices[-len(last_users) :] if len(user_indices) >= len(last_users) else user_indices
+                )
+                scoped_history = _topic_scoped_history(
+                    parsed,
+                    last_user_indices=last_user_indices,
+                    assigned_topic_ids=assigned[-len(last_user_indices) :],
+                    target_topic_id=topic_sel.topic_id,
+                )
+                if not scoped_history.strip():
+                    scoped_history = history_text or ""
         # If WEB_ONLY is chosen but the caller did not enable web, treat as normal RAG (per decision).
         final_action = decision.action
         if final_action == "web_only" and not enable_web_search:

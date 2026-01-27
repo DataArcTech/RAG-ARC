@@ -3,10 +3,8 @@ import logging
 from collections.abc import AsyncGenerator
 from typing import Any, Optional, Tuple
 
-from ..task.task_helpers import check_and_handle_cancellation, yield_cancellation_event, mark_task_completed
+from ..task.task_helpers import cache_deepsearch_event, check_and_handle_cancellation
 from ..deepsearch.deepsearch_handler import process_deepsearch
-from ..deepsearch.deepsearch_handler_ext import process_deepsearch_result
-from ..response.response_builder import convert_evidence_chunks_to_chunks
 from ..rag.stream_processor import start_stream_processing
 from ..task.task_registry import ChatTaskInfo
 
@@ -24,11 +22,8 @@ async def process_deepsearch_events(
     task_info: Optional[ChatTaskInfo],
     session_id: Any,
     user_message_id: Any
-) -> AsyncGenerator[Any, None]:
+) -> AsyncGenerator[str, None]:
     """处理 DeepSearch 事件流。
-
-    Note: this is an async generator (yields events). The final DeepSearch result is
-    stored in the containers returned by `process_deepsearch()` for the caller to read.
     """
     deepsearch_result_container, trace_file_path_container, deepsearch_gen = await process_deepsearch(
         query,
@@ -45,15 +40,13 @@ async def process_deepsearch_events(
         # 检查取消
         if await check_and_handle_cancellation(task_info, session_id, user_message_id):
             return
-
         # 缓存事件
-        from .task_helpers import cache_deepsearch_event
         await cache_deepsearch_event(task_info, event)
         yield event
-    
-    # Stream exhausted. Caller can inspect deepsearch_result_container/trace_file_path_container.
-    _ = deepsearch_result_container[0]
-    _ = trace_file_path_container[0]
+
+    # deepsearch_gen exhausted; keep containers referenced so refactors don't drop them silently.
+    _ = deepsearch_result_container
+    _ = trace_file_path_container
 
 
 async def process_rag_streaming(
@@ -85,6 +78,7 @@ async def process_rag_streaming(
         include_evidence,
         history_text,
         enable_web_search,
+        session_id,
         queue,
         loop,
         prepared,

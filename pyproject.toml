@@ -73,7 +73,7 @@ dependencies = [
     "stopwordsiso>=0.6.1",
     "pypdf>=6.5.0",
     "opencc-python-reimplemented>=0.1.7",
-    # Semantic routing (optional decision layer for intent/tool selection)
+    # Semantic routing (intent/tool selection).
     "semantic-router>=0.1.12,<0.2.0",
 ]
 

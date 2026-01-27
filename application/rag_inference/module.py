@@ -17,6 +17,7 @@ from core.prompts import (
     get_rag_inference_system_prompt,
     get_rag_chat_system_prompt,
     build_intent_context_system_prompt,
+    build_routing_intent_system_prompt,
 )
 from framework.register import Register
 from framework.thread_pool import get_thread_pool
@@ -27,12 +28,12 @@ from core.utils.chunk_dedupe import dedupe_chunks
 from encapsulation.web_search import TavilySearchClient
 from config.retrieval_routing import rag_retrieval_dynamic_quota_enabled
 from config.rag_intent_routing import (
-    rag_intent_routing_enabled,
     rag_evidence_consistency_enabled,
     rag_evidence_min_keep,
 )
 from config import pageindex as pageindex_cfg
 from core.retrieval.pageindex_retriever import PageIndexRetriever
+from application.intent_routing import IntentRoutingService
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -100,6 +101,15 @@ class RAGInference(AbstractModule):
             logger.warning("Failed to initialize Tavily client (web search disabled): %s", exc)
             self._tavily_client = None
 
+        self._intent_routing: IntentRoutingService | None = None
+        try:
+            self._intent_routing = IntentRoutingService()
+            logger.info("Intent routing initialized (TOML-driven semantic router)")
+        except Exception as exc:  # noqa: BLE001
+            # Intent routing is optional; fail open to normal RAG for safety.
+            logger.warning("Intent routing init failed; continuing without it: %s", exc)
+            self._intent_routing = None
+
     async def _run_blocking(self, func, *args, **kwargs):
         """Run a blocking function in a separate thread to avoid blocking the event loop."""
         return await get_thread_pool().run_blocking(func, *args, **kwargs)
@@ -161,8 +171,10 @@ class RAGInference(AbstractModule):
         owner_id: uuid.UUID,
         return_subgraph: bool = False,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        history_text: Optional[str] = None,
         current_user_query: Optional[str] = None,
         enable_web_search: bool = False,
+        session_id: uuid.UUID | None = None,
         *,
         include_share: bool = False,
         share_owner_id: uuid.UUID | None = None,
@@ -187,7 +199,9 @@ class RAGInference(AbstractModule):
             owner_id=owner_id,
             return_subgraph=return_subgraph,
             progress_callback=progress_callback,
+            history_text=history_text,
             enable_web_search=enable_web_search,
+            session_id=session_id,
             include_share=include_share,
             share_owner_id=share_owner_id,
         )
@@ -333,6 +347,7 @@ class RAGInference(AbstractModule):
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         history_text: Optional[str] = None,
         enable_web_search: bool = False,
+        session_id: uuid.UUID | None = None,
         user_type: Optional[int] = None,
     ) -> tuple[Iterator[str], list[Chunk], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """Stream chat completion from the configured LLM."""
@@ -344,6 +359,7 @@ class RAGInference(AbstractModule):
             progress_callback=progress_callback,
             history_text=history_text,
             enable_web_search=enable_web_search,
+            session_id=session_id,
             user_type=user_type,
         )
         return (self.llm.stream_chat(messages), chunks, subgraph_data, subgraph_info)
@@ -373,6 +389,7 @@ class RAGInference(AbstractModule):
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         history_text: Optional[str] = None,
         enable_web_search: bool = False,
+        session_id: uuid.UUID | None = None,
         user_type: Optional[int] = None,
         include_share: bool = False,
         share_owner_id: uuid.UUID | None = None,
@@ -445,15 +462,62 @@ class RAGInference(AbstractModule):
                 top.append({"source_file_id": fid, "count": int(count), "filename": name_by_id.get(fid)})
             return top
 
+        routing_intent: str | None = None
+        routing_action: str = "rag"
+        routed_history_text: str | None = None
+        # Some tests construct RAGInference via object.__new__ (skipping __init__),
+        # so guard against missing attributes.
+        intent_router = getattr(self, "_intent_routing", None)
+        if intent_router is not None:
+            self._emit_progress(progress_callback, {"stage": "intent_routing", "status": "start"})
+            routing_start = time.perf_counter()
+            try:
+                result = intent_router.route(
+                    session_id=str(session_id) if session_id is not None else None,
+                    user_query=str(query or ""),
+                    history_text=history_text,
+                    enable_web_search=bool(enable_web_search),
+                )
+                routing_intent = str(result.intent or "").strip() or None
+                routing_action = str(result.action or "").strip() or "rag"
+                routed_history_text = result.scoped_history_text
+                # Prefer scoped history when available; keep None for "no history".
+                if routed_history_text is not None:
+                    history_text = routed_history_text
+                self._emit_progress(
+                    progress_callback,
+                    {
+                        "stage": "intent_routing",
+                        "status": "end",
+                        "duration_ms": int((time.perf_counter() - routing_start) * 1000),
+                        "intent": routing_intent,
+                        "action": routing_action,
+                        "score": float(getattr(result, "score", 0.0) or 0.0),
+                        **({"topic": result.topic.__dict__} if getattr(result, "topic", None) else {}),
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Intent routing failed; defaulting to RAG: %s", exc)
+                self._emit_progress(
+                    progress_callback,
+                    {
+                        "stage": "intent_routing",
+                        "status": "error",
+                        "duration_ms": int((time.perf_counter() - routing_start) * 1000),
+                        "error": str(exc) or exc.__class__.__name__,
+                    },
+                )
+
         self._emit_progress(progress_callback, {"stage": "rewrite", "status": "start"})
         rewrite_start = time.perf_counter()
         rewrite_kwargs: dict[str, Any] = {}
         rewritten_query: str
         retrieval_ratios: dict[str, float] | None = None
+        # Legacy fields kept for backward compatibility with message building, now unused.
         rewrite_intent: str | None = None
         rewrite_anchors: list[str] = []
         rewrite_reason: str | None = None
-        skip_retrieval = False
+        skip_retrieval = routing_action == "no_retrieval"
         try:
             sig = inspect.signature(self.query_rewriter.rewrite_query)
             accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
@@ -463,44 +527,10 @@ class RAGInference(AbstractModule):
         except Exception as exc:  # noqa: BLE001
             logger.debug("Failed to inspect query_rewriter.rewrite_query signature: %s", exc, exc_info=True)
 
-        # Intent-aware rewrite (opt-in): single LLM call can classify intent and return anchors.
-        if rag_intent_routing_enabled() and hasattr(self.query_rewriter, "rewrite_query_with_intent"):
-            try:
-                fn = getattr(self.query_rewriter, "rewrite_query_with_intent")
-                sig = inspect.signature(fn)
-                accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
-                call_kwargs = dict(rewrite_kwargs)
-                if not accepts_var_kw and "history_text" not in sig.parameters:
-                    call_kwargs.pop("history_text", None)
-                payload = fn(query, **call_kwargs)  # type: ignore[misc]
-                if isinstance(payload, dict):
-                    rewrite_intent = str(payload.get("intent") or "").strip() or None
-                    rewrite_reason = str(payload.get("reason") or "").strip() or None
-                    anchors = payload.get("anchors")
-                    if isinstance(anchors, list):
-                        rewrite_anchors = [str(a or "").strip() for a in anchors if str(a or "").strip()]
-                    rewritten_query = str(payload.get("rewritten_query") or "").strip() or query
-                else:
-                    rewritten_query = self.query_rewriter.rewrite_query(query, **rewrite_kwargs)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("rewrite_query_with_intent failed; falling back to rewrite_query: %s", exc)
-                rewritten_query = self.query_rewriter.rewrite_query(query, **rewrite_kwargs)
-
-            # Self-consistency: keep anchors aligned to rewritten_query (reduces "CORRECTION mentions both A and B" drift).
-            if rewrite_anchors and rewritten_query:
-                try:
-                    from core.utils.anchor_consistency import prune_anchors_by_query_text
-
-                    rewrite_anchors = prune_anchors_by_query_text(
-                        anchors=rewrite_anchors,
-                        rewritten_query=rewritten_query,
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-
-            # Routing decision: for pure acknowledgement/clarification, do not retrieve.
-            if rewrite_intent in {"CHITCHAT_ACK", "CLARIFICATION"}:
-                skip_retrieval = True
+        # Only rewrite when we plan to retrieve (rag/web_only). For no_retrieval, answer quickly.
+        if skip_retrieval:
+            rewritten_query = str(query or "").strip()
+            retrieval_ratios = None
         elif rag_retrieval_dynamic_quota_enabled() and hasattr(self.query_rewriter, "rewrite_query_with_routing"):
             try:
                 fn = getattr(self.query_rewriter, "rewrite_query_with_routing")
@@ -523,7 +553,7 @@ class RAGInference(AbstractModule):
                 "status": "end",
                 "duration_ms": int((time.perf_counter() - rewrite_start) * 1000),
                 "rewritten_query": rewritten_query,
-                **({"intent": rewrite_intent} if rewrite_intent else {}),
+                **({"intent": routing_intent} if routing_intent else {}),
                 **({"anchors": rewrite_anchors} if rewrite_anchors else {}),
                 **({"reason": rewrite_reason} if rewrite_reason else {}),
                 **({"retrieval_ratios": retrieval_ratios} if retrieval_ratios else {}),
@@ -537,6 +567,11 @@ class RAGInference(AbstractModule):
             messages: List[Dict[str, str]] = []
             system_prompt = get_rag_chat_system_prompt(profile="cli", user_type=user_type)
             messages.append({"role": "system", "content": system_prompt})
+            # Routing-intent specific behavior (e.g. CLARIFY_REQUIRED) is expressed via centrally managed prompts.
+            if routing_intent:
+                routing_prompt = build_routing_intent_system_prompt(routing_intent)
+                if routing_prompt:
+                    messages.append({"role": "system", "content": routing_prompt})
             # Add a small, centralized guardrail so answers respect CORRECTION/TOPIC_SWITCH constraints even without retrieval.
             if rewrite_intent or rewrite_anchors or rewrite_reason:
                 messages.append(
@@ -561,6 +596,8 @@ class RAGInference(AbstractModule):
                         messages.append({"role": role, "content": content})
             messages.append({"role": "user", "content": str(query or "").strip()})
             return (messages, chunks, None, subgraph_info)
+
+        do_internal_retrieval = routing_action == "rag"
 
         self._emit_progress(progress_callback, {"stage": "retrieve", "status": "start"})
         retrieve_start = time.perf_counter()
@@ -600,107 +637,121 @@ class RAGInference(AbstractModule):
             web_future = get_thread_pool().executor.submit(_run_web_search)
             logger.info("Web search future submitted")
 
-        visibility = build_owner_visibility(
-            primary_owner_id=owner_id,
-            include_share=bool(include_share),
-            share_owner_id=share_owner_id,
-            label=("me+share" if include_share else "me"),
-        )
-        self._emit_progress(
-            progress_callback,
-            {
-                "stage": "retrieve",
-                "status": "scope",
-                "owner_visibility": {"label": visibility.label, "owner_ids": list(visibility.owner_ids)},
-            },
-        )
-
         pageindex_doc_ids: List[str] = []
         pageindex_doc_ids_by_owner: Dict[str, List[str]] = {}
         pageindex_section_scores: Dict[str, float] = {}
-        # Some tests construct RAGInference via object.__new__ (bypassing __init__),
-        # so guard against missing attributes.
-        pageindex_retriever = getattr(self, "pageindex_retriever", None)
-        if pageindex_retriever is not None and pageindex_cfg.pageindex_enabled():
-            try:
-                for owner_token in visibility.owner_ids:
-                    doc_ids: List[str] = []
-                    if pageindex_cfg.doc_routing_enabled():
-                        doc_ids = pageindex_retriever.retrieve_docs(
-                            rewritten_query,
-                            owner_id=str(owner_token),
-                        )
-                        if doc_ids:
-                            pageindex_doc_ids_by_owner[str(owner_token)] = doc_ids
-                    section_hits = pageindex_retriever.retrieve_sections(
-                        rewritten_query,
-                        owner_id=str(owner_token),
-                        file_ids=doc_ids or None,
-                    )
-                    for hit in section_hits:
-                        meta = getattr(hit, "metadata", None) or {}
-                        section_id = str(meta.get("section_id") or getattr(hit, "id", "") or "").strip()
-                        if not section_id:
-                            continue
-                        score = meta.get("score")
-                        if not isinstance(score, (int, float)):
-                            score = 0.0
-                        existing = pageindex_section_scores.get(section_id, None)
-                        if existing is None or score > existing:
-                            pageindex_section_scores[section_id] = float(score)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("PageIndex retrieval failed: %s", exc)
-
-        if len(visibility.owner_ids) == 1 and pageindex_doc_ids_by_owner:
-            owner_key = str(next(iter(visibility.owner_ids)))
-            pageindex_doc_ids = pageindex_doc_ids_by_owner.get(owner_key, [])
-            if pageindex_doc_ids:
-                pageindex_doc_ids = list(dict.fromkeys(pageindex_doc_ids))
-
         chunks: list[Chunk] = []
         subgraph_infos: list[dict[str, Any]] = []
-        for owner_token in visibility.owner_ids:
-            retrieved: list[Chunk] = self.retriever.invoke(
-                rewritten_query,
-                owner_id=owner_token,
-                return_subgraph_info=return_subgraph,
-                k=graph_candidates_k,
-                **({"retrieval_ratios": retrieval_ratios} if retrieval_ratios else {}),
-            )
-            per_info = self._consume_subgraph_info(retrieved)
-            if per_info:
-                try:
-                    per_info.setdefault("owner_scope", str(owner_token))
-                except Exception:  # noqa: BLE001
-                    pass
-                subgraph_infos.append(per_info)
-            chunks.extend(retrieved)
         retriever_info = None
-        try:
-            if hasattr(self.retriever, "get_multipath_info"):
-                retriever_info = self.retriever.get_multipath_info()
-        except Exception:  # noqa: BLE001
-            retriever_info = None
-        self._emit_progress(
-            progress_callback,
-            {
-                "stage": "retrieve",
-                "status": "end",
-                "duration_ms": int((time.perf_counter() - retrieve_start) * 1000),
-                "chunks": len(chunks),
-                "retriever": retriever_info,
-                "top_chunks": [_chunk_brief(chunk) for chunk in chunks[: min(len(chunks), 10)]],
-                **(
-                    {
-                        "file_distribution": _file_distribution(chunks, limit=RAG_RETRIEVAL_LOG_TOP_FILES),
-                    }
-                    if RAG_RETRIEVAL_OBSERVABILITY
-                    else {}
-                ),
-            },
-        )
 
-        if owner_id is not None and is_admin_owner(owner_id) and not chunks and self.graph_retriever is not None:
+        if do_internal_retrieval:
+            visibility = build_owner_visibility(
+                primary_owner_id=owner_id,
+                include_share=bool(include_share),
+                share_owner_id=share_owner_id,
+                label=("me+share" if include_share else "me"),
+            )
+            self._emit_progress(
+                progress_callback,
+                {
+                    "stage": "retrieve",
+                    "status": "scope",
+                    "owner_visibility": {"label": visibility.label, "owner_ids": list(visibility.owner_ids)},
+                },
+            )
+
+            # Some tests bypass __init__ so optional components may be missing.
+            pageindex_retriever = getattr(self, "pageindex_retriever", None)
+            if pageindex_retriever is not None and pageindex_cfg.pageindex_enabled():
+                try:
+                    for owner_token in visibility.owner_ids:
+                        doc_ids: List[str] = []
+                        if pageindex_cfg.doc_routing_enabled():
+                            doc_ids = pageindex_retriever.retrieve_docs(
+                                rewritten_query,
+                                owner_id=str(owner_token),
+                            )
+                            if doc_ids:
+                                pageindex_doc_ids_by_owner[str(owner_token)] = doc_ids
+                        section_hits = pageindex_retriever.retrieve_sections(
+                            rewritten_query,
+                            owner_id=str(owner_token),
+                            file_ids=doc_ids or None,
+                        )
+                        for hit in section_hits:
+                            meta = getattr(hit, "metadata", None) or {}
+                            section_id = str(meta.get("section_id") or getattr(hit, "id", "") or "").strip()
+                            if not section_id:
+                                continue
+                            score = meta.get("score")
+                            if not isinstance(score, (int, float)):
+                                score = 0.0
+                            existing = pageindex_section_scores.get(section_id, None)
+                            if existing is None or score > existing:
+                                pageindex_section_scores[section_id] = float(score)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("PageIndex retrieval failed: %s", exc)
+
+            if len(visibility.owner_ids) == 1 and pageindex_doc_ids_by_owner:
+                owner_key = str(next(iter(visibility.owner_ids)))
+                pageindex_doc_ids = pageindex_doc_ids_by_owner.get(owner_key, [])
+                if pageindex_doc_ids:
+                    pageindex_doc_ids = list(dict.fromkeys(pageindex_doc_ids))
+
+            for owner_token in visibility.owner_ids:
+                retrieved: list[Chunk] = self.retriever.invoke(
+                    rewritten_query,
+                    owner_id=owner_token,
+                    return_subgraph_info=return_subgraph,
+                    k=graph_candidates_k,
+                    **({"retrieval_ratios": retrieval_ratios} if retrieval_ratios else {}),
+                )
+                per_info = self._consume_subgraph_info(retrieved)
+                if per_info:
+                    try:
+                        per_info.setdefault("owner_scope", str(owner_token))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    subgraph_infos.append(per_info)
+                chunks.extend(retrieved)
+
+            try:
+                if hasattr(self.retriever, "get_multipath_info"):
+                    retriever_info = self.retriever.get_multipath_info()
+            except Exception:  # noqa: BLE001
+                retriever_info = None
+            self._emit_progress(
+                progress_callback,
+                {
+                    "stage": "retrieve",
+                    "status": "end",
+                    "duration_ms": int((time.perf_counter() - retrieve_start) * 1000),
+                    "chunks": len(chunks),
+                    "retriever": retriever_info,
+                    "top_chunks": [_chunk_brief(chunk) for chunk in chunks[: min(len(chunks), 10)]],
+                    **(
+                        {
+                            "file_distribution": _file_distribution(chunks, limit=RAG_RETRIEVAL_LOG_TOP_FILES),
+                        }
+                        if RAG_RETRIEVAL_OBSERVABILITY
+                        else {}
+                    ),
+                },
+            )
+        else:
+            # Web-only mode: skip internal retrieval and wait for (optional) web search.
+            self._emit_progress(
+                progress_callback,
+                {
+                    "stage": "retrieve",
+                    "status": "end",
+                    "duration_ms": int((time.perf_counter() - retrieve_start) * 1000),
+                    "chunks": 0,
+                    "skipped_internal_retrieval": True,
+                },
+            )
+
+        if do_internal_retrieval and owner_id is not None and is_admin_owner(owner_id) and not chunks and self.graph_retriever is not None:
             logger.info("Admin/global mode: multipath returned 0 results, falling back to graph retriever")
             graph_chunks = self.graph_retriever.invoke(
                 rewritten_query,

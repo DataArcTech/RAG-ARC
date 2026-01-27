@@ -60,7 +60,7 @@ Notes:
 - `requires_history=true` intents are excluded on the first user turn via semantic-router’s official `route_filter`.
 - Web search is frontend-controlled (`enable_web_search`). When it is `false`, `WEB_ONLY` is excluded via `route_filter`
   (capability gating); if it somehow still appears, the action is treated as normal `rag`.
- - `ANSWER_DISSATISFIED` forces `same_topic` in topic selection to avoid spurious topic switches.
+- `ANSWER_DISSATISFIED` forces `same_topic` in topic selection to avoid spurious topic switches.
 
 ### Multi-turn Topic Handling (Session Only)
 

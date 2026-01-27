@@ -1,7 +1,7 @@
 # Intent router threshold optimization / evaluation cases.
 #
 # This file is used by scripts that call semantic-router's official `evaluate`/`fit`
-# APIs (see dhttps://github.com/aurelio-labs/semantic-router/blob/7b37054d2c41776cc2eb2fdc77b0d322b4945b5c/docs/06-threshold-optimization.ipynb).
+# APIs (see https://github.com/aurelio-labs/semantic-router/blob/7b37054d2c41776cc2eb2fdc77b0d322b4945b5c/docs/06-threshold-optimization.ipynb).
 #
 # The examples are intentionally domain-agnostic and can be expanded over time.
 

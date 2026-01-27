@@ -60,7 +60,7 @@ RAG 推理在最开始调用 `application.intent_routing.IntentRoutingService.ro
 - `requires_history=true` 的意图（follow-up 类）在首轮会通过 semantic-router 官方 `route_filter` 自动排除。
 - `enable_web_search` 由前端控制：当本次请求 `enable_web_search=false` 时，会通过 `route_filter` 排除 `WEB_ONLY`
   （能力 gating）；如果极端情况下仍命中 `WEB_ONLY`，业务上按普通 `rag` 处理。
- - `ANSWER_DISSATISFIED` 会强制 topic 判定为 `same_topic`，避免反馈句触发无意义的 topic_switch。
+- `ANSWER_DISSATISFIED` 会强制 topic 判定为 `same_topic`，避免反馈句触发无意义的 topic_switch。
 
 ### 多轮对话主题管理（仅 session 内）
 

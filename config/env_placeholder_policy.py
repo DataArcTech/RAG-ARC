@@ -28,6 +28,12 @@ ENV_DEFAULTS: dict[str, str] = {
     "RAG_RETRIEVAL_WEIGHT_DENSE": "1.0",
     "RAG_RETRIEVAL_WEIGHT_BM25": "1.0",
     "RAG_RETRIEVAL_WEIGHT_GRAPH": "1.5",
+    # Intent router (semantic intent classification)
+    "INTENT_OPENAI_EMBEDDING_MODEL": "text-embedding-3-small",
+    "INTENT_QWEN_EMBEDDING_MODEL_NAME": "Qwen/Qwen3-Embedding-0.6B",
+    "INTENT_EMBEDDING_DEVICE": "cpu",
+    # Local intent embedding cache (aligns with default local model layout under ./models).
+    "INTENT_EMBEDDING_CACHE_FOLDER": "./models/Qwen",
 }
 
 # Missing placeholders that should not produce warnings because downstream config has safe defaults.
@@ -83,6 +89,14 @@ SILENT_MISSING_ENV_VARS: set[str] = {
     "OPENAI_CHAT_MODEL",
     "OPENAI_EMBEDDING_MODEL",
     "OPENAI_OCR_MODEL",
+    # Intent router optional overrides (TOML can provide defaults).
+    "INTENT_ROUTER_CONFIG_PATH",
+    "INTENT_EMBEDDING_API_KEY",
+    "INTENT_EMBEDDING_API_BASE_URL",
+    "INTENT_OPENAI_EMBEDDING_MODEL",
+    "INTENT_QWEN_EMBEDDING_MODEL_NAME",
+    "INTENT_EMBEDDING_DEVICE",
+    "INTENT_EMBEDDING_CACHE_FOLDER",
     # Optional external search (only required when enabled).
     "TAVILY_API_KEY",
     # Chunking knobs (TokenChunkerConfig has safe defaults).

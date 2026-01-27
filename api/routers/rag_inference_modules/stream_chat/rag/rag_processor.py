@@ -47,6 +47,7 @@ async def process_rag_streaming(
         include_evidence,
         history_text,
         enable_web_search,
+        session_id,
         queue,
         loop,
         prepared,

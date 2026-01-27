@@ -77,11 +77,29 @@ def create_sentence_transformer_client(config) -> Any:
             logger.info("Set HF_ENDPOINT to https://hf-mirror.com")
 
         import sentence_transformers
+        import torch
 
         model_name = getattr(config, 'model_name', 'sentence-transformers/all-mpnet-base-v2')
         device = getattr(config, 'device', 'cpu')
         cache_folder = getattr(config, 'cache_folder', None)
-        model_kwargs = getattr(config, 'model_kwargs', {})
+        model_kwargs = getattr(config, 'model_kwargs', {}) or {}
+        st_model_kwargs = getattr(config, "sentence_transformer_model_kwargs", {}) or {}
+
+        # `sentence_transformer_model_kwargs` maps to transformers `from_pretrained` kwargs.
+        # Allow a string torch_dtype in config for TOML friendliness.
+        if isinstance(st_model_kwargs, dict) and "torch_dtype" in st_model_kwargs and isinstance(st_model_kwargs["torch_dtype"], str):
+            dtype_token = st_model_kwargs["torch_dtype"].strip().lower()
+            dtype_map = {
+                "float16": torch.float16,
+                "fp16": torch.float16,
+                "bfloat16": torch.bfloat16,
+                "bf16": torch.bfloat16,
+                "float32": torch.float32,
+                "fp32": torch.float32,
+            }
+            if dtype_token in dtype_map:
+                st_model_kwargs = dict(st_model_kwargs)
+                st_model_kwargs["torch_dtype"] = dtype_map[dtype_token]
 
         # Log cache folder information
         if cache_folder:
@@ -94,7 +112,8 @@ def create_sentence_transformer_client(config) -> Any:
             model_name,
             cache_folder=cache_folder,
             device=device,
-            **model_kwargs
+            model_kwargs=st_model_kwargs if isinstance(st_model_kwargs, dict) else {},
+            **(model_kwargs if isinstance(model_kwargs, dict) else {}),
         )
 
         logger.info(f"SentenceTransformer client initialized successfully: {model_name}")

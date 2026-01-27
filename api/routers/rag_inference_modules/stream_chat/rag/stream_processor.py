@@ -17,6 +17,7 @@ def _run_stream_processing(
     include_evidence: bool,
     history_text: str | None,
     enable_web_search: bool,
+    session_id: Any,
     queue: asyncio.Queue,
     loop: asyncio.AbstractEventLoop,
     prepared: dict[str, Any],
@@ -48,6 +49,7 @@ def _run_stream_processing(
                     progress_callback=emit_progress,
                     history_text=history_text if history_text else None,
                     enable_web_search=enable_web_search,
+                    session_id=session_id,
                     user_type=user_type,
                 )
             )
@@ -61,6 +63,7 @@ def _run_stream_processing(
                         progress_callback=emit_progress,
                         history_text=history_text if history_text else None,
                         enable_web_search=enable_web_search,
+                        session_id=session_id,
                     )
                 )
             except TypeError:
@@ -72,6 +75,7 @@ def _run_stream_processing(
                             return_subgraph=(return_subgraph or include_evidence),
                             progress_callback=emit_progress,
                             history_text=history_text if history_text else None,
+                            session_id=session_id,
                             user_type=user_type,
                         )
                     )
@@ -175,6 +179,7 @@ def start_stream_processing(
     include_evidence: bool,
     history_text: str | None,
     enable_web_search: bool,
+    session_id: Any,
     queue: asyncio.Queue,
     loop: asyncio.AbstractEventLoop,
     prepared: dict[str, Any],
@@ -192,6 +197,7 @@ def start_stream_processing(
             include_evidence,
             history_text,
             enable_web_search,
+            session_id,
             queue,
             loop,
             prepared,

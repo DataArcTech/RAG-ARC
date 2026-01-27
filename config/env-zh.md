@@ -80,6 +80,13 @@ Benchmark/实验模式：
 | `EMBEDDING_RATE_LIMIT_MAX_RETRIES` | `6` | Embedding 命中 HTTP 429 限流时的额外重试次数。 |
 | `EMBEDDING_RATE_LIMIT_DEFAULT_SLEEP_SECONDS` | `60` | 当 429 响应未提供 Retry-After 时，默认每次重试等待（秒）。 |
 | `EMBEDDING_RATE_LIMIT_MAX_SLEEP_SECONDS` | `60` | 429 重试等待上限（秒，cap）。 |
+| `INTENT_ROUTER_CONFIG_PATH` | `config/core/intent_routing/intent_router.toml` | 语义意图路由（semantic intent routing）的 TOML 配置路径。 |
+| `INTENT_EMBEDDING_API_KEY` | _(空)_ | 意图 embedding 的 API Key（当 `intent_router.embedding.provider=openai_compat`）。 |
+| `INTENT_EMBEDDING_API_BASE_URL` | _(空)_ | 意图 embedding 的 OpenAI 兼容 Base URL（当 `intent_router.embedding.provider=openai_compat`）。 |
+| `INTENT_OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | 意图 embedding 的模型名称（当 `openai_compat`）。 |
+| `INTENT_QWEN_EMBEDDING_MODEL_NAME` | `Qwen/Qwen3-Embedding-0.6B` | 意图 embedding 的模型名称（当 `qwen_local`/SentenceTransformers）。 |
+| `INTENT_EMBEDDING_DEVICE` | `cpu` | 意图 embedding 的运行设备（当 `qwen_local`/SentenceTransformers）。 |
+| `INTENT_EMBEDDING_CACHE_FOLDER` | `./models/Qwen` | 可选：意图 embedding 的本地缓存目录（SentenceTransformers）。 |
 | `OCR_MODEL_PROVIDER` | `openai` | OCR/VLM 提供方（`openai`、`vllm`、`dots_ocr` 等）。 |
 | `OCR_API_KEY` | _(空)_ | OCR/VLM 的 API Key（使用云端 API 时必填）。 |
 | `OCR_API_BASE_URL` | _(空)_ | OCR/VLM 的 Base URL。 |
@@ -209,7 +216,6 @@ Benchmark/实验模式：
 | `RAG_RETRIEVAL_WEIGHT_BM25` | `1.0` | MultiPath 的 RRF 融合权重：BM25 路径。 |
 | `RAG_RETRIEVAL_WEIGHT_GRAPH` | `1.5` | MultiPath 的 RRF 融合权重：graph 路径（调低以避免在“稀有细节”问题上压制 dense/bm25）。 |
 | `RAG_RETRIEVAL_DYNAMIC_QUOTA_ENABLED` | `true` | 是否启用 LLM 动态路由比例（按 query 决定 dense/bm25/graph 的候选配额保底）。关闭后回退为静态比例（由权重推导）。 |
-| `RAG_INTENT_ROUTING_ENABLED` | `false` | 启用意图识别 + 意图感知的 query rewrite（同一次 LLM 调用输出 JSON：intent/anchors/rewritten_query）。用于多轮对话中识别“澄清/纠错/闲聊”等，减少不必要检索与跑偏。 |
 | `RAG_REWRITE_HISTORY_USER_ONLY` | `true` | rewrite 阶段只向模型提供 user 历史（不包含 assistant），降低错误回答污染后续 rewrite（assistant poisoning）。 |
 | `RAG_REWRITE_HISTORY_MOST_RECENT_FIRST` | `true` | rewrite 的 history context 按“最近在前”排序（与 rewrite prompt 保持一致）。 |
 | `RAG_EVIDENCE_CONSISTENCY_ENABLED` | `false` | 启用 evidence 一致性过滤：基于 rewrite 产出的 anchors，将召回结果收敛到同一公司/产品文件集合，降低跨产品证据混入导致的回答偏移。 |

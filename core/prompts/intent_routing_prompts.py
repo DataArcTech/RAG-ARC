@@ -22,7 +22,6 @@ _ANSWER_DISSATISFIED: Final[str] = (
     "- Do NOT restart retrieval or produce a long rewritten answer in this turn.\n"
 )
 
-
 def build_routing_intent_system_prompt(intent: str | None) -> str | None:
     token = str(intent or "").strip().upper()
     if token == "CLARIFY_REQUIRED":

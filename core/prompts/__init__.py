@@ -9,6 +9,7 @@ from .rerank_prompts import LISTWISE_RERANK_DEFAULT_PROMPT_TEMPLATE
 from .xlang_prompts import FILE_SCOPE_XLANG_REWRITE_PROMPT_TEMPLATE, build_file_scope_xlang_rewrite_prompt
 from .rag_inference_prompt_loader import get_rag_inference_system_prompt, get_rag_chat_system_prompt
 from .intent_context_prompt import build_intent_context_system_prompt
+from .intent_routing_prompts import build_routing_intent_system_prompt
 from .rag_inference_prompts import (
     RAG_INFERENCE_CITATION_SYSTEM_PROMPT_EN,
     RAG_CHAT_BASE_SYSTEM_PROMPT_EN,
@@ -26,6 +27,7 @@ __all__ = [
     "get_rag_inference_system_prompt",
     "get_rag_chat_system_prompt",
     "build_intent_context_system_prompt",
+    "build_routing_intent_system_prompt",
     "RAG_INFERENCE_CITATION_SYSTEM_PROMPT_EN",
     "RAG_CHAT_BASE_SYSTEM_PROMPT_EN",
     "RAG_CHAT_CITATION_ADDON_SYSTEM_PROMPT_EN",
