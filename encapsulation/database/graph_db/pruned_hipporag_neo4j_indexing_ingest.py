@@ -13,6 +13,7 @@ from encapsulation.database.utils.sdf_schema_payload import build_sdf_schema_pay
 from encapsulation.database.utils.schema_layer_nodes import build_schema_layer_payload
 from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id, text_processing
 from core.knowledge_graph.schema import normalize_relation_token
+from encapsulation.database.graph_db.pruned_hipporag_neo4j_chunk_upsert_cleanup import run_chunk_replace_cleanup
 
 logger = logging.getLogger(__name__)
 
@@ -358,7 +359,12 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
                         return None, True, bool(candidates)
                     return next(iter(candidates)), True, False
 
-                processed_triples: list[tuple[str, str, str, str, str, bool]] = []
+                # Triples may optionally include per-edge temporal bounds + paraphrased fact text.
+                # Shape:
+                #   (head_id, head_display, predicate, tail_id, tail_display, direction_sensitive, valid_from?, valid_to?, fact?)
+                processed_triples: list[
+                    tuple[str, str, str, str, str, bool, Optional[str], Optional[str], Optional[str]]
+                ] = []
                 for relation in chunk.graph.relations:
                     if len(relation) >= 3:
                         head_key, head_used_canonical, head_canonical_ambiguous = _resolve_endpoint_key(relation[0])
@@ -413,8 +419,21 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
 
                         if not direction_sensitive:
                             owner_stats["triples_kept_direction_insensitive"] += 1
+                        edge_valid_from = str(relation[3]).strip() if len(relation) > 3 and relation[3] is not None else None
+                        edge_valid_to = str(relation[4]).strip() if len(relation) > 4 and relation[4] is not None else None
+                        edge_fact = str(relation[5]).strip() if len(relation) > 5 and relation[5] is not None else None
                         processed_triples.append(
-                            (head_id, head_display, normalized_predicate, tail_id, tail_display, direction_sensitive)
+                            (
+                                head_id,
+                                head_display,
+                                normalized_predicate,
+                                tail_id,
+                                tail_display,
+                                direction_sensitive,
+                                edge_valid_from or None,
+                                edge_valid_to or None,
+                                edge_fact or None,
+                            )
                         )
                         owner_stats["triples_kept"] += 1
 
@@ -426,10 +445,23 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
                         business_time = dict(raw)
                 if not business_time and isinstance(metadata.get(BUSINESS_TIME_KEY), dict):
                     business_time = dict(metadata.get(BUSINESS_TIME_KEY) or {})
-                valid_from = business_time.get("valid_from") or business_time.get("effective_date")
-                effective_date = business_time.get("effective_date") or business_time.get("valid_from")
-                valid_to = business_time.get("valid_to")
-                for head_id, head_name, relation_type, tail_id, tail_name, direction_sensitive in processed_triples:
+                chunk_valid_from = business_time.get("valid_from") or business_time.get("effective_date")
+                chunk_effective_date = business_time.get("effective_date") or business_time.get("valid_from")
+                chunk_valid_to = business_time.get("valid_to")
+                for (
+                    head_id,
+                    head_name,
+                    relation_type,
+                    tail_id,
+                    tail_name,
+                    direction_sensitive,
+                    edge_valid_from,
+                    edge_valid_to,
+                    edge_fact,
+                ) in processed_triples:
+                    valid_from = edge_valid_from or (str(chunk_valid_from).strip() if chunk_valid_from else None)
+                    valid_to = edge_valid_to or (str(chunk_valid_to).strip() if chunk_valid_to else None)
+                    effective_date = edge_valid_from or (str(chunk_effective_date).strip() if chunk_effective_date else None)
                     upsert_fact_occurrence(
                         fact_data_by_id,
                         head_id=head_id,
@@ -444,9 +476,10 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
                         domain=domain,
                         direction_sensitive=direction_sensitive,
                         max_source_chunks=max_source_chunks,
-                        valid_from=str(valid_from) if valid_from else None,
-                        valid_to=str(valid_to) if valid_to else None,
-                        effective_date=str(effective_date) if effective_date else None,
+                        valid_from=valid_from,
+                        valid_to=valid_to,
+                        effective_date=effective_date,
+                        fact=edge_fact,
                     )
 
         # Prepare entity list for batch insertion
@@ -550,6 +583,16 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
         # Batch insert using single transaction
         with self._driver.session(database=self.database) as session:
             with session.begin_transaction() as tx:
+                # For chunk upserts (same chunk_id re-index), remove stale evidence first so the graph remains stable.
+                # This obeys "incremental + reconciliation" philosophy (like Graphiti), and avoids append-only drift.
+                if (str(getattr(cfg, "chunk_upsert_policy", "append") or "").strip().lower() == "replace") and chunk_data:
+                    try:
+                        chunk_keys = [{"chunk_id": c["chunk_id"], "owner_id": c["owner_id"]} for c in chunk_data if c.get("chunk_id") and c.get("owner_id")]
+                        run_chunk_replace_cleanup(tx, chunk_keys=chunk_keys)
+                    except Exception as exc:  # noqa: BLE001
+                        # No silent fallback: failing cleanup makes update semantics undefined, so surface clearly.
+                        raise RuntimeError(f"Chunk upsert cleanup failed (chunk_upsert_policy=replace): {exc}") from exc
+
                 # 1. Batch insert chunks
                 if chunk_data:
                     chunk_query = """

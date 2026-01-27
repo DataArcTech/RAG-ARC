@@ -60,6 +60,7 @@ def upsert_fact_occurrence(
     valid_from: Optional[str] = None,
     valid_to: Optional[str] = None,
     effective_date: Optional[str] = None,
+    fact: Optional[str] = None,
 ) -> str:
     """
     Merge a (head, predicate, tail) occurrence into an aggregated payload used by Neo4j UNWIND insertion.
@@ -79,7 +80,7 @@ def upsert_fact_occurrence(
     relation_type = str(relation_type or "").strip()
     fact_key = f"{head_id}|{relation_type}|{tail_id}"
     fact_id = compute_mdhash_id(fact_key, prefix="fact-", owner_id=owner_id)
-    fact_text = str((head_name, relation_type, tail_name))
+    fact_text = str(fact).strip() if fact is not None and str(fact).strip() else str((head_name, relation_type, tail_name))
 
     existing = fact_data_by_id.get(fact_id)
     if existing is None:

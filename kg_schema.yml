@@ -33,7 +33,9 @@ domains:
       "owned by": OWNED_BY
       "part of": PART_OF
       "has part": HAS_PART
-      "works for": WORKS_FOR
+      "works for": WORKS_AT
+      "work for": WORKS_AT
+      "work at": WORKS_AT
       "employs": EMPLOYS
       "supplies": SUPPLIES
       "produces": PRODUCES
@@ -48,13 +50,14 @@ domains:
     # - reject: drop the triple
     # - keep: keep (normalized) token as predicate
     # - collapse: replace with `unknown_predicate_fallback`
-    # General-domain default: preserve long-tail predicates (normalized) to avoid semantic loss.
-    unknown_predicate_policy: keep
-    unknown_predicate_fallback: RELATED_TO
+    #
+    # Default: collapse unknown predicates to avoid predicate explosion (quality-first for KG).
+    unknown_predicate_policy: collapse
+    unknown_predicate_fallback: RELATES_TO
 
     # Direction semantics:
     # - whitelist (legacy): only predicates in `direction_sensitive_relations` are directed; all others treated as undirected.
     # - blacklist (safer default): only predicates in `direction_insensitive_relations` are undirected; all others directed.
     direction_policy: blacklist
     direction_insensitive_relations:
-      - RELATED_TO
+      - RELATES_TO

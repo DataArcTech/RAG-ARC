@@ -43,7 +43,7 @@ class DomainSchema:
     entity_aliases: Dict[str, str] = field(default_factory=dict)
     entity_suffixes_to_strip: List[str] = field(default_factory=list)
     unknown_predicate_policy: str = "collapse"  # reject | keep | collapse
-    unknown_predicate_fallback: str = "RELATED_TO"
+    unknown_predicate_fallback: str = "RELATES_TO"
 
     def normalize_predicate(self, raw_predicate: str) -> Optional[str]:
         return self.normalize_predicate_with_meta(raw_predicate).canonical_predicate
@@ -258,7 +258,7 @@ def schema_from_dict(payload: Mapping[str, Any]) -> KGSchemaConfig:
         entity_aliases = _coerce_entity_aliases(domain_payload.get("entity_aliases"))
         suffixes = _coerce_suffixes(domain_payload.get("entity_suffixes_to_strip"))
         policy = str(domain_payload.get("unknown_predicate_policy") or "collapse").strip()
-        fallback = str(domain_payload.get("unknown_predicate_fallback") or "RELATED_TO").strip()
+        fallback = str(domain_payload.get("unknown_predicate_fallback") or "RELATES_TO").strip()
 
         domains[domain_key] = DomainSchema(
             allowed_relations=allowed_relations,

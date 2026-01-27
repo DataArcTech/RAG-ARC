@@ -1,6 +1,6 @@
 import os
 from typing import Annotated, Literal, Union
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from framework.config import AbstractConfig
 from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
@@ -65,6 +65,16 @@ class PrunedHippoRAGNeo4jConfig(AbstractConfig):
         ge=0,
         le=1000,
         description="Max chunk ids to retain per fact edge in Neo4j (`RELATES_TO.source_chunk_ids`). 0 disables storage.",
+    )
+
+    chunk_upsert_policy: Literal["replace", "append"] = Field(
+        default_factory=lambda: (os.getenv("KG_CHUNK_UPSERT_POLICY", "replace") or "replace").strip().lower(),
+        description=(
+            "When updating existing chunk_id(s), choose how to handle old graph evidence:\n"
+            "- replace: remove old evidence contributed by those chunk_id(s) (MENTIONS + RELATES_TO provenance cleanup)\n"
+            "- append: keep old evidence and only add new (legacy behavior; can cause drift)\n"
+            "Note: replace requires fact_provenance_max_source_chunks > 0 to be correct."
+        ),
     )
 
     enable_endpoint_canonical_fallback: bool = Field(
@@ -199,6 +209,15 @@ class PrunedHippoRAGNeo4jConfig(AbstractConfig):
             "(shared_module). Disable for strict isolation in tests/multi-tenant workers."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_chunk_upsert_policy(self):
+        if self.chunk_upsert_policy == "replace" and int(self.fact_provenance_max_source_chunks) == 0:
+            raise ValueError(
+                "chunk_upsert_policy=replace requires fact_provenance_max_source_chunks > 0 "
+                "(otherwise the store cannot remove stale chunk evidence from RELATES_TO edges)."
+            )
+        return self
 
     def build(self):
         """Build and return a PrunedHippoRAGNeo4jStore instance."""
