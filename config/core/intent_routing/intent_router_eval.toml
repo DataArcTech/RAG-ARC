@@ -1,0 +1,184 @@
+# Intent router threshold optimization / evaluation cases.
+#
+# This file is used by scripts that call semantic-router's official `evaluate`/`fit`
+# APIs (see dhttps://github.com/aurelio-labs/semantic-router/blob/7b37054d2c41776cc2eb2fdc77b0d322b4945b5c/docs/06-threshold-optimization.ipynb).
+#
+# The examples are intentionally domain-agnostic and can be expanded over time.
+
+[intent_router_eval]
+
+[[intent_router_eval.cases]]
+text = "这个是什么意思？"
+intent = "CLARIFY_REQUIRED"
+
+[[intent_router_eval.cases]]
+text = "帮我看看这个"
+intent = "CLARIFY_REQUIRED"
+
+[[intent_router_eval.cases]]
+text = "请先问我几个问题再回答"
+intent = "CLARIFY_REQUIRED"
+
+[[intent_router_eval.cases]]
+text = "写一个 Python 快速排序，给我代码"
+intent = "TASK_EXECUTION"
+
+[[intent_router_eval.cases]]
+text = "用 Python 写一个 quick sort，并解释一下复杂度"
+intent = "TASK_EXECUTION"
+
+[[intent_router_eval.cases]]
+text = "给我一段 SQL，建表 users(id,name,created_at)"
+intent = "TASK_EXECUTION"
+
+[[intent_router_eval.cases]]
+text = "把下面这段话改写得更清晰：我想要一个可以跑得更快的程序，但是我也不想让代码太复杂。"
+intent = "TASK_EXECUTION"
+
+[[intent_router_eval.cases]]
+text = "帮我翻译一下这句话：Hello world"
+intent = "TASK_EXECUTION"
+
+[[intent_router_eval.cases]]
+text = "把下面内容总结成表格：A=1, B=2"
+intent = "TASK_EXECUTION"
+
+[[intent_router_eval.cases]]
+text = "你好"
+intent = "NO_RETRIEVAL"
+
+[[intent_router_eval.cases]]
+text = "谢谢"
+intent = "NO_RETRIEVAL"
+
+[[intent_router_eval.cases]]
+text = "好的我知道了"
+intent = "NO_RETRIEVAL"
+
+[[intent_router_eval.cases]]
+text = "明白了，感谢"
+intent = "NO_RETRIEVAL"
+
+[[intent_router_eval.cases]]
+text = "不用查资料，直接回答"
+intent = "NO_RETRIEVAL"
+
+[[intent_router_eval.cases]]
+text = "帮我网上查一下：快速排序是谁提出的？给我来源链接"
+intent = "WEB_ONLY"
+
+[[intent_router_eval.cases]]
+text = "请在互联网上查证并给出链接"
+intent = "WEB_ONLY"
+
+[[intent_router_eval.cases]]
+text = "去官网查一下最新公告并总结"
+intent = "WEB_ONLY"
+
+[[intent_router_eval.cases]]
+text = "搜索一下这个名词的最新定义"
+intent = "WEB_ONLY"
+
+[[intent_router_eval.cases]]
+text = "帮我查一下最新的版本号和发布说明（给链接）"
+intent = "WEB_ONLY"
+
+[[intent_router_eval.cases]]
+text = "网上搜一下这个错误码的含义并给出处"
+intent = "WEB_ONLY"
+
+[[intent_router_eval.cases]]
+text = "帮我找一下官方文档链接"
+intent = "WEB_ONLY"
+
+[[intent_router_eval.cases]]
+text = "请根据我上传的资料回答这个问题"
+intent = "RAG_REQUIRED"
+
+[[intent_router_eval.cases]]
+text = "在文档里这个条款是什么意思？请给出处"
+intent = "RAG_REQUIRED"
+
+[[intent_router_eval.cases]]
+text = "A 和 B 的区别是什么？请引用依据"
+intent = "RAG_REQUIRED"
+
+[[intent_router_eval.cases]]
+text = "请给出门槛/条件/限制，并说明对应规则（给出处）"
+intent = "RAG_REQUIRED"
+
+[[intent_router_eval.cases]]
+text = "请从资料里提取关键字段并汇总"
+intent = "RAG_REQUIRED"
+
+[[intent_router_eval.cases]]
+text = "对比两款方案：分别列出主要特点（各3点）并给出处"
+intent = "RAG_REQUIRED"
+
+[[intent_router_eval.cases]]
+text = "有哪些限制条件？请说明规则并引用依据"
+intent = "RAG_REQUIRED"
+
+[[intent_router_eval.cases]]
+text = "在后备受保人的设置上，两款产品的区别是什么？"
+intent = "RAG_REQUIRED"
+
+[[intent_router_eval.cases]]
+text = "是否支持保单贷款？规则是什么"
+intent = "RAG_REQUIRED"
+
+[[intent_router_eval.cases]]
+text = "哪份产品在名义金额达到门槛时可享折扣，并且允许保单贷款达到某个比例？请给门槛与规则"
+intent = "RAG_REQUIRED"
+
+[[intent_router_eval.cases]]
+text = "继续刚才那个话题"
+intent = "FOLLOWUP_NO_RAG"
+
+[[intent_router_eval.cases]]
+text = "你刚刚说的是什么意思？"
+intent = "FOLLOWUP_NO_RAG"
+
+[[intent_router_eval.cases]]
+text = "再展开讲讲"
+intent = "FOLLOWUP_NO_RAG"
+
+[[intent_router_eval.cases]]
+text = "继续刚才：再解释一下复杂度"
+intent = "FOLLOWUP_NO_RAG"
+
+[[intent_router_eval.cases]]
+text = "继续刚才：时间复杂度和空间复杂度分别是多少？"
+intent = "FOLLOWUP_NO_RAG"
+
+[[intent_router_eval.cases]]
+text = "那你上面提到的点能不能再说清楚一点？"
+intent = "FOLLOWUP_NO_RAG"
+
+[[intent_router_eval.cases]]
+text = "回到刚才的主题，请再从资料里找一下证据"
+intent = "FOLLOWUP_RAG_REQUIRED"
+
+[[intent_router_eval.cases]]
+text = "继续查资料，给我更准确的条款/数字"
+intent = "FOLLOWUP_RAG_REQUIRED"
+
+[[intent_router_eval.cases]]
+text = "继续上一个问题：请从文档里补充细节并给出处"
+intent = "FOLLOWUP_RAG_REQUIRED"
+
+[[intent_router_eval.cases]]
+text = "回到刚才那份资料，补充更多原文依据"
+intent = "FOLLOWUP_RAG_REQUIRED"
+
+[[intent_router_eval.cases]]
+text = "你这个回答不对"
+intent = "ANSWER_DISSATISFIED"
+
+[[intent_router_eval.cases]]
+text = "你没回答我的问题，重新回答"
+intent = "ANSWER_DISSATISFIED"
+
+[[intent_router_eval.cases]]
+text = "太泛了，给更具体的步骤"
+intent = "ANSWER_DISSATISFIED"
