@@ -1,6 +1,8 @@
 """事件生成器辅助函数"""
 import logging
+from collections.abc import AsyncGenerator
 from typing import Any, Optional, Tuple
+
 from ..task.task_helpers import check_and_handle_cancellation, yield_cancellation_event, mark_task_completed
 from ..deepsearch.deepsearch_handler import process_deepsearch
 from ..deepsearch.deepsearch_handler_ext import process_deepsearch_result
@@ -22,8 +24,12 @@ async def process_deepsearch_events(
     task_info: Optional[ChatTaskInfo],
     session_id: Any,
     user_message_id: Any
-) -> Tuple[Optional[Any], Optional[str]]:
-    """处理 DeepSearch 事件流并返回结果"""
+) -> AsyncGenerator[Any, None]:
+    """处理 DeepSearch 事件流。
+
+    Note: this is an async generator (yields events). The final DeepSearch result is
+    stored in the containers returned by `process_deepsearch()` for the caller to read.
+    """
     deepsearch_result_container, trace_file_path_container, deepsearch_gen = await process_deepsearch(
         query,
         str(effective_owner),
@@ -38,18 +44,16 @@ async def process_deepsearch_events(
     async for event in deepsearch_gen:
         # 检查取消
         if await check_and_handle_cancellation(task_info, session_id, user_message_id):
-            return None, None
-        
+            return
+
         # 缓存事件
         from .task_helpers import cache_deepsearch_event
         await cache_deepsearch_event(task_info, event)
         yield event
     
-    # 获取结果
-    deepsearch_result = deepsearch_result_container[0]
-    deepsearch_trace_file_path = trace_file_path_container[0]
-    
-    return deepsearch_result, deepsearch_trace_file_path
+    # Stream exhausted. Caller can inspect deepsearch_result_container/trace_file_path_container.
+    _ = deepsearch_result_container[0]
+    _ = trace_file_path_container[0]
 
 
 async def process_rag_streaming(
