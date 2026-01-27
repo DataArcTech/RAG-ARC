@@ -1,8 +1,6 @@
-from __future__ import annotations
-
 """Fit semantic-router route thresholds using the official `fit` API.
 
-Reference: docs-proj/semantic-router/docs/06-threshold-optimization.ipynb
+Reference: https://github.com/aurelio-labs/semantic-router/blob/7b37054d2c41776cc2eb2fdc77b0d322b4945b5c/docs/06-threshold-optimization.ipynb
 
 This script:
 - loads `config/core/intent_routing/intent_router.toml` (with env placeholder substitution)

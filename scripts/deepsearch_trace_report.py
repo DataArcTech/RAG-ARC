@@ -187,7 +187,7 @@ def main() -> int:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("docs-proj/proj-deepsearch/deepsearch_trace_test_pdf.txt"),
+        default=Path("local/test_deepsearch/deepsearch_trace_test_pdf.txt"),
         help="Output report path.",
     )
     parser.add_argument("--question", type=str, default=None, help="Override question rendered in the report header.")

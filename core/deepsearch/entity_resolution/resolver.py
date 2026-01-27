@@ -1,6 +1,6 @@
 """Hybrid entity/name resolution for DeepSearch graph tools.
 
-Design goals (see docs-proj/docs-proj/plans/2026-01-15-deepsearch-online-entity-resolution-plan.md):
+Design goals:
 - Shared capability across all graph tools (neighbors/path/intersection/...).
 - Conservative auto-resolve: prefer returning candidates over mismatching.
 - Performance-aware: tools call this only on 0-hit/ambiguous paths.

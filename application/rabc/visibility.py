@@ -42,7 +42,7 @@ def build_owner_visibility(
     """
     Build the owner visibility scope for reads/retrieval.
 
-    Rules (per product decisions in docs-proj/multi-tenant-share-prd.md):
+    Rules:
     - Default: only include primary owner ("me" / "target_user").
     - include_share=True: include both primary + share owner.
 

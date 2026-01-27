@@ -379,7 +379,7 @@ def build_public_view_v2(
     refs_enabled: bool,
     trace_events: List[Dict[str, Any]] | None,
 ) -> Dict[str, Any]:
-    # Public json is a minimal event stream that mirrors docs-proj/testres.txt (XML-like tags).
+    # Public json is a minimal event stream (with XML-like tags).
     payload: Dict[str, Any] = {
         "dev_ref": build_ref(file="dev.json", enabled=refs_enabled),
         "events": [],
