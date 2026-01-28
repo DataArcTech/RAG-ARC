@@ -415,6 +415,21 @@ curl -X POST "http://localhost:8000/deepsearch/run" \
   -H "Content-Type: application/json" \
   -d '{"question": "什么是RAG-ARC?", "include_evidence": true}'
 
+```
+
+### 📚 DeepSearch 长文档导航（PageIndex）
+
+DeepSearch 对长文档（手册/标准/政策/合同等）做了优化。当 PageIndex 启用（默认）时，
+think→explore 会先选文件，再选章节，再读完整段落后回答。
+
+关键导航工具（DeepSearch explore 内部使用）：
+- `file.search`: 文档级路由（doc_description + doc_profile 用于消歧）
+- `toc.tree` / `section.search`: 章节级路由（目录/章节摘要）
+- `read.section` / `read.pages` / `read.neighbors`: 读取目标章节/页/邻近块的完整上下文
+
+若 PageIndex 关闭或缺少章节/页元数据，DeepSearch 会回退到 `search.*` + `read.chunk`，并在诊断信息中明确提示能力受限。
+
+```bash
 # 获取Token（登录）
 curl -X POST "http://localhost:8000/auth/token" \
   -H "Content-Type: application/x-www-form-urlencoded" \

@@ -196,11 +196,13 @@ SEARCH_ENTITY_EXTRACT_MAX_TOKENS = 240
 FILE_SEARCH_DEFAULT_TOP_K = 5
 FILE_SEARCH_RETRIEVE_CANDIDATES_K = 12
 FILE_SEARCH_DESC_MAX_CHARS = 900
+FILE_SEARCH_SUMMARY_DESC_PREVIEW_CHARS = 160
 
 # -----------------------------
 # section.search defaults (section-level routing)
 # -----------------------------
 SECTION_SEARCH_DEFAULT_TOP_K = 6
+SECTION_SEARCH_SUMMARY_PREVIEW_CHARS = 160
 
 # Allowlist for per-request graph retrieval overrides supplied via tool_args.
 # These map to fields in `config/core/retrieval/pruned_hipporag_neo4j_config.py`.
@@ -250,3 +252,23 @@ SEARCH_GRAPH_SAFE_OVERRIDE_KEYS = (
 EXPLORE_MAX_CONCURRENCY = 4
 EXPLORE_READ_MAX_CHUNKS = 12
 EXPLORE_READ_MAX_CHARS = 6000
+
+# -----------------------------
+# toc + structured reading defaults (PageIndex navigation)
+# -----------------------------
+TOC_TREE_DEFAULT_MAX_DEPTH = 6
+TOC_TREE_MAX_CHUNKS_SCANNED = 5000
+TOC_TREE_MAX_NODES = 220
+
+READ_SECTION_DEFAULT_MAX_CHUNKS = 80
+READ_SECTION_DEFAULT_MAX_CHARS = 16000
+
+READ_PAGES_DEFAULT_MAX_CHUNKS = 120
+READ_PAGES_DEFAULT_MAX_CHARS = 20000
+
+# Chunk-neighbor reading (without explicit NEXT_CHUNK edges).
+READ_NEIGHBORS_DEFAULT_BEFORE = 3
+READ_NEIGHBORS_DEFAULT_AFTER = 3
+READ_NEIGHBORS_MAX_WINDOW = 40
+READ_NEIGHBORS_DEFAULT_MAX_CHUNKS = 40
+READ_NEIGHBORS_DEFAULT_MAX_CHARS = 12000

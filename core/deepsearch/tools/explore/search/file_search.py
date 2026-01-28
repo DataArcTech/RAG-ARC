@@ -167,18 +167,27 @@ class FileSearchTool(GraphTool):
                 diagnostics={**diagnostics, "reason": reason},
             )
 
+        # Put doc_description/doc_profile into the human-readable summary (not only diagnostics)
+        # so the LLM can actually perform "doc routing" decisions.
         lines: List[str] = []
         for idx, row in enumerate(results[: min(len(results), 5)]):
             profile = row.get("doc_profile") if isinstance(row.get("doc_profile"), dict) else {}
             company = str(profile.get("company") or "").strip()
             version = str(profile.get("version") or "").strip()
+            product = str(profile.get("product") or "").strip()
             suffix = ""
-            if company or version:
-                suffix = f" company={company} version={version}".rstrip()
+            if company or product or version:
+                suffix = f" company={company} product={product} version={version}".rstrip()
+            desc = str(row.get("doc_description") or "").strip()
+            max_preview = int(tool_defaults.FILE_SEARCH_SUMMARY_DESC_PREVIEW_CHARS)
+            if max_preview > 0 and len(desc) > max_preview:
+                desc = desc[: max(0, max_preview - 3)].rstrip() + "..."
             lines.append(
                 f"{idx+1}. file_id={row.get('file_id')} score={row.get('score'):.4f} owner_id={row.get('owner_id')} "
                 f"filename={row.get('filename') or ''} title={row.get('title') or ''}{suffix}"
             )
+            if desc:
+                lines.append(f"   desc: {desc}")
         summary = "file.search returned candidate files:\n" + "\n".join(lines)
         return ToolResult(summary=summary, diagnostics=diagnostics)
 
@@ -195,4 +204,3 @@ class FileSearchTool(GraphTool):
         except Exception:
             parsed = int(default)
         return max(0, parsed)
-

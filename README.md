@@ -399,6 +399,22 @@ curl -X POST "http://localhost:8000/deepsearch/run" \
   -H "Content-Type: application/json" \
   -d '{"question": "What is RAG-ARC?", "include_evidence": true}'
 
+```
+
+### 📚 DeepSearch long-document navigation (PageIndex)
+
+DeepSearch is optimized for long documents (manuals, standards, policies, contracts). When PageIndex is enabled (default),
+the think→explore loop will first narrow down the right file, then the right section, then read the full block before answering.
+
+Key navigation tools (internal to DeepSearch explore):
+- `file.search`: doc-level routing (doc_description + doc_profile for disambiguation)
+- `toc.tree` / `section.search`: section-level routing (ToC/section summary)
+- `read.section` / `read.pages` / `read.neighbors`: read full context around the target section/pages/chunk
+
+If PageIndex is disabled or section/page metadata is missing, DeepSearch falls back to `search.*` + `read.chunk` and
+explicitly reports the limitation in diagnostics.
+
+```bash
 # Get Token (Login)
 curl -X POST "http://localhost:8000/auth/token" \
   -H "Content-Type: application/x-www-form-urlencoded" \

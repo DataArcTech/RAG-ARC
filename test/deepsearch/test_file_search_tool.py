@@ -54,6 +54,7 @@ async def test_file_search_returns_doc_descriptions(monkeypatch: pytest.MonkeyPa
     )
 
     result = await tool.run(req)
+    assert "desc:" in result.summary
     rows = result.diagnostics.get("results") or []
     assert [row["file_id"] for row in rows] == ["file-2", "file-1"]
     assert rows[0]["doc_description"] == "This is description two."

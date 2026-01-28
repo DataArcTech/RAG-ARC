@@ -58,6 +58,7 @@ async def test_section_search_returns_sections(monkeypatch: pytest.MonkeyPatch) 
     )
 
     result = await tool.run(req)
+    assert "summary:" in result.summary
     rows = result.diagnostics.get("results") or []
     assert [row["section_id"] for row in rows] == ["sec-2", "sec-1"]
 

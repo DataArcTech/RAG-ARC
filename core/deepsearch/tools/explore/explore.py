@@ -11,6 +11,7 @@ from config.core.deepsearch.tool_defaults import EXPLORE_MAX_CONCURRENCY, EXPLOR
 from config.core.deepsearch.evidence_defaults import EVIDENCE_CLASS_SOURCE_TEXT
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_PRIMARY
 from core.graph_adapter.cypher import adapter_supports_cypher
+from core.graph_adapter.concurrency import adapter_locked
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from ..governance_tags import EVIDENCE_PRIMARY, REQUIRES_LLM, SCOPE_FILE, SCOPE_OWNER
@@ -18,6 +19,9 @@ from .graph_ops import GraphOpsTool
 from .search.file_search import FileSearchTool
 from .search.section_search import SectionSearchTool
 from .search import SearchBM25Tool, SearchFaissTool, SearchGraphChunkTool, SearchTool
+from .toc_tree import TocTreeTool
+from .read_structured import ReadPagesTool, ReadSectionTool
+from .read_neighbors import ReadNeighborsTool
 from .web_search import WebSearchTool
 from .beam_search import BeamSearchTool
 from .llm_chain_explorer import LLMChainExplorerTool
@@ -26,6 +30,7 @@ from .llm_chain_explorer import LLMChainExplorerTool
 _ALLOWED_TOOL_NAMES = {
     "file.search",
     "section.search",
+    "toc.tree",
     "search",
     "search.faiss",
     "search.bm25",
@@ -35,6 +40,9 @@ _ALLOWED_TOOL_NAMES = {
     "graph.llm_chain_explorer",
     "web.search",
     "read.chunk",
+    "read.section",
+    "read.pages",
+    "read.neighbors",
 }
 
 _LLM_REQUIRED_ACTIONS = {"search.graph_chunk", "graph.beam_search", "graph.llm_chain_explorer"}
@@ -173,6 +181,8 @@ class ExploreTool(GraphTool):
             self._tools["file.search"] = FileSearchTool()
         if "section.search" not in self._tools:
             self._tools["section.search"] = SectionSearchTool()
+        if "toc.tree" not in self._tools:
+            self._tools["toc.tree"] = TocTreeTool()
         if "search" not in self._tools:
             self._tools["search"] = SearchTool(
                 llm_connector=self.llm_connector,
@@ -193,6 +203,12 @@ class ExploreTool(GraphTool):
             self._tools["graph.llm_chain_explorer"] = LLMChainExplorerTool(llm_connector=self.llm_connector)
         if "web.search" not in self._tools:
             self._tools["web.search"] = WebSearchTool()
+        if "read.section" not in self._tools:
+            self._tools["read.section"] = ReadSectionTool()
+        if "read.pages" not in self._tools:
+            self._tools["read.pages"] = ReadPagesTool()
+        if "read.neighbors" not in self._tools:
+            self._tools["read.neighbors"] = ReadNeighborsTool()
 
     async def _run_action(
         self,
@@ -328,7 +344,9 @@ class ExploreTool(GraphTool):
             "RETURN c.chunk_id AS chunk_id, c.content AS content, c.metadata AS metadata, "
             "c.source_file_id AS source_file_id, c.owner_id AS owner_id\n"
         )
-        rows = await request.adapter.acypher(cypher, {"chunk_ids": chunk_ids}, access_scope=request.access_scope)
+        # Protect Neo4j driver calls when the adapter does not opt into concurrency.
+        async with adapter_locked(request.adapter):
+            rows = await request.adapter.acypher(cypher, {"chunk_ids": chunk_ids}, access_scope=request.access_scope)
         evidences: List[EvidenceChunk] = []
         seen: set[str] = set()
         for row in rows or []:

@@ -24,6 +24,22 @@ def _coerce_section_id(meta: Any, fallback: Any) -> str | None:
     return token or None
 
 
+def _split_section_card(text: str) -> tuple[str, str, str]:
+    """Parse PageIndex section card: title \\n path \\n summary."""
+
+    raw = str(text or "").strip()
+    if not raw:
+        return "", "", ""
+    lines = [line.rstrip() for line in raw.splitlines()]
+    lines = [line for line in lines if line.strip()]
+    if not lines:
+        return "", "", ""
+    title = lines[0].strip()
+    path = lines[1].strip() if len(lines) >= 2 else ""
+    summary = "\n".join(lines[2:]).strip() if len(lines) >= 3 else ""
+    return title, path, summary
+
+
 class SectionSearchTool(GraphTool):
     descriptor = ToolDescriptor(
         name="section.search",
@@ -133,11 +149,18 @@ class SectionSearchTool(GraphTool):
                     "file_id": str(meta.get("source_file_id") or meta.get("file_id") or "").strip() or None,
                     "filename": str(meta.get("filename") or "").strip() or None,
                     "section_path": str(meta.get("section_path") or "").strip() or None,
-                    "title": str(meta.get("title") or "").strip() or None,
-                    "summary": str(meta.get("summary") or "").strip() or None,
+                    "title": None,
+                    "summary": None,
                     "page_start": meta.get("page_start"),
                     "page_end": meta.get("page_end"),
                 }
+                card_title, card_path, card_summary = _split_section_card(getattr(hit, "content", ""))
+                if card_title:
+                    row["title"] = card_title
+                if not row.get("section_path") and card_path:
+                    row["section_path"] = card_path
+                if card_summary:
+                    row["summary"] = card_summary
                 existing = merged.get(section_id)
                 if existing is None or score_f > float(existing.get("score") or 0.0):
                     merged[section_id] = row
@@ -150,11 +173,25 @@ class SectionSearchTool(GraphTool):
         if not results:
             return ToolResult(summary="section.search returned no sections.", diagnostics={**diagnostics, "reason": "empty_hit"})
 
+        # Put section summary into the human-readable summary so the LLM can route by structure
+        # (PageIndex: ToC/section navigation before chunk retrieval).
         lines: List[str] = []
         for idx, row in enumerate(results[: min(len(results), 6)]):
+            path = str(row.get("section_path") or "").strip()
+            title = str(row.get("title") or "").strip()
+            summary = str(row.get("summary") or "").strip()
+            max_preview = int(tool_defaults.SECTION_SEARCH_SUMMARY_PREVIEW_CHARS)
+            if max_preview > 0 and len(summary) > max_preview:
+                summary = summary[: max(0, max_preview - 3)].rstrip() + "..."
+            page_start = row.get("page_start")
+            page_end = row.get("page_end")
+            page_hint = ""
+            if page_start is not None or page_end is not None:
+                page_hint = f" pages={page_start}-{page_end}"
             lines.append(
                 f"{idx+1}. section_id={row.get('section_id')} score={row.get('score'):.4f} "
-                f"file_id={row.get('file_id') or ''} path={row.get('section_path') or ''}"
+                f"file_id={row.get('file_id') or ''}{page_hint} path={path or title}"
             )
+            if summary:
+                lines.append(f"   summary: {summary}")
         return ToolResult(summary="section.search returned candidate sections:\n" + "\n".join(lines), diagnostics=diagnostics)
-
