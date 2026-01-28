@@ -81,6 +81,8 @@ def build_stream_chat_payload(
             "chunk_index",
             "start_idx",
             "end_idx",
+            "page_start",
+            "page_end",
         ]
         
         for field in essential_fields:
@@ -118,4 +120,3 @@ def build_stream_chat_payload(
     if evidence is not None:
         response_dict["evidence"] = evidence
     return response_dict, subgraph
-
