@@ -15,6 +15,8 @@ from core.graph_adapter.cypher import adapter_supports_cypher
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from ..governance_tags import EVIDENCE_PRIMARY, REQUIRES_LLM, SCOPE_FILE, SCOPE_OWNER
 from .graph_ops import GraphOpsTool
+from .search.file_search import FileSearchTool
+from .search.section_search import SectionSearchTool
 from .search import SearchBM25Tool, SearchFaissTool, SearchGraphChunkTool, SearchTool
 from .web_search import WebSearchTool
 from .beam_search import BeamSearchTool
@@ -22,6 +24,8 @@ from .llm_chain_explorer import LLMChainExplorerTool
 
 
 _ALLOWED_TOOL_NAMES = {
+    "file.search",
+    "section.search",
     "search",
     "search.faiss",
     "search.bm25",
@@ -165,6 +169,10 @@ class ExploreTool(GraphTool):
         return ToolResult(summary=summary, evidences=evidences, diagnostics=diagnostics)
 
     def _register_builtin_tools(self) -> None:
+        if "file.search" not in self._tools:
+            self._tools["file.search"] = FileSearchTool()
+        if "section.search" not in self._tools:
+            self._tools["section.search"] = SectionSearchTool()
         if "search" not in self._tools:
             self._tools["search"] = SearchTool(
                 llm_connector=self.llm_connector,

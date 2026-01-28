@@ -190,6 +190,18 @@ SEARCH_GRAPH_ENABLE_ENTITY_FALLBACK = True
 SEARCH_ENTITY_EXTRACT_TEMPERATURE = 0.0
 SEARCH_ENTITY_EXTRACT_MAX_TOKENS = 240
 
+# -----------------------------
+# file.search defaults (doc-level routing)
+# -----------------------------
+FILE_SEARCH_DEFAULT_TOP_K = 5
+FILE_SEARCH_RETRIEVE_CANDIDATES_K = 12
+FILE_SEARCH_DESC_MAX_CHARS = 900
+
+# -----------------------------
+# section.search defaults (section-level routing)
+# -----------------------------
+SECTION_SEARCH_DEFAULT_TOP_K = 6
+
 # Allowlist for per-request graph retrieval overrides supplied via tool_args.
 # These map to fields in `config/core/retrieval/pruned_hipporag_neo4j_config.py`.
 SEARCH_GRAPH_SAFE_OVERRIDE_KEYS = (

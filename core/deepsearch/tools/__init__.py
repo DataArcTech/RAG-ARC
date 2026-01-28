@@ -5,6 +5,8 @@ from .base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest
 from .explore import (
     ExploreTool,
     GraphOpsTool,
+    FileSearchTool,
+    SectionSearchTool,
     SearchTool,
     SearchFaissTool,
     SearchBM25Tool,
@@ -24,6 +26,8 @@ __all__ = [
     "ToolRunRequest",
     "ExploreTool",
     "GraphOpsTool",
+    "FileSearchTool",
+    "SectionSearchTool",
     "SearchTool",
     "SearchFaissTool",
     "SearchBM25Tool",
@@ -44,6 +48,8 @@ __all__ = [
 _BUILTIN_CLASSES = [
     GraphOpsTool,
     ExploreTool,
+    FileSearchTool,
+    SectionSearchTool,
     SearchTool,
     SearchFaissTool,
     SearchBM25Tool,
