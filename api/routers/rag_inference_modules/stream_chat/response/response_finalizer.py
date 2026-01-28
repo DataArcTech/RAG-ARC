@@ -38,16 +38,13 @@ async def _get_or_create_final_assistant_message(
 ) -> Tuple[Any, bool]:
     """Create the assistant message and return (message, created_now).
     
-    重要：如果 return_subgraph=True，只有在 subgraph_data 存在时才创建消息。
-    这样可以确保存储的是包含完整 subgraph_data 的消息。
+    注意：即使 return_subgraph=True，也可能因为 mindmap 生成失败/被取消等原因导致 subgraph_data 为 None。
+    这时仍然允许创建消息（subgraph_data 留空），并在后续拿到 subgraph_data 时更新已有消息。
     """
-    # 如果 return_subgraph=True 但 subgraph_data 不存在，检查是否已有消息
-    # 如果有，返回它（稍后会更新 subgraph_data）；如果没有，不应该创建（等待 mindmap 生成完成）
     if return_subgraph and subgraph_data is None:
         logger.warning(
             "[STORE] return_subgraph=True but subgraph_data is None, checking for existing message"
         )
-        # 如果已有消息，返回它（稍后会更新 subgraph_data）
         if task_info:
             registry = get_chat_task_registry()
             lock = await registry.get_finalization_lock(task_info.task_id)
@@ -62,21 +59,10 @@ async def _get_or_create_final_assistant_message(
                             existing.id
                         )
                         return existing, False
-        # 如果没有现有消息，不应该创建（等待 mindmap 生成完成）
-        # 正常情况下，_build_and_yield_final_response 和 _ensure_finalization 都会等待 mindmap 生成完成后再调用此函数
-        logger.error(
-            "[STORE] Cannot create message: return_subgraph=True but subgraph_data is None. "
-            "This should not happen as mindmap should be generated before calling this function. "
-            "session_id=%s, task_id=%s",
+        logger.warning(
+            "[STORE] Creating message without subgraph_data (mindmap may have failed): session_id=%s, task_id=%s",
             session_id,
-            task_info.task_id if task_info else "None"
-        )
-        # 为了不破坏调用链，返回一个占位符，但记录错误
-        # 实际上这种情况不应该发生
-        raise ValueError(
-            f"Cannot create message: return_subgraph=True but subgraph_data is None. "
-            f"Please ensure mindmap is generated before calling this function. "
-            f"session_id={session_id}"
+            task_info.task_id if task_info else "None",
         )
     
     # 直接创建新消息（此时 subgraph_data 已存在或 return_subgraph=False）
@@ -332,7 +318,7 @@ async def _build_and_yield_final_response(
     )
     if return_subgraph and subgraph_data is None:
         logger.info(
-            "[STORE] Generating mindmap: return_subgraph=%s, subgraph_data is None, chunks_count=%d",
+            "[STORE] Generating mindmap: return_subgraph=%s, subgraph_data_is_none=%s, chunks_count=%d",
             return_subgraph,
             subgraph_data is None,
             len(chunks) if chunks else 0

@@ -262,19 +262,34 @@ async def stream_chat_sse(
     
     # Validate authentication and permissions
     await validators.validate_user_authentication(current_user)
-    await validators.validate_user_permissions(
-        current_user,
-        request.return_subgraph,
-        request.include_evidence
-    )
-    await validators.validate_session_access(session_id, current_user)
     
     # Extract parameters
     query = request.query
+    # NOTE: StreamChatRequest.return_subgraph defaults to True, but we only want to
+    # treat it as "requested" when the client explicitly provides the field.
+    # This keeps chatKB users (type=1) compatible with existing clients/tests.
+    if hasattr(request, "model_fields_set"):
+        fields_set = request.model_fields_set
+    else:
+        fields_set = getattr(request, "__fields_set__", set())
+    user_type = getattr(current_user, "type", 0)
+
     return_subgraph = request.return_subgraph
+    include_evidence = request.include_evidence
+    if user_type != 0:
+        if "return_subgraph" not in fields_set:
+            return_subgraph = False
+        if "include_evidence" not in fields_set:
+            include_evidence = False
+
+    await validators.validate_user_permissions(
+        current_user,
+        return_subgraph,
+        include_evidence,
+    )
+    await validators.validate_session_access(session_id, current_user)
     target_owner_id = request.target_owner_id
     include_all_owners = request.include_all_owners
-    include_evidence = request.include_evidence
     enable_deepsearch = bool(getattr(request, "enable_deepsearch", False))
     enable_web_search = bool(getattr(request, "enable_web_search", False))
     
