@@ -39,3 +39,16 @@ class DocDescription:
     title: str
     description: str
 
+
+@dataclass
+class DocProfile:
+    """Structured identifiers used for cross-document disambiguation in doc routing."""
+
+    company: Optional[str] = None
+    product: Optional[str] = None
+    model: Optional[str] = None
+    version: Optional[str] = None
+    doc_type: Optional[str] = None
+    language: Optional[str] = None
+    keywords: List[str] = field(default_factory=list)
+    aliases: List[str] = field(default_factory=list)

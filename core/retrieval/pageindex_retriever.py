@@ -141,3 +141,32 @@ class PageIndexRetriever:
                 file_ids.append(fid)
         return file_ids
 
+    def retrieve_doc_chunks(
+        self,
+        query: str,
+        *,
+        owner_id: str,
+        k_final: Optional[int] = None,
+        k_candidates: Optional[int] = None,
+    ) -> List[Any]:
+        """Return fused doc-routing chunks (title + doc description) with scores in metadata.
+
+        This is the same doc-routing signal as `retrieve_docs`, but exposes the full chunk payload
+        so DeepSearch tools can surface doc_description/filename to the LLM.
+        """
+
+        if not pageindex_cfg.doc_routing_enabled():
+            return []
+        final_k = int(k_final) if isinstance(k_final, int) else pageindex_cfg.doc_top_k()
+        cand_k = int(k_candidates) if isinstance(k_candidates, int) else pageindex_cfg.doc_retrieval_candidates_k()
+        cand_k = max(int(final_k), int(cand_k))
+
+        dense_hits: List[Any] = []
+        bm25_hits: List[Any] = []
+        if self.doc_dense is not None:
+            dense_hits = self.doc_dense.invoke(query, k=cand_k, owner_id=owner_id, with_score=True)
+        if self.doc_bm25 is not None:
+            bm25_hits = self.doc_bm25.invoke(query, k=cand_k, owner_id=owner_id, with_score=True)
+
+        fusion = RRFusion(k=pageindex_cfg.doc_rrf_k())
+        return fusion.fuse([dense_hits, bm25_hits], final_k)

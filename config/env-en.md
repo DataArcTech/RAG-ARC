@@ -172,6 +172,10 @@ Notes:
 | `SECTION_SUMMARY_LEAF_CHUNK_MAX_CHARS` | `1200` | Per-chunk max chars when assembling leaf summary input. |
 | `DOC_DESC_MODEL` | _(empty)_ | Doc description model override; falls back to `LOW_COST_MODEL`. |
 | `DOC_DESC_MAX_TOKENS` | `400` | Max input token budget for doc descriptions. |
+| `DOC_PROFILE_ENABLED` | `true` | Generate doc_profile (company/product/model/version) for cross-document disambiguation in doc routing. |
+| `DOC_PROFILE_MODEL` | _(empty)_ | Doc profile model override; falls back to `LOW_COST_MODEL`. |
+| `DOC_PROFILE_MAX_TOKENS` | `450` | Max input token budget for doc profile extraction (truncate beyond). |
+| `DOC_PROFILE_MAX_LIST_ITEMS` | `12` | Max items kept for `keywords`/`aliases`. |
 | `SECTION_TOP_K` | `6` | Online top-K sections to keep. |
 | `SECTION_RETRIEVE_CANDIDATES_K` | `20` | Section retrieval candidates per channel (dense/BM25). |
 | `SECTION_RRF_K` | `60` | RRF k for section fusion. |

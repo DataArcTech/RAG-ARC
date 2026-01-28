@@ -172,6 +172,10 @@ Benchmark/实验模式：
 | `SECTION_SUMMARY_LEAF_CHUNK_MAX_CHARS` | `1200` | 叶子摘要拼接时每个 chunk 的最大字符数。 |
 | `DOC_DESC_MODEL` | _(空)_ | 文档描述模型；为空则优先 `LOW_COST_MODEL`。 |
 | `DOC_DESC_MAX_TOKENS` | `400` | 文档描述输入最大 token 预算。 |
+| `DOC_PROFILE_ENABLED` | `true` | 是否生成 doc_profile（公司/产品/型号/版本）用于跨文件消歧与 doc routing。 |
+| `DOC_PROFILE_MODEL` | _(空)_ | doc_profile 模型；为空则优先 `LOW_COST_MODEL`。 |
+| `DOC_PROFILE_MAX_TOKENS` | `450` | doc_profile 输入最大 token 预算（超出会截断）。 |
+| `DOC_PROFILE_MAX_LIST_ITEMS` | `12` | `keywords/aliases` 最多保留条数。 |
 | `SECTION_TOP_K` | `6` | 在线检索保留的章节数量（Top-K sections）。 |
 | `SECTION_RETRIEVE_CANDIDATES_K` | `20` | 章节检索阶段每路（dense/BM25）的候选数量。 |
 | `SECTION_RRF_K` | `60` | 章节检索的 RRF 融合系数。 |

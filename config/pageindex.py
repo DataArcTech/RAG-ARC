@@ -130,6 +130,22 @@ def doc_desc_model_name() -> Optional[str]:
 def doc_desc_max_tokens(default: int = 400) -> int:
     return _env_int("DOC_DESC_MAX_TOKENS", default, minimum=0)
 
+def doc_profile_enabled() -> bool:
+    # Cross-doc disambiguation relies on this; keep default enabled.
+    return _env_bool("DOC_PROFILE_ENABLED", True)
+
+
+def doc_profile_model_name() -> Optional[str]:
+    return _env_optional_str("DOC_PROFILE_MODEL")
+
+
+def doc_profile_max_tokens(default: int = 450) -> int:
+    return _env_int("DOC_PROFILE_MAX_TOKENS", default, minimum=0)
+
+
+def doc_profile_max_list_items(default: int = 12) -> int:
+    return _env_int("DOC_PROFILE_MAX_LIST_ITEMS", default, minimum=0)
+
 
 def doc_top_k(default: int = 5) -> int:
     return _env_int("DOC_TOP_K", default, minimum=0)
@@ -214,6 +230,10 @@ __all__ = [
     "doc_routing_enabled",
     "doc_desc_model_name",
     "doc_desc_max_tokens",
+    "doc_profile_enabled",
+    "doc_profile_model_name",
+    "doc_profile_max_tokens",
+    "doc_profile_max_list_items",
     "doc_top_k",
     "doc_retrieval_candidates_k",
     "doc_rrf_k",

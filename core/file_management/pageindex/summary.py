@@ -1,16 +1,19 @@
 import asyncio
 import logging
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from config import pageindex as pageindex_cfg
-from core.file_management.pageindex.types import DocDescription, SectionNode
+from core.file_management.pageindex.types import DocDescription, DocProfile, SectionNode
 from core.file_management.pageindex.utils import truncate_text_by_tokens
 from core.prompts.pageindex import (
     DOC_DESCRIPTION_SYSTEM_PROMPT,
     DOC_DESCRIPTION_USER_PROMPT,
+    DOC_PROFILE_SYSTEM_PROMPT,
+    DOC_PROFILE_USER_PROMPT,
     SECTION_SUMMARY_SYSTEM_PROMPT,
     SECTION_SUMMARY_USER_PROMPT,
 )
+from core.utils.json_extract import safe_json_loads
 
 logger = logging.getLogger(__name__)
 
@@ -197,3 +200,93 @@ class DocDescriptionGenerator:
             return None
         return DocDescription(file_id=file_id, title=filename, description=description)
 
+
+class DocProfileGenerator:
+    def __init__(self, llm) -> None:
+        self.llm = llm
+        self.model_override = pageindex_cfg.doc_profile_model_name()
+        self.max_tokens = pageindex_cfg.doc_profile_max_tokens()
+        self.max_list_items = pageindex_cfg.doc_profile_max_list_items()
+
+    def _resolve_model(self) -> Optional[str]:
+        if self.model_override:
+            return self.model_override
+        cfg = getattr(self.llm, "config", None)
+        low_cost = getattr(cfg, "low_cost_model_name", None) if cfg is not None else None
+        token = str(low_cost or "").strip()
+        return token or None
+
+    @staticmethod
+    def _coerce_str(value: Any) -> Optional[str]:
+        token = str(value or "").strip()
+        return token or None
+
+    def _coerce_list(self, value: Any) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            items = [t.strip() for t in value.split(",") if t.strip()]
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            items = [str(v or "").strip() for v in value if str(v or "").strip()]
+        else:
+            items = [str(value).strip()] if str(value or "").strip() else []
+        deduped: List[str] = []
+        seen: set[str] = set()
+        for item in items:
+            if item in seen:
+                continue
+            seen.add(item)
+            deduped.append(item)
+            if self.max_list_items and len(deduped) >= self.max_list_items:
+                break
+        return deduped
+
+    async def build_profile(self, *, file_id: str, filename: str, nodes: List[SectionNode]) -> Optional[DocProfile]:
+        if not pageindex_cfg.doc_profile_enabled():
+            return None
+        if self.llm is None:
+            logger.warning("Doc profile skipped: LLM connector is missing")
+            return None
+
+        top_level = [node for node in nodes if node.parent_id is None]
+        lines: List[str] = []
+        for node in top_level:
+            summary = str(node.summary or "").strip()
+            if not summary:
+                continue
+            title = str(node.title or "").strip()
+            if title:
+                lines.append(f"- {title}: {summary}")
+            else:
+                lines.append(f"- {summary}")
+        if not lines:
+            return None
+
+        summaries = truncate_text_by_tokens("\n".join(lines), max_tokens=self.max_tokens)
+        messages = [
+            {"role": "system", "content": DOC_PROFILE_SYSTEM_PROMPT},
+            {"role": "user", "content": DOC_PROFILE_USER_PROMPT.format(title=filename, summaries=summaries)},
+        ]
+        model = self._resolve_model()
+        kwargs = {"model": model} if model else {}
+        try:
+            raw = await _call_llm_async(self.llm, messages, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Doc profile failed for %s: %s", file_id, exc)
+            return None
+
+        payload = safe_json_loads(str(raw or ""), expected="dict")
+        if not isinstance(payload, dict):
+            logger.warning("Doc profile parse failed for %s (non-json)", file_id)
+            return None
+
+        return DocProfile(
+            company=self._coerce_str(payload.get("company")),
+            product=self._coerce_str(payload.get("product")),
+            model=self._coerce_str(payload.get("model")),
+            version=self._coerce_str(payload.get("version")),
+            doc_type=self._coerce_str(payload.get("doc_type")),
+            language=self._coerce_str(payload.get("language")),
+            keywords=self._coerce_list(payload.get("keywords")),
+            aliases=self._coerce_list(payload.get("aliases")),
+        )
