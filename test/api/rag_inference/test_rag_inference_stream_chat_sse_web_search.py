@@ -141,7 +141,7 @@ def test_stream_chat_sse_includes_web_search_chunks_and_progress(monkeypatch, cl
     monkeypatch.setattr(handlers, "_session_handler", session_handler)
     monkeypatch.setattr(handlers, "_message_handler", message_handler)
     monkeypatch.setattr(handlers, "_rag_inference_handler", rag)
-    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.validators.validate_user_session", lambda *_: True)
+    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.utils.validators.validate_user_session", lambda *_: True)
 
     client.app.dependency_overrides[rag_router.get_current_user] = lambda: user
     try:
@@ -310,7 +310,7 @@ def test_stream_chat_sse_defaults_to_no_web_search(monkeypatch, client):
     monkeypatch.setattr(handlers, "_session_handler", session_handler)
     monkeypatch.setattr(handlers, "_message_handler", message_handler)
     monkeypatch.setattr(handlers, "_rag_inference_handler", rag)
-    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.validators.validate_user_session", lambda *_: True)
+    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.utils.validators.validate_user_session", lambda *_: True)
 
     client.app.dependency_overrides[rag_router.get_current_user] = lambda: user
     try:

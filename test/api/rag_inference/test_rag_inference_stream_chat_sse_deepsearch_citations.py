@@ -68,7 +68,7 @@ def test_rag_inference_stream_chat_deepsearch_emits_sup_citations_and_knowledge_
     monkeypatch.setattr("api.routers.rag_inference_handlers._session_handler", FakeSessionHandler())
     monkeypatch.setattr("api.routers.rag_inference_handlers._message_handler", FakeMessageHandler())
     monkeypatch.setattr("api.routers.rag_inference_handlers._rag_inference_handler", FakeRAG())
-    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.validators.validate_user_session", lambda *_: True)
+    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.utils.validators.validate_user_session", lambda *_: True)
 
     deepsearch_result = {
         "plan": {"plan": {"question": "q", "steps": []}},

@@ -3,7 +3,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from core.deepsearch.utils.compression import focused_truncate_text
+from core.deepsearch.utils.compression import focused_truncate_text, truncate_text
 
 
 @dataclass(frozen=True)
@@ -18,7 +18,7 @@ class EvidenceRecord:
         text = (self.content or "").strip().replace("\n", " ")
         if max_chars <= 0 or len(text) <= max_chars:
             return text
-        return text[: max(0, max_chars - 3)].rstrip() + "..."
+        return truncate_text(text, max_chars=max_chars)
 
 
 class EvidenceBank:
@@ -173,7 +173,7 @@ class EvidenceBank:
                 extra=None,
             )
         else:
-            excerpt = content[: max(0, max_chars - 3)].rstrip() + "..."
+            excerpt = truncate_text(content, max_chars=max_chars)
         self._excerpt_cache[cache_key] = excerpt
         return excerpt
 

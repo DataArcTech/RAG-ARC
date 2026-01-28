@@ -91,7 +91,7 @@ def test_stream_chat_livingkb_uses_user_id_as_owner(monkeypatch, client):
     monkeypatch.setattr(handlers, "_session_handler", session_handler)
     monkeypatch.setattr(handlers, "_message_handler", message_handler)
     monkeypatch.setattr(handlers, "_rag_inference_handler", rag)
-    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.validators.validate_user_session", lambda *_: True)
+    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.utils.validators.validate_user_session", lambda *_: True)
     monkeypatch.setattr(
         "api.routers.rag_inference_modules.stream_chat.response.response_builder._build_sources_for_frontend_with_llm_keys",
         lambda *_: [],
@@ -162,7 +162,7 @@ def test_stream_chat_chatkb_uses_shared_owner_id(monkeypatch, client):
     monkeypatch.setattr(handlers, "_session_handler", session_handler)
     monkeypatch.setattr(handlers, "_message_handler", message_handler)
     monkeypatch.setattr(handlers, "_rag_inference_handler", rag)
-    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.validators.validate_user_session", lambda *_: True)
+    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.utils.validators.validate_user_session", lambda *_: True)
     monkeypatch.setattr(
         "api.routers.rag_inference_modules.stream_chat.response.response_builder._build_sources_for_frontend_with_llm_keys",
         lambda *_: [],
@@ -230,7 +230,7 @@ def test_stream_chat_default_type_uses_user_id(monkeypatch, client):
     monkeypatch.setattr(handlers, "_session_handler", session_handler)
     monkeypatch.setattr(handlers, "_message_handler", message_handler)
     monkeypatch.setattr(handlers, "_rag_inference_handler", rag)
-    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.validators.validate_user_session", lambda *_: True)
+    monkeypatch.setattr("api.routers.rag_inference_modules.stream_chat.utils.validators.validate_user_session", lambda *_: True)
     monkeypatch.setattr(
         "api.routers.rag_inference_modules.stream_chat.response.response_builder._build_sources_for_frontend_with_llm_keys",
         lambda *_: [],
