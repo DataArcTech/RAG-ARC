@@ -20,6 +20,7 @@ from core.prompts.deepsearch.report import (
     REPORT_OUTLINE_USER_PROMPT_EN,
     REPORT_WRITE_SYSTEM_PROMPT_EN,
     REPORT_WRITE_USER_PROMPT_EN,
+    REPORT_STYLE_DEEPSEARCH_HINT_EN,
     REPORT_STYLE_RESEARCH_HINT_EN,
     SECTION_WRITE_SYSTEM_PROMPT_EN,
     SECTION_WRITE_USER_PROMPT_EN,
@@ -208,9 +209,11 @@ class DeepSearchLLMReportWriter:
     @classmethod
     def _system_prompt_with_style(cls, base_prompt: str, *, question: str, context: Dict[str, Any]) -> str:
         prompt = cls._system_prompt_with_language(base_prompt, question=question)
-        if cls._resolve_report_style(context) != "research":
-            return prompt
-        return f"{prompt.rstrip()}\n\n{REPORT_STYLE_RESEARCH_HINT_EN.strip()}\n"
+        style = cls._resolve_report_style(context)
+        if style == "research":
+            return f"{prompt.rstrip()}\n\n{REPORT_STYLE_RESEARCH_HINT_EN.strip()}\n"
+        # Default: deepsearch (strict question-scoped report).
+        return f"{prompt.rstrip()}\n\n{REPORT_STYLE_DEEPSEARCH_HINT_EN.strip()}\n"
 
     def __init__(
         self,

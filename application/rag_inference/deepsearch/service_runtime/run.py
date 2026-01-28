@@ -113,6 +113,11 @@ class DeepSearchServiceRunMixin:
                 bootstrap_context,
                 question=normalized_question,
             )
+            bootstrap_context = self._attach_doc_routing_hints(
+                bootstrap_context,
+                question=normalized_question,
+                scope=scope,
+            )
             initial_think = await self._execute_stage(
                 "initial_think",
                 self._run_initial_think,

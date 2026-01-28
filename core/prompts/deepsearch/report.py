@@ -1,5 +1,12 @@
 """Prompt templates for DeepSearch report generation."""
 
+REPORT_STYLE_DEEPSEARCH_HINT_EN = """## DeepSearch Scope Policy (STRICT)
+- Scope: answer ONLY what the user question asks. Do NOT expand into a broader topic survey.
+- No "nice-to-have" extras: avoid extra background, product overviews, unrelated recommendations, or adjacent FAQs unless the question explicitly asks.
+- If the evidence supports multiple variants (e.g., different companies/versions) and the question does not specify which one, do NOT guess. State the ambiguity and ask a clarification.
+- Keep the outline minimal and question-aligned: every section must map to an explicit sub-part of the user question.
+"""
+
 REPORT_OUTLINE_SYSTEM_PROMPT_EN = """You are a report writer specializing in knowledge graph-enhanced research reports.
 
 ## Goal
