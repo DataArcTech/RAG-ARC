@@ -43,6 +43,8 @@ class ServerConfig:
     port: int = 8899
     workers: int = 1
     max_jobs_per_worker: int = 1
+    # Max pending jobs (queued + running). 0 means unlimited.
+    max_pending_jobs: int = 0
 
     # Storage
     output_dir: str = str(DEFAULT_OUTPUT_DIR)

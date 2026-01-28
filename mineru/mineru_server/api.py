@@ -78,6 +78,9 @@ def build_app(cfg: ServerConfig) -> FastAPI:
     temp_root.mkdir(parents=True, exist_ok=True)
 
     parse_semaphore = asyncio.Semaphore(max(1, int(cfg.max_jobs_per_worker)))
+    pending_limit = max(0, int(cfg.max_pending_jobs))
+    pending_count = 0
+    pending_lock = asyncio.Lock()
 
     captioner = build_captioner(
         caption_mode=cfg.caption_mode,
@@ -102,6 +105,39 @@ def build_app(cfg: ServerConfig) -> FastAPI:
         description="Multimodal parsing service (MinerU) producing Markdown + assets.",
         version="4.0.0",
     )
+
+    async def _inc_pending(slots: int) -> None:
+        nonlocal pending_count
+        if slots <= 0:
+            return
+        async with pending_lock:
+            pending_count += slots
+
+    async def _dec_pending(slots: int) -> None:
+        nonlocal pending_count
+        if slots <= 0:
+            return
+        async with pending_lock:
+            pending_count = max(0, pending_count - slots)
+
+    async def _get_pending_count() -> int:
+        async with pending_lock:
+            return pending_count
+
+    async def try_acquire_capacity(slots: int = 1) -> bool:
+        nonlocal pending_count
+        if pending_limit <= 0 or slots <= 0:
+            return True
+        async with pending_lock:
+            if pending_count + slots > pending_limit:
+                return False
+            pending_count += slots
+            return True
+
+    async def release_capacity(slots: int = 1) -> None:
+        if pending_limit <= 0 or slots <= 0:
+            return
+        await _dec_pending(slots)
 
     def rel_to_task(task_root: Path, path: Optional[Path]) -> Optional[str]:
         if path is None:
@@ -233,6 +269,7 @@ def build_app(cfg: ServerConfig) -> FastAPI:
         task_id: str,
         original_filename: str,
         task_root: Path,
+        release_slot: bool = False,
     ) -> None:
         try:
             running = _make_status_result(
@@ -262,6 +299,8 @@ def build_app(cfg: ServerConfig) -> FastAPI:
             )
             _write_status(task_root, failed.model_dump())
         finally:
+            if release_slot:
+                await release_capacity(1)
             temp_file.unlink(missing_ok=True)
 
     @app.get("/health")
@@ -272,6 +311,8 @@ def build_app(cfg: ServerConfig) -> FastAPI:
             "port": cfg.port,
             "workers": cfg.workers,
             "max_jobs_per_worker": cfg.max_jobs_per_worker,
+            "max_pending_jobs": cfg.max_pending_jobs,
+            "pending_jobs": await _get_pending_count(),
             "output_dir": str(output_root),
             "temp_dir": str(temp_root),
             "model_source": cfg.model_source,
@@ -297,9 +338,13 @@ def build_app(cfg: ServerConfig) -> FastAPI:
         output_format: str = Form(default="mm_md"),
         wait: bool = Form(default=False, description="If true, wait for parsing to finish before returning."),
     ) -> ParseResult:
+        capacity_acquired = False
         task_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         from mineru_server.config import secure_filename
 
+        if not await try_acquire_capacity(1):
+            raise HTTPException(status_code=503, detail="Server is at maximum capacity. Please try again later.")
+        capacity_acquired = True
         safe_name, safe_stem = secure_filename(file.filename)
         temp_file = temp_root / task_id / safe_name
         copy_upload_to_temp(file.file, temp_file)
@@ -325,16 +370,21 @@ def build_app(cfg: ServerConfig) -> FastAPI:
             )
             _write_status(task_root, pending.model_dump())
             if wait:
-                result = await parse_one(
-                    temp_file=temp_file,
-                    doc_name=safe_stem,
-                    options=options,
-                    task_id=task_id,
-                    original_filename=file.filename,
-                )
-                _write_status(task_root, result.model_dump())
-                temp_file.unlink(missing_ok=True)
-                return result
+                try:
+                    result = await parse_one(
+                        temp_file=temp_file,
+                        doc_name=safe_stem,
+                        options=options,
+                        task_id=task_id,
+                        original_filename=file.filename,
+                    )
+                    _write_status(task_root, result.model_dump())
+                    temp_file.unlink(missing_ok=True)
+                    return result
+                finally:
+                    if capacity_acquired:
+                        await release_capacity(1)
+                        capacity_acquired = False
             asyncio.create_task(
                 _run_parse_job(
                     temp_file=temp_file,
@@ -343,10 +393,13 @@ def build_app(cfg: ServerConfig) -> FastAPI:
                     task_id=task_id,
                     original_filename=file.filename,
                     task_root=task_root,
+                    release_slot=capacity_acquired,
                 )
             )
             return pending
         except Exception:
+            if capacity_acquired:
+                await release_capacity(1)
             temp_file.unlink(missing_ok=True)
             raise
 
@@ -362,6 +415,11 @@ def build_app(cfg: ServerConfig) -> FastAPI:
         end_page: Optional[int] = Form(default=None),
         output_format: str = Form(default="mm_md"),
     ) -> BatchParseResult:
+        capacity_acquired = False
+        capacity_slots = len(files)
+        if not await try_acquire_capacity(capacity_slots):
+            raise HTTPException(status_code=503, detail="Server is at maximum capacity. Please try again later.")
+        capacity_acquired = True
         batch_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f") + "_" + uuid.uuid4().hex[:8]
         options = ParseOptions(
             backend=backend or cfg.backend,
@@ -404,6 +462,8 @@ def build_app(cfg: ServerConfig) -> FastAPI:
                 results=results,
             )
         finally:
+            if capacity_acquired:
+                await release_capacity(capacity_slots)
             for temp_file, *_ in temp_entries:
                 temp_file.unlink(missing_ok=True)
 
