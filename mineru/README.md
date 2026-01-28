@@ -151,7 +151,7 @@ If you want to keep using this service API, you can add a `server_url` parameter
 
 Hardware: 2 × NVIDIA H800 80GB, vLLM 0.11.0, `--gpu-memory-utilization 0.8`, warm run.
 
-- PDF: `(详)盛利2-至尊 产品手册(英文版).pdf` (126 pages)
+- PDF: [`(详)盛利2-至尊 产品手册(英文版).pdf`](../example/(详)盛利2-至尊%20产品手册(英文版).pdf) (126 pages)
 - Wall time: **~62s**
 - VLM inference time: **~49s** (≈ **2.5 pages/s**)
 
