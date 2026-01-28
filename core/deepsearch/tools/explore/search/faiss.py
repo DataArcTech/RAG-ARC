@@ -8,6 +8,7 @@ from encapsulation.data_model.deepsearch import EvidenceChunk
 from encapsulation.data_model.schema import Chunk
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_PRIMARY
 from core.deepsearch.utils.file_scope import resolve_file_scope
+from framework.thread_pool import get_thread_pool
 
 from ...base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from ...governance_tags import EVIDENCE_PRIMARY, SCOPE_FILE, SCOPE_OWNER
@@ -32,23 +33,41 @@ class _FaissChannel:
                 summary="FAISS search skipped: dense retriever unavailable.",
             )
 
-        owner_id = self._resolve_owner_id(request)
-        if owner_id is None:
+        visibility = self._resolve_owner_visibility(request)
+        if not visibility.enabled:
             return _ChannelResult(
                 channel="faiss",
                 evidences=[],
-                diagnostics={"query": query, "reason": "owner_id_missing"},
+                diagnostics={"query": query, "reason": "owner_id_missing", "owner_visibility": visibility.as_dict()},
                 summary="FAISS search skipped: missing owner scope.",
             )
 
         override = request.extra.get("faiss_top_k")
         effective_top_k = self._resolve_top_k(override, top_k)
 
-        def _call() -> List[Chunk]:
-            return retrievers.dense.invoke(query, k=effective_top_k, owner_id=owner_id, with_score=True)
+        async def _call_one(owner_id: str) -> List[Chunk]:
+            return await get_thread_pool().run_blocking(
+                retrievers.dense.invoke,
+                query,
+                k=effective_top_k,
+                owner_id=owner_id,
+                with_score=True,
+            )
 
-        chunks = await asyncio.to_thread(_call)
+        owner_ids = list(visibility.owner_ids_used)
+        parts = await asyncio.gather(*[_call_one(owner_id) for owner_id in owner_ids], return_exceptions=True)
+        chunks: List[Chunk] = []
+        per_owner: Dict[str, int] = {}
+        errors: List[str] = []
+        for owner_id, part in zip(owner_ids, parts):
+            if isinstance(part, Exception):
+                errors.append(f"{owner_id}: {part}")
+                continue
+            per_owner[owner_id] = len(part)
+            chunks.extend(part)
         chunks, dropped = self._apply_file_scope(chunks, file_scope)
+        section_scope = self._resolve_section_scope(request.extra or {})
+        chunks, section_dropped = self._apply_section_scope(chunks, section_scope)
 
         evidences: List[EvidenceChunk] = []
         results: List[Dict[str, Any]] = []
@@ -69,6 +88,7 @@ class _FaissChannel:
                     "channel": "faiss",
                     "rank": idx,
                     "file_name": file_name,
+                    "owner_id": getattr(chunk, "owner_id", None) or meta.get("owner_id"),
                     "evidence_class": EVIDENCE_CLASS_SOURCE_TEXT,
                     "metadata": meta,
                 },
@@ -89,6 +109,11 @@ class _FaissChannel:
             "top_k": effective_top_k,
             "retrieved": len(chunks),
             "file_scope_dropped": dropped,
+            "section_scope": sorted(section_scope),
+            "section_scope_dropped": section_dropped,
+            "owner_visibility": visibility.as_dict(),
+            "per_owner_retrieved": per_owner,
+            "errors": errors,
             "results": results,
         }
         return _ChannelResult(channel="faiss", evidences=evidences, diagnostics=diagnostics, summary=summary)
@@ -111,6 +136,12 @@ class SearchFaissTool(_SearchToolBase, _FaissChannel, GraphTool):
         input_schema=build_input_schema(
             extra_properties={
                 "focus_query": {"type": "string", "description": "Optional query override."},
+                "file_id": {"type": "string", "description": "Restrict results to a specific file_id."},
+                "file_ids": {"type": "array", "items": {"type": "string"}, "description": "Restrict results to file_ids."},
+                "filename_contains": {"type": "array", "items": {"type": "string"}, "description": "Best-effort filename filter."},
+                "section_id": {"type": "string", "description": "Restrict results to a specific section_id."},
+                "section_ids": {"type": "array", "items": {"type": "string"}, "description": "Restrict results to section_ids."},
+                "owner_ids": {"type": "array", "items": {"type": "string"}, "description": "Owner ids to search (me/share)."},
                 "top_k": {"type": "integer", "minimum": 0, "description": "Top-k results to return."},
                 "faiss_top_k": {"type": "integer", "minimum": 0, "description": "Alias of top_k."},
             }

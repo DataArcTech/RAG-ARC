@@ -36,6 +36,28 @@ class SearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
         input_schema=build_input_schema(
             extra_properties={
                 "focus_query": {"type": "string", "description": "Optional query override."},
+                "file_id": {"type": "string", "description": "Restrict results to a specific file_id."},
+                "file_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Restrict results to a set of file_ids.",
+                },
+                "filename_contains": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Restrict results by filename substring (best-effort).",
+                },
+                "section_id": {"type": "string", "description": "Restrict results to a specific section_id."},
+                "section_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Restrict results to a set of section_ids (exact match).",
+                },
+                "owner_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Owner ids to search (e.g. [me, share]). Must be authorized by code-side whitelist.",
+                },
                 "channels": {
                     "type": "array",
                     "items": {"type": "string"},

@@ -7,6 +7,7 @@ from encapsulation.data_model.deepsearch import EvidenceChunk
 from encapsulation.data_model.schema import Chunk
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 from core.deepsearch.utils.file_scope import chunk_in_scope
+from core.deepsearch.utils.owner_visibility import OwnerVisibilityResolution, resolve_owner_visibility
 from core.deepsearch.utils.query_clean import clean_query
 from core.graph_adapter.base import GraphDeepSearchAdapter
 from framework.register import Register
@@ -105,6 +106,14 @@ class _SearchToolBase:
         if graph_context is not None and graph_context.owner_id:
             return str(graph_context.owner_id)
         return None
+
+    @staticmethod
+    def _resolve_owner_visibility(request: ToolRunRequest) -> OwnerVisibilityResolution:
+        return resolve_owner_visibility(
+            extra=(request.extra or {}),
+            access_scope=request.access_scope,
+            graph_context_metadata=(request.graph_context.metadata if request.graph_context else {}),
+        )
 
     @staticmethod
     def _resolve_channels(extra: Mapping[str, Any]) -> Tuple[List[str], List[str]]:
@@ -263,6 +272,40 @@ class _SearchToolBase:
             else:
                 dropped += 1
         return filtered, dropped
+
+    @staticmethod
+    def _resolve_section_scope(extra: Mapping[str, Any] | None) -> frozenset[str]:
+        payload = dict(extra or {})
+        raw = payload.get("section_ids")
+        if raw is None:
+            raw = payload.get("section_id")
+        if raw is None:
+            return frozenset()
+        if isinstance(raw, (list, tuple, set, frozenset)):
+            items = raw
+        else:
+            items = [raw]
+        out: set[str] = set()
+        for item in items:
+            token = str(item or "").strip()
+            if token:
+                out.add(token)
+        return frozenset(out)
+
+    @staticmethod
+    def _apply_section_scope(chunks: List[Chunk], section_ids: frozenset[str]) -> Tuple[List[Chunk], int]:
+        if not section_ids:
+            return chunks, 0
+        kept: List[Chunk] = []
+        dropped = 0
+        for chunk in chunks:
+            meta = getattr(chunk, "metadata", None) or {}
+            sid = str(meta.get("section_id") or "").strip()
+            if sid and sid in section_ids:
+                kept.append(chunk)
+            else:
+                dropped += 1
+        return kept, dropped
 
     @staticmethod
     def _low_cost_model_name(llm_connector) -> Optional[str]:

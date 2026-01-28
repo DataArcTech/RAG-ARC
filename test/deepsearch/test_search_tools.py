@@ -25,7 +25,7 @@ class _StubBM25Retriever:
     def __init__(self, chunks):
         self._chunks = chunks
 
-    def invoke(self, query, k, owner_id, with_score=True, use_phrase_query=False):  # noqa: ARG002
+    def invoke(self, query, k, owner_id, with_score=True, use_phrase_query=False, filters=None):  # noqa: ARG002
         return list(self._chunks)[:k]
 
 
@@ -135,3 +135,34 @@ async def test_graph_chunk_raises_without_llm_when_fallback_needed() -> None:
 
     with pytest.raises(RuntimeError, match="LLM"):
         await tool.run(request)
+
+
+@pytest.mark.asyncio
+async def test_search_tool_filters_by_section_ids() -> None:
+    dense = _StubDenseRetriever(
+        [
+            Chunk(content="dense s1", metadata={"score": 0.9, "file_name": "a.md", "section_id": "s1"}, id="d1"),
+            Chunk(content="dense s2", metadata={"score": 0.8, "file_name": "a.md", "section_id": "s2"}, id="d2"),
+        ]
+    )
+    bm25 = _StubBM25Retriever(
+        [
+            Chunk(content="bm25 s2", metadata={"score": 0.9, "file_name": "a.md", "section_id": "s2"}, id="b1"),
+            Chunk(content="bm25 s1", metadata={"score": 0.8, "file_name": "a.md", "section_id": "s1"}, id="b2"),
+        ]
+    )
+    tool = SearchTool(llm_connector=_StubLLM(), dense_retriever=dense, bm25_retriever=bm25)
+    request = ToolRunRequest(
+        question="find relevant chunks",
+        plan_step="plan_01",
+        context_evidences=[],
+        adapter=None,
+        access_scope=GraphAccessScope(scope_id="owner-1"),
+        extra={"channels": ["faiss", "bm25"], "section_ids": ["s1"], "top_k": 10},
+    )
+
+    result = await tool.run(request)
+    assert result.evidences, "expected at least one evidence after filtering"
+    for ev in result.evidences:
+        meta = (ev.provenance or {}).get("metadata") or {}
+        assert meta.get("section_id") == "s1"

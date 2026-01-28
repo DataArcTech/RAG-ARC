@@ -17,6 +17,7 @@ from core.graph_adapter.concurrency import adapter_locked
 from core.graph_adapter.cypher import adapter_supports_cypher
 from core.prompts.deepsearch import SEARCH_ENTITY_EXTRACT_PROMPT_EN
 from core.utils.owner_guard import normalize_owner_id
+from framework.thread_pool import get_thread_pool
 
 from ...base import (
     GraphTool,
@@ -423,12 +424,12 @@ class _GraphChunkChannel:
                 summary="graph_chunk search skipped: graph retriever unavailable.",
             )
 
-        owner_id = self._resolve_owner_id(request)
-        if owner_id is None:
+        visibility = self._resolve_owner_visibility(request)
+        if not visibility.enabled:
             return _ChannelResult(
                 channel="graph_chunk",
                 evidences=[],
-                diagnostics={"query": query, "reason": "owner_id_missing"},
+                diagnostics={"query": query, "reason": "owner_id_missing", "owner_visibility": visibility.as_dict()},
                 summary="graph_chunk search skipped: missing owner scope.",
             )
 
@@ -459,58 +460,96 @@ class _GraphChunkChannel:
                 seeds=seed_items,
             )
 
-        async with adapter_locked(adapter):
-            chunks, diagnostics, needs_llm = await asyncio.to_thread(
-                self._graph_chunk_sync,
-                retriever=retriever,
-                query=query,
-                owner_id=owner_id,
-                top_k=effective_top_k,
-                use_ppr=use_ppr,
-                enable_llm_rerank=enable_llm_rerank,
-                enable_entity_fallback=enable_entity_fallback,
-                entity_seed_top_k=entity_seed_top_k,
-                seed_override=resolved_seeds if resolved_seeds else None,
-                overrides=overrides,
-            )
+        owner_ids = list(visibility.owner_ids_used)
+        section_scope = self._resolve_section_scope(request.extra or {})
+        section_dropped = 0
 
-        diagnostics["seed_entity_resolution"] = seed_diag
-
-        llm_diag: Dict[str, Any] = {}
-        if needs_llm and enable_entity_fallback and not resolved_seeds:
-            if self.llm_connector is None and entity_seed_top_k > 0:
-                raise RuntimeError("graph_chunk requires LLM entity extraction but no LLM connector is available")
-            llm_seeds, llm_diag = await self._extract_entities_with_llm(query=query, limit=entity_seed_top_k)
-            if llm_seeds:
-                resolved_llm_ids, llm_resolve_diag = await self._resolve_entity_ids(
-                    request=request,
-                    adapter=adapter,
-                    seeds=llm_seeds,
+        # Single-owner path: keep the original LLM entity fallback semantics.
+        if len(owner_ids) == 1:
+            owner_id = owner_ids[0]
+            async with adapter_locked(adapter):
+                chunks, diagnostics, needs_llm = await get_thread_pool().run_blocking(
+                    self._graph_chunk_sync,
+                    retriever=retriever,
+                    query=query,
+                    owner_id=owner_id,
+                    top_k=effective_top_k,
+                    use_ppr=use_ppr,
+                    enable_llm_rerank=enable_llm_rerank,
+                    enable_entity_fallback=enable_entity_fallback,
+                    entity_seed_top_k=entity_seed_top_k,
+                    seed_override=resolved_seeds if resolved_seeds else None,
+                    overrides=overrides,
                 )
-                llm_diag["resolved"] = llm_resolve_diag
-                if resolved_llm_ids:
-                    async with adapter_locked(adapter):
-                        chunks, diagnostics, _ = await asyncio.to_thread(
-                            self._graph_chunk_sync,
-                            retriever=retriever,
-                            query=query,
-                            owner_id=owner_id,
-                            top_k=effective_top_k,
-                            use_ppr=use_ppr,
-                            enable_llm_rerank=enable_llm_rerank,
-                            enable_entity_fallback=enable_entity_fallback,
-                            entity_seed_top_k=entity_seed_top_k,
-                            seed_override=resolved_llm_ids,
-                            overrides=overrides,
-                        )
-                    diagnostics["llm_seed_used"] = True
+
+            diagnostics["seed_entity_resolution"] = seed_diag
+
+            llm_diag: Dict[str, Any] = {}
+            if needs_llm and enable_entity_fallback and not resolved_seeds:
+                if self.llm_connector is None and entity_seed_top_k > 0:
+                    raise RuntimeError("graph_chunk requires LLM entity extraction but no LLM connector is available")
+                llm_seeds, llm_diag = await self._extract_entities_with_llm(query=query, limit=entity_seed_top_k)
+                if llm_seeds:
+                    resolved_llm_ids, llm_resolve_diag = await self._resolve_entity_ids(
+                        request=request,
+                        adapter=adapter,
+                        seeds=llm_seeds,
+                    )
+                    llm_diag["resolved"] = llm_resolve_diag
+                    if resolved_llm_ids:
+                        async with adapter_locked(adapter):
+                            chunks, diagnostics, _ = await get_thread_pool().run_blocking(
+                                self._graph_chunk_sync,
+                                retriever=retriever,
+                                query=query,
+                                owner_id=owner_id,
+                                top_k=effective_top_k,
+                                use_ppr=use_ppr,
+                                enable_llm_rerank=enable_llm_rerank,
+                                enable_entity_fallback=enable_entity_fallback,
+                                entity_seed_top_k=entity_seed_top_k,
+                                seed_override=resolved_llm_ids,
+                                overrides=overrides,
+                            )
+                        diagnostics["llm_seed_used"] = True
+                    else:
+                        diagnostics["llm_seed_used"] = False
                 else:
                     diagnostics["llm_seed_used"] = False
-            else:
-                diagnostics["llm_seed_used"] = False
-        diagnostics["llm_entity_extract"] = llm_diag
+            diagnostics["llm_entity_extract"] = llm_diag
 
-        chunks, dropped = self._apply_file_scope(chunks, file_scope)
+            chunks, dropped = self._apply_file_scope(chunks, file_scope)
+            chunks, section_dropped = self._apply_section_scope(chunks, section_scope)
+            per_owner_diag: Dict[str, Any] = {owner_id: diagnostics}
+            errors: List[str] = []
+        else:
+            # Multi-owner path: fan-out the base graph retrieval only (no implicit LLM entity fan-out).
+            chunks = []
+            per_owner_diag = {}
+            errors = []
+            for owner_id in owner_ids:
+                async with adapter_locked(adapter):
+                    part_chunks, diagnostics, needs_llm = await get_thread_pool().run_blocking(
+                        self._graph_chunk_sync,
+                        retriever=retriever,
+                        query=query,
+                        owner_id=owner_id,
+                        top_k=effective_top_k,
+                        use_ppr=use_ppr,
+                        enable_llm_rerank=enable_llm_rerank,
+                        enable_entity_fallback=enable_entity_fallback,
+                        entity_seed_top_k=entity_seed_top_k,
+                        seed_override=resolved_seeds if resolved_seeds else None,
+                        overrides=overrides,
+                    )
+                diagnostics["seed_entity_resolution"] = seed_diag
+                if needs_llm and enable_entity_fallback and not resolved_seeds:
+                    diagnostics["llm_seed_used"] = "skipped_multi_owner"
+                per_owner_diag[owner_id] = diagnostics
+                chunks.extend(part_chunks)
+
+            chunks, dropped = self._apply_file_scope(chunks, file_scope)
+            chunks, section_dropped = self._apply_section_scope(chunks, section_scope)
 
         evidences: List[EvidenceChunk] = []
         results: List[Dict[str, Any]] = []
@@ -531,6 +570,7 @@ class _GraphChunkChannel:
                     "channel": "graph_chunk",
                     "rank": idx,
                     "file_name": file_name,
+                    "owner_id": getattr(chunk, "owner_id", None) or meta.get("owner_id"),
                     "evidence_class": EVIDENCE_CLASS_GRAPH_CHUNK,
                     "metadata": meta,
                 },
@@ -550,14 +590,18 @@ class _GraphChunkChannel:
             if evidences
             else "graph_chunk search returned no chunks."
         )
-        diagnostics.update(
-            {
-                "top_k": effective_top_k,
-                "file_scope_dropped": dropped,
-                "results": results,
-            }
-        )
-        return _ChannelResult(channel="graph_chunk", evidences=evidences, diagnostics=diagnostics, summary=summary)
+        diagnostics_out = {
+            "query": query,
+            "top_k": effective_top_k,
+            "file_scope_dropped": dropped,
+            "section_scope": sorted(section_scope),
+            "section_scope_dropped": section_dropped,
+            "owner_visibility": visibility.as_dict(),
+            "per_owner_diagnostics": per_owner_diag,
+            "errors": errors,
+            "results": results,
+        }
+        return _ChannelResult(channel="graph_chunk", evidences=evidences, diagnostics=diagnostics_out, summary=summary)
 
 
 class SearchGraphChunkTool(_SearchToolBase, _GraphChunkChannel, GraphTool):
@@ -577,6 +621,12 @@ class SearchGraphChunkTool(_SearchToolBase, _GraphChunkChannel, GraphTool):
         input_schema=build_input_schema(
             extra_properties={
                 "focus_query": {"type": "string", "description": "Optional query override."},
+                "file_id": {"type": "string", "description": "Restrict results to a specific file_id."},
+                "file_ids": {"type": "array", "items": {"type": "string"}, "description": "Restrict results to file_ids."},
+                "filename_contains": {"type": "array", "items": {"type": "string"}, "description": "Best-effort filename filter."},
+                "section_id": {"type": "string", "description": "Restrict results to a specific section_id."},
+                "section_ids": {"type": "array", "items": {"type": "string"}, "description": "Restrict results to section_ids."},
+                "owner_ids": {"type": "array", "items": {"type": "string"}, "description": "Owner ids to search (me/share)."},
                 "top_k": {"type": "integer", "minimum": 0, "description": "Top-k results to return."},
                 "graph_top_k": {"type": "integer", "minimum": 0, "description": "Alias of top_k."},
                 "use_ppr": {"type": "boolean", "description": "Enable PPR (default off)."},
