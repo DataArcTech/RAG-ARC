@@ -240,7 +240,7 @@ async def stream_chat_sse(
     Request body (JSON):
     {
         "query": "User query text",
-        "return_subgraph": false,
+        "return_subgraph": true,  # 默认启用，用于生成和存储 subgraph_data
         "target_owner_id": null,
         "include_all_owners": false,
         "include_evidence": false

@@ -94,40 +94,80 @@ async def list_session_messages(
     include_subgraph: bool = True,
 ):
     """List session messages asynchronously using thread pool with pagination."""
+    import logging
+    logger = logging.getLogger(__name__)
     try:
+        logger.info("[QUERY] Starting list_session_messages: session_id=%s, limit=%d, offset=%d, include_subgraph=%s", 
+                   session_id, limit, offset, include_subgraph)
         messages = await get_thread_pool().run_blocking(
             get_message_handler().list_messages_by_session,
             session_id,
             limit,
             offset
         )
+        logger.info("[QUERY] Retrieved %d messages from database", len(messages) if messages else 0)
         # Convert SQLAlchemy models to Pydantic models to ensure proper serialization
         # Use fallback validation to handle potential source_file_ids format issues.
         result = []
         for msg in messages:
             try:
-                msg_dict = msg.__dict__.copy() if hasattr(msg, "__dict__") else {}
+                # 记录从数据库读取的原始数据
+                msg_id = str(getattr(msg, 'id', 'unknown'))
+                msg_role = getattr(msg, 'content', {}).get('role', 'unknown') if isinstance(getattr(msg, 'content', None), dict) else 'unknown'
+                db_has_subgraph = getattr(msg, 'subgraph_data', None) is not None
+                db_has_sources = getattr(msg, 'sources', None) is not None
+                db_has_source_file_ids = getattr(msg, 'source_file_ids', None) is not None
+                logger.info(
+                    "[QUERY] Reading message from DB: id=%s, role=%s, db_has_subgraph=%s, db_has_sources=%s, db_has_source_file_ids=%s, include_subgraph=%s",
+                    msg_id, msg_role, db_has_subgraph, db_has_sources, db_has_source_file_ids, include_subgraph
+                )
+                
+                # 直接使用 Pydantic 的 from_attributes，而不是 msg.__dict__
+                # 这样可以正确获取所有字段，包括值为 None 的字段
+                response = ChatMessageResponse.model_validate(msg)
+                
+                # 记录验证后的数据
+                logger.info(
+                    "[QUERY] After model_validate: id=%s, response_has_subgraph=%s, response_has_sources=%s, response_has_source_file_ids=%s",
+                    msg_id,
+                    response.subgraph_data is not None,
+                    response.sources is not None,
+                    response.source_file_ids is not None
+                )
                 
                 # 列表接口不需要返回这两个大字段，移除以减小响应体积
-                msg_dict.pop("deepsearch_trace", None)
-                msg_dict.pop("raw_llm_response", None)
+                response.deepsearch_trace = None
+                response.raw_llm_response = None
                 
                 # 根据参数决定是否移除subgraph_data
                 if not include_subgraph:
-                    msg_dict.pop("subgraph_data", None)
+                    response.subgraph_data = None
+                    logger.info("[QUERY] Removed subgraph_data due to include_subgraph=False for message %s", msg_id)
                 
-                result.append(ChatMessageResponse.model_validate(msg_dict))
+                logger.info(
+                    "[QUERY] Final response: id=%s, final_has_subgraph=%s, final_has_sources=%s, final_has_source_file_ids=%s",
+                    msg_id,
+                    response.subgraph_data is not None,
+                    response.sources is not None,
+                    response.source_file_ids is not None
+                )
+                
+                result.append(response)
             except Exception as e:
                 # If standard validation fails, try the fallback method.
                 try:
-                    msg_dict = msg.__dict__.copy() if hasattr(msg, "__dict__") else {}
+                    # 直接使用 Pydantic 的 from_attributes
+                    response = ChatMessageResponse.model_validate_with_fallback(msg)
+                    
                     # 列表接口不需要返回这两个大字段，移除以减小响应体积
-                    msg_dict.pop("deepsearch_trace", None)
-                    msg_dict.pop("raw_llm_response", None)
+                    response.deepsearch_trace = None
+                    response.raw_llm_response = None
+                    
                     # 根据参数决定是否移除subgraph_data
                     if not include_subgraph:
-                        msg_dict.pop("subgraph_data", None)
-                    result.append(ChatMessageResponse.model_validate_with_fallback(msg_dict))
+                        response.subgraph_data = None
+                    
+                    result.append(response)
                 except Exception as fallback_error:
                     # If fallback also fails, log the error and try a minimal safe conversion.
                     import logging
@@ -137,28 +177,38 @@ async def list_session_messages(
                         f"Original error: {e}. Attempting basic conversion."
                     )
                     # Build a safe response payload manually.
-                    if hasattr(msg, "__dict__"):
-                        msg_dict = msg.__dict__.copy()
-                    else:
-                        msg_dict = {}
-                    
-                    # 列表接口不需要返回这两个大字段，移除以减小响应体积
-                    msg_dict.pop("deepsearch_trace", None)
-                    msg_dict.pop("raw_llm_response", None)
-                    # 根据参数决定是否移除subgraph_data
-                    if not include_subgraph:
-                        msg_dict.pop("subgraph_data", None)
-                    
-                    # Ensure source_file_ids is a list of strings.
-                    if "source_file_ids" in msg_dict and msg_dict["source_file_ids"]:
-                        msg_dict["source_file_ids"] = [
-                            str(item) if item is not None else None
-                            for item in msg_dict["source_file_ids"]
-                            if item is not None
-                        ] or None
-                    
+                    # 直接使用属性访问，确保所有字段都被包含
                     try:
-                        result.append(ChatMessageResponse.model_validate(msg_dict))
+                        try:
+                            response = ChatMessageResponse.model_validate(msg)
+                        except Exception:
+                            # 如果还是失败，使用字典方式（兼容旧代码）
+                            msg_dict = {}
+                            for key in ['id', 'session_id', 'user_id', 'user_type', 'content', 
+                                       'source_file_ids', 'sources', 'subgraph_data', 
+                                       'raw_llm_response', 'deepsearch_trace', 'created_at']:
+                                if hasattr(msg, key):
+                                    msg_dict[key] = getattr(msg, key)
+                            
+                            # Ensure source_file_ids is a list of strings.
+                            if "source_file_ids" in msg_dict and msg_dict["source_file_ids"]:
+                                msg_dict["source_file_ids"] = [
+                                    str(item) if item is not None else None
+                                    for item in msg_dict["source_file_ids"]
+                                    if item is not None
+                                ] or None
+                            
+                            response = ChatMessageResponse.model_validate(msg_dict)
+                        
+                        # 列表接口不需要返回这两个大字段，移除以减小响应体积
+                        response.deepsearch_trace = None
+                        response.raw_llm_response = None
+                        
+                        # 根据参数决定是否移除subgraph_data
+                        if not include_subgraph:
+                            response.subgraph_data = None
+                        
+                        result.append(response)
                     except Exception as final_error:
                         logger.error(
                             f"Failed to create ChatMessageResponse for message {getattr(msg, 'id', 'unknown')}: {final_error}"
@@ -295,18 +345,24 @@ async def list_messages_by_user(
         result = []
         for msg in messages:
             try:
-                msg_dict = msg.__dict__.copy() if hasattr(msg, "__dict__") else {}
+                # 直接使用 Pydantic 的 from_attributes
+                response = ChatMessageResponse.model_validate(msg)
+                
                 # 列表接口不需要返回这两个大字段，移除以减小响应体积
-                msg_dict.pop("deepsearch_trace", None)
-                msg_dict.pop("raw_llm_response", None)
-                result.append(ChatMessageResponse.model_validate(msg_dict))
+                response.deepsearch_trace = None
+                response.raw_llm_response = None
+                
+                result.append(response)
             except Exception as e:
                 try:
-                    msg_dict = msg.__dict__.copy() if hasattr(msg, "__dict__") else {}
+                    # 直接使用 Pydantic 的 from_attributes
+                    response = ChatMessageResponse.model_validate_with_fallback(msg)
+                    
                     # 列表接口不需要返回这两个大字段，移除以减小响应体积
-                    msg_dict.pop("deepsearch_trace", None)
-                    msg_dict.pop("raw_llm_response", None)
-                    result.append(ChatMessageResponse.model_validate(msg_dict))
+                    response.deepsearch_trace = None
+                    response.raw_llm_response = None
+                    
+                    result.append(response)
                 except Exception as fallback_error:
                     import logging
                     logger = logging.getLogger(__name__)
@@ -315,25 +371,33 @@ async def list_messages_by_user(
                         f"Original error: {e}. Attempting basic conversion."
                     )
                     # Build a safe response payload manually.
-                    if hasattr(msg, "__dict__"):
-                        msg_dict = msg.__dict__.copy()
-                    else:
-                        msg_dict = {}
-                    
-                    # 列表接口不需要返回这两个大字段，移除以减小响应体积
-                    msg_dict.pop("deepsearch_trace", None)
-                    msg_dict.pop("raw_llm_response", None)
-                    
-                    # Ensure source_file_ids is a list of strings.
-                    if "source_file_ids" in msg_dict and msg_dict["source_file_ids"]:
-                        msg_dict["source_file_ids"] = [
-                            str(item) if item is not None else None
-                            for item in msg_dict["source_file_ids"]
-                            if item is not None
-                        ] or None
-                    
                     try:
-                        result.append(ChatMessageResponse.model_validate(msg_dict))
+                        try:
+                            response = ChatMessageResponse.model_validate(msg)
+                        except Exception:
+                            # 如果还是失败，使用字典方式（兼容旧代码）
+                            msg_dict = {}
+                            for key in ['id', 'session_id', 'user_id', 'user_type', 'content', 
+                                       'source_file_ids', 'sources', 'subgraph_data', 
+                                       'raw_llm_response', 'deepsearch_trace', 'created_at']:
+                                if hasattr(msg, key):
+                                    msg_dict[key] = getattr(msg, key)
+                            
+                            # Ensure source_file_ids is a list of strings.
+                            if "source_file_ids" in msg_dict and msg_dict["source_file_ids"]:
+                                msg_dict["source_file_ids"] = [
+                                    str(item) if item is not None else None
+                                    for item in msg_dict["source_file_ids"]
+                                    if item is not None
+                                ] or None
+                            
+                            response = ChatMessageResponse.model_validate(msg_dict)
+                        
+                        # 列表接口不需要返回这两个大字段，移除以减小响应体积
+                        response.deepsearch_trace = None
+                        response.raw_llm_response = None
+                        
+                        result.append(response)
                     except Exception as final_error:
                         logger.error(
                             f"Failed to create ChatMessageResponse for message {getattr(msg, 'id', 'unknown')}: {final_error}"
@@ -358,7 +422,11 @@ async def list_messages(
     page_size: int = 20,
     include_subgraph: bool = True,
 ):
-    """List messages asynchronously using thread pool with pagination."""
+    """List messages asynchronously using thread pool with pagination.
+    
+    Args:
+        include_subgraph: If True, returns subgraph_data field. Default True.
+    """
     try:
         session = await get_thread_pool().run_blocking(
             get_session_handler().get_session,

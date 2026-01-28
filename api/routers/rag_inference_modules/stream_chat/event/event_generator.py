@@ -606,6 +606,14 @@ async def generate_sse_events(
         subgraph_info = prepared.get("subgraph_info")
         raw_llm_response = prepared.get("raw_llm_response")
         raw_mindmap_response = prepared.get("raw_mindmap_response")
+        
+        # 记录从 prepared 中获取的数据
+        logger.info(
+            "Retrieved from prepared: chunks_count=%d, has_subgraph_data=%s, return_subgraph=%s",
+            len(chunks),
+            subgraph_data is not None,
+            return_subgraph
+        )
     
     # 检查任务是否被取消（在生成 mindmap 前）
     if await check_and_handle_cancellation(task_info, session_id, user_message.id):

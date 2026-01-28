@@ -90,6 +90,21 @@ def _run_stream_processing(
         prepared["raw_llm_response"] = None
         prepared["raw_mindmap_response"] = None
         
+        # 记录 subgraph_data 的生成情况
+        logger.info(
+            "RAG stream processing completed: chunks_count=%d, has_subgraph_data=%s, return_subgraph=%s, include_evidence=%s",
+            len(chunks) if chunks else 0,
+            subgraph_data is not None,
+            return_subgraph,
+            include_evidence
+        )
+        if subgraph_data:
+            logger.info(
+                "Subgraph_data details: nodes=%d, edges=%d",
+                len(subgraph_data.get("nodes", [])) if isinstance(subgraph_data, dict) else 0,
+                len(subgraph_data.get("edges", [])) if isinstance(subgraph_data, dict) else 0
+            )
+        
         # 发送chunks信息到progress事件，以便存储到Redis供恢复使用
         if chunks:
             chunks_info = {

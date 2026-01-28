@@ -20,7 +20,7 @@ class StreamChatRequest(BaseModel):
     """Request model for POST SSE stream chat endpoint."""
 
     query: str
-    return_subgraph: bool = False
+    return_subgraph: bool = True  # 默认启用，用于生成和存储 subgraph_data 到会话详情
     target_owner_id: Optional[uuid.UUID] = None
     include_all_owners: bool = False
     include_evidence: bool = False

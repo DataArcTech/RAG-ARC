@@ -245,6 +245,15 @@ async def create_assistant_message(
         else None
     )
     
+    # 记录存储的数据信息，用于调试
+    logger.info(
+        "Creating assistant_message: session_id=%s, sources_count=%d, has_subgraph_data=%s, return_subgraph=%s",
+        session_id,
+        len(sources_for_frontend) if sources_for_frontend else 0,
+        subgraph_data is not None,
+        return_subgraph
+    )
+    
     # 准备 raw_llm_response，包含 trace_file_path（如果存在）
     raw_llm_response_with_trace = raw_llm_response
     if deepsearch_trace_file_path:
@@ -263,7 +272,8 @@ async def create_assistant_message(
             else None
         ),
         sources=sources_for_storage,
-        subgraph_data=subgraph_data if return_subgraph else None,
+        # 只要有 subgraph_data 就存储，不依赖于 return_subgraph 标志
+        subgraph_data=subgraph_data if subgraph_data else None,
         raw_llm_response=raw_llm_response_with_trace,
         raw_mindmap_response=(
             {"response": raw_mindmap_response}
