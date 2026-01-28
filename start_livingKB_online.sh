@@ -1,0 +1,685 @@
+#!/bin/bash
+set -euo pipefail
+
+# ==============================================================================
+# 线上环境专用配置 (遵循新的命名规范)
+# ==============================================================================
+# PM2 应用名称
+PM2_APP_NAME="rag-app-livingKB_online"
+# 应用标识 (用于Docker资源命名)
+APP_ID="livingKB"
+# 环境标识 (用于Docker资源命名)
+ENV_ID="online"
+# Docker 资源命名前缀
+DOCKER_PREFIX="rag-arc"
+
+# ==============================================================================
+# 核心优化：自动定位main.py所在目录
+# ==============================================================================
+find_main_py() {
+    local current_dir=$(pwd)
+    local max_depth=10
+    local depth=0
+
+    if [ -f "${current_dir}/main.py" ]; then
+        echo "${current_dir}"
+        return 0
+    fi
+
+    while [ $depth -lt $max_depth ]; do
+        current_dir=$(dirname "${current_dir}")
+        if [ -f "${current_dir}/main.py" ]; then
+            echo "${current_dir}"
+            return 0
+        fi
+        depth=$((depth + 1))
+    done
+
+    echo "❌ 未找到main.py文件（已向上查找${max_depth}层）" >&2
+    exit 1
+}
+
+APP_DIR=$(find_main_py)
+echo "🔍 自动定位到应用目录: ${APP_DIR}"
+
+# ==============================================================================
+# 第一步：加载.env文件
+# ==============================================================================
+ENV_FILE=${ENV_FILE:-${APP_DIR}/.env} # 线上环境直接使用 .env 文件
+if [ -f "${ENV_FILE}" ]; then
+    echo "🔧 加载环境配置文件: ${ENV_FILE}"
+    # 使用 set -a 自动导出所有变量，避免注释和空行问题
+    set -a
+    source ${ENV_FILE}
+    set +a
+else
+    echo "⚠️  未找到.env文件（${ENV_FILE}），将使用脚本默认值或系统环境变量"
+fi
+
+# ==============================================================================
+# 第二步：配置区 (使用新的命名规范，端口与测试环境保持一致)
+# ==============================================================================
+# 1. 网络名称
+NETWORK_NAME=${NETWORK_NAME:-"${DOCKER_PREFIX}-network-${APP_ID}-${ENV_ID}"}
+
+# 2. PostgreSQL 配置
+POSTGRES_CONTAINER_NAME=${POSTGRES_CONTAINER_NAME:-"${DOCKER_PREFIX}-postgres-${APP_ID}-${ENV_ID}"}
+POSTGRES_HOST_PORT=${POSTGRES_PORT:-5432} # 使用5432端口
+POSTGRES_USER=${POSTGRES_USER:-postgres}
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres123}
+POSTGRES_DB=${POSTGRES_DB:-"rag_arc_${APP_ID}_${ENV_ID}"} # 数据库名也遵循规范
+POSTGRES_IMAGE=${POSTGRES_IMAGE:-postgres:16-alpine}
+
+# 3. Redis 配置
+REDIS_CONTAINER_NAME=${REDIS_CONTAINER_NAME:-"${DOCKER_PREFIX}-redis-${APP_ID}-${ENV_ID}"}
+REDIS_HOST_PORT=${REDIS_PORT:-6381} # 端口与测试环境一致
+REDIS_IMAGE=${REDIS_IMAGE:-redis:7-alpine}
+REDIS_PASSWORD=${REDIS_PASSWORD:-""}
+
+# 4. Neo4j 配置
+NEO4J_CONTAINER_NAME=${NEO4J_CONTAINER_NAME:-"${DOCKER_PREFIX}-neo4j-${APP_ID}-${ENV_ID}"}
+NEO4J_WEB_HOST_PORT=${NEO4J_WEB_PORT:-7476} # 端口与测试环境一致
+NEO4J_BOLT_HOST_PORT=${NEO4J_BOLT_PORT:-7689} # 端口与测试环境一致
+if [[ -n "${NEO4J_URL:-}" ]]; then
+    NEO4J_BOLT_HOST_PORT=$(echo ${NEO4J_URL} | awk -F':' '{print $NF}')
+fi
+NEO4J_USERNAME=${NEO4J_USERNAME:-neo4j}
+NEO4J_PASSWORD=${NEO4J_PASSWORD:-12345678}
+NEO4J_IMAGE=${NEO4J_IMAGE:-neo4j:latest}
+
+# 5. 应用配置
+APP_PORT=${APP_PORT:-8000} # 端口与测试环境一致
+APP_LOG_FILE=${APP_LOG_FILE:-${APP_DIR}/log/app_${ENV_ID}.log}
+PARSER_OUTPUT_DIR=${PARSER_OUTPUT_DIR:-${APP_DIR}/data/parsed_files_${ENV_ID}}
+LOCAL_FILE_STORAGE_PATH=${LOCAL_FILE_STORAGE_PATH:-${APP_DIR}/local/files_${ENV_ID}}
+
+# 6. MinerU 服务配置（客户端配置，用于连接远程 MinerU 服务）
+# 注意：此环境为客户端，MinerU 服务在远程服务器运行，不在此处启动
+MINERU_ENABLED=${MINERU_ENABLED:-false}
+MINERU_HOST=${MINERU_HOST:-0.0.0.0}
+MINERU_PORT=${MINERU_PORT:-8899}
+MINERU_OUTPUT_DIR=${MINERU_OUTPUT_DIR:-${APP_DIR}/data/mineru_outputs}
+MINERU_TEMP_DIR=${MINERU_TEMP_DIR:-/tmp/mineru_temp}
+MINERU_LOG_FILE=${MINERU_LOG_FILE:-${APP_DIR}/log/mineru.log}
+
+# 7. MinerU SSH 隧道配置（用于通过 SSH 隧道连接远程 MinerU 服务）
+MINERU_TUNNEL_ENABLED=${MINERU_TUNNEL_ENABLED:-false}
+MINERU_TUNNEL_REMOTE_HOST=${MINERU_TUNNEL_REMOTE_HOST:-""}
+MINERU_TUNNEL_REMOTE_PORT=${MINERU_TUNNEL_REMOTE_PORT:-8898}
+MINERU_TUNNEL_LOCAL_PORT=${MINERU_TUNNEL_LOCAL_PORT:-8899}
+MINERU_TUNNEL_SSH_USER=${MINERU_TUNNEL_SSH_USER:-root}
+MINERU_TUNNEL_SSH_PORT=${MINERU_TUNNEL_SSH_PORT:-22}
+MINERU_TUNNEL_SSH_HOST_ALIAS=${MINERU_TUNNEL_SSH_HOST_ALIAS:-""}
+MINERU_TUNNEL_SSH_IDENTITY_FILE=${MINERU_TUNNEL_SSH_IDENTITY_FILE:-""}
+MINERU_TUNNEL_SSH_PASSWORD=${MINERU_TUNNEL_SSH_PASSWORD:-""}
+MINERU_TUNNEL_MONITOR_PORT=${MINERU_TUNNEL_MONITOR_PORT:-20001}
+MINERU_TUNNEL_PID_FILE="/tmp/mineru_tunnel_${APP_ID}_${ENV_ID}.pid"
+MINERU_TUNNEL_LOG_FILE="${APP_DIR}/log/mineru_tunnel_${ENV_ID}.log"
+
+# ==============================================================================
+# 依赖检查
+# ==============================================================================
+check_dependency() {
+    if ! command -v "$1" &> /dev/null; then
+        echo "❌ 错误: 未找到 '$1' 命令。请先安装。" >&2
+        exit 1
+    fi
+}
+check_dependency "docker"
+check_dependency "pm2"
+check_dependency "uv"
+check_dependency "lsof"
+check_dependency "pkill"
+
+# 如果启用 MinerU 隧道，检查 autossh 和 sshpass（如果需要密码认证）
+if [[ "${MINERU_TUNNEL_ENABLED}" == "true" ]]; then
+    check_dependency "autossh"
+    if [ -z "${MINERU_TUNNEL_REMOTE_HOST}" ]; then
+        echo "❌ 错误: MINERU_TUNNEL_ENABLED=true 但 MINERU_TUNNEL_REMOTE_HOST 未设置" >&2
+        exit 1
+    fi
+    # 如果设置了密码且没有密钥文件，需要 sshpass
+    if [ -n "${MINERU_TUNNEL_SSH_PASSWORD}" ] && [ -z "${MINERU_TUNNEL_SSH_IDENTITY_FILE}" ]; then
+        if ! command -v sshpass &> /dev/null; then
+            echo "⚠️  警告: 需要 sshpass 来自动输入密码，但未安装"
+            echo "   安装命令: apt install -y sshpass"
+            echo "   或者配置 SSH 密钥认证（更安全）"
+            exit 1
+        fi
+    fi
+fi
+
+# ==============================================================================
+# 第三步：清理旧的 MinerU SSH 隧道（如果需要）
+# ==============================================================================
+# 在启动新隧道前，先清理可能存在的旧隧道
+if [[ "${MINERU_TUNNEL_ENABLED}" == "true" ]]; then
+    if [ -f "${MINERU_TUNNEL_PID_FILE}" ]; then
+        OLD_PID=$(cat "${MINERU_TUNNEL_PID_FILE}")
+        if ps -p "${OLD_PID}" > /dev/null 2>&1; then
+            echo "🧹 清理旧的 MinerU SSH 隧道 (PID: ${OLD_PID})..."
+            kill "${OLD_PID}" 2>/dev/null || true
+            sleep 1
+            if ps -p "${OLD_PID}" > /dev/null 2>&1; then
+                kill -9 "${OLD_PID}" 2>/dev/null || true
+            fi
+            rm -f "${MINERU_TUNNEL_PID_FILE}"
+        else
+            rm -f "${MINERU_TUNNEL_PID_FILE}"
+        fi
+    fi
+    # 清理可能残留的 SSH 进程
+    pkill -f "ssh.*${MINERU_TUNNEL_LOCAL_PORT}:127.0.0.1" 2>/dev/null || true
+fi
+
+# ==============================================================================
+# 第四步：启动 MinerU SSH 隧道（如果需要）
+# ==============================================================================
+start_mineru_tunnel() {
+    if [[ "${MINERU_TUNNEL_ENABLED}" != "true" ]]; then
+        return 0
+    fi
+
+    echo "🔗 处理 MinerU SSH 隧道..."
+    mkdir -p $(dirname ${MINERU_TUNNEL_LOG_FILE})
+
+    # 检查隧道是否已运行
+    if [ -f "${MINERU_TUNNEL_PID_FILE}" ]; then
+        OLD_PID=$(cat "${MINERU_TUNNEL_PID_FILE}")
+        if ps -p "${OLD_PID}" > /dev/null 2>&1; then
+            echo "  ✅ 隧道已在运行 (PID: ${OLD_PID})"
+            return 0
+        else
+            # PID 文件存在但进程不存在，清理
+            rm -f "${MINERU_TUNNEL_PID_FILE}"
+        fi
+    fi
+
+    # 检查本地端口是否被占用
+    if lsof -Pi :${MINERU_TUNNEL_LOCAL_PORT} -sTCP:LISTEN -t >/dev/null 2>&1; then
+        echo "  ⚠️  本地端口 ${MINERU_TUNNEL_LOCAL_PORT} 已被占用，尝试清理..."
+        PID_TO_KILL=$(lsof -t -i:${MINERU_TUNNEL_LOCAL_PORT} 2>/dev/null || true)
+        if [ -n "${PID_TO_KILL}" ]; then
+            kill -9 "${PID_TO_KILL}" > /dev/null 2>&1 || true
+            sleep 1
+        fi
+    fi
+
+    # 确定 SSH 连接目标（优先使用别名，否则使用 IP）
+    if [ -n "${MINERU_TUNNEL_SSH_HOST_ALIAS}" ]; then
+        SSH_TARGET="${MINERU_TUNNEL_SSH_HOST_ALIAS}"
+        echo "  🚀 启动 SSH 隧道（使用别名）..."
+        echo "    远程别名: ${MINERU_TUNNEL_SSH_USER}@${SSH_TARGET}:${MINERU_TUNNEL_REMOTE_PORT}"
+    else
+        SSH_TARGET="${MINERU_TUNNEL_REMOTE_HOST}"
+        echo "  🚀 启动 SSH 隧道..."
+        echo "    远程: ${MINERU_TUNNEL_SSH_USER}@${SSH_TARGET}:${MINERU_TUNNEL_REMOTE_PORT}"
+    fi
+    echo "    本地: localhost:${MINERU_TUNNEL_LOCAL_PORT}"
+
+    # 构建 SSH 参数
+    SSH_ARGS=()
+    
+    # SSH 端口参数
+    if [ "${MINERU_TUNNEL_SSH_PORT}" != "22" ]; then
+        SSH_ARGS+=("-p" "${MINERU_TUNNEL_SSH_PORT}")
+    fi
+    
+    # SSH 密钥文件参数
+    if [ -n "${MINERU_TUNNEL_SSH_IDENTITY_FILE}" ]; then
+        if [ -f "${MINERU_TUNNEL_SSH_IDENTITY_FILE}" ]; then
+            SSH_ARGS+=("-i" "${MINERU_TUNNEL_SSH_IDENTITY_FILE}")
+            echo "    使用密钥: ${MINERU_TUNNEL_SSH_IDENTITY_FILE}"
+        else
+            echo "  ⚠️  警告: 指定的密钥文件不存在: ${MINERU_TUNNEL_SSH_IDENTITY_FILE}"
+        fi
+    fi
+    
+    # SSH 选项
+    SSH_ARGS+=(
+        "-o" "ServerAliveInterval=60"
+        "-o" "ServerAliveCountMax=3"
+        "-o" "ExitOnForwardFailure=yes"
+        "-o" "StrictHostKeyChecking=no"
+    )
+
+    # 构建 SSH 命令参数
+    SSH_CMD_ARGS=()
+    SSH_CMD_ARGS+=("-C" "-N" "-g")
+    SSH_CMD_ARGS+=("${SSH_ARGS[@]}")
+    SSH_CMD_ARGS+=("-L" "${MINERU_TUNNEL_LOCAL_PORT}:127.0.0.1:${MINERU_TUNNEL_REMOTE_PORT}")
+    SSH_CMD_ARGS+=("${MINERU_TUNNEL_SSH_USER}@${SSH_TARGET}")
+    
+    # 如果设置了密码且没有密钥文件，使用 sshpass 包装 autossh
+    # 这样既能自动重连，又能使用密码认证
+    if [ -n "${MINERU_TUNNEL_SSH_PASSWORD}" ] && [ -z "${MINERU_TUNNEL_SSH_IDENTITY_FILE}" ]; then
+        if command -v sshpass &> /dev/null; then
+            echo "    使用密码认证（通过 sshpass + autossh，支持自动重连）"
+            # 创建固定的 ssh 包装脚本（避免临时目录被清理）
+            SSH_WRAPPER_DIR="/tmp/ssh_wrapper_${APP_ID}_${ENV_ID}"
+            mkdir -p "${SSH_WRAPPER_DIR}"
+            SSH_WRAPPER="${SSH_WRAPPER_DIR}/ssh"
+            # 创建 ssh 包装脚本，通过环境变量传递密码（更安全）
+            cat > "${SSH_WRAPPER}" <<'EOF'
+#!/bin/bash
+# 从环境变量 SSH_PASSWORD 获取密码
+exec sshpass -p "${SSH_PASSWORD}" /usr/bin/ssh "$@"
+EOF
+            chmod +x "${SSH_WRAPPER}"
+            
+            # 使用 autossh，通过 PATH 环境变量使用包装脚本
+            # 通过 SSH_PASSWORD 环境变量传递密码（不直接写在脚本文件中）
+            # 使用 nohup 和 & 后台运行，确保环境变量正确传递
+            nohup env \
+                PATH="${SSH_WRAPPER_DIR}:${PATH}" \
+                SSH_PASSWORD="${MINERU_TUNNEL_SSH_PASSWORD}" \
+                autossh -M ${MINERU_TUNNEL_MONITOR_PORT} \
+                "${SSH_CMD_ARGS[@]}" \
+                > "${MINERU_TUNNEL_LOG_FILE}" 2>&1 &
+            
+            AUTOSSH_PID=$!
+            echo "    启动 autossh 进程 (PID: ${AUTOSSH_PID})，等待连接建立..."
+            echo "    ⏳ 等待 20 秒，如需手动输入密码请在此期间完成..."
+            sleep 20  # 增加等待时间，给用户足够时间手动输入密码（如果需要）
+        else
+            echo "  ❌ 错误: 需要 sshpass 但未安装，请运行: apt install -y sshpass"
+            return 1
+        fi
+    else
+        # 使用 autossh（密钥认证或无需认证）
+        autossh -M ${MINERU_TUNNEL_MONITOR_PORT} \
+            -f \
+            "${SSH_CMD_ARGS[@]}" \
+            > "${MINERU_TUNNEL_LOG_FILE}" 2>&1
+    fi
+
+    # 查找 autossh 进程 PID（使用更通用的匹配模式）
+    # 如果上面已经设置了 AUTOSSH_PID，就使用它，否则查找
+    if [ -z "${AUTOSSH_PID:-}" ]; then
+        AUTOSSH_PID=$(pgrep -f "autossh.*${MINERU_TUNNEL_LOCAL_PORT}:127.0.0.1:${MINERU_TUNNEL_REMOTE_PORT}" | head -n 1)
+    fi
+
+    if [ -z "${AUTOSSH_PID}" ]; then
+        echo "  ❌ 隧道启动失败，请查看日志: ${MINERU_TUNNEL_LOG_FILE}"
+        cat "${MINERU_TUNNEL_LOG_FILE}"
+        return 1
+    fi
+
+    # 保存 PID
+    echo "${AUTOSSH_PID}" > "${MINERU_TUNNEL_PID_FILE}"
+    echo "  ✅ 隧道已启动 (PID: ${AUTOSSH_PID})"
+
+    # 测试连接（重试机制，确保隧道真正可用）
+    echo "  ⏳ 验证隧道连接..."
+    MAX_RETRIES=5
+    RETRY_COUNT=0
+    TUNNEL_READY=false
+    
+    while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+        sleep 2
+        if curl -s --max-time 3 "http://localhost:${MINERU_TUNNEL_LOCAL_PORT}/health" > /dev/null 2>&1; then
+            echo "  ✅ 隧道连接成功！MinerU 服务可访问: http://localhost:${MINERU_TUNNEL_LOCAL_PORT}"
+            TUNNEL_READY=true
+            break
+        fi
+        RETRY_COUNT=$((RETRY_COUNT + 1))
+        echo "  ⏳ 等待隧道就绪... (${RETRY_COUNT}/${MAX_RETRIES})"
+    done
+    
+    if [ "$TUNNEL_READY" = false ]; then
+        echo "  ❌ 隧道启动失败：无法连接到 MinerU 服务"
+        echo "     请检查："
+        echo "     1. 远程服务器 ${MINERU_TUNNEL_REMOTE_HOST} 是否可访问"
+        echo "     2. 远程 MinerU 服务是否在 ${MINERU_TUNNEL_REMOTE_PORT} 端口运行"
+        echo "     3. SSH 连接是否正常（查看日志: ${MINERU_TUNNEL_LOG_FILE}）"
+        echo ""
+        echo "  📝 查看隧道日志: tail -f ${MINERU_TUNNEL_LOG_FILE}"
+        return 1
+    fi
+    echo ""
+}
+
+stop_mineru_tunnel() {
+    if [[ "${MINERU_TUNNEL_ENABLED}" != "true" ]]; then
+        return 0
+    fi
+
+    if [ ! -f "${MINERU_TUNNEL_PID_FILE}" ]; then
+        # 尝试通过端口查找进程
+        PID=$(pgrep -f "autossh.*${MINERU_TUNNEL_LOCAL_PORT}:127.0.0.1" | head -n 1)
+        if [ -z "${PID}" ]; then
+            return 0
+        fi
+    else
+        PID=$(cat "${MINERU_TUNNEL_PID_FILE}")
+    fi
+
+    echo "  🛑 停止 MinerU SSH 隧道 (PID: ${PID})..."
+    kill "${PID}" 2>/dev/null || true
+    sleep 1
+
+    # 如果还在运行，强制杀死
+    if ps -p "${PID}" > /dev/null 2>&1; then
+        kill -9 "${PID}" 2>/dev/null || true
+    fi
+
+    # 清理 PID 文件
+    rm -f "${MINERU_TUNNEL_PID_FILE}"
+
+    # 清理可能残留的 SSH 进程
+    pkill -f "ssh.*${MINERU_TUNNEL_LOCAL_PORT}:127.0.0.1" 2>/dev/null || true
+    echo "  ✅ 隧道已停止"
+}
+
+# ==============================================================================
+# 第四步：启动 MinerU SSH 隧道（如果需要，必须在应用启动前完成）
+# ==============================================================================
+# 如果启用了隧道，必须先建立隧道并验证成功，否则阻止后续启动
+if [[ "${MINERU_TUNNEL_ENABLED}" == "true" ]]; then
+    echo ""
+    echo "=========================================="
+    echo "  步骤 1/4: 建立 MinerU SSH 隧道"
+    echo "=========================================="
+    if ! start_mineru_tunnel; then
+        echo ""
+        echo "❌ MinerU SSH 隧道启动失败，无法继续启动应用"
+        echo "   请解决隧道连接问题后重试"
+        exit 1
+    fi
+    echo "✅ MinerU SSH 隧道已就绪"
+    echo ""
+fi
+
+# ==============================================================================
+# 第五步：启动Docker容器
+# ==============================================================================
+echo -e "\n=========================================="
+echo "  RAG-ARC ${APP_ID} ${ENV_ID} 环境启动脚本 (PM2版)"
+echo "=========================================="
+if [[ "${MINERU_TUNNEL_ENABLED}" == "true" ]]; then
+    echo "  ✅ MinerU SSH 隧道: 已就绪"
+fi
+echo ""
+
+# 1. 创建Docker网络
+echo "📦 创建/检查Docker网络 [${NETWORK_NAME}]..."
+docker network create ${NETWORK_NAME} 2>/dev/null || echo "  ✅ 网络已存在，无需创建"
+echo ""
+
+# 2. 处理PostgreSQL
+echo "🗄️  处理PostgreSQL容器 [${POSTGRES_CONTAINER_NAME}]..."
+if docker ps -a | grep -q "${POSTGRES_CONTAINER_NAME}"; then
+    docker stop ${POSTGRES_CONTAINER_NAME} > /dev/null 2>&1 && echo "  ⏹️  已停止旧PostgreSQL容器"
+    docker update --restart always ${POSTGRES_CONTAINER_NAME} > /dev/null 2>&1 && echo "  🔄 已设置自动重启策略"
+    docker start ${POSTGRES_CONTAINER_NAME} && echo "  ✅ PostgreSQL容器重启成功（保留数据，已启用自动重启）"
+else
+    docker run -d \
+        --name ${POSTGRES_CONTAINER_NAME} \
+        --network ${NETWORK_NAME} \
+        --restart always \
+        -p ${POSTGRES_HOST_PORT}:5432 \
+        -e POSTGRES_USER=${POSTGRES_USER} \
+        -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD} \
+        -e POSTGRES_DB=${POSTGRES_DB} \
+        -v "${POSTGRES_CONTAINER_NAME}-data:/var/lib/postgresql/data" \
+        ${POSTGRES_IMAGE} && echo "  ✅ PostgreSQL容器已创建并启动（新数据卷，已启用自动重启）"
+fi
+echo ""
+
+# 3. 处理Redis
+echo "📦 处理Redis容器 [${REDIS_CONTAINER_NAME}]..."
+REDIS_CMD="redis-server --appendonly yes"
+if [[ -n "${REDIS_PASSWORD}" ]]; then
+    REDIS_CMD="redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}"
+fi
+if docker ps -a | grep -q "${REDIS_CONTAINER_NAME}"; then
+    docker stop ${REDIS_CONTAINER_NAME} > /dev/null 2>&1 && echo "  ⏹️  已停止旧Redis容器"
+    docker update --restart always ${REDIS_CONTAINER_NAME} > /dev/null 2>&1 && echo "  🔄 已设置自动重启策略"
+    docker start ${REDIS_CONTAINER_NAME} && echo "  ✅ Redis容器重启成功（保留数据，已启用自动重启）"
+else
+    docker run -d \
+        --name ${REDIS_CONTAINER_NAME} \
+        --network ${NETWORK_NAME} \
+        --restart always \
+        -p ${REDIS_HOST_PORT}:6379 \
+        -v "${REDIS_CONTAINER_NAME}-data:/data" \
+        ${REDIS_IMAGE} ${REDIS_CMD} && echo "  ✅ Redis容器已创建并启动（新数据卷，已启用自动重启）"
+fi
+echo ""
+
+# 4. 处理Neo4j
+echo "🔷 处理Neo4j容器 [${NEO4J_CONTAINER_NAME}]..."
+if docker ps -a | grep -q "${NEO4J_CONTAINER_NAME}"; then
+    docker stop ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 && echo "  ⏹️  已停止旧Neo4j容器"
+    docker update --restart always ${NEO4J_CONTAINER_NAME} > /dev/null 2>&1 && echo "  🔄 已设置自动重启策略"
+    docker start ${NEO4J_CONTAINER_NAME} && echo "  ✅ Neo4j容器重启成功（保留数据，已启用自动重启）"
+else
+    docker run -d \
+        --name ${NEO4J_CONTAINER_NAME} \
+        --network ${NETWORK_NAME} \
+        --restart always \
+        -p ${NEO4J_WEB_HOST_PORT}:7474 \
+        -p ${NEO4J_BOLT_HOST_PORT}:7687 \
+        -e NEO4J_AUTH=${NEO4J_USERNAME}/${NEO4J_PASSWORD} \
+        -e NEO4J_PLUGINS='["apoc"]' \
+        -e NEO4J_dbms_security_procedures_unrestricted=apoc.* \
+        -v "${NEO4J_CONTAINER_NAME}-data:/data" \
+        -v "${NEO4J_CONTAINER_NAME}-logs:/logs" \
+        ${NEO4J_IMAGE} && echo "  ✅ Neo4j容器已创建并启动（新数据卷，已启用自动重启）"
+fi
+echo ""
+
+# 5. 等待中间件就绪
+echo "⏳ 等待中间件就绪..."
+sleep 10
+MAX_ATTEMPTS=30
+ATTEMPT=0
+while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+    if docker exec ${POSTGRES_CONTAINER_NAME} pg_isready -U ${POSTGRES_USER} -h localhost > /dev/null 2>&1; then
+        echo "  ✅ PostgreSQL已就绪 (端口: ${POSTGRES_HOST_PORT})"
+        break
+    fi
+    ATTEMPT=$((ATTEMPT + 1))
+    echo -n "."
+    sleep 1
+done
+echo ""
+if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+    echo "  ⚠️  PostgreSQL启动超时，但将继续尝试启动应用（请检查容器日志）"
+fi 
+
+# ==============================================================================
+# 第六步：使用PM2启动/重启应用
+# ==============================================================================
+echo "🚀 启动/重启应用 [${APP_DIR}]..."
+mkdir -p ${PARSER_OUTPUT_DIR} ${LOCAL_FILE_STORAGE_PATH} $(dirname ${APP_LOG_FILE})
+
+# 确保 uv 命令在 PATH 中
+if [ -f "$HOME/.local/bin/env" ]; then
+    source "$HOME/.local/bin/env" 2>/dev/null || true
+fi
+export PATH="$HOME/.local/bin:$PATH"
+
+cd ${APP_DIR} || { echo "❌ 应用目录不存在: ${APP_DIR}"; exit 1; }
+
+if [ -f "pyproject.toml" ]; then
+    echo "  📦 同步项目依赖..."
+    if uv sync --quiet; then
+        echo "  ✅ 依赖同步完成"
+    else
+        echo "  ⚠️  依赖同步失败，尝试继续启动..."
+    fi
+fi
+
+# 4.1 【核心修改】增强版终极清理：确保端口绝对干净
+echo "🧹 正在进行增强版清理，确保端口 ${APP_PORT} 空闲..."
+
+# 步骤 1: 通过 PM2 清理
+echo "  -> 步骤 1: 通过 PM2 停止并删除旧的 [${PM2_APP_NAME}] 进程..."
+pm2 stop "${PM2_APP_NAME}" > /dev/null 2>&1 || true
+pm2 delete "${PM2_APP_NAME}" > /dev/null 2>&1 || true
+
+# 步骤 2: 通过 pkill 清理 (根据命令模式)
+echo "  -> 步骤 2: 通过 pkill 强制杀死所有相关的 uvicorn 进程..."
+pkill -f "uvicorn main:app --port ${APP_PORT}" > /dev/null 2>&1 || true
+
+# 步骤 3: 通过 lsof 清理 (根据端口号，最彻底)
+PID_TO_KILL=$(sudo lsof -t -i:"${APP_PORT}" 2>/dev/null || true)
+if [ -n "${PID_TO_KILL}" ]; then
+    echo "  -> 步骤 3: 发现进程 ${PID_TO_KILL} 占用端口 ${APP_PORT}，正在强制杀死..."
+    sudo kill -9 "${PID_TO_KILL}" > /dev/null 2>&1 || true
+    sleep 2 # 等待一下，确保进程已完全退出
+fi
+
+echo "  ✅ 清理完成。"
+
+# 4.2 使用 PM2 启动新进程（带环境变量更新）
+echo "  🚀 正在通过 PM2 启动新的 [${PM2_APP_NAME}] 进程..."
+pm2 start "uv run uvicorn main:app --host 0.0.0.0 --port ${APP_PORT}" \
+    --name "${PM2_APP_NAME}" \
+    --log "${APP_LOG_FILE}" \
+    --update-env \
+    --env "PYTHONUNBUFFERED=1" \
+    --env "POSTGRES_HOST=${POSTGRES_HOST:-localhost}" \
+    --env "POSTGRES_PORT=${POSTGRES_HOST_PORT}" \
+    --env "POSTGRES_USER=${POSTGRES_USER}" \
+    --env "POSTGRES_PASSWORD=${POSTGRES_PASSWORD}" \
+    --env "POSTGRES_DB=${POSTGRES_DB}" \
+    --env "REDIS_HOST=${REDIS_HOST:-localhost}" \
+    --env "REDIS_PORT=${REDIS_HOST_PORT}" \
+    --env "REDIS_PASSWORD=${REDIS_PASSWORD}" \
+    --env "REDIS_DB=${REDIS_DB:-0}" \
+    --env "NEO4J_URL=${NEO4J_URL:-bolt://localhost:${NEO4J_BOLT_HOST_PORT}}" \
+    --env "NEO4J_USERNAME=${NEO4J_USERNAME}" \
+    --env "NEO4J_PASSWORD=${NEO4J_PASSWORD}" \
+    --env "NEO4J_DATABASE=${NEO4J_DATABASE:-neo4j}" \
+    --env "OPENAI_API_KEY=${OPENAI_API_KEY:-}" \
+    --env "OPENAI_BASE_URL=${OPENAI_BASE_URL:-}" \
+    --env "OPENAI_CHAT_MODEL=${OPENAI_CHAT_MODEL:-}" \
+    --env "OPENAI_EMBEDDING_MODEL=${OPENAI_EMBEDDING_MODEL:-}" \
+    --env "EMBEDDING_MODEL_PROVIDER=${EMBEDDING_MODEL_PROVIDER:-}" \
+    --env "MODEL_PROFILE=${MODEL_PROFILE:-}" \
+    --env "PARSER_OUTPUT_DIR=${PARSER_OUTPUT_DIR}" \
+    --env "LOCAL_FILE_STORAGE_PATH=${LOCAL_FILE_STORAGE_PATH}" \
+    --env "LOG_LEVEL=${LOG_LEVEL:-INFO}" \
+    --env "JWT_SECRET_KEY=${JWT_SECRET_KEY:-}"
+
+echo "  ✅ ${PM2_APP_NAME} 应用已通过 PM2 启动！"
+echo ""
+
+# ==============================================================================
+# 6.3 启动/重启队列 Workers (参考 start.sh 的做法，直接调用脚本)
+# ==============================================================================
+echo "🔄 启动/重启队列 Workers..."
+cd ${APP_DIR} || { echo "❌ 应用目录不存在: ${APP_DIR}"; exit 1; }
+
+# 先停止旧的队列 workers (如果存在 stop 脚本)
+if [ -f "scripts/mq_tools/stop_mq_workers_local.sh" ]; then
+    echo "  🛑 停止旧的队列 workers..."
+    bash "scripts/mq_tools/stop_mq_workers_local.sh" >/dev/null 2>&1 || true
+fi
+
+# 使用 start_mq_workers_local.sh 启动新的 workers (强制启动模式，因为我们已经先停止了)
+if [ -f "scripts/mq_tools/start_mq_workers_local.sh" ]; then
+    echo "  🚀 启动新的队列 workers..."
+    MQ_WORKER_FORCE_START=1 bash "scripts/mq_tools/start_mq_workers_local.sh" || true
+    
+    # 自动配置队列 Workers 的开机自启（通过 systemd service）
+    SERVICE_NAME="rag-arc-mq-workers-livingKB_online.service"
+    SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}"
+    
+    echo "  🔧 配置队列 Workers 开机自启..."
+    cat > /tmp/${SERVICE_NAME} <<EOF
+[Unit]
+Description=RAG-ARC MQ Workers (Celery Workers for livingKB_online)
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=forking
+User=root
+WorkingDirectory=${APP_DIR}
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin"
+EnvironmentFile=-${APP_DIR}/.env
+ExecStart=/bin/bash scripts/mq_tools/start_mq_workers_local.sh
+ExecStop=/bin/bash scripts/mq_tools/stop_mq_workers_local.sh
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    sudo cp /tmp/${SERVICE_NAME} ${SERVICE_FILE} && \
+    sudo systemctl daemon-reload && \
+    sudo systemctl enable ${SERVICE_NAME} >/dev/null 2>&1 && \
+    echo "  ✅ 队列 Workers 开机自启已配置（systemd service: ${SERVICE_NAME}）" || \
+    echo "  ⚠️  队列 Workers 开机自启配置失败（需要 sudo 权限）"
+    rm -f /tmp/${SERVICE_NAME}
+else
+    echo "  ⚠️  未找到 start_mq_workers_local.sh 脚本，跳过队列 workers 启动"
+fi
+echo ""
+
+# ==============================================================================
+# 第七步：验证应用状态
+# ==============================================================================
+echo "⏳ 验证应用启动状态..."
+sleep 8
+
+# 验证 PM2 应用状态
+if pm2 list | grep -q "${PM2_APP_NAME}" && pm2 list | grep -q "online"; then
+    echo "=========================================="
+    echo "  ✅ ${APP_ID} ${ENV_ID} 所有服务启动/重启成功！（由 PM2 守护）"
+    echo "=========================================="
+    echo ""
+    echo "📋 服务信息（自动适配路径）："
+    echo "  - PostgreSQL: ${POSTGRES_HOST:-localhost}:${POSTGRES_HOST_PORT} (容器: ${POSTGRES_CONTAINER_NAME})"
+    echo "  - Redis: ${REDIS_HOST:-localhost}:${REDIS_HOST_PORT} (容器: ${REDIS_CONTAINER_NAME})"
+    echo "  - Neo4j Web: http://localhost:${NEO4J_WEB_HOST_PORT}"
+    echo "  - Neo4j Bolt: ${NEO4J_URL:-bolt://localhost:${NEO4J_BOLT_HOST_PORT}} (容器: ${NEO4J_CONTAINER_NAME})"
+    if [[ "${MINERU_ENABLED}" == "true" ]] || [[ "${PARSER_PARSE_MODE:-}" == "mineru" ]]; then
+        if [[ "${MINERU_TUNNEL_ENABLED}" == "true" ]]; then
+            echo "  - MinerU 服务（通过 SSH 隧道）: http://localhost:${MINERU_TUNNEL_LOCAL_PORT}"
+            echo "    远程服务器: ${MINERU_TUNNEL_SSH_USER}@${MINERU_TUNNEL_REMOTE_HOST}:${MINERU_TUNNEL_REMOTE_PORT}"
+        else
+            MINERU_SERVER_URL=${MINERU_SERVER_URL:-"http://${MINERU_HOST}:${MINERU_PORT}"}
+            echo "  - MinerU 服务（远程）: ${MINERU_SERVER_URL}"
+        fi
+    fi
+    echo "  - 应用API: http://localhost:${APP_PORT}"
+    echo "  - 自动定位的代码目录: ${APP_DIR}"
+    echo ""
+    echo "📝 PM2 管理命令："
+    echo "  - 查看状态: pm2 list"
+    echo "  - 查看日志: pm2 logs ${PM2_APP_NAME}"
+    echo "  - 重启应用: pm2 restart ${PM2_APP_NAME} --update-env"
+    echo "  - 停止应用: pm2 stop ${PM2_APP_NAME}"
+    echo "  - 开机自启: pm2 startup && pm2 save"
+    echo ""
+    echo "📝 队列 Workers 管理命令："
+    echo "  - 停止队列: bash scripts/mq_tools/stop_mq_workers_local.sh"
+    echo "  - 启动队列: MQ_WORKER_FORCE_START=1 bash scripts/mq_tools/start_mq_workers_local.sh"
+    echo "  - 查看队列日志: tail -f log/mq_workers/*.log"
+    echo "  - 系统服务管理: sudo systemctl {start|stop|status|restart} rag-arc-mq-workers-livingKB_online.service"
+    echo "  - 开机自启: ✅ 已自动配置（通过 systemd service）"
+    echo ""
+    if [[ "${MINERU_TUNNEL_ENABLED}" == "true" ]]; then
+        echo "📝 MinerU SSH 隧道管理命令："
+        echo "  - 查看状态: ps aux | grep autossh | grep ${MINERU_TUNNEL_LOCAL_PORT}"
+        echo "  - 查看日志: tail -f ${MINERU_TUNNEL_LOG_FILE}"
+        echo "  - 停止隧道: kill \$(cat ${MINERU_TUNNEL_PID_FILE})"
+        echo ""
+    fi
+else
+    echo "=========================================="
+    echo "  ⚠️  ${APP_ID} ${ENV_ID} 应用启动可能异常（请检查 PM2 日志）"
+    echo "=========================================="
+    echo ""
+    echo "📝 快速排查："
+    echo "  1. 查看 PM2 状态: pm2 list"
+    echo "  2. 查看应用日志: pm2 logs ${PM2_APP_NAME}"
+    echo "  3. 检查容器状态: docker ps | grep ${APP_ID}-${ENV_ID}"
+    echo ""
+fi
