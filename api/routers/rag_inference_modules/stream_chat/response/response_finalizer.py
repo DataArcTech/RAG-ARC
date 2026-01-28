@@ -210,7 +210,9 @@ async def _ensure_finalization(
     task_info: Optional[Any],
     user_message: Any,
     rag_inference_handler: Any,
-    deepsearch_trace_file_path: Optional[str]
+    deepsearch_trace_file_path: Optional[str],
+    citation_key_map_override: Optional[dict[int, int]] = None,
+    assistant_response_renumbered: bool = False,
 ) -> None:
     """确保最终化逻辑执行（不yield事件，用于客户端断开时）"""
     # 检查取消
@@ -242,6 +244,14 @@ async def _ensure_finalization(
     if enable_deepsearch and deepsearch_result and deepsearch_sources_for_frontend is not None:
         sources_for_frontend = deepsearch_sources_for_frontend
         citation_key_map = deepsearch_citation_key_map
+        if citation_key_map_override:
+            from api.routers.chatbot import _renumber_sources_by_key_map
+
+            sources_for_frontend = _renumber_sources_by_key_map(
+                sources_for_frontend,
+                citation_key_map_override,
+            )
+            citation_key_map = citation_key_map_override
     else:
         assistant_response, sources_for_frontend, citation_key_map = await build_sources_and_evidence(
             chunks,
@@ -249,7 +259,9 @@ async def _ensure_finalization(
             subgraph_info,
             rag_inference_handler,
             assistant_response,
-            False
+            False,
+            citation_key_map=citation_key_map_override,
+            assistant_response_renumbered=assistant_response_renumbered,
         )
     
     # Create the assistant message exactly once per task_id.
@@ -299,7 +311,10 @@ async def _build_and_yield_final_response(
     model_name: str,
     created: int,
     request_id: str,
-    deepsearch_trace_file_path: Optional[str]
+    deepsearch_trace_file_path: Optional[str],
+    emit_final_text: bool = True,
+    citation_key_map_override: Optional[dict[int, int]] = None,
+    assistant_response_renumbered: bool = False,
 ) -> AsyncGenerator[str, None]:
     """构建并生成最终响应事件"""
     # 检查取消（在生成 mindmap 前）
@@ -353,6 +368,14 @@ async def _build_and_yield_final_response(
     if enable_deepsearch and deepsearch_result and deepsearch_sources_for_frontend is not None:
         sources_for_frontend = deepsearch_sources_for_frontend
         citation_key_map = deepsearch_citation_key_map
+        if citation_key_map_override:
+            from api.routers.chatbot import _renumber_sources_by_key_map
+
+            sources_for_frontend = _renumber_sources_by_key_map(
+                sources_for_frontend,
+                citation_key_map_override,
+            )
+            citation_key_map = citation_key_map_override
     else:
         assistant_response, sources_for_frontend, citation_key_map = await build_sources_and_evidence(
             chunks,
@@ -360,7 +383,9 @@ async def _build_and_yield_final_response(
             subgraph_info,
             rag_inference_handler,
             assistant_response,
-            is_fallback_response
+            is_fallback_response,
+            citation_key_map=citation_key_map_override,
+            assistant_response_renumbered=assistant_response_renumbered,
         )
     
     # 检查取消（在创建消息前）
@@ -369,8 +394,7 @@ async def _build_and_yield_final_response(
             yield cancel_event
         return
 
-    # Emit a "final_text" event so the frontend can replace the streamed text.
-    # This is necessary because citation normalization/renumbering happens after streaming.
+    # Emit a "final_text" event when streaming did not already normalize citations.
     final_text_payload = {
         "type": "final_text",
         "content": assistant_response,
@@ -384,7 +408,8 @@ async def _build_and_yield_final_response(
             await registry.append_event(task_info.task_id, final_text_payload, event_type="final_text")
         except Exception:  # noqa: BLE001
             pass
-    yield sse_json_wrapped(final_text_payload, request_id=request_id)
+    if emit_final_text:
+        yield sse_json_wrapped(final_text_payload, request_id=request_id)
     
     # Create the assistant message exactly once per task_id (even if the background callback runs).
     deepsearch_trace = deepsearch_trace_file_path if enable_deepsearch else None

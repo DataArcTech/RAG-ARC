@@ -4,6 +4,7 @@ import uuid
 import asyncio
 import time
 import logging
+import os
 from datetime import datetime
 from typing import Any, AsyncGenerator, Optional
 from api.sse import (
@@ -17,6 +18,7 @@ from api.sse import (
 )
 from api.routers.rag_inference_models import build_stream_chat_payload
 from api.routers.rag_inference_handlers import get_rag_inference_handler
+from config.output_limits import CITATION_STREAM_MODE, CHAT_TOP_CHUNKS
 from ..utils.history_manager import create_user_message, load_and_process_history
 from ..deepsearch.deepsearch_handler import process_deepsearch
 from ..rag.stream_processor import start_stream_processing
@@ -42,6 +44,7 @@ from ..response.response_builder import (
     convert_evidence_chunks_to_chunks,
     build_deepsearch_sources_for_frontend,
 )
+from ..utils.citation_stream import CitationStreamRenumberer
 
 logger = logging.getLogger(__name__)
 
@@ -111,13 +114,20 @@ async def _yield_token_events(
     created: int,
     request_id: str,
     response_parts: list[str],
-    task_info: Any = None
+    task_info: Any = None,
+    citation_stream: CitationStreamRenumberer | None = None,
 ) -> AsyncGenerator[str, None]:
     """Yield token events as SSE."""
     if not text:
         return
-    
-    for delta_piece in iter_text_deltas(text):
+
+    text_to_emit = text
+    if citation_stream is not None:
+        text_to_emit = citation_stream.feed(text)
+        if not text_to_emit:
+            return
+
+    for delta_piece in iter_text_deltas(text_to_emit):
         response_parts.append(delta_piece)
         event = sse_json_wrapped(
             openai_chat_completion_chunk(
@@ -151,7 +161,8 @@ async def _yield_deepsearch_answer_stream(
     created: int,
     request_id: str,
     response_parts: list[str],
-    task_info: Any = None
+    task_info: Any = None,
+    citation_stream: CitationStreamRenumberer | None = None,
 ) -> AsyncGenerator[str, None]:
     """Yield DeepSearch answer as streaming token events."""
     async for event in _yield_token_events(
@@ -161,9 +172,24 @@ async def _yield_deepsearch_answer_stream(
         created,
         request_id,
         response_parts,
-        task_info
+        task_info,
+        citation_stream,
     ):
         yield event
+    if citation_stream is not None:
+        flush_text = citation_stream.flush()
+        if flush_text:
+            async for event in _yield_token_events(
+                flush_text,
+                chunk_id,
+                model_name,
+                created,
+                request_id,
+                response_parts,
+                task_info,
+                None,
+            ):
+                yield event
 
 
 async def _process_queue_events(
@@ -173,7 +199,8 @@ async def _process_queue_events(
     created: int,
     request_id: str,
     response_parts: list[str],
-    stream_error: list[Exception | None]
+    stream_error: list[Exception | None],
+    citation_stream: CitationStreamRenumberer | None = None,
 ) -> AsyncGenerator[str, None]:
     """Process events from queue."""
     while True:
@@ -199,10 +226,26 @@ async def _process_queue_events(
                 model_name,
                 created,
                 request_id,
-                response_parts
+                response_parts,
+                None,
+                citation_stream,
             ):
                 yield event
             continue
+    if citation_stream is not None:
+        flush_text = citation_stream.flush()
+        if flush_text:
+            async for event in _yield_token_events(
+                flush_text,
+                chunk_id,
+                model_name,
+                created,
+                request_id,
+                response_parts,
+                None,
+                None,
+            ):
+                yield event
 
 
 async def _process_queue_events_with_cache(
@@ -213,7 +256,8 @@ async def _process_queue_events_with_cache(
     request_id: str,
     response_parts: list[str],
     stream_error: list[Exception | None],
-    task_info: Any
+    task_info: Any,
+    citation_stream: CitationStreamRenumberer | None = None,
 ) -> AsyncGenerator[str, None]:
     """Process events from queue with task event caching."""
     while True:
@@ -254,10 +298,25 @@ async def _process_queue_events_with_cache(
                 created,
                 request_id,
                 response_parts,
-                task_info
+                task_info,
+                citation_stream,
             ):
                 yield event
             continue
+    if citation_stream is not None:
+        flush_text = citation_stream.flush()
+        if flush_text:
+            async for event in _yield_token_events(
+                flush_text,
+                chunk_id,
+                model_name,
+                created,
+                request_id,
+                response_parts,
+                task_info,
+                None,
+            ):
+                yield event
 
 
 async def _yield_error_event(
@@ -295,6 +354,8 @@ async def _ensure_finalization_after_queue(
     rag_inference_handler: Any,
     deepsearch_trace_file_path: Optional[str],
     assistant_response_override: Optional[str] = None,
+    citation_key_map_override: Optional[dict[int, int]] = None,
+    assistant_response_renumbered: bool = False,
 ) -> None:
     """在队列处理完成后，确保最终化逻辑执行（后台任务）"""
     try:
@@ -303,6 +364,7 @@ async def _ensure_finalization_after_queue(
             return
         
         from ..response.response_finalizer import _ensure_finalization
+        renumbered = assistant_response_renumbered and assistant_response_override is None
         await _ensure_finalization(
             assistant_response=assistant_response,
             chunks=chunks,
@@ -322,7 +384,9 @@ async def _ensure_finalization_after_queue(
             task_info=task_info,
             user_message=user_message,
             rag_inference_handler=rag_inference_handler,
-            deepsearch_trace_file_path=deepsearch_trace_file_path
+            deepsearch_trace_file_path=deepsearch_trace_file_path,
+            citation_key_map_override=citation_key_map_override,
+            assistant_response_renumbered=renumbered,
         )
         logger.info("Background finalization completed for task %s", task_info.task_id if task_info else "unknown")
     except Exception as e:
@@ -482,6 +546,17 @@ async def generate_sse_events(
     response_parts, queue, stream_error, prepared, rag_inference_handler, emit_progress = initialize_streaming_state(
         request_id, loop
     )
+
+    citation_stream = None
+    if CITATION_STREAM_MODE == "appearance":
+        try:
+            max_sources = int(os.getenv("CHATBOT_TOP_SOURCES", "5"))
+        except ValueError:
+            max_sources = 5
+        # LLM keys are assigned from the chunk list passed to the model (1..N).
+        # Keep the streaming remap bounded so hallucinated keys don't create "missing source" citations.
+        cap = CHAT_TOP_CHUNKS if isinstance(CHAT_TOP_CHUNKS, int) and CHAT_TOP_CHUNKS > 0 else max_sources
+        citation_stream = CitationStreamRenumberer(max_key=min(max_sources, cap))
     
     # Process DeepSearch if enabled
     deepsearch_result = None
@@ -500,7 +575,7 @@ async def generate_sse_events(
         
         async for event in process_deepsearch_with_events(
             query, effective_owner, request_id, chunk_id, model_name, created,
-            loop, task_info, session_id, user_message.id, response_parts
+            loop, task_info, session_id, user_message.id, response_parts, citation_stream
         ):
             if isinstance(event, tuple):
                 # 最后返回结果元组
@@ -557,6 +632,8 @@ async def generate_sse_events(
                     rag_inference_handler,
                     deepsearch_trace_file_path,
                     assistant_response_override=assistant_response_override,
+                    citation_key_map_override=(citation_stream.key_map if citation_stream else None),
+                    assistant_response_renumbered=bool(citation_stream),
                 )
                 logger.info("Background finalization completed for task %s", task_info.task_id if task_info else "unknown")
             except Exception as e:
@@ -569,7 +646,7 @@ async def generate_sse_events(
         try:
             async for event in process_rag_queue_events(
                 queue, chunk_id, model_name, created, request_id, response_parts,
-                stream_error, task_info, session_id, user_message.id
+                stream_error, task_info, session_id, user_message.id, citation_stream
             ):
                 yield event
         except Exception as e:
@@ -647,7 +724,10 @@ async def generate_sse_events(
             model_name=model_name,
             created=created,
             request_id=request_id,
-            deepsearch_trace_file_path=deepsearch_trace_file_path
+            deepsearch_trace_file_path=deepsearch_trace_file_path,
+            emit_final_text=(CITATION_STREAM_MODE != "appearance"),
+            citation_key_map_override=(citation_stream.key_map if citation_stream else None),
+            assistant_response_renumbered=bool(citation_stream),
         ):
             yield event
     except Exception as e:
@@ -675,7 +755,9 @@ async def generate_sse_events(
                 task_info=task_info,
                 user_message=user_message,
                 rag_inference_handler=rag_inference_handler,
-                deepsearch_trace_file_path=deepsearch_trace_file_path
+                deepsearch_trace_file_path=deepsearch_trace_file_path,
+                citation_key_map_override=(citation_stream.key_map if citation_stream else None),
+                assistant_response_renumbered=bool(citation_stream),
             )
         except Exception as finalize_error:
             logger.error("Failed to ensure finalization: %s", finalize_error, exc_info=True)

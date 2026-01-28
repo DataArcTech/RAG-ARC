@@ -398,11 +398,13 @@
 
 ### 6. 最终文本事件（Final Text Event）
 
-当后端在生成完成后，会对引用标记 `<sup>...</sup>` 做一次“过滤 + 重编号”（保证来源编号连续且与 sources 列表一致）。
+默认情况下，后端在生成完成后会对引用标记 `<sup>...</sup>` 做一次“过滤 + 重编号”（保证来源编号连续且与 sources 列表一致）。
 
-由于该过程发生在流式输出之后，前端需要用该事件的 `content` 覆盖/替换当前展示的流式文本，否则会出现：
+当 `RAGARC_CITATION_STREAM_MODE=final`（默认旧行为）时，该过程发生在流式输出之后，前端需要用该事件的 `content` 覆盖/替换当前展示的流式文本，否则会出现：
 - 流式文本里出现 `<sup>7</sup>` 但 sources 只有 1..N 的情况
 - 引用编号与 sources 面板对不上（“编号不存在”）
+
+当 `RAGARC_CITATION_STREAM_MODE=appearance` 时，后端会在流式过程中按“首次出现顺序”实时重编号，**正常流式连接不会再发送 `final_text`**；断线重连/任务恢复仍会缓存并回放该事件以保证一致性。
 
 ```json
 {
@@ -438,7 +440,9 @@
         "file_id": "file-id-or-null",
         "title": "source title",
         "file": "/static/files/{file_id}/{filename}",
-        "description": "chunk preview"
+        "description": "chunk preview",
+        "page_start": 1,
+        "page_end": 2
       }
     ],
     "citation_key_map": {

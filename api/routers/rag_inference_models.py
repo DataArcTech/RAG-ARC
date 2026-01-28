@@ -81,8 +81,6 @@ def build_stream_chat_payload(
             "chunk_index",
             "start_idx",
             "end_idx",
-            "page_start",
-            "page_end",
         ]
         
         for field in essential_fields:

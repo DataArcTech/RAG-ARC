@@ -67,7 +67,8 @@ async def process_rag_queue_events(
     stream_error: list,
     task_info: Optional[ChatTaskInfo],
     session_id: Any,
-    user_message_id: Any
+    user_message_id: Any,
+    citation_stream: Any = None,
 ) -> Any:
     """处理 RAG 队列事件并检查取消"""
     async for event in _process_queue_events_with_cache(
@@ -78,7 +79,8 @@ async def process_rag_queue_events(
         request_id,
         response_parts,
         stream_error,
-        task_info
+        task_info,
+        citation_stream,
     ):
         # 检查取消
         if await check_and_handle_cancellation(task_info, session_id, user_message_id):

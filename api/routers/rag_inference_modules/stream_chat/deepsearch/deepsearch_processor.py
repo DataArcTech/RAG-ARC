@@ -22,7 +22,8 @@ async def process_deepsearch_with_events(
     task_info: Optional[ChatTaskInfo],
     session_id: Any,
     user_message_id: Any,
-    response_parts: list[str]
+    response_parts: list[str],
+    citation_stream: Any = None,
 ) -> AsyncGenerator[Any, None]:
     """处理 DeepSearch 并生成事件流，最后 yield 结果元组"""
     deepsearch_result_container, trace_file_path_container, deepsearch_gen = await process_deepsearch(
@@ -59,6 +60,12 @@ async def process_deepsearch_with_events(
         deepsearch_result,
         False  # include_evidence
     )
+    if citation_stream is not None and deepsearch_sources_for_frontend:
+        try:
+            max_key = max(int(getattr(s, "key", 0) or 0) for s in deepsearch_sources_for_frontend)
+        except Exception:
+            max_key = None
+        citation_stream.set_max_key(max_key)
     
     if not deepsearch_answer:
         logger.warning("DeepSearch completed but no answer found, falling back to RAG system")
@@ -76,7 +83,8 @@ async def process_deepsearch_with_events(
         created,
         request_id,
         response_parts,
-        task_info
+        task_info,
+        citation_stream,
     ):
         yield event
     

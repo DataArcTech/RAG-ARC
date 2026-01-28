@@ -30,6 +30,17 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return default
 
 
+def _env_choice(name: str, default: str, allowed: set[str]) -> str:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in allowed:
+        return value
+    logger.warning("Invalid value for %s (%s); falling back to %s", name, raw, default)
+    return default
+
+
 def _limit_or_none(value: int) -> int | None:
     if ENABLE_ALL_EVIDENCE:
         return None
@@ -79,6 +90,13 @@ CHATBOT_LLM_TOP_SOURCES = _env_int("CHATBOT_LLM_TOP_SOURCES", 10)
 RAG_RETRIEVAL_OBSERVABILITY = _env_bool("RAG_RETRIEVAL_OBSERVABILITY", False)
 RAG_RETRIEVAL_LOG_TOP_FILES = _env_int("RAG_RETRIEVAL_LOG_TOP_FILES", 10)
 RAG_RETRIEVAL_LOG_TOP_CHUNKS = _env_int("RAG_RETRIEVAL_LOG_TOP_CHUNKS", 5)
+
+"""
+Citation streaming mode:
+- appearance: remap citations on the fly using first-appearance order in the answer.
+- final: keep original citations during streaming and rely on final_text refresh.
+"""
+CITATION_STREAM_MODE = _env_choice("RAGARC_CITATION_STREAM_MODE", "appearance", {"appearance", "final"})
 
 DEEPSEARCH_TOP_CHUNKS = _limit_or_none(_env_int("DEEPSEARCH_TOP_CHUNKS", 10))
 DEEPSEARCH_TOP_TRIPLES = _limit_or_none(_env_int("DEEPSEARCH_TOP_TRIPLES", 30))
