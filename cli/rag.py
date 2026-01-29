@@ -42,6 +42,7 @@ from config.output_limits import (
     DEEPSEARCH_TOP_CHUNKS,
 )
 from core.presentation.graph_chain import build_graph_chain
+from core.utils.json_safe import json_safe
 
 logger = logging.getLogger(__name__)
 app = typer.Typer(help="Run RAG-ARC algorithms through CLI without HTTP layer.")
@@ -93,7 +94,8 @@ def _write_json_payload(payload: Dict[str, Any], owner_id: UUID | str, prefix: s
     destination = _ensure_cli_output_dir(owner_id)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     path = destination / f"{prefix}_{timestamp}.json"
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    safe_payload = json_safe(payload)
+    path.write_text(json.dumps(safe_payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     return path
 
 
@@ -107,7 +109,8 @@ def _emit_json_output(
 ) -> Optional[Path]:
     """Persist JSON payload to disk and optionally emit it to stdout."""
 
-    serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+    payload_safe = json_safe(payload)
+    serialized = json.dumps(payload_safe, ensure_ascii=False, indent=2, default=str)
     payload_size = len(serialized.encode("utf-8"))
     typer.echo(f"[debug] trimmed payload size: {payload_size} bytes")
     if print_to_console or owner_id is None:
@@ -115,11 +118,12 @@ def _emit_json_output(
         typer.echo("[debug] payload printed to console")
     if owner_id is None:
         return None
-    target = _write_json_payload(payload, owner_id, prefix)
+    target = _write_json_payload(payload_safe, owner_id, prefix)
     typer.echo(f"JSON payload saved to {target} ({target.stat().st_size} bytes)")
     if raw_payload is not None:
-        raw_serialized = json.dumps(raw_payload, ensure_ascii=False, indent=2)
-        raw_target = _write_json_payload(raw_payload, owner_id, f"{prefix}_raw")
+        raw_safe = json_safe(raw_payload)
+        raw_serialized = json.dumps(raw_safe, ensure_ascii=False, indent=2, default=str)
+        raw_target = _write_json_payload(raw_safe, owner_id, f"{prefix}_raw")
         typer.echo(
             f"Raw JSON saved to {raw_target} ({raw_target.stat().st_size} bytes; in-memory size {len(raw_serialized.encode('utf-8'))} bytes)"
         )
