@@ -191,12 +191,19 @@ SEARCH_ENTITY_EXTRACT_TEMPERATURE = 0.0
 SEARCH_ENTITY_EXTRACT_MAX_TOKENS = 240
 
 # -----------------------------
-# file.search defaults (doc-level routing)
+# search.file defaults (relevant files routing)
 # -----------------------------
+# `search.file` is a *routing* tool: it searches globally for relevant chunks, aggregates them by
+# file_id, and returns candidate files + brief "why relevant" snippets.
 FILE_SEARCH_DEFAULT_TOP_K = 5
-FILE_SEARCH_RETRIEVE_CANDIDATES_K = 12
-FILE_SEARCH_DESC_MAX_CHARS = 900
-FILE_SEARCH_SUMMARY_DESC_PREVIEW_CHARS = 160
+# Retrieval depth per channel (faiss/bm25/graph_chunk). Higher values improve recall but cost more.
+FILE_SEARCH_CHANNEL_TOP_K = 25
+# Rank fusion (RRF) constant used to aggregate chunk ranks into a per-file score.
+FILE_SEARCH_RRF_K = 60
+# How many representative hits/snippets to show per candidate file in the human-readable summary.
+FILE_SEARCH_MAX_SNIPPETS_PER_FILE = 3
+# Hard cap for each snippet shown in the summary (diagnostics keep the full snippet returned by channel tool).
+FILE_SEARCH_SUMMARY_SNIPPET_PREVIEW_CHARS = 260
 
 # -----------------------------
 # section.search defaults (section-level routing)

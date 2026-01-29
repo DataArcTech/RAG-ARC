@@ -1,82 +1,108 @@
-"""file.search tool: doc-level routing using PageIndex doc description index.
+"""search.file tool: global relevant-file routing via chunk-level retrieval.
 
-This is intentionally *not* full-text search. It returns candidate `file_id`s plus
-their PageIndex-generated `doc_description`, used for doc routing and subsequent
-file-scoped chunk retrieval.
+`search.file` answers: "Which file(s) should we scope to next?"
+
+It does *not* depend on PageIndex doc descriptions / doc profiles (LLM-generated at index time).
+Instead it:
+- runs chunk-level retrieval globally (faiss/bm25/graph_chunk) across allowed owner scopes
+- aggregates hits by file_id (RRF over ranks)
+- returns candidate file_ids with short "why relevant" snippets
+
+This keeps indexing faster (no doc_description/doc_profile generation) and keeps routing grounded
+in retrievable evidence.
 """
 
-from typing import Any, Dict, List, Optional
+from __future__ import annotations
 
-from config import pageindex as pageindex_cfg
+from dataclasses import dataclass
+from typing import Any, Dict, List, Mapping, Optional, Sequence
+
 from config.core.deepsearch import tool_defaults
 from core.deepsearch.utils.owner_visibility import resolve_owner_visibility
-from core.retrieval.pageindex_retriever import PageIndexRetriever
 
 from ...base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from ...governance_tags import EVIDENCE_DERIVED, SCOPE_FILE, SCOPE_OWNER
+from .base import _SearchToolBase
+from .bm25 import _Bm25Channel
+from .faiss import _FaissChannel
+from .graph_chunk import _GraphChunkChannel
 
 
-def _coerce_file_id(meta: Any, fallback: Optional[str]) -> Optional[str]:
-    if isinstance(meta, dict):
-        for key in ("source_file_id", "file_id", "doc_id", "document_id"):
-            token = str(meta.get(key) or "").strip()
-            if token:
-                return token
-    token = str(fallback or "").strip()
-    return token or None
+def _coerce_file_id(meta: Mapping[str, Any]) -> Optional[str]:
+    for key in ("source_file_id", "file_id", "doc_id", "document_id"):
+        token = str(meta.get(key) or "").strip()
+        if token:
+            return token
+    return None
 
 
-def _split_title_desc(text: str) -> tuple[str, str]:
-    raw = str(text or "").strip()
-    if not raw:
-        return "", ""
-    lines = [line.rstrip() for line in raw.splitlines()]
-    lines = [line for line in lines if line.strip()]
-    if not lines:
-        return "", ""
-    title = lines[0].strip()
-    desc = "\n".join(lines[1:]).strip()
-    return title, desc
+def _coerce_filename(meta: Mapping[str, Any]) -> Optional[str]:
+    for key in ("filename", "source_file_name", "file_name", "source_path", "path"):
+        token = str(meta.get(key) or "").strip()
+        if token:
+            return token
+    return None
 
 
-class FileSearchTool(GraphTool):
-    """Doc-level file routing tool (PageIndex doc_routing)."""
+def _rrf(rank: int, *, k: int) -> float:
+    # Standard RRF: 1 / (k + rank). rank is 1-based.
+    return 1.0 / float(max(1, int(k) + int(rank)))
+
+
+@dataclass
+class _Hit:
+    channel: str
+    chunk_id: str
+    rank: int
+    score: Optional[float]
+    snippet: str
+
+
+class FileSearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChannel, GraphTool):
+    """Relevant-file routing tool (evidence-driven)."""
 
     descriptor = ToolDescriptor(
-        name="file.search",
+        name="search.file",
         channel="graph",
         description=(
-            "Doc-level routing search using PageIndex doc descriptions (NOT full-text). "
-            "Returns candidate file_ids with filename/title/description (+ optional doc_profile) "
-            "for subsequent file-scoped search."
+            "Find relevant file candidates by running global chunk-level retrieval "
+            "(faiss + bm25 + graph_chunk), aggregating hits by file_id, and returning "
+            "candidate files with short 'why relevant' snippets. "
+            "Use this to pick file_id(s), then use search.scoped.* for precise evidence exploration."
         ),
         speed="fast",
         cost="low",
-        strategy_tags=("search", "file_search", "doc_routing", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE),
+        strategy_tags=("search", "file_search", "relevant_files", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE),
         profile="F",
         determinism="hybrid",
-        namespace="rag-arc.deepsearch.tools.file_search",
+        namespace="rag-arc.deepsearch.tools.search.file",
         mcp_callable=True,
         input_schema=build_input_schema(
             extra_properties={
                 "focus_query": {"type": "string", "description": "Optional query override."},
                 "top_k": {"type": "integer", "minimum": 0, "description": "How many files to return."},
+                "channels": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Channels: faiss, bm25, graph_chunk (or 'graph' alias). Defaults to all.",
+                },
                 "owner_ids": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Owner ids to search (e.g. [me, share]). Must be authorized by code-side whitelist.",
                 },
+                "faiss_top_k": {"type": "integer", "minimum": 0, "description": "Optional override of channel top-k."},
+                "bm25_top_k": {"type": "integer", "minimum": 0, "description": "Optional override of channel top-k."},
+                "graph_top_k": {"type": "integer", "minimum": 0, "description": "Optional override of channel top-k."},
+                "use_ppr": {"type": "boolean", "description": "Only for graph_chunk channel."},
             }
         ),
         example_args={
-            "question": "Find the file about warranty terms",
+            "question": "Which PDF mentions multi-currency switching?",
             "plan_step": "plan_01",
-            "extra": {"top_k": 3, "owner_ids": ["<me-owner-id>", "<share-owner-id>"]},
+            "extra": {"top_k": 5, "channels": ["bm25", "faiss", "graph"], "owner_ids": ["<me-owner-id>"]},
         },
     )
-
-    def __init__(self, *, pageindex_retriever: PageIndexRetriever | None = None) -> None:
-        self._pageindex = pageindex_retriever or (PageIndexRetriever() if pageindex_cfg.pageindex_enabled() else None)
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         query = self._resolve_query(request)
@@ -87,75 +113,123 @@ class FileSearchTool(GraphTool):
         )
         diagnostics: Dict[str, Any] = {"query": query, "owner_visibility": visibility.as_dict()}
 
-        if not pageindex_cfg.pageindex_enabled() or not pageindex_cfg.doc_routing_enabled():
-            return ToolResult(
-                summary="file.search skipped: PageIndex doc routing is disabled.",
-                diagnostics={**diagnostics, "reason": "doc_routing_disabled"},
-            )
-        if self._pageindex is None:
-            return ToolResult(
-                summary="file.search skipped: PageIndex retriever unavailable.",
-                diagnostics={**diagnostics, "reason": "pageindex_retriever_unavailable"},
-            )
         if not visibility.enabled:
             return ToolResult(
-                summary="file.search skipped: missing owner scope.",
+                summary="search.file skipped: missing owner scope.",
                 diagnostics={**diagnostics, "reason": "owner_scope_missing"},
             )
 
-        top_k = self._resolve_top_k(request.extra.get("top_k"), tool_defaults.FILE_SEARCH_DEFAULT_TOP_K)
-        cand_k = int(tool_defaults.FILE_SEARCH_RETRIEVE_CANDIDATES_K)
-        max_desc_chars = max(120, int(tool_defaults.FILE_SEARCH_DESC_MAX_CHARS))
+        # Which chunk-retrieval channels to use for routing.
+        channels, unknown = self._resolve_channels(request.extra or {})
+        diagnostics["channels"] = channels
+        diagnostics["unknown_channels"] = unknown
+        if not channels:
+            return ToolResult(
+                summary="search.file skipped: no channels selected.",
+                diagnostics={**diagnostics, "reason": "channels_empty"},
+            )
 
-        # Gather per-owner results (me + share) then merge by best score per file_id.
-        merged: Dict[str, Dict[str, Any]] = {}
-        per_owner_counts: Dict[str, int] = {}
-        for owner_id in visibility.owner_ids_used:
-            try:
-                hits = self._pageindex.retrieve_doc_chunks(query, owner_id=owner_id, k_final=top_k, k_candidates=cand_k)
-            except Exception as exc:  # noqa: BLE001
-                diagnostics.setdefault("errors", []).append({"owner_id": owner_id, "error": str(exc)})
-                continue
-            per_owner_counts[owner_id] = len(hits)
-            for hit in hits:
-                meta = getattr(hit, "metadata", None) or {}
-                file_id = _coerce_file_id(meta, getattr(hit, "id", None))
+        # How many candidate files to return (final).
+        top_k_files = self._resolve_top_k(request.extra.get("top_k"), tool_defaults.FILE_SEARCH_DEFAULT_TOP_K)
+        # Retrieval depth for chunks (per channel). We rely on channel-specific overrides when present.
+        top_k_chunks = int(tool_defaults.FILE_SEARCH_CHANNEL_TOP_K)
+
+        # Run selected channels and collect chunk evidences. We intentionally do not return evidences
+        # from this tool; it is only for routing.
+        channel_summaries: List[str] = []
+        channel_diags: Dict[str, Any] = {}
+
+        # File-scope is intentionally disabled for search.file (global routing).
+        file_scope = None
+
+        hits: Dict[str, Dict[str, Any]] = {}
+        seen_chunk_ids_by_file: Dict[str, set[str]] = {}
+        rrf_k = int(tool_defaults.FILE_SEARCH_RRF_K)
+
+        async def _consume(channel: str, evidences: Sequence[Any], *, diag: Mapping[str, Any]) -> None:
+            channel_diags[channel] = dict(diag or {})
+            for ev in evidences or []:
+                provenance = getattr(ev, "provenance", None) or {}
+                meta = provenance.get("metadata") if isinstance(provenance, dict) else None
+                meta = dict(meta or {}) if isinstance(meta, dict) else {}
+                file_id = _coerce_file_id(meta)
                 if not file_id:
                     continue
-                score = meta.get("score")
-                score_f = float(score) if isinstance(score, (int, float)) else 0.0
-                filename = str(meta.get("filename") or meta.get("source_file_name") or "").strip()
-                title, desc = _split_title_desc(getattr(hit, "content", ""))
-                doc_desc = (desc or "").strip()
-                if len(doc_desc) > max_desc_chars:
-                    doc_desc = doc_desc[: max_desc_chars - 3].rstrip() + "..."
-                doc_profile = {
-                    "company": str(meta.get("doc_profile_company") or "").strip() or None,
-                    "product": str(meta.get("doc_profile_product") or "").strip() or None,
-                    "model": str(meta.get("doc_profile_model") or "").strip() or None,
-                    "version": str(meta.get("doc_profile_version") or "").strip() or None,
-                    "doc_type": str(meta.get("doc_profile_doc_type") or "").strip() or None,
-                    "language": str(meta.get("doc_profile_language") or "").strip() or None,
-                    "keywords": meta.get("doc_profile_keywords") if isinstance(meta.get("doc_profile_keywords"), list) else None,
-                    "aliases": meta.get("doc_profile_aliases") if isinstance(meta.get("doc_profile_aliases"), list) else None,
-                }
-                # Trim empty profiles to keep payload compact.
-                if not any(v for v in doc_profile.values()):
-                    doc_profile = None
-                existing = merged.get(file_id)
-                if existing is None or score_f > float(existing.get("score") or 0.0):
-                    merged[file_id] = {
-                        "file_id": file_id,
-                        "score": score_f,
-                        "owner_id": owner_id,
-                        "filename": filename or None,
-                        "title": title or None,
-                        "doc_description": doc_desc or None,
-                        "doc_profile": doc_profile,
-                    }
 
-        results = sorted(merged.values(), key=lambda row: float(row.get("score") or 0.0), reverse=True)[:top_k]
-        diagnostics["per_owner_retrieved"] = per_owner_counts
+                chunk_id = str(getattr(ev, "chunk_id", "") or "").strip()
+                if not chunk_id:
+                    continue
+                seen = seen_chunk_ids_by_file.setdefault(file_id, set())
+                if chunk_id in seen:
+                    continue
+                seen.add(chunk_id)
+
+                rank = provenance.get("rank") if isinstance(provenance, dict) else None
+                try:
+                    rank_i = int(rank) + 1 if rank is not None else 9999
+                except Exception:
+                    rank_i = 9999
+
+                score_val = getattr(ev, "score", None)
+                score_f = float(score_val) if isinstance(score_val, (int, float)) else None
+                snippet = str(getattr(ev, "content", "") or "").strip()
+
+                row = hits.get(file_id)
+                if row is None:
+                    row = {
+                        "file_id": file_id,
+                        "filename": _coerce_filename(meta),
+                        "score": 0.0,
+                        "hit_count": 0,
+                        "hits": [],
+                        "per_channel_hits": {},
+                    }
+                    hits[file_id] = row
+
+                row["score"] = float(row.get("score") or 0.0) + _rrf(rank_i, k=rrf_k)
+                row["hit_count"] = int(row.get("hit_count") or 0) + 1
+                per_channel = dict(row.get("per_channel_hits") or {})
+                per_channel[channel] = int(per_channel.get(channel) or 0) + 1
+                row["per_channel_hits"] = per_channel
+                row["hits"].append(
+                    _Hit(
+                        channel=channel,
+                        chunk_id=chunk_id,
+                        rank=rank_i,
+                        score=score_f,
+                        snippet=snippet,
+                    ).__dict__
+                )
+
+        # faiss
+        if "faiss" in channels:
+            result = await self._run_faiss(request=request, query=query, top_k=top_k_chunks, file_scope=file_scope)
+            channel_summaries.append(result.summary)
+            await _consume("faiss", result.evidences, diag=result.diagnostics)
+
+        # bm25
+        if "bm25" in channels:
+            result = await self._run_bm25(request=request, query=query, top_k=top_k_chunks, file_scope=file_scope)
+            channel_summaries.append(result.summary)
+            await _consume("bm25", result.evidences, diag=result.diagnostics)
+
+        # graph_chunk
+        if "graph_chunk" in channels:
+            try:
+                result = await self._run_graph_chunk(request=request, query=query, top_k=top_k_chunks, file_scope=file_scope)
+                channel_summaries.append(result.summary)
+                await _consume("graph_chunk", result.evidences, diag=result.diagnostics)
+            except Exception as exc:  # noqa: BLE001
+                # Keep this observable; graph channel may be unavailable in some deployments.
+                channel_summaries.append("graph_chunk search failed.")
+                channel_diags["graph_chunk"] = {"query": query, "error": str(exc)}
+
+        diagnostics["channels_summary"] = channel_summaries
+        diagnostics["channels_diagnostics"] = channel_diags
+
+        results = sorted(hits.values(), key=lambda row: float(row.get("score") or 0.0), reverse=True)
+        results = results[:top_k_files] if top_k_files > 0 else []
+
         diagnostics["results"] = results
 
         if not results:
@@ -163,44 +237,34 @@ class FileSearchTool(GraphTool):
             if visibility.owner_ids_rejected:
                 reason = "owner_ids_rejected"
             return ToolResult(
-                summary="file.search returned no files.",
+                summary="search.file returned no candidate files.",
                 diagnostics={**diagnostics, "reason": reason},
             )
 
-        # Put doc_description/doc_profile into the human-readable summary (not only diagnostics)
-        # so the LLM can actually perform "doc routing" decisions.
+        # Human-readable summary for routing decisions.
+        max_hits = max(1, int(tool_defaults.FILE_SEARCH_MAX_SNIPPETS_PER_FILE))
+        max_preview = max(0, int(tool_defaults.FILE_SEARCH_SUMMARY_SNIPPET_PREVIEW_CHARS))
         lines: List[str] = []
         for idx, row in enumerate(results[: min(len(results), 5)]):
-            profile = row.get("doc_profile") if isinstance(row.get("doc_profile"), dict) else {}
-            company = str(profile.get("company") or "").strip()
-            version = str(profile.get("version") or "").strip()
-            product = str(profile.get("product") or "").strip()
-            suffix = ""
-            if company or product or version:
-                suffix = f" company={company} product={product} version={version}".rstrip()
-            desc = str(row.get("doc_description") or "").strip()
-            max_preview = int(tool_defaults.FILE_SEARCH_SUMMARY_DESC_PREVIEW_CHARS)
-            if max_preview > 0 and len(desc) > max_preview:
-                desc = desc[: max(0, max_preview - 3)].rstrip() + "..."
             lines.append(
-                f"{idx+1}. file_id={row.get('file_id')} score={row.get('score'):.4f} owner_id={row.get('owner_id')} "
-                f"filename={row.get('filename') or ''} title={row.get('title') or ''}{suffix}"
+                f"{idx+1}. file_id={row.get('file_id')} score={float(row.get('score') or 0.0):.4f} "  # noqa: E501
+                f"hits={int(row.get('hit_count') or 0)} filename={row.get('filename') or ''}"
             )
-            if desc:
-                lines.append(f"   desc: {desc}")
-        summary = "file.search returned candidate files:\n" + "\n".join(lines)
+            hit_items = list(row.get("hits") or [])
+            hit_items.sort(key=lambda item: (str(item.get("channel") or ""), int(item.get("rank") or 9999)))
+            shown = 0
+            for item in hit_items:
+                if shown >= max_hits:
+                    break
+                snippet = str(item.get("snippet") or "").strip()
+                if max_preview and len(snippet) > max_preview:
+                    snippet = snippet[: max(0, max_preview - 3)].rstrip() + "..."
+                if not snippet:
+                    continue
+                channel = str(item.get("channel") or "")
+                rank = int(item.get("rank") or 0)
+                lines.append(f"   [{channel} rank={rank}] {snippet}")
+                shown += 1
+
+        summary = "search.file returned candidate files:\n" + "\n".join(lines)
         return ToolResult(summary=summary, diagnostics=diagnostics)
-
-    @staticmethod
-    def _resolve_query(request: ToolRunRequest) -> str:
-        extra = request.extra or {}
-        focus = extra.get("focus_query") or extra.get("query") or request.question
-        return str(focus or "").strip()
-
-    @staticmethod
-    def _resolve_top_k(value: Any, default: int) -> int:
-        try:
-            parsed = int(value) if value is not None else int(default)
-        except Exception:
-            parsed = int(default)
-        return max(0, parsed)
