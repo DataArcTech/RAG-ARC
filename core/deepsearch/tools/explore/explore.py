@@ -18,7 +18,10 @@ from ..governance_tags import EVIDENCE_PRIMARY, REQUIRES_LLM, SCOPE_FILE, SCOPE_
 from .graph_ops import GraphOpsTool
 from .search.file_search import FileSearchTool
 from .search.section_search import SectionSearchTool
-from .search import SearchBM25Tool, SearchFaissTool, SearchGraphChunkTool, SearchTool
+from .search.tool import SearchGlobalTool, SearchScopedTool
+from .search.faiss import SearchFaissTool, SearchGlobalFaissTool
+from .search.bm25 import SearchBM25Tool, SearchGlobalBM25Tool
+from .search.graph_chunk import SearchGraphChunkTool, SearchGlobalGraphTool
 from .toc_tree import TocTreeTool
 from .read_structured import ReadPagesTool, ReadSectionTool
 from .read_neighbors import ReadNeighborsTool
@@ -28,13 +31,17 @@ from .llm_chain_explorer import LLMChainExplorerTool
 
 
 _ALLOWED_TOOL_NAMES = {
-    "file.search",
-    "section.search",
+    "search.file",
+    "search.section",
     "toc.tree",
-    "search",
-    "search.faiss",
-    "search.bm25",
-    "search.graph_chunk",
+    "search.scoped",
+    "search.global",
+    "search.scoped.faiss",
+    "search.scoped.bm25",
+    "search.scoped.graph",
+    "search.global.faiss",
+    "search.global.bm25",
+    "search.global.graph",
     "graph.ops",
     "graph.beam_search",
     "graph.llm_chain_explorer",
@@ -45,7 +52,12 @@ _ALLOWED_TOOL_NAMES = {
     "read.neighbors",
 }
 
-_LLM_REQUIRED_ACTIONS = {"search.graph_chunk", "graph.beam_search", "graph.llm_chain_explorer"}
+_LLM_REQUIRED_ACTIONS = {
+    "search.scoped.graph",
+    "search.global.graph",
+    "graph.beam_search",
+    "graph.llm_chain_explorer",
+}
 
 
 @dataclass
@@ -105,7 +117,7 @@ class ExploreTool(GraphTool):
             "plan_step": "plan_01",
             "extra": {
                 "actions": [
-                    {"id": "s1", "tool": "search", "args": {"focus_query": "Company A control Company C", "top_k": 6}},
+                    {"id": "s1", "tool": "search.scoped", "args": {"focus_query": "Company A control Company C", "file_id": "<file_id>", "top_k": 6}},
                     {
                         "id": "g1",
                         "tool": "graph.ops",
@@ -177,24 +189,36 @@ class ExploreTool(GraphTool):
         return ToolResult(summary=summary, evidences=evidences, diagnostics=diagnostics)
 
     def _register_builtin_tools(self) -> None:
-        if "file.search" not in self._tools:
-            self._tools["file.search"] = FileSearchTool()
-        if "section.search" not in self._tools:
-            self._tools["section.search"] = SectionSearchTool()
+        if "search.file" not in self._tools:
+            self._tools["search.file"] = FileSearchTool()
+        if "search.section" not in self._tools:
+            self._tools["search.section"] = SectionSearchTool()
         if "toc.tree" not in self._tools:
             self._tools["toc.tree"] = TocTreeTool()
-        if "search" not in self._tools:
-            self._tools["search"] = SearchTool(
+        if "search.scoped" not in self._tools:
+            self._tools["search.scoped"] = SearchScopedTool(
                 llm_connector=self.llm_connector,
                 dense_retriever=self.dense_retriever,
                 bm25_retriever=self.bm25_retriever,
             )
-        if "search.faiss" not in self._tools:
-            self._tools["search.faiss"] = SearchFaissTool(dense_retriever=self.dense_retriever)
-        if "search.bm25" not in self._tools:
-            self._tools["search.bm25"] = SearchBM25Tool(bm25_retriever=self.bm25_retriever)
-        if "search.graph_chunk" not in self._tools:
-            self._tools["search.graph_chunk"] = SearchGraphChunkTool(llm_connector=self.llm_connector)
+        if "search.global" not in self._tools:
+            self._tools["search.global"] = SearchGlobalTool(
+                llm_connector=self.llm_connector,
+                dense_retriever=self.dense_retriever,
+                bm25_retriever=self.bm25_retriever,
+            )
+        if "search.scoped.faiss" not in self._tools:
+            self._tools["search.scoped.faiss"] = SearchFaissTool(dense_retriever=self.dense_retriever)
+        if "search.scoped.bm25" not in self._tools:
+            self._tools["search.scoped.bm25"] = SearchBM25Tool(bm25_retriever=self.bm25_retriever)
+        if "search.scoped.graph" not in self._tools:
+            self._tools["search.scoped.graph"] = SearchGraphChunkTool(llm_connector=self.llm_connector)
+        if "search.global.faiss" not in self._tools:
+            self._tools["search.global.faiss"] = SearchGlobalFaissTool(dense_retriever=self.dense_retriever)
+        if "search.global.bm25" not in self._tools:
+            self._tools["search.global.bm25"] = SearchGlobalBM25Tool(bm25_retriever=self.bm25_retriever)
+        if "search.global.graph" not in self._tools:
+            self._tools["search.global.graph"] = SearchGlobalGraphTool(llm_connector=self.llm_connector)
         if "graph.ops" not in self._tools:
             self._tools["graph.ops"] = GraphOpsTool()
         if "graph.beam_search" not in self._tools and self.llm_connector is not None:
@@ -337,6 +361,7 @@ class ExploreTool(GraphTool):
 
         goal = str(args.get("goal") or "").strip() or None
         max_chars = self._resolve_read_max_chars(args.get("max_chars"))
+        file_scope_ids = self._normalize_file_scope_ids(args)
 
         cypher = (
             "MATCH (c:Chunk)\n"
@@ -349,6 +374,9 @@ class ExploreTool(GraphTool):
             rows = await request.adapter.acypher(cypher, {"chunk_ids": chunk_ids}, access_scope=request.access_scope)
         evidences: List[EvidenceChunk] = []
         seen: set[str] = set()
+        dropped_out_of_scope = 0
+        dropped_missing_file_id = 0
+        dropped_ids: List[str] = []
         for row in rows or []:
             if not isinstance(row, dict):
                 continue
@@ -363,6 +391,15 @@ class ExploreTool(GraphTool):
             source_file_id = row.get("source_file_id") or metadata.get("source_file_id")
             if source_file_id:
                 metadata["source_file_id"] = source_file_id
+            if file_scope_ids:
+                if not source_file_id:
+                    dropped_missing_file_id += 1
+                    dropped_ids.append(chunk_id)
+                    continue
+                if str(source_file_id) not in file_scope_ids:
+                    dropped_out_of_scope += 1
+                    dropped_ids.append(chunk_id)
+                    continue
             evidence = EvidenceChunk(
                 chunk_id=chunk_id,
                 source="explore.read.chunk",
@@ -380,6 +417,19 @@ class ExploreTool(GraphTool):
 
         summary = f"read.chunk returned {len(evidences)} chunks." if evidences else "read.chunk returned no chunks."
         diagnostics = {"requested": len(chunk_ids), "returned": len(evidences), "goal": goal}
+        if file_scope_ids:
+            diagnostics["file_scope"] = {"file_ids": sorted(file_scope_ids), "source": "tool_args"}
+            diagnostics["dropped_out_of_scope"] = dropped_out_of_scope
+            diagnostics["dropped_missing_file_id"] = dropped_missing_file_id
+            if dropped_ids:
+                diagnostics["dropped_chunk_ids"] = dropped_ids[:20]
+            if dropped_out_of_scope or dropped_missing_file_id:
+                summary = (
+                    summary.rstrip(".")
+                    + f"; dropped {dropped_out_of_scope} out-of-scope"
+                    + (f" (+{dropped_missing_file_id} missing file_id)" if dropped_missing_file_id else "")
+                    + "."
+                )
         return _ActionResult(
             action_id=action_id,
             tool="read.chunk",
@@ -388,6 +438,22 @@ class ExploreTool(GraphTool):
             evidences=evidences,
             diagnostics=diagnostics,
         )
+
+    @staticmethod
+    def _normalize_file_scope_ids(args: Any) -> set[str]:
+        if not isinstance(args, dict):
+            return set()
+        out: set[str] = set()
+        for key in ("file_ids", "file_id", "source_file_ids", "source_file_id"):
+            raw = args.get(key)
+            if raw is None:
+                continue
+            items = raw if isinstance(raw, (list, tuple, set, frozenset)) else [raw]
+            for item in items:
+                token = str(item or "").strip()
+                if token:
+                    out.add(token)
+        return out
 
     @staticmethod
     def _normalize_actions(actions: Any) -> List[Dict[str, Any]]:

@@ -1,6 +1,6 @@
 """Multi-channel search tool orchestrator."""
 import asyncio
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from config.core.deepsearch import tool_defaults
 from encapsulation.data_model.deepsearch import EvidenceChunk
@@ -8,7 +8,7 @@ from core.deepsearch.utils.file_scope import resolve_file_scope
 
 from ...base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from ...governance_tags import EVIDENCE_PRIMARY, REQUIRES_LLM, SCOPE_FILE, SCOPE_OWNER
-from .base import _SearchToolBase
+from .base import _SearchToolBase, strip_file_scope_from_graph_context
 from .bm25 import _Bm25Channel
 from .faiss import _FaissChannel
 from .graph_chunk import _GraphChunkChannel
@@ -139,3 +139,122 @@ class SearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
             "windows": windows,
         }
         return ToolResult(summary=summary, evidences=evidences, diagnostics=diagnostics)
+
+
+def _coerce_file_ids(extra: Dict[str, Any] | None) -> List[str]:
+    payload = extra or {}
+    out: List[str] = []
+    seen: set[str] = set()
+    for key in ("file_ids", "file_id", "source_file_ids", "source_file_id"):
+        raw = payload.get(key)
+        if raw is None:
+            continue
+        items = raw if isinstance(raw, (list, tuple, set, frozenset)) else [raw]
+        for item in items:
+            token = str(item or "").strip()
+            if not token:
+                continue
+            if token in seen:
+                continue
+            seen.add(token)
+            out.append(token)
+    return out
+
+
+class SearchScopedTool(SearchTool):
+    """Scoped multi-channel search: requires an explicit file scope (file_id/file_ids)."""
+
+    descriptor = ToolDescriptor(
+        name="search.scoped",
+        channel="graph",
+        description=(
+            "Scoped three-way search (faiss + bm25 + graph_chunk). "
+            "Requires explicit file_id/file_ids to prevent cross-document/company contamination. "
+            "Use search.file first to choose the file, then use this tool."
+        ),
+        speed="fast",
+        cost="low",
+        strategy_tags=("search", "scoped", "faiss", "bm25", "graph_chunk", EVIDENCE_PRIMARY, SCOPE_OWNER, SCOPE_FILE, REQUIRES_LLM),
+        profile="F",
+        determinism="hybrid",
+        namespace="rag-arc.deepsearch.tools.search.scoped",
+        mcp_callable=True,
+        input_schema=build_input_schema(
+            extra_properties={
+                "focus_query": {"type": "string", "description": "Optional query override."},
+                "file_id": {"type": "string", "description": "Restrict results to a specific file_id (required unless file_ids provided)."},
+                "file_ids": {"type": "array", "items": {"type": "string"}, "description": "Restrict results to file_ids (required unless file_id provided)."},
+                "section_id": {"type": "string", "description": "Restrict results to a specific section_id."},
+                "section_ids": {"type": "array", "items": {"type": "string"}, "description": "Restrict results to section_ids."},
+                "channels": {"type": "array", "items": {"type": "string"}, "description": "Channels: faiss, bm25, graph_chunk."},
+                "top_k": {"type": "integer", "minimum": 0, "description": "Default top-k for all channels."},
+            }
+        ),
+        example_args={
+            "question": "Find relevant chunks in a specific file",
+            "plan_step": "plan_01",
+            "extra": {"file_id": "<file_id>", "channels": ["faiss", "bm25", "graph"], "top_k": 10},
+        },
+    )
+
+    async def run(self, request: ToolRunRequest) -> ToolResult:
+        query = self._resolve_query(request)
+        file_scope = resolve_file_scope(
+            extra=request.extra,
+            graph_context_metadata=(request.graph_context.metadata if request.graph_context else {}),
+            question=request.question,
+        )
+        if not getattr(file_scope, "file_ids", None):
+            return ToolResult(
+                summary="search.scoped skipped: missing file_id/file_ids (call search.file first).",
+                diagnostics={"reason": "missing_file_scope", "query": query, "required": ["file_id", "file_ids"]},
+            )
+        return await super().run(request)
+
+
+class SearchGlobalTool(SearchTool):
+    """Global multi-channel search: intentionally ignores inherited file_scope from graph_context."""
+
+    descriptor = ToolDescriptor(
+        name="search.global",
+        channel="graph",
+        description=(
+            "Global three-way search (faiss + bm25 + graph_chunk) across all accessible documents. "
+            "Warning: may introduce cross-document/company noise. Prefer search.scoped whenever possible."
+        ),
+        speed="fast",
+        cost="low",
+        strategy_tags=("search", "global", "faiss", "bm25", "graph_chunk", EVIDENCE_PRIMARY, SCOPE_OWNER, SCOPE_FILE, REQUIRES_LLM),
+        profile="F",
+        determinism="hybrid",
+        namespace="rag-arc.deepsearch.tools.search.global",
+        mcp_callable=True,
+        input_schema=SearchTool.descriptor.input_schema,
+        example_args={
+            "question": "Find relevant chunks across all documents",
+            "plan_step": "plan_01",
+            "extra": {"channels": ["faiss", "bm25", "graph"], "top_k": 10},
+        },
+    )
+
+    async def run(self, request: ToolRunRequest) -> ToolResult:
+        # Explicitly ignore inherited file_scope from graph_context.metadata to avoid
+        # accidental "scope persistence" when the user wants a true global expansion.
+        patched = ToolRunRequest(
+            question=request.question,
+            plan_step=request.plan_step,
+            context_evidences=request.context_evidences,
+            adapter=request.adapter,
+            access_scope=request.access_scope,
+            extra=dict(request.extra or {}),
+            graph_context=strip_file_scope_from_graph_context(request.graph_context),
+            coverage_metrics=request.coverage_metrics,
+        )
+        result = await super().run(patched)
+        risk = "global_search_may_introduce_cross_doc_noise"
+        result.diagnostics = {**dict(result.diagnostics or {}), "search_mode": "global", "risk": risk}
+        if result.summary:
+            result.summary = result.summary.rstrip() + f" NOTE: {risk}."
+        else:
+            result.summary = f"Search completed. NOTE: {risk}."
+        return result

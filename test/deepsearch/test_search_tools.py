@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from encapsulation.data_model.schema import Chunk
-from core.deepsearch.tools import SearchTool, SearchGraphChunkTool, ToolRunRequest
+from core.deepsearch.tools import SearchScopedTool, SearchGraphChunkTool, ToolRunRequest
 from core.graph_adapter.base import GraphAccessScope
 
 
@@ -60,7 +60,7 @@ class _StubGraphRetriever:
             chunks.append(
                 Chunk(
                     content=f"content for {chunk_id}",
-                    metadata={"score": score, "file_name": f"{chunk_id}.md"},
+                    metadata={"score": score, "file_name": f"{chunk_id}.md", "source_file_id": "file-1"},
                     id=chunk_id,
                 )
             )
@@ -96,7 +96,11 @@ class _StubAdapter:
 
 
 def _chunk(content, chunk_id, score):
-    return Chunk(content=content, metadata={"score": score, "file_name": f"{chunk_id}.md"}, id=chunk_id)
+    return Chunk(
+        content=content,
+        metadata={"score": score, "file_name": f"{chunk_id}.md", "source_file_id": "file-1"},
+        id=chunk_id,
+    )
 
 
 @pytest.mark.asyncio
@@ -104,14 +108,14 @@ async def test_search_tool_combines_channels() -> None:
     dense = _StubDenseRetriever([_chunk("dense one", "dense-1", 0.9)])
     bm25 = _StubBM25Retriever([_chunk("bm25 one", "bm25-1", 0.8)])
     adapter = _StubAdapter(_StubGraphRetriever())
-    tool = SearchTool(llm_connector=_StubLLM(), dense_retriever=dense, bm25_retriever=bm25)
+    tool = SearchScopedTool(llm_connector=_StubLLM(), dense_retriever=dense, bm25_retriever=bm25)
     request = ToolRunRequest(
         question="find relevant chunks",
         plan_step="plan_01",
         context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={},
+        extra={"file_id": "file-1"},
     )
 
     result = await tool.run(request)
@@ -130,7 +134,7 @@ async def test_graph_chunk_raises_without_llm_when_fallback_needed() -> None:
         context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={},
+        extra={"file_id": "file-1"},
     )
 
     with pytest.raises(RuntimeError, match="LLM"):
@@ -141,24 +145,24 @@ async def test_graph_chunk_raises_without_llm_when_fallback_needed() -> None:
 async def test_search_tool_filters_by_section_ids() -> None:
     dense = _StubDenseRetriever(
         [
-            Chunk(content="dense s1", metadata={"score": 0.9, "file_name": "a.md", "section_id": "s1"}, id="d1"),
-            Chunk(content="dense s2", metadata={"score": 0.8, "file_name": "a.md", "section_id": "s2"}, id="d2"),
+            Chunk(content="dense s1", metadata={"score": 0.9, "file_name": "a.md", "section_id": "s1", "source_file_id": "file-1"}, id="d1"),
+            Chunk(content="dense s2", metadata={"score": 0.8, "file_name": "a.md", "section_id": "s2", "source_file_id": "file-1"}, id="d2"),
         ]
     )
     bm25 = _StubBM25Retriever(
         [
-            Chunk(content="bm25 s2", metadata={"score": 0.9, "file_name": "a.md", "section_id": "s2"}, id="b1"),
-            Chunk(content="bm25 s1", metadata={"score": 0.8, "file_name": "a.md", "section_id": "s1"}, id="b2"),
+            Chunk(content="bm25 s2", metadata={"score": 0.9, "file_name": "a.md", "section_id": "s2", "source_file_id": "file-1"}, id="b1"),
+            Chunk(content="bm25 s1", metadata={"score": 0.8, "file_name": "a.md", "section_id": "s1", "source_file_id": "file-1"}, id="b2"),
         ]
     )
-    tool = SearchTool(llm_connector=_StubLLM(), dense_retriever=dense, bm25_retriever=bm25)
+    tool = SearchScopedTool(llm_connector=_StubLLM(), dense_retriever=dense, bm25_retriever=bm25)
     request = ToolRunRequest(
         question="find relevant chunks",
         plan_step="plan_01",
         context_evidences=[],
         adapter=None,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"channels": ["faiss", "bm25"], "section_ids": ["s1"], "top_k": 10},
+        extra={"file_id": "file-1", "channels": ["faiss", "bm25"], "section_ids": ["s1"], "top_k": 10},
     )
 
     result = await tool.run(request)

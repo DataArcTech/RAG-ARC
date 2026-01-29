@@ -30,7 +30,7 @@ from ...base import (
     safe_json_loads,
 )
 from ...governance_tags import EVIDENCE_PRIMARY, REQUIRES_LLM, SCOPE_FILE, SCOPE_OWNER
-from .base import _ChannelResult, _SearchToolBase
+from .base import _ChannelResult, _SearchToolBase, strip_file_scope_from_graph_context
 
 
 class _GraphChunkChannel:
@@ -608,7 +608,7 @@ class SearchGraphChunkTool(_SearchToolBase, _GraphChunkChannel, GraphTool):
     """Graph-subgraph search tool (HippoRAG graph)."""
 
     descriptor = ToolDescriptor(
-        name="search.graph_chunk",
+        name="search.scoped.graph",
         channel="graph",
         description="Graph-subgraph chunk retrieval without default PPR (optional) for fast localization.",
         speed="fast",
@@ -616,7 +616,7 @@ class SearchGraphChunkTool(_SearchToolBase, _GraphChunkChannel, GraphTool):
         strategy_tags=("search", "graph_chunk", EVIDENCE_PRIMARY, SCOPE_OWNER, SCOPE_FILE, REQUIRES_LLM),
         profile="F",
         determinism="hybrid",
-        namespace="rag-arc.deepsearch.tools.search.graph_chunk",
+        namespace="rag-arc.deepsearch.tools.search.scoped.graph",
         mcp_callable=True,
         input_schema=build_input_schema(
             extra_properties={
@@ -658,6 +658,63 @@ class SearchGraphChunkTool(_SearchToolBase, _GraphChunkChannel, GraphTool):
             graph_context_metadata=(request.graph_context.metadata if request.graph_context else {}),
             question=request.question,
         )
+        if not getattr(file_scope, "file_ids", None):
+            return ToolResult(
+                summary="search.scoped.graph skipped: missing file_id/file_ids (call search.file first).",
+                diagnostics={"reason": "missing_file_scope", "query": query},
+            )
         top_k = self._resolve_top_k(request.extra.get("top_k"), tool_defaults.SEARCH_DEFAULT_TOP_K)
         result = await self._run_graph_chunk(request=request, query=query, top_k=top_k, file_scope=file_scope)
         return ToolResult(summary=result.summary, evidences=result.evidences, diagnostics=result.diagnostics)
+
+
+class SearchGlobalGraphTool(_SearchToolBase, _GraphChunkChannel, GraphTool):
+    """Graph-subgraph global search tool (HippoRAG graph; does not inherit file_scope)."""
+
+    descriptor = ToolDescriptor(
+        name="search.global.graph",
+        channel="graph",
+        description=(
+            "Graph-subgraph chunk retrieval across all accessible documents. "
+            "Warning: may introduce cross-document/company noise. Prefer search.scoped.graph."
+        ),
+        speed="fast",
+        cost="medium",
+        strategy_tags=("search", "graph_chunk", "global", EVIDENCE_PRIMARY, SCOPE_OWNER, SCOPE_FILE, REQUIRES_LLM),
+        profile="F",
+        determinism="hybrid",
+        namespace="rag-arc.deepsearch.tools.search.global.graph",
+        mcp_callable=True,
+        input_schema=SearchGraphChunkTool.descriptor.input_schema,
+        example_args={
+            "question": "Find related chunks via graph signals globally",
+            "plan_step": "plan_01",
+            "extra": {"channels": ["graph"], "top_k": 10, "use_ppr": False},
+        },
+    )
+
+    async def run(self, request: ToolRunRequest) -> ToolResult:
+        query = self._resolve_query(request)
+        patched_ctx = strip_file_scope_from_graph_context(request.graph_context)
+        file_scope = resolve_file_scope(
+            extra=request.extra,
+            graph_context_metadata=(patched_ctx.metadata if patched_ctx else {}),
+            question=request.question,
+        )
+        top_k = self._resolve_top_k(request.extra.get("top_k"), tool_defaults.SEARCH_DEFAULT_TOP_K)
+        patched = ToolRunRequest(
+            question=request.question,
+            plan_step=request.plan_step,
+            context_evidences=request.context_evidences,
+            adapter=request.adapter,
+            access_scope=request.access_scope,
+            extra=dict(request.extra or {}),
+            graph_context=patched_ctx,
+            coverage_metrics=request.coverage_metrics,
+        )
+        result = await self._run_graph_chunk(request=patched, query=query, top_k=top_k, file_scope=file_scope)
+        risk = "global_search_may_introduce_cross_doc_noise"
+        diagnostics = {**dict(result.diagnostics or {}), "search_mode": "global", "risk": risk}
+        summary = (result.summary or "graph search completed.").rstrip()
+        summary = summary + f" NOTE: {risk}."
+        return ToolResult(summary=summary, evidences=result.evidences, diagnostics=diagnostics)

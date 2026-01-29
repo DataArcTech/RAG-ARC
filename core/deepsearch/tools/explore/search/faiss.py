@@ -12,7 +12,7 @@ from framework.thread_pool import get_thread_pool
 
 from ...base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from ...governance_tags import EVIDENCE_PRIMARY, SCOPE_FILE, SCOPE_OWNER
-from .base import _ChannelResult, _SearchToolBase
+from .base import _ChannelResult, _SearchToolBase, strip_file_scope_from_graph_context
 
 
 class _FaissChannel:
@@ -120,24 +120,24 @@ class _FaissChannel:
 
 
 class SearchFaissTool(_SearchToolBase, _FaissChannel, GraphTool):
-    """FAISS-only search tool."""
+    """FAISS-only scoped search tool (requires file scope)."""
 
     descriptor = ToolDescriptor(
-        name="search.faiss",
+        name="search.scoped.faiss",
         channel="graph",
-        description="FAISS-only dense search for quick semantic matches.",
+        description="FAISS-only dense search scoped to a file_id/file_ids (prevents cross-document noise).",
         speed="fast",
         cost="low",
         strategy_tags=("search", "faiss", EVIDENCE_PRIMARY, SCOPE_OWNER, SCOPE_FILE),
         profile="F",
         determinism="deterministic",
-        namespace="rag-arc.deepsearch.tools.search.faiss",
+        namespace="rag-arc.deepsearch.tools.search.scoped.faiss",
         mcp_callable=True,
         input_schema=build_input_schema(
             extra_properties={
                 "focus_query": {"type": "string", "description": "Optional query override."},
-                "file_id": {"type": "string", "description": "Restrict results to a specific file_id."},
-                "file_ids": {"type": "array", "items": {"type": "string"}, "description": "Restrict results to file_ids."},
+                "file_id": {"type": "string", "description": "Restrict results to a specific file_id (required unless file_ids provided)."},
+                "file_ids": {"type": "array", "items": {"type": "string"}, "description": "Restrict results to file_ids (required unless file_id provided)."},
                 "filename_contains": {"type": "array", "items": {"type": "string"}, "description": "Best-effort filename filter."},
                 "section_id": {"type": "string", "description": "Restrict results to a specific section_id."},
                 "section_ids": {"type": "array", "items": {"type": "string"}, "description": "Restrict results to section_ids."},
@@ -160,6 +160,63 @@ class SearchFaissTool(_SearchToolBase, _FaissChannel, GraphTool):
             graph_context_metadata=(request.graph_context.metadata if request.graph_context else {}),
             question=request.question,
         )
+        if not getattr(file_scope, "file_ids", None):
+            return ToolResult(
+                summary="search.scoped.faiss skipped: missing file_id/file_ids (call search.file first).",
+                diagnostics={"reason": "missing_file_scope", "query": query},
+            )
         top_k = self._resolve_top_k(request.extra.get("top_k"), tool_defaults.SEARCH_DEFAULT_TOP_K)
         result = await self._run_faiss(request=request, query=query, top_k=top_k, file_scope=file_scope)
         return ToolResult(summary=result.summary, evidences=result.evidences, diagnostics=result.diagnostics)
+
+
+class SearchGlobalFaissTool(_SearchToolBase, _FaissChannel, GraphTool):
+    """FAISS-only global search tool (does not inherit file_scope)."""
+
+    descriptor = ToolDescriptor(
+        name="search.global.faiss",
+        channel="graph",
+        description=(
+            "FAISS-only dense search across all accessible documents. "
+            "Warning: may introduce cross-document/company noise. Prefer search.scoped.faiss."
+        ),
+        speed="fast",
+        cost="low",
+        strategy_tags=("search", "faiss", "global", EVIDENCE_PRIMARY, SCOPE_OWNER, SCOPE_FILE),
+        profile="F",
+        determinism="deterministic",
+        namespace="rag-arc.deepsearch.tools.search.global.faiss",
+        mcp_callable=True,
+        input_schema=SearchFaissTool.descriptor.input_schema,
+        example_args={
+            "question": "Find semantic matches globally",
+            "plan_step": "plan_01",
+            "extra": {"channels": ["faiss"], "top_k": 10},
+        },
+    )
+
+    async def run(self, request: ToolRunRequest) -> ToolResult:
+        query = self._resolve_query(request)
+        patched_ctx = strip_file_scope_from_graph_context(request.graph_context)
+        file_scope = resolve_file_scope(
+            extra=request.extra,
+            graph_context_metadata=(patched_ctx.metadata if patched_ctx else {}),
+            question=request.question,
+        )
+        top_k = self._resolve_top_k(request.extra.get("top_k"), tool_defaults.SEARCH_DEFAULT_TOP_K)
+        patched = ToolRunRequest(
+            question=request.question,
+            plan_step=request.plan_step,
+            context_evidences=request.context_evidences,
+            adapter=request.adapter,
+            access_scope=request.access_scope,
+            extra=dict(request.extra or {}),
+            graph_context=patched_ctx,
+            coverage_metrics=request.coverage_metrics,
+        )
+        result = await self._run_faiss(request=patched, query=query, top_k=top_k, file_scope=file_scope)
+        risk = "global_search_may_introduce_cross_doc_noise"
+        diagnostics = {**dict(result.diagnostics or {}), "search_mode": "global", "risk": risk}
+        summary = (result.summary or "FAISS search completed.").rstrip()
+        summary = summary + f" NOTE: {risk}."
+        return ToolResult(summary=summary, evidences=result.evidences, diagnostics=diagnostics)

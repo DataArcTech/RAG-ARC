@@ -1,4 +1,4 @@
-"""section.search tool: section-level routing using PageIndex section index.
+"""search.section tool: section-level routing using PageIndex section index.
 
 This is intentionally not full-text retrieval. It returns candidate sections (path + summary)
 so the LLM can pick the right section before doing file-scoped chunk retrieval.
@@ -42,7 +42,7 @@ def _split_section_card(text: str) -> tuple[str, str, str]:
 
 class SectionSearchTool(GraphTool):
     descriptor = ToolDescriptor(
-        name="section.search",
+        name="search.section",
         channel="graph",
         description=(
             "Section-level routing search using PageIndex section index (path + summary). "
@@ -53,7 +53,7 @@ class SectionSearchTool(GraphTool):
         strategy_tags=("search", "section_search", "pageindex", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE),
         profile="F",
         determinism="hybrid",
-        namespace="rag-arc.deepsearch.tools.section_search",
+        namespace="rag-arc.deepsearch.tools.search.section",
         mcp_callable=True,
         input_schema=build_input_schema(
             extra_properties={
@@ -89,22 +89,22 @@ class SectionSearchTool(GraphTool):
 
         if not pageindex_cfg.pageindex_enabled() or not pageindex_cfg.section_index_enabled():
             return ToolResult(
-                summary="section.search skipped: PageIndex section index is disabled.",
+                summary="search.section skipped: PageIndex section index is disabled.",
                 diagnostics={**diagnostics, "reason": "section_index_disabled"},
             )
         if self._pageindex is None:
             return ToolResult(
-                summary="section.search skipped: PageIndex retriever unavailable.",
+                summary="search.section skipped: PageIndex retriever unavailable.",
                 diagnostics={**diagnostics, "reason": "pageindex_retriever_unavailable"},
             )
         if not visibility.enabled:
             return ToolResult(
-                summary="section.search skipped: missing owner scope.",
+                summary="search.section skipped: missing owner scope.",
                 diagnostics={**diagnostics, "reason": "owner_scope_missing"},
             )
         if not query:
             return ToolResult(
-                summary="section.search skipped: empty query.",
+                summary="search.section skipped: empty query.",
                 diagnostics={**diagnostics, "reason": "empty_query"},
             )
 
@@ -171,7 +171,7 @@ class SectionSearchTool(GraphTool):
         diagnostics["results"] = results
 
         if not results:
-            return ToolResult(summary="section.search returned no sections.", diagnostics={**diagnostics, "reason": "empty_hit"})
+            return ToolResult(summary="search.section returned no sections.", diagnostics={**diagnostics, "reason": "empty_hit"})
 
         # Put section summary into the human-readable summary so the LLM can route by structure
         # (PageIndex: ToC/section navigation before chunk retrieval).
@@ -194,4 +194,4 @@ class SectionSearchTool(GraphTool):
             )
             if summary:
                 lines.append(f"   summary: {summary}")
-        return ToolResult(summary="section.search returned candidate sections:\n" + "\n".join(lines), diagnostics=diagnostics)
+        return ToolResult(summary="search.section returned candidate sections:\n" + "\n".join(lines), diagnostics=diagnostics)

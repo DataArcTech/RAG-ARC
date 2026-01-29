@@ -1,16 +1,20 @@
 """Search tool package: orchestrator and channel tools."""
-from .tool import SearchTool
-from .faiss import SearchFaissTool
-from .bm25 import SearchBM25Tool
-from .graph_chunk import SearchGraphChunkTool
+from .tool import SearchGlobalTool, SearchScopedTool
+from .faiss import SearchFaissTool, SearchGlobalFaissTool
+from .bm25 import SearchBM25Tool, SearchGlobalBM25Tool
+from .graph_chunk import SearchGraphChunkTool, SearchGlobalGraphTool
 from .file_search import FileSearchTool
 from .section_search import SectionSearchTool
 
 __all__ = [
-    "SearchTool",
+    "SearchScopedTool",
+    "SearchGlobalTool",
     "SearchFaissTool",
+    "SearchGlobalFaissTool",
     "SearchBM25Tool",
+    "SearchGlobalBM25Tool",
     "SearchGraphChunkTool",
+    "SearchGlobalGraphTool",
     "FileSearchTool",
     "SectionSearchTool",
 ]

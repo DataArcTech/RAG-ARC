@@ -3,7 +3,16 @@ from .explore import ExploreTool
 from .graph_ops import GraphOpsTool
 from .search.file_search import FileSearchTool
 from .search.section_search import SectionSearchTool
-from .search import SearchTool, SearchFaissTool, SearchBM25Tool, SearchGraphChunkTool
+from .search import (
+    SearchScopedTool,
+    SearchGlobalTool,
+    SearchFaissTool,
+    SearchGlobalFaissTool,
+    SearchBM25Tool,
+    SearchGlobalBM25Tool,
+    SearchGraphChunkTool,
+    SearchGlobalGraphTool,
+)
 from .web_search import WebSearchTool
 from .toc_tree import TocTreeTool
 from .read_structured import ReadSectionTool, ReadPagesTool
@@ -20,10 +29,14 @@ __all__ = [
     "ReadSectionTool",
     "ReadPagesTool",
     "ReadNeighborsTool",
-    "SearchTool",
+    "SearchScopedTool",
+    "SearchGlobalTool",
     "SearchFaissTool",
+    "SearchGlobalFaissTool",
     "SearchBM25Tool",
+    "SearchGlobalBM25Tool",
     "SearchGraphChunkTool",
+    "SearchGlobalGraphTool",
     "WebSearchTool",
     "BeamSearchTool",
     "LLMChainExplorerTool",

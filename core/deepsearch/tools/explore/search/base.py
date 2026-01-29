@@ -15,7 +15,8 @@ from framework.register import Register
 from ...base import ToolRunRequest
 
 _CHANNEL_DEFAULTS = tuple(tool_defaults.SEARCH_DEFAULT_CHANNELS)
-_ALLOWED_CHANNELS = frozenset(_CHANNEL_DEFAULTS)
+# Allow "graph" as a user-friendly alias of the internal "graph_chunk" channel.
+_ALLOWED_CHANNELS = frozenset(set(_CHANNEL_DEFAULTS) | {"graph"})
 
 
 @dataclass(frozen=True)
@@ -48,7 +49,7 @@ class _SearchToolBase:
     @staticmethod
     def _require_adapter(adapter: GraphDeepSearchAdapter | None) -> GraphDeepSearchAdapter:
         if adapter is None:
-            raise RuntimeError("search.graph_chunk requires a GraphDeepSearchAdapter instance")
+            raise RuntimeError("search.scoped.graph requires a GraphDeepSearchAdapter instance")
         return adapter
 
     def _resolve_retrievers(self) -> _RetrieverBundle:
@@ -132,6 +133,8 @@ class _SearchToolBase:
             key = token.lower()
             if key in {"none", "null"}:
                 continue
+            if key == "graph":
+                key = "graph_chunk"
             if key in _ALLOWED_CHANNELS:
                 channels.append(key)
             else:
@@ -313,3 +316,22 @@ class _SearchToolBase:
         token = getattr(cfg, "low_cost_model_name", None) if cfg is not None else None
         token = str(token or "").strip()
         return token or None
+
+
+def strip_file_scope_from_graph_context(graph_context: Any) -> Any:
+    """Return a best-effort copy of GraphQueryContext with metadata.file_scope removed.
+
+    Used by `search.global*` tools to ensure they do not inherit prior scoped decisions.
+    """
+
+    if graph_context is None:
+        return None
+    meta = getattr(graph_context, "metadata", None)
+    if not isinstance(meta, dict) or "file_scope" not in meta:
+        return graph_context
+    cleaned = dict(meta)
+    cleaned.pop("file_scope", None)
+    try:
+        return graph_context.model_copy(update={"metadata": cleaned})
+    except Exception:  # noqa: BLE001
+        return graph_context

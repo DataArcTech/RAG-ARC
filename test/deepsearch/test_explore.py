@@ -49,7 +49,7 @@ class FakeAdapter:
 async def test_explore_runs_actions() -> None:
     tool = ExploreTool(
         tool_overrides={
-            "search": DummyTool("search", "search ok", "s1"),
+            "search.scoped": DummyTool("search.scoped", "search ok", "s1"),
             "graph.ops": DummyTool("graph.ops", "path ok", "g1"),
         }
     )
@@ -61,7 +61,7 @@ async def test_explore_runs_actions() -> None:
         access_scope=None,
         extra={
             "actions": [
-                {"id": "a1", "tool": "search", "args": {"top_k": 2, "channels": ["faiss"]}},
+                {"id": "a1", "tool": "search.scoped", "args": {"file_id": "f1", "top_k": 2, "channels": ["faiss"]}},
                 {"id": "a2", "tool": "graph.ops", "args": {"mode": "template", "template": "path_exists", "template_args": {"source": "A", "target": "B"}}},
             ]
         },
@@ -69,7 +69,7 @@ async def test_explore_runs_actions() -> None:
     result = await tool.run(request)
     assert len(result.evidences) == 2
     assert "explore completed" in result.summary
-    assert result.diagnostics["actions"][0]["tool"] == "search"
+    assert result.diagnostics["actions"][0]["tool"] == "search.scoped"
     assert result.diagnostics["actions"][1]["tool"] == "graph.ops"
 
 
@@ -84,7 +84,7 @@ async def test_explore_read_chunk() -> None:
         access_scope=GraphAccessScope(scope_id="owner"),
         extra={
             "actions": [
-                {"tool": "read.chunk", "args": {"chunk_ids": ["c1"], "goal": "validate evidence"}},
+                {"tool": "read.chunk", "args": {"chunk_ids": ["c1"], "goal": "validate evidence", "file_id": "f1"}},
             ],
         },
     )
@@ -94,3 +94,26 @@ async def test_explore_read_chunk() -> None:
     assert evidence.chunk_id == "c1"
     assert evidence.source == "explore.read.chunk"
     assert evidence.provenance.get("goal") == "validate evidence"
+
+
+@pytest.mark.asyncio
+async def test_explore_read_chunk_drops_out_of_scope_chunks() -> None:
+    tool = ExploreTool()
+    request = ToolRunRequest(
+        question="Q",
+        plan_step="plan_03",
+        context_evidences=[],
+        adapter=FakeAdapter(),
+        access_scope=GraphAccessScope(scope_id="owner"),
+        extra={
+            "actions": [
+                {"tool": "read.chunk", "args": {"chunk_ids": ["c1"], "goal": "validate evidence", "file_id": "other"}},
+            ],
+        },
+    )
+    result = await tool.run(request)
+    assert len(result.evidences) == 0
+    action = result.diagnostics["actions"][0]
+    assert action["tool"] == "read.chunk"
+    assert action["diagnostics"]["dropped_out_of_scope"] == 1
+    assert "dropped 1 out-of-scope" in (action["summary"] or "")
