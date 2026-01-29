@@ -171,7 +171,7 @@ class SearchFaissTool(_SearchToolBase, _FaissChannel, GraphTool):
 
 
 class SearchGlobalFaissTool(_SearchToolBase, _FaissChannel, GraphTool):
-    """FAISS-only global search tool (does not inherit file_scope)."""
+    """FAISS-only global search tool (explicitly ignores inherited file_scope)."""
 
     descriptor = ToolDescriptor(
         name="search.global.faiss",

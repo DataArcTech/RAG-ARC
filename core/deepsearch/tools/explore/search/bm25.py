@@ -284,7 +284,7 @@ class SearchBM25Tool(_SearchToolBase, _Bm25Channel, GraphTool):
 
 
 class SearchGlobalBM25Tool(_SearchToolBase, _Bm25Channel, GraphTool):
-    """BM25-only global search tool (does not inherit file_scope)."""
+    """BM25-only global search tool (explicitly ignores inherited file_scope)."""
 
     descriptor = ToolDescriptor(
         name="search.global.bm25",

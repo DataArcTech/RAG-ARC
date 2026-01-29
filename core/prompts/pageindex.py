@@ -1,7 +1,7 @@
 """Prompt templates for PageIndex section summaries.
 
-Note: We intentionally do NOT generate doc-level descriptions/profiles at index time. Doc routing
-is handled by DeepSearch's `search.file` via evidence-driven chunk retrieval.
+PageIndex focuses on long-document navigation (section tree + section summaries). DeepSearch handles
+relevant-file routing online via `search.file`.
 """
 
 SECTION_SUMMARY_SYSTEM_PROMPT = (

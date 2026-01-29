@@ -120,12 +120,12 @@ def section_bm25_index_path(default: str = "./data/section_bm25_index") -> str:
 
 
 def doc_routing_enabled() -> bool:
-    # Deprecated: doc routing is handled by DeepSearch `search.file` via evidence-driven retrieval.
+    # Doc routing is handled by DeepSearch `search.file` (relevant-file routing).
     return False
 
 
 def doc_desc_model_name() -> Optional[str]:
-    # Deprecated: no doc descriptions are generated.
+    # Reserved for legacy configs (doc descriptions are not part of PageIndex outputs).
     return None
 
 
@@ -133,7 +133,7 @@ def doc_desc_max_tokens(default: int = 400) -> int:
     return 0
 
 def doc_profile_enabled() -> bool:
-    # Deprecated: doc profile generation was removed to keep indexing fast and avoid LLM-generated noise.
+    # Reserved for legacy configs (doc profiles are not part of PageIndex outputs).
     return False
 
 
@@ -198,7 +198,7 @@ def pageindex_nodes_filename(default: str = "pageindex_nodes.jsonl") -> str:
 
 
 def pageindex_doc_filename(default: str = "pageindex_doc.json") -> str:
-    # Deprecated: no doc-level artifacts are produced.
+    # Reserved for legacy layouts (PageIndex produces section tree/nodes artifacts).
     return default
 
 

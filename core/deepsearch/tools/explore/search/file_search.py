@@ -1,19 +1,12 @@
-"""search.file tool: global relevant-file routing via chunk-level retrieval.
+"""search.file tool: relevant-file routing via global chunk-level retrieval.
 
 `search.file` answers: "Which file(s) should we scope to next?"
 
-It does *not* depend on PageIndex doc descriptions / doc profiles (LLM-generated at index time).
-Instead it:
+Behavior:
 - runs chunk-level retrieval globally (faiss/bm25/graph_chunk) across allowed owner scopes
 - aggregates hits by file_id (RRF over ranks)
-- returns candidate file_ids with short "why relevant" snippets
-
-This keeps indexing faster (no doc_description/doc_profile generation) and keeps routing grounded
-in retrievable evidence.
+- returns candidate file_ids with short "why relevant" snippets for routing decisions
 """
-
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 

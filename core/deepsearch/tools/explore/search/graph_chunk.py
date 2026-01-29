@@ -669,7 +669,7 @@ class SearchGraphChunkTool(_SearchToolBase, _GraphChunkChannel, GraphTool):
 
 
 class SearchGlobalGraphTool(_SearchToolBase, _GraphChunkChannel, GraphTool):
-    """Graph-subgraph global search tool (HippoRAG graph; does not inherit file_scope)."""
+    """Graph-subgraph global search tool (HippoRAG graph; explicitly ignores inherited file_scope)."""
 
     descriptor = ToolDescriptor(
         name="search.global.graph",
