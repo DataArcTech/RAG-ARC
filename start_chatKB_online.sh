@@ -102,19 +102,7 @@ MINERU_OUTPUT_DIR=${MINERU_OUTPUT_DIR:-${APP_DIR}/data/mineru_outputs}
 MINERU_TEMP_DIR=${MINERU_TEMP_DIR:-/tmp/mineru_temp}
 MINERU_LOG_FILE=${MINERU_LOG_FILE:-${APP_DIR}/log/mineru.log}
 
-# 7. MinerU SSH 隧道配置（用于通过 SSH 隧道连接远程 MinerU 服务）
-MINERU_TUNNEL_ENABLED=${MINERU_TUNNEL_ENABLED:-false}
-MINERU_TUNNEL_REMOTE_HOST=${MINERU_TUNNEL_REMOTE_HOST:-""}
-MINERU_TUNNEL_REMOTE_PORT=${MINERU_TUNNEL_REMOTE_PORT:-8898}
-MINERU_TUNNEL_LOCAL_PORT=${MINERU_TUNNEL_LOCAL_PORT:-8899}
-MINERU_TUNNEL_SSH_USER=${MINERU_TUNNEL_SSH_USER:-root}
-MINERU_TUNNEL_SSH_PORT=${MINERU_TUNNEL_SSH_PORT:-22}
-MINERU_TUNNEL_SSH_HOST_ALIAS=${MINERU_TUNNEL_SSH_HOST_ALIAS:-""}
-MINERU_TUNNEL_SSH_IDENTITY_FILE=${MINERU_TUNNEL_SSH_IDENTITY_FILE:-""}
-MINERU_TUNNEL_SSH_PASSWORD=${MINERU_TUNNEL_SSH_PASSWORD:-""}
-MINERU_TUNNEL_MONITOR_PORT=${MINERU_TUNNEL_MONITOR_PORT:-20000}
-MINERU_TUNNEL_PID_FILE="/tmp/mineru_tunnel_${APP_ID}_${ENV_ID}.pid"
-MINERU_TUNNEL_LOG_FILE="${APP_DIR}/log/mineru_tunnel_${ENV_ID}.log"
+# 7. MinerU SSH 隧道：由用户自行使用 tmux 等维护，本脚本不自动建立隧道。
 
 # ==============================================================================
 # 依赖检查
@@ -131,266 +119,12 @@ check_dependency "uv"
 check_dependency "lsof"
 check_dependency "pkill"
 
-# 如果启用 MinerU 隧道，检查 autossh 和 sshpass（如果需要密码认证）
-if [[ "${MINERU_TUNNEL_ENABLED}" == "true" ]]; then
-    check_dependency "autossh"
-    if [ -z "${MINERU_TUNNEL_REMOTE_HOST}" ]; then
-        echo "❌ 错误: MINERU_TUNNEL_ENABLED=true 但 MINERU_TUNNEL_REMOTE_HOST 未设置" >&2
-        exit 1
-    fi
-    # 如果设置了密码且没有密钥文件，需要 sshpass
-    if [ -n "${MINERU_TUNNEL_SSH_PASSWORD}" ] && [ -z "${MINERU_TUNNEL_SSH_IDENTITY_FILE}" ]; then
-        if ! command -v sshpass &> /dev/null; then
-            echo "⚠️  警告: 需要 sshpass 来自动输入密码，但未安装"
-            echo "   安装命令: apt install -y sshpass"
-            echo "   或者配置 SSH 密钥认证（更安全）"
-            exit 1
-        fi
-    fi
-fi
-
 # ==============================================================================
-# 第三步：清理旧的 MinerU SSH 隧道（如果需要）
-# ==============================================================================
-# 在启动新隧道前，先清理可能存在的旧隧道
-if [[ "${MINERU_TUNNEL_ENABLED}" == "true" ]]; then
-    if [ -f "${MINERU_TUNNEL_PID_FILE}" ]; then
-        OLD_PID=$(cat "${MINERU_TUNNEL_PID_FILE}")
-        if ps -p "${OLD_PID}" > /dev/null 2>&1; then
-            echo "🧹 清理旧的 MinerU SSH 隧道 (PID: ${OLD_PID})..."
-            kill "${OLD_PID}" 2>/dev/null || true
-            sleep 1
-            if ps -p "${OLD_PID}" > /dev/null 2>&1; then
-                kill -9 "${OLD_PID}" 2>/dev/null || true
-            fi
-            rm -f "${MINERU_TUNNEL_PID_FILE}"
-        else
-            rm -f "${MINERU_TUNNEL_PID_FILE}"
-        fi
-    fi
-    # 清理可能残留的 SSH 进程
-    pkill -f "ssh.*${MINERU_TUNNEL_LOCAL_PORT}:127.0.0.1" 2>/dev/null || true
-fi
-
-# ==============================================================================
-# 第四步：启动 MinerU SSH 隧道（如果需要）
-# ==============================================================================
-start_mineru_tunnel() {
-    if [[ "${MINERU_TUNNEL_ENABLED}" != "true" ]]; then
-        return 0
-    fi
-
-    echo "🔗 处理 MinerU SSH 隧道..."
-    mkdir -p $(dirname ${MINERU_TUNNEL_LOG_FILE})
-
-    # 检查隧道是否已运行
-    if [ -f "${MINERU_TUNNEL_PID_FILE}" ]; then
-        OLD_PID=$(cat "${MINERU_TUNNEL_PID_FILE}")
-        if ps -p "${OLD_PID}" > /dev/null 2>&1; then
-            echo "  ✅ 隧道已在运行 (PID: ${OLD_PID})"
-            return 0
-        else
-            # PID 文件存在但进程不存在，清理
-            rm -f "${MINERU_TUNNEL_PID_FILE}"
-        fi
-    fi
-
-    # 检查本地端口是否被占用
-    if lsof -Pi :${MINERU_TUNNEL_LOCAL_PORT} -sTCP:LISTEN -t >/dev/null 2>&1; then
-        echo "  ⚠️  本地端口 ${MINERU_TUNNEL_LOCAL_PORT} 已被占用，尝试清理..."
-        PID_TO_KILL=$(lsof -t -i:${MINERU_TUNNEL_LOCAL_PORT} 2>/dev/null || true)
-        if [ -n "${PID_TO_KILL}" ]; then
-            kill -9 "${PID_TO_KILL}" > /dev/null 2>&1 || true
-            sleep 1
-        fi
-    fi
-
-    # 确定 SSH 连接目标（优先使用别名，否则使用 IP）
-    if [ -n "${MINERU_TUNNEL_SSH_HOST_ALIAS}" ]; then
-        SSH_TARGET="${MINERU_TUNNEL_SSH_HOST_ALIAS}"
-        echo "  🚀 启动 SSH 隧道（使用别名）..."
-        echo "    远程别名: ${MINERU_TUNNEL_SSH_USER}@${SSH_TARGET}:${MINERU_TUNNEL_REMOTE_PORT}"
-    else
-        SSH_TARGET="${MINERU_TUNNEL_REMOTE_HOST}"
-        echo "  🚀 启动 SSH 隧道..."
-        echo "    远程: ${MINERU_TUNNEL_SSH_USER}@${SSH_TARGET}:${MINERU_TUNNEL_REMOTE_PORT}"
-    fi
-    echo "    本地: localhost:${MINERU_TUNNEL_LOCAL_PORT}"
-
-    # 构建 SSH 参数
-    SSH_ARGS=()
-    
-    # SSH 端口参数
-    if [ "${MINERU_TUNNEL_SSH_PORT}" != "22" ]; then
-        SSH_ARGS+=("-p" "${MINERU_TUNNEL_SSH_PORT}")
-    fi
-    
-    # SSH 密钥文件参数
-    if [ -n "${MINERU_TUNNEL_SSH_IDENTITY_FILE}" ]; then
-        if [ -f "${MINERU_TUNNEL_SSH_IDENTITY_FILE}" ]; then
-            SSH_ARGS+=("-i" "${MINERU_TUNNEL_SSH_IDENTITY_FILE}")
-            echo "    使用密钥: ${MINERU_TUNNEL_SSH_IDENTITY_FILE}"
-        else
-            echo "  ⚠️  警告: 指定的密钥文件不存在: ${MINERU_TUNNEL_SSH_IDENTITY_FILE}"
-        fi
-    fi
-    
-    # SSH 选项
-    SSH_ARGS+=(
-        "-o" "ServerAliveInterval=60"
-        "-o" "ServerAliveCountMax=3"
-        "-o" "ExitOnForwardFailure=yes"
-        "-o" "StrictHostKeyChecking=no"
-    )
-
-    # 构建 SSH 命令参数
-    SSH_CMD_ARGS=()
-    SSH_CMD_ARGS+=("-C" "-N" "-g")
-    SSH_CMD_ARGS+=("${SSH_ARGS[@]}")
-    SSH_CMD_ARGS+=("-L" "${MINERU_TUNNEL_LOCAL_PORT}:127.0.0.1:${MINERU_TUNNEL_REMOTE_PORT}")
-    SSH_CMD_ARGS+=("${MINERU_TUNNEL_SSH_USER}@${SSH_TARGET}")
-    
-    # 如果设置了密码且没有密钥文件，使用 sshpass 直接包装 ssh（不用 autossh）
-    # 因为 autossh 内部调用 ssh 时无法传递密码
-    if [ -n "${MINERU_TUNNEL_SSH_PASSWORD}" ] && [ -z "${MINERU_TUNNEL_SSH_IDENTITY_FILE}" ]; then
-        if command -v sshpass &> /dev/null; then
-            echo "    使用密码认证（通过 sshpass，直接使用 ssh）"
-            # 直接使用 sshpass + ssh，然后用 nohup 和后台运行
-            # 注意：这样会失去 autossh 的自动重连功能，但可以工作
-            nohup sshpass -p "${MINERU_TUNNEL_SSH_PASSWORD}" ssh \
-                "${SSH_CMD_ARGS[@]}" \
-                > "${MINERU_TUNNEL_LOG_FILE}" 2>&1 &
-            
-            SSH_PID=$!
-            sleep 3
-            
-            # 检查进程是否还在运行
-            if ps -p "${SSH_PID}" > /dev/null 2>&1; then
-                echo "${SSH_PID}" > "${MINERU_TUNNEL_PID_FILE}"
-                AUTOSSH_PID="${SSH_PID}"
-            else
-                echo "  ❌ SSH 隧道启动失败，请查看日志: ${MINERU_TUNNEL_LOG_FILE}"
-                cat "${MINERU_TUNNEL_LOG_FILE}" 2>/dev/null || true
-                return 1
-            fi
-        else
-            echo "  ❌ 错误: 需要 sshpass 但未安装，请运行: apt install -y sshpass"
-            return 1
-        fi
-    else
-        # 使用 autossh（密钥认证或无需认证）
-        autossh -M ${MINERU_TUNNEL_MONITOR_PORT} \
-            -f \
-            "${SSH_CMD_ARGS[@]}" \
-            > "${MINERU_TUNNEL_LOG_FILE}" 2>&1
-    fi
-
-    # 查找 autossh 进程 PID（使用更通用的匹配模式）
-    # 如果上面已经设置了 AUTOSSH_PID，就使用它，否则查找
-    if [ -z "${AUTOSSH_PID:-}" ]; then
-        AUTOSSH_PID=$(pgrep -f "autossh.*${MINERU_TUNNEL_LOCAL_PORT}:127.0.0.1:${MINERU_TUNNEL_REMOTE_PORT}" | head -n 1)
-    fi
-
-    if [ -z "${AUTOSSH_PID}" ]; then
-        echo "  ❌ 隧道启动失败，请查看日志: ${MINERU_TUNNEL_LOG_FILE}"
-        cat "${MINERU_TUNNEL_LOG_FILE}"
-        return 1
-    fi
-
-    # 保存 PID
-    echo "${AUTOSSH_PID}" > "${MINERU_TUNNEL_PID_FILE}"
-    echo "  ✅ 隧道已启动 (PID: ${AUTOSSH_PID})"
-
-    # 测试连接（重试机制，确保隧道真正可用）
-    echo "  ⏳ 验证隧道连接..."
-    MAX_RETRIES=5
-    RETRY_COUNT=0
-    TUNNEL_READY=false
-    
-    while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-        sleep 2
-        if curl -s --max-time 3 "http://localhost:${MINERU_TUNNEL_LOCAL_PORT}/health" > /dev/null 2>&1; then
-            echo "  ✅ 隧道连接成功！MinerU 服务可访问: http://localhost:${MINERU_TUNNEL_LOCAL_PORT}"
-            TUNNEL_READY=true
-            break
-        fi
-        RETRY_COUNT=$((RETRY_COUNT + 1))
-        echo "  ⏳ 等待隧道就绪... (${RETRY_COUNT}/${MAX_RETRIES})"
-    done
-    
-    if [ "$TUNNEL_READY" = false ]; then
-        echo "  ❌ 隧道启动失败：无法连接到 MinerU 服务"
-        echo "     请检查："
-        echo "     1. 远程服务器 ${MINERU_TUNNEL_REMOTE_HOST} 是否可访问"
-        echo "     2. 远程 MinerU 服务是否在 ${MINERU_TUNNEL_REMOTE_PORT} 端口运行"
-        echo "     3. SSH 连接是否正常（查看日志: ${MINERU_TUNNEL_LOG_FILE}）"
-        echo ""
-        echo "  📝 查看隧道日志: tail -f ${MINERU_TUNNEL_LOG_FILE}"
-        return 1
-    fi
-    echo ""
-}
-
-stop_mineru_tunnel() {
-    if [[ "${MINERU_TUNNEL_ENABLED}" != "true" ]]; then
-        return 0
-    fi
-
-    if [ ! -f "${MINERU_TUNNEL_PID_FILE}" ]; then
-        # 尝试通过端口查找进程
-        PID=$(pgrep -f "autossh.*${MINERU_TUNNEL_LOCAL_PORT}:127.0.0.1" | head -n 1)
-        if [ -z "${PID}" ]; then
-            return 0
-        fi
-    else
-        PID=$(cat "${MINERU_TUNNEL_PID_FILE}")
-    fi
-
-    echo "  🛑 停止 MinerU SSH 隧道 (PID: ${PID})..."
-    kill "${PID}" 2>/dev/null || true
-    sleep 1
-
-    # 如果还在运行，强制杀死
-    if ps -p "${PID}" > /dev/null 2>&1; then
-        kill -9 "${PID}" 2>/dev/null || true
-    fi
-
-    # 清理 PID 文件
-    rm -f "${MINERU_TUNNEL_PID_FILE}"
-
-    # 清理可能残留的 SSH 进程
-    pkill -f "ssh.*${MINERU_TUNNEL_LOCAL_PORT}:127.0.0.1" 2>/dev/null || true
-    echo "  ✅ 隧道已停止"
-}
-
-# ==============================================================================
-# 第四步：启动 MinerU SSH 隧道（如果需要，必须在应用启动前完成）
-# ==============================================================================
-# 如果启用了隧道，必须先建立隧道并验证成功，否则阻止后续启动
-if [[ "${MINERU_TUNNEL_ENABLED}" == "true" ]]; then
-    echo ""
-    echo "=========================================="
-    echo "  步骤 1/4: 建立 MinerU SSH 隧道"
-    echo "=========================================="
-    if ! start_mineru_tunnel; then
-        echo ""
-        echo "❌ MinerU SSH 隧道启动失败，无法继续启动应用"
-        echo "   请解决隧道连接问题后重试"
-        exit 1
-    fi
-    echo "✅ MinerU SSH 隧道已就绪"
-    echo ""
-fi
-
-# ==============================================================================
-# 第五步：启动Docker容器
+# 第三步：启动Docker容器
 # ==============================================================================
 echo -e "\n=========================================="
 echo "  RAG-ARC ${APP_ID} ${ENV_ID} 环境启动脚本 (PM2版)"
 echo "=========================================="
-if [[ "${MINERU_TUNNEL_ENABLED}" == "true" ]]; then
-    echo "  ✅ MinerU SSH 隧道: 已就绪"
-fi
 echo ""
 
 # 1. 创建Docker网络
@@ -481,7 +215,7 @@ if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
 fi 
 
 # ==============================================================================
-# 第六步：使用PM2启动/重启应用
+# 第四步：使用PM2启动/重启应用
 # ==============================================================================
 echo "🚀 启动/重启应用 [${APP_DIR}]..."
 mkdir -p ${PARSER_OUTPUT_DIR} ${LOCAL_FILE_STORAGE_PATH} $(dirname ${APP_LOG_FILE})
@@ -615,7 +349,7 @@ fi
 echo ""
 
 # ==============================================================================
-# 第七步：验证应用状态
+# 第五步：验证应用状态
 # ==============================================================================
 echo "⏳ 验证应用启动状态..."
 sleep 8
@@ -632,13 +366,8 @@ if pm2 list | grep -q "${PM2_APP_NAME}" && pm2 list | grep -q "online"; then
     echo "  - Neo4j Web: http://localhost:${NEO4J_WEB_HOST_PORT}"
     echo "  - Neo4j Bolt: ${NEO4J_URL:-bolt://localhost:${NEO4J_BOLT_HOST_PORT}} (容器: ${NEO4J_CONTAINER_NAME})"
     if [[ "${MINERU_ENABLED}" == "true" ]] || [[ "${PARSER_PARSE_MODE:-}" == "mineru" ]]; then
-        if [[ "${MINERU_TUNNEL_ENABLED}" == "true" ]]; then
-            echo "  - MinerU 服务（通过 SSH 隧道）: http://localhost:${MINERU_TUNNEL_LOCAL_PORT}"
-            echo "    远程服务器: ${MINERU_TUNNEL_SSH_USER}@${MINERU_TUNNEL_REMOTE_HOST}:${MINERU_TUNNEL_REMOTE_PORT}"
-        else
-            MINERU_SERVER_URL=${MINERU_SERVER_URL:-"http://${MINERU_HOST}:${MINERU_PORT}"}
-            echo "  - MinerU 服务（远程）: ${MINERU_SERVER_URL}"
-        fi
+        MINERU_SERVER_URL=${MINERU_SERVER_URL:-"http://${MINERU_HOST}:${MINERU_PORT}"}
+        echo "  - MinerU 服务（远程/隧道由 tmux 等自行维护）: ${MINERU_SERVER_URL}"
     fi
     echo "  - 应用API: http://localhost:${APP_PORT}"
     echo "  - 自动定位的代码目录: ${APP_DIR}"
@@ -657,13 +386,6 @@ if pm2 list | grep -q "${PM2_APP_NAME}" && pm2 list | grep -q "online"; then
     echo "  - 系统服务管理: sudo systemctl {start|stop|status|restart} rag-arc-mq-workers-chatKB_online.service"
     echo "  - 开机自启: ✅ 已自动配置（通过 systemd service）"
     echo ""
-    if [[ "${MINERU_TUNNEL_ENABLED}" == "true" ]]; then
-        echo "📝 MinerU SSH 隧道管理命令："
-        echo "  - 查看状态: ps aux | grep autossh | grep ${MINERU_TUNNEL_LOCAL_PORT}"
-        echo "  - 查看日志: tail -f ${MINERU_TUNNEL_LOG_FILE}"
-        echo "  - 停止隧道: kill \$(cat ${MINERU_TUNNEL_PID_FILE})"
-        echo ""
-    fi
 else
     echo "=========================================="
     echo "  ⚠️  ${APP_ID} ${ENV_ID} 应用启动可能异常（请检查 PM2 日志）"

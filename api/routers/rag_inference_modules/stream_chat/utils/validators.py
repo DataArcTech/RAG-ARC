@@ -24,14 +24,10 @@ async def validate_user_permissions(
     return_subgraph: bool,
     include_evidence: bool
 ) -> None:
-    """Validate user permissions for subgraph/evidence generation."""
-    if return_subgraph or include_evidence:
-        user_type = getattr(current_user, "type", 0)
-        if user_type != 0:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only livingKB users (type=0) can request subgraph generation"
-            )
+    """Validate user permissions for subgraph/evidence generation.
+    Note: 不在此处拦截非 livingKB 用户；由调用方根据 user_type 将 return_subgraph/include_evidence 置为 False，
+    使 chatKB 用户仍能正常获得对话流，仅不返回子图/证据。
+    """
 
 
 async def validate_session_access(
