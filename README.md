@@ -407,8 +407,8 @@ DeepSearch is optimized for long documents (manuals, standards, policies, contra
 the think→explore loop will first narrow down the right file, then the right section, then read the full block before answering.
 
 Key navigation tools (internal to DeepSearch explore):
-- `file.search`: doc-level routing (doc_description + doc_profile for disambiguation)
-- `toc.tree` / `section.search`: section-level routing (ToC/section summary)
+- `search.file`: doc-level routing (doc_description + doc_profile for disambiguation)
+- `toc.tree` / `search.section`: section-level routing (ToC/section summary)
 - `read.section` / `read.pages` / `read.neighbors`: read full context around the target section/pages/chunk
 
 If PageIndex is disabled or section/page metadata is missing, DeepSearch falls back to `search.*` + `read.chunk` and

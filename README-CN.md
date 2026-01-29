@@ -423,8 +423,8 @@ DeepSearch 对长文档（手册/标准/政策/合同等）做了优化。当 Pa
 think→explore 会先选文件，再选章节，再读完整段落后回答。
 
 关键导航工具（DeepSearch explore 内部使用）：
-- `file.search`: 文档级路由（doc_description + doc_profile 用于消歧）
-- `toc.tree` / `section.search`: 章节级路由（目录/章节摘要）
+- `search.file`: 文档级路由（doc_description + doc_profile 用于消歧）
+- `toc.tree` / `search.section`: 章节级路由（目录/章节摘要）
 - `read.section` / `read.pages` / `read.neighbors`: 读取目标章节/页/邻近块的完整上下文
 
 若 PageIndex 关闭或缺少章节/页元数据，DeepSearch 会回退到 `search.*` + `read.chunk`，并在诊断信息中明确提示能力受限。
