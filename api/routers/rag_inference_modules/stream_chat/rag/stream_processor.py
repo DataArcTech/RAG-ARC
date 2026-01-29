@@ -162,7 +162,7 @@ def _run_stream_processing(
         stream_error[0] = exc
     finally:
         asyncio.run_coroutine_threadsafe(queue.put(None), loop)
-        # 任务完成，触发最终化回调（不依赖SSE连接）
+        # 任务完成后触发最终化回调（与 SSE 连接消费解耦）
         finalization_callback = prepared.get("finalization_callback")
         if finalization_callback and stream_error[0] is None:
             try:

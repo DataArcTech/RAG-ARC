@@ -301,7 +301,7 @@ async def create_assistant_message(
             else None
         ),
         sources=sources_for_storage,
-        # 只要有 subgraph_data 就存储，不依赖于 return_subgraph 标志
+        # 只要有 subgraph_data 就存储（return_subgraph 仅影响是否返回给前端）
         subgraph_data=subgraph_data if subgraph_data else None,
         raw_llm_response=raw_llm_response_with_trace,
         raw_mindmap_response=(
