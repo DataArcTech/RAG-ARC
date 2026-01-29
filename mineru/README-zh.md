@@ -1,73 +1,58 @@
 ## MinerU 文件解析服务（独立部署）
 
-本目录提供一个可**独立部署**的 MinerU 多模态文件解析服务（FastAPI Server + Client），用于在 GPU 机器上运行解析，并通过 HTTP/SSH 隧道在本地调用；同时也可以作为 RAG-ARC 的远程解析后端。
-
-- **与 RAG-ARC 运行环境/依赖隔离**：MinerU 的安装与配置请参考上游官方教程，本目录只负责“封装成服务”。
-- 适用于“本地算力不足，把解析服务迁移到任意服务器上运行”的场景。
+本目录提供一个独立的 FastAPI 服务，封装上游 MinerU 解析能力。
+可部署在 GPU 机器上，通过 `MINERU_SERVER_URL` 或 SSH 隧道远程调用。
 
 ---
 
-## 功能说明
+## 功能概述
 
 **Server（`mineru_server`）**
-
-- 提供 HTTP API：上传 PDF/图片，调用上游 MinerU 进行解析。
-- 输出：Markdown、`content_list` JSON、图片等资源文件。
-- 可选：使用 OpenAI 兼容的多模态 Chat 接口为图片生成可检索图注（用于检索/切分/召回更友好）。
-- 任务输出落盘：`--output-dir/<task_id>/...`，并提供清单与文件下载接口。
+- HTTP API：解析 PDF/图片。
+- 输出 Markdown、content_list JSON、图片等资源文件。
+- 可选：调用 OpenAI 兼容多模态接口生成图片图注。
+- 任务产物落盘到 `--output-dir/<task_id>/...` 并提供下载接口。
 
 **Client**
-
-- `mineru_client.py`：通用客户端 + CLI（解析/下载主要产物/同步整个任务目录）。
-- `mineru_server/client.py` + `mineru_server/cli.py client`：更轻量的“同步任务目录”客户端。
+- `mineru_client.py`：简单 CLI（解析 / 下载 / 同步任务目录）。
+- `mineru_server/client.py` + `mineru_server/cli.py client`：轻量同步工具。
 
 ---
 
-## 上游 MinerU 环境（必须先配好）
+## 前置条件（上游 MinerU 环境）
 
-本服务**不会替你安装/配置 MinerU**。请务必按上游官方教程完成：
-
-- CUDA / 依赖 / 模型 / backend 配置
-- 确认在同一个 Python 环境里可以正常 `import mineru` 并运行解析
-
-本服务运行时会调用：
-- `mineru.cli.common.do_parse` / `aio_do_parse`
-- `mineru.utils.enum_class.MakeMode`
+本服务**不会安装或配置 MinerU**，请先按上游文档准备环境（CUDA、模型、后端等）。
+确保同一 Python 环境中 `import mineru` 可用。
 
 ---
 
 ## 快速开始
 
-### 1) 启动 Server（建议在 GPU 机器）
-
-在仓库根目录执行：
+### 1) 启动服务（建议在 GPU 机器）
 
 ```bash
-python mineru/mineru_main.py server --host 0.0.0.0 --port 8899
+python mineru_main.py server --host 0.0.0.0 --port 8899
 ```
 
-生产建议（可迁移、可落盘、避免写到仓库目录）：
+生产建议路径：
 
 ```bash
-python mineru/mineru_main.py server \
+python mineru_main.py server \
   --host 0.0.0.0 --port 8899 \
   --output-dir /data/mineru_outputs \
   --temp-dir /tmp/mineru_temp
 ```
 
-开启 LLM 图注（仅当 `--caption-mode` 使用 LLM 时需要）：
+开启 LLM 图注：
 
 ```bash
 export CHAT_API_BASE_URL="https://api.openai.com/v1"
 export CHAT_API_KEY="sk-xxx"
-export OPENAI_CHAT_MODEL="gpt-4o-mini"  # 必须支持图片输入（多模态）
+export OPENAI_CHAT_MODEL="gpt-4o-mini"
 
-python mineru/mineru_main.py server \
+python mineru_main.py server \
   --caption-mode content_list_then_llm
 ```
-
-提示：可用 `--caption-max-images` 限制送入 LLM 做图注的图片数量；设置为 `0`（或任意负数）表示解除限制。
-默认图注模式为 `content_list_then_llm`，且默认不限制图片数量（`caption_max_images=0`）。只要使用支持图片输入的多模态模型即可。
 
 健康检查：
 
@@ -75,37 +60,73 @@ python mineru/mineru_main.py server \
 curl http://127.0.0.1:8899/health
 ```
 
----
-
-## 多卡 vLLM 加速（推荐高吞吐）
-
-本服务支持 vLLM 后端，但**进程内 vLLM 目前只能单卡**（未透传 tensor-parallel 参数）。
-要实现**真正多卡加速**，推荐启动一个外部 vLLM 的 OpenAI 兼容服务，然后用 MinerU 的
-`vlm-http-client` 后端访问（或给本服务新增 `server_url` 透传）。
-
-### A) 启动多卡 vLLM 服务（OpenAI 兼容）
-
-示例（2 张 GPU，H800 80GB，ModelScope 缓存）：
+### 2) 客户端调用
 
 ```bash
-# 推荐：使用 service/scripts 启动脚本
-./service/scripts/start_vllm.sh --gpus 4,6 --tp 2 --port 30000
+export MINERU_SERVER_URL="http://<server-ip>:8899"
+
+python mineru_main.py client \
+  --base-url "$MINERU_SERVER_URL" \
+  --file /path/to/demo.pdf \
+  --output-dir ./mineru_client_outputs
 ```
 
-脚本用法（常见选项）：
+### 3) Python 调用（import client）
+
+Python 里调用服务有两种常见方式：
+- 直接用 HTTP（`requests`）；
+- 或者 import 本仓库里自带的轻量 client（需要把 `` 加到 `PYTHONPATH`）。
+
+示例：
+
+```python
+from pathlib import Path
+from mineru_server.client import MinerUServerClient
+
+client = MinerUServerClient(base_url="http://127.0.0.1:8899", timeout_s=3600)
+result = client.parse(
+    file_path=Path("demo/pdfs/demo3.pdf"),
+    backend="vlm-transformers",
+    parse_method="auto",
+    lang="ch",
+    formula_enable=True,
+    table_enable=True,
+    start_page=0,
+    end_page=None,
+    output_format="mm_md",
+    wait=True,
+)
+print(result["status"], result.get("processing_time"))
+```
+
+---
+
+## 外部 vLLM 多卡加速
+
+**说明：**本服务内置 vLLM 仅单卡。若要多卡加速，需要启动外部 vLLM（OpenAI 兼容）并让本服务走 `vlm-http-client`。
+
+### A) 启动 vLLM 服务
+
+推荐脚本：
 
 ```bash
-# 指定自定义模型路径
-./service/scripts/start_vllm.sh --model-path /path/to/vlm_model --gpus 0,1 --tp 2 --port 30000
+./scripts/start_vllm.sh --gpus 4,6 --tp 2 --port 30000
+```
+
+脚本常用参数：
+
+```bash
+# 指定模型路径
+./scripts/start_vllm.sh --model-path /path/to/vlm_model --gpus 0,1 --tp 2 --port 30000
 
 # 使用 HuggingFace 缓存的 MinerU2.5
-./service/scripts/start_vllm.sh --model-key mineru2.5 --model-source hf --gpus 0,1 --tp 2 --port 30000
+./scripts/start_vllm.sh --model-key mineru2.5 --model-source hf --gpus 0,1 --tp 2 --port 30000
 
 # 单卡
-./service/scripts/start_vllm.sh --gpus 0 --tp 1 --port 30000
+./scripts/start_vllm.sh --gpus 0 --tp 1 --port 30000
 
-# 透传额外 vLLM 参数（放在 -- 后面）
-./service/scripts/start_vllm.sh --gpus 0,1 --tp 2 --port 30000 -- --max-model-len 8192
+# 透传 vLLM 额外参数（放在 -- 后）
+./scripts/start_vllm.sh --gpus 0,1 --tp 2 --port 30000 -- --max-model-len 8192
 ```
 
 等价手动命令：
@@ -122,255 +143,177 @@ vllm serve /home/dataarc/.cache/modelscope/hub/models/OpenDataLab/MinerU2.5-2509
 ```
 
 注意：
-- `--tensor-parallel-size` 必须与可见 GPU 数量一致。
-- vLLM 会预分配显存；如 OOM 请调低 `--gpu-memory-utilization`。
-- vLLM 仅用于 VLM 模型；OCR 模型（如 PaddleOCR）**不走 vLLM**。
+- `--tensor-parallel-size` 必须与 GPU 数量一致。
+- vLLM 预分配显存；如 OOM 请调低 `--gpu-memory-utilization`。
+- vLLM 仅用于 **VLM 模型**；OCR 模型（如 PaddleOCR）**不走 vLLM**。
 
-### B) 使用 MinerU http-client 后端（示例）
+### B) 无需改客户端（推荐）
 
-上游 MinerU API 支持 `vlm-http-client` 并可传 `server_url`（OpenAI 兼容）：
-
-```python
-from pathlib import Path
-from mineru.cli.common import aio_do_parse, read_fn
-
-await aio_do_parse(
-    output_dir="/tmp/mineru_outputs",
-    pdf_file_names=["demo3"],
-    pdf_bytes_list=[read_fn(Path("demo/pdfs/demo3.pdf"))],
-    p_lang_list=["ch"],
-    backend="vlm-http-client",
-    server_url="http://127.0.0.1:30000",
-)
-```
-
-如需继续使用本服务的 API，可在 `service` 里新增 `server_url` 参数并透传给
-`run_mineru_parse()` → `aio_do_parse()`，即可无缝接入多卡 vLLM。
-
-### 加速效果（本机示例）
-
-硬件：2 × NVIDIA H800 80GB，vLLM 0.11.0，`--gpu-memory-utilization 0.8`，热身后测试。
-
-- 文档：[`(详)盛利2-至尊 产品手册(英文版).pdf`](../example/(详)盛利2-至尊%20产品手册(英文版).pdf)（126 页）
-- 总耗时：**~62s**
-- VLM 推理耗时：**~49s**（约 **2.5 页/秒**）
-
-小文档可能被固定开销主导；大文档或更高并发更能体现多卡优势。
-
-### 2) 本地 Client 调用
-
-配置服务地址（避免硬编码，方便随时迁移服务机器）：
+启动 vLLM 后，用 `vlm-http-client` + `--server-url` 启动本服务：
 
 ```bash
-export MINERU_SERVER_URL="http://<server-ip>:8899"
+python mineru_main.py server \
+  --backend vlm-http-client \
+  --server-url http://127.0.0.1:30000
 ```
 
-解析并下载产物：
+已有客户端仍然调用 `/parse`，无需改代码。
+
+### C) 网关 + 服务池（推荐提高吞吐）
+
+如果你启动了**多个** vLLM 实例（不同 GPU/端口），可以只启动**一个** MinerU server 作为网关，
+并配置 `--server-urls` 地址池：
+
+先启动 vLLM 池（默认每张卡一个 vLLM 实例）：
 
 ```bash
-python mineru/mineru_client.py parse \
-  --file /path/to/demo.pdf \
-  --output-dir ./mineru_client_outputs
+conda activate mineru
+./scripts/start_vllm_pool.sh --gpus 4,6 --base-port 30000
 ```
 
-多文件压测：
+再启动 MinerU 网关：
 
 ```bash
-python mineru/mineru_client.py bench \
-  --files /path/a.pdf /path/b.pdf \
-  --concurrency 2 \
-  --output-dir ./mineru_client_outputs \
-  --no-download
+python mineru_main.py server \
+  --backend vlm-http-client \
+  --server-urls http://127.0.0.1:30000,http://127.0.0.1:30001 \
+  --max-jobs 2 \
+  --max-pending 16
 ```
+
+网关会按“当前 in-flight 数量最少”的策略选择后端；当某个后端报错时，会进入短暂冷却期并被暂时避开。
+
+**TP 与池模式的区别（很重要）：**
+- `start_vllm.sh --gpus 4,6 --tp 2`：启动 *一个* 模型实例，切到两张卡上；**单个请求会同时用两张卡**。
+- `start_vllm_pool.sh --gpus 4,6`：启动 *两个* 模型实例（每个 tp=1）；并发请求可被路由到**不同 GPU**。
 
 ---
 
-## RAG-ARC 集成方式
-
-RAG-ARC 可通过 `.env` 把 PDF/图片解析切到该服务：
-
-- 设置 `PARSER_PARSE_MODE=mineru`
-- 设置 `MINERU_SERVER_URL=http://<server-ip>:8899`（可选 `MINERU_TIMEOUT_S=900`）
-- 可选页范围（0-based，结束页包含）：`MINERU_START_PAGE=0`、`MINERU_END_PAGE=1`
-
-解析产物会被镜像到 `PARSER_OUTPUT_DIR`（默认 `./data/parsed_files/mineru/<file_id>/...`），其中 `<file_id>` 是 RAG-ARC 侧的文件 ID，用于避免同名文件导致的产物覆盖/串读。
-
-### 证据资源 URL（RAG-ARC API）
-
-当 `include_evidence=true` 时，RAG-ARC 会返回：
-- `document_url`：`GET /knowledge/{file_id}/download`
-- 对 MinerU 解析产出的 Markdown，若 `chunk.content` 内有 `![...](images/xxx.jpg)` 这类相对路径图片链接，后端会改写为 `GET /knowledge/{file_id}/mineru-assets/images/...`，便于前端直接渲染（需要鉴权）。
-
-## 通过 SSH 隧道调用（推荐）
-
-当 GPU 机器不对外开端口时：
-
-```bash
-ssh -L 8899:127.0.0.1:8899 <user>@<gpu-host>
-export MINERU_SERVER_URL="http://127.0.0.1:8899"
-python mineru/mineru_client.py parse --file demo.pdf --output-dir ./mineru_client_outputs
-```
-
----
-
-## Server HTTP API 说明
-
-Base URL：`http://<host>:<port>`
-
-### 接口列表
-
-- `GET /health`：健康检查 + 当前配置摘要。
-- `GET /config`：返回配置（敏感字段会脱敏）。
-- `POST /parse`：单文件解析（multipart 上传）。
-- `GET /parse/status/{task_id}`：异步解析状态轮询。
-- `POST /parse/batch`：多文件解析（multipart 上传）。
-- `GET /task/{task_id}/manifest`：列出 `output_dir/<task_id>/...` 下的文件清单。
-- `GET /task/{task_id}/file/{rel_path}`：按相对路径下载文件（推荐，避免同名冲突）。
-- `GET /download/{task_id}/{filename}`：按文件名搜索下载（历史接口，若目录下存在重名文件可能有歧义）。
-
-### `POST /parse` 表单参数
-
-- `backend`：默认从服务配置读取（推荐 `vlm-transformers`）。
-- `parse_method`：默认 `auto`。
-- `lang`：默认 `ch`。
-- `formula_enable`：`true|false`。
-- `table_enable`：`true|false`。
-- `start_page`：起始页（0-based）。
-- `end_page`：结束页（包含，选填）。
-- `output_format`：`mm_md | md_only | content_list`。
-- `wait`：是否阻塞等待解析完成（默认 `false`，立即返回）。
-
-返回体包含（异步时请轮询 `GET /parse/status/{task_id}` 直到 `status=success`）：
-- `task_id`, `status`, `processing_time`
-- 各类产物的绝对路径（`*_path`）与**任务相对路径**（`*_rel_path`，用于稳定下载）
-- `images_metadata`（每张图包含 `task_rel_path`，可直接走 `/task/.../file/...` 下载）
-
----
-
-## CLI 使用说明
+## 命令行参数（完整）
 
 ### Server CLI
 
 ```bash
-python mineru/mineru_main.py server --help
+python mineru_main.py server --help
 ```
 
-常用参数：
-- 网络：`--host`, `--port`, `--workers`, `--max-jobs`, `--max-pending`
-- 存储：`--output-dir`, `--temp-dir`, `--modelscope-cache-dir`, `--hf-home`, `--mineru-home`
-- MinerU 默认参数：`--backend`, `--parse-method`, `--lang`, `--no-formula`, `--no-table`, `--model-source`, `--device`
-- vLLM（仅 vLLM backend 生效）：`--vllm-gpu-mem-util`, `--vllm-enforce-eager`, `--vllm-max-model-len`, `--vllm-swap-space-gb`, `--vllm-cpu-offload-gb`
-- 图注：`--caption-mode`, `--caption-max-images`, `--chat-api-base-url`, `--chat-api-key`, `--chat-api-key-file`, `--chat-model`, `--caption-context`, `--caption-context-file`, `--up`, `--down`
+**网络与容量**
+- `--host`（默认 `0.0.0.0`）
+- `--port`（默认 `8899`）
+- `--workers`（默认 `1`）
+- `--max-jobs`（默认 `1`）：单 worker 最大并发
+- `--max-pending`（默认 `0`）：排队+运行的总上限，`0` 表示无限
+  - 环境变量：`MINERU_SERVER_MAX_PENDING_JOBS`
+- `--enforce-backend`（默认 `false`）：忽略请求里传入的 `backend`，始终使用服务端默认 `--backend`（网关模式）
+  - 环境变量：`MINERU_SERVER_ENFORCE_BACKEND=1`
+
+**MinerU 默认参数**
+- `--backend`（默认 `vlm-transformers`）
+- `--parse-method`（默认 `auto`）
+- `--lang`（默认 `ch`）
+- `--formula-enable` / `--no-formula`（默认开启）
+- `--table-enable` / `--no-table`（默认开启）
+
+**外部 VLM 服务（http-client 后端）**
+- `--server-url`：OpenAI 兼容服务地址
+  - 环境变量：`MINERU_VLM_SERVER_URL`
+  - 仅在 `vlm-http-client` / `hybrid-http-client` 生效
+- `--server-urls`：OpenAI 兼容服务地址池（网关模式；按请求路由）
+  - 可重复传入
+  - 环境变量：`MINERU_VLM_SERVER_URLS`
+
+**设备与模型来源**
+- `--model-source`（默认 `modelscope`）
+- `--device`（默认 `cuda`）
+- `--virtual-vram-gb`（默认 `None`）
+
+**vLLM 参数（仅进程内 vLLM）**
+- `--vllm-gpu-mem-util`（默认 `0.5`）
+- `--vllm-enforce-eager`（默认 `false`）
+- `--vllm-max-model-len`（默认 `None`）
+- `--vllm-swap-space-gb`（默认 `4.0`）
+- `--vllm-cpu-offload-gb`（默认 `0.0`）
+
+**存储路径**
+- `--output-dir`（默认 `mineru_outputs`）
+- `--temp-dir`（默认 `.tmp/mineru_temp`）
+- `--modelscope-cache-dir`（默认 `~/.cache/modelscope/hub`）
+- `--hf-home`（默认 `~/.cache/huggingface`）
+- `--mineru-home`（默认 `..`）
+
+**图注（LLM caption）**
+- `--caption-mode`（默认 `content_list_then_llm`）
+- `--chat-api-base-url`（env: `CHAT_API_BASE_URL`）
+- `--chat-api-key`（env: `CHAT_API_KEY`）
+- `--chat-api-key-file`（env: `CHAT_API_KEY_FILE`）
+- `--chat-model`（env: `OPENAI_CHAT_MODEL`）
+- `--chat-timeout-s`（默认 `60`）
+- `--caption-max-images`（默认 `0`，<=0 表示不限）
+- `--caption-context`（env: `CAPTION_CONTEXT`）
+- `--caption-context-file`（env: `CAPTION_CONTEXT_FILE`）
+- `--up`（默认 `500`）
+- `--down`（默认 `500`）
 
 ### Client CLI
 
 ```bash
-python mineru/mineru_client.py --help
+python mineru_main.py client --help
+```
+
+- `--base-url`（默认 `MINERU_SERVER_URL` 或 `http://127.0.0.1:8899`）
+- `--file`（必填）
+- `--output-dir`（默认 `./mineru_client_outputs`）
+- `--backend`（默认 `vlm-transformers`）
+- `--parse-method`（默认 `auto`）
+- `--lang`（默认 `ch`）
+- `--formula-enable` / `--no-formula`
+- `--table-enable` / `--no-table`
+- `--start-page`（默认 `0`）
+- `--end-page`（默认 `None`）
+- `--output-format`（默认 `mm_md`，可选 `mm_md|md_only|content_list`）
+- `--timeout`（默认 `900`）
+
+---
+
+## HTTP API（Server）
+
+Base URL：`http://<host>:<port>`
+
+Endpoints：
+- `GET /health`
+- `GET /config`
+- `POST /parse`
+- `GET /parse/status/{task_id}`
+- `POST /parse/batch`
+- `GET /task/{task_id}/manifest`
+- `GET /task/{task_id}/file/{rel_path}`
+- `GET /download/{task_id}/{filename}`（历史接口）
+
+`POST /parse` 表单参数：
+- `backend`, `parse_method`, `lang`, `formula_enable`, `table_enable`
+- `start_page`, `end_page`, `output_format`
+- `wait`（true 表示阻塞等待）
+
+---
+
+## SSH 隧道（远程 GPU）
+
+```bash
+ssh -CNg -L 8899:127.0.0.1:8899 <user>@<gpu-host>
+export MINERU_SERVER_URL="http://127.0.0.1:8899"
+python mineru_main.py client --base-url "$MINERU_SERVER_URL" --file demo.pdf --output-dir ./mineru_client_outputs
 ```
 
 ---
 
-## 代码调用（Python）
+## RAG-ARC 集成
 
-### 最小：解析 + 同步整个任务目录
+- `PARSER_PARSE_MODE=mineru`
+- `MINERU_SERVER_URL=http://<server-ip>:8899`（可选 `MINERU_TIMEOUT_S=900`）
+- 可选页范围：`MINERU_START_PAGE=0`, `MINERU_END_PAGE=1`
 
-```python
-from pathlib import Path
-from mineru_server.client import MinerUServerClient
+解析产物会落盘到 `PARSER_OUTPUT_DIR`（默认 `./data/parsed_files/mineru/<file_id>/...`）。
 
-client = MinerUServerClient(base_url="http://127.0.0.1:8899", timeout_s=900)
-result = client.parse(
-    file_path=Path("demo.pdf"),
-    backend="vlm-transformers",
-    parse_method="auto",
-    lang="ch",
-    formula_enable=True,
-    table_enable=True,
-    start_page=0,
-    end_page=None,
-    output_format="mm_md",
-)
-task_root = client.sync_task(result["task_id"], Path("./mineru_client_outputs"))
-print(task_root)
-```
-
-默认会轮询 `/parse/status/{task_id}` 直到完成；如需立即返回可传 `wait=False`。
-
-### 下载主要产物（md/json/images）
-
-```python
-from pathlib import Path
-from mineru_client import MinerUClient
-
-client = MinerUClient(base_url="http://127.0.0.1:8899", timeout=900)
-parse_result = client.parse_file(Path("demo.pdf"))
-downloaded = client.download_artifacts(parse_result, Path("./mineru_client_outputs"))
-print(downloaded["document_dir"])
-```
-
----
-
-## 环境变量说明
-
-### Client
-
-- `MINERU_SERVER_URL`：客户端默认服务地址（例如 `http://127.0.0.1:8899`）。
-
-### Server 的 `.env` 加载机制
-
-- `MINERU_DOTENV_PATH`：指定 `.env` 文件绝对/相对路径（优先级最高）。
-
-不指定时，Server 默认按以下顺序加载：
-1) `mineru/.env`（推荐：服务独立配置）
-2) `<cwd>/.env`
-
-### LLM 图注（仅 `--caption-mode` 使用 LLM 时需要）
-
-- `CHAT_API_BASE_URL`：OpenAI 兼容 base url（例如 `https://api.openai.com/v1`）。
-- `CHAT_API_KEY`：API Key（多 worker 建议用 `CHAT_API_KEY_FILE`）。
-- `CHAT_API_KEY_FILE`：包含 API Key 的文件路径。
-- `OPENAI_CHAT_MODEL`：模型名（必须支持图片输入）。
-
-可选：
-- `CAPTION_CONTEXT`：追加到图注 prompt 前的固定上下文。
-- `CAPTION_CONTEXT_FILE`：从文件读取固定上下文。
-- `CAPTION_UP`：图片上文 token 窗口（默认 `500`）。
-- `CAPTION_DOWN`：图片下文 token 窗口（默认 `500`）。
-
-### 缓存目录（建议显式配置，便于迁移与磁盘管理）
-
-- `MODELSCOPE_CACHE`：ModelScope 缓存目录（默认 `~/.cache/modelscope/hub`）。
-- `HF_HOME`：HuggingFace 缓存目录（默认 `~/.cache/huggingface`）。
-- `XDG_CACHE_HOME`：会影响默认缓存根目录。
-
-注意：Server 会根据自身配置设置上游 MinerU 的运行环境变量（例如 `MINERU_DEVICE_MODE`, `MINERU_OUTPUT_DIR`, `HF_HOME` 等），以保证可复现与可迁移。
-
----
-
-## 输出目录结构
-
-Server 输出根目录：`--output-dir`（默认：`mineru/mineru_outputs`）
-
-每次请求输出：
-
-```
-<output-dir>/<task_id>/<doc_name>/<method_dir>/
-  <doc_name>.md
-  <doc_name>_content_list.json
-  images/
-```
-
-Client 可把整个任务目录同步到：
-
-```
-<client-output-dir>/mineru_outputs/<task_id>/...
-```
-
----
-
-## 可迁移部署建议（随时搬到任意机器）
-
-- 生产环境不要依赖仓库相对路径：显式传入绝对 `--output-dir`、`--temp-dir`。
-- Client 统一通过 `MINERU_SERVER_URL` 配置服务地址，避免写死 IP。
-- 多 worker 场景建议使用 `CHAT_API_KEY_FILE` 管理密钥（避免把 key 写进配置文件/历史记录）。
-- `--workers > 1` 时会在 `mineru/.tmp/` 写入 config JSON 供 worker 进程读取，请保证该目录可写且权限受控。
+### 证据资源 URL（RAG-ARC API）
+- `document_url`: `GET /knowledge/{file_id}/download`
+- Markdown 图片链接 `images/...` 会被改写为 `GET /knowledge/{file_id}/mineru-assets/images/...`

@@ -71,6 +71,77 @@ class BatchParseResult(BaseModel):
     results: List[ParseResult]
 
 
+class VLMServerPool:
+    """
+    Async router for OpenAI-compatible VLM servers (e.g. multiple vLLM instances).
+    This makes the MinerU server behave like a simple gateway in front of a VLM service pool.
+    """
+
+    def __init__(self, urls: List[str], *, cooldown_s: float = 30.0):
+        self._lock = asyncio.Lock()
+        self._cooldown_s = float(cooldown_s)
+        self._rr = 0
+        # url -> state
+        self._state: Dict[str, Dict[str, Any]] = {
+            u: {"inflight": 0, "unavailable_until": 0.0, "last_error": None, "last_error_at": None}
+            for u in (urls or [])
+            if str(u).strip()
+        }
+
+    def urls(self) -> List[str]:
+        return list(self._state.keys())
+
+    async def snapshot(self) -> List[Dict[str, Any]]:
+        async with self._lock:
+            out: List[Dict[str, Any]] = []
+            for url, st in self._state.items():
+                out.append(
+                    {
+                        "url": url,
+                        "inflight": int(st.get("inflight") or 0),
+                        "unavailable_until": float(st.get("unavailable_until") or 0.0),
+                        "last_error": st.get("last_error"),
+                        "last_error_at": st.get("last_error_at"),
+                    }
+                )
+            return out
+
+    async def acquire(self) -> str:
+        now = time.time()
+        async with self._lock:
+            urls = list(self._state.keys())
+            if not urls:
+                raise RuntimeError("No VLM server URLs configured.")
+
+            healthy = [u for u in urls if float(self._state[u].get("unavailable_until") or 0.0) <= now]
+            candidates = healthy if healthy else urls
+
+            min_inflight = min(int(self._state[u].get("inflight") or 0) for u in candidates)
+            tied = [u for u in candidates if int(self._state[u].get("inflight") or 0) == min_inflight]
+            if len(tied) == 1:
+                chosen = tied[0]
+            else:
+                chosen = tied[self._rr % len(tied)]
+                self._rr += 1
+
+            self._state[chosen]["inflight"] = int(self._state[chosen].get("inflight") or 0) + 1
+            return chosen
+
+    async def release(self, url: str) -> None:
+        async with self._lock:
+            if url not in self._state:
+                return
+            self._state[url]["inflight"] = max(0, int(self._state[url].get("inflight") or 0) - 1)
+
+    async def mark_failure(self, url: str, exc: Exception) -> None:
+        async with self._lock:
+            if url not in self._state:
+                return
+            self._state[url]["unavailable_until"] = time.time() + self._cooldown_s
+            self._state[url]["last_error"] = str(exc)
+            self._state[url]["last_error_at"] = datetime.utcnow().isoformat() + "Z"
+
+
 def build_app(cfg: ServerConfig) -> FastAPI:
     output_root = cfg.output_dir_path()
     temp_root = cfg.temp_dir_path()
@@ -105,6 +176,9 @@ def build_app(cfg: ServerConfig) -> FastAPI:
         description="Multimodal parsing service (MinerU) producing Markdown + assets.",
         version="4.0.0",
     )
+
+    vlm_pool_urls = cfg.vlm_server_urls()
+    vlm_pool = VLMServerPool(vlm_pool_urls) if vlm_pool_urls else None
 
     async def _inc_pending(slots: int) -> None:
         nonlocal pending_count
@@ -190,7 +264,13 @@ def build_app(cfg: ServerConfig) -> FastAPI:
         task_root.mkdir(parents=True, exist_ok=True)
 
         await parse_semaphore.acquire()
+        selected_server_url: Optional[str] = None
         try:
+            # Gateway mode: select a VLM endpoint per job for http-client backends.
+            selected_server_url = cfg.server_url
+            if vlm_pool is not None and options.backend.endswith("http-client"):
+                selected_server_url = await vlm_pool.acquire()
+
             method_dir, md_path, content_list_path = await run_mineru_parse(
                 cfg=cfg,
                 task_dir=task_root,
@@ -201,6 +281,7 @@ def build_app(cfg: ServerConfig) -> FastAPI:
                 lang=options.lang,
                 formula_enable=options.formula_enable,
                 table_enable=options.table_enable,
+                server_url=selected_server_url,
                 start_page=options.start_page,
                 end_page=options.end_page,
                 output_format=options.output_format,
@@ -248,6 +329,8 @@ def build_app(cfg: ServerConfig) -> FastAPI:
                 processing_time=(time.perf_counter() - started),
             )
         except Exception as exc:
+            if vlm_pool is not None and selected_server_url and options.backend.endswith("http-client"):
+                await vlm_pool.mark_failure(str(selected_server_url), exc)
             logger.exception("Failed to parse document")
             return ParseResult(
                 task_id=task_id,
@@ -259,6 +342,8 @@ def build_app(cfg: ServerConfig) -> FastAPI:
                 processing_time=(time.perf_counter() - started),
             )
         finally:
+            if vlm_pool is not None and selected_server_url and options.backend.endswith("http-client"):
+                await vlm_pool.release(str(selected_server_url))
             parse_semaphore.release()
 
     async def _run_parse_job(
@@ -305,6 +390,7 @@ def build_app(cfg: ServerConfig) -> FastAPI:
 
     @app.get("/health")
     async def health() -> Dict[str, Any]:
+        pool_snapshot = await vlm_pool.snapshot() if vlm_pool is not None else []
         return {
             "status": "healthy",
             "host": cfg.host,
@@ -318,7 +404,11 @@ def build_app(cfg: ServerConfig) -> FastAPI:
             "model_source": cfg.model_source,
             "device_mode": cfg.device_mode,
             "backend_default": cfg.backend,
+            "enforce_backend": cfg.enforce_backend,
             "caption_mode": cfg.caption_mode,
+            "vlm_server_url": cfg.server_url,
+            "vlm_server_urls": cfg.vlm_server_urls(),
+            "vlm_pool": pool_snapshot,
         }
 
     @app.get("/config")
@@ -351,8 +441,9 @@ def build_app(cfg: ServerConfig) -> FastAPI:
         task_root = output_root / task_id
         task_root.mkdir(parents=True, exist_ok=True)
         try:
+            effective_backend = cfg.backend if cfg.enforce_backend else (backend or cfg.backend)
             options = ParseOptions(
-                backend=backend or cfg.backend,
+                backend=effective_backend,
                 parse_method=parse_method or cfg.parse_method,
                 lang=lang or cfg.lang,
                 formula_enable=bool(formula_enable),
@@ -421,8 +512,9 @@ def build_app(cfg: ServerConfig) -> FastAPI:
             raise HTTPException(status_code=503, detail="Server is at maximum capacity. Please try again later.")
         capacity_acquired = True
         batch_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f") + "_" + uuid.uuid4().hex[:8]
+        effective_backend = cfg.backend if cfg.enforce_backend else (backend or cfg.backend)
         options = ParseOptions(
-            backend=backend or cfg.backend,
+            backend=effective_backend,
             parse_method=parse_method or cfg.parse_method,
             lang=lang or cfg.lang,
             formula_enable=bool(formula_enable),
@@ -562,6 +654,13 @@ def create_app() -> FastAPI:
         updates["chat_model"] = env.get("OPENAI_CHAT_MODEL")
     if not cfg.caption_context and env.get("CAPTION_CONTEXT"):
         updates["caption_context"] = env.get("CAPTION_CONTEXT")
+    if not cfg.server_url and env.get("MINERU_VLM_SERVER_URL"):
+        updates["server_url"] = env.get("MINERU_VLM_SERVER_URL")
+    if (not cfg.server_urls) and env.get("MINERU_VLM_SERVER_URLS"):
+        raw = str(env.get("MINERU_VLM_SERVER_URLS") or "")
+        urls = [u.strip() for u in raw.split(",") if u.strip()]
+        if urls:
+            updates["server_urls"] = urls
     if not cfg.caption_context_file and env.get("CAPTION_CONTEXT_FILE"):
         updates["caption_context_file"] = env.get("CAPTION_CONTEXT_FILE")
     if env.get("CAPTION_UP") and cfg.caption_up_tokens == 500:

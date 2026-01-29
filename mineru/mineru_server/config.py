@@ -5,7 +5,7 @@ import sys
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -45,6 +45,9 @@ class ServerConfig:
     max_jobs_per_worker: int = 1
     # Max pending jobs (queued + running). 0 means unlimited.
     max_pending_jobs: int = 0
+    # If true, ignore request-level `backend` override and always use `backend`.
+    # Useful when running the server as a gateway in front of an external vLLM service.
+    enforce_backend: bool = False
 
     # Storage
     output_dir: str = str(DEFAULT_OUTPUT_DIR)
@@ -60,6 +63,11 @@ class ServerConfig:
     lang: str = "ch"
     formula_enable: bool = True
     table_enable: bool = True
+    # OpenAI-compatible server URL for vlm/hybrid http-client backends.
+    server_url: Optional[str] = None
+    # OpenAI-compatible server URL pool for vlm/hybrid http-client backends.
+    # If provided, it takes precedence over `server_url`.
+    server_urls: List[str] = field(default_factory=list)
 
     # vLLM knobs (only used for vLLM backends)
     virtual_vram_gb: Optional[int] = None
@@ -110,6 +118,26 @@ class ServerConfig:
 
     def hf_home_path(self) -> Path:
         return Path(self.hf_home).expanduser().resolve()
+
+    def vlm_server_urls(self) -> List[str]:
+        """
+        Return the configured OpenAI-compatible server URL pool.
+        - If `server_urls` is non-empty, use it.
+        - Else fall back to `server_url` if set.
+        """
+        urls = [str(u).strip() for u in (self.server_urls or []) if str(u).strip()]
+        if urls:
+            # de-duplicate while preserving order
+            seen = set()
+            out: List[str] = []
+            for u in urls:
+                if u not in seen:
+                    out.append(u)
+                    seen.add(u)
+            return out
+        if self.server_url and str(self.server_url).strip():
+            return [str(self.server_url).strip()]
+        return []
 
     @staticmethod
     def from_dict(data: Dict[str, Any]) -> "ServerConfig":

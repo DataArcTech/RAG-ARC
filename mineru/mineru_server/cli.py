@@ -48,6 +48,12 @@ def parse_args(argv: Optional[List[str]]) -> argparse.Namespace:
         default=int(os.getenv("MINERU_SERVER_MAX_PENDING_JOBS", "0")),
         help="Max pending parse jobs (queued + running). 0 means unlimited.",
     )
+    s.add_argument(
+        "--enforce-backend",
+        action="store_true",
+        default=bool(int(os.getenv("MINERU_SERVER_ENFORCE_BACKEND", "0"))),
+        help="If set, ignore request-level backend override and always use the server default backend.",
+    )
 
     s.add_argument("--backend", default="vlm-transformers")
     s.add_argument("--parse-method", default="auto")
@@ -59,6 +65,17 @@ def parse_args(argv: Optional[List[str]]) -> argparse.Namespace:
 
     s.add_argument("--model-source", default="modelscope")
     s.add_argument("--device", default="cuda", dest="device_mode")
+    s.add_argument(
+        "--server-url",
+        default=os.environ.get("MINERU_VLM_SERVER_URL"),
+        help="OpenAI-compatible server URL for vlm/hybrid http-client backends.",
+    )
+    s.add_argument(
+        "--server-urls",
+        action="append",
+        default=None,
+        help="Comma-separated OpenAI-compatible server URL pool for vlm/hybrid http-client backends. Can be repeated. Env: MINERU_VLM_SERVER_URLS.",
+    )
     s.add_argument("--virtual-vram-gb", type=int, default=None)
     s.add_argument("--vllm-gpu-mem-util", type=float, default=0.5)
     s.add_argument("--vllm-enforce-eager", action="store_true", default=False)
@@ -134,12 +151,35 @@ def run_server(args: argparse.Namespace) -> None:
     up_tokens = int(args.up or int(env.get("CAPTION_UP") or 500))
     down_tokens = int(args.down or int(env.get("CAPTION_DOWN") or 500))
 
+    # vLLM/OpenAI server URL pool (gateway mode)
+    server_urls: list[str] = []
+    raw_urls = []
+    if args.server_urls:
+        raw_urls.extend(args.server_urls)
+    if env.get("MINERU_VLM_SERVER_URLS"):
+        raw_urls.append(env.get("MINERU_VLM_SERVER_URLS") or "")
+    for raw in raw_urls:
+        for token in str(raw or "").split(","):
+            token = token.strip()
+            if token:
+                server_urls.append(token)
+    # de-duplicate while preserving order
+    if server_urls:
+        seen = set()
+        deduped: list[str] = []
+        for u in server_urls:
+            if u not in seen:
+                deduped.append(u)
+                seen.add(u)
+        server_urls = deduped
+
     cfg = ServerConfig(
         host=str(args.host),
         port=int(args.port),
         workers=int(args.workers),
         max_jobs_per_worker=max(1, int(args.max_jobs)),
         max_pending_jobs=max(0, int(args.max_pending)),
+        enforce_backend=bool(args.enforce_backend),
         output_dir=str(Path(args.output_dir).expanduser().resolve()),
         temp_dir=str(Path(args.temp_dir).expanduser().resolve()),
         config_path=str(DEFAULT_CONFIG_PATH),
@@ -151,6 +191,8 @@ def run_server(args: argparse.Namespace) -> None:
         lang=str(args.lang),
         formula_enable=bool(args.formula_enable),
         table_enable=bool(args.table_enable),
+        server_url=str(args.server_url) if args.server_url else None,
+        server_urls=server_urls,
         virtual_vram_gb=args.virtual_vram_gb,
         vllm_gpu_memory_utilization=float(args.vllm_gpu_mem_util),
         vllm_enforce_eager=bool(args.vllm_enforce_eager),
