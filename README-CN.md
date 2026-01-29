@@ -306,6 +306,7 @@ RAG-ARC 支持通过 `.env` 切换 PDF/图片解析方式：
 使用 MinerU 时：
 
 - 设置 `MINERU_SERVER_URL`（例如 `http://127.0.0.1:8899`），可选 `MINERU_TIMEOUT_S=900`。
+- 可选设置 `MINERU_BACKEND`（例如 `vlm-http-client`）以指定发送给 MinerU 的后端类型。
 - MinerU 相关的更多选项（页范围、资源 URL、SSH 隧道等）请参见 `mineru/README-zh.md`。
 
 如需直接切换官方提供的两套配置，可设置 `MODEL_PROFILE=api` 或 `MODEL_PROFILE=local`（或自行指定配置文件路径）。

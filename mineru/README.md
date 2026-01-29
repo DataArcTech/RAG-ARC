@@ -340,6 +340,7 @@ python mineru_main.py client --base-url "$MINERU_SERVER_URL" --file demo.pdf --o
 
 - `PARSER_PARSE_MODE=mineru`
 - `MINERU_SERVER_URL=http://<server-ip>:8899` (optional `MINERU_TIMEOUT_S=900`)
+- Optional backend override: `MINERU_BACKEND=vlm-http-client`
 - Optional page range: `MINERU_START_PAGE=0`, `MINERU_END_PAGE=1`
 
 Parsed outputs are mirrored under `PARSER_OUTPUT_DIR` (default `./data/parsed_files/mineru/<file_id>/...`).

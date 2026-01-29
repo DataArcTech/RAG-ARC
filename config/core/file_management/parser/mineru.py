@@ -65,6 +65,11 @@ def _default_end_page() -> Optional[int]:
         return None
 
 
+def _default_backend() -> str:
+    raw = str(os.getenv("MINERU_BACKEND", "") or "").strip()
+    return raw or "vlm-transformers"
+
+
 class MinerUParserConfig(AbstractConfig):
     type: Literal["mineru_parser"] = "mineru_parser"
 
@@ -92,7 +97,7 @@ class MinerUParserConfig(AbstractConfig):
     )
 
     # MinerU parse defaults (can be overridden per-call via kwargs)
-    backend: str = Field(default="vlm-transformers")
+    backend: str = Field(default_factory=_default_backend)
     parse_method: str = Field(default="auto")
     lang: str = Field(default="ch")
     formula_enable: bool = Field(default=True)

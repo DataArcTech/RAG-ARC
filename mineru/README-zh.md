@@ -334,6 +334,7 @@ python mineru_main.py client --base-url "$MINERU_SERVER_URL" --file demo.pdf --o
 
 - `PARSER_PARSE_MODE=mineru`
 - `MINERU_SERVER_URL=http://<server-ip>:8899`（可选 `MINERU_TIMEOUT_S=900`）
+- 可选后端类型：`MINERU_BACKEND=vlm-http-client`
 - 可选页范围：`MINERU_START_PAGE=0`, `MINERU_END_PAGE=1`
 
 解析产物会落盘到 `PARSER_OUTPUT_DIR`（默认 `./data/parsed_files/mineru/<file_id>/...`）。
