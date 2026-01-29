@@ -85,9 +85,16 @@ def collect_image_paths_from_chunk_payloads(
                 metadata = dict(raw_meta)
 
         if not content.strip():
-            continue
+            # Some pipelines store image URLs only in metadata (e.g. semantic_unit_type="image").
+            # Keep going so we can still resolve images via `image_urls`.
+            content = ""
 
         urls = extract_image_urls_from_markdown(content)
+        # Fallback: metadata-driven image URLs (e.g. semantic_unit_chunker image segments).
+        meta_urls = metadata.get("image_urls")
+        if isinstance(meta_urls, list):
+            urls.extend([str(u).strip() for u in meta_urls if isinstance(u, str) and str(u).strip()])
+        urls = [u for u in urls if u]
         if not urls:
             continue
 
@@ -138,12 +145,22 @@ def collect_image_paths_from_deepsearch_evidences(
             continue
         content = str(evidence.get("content") or "")
         provenance = evidence.get("provenance")
-        chunk_meta: Dict[str, Any] = {}
+        meta: Dict[str, Any] = {}
         if isinstance(provenance, dict):
-            meta = provenance.get("metadata")
-            if isinstance(meta, dict):
-                cm = meta.get("chunk_metadata")
-                if isinstance(cm, dict):
-                    chunk_meta = dict(cm)
-        wrapped.append({"content": content, "metadata": {"chunk_metadata": chunk_meta}})
+            raw_meta = provenance.get("metadata")
+            if isinstance(raw_meta, dict):
+                # Two supported shapes:
+                # 1) provenance.metadata.chunk_metadata (older/explicit)
+                # 2) provenance.metadata directly contains chunk metadata (current DeepSearch composer)
+                cm = raw_meta.get("chunk_metadata")
+                if isinstance(cm, dict) and cm:
+                    meta.update(dict(cm))
+                else:
+                    meta.update(dict(raw_meta))
+            # Back-compat: some evidence records keep filename at provenance.file_name.
+            if "filename" not in meta:
+                token = provenance.get("file_name")
+                if isinstance(token, str) and token.strip():
+                    meta["filename"] = token.strip()
+        wrapped.append({"content": content, "metadata": meta})
     return collect_image_paths_from_chunk_payloads(wrapped, max_images=max_images)

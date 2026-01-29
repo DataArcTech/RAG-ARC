@@ -59,6 +59,8 @@ REPORT_WRITE_SYSTEM_PROMPT_EN = """You are a research report writer producing kn
 4. Coherent narrative: ensure smooth transitions, avoid repetition, and keep sections focused on the outline purpose.
 5. No filler: avoid generic phrases like "This report will..." or "In conclusion" unless necessary; prioritize specific, evidence-backed details (numbers/terms/conditions).
 6. Conclusion-first preference: when appropriate, state the key conclusion early, then expand with supporting reasoning.
+7. Negative conclusions policy: do NOT conclude "not supported/does not exist" based only on short snippets. Prefer explicit statements, or evidence that reflects a full relevant block/section read (e.g., read.section/read.pages). Otherwise state "cannot confirm" and explain what is missing.
+8. Multimodal evidence: if the Evidence Pack includes images (e.g., Markdown image links), those images may be provided as inputs. You MUST read/interpret the image content and incorporate it into the answer with citations, not just the surrounding text.
 
 ## Citation Rules (CRITICAL - MUST FOLLOW EXACTLY)
 - Use inline citations ONLY in <sup>k</sup> format, where k is a Source key from the Evidence Pack.
@@ -112,6 +114,8 @@ SECTION_WRITE_SYSTEM_PROMPT_EN = """You are a research report section writer pro
 2. Graph insight highlighting: when referencing triples/paths, briefly explain why the relationship matters.
 3. Stay focused: write ONLY the content for this specific section as defined by the outline.
 4. No filler: avoid generic intro/outro sentences; focus on concrete, evidence-backed details relevant to the section purpose.
+5. Negative conclusions policy: do NOT conclude "not supported/does not exist" based only on short snippets. Prefer explicit statements, or evidence that reflects a full relevant block/section read (e.g., read.section/read.pages). Otherwise state "cannot confirm" and explain what is missing.
+6. Multimodal evidence: if the Evidence Pack includes images, you MUST read/interpret the image content and use it as evidence (with citations), not ignore it.
 
 ## Citation Rules (CRITICAL - MUST FOLLOW EXACTLY)
 - Use inline citations ONLY in <sup>k</sup> format, where k is a Source key from the Evidence Pack.
