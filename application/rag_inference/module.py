@@ -34,6 +34,7 @@ from config.rag_intent_routing import (
 from config import pageindex as pageindex_cfg
 from core.retrieval.pageindex_retriever import PageIndexRetriever
 from application.intent_routing import IntentRoutingService
+from config.rag_intent_routing import rag_intent_routing_enabled
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -102,13 +103,15 @@ class RAGInference(AbstractModule):
             self._tavily_client = None
 
         self._intent_routing: IntentRoutingService | None = None
-        try:
-            self._intent_routing = IntentRoutingService()
-            logger.info("Intent routing initialized (TOML-driven semantic router)")
-        except Exception as exc:  # noqa: BLE001
-            # Intent routing is optional; fail open to normal RAG for safety.
-            logger.warning("Intent routing init failed; continuing without it: %s", exc)
-            self._intent_routing = None
+        if rag_intent_routing_enabled():
+            try:
+                self._intent_routing = IntentRoutingService()
+                logger.info("Intent routing initialized (TOML-driven semantic router)")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Intent routing init failed; continuing without it: %s", exc)
+                self._intent_routing = None
+        else:
+            logger.info("Intent routing disabled (RAG_INTENT_ROUTING_ENABLED=0)")
 
     async def _run_blocking(self, func, *args, **kwargs):
         """Run a blocking function in a separate thread to avoid blocking the event loop."""
