@@ -1015,7 +1015,15 @@ class DeepSearchToolManager:
         artifact_path = self.artifact_dir / file_name
         try:
             with artifact_path.open("w", encoding="utf-8") as handle:
-                json.dump(payload.model_dump(), handle, ensure_ascii=False, indent=2)
+                # Tool payloads can carry UUID/path-like objects inside provenance/diagnostics.
+                # Persist a JSON-safe representation so artifact logging never breaks tool execution.
+                json.dump(
+                    json_safe(payload.model_dump(exclude_none=True)),
+                    handle,
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                )
         except OSError as exc:
             logger.warning("Failed to persist tool artifact for %s: %s", tool_name, exc)
             return None
