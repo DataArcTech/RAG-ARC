@@ -31,6 +31,17 @@ def _default_base_url() -> str:
     return os.getenv("CHAT_API_BASE_URL", os.getenv("OPENAI_BASE_URL", ""))
 
 
+def _default_timeout() -> float:
+    raw = os.getenv("CHAT_TIMEOUT_SECONDS", "")
+    token = str(raw or "").strip()
+    if token:
+        try:
+            return float(token)
+        except ValueError:
+            pass
+    return 60.0
+
+
 class OpenAIChatConfig(AbstractConfig):
     """Configuration for OpenAI Chat LLM"""
 
@@ -55,7 +66,7 @@ class OpenAIChatConfig(AbstractConfig):
     openai_api_key: str = Field(default_factory=_default_api_key)
     openai_base_url: str = Field(default_factory=_default_base_url)
     organization: Optional[str] = None
-    timeout: float = 60.0
+    timeout: float = Field(default_factory=_default_timeout)
     max_retries: int = 3
 
     def build(self) -> OpenAIChatLLM:

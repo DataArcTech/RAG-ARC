@@ -482,6 +482,8 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             "plan_step": plan_step_id,
             "question": question,
             "context_evidences": list(compacted),
+            "adapter": self.adapter,
+            "access_scope": context.access_scope,
             "graph_context": context.model_dump(exclude_none=True),
             "coverage_metrics": coverage_hint or {},
             "extra": extra or {},

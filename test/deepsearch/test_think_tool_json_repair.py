@@ -57,3 +57,33 @@ async def test_think_tool_raises_when_json_repair_disabled() -> None:
     )
     with pytest.raises(RuntimeError, match="non-JSON"):
         await tool.run(req)
+
+
+@pytest.mark.asyncio
+async def test_think_tool_repairs_schema_error() -> None:
+    invalid = {
+        "reasoning": "ok",
+        "tool_calls": [],
+        "plan": [],
+    }
+    fixed = {
+        "reasoning": "ok",
+        "tool_calls": [],
+        "plan": [],
+        "is_final": True,
+    }
+    llm = _StubLLM([json.dumps(invalid), json.dumps(fixed)])
+    tool = ThinkTool(llm_connector=llm, json_repair_attempts=1, json_repair_temperature=0.0)
+    req = ToolRunRequest(
+        question="q",
+        plan_step="p1",
+        context_evidences=[],
+        adapter=None,
+        access_scope=None,
+        extra={"think_mode": "final"},
+    )
+    result = await tool.run(req)
+    assert len(llm.calls) == 2
+    raw = result.think_notes[0].metadata.get("raw")
+    assert raw.get("is_final") is True
+    assert result.think_notes[0].metadata.get("schema_repair")

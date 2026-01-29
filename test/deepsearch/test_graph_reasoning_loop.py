@@ -131,6 +131,9 @@ async def test_think_loop_executes_tool_calls_and_updates_plan() -> None:
     tool_names = [name for name, _ in tool_manager.calls]
     assert tool_names.count("think") == 2
     assert "explore" in tool_names
+    explore_payload = next(payload for name, payload in tool_manager.calls if name == "explore")
+    assert explore_payload.get("access_scope").scope_id == "owner"
+    assert explore_payload.get("adapter") is loop.adapter
     assert any(ev.get("chunk_id") == "e1" for ev in result.get("evidences") or [])
 
     plan = result.get("runtime_plan") or {}

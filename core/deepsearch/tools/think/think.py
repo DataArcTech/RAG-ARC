@@ -151,8 +151,23 @@ class ThinkTool(GraphTool):
         try:
             response = await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
             parsed = await self._parse_or_repair_json(messages=messages, raw=response)
-            payload = ThinkToolResponse.model_validate(self._normalize_payload(parsed))
-            self._validate_mode(payload, extra)
+            schema_repair = None
+            try:
+                payload = ThinkToolResponse.model_validate(self._normalize_payload(parsed))
+                self._validate_mode(payload, extra)
+            except Exception as exc:
+                repaired = await self._attempt_json_repair(
+                    messages=messages,
+                    raw=self._serialize_payload(parsed if isinstance(parsed, dict) else {"raw": parsed}),
+                    expected="dict",
+                    error=str(exc),
+                )
+                if not isinstance(repaired, dict):
+                    raise
+                schema_repair = {"error": str(exc)}
+                parsed = repaired
+                payload = ThinkToolResponse.model_validate(self._normalize_payload(parsed))
+                self._validate_mode(payload, extra)
             return ThinkNote(
                 plan_step_id=request.plan_step,
                 reasoning=payload.reasoning,
@@ -169,6 +184,7 @@ class ThinkTool(GraphTool):
                     "report_style": payload.report_style,
                     "is_final": payload.is_final,
                     "compression": compaction_meta,
+                    "schema_repair": schema_repair,
                 },
             )
         except Exception as exc:
@@ -215,7 +231,7 @@ class ThinkTool(GraphTool):
         parsed = safe_json_loads(raw, expected="dict")
         if isinstance(parsed, dict):
             return parsed
-        repaired = await self._attempt_json_repair(messages=messages, raw=raw, expected="dict")
+        repaired = await self._attempt_json_repair(messages=messages, raw=raw, expected="dict", error="invalid_json")
         if isinstance(repaired, dict):
             return repaired
         snippet = (raw or "").strip().replace("\n", "\\n")
@@ -223,7 +239,14 @@ class ThinkTool(GraphTool):
             snippet = snippet[: self.json_repair_max_raw_chars] + "…"
         raise ValueError(f"Think tool returned non-JSON or non-dict payload. raw_snippet={snippet}")
 
-    async def _attempt_json_repair(self, *, messages: List[Dict[str, str]], raw: str, expected: str) -> Any:
+    async def _attempt_json_repair(
+        self,
+        *,
+        messages: List[Dict[str, str]],
+        raw: str,
+        expected: str,
+        error: str,
+    ) -> Any:
         if self.json_repair_attempts <= 0:
             return None
         snippet = (raw or "").strip()
@@ -232,7 +255,7 @@ class ThinkTool(GraphTool):
         expected_label = "object" if expected == "dict" else ("array" if expected == "list" else expected)
         repair_prompt = JSON_REPAIR_USER_PROMPT_EN.format(
             expected_top_level=expected_label,
-            error="invalid_json",
+            error=error,
             raw_snippet=snippet,
         )
         thread = messages + [{"role": "assistant", "content": str(raw or "")}, {"role": "user", "content": repair_prompt}]

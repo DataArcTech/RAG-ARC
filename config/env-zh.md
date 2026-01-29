@@ -65,6 +65,7 @@ Benchmark/实验模式：
 | `CHAT_MODEL_CACHE_FOLDER` | _(空)_ | 可选：HuggingFace 对话模型权重/Tokenizer 缓存目录。 |
 | `CHAT_API_KEY` | _(空)_ | **必填**（当 `CHAT_MODEL_PROVIDER=openai`）：对话模型 API Key。 |
 | `CHAT_API_BASE_URL` | _(空)_ | **必填**（当 `CHAT_MODEL_PROVIDER=openai`）：OpenAI 兼容 API Base URL（例如 `https://api.openai.com/v1`）。 |
+| `CHAT_TIMEOUT_SECONDS` | `60` | 对话模型请求超时（秒）。上游响应慢时可适当调大。 |
 | `OPENAI_CHAT_MODEL` | `gpt-4o-mini` | 兼容/默认的对话模型名（当 `CHAT_MODEL_NAME` 为空时使用）。 |
 | `LOW_COST_MODEL` | _(空)_ | 可选：更便宜的模型，用于探索型/多次调用的场景（planning/reflection）。留空则复用主对话模型。 |
 | `OPENAI_API_BASE` | _(空)_ | 可选：历史兼容的 OpenAI Base URL 别名。 |
