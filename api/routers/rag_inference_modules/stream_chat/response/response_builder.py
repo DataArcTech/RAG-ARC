@@ -17,11 +17,13 @@ from api.routers.rag_inference_handlers import (
 from api.routers.chatbot import (
     _build_sources_for_frontend,
     _build_sources_for_frontend_with_llm_keys,
+    _filter_and_renumber_sources_by_sup_keys_appearance,
     _filter_and_renumber_sources_by_sup_keys_sorted,
+    _renumber_sources_by_key_map,
     ChatbotSourceItem,
 )
 from core.presentation.evidence import build_chat_evidence
-from config.output_limits import CHAT_TOP_CHUNKS
+from config.output_limits import CHAT_TOP_CHUNKS, CITATION_STREAM_MODE
 from framework.thread_pool import get_thread_pool
 
 logger = logging.getLogger(__name__)
@@ -121,7 +123,9 @@ async def build_sources_and_evidence(
     subgraph_info: Any,
     rag_inference_handler: Any,
     assistant_response: str,
-    is_fallback_response: bool
+    is_fallback_response: bool,
+    citation_key_map: dict[int, int] | None = None,
+    assistant_response_renumbered: bool = False
 ) -> tuple[str, list, dict[int, int]]:
     """Build sources and evidence for response."""
     max_sources = int(os.getenv("CHATBOT_TOP_SOURCES", "5"))
@@ -188,18 +192,43 @@ async def build_sources_and_evidence(
     logger.info("SSE <sup> tags found in assistant_response (single format): %s", sup_tags_single)
     logger.info("SSE <sup> tags found in assistant_response (all formats): %s", sup_tags_multiple)
     
-    citation_key_map: dict[int, int] = {}
+    final_citation_key_map: dict[int, int] = citation_key_map or {}
     if not is_fallback_response:
-        assistant_response, sources_for_frontend, citation_key_map = (
-            _filter_and_renumber_sources_by_sup_keys_sorted(
+        if final_citation_key_map:
+            sources_for_frontend = _renumber_sources_by_key_map(
                 sources_for_frontend,
-                assistant_response,
+                final_citation_key_map,
             )
-        )
+            if not assistant_response_renumbered:
+                from api.routers.chatbot import _renumber_sup_tags
+
+                assistant_response = _renumber_sup_tags(
+                    assistant_response,
+                    final_citation_key_map,
+                    sort_keys=False,
+                )
+        else:
+            # Default (no override): apply the same normalization strategy used by the UI.
+            # - final: preserve legacy behavior (sorted by original key).
+            # - appearance: normalize by first-appearance order (consistent with streaming mode).
+            if CITATION_STREAM_MODE == "final":
+                assistant_response, sources_for_frontend, final_citation_key_map = (
+                    _filter_and_renumber_sources_by_sup_keys_sorted(
+                        sources_for_frontend,
+                        assistant_response,
+                    )
+                )
+            else:
+                assistant_response, sources_for_frontend, final_citation_key_map = (
+                    _filter_and_renumber_sources_by_sup_keys_appearance(
+                        sources_for_frontend,
+                        assistant_response,
+                    )
+                )
         logger.info(
             "SSE citation normalization applied: cited_sources=%d citation_key_map=%s",
             len(sources_for_frontend),
-            citation_key_map,
+            final_citation_key_map,
         )
     
     # Log final SSE response content (sources and citation_key_map)
@@ -211,7 +240,7 @@ async def build_sources_and_evidence(
         "SSE final response: sources_count=%d sources=%s citation_key_map=%s assistant_response_length=%d",
         len(sources_for_frontend),
         sources_summary,
-        citation_key_map,
+        final_citation_key_map,
         len(assistant_response),
     )
     
@@ -219,12 +248,12 @@ async def build_sources_and_evidence(
     sse_data_summary = {
         "sources_count": len(sources_for_frontend),
         "sources_keys": [s.key for s in sources_for_frontend],
-        "citation_key_map": citation_key_map,
+        "citation_key_map": final_citation_key_map,
         "assistant_response_has_sup_tags": "<sup>" in assistant_response,
     }
     logger.info("SSE complete data summary: %s", sse_data_summary)
     
-    return assistant_response, sources_for_frontend, citation_key_map
+    return assistant_response, sources_for_frontend, final_citation_key_map
 
 
 async def create_assistant_message(

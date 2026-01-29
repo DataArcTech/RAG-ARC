@@ -42,6 +42,12 @@ def parse_args(argv: Optional[List[str]]) -> argparse.Namespace:
     s.add_argument("--port", type=int, default=8899)
     s.add_argument("--workers", type=int, default=1)
     s.add_argument("--max-jobs", type=int, default=1)
+    s.add_argument(
+        "--max-pending",
+        type=int,
+        default=int(os.getenv("MINERU_SERVER_MAX_PENDING_JOBS", "0")),
+        help="Max pending parse jobs (queued + running). 0 means unlimited.",
+    )
 
     s.add_argument("--backend", default="vlm-transformers")
     s.add_argument("--parse-method", default="auto")
@@ -133,6 +139,7 @@ def run_server(args: argparse.Namespace) -> None:
         port=int(args.port),
         workers=int(args.workers),
         max_jobs_per_worker=max(1, int(args.max_jobs)),
+        max_pending_jobs=max(0, int(args.max_pending)),
         output_dir=str(Path(args.output_dir).expanduser().resolve()),
         temp_dir=str(Path(args.temp_dir).expanduser().resolve()),
         config_path=str(DEFAULT_CONFIG_PATH),

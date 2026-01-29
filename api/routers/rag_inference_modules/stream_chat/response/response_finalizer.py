@@ -38,16 +38,13 @@ async def _get_or_create_final_assistant_message(
 ) -> Tuple[Any, bool]:
     """Create the assistant message and return (message, created_now).
     
-    重要：如果 return_subgraph=True，只有在 subgraph_data 存在时才创建消息。
-    这样可以确保存储的是包含完整 subgraph_data 的消息。
+    注意：即使 return_subgraph=True，也可能因为 mindmap 生成失败/被取消等原因导致 subgraph_data 为 None。
+    这时仍然允许创建消息（subgraph_data 留空），并在后续拿到 subgraph_data 时更新已有消息。
     """
-    # 如果 return_subgraph=True 但 subgraph_data 不存在，检查是否已有消息
-    # 如果有，返回它（稍后会更新 subgraph_data）；如果没有，不应该创建（等待 mindmap 生成完成）
     if return_subgraph and subgraph_data is None:
         logger.warning(
             "[STORE] return_subgraph=True but subgraph_data is None, checking for existing message"
         )
-        # 如果已有消息，返回它（稍后会更新 subgraph_data）
         if task_info:
             registry = get_chat_task_registry()
             lock = await registry.get_finalization_lock(task_info.task_id)
@@ -62,21 +59,10 @@ async def _get_or_create_final_assistant_message(
                             existing.id
                         )
                         return existing, False
-        # 如果没有现有消息，不应该创建（等待 mindmap 生成完成）
-        # 正常情况下，_build_and_yield_final_response 和 _ensure_finalization 都会等待 mindmap 生成完成后再调用此函数
-        logger.error(
-            "[STORE] Cannot create message: return_subgraph=True but subgraph_data is None. "
-            "This should not happen as mindmap should be generated before calling this function. "
-            "session_id=%s, task_id=%s",
+        logger.warning(
+            "[STORE] Creating message without subgraph_data (mindmap may have failed): session_id=%s, task_id=%s",
             session_id,
-            task_info.task_id if task_info else "None"
-        )
-        # 为了不破坏调用链，返回一个占位符，但记录错误
-        # 实际上这种情况不应该发生
-        raise ValueError(
-            f"Cannot create message: return_subgraph=True but subgraph_data is None. "
-            f"Please ensure mindmap is generated before calling this function. "
-            f"session_id={session_id}"
+            task_info.task_id if task_info else "None",
         )
     
     # 直接创建新消息（此时 subgraph_data 已存在或 return_subgraph=False）
@@ -210,7 +196,9 @@ async def _ensure_finalization(
     task_info: Optional[Any],
     user_message: Any,
     rag_inference_handler: Any,
-    deepsearch_trace_file_path: Optional[str]
+    deepsearch_trace_file_path: Optional[str],
+    citation_key_map_override: Optional[dict[int, int]] = None,
+    assistant_response_renumbered: bool = False,
 ) -> None:
     """确保最终化逻辑执行（不yield事件，用于客户端断开时）"""
     # 检查取消
@@ -242,6 +230,14 @@ async def _ensure_finalization(
     if enable_deepsearch and deepsearch_result and deepsearch_sources_for_frontend is not None:
         sources_for_frontend = deepsearch_sources_for_frontend
         citation_key_map = deepsearch_citation_key_map
+        if citation_key_map_override:
+            from api.routers.chatbot import _renumber_sources_by_key_map
+
+            sources_for_frontend = _renumber_sources_by_key_map(
+                sources_for_frontend,
+                citation_key_map_override,
+            )
+            citation_key_map = citation_key_map_override
     else:
         assistant_response, sources_for_frontend, citation_key_map = await build_sources_and_evidence(
             chunks,
@@ -249,7 +245,9 @@ async def _ensure_finalization(
             subgraph_info,
             rag_inference_handler,
             assistant_response,
-            False
+            False,
+            citation_key_map=citation_key_map_override,
+            assistant_response_renumbered=assistant_response_renumbered,
         )
     
     # Create the assistant message exactly once per task_id.
@@ -299,7 +297,10 @@ async def _build_and_yield_final_response(
     model_name: str,
     created: int,
     request_id: str,
-    deepsearch_trace_file_path: Optional[str]
+    deepsearch_trace_file_path: Optional[str],
+    emit_final_text: bool = True,
+    citation_key_map_override: Optional[dict[int, int]] = None,
+    assistant_response_renumbered: bool = False,
 ) -> AsyncGenerator[str, None]:
     """构建并生成最终响应事件"""
     # 检查取消（在生成 mindmap 前）
@@ -317,7 +318,7 @@ async def _build_and_yield_final_response(
     )
     if return_subgraph and subgraph_data is None:
         logger.info(
-            "[STORE] Generating mindmap: return_subgraph=%s, subgraph_data is None, chunks_count=%d",
+            "[STORE] Generating mindmap: return_subgraph=%s, subgraph_data_is_none=%s, chunks_count=%d",
             return_subgraph,
             subgraph_data is None,
             len(chunks) if chunks else 0
@@ -353,6 +354,14 @@ async def _build_and_yield_final_response(
     if enable_deepsearch and deepsearch_result and deepsearch_sources_for_frontend is not None:
         sources_for_frontend = deepsearch_sources_for_frontend
         citation_key_map = deepsearch_citation_key_map
+        if citation_key_map_override:
+            from api.routers.chatbot import _renumber_sources_by_key_map
+
+            sources_for_frontend = _renumber_sources_by_key_map(
+                sources_for_frontend,
+                citation_key_map_override,
+            )
+            citation_key_map = citation_key_map_override
     else:
         assistant_response, sources_for_frontend, citation_key_map = await build_sources_and_evidence(
             chunks,
@@ -360,7 +369,9 @@ async def _build_and_yield_final_response(
             subgraph_info,
             rag_inference_handler,
             assistant_response,
-            is_fallback_response
+            is_fallback_response,
+            citation_key_map=citation_key_map_override,
+            assistant_response_renumbered=assistant_response_renumbered,
         )
     
     # 检查取消（在创建消息前）
@@ -369,8 +380,7 @@ async def _build_and_yield_final_response(
             yield cancel_event
         return
 
-    # Emit a "final_text" event so the frontend can replace the streamed text.
-    # This is necessary because citation normalization/renumbering happens after streaming.
+    # Emit a "final_text" event when streaming did not already normalize citations.
     final_text_payload = {
         "type": "final_text",
         "content": assistant_response,
@@ -384,7 +394,8 @@ async def _build_and_yield_final_response(
             await registry.append_event(task_info.task_id, final_text_payload, event_type="final_text")
         except Exception:  # noqa: BLE001
             pass
-    yield sse_json_wrapped(final_text_payload, request_id=request_id)
+    if emit_final_text:
+        yield sse_json_wrapped(final_text_payload, request_id=request_id)
     
     # Create the assistant message exactly once per task_id (even if the background callback runs).
     deepsearch_trace = deepsearch_trace_file_path if enable_deepsearch else None

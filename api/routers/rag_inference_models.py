@@ -20,7 +20,8 @@ class StreamChatRequest(BaseModel):
     """Request model for POST SSE stream chat endpoint."""
 
     query: str
-    return_subgraph: bool = True  # 默认启用，用于生成和存储 subgraph_data 到会话详情
+    # 默认启用（主要面向 livingKB）；服务端可能会基于用户权限自动禁用该能力
+    return_subgraph: bool = True
     target_owner_id: Optional[uuid.UUID] = None
     include_all_owners: bool = False
     include_evidence: bool = False
@@ -118,4 +119,3 @@ def build_stream_chat_payload(
     if evidence is not None:
         response_dict["evidence"] = evidence
     return response_dict, subgraph
-

@@ -74,6 +74,89 @@ Health check:
 curl http://127.0.0.1:8899/health
 ```
 
+---
+
+## Multi-GPU vLLM Acceleration (Recommended for High Throughput)
+
+This service supports vLLM backends, but **in-process vLLM currently runs on a single GPU only** because
+we do not pass vLLM tensor-parallel settings from this service. For **true multi-GPU acceleration**, run
+an external vLLM OpenAI-compatible server with tensor parallelism and use MinerU's `vlm-http-client`
+backend (or extend this service to pass `server_url`).
+
+### A) Start a multi-GPU vLLM server (OpenAI-compatible)
+
+Example (2 GPUs, H800 80GB, ModelScope cache):
+
+```bash
+# Recommended: use the helper script in service/scripts
+./service/scripts/start_vllm.sh --gpus 4,6 --tp 2 --port 30000
+```
+
+Script usage (common flags):
+
+```bash
+# Use a different model path
+./service/scripts/start_vllm.sh --model-path /path/to/vlm_model --gpus 0,1 --tp 2 --port 30000
+
+# Use HuggingFace cache for MinerU2.5
+./service/scripts/start_vllm.sh --model-key mineru2.5 --model-source hf --gpus 0,1 --tp 2 --port 30000
+
+# Single GPU
+./service/scripts/start_vllm.sh --gpus 0 --tp 1 --port 30000
+
+# Pass extra vLLM args (after --)
+./service/scripts/start_vllm.sh --gpus 0,1 --tp 2 --port 30000 -- --max-model-len 8192
+```
+
+Equivalent manual command:
+
+```bash
+conda activate mineru
+
+CUDA_VISIBLE_DEVICES=4,6 \
+vllm serve /home/dataarc/.cache/modelscope/hub/models/OpenDataLab/MinerU2.5-2509-1.2B \
+  --served-model-name MinerU2.5-2509-1.2B \
+  --port 30000 \
+  --tensor-parallel-size 2 \
+  --gpu-memory-utilization 0.8
+```
+
+Notes:
+- `--tensor-parallel-size` must match the number of visible GPUs.
+- vLLM pre-allocates VRAM; adjust `--gpu-memory-utilization` if you see OOM.
+- vLLM only serves VLM models; OCR models (e.g., PaddleOCR) are **not** served by vLLM.
+
+### B) Use MinerU http-client backend (example)
+
+The upstream MinerU API supports `vlm-http-client` with a `server_url` (OpenAI-compatible):
+
+```python
+from pathlib import Path
+from mineru.cli.common import aio_do_parse, read_fn
+
+await aio_do_parse(
+    output_dir="/tmp/mineru_outputs",
+    pdf_file_names=["demo3"],
+    pdf_bytes_list=[read_fn(Path("demo/pdfs/demo3.pdf"))],
+    p_lang_list=["ch"],
+    backend="vlm-http-client",
+    server_url="http://127.0.0.1:30000",
+)
+```
+
+If you want to keep using this service API, you can add a `server_url` parameter and pass it through to
+`run_mineru_parse()` → `aio_do_parse()`; that enables multi-GPU vLLM without changing your client.
+
+### Acceleration effect (example on this machine)
+
+Hardware: 2 × NVIDIA H800 80GB, vLLM 0.11.0, `--gpu-memory-utilization 0.8`, warm run.
+
+- PDF: [`(详)盛利2-至尊 产品手册(英文版).pdf`](../example/(详)盛利2-至尊%20产品手册(英文版).pdf) (126 pages)
+- Wall time: **~62s**
+- VLM inference time: **~49s** (≈ **2.5 pages/s**)
+
+Small documents can be dominated by overhead; for best gains, use larger PDFs or higher concurrency.
+
 ### 2) Client (run on your laptop)
 
 Set the server URL:
@@ -173,7 +256,7 @@ python mineru/mineru_main.py server --help
 ```
 
 Key options:
-- Networking: `--host`, `--port`, `--workers`, `--max-jobs`
+- Networking: `--host`, `--port`, `--workers`, `--max-jobs`, `--max-pending`
 - Storage: `--output-dir`, `--temp-dir`, `--modelscope-cache-dir`, `--hf-home`, `--mineru-home`
 - MinerU defaults: `--backend`, `--parse-method`, `--lang`, `--no-formula`, `--no-table`, `--model-source`, `--device`
 - vLLM knobs (vLLM backends only): `--vllm-gpu-mem-util`, `--vllm-enforce-eager`, `--vllm-max-model-len`, `--vllm-swap-space-gb`, `--vllm-cpu-offload-gb`

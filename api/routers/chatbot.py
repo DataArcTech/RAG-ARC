@@ -78,6 +78,9 @@ class ChatbotSourceItem(BaseModel):
     title: str
     file: Optional[str] = None
     description: str
+    # Optional page index info (recommended for UI display/persistence; populated by RAG SSE sources event).
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
 
 
 def _parse_uuid(value: str, field_name: str) -> uuid.UUID:
@@ -201,6 +204,7 @@ def _estimate_tokens(text: str) -> tuple[int, str]:
     if ratio > 0.8:
         return max(int(len(text) / 4), 1), "heuristic(ascii/4)"
     return len(text), "heuristic(chars)"
+
 
 def _estimate_tokens_for_messages(messages: List[Dict[str, str]]) -> tuple[int, str]:
     texts: List[str] = []
@@ -398,7 +402,7 @@ def _build_sup_key_map_sorted(
     return {old: idx + 1 for idx, old in enumerate(ordered)}
 
 
-def _renumber_sup_tags(answer_text: str, key_map: Dict[int, int]) -> str:
+def _renumber_sup_tags(answer_text: str, key_map: Dict[int, int], *, sort_keys: bool = True) -> str:
     """Renumber <sup> tags using key_map. Supports both single and multiple key formats.
     
     Examples:
@@ -447,8 +451,9 @@ def _renumber_sup_tags(answer_text: str, key_map: Dict[int, int]) -> str:
                 seen.add(k)
                 unique_new_keys.append(k)
         
-        # Sort for consistent output
-        unique_new_keys.sort()
+        # Sort for consistent output unless we want first-appearance order.
+        if sort_keys:
+            unique_new_keys.sort()
         
         # Format as comma-separated list
         keys_formatted = ", ".join(str(k) for k in unique_new_keys)
@@ -477,6 +482,56 @@ def _filter_and_renumber_sources_by_sup_keys_sorted(
     renumbered_sources = [s.model_copy(update={"key": key_map[s.key]}) for s in filtered]
     renumbered_answer = _renumber_sup_tags(answer_text, key_map)
     return (renumbered_answer, renumbered_sources, key_map)
+
+
+def _build_sup_key_map_by_appearance(
+    answer_text: str,
+    *,
+    sources: List[ChatbotSourceItem] | None = None,
+) -> Dict[int, int]:
+    """Build a citation key remap based on first-appearance order."""
+    ordered_keys = _extract_sup_keys(answer_text)
+    if sources is not None:
+        available = {int(s.key) for s in sources if isinstance(getattr(s, "key", None), int)}
+        ordered_keys = [key for key in ordered_keys if key in available]
+    key_map: Dict[int, int] = {}
+    for key in ordered_keys:
+        if key not in key_map:
+            key_map[key] = len(key_map) + 1
+    return key_map
+
+
+def _renumber_sources_by_key_map(
+    sources: List[ChatbotSourceItem],
+    key_map: Dict[int, int],
+) -> List[ChatbotSourceItem]:
+    """Renumber sources using a precomputed key map (old->new)."""
+    if not sources or not key_map:
+        return []
+    filtered = [s for s in sources if s.key in key_map]
+    filtered.sort(key=lambda item: key_map[item.key])
+    return [s.model_copy(update={"key": key_map[s.key]}) for s in filtered]
+
+
+def _filter_and_renumber_sources_by_sup_keys_appearance(
+    sources: List[ChatbotSourceItem],
+    answer_text: str,
+) -> tuple[str, List[ChatbotSourceItem], Dict[int, int]]:
+    """
+    Keep only cited sources but ensure contiguous keys starting at 1.
+    Remap strategy: first-appearance order in the answer.
+    """
+    if not sources:
+        return (answer_text or "", [], {})
+
+    key_map = _build_sup_key_map_by_appearance(answer_text, sources=sources)
+    if not key_map:
+        return (answer_text or "", [], {})
+
+    renumbered_sources = _renumber_sources_by_key_map(sources, key_map)
+    renumbered_answer = _renumber_sup_tags(answer_text, key_map, sort_keys=False)
+    return (renumbered_answer, renumbered_sources, key_map)
+
 
 def _guess_media_type(filename: str | None, fallback: str = "application/octet-stream") -> str:
     if filename:
@@ -589,6 +644,16 @@ def _build_sources_for_frontend_with_llm_keys(
         metadata = dict(entry.get("metadata") or {})
         file_id = str(metadata.get("source_file_id") or "").strip() or None
         filename = str(metadata.get("filename") or "").strip() or "source"
+        page_start = metadata.get("page_start")
+        page_end = metadata.get("page_end")
+        try:
+            page_start = int(page_start) if page_start is not None else None
+        except Exception:  # noqa: BLE001
+            page_start = None
+        try:
+            page_end = int(page_end) if page_end is not None else None
+        except Exception:  # noqa: BLE001
+            page_end = None
 
         content = str(entry.get("content") or "").strip()
         if max_chars > 0 and len(content) > max_chars:
@@ -647,6 +712,8 @@ def _build_sources_for_frontend_with_llm_keys(
                 title=source_title,
                 file=file_url,
                 description=content,
+                page_start=page_start,
+                page_end=page_end,
             )
         )
     

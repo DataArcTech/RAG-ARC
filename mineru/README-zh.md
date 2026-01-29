@@ -75,6 +75,88 @@ python mineru/mineru_main.py server \
 curl http://127.0.0.1:8899/health
 ```
 
+---
+
+## 多卡 vLLM 加速（推荐高吞吐）
+
+本服务支持 vLLM 后端，但**进程内 vLLM 目前只能单卡**（未透传 tensor-parallel 参数）。
+要实现**真正多卡加速**，推荐启动一个外部 vLLM 的 OpenAI 兼容服务，然后用 MinerU 的
+`vlm-http-client` 后端访问（或给本服务新增 `server_url` 透传）。
+
+### A) 启动多卡 vLLM 服务（OpenAI 兼容）
+
+示例（2 张 GPU，H800 80GB，ModelScope 缓存）：
+
+```bash
+# 推荐：使用 service/scripts 启动脚本
+./service/scripts/start_vllm.sh --gpus 4,6 --tp 2 --port 30000
+```
+
+脚本用法（常见选项）：
+
+```bash
+# 指定自定义模型路径
+./service/scripts/start_vllm.sh --model-path /path/to/vlm_model --gpus 0,1 --tp 2 --port 30000
+
+# 使用 HuggingFace 缓存的 MinerU2.5
+./service/scripts/start_vllm.sh --model-key mineru2.5 --model-source hf --gpus 0,1 --tp 2 --port 30000
+
+# 单卡
+./service/scripts/start_vllm.sh --gpus 0 --tp 1 --port 30000
+
+# 透传额外 vLLM 参数（放在 -- 后面）
+./service/scripts/start_vllm.sh --gpus 0,1 --tp 2 --port 30000 -- --max-model-len 8192
+```
+
+等价手动命令：
+
+```bash
+conda activate mineru
+
+CUDA_VISIBLE_DEVICES=4,6 \
+vllm serve /home/dataarc/.cache/modelscope/hub/models/OpenDataLab/MinerU2.5-2509-1.2B \
+  --served-model-name MinerU2.5-2509-1.2B \
+  --port 30000 \
+  --tensor-parallel-size 2 \
+  --gpu-memory-utilization 0.8
+```
+
+注意：
+- `--tensor-parallel-size` 必须与可见 GPU 数量一致。
+- vLLM 会预分配显存；如 OOM 请调低 `--gpu-memory-utilization`。
+- vLLM 仅用于 VLM 模型；OCR 模型（如 PaddleOCR）**不走 vLLM**。
+
+### B) 使用 MinerU http-client 后端（示例）
+
+上游 MinerU API 支持 `vlm-http-client` 并可传 `server_url`（OpenAI 兼容）：
+
+```python
+from pathlib import Path
+from mineru.cli.common import aio_do_parse, read_fn
+
+await aio_do_parse(
+    output_dir="/tmp/mineru_outputs",
+    pdf_file_names=["demo3"],
+    pdf_bytes_list=[read_fn(Path("demo/pdfs/demo3.pdf"))],
+    p_lang_list=["ch"],
+    backend="vlm-http-client",
+    server_url="http://127.0.0.1:30000",
+)
+```
+
+如需继续使用本服务的 API，可在 `service` 里新增 `server_url` 参数并透传给
+`run_mineru_parse()` → `aio_do_parse()`，即可无缝接入多卡 vLLM。
+
+### 加速效果（本机示例）
+
+硬件：2 × NVIDIA H800 80GB，vLLM 0.11.0，`--gpu-memory-utilization 0.8`，热身后测试。
+
+- 文档：[`(详)盛利2-至尊 产品手册(英文版).pdf`](../example/(详)盛利2-至尊%20产品手册(英文版).pdf)（126 页）
+- 总耗时：**~62s**
+- VLM 推理耗时：**~49s**（约 **2.5 页/秒**）
+
+小文档可能被固定开销主导；大文档或更高并发更能体现多卡优势。
+
 ### 2) 本地 Client 调用
 
 配置服务地址（避免硬编码，方便随时迁移服务机器）：
@@ -174,7 +256,7 @@ python mineru/mineru_main.py server --help
 ```
 
 常用参数：
-- 网络：`--host`, `--port`, `--workers`, `--max-jobs`
+- 网络：`--host`, `--port`, `--workers`, `--max-jobs`, `--max-pending`
 - 存储：`--output-dir`, `--temp-dir`, `--modelscope-cache-dir`, `--hf-home`, `--mineru-home`
 - MinerU 默认参数：`--backend`, `--parse-method`, `--lang`, `--no-formula`, `--no-table`, `--model-source`, `--device`
 - vLLM（仅 vLLM backend 生效）：`--vllm-gpu-mem-util`, `--vllm-enforce-eager`, `--vllm-max-model-len`, `--vllm-swap-space-gb`, `--vllm-cpu-offload-gb`

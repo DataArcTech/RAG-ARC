@@ -118,7 +118,7 @@ async def stream_chat_sse(
     Request body (JSON):
     {
         "query": "User query text",
-        "return_subgraph": true,  # 默认启用，用于生成和存储 subgraph_data
+        "return_subgraph": true,  # 默认启用（livingKB）；非 livingKB 若未显式传入会被自动关闭，显式传入会进行权限校验
         "target_owner_id": null,
         "include_all_owners": false,
         "include_evidence": false
@@ -140,17 +140,20 @@ async def stream_chat_sse(
     
     # Validate authentication and permissions
     await validators.validate_user_authentication(current_user)
-    await validators.validate_user_permissions(
-        current_user,
-        request.return_subgraph,
-        request.include_evidence
-    )
-    await validators.validate_session_access(session_id, current_user)
     
     # chatKB 用户（type!=0）不返回子图/证据，但照常返回对话流
+    # 强制判断：chatKB用户无论客户端如何传入，都无条件禁用子图和证据
     user_type = getattr(current_user, "type", 0)
     return_subgraph = request.return_subgraph and (user_type == 0)
     include_evidence = request.include_evidence and (user_type == 0)
+    
+    # 权限验证
+    await validators.validate_user_permissions(
+        current_user,
+        return_subgraph,
+        include_evidence,
+    )
+    await validators.validate_session_access(session_id, current_user)
     
     # Extract parameters（return_subgraph/include_evidence 已按 user_type 处理，见上）
     query = request.query
