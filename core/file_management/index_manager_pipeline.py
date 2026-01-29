@@ -338,20 +338,6 @@ class _IndexManagerPipelineMixin:
                         chunks=stored_chunks,
                     )
                     pageindex_info["summaries"] = summary_info
-                    doc_desc = await self.pageindex_service.build_doc_description(context=pageindex_context)
-                    if doc_desc is not None:
-                        pageindex_info["doc_description"] = {"enabled": True}
-                    doc_profile = await self.pageindex_service.build_doc_profile(context=pageindex_context)
-                    try:
-                        from config import pageindex as pageindex_cfg
-
-                        pageindex_info["doc_profile"] = {
-                            "enabled": bool(pageindex_cfg.doc_profile_enabled()),
-                            "generated": bool(doc_profile is not None),
-                        }
-                    except Exception:
-                        if doc_profile is not None:
-                            pageindex_info["doc_profile"] = {"enabled": True, "generated": True}
                 except Exception as exc:
                     logger.warning("PageIndex summaries failed for %s: %s", file_id, exc)
                     pageindex_info["summary_error"] = str(exc)

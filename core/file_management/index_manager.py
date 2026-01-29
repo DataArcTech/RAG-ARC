@@ -57,11 +57,7 @@ class IndexManager(_IndexManagerPipelineMixin, _IndexManagerStatusMixin, _IndexM
 
             if pageindex_cfg.pageindex_enabled():
                 llm = None
-                if (
-                    pageindex_cfg.section_summary_enabled()
-                    or pageindex_cfg.doc_routing_enabled()
-                    or pageindex_cfg.doc_profile_enabled()
-                ):
+                if pageindex_cfg.section_summary_enabled():
                     try:
                         llm = OpenAIChatConfig().build()
                     except Exception as exc:  # noqa: BLE001

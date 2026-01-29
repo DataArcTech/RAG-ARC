@@ -10,9 +10,9 @@ from core.file_management.pageindex.indexing import (
     resolve_base_bm25_config,
     resolve_base_faiss_config,
 )
-from core.file_management.pageindex.summary import DocDescriptionGenerator, DocProfileGenerator, SectionSummaryGenerator
+from core.file_management.pageindex.summary import SectionSummaryGenerator
 from core.file_management.pageindex.tree_builder import SectionTreeBuildResult, build_section_tree
-from core.file_management.pageindex.types import DocDescription, DocProfile, SectionNode
+from core.file_management.pageindex.types import SectionNode
 from core.file_management.pageindex.utils import normalize_for_match
 from core.utils.path_guard import require_writable_dir
 from encapsulation.data_model.schema import Chunk
@@ -30,8 +30,6 @@ class PageIndexContext:
     tree: SectionTreeBuildResult
     nodes_by_id: Dict[str, SectionNode]
     normalized_page_texts: Dict[int, str]
-    doc_description: Optional[DocDescription] = None
-    doc_profile: Optional[DocProfile] = None
 
 
 def _build_tree_payload(nodes: List[SectionNode]) -> dict:
@@ -78,8 +76,6 @@ class PageIndexService:
     def __init__(self, llm) -> None:
         self.llm = llm
         self.summary_generator = SectionSummaryGenerator(llm) if llm else None
-        self.doc_generator = DocDescriptionGenerator(llm) if llm else None
-        self.profile_generator = DocProfileGenerator(llm) if llm else None
 
     def build_context(
         self,
@@ -133,7 +129,6 @@ class PageIndexService:
 
         tree_path = artifact_dir / pageindex_cfg.pageindex_tree_filename()
         nodes_path = artifact_dir / pageindex_cfg.pageindex_nodes_filename()
-        doc_path = artifact_dir / pageindex_cfg.pageindex_doc_filename()
 
         tree_payload = {
             "file_id": context.file_id,
@@ -150,26 +145,6 @@ class PageIndexService:
         with nodes_path.open("w", encoding="utf-8") as handle:
             for row in nodes_payload:
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-        if context.doc_description or context.doc_profile:
-            doc_payload: dict[str, Any] = {
-                "file_id": context.file_id,
-                "title": context.filename,
-            }
-            if context.doc_description:
-                doc_payload["description"] = context.doc_description.description
-            if context.doc_profile is not None:
-                doc_payload["profile"] = {
-                    "company": context.doc_profile.company,
-                    "product": context.doc_profile.product,
-                    "model": context.doc_profile.model,
-                    "version": context.doc_profile.version,
-                    "doc_type": context.doc_profile.doc_type,
-                    "language": context.doc_profile.language,
-                    "keywords": list(context.doc_profile.keywords),
-                    "aliases": list(context.doc_profile.aliases),
-                }
-            doc_path.write_text(json.dumps(doc_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _chunk_offset(self, markdown: str, chunk_text: str, *, cursor: int, snippet_chars: int) -> Optional[int]:
         if not chunk_text:
@@ -313,34 +288,6 @@ class PageIndexService:
         summary_count = sum(1 for node in context.tree.nodes if node.summary)
         return {"summaries": summary_count}
 
-    async def build_doc_description(self, *, context: PageIndexContext) -> Optional[DocDescription]:
-        if not pageindex_cfg.doc_routing_enabled():
-            return None
-        if self.doc_generator is None:
-            logger.warning("Doc description generator missing; skipping doc routing description")
-            return None
-        desc = await self.doc_generator.build_description(
-            file_id=context.file_id,
-            filename=context.filename,
-            nodes=context.tree.nodes,
-        )
-        context.doc_description = desc
-        return desc
-
-    async def build_doc_profile(self, *, context: PageIndexContext) -> Optional[DocProfile]:
-        if not pageindex_cfg.doc_profile_enabled():
-            return None
-        if self.profile_generator is None:
-            logger.warning("Doc profile generator missing; skipping doc profile")
-            return None
-        profile = await self.profile_generator.build_profile(
-            file_id=context.file_id,
-            filename=context.filename,
-            nodes=context.tree.nodes,
-        )
-        context.doc_profile = profile
-        return profile
-
     def _section_chunks(self, *, context: PageIndexContext, owner_id: Optional[str]) -> List[Chunk]:
         chunks: List[Chunk] = []
         for node in context.tree.nodes:
@@ -368,60 +315,6 @@ class PageIndexService:
             )
         return chunks
 
-    def _doc_chunks(self, *, context: PageIndexContext, owner_id: Optional[str]) -> List[Chunk]:
-        desc = context.doc_description
-        profile = context.doc_profile
-        if desc is None and profile is None:
-            return []
-        title = str((desc.title if desc is not None else context.filename) or "").strip()
-        parts: list[str] = []
-        if desc is not None:
-            parts.append(str(desc.description or "").strip())
-        if profile is not None:
-            # Keep this compact; it is used for routing and disambiguation.
-            if profile.company:
-                parts.append(f"company: {profile.company}")
-            if profile.product:
-                parts.append(f"product: {profile.product}")
-            if profile.model:
-                parts.append(f"model: {profile.model}")
-            if profile.version:
-                parts.append(f"version: {profile.version}")
-            if profile.doc_type:
-                parts.append(f"doc_type: {profile.doc_type}")
-            if profile.language:
-                parts.append(f"language: {profile.language}")
-            if profile.keywords:
-                parts.append("keywords: " + ", ".join(profile.keywords))
-            if profile.aliases:
-                parts.append("aliases: " + ", ".join(profile.aliases))
-
-        content = "\n".join([p for p in (title, "\n".join([p for p in parts if p]).strip()) if p]).strip()
-        metadata: dict[str, Any] = {
-            "doc_id": context.file_id,
-            "source_file_id": context.file_id,
-            "filename": context.filename,
-            "owner_id": owner_id,
-        }
-        if profile is not None:
-            # Keep metadata flat and JSON-serializable for downstream indexers/filters.
-            for key, value in (
-                ("doc_profile_company", profile.company),
-                ("doc_profile_product", profile.product),
-                ("doc_profile_model", profile.model),
-                ("doc_profile_version", profile.version),
-                ("doc_profile_doc_type", profile.doc_type),
-                ("doc_profile_language", profile.language),
-            ):
-                if value:
-                    metadata[key] = value
-            if profile.keywords:
-                metadata["doc_profile_keywords"] = list(profile.keywords)
-            if profile.aliases:
-                metadata["doc_profile_aliases"] = list(profile.aliases)
-
-        return [Chunk(id=context.file_id, content=content, owner_id=owner_id, metadata=metadata)]
-
     async def build_indexes(
         self,
         *,
@@ -439,9 +332,6 @@ class PageIndexService:
         section_chunks = self._section_chunks(context=context, owner_id=owner_id)
         if section_chunks:
             results["section_index"] = await indexers.index_sections(section_chunks)
-        doc_chunks = self._doc_chunks(context=context, owner_id=owner_id)
-        if doc_chunks:
-            results["doc_index"] = await indexers.index_docs(doc_chunks)
 
         self._write_artifacts(context)
         return results

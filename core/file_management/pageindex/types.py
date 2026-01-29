@@ -31,24 +31,3 @@ class SectionNode:
     heading_start: Optional[int] = None
     heading_end: Optional[int] = None
     level_source: Optional[str] = None
-
-
-@dataclass
-class DocDescription:
-    file_id: str
-    title: str
-    description: str
-
-
-@dataclass
-class DocProfile:
-    """Structured identifiers used for cross-document disambiguation in doc routing."""
-
-    company: Optional[str] = None
-    product: Optional[str] = None
-    model: Optional[str] = None
-    version: Optional[str] = None
-    doc_type: Optional[str] = None
-    language: Optional[str] = None
-    keywords: List[str] = field(default_factory=list)
-    aliases: List[str] = field(default_factory=list)

@@ -120,51 +120,53 @@ def section_bm25_index_path(default: str = "./data/section_bm25_index") -> str:
 
 
 def doc_routing_enabled() -> bool:
-    return _env_bool("DOC_ROUTING_ENABLED", True)
+    # Deprecated: doc routing is handled by DeepSearch `search.file` via evidence-driven retrieval.
+    return False
 
 
 def doc_desc_model_name() -> Optional[str]:
-    return _env_optional_str("DOC_DESC_MODEL")
+    # Deprecated: no doc descriptions are generated.
+    return None
 
 
 def doc_desc_max_tokens(default: int = 400) -> int:
-    return _env_int("DOC_DESC_MAX_TOKENS", default, minimum=0)
+    return 0
 
 def doc_profile_enabled() -> bool:
-    # Cross-doc disambiguation relies on this; keep default enabled.
-    return _env_bool("DOC_PROFILE_ENABLED", True)
+    # Deprecated: doc profile generation was removed to keep indexing fast and avoid LLM-generated noise.
+    return False
 
 
 def doc_profile_model_name() -> Optional[str]:
-    return _env_optional_str("DOC_PROFILE_MODEL")
+    return None
 
 
 def doc_profile_max_tokens(default: int = 450) -> int:
-    return _env_int("DOC_PROFILE_MAX_TOKENS", default, minimum=0)
+    return 0
 
 
 def doc_profile_max_list_items(default: int = 12) -> int:
-    return _env_int("DOC_PROFILE_MAX_LIST_ITEMS", default, minimum=0)
+    return 0
 
 
 def doc_top_k(default: int = 5) -> int:
-    return _env_int("DOC_TOP_K", default, minimum=0)
+    return 0
 
 
 def doc_retrieval_candidates_k(default: int = 10) -> int:
-    return _env_int("DOC_RETRIEVE_CANDIDATES_K", default, minimum=0)
+    return 0
 
 
 def doc_rrf_k(default: int = 60) -> int:
-    return _env_int("DOC_RRF_K", default, minimum=1)
+    return 0
 
 
 def doc_routing_faiss_index_path(default: str = "./data/doc_routing_faiss_index") -> str:
-    return str(os.getenv("DOC_ROUTING_FAISS_INDEX_PATH", default))
+    return default
 
 
 def doc_routing_bm25_index_path(default: str = "./data/doc_routing_bm25_index") -> str:
-    return str(os.getenv("DOC_ROUTING_BM25_INDEX_PATH", default))
+    return default
 
 
 def section_level_conflict_ratio(default: float = 0.4) -> float:
@@ -196,7 +198,8 @@ def pageindex_nodes_filename(default: str = "pageindex_nodes.jsonl") -> str:
 
 
 def pageindex_doc_filename(default: str = "pageindex_doc.json") -> str:
-    return str(os.getenv("PAGEINDEX_DOC_FILENAME", default))
+    # Deprecated: no doc-level artifacts are produced.
+    return default
 
 
 def section_chunk_match_snippet_chars(default: int = 200) -> int:
@@ -227,18 +230,6 @@ __all__ = [
     "section_score_weight",
     "section_faiss_index_path",
     "section_bm25_index_path",
-    "doc_routing_enabled",
-    "doc_desc_model_name",
-    "doc_desc_max_tokens",
-    "doc_profile_enabled",
-    "doc_profile_model_name",
-    "doc_profile_max_tokens",
-    "doc_profile_max_list_items",
-    "doc_top_k",
-    "doc_retrieval_candidates_k",
-    "doc_rrf_k",
-    "doc_routing_faiss_index_path",
-    "doc_routing_bm25_index_path",
     "section_level_conflict_ratio",
     "section_level_force_flat_if_uniform",
     "section_level_max",
@@ -246,7 +237,6 @@ __all__ = [
     "section_numbering_max_level",
     "pageindex_tree_filename",
     "pageindex_nodes_filename",
-    "pageindex_doc_filename",
     "section_chunk_match_snippet_chars",
     "section_page_match_snippet_chars",
     "section_page_match_max_pages",

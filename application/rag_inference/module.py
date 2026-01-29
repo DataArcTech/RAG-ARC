@@ -637,8 +637,6 @@ class RAGInference(AbstractModule):
             web_future = get_thread_pool().executor.submit(_run_web_search)
             logger.info("Web search future submitted")
 
-        pageindex_doc_ids: List[str] = []
-        pageindex_doc_ids_by_owner: Dict[str, List[str]] = {}
         pageindex_section_scores: Dict[str, float] = {}
         chunks: list[Chunk] = []
         subgraph_infos: list[dict[str, Any]] = []
@@ -665,18 +663,10 @@ class RAGInference(AbstractModule):
             if pageindex_retriever is not None and pageindex_cfg.pageindex_enabled():
                 try:
                     for owner_token in visibility.owner_ids:
-                        doc_ids: List[str] = []
-                        if pageindex_cfg.doc_routing_enabled():
-                            doc_ids = pageindex_retriever.retrieve_docs(
-                                rewritten_query,
-                                owner_id=str(owner_token),
-                            )
-                            if doc_ids:
-                                pageindex_doc_ids_by_owner[str(owner_token)] = doc_ids
                         section_hits = pageindex_retriever.retrieve_sections(
                             rewritten_query,
                             owner_id=str(owner_token),
-                            file_ids=doc_ids or None,
+                            file_ids=None,
                         )
                         for hit in section_hits:
                             meta = getattr(hit, "metadata", None) or {}
@@ -691,12 +681,6 @@ class RAGInference(AbstractModule):
                                 pageindex_section_scores[section_id] = float(score)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("PageIndex retrieval failed: %s", exc)
-
-            if len(visibility.owner_ids) == 1 and pageindex_doc_ids_by_owner:
-                owner_key = str(next(iter(visibility.owner_ids)))
-                pageindex_doc_ids = pageindex_doc_ids_by_owner.get(owner_key, [])
-                if pageindex_doc_ids:
-                    pageindex_doc_ids = list(dict.fromkeys(pageindex_doc_ids))
 
             for owner_token in visibility.owner_ids:
                 retrieved: list[Chunk] = self.retriever.invoke(
@@ -766,14 +750,6 @@ class RAGInference(AbstractModule):
         chunks = dedupe_chunks(chunks)
         if len(chunks) != before:
             logger.info("Deduped retrieved chunks: %d -> %d", before, len(chunks))
-
-        if pageindex_doc_ids:
-            chunks, info = self._filter_chunks_by_doc_ids(
-                chunks,
-                doc_ids=pageindex_doc_ids,
-                min_keep=pageindex_cfg.section_min_keep(),
-            )
-            logger.info("PageIndex doc filter: %s", info)
 
         if pageindex_section_scores:
             chunks, info = self._filter_chunks_by_section_scores(
