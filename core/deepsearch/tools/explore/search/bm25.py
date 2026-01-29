@@ -1,6 +1,5 @@
 """BM25 search channel and tool."""
 import asyncio
-import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from config.core.deepsearch import tool_defaults
@@ -13,15 +12,46 @@ from framework.thread_pool import get_thread_pool
 
 from ...base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from ...governance_tags import EVIDENCE_PRIMARY, SCOPE_FILE, SCOPE_OWNER
-from .base import _ChannelResult, _SearchToolBase
+from .base import _ChannelResult, _SearchToolBase, strip_file_scope_from_graph_context
 
 
 class _Bm25Channel:
     @staticmethod
     def _tokenize_query(query: str, *, min_len: int) -> List[str]:
+        # Tokenization for snippet highlighting only (not retrieval). Avoid regex-based tokenization.
         raw = str(query or "")
-        tokens = re.findall(r"[\u4e00-\u9fff]+|[A-Za-z0-9_\\-]+", raw)
-        filtered = []
+        tokens: List[str] = []
+        buf: List[str] = []
+        mode: Optional[str] = None  # "zh" | "alnum"
+
+        def _flush() -> None:
+            nonlocal buf, mode
+            if not buf:
+                return
+            tokens.append("".join(buf))
+            buf = []
+            mode = None
+
+        for ch in raw:
+            code = ord(ch)
+            is_zh = 0x4E00 <= code <= 0x9FFF
+            is_alnum = ch.isalnum() or ch in {"_", "-"}
+            if is_zh:
+                if mode != "zh":
+                    _flush()
+                    mode = "zh"
+                buf.append(ch)
+                continue
+            if is_alnum:
+                if mode != "alnum":
+                    _flush()
+                    mode = "alnum"
+                buf.append(ch)
+                continue
+            _flush()
+        _flush()
+
+        filtered: List[str] = []
         seen: set[str] = set()
         for token in tokens:
             key = token.strip()
@@ -44,27 +74,34 @@ class _Bm25Channel:
         if not query_tokens:
             return self._summary_window(raw), None
 
-        try:
-            pattern = re.compile("|".join(re.escape(t) for t in query_tokens), flags=re.IGNORECASE)
-        except re.error:
-            return self._summary_window(raw), None
+        lowered = raw.lower()
+        best_pos = None
+        best_token = None
+        for token in query_tokens:
+            pos = lowered.find(token.lower())
+            if pos == -1:
+                continue
+            if best_pos is None or pos < best_pos:
+                best_pos = pos
+                best_token = token
 
-        match = pattern.search(raw)
-        if not match:
+        if best_pos is None or best_token is None:
             return self._summary_window(raw), None
 
         window = max(1, int(tool_defaults.SEARCH_BM25_HIGHLIGHT_WINDOW_CHARS))
-        start = max(0, match.start() - int(window / 2))
+        start = max(0, int(best_pos) - int(window / 2))
         end = min(len(raw), start + window)
         snippet = raw[start:end]
 
         prefix = str(tool_defaults.SEARCH_BM25_HIGHLIGHT_PREFIX)
         suffix = str(tool_defaults.SEARCH_BM25_HIGHLIGHT_SUFFIX)
+        # Highlight in a simple, deterministic way without regex.
+        snippet_lower = snippet.lower()
+        token_lower = best_token.lower()
+        idx = snippet_lower.find(token_lower)
+        if idx != -1:
+            snippet = snippet[:idx] + prefix + snippet[idx : idx + len(best_token)] + suffix + snippet[idx + len(best_token) :]
 
-        def _wrap(m: re.Match[str]) -> str:
-            return f"{prefix}{m.group(0)}{suffix}"
-
-        snippet = pattern.sub(_wrap, snippet)
         if start > 0:
             snippet = "..." + snippet
         if end < len(raw):
@@ -73,7 +110,7 @@ class _Bm25Channel:
         max_chars = max(1, int(tool_defaults.SEARCH_BM25_SNIPPET_MAX_CHARS))
         if len(snippet) > max_chars:
             snippet = snippet[: max_chars - 3].rstrip() + "..."
-        return snippet, match.group(0)
+        return snippet, best_token
 
     async def _run_bm25(
         self: _SearchToolBase,
@@ -198,21 +235,21 @@ class SearchBM25Tool(_SearchToolBase, _Bm25Channel, GraphTool):
     """BM25-only search tool."""
 
     descriptor = ToolDescriptor(
-        name="search.bm25",
+        name="search.scoped.bm25",
         channel="graph",
-        description="BM25-only lexical search with highlighted snippets.",
+        description="BM25-only lexical search scoped to a file_id/file_ids (prevents cross-document noise).",
         speed="fast",
         cost="low",
         strategy_tags=("search", "bm25", EVIDENCE_PRIMARY, SCOPE_OWNER, SCOPE_FILE),
         profile="F",
         determinism="deterministic",
-        namespace="rag-arc.deepsearch.tools.search.bm25",
+        namespace="rag-arc.deepsearch.tools.search.scoped.bm25",
         mcp_callable=True,
         input_schema=build_input_schema(
             extra_properties={
                 "focus_query": {"type": "string", "description": "Optional query override."},
-                "file_id": {"type": "string", "description": "Restrict results to a specific file_id."},
-                "file_ids": {"type": "array", "items": {"type": "string"}, "description": "Restrict results to file_ids."},
+                "file_id": {"type": "string", "description": "Restrict results to a specific file_id (required unless file_ids provided)."},
+                "file_ids": {"type": "array", "items": {"type": "string"}, "description": "Restrict results to file_ids (required unless file_id provided)."},
                 "filename_contains": {"type": "array", "items": {"type": "string"}, "description": "Best-effort filename filter."},
                 "section_id": {"type": "string", "description": "Restrict results to a specific section_id."},
                 "section_ids": {"type": "array", "items": {"type": "string"}, "description": "Restrict results to section_ids."},
@@ -236,6 +273,63 @@ class SearchBM25Tool(_SearchToolBase, _Bm25Channel, GraphTool):
             graph_context_metadata=(request.graph_context.metadata if request.graph_context else {}),
             question=request.question,
         )
+        if not getattr(file_scope, "file_ids", None):
+            return ToolResult(
+                summary="search.scoped.bm25 skipped: missing file_id/file_ids (call search.file first).",
+                diagnostics={"reason": "missing_file_scope", "query": query},
+            )
         top_k = self._resolve_top_k(request.extra.get("top_k"), tool_defaults.SEARCH_DEFAULT_TOP_K)
         result = await self._run_bm25(request=request, query=query, top_k=top_k, file_scope=file_scope)
         return ToolResult(summary=result.summary, evidences=result.evidences, diagnostics=result.diagnostics)
+
+
+class SearchGlobalBM25Tool(_SearchToolBase, _Bm25Channel, GraphTool):
+    """BM25-only global search tool (does not inherit file_scope)."""
+
+    descriptor = ToolDescriptor(
+        name="search.global.bm25",
+        channel="graph",
+        description=(
+            "BM25-only lexical search across all accessible documents. "
+            "Warning: may introduce cross-document/company noise. Prefer search.scoped.bm25."
+        ),
+        speed="fast",
+        cost="low",
+        strategy_tags=("search", "bm25", "global", EVIDENCE_PRIMARY, SCOPE_OWNER, SCOPE_FILE),
+        profile="F",
+        determinism="deterministic",
+        namespace="rag-arc.deepsearch.tools.search.global.bm25",
+        mcp_callable=True,
+        input_schema=SearchBM25Tool.descriptor.input_schema,
+        example_args={
+            "question": "Find keyword matches globally",
+            "plan_step": "plan_01",
+            "extra": {"channels": ["bm25"], "top_k": 10},
+        },
+    )
+
+    async def run(self, request: ToolRunRequest) -> ToolResult:
+        query = self._resolve_query(request)
+        patched_ctx = strip_file_scope_from_graph_context(request.graph_context)
+        file_scope = resolve_file_scope(
+            extra=request.extra,
+            graph_context_metadata=(patched_ctx.metadata if patched_ctx else {}),
+            question=request.question,
+        )
+        top_k = self._resolve_top_k(request.extra.get("top_k"), tool_defaults.SEARCH_DEFAULT_TOP_K)
+        patched = ToolRunRequest(
+            question=request.question,
+            plan_step=request.plan_step,
+            context_evidences=request.context_evidences,
+            adapter=request.adapter,
+            access_scope=request.access_scope,
+            extra=dict(request.extra or {}),
+            graph_context=patched_ctx,
+            coverage_metrics=request.coverage_metrics,
+        )
+        result = await self._run_bm25(request=patched, query=query, top_k=top_k, file_scope=file_scope)
+        risk = "global_search_may_introduce_cross_doc_noise"
+        diagnostics = {**dict(result.diagnostics or {}), "search_mode": "global", "risk": risk}
+        summary = (result.summary or "BM25 search completed.").rstrip()
+        summary = summary + f" NOTE: {risk}."
+        return ToolResult(summary=summary, evidences=result.evidences, diagnostics=diagnostics)
