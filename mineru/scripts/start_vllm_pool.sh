@@ -6,10 +6,10 @@ set -euo pipefail
 #
 # Example:
 #   conda activate mineru
-#   ./service/scripts/start_vllm_pool.sh --gpus 4,5,6 --base-port 30000
+#   ./scripts/start_vllm_pool.sh --gpus 4,5,6 --base-port 30000
 #
 # Then point the MinerU gateway at the pool:
-#   python service/mineru_main.py server --backend vlm-http-client \
+#   python mineru_main.py server --backend vlm-http-client \
 #     --server-urls http://127.0.0.1:30000,http://127.0.0.1:30001,http://127.0.0.1:30002
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -33,13 +33,13 @@ This service **does not install or configure upstream MinerU**. Please follow th
 ### 1) Start the Server (GPU machine)
 
 ```bash
-python service/mineru_main.py server --host 0.0.0.0 --port 8899
+python mineru_main.py server --host 0.0.0.0 --port 8899
 ```
 
 Recommended production paths:
 
 ```bash
-python service/mineru_main.py server \
+python mineru_main.py server \
   --host 0.0.0.0 --port 8899 \
   --output-dir /data/mineru_outputs \
   --temp-dir /tmp/mineru_temp
@@ -52,7 +52,7 @@ export CHAT_API_BASE_URL="https://api.openai.com/v1"
 export CHAT_API_KEY="sk-xxx"
 export OPENAI_CHAT_MODEL="gpt-4o-mini"
 
-python service/mineru_main.py server \
+python mineru_main.py server \
   --caption-mode content_list_then_llm
 ```
 
@@ -67,7 +67,7 @@ curl http://127.0.0.1:8899/health
 ```bash
 export MINERU_SERVER_URL="http://<server-ip>:8899"
 
-python service/mineru_main.py client \
+python mineru_main.py client \
   --base-url "$MINERU_SERVER_URL" \
   --file /path/to/demo.pdf \
   --output-dir ./mineru_client_outputs
@@ -77,7 +77,7 @@ python service/mineru_main.py client \
 
 If you want to call the server from Python, you can either:
 - use plain HTTP (`requests`), or
-- import the lightweight client in this repo (make sure `service/` is on `PYTHONPATH`).
+- import the lightweight client in this repo (make sure `` is on `PYTHONPATH`).
 
 Example:
 
@@ -152,12 +152,36 @@ Notes:
 - vLLM pre-allocates VRAM; adjust `--gpu-memory-utilization` if you see OOM.
 - vLLM serves **VLM models only**; OCR models (e.g., PaddleOCR) are **not** served by vLLM.
 
+### Stopping vLLM / MinerU (and freeing VRAM)
+
+If you start vLLM via `start_vllm_pool.sh`, each instance writes:
+- pid: `/tmp/vllm_<port>.pid`
+- log: `/tmp/vllm_<port>.log`
+
+Use the stop helper:
+
+```bash
+# stop vLLM on ports
+./scripts/stop_mineru_vllm.sh --vllm-ports 30000,30001 --clean
+
+# stop MinerU servers on ports
+./scripts/stop_mineru_vllm.sh --mineru-ports 8897,8898,8899 --clean
+```
+
+If you already `kill -9` the LISTEN process (via `lsof -i:<port>`), VRAM can still be occupied by
+`VLLM::EngineCore` child processes. In that case, identify the GPUs used and kill EngineCore on them:
+
+```bash
+# example: vLLM used GPU 5 and 6
+./scripts/stop_mineru_vllm.sh --kill-enginecore-gpus 5,6
+```
+
 ### B) No-Client-Change Option (Recommended)
 
 Start vLLM, then start this service pointing to it:
 
 ```bash
-python service/mineru_main.py server \
+python mineru_main.py server \
   --backend vlm-http-client \
   --server-url http://127.0.0.1:30000
 ```
@@ -179,7 +203,7 @@ conda activate mineru
 Then start the MinerU gateway:
 
 ```bash
-python service/mineru_main.py server \
+python mineru_main.py server \
   --backend vlm-http-client \
   --server-urls http://127.0.0.1:30000,http://127.0.0.1:30001 \
   --max-jobs 2 \
@@ -200,7 +224,7 @@ errors, it is temporarily put into cooldown and avoided.
 ### Server CLI
 
 ```bash
-python service/mineru_main.py server --help
+python mineru_main.py server --help
 ```
 
 **Networking & capacity**
@@ -263,7 +287,7 @@ python service/mineru_main.py server --help
 ### Client CLI
 
 ```bash
-python service/mineru_main.py client --help
+python mineru_main.py client --help
 ```
 
 - `--base-url` (default: `MINERU_SERVER_URL` or `http://127.0.0.1:8899`)
@@ -307,7 +331,7 @@ Endpoints:
 ```bash
 ssh -CNg -L 8899:127.0.0.1:8899 <user>@<gpu-host>
 export MINERU_SERVER_URL="http://127.0.0.1:8899"
-python service/mineru_main.py client --base-url "$MINERU_SERVER_URL" --file demo.pdf --output-dir ./mineru_client_outputs
+python mineru_main.py client --base-url "$MINERU_SERVER_URL" --file demo.pdf --output-dir ./mineru_client_outputs
 ```
 
 ---

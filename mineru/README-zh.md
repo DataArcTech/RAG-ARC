@@ -147,6 +147,30 @@ vllm serve /home/dataarc/.cache/modelscope/hub/models/OpenDataLab/MinerU2.5-2509
 - vLLM 预分配显存；如 OOM 请调低 `--gpu-memory-utilization`。
 - vLLM 仅用于 **VLM 模型**；OCR 模型（如 PaddleOCR）**不走 vLLM**。
 
+### 停止 vLLM / MinerU（并释放显存）
+
+如果你用 `start_vllm_pool.sh` 启动 vLLM，每个实例会写：
+- pid：`/tmp/vllm_<port>.pid`
+- log：`/tmp/vllm_<port>.log`
+
+推荐用停止脚本：
+
+```bash
+# 停掉指定端口的 vLLM
+./scripts/stop_mineru_vllm.sh --vllm-ports 30000,30001 --clean
+
+# 停掉指定端口的 MinerU server
+./scripts/stop_mineru_vllm.sh --mineru-ports 8897,8898,8899 --clean
+```
+
+如果你已经通过 `lsof -i:<port>` 找到 LISTEN 进程并 `kill -9`，但显存仍然被占用，
+通常是 `VLLM::EngineCore` 子进程还活着。此时按 vLLM 用到的 GPU 强制清掉 EngineCore：
+
+```bash
+# 示例：vLLM 用的是 GPU 5 和 6
+./scripts/stop_mineru_vllm.sh --kill-enginecore-gpus 5,6
+```
+
 ### B) 无需改客户端（推荐）
 
 启动 vLLM 后，用 `vlm-http-client` + `--server-url` 启动本服务：
