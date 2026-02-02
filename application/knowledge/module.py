@@ -796,21 +796,33 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
     ) -> int:
         """
         Count all files accessible to a specific user (files with permissions).
-        
+        When status is None, uses the same filter as list_user_files (active status and not marked for deletion)
+        so that total matches the list length and pagination is consistent.
+
         Args:
             user_id: UUID of the user
             status: Optional filter by file status
             search: Optional search keyword for filename (fuzzy match)
-            
+
         Returns:
             Total count of files accessible to the user
         """
         try:
             if status is None:
-                total = self.file_storage.count_accessible_files(user_id=user_id, search=search)
-                deleted = self.file_storage.count_accessible_files(user_id=user_id, status=FileStatus.DELETED, search=search)
-                mark_only = len(self._files_marked_for_deletion_by_owner.get(user_id, set()))
-                count = max(total - deleted - mark_only, 0)
+                # Use same logic as list_user_files: list all accessible, then filter to active and not marked.
+                # Avoids double-subtraction when a file is both DELETED and in _files_marked_for_deletion.
+                all_files = self.file_storage.list_accessible_files(
+                    user_id=user_id,
+                    status=None,
+                    limit=None,
+                    offset=None,
+                    search=search,
+                )
+                count = sum(
+                    1
+                    for f in all_files
+                    if self._is_active_status(f.status) and not self._is_file_marked_for_deletion(f.file_id)
+                )
             else:
                 count = self.file_storage.count_accessible_files(user_id=user_id, status=status, search=search)
             logger.info(f"Counted {count} accessible files for user {user_id}")
