@@ -200,6 +200,10 @@ FILE_SEARCH_DEFAULT_TOP_K = 5
 FILE_SEARCH_CHANNEL_TOP_K = 25
 # Rank fusion (RRF) constant used to aggregate chunk ranks into a per-file score.
 FILE_SEARCH_RRF_K = 60
+# LLM rerank defaults (intent alignment)
+FILE_SEARCH_ENABLE_LLM_RERANK_DEFAULT = True
+FILE_SEARCH_RERANK_TOP_K = 10
+FILE_SEARCH_RERANK_TEMPERATURE = 0.1
 # How many representative hits/snippets to show per candidate file in the human-readable summary.
 FILE_SEARCH_MAX_SNIPPETS_PER_FILE = 3
 # Hard cap for each snippet shown in the summary (diagnostics keep the full snippet returned by channel tool).
@@ -210,6 +214,39 @@ FILE_SEARCH_SUMMARY_SNIPPET_PREVIEW_CHARS = 260
 # -----------------------------
 SECTION_SEARCH_DEFAULT_TOP_K = 6
 SECTION_SEARCH_SUMMARY_PREVIEW_CHARS = 160
+
+# -----------------------------
+# section.select defaults (LLM-assisted section selection)
+# -----------------------------
+SECTION_SELECT_CANDIDATE_TOP_K = 8
+SECTION_SELECT_MAX_SECTIONS = 120
+SECTION_SELECT_ENTITY_HINTS_MAX = 6
+SECTION_SELECT_SUBTREE_PREVIEW_MAX = 24
+SECTION_SELECT_TEMPERATURE = 0.1
+SECTION_SELECT_DEFAULT_MAX_DEPTH = 2
+SECTION_SELECT_SEED_MAX = 24
+# Hybrid tree search loop controls
+SECTION_SELECT_MAX_ROUNDS = 4
+SECTION_SELECT_CONSUMER_BATCH_SIZE = 6
+# Value-based tree search (PageIndex hybrid tree search)
+# - Use chunk-level retrieval to score sections by NodeScore = sum(scores) / sqrt(N+1)
+# - Channels default to dense+bm25 for speed; can be tuned here.
+SECTION_SELECT_VALUE_TOP_K = 25
+SECTION_SELECT_VALUE_CHANNELS = ("faiss", "bm25")
+
+# -----------------------------
+# section tree/node-type hints
+# -----------------------------
+# Map semantic_unit_type -> node_type label (page/image/table hints).
+SECTION_NODE_TYPE_MAP = {
+    "table": "table",
+    "image": "image",
+    "math": "equation",
+}
+SECTION_NODE_TYPE_DEFAULT = "page"
+# Limit how many chunk metadata rows to scan when deriving node-type counts for sections.
+SECTION_NODE_TYPE_MAX_CHUNKS = 2000
+SECTION_NODE_TYPE_MAX_PER_SECTION = 160
 
 # Allowlist for per-request graph retrieval overrides supplied via tool_args.
 # These map to fields in `config/core/retrieval/pruned_hipporag_neo4j_config.py`.
@@ -261,9 +298,25 @@ EXPLORE_READ_MAX_CHUNKS = 12
 EXPLORE_READ_MAX_CHARS = 6000
 
 # -----------------------------
+# navigation bootstrap defaults (service-side; long-doc navigation)
+# -----------------------------
+# Deterministic preflight steps executed before graph reasoning:
+# search.file -> toc.tree/search.section (Top-N candidate files)
+# Default off: let the LLM decide whether to route files/sections (prevents unnecessary retrieval
+# for questions that do not require consulting the user's corpus).
+NAV_BOOTSTRAP_ENABLED = False
+NAV_BOOTSTRAP_FILE_TOP_K = 5
+NAV_BOOTSTRAP_CANDIDATE_FILES = 2
+NAV_BOOTSTRAP_TOC_MAX_DEPTH = 5
+NAV_BOOTSTRAP_TOC_MAX_NODES = 120
+NAV_BOOTSTRAP_SECTION_TOP_K = 6
+NAV_BOOTSTRAP_EVIDENCE_MAX_CHARS = 6000
+NAV_BOOTSTRAP_TRACE_MAX_CHARS = 1200
+
+# -----------------------------
 # toc + structured reading defaults (PageIndex navigation)
 # -----------------------------
-TOC_TREE_DEFAULT_MAX_DEPTH = 6
+TOC_TREE_DEFAULT_MAX_DEPTH = 2
 TOC_TREE_MAX_CHUNKS_SCANNED = 5000
 TOC_TREE_MAX_NODES = 220
 
@@ -279,3 +332,13 @@ READ_NEIGHBORS_DEFAULT_AFTER = 3
 READ_NEIGHBORS_MAX_WINDOW = 40
 READ_NEIGHBORS_DEFAULT_MAX_CHUNKS = 40
 READ_NEIGHBORS_DEFAULT_MAX_CHARS = 12000
+
+# -----------------------------
+# search UX hints (LLM guidance)
+# -----------------------------
+# When search returns chunk snippets that include page metadata, we surface suggested read.pages
+# calls so the model can expand context deterministically.
+SEARCH_SUGGESTED_READ_MAX = 2
+SEARCH_TERM_HINTS_MAX = 8
+# When scoped search yields no hits, suggest reading the first few pages (often product facts / key terms).
+SEARCH_EMPTY_SUGGEST_OVERVIEW_PAGE_END = 2
