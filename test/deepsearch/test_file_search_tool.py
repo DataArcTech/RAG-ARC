@@ -24,6 +24,16 @@ class _StubBM25Retriever:
         return list(self._by_owner.get(owner_id, []))[: int(k)]
 
 
+class _StubLLM:
+    def __init__(self, response: str):
+        self._response = response
+        self.calls = 0
+
+    def chat(self, messages, **kwargs):  # noqa: D401, ARG002
+        self.calls += 1
+        return self._response
+
+
 @pytest.mark.asyncio
 async def test_file_search_aggregates_by_file_id(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SHARE_OWNER_ID", "share-1")
@@ -90,3 +100,79 @@ async def test_file_search_rejects_unknown_owner(monkeypatch: pytest.MonkeyPatch
     visibility = result.diagnostics.get("owner_visibility") or {}
     assert visibility.get("owner_ids_rejected") == ["other-1"]
 
+
+@pytest.mark.asyncio
+async def test_file_search_llm_rerank_changes_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SHARE_OWNER_ID", "share-1")
+
+    dense = _StubDenseRetriever(
+        {
+            "owner-1": [
+                Chunk(id="c1", owner_id="owner-1", content="hit one", metadata={"source_file_id": "file-1", "score": 0.9, "filename": "a.pdf"}),
+                Chunk(id="c2", owner_id="owner-1", content="hit two", metadata={"source_file_id": "file-2", "score": 0.8, "filename": "b.pdf"}),
+            ]
+        }
+    )
+    bm25 = _StubBM25Retriever(
+        {
+            "owner-1": [
+                Chunk(id="c3", owner_id="owner-1", content="bm25 hit", metadata={"source_file_id": "file-2", "score": 3.0, "filename": "b.pdf"}),
+            ]
+        }
+    )
+    llm = _StubLLM('{"ranked_file_ids": ["file-1", "file-2"], "reasoning": "User intent matches file-1."}')
+    tool = FileSearchTool(dense_retriever=dense, bm25_retriever=bm25, llm_connector=llm)
+    req = ToolRunRequest(
+        question="find docs",
+        plan_step="plan_01",
+        context_evidences=[],
+        adapter=None,
+        access_scope=GraphAccessScope(scope_id="owner-1"),
+        extra={"owner_ids": ["owner-1"], "top_k": 5, "channels": ["faiss", "bm25"]},
+        graph_context=None,
+        coverage_metrics=None,
+    )
+
+    result = await tool.run(req)
+    rows = result.diagnostics.get("results") or []
+    assert [row["file_id"] for row in rows][:2] == ["file-1", "file-2"]
+    assert result.diagnostics.get("llm_rerank", {}).get("ranked_file_ids") == ["file-1", "file-2"]
+    assert llm.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_file_search_llm_rerank_accepts_filename(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SHARE_OWNER_ID", "share-1")
+
+    dense = _StubDenseRetriever(
+        {
+            "owner-1": [
+                Chunk(id="c1", owner_id="owner-1", content="hit one", metadata={"source_file_id": "file-1", "score": 0.9, "filename": "a.pdf"}),
+                Chunk(id="c2", owner_id="owner-1", content="hit two", metadata={"source_file_id": "file-2", "score": 0.8, "filename": "b.pdf"}),
+            ]
+        }
+    )
+    bm25 = _StubBM25Retriever(
+        {
+            "owner-1": [
+                Chunk(id="c3", owner_id="owner-1", content="bm25 hit", metadata={"source_file_id": "file-2", "score": 3.0, "filename": "b.pdf"}),
+            ]
+        }
+    )
+    llm = _StubLLM('{"ranked_file_ids": ["b.pdf", "a.pdf"], "reasoning": "Use filenames."}')
+    tool = FileSearchTool(dense_retriever=dense, bm25_retriever=bm25, llm_connector=llm)
+    req = ToolRunRequest(
+        question="find docs",
+        plan_step="plan_01",
+        context_evidences=[],
+        adapter=None,
+        access_scope=GraphAccessScope(scope_id="owner-1"),
+        extra={"owner_ids": ["owner-1"], "top_k": 5, "channels": ["faiss", "bm25"]},
+        graph_context=None,
+        coverage_metrics=None,
+    )
+
+    result = await tool.run(req)
+    rows = result.diagnostics.get("results") or []
+    assert [row["file_id"] for row in rows][:2] == ["file-2", "file-1"]
+    assert llm.calls == 1
