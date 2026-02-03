@@ -980,9 +980,10 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
                     invalid_files.append(f"File is deleted: {file_id}")
                     continue
 
-                # Only allow indexing for STORED or FAILED files, unless force is enabled.
-                # Skip files that are in intermediate processing states (PARSED, CHUNKED) or already running.
-                if metadata.status in {FileStatus.STORED, FileStatus.FAILED} or force:
+                # Only allow indexing for STORED, FAILED, or PARTIAL_INDEXED files, unless force is enabled.
+                # PARTIAL_INDEXED is treated as retriable (same as FAILED from user perspective).
+                # Skip files that are in intermediate processing states (PARSED, CHUNKED) or already INDEXED.
+                if metadata.status in {FileStatus.STORED, FileStatus.FAILED, FileStatus.PARTIAL_INDEXED} or force:
                     valid_files.append(file_id)
                 else:
                     skipped_files.append(file_id)
