@@ -155,11 +155,13 @@ class FaissVectorDB(VectorDB):
             self.deleted_ids = set(data.get("deleted_ids", []))
             stored_fingerprint = data.get("embedding_fingerprint")
             current_fingerprint = self._embedding_fingerprint()
-            if stored_fingerprint and stored_fingerprint != current_fingerprint:
+            normalized_stored = self._normalize_embedding_fingerprint(stored_fingerprint)
+            normalized_current = self._normalize_embedding_fingerprint(current_fingerprint)
+            if normalized_stored and normalized_stored != normalized_current:
                 logger.warning(
                     "FAISS embedding fingerprint mismatch; requiring rebuild. stored=%s current=%s",
-                    stored_fingerprint,
-                    current_fingerprint,
+                    normalized_stored,
+                    normalized_current,
                 )
                 with self._lock:
                     self.index = None
@@ -233,13 +235,34 @@ class FaissVectorDB(VectorDB):
         payload: Dict[str, Any] = {}
         cfg = getattr(self.config, "embedding_config", None)
         if cfg is not None:
+            from config.encapsulation.database.vector_db.embedding_model_aliases import normalize_embedding_model_name
+
             payload = {
                 "type": getattr(cfg, "type", None) or cfg.__class__.__name__,
                 "loading_method": getattr(cfg, "loading_method", None),
-                "model_name": getattr(cfg, "model_name", None),
+                "model_name": normalize_embedding_model_name(getattr(cfg, "model_name", None)),
                 "embedding_dimensions": getattr(cfg, "embedding_dimensions", None),
             }
         return json.dumps(payload, sort_keys=True, ensure_ascii=False)
+
+    @staticmethod
+    def _normalize_embedding_fingerprint(value: Optional[str]) -> Optional[str]:
+        if not value:
+            return value
+        try:
+            payload = json.loads(value)
+        except Exception:
+            return value
+        if not isinstance(payload, dict):
+            return value
+        try:
+            from config.encapsulation.database.vector_db.embedding_model_aliases import normalize_embedding_model_name
+
+            payload = dict(payload)
+            payload["model_name"] = normalize_embedding_model_name(payload.get("model_name"))
+            return json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        except Exception:
+            return value
     
     def build_index(self, chunks: List[Chunk]):
         """Build index from chunks
