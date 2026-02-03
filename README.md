@@ -290,6 +290,7 @@ Note: Some PDFs without a usable `ToUnicode` cmap may produce glyph-name artifac
 When using MinerU:
 
 - Set `MINERU_SERVER_URL` (e.g. `http://127.0.0.1:8899`) and optionally `MINERU_TIMEOUT_S=900`.
+- Optional: set `MINERU_BACKEND` (e.g. `vlm-http-client`) to control the backend sent to the MinerU service.
 - See `mineru/README.md` for MinerU-specific options (page range, asset URLs, SSH tunnel, etc).
 
 To switch the bundled pipeline between API and local defaults without editing JSON, set `MODEL_PROFILE=api` or `MODEL_PROFILE=local` in `.env` (or point `*_CONFIG_PATH` to your own files).
