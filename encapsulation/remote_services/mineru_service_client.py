@@ -5,6 +5,9 @@ from typing import Any, Dict, Optional
 
 import requests
 from urllib.parse import urlparse, urlunparse
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class MinerUServiceClient:
@@ -14,11 +17,17 @@ class MinerUServiceClient:
         timeout_s: int = 600,
         poll_interval_s: int = 5,
         poll_timeout_s: int = 0,
+        http_max_retries: int = 0,
+        http_retry_backoff_s: float = 1.0,
+        http_retry_max_backoff_s: float = 8.0,
     ):
         self.base_url = str(base_url or "").rstrip("/")
         self.timeout_s = int(timeout_s)
         self.poll_interval_s = max(1, int(poll_interval_s))
         self.poll_timeout_s = max(0, int(poll_timeout_s))
+        self.http_max_retries = max(0, int(http_max_retries))
+        self.http_retry_backoff_s = max(0.0, float(http_retry_backoff_s))
+        self.http_retry_max_backoff_s = max(0.0, float(http_retry_max_backoff_s))
         self.session = requests.Session()
         self._validated_base_url = False
 
@@ -59,16 +68,15 @@ class MinerUServiceClient:
         if host not in {"localhost", "127.0.0.1"} or port is None:
             return [raw]
 
-        # Prefer deterministic loopback addresses over `localhost` to avoid
-        # flakey resolver ordering between IPv4/IPv6 during long-running processes.
-        candidates = []
-        netloc_ipv6 = f"[::1]:{port}"
-        candidates.append(urlunparse(parsed._replace(netloc=netloc_ipv6)))
+        # Prefer explicit IPv4 loopback first for SSH tunnels that bind to 127.0.0.1.
+        # Then try IPv6 loopback, and finally preserve `localhost`.
+        candidates = [raw]
         netloc_ipv4 = f"127.0.0.1:{port}"
         candidates.append(urlunparse(parsed._replace(netloc=netloc_ipv4)))
+        netloc_ipv6 = f"[::1]:{port}"
+        candidates.append(urlunparse(parsed._replace(netloc=netloc_ipv6)))
         netloc_localhost = f"localhost:{port}"
         candidates.append(urlunparse(parsed._replace(netloc=netloc_localhost)))
-        candidates.append(raw)
 
         out: list[str] = []
         seen: set[str] = set()
@@ -78,6 +86,45 @@ class MinerUServiceClient:
             seen.add(candidate)
             out.append(candidate)
         return out
+
+    def _request_with_retry(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        """
+        Best-effort retry wrapper for transient network errors.
+
+        We retry only a bounded number of times to avoid hiding persistent failures.
+        """
+        max_retries = int(self.http_max_retries)
+        attempt = 0
+        while True:
+            try:
+                resp = self.session.request(method, url, **kwargs)
+                # Retry on common transient gateway errors.
+                if resp.status_code in {502, 503, 504} and attempt < max_retries:
+                    raise requests.HTTPError(f"HTTP {resp.status_code}", response=resp)
+                return resp
+            except (
+                requests.ConnectionError,
+                requests.Timeout,
+                requests.exceptions.ChunkedEncodingError,
+                requests.HTTPError,
+            ) as exc:
+                if attempt >= max_retries:
+                    raise
+                backoff = min(self.http_retry_backoff_s * (2**attempt), self.http_retry_max_backoff_s)
+                attempt += 1
+                logger.warning(
+                    "MinerU request retrying (%s %s) attempt=%s/%s backoff_s=%.2f error=%s",
+                    method,
+                    url,
+                    attempt,
+                    max_retries,
+                    backoff,
+                    str(exc),
+                )
+                time.sleep(backoff)
+            except requests.RequestException as exc:
+                # Non-transient request errors: do not retry by default.
+                raise exc
 
     def _ensure_valid_base_url(self) -> None:
         if self._validated_base_url:
@@ -91,13 +138,7 @@ class MinerUServiceClient:
             openapi = self._get_openapi(candidate)
             if self._is_mineru_openapi(openapi):
                 if candidate != self.base_url:
-                    import logging
-
-                    logging.getLogger(__name__).warning(
-                        "MINERU_SERVER_URL=%s does not appear to be MinerU; switching to %s based on /openapi.json",
-                        self.base_url,
-                        candidate,
-                    )
+                    logger.info("MinerU base_url selected: %s (input=%s)", candidate, self.base_url)
                 self.base_url = candidate.rstrip("/")
                 self._validated_base_url = True
                 return
@@ -141,7 +182,7 @@ class MinerUServiceClient:
 
         file_obj = io.BytesIO(file_bytes)
         files = {"file": (str(filename or "document"), file_obj, "application/octet-stream")}
-        resp = self.session.post(url, data=data, files=files, timeout=self.timeout_s)
+        resp = self._request_with_retry("POST", url, data=data, files=files, timeout=self.timeout_s)
         resp.raise_for_status()
         result = resp.json()
         status = str(result.get("status") or "").lower()
@@ -156,7 +197,7 @@ class MinerUServiceClient:
         if not self.base_url:
             raise ValueError("MinerU base_url is empty (set MINERU_SERVER_URL).")
         self._ensure_valid_base_url()
-        resp = self.session.get(f"{self.base_url}/parse/status/{task_id}", timeout=self.timeout_s)
+        resp = self._request_with_retry("GET", f"{self.base_url}/parse/status/{task_id}", timeout=self.timeout_s)
         resp.raise_for_status()
         return resp.json()
 
@@ -177,7 +218,7 @@ class MinerUServiceClient:
         if not self.base_url:
             raise ValueError("MinerU base_url is empty (set MINERU_SERVER_URL).")
         self._ensure_valid_base_url()
-        resp = self.session.get(f"{self.base_url}/task/{task_id}/manifest", timeout=self.timeout_s)
+        resp = self._request_with_retry("GET", f"{self.base_url}/task/{task_id}/manifest", timeout=self.timeout_s)
         resp.raise_for_status()
         return resp.json()
 
@@ -186,7 +227,8 @@ class MinerUServiceClient:
             raise ValueError("MinerU base_url is empty (set MINERU_SERVER_URL).")
         self._ensure_valid_base_url()
         rel_path = str(rel_path).lstrip("/")
-        resp = self.session.get(
+        resp = self._request_with_retry(
+            "GET",
             f"{self.base_url}/task/{task_id}/file/{rel_path}",
             timeout=self.timeout_s,
             stream=True,
