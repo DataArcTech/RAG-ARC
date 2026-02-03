@@ -69,6 +69,33 @@ def _default_backend() -> str:
     raw = str(os.getenv("MINERU_BACKEND", "") or "").strip()
     return raw or "vlm-transformers"
 
+def _default_http_max_retries() -> int:
+    raw = str(os.getenv("MINERU_HTTP_MAX_RETRIES", "") or "").strip()
+    if not raw:
+        return 3
+    try:
+        return max(0, int(raw))
+    except Exception:
+        return 3
+
+def _default_http_retry_backoff_s() -> float:
+    raw = str(os.getenv("MINERU_HTTP_RETRY_BACKOFF_S", "") or "").strip()
+    if not raw:
+        return 1.0
+    try:
+        return max(0.0, float(raw))
+    except Exception:
+        return 1.0
+
+def _default_http_retry_max_backoff_s() -> float:
+    raw = str(os.getenv("MINERU_HTTP_RETRY_MAX_BACKOFF_S", "") or "").strip()
+    if not raw:
+        return 8.0
+    try:
+        return max(0.0, float(raw))
+    except Exception:
+        return 8.0
+
 
 class MinerUParserConfig(AbstractConfig):
     type: Literal["mineru_parser"] = "mineru_parser"
@@ -87,6 +114,18 @@ class MinerUParserConfig(AbstractConfig):
     poll_timeout_s: int = Field(
         default_factory=_default_poll_timeout_s,
         description="Max seconds to wait for MinerU parse; <=0 means no limit.",
+    )
+    http_max_retries: int = Field(
+        default_factory=_default_http_max_retries,
+        description="Max retry attempts for transient MinerU HTTP errors (0 disables retries).",
+    )
+    http_retry_backoff_s: float = Field(
+        default_factory=_default_http_retry_backoff_s,
+        description="Base backoff seconds for MinerU HTTP retries.",
+    )
+    http_retry_max_backoff_s: float = Field(
+        default_factory=_default_http_retry_max_backoff_s,
+        description="Max backoff seconds for MinerU HTTP retries.",
     )
     reuse_cache: bool = Field(
         default_factory=_default_reuse_cache,
