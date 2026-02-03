@@ -494,11 +494,13 @@ async def list_files(
                 # Timezone-aware datetime, convert to Beijing time
                 updated_at_beijing = file.updated_at.astimezone(beijing_tz)
             
+            # 对前端统一将“部分索引”视为失败，返回 FAILED
+            status_for_frontend = "FAILED" if file.status == FileStatus.PARTIAL_INDEXED else file.status.value
             file_infos.append(
                 FileInfo(
                     file_id=file.file_id,
                     filename=file.filename,
-                    status=file.status.value,  # Convert enum to string
+                    status=status_for_frontend,  # Convert enum to string; PARTIAL_INDEXED → FAILED
                     created_at=created_at_beijing.isoformat(),
                     updated_at=updated_at_beijing.isoformat(),
                     file_size=file.file_size,

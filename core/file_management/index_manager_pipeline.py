@@ -426,22 +426,34 @@ class _IndexManagerPipelineMixin:
                         {"file_id": file_id, "success": True, "status": "INDEXED", "chunks_updated": chunks_updated},
                     )
                 else:
-                    await get_thread_pool().run_blocking(
-                        self._update_file_status_to_partially_indexed,
-                        file_id,
-                        **kwargs,
-                    )
+                    # 部分 indexer 成功也视为索引失败，状态标为 FAILED
+                    from encapsulation.data_model.orm_models import FileStatus
+
+                    result["success"] = False
+                    result["error_message"] = "partial indexing: not all indexers succeeded"
+                    try:
+                        metadata = None
+                        try:
+                            metadata = self.file_storage.get_file_metadata(file_id)
+                        except Exception:
+                            metadata = None
+                        if metadata is not None and getattr(metadata, "status", None) == FileStatus.DELETED:
+                            logger.info("Skip updating file %s to FAILED because status is DELETED", file_id)
+                        else:
+                            await get_thread_pool().run_blocking(
+                                self.file_storage.metadata_store.update_file_status,
+                                file_id,
+                                FileStatus.FAILED,
+                                **kwargs,
+                            )
+                    except Exception as status_error:
+                        logger.error("Failed to update file status to FAILED for %s: %s", file_id, status_error)
                     _emit(
-                        "indexed_partial",
-                        95,
-                        {
-                            "file_id": file_id,
-                            "success": True,
-                            "status": "PARTIAL_INDEXED",
-                            "chunks_updated": chunks_updated,
-                            "indexers": result["metadata"]["indexing_summary"],
-                        },
+                        "index_failed",
+                        100,
+                        {"file_id": file_id, "success": False, "indexers": result["metadata"]["indexing_summary"]},
                     )
+                    return result
             else:
                 logger.info("Step 6: No indexers configured, skipping indexing")
 
