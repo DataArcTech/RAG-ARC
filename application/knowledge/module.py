@@ -1002,6 +1002,14 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
             message_parts.append("No files scheduled for indexing.")
             return "\n".join(message_parts)
 
+        # 调度前先把状态改为 CHUNKED，让 list_files 立即显示「处理中」而不是仍显示失败
+        for file_id in valid_files:
+            await self._run_blocking(
+                self.file_storage.metadata_store.update_file_status,
+                file_id,
+                FileStatus.CHUNKED,
+            )
+
         logger.info(
             f"Triggering indexing for files: {'; '.join(valid_files)}"
         )
