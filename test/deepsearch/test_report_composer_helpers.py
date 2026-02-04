@@ -4,7 +4,7 @@ from core.deepsearch.report.composer_helpers import _split_authoritative_evidenc
 def test_split_authoritative_evidences_does_not_treat_colon_chunk_ids_as_tool_generated():
     authoritative, generated = _split_authoritative_evidences(
         [
-            {"chunk_id": "file:12:3", "source": "hipporag", "content": "primary"},
+            {"chunk_id": "file:12:3", "source": "read.pages", "content": "primary"},
             {"chunk_id": "think:1", "source": "think", "content": "toolish"},
         ]
     )

@@ -4,6 +4,7 @@ from core.utils.json_extract import safe_json_loads
 
 from config.core.deepsearch import report_composer_defaults as composer_defaults
 from core.deepsearch.report.composer_helpers import _rank_evidences_for_question
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 
 
 def attach_provenance_chunk_evidence(
@@ -141,6 +142,7 @@ def attach_provenance_chunk_evidence(
                 "source": "neo4j_chunk",
                 "content": content,
                 "score": 1.0,
+                "kind": EVIDENCE_KIND_DERIVED,
                 "provenance": {
                     "metadata": meta,
                     "linked_from": references.get(chunk_id, []),
@@ -156,4 +158,3 @@ def attach_provenance_chunk_evidence(
         return evidences
     merged = list(evidences) + attached
     return _rank_evidences_for_question(question, merged)
-

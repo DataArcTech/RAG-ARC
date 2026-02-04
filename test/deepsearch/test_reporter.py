@@ -108,8 +108,8 @@ def _build_trace(include_final_answer: bool = True):
         ],
         "evidences": [
             {
-                "chunk_id": "ev1",
-                "source": "hipporag",
+                "chunk_id": "read.pages:ev1",
+                "source": "read.pages",
                 "content": "OpenAI entered a partnership with Microsoft in 2019.",
             }
         ],
@@ -179,7 +179,7 @@ def test_reporter_raises_when_report_text_missing_citations():
     reporter = DeepSearchReporter(
         template_store=None,
         config=_default_reporter_config(),
-        llm_connector=_FakeLLM([outline, report_json]),
+        llm_connector=_FakeLLM([outline, report_json, report_json, report_json]),
     )
     trace = _build_trace(include_final_answer=False)
 
@@ -208,7 +208,7 @@ def test_reporter_citation_agent_fills_missing_citations():
 
     citations = report["structured_report"]["citations"]
     assert isinstance(citations, list)
-    assert any(entry.get("evidence_id") == "ev1" for entry in citations if isinstance(entry, dict))
+    assert any(entry.get("evidence_id") == "read.pages:ev1" for entry in citations if isinstance(entry, dict))
     assert isinstance(report["structured_report"].get("evidence_index"), list)
 
 
@@ -226,6 +226,22 @@ def test_reporter_raises_when_llm_output_invalid():
         config=_default_reporter_config(),
         llm_connector=_FakeLLM(
             [
+                "not-json",
+                "not-json",
+                "not-json",
+                "not-json",
+                "not-json",
+                "not-json",
+                "not-json",
+                "not-json",
+                "not-json",
+                "not-json",
+                "not-json",
+                "not-json",
+                "not-json",
+                "not-json",
+                "not-json",
+                "not-json",
                 "not-json",
                 "not-json",
             ]
@@ -249,12 +265,12 @@ def test_reporter_includes_chunk_evidence_preview():
     trace["evidences"] = [
         {
             "chunk_id": "chunk_abc123",
-            "source": "test-doc.pdf",
+            "source": "read.pages",
             "content": "This is a long piece of content that should be truncated to show only the first 100 characters in the preview section of the report.",
         },
         {
             "chunk_id": "chunk_def456",
-            "source": "another.txt",
+            "source": "read.pages",
             "content": "Short content.",
         },
     ]
@@ -264,9 +280,9 @@ def test_reporter_includes_chunk_evidence_preview():
     answer = report["answer"]
     assert "## Appendix: Chunk Evidence" in answer
     assert "`chunk_abc123`" in answer
-    assert "(test-doc.pdf)" in answer
+    assert "(read.pages)" in answer
     assert "This is a long piece of content that should be truncated to show only the first 100 characters" in answer
-    assert "..." in answer
+    # DeepSearch external-memory policy: do not truncate evidence text in appendices.
     assert "`chunk_def456`" in answer
     assert "Short content." in answer
 
@@ -312,13 +328,13 @@ def test_reporter_comparison_avoids_false_missing_named_files_when_filename_is_n
         "evidences": [
             {
                 "chunk_id": "evA",
-                "source": "hipporag",
+                "source": "read.pages",
                 "content": "A evidence",
                 "provenance": {"metadata": {"chunk_metadata": {"filename": "智盈匯聚(優越版)II壽險計劃.pdf"}}},
             },
             {
                 "chunk_id": "evB",
-                "source": "hipporag",
+                "source": "read.pages",
                 "content": "B evidence",
                 "provenance": {"metadata": {"chunk_metadata": {"filename": "價值連承壽險計劃.pdf"}}},
             },
@@ -338,6 +354,7 @@ def test_reporter_parallel_sections_synthesizes_summary():
         llm_connector=_PromptAwareLLM(),
     )
     trace = _build_trace(include_final_answer=False)
+    trace.setdefault("graph_context", {}).setdefault("metadata", {})["report_style"] = "research"
 
     report = asyncio.run(reporter.compose(trace, external_evidence=[]))
 
@@ -364,7 +381,7 @@ def test_reporter_includes_external_evidence_even_when_internal_is_full():
         "coverage_metrics": {},
         "graph_context": {"adapter_name": "hipporag", "question": "Q", "metadata": {}},
         "evidences": [
-            {"chunk_id": f"ev{i:02d}", "source": "hipporag", "content": f"internal {i}"}
+            {"chunk_id": f"ev{i:02d}", "source": "read.pages", "content": f"internal {i}"}
             for i in range(12)
         ],
     }

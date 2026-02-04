@@ -39,12 +39,13 @@ class _BudgetLLM:
 def test_report_writer_shrinks_prompts_on_context_limit():
     from core.deepsearch.report.llm_writer import DeepSearchLLMReportWriter
 
-    llm = _BudgetLLM(max_chars=14_000)
+    # With evidence text untruncated, the minimum viable report prompt is still sizeable.
+    # Use a budget that is small enough to force shrinking, but large enough to fit one full evidence item.
+    llm = _BudgetLLM(max_chars=20_000)
     writer = DeepSearchLLMReportWriter(
         llm_connector=llm,
         max_retries=4,
         max_evidence_items=32,
-        max_evidence_chars=4000,
         max_graph_chain_items=200,
         parallel_sections=False,
     )

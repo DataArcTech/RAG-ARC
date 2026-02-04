@@ -1,9 +1,12 @@
-"""In-process evidence memory bank for DeepSearch."""
-import hashlib
-from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+"""In-process evidence memory bank for DeepSearch.
 
-from core.deepsearch.utils.compression import focused_truncate_text, truncate_text
+Design:
+- Treat the EvidencePool/EvidenceBank as "external memory": it stores full evidence content.
+- Tools (think/explore/code) should consume metadata-only *cards* rather than full text.
+- The report stage materializes full evidence text from this bank .
+"""
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 
 @dataclass(frozen=True)
@@ -14,27 +17,13 @@ class EvidenceRecord:
     score: Optional[float] = None
     provenance: Dict[str, Any] | None = None
 
-    def summary(self, *, max_chars: int = 240) -> str:
-        text = (self.content or "").strip().replace("\n", " ")
-        if max_chars <= 0 or len(text) <= max_chars:
-            return text
-        return truncate_text(text, max_chars=max_chars)
-
 
 class EvidenceBank:
-    """A tiny in-process evidence store with deterministic selection helpers.
-
-    Core design goals:
-    - stable lookup by evidence_id (chunk_id)
-    - explicit, bounded prompt materialization (index + retrieved snippets)
-    - recency retention (retain the last K used evidence ids)
-    """
+    """A tiny in-process evidence store with deterministic selection helpers ."""
 
     def __init__(self) -> None:
         self._records: Dict[str, EvidenceRecord] = {}
         self._order: List[str] = []
-        # Cache key: (evidence_id, max_chars, question_key) -> excerpt text
-        self._excerpt_cache: Dict[Tuple[str, int, str], str] = {}
 
     def add_many(self, evidences: Iterable[Dict[str, Any]]) -> None:
         for raw in evidences or []:
@@ -45,14 +34,13 @@ class EvidenceBank:
                 continue
             if evidence_id in self._records:
                 continue
-            record = EvidenceRecord(
+            self._records[evidence_id] = EvidenceRecord(
                 evidence_id=evidence_id,
                 source=str(raw.get("source") or "").strip() or None,
                 content=str(raw.get("content") or ""),
                 score=raw.get("score"),
                 provenance=raw.get("provenance") if isinstance(raw.get("provenance"), dict) else None,
             )
-            self._records[evidence_id] = record
             self._order.append(evidence_id)
 
     def get(self, evidence_id: str) -> Optional[EvidenceRecord]:
@@ -61,39 +49,8 @@ class EvidenceBank:
             return None
         return self._records.get(token)
 
-    def has(self, evidence_id: str) -> bool:
-        return self.get(evidence_id) is not None
-
     def ids(self) -> List[str]:
         return list(self._order)
-
-    def index_for_prompt(self, *, max_items: Optional[int] = None, max_summary_chars: int = 240) -> List[Dict[str, Any]]:
-        subset = self._order if max_items is None else self._order[: max(0, int(max_items))]
-        payload: List[Dict[str, Any]] = []
-        for evidence_id in subset:
-            record = self._records.get(evidence_id)
-            if record is None:
-                continue
-            payload.append(
-                {
-                    # Keep both keys:
-                    # - `chunk_id`: the canonical identifier used by inline citations and most prompts.
-                    # - `evidence_id`: backward-compatible alias (some call sites use this name).
-                    "chunk_id": record.evidence_id,
-                    "evidence_id": record.evidence_id,
-                    "source": record.source,
-                    "score": record.score,
-                    "summary": record.summary(max_chars=max_summary_chars),
-                }
-            )
-        return payload
-
-    @staticmethod
-    def _question_key(question: str | None) -> str:
-        normalized = " ".join(str(question or "").split())
-        if not normalized:
-            return "no_question"
-        return hashlib.sha1(normalized.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _extract_provenance_hint(provenance: Any) -> str | None:
@@ -102,99 +59,67 @@ class EvidenceBank:
         if not isinstance(provenance, dict):
             return None
 
-        candidates: list[str] = []
-
-        def _add(label: str, value: Any) -> None:
-            token = str(value or "").strip()
-            if not token:
-                return
-            candidates.append(f"{label}={token}")
-
-        # Common patterns seen in chunk metadata and evidence wrappers.
-        meta = provenance.get("metadata")
-        if isinstance(meta, dict):
-            _add("filename", meta.get("filename") or meta.get("source_file_name") or meta.get("source_file") or meta.get("path"))
-            _add("page", meta.get("page") or meta.get("page_number"))
-
-            chunk_meta = meta.get("chunk_metadata")
-            if isinstance(chunk_meta, dict):
-                _add(
-                    "filename",
-                    chunk_meta.get("filename")
-                    or chunk_meta.get("source_file_name")
-                    or chunk_meta.get("source_file")
-                    or chunk_meta.get("path"),
-                )
-                _add("page", chunk_meta.get("page") or chunk_meta.get("page_number"))
-
-        raw_chunk = provenance.get("raw_chunk")
-        if isinstance(raw_chunk, dict):
-            raw_meta = raw_chunk.get("metadata")
-            if isinstance(raw_meta, dict):
-                _add(
-                    "filename",
-                    raw_meta.get("filename")
-                    or raw_meta.get("source_file_name")
-                    or raw_meta.get("source_file")
-                    or raw_meta.get("path"),
-                )
-                _add("page", raw_meta.get("page") or raw_meta.get("page_number"))
-
-        if not candidates:
+        def _pick(*values: Any) -> str | None:
+            for v in values:
+                token = str(v or "").strip()
+                if token:
+                    return token
             return None
-        # Keep it compact and deterministic.
-        return ", ".join(dict.fromkeys(candidates))
 
-    def excerpt_for_prompt(
-        self,
-        evidence_id: str,
-        *,
-        max_chars: int,
-        question: str | None = None,
-    ) -> str:
-        record = self.get(evidence_id)
-        if record is None:
-            return ""
-        content = (record.content or "").strip()
-        if max_chars <= 0 or len(content) <= max_chars:
-            return content
+        meta = provenance.get("metadata") if isinstance(provenance.get("metadata"), dict) else {}
+        filename = _pick(meta.get("filename"), meta.get("source_file_name"), meta.get("path"))
+        # Support both normalized page_start/page_end and legacy metadata keys.
+        page_start = provenance.get("page_start")
+        page_end = provenance.get("page_end")
+        if page_start is None:
+            page_start = meta.get("page_start")
+        if page_end is None:
+            page_end = meta.get("page_end")
+        if page_start is None:
+            page_start = meta.get("page_number")
+        if page_start is None:
+            page_start = meta.get("page")
+        if page_end is None:
+            page_end = meta.get("page_number_end")
+        if page_end is None:
+            page_end = meta.get("page_end")
+        if filename and page_start is not None:
+            page = f"page={page_start}" if page_end in (None, page_start) else f"pages={page_start}-{page_end}"
+            return f"filename={filename}, {page}"
+        if filename:
+            return f"filename={filename}"
+        if page_start is not None:
+            page = f"page={page_start}" if page_end in (None, page_start) else f"pages={page_start}-{page_end}"
+            return page
+        return None
 
-        qkey = self._question_key(question)
-        cache_key = (record.evidence_id, int(max_chars), qkey)
-        cached = self._excerpt_cache.get(cache_key)
-        if isinstance(cached, str) and cached:
-            return cached
-
-        if question and str(question).strip():
-            excerpt = focused_truncate_text(
-                content,
-                max_chars=max_chars,
-                question=str(question),
-                extra=None,
+    def index_for_prompt(self, *, max_items: int | None = None) -> List[Dict[str, Any]]:
+        subset = self._order if max_items is None else self._order[: max(0, int(max_items))]
+        payload: List[Dict[str, Any]] = []
+        for evidence_id in subset:
+            rec = self._records.get(evidence_id)
+            if rec is None:
+                continue
+            hint = self._extract_provenance_hint(rec.provenance)
+            payload.append(
+                {
+                    "chunk_id": rec.evidence_id,
+                    "evidence_id": rec.evidence_id,
+                    "source": rec.source,
+                    "score": rec.score,
+                    "provenance_hint": hint,
+                }
             )
-        else:
-            excerpt = truncate_text(content, max_chars=max_chars)
-        self._excerpt_cache[cache_key] = excerpt
-        return excerpt
+        return payload
 
     def evidence_pack_for_prompt(
         self,
         evidence_ids: Sequence[str],
         *,
         source_key_map: Mapping[str, str] | None = None,
-        question: str | None = None,
-        max_items: int | None = None,
-        max_chars_per_evidence: int = 900,
-        max_summary_chars: int = 240,
         title: str = "Evidence Pack",
     ) -> str:
-        """Materialize a bounded, human-readable evidence pack for LLM prompting.
-
-        This is intentionally "document-like" (index + per-evidence sections) so models can:
-        - navigate sources via the index,
-        - quote/extract only the relevant portions from each evidence section,
-        - cite using stable Source keys in <sup>k</sup> format.
-        """
+        """Materialize a human-readable evidence pack ."""
 
         source_key_map = dict(source_key_map or {})
         ordered: List[str] = []
@@ -215,29 +140,16 @@ class EvidenceBank:
                 token = str(source_key_map.get(str(key_num)) or "").strip()
                 if token and token not in ordered and token in self._records:
                     ordered.append(token)
-            if max_items is not None:
-                ordered_keys = ordered_keys[: max(0, int(max_items))]
-                allowed_ids = {str(source_key_map.get(str(k)) or "").strip() for k in ordered_keys}
-                ordered = [eid for eid in ordered if eid in allowed_ids]
         else:
-            ordered = []
-            seen: set[str] = set()
-
-            def _add(eid: str) -> None:
-                token = str(eid or "").strip()
-                if not token or token in seen:
-                    return
-                if token not in self._records:
-                    return
-                seen.add(token)
-                ordered.append(token)
-
             if not evidence_ids:
                 raise ValueError("evidence_ids must be a non-empty list")
+            seen: set[str] = set()
             for eid in evidence_ids:
-                _add(str(eid))
-            if max_items is not None:
-                ordered = ordered[: max(0, int(max_items))]
+                token = str(eid or "").strip()
+                if not token or token in seen or token not in self._records:
+                    continue
+                seen.add(token)
+                ordered.append(token)
             source_key_map = self.source_key_map_for_prompt(ordered)
             ordered_keys = sorted(int(k) for k in source_key_map.keys())
 
@@ -246,18 +158,16 @@ class EvidenceBank:
         if allowlist:
             lines.extend(["Citable Source key allowlist:", allowlist, ""])
 
-        lines.append("Index (Source key -> short summary):")
+        lines.append("Index (Source key -> id + provenance hint):")
         for key_num in ordered_keys:
             eid = str(source_key_map.get(str(key_num)) or "").strip()
             if not eid:
                 continue
             rec = self._records[eid]
-            src = f" | source={rec.source}" if rec.source else ""
             hint = self._extract_provenance_hint(rec.provenance)
-            hint_str = f" | {hint}" if hint else ""
-            lines.append(
-                f"- Source key={key_num} id={rec.evidence_id}{src}{hint_str} :: {rec.summary(max_chars=max_summary_chars)}"
-            )
+            hint_str = f" ({hint})" if hint else ""
+            src = f" source={rec.source}" if rec.source else ""
+            lines.append(f"- Source key={key_num} id={rec.evidence_id}{src}{hint_str}")
         lines.append("")
 
         lines.append("Evidence details (use ONLY these as authoritative sources):")
@@ -274,7 +184,7 @@ class EvidenceBank:
             if hint:
                 header = f"{header} ({hint})"
             lines.append(header)
-            lines.append(self.excerpt_for_prompt(rec.evidence_id, max_chars=max_chars_per_evidence, question=question))
+            lines.append(str(rec.content or ""))
 
         return "\n".join(lines).strip()
 
@@ -296,58 +206,34 @@ class EvidenceBank:
             ordered = ordered[: max(0, int(max_items))]
         return {str(idx): eid for idx, eid in enumerate(ordered, start=1)}
 
-    def select_evidences(
-        self,
-        evidence_ids: Sequence[str],
-        *,
-        max_chars: int = 900,
-        question: str | None = None,
-    ) -> List[Dict[str, Any]]:
-        """Materialize a bounded evidence list for prompts.
-
-        - Only include explicitly provided evidence_ids (in given order).
-        """
+    def select_evidences(self, evidence_ids: Sequence[str]) -> List[Dict[str, Any]]:
+        """Materialize full evidence dicts for a given id list ."""
 
         ordered: List[str] = []
         seen: set[str] = set()
-
-        def _add(eid: str) -> None:
+        for eid in evidence_ids or []:
             token = str(eid or "").strip()
-            if not token or token in seen:
-                return
-            if token not in self._records:
-                return
+            if not token or token in seen or token not in self._records:
+                continue
             seen.add(token)
             ordered.append(token)
 
-        if not evidence_ids:
-            raise ValueError("evidence_ids must be a non-empty list")
-        for eid in evidence_ids:
-            _add(str(eid))
-
         payload: List[Dict[str, Any]] = []
         for eid in ordered:
-            record = self._records[eid]
-            content = self.excerpt_for_prompt(record.evidence_id, max_chars=max_chars, question=question)
+            rec = self._records[eid]
             payload.append(
                 {
-                    "chunk_id": record.evidence_id,
-                    "source": record.source,
-                    "content": content,
-                    "score": record.score,
+                    "chunk_id": rec.evidence_id,
+                    "source": rec.source,
+                    "content": rec.content,
+                    "score": rec.score,
+                    "provenance": rec.provenance,
                 }
             )
         return payload
 
     @staticmethod
-    def update_recency(
-        recent: List[str],
-        *,
-        used_ids: Sequence[str],
-        retain_k: int,
-    ) -> List[str]:
-        """Return an updated recency list containing unique ids (most-recent last)."""
-
+    def update_recency(recent: List[str], *, used_ids: Sequence[str], retain_k: int) -> List[str]:
         if retain_k <= 0:
             return []
         base: List[str] = [str(x).strip() for x in (recent or []) if str(x).strip()]
@@ -357,7 +243,6 @@ class EvidenceBank:
             if not token:
                 continue
             if token in seen:
-                # move to the end
                 base = [x for x in base if x != token]
             seen.add(token)
             base.append(token)
@@ -375,7 +260,6 @@ class EvidenceBank:
             ids = [value.strip()] if value.strip() else []
         else:
             ids = [str(value).strip()] if str(value).strip() else []
-        # keep order, unique
         seen: set[str] = set()
         ordered: List[str] = []
         for eid in ids:
@@ -384,3 +268,6 @@ class EvidenceBank:
             seen.add(eid)
             ordered.append(eid)
         return ordered
+
+
+__all__ = ["EvidenceBank", "EvidenceRecord"]

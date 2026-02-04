@@ -58,24 +58,6 @@
     "allow_semantic_channel": true,
     "chain_depth": 4,
     "enable_custom_hooks": false,
-    "tool_context_max_evidences": 5,
-    "tool_context_max_chars": 800,
-    "compression": {
-      "tool_context": {
-        "mode": "truncate",
-        "max_items": 5,
-        "max_chars": 800,
-        "excerpt_chars": 900,
-        "retention": "tail"
-      },
-      "think": {
-        "mode": "truncate",
-        "max_items": 8,
-        "max_chars": 1600,
-        "excerpt_chars": 900,
-        "retention": "head"
-      }
-    },
     "coverage_expected_min_chunks": 3,
     "trace_reflection_enabled": true,
     "trace_reflection_max": 24,
@@ -90,16 +72,14 @@
       "enable_tool_calls": true,
       "max_tool_calls": 4,
       "tool_call_concurrency": 2,
-      "tool_catalog_max_items": 6,
-      "tool_catalog_allowlist": [
+      "tool_catalog_max_items": 12,
+        "tool_catalog_allowlist": [
         "explore",
-        "logic.check",
         "code.python"
       ],
       "include_llm_tools": true,
       "recent_tool_runs_max": 3,
-      "recent_tool_run_summary_max_chars": 320,
-      "max_rounds_per_checkpoint": 2
+      "max_rounds_per_checkpoint": 8
     }
   },
   "reporter": {
@@ -110,16 +90,12 @@
     "enable_llm_report": true,
     "include_appendices_in_answer": false,
     "report_temperature": 0.2,
-    "report_max_evidence_chars": 900,
-    "max_evidence_items": 10,
     "provenance_chunk_attach_max": 10,
     "report_max_graph_chain_items": 200,
     "report_max_seed_entities": 15,
     "sectionwise_writer": true,
     "sectionwise_retain_k": 5,
     "citation_aliases": true,
-    "outline_evidence_summary_chars": 240,
-    "methodology_summary_chars": 1200,
     "keep_tool_results": 8,
     "enable_citation_agent": true,
     "parallel_sections": false,

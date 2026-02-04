@@ -4,6 +4,7 @@ This reporter converts DeepSearch execution traces into a readable, end-user rep
 prompting an LLM with the collected evidence, highlights, and execution metadata.
 """
 import re
+import math
 from typing import Any, Dict, Iterable, List, Optional
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
@@ -31,6 +32,8 @@ from core.deepsearch.report.composer_helpers import (
     _split_authoritative_evidences,
     _trim_text,
 )
+from core.utils.stopwords import get_stopwords
+from config.core.deepsearch.stopwords import EVIDENCE_RANK_STOPWORDS
 
 class DeepSearchReporter:
     """Generate a structured report from DeepSearch traces."""
@@ -53,9 +56,18 @@ class DeepSearchReporter:
         self.graph_store = graph_store
 
         self.max_highlights = int(self.config["max_highlights"])
-        self.max_evidence_items = int(self.config["max_evidence_items"])
+        raw_max_items = self.config.get("max_evidence_items", None)
+        self.max_evidence_items = None
+        if raw_max_items is not None:
+            # Keep this as an *optional* safety knob; default is no truncation so the report stage
+            # can select pages from the evidence index without losing late pages (e.g., p11/p12).
+            try:
+                parsed = int(raw_max_items)
+            except Exception as exc:  # noqa: BLE001
+                raise ValueError("reporter.max_evidence_items must be an integer or null") from exc
+            if parsed > 0:
+                self.max_evidence_items = parsed
         self.report_temperature = float(self.config["report_temperature"])
-        self.report_max_evidence_chars = int(self.config["report_max_evidence_chars"])
         self.report_max_graph_chain_items = int(self.config["report_max_graph_chain_items"])
         self.report_max_seed_entities = int(self.config["report_max_seed_entities"])
         self.enable_llm_report = bool(self.config["enable_llm_report"])
@@ -316,28 +328,36 @@ class DeepSearchReporter:
             coverage=coverage_metrics,
             request_context=request_context,
         )
+        report_style = str(context.get("report_style") or "deepsearch").strip().lower()
         writer = DeepSearchLLMReportWriter(
             self.llm_connector,
             temperature=self.report_temperature,
             max_evidence_items=self.max_evidence_items,
-            max_evidence_chars=self.report_max_evidence_chars,
             max_graph_chain_items=self.report_max_graph_chain_items,
             parallel_sections=self.parallel_sections,
             max_parallel_sections=self.max_parallel_sections,
             synthesis_section_max_chars=int(self.config["synthesis_section_max_chars"]),
         )
         outline = await writer.build_outline(question=question, context=context)
-        if self.sectionwise_writer:
-            structured_llm = await writer.write_report_sectionwise(
-                question=question,
-                outline=outline,
-                context=context,
-                retain_k=max(0, int(self.sectionwise_retain_k)),
-            )
-        elif self.parallel_sections:
-            structured_llm = await writer.write_report_parallel(question=question, outline=outline, context=context)
-        else:
-            structured_llm = await writer.write_report(question=question, outline=outline, context=context)
+        try:
+            if report_style == "deepsearch":
+                structured_llm = await writer.write_report(question=question, outline=outline, context=context)
+            elif self.sectionwise_writer:
+                structured_llm = await writer.write_report_sectionwise(
+                    question=question,
+                    outline=outline,
+                    context=context,
+                    retain_k=max(0, int(self.sectionwise_retain_k)),
+                )
+            elif self.parallel_sections:
+                structured_llm = await writer.write_report_parallel(question=question, outline=outline, context=context)
+            else:
+                structured_llm = await writer.write_report(question=question, outline=outline, context=context)
+        except RuntimeError as exc:
+            # Normalize internal LLM-budget failures into a stable public exception type for callers/tests.
+            raise ValueError(str(exc)) from exc
+        if isinstance(structured_llm, dict) and structured_llm.get("writer_fallback"):
+            metadata["writer_fallback"] = structured_llm.get("writer_fallback")
         if alias_bundle:
             structured_llm, alias_diag = self._rewrite_citation_aliases(structured_llm, alias_bundle)
             if alias_diag:
@@ -596,7 +616,6 @@ class DeepSearchReporter:
         reasoning_steps = trace.get("reasoning_steps") or []
         tool_results = list(trace.get("tool_results") or [])
 
-        methodology_summary_chars = int(self.config["methodology_summary_chars"])
         keep_tool_results = int(self.config["keep_tool_results"])
         if keep_tool_results == 0:
             tool_results = []
@@ -610,7 +629,7 @@ class DeepSearchReporter:
                     "description": step.get("description"),
                     "channel": step.get("channel"),
                     "status": step.get("status"),
-                    "output_summary": _trim_text(step.get("output_summary"), max_chars=methodology_summary_chars),
+                    "output_summary": _trim_text(step.get("output_summary")),
                     "tool": step.get("tool")
                     or (step.get("metadata") or {}).get("tool")
                     or (step.get("diagnostics") or {}).get("tool"),
@@ -640,10 +659,7 @@ class DeepSearchReporter:
         bank = EvidenceBank()
         bank.add_many(evidences)
         outline_index_limit = self.max_evidence_items if self.max_evidence_items is not None else None
-        evidence_index = bank.index_for_prompt(
-            max_items=outline_index_limit,
-            max_summary_chars=int(self.config["outline_evidence_summary_chars"]),
-        )
+        evidence_index = bank.index_for_prompt(max_items=outline_index_limit)
         graph_context = trace.get("graph_context") if isinstance(trace.get("graph_context"), dict) else {}
         context_meta = graph_context.get("metadata") if isinstance(graph_context, dict) else {}
         report_style = None
@@ -683,6 +699,134 @@ class DeepSearchReporter:
         # Rank before applying the final max_items budget so prompts focus on high-signal chunks.
         internal_items = _rank_evidences_for_question(question, internal_items)
         external_items = _rank_evidences_for_question(question, external_items)
+
+        # If evidence spans multiple files, diversify the *prompt bundle* so the report writer sees at
+        # least a small amount of page evidence per top file. This helps comparison-like questions
+        # and reduces "single-file drift" when one document dominates the rank signal.
+        if bool(getattr(composer_defaults, "DEFAULT_REPORT_EVIDENCE_DIVERSIFY_BY_FILE", True)):
+            try:
+                max_files = int(getattr(composer_defaults, "DEFAULT_REPORT_EVIDENCE_MAX_FILES", 3))
+            except Exception:
+                max_files = 3
+            try:
+                min_per_file = int(getattr(composer_defaults, "DEFAULT_REPORT_EVIDENCE_MIN_ITEMS_PER_FILE", 1))
+            except Exception:
+                min_per_file = 1
+            max_files = max(1, max_files)
+            min_per_file = max(0, min_per_file)
+
+            def _file_id(ev: Dict[str, Any]) -> str | None:
+                prov = ev.get("provenance") if isinstance(ev.get("provenance"), dict) else {}
+                if not isinstance(prov, dict):
+                    return None
+                fid = prov.get("source_file_id")
+                if isinstance(fid, str) and fid.strip():
+                    return fid.strip()
+                meta = prov.get("metadata") if isinstance(prov.get("metadata"), dict) else {}
+                if isinstance(meta, dict):
+                    fid2 = meta.get("source_file_id")
+                    if isinstance(fid2, str) and fid2.strip():
+                        return fid2.strip()
+                return None
+
+            # Prefer diversifying across read.pages evidence; graph inference may be file-agnostic.
+            #
+            # Use aggregation to pick top files:
+            #   FileScore = (1/sqrt(N+1)) * sum ChunkScore(n)
+            # Here ChunkScore is a lightweight, deterministic proxy (anchor match count) because
+            # read.pages chunks do not carry an embedding similarity score at this stage.
+            q = str(question or "")
+            anchors: list[str] = []
+            for token in re.findall(r"\d[\d,\.%]*", q, flags=re.UNICODE):
+                token = token.strip()
+                if token and token not in anchors:
+                    anchors.append(token)
+            token_re = re.compile(
+                rf"[^\W_]{{{composer_defaults.DEFAULT_EVIDENCE_RANK_ASCII_ANCHOR_MIN},{composer_defaults.DEFAULT_EVIDENCE_RANK_ASCII_ANCHOR_MAX}}}",
+                flags=re.UNICODE,
+            )
+            en_stop = frozenset(word.lower() for word in get_stopwords("en"))
+            for token in token_re.findall(q):
+                token = token.strip()
+                if not token or token in EVIDENCE_RANK_STOPWORDS:
+                    continue
+                if en_stop and token.lower() in en_stop:
+                    continue
+                if token not in anchors:
+                    anchors.append(token)
+            anchors = [a for a in anchors if a and a not in EVIDENCE_RANK_STOPWORDS][
+                : composer_defaults.DEFAULT_EVIDENCE_RANK_MAX_ANCHORS
+            ]
+
+            def _chunk_score(ev: Dict[str, Any]) -> float:
+                content = str(ev.get("content") or "")
+                if not content or not anchors:
+                    return 0.0
+                lowered = content.lower()
+                match_count = 0
+                for term in anchors:
+                    t = term.lower()
+                    if t and t in lowered:
+                        match_count += 1
+                return float(match_count)
+
+            file_stats: Dict[str, Dict[str, float]] = {}
+            for ev in internal_items:
+                if not isinstance(ev, dict):
+                    continue
+                if str(ev.get("source") or "").strip() != "read.pages":
+                    continue
+                fid = _file_id(ev)
+                if not fid:
+                    continue
+                score = _chunk_score(ev)
+                bucket = file_stats.setdefault(fid, {"n": 0.0, "sum": 0.0, "count": 0.0})
+                bucket["count"] += 1.0
+                if score > 0:
+                    bucket["n"] += 1.0
+                    bucket["sum"] += float(score)
+
+            if len(file_stats) >= 2 and min_per_file > 0:
+                scored_files: list[tuple[str, float, float]] = []
+                for fid, bucket in file_stats.items():
+                    n = float(bucket.get("n") or 0.0)
+                    s = float(bucket.get("sum") or 0.0)
+                    # If no anchor match exists for this file in the evidence pool, still allow it to be considered
+                    # by using a tiny non-zero N (prevents division by 0 and keeps the ordering deterministic).
+                    denom = math.sqrt(max(0.0, n) + 1.0)
+                    file_score = (s / denom) if denom > 0 else 0.0
+                    # Tie-breaker: prefer files with more pages surfaced (count).
+                    scored_files.append((fid, file_score, float(bucket.get("count") or 0.0)))
+                scored_files.sort(key=lambda t: (t[1], t[2]), reverse=True)
+                top_files = [fid for fid, _s, _c in scored_files[:max_files]]
+                if top_files:
+                    selected_keys: set[str] = set()
+                    selected: List[Dict[str, Any]] = []
+                    remainder: List[Dict[str, Any]] = []
+
+                    def _key(ev: Dict[str, Any]) -> str:
+                        source = str(ev.get("source") or "").strip()
+                        chunk_id = str(ev.get("chunk_id") or ev.get("evidence_id") or "").strip()
+                        return f"{source}::{chunk_id}"
+
+                    per_file_taken: Dict[str, int] = {fid: 0 for fid in top_files}
+                    for ev in internal_items:
+                        if not isinstance(ev, dict):
+                            continue
+                        k = _key(ev)
+                        if k in selected_keys:
+                            continue
+                        fid = _file_id(ev)
+                        if fid in per_file_taken and str(ev.get("source") or "").strip() == "read.pages":
+                            if per_file_taken[fid] < min_per_file:
+                                selected.append(ev)
+                                selected_keys.add(k)
+                                per_file_taken[fid] += 1
+                                continue
+                        remainder.append(ev)
+
+                    # Re-rank: keep selected first (in original rank order), then everything else.
+                    internal_items = selected + [ev for ev in remainder if _key(ev) not in selected_keys]
 
         merged: List[Dict[str, Any]] = []
         seen: set[str] = set()
@@ -840,9 +984,13 @@ def _append_chunk_evidence(
     *,
     evidences: List[Dict[str, Any]],
     max_items: int | None = None,
-    preview_length: int = composer_defaults.DEFAULT_EVIDENCE_PREVIEW_CHARS,
 ) -> str:
-    """Append a compact section listing chunk evidence with content preview."""
+    """Append a chunk-evidence section without truncating content.
+
+    Note: DeepSearch uses an EvidencePool/EvidenceBank as external memory; we do not slice
+    the underlying page text here. If the appendix becomes large, reduce `max_items`
+    rather than truncating strings.
+    """
 
     if not evidences:
         return markdown_text
@@ -860,11 +1008,11 @@ def _append_chunk_evidence(
         content = str(entry.get("content") or "").strip()
         if not chunk_id:
             continue
-        preview = content[:preview_length].replace("\n", " ").strip()
-        if len(content) > preview_length:
-            preview += "..."
         source_tag = f" ({source})" if source else ""
-        blocks.append(f"- `{chunk_id}`{source_tag}: {preview}")
+        if content:
+            blocks.extend([f"- `{chunk_id}`{source_tag}:", "", content, ""])
+        else:
+            blocks.append(f"- `{chunk_id}`{source_tag}: (empty)")
 
     return (markdown_text or "").rstrip() + "\n" + "\n".join(blocks).rstrip() + "\n"
 
@@ -874,7 +1022,6 @@ def _append_tool_evidence(
     *,
     evidences: List[Dict[str, Any]],
     max_items: int | None = None,
-    preview_length: int = composer_defaults.DEFAULT_EVIDENCE_PREVIEW_CHARS,
 ) -> str:
     """Append non-authoritative tool-generated artifacts for debugging."""
 
@@ -897,11 +1044,11 @@ def _append_tool_evidence(
         content = str(entry.get("content") or "").strip()
         if not chunk_id:
             continue
-        preview = content[:preview_length].replace("\n", " ").strip()
-        if len(content) > preview_length:
-            preview += "..."
         source_tag = f" ({source})" if source else ""
-        blocks.append(f"- `{chunk_id}`{source_tag}: {preview}")
+        if content:
+            blocks.extend([f"- `{chunk_id}`{source_tag}:", "", content, ""])
+        else:
+            blocks.append(f"- `{chunk_id}`{source_tag}: (empty)")
 
     return (markdown_text or "").rstrip() + "\n" + "\n".join(blocks).rstrip() + "\n"
 

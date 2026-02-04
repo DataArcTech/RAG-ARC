@@ -12,8 +12,6 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
-from config.output_limits import DEEPSEARCH_SOURCE_MAX_CHARS, DEEPSEARCH_SOURCE_TITLE_MAX_CHARS
-from core.deepsearch.utils.compression import truncate_text
 from core.presentation.evidence import document_download_url, document_preview_url
 
 _BRACKET_RE = re.compile(r"\[([^\[\]]+)\]")
@@ -261,19 +259,10 @@ def format_answer_with_references(
     return converted, sources, citation_key_map
 
 
-def _truncate_text(text: str, *, max_chars: int) -> str:
-    if max_chars <= 0:
-        return ""
-    raw = str(text or "")
-    return truncate_text(raw, max_chars=max_chars)
-
-
-def _sanitize_title(text: str, *, max_chars: int) -> str:
+def _sanitize_title(text: str) -> str:
     compact = " ".join(str(text or "").strip().split())
     if not compact:
         return "source"
-    if max_chars > 0 and len(compact) > max_chars:
-        compact = compact[:max_chars].rstrip()
     return compact
 
 
@@ -356,14 +345,14 @@ def build_source_entries(
         file_id, filename = _extract_file_meta_from_provenance(provenance) if provenance else (None, None)
 
         content = str(evidence.get("content") or "")
-        description = _truncate_text(content, max_chars=DEEPSEARCH_SOURCE_MAX_CHARS)
+        description = content
 
         if url:
-            title = _sanitize_title(content.splitlines()[0] if content else url, max_chars=DEEPSEARCH_SOURCE_TITLE_MAX_CHARS)
+            title = _sanitize_title(content.splitlines()[0] if content else url)
             file_url = url
         else:
             safe_name = Path(filename).name if filename else ""
-            title = _sanitize_title(safe_name or "source", max_chars=DEEPSEARCH_SOURCE_TITLE_MAX_CHARS)
+            title = _sanitize_title(safe_name or "source")
             file_url = document_preview_url(file_id, filename) if file_id else None
 
         entries.append(

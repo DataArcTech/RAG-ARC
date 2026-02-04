@@ -11,7 +11,6 @@ async def test_section_writer_retries_on_invalid_json_then_succeeds():
         temperature=0.0,
         max_retries=2,
         max_evidence_items=5,
-        max_evidence_chars=800,
         max_graph_chain_items=10,
         parallel_sections=False,
         max_parallel_sections=1,

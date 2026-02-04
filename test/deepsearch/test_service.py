@@ -24,6 +24,21 @@ class _StubGraphLoop:
     def __init__(self):
         self.calls: List[str] = []
 
+    @staticmethod
+    def _stub_page_evidence() -> List[Dict[str, Any]]:
+        # DeepSearch report generation requires at least one read.pages evidence (full-page context).
+        # Keep the stub minimal: tests here validate scope wiring, not retrieval quality.
+        return [
+            {
+                "chunk_id": "stub:read.pages:1",
+                "source": "read.pages",
+                "content": "stub page evidence",
+                "kind": "primary",
+                "score": None,
+                "provenance": {"page_start": 1, "page_end": 1, "source_file_id": "stub-file"},
+            }
+        ]
+
     async def run_think_loop(
         self,
         question: str,
@@ -42,7 +57,7 @@ class _StubGraphLoop:
             "plan_steps": [],
             "graph_traversals": [],
             "reasoning_steps": [],
-            "evidences": [],
+            "evidences": self._stub_page_evidence(),
             "tool_results": [],
             "think_notes": [],
             "coverage_metrics": {},

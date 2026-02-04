@@ -25,12 +25,12 @@ def test_report_writer_language_enforcement_uses_inferred_user_language():
         "- AXA安盛「盛利II-至尊」.pdf\n"
     )
     sys_prompt = DeepSearchLLMReportWriter._system_prompt_with_language(base, question=q)
-    assert "Write ALL fields in English" in sys_prompt
+    assert "Write titles/purposes/text in English" in sys_prompt
     assert "Do NOT output" in sys_prompt
 
     q2 = "请总结这份英文产品文件的核心信息。"
     sys_prompt2 = DeepSearchLLMReportWriter._system_prompt_with_language(base, question=q2)
-    assert "Write ALL fields in Simplified Chinese" in sys_prompt2
+    assert "Write titles/purposes/text in Simplified Chinese" in sys_prompt2
 
 
 def test_infer_user_language_ignores_split_filename_cjk_prefix():

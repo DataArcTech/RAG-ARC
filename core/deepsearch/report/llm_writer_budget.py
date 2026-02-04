@@ -2,7 +2,6 @@ import json
 from typing import Any, Dict, List
 
 from config.core.deepsearch import report_writer_defaults as report_defaults
-from core.deepsearch.utils.compression import focused_truncate_text
 
 
 def dump_json(payload: Any) -> str:
@@ -124,9 +123,6 @@ def slim_coverage(coverage: Any, *, level: int) -> Dict[str, Any]:
 def limit_evidences(
     evidences: List[Dict[str, Any]],
     max_items: int | None,
-    max_chars: int,
-    *,
-    question: str | None = None,
 ) -> List[Dict[str, Any]]:
     limited: List[Dict[str, Any]] = []
     subset = list(evidences) if max_items is None else evidences[: max(max_items, 0)]
@@ -135,17 +131,13 @@ def limit_evidences(
             continue
         chunk_id = entry.get("chunk_id")
         content = str(entry.get("content") or "")
-        if max_chars > 0 and len(content) > max_chars:
-            if question and str(question).strip():
-                content = focused_truncate_text(content, max_chars=max_chars, question=str(question), extra=None)
-            else:
-                content = content[:max_chars].rstrip() + "..."
         limited.append(
             {
                 "chunk_id": chunk_id,
                 "source": entry.get("source"),
                 "content": content,
                 "score": entry.get("score"),
+                "provenance": entry.get("provenance"),
             }
         )
     return limited
@@ -155,7 +147,6 @@ def limit_highlights(
     highlights: list[Any],
     *,
     max_items: int | None,
-    text_max_chars: int | None,
 ) -> list[dict[str, Any]]:
     if not isinstance(highlights, list) or not highlights:
         return []
@@ -165,11 +156,5 @@ def limit_highlights(
         if not isinstance(item, dict):
             continue
         payload: dict[str, Any] = dict(item)
-        if text_max_chars is not None:
-            limit = max(int(text_max_chars), 0)
-            for key in ("summary", "content", "details", "text"):
-                value = payload.get(key)
-                if isinstance(value, str) and limit > 0 and len(value) > limit:
-                    payload[key] = value[:limit].rstrip() + "..."
         limited.append(payload)
     return limited

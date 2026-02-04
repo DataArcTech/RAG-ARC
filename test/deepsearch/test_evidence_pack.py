@@ -20,12 +20,9 @@ def test_evidence_pack_is_deterministic_and_bounded() -> None:
         ]
     )
 
-    pack = bank.evidence_pack_for_prompt(
-        ["chunk_001", "chunk_002"],
-        question="What is the deductible?",
-        max_chars_per_evidence=60,
-        max_summary_chars=20,
-    )
+    ids = ["chunk_001", "chunk_002"]
+    source_key_map = bank.source_key_map_for_prompt(ids)
+    pack = bank.evidence_pack_for_prompt(ids, source_key_map=source_key_map)
     assert "Evidence Pack" in pack
     assert "Citable Source key allowlist:" in pack
     assert "1, 2" in pack
@@ -34,10 +31,10 @@ def test_evidence_pack_is_deterministic_and_bounded() -> None:
     assert "filename=policy.pdf" in pack
     assert "page=3" in pack
     assert "filename=brochure.pdf" in pack
+    # External-memory policy: evidence packs include full evidence text (no truncation).
+    assert "deductible is 5000 HKD" in pack
+    assert "premium refund rate" in pack
 
-    excerpt = bank.excerpt_for_prompt("chunk_001", question="What is the deductible?", max_chars=60)
-    assert excerpt
-    assert len(excerpt) <= 60
-
-    pack_one = bank.evidence_pack_for_prompt(["chunk_001", "chunk_002"], max_items=1, max_chars_per_evidence=40)
+    # Bounded by item count: pass fewer ids.
+    pack_one = bank.evidence_pack_for_prompt(["chunk_001"], source_key_map={"1": "chunk_001"})
     assert "chunk_002" not in pack_one

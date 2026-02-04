@@ -11,7 +11,6 @@ DEFAULT_REPORT_MAX_RETRIES = 2
 DEFAULT_REPORT_JSON_REPAIR_ATTEMPTS = 2
 
 DEFAULT_REPORT_MAX_EVIDENCE_ITEMS: Optional[int] = 24
-DEFAULT_REPORT_MAX_EVIDENCE_CHARS = 900
 DEFAULT_REPORT_MAX_GRAPH_CHAIN_ITEMS: Optional[int] = 48
 
 DEFAULT_REPORT_PARALLEL_SECTIONS = False
@@ -21,6 +20,13 @@ DEFAULT_REPORT_SYNTHESIS_SECTION_MAX_CHARS = 1200
 
 DEFAULT_PARALLEL_TITLE_MAX_CHARS = 80
 DEFAULT_ERROR_SNIPPET_LIMIT_CHARS = 500
+
+# Evidence selection (index first, open sources on demand).
+# These are prompt-only policies; they do NOT hardcode business logic.
+DEFAULT_REPORT_SOURCE_SELECT_ENABLED = True
+DEFAULT_REPORT_SOURCE_SELECT_MIN_SOURCES = 3
+DEFAULT_REPORT_SOURCE_SELECT_MAX_SOURCES = 8
+DEFAULT_REPORT_SOURCE_SELECT_PREVIEW_CHARS = 180
 
 SECTIONWISE_PREVIOUS_TITLES_MAX = 2
 SECTIONWISE_PRIMARY_EVIDENCE_IDS_MAX = 12
@@ -43,7 +49,10 @@ SLIM_GRAPH_EVIDENCE_LEVEL_SEED_ENTITIES = 12
 class ReportWritePromptBudgetLevel:
     """A shrink profile for the report-writing prompt when context is exceeded.
 
-    Divisors are applied to per-writer maxima (e.g., max_evidence_chars).
+    We do not truncate evidence text. To reduce prompt size we only shrink:
+    - number of evidence items
+    - number of graph-chain items
+    - methodology/coverage detail levels
     """
 
     methodology_level: int
@@ -51,10 +60,8 @@ class ReportWritePromptBudgetLevel:
     coverage_level: int
 
     highlights_max_items: Optional[int]
-    highlight_text_max_chars: Optional[int]
 
     evidence_items_divisor: int
-    evidence_chars_divisor: int
     graph_chain_items_divisor: int
 
 
@@ -64,9 +71,7 @@ REPORT_WRITE_PROMPT_BUDGET_LEVELS: tuple[ReportWritePromptBudgetLevel, ...] = (
         graph_evidence_level=0,
         coverage_level=0,
         highlights_max_items=None,
-        highlight_text_max_chars=None,
         evidence_items_divisor=1,
-        evidence_chars_divisor=1,
         graph_chain_items_divisor=1,
     ),
     ReportWritePromptBudgetLevel(
@@ -74,9 +79,7 @@ REPORT_WRITE_PROMPT_BUDGET_LEVELS: tuple[ReportWritePromptBudgetLevel, ...] = (
         graph_evidence_level=1,
         coverage_level=1,
         highlights_max_items=4,
-        highlight_text_max_chars=2000,
         evidence_items_divisor=4,
-        evidence_chars_divisor=4,
         graph_chain_items_divisor=4,
     ),
     ReportWritePromptBudgetLevel(
@@ -84,19 +87,15 @@ REPORT_WRITE_PROMPT_BUDGET_LEVELS: tuple[ReportWritePromptBudgetLevel, ...] = (
         graph_evidence_level=2,
         coverage_level=2,
         highlights_max_items=2,
-        highlight_text_max_chars=1200,
         evidence_items_divisor=8,
-        evidence_chars_divisor=8,
         graph_chain_items_divisor=8,
     ),
     ReportWritePromptBudgetLevel(
         methodology_level=3,
         graph_evidence_level=3,
         coverage_level=3,
-        highlights_max_items=1,
-        highlight_text_max_chars=800,
-        evidence_items_divisor=16,
-        evidence_chars_divisor=16,
-        graph_chain_items_divisor=16,
+        highlights_max_items=0,
+        evidence_items_divisor=32,
+        graph_chain_items_divisor=32,
     ),
 )

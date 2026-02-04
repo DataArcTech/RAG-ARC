@@ -233,11 +233,24 @@ def _trim_graph_snapshot(
         def _rank(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             return sorted(items, key=lambda entry: entry.get("ppr_score") or 0.0, reverse=True)
 
-        chunk_ranked = _rank(chunk_nodes)
-        chunk_nodes = chunk_ranked[: min(len(chunk_ranked), node_limit)]
-        remaining = max(node_limit - len(chunk_nodes), 0)
+        # Prefer retaining entity nodes over chunk nodes so that relation edges (which are typically
+        # expressed in entity-name space) survive trimming. Chunk nodes are mainly useful for
+        # visualization/debugging; DeepSearch uses page evidence as the authoritative citation source.
+        #
+        # This avoids a failure mode where `node_limit` is consumed entirely by chunks, leaving zero
+        # entities, and therefore filtering out all meaningful entity-entity edges (triples).
         entity_ranked = _rank(entity_nodes)
-        entity_nodes = entity_ranked[: min(len(entity_ranked), remaining)] if remaining else []
+        chunk_ranked = _rank(chunk_nodes)
+
+        if entity_ranked:
+            entity_budget = min(len(entity_ranked), node_limit)
+            entity_nodes = entity_ranked[:entity_budget]
+            remaining = max(node_limit - len(entity_nodes), 0)
+            chunk_nodes = chunk_ranked[:remaining] if remaining else []
+        else:
+            chunk_nodes = chunk_ranked[: min(len(chunk_ranked), node_limit)]
+            remaining = max(node_limit - len(chunk_nodes), 0)
+            entity_nodes = entity_ranked[: min(len(entity_ranked), remaining)] if remaining else []
 
     def _id_tokens(entries: List[Dict[str, Any]]) -> set[str]:
         tokens: set[str] = set()
@@ -334,6 +347,32 @@ def _first_subgraph_info_from_reasoning(payload: Dict[str, Any]) -> Optional[Dic
                 subgraph = filtered_meta.get("_subgraph_info") or filtered_meta.get("subgraph_info")
                 if isinstance(subgraph, dict) and subgraph:
                     return subgraph
+
+    # Fallback: some payloads aggressively cap `reasoning.evidences` for size, but keep tool_results.
+    # When present, scan tool_results[*].result.evidences for a subgraph snapshot.
+    tool_results = reasoning.get("tool_results") or []
+    if isinstance(tool_results, list):
+        for entry in tool_results:
+            if not isinstance(entry, dict):
+                continue
+            result = entry.get("result")
+            if not isinstance(result, dict):
+                continue
+            evidences = result.get("evidences") or []
+            if not isinstance(evidences, list):
+                continue
+            for evidence in evidences:
+                if not isinstance(evidence, dict):
+                    continue
+                provenance = evidence.get("provenance") or {}
+                metadata = provenance.get("metadata") or {}
+                if isinstance(metadata, dict):
+                    subgraph = metadata.get("_subgraph_info") or metadata.get("subgraph_info")
+                    if isinstance(subgraph, dict) and subgraph:
+                        return subgraph
+                subgraph = provenance.get("_subgraph_info") or provenance.get("subgraph_info")
+                if isinstance(subgraph, dict) and subgraph:
+                    return subgraph
     return None
 
 
@@ -344,6 +383,7 @@ def _serialize_deepsearch_chunks(evidences: Iterable[Dict[str, Any]], limit: Opt
             break
         provenance = evidence.get("provenance") or {}
         metadata = provenance.get("metadata") or {}
+        evidence_class = provenance.get("evidence_class")
         file_id = None
         if isinstance(metadata, dict):
             chunk_meta = metadata.get("chunk_metadata")
@@ -364,6 +404,7 @@ def _serialize_deepsearch_chunks(evidences: Iterable[Dict[str, Any]], limit: Opt
                 "document_url": _document_download_url(file_id) if file_id else None,
                 "content": content,
                 "score": evidence.get("score"),
+                "evidence_class": evidence_class,
                 "metadata": safe_meta,
             }
         )

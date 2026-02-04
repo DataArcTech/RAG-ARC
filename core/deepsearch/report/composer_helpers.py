@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 from core.utils.stopwords import get_stopwords
 
 from config.core.deepsearch import report_composer_defaults as composer_defaults
+from config.core.deepsearch.evidence_defaults import EVIDENCE_CLASS_GRAPH_INFERENCE
 from config.core.deepsearch.stopwords import EVIDENCE_RANK_STOPWORDS
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_PRIMARY
 from core.deepsearch.utils.file_scope import normalize_filename_token
@@ -139,14 +140,25 @@ def _extract_question_scope_terms(question: str) -> List[str]:
 
 
 def _filter_evidences_by_question_scope(question: str, items: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    graph_items: List[Dict[str, Any]] = []
+    non_graph_items: List[Dict[str, Any]] = []
+    for ev in items:
+        if not isinstance(ev, dict):
+            continue
+        prov = ev.get("provenance") if isinstance(ev.get("provenance"), dict) else {}
+        if isinstance(prov, dict) and prov.get("evidence_class") == EVIDENCE_CLASS_GRAPH_INFERENCE:
+            graph_items.append(ev)
+        else:
+            non_graph_items.append(ev)
+
     terms = _extract_question_scope_terms(question)
     if len(terms) < 2:
-        return items, {"scope_terms_applied": False}
+        return items, {"scope_terms_applied": False, "graph_evidence_kept": len(graph_items)}
 
     # Prefer terms that are discriminative across the retrieved evidence pool.
     # This keeps cross-doc questions from "drifting" into unrelated files when generic
     # words (e.g. "payment", "plan") appear everywhere.
-    evidence_count = len([ev for ev in items if isinstance(ev, dict)])
+    evidence_count = len([ev for ev in non_graph_items if isinstance(ev, dict)])
     max_common_ratio = 0.65
     rare_ratio_cutoff = 0.45
     max_effective_terms = 6
@@ -154,7 +166,7 @@ def _filter_evidences_by_question_scope(question: str, items: List[Dict[str, Any
     for term in terms:
         term_lower = term.lower()
         hits = 0
-        for ev in items:
+        for ev in non_graph_items:
             if not isinstance(ev, dict):
                 continue
             content = str(ev.get("content") or "").lower()
@@ -189,26 +201,28 @@ def _filter_evidences_by_question_scope(question: str, items: List[Dict[str, Any
     anchor_terms = [t for t in terms if _looks_like_anchor(t)]
     if anchor_terms:
         if all(int(term_stats.get(t, {}).get("hits") or 0) <= 0 for t in anchor_terms):
-            return [], {
+            return graph_items, {
                 "scope_terms_applied": True,
                 "hard_filter": True,
                 "anchor_miss": True,
                 "anchor_terms": anchor_terms,
                 "scope_terms": terms,
                 "term_stats": term_stats,
+                "graph_evidence_kept": len(graph_items),
             }
 
     dropped_missing = [t for t in terms if int(term_stats.get(t, {}).get("hits") or 0) <= 0]
     dropped_common = [t for t in terms if t not in dropped_missing and float(term_stats.get(t, {}).get("ratio") or 0.0) > max_common_ratio]
     candidates = [t for t in terms if t not in dropped_missing and t not in dropped_common]
     if len(candidates) < 2:
-        return items, {
+        return graph_items + non_graph_items, {
             "scope_terms_applied": False,
             "scope_terms": terms,
             "term_stats": term_stats,
             "dropped_missing": dropped_missing,
             "dropped_common": dropped_common,
             "fallback": True,
+            "graph_evidence_kept": len(graph_items),
         }
 
     # Take the rarest terms first (ratio asc, then prefer longer tokens).
@@ -222,18 +236,19 @@ def _filter_evidences_by_question_scope(question: str, items: List[Dict[str, Any
     else:
         discriminative_terms = ranked[: max(2, min(max_effective_terms, len(ranked)))]
     if len(discriminative_terms) < 2:
-        return items, {
+        return graph_items + non_graph_items, {
             "scope_terms_applied": False,
             "scope_terms": terms,
             "term_stats": term_stats,
             "dropped_missing": dropped_missing,
             "dropped_common": dropped_common,
             "fallback": True,
+            "graph_evidence_kept": len(graph_items),
         }
 
     kept: List[Dict[str, Any]] = []
     dropped = 0
-    for ev in items:
+    for ev in non_graph_items:
         if not isinstance(ev, dict):
             continue
         content = str(ev.get("content") or "").lower()
@@ -254,7 +269,7 @@ def _filter_evidences_by_question_scope(question: str, items: List[Dict[str, Any
             dropped += 1
 
     if kept:
-        return kept, {
+        return graph_items + kept, {
             "scope_terms_applied": True,
             "scope_terms": terms,
             "scope_terms_effective": discriminative_terms,
@@ -263,18 +278,20 @@ def _filter_evidences_by_question_scope(question: str, items: List[Dict[str, Any
             "dropped_common": dropped_common,
             "kept": len(kept),
             "dropped": dropped,
+            "graph_evidence_kept": len(graph_items),
         }
     # Avoid false negatives: if heuristic drops everything, keep original set.
-    return items, {
+    return graph_items + non_graph_items, {
         "scope_terms_applied": False,
         "scope_terms": terms,
         "scope_terms_effective": discriminative_terms,
         "term_stats": term_stats,
         "dropped_missing": dropped_missing,
         "dropped_common": dropped_common,
-        "kept": len(items),
+        "kept": len(non_graph_items),
         "dropped": 0,
         "fallback": True,
+        "graph_evidence_kept": len(graph_items),
     }
 
 
@@ -294,11 +311,25 @@ def _is_tool_generated_evidence(evidence: Dict[str, Any], *, toolish_chunk_id_pr
 def _split_authoritative_evidences(evidences: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Split evidences into authoritative corpus chunks vs tool-generated artifacts."""
 
+    allowed_sources = tuple(getattr(composer_defaults, "PRIMARY_EVIDENCE_SOURCES", ()) or ())
+    allowed_set = {str(source).strip().lower() for source in allowed_sources if str(source or "").strip()}
     authoritative: List[Dict[str, Any]] = []
     generated: List[Dict[str, Any]] = []
     for ev in evidences or []:
         if not isinstance(ev, dict):
             continue
+        provenance = ev.get("provenance") if isinstance(ev.get("provenance"), dict) else {}
+        evidence_class = None
+        if isinstance(provenance, dict):
+            evidence_class = provenance.get("evidence_class")
+        if evidence_class == EVIDENCE_CLASS_GRAPH_INFERENCE:
+            authoritative.append(ev)
+            continue
+        if allowed_set:
+            source_name = str(ev.get("source") or "").strip().lower()
+            if source_name not in allowed_set:
+                generated.append(ev)
+                continue
         # Prefer explicit evidence governance labels when available.
         kind = str(ev.get("kind") or "").strip().lower()
         if kind:
@@ -318,16 +349,12 @@ def _split_authoritative_evidences(evidences: List[Dict[str, Any]]) -> tuple[Lis
     return authoritative, generated
 
 
-def _trim_text(value: Any, *, max_chars: int) -> str | None:
+def _trim_text(value: Any) -> str | None:
+    """Return a string view of a value without truncation (DeepSearch external-memory policy)."""
+
     if value is None:
         return None
-    text = str(value)
-    limit = max(0, int(max_chars))
-    if limit <= 0:
-        return ""
-    if len(text) <= limit:
-        return text
-    return text[: max(0, limit - 3)].rstrip() + "..."
+    return str(value)
 
 
 def _slim_diagnostics(
@@ -346,10 +373,9 @@ def _slim_diagnostics(
         if isinstance(raw, (int, float, bool)):
             trimmed[str(key)] = raw
         elif isinstance(raw, str):
-            trimmed[str(key)] = _trim_text(raw, max_chars=max_value_chars)
+            trimmed[str(key)] = _trim_text(raw)
         elif isinstance(raw, (list, tuple)) and len(raw) <= composer_defaults.DEFAULT_DIAGNOSTICS_MAX_SMALL_LIST_ITEMS:
-            item_limit = composer_defaults.DEFAULT_DIAGNOSTICS_LIST_ITEM_PREVIEW_CHARS
-            trimmed[str(key)] = [(_trim_text(item, max_chars=item_limit) if isinstance(item, str) else item) for item in raw]
+            trimmed[str(key)] = [(_trim_text(item) if isinstance(item, str) else item) for item in raw]
         else:
             continue
     return trimmed or None

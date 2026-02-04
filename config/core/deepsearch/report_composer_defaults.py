@@ -17,13 +17,19 @@ DEFAULT_UNKNOWN_ALIAS_SAMPLE_SIZE = 20
 DEFAULT_GRAPH_EVIDENCE_SEED_ENTITIES_MAX = 12
 DEFAULT_GRAPH_CHAIN_PREVIEW_MAX = 40
 
-DEFAULT_EVIDENCE_PREVIEW_CHARS = 100
 DEFAULT_EVIDENCE_PREVIEW_MAX_ITEMS = 40
 
 DEFAULT_EXTERNAL_EVIDENCE_MIN_ITEMS = 2
 DEFAULT_EXTERNAL_EVIDENCE_FRACTION_DIVISOR = 3
 
 DEFAULT_PROVENANCE_CHUNK_ATTACH_MAX = 10
+
+# Evidence diversification (report prompting): when evidence spans multiple files,
+# keep at least a small amount of page evidence per top file to avoid "single-file drift"
+# in comparison-like questions. This is a prompt-shaping policy (not a retrieval policy).
+DEFAULT_REPORT_EVIDENCE_DIVERSIFY_BY_FILE = True
+DEFAULT_REPORT_EVIDENCE_MAX_FILES = 3
+DEFAULT_REPORT_EVIDENCE_MIN_ITEMS_PER_FILE = 1
 
 TOOLISH_CHUNK_ID_PREFIXES: tuple[str, ...] = ("graph.", "tool:", "think")
 TOOLISH_SOURCE_NAMES: frozenset[str] = frozenset(
@@ -33,3 +39,8 @@ TOOLISH_SOURCE_NAMES: frozenset[str] = frozenset(
         "graph.llm_chain_explorer",
     }
 )
+
+# Authoritative evidence sources (DeepSearch): only these sources are allowed to be citable
+# (plus graph inference evidences explicitly tagged with GRAPH_INFERENCE).
+# Keep this list minimal to enforce read.pages as the primary evidence path for answers.
+PRIMARY_EVIDENCE_SOURCES: tuple[str, ...] = ("read.pages",)

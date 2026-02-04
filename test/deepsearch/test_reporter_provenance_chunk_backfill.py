@@ -42,7 +42,7 @@ class _ChunkCitingLLM:
         if "Return a JSON array of sections" in user_prompt:
             return """
 [
-  {"title": "Answer", "section_type": "analysis", "purpose": "Answer with citations.", "evidence_ids": ["chunk_001"]}
+  {"title": "Answer", "section_type": "analysis", "purpose": "Answer with citations.", "evidence_ids": ["read.pages:0"]}
 ]
 """.strip()
 
@@ -90,6 +90,11 @@ def test_reporter_backfills_provenance_chunks_into_evidence_pool() -> None:
     trace = {
         "question": "免赔额是多少？",
         "evidences": [
+            {
+                "chunk_id": "read.pages:0",
+                "source": "read.pages",
+                "content": "免赔额为 5000 元。",
+            },
             {
                 "chunk_id": "graph.latest_truth:p1",
                 "source": "graph.latest_truth",
