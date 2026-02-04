@@ -129,7 +129,7 @@ async def build_sources_and_evidence(
 ) -> tuple[str, list, dict[int, int]]:
     """Build sources and evidence for response."""
     max_sources = int(os.getenv("CHATBOT_TOP_SOURCES", "5"))
-    
+
     graph_store = None
     try:
         graph_store = rag_inference_handler.get_graph_store()
@@ -146,7 +146,7 @@ async def build_sources_and_evidence(
     
     evidence_chunks = evidence.get("chunks") or []
     logger.info("SSE evidence_chunks count: %d", len(evidence_chunks))
-    
+
     # Log chunk IDs to track which chunks are passed to frontend
     chunk_ids_in_evidence = [str(c.get("id", "")) for c in evidence_chunks[:10]]  # Log first 10
     logger.info("SSE evidence_chunks IDs (first 10): %s", chunk_ids_in_evidence)

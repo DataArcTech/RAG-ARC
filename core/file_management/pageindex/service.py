@@ -220,6 +220,17 @@ class PageIndexService:
 
             node = node_map.get(section_id) if section_id else None
             if node is None:
+                # 未匹配到 section 时仍尝试赋予第一页，避免 page_start/page_end 恒为 null
+                if context.tree.nodes and context.normalized_page_texts:
+                    meta = chunk.get("metadata") or {}
+                    first_node = context.tree.nodes[0]
+                    meta["section_id"] = first_node.section_id
+                    meta["section_path"] = first_node.path
+                    meta["section_level"] = first_node.level
+                    first_page = min(context.normalized_page_texts.keys())
+                    meta["page_start"] = first_page
+                    meta["page_end"] = first_page
+                    chunk["metadata"] = meta
                 continue
 
             meta = chunk.get("metadata") or {}
@@ -253,6 +264,14 @@ class PageIndexService:
                     meta["page_end"] = matched_page
                     chunk["metadata"] = meta
                     matched_pages += 1
+
+            # 若 section 有匹配但 page 仍为 None（content_list 无 page_idx 或 _match_page 未命中），
+            # 且有页面文本，则用第一页作为回退，避免 SSE 返回 page_start/page_end 恒为 null
+            if meta.get("page_start") is None and meta.get("page_end") is None and context.normalized_page_texts:
+                first_page = min(context.normalized_page_texts.keys())
+                meta["page_start"] = first_page
+                meta["page_end"] = first_page
+                chunk["metadata"] = meta
 
         return {"sections_matched": matched_sections, "pages_matched": matched_pages, "unmatched_chunks": unmatched}
 

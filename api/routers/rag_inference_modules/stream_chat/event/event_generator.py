@@ -411,7 +411,7 @@ async def _yield_sources_event(
     request_id: str,
     task_info: Any = None
 ) -> AsyncGenerator[str, None]:
-    """Yield sources event."""
+    """Yield sources event (SSE 倒数第三个事件流，sources 部分)."""
     sources_data = [s.model_dump() for s in sources_for_frontend]
     payload = {
         "type": "sources",
@@ -419,7 +419,7 @@ async def _yield_sources_event(
         "citation_key_map": {str(k): v for k, v in citation_key_map.items()},
         "id": str(session_id)
     }
-    
+
     # 存储sources事件到Redis，供恢复使用
     if task_info:
         try:

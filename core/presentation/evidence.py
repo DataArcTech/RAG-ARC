@@ -1,10 +1,13 @@
 """Helpers to assemble chunk, triple, and seed-entity evidence payloads."""
+import logging
 import re
 from pathlib import Path
 from urllib.parse import quote
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from encapsulation.data_model.schema import Chunk
+
+logger = logging.getLogger(__name__)
 
 from config.output_limits import (
     CHAT_TOP_CHUNKS,
