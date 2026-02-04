@@ -207,51 +207,9 @@ class GraphReasoningThinkConfig(BaseModel):
         3,
         description="Max recent tool run summaries included in think payload (0 disables).",
     )
-    recent_tool_run_summary_max_chars: int = Field(
-        320,
-        description="Max characters per recent tool run summary in think payload.",
-    )
     max_rounds_per_checkpoint: int = Field(
         1,
         description="Maximum think→tool_calls→think iterations per periodic checkpoint (>=1).",
-    )
-
-
-class CompressionBranchConfig(BaseModel):
-    """Shared compaction schema used across tool contexts and think windows."""
-
-    mode: Literal["truncate", "excerpt"] = Field(
-        "truncate",
-        description="truncate keeps prefixes; excerpt extracts windows around key terms.",
-    )
-    max_items: int = Field(0, description="Maximum number of evidence items kept (0 disables item limit).")
-    max_chars: int = Field(0, description="Maximum characters kept per evidence item (0 disables truncation).")
-    excerpt_chars: int = Field(900, description="Excerpt window size (only used when mode == 'excerpt').")
-    retention: Literal["head", "tail"] = Field("tail", description="Retention policy when max_items applies.")
-
-
-class GraphReasoningCompressionConfig(BaseModel):
-    """Unified `compression` schema: tool_context vs think."""
-
-    tool_context: CompressionBranchConfig = Field(
-        default_factory=lambda: CompressionBranchConfig(
-            mode="truncate",
-            max_items=5,
-            max_chars=800,
-            excerpt_chars=900,
-            retention="tail",
-        ),
-        description="Compaction settings applied to tool payload `context_evidences`.",
-    )
-    think: CompressionBranchConfig = Field(
-        default_factory=lambda: CompressionBranchConfig(
-            mode="truncate",
-            max_items=8,
-            max_chars=1600,
-            excerpt_chars=900,
-            retention="head",
-        ),
-        description="Compaction settings applied to `think` context window.",
     )
 
 
@@ -263,16 +221,11 @@ class GraphReasoningStrategyConfig(BaseModel):
     chain_depth: int = Field(4, description="Maximum traversal chain depth.")
     enable_custom_hooks: bool = Field(False, description="Reserved flag for custom traversal hooks.")
     tool_context_max_evidences: int = Field(
-        5,
-        description="Deprecated: prefer compression.tool_context.max_items (kept for backward compatibility).",
-    )
-    tool_context_max_chars: int = Field(
-        800,
-        description="Deprecated: prefer compression.tool_context.max_chars (kept for backward compatibility).",
-    )
-    compression: GraphReasoningCompressionConfig = Field(
-        default_factory=GraphReasoningCompressionConfig,
-        description="Unified evidence compaction schema shared by tool payload windows and think checkpoints.",
+        0,
+        description=(
+            "Maximum number of evidence cards included in each tool payload (metadata-only). "
+            "0 means unlimited (do not truncate)."
+        ),
     )
     coverage_expected_min_chunks: int = Field(
         3,
@@ -319,10 +272,12 @@ class ReporterConfig(BaseModel):
     parallel_thinking_runs: int = Field(1, description="Number of combined parallel-thinking passes.")
     enable_llm_report: bool = Field(True, description="Generate the final report via the LLM.")
     report_temperature: float = Field(0.2, description="Sampling temperature for the report writer.")
-    report_max_evidence_chars: int = Field(900, description="Maximum characters per evidence snippet forwarded to the report writer.")
-    max_evidence_items: int = Field(
-        10,
-        description="Maximum number of authoritative evidence chunks included in report prompts/appendices.",
+    max_evidence_items: Optional[int] = Field(
+        None,
+        description=(
+            "Maximum number of authoritative evidence chunks included in report prompts/appendices. "
+            "None disables truncation (preferred; the report writer selects sources from an index)."
+        ),
     )
     report_max_graph_chain_items: int = Field(
         200,
@@ -352,14 +307,6 @@ class ReporterConfig(BaseModel):
     citation_aliases: bool = Field(
         True,
         description="Alias long chunk IDs into short stable tokens for LLM prompting.",
-    )
-    outline_evidence_summary_chars: int = Field(
-        240,
-        description="Characters per evidence index summary forwarded to the report outline writer.",
-    )
-    methodology_summary_chars: int = Field(
-        1200,
-        description="Maximum characters kept per reasoning/tool summary in report prompts.",
     )
     keep_tool_results: int = Field(
         8,

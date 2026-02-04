@@ -39,6 +39,7 @@ class DeepSearchServiceInitialThinkMixin:
         question: str,
         scope: GraphAccessScope,
         reasoning_context: GraphQueryContext,
+        context_evidences: Sequence[Dict[str, Any]] | None = None,
         plan_steps: Sequence[Dict[str, Any]] | None = None,
     ) -> Dict[str, Any]:
         tool_manager = getattr(self, "tool_manager", None)
@@ -47,6 +48,7 @@ class DeepSearchServiceInitialThinkMixin:
 
         steps = list(plan_steps or [])
         total_steps = len(steps)
+        evidences = list(context_evidences or [])
 
         plan_state = PlanState()
         if isinstance(reasoning_context.metadata, dict):
@@ -54,7 +56,7 @@ class DeepSearchServiceInitialThinkMixin:
         payload = {
             "question": question,
             "plan_step": "think_init",
-            "context_evidences": [],
+            "context_evidences": evidences,
             "adapter": getattr(getattr(self, "graph_loop", None), "adapter", None),
             "access_scope": scope,
             "extra": {
@@ -65,8 +67,8 @@ class DeepSearchServiceInitialThinkMixin:
             },
             "graph_context": reasoning_context.model_dump(exclude_none=True),
             "coverage_metrics": {
-                "evidence_count": 0,
-                "unique_source_count": 0,
+                "evidence_count": len(evidences),
+                "unique_source_count": len({(ev.get("source") if isinstance(ev, dict) else None) for ev in evidences}),
                 "completed_steps": 0,
                 "total_steps": total_steps,
                 "coverage_ratio": 0.0,

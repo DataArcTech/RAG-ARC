@@ -53,8 +53,8 @@ def _generate_trace_message(trace_event: TraceEvent) -> str:
             return "正在探索知识库..."
         if tool_name == "code.python":
             return "正在进行计算验证..."
-        if tool_name == "read.chunk":
-            return "正在精读证据..."
+        if tool_name == "read.pages":
+            return "正在读取证据..."
         if tool_name.startswith("graph."):
             return "正在执行图谱操作..."
         if tool_name.startswith("search"):
@@ -78,8 +78,8 @@ def _generate_trace_message(trace_event: TraceEvent) -> str:
             return "探索完成"
         if tool_name == "code.python":
             return "计算完成"
-        if tool_name == "read.chunk":
-            return "精读完成"
+        if tool_name == "read.pages":
+            return "读取完成"
         if tool_name.startswith("graph."):
             return "图谱操作完成"
         if tool_name.startswith("search"):

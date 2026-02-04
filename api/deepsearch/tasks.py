@@ -92,6 +92,8 @@ class DeepSearchTaskRegistry:
         if event_type != "trace":
             info.last_progress = payload
         info.append_event(event)
+        # Best-effort observability: also mirror events into RedisTaskQueue.
+        # IMPORTANT: never block the event loop on Redis I/O (tests/inprocess mode rely on fast completion).
         try:
             progress = payload.get("progress") if isinstance(payload, dict) else None
             percent = None
@@ -100,17 +102,30 @@ class DeepSearchTaskRegistry:
                     percent = int(progress.get("percent"))
                 except Exception:
                     percent = None
-            _get_redis_task_queue().append_progress_event(
-                flow="deepsearch",
-                task_run_id=run_id,
-                stage=str(payload.get("stage") or event_type),
-                status=str(event_type),
-                percent=percent,
-                resource_id=run_id,
-                payload=payload if isinstance(payload, dict) else {"payload": payload},
-            )
+
+            async def _append() -> None:
+                try:
+                    await asyncio.to_thread(
+                        _get_redis_task_queue().append_progress_event,
+                        flow="deepsearch",
+                        task_run_id=run_id,
+                        stage=str(payload.get("stage") or event_type),
+                        status=str(event_type),
+                        percent=percent,
+                        resource_id=run_id,
+                        payload=payload if isinstance(payload, dict) else {"payload": payload},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Failed to append DeepSearch progress event to RedisTaskQueue: %s", exc, exc_info=True)
+
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(_append())
+            except RuntimeError:
+                # No running loop; skip Redis mirroring.
+                pass
         except Exception as exc:  # noqa: BLE001
-            logger.debug("Failed to append DeepSearch progress event to RedisTaskQueue: %s", exc, exc_info=True)
+            logger.debug("Failed to schedule DeepSearch progress mirroring to RedisTaskQueue: %s", exc, exc_info=True)
         async with info.cond:
             info.cond.notify_all()
 

@@ -15,6 +15,59 @@ def _coerce_evidence_id(evidence: Dict[str, Any]) -> str | None:
     return None
 
 
+def _extract_report_evidence_ids(report: Dict[str, Any]) -> List[str]:
+    """Prefer citeable evidence ids from the structured report over raw report evidences.
+
+    Rationale:
+    - report["evidences"] may include navigation snippets (bm25/faiss/etc) used during reasoning.
+    - structured_report.source_key_map / citations represent what the report can actually cite.
+    """
+
+    if not isinstance(report, dict):
+        return []
+    structured = report.get("structured_report")
+    if isinstance(structured, dict):
+        source_key_map = structured.get("source_key_map")
+        if isinstance(source_key_map, dict) and source_key_map:
+            pairs: List[tuple[int, str]] = []
+            for key, ev_id in source_key_map.items():
+                try:
+                    key_num = int(str(key).strip())
+                except Exception:  # noqa: BLE001
+                    continue
+                token = str(ev_id or "").strip()
+                if token:
+                    pairs.append((key_num, token))
+            pairs.sort(key=lambda item: item[0])
+            ordered = [ev_id for _k, ev_id in pairs]
+            # Dedup while preserving order.
+            out: List[str] = []
+            seen: set[str] = set()
+            for ev_id in ordered:
+                if ev_id in seen:
+                    continue
+                seen.add(ev_id)
+                out.append(ev_id)
+            return out
+
+        citations = structured.get("citations")
+        if isinstance(citations, list) and citations:
+            out: List[str] = []
+            seen: set[str] = set()
+            for entry in citations:
+                if not isinstance(entry, dict):
+                    continue
+                token = str(entry.get("evidence_id") or entry.get("chunk_id") or "").strip()
+                if not token or token in seen:
+                    continue
+                seen.add(token)
+                out.append(token)
+            if out:
+                return out
+
+    return []
+
+
 def build_evidence_pool_v2(
     *,
     reasoning: Dict[str, Any],
@@ -61,7 +114,25 @@ def build_evidence_pool_v2(
 
     report_evidence_ids: List[str] = []
     raw_report_evidences = report.get("evidences") if isinstance(report, dict) else None
-    if isinstance(raw_report_evidences, list):
+    # Prefer citeable report evidence ids from the structured report.
+    cited_ids = _extract_report_evidence_ids(report if isinstance(report, dict) else {})
+    if cited_ids:
+        for ev_id in cited_ids:
+            token = str(ev_id or "").strip()
+            if not token:
+                continue
+            # Ensure the evidence object exists in the pool (it usually comes from tool_results already).
+            if token not in evidences_by_id and isinstance(raw_report_evidences, list):
+                for item in raw_report_evidences:
+                    if not isinstance(item, dict):
+                        continue
+                    if _coerce_evidence_id(item) == token:
+                        _add_evidence(item)
+                        break
+            if token in evidences_by_id:
+                report_evidence_ids.append(token)
+    elif isinstance(raw_report_evidences, list):
+        # Backward-compatible behavior: include all report evidences when we have no structured citation info.
         for item in raw_report_evidences:
             if isinstance(item, dict):
                 ev_id = _add_evidence(item)

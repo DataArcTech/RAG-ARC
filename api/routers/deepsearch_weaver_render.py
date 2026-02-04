@@ -2,14 +2,7 @@ import json
 from typing import Any, Dict
 
 from config.output_limits import (
-    DEEPSEARCH_WEAVER_EVIDENCE_PREVIEW_CHARS,
     DEEPSEARCH_WEAVER_EVIDENCE_SAMPLE_COUNT,
-    DEEPSEARCH_WEAVER_TOOL_ABOUT_CHARS,
-    DEEPSEARCH_WEAVER_TOOL_CODE_PREVIEW_CHARS,
-    DEEPSEARCH_WEAVER_TOOL_ERROR_CHARS,
-    DEEPSEARCH_WEAVER_TOOL_EXEC_ERROR_CHARS,
-    DEEPSEARCH_WEAVER_TOOL_PURPOSE_CHARS,
-    DEEPSEARCH_WEAVER_TOOL_QUERY_CHARS,
 )
 
 _WEAVER_ALLOWED_TAGS = {
@@ -25,10 +18,9 @@ _WEAVER_ALLOWED_TAGS = {
 
 
 def _truncate_text(value: str, *, limit: int) -> str:
-    text = str(value or "")
-    if limit <= 0 or len(text) <= limit:
-        return text
-    return text[: max(0, limit - 1)] + "…"
+    # DeepSearch external-memory policy: do NOT truncate trace text/evidence.
+    # If the UI needs sampling, do it by limiting the number of items, not slicing strings.
+    return str(value or "")
 
 
 def _try_parse_json(value: Any) -> Any | None:
@@ -85,10 +77,10 @@ def _render_tool_call(payload: Dict[str, Any]) -> str:
                 )
             )
         if about:
-            lines.append("about=" + _truncate_text(about, limit=int(DEEPSEARCH_WEAVER_TOOL_ABOUT_CHARS)))
+            lines.append("about=" + _truncate_text(about, limit=0))
 
     if query:
-        lines.append("query=" + _truncate_text(query, limit=int(DEEPSEARCH_WEAVER_TOOL_QUERY_CHARS)))
+        lines.append("query=" + _truncate_text(query, limit=0))
 
     if tool_name == "code.python":
         runtime = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else {}
@@ -115,12 +107,12 @@ def _render_tool_call(payload: Dict[str, Any]) -> str:
             )
         purpose = extra.get("purpose")
         if isinstance(purpose, str) and purpose.strip():
-            lines.append("purpose=" + _truncate_text(purpose.strip(), limit=int(DEEPSEARCH_WEAVER_TOOL_PURPOSE_CHARS)))
+            lines.append("purpose=" + _truncate_text(purpose.strip(), limit=0))
         code = extra.get("code")
         if isinstance(code, str) and code.strip():
             preview = code.strip().replace("\n", " ")
             lines.append(
-                "code_preview=" + _truncate_text(preview, limit=int(DEEPSEARCH_WEAVER_TOOL_CODE_PREVIEW_CHARS))
+                "code_preview=" + _truncate_text(preview, limit=0)
             )
 
     routing = payload.get("routing") if isinstance(payload.get("routing"), dict) else {}
@@ -172,10 +164,9 @@ def _evidence_preview(evidence: Dict[str, Any]) -> str:
     if isinstance(score, (int, float)):
         prefix += f" score={float(score):.4f}"
 
-    preview_limit = int(DEEPSEARCH_WEAVER_EVIDENCE_PREVIEW_CHARS)
     content = str(evidence.get("content") or "").strip().replace("\n", " ")
     if content:
-        prefix += "\n  " + _truncate_text(content, limit=max(80, preview_limit))
+        prefix += "\n  " + _truncate_text(content, limit=0)
 
     provenance = evidence.get("provenance") if isinstance(evidence.get("provenance"), dict) else None
     if provenance:
@@ -213,11 +204,11 @@ def _render_tool_response(payload: Dict[str, Any]) -> str:
 
     error_message = extra.get("error") or extra.get("error_message")
     if isinstance(error_message, str) and error_message.strip():
-        lines.append("error=" + _truncate_text(error_message.strip(), limit=int(DEEPSEARCH_WEAVER_TOOL_ERROR_CHARS)))
+        lines.append("error=" + _truncate_text(error_message.strip(), limit=0))
 
     top_error = payload.get("error")
     if isinstance(top_error, str) and top_error.strip():
-        lines.append("error=" + _truncate_text(top_error.strip(), limit=int(DEEPSEARCH_WEAVER_TOOL_ERROR_CHARS)))
+        lines.append("error=" + _truncate_text(top_error.strip(), limit=0))
 
     result_obj = payload.get("result") if isinstance(payload.get("result"), dict) else {}
 
@@ -245,7 +236,7 @@ def _render_tool_response(payload: Dict[str, Any]) -> str:
             lines.append("allowed_imports=" + json.dumps(allowed, ensure_ascii=False, separators=(",", ":"), default=str))
         purpose = diagnostics.get("purpose")
         if isinstance(purpose, str) and purpose.strip():
-            lines.append("purpose=" + _truncate_text(purpose.strip(), limit=int(DEEPSEARCH_WEAVER_TOOL_PURPOSE_CHARS)))
+            lines.append("purpose=" + _truncate_text(purpose.strip(), limit=0))
 
         code_block = diagnostics.get("code_block")
         if isinstance(code_block, str) and code_block.strip():
@@ -267,7 +258,7 @@ def _render_tool_response(payload: Dict[str, Any]) -> str:
         if isinstance(err, dict) and (err.get("message") or err.get("type")):
             message = str(err.get("message") or err.get("type"))
             lines.append(
-                "exec_error=" + _truncate_text(message, limit=int(DEEPSEARCH_WEAVER_TOOL_EXEC_ERROR_CHARS))
+                "exec_error=" + _truncate_text(message, limit=0)
             )
             tb = err.get("traceback")
             if isinstance(tb, str) and tb.strip():

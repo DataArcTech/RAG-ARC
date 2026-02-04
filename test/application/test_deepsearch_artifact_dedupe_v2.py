@@ -85,3 +85,27 @@ def test_deepsearch_artifact_dedupe_v2_builds_evidence_pool_and_refs():
     assert meta["graph_visualization_ref"]["$ref"] == {"file": "reasoning.json", "json_pointer": "/graph_traversals"}
     assert meta["plan_ref"]["$ref"] == {"file": "plan_result.json", "json_pointer": "/plan"}
     assert meta["reasoning_ref"]["$ref"]["file"] == "reasoning.json"
+
+
+def test_deepsearch_artifact_dedupe_v2_prefers_structured_report_evidence_ids():
+    reasoning = {
+        "evidences": [{"chunk_id": "c1", "text": "t1"}],
+        "tool_results": [
+            {
+                "tool_name": "read.pages",
+                "result": {"evidences": [{"chunk_id": "p1", "text": "page evidence"}]},
+            }
+        ],
+    }
+    # report.evidences may include navigation snippets; structured_report.source_key_map tells what is citeable.
+    report = {
+        "answer": "final answer <sup>1</sup>",
+        "evidences": [{"chunk_id": "bm25-1", "text": "snippet"}, {"chunk_id": "p1", "text": "page evidence"}],
+        "structured_report": {"source_key_map": {"1": "p1"}},
+    }
+
+    pool, _reasoning_ids, report_ids = build_evidence_pool_v2(reasoning=reasoning, report=report, artifact_version=2)
+    assert pool["kind"] == "evidence_pool"
+    assert "p1" in pool["evidences_by_id"]
+    # Only include citeable evidence ids for report (avoid listing navigation snippets as report evidence).
+    assert report_ids == ["p1"]
