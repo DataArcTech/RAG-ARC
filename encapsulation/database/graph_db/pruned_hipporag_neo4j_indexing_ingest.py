@@ -14,6 +14,8 @@ from encapsulation.database.utils.schema_layer_nodes import build_schema_layer_p
 from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id, text_processing
 from core.knowledge_graph.schema import normalize_relation_token
 from encapsulation.database.graph_db.pruned_hipporag_neo4j_chunk_upsert_cleanup import run_chunk_replace_cleanup
+from config import pageindex as pageindex_cfg
+from config.core.deepsearch import tool_defaults
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,60 @@ def _coerce_fact_provenance_max_source_chunks(raw: Any, *, default: int = 50, ma
         except (TypeError, ValueError):
             value = int(default)
     return max(0, min(int(max_value), value))
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_node_type(raw: Any) -> str:
+    token = str(raw or "").strip().lower()
+    mapping = getattr(tool_defaults, "SECTION_NODE_TYPE_MAP", {}) or {}
+    if token and token in mapping:
+        return str(mapping[token])
+    default = getattr(tool_defaults, "SECTION_NODE_TYPE_DEFAULT", "page")
+    return str(default)
+
+
+def _coerce_str(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _trim_summary(text: str, *, max_chars: int) -> str:
+    if max_chars <= 0:
+        return text
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "..."
+
+
+def _tree_node_summary(metadata: Dict[str, Any], content: str) -> Optional[str]:
+    summary = ""
+    index_text = metadata.get("index_text")
+    if isinstance(index_text, str) and index_text.strip():
+        summary = index_text.strip()
+    if not summary:
+        caption = metadata.get("table_caption")
+        if isinstance(caption, str) and caption.strip():
+            summary = caption.strip()
+    if not summary:
+        alts = metadata.get("image_alts")
+        if isinstance(alts, list):
+            cleaned = [str(a).strip() for a in alts if str(a or "").strip()]
+            if cleaned:
+                summary = "; ".join(cleaned)
+    if not summary:
+        summary = str(content or "").strip()
+    if not summary:
+        return None
+    max_chars = int(getattr(tool_defaults, "SECTION_SEARCH_SUMMARY_PREVIEW_CHARS", 160))
+    max_chars = max(1, max_chars)
+    return _trim_summary(summary, max_chars=max_chars)
 
 
 def _select_domain_for_chunk(chunk: Chunk, metadata: Dict[str, Any], schema: Any) -> str:
@@ -130,6 +186,15 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
 
         # Collect all data
         chunk_data = []
+        section_data_by_key: Dict[tuple[str, str], Dict[str, Any]] = {}
+        section_chunk_links: List[Dict[str, Any]] = []
+        tree_node_data_by_key: Dict[tuple[str, str], Dict[str, Any]] = {}
+        tree_node_section_links: List[Dict[str, Any]] = []
+        tree_node_chunk_links: List[Dict[str, Any]] = []
+        tree_node_parent_links: List[Dict[str, Any]] = []
+        tree_node_section_link_keys: set[tuple[str, str, str]] = set()
+        tree_node_chunk_link_keys: set[tuple[str, str, str]] = set()
+        tree_node_parent_link_keys: set[tuple[str, str, str]] = set()
         entity_data: Dict[str, Dict[str, Any]] = {}  # entity_id -> entity payload
         mention_data = []
         fact_data_by_id: Dict[str, Dict[str, Any]] = {}
@@ -211,6 +276,145 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
                 'owner_id': db_owner_id,
                 'source_file_id': source_file_id  # Store as independent property for filtering
             })
+
+            section_id = str(metadata.get("section_id") or "").strip()
+            if section_id and source_file_id:
+                section_key = (db_owner_id, section_id)
+                section_path = str(metadata.get("section_path") or "").strip()
+                section_title = str(metadata.get("section_title") or "").strip()
+                if not section_title and section_path:
+                    delimiter = pageindex_cfg.section_path_delimiter()
+                    section_title = section_path.split(delimiter)[-1].strip() if delimiter in section_path else section_path
+                section_level = _coerce_int(metadata.get("section_level"))
+                section_parent_id = str(metadata.get("section_parent_id") or "").strip() or None
+                page_start = _coerce_int(metadata.get("section_page_start"))
+                if page_start is None:
+                    page_start = _coerce_int(metadata.get("page_start"))
+                page_end = _coerce_int(metadata.get("section_page_end"))
+                if page_end is None:
+                    page_end = _coerce_int(metadata.get("page_end"))
+
+                existing = section_data_by_key.get(section_key)
+                if existing is None:
+                    section_data_by_key[section_key] = {
+                        "section_id": section_id,
+                        "owner_id": db_owner_id,
+                        "source_file_id": source_file_id,
+                        "section_path": section_path or None,
+                        "section_title": section_title or None,
+                        "section_level": section_level,
+                        "section_parent_id": section_parent_id,
+                        "page_start": page_start,
+                        "page_end": page_end,
+                    }
+                else:
+                    if not existing.get("section_path") and section_path:
+                        existing["section_path"] = section_path
+                    if not existing.get("section_title") and section_title:
+                        existing["section_title"] = section_title
+                    if existing.get("section_level") is None and section_level is not None:
+                        existing["section_level"] = section_level
+                    if not existing.get("section_parent_id") and section_parent_id:
+                        existing["section_parent_id"] = section_parent_id
+                    if page_start is not None:
+                        existing_start = existing.get("page_start")
+                        existing["page_start"] = page_start if existing_start is None else min(int(existing_start), page_start)
+                    if page_end is not None:
+                        existing_end = existing.get("page_end")
+                        existing["page_end"] = page_end if existing_end is None else max(int(existing_end), page_end)
+
+                section_chunk_links.append(
+                    {
+                        "section_id": section_id,
+                        "chunk_id": chunk_id,
+                        "owner_id": db_owner_id,
+                    }
+                )
+
+            tree_node_id = _coerce_str(metadata.get("semantic_unit_id")) or chunk_id
+            semantic_unit_type = _coerce_str(metadata.get("semantic_unit_type")) or "text"
+            node_type = _normalize_node_type(semantic_unit_type)
+            section_path = str(metadata.get("section_path") or "").strip()
+            page_start = _coerce_int(metadata.get("page_start"))
+            page_end = _coerce_int(metadata.get("page_end"))
+            summary = _tree_node_summary(metadata, chunk.content or "")
+            token_count = _coerce_int(metadata.get("token_count"))
+            resource_urls: Optional[List[str]] = None
+            urls = metadata.get("image_urls")
+            if isinstance(urls, list):
+                cleaned = [str(u).strip() for u in urls if str(u or "").strip()]
+                if cleaned:
+                    resource_urls = cleaned
+
+            if tree_node_id and source_file_id:
+                tree_key = (db_owner_id, tree_node_id)
+                existing = tree_node_data_by_key.get(tree_key)
+                if existing is None:
+                    tree_node_data_by_key[tree_key] = {
+                        "node_id": tree_node_id,
+                        "owner_id": db_owner_id,
+                        "source_file_id": source_file_id,
+                        "node_type": node_type,
+                        "semantic_unit_type": semantic_unit_type,
+                        "section_id": section_id or None,
+                        "section_path": section_path or None,
+                        "page_start": page_start,
+                        "page_end": page_end,
+                        "summary": summary,
+                        "resource_urls": resource_urls,
+                        "resource_paths": resource_urls,
+                        "token_count": token_count,
+                    }
+                else:
+                    if not existing.get("node_type") or (
+                        existing.get("node_type") == tool_defaults.SECTION_NODE_TYPE_DEFAULT
+                        and node_type != tool_defaults.SECTION_NODE_TYPE_DEFAULT
+                    ):
+                        existing["node_type"] = node_type
+                    if not existing.get("semantic_unit_type") and semantic_unit_type:
+                        existing["semantic_unit_type"] = semantic_unit_type
+                    if not existing.get("section_id") and section_id:
+                        existing["section_id"] = section_id
+                    if not existing.get("section_path") and section_path:
+                        existing["section_path"] = section_path
+                    if page_start is not None:
+                        prev = existing.get("page_start")
+                        existing["page_start"] = page_start if prev is None else min(int(prev), page_start)
+                    if page_end is not None:
+                        prev = existing.get("page_end")
+                        existing["page_end"] = page_end if prev is None else max(int(prev), page_end)
+                    if summary and not existing.get("summary"):
+                        existing["summary"] = summary
+                    if resource_urls and not existing.get("resource_urls"):
+                        existing["resource_urls"] = resource_urls
+                    if resource_urls and not existing.get("resource_paths"):
+                        existing["resource_paths"] = resource_urls
+                    if token_count is not None:
+                        existing["token_count"] = int(existing.get("token_count") or 0) + token_count
+
+                chunk_link_key = (db_owner_id, tree_node_id, chunk_id)
+                if chunk_link_key not in tree_node_chunk_link_keys:
+                    tree_node_chunk_link_keys.add(chunk_link_key)
+                    tree_node_chunk_links.append(
+                        {"node_id": tree_node_id, "chunk_id": chunk_id, "owner_id": db_owner_id}
+                    )
+
+                if section_id:
+                    section_link_key = (db_owner_id, section_id, tree_node_id)
+                    if section_link_key not in tree_node_section_link_keys:
+                        tree_node_section_link_keys.add(section_link_key)
+                        tree_node_section_links.append(
+                            {"section_id": section_id, "node_id": tree_node_id, "owner_id": db_owner_id}
+                        )
+
+                parent_unit_id = _coerce_str(metadata.get("parent_unit_id"))
+                if parent_unit_id and parent_unit_id != tree_node_id:
+                    parent_link_key = (db_owner_id, parent_unit_id, tree_node_id)
+                    if parent_link_key not in tree_node_parent_link_keys:
+                        tree_node_parent_link_keys.add(parent_link_key)
+                        tree_node_parent_links.append(
+                            {"parent_id": parent_unit_id, "node_id": tree_node_id, "owner_id": db_owner_id}
+                        )
 
             if enable_schema_layers:
                 mindmap = None
@@ -575,6 +779,32 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
                 payload["endpoint_drop_ratio"],
             )
 
+        if section_data_by_key:
+            delimiter = pageindex_cfg.section_path_delimiter()
+            path_index: Dict[tuple[str, str, str], str] = {}
+            for record in section_data_by_key.values():
+                owner_id = str(record.get("owner_id") or "").strip()
+                source_file_id = str(record.get("source_file_id") or "").strip()
+                section_path = str(record.get("section_path") or "").strip()
+                section_id = str(record.get("section_id") or "").strip()
+                if owner_id and source_file_id and section_path and section_id:
+                    path_index[(owner_id, source_file_id, section_path)] = section_id
+
+            for record in section_data_by_key.values():
+                if record.get("section_parent_id"):
+                    continue
+                section_path = str(record.get("section_path") or "").strip()
+                if not section_path or delimiter not in section_path:
+                    continue
+                parent_path = delimiter.join([seg for seg in section_path.split(delimiter)[:-1] if seg])
+                if not parent_path:
+                    continue
+                owner_id = str(record.get("owner_id") or "").strip()
+                source_file_id = str(record.get("source_file_id") or "").strip()
+                parent_id = path_index.get((owner_id, source_file_id, parent_path))
+                if parent_id:
+                    record["section_parent_id"] = parent_id
+
         logger.info(
             f"Batch data prepared: {len(chunk_data)} chunks, {len(entity_list)} entities, "
             f"{len(mention_data)} mentions, {len(fact_data)} facts"
@@ -607,6 +837,122 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
                     """
                     tx.run(chunk_query, {'chunks': chunk_data})
                     logger.info(f"  Batch inserted {len(chunk_data)} chunks")
+
+                if section_data_by_key:
+                    section_query = """
+                    UNWIND $sections AS section
+                    MERGE (s:Section {section_id: section.section_id, owner_id: section.owner_id})
+                    SET s.source_file_id = COALESCE(section.source_file_id, s.source_file_id),
+                        s.section_path = COALESCE(section.section_path, s.section_path),
+                        s.section_title = COALESCE(section.section_title, s.section_title),
+                        s.section_level = COALESCE(section.section_level, s.section_level),
+                        s.section_parent_id = COALESCE(section.section_parent_id, s.section_parent_id),
+                        s.page_start = COALESCE(section.page_start, s.page_start),
+                        s.page_end = COALESCE(section.page_end, s.page_end),
+                        s.updated_at = datetime(),
+                        s.created_at = COALESCE(s.created_at, datetime())
+                    """
+                    tx.run(section_query, {"sections": list(section_data_by_key.values())})
+                    logger.info("  Upserted %s Section nodes", len(section_data_by_key))
+
+                if section_data_by_key:
+                    parent_links = [
+                        {"owner_id": s.get("owner_id"), "section_id": s.get("section_id"), "parent_id": s.get("section_parent_id")}
+                        for s in section_data_by_key.values()
+                        if s.get("section_parent_id")
+                    ]
+                    if parent_links:
+                        parent_query = """
+                        UNWIND $links AS link
+                        MATCH (c:Section {section_id: link.section_id, owner_id: link.owner_id})
+                        MATCH (p:Section {section_id: link.parent_id, owner_id: link.owner_id})
+                        MERGE (p)-[r:PARENT_OF {section_id: link.section_id, parent_id: link.parent_id}]->(c)
+                        SET r.updated_at = datetime(),
+                            r.created_at = COALESCE(r.created_at, datetime())
+                        """
+                        tx.run(parent_query, {"links": parent_links})
+                        logger.info("  Upserted %s PARENT_OF relationships", len(parent_links))
+
+                if section_chunk_links:
+                    chunk_link_query = """
+                    UNWIND $links AS link
+                    MATCH (s:Section {section_id: link.section_id, owner_id: link.owner_id})
+                    MATCH (c:Chunk {chunk_id: link.chunk_id})
+                    WHERE COALESCE(c.owner_id, link.owner_id) = link.owner_id
+                    MERGE (s)-[r:HAS_CHUNK {section_id: link.section_id, chunk_id: link.chunk_id}]->(c)
+                    SET r.owner_id = link.owner_id,
+                        r.updated_at = datetime(),
+                        r.created_at = COALESCE(r.created_at, datetime())
+                    """
+                    tx.run(chunk_link_query, {"links": section_chunk_links})
+                    logger.info("  Upserted %s HAS_CHUNK relationships", len(section_chunk_links))
+
+                if tree_node_data_by_key:
+                    tree_node_query = """
+                    UNWIND $nodes AS node
+                    MERGE (t:TreeNode {node_id: node.node_id, owner_id: node.owner_id})
+                    SET t.source_file_id = COALESCE(node.source_file_id, t.source_file_id),
+                        t.section_id = COALESCE(node.section_id, t.section_id),
+                        t.section_path = COALESCE(node.section_path, t.section_path),
+                        t.node_type = COALESCE(node.node_type, t.node_type),
+                        t.semantic_unit_type = COALESCE(node.semantic_unit_type, t.semantic_unit_type),
+                        t.page_start = CASE WHEN node.page_start IS NULL THEN t.page_start ELSE node.page_start END,
+                        t.page_end = CASE WHEN node.page_end IS NULL THEN t.page_end ELSE node.page_end END,
+                        t.summary = CASE WHEN node.summary IS NULL OR node.summary = '' THEN t.summary ELSE node.summary END,
+                        t.resource_urls = CASE
+                            WHEN node.resource_urls IS NULL OR size(node.resource_urls) = 0 THEN t.resource_urls
+                            ELSE node.resource_urls
+                        END,
+                        t.resource_paths = CASE
+                            WHEN node.resource_paths IS NULL OR size(node.resource_paths) = 0 THEN t.resource_paths
+                            ELSE node.resource_paths
+                        END,
+                        t.token_count = COALESCE(node.token_count, t.token_count),
+                        t.updated_at = datetime(),
+                        t.created_at = COALESCE(t.created_at, datetime())
+                    """
+                    tx.run(tree_node_query, {"nodes": list(tree_node_data_by_key.values())})
+                    logger.info("  Upserted %s TreeNode nodes", len(tree_node_data_by_key))
+
+                if tree_node_section_links:
+                    section_tree_link_query = """
+                    UNWIND $links AS link
+                    MATCH (s:Section {section_id: link.section_id, owner_id: link.owner_id})
+                    MATCH (t:TreeNode {node_id: link.node_id, owner_id: link.owner_id})
+                    MERGE (s)-[r:HAS_CHILD {section_id: link.section_id, node_id: link.node_id}]->(t)
+                    SET r.owner_id = link.owner_id,
+                        r.updated_at = datetime(),
+                        r.created_at = COALESCE(r.created_at, datetime())
+                    """
+                    tx.run(section_tree_link_query, {"links": tree_node_section_links})
+                    logger.info("  Upserted %s Section->TreeNode HAS_CHILD relationships", len(tree_node_section_links))
+
+                if tree_node_parent_links:
+                    node_parent_query = """
+                    UNWIND $links AS link
+                    MATCH (p:TreeNode {node_id: link.parent_id, owner_id: link.owner_id})
+                    MATCH (c:TreeNode {node_id: link.node_id, owner_id: link.owner_id})
+                    MERGE (p)-[r:HAS_CHILD {parent_id: link.parent_id, node_id: link.node_id}]->(c)
+                    SET r.owner_id = link.owner_id,
+                        r.updated_at = datetime(),
+                        r.created_at = COALESCE(r.created_at, datetime())
+                    """
+                    tx.run(node_parent_query, {"links": tree_node_parent_links})
+                    logger.info("  Upserted %s TreeNode HAS_CHILD relationships", len(tree_node_parent_links))
+
+                if tree_node_chunk_links:
+                    tree_node_chunk_query = """
+                    UNWIND $links AS link
+                    MATCH (t:TreeNode {node_id: link.node_id, owner_id: link.owner_id})
+                    MATCH (c:Chunk {chunk_id: link.chunk_id})
+                    WHERE COALESCE(c.owner_id, link.owner_id) = link.owner_id
+                    MERGE (t)-[r:HAS_CHUNK {node_id: link.node_id, chunk_id: link.chunk_id}]->(c)
+                    SET r.owner_id = link.owner_id,
+                        r.updated_at = datetime(),
+                        r.created_at = COALESCE(r.created_at, datetime())
+                    """
+                    tx.run(tree_node_chunk_query, {"links": tree_node_chunk_links})
+                    logger.info("  Upserted %s TreeNode HAS_CHUNK relationships", len(tree_node_chunk_links))
 
                 # 2. Batch insert entities and track new ones
                 if entity_list:

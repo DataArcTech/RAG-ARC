@@ -31,9 +31,14 @@ def test_run_chunk_replace_cleanup_emits_mentions_and_facts_queries() -> None:
     keys = _chunk_keys([{"chunk_id": "chunk-1", "owner_id": "__GLOBAL__"}])
     run_chunk_replace_cleanup(tx, chunk_keys=keys)
 
-    assert len(tx.calls) == 2
+    assert len(tx.calls) == 5
     assert "MENTIONS" in tx.calls[0]["query"]
-    assert "RELATES_TO" in tx.calls[1]["query"]
+    assert "HAS_CHUNK" in tx.calls[1]["query"]
+    assert "HAS_CHUNK" in tx.calls[2]["query"]
+    assert "TreeNode" in tx.calls[3]["query"]
+    assert "RELATES_TO" in tx.calls[4]["query"]
     assert tx.calls[0]["params"]["chunk_keys"] == keys
     assert tx.calls[1]["params"]["chunk_keys"] == keys
-
+    assert tx.calls[2]["params"]["chunk_keys"] == keys
+    assert tx.calls[3]["params"]["chunk_keys"] == keys
+    assert tx.calls[4]["params"]["chunk_keys"] == keys

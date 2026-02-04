@@ -56,6 +56,43 @@ def run_chunk_replace_cleanup(
         {"chunk_keys": keys},
     )
 
+    # 1.5) Remove Section -> Chunk links so they can be rebuilt.
+    tx.run(
+        """
+        UNWIND $chunk_keys AS k
+        MATCH (c:Chunk {chunk_id: k.chunk_id})
+        WHERE COALESCE(c.owner_id, k.owner_id) = k.owner_id
+        MATCH (:Section)-[r:HAS_CHUNK]->(c)
+        WHERE COALESCE(r.owner_id, k.owner_id) = k.owner_id
+        DELETE r
+        """,
+        {"chunk_keys": keys},
+    )
+
+    # 1.6) Remove TreeNode -> Chunk links so they can be rebuilt.
+    tx.run(
+        """
+        UNWIND $chunk_keys AS k
+        MATCH (c:Chunk {chunk_id: k.chunk_id})
+        WHERE COALESCE(c.owner_id, k.owner_id) = k.owner_id
+        MATCH (t:TreeNode)-[r:HAS_CHUNK]->(c)
+        WHERE COALESCE(t.owner_id, k.owner_id) = k.owner_id
+        DELETE r
+        """,
+        {"chunk_keys": keys},
+    )
+
+    # 1.7) Cleanup orphaned TreeNodes (no remaining HAS_CHUNK).
+    tx.run(
+        """
+        UNWIND $chunk_keys AS k
+        MATCH (t:TreeNode {owner_id: k.owner_id})
+        WHERE NOT (t)-[:HAS_CHUNK]->(:Chunk)
+        DETACH DELETE t
+        """,
+        {"chunk_keys": keys},
+    )
+
     # 2) Remove stale provenance from aggregated fact edges.
     #    If a fact loses all evidence after filtering, delete the relationship.
     #
@@ -87,4 +124,3 @@ def run_chunk_replace_cleanup(
         """,
         {"chunk_keys": keys},
     )
-
