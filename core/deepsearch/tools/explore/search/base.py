@@ -120,12 +120,11 @@ class _SearchToolBase:
         focus = extra.get("focus_query") or extra.get("query") or request.question
         return clean_query(str(focus or ""), max_chars=max_chars) or str(focus or "").strip()
 
-    @staticmethod
-    def _resolve_query_variants(query: str) -> List[str]:
+    def _resolve_query_variants(self, query: str) -> List[str]:
         try:
             from core.utils.query_variants import generate_query_variants
 
-            variants = generate_query_variants(query)
+            variants = generate_query_variants(query, llm_connector=self.llm_connector)
         except Exception:  # noqa: BLE001
             variants = [str(query or "").strip()]
 

@@ -1,6 +1,10 @@
-"""LLM-driven query variants for retrieval (domain-agnostic)."""
+"""LLM-driven query variants for retrieval (domain-agnostic).
+
+Design note:
+- This module must be safe in offline/unit-test environments. It will only call
+  an LLM when an explicit `llm_connector` is provided.
+"""
 import logging
-from functools import lru_cache
 import json
 from typing import Optional
 
@@ -14,7 +18,6 @@ from core.prompts.query_variants import (
     QUERY_VARIANTS_SYSTEM_PROMPT,
     QUERY_VARIANTS_USER_PROMPT_TEMPLATE,
 )
-from config.encapsulation.llm.chat.openai import OpenAIChatConfig
 
 logger = logging.getLogger(__name__)
 
@@ -29,16 +32,6 @@ def _dedupe_preserve_order(items: list[str]) -> list[str]:
         seen.add(token)
         out.append(token)
     return out
-
-
-@lru_cache(maxsize=1)
-def _get_llm():
-    try:
-        cfg = OpenAIChatConfig()
-        return cfg.build()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Query variants LLM unavailable; falling back to base query. error=%s", exc)
-        return None
 
 
 def _low_cost_model_name(llm_connector) -> Optional[str]:
@@ -63,9 +56,8 @@ def _extract_json_object(text: str) -> Optional[dict]:
     return payload if isinstance(payload, dict) else None
 
 
-def _llm_rewrite_variants(query: str, langs: list[str]) -> dict[str, str]:
-    llm = _get_llm()
-    if llm is None:
+def _llm_rewrite_variants(llm_connector, query: str, langs: list[str]) -> dict[str, str]:
+    if llm_connector is None:
         return {}
 
     payload = {"query": query, "target_langs": list(langs)}
@@ -74,11 +66,16 @@ def _llm_rewrite_variants(query: str, langs: list[str]) -> dict[str, str]:
         {"role": "user", "content": QUERY_VARIANTS_USER_PROMPT_TEMPLATE.format(payload=json.dumps(payload, ensure_ascii=False))},
     ]
     kwargs = {"temperature": 0.0, "max_tokens": 512}
-    low_cost = _low_cost_model_name(llm)
+    low_cost = _low_cost_model_name(llm_connector)
     if low_cost:
         kwargs["model"] = low_cost
     try:
-        response = llm.chat(messages, **kwargs)
+        chat = getattr(llm_connector, "chat", None)
+        if callable(chat):
+            response = chat(messages, **kwargs)
+        else:
+            # Async-only connectors are ignored here (keep it deterministic + offline-safe).
+            return {}
     except Exception as exc:  # noqa: BLE001
         logger.warning("Query variants LLM call failed; using base query only. error=%s", exc)
         return {}
@@ -93,7 +90,7 @@ def _llm_rewrite_variants(query: str, langs: list[str]) -> dict[str, str]:
     return out
 
 
-def generate_query_variants(query: str) -> list[str]:
+def generate_query_variants(query: str, *, llm_connector=None) -> list[str]:
     """
     Generate a small set of deterministic query variants.
 
@@ -118,8 +115,8 @@ def generate_query_variants(query: str) -> list[str]:
             continue
         langs.append(token)
 
-    if langs:
-        rewritten = _llm_rewrite_variants(base, langs)
+    if langs and llm_connector is not None:
+        rewritten = _llm_rewrite_variants(llm_connector, base, langs)
         for lang in langs:
             candidate = str(rewritten.get(lang) or "").strip()
             if candidate:
