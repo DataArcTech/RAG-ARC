@@ -14,6 +14,7 @@ from encapsulation.message_queue.result_store import ResultStore, ResultStoreErr
 
 logger = logging.getLogger(__name__)
 _RESULT_ENVELOPE_KEY = "__ragarc_result__"
+_PROGRESS_PAYLOAD_ENVELOPE_KEY = "__ragarc_progress_payload__"
 
 _APPEND_PROGRESS_EVENT_LUA = r"""
 -- KEYS:
@@ -629,21 +630,45 @@ class RedisTaskQueue:
         if max_inline > 0:
             payload_size_bytes = len(event_payload.encode("utf-8", errors="replace"))
             if payload_size_bytes > max_inline:
-                logger.warning(
-                    "Progress event payload too large; truncating further (flow=%s run_id=%s size_bytes=%d limit_bytes=%d)",
-                    flow,
-                    task_run_id,
-                    payload_size_bytes,
-                    max_inline,
-                )
-                event["payload"] = {
-                    "_mq_truncated": True,
-                    "_mq_original_size_bytes": payload_size_bytes,
-                    "_mq_limit_bytes": max_inline,
-                    "note": "payload truncated to protect Redis",
-                    "keys": sorted(list(payload_value.keys()))[:200] if isinstance(payload_value, dict) else None,
-                }
-                event_payload = json.dumps(event, ensure_ascii=False, separators=(",", ":"), default=str)
+                # Keep Redis healthy by externalizing oversize payloads, while preserving the full (untrimmed)
+                # payload for later inspection. This mirrors the result externalization pattern, but applies to
+                # progress/trace events as well.
+                try:
+                    original_payload_json = json.dumps(payload_value, ensure_ascii=False, separators=(",", ":"), default=str)
+                    original_size_bytes = len(original_payload_json.encode("utf-8", errors="replace"))
+                    ref = self._get_result_store().put_bytes(
+                        namespace=self._settings.namespace,
+                        run_id=f"{task_run_id}:progress:{uuid.uuid4().hex}",
+                        payload=original_payload_json.encode("utf-8", errors="replace"),
+                        ttl_seconds=int(self._settings.progress_ttl_seconds),
+                    )
+                    event["payload"] = {
+                        _PROGRESS_PAYLOAD_ENVELOPE_KEY: {
+                            "v": 1,
+                            "kind": "external",
+                            "ref": str(ref),
+                            "size_bytes": int(original_size_bytes),
+                            "note": "payload externalized to protect Redis",
+                        }
+                    }
+                    event_payload = json.dumps(event, ensure_ascii=False, separators=(",", ":"), default=str)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Progress event payload too large; externalization failed; truncating further (flow=%s run_id=%s size_bytes=%d limit_bytes=%d): %s",
+                        flow,
+                        task_run_id,
+                        payload_size_bytes,
+                        max_inline,
+                        exc,
+                    )
+                    event["payload"] = {
+                        "_mq_truncated": True,
+                        "_mq_original_size_bytes": payload_size_bytes,
+                        "_mq_limit_bytes": max_inline,
+                        "note": "payload truncated to protect Redis (externalization failed)",
+                        "keys": sorted(list(payload_value.keys()))[:200] if isinstance(payload_value, dict) else None,
+                    }
+                    event_payload = json.dumps(event, ensure_ascii=False, separators=(",", ":"), default=str)
 
         # Fast-path: one atomic Redis roundtrip (seq increment + stream writes + seq_map + TTLs).
         try:
@@ -812,6 +837,31 @@ class RedisTaskQueue:
                     continue
                 if not isinstance(parsed, dict):
                     continue
+
+                # Resolve externally-stored progress payloads (e.g. trace tool responses with full-page evidence).
+                try:
+                    payload_obj = parsed.get("payload")
+                    if (
+                        isinstance(payload_obj, dict)
+                        and set(payload_obj.keys()) == {_PROGRESS_PAYLOAD_ENVELOPE_KEY}
+                        and isinstance(payload_obj.get(_PROGRESS_PAYLOAD_ENVELOPE_KEY), dict)
+                    ):
+                        meta = payload_obj.get(_PROGRESS_PAYLOAD_ENVELOPE_KEY) or {}
+                        kind = str(meta.get("kind") or "").strip().lower()
+                        ref = meta.get("ref")
+                        if kind == "external" and isinstance(ref, str) and ref.strip():
+                            try:
+                                resolved = self._get_result_store().get_json(ref)
+                                parsed["payload"] = resolved if isinstance(resolved, dict) else {"payload": resolved}
+                                parsed.setdefault("_mq_external_payload_resolved", True)
+                            except ResultStoreError as exc:
+                                logger.warning("RedisTaskQueue external progress payload read failed (%s): %s", task_run_id, exc)
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning("RedisTaskQueue external progress payload read unexpected error (%s): %s", task_run_id, exc)
+                except Exception:
+                    # Never break progress streaming on payload resolution failures.
+                    pass
+
                 if last_seq >= 0:
                     try:
                         seq_val = int(parsed.get("seq"))  # type: ignore[arg-type]

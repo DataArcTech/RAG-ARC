@@ -2,6 +2,7 @@ import json
 import threading
 import time
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -171,3 +172,36 @@ def test_progress_seq_key_corruption_is_healed(monkeypatch: pytest.MonkeyPatch):
 
     # Spot-check payload was preserved.
     assert json.loads(json.dumps(events[0])).get("payload", {}).get("a") == 1
+
+
+def test_progress_payload_externalization_roundtrips_full_payload(tmp_path: Path):
+    """Large progress payloads should not break Redis; they are externalized and resolved on read."""
+
+    from config.encapsulation.database.cache_db.redis_config import RedisConfig
+    from encapsulation.message_queue.redis_task_queue import RedisTaskQueue, RedisTaskQueueSettings
+
+    fake_client = _FakeRedis()
+    queue = RedisTaskQueue(
+        RedisConfig(),
+        RedisTaskQueueSettings(
+            namespace=f"test:mq:{uuid.uuid4().hex}",
+            stream_maxlen=100,
+            # Force externalization path for progress events.
+            result_max_inline_bytes=64,
+            result_store_backend="local",
+            result_store_local_dir=str(tmp_path),
+        ),
+    )
+    queue._redis_db = _FakeRedisDB(fake_client)  # type: ignore[attr-defined]
+
+    run_id = uuid.uuid4().hex
+    queue.create_task_run(task_run_id=run_id, task_type="test", owner_id=uuid.UUID(int=0), resource_id=run_id)
+
+    huge = "x" * 10000
+    queue.append_progress_event(flow="t", task_run_id=run_id, stage="trace", status="trace", payload={"content": huge})
+
+    events = queue.read_progress_events(run_id, last_seq=-1, count=10, block_ms=0)
+    assert len(events) == 1
+    payload = events[0].get("payload") or {}
+    assert isinstance(payload, dict)
+    assert payload.get("content") == huge
