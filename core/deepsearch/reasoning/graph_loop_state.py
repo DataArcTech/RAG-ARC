@@ -17,10 +17,6 @@ _RUN_EVIDENCE_LOCK: contextvars.ContextVar[asyncio.Lock | None] = contextvars.Co
 _RUN_TOTAL_STEPS: contextvars.ContextVar[int] = contextvars.ContextVar("deepsearch_run_total_steps", default=0)
 _RUN_THINK_COUNT: contextvars.ContextVar[int] = contextvars.ContextVar("deepsearch_run_think_count", default=0)
 _RUN_REFLECT_COUNT: contextvars.ContextVar[int] = contextvars.ContextVar("deepsearch_run_reflect_count", default=0)
-_RUN_THINK_TOOL_SIGNATURES: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar(
-    "deepsearch_run_think_tool_signatures",
-    default=None,
-)
 _RUN_PLAN_STATE: contextvars.ContextVar[PlanState | None] = contextvars.ContextVar(
     "deepsearch_run_plan_state",
     default=None,
@@ -47,7 +43,6 @@ __all__ = [
     "_RUN_EVIDENCE_LOCK",
     "_RUN_REFLECT_COUNT",
     "_RUN_THINK_COUNT",
-    "_RUN_THINK_TOOL_SIGNATURES",
     "_RUN_TOTAL_STEPS",
     "_RUN_PLAN_STATE",
     "_run_evidence_state",

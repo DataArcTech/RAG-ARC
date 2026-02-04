@@ -845,7 +845,38 @@ class DeepSearchToolManager:
                 try:
                     context_evidences.append(EvidenceChunk(**item))
                 except Exception:
-                    continue
+                    # DeepSearch external-memory policy: tools may pass "evidence cards" (metadata-only)
+                    # instead of full evidence chunks. Convert cards into minimal EvidenceChunk stubs so
+                    # downstream tools can still see provenance, ids, and sources.
+                    chunk_id = str(item.get("chunk_id") or item.get("evidence_id") or "").strip()
+                    source = str(item.get("source") or "").strip()
+                    if not chunk_id or not source:
+                        continue
+                    kind = str(item.get("kind") or "derived").strip().lower() or "derived"
+                    if kind not in {"primary", "derived", "diagnostic"}:
+                        kind = "derived"
+                    score = item.get("score")
+                    provenance = item.get("provenance") if isinstance(item.get("provenance"), dict) else {}
+                    # Preserve card-only hints so the model/dev can reason about where to read next.
+                    if isinstance(item.get("content_len"), int):
+                        provenance = {**provenance, "content_len": int(item["content_len"])}
+                    if bool(item.get("content_in_evidence_pool")):
+                        provenance = {**provenance, "content_in_evidence_pool": True}
+                    # Minimal placeholder: keep it short; full text lives in evidence pool / read.pages.
+                    content = f"[evidence_card] id={chunk_id} source={source}"
+                    try:
+                        context_evidences.append(
+                            EvidenceChunk(
+                                kind=kind,  # type: ignore[arg-type]
+                                chunk_id=chunk_id,
+                                source=source,
+                                content=content,
+                                score=score if isinstance(score, (int, float)) else None,
+                                provenance=provenance,
+                            )
+                        )
+                    except Exception:
+                        continue
         adapter = payload.get("adapter")
         access_scope = payload.get("access_scope")
         if access_scope and not hasattr(access_scope, "as_token"):

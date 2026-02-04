@@ -14,9 +14,10 @@ from encapsulation.data_model.deepsearch import (
 )
 from core.deepsearch.memory.plan_state import update_plan_from_think_notes
 from core.deepsearch.trace import emit_trace
+from core.deepsearch.utils.llm_envelope import try_parse_llm_envelope
 from config.core.deepsearch import tool_defaults
 
-from .graph_loop_state import _RUN_THINK_COUNT, _RUN_THINK_TOOL_SIGNATURES, _run_plan_state
+from .graph_loop_state import _RUN_THINK_COUNT, _run_plan_state
 
 logger = logging.getLogger(__name__)
 
@@ -67,18 +68,50 @@ class GraphLoopRuntimeMixin:
         proposed = proposed[:max_calls]
         if not proposed:
             return [], {"proposed": 0, "results": []}
+        proposed_total = len(proposed)
 
+        # Dedupe policy (critical for agentic robustness):
+        # - Only dedupe within the current think checkpoint to avoid repeated identical calls in a single response.
+        # - Do NOT dedupe across checkpoints; the model must be allowed to re-read the same pages after discovering
+        #   evidence gaps (e.g., tables not covered, wrong section, etc.).
+        deduped_records: list[ReasoningStepRecord] = []
+        unique: list[tuple[int, Dict[str, Any]]] = []
+        seen: set[str] = set()
+        for idx, call in enumerate(proposed, start=1):
+            tool_name = str(call.get("tool_name") or call.get("tool") or "").strip()
+            tool_args = call.get("tool_args") if isinstance(call.get("tool_args"), dict) else {}
+            try:
+                sig = tool_name + ":" + json.dumps(tool_args, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            except Exception:  # noqa: BLE001
+                sig = tool_name
+            if sig and sig in seen:
+                deduped_records.append(
+                    ReasoningStepRecord(
+                        step_id=f"{think_step_id}_call_{idx:02d}",
+                        description="Think-proposed tool call (deduped)",
+                        channel="graph",
+                        status="skipped",
+                        diagnostics={"reason": "deduped", "tool_name": tool_name},
+                    )
+                )
+                continue
+            if sig:
+                seen.add(sig)
+            unique.append((idx, call))
+        proposed = [call for _idx, call in unique]
+
+        # Note: config uses 0 to mean "sequential" (avoid accidental full parallelism).
         concurrency = int(self._think_config.get("tool_call_concurrency") or 0)
         if concurrency <= 0:
-            concurrency = len(proposed)
+            concurrency = 1
         semaphore = asyncio.Semaphore(max(1, concurrency))
 
-        async def run_one(idx: int, call: Dict[str, Any]) -> ReasoningStepRecord:
+        async def run_one(orig_idx: int, call: Dict[str, Any]) -> ReasoningStepRecord:
             tool_name = str(call.get("tool_name") or call.get("tool") or "").strip()
             tool_args = call.get("tool_args") if isinstance(call.get("tool_args"), dict) else {}
             if not tool_name:
                 return ReasoningStepRecord(
-                    step_id=f"{think_step_id}_call_{idx:02d}",
+                    step_id=f"{think_step_id}_call_{orig_idx:02d}",
                     description="Think-proposed tool call (invalid)",
                     channel="graph",
                     status="failed",
@@ -86,29 +119,13 @@ class GraphLoopRuntimeMixin:
                 )
             if available_tool_names and tool_name not in available_tool_names:
                 return ReasoningStepRecord(
-                    step_id=f"{think_step_id}_call_{idx:02d}",
+                    step_id=f"{think_step_id}_call_{orig_idx:02d}",
                     description="Think-proposed tool call (unknown tool)",
                     channel="graph",
                     status="failed",
                     diagnostics={"reason": "unknown_tool", "tool_name": tool_name},
                 )
-            plan_step_id = f"{think_step_id}_call_{idx:02d}"
-
-            signatures = _RUN_THINK_TOOL_SIGNATURES.get()
-            if signatures is not None:
-                try:
-                    sig = tool_name + ":" + json.dumps(tool_args, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-                except Exception:
-                    sig = tool_name
-                if sig in signatures:
-                    return ReasoningStepRecord(
-                        step_id=plan_step_id,
-                        description="Think-proposed tool call (deduped)",
-                        channel="graph",
-                        status="skipped",
-                        diagnostics={"reason": "deduped", "tool_name": tool_name},
-                    )
-                signatures.add(sig)
+            plan_step_id = f"{think_step_id}_call_{orig_idx:02d}"
 
             record = ReasoningStepRecord(
                 step_id=plan_step_id,
@@ -134,10 +151,13 @@ class GraphLoopRuntimeMixin:
                 )
                 start = time.perf_counter()
                 invocation = self.tool_manager.invoke(tool_name, payload=payload)
-                if self._tool_timeout and self._tool_timeout > 0:
-                    result = await asyncio.wait_for(invocation, timeout=self._tool_timeout)
-                else:
-                    result = await invocation
+                try:
+                    if self._tool_timeout and self._tool_timeout > 0:
+                        result = await asyncio.wait_for(invocation, timeout=self._tool_timeout)
+                    else:
+                        result = await invocation
+                except Exception:  # noqa: BLE001
+                    raise
                 latency_ms = int((time.perf_counter() - start) * 1000)
 
             await self._extend_shared_evidences(result.evidences)
@@ -183,24 +203,30 @@ class GraphLoopRuntimeMixin:
                     )
             return record
 
-        results = await asyncio.gather(
-            *[run_one(idx + 1, call) for idx, call in enumerate(proposed)],
-            return_exceptions=True,
-        )
+        results = await asyncio.gather(*[run_one(orig_idx, call) for orig_idx, call in unique], return_exceptions=True)
         records: List[ReasoningStepRecord] = []
+        records.extend(deduped_records)
         summary_rows: List[Dict[str, Any]] = []
-        for idx, res in enumerate(results, start=1):
+        for (orig_idx, _call), res in zip(unique, results):
             if isinstance(res, Exception):
+                err_text = str(res) or f"{res.__class__.__name__}"
                 records.append(
                     ReasoningStepRecord(
                         step_id=f"{think_step_id}_call_err",
                         description="Think-proposed tool call failed",
                         channel="graph",
                         status="failed",
-                        diagnostics={"reason": "exception", "error": str(res)},
+                        diagnostics={"reason": "exception", "error": err_text},
                     )
                 )
-                summary_rows.append({"status": "failed", "step_id": f"{think_step_id}_call_{idx:02d}"})
+                summary_rows.append(
+                    {
+                        "status": "failed",
+                        "step_id": f"{think_step_id}_call_{orig_idx:02d}",
+                        "failure_reason": "exception",
+                        "error": err_text,
+                    }
+                )
                 continue
             records.append(res)
             tool_name = None
@@ -223,14 +249,13 @@ class GraphLoopRuntimeMixin:
                     "failure_reason": res.diagnostics.get("reason") if isinstance(res.diagnostics, dict) else None,
                 }
             )
-        return records, {"proposed": len(proposed), "results": summary_rows}
+        return records, {"proposed": proposed_total, "results": summary_rows}
 
     @staticmethod
     def _summarize_recent_tool_runs(
         tool_runs: Sequence[Dict[str, Any]],
         *,
         max_items: int,
-        max_chars: int,
     ) -> List[Dict[str, Any]]:
         if max_items <= 0 or not tool_runs:
             return []
@@ -240,8 +265,23 @@ class GraphLoopRuntimeMixin:
                 continue
             result = run.get("result") if isinstance(run.get("result"), dict) else {}
             summary = str(result.get("summary") or "").strip()
-            if max_chars > 0 and len(summary) > max_chars:
-                summary = summary[: max_chars - 3].rstrip() + "..."
+            envelope = try_parse_llm_envelope(summary)
+            # Keep JSON envelopes machine-readable for the next LLM step.
+            if envelope is not None:
+                summaries.append(
+                    {
+                        "plan_step_id": run.get("plan_step_id"),
+                        "tool_name": run.get("tool_name"),
+                        "channel": run.get("channel"),
+                        "envelope": envelope,
+                        "summary": None,  # Prefer structured envelope for JSON summaries.
+                        "evidence_count": len(result.get("evidences") or []) if isinstance(result.get("evidences"), list) else 0,
+                        "failure_reason": (
+                            (result.get("diagnostics") or {}).get("reason") if isinstance(result.get("diagnostics"), dict) else None
+                        ),
+                    }
+                )
+                continue
             evidences = result.get("evidences")
             evidence_count = len(evidences) if isinstance(evidences, list) else 0
             diagnostics = result.get("diagnostics") if isinstance(result, dict) else None
@@ -267,8 +307,9 @@ class GraphLoopRuntimeMixin:
         plan_state: Any,
     ) -> Dict[str, Any]:
         max_items = int(tool_defaults.LOGIC_CHECK_RECENT_TOOL_RUNS_MAX)
-        max_chars = int(tool_defaults.LOGIC_CHECK_RECENT_TOOL_RUNS_MAX_CHARS)
-        recent = self._summarize_recent_tool_runs(tool_runs, max_items=max_items, max_chars=max_chars)
+        # External-memory policy: do not truncate tool summaries. If prompt size becomes an issue,
+        # reduce the number of recent runs rather than slicing strings.
+        recent = self._summarize_recent_tool_runs(tool_runs, max_items=max_items)
         evidence_ids = self._collect_evidence_ids_from_runs(
             tool_runs,
             limit=int(tool_defaults.LOGIC_CHECK_EVIDENCE_ID_MAX),

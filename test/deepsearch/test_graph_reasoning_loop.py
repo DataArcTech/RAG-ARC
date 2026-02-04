@@ -3,6 +3,7 @@ import pytest
 from encapsulation.data_model.deepsearch import EvidenceChunk, GraphQueryContext, ThinkNote, ToolResultPayload
 from core.graph_adapter.base import GraphAccessScope
 from core.deepsearch.reasoning import GraphReasoningLoop
+import asyncio
 
 
 class _StubAdapter:
@@ -181,3 +182,65 @@ async def test_think_loop_skips_unknown_tools() -> None:
     assert "search" not in tool_names
     failures = [step for step in result.get("reasoning_steps") or [] if step.get("status") == "failed"]
     assert any(step.get("diagnostics", {}).get("reason") == "unknown_tool" for step in failures)
+
+
+class _InflightToolManager(_StubToolManager):
+    """Tool manager that records max concurrent in-flight tool calls (excluding think)."""
+
+    def __init__(self, think_payloads: list[dict]):
+        super().__init__(think_payloads)
+        self.inflight = 0
+        self.max_inflight = 0
+
+    async def invoke(self, tool_name: str, *, payload: dict) -> ToolResultPayload:
+        if tool_name == "think":
+            return await super().invoke(tool_name, payload=payload)
+
+        self.inflight += 1
+        self.max_inflight = max(self.max_inflight, self.inflight)
+        try:
+            # Give the scheduler a chance to overlap calls if concurrency > 1.
+            await asyncio.sleep(0.05)
+            return await super().invoke(tool_name, payload=payload)
+        finally:
+            self.inflight -= 1
+
+
+@pytest.mark.asyncio
+async def test_think_tool_call_concurrency_zero_is_sequential() -> None:
+    think_payloads = [
+        {
+            "reasoning": "Run two tool calls.",
+            "tool_calls": [
+                {"tool_name": "explore", "tool_args": {"actions": [{"tool": "search"}]}, "rationale": "call 1", "parallelizable": True},
+                {"tool_name": "code.python", "tool_args": {"code": "1+2"}, "rationale": "call 2", "parallelizable": True},
+            ],
+            "plan": [{"text": "Do two calls", "checked": False}],
+        },
+        {
+            "reasoning": "Done.",
+            "tool_calls": [],
+            "plan": [{"text": "Do two calls", "checked": True}],
+        },
+    ]
+    tool_manager = _InflightToolManager(think_payloads)
+    loop = GraphReasoningLoop(
+        adapter=_StubAdapter(),
+        llm_connector=None,
+        strategy_config=_strategy_config(
+            think_overrides={
+                "tool_call_concurrency": 0,  # 0 => sequential
+                "max_tool_calls": 2,
+                "max_rounds_per_checkpoint": 1,
+            }
+        ),
+        tool_manager=tool_manager,
+    )
+    context = GraphQueryContext(
+        adapter_name="stub",
+        question="Q",
+        access_scope=GraphAccessScope(scope_id="owner"),
+    )
+
+    await loop.run_think_loop("Q", graph_context=context)
+    assert tool_manager.max_inflight == 1

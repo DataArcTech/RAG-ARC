@@ -17,13 +17,14 @@ from core.deepsearch.memory.plan_state import PlanState, update_plan_from_think_
 from core.deepsearch.tooling.budget import attach_tool_budget_metadata, get_tool_budget
 from core.deepsearch.tooling.protocols import ToolInvoker
 from core.deepsearch.trace import emit_trace
-from core.deepsearch.utils.compression import compact_evidences, resolve_compaction_config
 from core.deepsearch.utils.evidence_kinds import count_evidences_by_kind, is_primary_evidence
+from core.deepsearch.utils.evidence_cards import evidence_cards
 from config.core.deepsearch.reasoning_defaults import (
+    REPORT_HARD_GATE_MIN_PRIMARY_PAGE_EVIDENCE,
     THINK_RECENT_TOOL_RUNS_MAX,
-    THINK_RECENT_TOOL_RUN_SUMMARY_MAX_CHARS,
     THINK_TOOL_CATALOG_ALWAYS_INCLUDE,
 )
+from config.core.deepsearch.runtime_messages import MISSING_PRIMARY_EVIDENCE_HARD_GATE_MESSAGE
 from core.graph_adapter.base import GraphAccessScope, GraphDeepSearchAdapter
 from core.graph_adapter.scope_provider import require_scope
 
@@ -33,7 +34,6 @@ from .graph_loop_state import (
     _RUN_EVIDENCE_LOCK,
     _RUN_REFLECT_COUNT,
     _RUN_THINK_COUNT,
-    _RUN_THINK_TOOL_SIGNATURES,
     _RUN_TOTAL_STEPS,
     _RUN_PLAN_STATE,
     _run_evidence_state,
@@ -61,7 +61,6 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
         self._think_config = self._build_think_config(strategy_config)
         self._tool_timeout = self._resolve_tool_timeout(strategy_config)
         self._tool_context_max_items = self._resolve_tool_context_max_items(strategy_config)
-        self._tool_context_max_chars = self._resolve_tool_context_max_chars(strategy_config)
         self._coverage_expected_min_chunks = self._resolve_expected_min_chunks(strategy_config)
 
     async def run_think_loop(
@@ -93,7 +92,6 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
         total_steps_token = _RUN_TOTAL_STEPS.set(0)
         think_count_token = _RUN_THINK_COUNT.set(0)
         reflect_count_token = _RUN_REFLECT_COUNT.set(0)
-        think_sig_token = _RUN_THINK_TOOL_SIGNATURES.set(set())
         plan_state = PlanState()
         if isinstance(context.metadata, dict):
             plan_state.update(context.metadata.get("runtime_plan"))
@@ -169,7 +167,6 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                 recent_tool_runs = self._summarize_recent_tool_runs(
                     tool_runs,
                     max_items=int(self._think_config.get("recent_tool_runs_max") or 0),
-                    max_chars=int(self._think_config.get("recent_tool_run_summary_max_chars") or 0),
                 )
                 next_count = _RUN_THINK_COUNT.get() + 1
                 _RUN_THINK_COUNT.set(next_count)
@@ -209,6 +206,28 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                     record.status = "failed"
                     record.diagnostics.setdefault("reason", "think_loop")
                     record.diagnostics.setdefault("error", str(exc))
+                    # Robustness: do not abort the whole DeepSearch run on a single think parsing/routing failure.
+                    # Feed the error back into the next think checkpoint so the model can retry with corrected JSON.
+                    previous_tool_call_results = [
+                        {
+                            "status": "failed",
+                            "step_id": think_step_id,
+                            "failure_reason": "think_tool_error",
+                            "error": str(exc),
+                            "suggested_next_steps": [
+                                "Retry think and return ONLY valid JSON matching the schema.",
+                                "If you propose tool calls, emit them under tool_calls (array of objects).",
+                                "Do not stop (tool_calls=[]) until at least one read.pages evidence exists for report-style DeepSearch.",
+                            ],
+                        }
+                    ]
+                    await emit_trace(
+                        "think",
+                        "Think tool failed (continuing loop).",
+                        meta={"stage": "think_loop_error", "round": round_idx, "error": str(exc)},
+                    )
+                    if round_idx < max_rounds:
+                        continue
                     break
 
                 await self._extend_shared_evidences(result.evidences)
@@ -267,6 +286,28 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
                 proposed = int(tool_call_summary.get("proposed") or 0)
                 previous_tool_call_results = list(tool_call_summary.get("results") or [])
                 if proposed <= 0:
+                    # Hard evidence gate (report-style DeepSearch): do not stop the loop until we have at least one
+                    # successful read.pages evidence. This keeps final reports grounded in full-page context.
+                    if self._should_require_primary_page_evidence(context) and not self._has_primary_page_evidence(evidences):
+                        previous_tool_call_results = [
+                            {
+                                "status": "failed",
+                                "step_id": f"{think_step_id}_evidence_gate",
+                                "failure_reason": "missing_primary_page_evidence",
+                                "error": MISSING_PRIMARY_EVIDENCE_HARD_GATE_MESSAGE,
+                                "suggested_next_steps": [
+                                    "Use explore + search.file to obtain a real file_id (UUID).",
+                                    "Use toc.tree / tree.root / tree.open / section.select (or search.scoped) to locate likely pages.",
+                                    "Call read.pages on those pages (at least once) before stopping.",
+                                ],
+                            }
+                        ]
+                        await emit_trace(
+                            "think",
+                            "Evidence gate: missing read.pages (continuing think loop).",
+                            meta={"stage": "evidence_gate", "round": round_idx},
+                        )
+                        continue
                     break
         finally:
             _RUN_EVIDENCES.reset(evidences_token)
@@ -274,7 +315,6 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             _RUN_TOTAL_STEPS.reset(total_steps_token)
             _RUN_THINK_COUNT.reset(think_count_token)
             _RUN_REFLECT_COUNT.reset(reflect_count_token)
-            _RUN_THINK_TOOL_SIGNATURES.reset(think_sig_token)
             _RUN_PLAN_STATE.reset(plan_token)
 
         coverage_metrics = self._coverage_snapshot(
@@ -295,6 +335,30 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             "runtime_plan": plan_state.to_payload(),
             "coverage_metrics": coverage_metrics,
         }
+
+    @staticmethod
+    def _should_require_primary_page_evidence(context: GraphQueryContext) -> bool:
+        meta = context.metadata if isinstance(getattr(context, "metadata", None), dict) else {}
+        report_needed = meta.get("report_needed")
+        if report_needed is False:
+            return False
+        style = str(meta.get("report_style") or "").strip().lower()
+        if style not in {"deepsearch", "research"}:
+            return False
+        try:
+            return int(REPORT_HARD_GATE_MIN_PRIMARY_PAGE_EVIDENCE) >= 1
+        except Exception:
+            return True
+
+    @staticmethod
+    def _has_primary_page_evidence(evidences: Sequence[EvidenceChunk]) -> bool:
+        for ev in evidences or []:
+            try:
+                if ev.source == "read.pages":
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _build_think_config(self, config) -> Dict[str, Any]:
         think = None
@@ -318,9 +382,6 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
         recent_tool_runs_max = _get(think, "recent_tool_runs_max")
         if recent_tool_runs_max is None:
             recent_tool_runs_max = THINK_RECENT_TOOL_RUNS_MAX
-        recent_tool_run_summary_max_chars = _get(think, "recent_tool_run_summary_max_chars")
-        if recent_tool_run_summary_max_chars is None:
-            recent_tool_run_summary_max_chars = THINK_RECENT_TOOL_RUN_SUMMARY_MAX_CHARS
 
         cfg = {
             "tool_name": str(_get(think, "tool_name") or "").strip(),
@@ -333,7 +394,6 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             "tool_catalog_max_items": int(_get(think, "tool_catalog_max_items")),
             "tool_catalog_allowlist": _get(think, "tool_catalog_allowlist"),
             "recent_tool_runs_max": max(0, int(recent_tool_runs_max)),
-            "recent_tool_run_summary_max_chars": max(0, int(recent_tool_run_summary_max_chars)),
             "max_rounds_per_checkpoint": max(1, int(_get(think, "max_rounds_per_checkpoint") or 1)),
             "include_llm_tools": bool(include_llm_tools),
         }
@@ -374,10 +434,6 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
         if isinstance(meta, dict) and meta.get("adapter_name"):
             adapter_name = str(meta.get("adapter_name"))
         context_metadata = dict(metadata or {})
-        compression = self._resolve_strategy_compression_schema()
-        if compression:
-            current = context_metadata.get("compression") if isinstance(context_metadata.get("compression"), dict) else None
-            context_metadata["compression"] = self._merge_compression_defaults(defaults=compression, overrides=current)
         return GraphQueryContext(
             adapter_name=adapter_name,
             question=question,
@@ -406,53 +462,7 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             context = context.model_copy(update={"access_scope": scope})
 
         metadata = dict(context.metadata or {})
-        compression = self._resolve_strategy_compression_schema()
-        if compression:
-            current = metadata.get("compression") if isinstance(metadata.get("compression"), dict) else None
-            metadata["compression"] = self._merge_compression_defaults(defaults=compression, overrides=current)
         return context.model_copy(update={"metadata": metadata})
-
-    def _resolve_strategy_compression_schema(self) -> Dict[str, Any]:
-        cfg = self.strategy_config
-        if hasattr(cfg, "compression"):
-            fields_set = getattr(cfg, "model_fields_set", None)
-            if isinstance(fields_set, set) and "compression" not in fields_set:
-                return {}
-            raw = getattr(cfg, "compression")
-            if hasattr(raw, "model_dump"):
-                try:
-                    payload = raw.model_dump(exclude_none=True)
-                except TypeError:
-                    payload = raw.model_dump()
-            elif isinstance(raw, dict):
-                payload = dict(raw)
-            else:
-                payload = {}
-        elif isinstance(cfg, dict) and isinstance(cfg.get("compression"), dict):
-            payload = dict(cfg.get("compression") or {})
-        else:
-            payload = {}
-
-        allowed: Dict[str, Any] = {}
-        for key in ("tool_context", "think"):
-            value = payload.get(key)
-            if isinstance(value, dict) and value:
-                allowed[key] = dict(value)
-        return allowed
-
-    @staticmethod
-    def _merge_compression_defaults(*, defaults: Dict[str, Any], overrides: Dict[str, Any] | None) -> Dict[str, Any]:
-        if not overrides:
-            return dict(defaults)
-        merged: Dict[str, Any] = dict(defaults)
-        for branch, override in overrides.items():
-            if branch not in {"tool_context", "think"}:
-                continue
-            if isinstance(override, dict) and isinstance(merged.get(branch), dict):
-                merged[branch] = {**dict(merged.get(branch) or {}), **dict(override)}
-            else:
-                merged[branch] = override
-        return merged
 
     def _build_tool_payload(
         self,
@@ -464,24 +474,16 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
         coverage_hint: Optional[Dict[str, Any]] = None,
         extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        compaction = resolve_compaction_config(
-            branch="tool_context",
-            graph_context=context,
-            extra=extra,
-            default_max_items=self._tool_context_max_items,
-            default_max_chars=self._tool_context_max_chars,
-        )
-        compacted, _ = compact_evidences(
-            evidences=evidences,
-            cfg=compaction,
-            question=question,
-            extra=extra or {},
-            include_triple_count=False,
-        )
+        # NOTE: Do not inline full evidence text in tool contexts.
+        # EvidencePool/EvidenceBank stores full content; tools see cards (metadata-only) to decide next actions.
+        cards = evidence_cards(evidences)
+        max_items = max(0, int(self._tool_context_max_items))
+        if max_items:
+            cards = cards[-max_items:]
         payload: Dict[str, Any] = {
             "plan_step": plan_step_id,
             "question": question,
-            "context_evidences": list(compacted),
+            "context_evidences": list(cards),
             "adapter": self.adapter,
             "access_scope": context.access_scope,
             "graph_context": context.model_dump(exclude_none=True),
@@ -495,38 +497,21 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
 
     @staticmethod
     def _resolve_tool_context_max_items(config: Any) -> int:
+        # NOTE: We used to require `tool_context_max_evidences` and default it to a small
+        # recency window. This caused older evidence cards to "disappear" from the LLM's
+        # decision context and led to premature stopping / incomplete reads.
+        #
+        # New default: unlimited cards (0 means "do not truncate").
         if isinstance(config, dict):
-            if "tool_context_max_evidences" not in config:
-                raise ValueError("strategy_config.tool_context_max_evidences is required for GraphReasoningLoop")
-            value = config["tool_context_max_evidences"]
+            value = config.get("tool_context_max_evidences", 0)
         else:
-            if not hasattr(config, "tool_context_max_evidences"):
-                raise ValueError("strategy_config.tool_context_max_evidences is required for GraphReasoningLoop")
-            value = getattr(config, "tool_context_max_evidences")
+            value = getattr(config, "tool_context_max_evidences", 0)
         try:
             int_value = int(value)
         except (TypeError, ValueError) as exc:  # noqa: PERF203
             raise ValueError("strategy_config.tool_context_max_evidences must be an integer") from exc
         if int_value < 0:
             raise ValueError("strategy_config.tool_context_max_evidences must be >= 0")
-        return int_value
-
-    @staticmethod
-    def _resolve_tool_context_max_chars(config: Any) -> int:
-        if isinstance(config, dict):
-            if "tool_context_max_chars" not in config:
-                raise ValueError("strategy_config.tool_context_max_chars is required for GraphReasoningLoop")
-            value = config["tool_context_max_chars"]
-        else:
-            if not hasattr(config, "tool_context_max_chars"):
-                raise ValueError("strategy_config.tool_context_max_chars is required for GraphReasoningLoop")
-            value = getattr(config, "tool_context_max_chars")
-        try:
-            int_value = int(value)
-        except (TypeError, ValueError) as exc:  # noqa: PERF203
-            raise ValueError("strategy_config.tool_context_max_chars must be an integer") from exc
-        if int_value < 0:
-            raise ValueError("strategy_config.tool_context_max_chars must be >= 0")
         return int_value
 
     @staticmethod
