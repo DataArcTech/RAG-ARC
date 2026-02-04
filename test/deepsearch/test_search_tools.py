@@ -60,7 +60,7 @@ class _StubGraphRetriever:
             chunks.append(
                 Chunk(
                     content=f"content for {chunk_id}",
-                    metadata={"score": score, "file_name": f"{chunk_id}.md", "source_file_id": "file-1"},
+                    metadata={"score": score, "file_name": f"{chunk_id}.md", "source_file_id": "11111111-1111-1111-1111-111111111111"},
                     id=chunk_id,
                 )
             )
@@ -98,7 +98,7 @@ class _StubAdapter:
 def _chunk(content, chunk_id, score):
     return Chunk(
         content=content,
-        metadata={"score": score, "file_name": f"{chunk_id}.md", "source_file_id": "file-1"},
+        metadata={"score": score, "file_name": f"{chunk_id}.md", "source_file_id": "11111111-1111-1111-1111-111111111111"},
         id=chunk_id,
     )
 
@@ -115,13 +115,14 @@ async def test_search_tool_combines_channels() -> None:
         context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"file_id": "file-1"},
+        extra={"file_id": "11111111-1111-1111-1111-111111111111"},
     )
 
     result = await tool.run(request)
     sources = {evidence.source for evidence in result.evidences}
     assert {"faiss", "bm25", "graph_chunk"}.issubset(sources)
     assert result.diagnostics.get("channels") == ["faiss", "bm25", "graph_chunk"]
+    assert all(ev.kind == "derived" for ev in result.evidences)
 
 
 @pytest.mark.asyncio
@@ -134,7 +135,7 @@ async def test_graph_chunk_raises_without_llm_when_fallback_needed() -> None:
         context_evidences=[],
         adapter=adapter,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"file_id": "file-1"},
+        extra={"file_id": "11111111-1111-1111-1111-111111111111"},
     )
 
     with pytest.raises(RuntimeError, match="LLM"):
@@ -145,14 +146,14 @@ async def test_graph_chunk_raises_without_llm_when_fallback_needed() -> None:
 async def test_search_tool_filters_by_section_ids() -> None:
     dense = _StubDenseRetriever(
         [
-            Chunk(content="dense s1", metadata={"score": 0.9, "file_name": "a.md", "section_id": "s1", "source_file_id": "file-1"}, id="d1"),
-            Chunk(content="dense s2", metadata={"score": 0.8, "file_name": "a.md", "section_id": "s2", "source_file_id": "file-1"}, id="d2"),
+            Chunk(content="dense s1", metadata={"score": 0.9, "file_name": "a.md", "section_id": "s1", "source_file_id": "11111111-1111-1111-1111-111111111111"}, id="d1"),
+            Chunk(content="dense s2", metadata={"score": 0.8, "file_name": "a.md", "section_id": "s2", "source_file_id": "11111111-1111-1111-1111-111111111111"}, id="d2"),
         ]
     )
     bm25 = _StubBM25Retriever(
         [
-            Chunk(content="bm25 s2", metadata={"score": 0.9, "file_name": "a.md", "section_id": "s2", "source_file_id": "file-1"}, id="b1"),
-            Chunk(content="bm25 s1", metadata={"score": 0.8, "file_name": "a.md", "section_id": "s1", "source_file_id": "file-1"}, id="b2"),
+            Chunk(content="bm25 s2", metadata={"score": 0.9, "file_name": "a.md", "section_id": "s2", "source_file_id": "11111111-1111-1111-1111-111111111111"}, id="b1"),
+            Chunk(content="bm25 s1", metadata={"score": 0.8, "file_name": "a.md", "section_id": "s1", "source_file_id": "11111111-1111-1111-1111-111111111111"}, id="b2"),
         ]
     )
     tool = SearchScopedTool(llm_connector=_StubLLM(), dense_retriever=dense, bm25_retriever=bm25)
@@ -162,7 +163,7 @@ async def test_search_tool_filters_by_section_ids() -> None:
         context_evidences=[],
         adapter=None,
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"file_id": "file-1", "channels": ["faiss", "bm25"], "section_ids": ["s1"], "top_k": 10},
+        extra={"file_id": "11111111-1111-1111-1111-111111111111", "channels": ["faiss", "bm25"], "section_ids": ["s1"], "top_k": 10},
     )
 
     result = await tool.run(request)

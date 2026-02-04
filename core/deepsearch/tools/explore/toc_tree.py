@@ -1,53 +1,24 @@
 """toc.tree tool: list a file's section tree (PageIndex navigation).
 
-This tool is intentionally "structure first": it does not do semantic retrieval.
-It scans chunk metadata for `section_path/section_id/section_level/page_*` and
-reconstructs a readable ToC tree for the LLM to pick a section before reading.
+Structure-first navigation: reads PageIndex-aligned Section nodes to reconstruct
+a readable ToC tree for the LLM to pick a section before reading.
 """
-import json
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 from config.core.deepsearch import tool_defaults
-from config import pageindex as pageindex_cfg
-from core.graph_adapter.concurrency import adapter_locked
-from core.graph_adapter.cypher import adapter_supports_cypher
+from core.deepsearch.utils.section_tree import build_section_tree, fetch_section_nodes, normalize_file_id
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from ..governance_tags import EVIDENCE_DERIVED, SCOPE_FILE, SCOPE_OWNER
 
-_PATH_DELIM = " > "
 
-
-def _parse_metadata(raw: Any) -> Dict[str, Any]:
-    # Neo4j drivers may return maps or JSON-encoded strings depending on adapter/storage.
-    if isinstance(raw, dict):
-        return dict(raw)
-    if isinstance(raw, str) and raw.strip():
-        try:
-            parsed = json.loads(raw)
-            return dict(parsed) if isinstance(parsed, dict) else {}
-        except Exception:
-            return {}
-    return {}
-
-
-def _coerce_int(value: Any) -> Optional[int]:
+def _coerce_int(value: Any) -> int | None:
     try:
         if value is None:
             return None
         return int(value)
     except Exception:
         return None
-
-
-@dataclass
-class _SectionInfo:
-    section_id: str
-    path: str
-    level: Optional[int]
-    page_start: Optional[int]
-    page_end: Optional[int]
 
 
 class TocTreeTool(GraphTool):
@@ -73,134 +44,58 @@ class TocTreeTool(GraphTool):
         example_args={
             "question": "Show ToC for the manual",
             "plan_step": "plan_01",
-            "extra": {"file_id": "<file_id>", "max_depth": 4},
+            "extra": {"file_id": "REPLACE_WITH_REAL_FILE_ID_UUID", "max_depth": 4},
         },
     )
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
-        if not pageindex_cfg.pageindex_enabled():
-            return ToolResult(summary="toc.tree skipped: PageIndex disabled.", diagnostics={"reason": "pageindex_disabled"})
-        if request.adapter is None or not adapter_supports_cypher(request.adapter):
-            return ToolResult(summary="toc.tree skipped: Cypher unavailable.", diagnostics={"reason": "cypher_unavailable"})
-        if request.access_scope is None or not getattr(request.access_scope, "scope_id", None):
-            return ToolResult(summary="toc.tree skipped: missing owner scope.", diagnostics={"reason": "owner_scope_missing"})
-
         extra = request.extra or {}
-        file_id = str(extra.get("file_id") or "").strip()
+        file_id, file_id_raw = normalize_file_id(extra.get("file_id"))
         if not file_id:
-            return ToolResult(summary="toc.tree skipped: missing file_id.", diagnostics={"reason": "missing_file_id"})
+            reason = "missing_file_id" if not file_id_raw else "invalid_file_id_format"
+            return ToolResult(
+                summary="toc.tree skipped: invalid/missing file_id (expected UUID; use search.file to obtain file_id).",
+                diagnostics={"reason": reason, "file_id_raw": file_id_raw or None},
+            )
 
         max_depth = _coerce_int(extra.get("max_depth")) or int(tool_defaults.TOC_TREE_DEFAULT_MAX_DEPTH)
         max_nodes = _coerce_int(extra.get("max_nodes")) or int(tool_defaults.TOC_TREE_MAX_NODES)
         max_depth = max(1, max_depth)
         max_nodes = max(1, max_nodes)
-        scan_limit = int(tool_defaults.TOC_TREE_MAX_CHUNKS_SCANNED)
-
-        cypher = (
-            "MATCH (c:Chunk)\n"
-            "WHERE c.source_file_id = $file_id AND COALESCE(c.owner_id, $global_owner) = $owner_id\n"
-            "RETURN c.metadata AS metadata\n"
-            "LIMIT $limit\n"
+        sections, fetch_diag = await fetch_section_nodes(
+            adapter=request.adapter,
+            access_scope=request.access_scope,
+            file_id=file_id,
+            file_id_raw=file_id_raw,
+            include_node_types=True,
         )
-        params = {"file_id": file_id, "limit": max(1, scan_limit)}
-        async with adapter_locked(request.adapter):
-            rows = await request.adapter.acypher(cypher, params, access_scope=request.access_scope)
-
-        unique: Dict[str, _SectionInfo] = {}
-        missing_meta = 0
-        for row in rows or []:
-            if not isinstance(row, dict):
-                continue
-            meta = _parse_metadata(row.get("metadata"))
-            if not meta:
-                missing_meta += 1
-                continue
-            section_id = str(meta.get("section_id") or "").strip()
-            section_path = str(meta.get("section_path") or "").strip()
-            if not section_id or not section_path:
-                continue
-            info = unique.get(section_id)
-            page_start = _coerce_int(meta.get("page_start"))
-            page_end = _coerce_int(meta.get("page_end"))
-            level = _coerce_int(meta.get("section_level"))
-            if info is None:
-                unique[section_id] = _SectionInfo(
-                    section_id=section_id,
-                    path=section_path,
-                    level=level,
-                    page_start=page_start,
-                    page_end=page_end,
-                )
-            else:
-                # Merge page ranges conservatively (best-effort).
-                if page_start is not None:
-                    info.page_start = page_start if info.page_start is None else min(info.page_start, page_start)
-                if page_end is not None:
-                    info.page_end = page_end if info.page_end is None else max(info.page_end, page_end)
-
-        sections = list(unique.values())
-        sections.sort(key=lambda s: (s.page_start if s.page_start is not None else 1_000_000, s.path))
-
-        tree, printed = self._build_tree(sections)
+        tree, printed, orphaned = build_section_tree(sections)
         lines = self._format_tree(tree, max_depth=max_depth, max_nodes=max_nodes)
         truncated = len(lines) >= max_nodes
         summary = "toc.tree returned section tree:\n" + "\n".join(lines)
         if truncated:
             summary += "\n... (truncated)"
         diagnostics = {
-            "file_id": file_id,
-            "sections": len(sections),
-            "scan_limit": scan_limit,
-            "rows_scanned": len(rows or []),
-            "missing_metadata_rows": missing_meta,
+            **fetch_diag,
             "tree": tree,
             "printed_nodes": printed,
+            "orphaned_nodes": orphaned,
             "truncated": truncated,
             "max_depth": max_depth,
             "max_nodes": max_nodes,
+            "toc_source": "neo4j_section",
         }
         if not sections:
-            diagnostics["reason"] = "no_sections_found"
-            return ToolResult(summary="toc.tree returned no sections (missing PageIndex section metadata).", diagnostics=diagnostics)
+            reason = diagnostics.get("reason") or "no_sections_found"
+            diagnostics["reason"] = reason
+            if reason == "pageindex_disabled":
+                return ToolResult(summary="toc.tree skipped: PageIndex disabled.", diagnostics=diagnostics)
+            if reason == "cypher_unavailable":
+                return ToolResult(summary="toc.tree skipped: Cypher unavailable.", diagnostics=diagnostics)
+            if reason == "owner_scope_missing":
+                return ToolResult(summary="toc.tree skipped: missing owner scope.", diagnostics=diagnostics)
+            return ToolResult(summary="toc.tree returned no sections (PageIndex Section nodes missing).", diagnostics=diagnostics)
         return ToolResult(summary=summary, diagnostics=diagnostics)
-
-    @staticmethod
-    def _build_tree(sections: List[_SectionInfo]) -> Tuple[Dict[str, Any], int]:
-        root: Dict[str, Any] = {"title": None, "children": []}
-        nodes: Dict[Tuple[str, ...], Dict[str, Any]] = {(): root}
-        printed = 0
-        for item in sections:
-            parts = [p.strip() for p in item.path.split(_PATH_DELIM) if p.strip()]
-            if not parts:
-                continue
-            for depth in range(1, len(parts) + 1):
-                key = tuple(parts[:depth])
-                parent_key = tuple(parts[: depth - 1])
-                if key not in nodes:
-                    node = {"title": parts[depth - 1], "children": []}
-                    nodes[key] = node
-                    nodes[parent_key]["children"].append(node)
-                if depth == len(parts):
-                    nodes[key]["section_id"] = item.section_id
-                    nodes[key]["page_start"] = item.page_start
-                    nodes[key]["page_end"] = item.page_end
-                    nodes[key]["level"] = item.level
-            printed += 1
-
-        def _sort(node: Dict[str, Any]) -> None:
-            children = node.get("children") if isinstance(node.get("children"), list) else []
-            children.sort(
-                key=lambda c: (
-                    c.get("page_start") if isinstance(c, dict) and isinstance(c.get("page_start"), int) else 1_000_000,
-                    str(c.get("title") or "") if isinstance(c, dict) else "",
-                )
-            )
-            for child in children:
-                if isinstance(child, dict):
-                    _sort(child)
-
-        _sort(root)
-        return root, printed
 
     @staticmethod
     def _format_tree(tree: Dict[str, Any], *, max_depth: int, max_nodes: int) -> List[str]:
@@ -224,11 +119,18 @@ class TocTreeTool(GraphTool):
                 page_hint = ""
                 if isinstance(page_start, int) or isinstance(page_end, int):
                     page_hint = f" (p{page_start}-{page_end})"
+                node_types = child.get("node_types") if isinstance(child.get("node_types"), dict) else {}
+                node_tags = []
+                for key in ("table", "image", "equation"):
+                    count = node_types.get(key)
+                    if isinstance(count, int) and count > 0:
+                        node_tags.append(f"{key}={count}")
+                node_hint = f" [{', '.join(node_tags)}]" if node_tags else ""
                 label = title
                 if sid:
                     label = f"{title} [section_id={sid}]"
                 indent = "  " * max(0, depth - 1)
-                lines.append(f"{indent}- {label}{page_hint}".rstrip())
+                lines.append(f"{indent}- {label}{page_hint}{node_hint}".rstrip())
                 _walk(child, depth + 1)
 
         _walk(tree, 1)

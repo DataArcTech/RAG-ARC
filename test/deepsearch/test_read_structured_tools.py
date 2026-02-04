@@ -1,7 +1,7 @@
 import pytest
 
 from core.deepsearch.tools import ToolRunRequest
-from core.deepsearch.tools.explore.read_structured import ReadPagesTool, ReadSectionTool
+from core.deepsearch.tools.explore.read_structured import ReadPagesTool
 from core.graph_adapter.base import GraphAccessScope
 
 
@@ -12,8 +12,22 @@ class _FakeAdapter:
     async def acypher(self, cypher: str, params=None, *, access_scope=None):  # noqa: ANN001, ARG002
         params = params or {}
         file_id = params.get("file_id")
-        if file_id != "file-1":
+        if file_id != "11111111-1111-1111-1111-111111111111":
             return []
+        section_id = params.get("section_id")
+        if section_id == "sec-safety":
+            return [
+                {
+                    "chunk_id": "c2",
+                    "content": "Safety warning A.",
+                    "metadata": {"chunk_index": 1, "section_id": "sec-safety", "page_start": 1, "page_end": 1},
+                },
+                {
+                    "chunk_id": "c3",
+                    "content": "Safety warning B.",
+                    "metadata": {"chunk_index": 2, "section_id": "sec-safety", "page_start": 2, "page_end": 2},
+                },
+            ]
         return [
             {
                 "chunk_id": "c1",
@@ -39,28 +53,6 @@ class _FakeAdapter:
 
 
 @pytest.mark.asyncio
-async def test_read_section_returns_ordered_full_text() -> None:
-    tool = ReadSectionTool()
-    req = ToolRunRequest(
-        question="read",
-        plan_step="plan_01",
-        context_evidences=[],
-        adapter=_FakeAdapter(),
-        access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"file_id": "file-1", "section_id": "sec-safety", "max_chars": 5000, "max_chunks": 20},
-        graph_context=None,
-        coverage_metrics=None,
-    )
-    result = await tool.run(req)
-    assert "read.section returned" in result.summary
-    assert len(result.evidences) == 1
-    evidence = result.evidences[0]
-    assert evidence.source == "read.section"
-    assert "Safety warning A." in evidence.content
-    assert "Safety warning B." in evidence.content
-
-
-@pytest.mark.asyncio
 async def test_read_pages_filters_by_page_range() -> None:
     tool = ReadPagesTool()
     req = ToolRunRequest(
@@ -69,15 +61,30 @@ async def test_read_pages_filters_by_page_range() -> None:
         context_evidences=[],
         adapter=_FakeAdapter(),
         access_scope=GraphAccessScope(scope_id="owner-1"),
-        extra={"file_id": "file-1", "page_start": 1, "page_end": 2, "max_chars": 5000, "max_chunks": 20},
+        extra={"file_id": "11111111-1111-1111-1111-111111111111", "page_start": 1, "page_end": 2, "max_chars": 5000, "max_chunks": 20},
         graph_context=None,
         coverage_metrics=None,
     )
     result = await tool.run(req)
     assert "read.pages returned" in result.summary
-    assert len(result.evidences) == 1
-    evidence = result.evidences[0]
-    assert evidence.source == "read.pages"
-    assert "Safety warning A." in evidence.content
-    assert "Safety warning B." in evidence.content
-    assert "Procedure step 1." not in evidence.content
+    # read.pages returns one primary evidence item per page (full-page content, no truncation).
+    assert len(result.evidences) == 2
+    ev_p1 = result.evidences[0]
+    ev_p2 = result.evidences[1]
+    assert ev_p1.source == "read.pages"
+    assert ev_p2.source == "read.pages"
+    assert "Safety warning A." in ev_p1.content
+    assert "Safety warning B." not in ev_p1.content
+    assert "Safety warning B." in ev_p2.content
+    assert "Procedure step 1." not in ev_p1.content
+    assert "Procedure step 1." not in ev_p2.content
+    assert ev_p1.provenance.get("node_type") == "page"
+    assert ev_p2.provenance.get("node_type") == "page"
+    meta1 = ev_p1.provenance.get("metadata") if isinstance(ev_p1.provenance, dict) else {}
+    meta2 = ev_p2.provenance.get("metadata") if isinstance(ev_p2.provenance, dict) else {}
+    assert isinstance(meta1, dict)
+    assert isinstance(meta2, dict)
+    assert meta1.get("source_file_id") == "11111111-1111-1111-1111-111111111111"
+    assert meta2.get("source_file_id") == "11111111-1111-1111-1111-111111111111"
+    assert meta1.get("page_start") == 1
+    assert meta2.get("page_start") == 2

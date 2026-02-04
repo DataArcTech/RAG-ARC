@@ -4,7 +4,6 @@ from .faiss import SearchFaissTool, SearchGlobalFaissTool
 from .bm25 import SearchBM25Tool, SearchGlobalBM25Tool
 from .graph_chunk import SearchGraphChunkTool, SearchGlobalGraphTool
 from .file_search import FileSearchTool
-from .section_search import SectionSearchTool
 
 __all__ = [
     "SearchScopedTool",
@@ -16,5 +15,4 @@ __all__ = [
     "SearchGraphChunkTool",
     "SearchGlobalGraphTool",
     "FileSearchTool",
-    "SectionSearchTool",
 ]

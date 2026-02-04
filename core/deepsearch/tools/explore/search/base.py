@@ -6,7 +6,8 @@ from config.core.deepsearch import tool_defaults
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from encapsulation.data_model.schema import Chunk
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
-from core.deepsearch.utils.file_scope import chunk_in_scope
+from core.deepsearch.utils.file_scope import FileScope, chunk_in_scope
+from core.deepsearch.utils.ids import coerce_uuid_list
 from core.deepsearch.utils.owner_visibility import OwnerVisibilityResolution, resolve_owner_visibility
 from core.deepsearch.utils.query_clean import clean_query
 from core.graph_adapter.base import GraphDeepSearchAdapter
@@ -17,6 +18,29 @@ from ...base import ToolRunRequest
 _CHANNEL_DEFAULTS = tuple(tool_defaults.SEARCH_DEFAULT_CHANNELS)
 # Allow "graph" as a user-friendly alias of the internal "graph_chunk" channel.
 _ALLOWED_CHANNELS = frozenset(set(_CHANNEL_DEFAULTS) | {"graph"})
+
+
+def resolve_explicit_file_scope(extra: Mapping[str, Any] | None) -> tuple[FileScope | None, List[str], List[str]]:
+    """Resolve explicit file_id/file_ids from tool args only (UUID-only)."""
+    payload = dict(extra or {})
+    raw_ids: List[str] = []
+    seen: set[str] = set()
+    for key in ("file_ids", "file_id", "source_file_ids", "source_file_id"):
+        raw = payload.get(key)
+        if raw is None:
+            continue
+        items = raw if isinstance(raw, (list, tuple, set, frozenset)) else [raw]
+        for item in items:
+            token = str(item or "").strip()
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            raw_ids.append(token)
+    file_ids, invalid = coerce_uuid_list(raw_ids)
+    if not file_ids:
+        return None, invalid, raw_ids
+    scope = FileScope(file_ids=frozenset(file_ids), filename_contains=(), source="tool_args")
+    return scope, invalid, raw_ids
 
 
 @dataclass(frozen=True)
@@ -95,6 +119,29 @@ class _SearchToolBase:
         extra = request.extra or {}
         focus = extra.get("focus_query") or extra.get("query") or request.question
         return clean_query(str(focus or ""), max_chars=max_chars) or str(focus or "").strip()
+
+    @staticmethod
+    def _resolve_query_variants(query: str) -> List[str]:
+        try:
+            from core.utils.query_variants import generate_query_variants
+
+            variants = generate_query_variants(query)
+        except Exception:  # noqa: BLE001
+            variants = [str(query or "").strip()]
+
+        cleaned: List[str] = []
+        seen: set[str] = set()
+        for item in variants or []:
+            token = str(item or "").strip()
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            cleaned.append(token)
+        if not cleaned:
+            token = str(query or "").strip()
+            if token:
+                cleaned = [token]
+        return cleaned
 
     @staticmethod
     def _resolve_owner_id(request: ToolRunRequest) -> Optional[str]:

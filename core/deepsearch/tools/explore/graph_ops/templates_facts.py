@@ -358,9 +358,11 @@ async def run_expand_terms(tool, request: ToolRunRequest, args: Dict[str, Any]) 
             diagnostics={"reason": "cypher_unavailable"},
         )
 
-    concept = normalize_entity_name(args.get("concept"))
+    # Accept common alias keys to improve tool robustness across models.
+    # This is API-compatibility (not a domain rule): the underlying operation needs a single concept string.
+    concept = normalize_entity_name(args.get("concept") or args.get("term"))
     if not concept:
-        return ToolResult(summary="expand_terms requires a non-empty concept.")
+        return ToolResult(summary="expand_terms requires a non-empty concept (use template_args.concept).")
 
     concept_type = str(args.get("concept_type") or "").strip()
     predicates = normalize_predicates(args.get("predicates"))

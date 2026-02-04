@@ -31,15 +31,15 @@ async def call_llm_with_optional_images_async(
     from core.deepsearch.tools.base import call_llm_async
 
     if not image_paths:
-        return await call_llm_async(llm, messages, **kwargs)
+        return await call_llm_async(llm, messages, warn_context=warn_context, **kwargs)
 
     if user_message_index < 0 or user_message_index >= len(messages):
-        return await call_llm_async(llm, messages, **kwargs)
+        return await call_llm_async(llm, messages, warn_context=warn_context, **kwargs)
 
     original = messages[user_message_index]
     original_content = original.get("content")
     if not isinstance(original_content, str):
-        return await call_llm_async(llm, messages, **kwargs)
+        return await call_llm_async(llm, messages, warn_context=warn_context, **kwargs)
 
     multimodal_messages = [dict(m) for m in messages]
     multimodal_messages[user_message_index] = build_multimodal_user_message(
@@ -48,12 +48,11 @@ async def call_llm_with_optional_images_async(
     )
 
     try:
-        return await call_llm_async(llm, multimodal_messages, **kwargs)
+        return await call_llm_async(llm, multimodal_messages, warn_context=f"{warn_context}.multimodal", **kwargs)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "Multimodal input unsupported or failed (%s): %s; falling back to text-only using captions/alt text.",
             warn_context,
             exc,
         )
-        return await call_llm_async(llm, messages, **kwargs)
-
+        return await call_llm_async(llm, messages, warn_context=f"{warn_context}.text_fallback", **kwargs)

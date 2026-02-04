@@ -264,12 +264,13 @@ def build_section_tree(
 
     stack: List[SectionNode] = []
     section_counter = 0
+    path_delimiter = pageindex_cfg.section_path_delimiter()
     for idx, signal in enumerate(signals):
         while stack and signal.resolved_level <= stack[-1].level:
             stack.pop()
         parent = stack[-1] if stack else None
         section_counter += 1
-        path = signal.title if parent is None else f"{parent.path} > {signal.title}"
+        path = signal.title if parent is None else f"{parent.path}{path_delimiter}{signal.title}"
         page_start, page_end = ranges.get(idx, (None, None))
         node = SectionNode(
             section_id=f"{file_id}:sec:{section_counter}",
@@ -322,4 +323,3 @@ def build_section_tree(
         level_conflict_ratio=conflict_ratio,
         uniform_level_flattened=uniform_flattened,
     )
-

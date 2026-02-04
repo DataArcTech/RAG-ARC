@@ -2,6 +2,7 @@ import pytest
 
 from core.deepsearch.tools import ToolRunRequest
 from core.deepsearch.tools.explore import ExploreTool
+from core.utils.json_extract import safe_json_loads
 
 
 @pytest.mark.asyncio
@@ -17,7 +18,9 @@ async def test_explore_rejects_unknown_action_tool() -> None:
     )
 
     result = await tool.run(request)
-    assert "explore completed" in result.summary
+    payload = safe_json_loads(result.summary, expected="dict")
+    assert payload["answer"]["ok_actions"] == 0
+    assert payload["answer"]["total_actions"] == 1
     errors = result.diagnostics.get("errors") or []
     assert errors
     assert "tool_not_allowed" in errors[0]

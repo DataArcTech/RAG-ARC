@@ -29,11 +29,17 @@ class MinerUParser(AbstractParser):
         timeout_s = int(getattr(self.config, "timeout_s", 900) or 900)
         poll_interval_s = int(getattr(self.config, "poll_interval_s"))
         poll_timeout_s = int(getattr(self.config, "poll_timeout_s"))
+        http_max_retries = int(getattr(self.config, "http_max_retries", 0) or 0)
+        http_retry_backoff_s = float(getattr(self.config, "http_retry_backoff_s", 1.0) or 1.0)
+        http_retry_max_backoff_s = float(getattr(self.config, "http_retry_max_backoff_s", 8.0) or 8.0)
         self.client = MinerUServiceClient(
             base_url=server_url,
             timeout_s=timeout_s,
             poll_interval_s=poll_interval_s,
             poll_timeout_s=poll_timeout_s,
+            http_max_retries=http_max_retries,
+            http_retry_backoff_s=http_retry_backoff_s,
+            http_retry_max_backoff_s=http_retry_max_backoff_s,
         )
 
     def get_supported_extensions(self) -> List[str]:

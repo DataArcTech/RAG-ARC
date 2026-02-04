@@ -20,9 +20,13 @@ SEARCH_FILE_RERANK_SYSTEM_PROMPT_EN = (
     "- Do not discard other relevant files; place them after the primary one.\n"
     "- Output can use file_id OR filename (base name only, no paths). Prefer filename if unsure.\n"
     "- Do NOT invent file ids or filenames. Use only candidate ids/names.\n"
-    "- Return reasoning in the same language as the question.\n"
+    "- Return thinking in the same language as the question (brief; no step-by-step chain-of-thought).\n"
     "\n"
-    "Return ONLY valid JSON with keys: ranked_file_ids (array), reasoning (string)."
+    "Response Format (return ONLY valid JSON):\n"
+    "{\n"
+    '  \"thinking\": \"<brief rationale>\",\n'
+    '  \"answer\": [\"<file_id_or_filename>\", \"...\"]\n'
+    "}\n"
 )
 
 SEARCH_FILE_RERANK_USER_PROMPT_TEMPLATE_EN = (

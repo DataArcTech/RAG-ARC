@@ -6,11 +6,11 @@ from config.core.deepsearch import tool_defaults
 from config.core.deepsearch.evidence_defaults import EVIDENCE_CLASS_WEB_SNIPPET
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from encapsulation.web_search import TavilySearchClient, TavilySearchResult
-from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_PRIMARY
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
-from ..governance_tags import EVIDENCE_PRIMARY, SCOPE_OWNER
+from ..governance_tags import EVIDENCE_DERIVED, SCOPE_OWNER
 
 
 class WebSearchTool(GraphTool):
@@ -25,7 +25,7 @@ class WebSearchTool(GraphTool):
         ),
         speed="medium",
         cost="medium",
-        strategy_tags=("web", "search", EVIDENCE_PRIMARY, SCOPE_OWNER),
+        strategy_tags=("web", "search", EVIDENCE_DERIVED, SCOPE_OWNER),
         profile="X",
         determinism="stochastic",
         namespace="rag-arc.deepsearch.tools.explore.web.search",
@@ -118,7 +118,7 @@ class WebSearchTool(GraphTool):
                     chunk_id=chunk_id,
                     source="web.search",
                     content=content,
-                    kind=EVIDENCE_KIND_PRIMARY,
+                    kind=EVIDENCE_KIND_DERIVED,
                     score=item.score,
                     provenance={
                         "provider": "tavily",

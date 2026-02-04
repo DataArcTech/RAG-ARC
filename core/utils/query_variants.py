@@ -1,12 +1,8 @@
-"""Deterministic query variants for retrieval (domain-agnostic).
-
-Currently supported:
-- Simplified/Traditional Chinese (Hans<->Hant) via OpenCC, when available.
-- English token variant: best-effort ASCII token extraction (no translation).
-"""
+"""LLM-driven query variants for retrieval (domain-agnostic)."""
 import logging
-import re
 from functools import lru_cache
+import json
+from typing import Optional
 
 from config.query_variants import (
     QUERY_VARIANTS_ENABLED,
@@ -14,6 +10,11 @@ from config.query_variants import (
     QUERY_VARIANTS_MAX,
     QUERY_VARIANTS_ZH_HANS_HANT_ENABLED,
 )
+from core.prompts.query_variants import (
+    QUERY_VARIANTS_SYSTEM_PROMPT,
+    QUERY_VARIANTS_USER_PROMPT_TEMPLATE,
+)
+from config.encapsulation.llm.chat.openai import OpenAIChatConfig
 
 logger = logging.getLogger(__name__)
 
@@ -30,36 +31,66 @@ def _dedupe_preserve_order(items: list[str]) -> list[str]:
     return out
 
 
-@lru_cache(maxsize=4)
-def _opencc_converter(name: str):
-    # Lazy import to keep core import surface small and allow deployments without OpenCC.
-    import opencc  # type: ignore[import-not-found]
-
-    return opencc.OpenCC(name)
-
-
-def _try_opencc_convert(query: str, *, converter: str) -> str | None:
+@lru_cache(maxsize=1)
+def _get_llm():
     try:
-        cc = _opencc_converter(converter)
-        out = cc.convert(query)
-        out = str(out or "").strip()
-        return out or None
+        cfg = OpenAIChatConfig()
+        return cfg.build()
     except Exception as exc:  # noqa: BLE001
-        # Keep it observable but non-fatal: variant generation is an enhancement.
-        logger.debug("OpenCC convert failed (converter=%s): %s", converter, exc)
+        logger.warning("Query variants LLM unavailable; falling back to base query. error=%s", exc)
         return None
 
 
-_ASCII_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*")
+def _low_cost_model_name(llm_connector) -> Optional[str]:
+    cfg = getattr(llm_connector, "config", None)
+    token = getattr(cfg, "low_cost_model_name", None) if cfg is not None else None
+    token = str(token or "").strip()
+    return token or None
 
 
-def _extract_ascii_tokens(query: str) -> str | None:
-    tokens = _ASCII_TOKEN_RE.findall(str(query or ""))
-    tokens = [t.strip() for t in tokens if t and t.strip()]
-    if not tokens:
+def _extract_json_object(text: str) -> Optional[dict]:
+    if not text:
         return None
-    out = " ".join(tokens).strip()
-    return out or None
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    snippet = text[start : end + 1]
+    try:
+        payload = json.loads(snippet)
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _llm_rewrite_variants(query: str, langs: list[str]) -> dict[str, str]:
+    llm = _get_llm()
+    if llm is None:
+        return {}
+
+    payload = {"query": query, "target_langs": list(langs)}
+    messages = [
+        {"role": "system", "content": QUERY_VARIANTS_SYSTEM_PROMPT},
+        {"role": "user", "content": QUERY_VARIANTS_USER_PROMPT_TEMPLATE.format(payload=json.dumps(payload, ensure_ascii=False))},
+    ]
+    kwargs = {"temperature": 0.0, "max_tokens": 512}
+    low_cost = _low_cost_model_name(llm)
+    if low_cost:
+        kwargs["model"] = low_cost
+    try:
+        response = llm.chat(messages, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Query variants LLM call failed; using base query only. error=%s", exc)
+        return {}
+    parsed = _extract_json_object(str(response or "").strip())
+    if not parsed:
+        return {}
+    out: dict[str, str] = {}
+    for key in langs:
+        token = str(parsed.get(key) or "").strip()
+        if token:
+            out[key] = token
+    return out
 
 
 def generate_query_variants(query: str) -> list[str]:
@@ -77,32 +108,29 @@ def generate_query_variants(query: str) -> list[str]:
 
     variants: list[str] = [base]
 
-    # Add variants in configured language order, but always keep the original query first.
+    langs: list[str] = []
     for lang in QUERY_VARIANTS_LANGS:
-        key = str(lang or "").strip().lower()
-        if not key:
+        token = str(lang or "").strip()
+        if not token:
             continue
+        key = token.lower()
+        if key in {"zh-hans", "zh-hant"} and not QUERY_VARIANTS_ZH_HANS_HANT_ENABLED:
+            continue
+        langs.append(token)
 
-        if key in {"zh-hans", "zh-hant"}:
-            if not QUERY_VARIANTS_ZH_HANS_HANT_ENABLED:
-                continue
-            # For robustness we don't attempt to detect the input script:
-            # - t2s normalizes to Simplified
-            # - s2t normalizes to Traditional
-            converter = "t2s" if key == "zh-hans" else "s2t"
-            out = _try_opencc_convert(base, converter=converter)
-            if out:
-                variants.append(out)
-            continue
-
-        if key == "en":
-            out = _extract_ascii_tokens(base)
-            if out:
-                variants.append(out)
-            continue
+    if langs:
+        rewritten = _llm_rewrite_variants(base, langs)
+        for lang in langs:
+            candidate = str(rewritten.get(lang) or "").strip()
+            if candidate:
+                variants.append(candidate)
 
     variants = _dedupe_preserve_order(variants)
-    return variants[: int(QUERY_VARIANTS_MAX)]
+    desired_max = int(QUERY_VARIANTS_MAX)
+    minimum = 1 + len(langs)
+    if desired_max < minimum:
+        desired_max = minimum
+    return variants[: desired_max]
 
 
 __all__ = ["generate_query_variants"]

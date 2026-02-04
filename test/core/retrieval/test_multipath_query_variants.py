@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 from encapsulation.data_model.schema import Chunk
 from core.retrieval.multipath import MultiPathRetriever
+from core.utils import query_variants
 
 
 class _DummyRetriever:
@@ -25,7 +26,12 @@ class _DummyConfig:
     fusion_instance: object | None = None
 
 
-def test_multipath_calls_retriever_for_distinct_query_variants():
+def test_multipath_calls_retriever_for_distinct_query_variants(monkeypatch):
+    monkeypatch.setattr(
+        query_variants,
+        "generate_query_variants",
+        lambda query: [str(query), "計劃特點"],
+    )
     retriever = _DummyRetriever(results=[Chunk(id="c1", content="x", metadata={"score": 1.0})])
     config = _DummyConfig(retrievers=[object()], search_kwargs={"k": 5, "with_score": True}, built_retrievers=[retriever])
     multipath = MultiPathRetriever(config)  # type: ignore[arg-type]
@@ -37,11 +43,15 @@ def test_multipath_calls_retriever_for_distinct_query_variants():
     assert "計劃特點" in retriever.invoked_queries
 
 
-def test_multipath_does_not_duplicate_calls_when_no_variants():
+def test_multipath_does_not_duplicate_calls_when_no_variants(monkeypatch):
+    monkeypatch.setattr(
+        query_variants,
+        "generate_query_variants",
+        lambda query: [str(query)],
+    )
     retriever = _DummyRetriever(results=[Chunk(id="c1", content="x", metadata={"score": 1.0})])
     config = _DummyConfig(retrievers=[object()], search_kwargs={"k": 5, "with_score": True}, built_retrievers=[retriever])
     multipath = MultiPathRetriever(config)  # type: ignore[arg-type]
 
     _ = multipath._get_relevant_chunks("hello world", k=5, owner_id="owner")
     assert retriever.invoked_queries == ["hello world"]
-

@@ -6,13 +6,12 @@ from config.core.deepsearch import tool_defaults
 from config.core.deepsearch.evidence_defaults import EVIDENCE_CLASS_SOURCE_TEXT
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from encapsulation.data_model.schema import Chunk
-from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_PRIMARY
-from core.deepsearch.utils.file_scope import resolve_file_scope
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 from framework.thread_pool import get_thread_pool
 
 from ...base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
-from ...governance_tags import EVIDENCE_PRIMARY, SCOPE_FILE, SCOPE_OWNER
-from .base import _ChannelResult, _SearchToolBase, strip_file_scope_from_graph_context
+from ...governance_tags import EVIDENCE_DERIVED, SCOPE_FILE, SCOPE_OWNER
+from .base import _ChannelResult, _SearchToolBase, resolve_explicit_file_scope, strip_file_scope_from_graph_context
 
 
 class _Bm25Channel:
@@ -152,10 +151,10 @@ class _Bm25Channel:
             bm25_filters = dict(bm25_filters or {})
             bm25_filters["section_id"] = sorted(section_scope)
 
-        async def _call_one(owner_id: str) -> List[Chunk]:
+        async def _call_one(owner_id: str, query_text: str) -> List[Chunk]:
             return await get_thread_pool().run_blocking(
                 retrievers.bm25.invoke,
-                query,
+                query_text,
                 k=effective_top_k,
                 owner_id=owner_id,
                 with_score=True,
@@ -164,16 +163,47 @@ class _Bm25Channel:
             )
 
         owner_ids = list(visibility.owner_ids_used)
-        parts = await asyncio.gather(*[_call_one(owner_id) for owner_id in owner_ids], return_exceptions=True)
+        query_variants = self._resolve_query_variants(query)
+        parts = await asyncio.gather(
+            *[_call_one(owner_id, qv) for qv in query_variants for owner_id in owner_ids],
+            return_exceptions=True,
+        )
         chunks: List[Chunk] = []
         per_owner: Dict[str, int] = {}
+        per_variant: Dict[str, int] = {}
         errors: List[str] = []
-        for owner_id, part in zip(owner_ids, parts):
-            if isinstance(part, Exception):
-                errors.append(f"{owner_id}: {part}")
+        part_idx = 0
+        for qv in query_variants:
+            variant_count = 0
+            for owner_id in owner_ids:
+                if part_idx >= len(parts):
+                    break
+                part = parts[part_idx]
+                part_idx += 1
+                if isinstance(part, Exception):
+                    errors.append(f"{owner_id}: {part}")
+                    continue
+                variant_count += len(part)
+                per_owner[owner_id] = per_owner.get(owner_id, 0) + len(part)
+                chunks.extend(part)
+            per_variant[str(qv)] = variant_count
+        # Deduplicate across variants by chunk_id, keep highest-score instance if available.
+        deduped: Dict[str, Chunk] = {}
+        deduped_scores: Dict[str, float] = {}
+        for chunk in chunks:
+            chunk_id = self._chunk_id(chunk, "bm25")
+            score = self._chunk_score(chunk)
+            if chunk_id not in deduped:
+                deduped[chunk_id] = chunk
+                if score is not None:
+                    deduped_scores[chunk_id] = score
                 continue
-            per_owner[owner_id] = len(part)
-            chunks.extend(part)
+            if score is not None:
+                prev = deduped_scores.get(chunk_id)
+                if prev is None or score > prev:
+                    deduped[chunk_id] = chunk
+                    deduped_scores[chunk_id] = score
+        chunks = list(deduped.values())
         chunks, dropped = self._apply_file_scope(chunks, file_scope)
         chunks, section_dropped = self._apply_section_scope(chunks, section_scope)
 
@@ -191,7 +221,7 @@ class _Bm25Channel:
                 chunk_id=chunk_id,
                 source="bm25",
                 content=snippet,
-                kind=EVIDENCE_KIND_PRIMARY,
+                kind=EVIDENCE_KIND_DERIVED,
                 score=score,
                 provenance={
                     "channel": "bm25",
@@ -217,6 +247,7 @@ class _Bm25Channel:
         summary = f"BM25 search returned {len(evidences)} chunks." if evidences else "BM25 search returned no chunks."
         diagnostics = {
             "query": query,
+            "query_variants": query_variants,
             "top_k": effective_top_k,
             "retrieved": len(chunks),
             "file_scope_dropped": dropped,
@@ -225,6 +256,7 @@ class _Bm25Channel:
             "filters_used": bm25_filters,
             "owner_visibility": visibility.as_dict(),
             "per_owner_retrieved": per_owner,
+            "per_variant_retrieved": per_variant,
             "errors": errors,
             "results": results,
         }
@@ -240,7 +272,7 @@ class SearchBM25Tool(_SearchToolBase, _Bm25Channel, GraphTool):
         description="BM25-only lexical search scoped to a file_id/file_ids (prevents cross-document noise).",
         speed="fast",
         cost="low",
-        strategy_tags=("search", "bm25", EVIDENCE_PRIMARY, SCOPE_OWNER, SCOPE_FILE),
+        strategy_tags=("search", "bm25", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.search.scoped.bm25",
@@ -250,7 +282,6 @@ class SearchBM25Tool(_SearchToolBase, _Bm25Channel, GraphTool):
                 "focus_query": {"type": "string", "description": "Optional query override."},
                 "file_id": {"type": "string", "description": "Restrict results to a specific file_id (required unless file_ids provided)."},
                 "file_ids": {"type": "array", "items": {"type": "string"}, "description": "Restrict results to file_ids (required unless file_id provided)."},
-                "filename_contains": {"type": "array", "items": {"type": "string"}, "description": "Best-effort filename filter."},
                 "section_id": {"type": "string", "description": "Restrict results to a specific section_id."},
                 "section_ids": {"type": "array", "items": {"type": "string"}, "description": "Restrict results to section_ids."},
                 "owner_ids": {"type": "array", "items": {"type": "string"}, "description": "Owner ids to search (me/share)."},
@@ -268,17 +299,24 @@ class SearchBM25Tool(_SearchToolBase, _Bm25Channel, GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         query = self._resolve_query(request)
-        file_scope = resolve_file_scope(
-            extra=request.extra,
-            graph_context_metadata=(request.graph_context.metadata if request.graph_context else {}),
-            question=request.question,
-        )
-        if not getattr(file_scope, "file_ids", None):
+        extra = request.extra or {}
+        file_scope, invalid, raw_ids = resolve_explicit_file_scope(extra)
+        if invalid:
+            return ToolResult(
+                summary="search.scoped.bm25 skipped: invalid file_id(s) (expected UUID; use search.file to obtain file_id).",
+                diagnostics={
+                    "reason": "invalid_file_id_format",
+                    "query": query,
+                    "invalid_file_ids": invalid[:20],
+                    "file_ids_filter_raw": raw_ids[:20],
+                },
+            )
+        if file_scope is None or not getattr(file_scope, "file_ids", None):
             return ToolResult(
                 summary="search.scoped.bm25 skipped: missing file_id/file_ids (call search.file first).",
                 diagnostics={"reason": "missing_file_scope", "query": query},
             )
-        top_k = self._resolve_top_k(request.extra.get("top_k"), tool_defaults.SEARCH_DEFAULT_TOP_K)
+        top_k = self._resolve_top_k(extra.get("top_k"), tool_defaults.SEARCH_DEFAULT_TOP_K)
         result = await self._run_bm25(request=request, query=query, top_k=top_k, file_scope=file_scope)
         return ToolResult(summary=result.summary, evidences=result.evidences, diagnostics=result.diagnostics)
 
@@ -295,7 +333,7 @@ class SearchGlobalBM25Tool(_SearchToolBase, _Bm25Channel, GraphTool):
         ),
         speed="fast",
         cost="low",
-        strategy_tags=("search", "bm25", "global", EVIDENCE_PRIMARY, SCOPE_OWNER, SCOPE_FILE),
+        strategy_tags=("search", "bm25", "global", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.search.global.bm25",
@@ -311,19 +349,18 @@ class SearchGlobalBM25Tool(_SearchToolBase, _Bm25Channel, GraphTool):
     async def run(self, request: ToolRunRequest) -> ToolResult:
         query = self._resolve_query(request)
         patched_ctx = strip_file_scope_from_graph_context(request.graph_context)
-        file_scope = resolve_file_scope(
-            extra=request.extra,
-            graph_context_metadata=(patched_ctx.metadata if patched_ctx else {}),
-            question=request.question,
-        )
-        top_k = self._resolve_top_k(request.extra.get("top_k"), tool_defaults.SEARCH_DEFAULT_TOP_K)
+        extra = dict(request.extra or {})
+        for key in ("file_id", "file_ids", "source_file_id", "source_file_ids", "filename_contains"):
+            extra.pop(key, None)
+        file_scope = None
+        top_k = self._resolve_top_k(extra.get("top_k"), tool_defaults.SEARCH_DEFAULT_TOP_K)
         patched = ToolRunRequest(
             question=request.question,
             plan_step=request.plan_step,
             context_evidences=request.context_evidences,
             adapter=request.adapter,
             access_scope=request.access_scope,
-            extra=dict(request.extra or {}),
+            extra=extra,
             graph_context=patched_ctx,
             coverage_metrics=request.coverage_metrics,
         )

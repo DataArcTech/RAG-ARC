@@ -1,12 +1,9 @@
-from typing import Any, Dict, List
-
 import pytest
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.deepsearch.tools import ToolDescriptor, ToolResult, ToolRunRequest
 from core.deepsearch.tools.explore import ExploreTool
 from core.deepsearch.tools.governance_tags import EVIDENCE_PRIMARY, SCOPE_OWNER
-from core.graph_adapter.base import GraphAccessScope
 
 
 class DummyTool:
@@ -29,22 +26,6 @@ class DummyTool:
         return ToolResult(summary=self._summary, evidences=[evidence], diagnostics={"dummy": True})
 
 
-class FakeAdapter:
-    def cypher_capable(self) -> bool:
-        return True
-
-    async def acypher(self, cypher: str, params: Dict[str, Any] | None = None, *, access_scope=None) -> List[Dict[str, Any]]:
-        return [
-            {
-                "chunk_id": "c1",
-                "content": "chunk content",
-                "metadata": '{"source_file_id": "f1"}',
-                "source_file_id": "f1",
-                "owner_id": "owner",
-            }
-        ]
-
-
 @pytest.mark.asyncio
 async def test_explore_runs_actions() -> None:
     tool = ExploreTool(
@@ -61,27 +42,29 @@ async def test_explore_runs_actions() -> None:
         access_scope=None,
         extra={
             "actions": [
-                {"id": "a1", "tool": "search.scoped", "args": {"file_id": "f1", "top_k": 2, "channels": ["faiss"]}},
+                {"id": "a1", "tool": "search.scoped", "args": {"file_id": "11111111-1111-1111-1111-111111111111", "top_k": 2, "channels": ["faiss"]}},
                 {"id": "a2", "tool": "graph.ops", "args": {"mode": "template", "template": "path_exists", "template_args": {"source": "A", "target": "B"}}},
             ]
         },
     )
     result = await tool.run(request)
     assert len(result.evidences) == 2
-    assert "explore completed" in result.summary
+    # Summary is a JSON envelope for LLM visibility.
+    assert "\"thinking\"" in result.summary
+    assert "\"answer\"" in result.summary
     assert result.diagnostics["actions"][0]["tool"] == "search.scoped"
     assert result.diagnostics["actions"][1]["tool"] == "graph.ops"
 
 
 @pytest.mark.asyncio
-async def test_explore_read_chunk() -> None:
+async def test_explore_rejects_read_chunk() -> None:
     tool = ExploreTool()
     request = ToolRunRequest(
         question="Q",
         plan_step="plan_02",
         context_evidences=[],
-        adapter=FakeAdapter(),
-        access_scope=GraphAccessScope(scope_id="owner"),
+        adapter=None,
+        access_scope=None,
         extra={
             "actions": [
                 {"tool": "read.chunk", "args": {"chunk_ids": ["c1"], "goal": "validate evidence", "file_id": "f1"}},
@@ -89,31 +72,58 @@ async def test_explore_read_chunk() -> None:
         },
     )
     result = await tool.run(request)
-    assert len(result.evidences) == 1
-    evidence = result.evidences[0]
-    assert evidence.chunk_id == "c1"
-    assert evidence.source == "explore.read.chunk"
-    assert evidence.provenance.get("goal") == "validate evidence"
+    assert len(result.evidences) == 0
+    action = result.diagnostics["actions"][0]
+    assert action["tool"] == "read.chunk"
+    assert action["status"] == "failed"
+    assert action["diagnostics"]["reason"] == "tool_not_allowed"
 
 
 @pytest.mark.asyncio
-async def test_explore_read_chunk_drops_out_of_scope_chunks() -> None:
+async def test_explore_rejects_read_neighbors() -> None:
     tool = ExploreTool()
     request = ToolRunRequest(
         question="Q",
         plan_step="plan_03",
         context_evidences=[],
-        adapter=FakeAdapter(),
-        access_scope=GraphAccessScope(scope_id="owner"),
+        adapter=None,
+        access_scope=None,
         extra={
             "actions": [
-                {"tool": "read.chunk", "args": {"chunk_ids": ["c1"], "goal": "validate evidence", "file_id": "other"}},
+                {"tool": "read.neighbors", "args": {"chunk_id": "c1", "before": 2, "after": 2}},
             ],
         },
     )
     result = await tool.run(request)
     assert len(result.evidences) == 0
     action = result.diagnostics["actions"][0]
-    assert action["tool"] == "read.chunk"
-    assert action["diagnostics"]["dropped_out_of_scope"] == 1
-    assert "dropped 1 out-of-scope" in (action["summary"] or "")
+    assert action["tool"] == "read.neighbors"
+    assert action["status"] == "failed"
+    assert action["diagnostics"]["reason"] == "tool_not_allowed"
+
+
+@pytest.mark.asyncio
+async def test_explore_allows_search_global_without_file_id() -> None:
+    tool = ExploreTool(
+        tool_overrides={
+            "search.file": DummyTool("search.file", "file ok", "f1"),
+            "search.global": DummyTool("search.global", "global ok", "g1"),
+        }
+    )
+    request = ToolRunRequest(
+        question="Q",
+        plan_step="plan_04",
+        context_evidences=[],
+        adapter=None,
+        access_scope=None,
+        extra={
+            "actions": [
+                {"id": "a1", "tool": "search.global", "args": {"top_k": 3}},
+            ]
+        },
+    )
+    result = await tool.run(request)
+    assert len(result.evidences) == 1
+    assert result.diagnostics["actions"][0]["tool"] == "search.global"
+    gate = result.diagnostics.get("file_routing_gate") or {}
+    assert gate == {}

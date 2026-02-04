@@ -225,7 +225,11 @@ class PageIndexService:
             meta = chunk.get("metadata") or {}
             meta["section_id"] = node.section_id
             meta["section_path"] = node.path
+            meta["section_title"] = node.title
             meta["section_level"] = node.level
+            meta["section_parent_id"] = node.parent_id
+            meta["section_page_start"] = node.page_start
+            meta["section_page_end"] = node.page_end
             meta["page_start"] = node.page_start
             meta["page_end"] = node.page_end
             chunk["metadata"] = meta
@@ -298,7 +302,11 @@ class PageIndexService:
             metadata = {
                 "section_id": node.section_id,
                 "section_path": node.path,
+                "section_title": node.title,
                 "section_level": node.level,
+                "section_parent_id": node.parent_id,
+                "section_page_start": node.page_start,
+                "section_page_end": node.page_end,
                 "page_start": node.page_start,
                 "page_end": node.page_end,
                 "source_file_id": context.file_id,

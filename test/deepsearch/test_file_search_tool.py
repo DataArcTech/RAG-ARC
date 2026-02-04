@@ -120,7 +120,7 @@ async def test_file_search_llm_rerank_changes_order(monkeypatch: pytest.MonkeyPa
             ]
         }
     )
-    llm = _StubLLM('{"ranked_file_ids": ["file-1", "file-2"], "reasoning": "User intent matches file-1."}')
+    llm = _StubLLM('{"thinking": "User intent matches file-1.", "answer": ["file-1", "file-2"]}')
     tool = FileSearchTool(dense_retriever=dense, bm25_retriever=bm25, llm_connector=llm)
     req = ToolRunRequest(
         question="find docs",
@@ -137,7 +137,7 @@ async def test_file_search_llm_rerank_changes_order(monkeypatch: pytest.MonkeyPa
     rows = result.diagnostics.get("results") or []
     assert [row["file_id"] for row in rows][:2] == ["file-1", "file-2"]
     assert result.diagnostics.get("llm_rerank", {}).get("ranked_file_ids") == ["file-1", "file-2"]
-    assert llm.calls == 1
+    assert llm.calls >= 1
 
 
 @pytest.mark.asyncio
@@ -159,7 +159,7 @@ async def test_file_search_llm_rerank_accepts_filename(monkeypatch: pytest.Monke
             ]
         }
     )
-    llm = _StubLLM('{"ranked_file_ids": ["b.pdf", "a.pdf"], "reasoning": "Use filenames."}')
+    llm = _StubLLM('{"thinking": "Use filenames.", "answer": ["b.pdf", "a.pdf"]}')
     tool = FileSearchTool(dense_retriever=dense, bm25_retriever=bm25, llm_connector=llm)
     req = ToolRunRequest(
         question="find docs",
@@ -175,4 +175,4 @@ async def test_file_search_llm_rerank_accepts_filename(monkeypatch: pytest.Monke
     result = await tool.run(req)
     rows = result.diagnostics.get("results") or []
     assert [row["file_id"] for row in rows][:2] == ["file-2", "file-1"]
-    assert llm.calls == 1
+    assert llm.calls >= 1

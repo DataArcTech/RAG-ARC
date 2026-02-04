@@ -19,6 +19,7 @@ from core.prompts.deepsearch.search_file import (
     SEARCH_FILE_RERANK_SYSTEM_PROMPT_EN,
     SEARCH_FILE_RERANK_USER_PROMPT_TEMPLATE_EN,
 )
+from core.deepsearch.utils.llm_envelope import build_llm_envelope
 
 from ...base import (
     GraphTool,
@@ -250,7 +251,7 @@ class FileSearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkCh
         diagnostics["channels_summary"] = channel_summaries
         diagnostics["channels_diagnostics"] = channel_diags
 
-        # PageIndex-style DocScore per channel: sum(scores) / sqrt(N+1)
+        # DocScore per channel: sum(scores) / sqrt(N+1)
         channel_doc_scores: Dict[str, Dict[str, float]] = {}
         channel_doc_ranks: Dict[str, Dict[str, int]] = {}
         fused_scores: Dict[str, float] = {}
@@ -310,19 +311,28 @@ class FileSearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkCh
             if visibility.owner_ids_rejected:
                 reason = "owner_ids_rejected"
             return ToolResult(
-                summary="search.file returned no candidate files.",
+                summary=build_llm_envelope(
+                    thinking="Global file routing via chunk retrieval produced no usable file candidates.",
+                    answer=[],
+                    extra={"reason": reason, "next_step": "Revise query terms or broaden owner_ids/channels; then rerun search.file."},
+                ),
                 diagnostics={**diagnostics, "reason": reason},
             )
 
-        # Human-readable summary for routing decisions.
+        # Human-readable preview for routing decisions (embedded into the JSON envelope).
         max_hits = max(1, int(tool_defaults.FILE_SEARCH_MAX_SNIPPETS_PER_FILE))
         max_preview = max(0, int(tool_defaults.FILE_SEARCH_SUMMARY_SNIPPET_PREVIEW_CHARS))
-        lines: List[str] = []
+        preview_rows: List[Dict[str, Any]] = []
         for idx, row in enumerate(results[: min(len(results), 5)]):
-            lines.append(
-                f"{idx+1}. file_id={row.get('file_id')} score={float(row.get('score') or 0.0):.4f} "  # noqa: E501
-                f"hits={int(row.get('hit_count') or 0)} filename={row.get('filename') or ''}"
-            )
+            preview = {
+                "rank": idx + 1,
+                "file_id": row.get("file_id"),
+                "filename": row.get("filename") or "",
+                "score": float(row.get("score") or 0.0),
+                "hit_count": int(row.get("hit_count") or 0),
+                "per_channel_hits": row.get("per_channel_hits") or {},
+                "snippets": [],
+            }
             hit_items = list(row.get("hits") or [])
             hit_items.sort(key=lambda item: (str(item.get("channel") or ""), int(item.get("rank") or 9999)))
             shown = 0
@@ -334,16 +344,35 @@ class FileSearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkCh
                     snippet = snippet[: max(0, max_preview - 3)].rstrip() + "..."
                 if not snippet:
                     continue
-                channel = str(item.get("channel") or "")
-                rank = int(item.get("rank") or 0)
-                lines.append(f"   [{channel} rank={rank}] {snippet}")
+                preview["snippets"].append(
+                    {
+                        "channel": str(item.get("channel") or ""),
+                        "rank": int(item.get("rank") or 0),
+                        "snippet": snippet,
+                    }
+                )
                 shown += 1
+            preview_rows.append(preview)
 
         next_steps = (
-            "Next steps: pick the best file_id, then use toc.tree/tree.root + tree.children/tree.open "
-            "to locate sections, and finally read.pages for full evidence."
+            "Pick the best file_id from answer[0], then use toc.tree/tree.root + tree.children/tree.open "
+            "to locate relevant pages, and finally use read.pages for citeable evidence."
         )
-        summary = "search.file returned candidate files:\n" + "\n".join(lines) + "\n" + next_steps
+        llm_rerank = diagnostics.get("llm_rerank") if isinstance(diagnostics, dict) else None
+        rerank_thinking = None
+        if isinstance(llm_rerank, dict):
+            rerank_thinking = str(llm_rerank.get("thinking") or llm_rerank.get("reasoning") or "").strip() or None
+
+        ranked_file_ids = [str(row.get("file_id")) for row in results if row.get("file_id")]
+        summary = build_llm_envelope(
+            thinking="Aggregate global chunk hits into file candidates (routing only), optionally rerank by user intent.",
+            answer=ranked_file_ids,
+            extra={
+                "preview": preview_rows,
+                "rerank_thinking": rerank_thinking,
+                "next_steps": next_steps,
+            },
+        )
         return ToolResult(summary=summary, diagnostics=diagnostics)
 
     async def _llm_rerank(
@@ -414,11 +443,13 @@ class FileSearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkCh
         diagnostics["raw_response"] = raw_response
 
         extracted = extract_json_from_text(raw_response) or raw_response
-        payload = safe_json_loads(extracted, expected="object") if extracted else None
+        payload = safe_json_loads(extracted, expected="dict") if extracted else None
         if not isinstance(payload, dict):
             diagnostics["error"] = "json_parse_failed"
             return [], diagnostics
-        ranked = payload.get("ranked_file_ids")
+        ranked = payload.get("answer")
+        if ranked is None:
+            ranked = payload.get("ranked_file_ids")
         if not isinstance(ranked, list):
             diagnostics["error"] = "missing_ranked_file_ids"
             return [], diagnostics
@@ -446,9 +477,11 @@ class FileSearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkCh
             if mapped and mapped not in normalized:
                 normalized.append(mapped)
 
-        reasoning = payload.get("reasoning")
-        if isinstance(reasoning, str) and reasoning.strip():
-            diagnostics["reasoning"] = reasoning.strip()
+        thinking = payload.get("thinking")
+        if not isinstance(thinking, str) or not thinking.strip():
+            thinking = payload.get("reasoning")
+        if isinstance(thinking, str) and thinking.strip():
+            diagnostics["thinking"] = thinking.strip()
 
         diagnostics["ranked_file_ids"] = normalized
         return normalized, diagnostics

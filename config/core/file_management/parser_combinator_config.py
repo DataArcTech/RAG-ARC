@@ -56,7 +56,7 @@ class ParserCombinatorConfig(AbstractConfig):
     )
 
     mineru_fallback_to_native_on_failure: bool = Field(
-        default_factory=lambda: str(os.getenv("MINERU_FALLBACK_TO_NATIVE_ON_FAILURE", "true") or "true").strip().lower()
+        default_factory=lambda: str(os.getenv("MINERU_FALLBACK_TO_NATIVE_ON_FAILURE", "false") or "false").strip().lower()
         in {"1", "true", "yes", "y", "on"},
         description=(
             "When PARSER_PARSE_MODE=mineru, fallback to native PDF text extraction if MinerU parsing fails "

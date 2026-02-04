@@ -66,13 +66,7 @@ async def test_think_tool_repairs_schema_error() -> None:
         "tool_calls": [],
         "plan": [],
     }
-    fixed = {
-        "reasoning": "ok",
-        "tool_calls": [],
-        "plan": [],
-        "is_final": True,
-    }
-    llm = _StubLLM([json.dumps(invalid), json.dumps(fixed)])
+    llm = _StubLLM([json.dumps(invalid)])
     tool = ThinkTool(llm_connector=llm, json_repair_attempts=1, json_repair_temperature=0.0)
     req = ToolRunRequest(
         question="q",
@@ -83,7 +77,8 @@ async def test_think_tool_repairs_schema_error() -> None:
         extra={"think_mode": "final"},
     )
     result = await tool.run(req)
-    assert len(llm.calls) == 2
-    raw = result.think_notes[0].metadata.get("raw")
-    assert raw.get("is_final") is True
-    assert result.think_notes[0].metadata.get("schema_repair")
+    # Final-mode robustness: when the model omits `is_final` but provides no tool calls,
+    # ThinkTool should safely fill `is_final=true` without triggering JSON repair.
+    assert len(llm.calls) == 1
+    assert result.think_notes[0].metadata.get("is_final") is True
+    assert result.think_notes[0].metadata.get("schema_repair") is None

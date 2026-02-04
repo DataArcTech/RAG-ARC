@@ -102,10 +102,11 @@ def safe_json_loads(raw: str, *, expected: str | None = None) -> Any | None:
         value = json.loads(extracted)
     except json.JSONDecodeError:
         repaired = _escape_unescaped_newlines_in_json_strings(extracted)
-        if repaired == extracted:
+        repaired2 = _strip_invalid_json_escapes(repaired)
+        if repaired2 == extracted:
             return None
         try:
-            value = json.loads(repaired)
+            value = json.loads(repaired2)
         except json.JSONDecodeError:
             return None
     if expected == "dict":
@@ -165,6 +166,58 @@ def _escape_unescaped_newlines_in_json_strings(text: str) -> str:
             in_string = True
             continue
         out.append(ch)
+
+    if not changed:
+        return text
+    return "".join(out)
+
+
+def _strip_invalid_json_escapes(text: str) -> str:
+    """Remove invalid escape backslashes inside JSON string literals.
+
+    Some LLMs emit Python-style escapes like ``\\'`` inside JSON strings. JSON only
+    allows a small set of escapes: \\\", \\\\, \\/, \\b, \\f, \\n, \\r, \\t, \\uXXXX.
+    We strip the backslash when it precedes an unsupported escape char while inside a
+    quoted string.
+    """
+
+    if not text or "\\" not in text or "\"" not in text:
+        return text
+
+    allowed = {"\"", "\\", "/", "b", "f", "n", "r", "t", "u"}
+    out: list[str] = []
+    in_string = False
+    escape = False
+    changed = False
+
+    for ch in text:
+        if in_string:
+            if escape:
+                # We are at the char AFTER a backslash inside a string.
+                if ch in allowed:
+                    out.append("\\")
+                    out.append(ch)
+                else:
+                    # Invalid JSON escape (e.g. \' or \() -> drop the backslash, keep the char.
+                    out.append(ch)
+                    changed = True
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            out.append(ch)
+            if ch == "\"":
+                in_string = False
+            continue
+
+        out.append(ch)
+        if ch == "\"":
+            in_string = True
+
+    # Trailing backslash inside a string: keep it (let json.loads fail; avoids inventing chars).
+    if escape:
+        out.append("\\")
 
     if not changed:
         return text

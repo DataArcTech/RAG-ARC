@@ -213,6 +213,20 @@ def section_page_match_snippet_chars(default: int = 160) -> int:
 def section_page_match_max_pages(default: int = 20) -> int:
     return _env_int("SECTION_PAGE_MATCH_MAX_PAGES", default, minimum=0)
 
+def section_path_delimiter(default: str = " / ") -> str:
+    """Delimiter used to join/split section paths in PageIndex artifacts."""
+    token = str(os.getenv("SECTION_PATH_DELIMITER", default) or "").strip()
+    return token or str(default)
+
+
+def max_page_num_each_node(default: int = 20) -> int:
+    """Max pages to display/expand per tree node in navigation tools."""
+    return _env_int("TREE_NODE_MAX_PAGES", default, minimum=1)
+
+def max_token_num_each_node(default: int = 1800) -> int:
+    """Max tokens (approx) to display per tree node preview in navigation tools."""
+    return _env_int("TREE_NODE_MAX_TOKENS", default, minimum=0)
+
 
 __all__ = [
     "pageindex_enabled",
@@ -240,4 +254,7 @@ __all__ = [
     "section_chunk_match_snippet_chars",
     "section_page_match_snippet_chars",
     "section_page_match_max_pages",
+    "section_path_delimiter",
+    "max_page_num_each_node",
+    "max_token_num_each_node",
 ]

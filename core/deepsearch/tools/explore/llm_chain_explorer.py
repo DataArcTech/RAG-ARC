@@ -9,7 +9,7 @@ from core.prompts.deepsearch import LLM_CHAIN_EXPLORER_SYSTEM_PROMPT_EN
 from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.file_scope import resolve_file_scope
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
-from core.deepsearch.utils.compression import compact_context_snippet, resolve_compaction_config
+from core.deepsearch.utils.evidence_cards import evidence_cards
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, safe_json_loads
 from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_LLM, SCOPE_FILE, SCOPE_OWNER
@@ -143,29 +143,15 @@ class LLMChainExplorerTool(GraphTool):
 
     def _build_prompt(self, request: ToolRunRequest) -> str:
         adapter_meta = asdict(request.adapter.metadata()) if request.adapter else {}
-        cfg = resolve_compaction_config(
-            branch="tool_context",
-            graph_context=request.graph_context,
-            extra=(request.extra or {}),
-            default_max_items=3,
-            default_max_chars=200,
-            default_mode="truncate",
-            default_retention="tail",
-            env_max_items="DEEPSEARCH_TOOL_CONTEXT_MAX_EVIDENCES",
-            env_max_chars="DEEPSEARCH_TOOL_CONTEXT_MAX_CHARS",
-        )
-        context_snippets, _meta = compact_context_snippet(
-            request.context_evidences or [],
-            cfg=cfg,
-            question=request.question,
-            extra=(request.extra or {}),
-            joiner="\n",
-        )
+        # External-memory contract: do not inline full evidence text in tool prompts.
+        # Provide a small set of metadata-only cards as context.
+        cards = evidence_cards(request.context_evidences or [])
+        cards = cards[-3:] if len(cards) > 3 else cards
         return json.dumps(
             {
                 "question": request.question,
                 "adapter_metadata": adapter_meta,
-                "context": context_snippets,
+                "context_evidences": cards,
                 "instructions": {
                     "max_queries": self.max_queries,
                     "allowed_channels": ["graph", "text"],

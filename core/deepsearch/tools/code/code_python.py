@@ -27,6 +27,7 @@ from config.core.deepsearch.evidence_defaults import EVIDENCE_CLASS_TOOL_OUTPUT
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
+from core.deepsearch.utils.llm_envelope import build_llm_envelope
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from ..governance_tags import EVIDENCE_DERIVED, SCOPE_OWNER
@@ -356,7 +357,15 @@ class CodePythonTool(GraphTool):
         code = raw_code.strip("\n")
         if not code.strip():
             diagnostics = {"exec_status": "failed", "error": "missing_code"}
-            return ToolResult(summary="code.python failed: missing code.", diagnostics=diagnostics, evidences=[])
+            return ToolResult(
+                summary=build_llm_envelope(
+                    thinking="No code was provided for deterministic verification.",
+                    answer={"exec_status": "failed", "error": "missing_code"},
+                    extra={"next_steps": ["Provide Python code via extra.code and retry code.python."]},
+                ),
+                diagnostics=diagnostics,
+                evidences=[],
+            )
 
         if self.limits.max_code_chars > 0 and len(code) > self.limits.max_code_chars:
             truncated = _truncate(code, self.limits.max_code_chars)
@@ -367,7 +376,15 @@ class CodePythonTool(GraphTool):
                 "code_preview": truncated,
             }
             return ToolResult(
-                summary=f"code.python failed: code exceeds max_code_chars={self.limits.max_code_chars}.",
+                summary=build_llm_envelope(
+                    thinking="The provided code exceeds the safety limit.",
+                    answer={
+                        "exec_status": "failed",
+                        "error": "code_too_large",
+                        "max_code_chars": self.limits.max_code_chars,
+                    },
+                    extra={"next_steps": ["Shorten/simplify the code or split into multiple smaller checks, then retry."]},
+                ),
                 diagnostics=diagnostics,
                 evidences=[],
             )
@@ -412,7 +429,28 @@ class CodePythonTool(GraphTool):
             elif stderr.strip():
                 summary_parts.append("stderr=" + _truncate(stderr.strip(), int(CODE_PYTHON_SUMMARY_PREVIEW_CHARS)))
         summary_parts.append(f"latency_ms={latency_ms}")
-        summary = "code.python: " + " ".join(summary_parts)
+        summary_text = "code.python: " + " ".join(summary_parts)
+        next_steps: List[str] = []
+        if exec_status == "ok":
+            next_steps = [
+                "Use this deterministic result to verify the numeric claim/logic in your answer.",
+                "Ground the claim with citeable page evidence via read.pages before finalizing.",
+            ]
+        else:
+            next_steps = [
+                "Fix the code/inputs and retry code.python.",
+                "If the value should come from documents, locate the source pages via explore + read.pages first.",
+            ]
+        summary = build_llm_envelope(
+            thinking="Executed Python deterministically for verification (not a source citation).",
+            answer={
+                "summary": summary_text,
+                "exec_status": exec_status,
+                "result_preview": _truncate(result_text, int(CODE_PYTHON_SUMMARY_PREVIEW_CHARS)) if result_text else None,
+                "latency_ms": latency_ms,
+            },
+            extra={"next_steps": next_steps},
+        )
 
         diagnostics = dict(outcome)
         diagnostics["latency_ms"] = latency_ms

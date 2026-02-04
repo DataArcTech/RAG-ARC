@@ -10,8 +10,7 @@ from config.core.deepsearch.evidence_defaults import EVIDENCE_CLASS_GRAPH_CHUNK
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from encapsulation.data_model.schema import Chunk
 from core.deepsearch.entity_resolution import build_default_entity_resolver
-from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_PRIMARY
-from core.deepsearch.utils.file_scope import resolve_file_scope
+from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 from core.graph_adapter.base import GraphDeepSearchAdapter
 from core.graph_adapter.concurrency import adapter_locked
 from core.graph_adapter.cypher import adapter_supports_cypher
@@ -29,8 +28,9 @@ from ...base import (
     extract_json_from_text,
     safe_json_loads,
 )
-from ...governance_tags import EVIDENCE_PRIMARY, REQUIRES_LLM, SCOPE_FILE, SCOPE_OWNER
-from .base import _ChannelResult, _SearchToolBase, strip_file_scope_from_graph_context
+from ...governance_tags import EVIDENCE_DERIVED, REQUIRES_LLM, SCOPE_FILE, SCOPE_OWNER
+from core.deepsearch.utils.llm_json import call_llm_json_with_retry
+from .base import _ChannelResult, _SearchToolBase, resolve_explicit_file_scope, strip_file_scope_from_graph_context
 
 
 class _GraphChunkChannel:
@@ -132,23 +132,29 @@ class _GraphChunkChannel:
             kwargs["model"] = low_cost
             diagnostics["model"] = low_cost
         try:
-            response = await call_llm_async(self.llm_connector, messages, **kwargs)
+            payload = await call_llm_json_with_retry(
+                llm_connector=self.llm_connector,
+                messages=messages,
+                expected="object",
+                temperature=float(kwargs["temperature"]),
+                max_tokens=int(kwargs["max_tokens"]),
+            )
         except Exception as exc:  # noqa: BLE001
             diagnostics["error"] = str(exc)
             return [], diagnostics
-
-        extracted = extract_json_from_text(response) or response
-        payload = safe_json_loads(extracted, expected="object") if extracted else None
         if not isinstance(payload, dict):
             diagnostics["error"] = "json_parse_failed"
             return [], diagnostics
-        entities = payload.get("entities")
-        if not isinstance(entities, list):
-            diagnostics["error"] = "missing_entities"
+        # Online term extraction: accept both {terms:[...]} (preferred) and legacy {entities:[...]} payloads.
+        items = payload.get("terms")
+        if not isinstance(items, list):
+            items = payload.get("entities")
+        if not isinstance(items, list):
+            diagnostics["error"] = "missing_terms"
             return [], diagnostics
 
         results: List[Tuple[str, str | None]] = []
-        for item in entities:
+        for item in items:
             if len(results) >= int(limit):
                 break
             if isinstance(item, str):
@@ -157,11 +163,11 @@ class _GraphChunkChannel:
                     results.append((token, None))
                 continue
             if isinstance(item, dict):
-                name = str(item.get("name") or "").strip()
-                if not name:
+                text = str(item.get("text") or item.get("name") or item.get("term") or "").strip()
+                if not text:
                     continue
-                etype = str(item.get("type") or "").strip() or None
-                results.append((name, etype))
+                etype = str(item.get("kind") or item.get("type") or "").strip() or None
+                results.append((text, etype))
         diagnostics["extracted"] = len(results)
         return results, diagnostics
 
@@ -177,12 +183,14 @@ class _GraphChunkChannel:
         enable_entity_fallback: bool,
         entity_seed_top_k: int,
         seed_override: Optional[Sequence[str]],
+        return_subgraph_info: bool,
         overrides: Mapping[str, Any],
     ) -> Tuple[List[Chunk], Dict[str, Any], bool]:
         diagnostics: Dict[str, Any] = {
             "query": query,
             "top_k": top_k,
             "use_ppr": use_ppr,
+            "return_subgraph_info": bool(return_subgraph_info),
         }
 
         normalized_owner = normalize_owner_id(owner_id)
@@ -335,6 +343,18 @@ class _GraphChunkChannel:
                 chunk_ids = [cid for cid, _score in selected]
                 chunk_scores = [score for _cid, score in selected]
                 chunks = retriever._convert_to_chunks(chunk_ids, chunk_scores, owner_id=normalized_owner)
+                if return_subgraph_info and chunks:
+                    # Minimal subgraph snapshot for visualization/tracing (not citeable evidence).
+                    subgraph_info = {
+                        "subgraph_nodes": list(subgraph_nodes),
+                        "seed_entity_ids": list(seed_entity_ids),
+                        "retrieved_chunk_ids": chunk_ids,
+                        "query": query,
+                        "mode": "dense_over_subgraph",
+                    }
+                    if chunks[0].metadata is None:
+                        chunks[0].metadata = {}
+                    chunks[0].metadata["_subgraph_info"] = subgraph_info
                 diagnostics["selected"] = len(chunks)
                 return chunks, diagnostics, False
 
@@ -398,7 +418,7 @@ class _GraphChunkChannel:
                 ppr_scores_dict=ppr_scores_dict,
                 subgraph_nodes=subgraph_nodes,
                 seed_entity_ids=seed_entity_ids,
-                return_subgraph_info=False,
+                return_subgraph_info=bool(return_subgraph_info),
                 top_entity_id=top_entity_id,
                 dense_score_map=dense_score_map,
                 dense_mix_k=dense_mix_k,
@@ -460,6 +480,8 @@ class _GraphChunkChannel:
                 seeds=seed_items,
             )
 
+        want_subgraph_info = bool(getattr(file_scope, "enabled", False))
+
         owner_ids = list(visibility.owner_ids_used)
         section_scope = self._resolve_section_scope(request.extra or {})
         section_dropped = 0
@@ -479,6 +501,7 @@ class _GraphChunkChannel:
                     enable_entity_fallback=enable_entity_fallback,
                     entity_seed_top_k=entity_seed_top_k,
                     seed_override=resolved_seeds if resolved_seeds else None,
+                    return_subgraph_info=want_subgraph_info,
                     overrides=overrides,
                 )
 
@@ -509,6 +532,7 @@ class _GraphChunkChannel:
                                 enable_entity_fallback=enable_entity_fallback,
                                 entity_seed_top_k=entity_seed_top_k,
                                 seed_override=resolved_llm_ids,
+                                return_subgraph_info=want_subgraph_info,
                                 overrides=overrides,
                             )
                         diagnostics["llm_seed_used"] = True
@@ -518,8 +542,28 @@ class _GraphChunkChannel:
                     diagnostics["llm_seed_used"] = False
             diagnostics["llm_entity_extract"] = llm_diag
 
+            subgraph_info = None
+            if want_subgraph_info:
+                for chunk in chunks or []:
+                    meta = getattr(chunk, "metadata", None) or {}
+                    if isinstance(meta, dict) and isinstance(meta.get("_subgraph_info"), dict) and meta["_subgraph_info"]:
+                        subgraph_info = dict(meta["_subgraph_info"])
+                        break
+
             chunks, dropped = self._apply_file_scope(chunks, file_scope)
             chunks, section_dropped = self._apply_section_scope(chunks, section_scope)
+
+            if want_subgraph_info and subgraph_info and chunks:
+                kept_chunk_ids = [str(getattr(c, "id", "") or "").strip() for c in chunks]
+                kept_chunk_ids = [cid for cid in kept_chunk_ids if cid]
+                if kept_chunk_ids:
+                    subgraph_info["retrieved_chunk_ids"] = kept_chunk_ids
+                if hasattr(file_scope, "as_dict"):
+                    subgraph_info["file_scope"] = file_scope.as_dict()
+                if chunks[0].metadata is None:
+                    chunks[0].metadata = {}
+                chunks[0].metadata["_subgraph_info"] = subgraph_info
+
             per_owner_diag: Dict[str, Any] = {owner_id: diagnostics}
             errors: List[str] = []
         else:
@@ -540,6 +584,7 @@ class _GraphChunkChannel:
                         enable_entity_fallback=enable_entity_fallback,
                         entity_seed_top_k=entity_seed_top_k,
                         seed_override=resolved_seeds if resolved_seeds else None,
+                        return_subgraph_info=want_subgraph_info,
                         overrides=overrides,
                     )
                 diagnostics["seed_entity_resolution"] = seed_diag
@@ -548,8 +593,27 @@ class _GraphChunkChannel:
                 per_owner_diag[owner_id] = diagnostics
                 chunks.extend(part_chunks)
 
+            subgraph_info = None
+            if want_subgraph_info:
+                for chunk in chunks or []:
+                    meta = getattr(chunk, "metadata", None) or {}
+                    if isinstance(meta, dict) and isinstance(meta.get("_subgraph_info"), dict) and meta["_subgraph_info"]:
+                        subgraph_info = dict(meta["_subgraph_info"])
+                        break
+
             chunks, dropped = self._apply_file_scope(chunks, file_scope)
             chunks, section_dropped = self._apply_section_scope(chunks, section_scope)
+
+            if want_subgraph_info and subgraph_info and chunks:
+                kept_chunk_ids = [str(getattr(c, "id", "") or "").strip() for c in chunks]
+                kept_chunk_ids = [cid for cid in kept_chunk_ids if cid]
+                if kept_chunk_ids:
+                    subgraph_info["retrieved_chunk_ids"] = kept_chunk_ids
+                if hasattr(file_scope, "as_dict"):
+                    subgraph_info["file_scope"] = file_scope.as_dict()
+                if chunks[0].metadata is None:
+                    chunks[0].metadata = {}
+                chunks[0].metadata["_subgraph_info"] = subgraph_info
 
         evidences: List[EvidenceChunk] = []
         results: List[Dict[str, Any]] = []
@@ -564,7 +628,7 @@ class _GraphChunkChannel:
                 chunk_id=chunk_id,
                 source="graph_chunk",
                 content=snippet,
-                kind=EVIDENCE_KIND_PRIMARY,
+                kind=EVIDENCE_KIND_DERIVED,
                 score=score,
                 provenance={
                     "channel": "graph_chunk",
@@ -613,7 +677,7 @@ class SearchGraphChunkTool(_SearchToolBase, _GraphChunkChannel, GraphTool):
         description="Graph-subgraph chunk retrieval without default PPR (optional) for fast localization.",
         speed="fast",
         cost="medium",
-        strategy_tags=("search", "graph_chunk", EVIDENCE_PRIMARY, SCOPE_OWNER, SCOPE_FILE, REQUIRES_LLM),
+        strategy_tags=("search", "graph_chunk", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE, REQUIRES_LLM),
         profile="F",
         determinism="hybrid",
         namespace="rag-arc.deepsearch.tools.search.scoped.graph",
@@ -623,7 +687,6 @@ class SearchGraphChunkTool(_SearchToolBase, _GraphChunkChannel, GraphTool):
                 "focus_query": {"type": "string", "description": "Optional query override."},
                 "file_id": {"type": "string", "description": "Restrict results to a specific file_id."},
                 "file_ids": {"type": "array", "items": {"type": "string"}, "description": "Restrict results to file_ids."},
-                "filename_contains": {"type": "array", "items": {"type": "string"}, "description": "Best-effort filename filter."},
                 "section_id": {"type": "string", "description": "Restrict results to a specific section_id."},
                 "section_ids": {"type": "array", "items": {"type": "string"}, "description": "Restrict results to section_ids."},
                 "owner_ids": {"type": "array", "items": {"type": "string"}, "description": "Owner ids to search (me/share)."},
@@ -653,17 +716,24 @@ class SearchGraphChunkTool(_SearchToolBase, _GraphChunkChannel, GraphTool):
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         query = self._resolve_query(request)
-        file_scope = resolve_file_scope(
-            extra=request.extra,
-            graph_context_metadata=(request.graph_context.metadata if request.graph_context else {}),
-            question=request.question,
-        )
-        if not getattr(file_scope, "file_ids", None):
+        extra = request.extra or {}
+        file_scope, invalid, raw_ids = resolve_explicit_file_scope(extra)
+        if invalid:
+            return ToolResult(
+                summary="search.scoped.graph skipped: invalid file_id(s) (expected UUID; use search.file to obtain file_id).",
+                diagnostics={
+                    "reason": "invalid_file_id_format",
+                    "query": query,
+                    "invalid_file_ids": invalid[:20],
+                    "file_ids_filter_raw": raw_ids[:20],
+                },
+            )
+        if file_scope is None or not getattr(file_scope, "file_ids", None):
             return ToolResult(
                 summary="search.scoped.graph skipped: missing file_id/file_ids (call search.file first).",
                 diagnostics={"reason": "missing_file_scope", "query": query},
             )
-        top_k = self._resolve_top_k(request.extra.get("top_k"), tool_defaults.SEARCH_DEFAULT_TOP_K)
+        top_k = self._resolve_top_k(extra.get("top_k"), tool_defaults.SEARCH_DEFAULT_TOP_K)
         result = await self._run_graph_chunk(request=request, query=query, top_k=top_k, file_scope=file_scope)
         return ToolResult(summary=result.summary, evidences=result.evidences, diagnostics=result.diagnostics)
 
@@ -680,7 +750,7 @@ class SearchGlobalGraphTool(_SearchToolBase, _GraphChunkChannel, GraphTool):
         ),
         speed="fast",
         cost="medium",
-        strategy_tags=("search", "graph_chunk", "global", EVIDENCE_PRIMARY, SCOPE_OWNER, SCOPE_FILE, REQUIRES_LLM),
+        strategy_tags=("search", "graph_chunk", "global", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE, REQUIRES_LLM),
         profile="F",
         determinism="hybrid",
         namespace="rag-arc.deepsearch.tools.search.global.graph",
@@ -696,19 +766,18 @@ class SearchGlobalGraphTool(_SearchToolBase, _GraphChunkChannel, GraphTool):
     async def run(self, request: ToolRunRequest) -> ToolResult:
         query = self._resolve_query(request)
         patched_ctx = strip_file_scope_from_graph_context(request.graph_context)
-        file_scope = resolve_file_scope(
-            extra=request.extra,
-            graph_context_metadata=(patched_ctx.metadata if patched_ctx else {}),
-            question=request.question,
-        )
-        top_k = self._resolve_top_k(request.extra.get("top_k"), tool_defaults.SEARCH_DEFAULT_TOP_K)
+        extra = dict(request.extra or {})
+        for key in ("file_id", "file_ids", "source_file_id", "source_file_ids", "filename_contains"):
+            extra.pop(key, None)
+        file_scope = None
+        top_k = self._resolve_top_k(extra.get("top_k"), tool_defaults.SEARCH_DEFAULT_TOP_K)
         patched = ToolRunRequest(
             question=request.question,
             plan_step=request.plan_step,
             context_evidences=request.context_evidences,
             adapter=request.adapter,
             access_scope=request.access_scope,
-            extra=dict(request.extra or {}),
+            extra=extra,
             graph_context=patched_ctx,
             coverage_metrics=request.coverage_metrics,
         )

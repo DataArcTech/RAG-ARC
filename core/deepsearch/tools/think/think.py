@@ -8,7 +8,8 @@ from config.core.deepsearch import tool_defaults
 from encapsulation.data_model.deepsearch import ThinkNote, GraphQueryContext, PlanItem
 from core.prompts.deepsearch.report import JSON_REPAIR_USER_PROMPT_EN
 from core.prompts.deepsearch import THINK_TOOL_SYSTEM_PROMPT_EN
-from core.deepsearch.utils.compression import compact_evidences, resolve_compaction_config
+from core.deepsearch.utils.evidence_cards import evidence_cards
+from core.deepsearch.utils.llm_envelope import build_llm_envelope
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, call_llm_async, safe_json_loads
 from ..governance_tags import EVIDENCE_DERIVED, REQUIRES_LLM, SCOPE_OWNER
@@ -68,12 +69,14 @@ class ThinkTool(GraphTool):
         json_repair_attempts: int = tool_defaults.THINK_JSON_REPAIR_DEFAULT_ATTEMPTS,
         json_repair_temperature: float = tool_defaults.THINK_JSON_REPAIR_DEFAULT_TEMPERATURE,
         json_repair_max_raw_chars: int = tool_defaults.THINK_JSON_REPAIR_DEFAULT_MAX_RAW_CHARS,
+        json_repair_model: str | None = None,
     ):
         self.llm_connector = llm_connector
         self.temperature = temperature
         self.system_prompt = system_prompt
         self.json_repair_attempts = max(0, int(json_repair_attempts))
         self.json_repair_temperature = float(json_repair_temperature)
+        self.json_repair_model = str(json_repair_model).strip() if isinstance(json_repair_model, str) and json_repair_model.strip() else None
         max_raw_chars = int(json_repair_max_raw_chars)
         self.json_repair_max_raw_chars = (
             max_raw_chars if max_raw_chars > 0 else tool_defaults.THINK_JSON_REPAIR_DEFAULT_MAX_RAW_CHARS
@@ -89,15 +92,45 @@ class ThinkTool(GraphTool):
             "graph_context": context_snapshot,
             "coverage_metrics": coverage_snapshot,
         }
-        if isinstance(note.metadata, dict) and isinstance(note.metadata.get("compression"), dict):
-            diagnostics["compression"] = note.metadata.get("compression")
         diagnostics["thought_log"] = [
             self._build_thought_log_entry(
                 note,
                 coverage_snapshot=coverage_snapshot,
             )
         ]
-        summary = note.reasoning
+        meta = note.metadata if isinstance(note.metadata, dict) else {}
+        tool_calls = meta.get("tool_calls") or []
+        next_steps: List[Dict[str, Any]] = []
+        if isinstance(tool_calls, list) and tool_calls:
+            for call in tool_calls:
+                if not isinstance(call, dict):
+                    continue
+                name = str(call.get("tool_name") or "").strip()
+                if not name:
+                    continue
+                next_steps.append(
+                    {
+                        "tool_name": name,
+                        "rationale": str(call.get("rationale") or "").strip() or None,
+                    }
+                )
+                if len(next_steps) >= 4:
+                    break
+        summary = build_llm_envelope(
+            thinking=note.reasoning,
+            answer={
+                "tool_calls": tool_calls,
+                "plan": meta.get("plan") or [],
+                "report_needed": meta.get("report_needed"),
+                "report_style": meta.get("report_style"),
+                "is_final": meta.get("is_final"),
+            },
+            extra={
+                "plan_step": request.plan_step,
+                "think_mode": str((request.extra or {}).get("think_mode") or "normal"),
+                "next_steps": next_steps,
+            },
+        )
         return ToolResult(summary=summary, diagnostics=diagnostics, think_notes=[note])
 
     async def _build_note(self, request: ToolRunRequest) -> ThinkNote:
@@ -106,31 +139,14 @@ class ThinkTool(GraphTool):
         if not self.llm_connector:
             raise RuntimeError("ThinkTool requires an LLM connector")
 
-        cfg = resolve_compaction_config(
-            branch="think",
-            graph_context=request.graph_context,
-            extra=(request.extra or {}),
-            default_max_items=8,
-            default_max_chars=1600,
-            default_mode="truncate",
-            default_excerpt_chars=900,
-            default_retention="head",
-            env_max_items="DEEPSEARCH_THINK_MAX_EVIDENCES",
-            env_max_chars="DEEPSEARCH_THINK_EVIDENCE_MAX_CHARS",
-            env_excerpt_chars="DEEPSEARCH_THINK_EVIDENCE_EXCERPT_CHARS",
-        )
-        compacted, compaction_meta = compact_evidences(
-            request.context_evidences or [],
-            cfg=cfg,
-            question=request.question,
-            extra=(request.extra or {}),
-            include_triple_count=True,
-        )
+        # Do not inline full evidence text in think prompts.
+        # The EvidencePool/EvidenceBank stores full content; the think tool consumes metadata-only cards.
+        cards = evidence_cards(request.context_evidences or [])
         extra = request.extra or {}
         prompt_payload = {
             "question": request.question,
             "plan_step": request.plan_step,
-            "context_evidences": compacted,
+            "context_evidences": cards,
             "graph_context": context_snapshot,
             "tool_budget": (context_snapshot.get("metadata") or {}).get("tool_budget") if isinstance(context_snapshot, dict) else None,
             "coverage_metrics": coverage_snapshot,
@@ -139,7 +155,6 @@ class ThinkTool(GraphTool):
             "recent_tool_runs": extra.get("recent_tool_runs"),
             "current_plan": extra.get("current_plan"),
             "extra": extra,
-            "compression": compaction_meta,
         }
         messages = [
             {"role": "system", "content": self.system_prompt},
@@ -148,12 +163,65 @@ class ThinkTool(GraphTool):
                 "content": self._serialize_payload(prompt_payload),
             },
         ]
+        mode = str((request.extra or {}).get("think_mode") or normal_mode.MODE).strip().lower()
+        mode_defaults: Dict[str, Any] | None = None
         try:
-            response = await call_llm_async(self.llm_connector, messages, temperature=self.temperature)
-            parsed = await self._parse_or_repair_json(messages=messages, raw=response)
+            response = await call_llm_async(
+                self.llm_connector,
+                messages,
+                temperature=self.temperature,
+                warn_context="deepsearch.think.init",
+            )
+            try:
+                parsed = await self._parse_or_repair_json(messages=messages, raw=response)
+            except ValueError as exc:
+                # Robustness: some models occasionally ignore the JSON-only contract, especially in final mode.
+                # In final mode, we can safely wrap plain text into a minimal valid payload (no tool calls).
+                if mode == final_mode.MODE:
+                    current_plan = (request.extra or {}).get("current_plan")
+                    parsed = {
+                        "reasoning": str(response or "").strip() or "（空输出）",
+                        "tool_calls": [],
+                        "plan": list(current_plan) if isinstance(current_plan, list) else [],
+                        "is_final": True,
+                    }
+                    mode_defaults = {
+                        **(mode_defaults or {}),
+                        "filled_from_plain_text": True,
+                        "parse_error": str(exc),
+                    }
+                else:
+                    raise
             schema_repair = None
             try:
-                payload = ThinkToolResponse.model_validate(self._normalize_payload(parsed))
+                normalized = self._normalize_payload(parsed)
+                # If the model omits the plan (common on weaker models), reuse the current plan
+                # snapshot from the runtime. This keeps the loop robust without hardcoding new steps.
+                if isinstance(normalized, dict) and not isinstance(normalized.get("plan"), list):
+                    current_plan = (request.extra or {}).get("current_plan")
+                    if isinstance(current_plan, list):
+                        normalized = dict(normalized)
+                        normalized["plan"] = list(current_plan)
+                        mode_defaults = {**(mode_defaults or {}), "filled_plan_from_current_plan": True}
+                    else:
+                        normalized = dict(normalized)
+                        normalized["plan"] = []
+                        mode_defaults = {**(mode_defaults or {}), "filled_plan_empty": True}
+                # Mode-aware coercions (minimal + observable):
+                # - In think_mode=final, tool_calls are not executable; drop them to enforce the contract.
+                # - In think_mode=final, some models omit `is_final`; when there are no tool calls, treat omission as
+                #   `is_final=true` for robustness (still observable via mode_defaults).
+                if mode == final_mode.MODE and isinstance(normalized, dict):
+                    tool_calls = normalized.get("tool_calls")
+                    if isinstance(tool_calls, list) and tool_calls:
+                        normalized = dict(normalized)
+                        normalized["tool_calls"] = []
+                        mode_defaults = {**(mode_defaults or {}), "dropped_tool_calls": len(tool_calls)}
+                    if normalized.get("is_final") is not True and not normalized.get("tool_calls"):
+                        normalized = dict(normalized)
+                        normalized["is_final"] = True
+                        mode_defaults = {**(mode_defaults or {}), "filled_is_final": True}
+                payload = ThinkToolResponse.model_validate(normalized)
                 self._validate_mode(payload, extra)
             except Exception as exc:
                 repaired = await self._attempt_json_repair(
@@ -166,7 +234,30 @@ class ThinkTool(GraphTool):
                     raise
                 schema_repair = {"error": str(exc)}
                 parsed = repaired
-                payload = ThinkToolResponse.model_validate(self._normalize_payload(parsed))
+                normalized = self._normalize_payload(parsed)
+                if isinstance(normalized, dict) and not isinstance(normalized.get("plan"), list):
+                    current_plan = (request.extra or {}).get("current_plan")
+                    if isinstance(current_plan, list):
+                        normalized = dict(normalized)
+                        normalized["plan"] = list(current_plan)
+                        mode_defaults = {**(mode_defaults or {}), "filled_plan_from_current_plan": True, "after_repair": True}
+                    else:
+                        normalized = dict(normalized)
+                        normalized["plan"] = []
+                        mode_defaults = {**(mode_defaults or {}), "filled_plan_empty": True, "after_repair": True}
+                if mode == final_mode.MODE and isinstance(normalized, dict):
+                    tool_calls = normalized.get("tool_calls")
+                    if isinstance(tool_calls, list) and tool_calls:
+                        normalized = dict(normalized)
+                        normalized["tool_calls"] = []
+                        mode_defaults = {**(mode_defaults or {}), "dropped_tool_calls": len(tool_calls), "after_repair": True}
+                    # If the model still omits is_final after repair, fall back to is_final=true only when
+                    # no tool calls exist (content is already final-answer-style). Keep this observable.
+                    if normalized.get("is_final") is not True and not normalized.get("tool_calls"):
+                        normalized = dict(normalized)
+                        normalized["is_final"] = True
+                        mode_defaults = {**(mode_defaults or {}), "filled_is_final": True, "after_repair": True}
+                payload = ThinkToolResponse.model_validate(normalized)
                 self._validate_mode(payload, extra)
             return ThinkNote(
                 plan_step_id=request.plan_step,
@@ -183,8 +274,8 @@ class ThinkTool(GraphTool):
                     "report_needed": payload.report_needed,
                     "report_style": payload.report_style,
                     "is_final": payload.is_final,
-                    "compression": compaction_meta,
                     "schema_repair": schema_repair,
+                    "mode_defaults": mode_defaults,
                 },
             )
         except Exception as exc:
@@ -261,7 +352,16 @@ class ThinkTool(GraphTool):
         thread = messages + [{"role": "assistant", "content": str(raw or "")}, {"role": "user", "content": repair_prompt}]
         last_raw = raw
         for _attempt in range(self.json_repair_attempts):
-            last_raw = await call_llm_async(self.llm_connector, thread, temperature=self.json_repair_temperature)
+            model = self.json_repair_model
+            if model is None:
+                cfg = getattr(self.llm_connector, "config", None) if self.llm_connector is not None else None
+                candidate = getattr(cfg, "low_cost_model_name", None) if cfg is not None else None
+                if isinstance(candidate, str) and candidate.strip():
+                    model = candidate.strip()
+            kwargs: Dict[str, Any] = {"temperature": self.json_repair_temperature}
+            if model:
+                kwargs["model"] = model
+            last_raw = await call_llm_async(self.llm_connector, thread, warn_context="deepsearch.think.loop", **kwargs)
             parsed = safe_json_loads(last_raw, expected=expected)
             if parsed is not None:
                 return parsed

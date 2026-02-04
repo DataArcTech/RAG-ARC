@@ -26,8 +26,8 @@ from config.core.deepsearch.tool_defaults import (
 )
 from core.graph_adapter.concurrency import adapter_locked
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
-from core.deepsearch.utils.compression import truncate_text
 from core.prompts.deepsearch import SEARCH_ENTITY_EXTRACT_PROMPT_EN
+from core.deepsearch.utils.llm_json import call_llm_json_with_retry
 from core.prompts.deepsearch.heavy_tools import BEAM_SEARCH_RERANK_SYSTEM_PROMPT_V1_EN
 
 
@@ -187,16 +187,24 @@ class BeamSearchTool(GraphTool):
         low_cost = self._low_cost_model_name(self.llm_connector)
         if low_cost:
             kwargs["model"] = low_cost
-        response = await call_llm_async(self.llm_connector, messages, **kwargs)
-        extracted = extract_json_from_text(response) or response
-        payload = safe_json_loads(extracted, expected="object") if extracted else None
+        payload = await call_llm_json_with_retry(
+            llm_connector=self.llm_connector,
+            messages=messages,
+            expected="object",
+            temperature=float(kwargs["temperature"]),
+            max_tokens=int(kwargs["max_tokens"]),
+            attempts=None,
+        )
         if not isinstance(payload, dict):
             return []
-        entities = payload.get("entities")
-        if not isinstance(entities, list):
+        # Online term extraction: accept both {terms:[...]} (preferred) and legacy {entities:[...]} payloads.
+        items = payload.get("terms")
+        if not isinstance(items, list):
+            items = payload.get("entities")
+        if not isinstance(items, list):
             return []
         results: List[str] = []
-        for item in entities:
+        for item in items:
             if len(results) >= int(limit):
                 break
             if isinstance(item, str):
@@ -205,9 +213,9 @@ class BeamSearchTool(GraphTool):
                     results.append(token)
                 continue
             if isinstance(item, dict):
-                name = str(item.get("name") or "").strip()
-                if name:
-                    results.append(name)
+                text = str(item.get("text") or item.get("name") or item.get("term") or "").strip()
+                if text:
+                    results.append(text)
         return self._deduplicate(results)
 
     async def _rank_paths(self, request: ToolRunRequest, paths: List[Dict[str, Any]], beam_size: int) -> List[Dict[str, Any]]:
@@ -308,7 +316,7 @@ class BeamSearchTool(GraphTool):
                     "nodes": self._deduplicate(nodes) or ["unknown"],
                     "triples": [],
                     "score": 0.2,
-                    "summary": truncate_text(content, max_chars=200),
+                    "summary": content,
                 }
             )
         return normalized

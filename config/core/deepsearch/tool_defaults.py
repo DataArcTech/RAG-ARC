@@ -115,7 +115,7 @@ ENTITY_RESOLUTION_ALIAS_SCORE_BONUS = 0.12
 # -----------------------------
 # think tool defaults
 # -----------------------------
-THINK_JSON_REPAIR_DEFAULT_ATTEMPTS = 1
+THINK_JSON_REPAIR_DEFAULT_ATTEMPTS = 2
 THINK_JSON_REPAIR_DEFAULT_TEMPERATURE = 0.0
 THINK_JSON_REPAIR_DEFAULT_MAX_RAW_CHARS = 2000
 
@@ -129,7 +129,6 @@ LOGIC_CHECK_JSON_REPAIR_DEFAULT_MAX_RAW_CHARS = 2000
 LOGIC_CHECK_MAX_ASSERTIONS = 12
 LOGIC_CHECK_MAX_ISSUES = 8
 LOGIC_CHECK_RECENT_TOOL_RUNS_MAX = 10
-LOGIC_CHECK_RECENT_TOOL_RUNS_MAX_CHARS = 320
 LOGIC_CHECK_EVIDENCE_ID_MAX = 200
 
 # -----------------------------
@@ -188,7 +187,8 @@ SEARCH_GRAPH_ENABLE_LLM_RERANK_DEFAULT = False
 SEARCH_GRAPH_ENTITY_SEED_TOP_K = 10
 SEARCH_GRAPH_ENABLE_ENTITY_FALLBACK = True
 SEARCH_ENTITY_EXTRACT_TEMPERATURE = 0.0
-SEARCH_ENTITY_EXTRACT_MAX_TOKENS = 240
+SEARCH_ENTITY_EXTRACT_MAX_TOKENS = 480
+SEARCH_ENTITY_EXTRACT_JSON_REPAIR_ATTEMPTS = 4
 
 # -----------------------------
 # search.file defaults (relevant files routing)
@@ -210,12 +210,6 @@ FILE_SEARCH_MAX_SNIPPETS_PER_FILE = 3
 FILE_SEARCH_SUMMARY_SNIPPET_PREVIEW_CHARS = 260
 
 # -----------------------------
-# section.search defaults (section-level routing)
-# -----------------------------
-SECTION_SEARCH_DEFAULT_TOP_K = 6
-SECTION_SEARCH_SUMMARY_PREVIEW_CHARS = 160
-
-# -----------------------------
 # section.select defaults (LLM-assisted section selection)
 # -----------------------------
 SECTION_SELECT_CANDIDATE_TOP_K = 8
@@ -225,6 +219,20 @@ SECTION_SELECT_SUBTREE_PREVIEW_MAX = 24
 SECTION_SELECT_TEMPERATURE = 0.1
 SECTION_SELECT_DEFAULT_MAX_DEPTH = 2
 SECTION_SELECT_SEED_MAX = 24
+
+# -----------------------------
+# section.select graph-signal defaults
+# -----------------------------
+# `section.select` uses graph as a *signal* to rank candidate sections (navigation-only).
+# Prefer deterministic matches (canonical/alias tables) and keep this configurable.
+SECTION_SELECT_GRAPH_ENTITY_MATCH_ENABLE_CONTAINS = True
+SECTION_SELECT_GRAPH_ENTITY_MATCH_PER_TERM_ENTITY_LIMIT = 8
+SECTION_SELECT_GRAPH_ENTITY_MATCH_MAX_TERMS = 6
+
+# When query entities fail to match (aliases/casing/language drift), optionally fall back to adapter retrieval
+# (embedding/PPR-informed) to collect additional chunk signals scoped to the current file.
+SECTION_SELECT_GRAPH_RETRIEVAL_FALLBACK_ENABLED = True
+SECTION_SELECT_GRAPH_RETRIEVAL_FALLBACK_TOP_K_CHUNKS = 12
 # Hybrid tree search loop controls
 SECTION_SELECT_MAX_ROUNDS = 4
 SECTION_SELECT_CONSUMER_BATCH_SIZE = 6
@@ -301,17 +309,15 @@ EXPLORE_READ_MAX_CHARS = 6000
 # navigation bootstrap defaults (service-side; long-doc navigation)
 # -----------------------------
 # Deterministic preflight steps executed before graph reasoning:
-# search.file -> toc.tree/search.section (Top-N candidate files)
+# search.file -> toc.tree/section.select (Top-N candidate files)
 # Default off: let the LLM decide whether to route files/sections (prevents unnecessary retrieval
 # for questions that do not require consulting the user's corpus).
 NAV_BOOTSTRAP_ENABLED = False
 NAV_BOOTSTRAP_FILE_TOP_K = 5
 NAV_BOOTSTRAP_CANDIDATE_FILES = 2
-NAV_BOOTSTRAP_TOC_MAX_DEPTH = 5
+NAV_BOOTSTRAP_TOC_MAX_DEPTH = 2
 NAV_BOOTSTRAP_TOC_MAX_NODES = 120
 NAV_BOOTSTRAP_SECTION_TOP_K = 6
-NAV_BOOTSTRAP_EVIDENCE_MAX_CHARS = 6000
-NAV_BOOTSTRAP_TRACE_MAX_CHARS = 1200
 
 # -----------------------------
 # toc + structured reading defaults (PageIndex navigation)
@@ -320,18 +326,8 @@ TOC_TREE_DEFAULT_MAX_DEPTH = 2
 TOC_TREE_MAX_CHUNKS_SCANNED = 5000
 TOC_TREE_MAX_NODES = 220
 
-READ_SECTION_DEFAULT_MAX_CHUNKS = 80
-READ_SECTION_DEFAULT_MAX_CHARS = 16000
-
-READ_PAGES_DEFAULT_MAX_CHUNKS = 120
-READ_PAGES_DEFAULT_MAX_CHARS = 20000
-
-# Chunk-neighbor reading (without explicit NEXT_CHUNK edges).
-READ_NEIGHBORS_DEFAULT_BEFORE = 3
-READ_NEIGHBORS_DEFAULT_AFTER = 3
-READ_NEIGHBORS_MAX_WINDOW = 40
-READ_NEIGHBORS_DEFAULT_MAX_CHUNKS = 40
-READ_NEIGHBORS_DEFAULT_MAX_CHARS = 12000
+# NOTE: `read.pages` returns full pages without truncation. Page selection (which pages to read)
+# is controlled by the reasoning loop / LLM, not by per-page character caps.
 
 # -----------------------------
 # search UX hints (LLM guidance)

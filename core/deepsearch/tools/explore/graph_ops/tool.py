@@ -12,7 +12,7 @@ from core.graph_adapter.concurrency import adapter_locked
 from core.graph_adapter.cypher import adapter_supports_cypher, assert_read_only_cypher
 
 from ...base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
-from ...governance_tags import EVIDENCE_PRIMARY, REQUIRES_CYPHER, SCOPE_OWNER
+from ...governance_tags import EVIDENCE_DERIVED, REQUIRES_CYPHER, SCOPE_OWNER
 from .templates import template_descriptions, template_names, template_registry
 from .templates_utils import build_derived_evidence
 
@@ -50,7 +50,7 @@ class GraphOpsTool(GraphTool):
         ),
         speed="fast",
         cost="low",
-        strategy_tags=("graph_ops", "cypher", "deterministic", EVIDENCE_PRIMARY, SCOPE_OWNER, REQUIRES_CYPHER),
+        strategy_tags=("graph_ops", "cypher", "deterministic", EVIDENCE_DERIVED, SCOPE_OWNER, REQUIRES_CYPHER),
         profile="F",
         determinism="deterministic",
         namespace="rag-arc.deepsearch.tools.explore.graph_ops",

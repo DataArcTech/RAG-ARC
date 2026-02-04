@@ -168,14 +168,88 @@ async def call_llm_async(llm, messages: List[Dict[str, Any]], **kwargs) -> str:
     if llm is None:
         raise RuntimeError("LLM connector is required for this tool")
 
+    # Debug-only metadata (do NOT forward to provider SDKs).
+    warn_context = str(kwargs.pop("warn_context", "") or "").strip() or None
+
+    from core.utils.llm_debug_dump import append_llm_event  # local import to avoid global side-effects
+
+    model = kwargs.get("model")
+    if model is None:
+        cfg = getattr(llm, "config", None)
+        model = getattr(cfg, "model_name", None) if cfg is not None else None
+
     async_chat = getattr(llm, "achat", None)
     if callable(async_chat):
-        return await async_chat(messages, **kwargs)
+        try:
+            append_llm_event(
+                {
+                    "event": "llm.request",
+                    "transport": "async",
+                    "warn_context": warn_context,
+                    "model": model,
+                    "kwargs": dict(kwargs),
+                    "messages": messages,
+                }
+            )
+            response = await async_chat(messages, **kwargs)
+            append_llm_event(
+                {
+                    "event": "llm.response",
+                    "transport": "async",
+                    "warn_context": warn_context,
+                    "model": model,
+                    "text": response,
+                }
+            )
+            return response
+        except Exception as exc:  # noqa: BLE001
+            append_llm_event(
+                {
+                    "event": "llm.error",
+                    "transport": "async",
+                    "warn_context": warn_context,
+                    "model": model,
+                    "error": str(exc),
+                }
+            )
+            raise
 
     chat = getattr(llm, "chat", None)
     if not callable(chat):
         raise RuntimeError("LLM connector does not expose chat/achat methods")
-    return chat(messages, **kwargs)
+    try:
+        append_llm_event(
+            {
+                "event": "llm.request",
+                "transport": "sync",
+                "warn_context": warn_context,
+                "model": model,
+                "kwargs": dict(kwargs),
+                "messages": messages,
+            }
+        )
+        response = chat(messages, **kwargs)
+        append_llm_event(
+            {
+                "event": "llm.response",
+                "transport": "sync",
+                "warn_context": warn_context,
+                "model": model,
+                "text": response,
+            }
+        )
+        return response
+    except Exception as exc:  # noqa: BLE001
+        append_llm_event(
+            {
+                "event": "llm.error",
+                "transport": "sync",
+                "warn_context": warn_context,
+                "model": model,
+                "error": str(exc),
+            }
+        )
+        raise
 
 
 def extract_json_from_text(raw: str) -> str | None:

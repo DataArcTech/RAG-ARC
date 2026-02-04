@@ -3,15 +3,94 @@ import asyncio
 from typing import Any, Dict, List, Optional
 
 from config.core.deepsearch import tool_defaults
+from config import pageindex as pageindex_cfg
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.deepsearch.utils.file_scope import resolve_file_scope
+from core.deepsearch.utils.ids import coerce_uuid_list
 
 from ...base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
-from ...governance_tags import EVIDENCE_PRIMARY, REQUIRES_LLM, SCOPE_FILE, SCOPE_OWNER
+from ...governance_tags import EVIDENCE_DERIVED, REQUIRES_LLM, SCOPE_FILE, SCOPE_OWNER
 from .base import _SearchToolBase, strip_file_scope_from_graph_context
 from .bm25 import _Bm25Channel
 from .faiss import _FaissChannel
 from .graph_chunk import _GraphChunkChannel
+
+
+def _coerce_int(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
+def _suggest_read_pages_from_evidences(evidences: List[EvidenceChunk]) -> List[Dict[str, Any]]:
+    """Suggest read.pages ranges based on evidence provenance metadata."""
+
+    out: List[Dict[str, Any]] = []
+    seen: set[tuple[str, int, int]] = set()
+    max_items = max(0, int(tool_defaults.SEARCH_SUGGESTED_READ_MAX))
+    for ev in evidences:
+        if max_items and len(out) >= max_items:
+            break
+        prov = getattr(ev, "provenance", None) or {}
+        meta = prov.get("metadata") if isinstance(prov, dict) else None
+        if not isinstance(meta, dict):
+            continue
+        file_id = str(meta.get("source_file_id") or meta.get("file_id") or "").strip()
+        ps = _coerce_int(meta.get("section_page_start"))
+        if ps is None:
+            ps = _coerce_int(meta.get("page_start"))
+        pe = _coerce_int(meta.get("section_page_end"))
+        if pe is None:
+            pe = _coerce_int(meta.get("page_end"))
+        if not file_id or ps is None or pe is None:
+            continue
+        if pe < ps:
+            ps, pe = pe, ps
+        key = (file_id, ps, pe)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            {
+                "tool": "read.pages",
+                "args": {"file_id": file_id, "page_start": ps, "page_end": pe},
+                "why": "expand_full_context_for_top_hit",
+            }
+        )
+    return out
+
+
+def _collect_term_hints(evidences: List[EvidenceChunk]) -> List[str]:
+    """Collect document-native term hints from section paths/titles."""
+    max_items = max(0, int(tool_defaults.SEARCH_TERM_HINTS_MAX))
+    if max_items <= 0:
+        return []
+    delimiter = pageindex_cfg.section_path_delimiter()
+    seen: set[str] = set()
+    out: List[str] = []
+    for ev in evidences:
+        prov = getattr(ev, "provenance", None) or {}
+        meta = prov.get("metadata") if isinstance(prov, dict) else None
+        if not isinstance(meta, dict):
+            continue
+        for key in ("section_title", "section_path", "title", "path"):
+            raw = str(meta.get(key) or "").strip()
+            if not raw:
+                continue
+            candidates = [raw]
+            if key == "section_path" or key == "path":
+                candidates = [seg.strip() for seg in raw.split(delimiter) if seg.strip()]
+            for item in candidates:
+                if not item or item in seen:
+                    continue
+                seen.add(item)
+                out.append(item)
+                if len(out) >= max_items:
+                    return out
+    return out
 
 
 class SearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChannel, GraphTool):
@@ -22,13 +101,13 @@ class SearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
         channel="graph",
         description=(
             "Three-way fast search (faiss + bm25 + graph_chunk) for quick localization. "
-            "Evidence: primary snippets (citeable). "
+            "Evidence: derived routing snippets; citeable evidence comes from read.pages. "
             "Good: focus_query='HippoRAG graph', channels=['faiss','bm25'], top_k=10. "
             "Bad: empty query or repeating the same args after empty_hit."
         ),
         speed="fast",
         cost="low",
-        strategy_tags=("search", "faiss", "bm25", "graph_chunk", EVIDENCE_PRIMARY, SCOPE_OWNER, SCOPE_FILE, REQUIRES_LLM),
+        strategy_tags=("search", "faiss", "bm25", "graph_chunk", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE, REQUIRES_LLM),
         profile="F",
         determinism="hybrid",
         namespace="rag-arc.deepsearch.tools.search",
@@ -138,6 +217,36 @@ class SearchTool(_SearchToolBase, _FaissChannel, _Bm25Channel, _GraphChunkChanne
             "errors": errors,
             "windows": windows,
         }
+        term_hints = _collect_term_hints(evidences)
+        if term_hints:
+            diagnostics["term_hints"] = term_hints
+            summary = summary.rstrip() + " TERM_HINTS: " + ", ".join(term_hints) + "."
+        suggested_reads = _suggest_read_pages_from_evidences(evidences)
+        if suggested_reads:
+            diagnostics["suggested_reads"] = suggested_reads
+            # Keep summary short but actionable.
+            tips = []
+            for item in suggested_reads[: max(1, int(tool_defaults.SEARCH_SUGGESTED_READ_MAX))]:
+                args = item.get("args") if isinstance(item, dict) else None
+                if not isinstance(args, dict):
+                    continue
+                tips.append(f"read.pages(file_id={args.get('file_id')}, pages={args.get('page_start')}-{args.get('page_end')})")
+            if tips:
+                summary = summary.rstrip() + " TIP: consider " + "; ".join(tips) + " for full context."
+        elif not evidences and getattr(file_scope, "file_ids", None):
+            # No hits: suggest a small overview read for the scoped file(s).
+            page_end = int(tool_defaults.SEARCH_EMPTY_SUGGEST_OVERVIEW_PAGE_END)
+            if page_end >= 0:
+                file_ids = list(getattr(file_scope, "file_ids") or [])[:1]
+                if file_ids:
+                    diagnostics["suggested_reads"] = [
+                        {
+                            "tool": "read.pages",
+                            "args": {"file_id": file_ids[0], "page_start": 0, "page_end": page_end},
+                            "why": "no_hits_read_overview_pages",
+                        }
+                    ]
+                    summary = summary.rstrip() + f" TIP: no hits; consider read.pages(file_id={file_ids[0]}, pages=0-{page_end}) to inspect key facts/terms."
         return ToolResult(summary=summary, evidences=evidences, diagnostics=diagnostics)
 
 
@@ -174,7 +283,7 @@ class SearchScopedTool(SearchTool):
         ),
         speed="fast",
         cost="low",
-        strategy_tags=("search", "scoped", "faiss", "bm25", "graph_chunk", EVIDENCE_PRIMARY, SCOPE_OWNER, SCOPE_FILE, REQUIRES_LLM),
+        strategy_tags=("search", "scoped", "faiss", "bm25", "graph_chunk", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE, REQUIRES_LLM),
         profile="F",
         determinism="hybrid",
         namespace="rag-arc.deepsearch.tools.search.scoped",
@@ -193,23 +302,45 @@ class SearchScopedTool(SearchTool):
         example_args={
             "question": "Find relevant chunks in a specific file",
             "plan_step": "plan_01",
-            "extra": {"file_id": "<file_id>", "channels": ["faiss", "bm25", "graph"], "top_k": 10},
+            "extra": {"file_id": "REPLACE_WITH_REAL_FILE_ID_UUID", "channels": ["faiss", "bm25", "graph_chunk"], "top_k": 10},
         },
     )
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         query = self._resolve_query(request)
-        file_scope = resolve_file_scope(
-            extra=request.extra,
-            graph_context_metadata=(request.graph_context.metadata if request.graph_context else {}),
-            question=request.question,
-        )
-        if not getattr(file_scope, "file_ids", None):
+        file_ids_raw = _coerce_file_ids(request.extra)
+        file_ids, invalid = coerce_uuid_list(file_ids_raw)
+        if invalid:
+            return ToolResult(
+                summary="search.scoped skipped: invalid file_id(s) (expected UUID; use search.file to obtain file_id).",
+                diagnostics={"reason": "invalid_file_id_format", "query": query, "invalid_file_ids": invalid[:20]},
+            )
+        if not file_ids:
             return ToolResult(
                 summary="search.scoped skipped: missing file_id/file_ids (call search.file first).",
                 diagnostics={"reason": "missing_file_scope", "query": query, "required": ["file_id", "file_ids"]},
             )
-        return await super().run(request)
+
+        patched_extra = dict(request.extra or {})
+        # Normalize into UUIDs to keep tool traces stable and prevent accidental broadening.
+        patched_extra.pop("filename_contains", None)
+        patched_extra.pop("source_file_name", None)
+        patched_extra.pop("source_file_names", None)
+        patched_extra["file_ids"] = list(file_ids)
+        if len(file_ids) == 1:
+            patched_extra["file_id"] = file_ids[0]
+
+        patched = ToolRunRequest(
+            question=request.question,
+            plan_step=request.plan_step,
+            context_evidences=request.context_evidences,
+            adapter=request.adapter,
+            access_scope=request.access_scope,
+            extra=patched_extra,
+            graph_context=request.graph_context,
+            coverage_metrics=request.coverage_metrics,
+        )
+        return await super().run(patched)
 
 
 class SearchGlobalTool(SearchTool):
@@ -224,7 +355,7 @@ class SearchGlobalTool(SearchTool):
         ),
         speed="fast",
         cost="low",
-        strategy_tags=("search", "global", "faiss", "bm25", "graph_chunk", EVIDENCE_PRIMARY, SCOPE_OWNER, SCOPE_FILE, REQUIRES_LLM),
+        strategy_tags=("search", "global", "faiss", "bm25", "graph_chunk", EVIDENCE_DERIVED, SCOPE_OWNER, SCOPE_FILE, REQUIRES_LLM),
         profile="F",
         determinism="hybrid",
         namespace="rag-arc.deepsearch.tools.search.global",
@@ -240,13 +371,17 @@ class SearchGlobalTool(SearchTool):
     async def run(self, request: ToolRunRequest) -> ToolResult:
         # Explicitly ignore inherited file_scope from graph_context.metadata to avoid
         # accidental "scope persistence" when the user wants a true global expansion.
+        extra = dict(request.extra or {})
+        # Also ignore explicit file filters to keep semantics stable: global means global.
+        for key in ("file_id", "file_ids", "source_file_id", "source_file_ids", "filename_contains"):
+            extra.pop(key, None)
         patched = ToolRunRequest(
             question=request.question,
             plan_step=request.plan_step,
             context_evidences=request.context_evidences,
             adapter=request.adapter,
             access_scope=request.access_scope,
-            extra=dict(request.extra or {}),
+            extra=extra,
             graph_context=strip_file_scope_from_graph_context(request.graph_context),
             coverage_metrics=request.coverage_metrics,
         )
