@@ -202,6 +202,10 @@ def pageindex_doc_filename(default: str = "pageindex_doc.json") -> str:
     return default
 
 
+def section_path_delimiter(default: str = " > ") -> str:
+    return str(os.getenv("SECTION_PATH_DELIMITER", default))
+
+
 def section_chunk_match_snippet_chars(default: int = 200) -> int:
     return _env_int("SECTION_CHUNK_MATCH_SNIPPET_CHARS", default, minimum=0)
 
@@ -213,19 +217,16 @@ def section_page_match_snippet_chars(default: int = 160) -> int:
 def section_page_match_max_pages(default: int = 20) -> int:
     return _env_int("SECTION_PAGE_MATCH_MAX_PAGES", default, minimum=0)
 
-def section_path_delimiter(default: str = " / ") -> str:
-    """Delimiter used to join/split section paths in PageIndex artifacts."""
-    token = str(os.getenv("SECTION_PATH_DELIMITER", default) or "").strip()
-    return token or str(default)
+def toc_check_page_num(default: int = 20) -> int:
+    return _env_int("PAGEINDEX_TOC_CHECK_PAGE_NUM", default, minimum=1)
 
 
-def max_page_num_each_node(default: int = 20) -> int:
-    """Max pages to display/expand per tree node in navigation tools."""
-    return _env_int("TREE_NODE_MAX_PAGES", default, minimum=1)
+def max_page_num_each_node(default: int = 10) -> int:
+    return _env_int("PAGEINDEX_MAX_PAGE_NUM_EACH_NODE", default, minimum=1)
 
-def max_token_num_each_node(default: int = 1800) -> int:
-    """Max tokens (approx) to display per tree node preview in navigation tools."""
-    return _env_int("TREE_NODE_MAX_TOKENS", default, minimum=0)
+
+def max_token_num_each_node(default: int = 20000) -> int:
+    return _env_int("PAGEINDEX_MAX_TOKEN_NUM_EACH_NODE", default, minimum=1)
 
 
 __all__ = [
@@ -251,10 +252,11 @@ __all__ = [
     "section_numbering_max_level",
     "pageindex_tree_filename",
     "pageindex_nodes_filename",
+    "section_path_delimiter",
     "section_chunk_match_snippet_chars",
     "section_page_match_snippet_chars",
     "section_page_match_max_pages",
-    "section_path_delimiter",
+    "toc_check_page_num",
     "max_page_num_each_node",
     "max_token_num_each_node",
 ]
