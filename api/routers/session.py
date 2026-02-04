@@ -133,7 +133,7 @@ async def list_session_messages(
             get_message_handler().list_messages_by_session,
             session_id,
             limit,
-            offset
+            offset,
         )
         messages = _sort_messages_question_then_answer_newest_first(messages or [])
         logger.info("[QUERY] Retrieved %d messages from database", len(messages) if messages else 0)

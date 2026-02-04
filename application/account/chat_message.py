@@ -69,14 +69,6 @@ class ChatMessageManager(AbstractModule):
     ) -> List[ChatMessage]:
         """
         List messages for a session with pagination.
-
-        Args:
-            session_id: Session ID as UUID
-            limit: Maximum number of messages to return
-            offset: Number of messages to skip
-
-        Returns:
-            List of message metadata, ordered by created_at (oldest first)
         """
         return self.message_storage.list_messages_by_session(
             session_id=session_id,

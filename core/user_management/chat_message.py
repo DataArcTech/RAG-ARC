@@ -86,14 +86,17 @@ class ChatMessageStorage(AbstractModule):
         return f"chat:session:{session_id}:messages"
 
     def _message_to_cache_format(self, message: ChatMessage) -> Dict[str, Any]:
-        """Convert ChatMessage ORM object to cache-friendly dict"""
+        """Convert ChatMessage ORM object to cache-friendly dict（含 subgraph_data/sources 以便读缓存时完整返回）"""
         return {
             "message_id": str(message.id),
             "session_id": str(message.session_id),
             "role": message.content.get("role", "user"),
             "content": message.content.get("content", ""),
             "metadata": message.content.get("metadata", {}),
-            "created_at": message.created_at.isoformat() if message.created_at else None
+            "created_at": message.created_at.isoformat() if message.created_at else None,
+            "subgraph_data": getattr(message, "subgraph_data", None),
+            "sources": getattr(message, "sources", None),
+            "source_file_ids": getattr(message, "source_file_ids", None),
         }
 
     def _cache_format_to_message_dict(self, cache_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -132,6 +135,9 @@ class ChatMessageStorage(AbstractModule):
                     "metadata": cache_data.get("metadata", {}),
                 },
                 created_at=created_at or datetime.now(),
+                subgraph_data=cache_data.get("subgraph_data"),
+                sources=cache_data.get("sources"),
+                source_file_ids=cache_data.get("source_file_ids"),
             )
         except Exception:  # noqa: BLE001
             return None
@@ -288,19 +294,7 @@ class ChatMessageStorage(AbstractModule):
         """
         List all messages for a specific session with dual-layer read.
 
-        Read flow:
-        1. Try to read from Redis first (fast)
-        2. If not found or insufficient data, read from PostgreSQL
-        3. Backfill Redis with PostgreSQL data
-
-        Args:
-            session_id: Session ID as UUID
-            limit: Maximum number of messages to return
-            offset: Number of messages to skip
-            **kwargs: Additional arguments
-
-        Returns:
-            List of chat message metadata, ordered by created_at (oldest first)
+        Read flow: 先读缓存，缓存没有或不足则读数据库，并把数据库结果写入缓存；缓存异常时直接读数据库。
         """
         try:
             cache_key = self._get_cache_key(str(session_id))

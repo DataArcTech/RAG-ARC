@@ -613,7 +613,9 @@ async def generate_sse_events(
                 assistant_response_override = prepared.get("assistant_response")
                 if not (assistant_response_override or "".join(response_parts)):
                     return
-                
+                # 需要 subgraph 但 prepared 里还没有时，不在此处落库，由主协程在生成 mindmap 后再创建，避免落库 subgraph_data=null
+                if return_subgraph and prepared.get("subgraph_data") is None:
+                    return
                 # 从prepared中获取chunks等变量
                 final_chunks = prepared.get("chunks") or []
                 final_subgraph_data = prepared.get("subgraph_data")
