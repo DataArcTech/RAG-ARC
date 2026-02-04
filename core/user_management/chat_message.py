@@ -342,6 +342,14 @@ class ChatMessageStorage(AbstractModule):
             logger.error(f"Failed to list chat messages for session {session_id}: {e}")
             return []
 
+    def count_messages_by_session(self, session_id: uuid.UUID, **kwargs: Any) -> int:
+        """Return total message count for a session (for pagination total_pages)."""
+        try:
+            return self.metadata_store.count_chat_messages_by_session(session_id=session_id, **kwargs)
+        except Exception as e:
+            logger.error(f"Failed to count messages for session {session_id}: {e}")
+            return 0
+
     def list_messages_by_user(
         self,
         user_id: uuid.UUID,

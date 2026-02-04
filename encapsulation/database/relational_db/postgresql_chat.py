@@ -195,7 +195,7 @@ class _PostgreSQLChatMixin:
         """List all chat messages for a specific session using SQLAlchemy ORM"""
         try:
             with self.SessionMaker() as db_session:
-                query = db_session.query(ChatMessage).filter_by(session_id=session_id).order_by(ChatMessage.created_at.asc())
+                query = db_session.query(ChatMessage).filter_by(session_id=session_id).order_by(ChatMessage.created_at.desc())
 
                 if offset:
                     query = query.offset(offset)
@@ -212,6 +212,15 @@ class _PostgreSQLChatMixin:
 
         except SQLAlchemyError as e:
             logger.error(f"Database error listing chat messages for session {session_id}: {e}")
+            raise
+
+    def count_chat_messages_by_session(self, session_id: uuid.UUID, **kwargs: Any) -> int:
+        """Return total number of messages for a session (for pagination total / total_pages)."""
+        try:
+            with self.SessionMaker() as db_session:
+                return db_session.query(ChatMessage).filter_by(session_id=session_id).count()
+        except SQLAlchemyError as e:
+            logger.error(f"Database error counting chat messages for session {session_id}: {e}")
             raise
 
     def delete_chat_message(self, message_id: uuid.UUID, **kwargs: Any) -> bool:

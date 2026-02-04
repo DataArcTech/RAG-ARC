@@ -71,6 +71,16 @@ class ChatMessageResponse(BaseModel):
             
             return cls.model_validate(obj_dict)
 
+
+class SessionMessagesResponse(BaseModel):
+    """分页会话消息：messages + total、total_pages、page、page_size"""
+    messages: List[ChatMessageResponse]
+    total: int
+    total_pages: int
+    page: int
+    page_size: int
+
+
 router = APIRouter(prefix="/session", tags=["session"])
 
 registry = Register()
@@ -87,24 +97,45 @@ def get_account_handler() -> Account:
     """Lazy loading function to get account handler after initialization."""
     return registry.get_object("account")
 
+
+def _sort_messages_question_then_answer_newest_first(messages: List[Any]) -> List[Any]:
+    """按「提问-回答」成对排序：先时间正序成对，再按轮次从新到旧；同轮内提问在前、回答在后。不改 DB，仅内存排序。"""
+    if not messages:
+        return messages
+    by_time = sorted(messages, key=lambda m: (getattr(m, "created_at", None) or datetime.min))
+    pairs: List[List[Any]] = []
+    i = 0
+    while i < len(by_time):
+        role = (getattr(by_time[i], "content", None) or {}).get("role", "")
+        if role == "user" and i + 1 < len(by_time) and (getattr(by_time[i + 1], "content", None) or {}).get("role") == "assistant":
+            pairs.append([by_time[i], by_time[i + 1]])
+            i += 2
+        else:
+            pairs.append([by_time[i]])
+            i += 1
+    return [m for pair in reversed(pairs) for m in pair]
+
+
 async def list_session_messages(
     session_id: uuid.UUID,
     limit: int = 20,
     offset: int = 0,
     include_subgraph: bool = True,
 ):
-    """List session messages asynchronously using thread pool with pagination."""
+    """List session messages with pagination. Returns messages, total, total_pages, page, page_size."""
     import logging
+    import math
     logger = logging.getLogger(__name__)
     try:
-        logger.info("[QUERY] Starting list_session_messages: session_id=%s, limit=%d, offset=%d, include_subgraph=%s", 
-                   session_id, limit, offset, include_subgraph)
+        logger.info("[QUERY] Starting list_session_messages: session_id=%s, limit=%d, offset=%d, include_subgraph=%s",
+                    session_id, limit, offset, include_subgraph)
         messages = await get_thread_pool().run_blocking(
             get_message_handler().list_messages_by_session,
             session_id,
             limit,
             offset
         )
+        messages = _sort_messages_question_then_answer_newest_first(messages or [])
         logger.info("[QUERY] Retrieved %d messages from database", len(messages) if messages else 0)
         # Convert SQLAlchemy models to Pydantic models to ensure proper serialization
         # Use fallback validation to handle potential source_file_ids format issues.
@@ -215,7 +246,19 @@ async def list_session_messages(
                         )
                         # Skip this malformed message and continue.
                         continue
-        return result
+        total = await get_thread_pool().run_blocking(
+            get_message_handler().count_messages_by_session,
+            session_id,
+        )
+        total_pages = math.ceil(total / limit) if limit else 1
+        page_num = (offset // limit) + 1 if limit else 1
+        return SessionMessagesResponse(
+            messages=result,
+            total=total,
+            total_pages=total_pages,
+            page=page_num,
+            page_size=limit,
+        )
     except Exception as e:
         import logging
         logger = logging.getLogger(__name__)
@@ -414,7 +457,7 @@ async def list_messages_by_user(
         )
 
 
-@router.get("/{session_id}/messages", response_model=List[ChatMessageResponse])
+@router.get("/{session_id}/messages", response_model=SessionMessagesResponse)
 async def list_messages(
     session_id: uuid.UUID,
     current_user: Annotated[User | None, Depends(get_current_user)],

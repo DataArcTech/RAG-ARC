@@ -84,6 +84,10 @@ class ChatMessageManager(AbstractModule):
             offset=offset,
         )
 
+    def count_messages_by_session(self, session_id: uuid.UUID) -> int:
+        """Return total message count for a session (for pagination total_pages)."""
+        return self.message_storage.count_messages_by_session(session_id=session_id)
+
     def delete_message(
         self,
         message_id: uuid.UUID
