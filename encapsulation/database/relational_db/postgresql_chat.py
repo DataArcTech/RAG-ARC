@@ -195,6 +195,7 @@ class _PostgreSQLChatMixin:
         """List all chat messages for a specific session using SQLAlchemy ORM"""
         try:
             with self.SessionMaker() as db_session:
+                # 按 created_at 降序取（最新的先取），再反转为升序返回，使当前页内第一条为最早、最后一条为最新
                 query = db_session.query(ChatMessage).filter_by(session_id=session_id).order_by(ChatMessage.created_at.desc())
 
                 if offset:
@@ -202,7 +203,7 @@ class _PostgreSQLChatMixin:
                 if limit:
                     query = query.limit(limit)
 
-                messages = query.all()
+                messages = list(reversed(query.all()))
                 # Detach from session
                 for msg in messages:
                     db_session.expunge(msg)

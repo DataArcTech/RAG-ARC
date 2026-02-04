@@ -135,7 +135,7 @@ async def list_session_messages(
             limit,
             offset,
         )
-        messages = _sort_messages_question_then_answer_newest_first(messages or [])
+        # 排序已在 DB 层完成：按 message_id 降序分页，页内升序返回（当前页第一条较旧，最后一条最新）
         logger.info("[QUERY] Retrieved %d messages from database", len(messages) if messages else 0)
         # Convert SQLAlchemy models to Pydantic models to ensure proper serialization
         # Use fallback validation to handle potential source_file_ids format issues.
