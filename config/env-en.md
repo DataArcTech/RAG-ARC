@@ -73,6 +73,7 @@ How secrets flow into configs:
 | `EMBEDDING_API_KEY` | _(empty)_ | **Required** (when `EMBEDDING_MODEL_PROVIDER=openai`): API key for embedding provider. |
 | `EMBEDDING_API_BASE_URL` | _(empty)_ | **Required** (when `EMBEDDING_MODEL_PROVIDER=openai`): Base URL for OpenAI-compatible embedding endpoints. |
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model name. When set, it takes precedence over `EMBEDDING_MODEL_NAME` for `EMBEDDING_MODEL_PROVIDER=openai`. |
+| `EMBEDDING_MODEL_NAME_ALIASES` | _(empty)_ | Optional JSON mapping to normalize embedding model names for fingerprinting. Useful for OpenRouter-style names (e.g., `{"openai/text-embedding-3-small":"text-embedding-3-small"}`) to avoid unnecessary FAISS rebuilds. |
 | `EMBEDDING_DEVICE` | `cpu` | HuggingFace embedding runtime device (used when `EMBEDDING_MODEL_PROVIDER=huggingface`). |
 | `EMBEDDING_CACHE_FOLDER` | _(empty)_ | Optional HuggingFace cache folder for embedding weights. |
 | `EMBEDDING_DIMENSIONS` | _(empty)_ | Optional override for embedding vector dimension. When empty, the system can auto-detect the dimension (and will cache it). |
@@ -162,29 +163,18 @@ Notes:
 | `SECTION_INDEX_ENABLED` | `true` | Enable section index ingestion. |
 | `SECTION_FAISS_INDEX_PATH` | `./data/section_faiss_index` | Section FAISS index path (separate from main FAISS). |
 | `SECTION_BM25_INDEX_PATH` | `./data/section_bm25_index` | Section BM25 index path (separate from main BM25). |
-| `DOC_ROUTING_ENABLED` | `true` | Enable doc descriptions + doc routing prefilter. |
-| `DOC_ROUTING_FAISS_INDEX_PATH` | `./data/doc_routing_faiss_index` | Doc routing FAISS index path. |
-| `DOC_ROUTING_BM25_INDEX_PATH` | `./data/doc_routing_bm25_index` | Doc routing BM25 index path. |
-| `SECTION_SUMMARY_ENABLED` | `true` | Generate section summaries (used by section index and doc routing). |
+| `SECTION_PATH_DELIMITER` | `" > "` | Delimiter used when building PageIndex section paths. |
+| `SECTION_SUMMARY_ENABLED` | `true` | Generate section summaries (used by section index). |
 | `SECTION_SUMMARY_MODEL` | _(empty)_ | Summary model override; falls back to `LOW_COST_MODEL` then chat model. |
 | `SECTION_SUMMARY_MAX_TOKENS` | `800` | Max input token budget for section summaries (truncate beyond). |
 | `SECTION_SUMMARY_TOP_K` | `5` | Number of leaf chunks to sample for leaf summaries. |
 | `SECTION_SUMMARY_MAX_CONCURRENCY` | `6` | Max concurrent section summaries (offline). |
 | `SECTION_SUMMARY_LEAF_CHUNK_MAX_CHARS` | `1200` | Per-chunk max chars when assembling leaf summary input. |
-| `DOC_DESC_MODEL` | _(empty)_ | Doc description model override; falls back to `LOW_COST_MODEL`. |
-| `DOC_DESC_MAX_TOKENS` | `400` | Max input token budget for doc descriptions. |
-| `DOC_PROFILE_ENABLED` | `true` | Generate doc_profile (company/product/model/version) for cross-document disambiguation in doc routing. |
-| `DOC_PROFILE_MODEL` | _(empty)_ | Doc profile model override; falls back to `LOW_COST_MODEL`. |
-| `DOC_PROFILE_MAX_TOKENS` | `450` | Max input token budget for doc profile extraction (truncate beyond). |
-| `DOC_PROFILE_MAX_LIST_ITEMS` | `12` | Max items kept for `keywords`/`aliases`. |
 | `SECTION_TOP_K` | `6` | Online top-K sections to keep. |
 | `SECTION_RETRIEVE_CANDIDATES_K` | `20` | Section retrieval candidates per channel (dense/BM25). |
 | `SECTION_RRF_K` | `60` | RRF k for section fusion. |
 | `SECTION_SCORE_WEIGHT` | `0.1` | Section score boost weight applied to chunk scores. |
 | `SECTION_MIN_KEEP` | `5` | Minimum chunks to keep after section filter; fallback to full set when below. |
-| `DOC_TOP_K` | `5` | Doc routing top-K documents. |
-| `DOC_RETRIEVE_CANDIDATES_K` | `10` | Doc routing candidates per channel. |
-| `DOC_RRF_K` | `60` | RRF k for doc routing fusion. |
 | `SECTION_LEVEL_CONFLICT_RATIO` | `0.4` | Flatten to level-1 when heading-level signals conflict above this ratio. |
 | `SECTION_LEVEL_FORCE_FLAT_IF_UNIFORM` | `true` | Flatten to level-1 when all headings share the same non-1 level. |
 | `SECTION_LEVEL_MAX` | `6` | Maximum section depth. |
@@ -196,6 +186,9 @@ Notes:
 | `PAGEINDEX_TREE_FILENAME` | `pageindex_tree.json` | Section tree JSON filename. |
 | `PAGEINDEX_NODES_FILENAME` | `pageindex_nodes.jsonl` | Section node JSONL filename. |
 | `PAGEINDEX_DOC_FILENAME` | `pageindex_doc.json` | Doc description JSON filename. |
+| `PAGEINDEX_TOC_CHECK_PAGE_NUM` | `20` | PageIndex ToC scan page window size (pages). |
+| `PAGEINDEX_MAX_PAGE_NUM_EACH_NODE` | `10` | Max pages per PageIndex node before split. |
+| `PAGEINDEX_MAX_TOKEN_NUM_EACH_NODE` | `20000` | Max tokens per PageIndex node before split. |
 
 ## 2. Evidence Output Controls
 
@@ -213,8 +206,8 @@ Notes:
 | `RAG_RETRIEVAL_OBSERVABILITY` | `false` | When `true`, emit retrieval observability logs/progress (per-retriever file distribution, fused distribution, rerank distribution) to debug "wrong file recalled" and follow-up drift. |
 | `RAG_RETRIEVAL_LOG_TOP_FILES` | `10` | Max file ids shown in retrieval distribution logs (counted by file_id). |
 | `RAG_RETRIEVAL_LOG_TOP_CHUNKS` | `5` | Max chunk previews shown in retrieval observability logs. |
-| `QUERY_VARIANTS_ENABLED` | `true` | Enable retrieval-time query variants (MultiPath generates variants per retriever and unions results). Improves recall on mixed-script/variant corpora. |
-| `QUERY_VARIANTS_LANGS` | `zh-Hans,en,zh-Hant` | Comma-separated variant targets, in order. `zh-Hans/zh-Hant` use OpenCC conversion (when installed). `en` is best-effort ASCII token extraction (no translation). |
+| `QUERY_VARIANTS_ENABLED` | `true` | Enable retrieval-time query variants (LLM rewrites per target language, results are unioned per retriever). Improves recall on mixed-script/variant corpora. |
+| `QUERY_VARIANTS_LANGS` | `zh-Hans,en,zh-Hant` | Comma-separated variant targets, in order. Variants are generated by the low-cost model and returned as JSON `{lang: rewritten_query}`. Use a single lang (e.g. `zh-Hans`) to disable other variants. |
 | `QUERY_VARIANTS_ZH_HANS_HANT_ENABLED` | `true` | Enable Simplified/Traditional Chinese variants (requires OpenCC). |
 | `QUERY_VARIANTS_MAX` | `3` | Max number of query variants (including the original). |
 | `RAG_RETRIEVAL_WEIGHT_DENSE` | `1.0` | MultiPath RRF fusion weight for the dense retriever. |
@@ -225,7 +218,7 @@ Notes:
 | `RAG_REWRITE_HISTORY_MOST_RECENT_FIRST` | `true` |Order rewrite history context as most-recent-first (aligned with rewrite prompt wording). |
 | `RAG_EVIDENCE_CONSISTENCY_ENABLED` | `false` | Enable evidence consistency filtering: use rewrite-produced anchors to keep retrieval evidence within the same company/product file set (reduces cross-product mixing). |
 | `RAG_EVIDENCE_MIN_KEEP` | `5` | Minimum number of chunks to keep after evidence consistency filtering; if not met, the filter is skipped and diagnostics are emitted. |
-| `DEEPSEARCH_TOP_CHUNKS` | `10` | Maximum chunks returned in DeepSearch evidence and displayed in report appendix (first 100 chars preview). |
+| `DEEPSEARCH_TOP_CHUNKS` | `10` | Maximum chunks returned in DeepSearch evidence and displayed in report artifacts/appendix (no truncation; item count only). |
 | `DEEPSEARCH_TOP_TRIPLES` | `30` | Maximum graph triples returned in DeepSearch evidence. |
 | `DEEPSEARCH_TOP_SEED_ENTITIES` | `15` | Maximum seed entities surfaced in DeepSearch evidence. |
 | `DEEPSEARCH_MAX_IMAGE_INPUTS` | `6` | Maximum local images attached to DeepSearch report generation when the model supports multimodal inputs (MinerU image assets). Set to `0` (or any negative value) to remove the limit. |
@@ -234,8 +227,7 @@ Notes:
 | `DEEPSEARCH_MAX_REASONING_STEPS` | `32` | Maximum reasoning steps returned in DeepSearch payloads. |
 | `DEEPSEARCH_MAX_STAGE_HISTORY` | `10` | Maximum stage history entries returned in DeepSearch payloads. |
 | `DEEPSEARCH_MAX_TOOL_METADATA` | `5` | Maximum tool metadata entries returned in DeepSearch payloads. |
-| `DEEPSEARCH_WEAVER_EVIDENCE_PREVIEW_CHARS` | `180` | Evidence preview character limit in the DeepSearch Weaver trace rendering. |
-| `DEEPSEARCH_WEAVER_EVIDENCE_SAMPLE_COUNT` | `3` | Number of evidence samples included in the DeepSearch Weaver trace rendering. |
+| `DEEPSEARCH_WEAVER_EVIDENCE_SAMPLE_COUNT` | `3` | Number of evidence items sampled in the DeepSearch Weaver trace rendering (no text truncation; sampling only). |
 | `DEEPSEARCH_SOURCE_MAX_CHARS` | `1600` | Max characters included in each DeepSearch `report.sources[*].description` (HippoRAG-compatible sources payload). |
 | `DEEPSEARCH_SOURCE_TITLE_MAX_CHARS` | `80` | Max characters included in each DeepSearch `report.sources[*].title`. |
 | `DEEPSEARCH_GRAPH_EXPORT_MAX_EDGES` | `2000` | Hard cap on exported edges for DeepSearch subgraph visualization (Neo4j exporter). |
@@ -336,7 +328,7 @@ When `TASK_QUEUE_MODE=celery`, these long-running operations are executed by Cel
 | `MQ_TASK_RUN_TTL_SECONDS` | `86400` | TTL (seconds) for TaskRun KV records. |
 | `MQ_PROGRESS_TTL_SECONDS` | `86400` | TTL (seconds) for per-run progress streams / seq maps. |
 | `MQ_RESULT_TTL_SECONDS` | `86400` | TTL (seconds) for result keys. |
-| `MQ_RESULT_MAX_INLINE_BYTES` | `262144` | Max JSON size (bytes) stored inline in Redis; when exceeded, result is stored externally (local/MinIO) and Redis stores a small ref envelope (`0` disables externalization). |
+| `MQ_RESULT_MAX_INLINE_BYTES` | `262144` | Max JSON size (bytes) stored inline in Redis; when exceeded, payloads are stored externally (local/MinIO) and Redis stores a small ref envelope (`0` disables externalization). Applies to both task results and large progress/trace payloads. |
 | `MQ_RESULT_STORE` | `local` | External result store backend: `local` or `minio`. |
 | `MQ_RESULT_LOCAL_DIR` | `local/mq_results` | Base directory for `local` external results. |
 | `MQ_RESULT_MINIO_ENDPOINT` | _(empty)_ | MinIO endpoint for `minio` result store (TODO implementation). |
@@ -409,7 +401,6 @@ Location: `config/json_configs/deepsearch_service.json` → `tool_manager.enable
 | `DEEPSEARCH_TOOL_MCP_TOOLS` | _(empty)_ | Optional comma separated tool allowlist; use `__all__` to expose every built-in tool. |
 | `DEEPSEARCH_ALLOW_SEMANTIC_CHANNEL` | `true` | Allow semantic traversal branch. |
 | `DEEPSEARCH_CHAIN_DEPTH` | `4` | Graph traversal depth. |
-| `DEEPSEARCH_TOOL_CONTEXT_MAX_EVIDENCES` | `5` | Max number of `context_evidences` sent to tool calls (recency retention). |
 | `DEEPSEARCH_TOOL_CONTEXT_MAX_CHARS` | `800` | Max characters per evidence content in tool prompts (truncates beyond this). |
 | `DEEPSEARCH_MCP_SERVER_URI` | _(empty)_ | Remote MCP URI for DeepSearch (disable by default). |
 | `DEEPSEARCH_MCP_API_KEY` | _(empty)_ | API key for remote MCP. |
@@ -462,12 +453,16 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `VLMOCR_OUTPUT_DIR` | _(empty)_ | Optional override for VLM OCR output directory. |
 | `MINERU_SERVER_URL` | _(empty)_ | Required when `PARSER_PARSE_MODE=mineru`: MinerU server base URL (e.g. `http://127.0.0.1:8899`). |
 | `MINERU_HEALTHCHECK_TIMEOUT_S` | `2` | Startup/indexing healthcheck timeout seconds for `GET $MINERU_SERVER_URL/health` when `PARSER_PARSE_MODE=mineru`. |
-| `MINERU_FALLBACK_TO_NATIVE_ON_FAILURE` | `true` | When `PARSER_PARSE_MODE=mineru`, fallback to native PDF text extraction if MinerU parsing fails (e.g. service not running). Fallback is recorded in parse result metadata (`metadata.parser_fallback`). |
+| `MINERU_FALLBACK_TO_NATIVE_ON_FAILURE` | `false` | When `PARSER_PARSE_MODE=mineru`, fallback to native PDF text extraction if MinerU parsing fails (e.g. service not running). Fallback is recorded in parse result metadata (`metadata.parser_fallback`). |
+| `MINERU_REUSE_CACHE` | `1` | When re-indexing, reuse existing MinerU markdown artifacts under `PARSER_OUTPUT_DIR/mineru/<file_id>/` if present (skip remote MinerU call). |
 | `MINERU_TIMEOUT_S` | `900` | Optional: HTTP timeout seconds for remote MinerU parsing/downloads. |
 | `MINERU_POLL_INTERVAL_S` | `5` | Optional: polling interval seconds for MinerU async parse status. |
 | `MINERU_POLL_TIMEOUT_S` | `0` | Optional: max seconds to wait for MinerU parse completion; `0` or negative means no limit. |
 | `MINERU_START_PAGE` | `0` | Optional: start page (0-based) for MinerU parsing. |
 | `MINERU_END_PAGE` | _(empty)_ | Optional: end page (0-based, inclusive). If empty, parse to the end. |
+| `MINERU_HTTP_MAX_RETRIES` | `3` | Optional: retry transient MinerU HTTP errors (0 disables retries). |
+| `MINERU_HTTP_RETRY_BACKOFF_S` | `1.0` | Optional: base backoff seconds for MinerU HTTP retries. |
+| `MINERU_HTTP_RETRY_MAX_BACKOFF_S` | `8.0` | Optional: max backoff seconds for MinerU HTTP retries. |
 | `TOKEN_CHUNK_SIZE` | `1000` | Token chunk size for `token_chunker` (also used as `semantic_unit_chunker.fallback_chunker_config`). |
 | `TOKEN_CHUNK_OVERLAP` | `100` | Token overlap for `token_chunker` (also used as `semantic_unit_chunker.fallback_chunker_config`). |
 | `TOKEN_URL_ATOMIC_CONTEXT_TOKENS` | `10` | URL atomic protection: keep this many tokens before/after each URL together (applies to `token_chunker` and semantic-unit fallback). |

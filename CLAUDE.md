@@ -133,7 +133,7 @@ To add a new graph backend, implement `GraphAdapter` and register it via the reg
 ### DeepSearch on Graph
 DeepSearch (`application/rag_inference/deepsearch/service.py`) implements a think-driven loop:
 1. **Think**: Intent detection + plan update + decide next tool calls.
-2. **Explore**: Graph-first orchestration (parallel actions: search/graph.ops/read.chunk/web.search).
+2. **Explore**: Graph-first orchestration (parallel actions: search/graph.ops/read.pages/web.search).
 3. **Code**: Deterministic math/finance verification (`code.python`).
 4. **Report Composer**: Synthesizes evidence into structured reports.
 

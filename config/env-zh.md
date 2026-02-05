@@ -73,6 +73,7 @@ Benchmark/实验模式：
 | `EMBEDDING_API_KEY` | _(空)_ | **必填**（当 `EMBEDDING_MODEL_PROVIDER=openai`）：嵌入模型 API Key。 |
 | `EMBEDDING_API_BASE_URL` | _(空)_ | **必填**（当 `EMBEDDING_MODEL_PROVIDER=openai`）：嵌入模型 Base URL。 |
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI 嵌入模型名称；当 `EMBEDDING_MODEL_PROVIDER=openai` 时优先级高于 `EMBEDDING_MODEL_NAME`。 |
+| `EMBEDDING_MODEL_NAME_ALIASES` | _(空)_ | 可选 JSON 映射，用于规范化 embedding 模型名称指纹（例如 OpenRouter 风格 `{"openai/text-embedding-3-small":"text-embedding-3-small"}`），避免不必要的 FAISS 重建。 |
 | `EMBEDDING_DEVICE` | `cpu` | HuggingFace 嵌入模型运行设备（仅当 `EMBEDDING_MODEL_PROVIDER=huggingface` 时使用）。 |
 | `EMBEDDING_CACHE_FOLDER` | _(空)_ | 可选：HuggingFace 嵌入模型缓存目录。 |
 | `EMBEDDING_DIMENSIONS` | _(空)_ | 可选：嵌入向量维度覆盖。留空时系统可自动探测并缓存维度。 |
@@ -162,29 +163,18 @@ Benchmark/实验模式：
 | `SECTION_INDEX_ENABLED` | `true` | 是否启用章节索引（section index）入库。 |
 | `SECTION_FAISS_INDEX_PATH` | `./data/section_faiss_index` | 章节向量索引目录（独立于主 FAISS）。 |
 | `SECTION_BM25_INDEX_PATH` | `./data/section_bm25_index` | 章节 BM25 索引目录（独立于主 BM25）。 |
-| `DOC_ROUTING_ENABLED` | `true` | 是否启用文档级描述 + doc routing 预筛。 |
-| `DOC_ROUTING_FAISS_INDEX_PATH` | `./data/doc_routing_faiss_index` | doc routing 向量索引目录。 |
-| `DOC_ROUTING_BM25_INDEX_PATH` | `./data/doc_routing_bm25_index` | doc routing BM25 索引目录。 |
-| `SECTION_SUMMARY_ENABLED` | `true` | 是否生成章节摘要（用于 section index 与 doc routing）。 |
+| `SECTION_PATH_DELIMITER` | `" > "` | PageIndex 章节路径的分隔符。 |
+| `SECTION_SUMMARY_ENABLED` | `true` | 是否生成章节摘要（用于 section index）。 |
 | `SECTION_SUMMARY_MODEL` | _(空)_ | 章节摘要模型；为空则优先使用 `LOW_COST_MODEL`，再回退主聊天模型。 |
 | `SECTION_SUMMARY_MAX_TOKENS` | `800` | 章节摘要输入最大 token 预算（超出会截断）。 |
 | `SECTION_SUMMARY_TOP_K` | `5` | 叶子章节汇总时采样的 chunk 数量。 |
 | `SECTION_SUMMARY_MAX_CONCURRENCY` | `6` | 章节摘要并发上限（离线 ingest）。 |
 | `SECTION_SUMMARY_LEAF_CHUNK_MAX_CHARS` | `1200` | 叶子摘要拼接时每个 chunk 的最大字符数。 |
-| `DOC_DESC_MODEL` | _(空)_ | 文档描述模型；为空则优先 `LOW_COST_MODEL`。 |
-| `DOC_DESC_MAX_TOKENS` | `400` | 文档描述输入最大 token 预算。 |
-| `DOC_PROFILE_ENABLED` | `true` | 是否生成 doc_profile（公司/产品/型号/版本）用于跨文件消歧与 doc routing。 |
-| `DOC_PROFILE_MODEL` | _(空)_ | doc_profile 模型；为空则优先 `LOW_COST_MODEL`。 |
-| `DOC_PROFILE_MAX_TOKENS` | `450` | doc_profile 输入最大 token 预算（超出会截断）。 |
-| `DOC_PROFILE_MAX_LIST_ITEMS` | `12` | `keywords/aliases` 最多保留条数。 |
 | `SECTION_TOP_K` | `6` | 在线检索保留的章节数量（Top-K sections）。 |
 | `SECTION_RETRIEVE_CANDIDATES_K` | `20` | 章节检索阶段每路（dense/BM25）的候选数量。 |
 | `SECTION_RRF_K` | `60` | 章节检索的 RRF 融合系数。 |
 | `SECTION_SCORE_WEIGHT` | `0.1` | 章节命中对 chunk score 的加权系数。 |
 | `SECTION_MIN_KEEP` | `5` | 章节过滤后最少保留的 chunk 数；不足则回退全量。 |
-| `DOC_TOP_K` | `5` | doc routing 返回的文档数量。 |
-| `DOC_RETRIEVE_CANDIDATES_K` | `10` | doc routing 每路检索候选数量。 |
-| `DOC_RRF_K` | `60` | doc routing 的 RRF 融合系数。 |
 | `SECTION_LEVEL_CONFLICT_RATIO` | `0.4` | 标题层级信号冲突比例超过该值时强制平坦化为一级。 |
 | `SECTION_LEVEL_FORCE_FLAT_IF_UNIFORM` | `true` | 当所有标题同级且非一级时，强制降级为一级。 |
 | `SECTION_LEVEL_MAX` | `6` | 章节层级最大深度。 |
@@ -196,6 +186,9 @@ Benchmark/实验模式：
 | `PAGEINDEX_TREE_FILENAME` | `pageindex_tree.json` | 章节树 JSON 文件名。 |
 | `PAGEINDEX_NODES_FILENAME` | `pageindex_nodes.jsonl` | 章节节点 JSONL 文件名。 |
 | `PAGEINDEX_DOC_FILENAME` | `pageindex_doc.json` | 文档描述 JSON 文件名。 |
+| `PAGEINDEX_TOC_CHECK_PAGE_NUM` | `20` | PageIndex 目录页检查窗口大小（页数）。 |
+| `PAGEINDEX_MAX_PAGE_NUM_EACH_NODE` | `10` | PageIndex 单节点最大页数阈值。 |
+| `PAGEINDEX_MAX_TOKEN_NUM_EACH_NODE` | `20000` | PageIndex 单节点最大 token 数阈值。 |
 
 ## 2. 证据输出控制
 
@@ -213,8 +206,8 @@ Benchmark/实验模式：
 | `RAG_RETRIEVAL_OBSERVABILITY` | `false` | 为 `true` 时在服务日志/进度事件中输出检索可观测信息（每路召回文件分布、融合文件分布、rerank 文件分布等），用于排查“召回文件不对/追问跑偏”。 |
 | `RAG_RETRIEVAL_LOG_TOP_FILES` | `10` | 检索可观测日志中最多展示的文件分布条数（按 file_id 计数）。 |
 | `RAG_RETRIEVAL_LOG_TOP_CHUNKS` | `5` | 检索可观测日志中最多展示的 chunk 预览条数（用于快速定位命中段落）。 |
-| `QUERY_VARIANTS_ENABLED` | `true` | 是否启用检索期 query variants（MultiPath 内部对每路检索生成变体并 union 结果）。用于提升跨脚本/跨写法的召回稳定性。 |
-| `QUERY_VARIANTS_LANGS` | `zh-Hans,en,zh-Hant` | 变体目标列表（逗号分隔、按顺序执行）。`zh-Hans/zh-Hant` 使用 OpenCC 简繁互转（需安装）。`en` 为 ASCII token 提取（不做翻译），用于命中英文/型号/编号等混合 token。 |
+| `QUERY_VARIANTS_ENABLED` | `true` | 是否启用检索期 query variants（由低成本模型按目标语言重写，再对每路检索 union 结果）。用于提升跨脚本/跨写法的召回稳定性。 |
+| `QUERY_VARIANTS_LANGS` | `zh-Hans,en,zh-Hant` | 变体目标列表（逗号分隔、按顺序执行）。由低成本模型生成 JSON `{lang: rewritten_query}`。若只填写 `zh-Hans` 可禁用其他变体。 |
 | `QUERY_VARIANTS_ZH_HANS_HANT_ENABLED` | `true` | 是否启用中文简繁体互转变体（需要 OpenCC）。 |
 | `QUERY_VARIANTS_MAX` | `3` | query variants 最大数量（包含原 query）。 |
 | `RAG_RETRIEVAL_WEIGHT_DENSE` | `1.0` | MultiPath 的 RRF 融合权重：dense 路径。 |
@@ -225,7 +218,7 @@ Benchmark/实验模式：
 | `RAG_REWRITE_HISTORY_MOST_RECENT_FIRST` | `true` | rewrite 的 history context 按“最近在前”排序（与 rewrite prompt 保持一致）。 |
 | `RAG_EVIDENCE_CONSISTENCY_ENABLED` | `false` | 启用 evidence 一致性过滤：基于 rewrite 产出的 anchors，将召回结果收敛到同一公司/产品文件集合，降低跨产品证据混入导致的回答偏移。 |
 | `RAG_EVIDENCE_MIN_KEEP` | `5` | evidence 一致性过滤后至少保留的 chunks 数；不足时会放弃过滤并在进度事件中标记。 |
-| `DEEPSEARCH_TOP_CHUNKS` | `10` | DeepSearch 证据中最多保留的 chunk 数量，同时也是报告附录中显示原文预览（前100字符）的数量。 |
+| `DEEPSEARCH_TOP_CHUNKS` | `10` | DeepSearch 证据中最多保留的 chunk 数量；报告/产物中不再截断原文，只通过数量做上限控制。 |
 | `DEEPSEARCH_TOP_TRIPLES` | `30` | DeepSearch 证据中最多保留的图三元组数量。 |
 | `DEEPSEARCH_TOP_SEED_ENTITIES` | `15` | DeepSearch 证据中最多保留的种子实体数量。 |
 | `DEEPSEARCH_MAX_IMAGE_INPUTS` | `6` | 当模型支持多模态输入时，DeepSearch 报告生成阶段允许附带的本地图片最大数量（MinerU 输出的图片资产）。设置为 `0`（或任意负数）表示解除限制。 |
@@ -234,8 +227,7 @@ Benchmark/实验模式：
 | `DEEPSEARCH_MAX_REASONING_STEPS` | `32` | DeepSearch payload 中最多保留的 reasoning steps 数量。 |
 | `DEEPSEARCH_MAX_STAGE_HISTORY` | `10` | DeepSearch payload 中最多保留的 stage_history 条数。 |
 | `DEEPSEARCH_MAX_TOOL_METADATA` | `5` | DeepSearch payload 中最多保留的 tool_results 条数。 |
-| `DEEPSEARCH_WEAVER_EVIDENCE_PREVIEW_CHARS` | `180` | DeepSearch Weaver trace 渲染时的证据预览字符上限。 |
-| `DEEPSEARCH_WEAVER_EVIDENCE_SAMPLE_COUNT` | `3` | DeepSearch Weaver trace 渲染时展示的证据样本数量。 |
+| `DEEPSEARCH_WEAVER_EVIDENCE_SAMPLE_COUNT` | `3` | DeepSearch Weaver trace 渲染时的证据采样数量（不截断文本，仅做采样）。 |
 | `DEEPSEARCH_GRAPH_EXPORT_MAX_EDGES` | `2000` | DeepSearch 子图可视化导出 edges 上限（Neo4j exporter）。 |
 | `KNOWLEDGE_GRAPH_EXPORT_MAX_NODES` | `1000` | `/knowledge/graph/export*` 的 max_nodes 上限，用于防止导出过大导致资源消耗过高。 |
 | `KNOWLEDGE_GRAPH_EXPORT_MAX_EDGES` | `5000` | `/knowledge/graph/export*` 的 max_edges 上限，用于防止导出过大导致资源消耗过高。 |
@@ -334,7 +326,7 @@ Benchmark/实验模式：
 | `MQ_TASK_RUN_TTL_SECONDS` | `86400` | TaskRun KV 的 TTL（秒）。 |
 | `MQ_PROGRESS_TTL_SECONDS` | `86400` | 进度流（per-run stream/seq_map 等）的 TTL（秒）。 |
 | `MQ_RESULT_TTL_SECONDS` | `86400` | 结果 key 的 TTL（秒）。 |
-| `MQ_RESULT_MAX_INLINE_BYTES` | `262144` | 结果 JSON 存入 Redis 的最大字节数；超过后自动外置存储（local/MinIO），Redis 仅存引用 envelope（`0` 表示禁用外置）。 |
+| `MQ_RESULT_MAX_INLINE_BYTES` | `262144` | Redis 内联存储的最大 JSON 字节数；超过后自动外置存储（local/MinIO），Redis 仅存引用 envelope（`0` 表示禁用外置）。该限制同时作用于任务结果与超大 progress/trace payload。 |
 | `MQ_RESULT_STORE` | `local` | 结果外置存储后端：`local` 或 `minio`。 |
 | `MQ_RESULT_LOCAL_DIR` | `local/mq_results` | `local` 外置结果的基础目录。 |
 | `MQ_RESULT_MINIO_ENDPOINT` | _(空)_ | `minio` 外置结果的 MinIO endpoint（TODO：尚未实现）。 |
@@ -407,7 +399,6 @@ Benchmark/实验模式：
 | `DEEPSEARCH_TOOL_MCP_TOOLS` | _(空)_ | MCP 工具白名单（逗号分隔）；设置为 `__all__` 可暴露全部内建工具。 |
 | `DEEPSEARCH_ALLOW_SEMANTIC_CHANNEL` | `true` | 是否启用语义通道。 |
 | `DEEPSEARCH_CHAIN_DEPTH` | `4` | 图遍历层数。 |
-| `DEEPSEARCH_TOOL_CONTEXT_MAX_EVIDENCES` | `5` | 工具调用时传入的 `context_evidences` 最大条数（recency 保留最近 K 条，防止 context 爆炸）。 |
 | `DEEPSEARCH_TOOL_CONTEXT_MAX_CHARS` | `800` | 工具调用时每条 evidence 的最大字符数（超出会截断）。 |
 | `DEEPSEARCH_MCP_SERVER_URI` | _(空)_ | 远程 MCP 服务地址。 |
 | `DEEPSEARCH_MCP_API_KEY` | _(空)_ | MCP 远程访问 Key。 |
@@ -460,12 +451,16 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `VLMOCR_OUTPUT_DIR` | _(空)_ | 可选：VLM OCR 输出目录覆盖。 |
 | `MINERU_SERVER_URL` | _(空)_ | 当 `PARSER_PARSE_MODE=mineru` 时必填：MinerU 服务地址（例如 `http://127.0.0.1:8899`）。 |
 | `MINERU_HEALTHCHECK_TIMEOUT_S` | `2` | 当 `PARSER_PARSE_MODE=mineru` 时，启动/索引会对 `GET $MINERU_SERVER_URL/health` 做健康检查；该变量控制超时秒数。 |
-| `MINERU_FALLBACK_TO_NATIVE_ON_FAILURE` | `true` | 当 `PARSER_PARSE_MODE=mineru` 时，如果 MinerU 解析失败（例如服务未启动）则回退到 native 的 PDF 文本抽取；回退信息会写入解析结果元数据（`metadata.parser_fallback`）。 |
+| `MINERU_FALLBACK_TO_NATIVE_ON_FAILURE` | `false` | 当 `PARSER_PARSE_MODE=mineru` 时，如果 MinerU 解析失败（例如服务未启动）则回退到 native 的 PDF 文本抽取；回退信息会写入解析结果元数据（`metadata.parser_fallback`）。 |
+| `MINERU_REUSE_CACHE` | `1` | 重新入库时，如果 `PARSER_OUTPUT_DIR/mineru/<file_id>/` 下已有 MinerU markdown，则复用缓存（跳过远程 MinerU 调用）。 |
 | `MINERU_TIMEOUT_S` | `900` | 可选：远程 MinerU 解析/下载的 HTTP 超时（秒）。 |
 | `MINERU_POLL_INTERVAL_S` | `5` | 可选：MinerU 异步解析状态的轮询间隔（秒）。 |
 | `MINERU_POLL_TIMEOUT_S` | `0` | 可选：等待 MinerU 解析完成的最大秒数；`0` 或负数表示不限制。 |
 | `MINERU_START_PAGE` | `0` | 可选：MinerU 解析起始页（0-based）。 |
 | `MINERU_END_PAGE` | _(空)_ | 可选：MinerU 解析结束页（0-based，包含该页）。为空表示解析到末尾。 |
+| `MINERU_HTTP_MAX_RETRIES` | `3` | 可选：MinerU HTTP 短暂错误重试次数（设为 `0` 表示不重试）。 |
+| `MINERU_HTTP_RETRY_BACKOFF_S` | `1.0` | 可选：MinerU HTTP 重试的基础退避秒数。 |
+| `MINERU_HTTP_RETRY_MAX_BACKOFF_S` | `8.0` | 可选：MinerU HTTP 重试的最大退避秒数。 |
 | `TOKEN_CHUNK_SIZE` | `1000` | `token_chunker` 的 chunk size（同时用于 `semantic_unit_chunker.fallback_chunker_config`）。 |
 | `TOKEN_CHUNK_OVERLAP` | `100` | `token_chunker` 的 overlap（同时用于 `semantic_unit_chunker.fallback_chunker_config`）。 |
 | `TOKEN_URL_ATOMIC_CONTEXT_TOKENS` | `10` | URL 不可分割保护：URL 前后保留的 token 数（`token_chunker`/`semantic_unit_chunker` fallback 生效）。 |
