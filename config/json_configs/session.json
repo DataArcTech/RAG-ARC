@@ -1,14 +1,1 @@
-{
-    "type": "chat_session",
-    "session_storage_config": {
-        "type": "chat_session_storage",
-        "relational_db_config": {
-            "type": "postgresql",
-            "host": "${POSTGRES_HOST}",
-            "port": "${POSTGRES_PORT}",
-            "database": "${POSTGRES_DB}",
-            "user": "${POSTGRES_USER}",
-            "password": "${POSTGRES_PASSWORD}"
-        }
-    }
-}
+{"type":"chat_session","session_storage_config":{"type":"chat_session_storage","cache_db_config":{"type":"redis","host":"${REDIS_HOST}","port":"${REDIS_PORT}","db":"${REDIS_DB}","password":"${REDIS_PASSWORD}"},"cache_ttl":604800,"relational_db_config":{"type":"postgresql","host":"${POSTGRES_HOST}","port":"${POSTGRES_PORT}","database":"${POSTGRES_DB}","user":"${POSTGRES_USER}","password":"${POSTGRES_PASSWORD}"}}}
