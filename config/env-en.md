@@ -138,6 +138,9 @@ These vars control when DeepSearch attempts a single query rewrite (via the retr
 | `CHUNK_STORE_BASE_PATH` | `./data/chunk_store` | Chunk store path (relative paths are resolved against the repo root). |
 | `LOCAL_BLOB_STORE_BASE_PATH` | `./data/files` | Legacy alias for `LOCAL_FILE_STORAGE_PATH` (only used when a JSON `base_path` is not provided). |
 | `FAISS_INDEX_PATH` | `./data/unified_faiss_index` | Unified FAISS index directory. |
+| `FAISS_TWO_STAGE_ENABLED` | `false` | Enable two-stage retrieval for FAISS HNSW: ANN prefetch then exact rescoring on candidates. Applies only when the FAISS index uses `index_type=hnsw`. |
+| `FAISS_TWO_STAGE_PREFETCH_K` | `200` | Candidate pool size for two-stage HNSW prefetch. If smaller than `k`, `k` is used. |
+| `FAISS_MIN_TRAIN_SIZE` | `100` | IVF training guard (only relevant when `index_type=ivf`). Minimum number of vectors required to train IVF; also must be >= `nlist`. |
 | `BM25_INDEX_PATH` | `./data/unified_bm25_index` | Unified BM25 index directory. |
 | `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | Graph index / embedding cache directory (Neo4j HippoRAG). |
 | `GRAPH_INDEX_NAME` | `index` | Graph index file name prefix. |
@@ -162,6 +165,9 @@ Notes:
 | `PAGEINDEX_ENABLED` | `true` | Enable PageIndex section tree build and retrieval filtering (offline ingest). |
 | `SECTION_INDEX_ENABLED` | `true` | Enable section index ingestion. |
 | `SECTION_FAISS_INDEX_PATH` | `./data/section_faiss_index` | Section FAISS index path (separate from main FAISS). |
+| `SECTION_FAISS_INDEX_TYPE` | `flat` | FAISS `index_type` for the PageIndex **section** index only (does not affect `FAISS_INDEX_PATH`). Allowed: `flat` / `ivf` / `hnsw`. |
+| `SECTION_FAISS_TWO_STAGE_ENABLED` | _(empty/inherit)_ | Override `two_stage_enabled` for the PageIndex **section** FAISS index only. Applies only when the section index uses `index_type=hnsw`. Allowed: `true` / `false`. |
+| `SECTION_FAISS_TWO_STAGE_PREFETCH_K` | _(empty/inherit)_ | Override `two_stage_prefetch_k` for the PageIndex **section** FAISS index only. Must be >= 1. |
 | `SECTION_BM25_INDEX_PATH` | `./data/section_bm25_index` | Section BM25 index path (separate from main BM25). |
 | `SECTION_PATH_DELIMITER` | `" > "` | Delimiter used when building PageIndex section paths. |
 | `SECTION_SUMMARY_ENABLED` | `true` | Generate section summaries (used by section index). |

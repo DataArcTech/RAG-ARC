@@ -138,6 +138,9 @@ Benchmark/实验模式：
 | `CHUNK_STORE_BASE_PATH` | `./data/chunk_store` | Chunk 存储目录（相对路径按项目根目录解析）。 |
 | `LOCAL_BLOB_STORE_BASE_PATH` | `./data/files` | `LOCAL_FILE_STORAGE_PATH` 的历史别名（仅在 JSON 未提供 `base_path` 时才会使用）。 |
 | `FAISS_INDEX_PATH` | `./data/unified_faiss_index` | 统一 FAISS 索引目录。 |
+| `FAISS_TWO_STAGE_ENABLED` | `false` | 启用 FAISS HNSW 的两阶段检索：先 ANN 预召回，再对候选做 exact 重打分（稳定排序）。仅在索引 `index_type=hnsw` 时生效。 |
+| `FAISS_TWO_STAGE_PREFETCH_K` | `200` | 两阶段 HNSW 预召回候选池大小；若小于 `k`，将自动使用 `k`。 |
+| `FAISS_MIN_TRAIN_SIZE` | `100` | IVF 训练保护（仅当 `index_type=ivf` 相关）。训练 IVF 至少需要这么多向量，同时也必须 >= `nlist`。 |
 | `BM25_INDEX_PATH` | `./data/unified_bm25_index` | 统一 BM25 索引目录。 |
 | `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | 图索引/向量缓存落盘目录（Neo4j HippoRAG）。 |
 | `GRAPH_INDEX_NAME` | `index` | 图索引文件前缀名。 |
@@ -162,6 +165,9 @@ Benchmark/实验模式：
 | `PAGEINDEX_ENABLED` | `true` | 是否启用 PageIndex 章节树构建与检索过滤（离线 ingest 生成）。 |
 | `SECTION_INDEX_ENABLED` | `true` | 是否启用章节索引（section index）入库。 |
 | `SECTION_FAISS_INDEX_PATH` | `./data/section_faiss_index` | 章节向量索引目录（独立于主 FAISS）。 |
+| `SECTION_FAISS_INDEX_TYPE` | `flat` | PageIndex **章节向量索引**的 FAISS `index_type`（不影响主 `FAISS_INDEX_PATH`）。支持：`flat` / `ivf` / `hnsw`。 |
+| `SECTION_FAISS_TWO_STAGE_ENABLED` | _(空/继承)_ | 覆盖 PageIndex **章节向量索引**的 `two_stage_enabled`（仅章节索引生效）。仅在章节索引使用 `index_type=hnsw` 时生效。支持：`true` / `false`。 |
+| `SECTION_FAISS_TWO_STAGE_PREFETCH_K` | _(空/继承)_ | 覆盖 PageIndex **章节向量索引**的 `two_stage_prefetch_k`（仅章节索引生效）。要求 >= 1。 |
 | `SECTION_BM25_INDEX_PATH` | `./data/section_bm25_index` | 章节 BM25 索引目录（独立于主 BM25）。 |
 | `SECTION_PATH_DELIMITER` | `" > "` | PageIndex 章节路径的分隔符。 |
 | `SECTION_SUMMARY_ENABLED` | `true` | 是否生成章节摘要（用于 section index）。 |
