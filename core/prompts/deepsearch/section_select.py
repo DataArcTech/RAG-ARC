@@ -41,7 +41,8 @@ SECTION_SELECT_CONSUMER_USER_PROMPT = (
     "Instructions:\n"
     "- Choose primary sections that directly answer the question.\n"
     "- Choose supplementary sections that provide required context, definitions, tables, or images.\n"
-    "- Use only the metadata provided (title/path/summary/node_types/page range) for routing.\n"
+    "- Use only the metadata provided for routing (title/path/summary/node_types/page range, plus optional signals/queue_meta).\n"
+    "- If signals/queue_meta are present, treat them as navigation-only relevance hints (higher is usually better); they are NOT evidence.\n"
     "- Set enough_info=true only when you can already pick the pages/sections to read via read.pages.\n"
     "- Output JSON with keys: primary_section_ids (array), supplementary_section_ids (array), enough_info (boolean), explanation (string).\n"
 )

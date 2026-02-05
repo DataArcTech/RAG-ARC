@@ -229,6 +229,14 @@ SECTION_SELECT_GRAPH_ENTITY_MATCH_ENABLE_CONTAINS = True
 SECTION_SELECT_GRAPH_ENTITY_MATCH_PER_TERM_ENTITY_LIMIT = 8
 SECTION_SELECT_GRAPH_ENTITY_MATCH_MAX_TERMS = 6
 
+# Light bridge (online / deterministic): use entity canonicalization + embedding-nearest neighbors
+# to expand query terms into candidate entities, then project them back to file-scoped sections.
+# Output is navigation-only (never citeable evidence).
+SECTION_SELECT_GRAPH_BRIDGE_ENABLED = True
+SECTION_SELECT_GRAPH_BRIDGE_MAX_TERMS = 4
+SECTION_SELECT_GRAPH_BRIDGE_CANDIDATES_PER_TERM = 6
+SECTION_SELECT_GRAPH_BRIDGE_MAX_ENTITY_IDS = 32
+
 # When query entities fail to match (aliases/casing/language drift), optionally fall back to adapter retrieval
 # (embedding/PPR-informed) to collect additional chunk signals scoped to the current file.
 SECTION_SELECT_GRAPH_RETRIEVAL_FALLBACK_ENABLED = True

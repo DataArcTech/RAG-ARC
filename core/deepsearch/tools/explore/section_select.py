@@ -11,6 +11,7 @@ from core.deepsearch.utils.evidence_ids import derived_chunk_id
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
 from core.deepsearch.utils.section_tree import build_section_tree, fetch_section_nodes, normalize_file_id
 from core.deepsearch.utils.file_scope import FileScope
+from core.deepsearch.entity_resolution import build_default_entity_resolver
 from core.graph_adapter.concurrency import adapter_locked
 from core.graph_adapter.cypher import adapter_supports_cypher
 from core.prompts.deepsearch import SEARCH_ENTITY_EXTRACT_PROMPT_EN
@@ -281,6 +282,9 @@ class SectionSelectTool(_SearchToolBase, _FaissChannel, _Bm25Channel, GraphTool)
             file_id=file_id,
             section_ids=candidate_ids,
         )
+        # Attach multi-signal hints onto section_map so downstream LLM steps (consumer) can see
+        # *why* a node is in the queue (graph/index/value signals). These are navigation-only hints.
+        self._attach_candidate_signals(section_map, candidates)
         for cand in candidates:
             if cand.summary:
                 section_map[cand.section_id]["summary"] = cand.summary
@@ -301,6 +305,8 @@ class SectionSelectTool(_SearchToolBase, _FaissChannel, _Bm25Channel, GraphTool)
             graph_candidates=graph_candidates,
             section_map=section_map,
         )
+        # Persist queue source/scores for consumer routing decisions.
+        self._attach_queue_meta(section_map, queue_items)
         if queue_ids:
             entity_hints = await self._collect_entity_hints(
                 request=request,
@@ -700,6 +706,21 @@ class SectionSelectTool(_SearchToolBase, _FaissChannel, _Bm25Channel, GraphTool)
                 )
             )
 
+        # Light bridge (online/deterministic):
+        # Expand query terms via alias/canonicalization and embedding-nearest neighbors (entity FAISS),
+        # then project expanded entities back to file-scoped sections. This is a navigation-only signal.
+        bridge_diag: Dict[str, Any] = {}
+        if bool(getattr(tool_defaults, "SECTION_SELECT_GRAPH_BRIDGE_ENABLED", True)):
+            bridge_candidates, bridge_diag = await self._graph_bridge_candidates(
+                request=request,
+                file_id=file_id,
+                section_map=section_map,
+                raw_terms=list(terms),
+                limit_sections=limit_sections,
+            )
+            candidates.extend(bridge_candidates)
+        diagnostics["bridge"] = bridge_diag
+
         candidates.sort(key=lambda c: c.score, reverse=True)
         diagnostics["candidate_count"] = len(candidates)
         if candidates:
@@ -799,6 +820,159 @@ class SectionSelectTool(_SearchToolBase, _FaissChannel, _Bm25Channel, GraphTool)
             "section_hits": len(fallback_candidates),
         }
         return fallback_candidates[:limit_sections], diagnostics
+
+    async def _graph_bridge_candidates(
+        self,
+        *,
+        request: ToolRunRequest,
+        file_id: str,
+        section_map: Dict[str, Dict[str, Any]],
+        raw_terms: Sequence[str],
+        limit_sections: int,
+    ) -> tuple[List[_CandidateSection], Dict[str, Any]]:
+        adapter = request.adapter
+        if adapter is None or not adapter_supports_cypher(adapter):
+            return [], {"enabled": True, "reason": "cypher_unavailable"}
+        access_scope = request.access_scope
+        if access_scope is None or not getattr(access_scope, "scope_id", None):
+            return [], {"enabled": True, "reason": "owner_scope_missing"}
+
+        max_terms = int(getattr(tool_defaults, "SECTION_SELECT_GRAPH_BRIDGE_MAX_TERMS", 4))
+        max_terms = max(0, min(max_terms, 32))
+        term_list = [str(t or "").strip() for t in raw_terms if str(t or "").strip()]
+        if max_terms > 0:
+            term_list = term_list[:max_terms]
+        if not term_list:
+            return [], {"enabled": True, "reason": "no_terms"}
+
+        per_term = int(getattr(tool_defaults, "SECTION_SELECT_GRAPH_BRIDGE_CANDIDATES_PER_TERM", 6))
+        per_term = max(1, min(per_term, 50))
+        max_entity_ids = int(getattr(tool_defaults, "SECTION_SELECT_GRAPH_BRIDGE_MAX_ENTITY_IDS", 32))
+        max_entity_ids = max(1, min(max_entity_ids, 200))
+
+        resolver = build_default_entity_resolver(candidate_limit=max(12, per_term))
+
+        expanded: Dict[str, Dict[str, Any]] = {}
+        diag_terms: List[Dict[str, Any]] = []
+        for term in term_list:
+            try:
+                res = await resolver.resolve(adapter=adapter, access_scope=access_scope, raw_entity=term, entity_type_hint="")
+            except Exception as exc:  # noqa: BLE001
+                diag_terms.append({"term": term, "error": str(exc)})
+                continue
+
+            cands = list(res.candidates or [])
+            # Prefer resolved candidate if available, otherwise take top-N candidates.
+            chosen = []
+            if res.resolved_candidate is not None:
+                chosen.append(res.resolved_candidate)
+            for cand in cands:
+                if len(chosen) >= per_term:
+                    break
+                if res.resolved_candidate is not None and cand.entity_id == res.resolved_candidate.entity_id:
+                    continue
+                chosen.append(cand)
+
+            diag_terms.append(
+                {
+                    "term": term,
+                    "normalized": res.normalized,
+                    "resolved": bool(res.resolved),
+                    "chosen": [
+                        {
+                            "entity_id": c.entity_id,
+                            "entity_name": c.entity_name,
+                            "strategy": c.strategy,
+                            "score": float(c.score),
+                        }
+                        for c in chosen
+                    ],
+                }
+            )
+            for c in chosen:
+                if len(expanded) >= max_entity_ids:
+                    break
+                expanded.setdefault(
+                    c.entity_id,
+                    {
+                        "entity_id": c.entity_id,
+                        "entity_name": c.entity_name,
+                        "strategies": set(),
+                        "max_score": 0.0,
+                    },
+                )
+                expanded[c.entity_id]["strategies"].add(str(c.strategy))
+                expanded[c.entity_id]["max_score"] = max(float(expanded[c.entity_id]["max_score"]), float(c.score))
+            if len(expanded) >= max_entity_ids:
+                break
+
+        entity_ids = list(expanded.keys())
+        if not entity_ids:
+            return [], {"enabled": True, "reason": "no_expanded_entities", "terms": diag_terms}
+
+        # Project expanded entities -> file-scoped sections via mentions.
+        cypher = (
+            "UNWIND $entity_ids AS eid\n"
+            "MATCH (e:Entity {entity_id: eid})\n"
+            "WHERE COALESCE(e.owner_id, $global_owner) = $owner_id\n"
+            "MATCH (e)<-[:MENTIONS]-(c:Chunk)<-[:HAS_CHUNK]-(s:Section)\n"
+            "WHERE s.source_file_id = $file_id AND COALESCE(s.owner_id, $global_owner) = $owner_id\n"
+            "RETURN s.section_id AS section_id,\n"
+            "       count(DISTINCT c.chunk_id) AS mentions,\n"
+            "       collect(DISTINCT e.entity_name)[..$entity_name_limit] AS matched_entities\n"
+            "ORDER BY mentions DESC\n"
+            "LIMIT $limit\n"
+        )
+        params = {
+            "entity_ids": entity_ids,
+            "file_id": file_id,
+            "limit": int(max(1, int(limit_sections))),
+            "entity_name_limit": max(1, int(getattr(tool_defaults, "SECTION_SELECT_ENTITY_HINTS_MAX", 6))),
+        }
+        async with adapter_locked(adapter):
+            rows = await adapter.acypher(cypher, params, access_scope=access_scope)
+
+        out: List[_CandidateSection] = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            section_id = str(row.get("section_id") or "").strip()
+            if not section_id or section_id not in section_map:
+                continue
+            try:
+                mentions = float(row.get("mentions") or 0.0)
+            except Exception:
+                mentions = 0.0
+            matched = row.get("matched_entities") if isinstance(row.get("matched_entities"), list) else []
+            matched_entities = [str(item).strip() for item in matched if str(item or "").strip()]
+            meta = section_map.get(section_id) or {}
+            summary = None
+            if matched_entities:
+                preview = matched_entities[: max(1, int(tool_defaults.SECTION_SELECT_ENTITY_HINTS_MAX))]
+                summary = "graph_bridge_entities: " + ", ".join(preview)
+            out.append(
+                _CandidateSection(
+                    section_id=section_id,
+                    score=mentions,
+                    title=str(meta.get("section_title") or meta.get("section_path") or "").strip() or None,
+                    path=str(meta.get("section_path") or "").strip() or None,
+                    summary=summary,
+                    page_start=_coerce_int(meta.get("page_start")),
+                    page_end=_coerce_int(meta.get("page_end")),
+                    source="graph_bridge",
+                    graph_score=mentions,
+                    graph_entities=matched_entities or None,
+                )
+            )
+
+        out.sort(key=lambda c: c.score, reverse=True)
+        return out[: max(1, int(limit_sections))], {
+            "enabled": True,
+            "reason": "ok" if out else "empty_projection",
+            "terms": diag_terms,
+            "expanded_entity_ids": len(entity_ids),
+            "projected_sections": len(out),
+        }
 
     @staticmethod
     def _merge_candidates(
@@ -1015,10 +1189,65 @@ class SectionSelectTool(_SearchToolBase, _FaissChannel, _Bm25Channel, GraphTool)
                 "page_end": meta.get("page_end"),
                 "node_types": meta.get("node_types") or {},
             }
+            # Optional navigation-only hints (for selection only; NOT citeable evidence):
+            # - signals: multi-channel relevance hints (section_index/value_node_score/graph_entities)
+            # - queue_meta: how this node entered the current queue (source + scores)
+            signals = meta.get("signals")
+            if isinstance(signals, dict) and signals:
+                node["signals"] = signals
+            queue_meta = meta.get("queue_meta")
+            if isinstance(queue_meta, dict) and queue_meta:
+                node["queue_meta"] = queue_meta
             if sid in entity_hints:
                 node["entity_hints"] = entity_hints[sid]
             payload.append(node)
         return payload
+
+    @staticmethod
+    def _attach_candidate_signals(section_map: Dict[str, Dict[str, Any]], candidates: Sequence[_CandidateSection]) -> None:
+        for cand in candidates or []:
+            meta = section_map.get(cand.section_id)
+            if not isinstance(meta, dict):
+                continue
+            signals: Dict[str, Any] = dict(meta.get("signals") or {}) if isinstance(meta.get("signals"), dict) else {}
+            if cand.index_score is not None:
+                signals["index_score"] = cand.index_score
+            if cand.node_score is not None:
+                signals["node_score"] = cand.node_score
+            if cand.graph_score is not None:
+                signals["graph_score"] = cand.graph_score
+            if cand.source:
+                signals["source"] = cand.source
+            if cand.hit_count is not None:
+                signals["hit_count"] = cand.hit_count
+            if cand.chunk_count is not None:
+                signals["chunk_count"] = cand.chunk_count
+            if cand.graph_entities:
+                signals["graph_entities"] = cand.graph_entities
+            if signals:
+                meta["signals"] = signals
+
+    @staticmethod
+    def _attach_queue_meta(section_map: Dict[str, Dict[str, Any]], queue_items: Sequence[Dict[str, Any]]) -> None:
+        for item in queue_items or []:
+            if not isinstance(item, dict):
+                continue
+            sid = str(item.get("section_id") or "").strip()
+            if not sid:
+                continue
+            meta = section_map.get(sid)
+            if not isinstance(meta, dict):
+                continue
+            queue_meta: Dict[str, Any] = {}
+            source = str(item.get("source") or "").strip()
+            if source:
+                queue_meta["source"] = source
+            for key in ("index_score", "node_score", "graph_score"):
+                val = item.get(key)
+                if isinstance(val, (int, float)):
+                    queue_meta[key] = float(val)
+            if queue_meta:
+                meta["queue_meta"] = queue_meta
 
     @staticmethod
     def _parse_consumer_output(payload: Any, section_map: Dict[str, Dict[str, Any]]) -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
