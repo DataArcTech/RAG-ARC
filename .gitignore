@@ -227,3 +227,4 @@ webui/
 mineru_outputs/
 mineru_client_outputs/
 user_files/
+tmp/
