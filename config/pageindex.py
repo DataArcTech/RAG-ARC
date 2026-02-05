@@ -114,6 +114,53 @@ def section_score_weight(default: float = 0.1) -> float:
 def section_faiss_index_path(default: str = "./data/section_faiss_index") -> str:
     return str(os.getenv("SECTION_FAISS_INDEX_PATH", default))
 
+def section_faiss_index_type() -> Optional[str]:
+    """Override index_type for PageIndex section FAISS index only (default: flat)."""
+    token = str(os.getenv("SECTION_FAISS_INDEX_TYPE", "") or "").strip().lower()
+    if not token:
+        return None
+    if token in {"flat", "ivf", "hnsw"}:
+        return token
+    logger.warning("Invalid SECTION_FAISS_INDEX_TYPE=%s; expected flat/ivf/hnsw. Ignoring.", token)
+    return None
+
+def section_faiss_two_stage_enabled() -> Optional[bool]:
+    """Override two-stage retrieval for PageIndex section FAISS index only (default: inherit base FAISS config)."""
+    token = str(os.getenv("SECTION_FAISS_TWO_STAGE_ENABLED", "") or "").strip().lower()
+    if not token:
+        return None
+    if token in {"1", "true", "yes", "y", "on"}:
+        return True
+    if token in {"0", "false", "no", "n", "off"}:
+        return False
+    logger.warning(
+        "Invalid SECTION_FAISS_TWO_STAGE_ENABLED=%s; expected true/false. Ignoring.",
+        token,
+    )
+    return None
+
+
+def section_faiss_two_stage_prefetch_k() -> Optional[int]:
+    """Override two-stage prefetch_k for PageIndex section FAISS index only (default: inherit base FAISS config)."""
+    token = str(os.getenv("SECTION_FAISS_TWO_STAGE_PREFETCH_K", "") or "").strip()
+    if not token:
+        return None
+    try:
+        value = int(token)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Invalid SECTION_FAISS_TWO_STAGE_PREFETCH_K=%s; expected int. Ignoring.",
+            token,
+        )
+        return None
+    if value < 1:
+        logger.warning(
+            "Invalid SECTION_FAISS_TWO_STAGE_PREFETCH_K=%s; expected >=1. Ignoring.",
+            token,
+        )
+        return None
+    return value
+
 
 def section_bm25_index_path(default: str = "./data/section_bm25_index") -> str:
     return str(os.getenv("SECTION_BM25_INDEX_PATH", default))
@@ -244,6 +291,9 @@ __all__ = [
     "section_min_keep",
     "section_score_weight",
     "section_faiss_index_path",
+    "section_faiss_index_type",
+    "section_faiss_two_stage_enabled",
+    "section_faiss_two_stage_prefetch_k",
     "section_bm25_index_path",
     "section_level_conflict_ratio",
     "section_level_force_flat_if_uniform",

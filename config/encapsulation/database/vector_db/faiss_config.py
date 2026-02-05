@@ -19,7 +19,30 @@ class FaissVectorDBConfig(AbstractConfig):
     efConstruction: int = 40
     efSearch: int = 16
     train_size: int = 10000
+    min_train_size: int = Field(
+        default_factory=lambda: int(os.getenv("FAISS_MIN_TRAIN_SIZE", "100")),
+        description=(
+            "Minimum number of vectors required to train IVF indexes. "
+            "If you use index_type=ivf and have fewer vectors than this (or fewer than nlist), "
+            "indexing will fail-fast with a clear error."
+        ),
+    )
     normalize_L2: bool = True
+    two_stage_enabled: bool = Field(
+        default_factory=lambda: str(os.getenv("FAISS_TWO_STAGE_ENABLED", "false")).strip().lower()
+        in {"1", "true", "yes", "y", "on"},
+        description=(
+            "Enable two-stage retrieval for HNSW: ANN prefetch then exact rescoring on candidates. "
+            "Applies only when index_type=hnsw."
+        ),
+    )
+    two_stage_prefetch_k: int = Field(
+        default_factory=lambda: int(os.getenv("FAISS_TWO_STAGE_PREFETCH_K", "200")),
+        description=(
+            "Candidate pool size for two-stage retrieval (HNSW prefetch). "
+            "Must be >= k; if smaller, k is used."
+        ),
+    )
 
     embedding_text_prefix_keys: List[str] = Field(
         default_factory=list,

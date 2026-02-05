@@ -16,13 +16,30 @@ logger = logging.getLogger(__name__)
 
 
 def _clone_faiss_config(base: Optional[FaissVectorDBConfig], *, index_path: str) -> FaissVectorDBConfig:
+    section_index_type = pageindex_cfg.section_faiss_index_type()
+    section_two_stage_enabled = pageindex_cfg.section_faiss_two_stage_enabled()
+    section_two_stage_prefetch_k = pageindex_cfg.section_faiss_two_stage_prefetch_k()
+    # Default to flat for section index unless explicitly overridden.
+    effective_index_type = section_index_type or "flat"
     if base is not None:
         try:
-            return base.model_copy(update={"index_path": index_path})
+            update = {"index_path": index_path}
+            update["index_type"] = effective_index_type
+            if section_two_stage_enabled is not None:
+                update["two_stage_enabled"] = section_two_stage_enabled
+            if section_two_stage_prefetch_k is not None:
+                update["two_stage_prefetch_k"] = section_two_stage_prefetch_k
+            return base.model_copy(update=update)
         except Exception:  # noqa: BLE001
             pass
     embedding_config = OpenAIEmbeddingConfig()
-    return FaissVectorDBConfig(index_path=index_path, embedding_config=embedding_config)
+    kwargs: dict[str, Any] = {"index_path": index_path, "embedding_config": embedding_config}
+    kwargs["index_type"] = effective_index_type
+    if section_two_stage_enabled is not None:
+        kwargs["two_stage_enabled"] = section_two_stage_enabled
+    if section_two_stage_prefetch_k is not None:
+        kwargs["two_stage_prefetch_k"] = section_two_stage_prefetch_k
+    return FaissVectorDBConfig(**kwargs)
 
 
 def _clone_bm25_config(base: Optional[BM25BuilderConfig], *, index_path: str) -> BM25BuilderConfig:

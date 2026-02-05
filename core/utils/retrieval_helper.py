@@ -421,47 +421,179 @@ class RetrievalHelper:
         deleted_count = len(index.deleted_ids) if hasattr(index, 'deleted_ids') else 0
         fetch_k = min(k + deleted_count, index.index.ntotal)
 
-        # Execute search
-        with FAISS_LOCK:
-            distances, indices = index.index.search(query_vector, fetch_k)
+        def _two_stage_cfg() -> tuple[bool, Optional[int]]:
+            cfg = getattr(index, "config", None)
+            enabled = bool(getattr(cfg, "two_stage_enabled", False))
+            try:
+                prefetch = getattr(cfg, "two_stage_prefetch_k", None)
+                if prefetch is None:
+                    return enabled, None
+                prefetch_k = int(prefetch)
+                return enabled, prefetch_k if prefetch_k > 0 else None
+            except Exception:
+                return enabled, None
 
-        results = []
-        skipped_count = 0
-        for distance, idx in zip(distances[0], indices[0]):
-            if idx == -1:  # FAISS returns -1 for invalid results
-                continue
+        def _hnsw_two_stage_search(*, prefetch_k: int) -> List[Tuple[Any, float]]:
+            """
+            Two-stage retrieval for HNSW: ANN prefetch then exact rescoring on candidate vectors.
 
-            doc_id = index.index_to_docstore_id[idx]
+            Notes:
+            - Candidates are navigation-only until `read.pages` in DeepSearch; here we only improve ordering.
+            - We use FAISS reconstruct() to obtain stored (already-normalized) vectors for exact scoring.
+            """
+            # Step 1) ANN prefetch
+            with FAISS_LOCK:
+                _maybe_set_hnsw_params()
+                distances, indices = index.index.search(query_vector, prefetch_k)
 
-            # Skip soft-deleted documents
-            if hasattr(index, 'deleted_ids') and doc_id in index.deleted_ids:
-                skipped_count += 1
-                continue
+            candidate_faiss_ids: list[int] = []
+            candidate_doc_ids: list[str] = []
+            for idx in indices[0]:
+                if int(idx) == -1:
+                    continue
+                faiss_id = int(idx)
+                doc_id = index.index_to_docstore_id.get(faiss_id)
+                if not doc_id:
+                    continue
+                if hasattr(index, "deleted_ids") and doc_id in index.deleted_ids:
+                    continue
+                candidate_faiss_ids.append(faiss_id)
+                candidate_doc_ids.append(doc_id)
+                # Cap the candidate set so rescoring cost stays bounded by config.
+                if len(candidate_faiss_ids) >= prefetch_k:
+                    break
 
-            doc = index.docstore[doc_id]
-            if Chunk is not None and isinstance(doc, Chunk):
-                doc = Chunk(
-                    id=doc.id,
-                    content=doc.content,
-                    owner_id=doc.owner_id,
-                    domain=getattr(doc, "domain", None),
-                    metadata=copy.deepcopy(doc.metadata) if getattr(doc, "metadata", None) else {},
-                    graph=copy.deepcopy(doc.graph) if getattr(doc, "graph", None) else None,
-                )
+            if not candidate_faiss_ids:
+                return []
 
-            # For cosine metric, FAISS returns similarity score instead of distance
-            if metric == "cosine":
-                similarity_score = float(distance)
-            else:
-                # For other metrics, convert distance to similarity score
-                relevance_score_fn = RetrievalHelper.select_relevance_score_fn_by_metric(metric)
-                similarity_score = relevance_score_fn(float(distance))
+            # Step 2) exact rescoring (outside FAISS lock)
+            with FAISS_LOCK:
+                cand_vecs = [index.index.reconstruct(i) for i in candidate_faiss_ids]
 
-            results.append((doc, similarity_score))
+            q = query_vector[0]
+            scored: list[tuple[Any, float]] = []
+            relevance_score_fn = RetrievalHelper.select_relevance_score_fn_by_metric(metric)
+            for doc_id, vec in zip(candidate_doc_ids, cand_vecs):
+                doc = index.docstore[doc_id]
+                if Chunk is not None and isinstance(doc, Chunk):
+                    doc = Chunk(
+                        id=doc.id,
+                        content=doc.content,
+                        owner_id=doc.owner_id,
+                        domain=getattr(doc, "domain", None),
+                        metadata=copy.deepcopy(doc.metadata) if getattr(doc, "metadata", None) else {},
+                        graph=copy.deepcopy(doc.graph) if getattr(doc, "graph", None) else None,
+                    )
 
-            # Stop once we have k results (after filtering deleted documents)
-            if len(results) >= k:
-                break
+                v = np.asarray(vec, dtype=np.float32)
+                if metric == "cosine":
+                    # Vectors are normalized at indexing time for cosine; dot is exact cosine.
+                    sim = float(np.dot(q, v))
+                elif metric == "ip":
+                    sim = float(np.dot(q, v))
+                else:
+                    # l2: compute exact distance then convert to similarity score.
+                    dist = float(np.linalg.norm(q - v))
+                    sim = float(relevance_score_fn(dist))
+                scored.append((doc, sim))
+
+            scored.sort(key=lambda x: x[1], reverse=True)
+            return scored
+
+        def _maybe_set_hnsw_params() -> None:
+            # Allow configuring efSearch without hardcoding. Safe no-op for non-HNSW indexes.
+            try:
+                import faiss  # local import for test isolation
+
+                if isinstance(index.index, faiss.IndexHNSWFlat):
+                    ef_search = getattr(getattr(index, "config", None), "efSearch", None)
+                    if ef_search is not None:
+                        try:
+                            index.index.hnsw.efSearch = int(ef_search)
+                        except Exception:
+                            pass
+            except Exception:
+                return
+
+        # Execute search (optionally via two-stage HNSW).
+        two_stage_enabled, two_stage_prefetch = _two_stage_cfg()
+        try:
+            use_two_stage = bool(two_stage_enabled) and isinstance(index.index, faiss.IndexHNSWFlat)
+        except Exception:
+            use_two_stage = False
+
+        if use_two_stage:
+            # Prefer config prefetch_k; ensure it's >= requested k.
+            base_prefetch = int(two_stage_prefetch or 0)
+            desired_prefetch = max(k, base_prefetch) if base_prefetch > 0 else k
+            desired_prefetch = min(desired_prefetch + deleted_count, index.index.ntotal)
+            results = _hnsw_two_stage_search(prefetch_k=desired_prefetch)
+        else:
+            with FAISS_LOCK:
+                _maybe_set_hnsw_params()
+                distances, indices = index.index.search(query_vector, fetch_k)
+            results = []
+
+        if not use_two_stage:
+            skipped_count = 0
+            for distance, idx in zip(distances[0], indices[0]):
+                if idx == -1:  # FAISS returns -1 for invalid results
+                    continue
+
+                doc_id = index.index_to_docstore_id[idx]
+
+                # Skip soft-deleted documents
+                if hasattr(index, 'deleted_ids') and doc_id in index.deleted_ids:
+                    skipped_count += 1
+                    continue
+
+                doc = index.docstore[doc_id]
+                if Chunk is not None and isinstance(doc, Chunk):
+                    doc = Chunk(
+                        id=doc.id,
+                        content=doc.content,
+                        owner_id=doc.owner_id,
+                        domain=getattr(doc, "domain", None),
+                        metadata=copy.deepcopy(doc.metadata) if getattr(doc, "metadata", None) else {},
+                        graph=copy.deepcopy(doc.graph) if getattr(doc, "graph", None) else None,
+                    )
+
+                def _coerce_similarity(distance_value: float) -> float:
+                    """
+                    Convert FAISS distance into a similarity score in a metric-aware way.
+
+                    Notes on HNSW:
+                    - FAISS IndexHNSWFlat often returns L2^2 distances even when metric_type is set.
+                    - In some builds, those L2^2 distances are returned with a negative sign when
+                      the index was configured as "inner product".
+                    - For unit-normalized vectors, cosine similarity relates to squared L2:
+                        L2^2 = 2 - 2*cos  =>  cos = 1 - L2^2/2
+                      If FAISS returns -L2^2, then: cos = 1 + distance/2
+                    """
+                    if metric == "cosine":
+                        try:
+                            import faiss
+
+                            if isinstance(index.index, faiss.IndexHNSWFlat):
+                                # Interpret HNSW distances as ±L2^2 on unit vectors.
+                                if distance_value >= 0:
+                                    return 1.0 - float(distance_value) / 2.0
+                                return 1.0 + float(distance_value) / 2.0
+                        except Exception:
+                            pass
+                        return float(distance_value)
+
+                    # For other metrics, convert distance to similarity score (best-effort).
+                    relevance_score_fn = RetrievalHelper.select_relevance_score_fn_by_metric(metric)
+                    return relevance_score_fn(float(distance_value))
+
+                similarity_score = _coerce_similarity(float(distance))
+
+                results.append((doc, similarity_score))
+
+                # Stop once we have k results (after filtering deleted documents)
+                if len(results) >= k:
+                    break
 
 
         # Sort by similarity score in descending order
@@ -478,6 +610,10 @@ class RetrievalHelper:
                 logger.warning(
                     f"Using score threshold {score_threshold} did not retrieve any relevant chunks"
                 )
+
+        # Ensure we respect the requested k even in two-stage mode.
+        if len(results) > k:
+            results = results[:k]
 
         return results
 

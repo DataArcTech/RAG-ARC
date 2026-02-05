@@ -284,16 +284,31 @@ class FaissVectorDB(VectorDB):
         # Use saved values if available (from pkl), otherwise use config
         index_type = getattr(self, 'saved_index_type', getattr(self.config, 'index_type', 'flat'))
         metric = getattr(self, 'saved_metric', getattr(self.config, 'metric', 'cosine'))
+        # Index params (no hardcoding; fall back to legacy defaults when missing).
+        nlist = int(getattr(self.config, "nlist", 100) or 100)
+        m = int(getattr(self.config, "m", 32) or 32)
+        ef_construction = int(getattr(self.config, "efConstruction", 40) or 40)
+        ef_search = int(getattr(self.config, "efSearch", 16) or 16)
         
         if metric == "cosine":
             if index_type == "flat":
                 index = faiss.IndexFlatIP(dimension)
             elif index_type == "ivf":
                 quantizer = faiss.IndexFlatIP(dimension)
-                index = faiss.IndexIVFFlat(quantizer, dimension, 100)
+                index = faiss.IndexIVFFlat(quantizer, dimension, nlist)
             elif index_type == "hnsw":
-                index = faiss.IndexHNSWFlat(dimension, 32)
+                index = faiss.IndexHNSWFlat(dimension, m)
+                # NOTE: IndexHNSWFlat behaves like an L2-based structure internally in FAISS.
+                # We still set metric_type for better compatibility with downstream tooling.
                 index.metric_type = faiss.METRIC_INNER_PRODUCT
+                try:
+                    index.hnsw.efConstruction = ef_construction
+                except Exception:
+                    pass
+                try:
+                    index.hnsw.efSearch = ef_search
+                except Exception:
+                    pass
             else:
                 raise ValueError(f"Unsupported index type: {index_type}")
         elif metric == "l2":
@@ -301,9 +316,17 @@ class FaissVectorDB(VectorDB):
                 index = faiss.IndexFlatL2(dimension)
             elif index_type == "ivf":
                 quantizer = faiss.IndexFlatL2(dimension)
-                index = faiss.IndexIVFFlat(quantizer, dimension, 100)
+                index = faiss.IndexIVFFlat(quantizer, dimension, nlist)
             elif index_type == "hnsw":
-                index = faiss.IndexHNSWFlat(dimension, 32)
+                index = faiss.IndexHNSWFlat(dimension, m)
+                try:
+                    index.hnsw.efConstruction = ef_construction
+                except Exception:
+                    pass
+                try:
+                    index.hnsw.efSearch = ef_search
+                except Exception:
+                    pass
             else:
                 raise ValueError(f"Unsupported index type: {index_type}")
         elif metric == "ip":
@@ -311,10 +334,18 @@ class FaissVectorDB(VectorDB):
                 index = faiss.IndexFlatIP(dimension)
             elif index_type == "ivf":
                 quantizer = faiss.IndexFlatIP(dimension)
-                index = faiss.IndexIVFFlat(quantizer, dimension, 100)
+                index = faiss.IndexIVFFlat(quantizer, dimension, nlist)
             elif index_type == "hnsw":
-                index = faiss.IndexHNSWFlat(dimension, 32)
+                index = faiss.IndexHNSWFlat(dimension, m)
                 index.metric_type = faiss.METRIC_INNER_PRODUCT
+                try:
+                    index.hnsw.efConstruction = ef_construction
+                except Exception:
+                    pass
+                try:
+                    index.hnsw.efSearch = ef_search
+                except Exception:
+                    pass
             else:
                 raise ValueError(f"Unsupported index type: {index_type}")
         else:
@@ -423,9 +454,25 @@ class FaissVectorDB(VectorDB):
             if (
                 hasattr(self.index, "is_trained")
                 and not self.index.is_trained
-                and embeddings_np.shape[0] >= 100
             ):
-                self.index.train(embeddings_np)
+                # IVF requires training before adding vectors. Avoid hardcoded thresholds:
+                # use config-driven guards (min_train_size + nlist) and a bounded train sample size.
+                try:
+                    n_total = int(embeddings_np.shape[0])
+                except Exception:
+                    n_total = 0
+                nlist = int(getattr(self.config, "nlist", 100) or 100)
+                min_train_size = int(getattr(self.config, "min_train_size", 100) or 100)
+                required = max(1, nlist, min_train_size)
+                if n_total < required:
+                    raise RuntimeError(
+                        "IVF index requires training but has insufficient vectors: "
+                        f"got={n_total}, required>={required} (nlist={nlist}, min_train_size={min_train_size}). "
+                        "Add more chunks, or switch index_type to flat/hnsw, or lower nlist/min_train_size."
+                    )
+                train_size = int(getattr(self.config, "train_size", n_total) or n_total)
+                train_n = min(n_total, max(required, train_size))
+                self.index.train(embeddings_np[:train_n])
 
             # Get current index size
             start_index = self.index.ntotal

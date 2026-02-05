@@ -25,10 +25,21 @@ def _coerce_file_id(meta: Any) -> Optional[str]:
 
 
 def _build_dense_retriever(index_path: str) -> DenseRetriever:
-    faiss_cfg = FaissVectorDBConfig(
-        index_path=index_path,
-        embedding_config=OpenAIEmbeddingConfig(),
-    )
+    index_type_override = pageindex_cfg.section_faiss_index_type()
+    two_stage_override = pageindex_cfg.section_faiss_two_stage_enabled()
+    prefetch_k_override = pageindex_cfg.section_faiss_two_stage_prefetch_k()
+    kwargs: dict[str, Any] = {
+        "index_path": index_path,
+        # Default: flat for section index (unless explicitly overridden).
+        "index_type": index_type_override or "flat",
+        "embedding_config": OpenAIEmbeddingConfig(),
+    }
+    # Optional overrides for section-only behavior. If unset, inherit from base FAISS config/env defaults.
+    if two_stage_override is not None:
+        kwargs["two_stage_enabled"] = two_stage_override
+    if prefetch_k_override is not None:
+        kwargs["two_stage_prefetch_k"] = prefetch_k_override
+    faiss_cfg = FaissVectorDBConfig(**kwargs)
     retriever_cfg = DenseRetrieverConfig(index_config=faiss_cfg)
     return retriever_cfg.build()
 
