@@ -4,7 +4,6 @@ import os
 import time
 import threading
 import contextvars
-from datetime import datetime
 from typing import Annotated, Any, Dict, List, Optional
 from fastapi import (
     APIRouter,
@@ -12,13 +11,11 @@ from fastapi import (
     HTTPException,
     status,
     Query,
-    WebSocket,
 )
-from fastapi.websockets import WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from api.routers.auth import get_current_user, ws_get_current_user, validate_user_session
+from api.routers.auth import get_current_user
 from asgi_correlation_id import correlation_id
 from api.sse import (
     delta_envelope,
@@ -41,11 +38,10 @@ from framework.thread_pool import get_thread_pool
 from framework.register import Register
 import uuid
 import logging
-from core.utils.owner_guard import is_admin_owner, get_admin_owner_id
+from core.utils.owner_guard import is_admin_owner
 from api.routers.rag_inference_handlers import (
     generate_title_via_llm,
     get_account_handler,
-    get_default_owner_id,
     get_message_handler,
     get_rag_inference_handler,
     get_session_handler,
@@ -53,11 +49,7 @@ from api.routers.rag_inference_handlers import (
 from api.routers.rag_inference_models import (
     GraphOverviewResponse,
     StreamChatRequest,
-    build_stream_chat_payload,
 )
-from config.output_limits import CHAT_TOP_CHUNKS
-from core.presentation.evidence import build_chat_evidence
-from encapsulation.data_model.orm_models import ChatMessage
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -391,198 +383,6 @@ async def stream_chat_sse_get(
         enable_web_search=enable_web_search,
     )
     return await stream_chat_sse(session_id=session_id, request=request, current_user=current_user)
-
-
-@router.websocket("/stream_chat/{session_id}")
-async def stream_chat_ws(
-    websocket: WebSocket,
-    session_id: uuid.UUID,
-    current_user: Annotated[User | None, Depends(ws_get_current_user)],
-):
-    await websocket.accept()
-    if current_user is None:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
-
-    session = await get_thread_pool().run_blocking(get_session_handler().get_session, session_id)
-    if session is None or not validate_user_session(session, current_user):
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
-
-    message_handler = get_message_handler()
-    rag_inference_handler = get_rag_inference_handler()
-
-    try:
-        while True:
-            message_text = await websocket.receive_text()
-            return_subgraph = False
-            target_owner_id: uuid.UUID | None = None
-            include_all_owners = False
-            include_evidence = False
-            enable_web_search = False
-            query = message_text
-
-            try:
-                payload = json.loads(message_text)
-                if isinstance(payload, dict):
-                    query = payload.get("query") or payload.get("message") or query
-                    return_subgraph = bool(payload.get("return_subgraph", False))
-                    include_all_owners = bool(payload.get("include_all_owners", False))
-                    include_evidence = bool(payload.get("include_evidence", False))
-                    enable_web_search = bool(payload.get("enable_web_search", False))
-                    if payload.get("target_owner_id"):
-                        target_owner_id = uuid.UUID(str(payload["target_owner_id"]))
-            except Exception:  # noqa: BLE001
-                pass
-
-            # Web search is controlled by the frontend flag (enable_web_search).
-            logger.info("Web search flag: enable_web_search=%s", enable_web_search)
-
-            # Guard: only livingKB users (type=0) may request subgraph/evidence generation.
-            if return_subgraph or include_evidence:
-                user_type = getattr(current_user, "type", 0)
-                if user_type != 0:
-                    await websocket.close(
-                        code=status.WS_1008_POLICY_VIOLATION,
-                        reason="Only livingKB users (type=0) can request subgraph generation"
-                    )
-                    return
-
-            effective_owner: uuid.UUID | None = get_default_owner_id(current_user)
-            if include_all_owners:
-                if not is_admin_owner(current_user.id):
-                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-                    return
-                admin_owner = get_admin_owner_id()
-                if admin_owner is None:
-                    await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
-                    return
-                effective_owner = uuid.UUID(admin_owner)
-            elif target_owner_id is not None:
-                if not is_admin_owner(current_user.id):
-                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-                    return
-                effective_owner = target_owner_id
-
-            user_message = ChatMessage(
-                session_id=session_id,
-                content={"role": "user", "content": query},
-                created_at=datetime.now(),
-            )
-            await get_thread_pool().run_blocking(message_handler.create_message, user_message)
-            history_messages = await get_thread_pool().run_blocking(
-                message_handler.list_messages_by_session,
-                session_id,
-            )
-            # Exclude the current user message from history_text; it will be passed as `query`.
-            trimmed = list(history_messages or [])
-            try:
-                if trimmed:
-                    last = trimmed[-1]
-                    last_role = (last.content or {}).get("role")
-                    last_content = (last.content or {}).get("content")
-                    if last_role == "user" and str(last_content or "").strip() == str(query or "").strip():
-                        trimmed = trimmed[:-1]
-            except Exception:  # noqa: BLE001
-                pass
-            history_text = "\n".join(
-                f"{msg.content['role']}: {msg.content['content']}" for msg in trimmed
-            )
-
-            return_subgraph_flag = return_subgraph or include_evidence
-            # Backward compatible dispatch: older handlers accept (history_text, owner_id, ...).
-            import inspect
-
-            sig = inspect.signature(rag_inference_handler.chat_async)
-            params = set(sig.parameters.keys())
-            if "query" in params:
-                result = await rag_inference_handler.chat_async(
-                    query,
-                    owner_id=effective_owner,
-                    return_subgraph=return_subgraph_flag,
-                    history_text=history_text,
-                    current_user_query=query,
-                    enable_web_search=enable_web_search,
-                    session_id=session_id,
-                )
-            else:
-                full_history_text = "\n".join(
-                    f"{msg.content['role']}: {msg.content['content']}" for msg in (history_messages or [])
-                )
-                result = await rag_inference_handler.chat_async(
-                    full_history_text,
-                    owner_id=effective_owner,
-                    return_subgraph=return_subgraph_flag,
-                )
-
-            raw_llm_response = None
-            raw_mindmap_response = None
-            if isinstance(result, tuple) and len(result) == 4:
-                assistant_response, chunks, subgraph_data, subgraph_info = result
-            else:
-                (
-                    assistant_response,
-                    chunks,
-                    subgraph_data,
-                    subgraph_info,
-                    raw_llm_response,
-                    raw_mindmap_response,
-                ) = result
-            
-            # Log full response details (including graph payload).
-            logger.info(
-                "WebSocket chat response: text_length=%d, chunks_count=%d, subgraph_nodes=%d, subgraph_edges=%d, raw_response=%s, raw_mindmap_response=%s",
-                len(assistant_response) if assistant_response else 0,
-                len(chunks) if chunks else 0,
-                len(subgraph_data.get("nodes", [])) if subgraph_data else 0,
-                len(subgraph_data.get("edges", [])) if subgraph_data else 0,
-                json.dumps(raw_llm_response, ensure_ascii=False, default=str) if raw_llm_response else None,
-                raw_mindmap_response if raw_mindmap_response else None
-            )
-            if subgraph_data:
-                logger.debug("WebSocket subgraph data: %s", json.dumps(subgraph_data, ensure_ascii=False, default=str))
-            
-            assistant_message = ChatMessage(
-                session_id=session_id,
-                content={"role": "assistant", "content": assistant_response},
-                source_file_ids=[chunk.id for chunk in chunks] if chunks else None,
-                subgraph_data=subgraph_data if return_subgraph else None,
-                raw_llm_response=raw_llm_response,
-                raw_mindmap_response={"response": raw_mindmap_response} if raw_mindmap_response else None,
-                created_at=datetime.now(),
-            )
-            assistant_message = await get_thread_pool().run_blocking(
-                message_handler.create_message, assistant_message
-            )
-
-            evidence = None
-            if include_evidence:
-                graph_store = None
-                try:
-                    graph_store = rag_inference_handler.get_graph_store()
-                except Exception:  # noqa: BLE001
-                    graph_store = None
-                evidence = build_chat_evidence(
-                    chunks,
-                    subgraph_data=subgraph_data,
-                    subgraph_info=subgraph_info,
-                    max_chunks=CHAT_TOP_CHUNKS,
-                    graph_store=graph_store,
-                )
-
-            response_payload, subgraph_for_outer = build_stream_chat_payload(
-                assistant_message,
-                chunks,
-                subgraph=subgraph_data if return_subgraph else None,
-                evidence=evidence,
-            )
-            # Add subgraph at outer level if present
-            if subgraph_for_outer is not None:
-                response_payload["subgraph"] = subgraph_for_outer
-            await websocket.send_json(response_payload)
-
-    except WebSocketDisconnect:
-        logger.info("WebSocket disconnect (session_id=%s user=%s)", session_id, current_user.id)
 
 
 @router.post("/stream_chat/{session_id}/cancel")
