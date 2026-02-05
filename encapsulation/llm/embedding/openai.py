@@ -6,6 +6,7 @@ import logging
 import random
 import re
 import time
+import openai
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,11 @@ class OpenAIEmbeddingLLM(EmbeddingLLMBase):
             rate_limit_default_sleep = float(getattr(self.config, "rate_limit_default_sleep_seconds", 60.0) or 60.0)
             rate_limit_max_sleep = float(getattr(self.config, "rate_limit_max_sleep_seconds", 60.0) or 60.0)
 
+            transient_max_retries = int(getattr(self.config, "transient_max_retries", 0) or 0)
+            transient_backoff_initial = float(getattr(self.config, "transient_backoff_initial_seconds", 1.0) or 1.0)
+            transient_backoff_max = float(getattr(self.config, "transient_backoff_max_seconds", 20.0) or 20.0)
+            transient_jitter = float(getattr(self.config, "transient_backoff_jitter_seconds", 0.8) or 0.0)
+
             def _retry_after_seconds(exc: Exception) -> float | None:
                 def _coerce_float(value: Any) -> float | None:
                     if value is None:
@@ -196,6 +202,30 @@ class OpenAIEmbeddingLLM(EmbeddingLLMBase):
                         return None
                 return None
 
+            def _is_transient_failure(exc: Exception) -> bool:
+                # Rate limit handled separately via Retry-After parsing.
+                if isinstance(exc, openai.RateLimitError):
+                    return False
+                if isinstance(exc, (openai.APITimeoutError, openai.APIConnectionError, openai.InternalServerError)):
+                    return True
+                if isinstance(exc, openai.APIStatusError):
+                    try:
+                        status = int(getattr(getattr(exc, "response", None), "status_code", None))
+                    except Exception:
+                        status = None
+                    if status in {408, 409, 500, 502, 503, 504}:
+                        return True
+                # Gateway fallback (best-effort, kept minimal).
+                msg = str(exc).lower()
+                return ("timed out" in msg) or ("timeout" in msg) or ("connection error" in msg)
+
+            def _transient_sleep_seconds(attempt: int) -> float:
+                base = max(0.0, transient_backoff_initial) * (2.0 ** max(0, int(attempt)))
+                sleep_for = min(max(0.0, transient_backoff_max), base)
+                if transient_jitter > 0:
+                    sleep_for += random.uniform(0.0, max(0.0, transient_jitter))
+                return max(0.0, float(sleep_for))
+
             def _call_with_rate_limit_backoff(*, model: str, input_payload: Any) -> Any:
                 attempt = 0
                 while True:
@@ -211,14 +241,33 @@ class OpenAIEmbeddingLLM(EmbeddingLLMBase):
                         time.sleep(sleep_for)
                         attempt += 1
 
+            def _call_with_transient_and_rate_limit(*, model: str, input_payload: Any) -> Any:
+                attempt = 0
+                while True:
+                    try:
+                        return _call_with_rate_limit_backoff(model=model, input_payload=input_payload)
+                    except Exception as exc:  # noqa: BLE001
+                        if attempt >= transient_max_retries or not _is_transient_failure(exc):
+                            raise
+                        sleep_for = _transient_sleep_seconds(attempt)
+                        logger.warning(
+                            "Embedding transient failure (%s); sleeping %.2fs before retry %d/%d",
+                            type(exc).__name__,
+                            sleep_for,
+                            attempt + 1,
+                            transient_max_retries,
+                        )
+                        time.sleep(sleep_for)
+                        attempt += 1
+
             if supports_batch_input:
                 for i in range(0, len(cleaned_texts), batch_size):
                     batch = cleaned_texts[i:i + batch_size]
-                    response = _call_with_rate_limit_backoff(model=self.model_name, input_payload=batch)
+                    response = _call_with_transient_and_rate_limit(model=self.model_name, input_payload=batch)
                     embeddings.extend(_extract_embeddings(response))
             else:
                 for text in cleaned_texts:
-                    response = _call_with_rate_limit_backoff(model=self.model_name, input_payload=text)
+                    response = _call_with_transient_and_rate_limit(model=self.model_name, input_payload=text)
                     embeddings.extend(_extract_embeddings(response))
             return embeddings
 
@@ -302,6 +351,11 @@ class OpenAIEmbeddingLLM(EmbeddingLLMBase):
             rate_limit_default_sleep = float(getattr(self.config, "rate_limit_default_sleep_seconds", 60.0) or 60.0)
             rate_limit_max_sleep = float(getattr(self.config, "rate_limit_max_sleep_seconds", 60.0) or 60.0)
 
+            transient_max_retries = int(getattr(self.config, "transient_max_retries", 0) or 0)
+            transient_backoff_initial = float(getattr(self.config, "transient_backoff_initial_seconds", 1.0) or 1.0)
+            transient_backoff_max = float(getattr(self.config, "transient_backoff_max_seconds", 20.0) or 20.0)
+            transient_jitter = float(getattr(self.config, "transient_backoff_jitter_seconds", 0.8) or 0.0)
+
             def _retry_after_seconds(exc: Exception) -> float | None:
                 def _coerce_float(value: Any) -> float | None:
                     if value is None:
@@ -376,6 +430,28 @@ class OpenAIEmbeddingLLM(EmbeddingLLMBase):
                         return None
                 return None
 
+            def _is_transient_failure(exc: Exception) -> bool:
+                if isinstance(exc, openai.RateLimitError):
+                    return False
+                if isinstance(exc, (openai.APITimeoutError, openai.APIConnectionError, openai.InternalServerError)):
+                    return True
+                if isinstance(exc, openai.APIStatusError):
+                    try:
+                        status = int(getattr(getattr(exc, "response", None), "status_code", None))
+                    except Exception:
+                        status = None
+                    if status in {408, 409, 500, 502, 503, 504}:
+                        return True
+                msg = str(exc).lower()
+                return ("timed out" in msg) or ("timeout" in msg) or ("connection error" in msg)
+
+            def _transient_sleep_seconds(attempt: int) -> float:
+                base = max(0.0, transient_backoff_initial) * (2.0 ** max(0, int(attempt)))
+                sleep_for = min(max(0.0, transient_backoff_max), base)
+                if transient_jitter > 0:
+                    sleep_for += random.uniform(0.0, max(0.0, transient_jitter))
+                return max(0.0, float(sleep_for))
+
             async def _acall_with_rate_limit_backoff(*, model: str, input_payload: Any) -> Any:
                 attempt = 0
                 while True:
@@ -396,14 +472,33 @@ class OpenAIEmbeddingLLM(EmbeddingLLMBase):
                         await asyncio.sleep(sleep_for)
                         attempt += 1
 
+            async def _acall_with_transient_and_rate_limit(*, model: str, input_payload: Any) -> Any:
+                attempt = 0
+                while True:
+                    try:
+                        return await _acall_with_rate_limit_backoff(model=model, input_payload=input_payload)
+                    except Exception as exc:  # noqa: BLE001
+                        if attempt >= transient_max_retries or not _is_transient_failure(exc):
+                            raise
+                        sleep_for = _transient_sleep_seconds(attempt)
+                        logger.warning(
+                            "Async embedding transient failure (%s); sleeping %.2fs before retry %d/%d",
+                            type(exc).__name__,
+                            sleep_for,
+                            attempt + 1,
+                            transient_max_retries,
+                        )
+                        await asyncio.sleep(sleep_for)
+                        attempt += 1
+
             if supports_batch_input:
                 for i in range(0, len(text_list), batch_size):
                     batch = text_list[i:i + batch_size]
-                    response = await _acall_with_rate_limit_backoff(model=self.model_name, input_payload=batch)
+                    response = await _acall_with_transient_and_rate_limit(model=self.model_name, input_payload=batch)
                     embeddings.extend(data.embedding for data in response.data)
             else:
                 for text in text_list:
-                    response = await _acall_with_rate_limit_backoff(model=self.model_name, input_payload=text)
+                    response = await _acall_with_transient_and_rate_limit(model=self.model_name, input_payload=text)
                     embeddings.extend(data.embedding for data in response.data)
 
             return embeddings[0] if is_single else embeddings

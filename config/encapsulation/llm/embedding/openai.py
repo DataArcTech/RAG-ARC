@@ -8,6 +8,12 @@ from pydantic import model_validator
 
 from framework.config import AbstractConfig
 from encapsulation.llm.embedding.openai import OpenAIEmbeddingLLM
+from config.core.embedding_retry_defaults import (
+    EMBEDDING_TRANSIENT_BACKOFF_INITIAL_SECONDS,
+    EMBEDDING_TRANSIENT_BACKOFF_JITTER_SECONDS,
+    EMBEDDING_TRANSIENT_BACKOFF_MAX_SECONDS,
+    EMBEDDING_TRANSIENT_MAX_RETRIES,
+)
 
 
 def _resolve_embedding_provider():
@@ -104,6 +110,24 @@ class OpenAIEmbeddingConfig(AbstractConfig):
     rate_limit_max_sleep_seconds: float = Field(
         default_factory=lambda: float(os.getenv("EMBEDDING_RATE_LIMIT_MAX_SLEEP_SECONDS", "60")),
         description="Upper bound on sleep (seconds) between rate-limit retries.",
+    )
+
+    # Transient network/server failure retries (non-429).
+    transient_max_retries: int = Field(
+        default=EMBEDDING_TRANSIENT_MAX_RETRIES,
+        description="Retries for transient embedding failures (timeouts/connection/5xx). Does not apply to 429.",
+    )
+    transient_backoff_initial_seconds: float = Field(
+        default=EMBEDDING_TRANSIENT_BACKOFF_INITIAL_SECONDS,
+        description="Base seconds for exponential backoff on transient embedding failures (non-429).",
+    )
+    transient_backoff_max_seconds: float = Field(
+        default=EMBEDDING_TRANSIENT_BACKOFF_MAX_SECONDS,
+        description="Max sleep seconds for exponential backoff on transient embedding failures (non-429).",
+    )
+    transient_backoff_jitter_seconds: float = Field(
+        default=EMBEDDING_TRANSIENT_BACKOFF_JITTER_SECONDS,
+        description="Jitter seconds added to transient backoff sleeps to avoid thundering herds.",
     )
 
     @model_validator(mode="after")
