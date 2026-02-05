@@ -3,7 +3,7 @@
 本目录提供一个独立的 FastAPI 服务，封装上游 MinerU 解析能力。
 可部署在 GPU 机器上，通过 `MINERU_SERVER_URL` 或 SSH 隧道远程调用。
 
-
+---
 
 ## 功能概述
 
@@ -17,14 +17,14 @@
 - `mineru_client.py`：简单 CLI（解析 / 下载 / 同步任务目录）。
 - `mineru_server/client.py` + `mineru_server/cli.py client`：轻量同步工具。
 
-
+---
 
 ## 前置条件（上游 MinerU 环境）
 
 本服务**不会安装或配置 MinerU**，请先按上游文档准备环境（CUDA、模型、后端等）。
 确保同一 Python 环境中 `import mineru` 可用。
 
-
+---
 
 ## 快速开始
 
@@ -99,11 +99,11 @@ result = client.parse(
 print(result["status"], result.get("processing_time"))
 ```
 
-
+---
 
 ## 外部 vLLM 多卡加速
 
-**说明：** 本服务内置 vLLM 仅单卡。若要多卡加速，需要启动外部 vLLM（OpenAI 兼容）并让本服务走 `vlm-http-client`。
+**说明：**本服务内置 vLLM 仅单卡。若要多卡加速，需要启动外部 vLLM（OpenAI 兼容）并让本服务走 `vlm-http-client`。
 
 ### A) 启动 vLLM 服务
 
@@ -211,7 +211,7 @@ python mineru_main.py server \
 - `start_vllm.sh --gpus 4,6 --tp 2`：启动 *一个* 模型实例，切到两张卡上；**单个请求会同时用两张卡**。
 - `start_vllm_pool.sh --gpus 4,6`：启动 *两个* 模型实例（每个 tp=1）；并发请求可被路由到**不同 GPU**。
 
-
+---
 
 ## 命令行参数（完整）
 
@@ -297,59 +297,47 @@ python mineru_main.py client --help
 - `--output-format`（默认 `mm_md`，可选 `mm_md|md_only|content_list`）
 - `--timeout`（默认 `900`）
 
-
+---
 
 ## HTTP API（Server）
 
 Base URL：`http://<host>:<port>`
 
 Endpoints：
-- `GET /health`：健康检查 + 当前配置摘要
-- `GET /config`：返回配置（敏感字段会脱敏）
-- `POST /parse`：单文件解析（multipart 上传）
-- `GET /parse/status/{task_id}`：异步解析状态轮询
-- `POST /parse/batch`：多文件解析（multipart 上传）
-- `GET /task/{task_id}/manifest`：列出任务目录下的文件清单
-- `GET /task/{task_id}/file/{rel_path}`：按相对路径下载（推荐，避免同名冲突）
-- `GET /download/{task_id}/{filename}`：按文件名搜索下载（历史接口）
+- `GET /health`
+- `GET /config`
+- `POST /parse`
+- `GET /parse/status/{task_id}`
+- `POST /parse/batch`
+- `GET /task/{task_id}/manifest`
+- `GET /task/{task_id}/file/{rel_path}`
+- `GET /download/{task_id}/{filename}`（历史接口）
 
 `POST /parse` 表单参数：
 - `backend`, `parse_method`, `lang`, `formula_enable`, `table_enable`
 - `start_page`, `end_page`, `output_format`
 - `wait`（true 表示阻塞等待）
 
-返回体包含（异步时请轮询 `GET /parse/status/{task_id}` 直到 `status=success`）：
-- `task_id`, `status`, `processing_time`
-- 各类产物的绝对路径（`*_path`）与任务相对路径（`*_rel_path`，用于稳定下载）
-- `images_metadata`（每张图包含 `task_rel_path`，可直接走 `/task/.../file/...` 下载）
-
-
+---
 
 ## SSH 隧道（远程 GPU）
 
 ```bash
-# 默认端口 22
 ssh -CNg -L 8899:127.0.0.1:8899 <user>@<gpu-host>
-# 如果 SSH 使用了非默认端口
-ssh -CNg -L 8899:127.0.0.1:8899 <user>@<gpu-host> -p <port>
 export MINERU_SERVER_URL="http://127.0.0.1:8899"
 python mineru_main.py client --base-url "$MINERU_SERVER_URL" --file demo.pdf --output-dir ./mineru_client_outputs
 ```
 
-
+---
 
 ## RAG-ARC 集成
 
-可通过 `.env` 把 PDF/图片解析切到该服务：
-
 - `PARSER_PARSE_MODE=mineru`
 - `MINERU_SERVER_URL=http://<server-ip>:8899`（可选 `MINERU_TIMEOUT_S=900`）
-- 可选后端类型：`MINERU_BACKEND=vlm-http-client`
-- 可选页范围（0-based，结束页包含）：`MINERU_START_PAGE=0`、`MINERU_END_PAGE=1`
+- 可选页范围：`MINERU_START_PAGE=0`, `MINERU_END_PAGE=1`
 
-解析产物会落盘到 `PARSER_OUTPUT_DIR`（默认 `./data/parsed_files/mineru/<file_id>/...`），其中 `<file_id>` 是 RAG-ARC 侧的文件 ID，用于避免同名文件导致的产物覆盖/串读。
+解析产物会落盘到 `PARSER_OUTPUT_DIR`（默认 `./data/parsed_files/mineru/<file_id>/...`）。
 
 ### 证据资源 URL（RAG-ARC API）
-当 `include_evidence=true` 时，RAG-ARC 会返回：
-- `document_url`：`GET /knowledge/{file_id}/download`
-- Markdown 图片链接 `images/...` 会被改写为 `GET /knowledge/{file_id}/mineru-assets/images/...`（便于前端直接渲染，需要鉴权）
+- `document_url`: `GET /knowledge/{file_id}/download`
+- Markdown 图片链接 `images/...` 会被改写为 `GET /knowledge/{file_id}/mineru-assets/images/...`
