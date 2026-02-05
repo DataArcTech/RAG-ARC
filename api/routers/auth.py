@@ -12,7 +12,6 @@ from fastapi import (
     Depends,
     HTTPException,
     Request,
-    WebSocket,
     status,
 )
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -462,30 +461,6 @@ async def get_current_user_optional(
         return None
     # Use async version to avoid blocking the event loop
     user = await get_user_async(username=token_data.username)
-    return user
-
-async def ws_get_current_user(
-    websocket: WebSocket
-):
-    auth_token = websocket.cookies.get("auth_token")
-    if not auth_token:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return None
-
-    try:
-        payload = jwt.decode(auth_token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        token_data = TokenData(username=username)
-    except InvalidTokenError:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return None
-
-    # Use async method to avoid blocking the event loop
-    user = await get_user_async(username=token_data.username)
-    if user is None:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return None
-
     return user
 
 @router.post("/token")
