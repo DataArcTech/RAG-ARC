@@ -809,20 +809,50 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
         """
         try:
             if status is None:
-                # Use same logic as list_user_files: list all accessible, then filter to active and not marked.
-                # Avoids double-subtraction when a file is both DELETED and in _files_marked_for_deletion.
-                all_files = self.file_storage.list_accessible_files(
-                    user_id=user_id,
-                    status=None,
-                    limit=None,
-                    offset=None,
-                    search=search,
-                )
-                count = sum(
-                    1
-                    for f in all_files
-                    if self._is_active_status(f.status) and not self._is_file_marked_for_deletion(f.file_id)
-                )
+                # Keep counting consistent with list_user_files (active + not marked for deletion),
+                # but prefer storage-level counts when available to avoid scanning full lists.
+
+                def _safe_count_accessible_files(*, status_filter: FileStatus | None) -> int:
+                    if hasattr(self.file_storage, "count_accessible_files"):
+                        return int(
+                            self.file_storage.count_accessible_files(
+                                user_id=user_id,
+                                status=status_filter,
+                                search=search,
+                            )
+                            or 0
+                        )
+                    # Fallback for storages that do not implement count_accessible_files().
+                    files = self.file_storage.list_accessible_files(
+                        user_id=user_id,
+                        status=status_filter,
+                        limit=None,
+                        offset=None,
+                        search=search,
+                    )
+                    return len(files or [])
+
+                def _count_marked_for_deletion_non_deleted() -> int:
+                    marked = self._files_marked_for_deletion_by_owner.get(user_id, set()) or set()
+                    if not marked:
+                        return 0
+                    # Avoid double-subtraction when we can observe that a marked file is already DELETED.
+                    count = 0
+                    get_meta = getattr(self.file_storage, "get_file_metadata", None)
+                    for file_id in marked:
+                        try:
+                            meta = get_meta(file_id) if callable(get_meta) else None
+                        except Exception:  # noqa: BLE001
+                            meta = None
+                        if meta is not None and getattr(meta, "status", None) == FileStatus.DELETED:
+                            continue
+                        count += 1
+                    return count
+
+                total = _safe_count_accessible_files(status_filter=None)
+                deleted = _safe_count_accessible_files(status_filter=FileStatus.DELETED)
+                marked_non_deleted = _count_marked_for_deletion_non_deleted()
+                count = max(0, total - deleted - marked_non_deleted)
             else:
                 count = self.file_storage.count_accessible_files(user_id=user_id, status=status, search=search)
             logger.info(f"Counted {count} accessible files for user {user_id}")
