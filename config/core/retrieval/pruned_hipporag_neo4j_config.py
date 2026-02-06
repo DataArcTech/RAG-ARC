@@ -1,10 +1,12 @@
-from typing import Literal, Optional
+from typing import Literal, Optional, ClassVar
+import threading
 from pydantic import Field
 
 from framework.config import AbstractConfig
 from config.encapsulation.llm.chat.openai import OpenAIChatConfig
 from config.encapsulation.database.graph_db.pruned_hipporag_neo4j_config import PrunedHippoRAGNeo4jConfig
 from core.retrieval.graph_retrieveal.pruned_hipporag_neo4j import PrunedHippoRAGNeo4jRetriever
+from framework.shared_module_decorator import make_hashable
 
 
 class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
@@ -21,6 +23,16 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
     - FAISS indices: Same (facts and entities)
     """
     type: Literal["pruned_hipporag_neo4j_retrieval"] = "pruned_hipporag_neo4j_retrieval"
+
+    # Process-level cache toggle (via @shared_module on PrunedHippoRAGNeo4jRetriever).
+    # Default True: identical configs share one in-process retriever instance, so expensive graph caches load once.
+    shared_instance: bool = Field(
+        default=True,
+        description=(
+            "Whether to reuse a process-level shared PrunedHippoRAGNeo4jRetriever instance for identical configs. "
+            "Disable for strict isolation in tests/multi-tenant workers."
+        ),
+    )
 
     # Neo4j graph store configuration
     graph_config: PrunedHippoRAGNeo4jConfig
@@ -420,4 +432,21 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
     )
 
     def build(self):
-        return PrunedHippoRAGNeo4jRetriever(config=self)
+        if not bool(getattr(self, "shared_instance", True)):
+            return PrunedHippoRAGNeo4jRetriever(config=self)
+        key = make_hashable(self.model_dump())
+        with self._process_cache_lock:
+            cached = self._process_cache.get(key)
+            if cached is not None:
+                return cached
+            inst = PrunedHippoRAGNeo4jRetriever(config=self)
+            self._process_cache[key] = inst
+            return inst
+
+    _process_cache_lock: ClassVar[threading.Lock] = threading.Lock()
+    _process_cache: ClassVar[dict[object, PrunedHippoRAGNeo4jRetriever]] = {}
+
+    @classmethod
+    def clear_process_cache(cls) -> None:
+        with cls._process_cache_lock:
+            cls._process_cache.clear()

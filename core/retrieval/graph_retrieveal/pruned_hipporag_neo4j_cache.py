@@ -17,6 +17,14 @@ class _PrunedHippoRAGNeo4jCacheMixin:
         return tls
 
     @property
+    def passage_node_keys(self) -> list[str]:
+        return getattr(self._get_tls(), "passage_node_keys", [])
+
+    @passage_node_keys.setter
+    def passage_node_keys(self, value: list[str]) -> None:
+        setattr(self._get_tls(), "passage_node_keys", value)
+
+    @property
     def _cached_owner_id(self) -> Optional[str]:
         return getattr(self._get_tls(), "cached_owner_id", None)
 
