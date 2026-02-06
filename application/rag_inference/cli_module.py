@@ -69,17 +69,21 @@ class RAGInferenceCLIModule:
         original_query = query
         rewritten_query = query
         retrieval_ratios: Dict[str, float] | None = None
+        bm25_query: str | None = None
 
         # Keep rewrite+routing behavior aligned with the user-facing rag_inference pipeline.
         if rag_retrieval_dynamic_quota_enabled() and hasattr(self._rag.query_rewriter, "rewrite_query_with_routing"):
             try:
-                rewritten_query, retrieval_ratios = self._rag.query_rewriter.rewrite_query_with_routing(query)  # type: ignore[attr-defined]
+                rewritten_query, retrieval_ratios, bm25_query = self._rag.query_rewriter.rewrite_query_with_routing(query)  # type: ignore[attr-defined]
             except Exception as exc:  # noqa: BLE001
                 logger.warning("rewrite_query_with_routing failed; falling back to rewrite_query: %s", exc)
                 rewritten_query = self._rag.query_rewriter.rewrite_query(query)
                 retrieval_ratios = None
+                bm25_query = None
         else:
             rewritten_query = self._rag.query_rewriter.rewrite_query(query)
+            retrieval_ratios = None
+            bm25_query = None
 
         logger.info("Query rewritten from '%s' to '%s'", original_query, rewritten_query)
 
@@ -87,6 +91,7 @@ class RAGInferenceCLIModule:
             rewritten_query,
             owner_id=owner_id,
             return_subgraph_info=return_subgraph,
+            **({"bm25_query": bm25_query} if bm25_query else {}),
             **({"retrieval_ratios": retrieval_ratios} if retrieval_ratios else {}),
         )
         logger.info("Retriever returned %d chunks", len(chunks))

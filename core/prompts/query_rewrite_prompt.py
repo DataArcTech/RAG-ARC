@@ -37,11 +37,24 @@ QUERY_REWRITE_USER_PROMPT_WITH_HISTORY: Final[str] = (
 QUERY_REWRITE_ROUTING_SYSTEM_SUFFIX: Final[str] = (
     "Additionally, you must output a JSON object ONLY (no markdown/code fences) with keys:\n"
     "- rewritten_query: string\n"
+    "- bm25_query: string (optional)\n"
+    "  * If provided, bm25_query is used ONLY for keyword-based BM25 retrieval.\n"
+    "  * Keep bm25_query short and concrete: noun phrases / key entities / product names / feature names.\n"
+    "  * For each key feature term in the user query, include at least ONE close, document-style alias/label that is\n"
+    "    likely to appear in headings/parameter tables (still noun phrases; no sentences), to improve recall.\n"
+    "    Example: for a currency-related feature like multi-currency conversion/switching, prefer searching the parameter\n"
+    "    labels used in brochures/tables (e.g. '保单货币', '货币选择', '货币转换'), rather than only the marketing phrasing.\n"
+    "  * Prefer fewer, more distinctive keywords over many generic ones (aim ~3-10 keyword tokens).\n"
+    "  * If the corpus is likely to use a different Chinese script (Simplified vs Traditional), you MAY include BOTH\n"
+    "    script variants for the KEYWORDS in bm25_query (e.g. table labels), not just for proper nouns.\n"
+    "  * Do NOT include long sentences, reasoning, or multiple subquestions.\n"
+    "  * Do NOT include citation-like text, markdown, or special formatting.\n"
     "- retrieval_ratios: object with numeric fields {dense, bm25, graph}\n"
     "  * These ratios control how many retrieval candidates to allocate to each backend.\n"
     "  * Use higher graph ratio when the question likely needs multi-entity linking / relationship evidence across chunks/files.\n"
     "  * Use higher dense/bm25 ratios when the answer is likely a specific clause/number/threshold in one document.\n"
     "  * Keep ratios small, non-negative, and comparable (e.g. 1, 1, 1.5).\n"
+    "  * You MAY set a ratio to 0 to disable that backend for this query.\n"
     "- reason: short string (optional)\n"
     "\n"
     "Return STRICT JSON only."
@@ -58,7 +71,7 @@ QUERY_REWRITE_AND_ROUTING_USER_PROMPT: Final[str] = (
     "\n"
     "User query: {query}\n"
     "\n"
-    "Output JSON with keys: rewritten_query, retrieval_ratios, reason."
+    "Output JSON with keys: rewritten_query, bm25_query (optional), retrieval_ratios, reason."
 )
 
 QUERY_REWRITE_AND_ROUTING_USER_PROMPT_WITH_HISTORY: Final[str] = (

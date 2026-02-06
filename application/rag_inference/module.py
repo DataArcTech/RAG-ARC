@@ -516,6 +516,7 @@ class RAGInference(AbstractModule):
         rewrite_kwargs: dict[str, Any] = {}
         rewritten_query: str
         retrieval_ratios: dict[str, float] | None = None
+        bm25_query: str | None = None
         # Legacy fields kept for backward compatibility with message building, now unused.
         rewrite_intent: str | None = None
         rewrite_anchors: list[str] = []
@@ -534,6 +535,7 @@ class RAGInference(AbstractModule):
         if skip_retrieval:
             rewritten_query = str(query or "").strip()
             retrieval_ratios = None
+            bm25_query = None
         elif rag_retrieval_dynamic_quota_enabled() and hasattr(self.query_rewriter, "rewrite_query_with_routing"):
             try:
                 fn = getattr(self.query_rewriter, "rewrite_query_with_routing")
@@ -542,13 +544,16 @@ class RAGInference(AbstractModule):
                 call_kwargs = dict(rewrite_kwargs)
                 if not accepts_var_kw and "history_text" not in sig.parameters:
                     call_kwargs.pop("history_text", None)
-                rewritten_query, retrieval_ratios = fn(query, **call_kwargs)  # type: ignore[misc]
+                rewritten_query, retrieval_ratios, bm25_query = fn(query, **call_kwargs)  # type: ignore[misc]
             except Exception as exc:  # noqa: BLE001
                 logger.warning("rewrite_query_with_routing failed; falling back to rewrite_query: %s", exc)
                 rewritten_query = self.query_rewriter.rewrite_query(query, **rewrite_kwargs)
                 retrieval_ratios = None
+                bm25_query = None
         else:
             rewritten_query = self.query_rewriter.rewrite_query(query, **rewrite_kwargs)
+            retrieval_ratios = None
+            bm25_query = None
         self._emit_progress(
             progress_callback,
             {
@@ -560,6 +565,7 @@ class RAGInference(AbstractModule):
                 **({"anchors": rewrite_anchors} if rewrite_anchors else {}),
                 **({"reason": rewrite_reason} if rewrite_reason else {}),
                 **({"retrieval_ratios": retrieval_ratios} if retrieval_ratios else {}),
+                **({"bm25_query": bm25_query} if bm25_query else {}),
             },
         )
 
@@ -691,6 +697,7 @@ class RAGInference(AbstractModule):
                     owner_id=owner_token,
                     return_subgraph_info=return_subgraph,
                     k=graph_candidates_k,
+                    **({"bm25_query": bm25_query} if bm25_query else {}),
                     **({"retrieval_ratios": retrieval_ratios} if retrieval_ratios else {}),
                 )
                 per_info = self._consume_subgraph_info(retrieved)

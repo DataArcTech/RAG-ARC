@@ -269,20 +269,20 @@ class LLMQueryRewriter(AbstractQueryRewriter):
         *,
         history_text: str | None = None,
         **kwargs: Any,
-    ) -> tuple[str, dict[str, float] | None]:
+    ) -> tuple[str, dict[str, float] | None, str | None]:
         """
         Rewrite query and (optionally) return per-query retrieval ratios for MultiPath quotas.
 
         Ratios are small non-negative numbers, e.g. {dense:1, bm25:1, graph:1.5}.
         """
         if benchmark_mode_enabled():
-            return str(query or ""), None
+            return str(query or ""), None, None
         if not query or not query.strip():
             raise ValueError("Query cannot be empty")
 
         # Gate: allow disabling dynamic routing without changing JSON config.
         if not rag_retrieval_dynamic_quota_enabled():
-            return self.rewrite_query(query, history_text=history_text, **kwargs), None
+            return self.rewrite_query(query, history_text=history_text, **kwargs), None, None
 
         query = str(query)
         # Keep existing skip rules for rewrite; when triggered, fall back to static routing ratios.
@@ -290,7 +290,7 @@ class LLMQueryRewriter(AbstractQueryRewriter):
             for token in list(getattr(self.config, "skip_rewrite_if_contains") or []):
                 if token and token in query:
                     logger.info("Skipping query rewrite (routing fallback) because query contains %r", token)
-                    return query, None
+                    return query, None, None
         if getattr(self.config, "skip_rewrite_regexes", None):
             for pattern in list(getattr(self.config, "skip_rewrite_regexes") or []):
                 if not pattern:
@@ -298,7 +298,7 @@ class LLMQueryRewriter(AbstractQueryRewriter):
                 try:
                     if re.search(pattern, query):
                         logger.info("Skipping query rewrite (routing fallback) because query matches pattern %r", pattern)
-                        return query, None
+                        return query, None, None
                 except re.error:
                     logger.warning("Invalid skip rewrite regex ignored: %r", pattern)
 
@@ -330,11 +330,13 @@ class LLMQueryRewriter(AbstractQueryRewriter):
                 # Strict contract: routing mode must return JSON.
                 # Avoid a second LLM call on failure; keep behavior deterministic.
                 logger.warning("Query rewrite routing: non-JSON response; using original query and static routing")
-                return query, None
+                return query, None, None
 
             rewritten = str(payload.get("rewritten_query") or "").strip().strip('"').strip("'")
             if not rewritten:
                 rewritten = query
+
+            bm25_query = str(payload.get("bm25_query") or "").strip().strip('"').strip("'") or None
 
             ratios_raw = payload.get("retrieval_ratios")
             ratios: dict[str, float] = {}
@@ -350,13 +352,13 @@ class LLMQueryRewriter(AbstractQueryRewriter):
                     ratios[key] = f
 
             if not ratios:
-                return rewritten, None
+                return rewritten, None, bm25_query
 
-            return rewritten, ratios
+            return rewritten, ratios, bm25_query
         except Exception as exc:  # noqa: BLE001
             # Avoid a second LLM call on errors; keep retrieval functional by falling back to the original query.
             logger.warning("Query rewrite with routing failed; using original query and static routing: %s", exc)
-            return query, None
+            return query, None, None
 
     def get_rewriter_info(self) -> Dict[str, Any]:
         """
