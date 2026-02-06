@@ -121,6 +121,9 @@
     "candidate_selection": {
         "graph_candidates_k": 30,
         "web_candidates_k": 5,
-        "rerank_keep_k": 10
+        "rerank_keep_k": 10,
+        "file_prune_enabled": true,
+        "file_prune_max_files": 4,
+        "file_prune_max_chunks_per_file": 6
     }
 }

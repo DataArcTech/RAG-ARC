@@ -907,6 +907,49 @@ class RAGInference(AbstractModule):
         chunks = dedupe_chunks(chunks)
         if len(chunks) != before:
             logger.info("Deduped chunks after web merge: %d -> %d", before, len(chunks))
+
+        # File-level candidate pruning (file-first): keep top files then top chunks per file.
+        # Keep it close to rerank so it sees the final merged candidate pool.
+        try:
+            from core.retrieval.file_pruning import prune_chunks_by_file
+
+            enabled = bool(getattr(candidate_cfg, "file_prune_enabled", True))
+            max_files = int(getattr(candidate_cfg, "file_prune_max_files", 4))
+            max_chunks_per_file = int(getattr(candidate_cfg, "file_prune_max_chunks_per_file", 6))
+            self._emit_progress(
+                progress_callback,
+                {
+                    "stage": "candidate_prune",
+                    "status": "start",
+                    "enabled": enabled,
+                    "max_files": max_files,
+                    "max_chunks_per_file": max_chunks_per_file,
+                    "chunks_in": len(chunks),
+                },
+            )
+            pruned, info = prune_chunks_by_file(
+                chunks,
+                enabled=enabled,
+                max_files=max_files,
+                max_chunks_per_file=max_chunks_per_file,
+            )
+            chunks = pruned
+            self._emit_progress(
+                progress_callback,
+                {
+                    "stage": "candidate_prune",
+                    "status": "end",
+                    "enabled": bool(getattr(info, "enabled", False)),
+                    "chunks_in": int(getattr(info, "chunks_in", len(chunks))),
+                    "chunks_out": int(getattr(info, "chunks_out", len(chunks))),
+                    "files_in": int(getattr(info, "files_in", 0)),
+                    "files_kept": int(getattr(info, "files_kept", 0)),
+                    "top_files": getattr(info, "top_files", None),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Candidate prune failed (ignored): %s", exc)
+
         subgraph_info = None
         if subgraph_infos:
             if len(subgraph_infos) == 1:
