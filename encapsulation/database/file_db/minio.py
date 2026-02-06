@@ -11,11 +11,13 @@ from minio import Minio
 from minio.error import S3Error
 
 from .base import FileDB
+from framework.singleton_decorator import singleton
 
 
 logger = logging.getLogger(__name__)
 
 
+@singleton
 class MinIODB(FileDB):
     """
     MinIO S3-compatible blob storage implementation for distributed object storage.
@@ -94,10 +96,7 @@ class MinIODB(FileDB):
             config: Configuration object with MinIO connection parameters
         """
         super().__init__(config)
-        self._object_prefix = (getattr(self.config, "object_key_prefix", None) or "").strip().rstrip("/")
-        if self._object_prefix and not self._object_prefix.endswith("/"):
-            self._object_prefix += "/"
-        logger.info("Initializing MinIODB (endpoint=%s, bucket=%s, prefix=%r)", self.config.endpoint, self.config.bucket_name, self._object_prefix or "(none)")
+        logger.info("Initializing MinIODB")
 
         # Build MinIO client immediately
         self.client = Minio(
@@ -108,32 +107,21 @@ class MinIODB(FileDB):
             region=getattr(self.config, 'region', None),
         )
 
-        # Ensure bucket exists (Alibaba OSS bucket must pre-exist, skip create)
-        try:
-            if not self.client.bucket_exists(self.config.bucket_name):
-                try:
-                    self.client.make_bucket(self.config.bucket_name)
-                except Exception as make_err:
-                    logger.warning("Bucket create skipped (OSS bucket must pre-exist): %s", make_err)
-        except Exception as check_err:
-            logger.warning("Bucket existence check skipped (OSS): %s", check_err)
+        # Ensure bucket exists
+        self._ensure_bucket_exists(self.client)
         logger.info(f"MinIODB initialized with bucket: {self.config.bucket_name}")
-
-    def _object_key(self, key: str) -> str:
-        """Apply object_key_prefix to the storage key."""
-        k = (key or "").lstrip("/")
-        if not self._object_prefix:
-            return k
-        return self._object_prefix + k
-
-    def _strip_prefix(self, object_name: str) -> str:
-        """Remove object_key_prefix from returned key."""
-        if not self._object_prefix or not object_name:
-            return object_name
-        if object_name.startswith(self._object_prefix):
-            return object_name[len(self._object_prefix):]
-        return object_name
-
+    
+    def _ensure_bucket_exists(self, client: Minio) -> None:
+        """Create bucket if it doesn't exist"""
+        try:
+            bucket_name = self.config.bucket_name
+            if not client.bucket_exists(bucket_name):
+                client.make_bucket(bucket_name)
+                logger.info(f"Created bucket: {bucket_name}")
+        except S3Error as e:
+            logger.error(f"Error ensuring bucket exists: {e}")
+            raise
+    
     def store(
         self,
         key: str,
@@ -149,19 +137,18 @@ class MinIODB(FileDB):
             # Always overwrite - no conflict resolution needed since keys are unique
             was_overwritten = False
             storage_key = key
-            obj_key = self._object_key(storage_key)
-
+            
             key_exists = self.exists(key)
-
+            
             if key_exists:
                 was_overwritten = True
                 logger.info(f"Overwriting existing blob with key: '{key}'")
-
+            
             data_stream = BytesIO(data)
-
+            
             client.put_object(
                 bucket_name=bucket_name,
-                object_name=obj_key,
+                object_name=storage_key,
                 data=data_stream,
                 length=len(data),
                 content_type=content_type,
@@ -180,11 +167,10 @@ class MinIODB(FileDB):
         try:
             client = self.client
             bucket_name = self.config.bucket_name
-            obj_key = self._object_key(key)
-
+            
             response = client.get_object(
                 bucket_name=bucket_name,
-                object_name=obj_key,
+                object_name=key,
                 **kwargs
             )
             
@@ -206,11 +192,10 @@ class MinIODB(FileDB):
         try:
             client = self.client
             bucket_name = self.config.bucket_name
-            obj_key = self._object_key(key)
-
+            
             # Check if object exists first
             try:
-                client.stat_object(bucket_name, obj_key)
+                client.stat_object(bucket_name, key)
             except S3Error as e:
                 if e.code == 'NoSuchKey':
                     logger.warning(f"Attempted to delete non-existent blob: {key}")
@@ -220,7 +205,7 @@ class MinIODB(FileDB):
             # Object exists, proceed with deletion
             client.remove_object(
                 bucket_name=bucket_name,
-                object_name=obj_key,
+                object_name=key,
                 **kwargs
             )
             
@@ -236,11 +221,10 @@ class MinIODB(FileDB):
         try:
             client = self.client
             bucket_name = self.config.bucket_name
-            obj_key = self._object_key(key)
-
+            
             client.stat_object(
                 bucket_name=bucket_name,
-                object_name=obj_key,
+                object_name=key,
                 **kwargs
             )
             return True
@@ -262,21 +246,20 @@ class MinIODB(FileDB):
             client = self.client
             bucket_name = self.config.bucket_name
             recursive = True
-            obj_prefix = self._object_key(prefix or "") or None
-
+            
             objects = client.list_objects(
                 bucket_name=bucket_name,
-                prefix=obj_prefix or None,
+                prefix=prefix,
                 recursive=recursive,
                 **kwargs
             )
-
+            
             keys = []
             for obj in objects:
-                keys.append(self._strip_prefix(obj.object_name))
+                keys.append(obj.object_name)
                 if limit and len(keys) >= limit:
                     break
-
+            
             logger.debug(f"Listed {len(keys)} blob keys with prefix: {prefix}")
             return keys
             
@@ -294,15 +277,14 @@ class MinIODB(FileDB):
         """Generate presigned URL for blob access"""
         try:
             from datetime import timedelta
-
+            
             client = self.client
             bucket_name = self.config.bucket_name
-            obj_key = self._object_key(key)
-
+            
             url = client.get_presigned_url(
                 method=method,
                 bucket_name=bucket_name,
-                object_name=obj_key,
+                object_name=key,
                 expires=timedelta(seconds=expiration_seconds),
                 **kwargs
             )

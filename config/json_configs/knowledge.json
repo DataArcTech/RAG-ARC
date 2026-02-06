@@ -3,8 +3,8 @@
     "file_storage_config": {
         "type": "file_storage",
         "file_db_config": {
-            "type": "oss_blob_store",
-            "object_key_prefix": "${OSS_FILE_PREFIX}"
+            "type": "local_blob_store",
+            "base_path": "${FILE_STORE_BASE_PATH}"
         },
         "relational_db_config": {
             "type": "postgresql",
@@ -20,8 +20,8 @@
         "file_storage_config": {
             "type": "file_storage",
             "file_db_config": {
-                "type": "oss_blob_store",
-                "object_key_prefix": "${OSS_FILE_PREFIX}"
+                "type": "local_blob_store",
+                "base_path": "${FILE_STORE_BASE_PATH}"
             },
             "relational_db_config": {
                 "type": "postgresql",
@@ -35,8 +35,8 @@
         "parsed_content_storage_config": {
             "type": "parsed_content_storage",
             "file_db_config": {
-                "type": "oss_blob_store",
-                "object_key_prefix": "${OSS_PARSED_CONTENT_PREFIX}"
+                "type": "local_blob_store",
+                "base_path": "${PARSED_CONTENT_STORE_BASE_PATH}"
             },
             "relational_db_config": {
                 "type": "postgresql",
@@ -50,8 +50,8 @@
         "chunk_storage_config": {
             "type": "chunk_storage",
             "file_db_config": {
-                "type": "oss_blob_store",
-                "object_key_prefix": "${OSS_CHUNK_PREFIX}"
+                "type": "local_blob_store",
+                "base_path": "${CHUNK_STORE_BASE_PATH}"
             },
             "relational_db_config": {
                 "type": "postgresql",

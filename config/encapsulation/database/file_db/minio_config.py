@@ -19,7 +19,6 @@ class MinIOConfig(AbstractConfig):
     username: str = Field(default_factory=lambda: os.getenv("MINIO_USERNAME", "ROOTNAME"))
     password: str = Field(default_factory=lambda: os.getenv("MINIO_PASSWORD", "CHANGEME123"))
     bucket_name: str = "test-bucket"
-    object_key_prefix: str = ""
     secure: bool = False
     region: str = "us-east-1"
 

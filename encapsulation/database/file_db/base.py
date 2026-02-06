@@ -49,10 +49,8 @@ class FileDB(AbstractModule):
         content_type: Optional[str] = None,
         **kwargs: Any,
     ) -> Tuple[str, bool]:
-        """Asynchronously store blob data (runs sync store in thread pool)."""
-        return await asyncio.to_thread(
-            self.store, key, data, content_type, **kwargs
-        )
+        """Asynchronously store blob data"""
+        return await self.store(key, data, content_type, **kwargs)
 
     @abstractmethod
     def retrieve(self, key: str, **kwargs: Any) -> bytes:
@@ -71,8 +69,8 @@ class FileDB(AbstractModule):
         pass
 
     async def aretrieve(self, key: str, **kwargs: Any) -> bytes:
-        """Asynchronously retrieve blob data (runs sync retrieve in thread pool)."""
-        return await asyncio.to_thread(self.retrieve, key, **kwargs)
+        """Asynchronously retrieve blob data"""
+        return await self.retrieve(key, **kwargs)
 
     @abstractmethod
     def delete(self, key: str, **kwargs: Any) -> bool:

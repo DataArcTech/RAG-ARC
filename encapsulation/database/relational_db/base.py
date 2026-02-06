@@ -329,35 +329,33 @@ class RelationalDB(AbstractModule):
         file_metadata: 'FileMetadata',
         **kwargs: Any,
     ) -> str:
-        """Asynchronously store file metadata (runs sync store in thread pool)."""
-        return await asyncio.to_thread(self.store_file_metadata, file_metadata, **kwargs)
+        """Asynchronously store file metadata"""
+        return await self.store_file_metadata(file_metadata, **kwargs)
 
     async def aget_file_metadata(self, file_id: str, **kwargs: Any) -> Optional['FileMetadata']:
-        """Asynchronously retrieve file metadata (runs sync get in thread pool)."""
-        return await asyncio.to_thread(self.get_file_metadata, file_id, **kwargs)
+        """Asynchronously retrieve file metadata"""
+        return await self.get_file_metadata(file_id, **kwargs)
 
     async def astore_parsed_content_metadata(
         self,
         parsed_content_metadata: 'ParsedContentMetadata',
         **kwargs: Any,
     ) -> str:
-        """Asynchronously store parsed content metadata (runs sync store in thread pool)."""
-        return await asyncio.to_thread(
-            self.store_parsed_content_metadata, parsed_content_metadata, **kwargs
-        )
+        """Asynchronously store parsed content metadata"""
+        return await self.store_parsed_content_metadata(parsed_content_metadata, **kwargs)
 
     async def aget_parsed_content_metadata(self, parsed_content_id: str, **kwargs: Any) -> Optional['ParsedContentMetadata']:
-        """Asynchronously retrieve parsed content metadata (runs sync get in thread pool)."""
-        return await asyncio.to_thread(self.get_parsed_content_metadata, parsed_content_id, **kwargs)
+        """Asynchronously retrieve parsed content metadata"""
+        return await self.get_parsed_content_metadata(parsed_content_id, **kwargs)
 
     async def astore_chunk_metadata(
         self,
         chunk_metadata: 'ChunkMetadata',
         **kwargs: Any,
     ) -> str:
-        """Asynchronously store chunk metadata (runs sync store in thread pool)."""
-        return await asyncio.to_thread(self.store_chunk_metadata, chunk_metadata, **kwargs)
+        """Asynchronously store chunk metadata"""
+        return await self.store_chunk_metadata(chunk_metadata, **kwargs)
 
     async def aget_chunk_metadata(self, chunk_id: str, **kwargs: Any) -> Optional['ChunkMetadata']:
-        """Asynchronously retrieve chunk metadata (runs sync get in thread pool)."""
-        return await asyncio.to_thread(self.get_chunk_metadata, chunk_id, **kwargs)
+        """Asynchronously retrieve chunk metadata"""
+        return await self.get_chunk_metadata(chunk_id, **kwargs)
