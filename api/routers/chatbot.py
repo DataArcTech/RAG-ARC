@@ -589,7 +589,8 @@ async def _stream_minio_object(minio_db: Any, blob_key: str, chunk_size: int = 1
         bucket = getattr(config, "bucket_name", None) if config is not None else None
         if client is None or not bucket:
             raise RuntimeError("minio client or bucket not configured")
-        response = client.get_object(bucket, blob_key)
+        obj_key = minio_db._object_key(blob_key) if hasattr(minio_db, "_object_key") else blob_key
+        response = client.get_object(bucket, obj_key)
         while True:
             data = response.read(chunk_size)
             if not data:

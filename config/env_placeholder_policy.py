@@ -21,6 +21,10 @@ ENV_DEFAULTS: dict[str, str] = {
     "FILE_STORE_BASE_PATH": "./data/file_store",
     "PARSED_CONTENT_STORE_BASE_PATH": "./data/parsed_content_store",
     "CHUNK_STORE_BASE_PATH": "./data/chunk_store",
+    # OSS object key prefixes (used when file_db type is oss_blob_store).
+    "OSS_FILE_PREFIX": "chatKB/files",
+    "OSS_PARSED_CONTENT_PREFIX": "chatKB/parsed_content",
+    "OSS_CHUNK_PREFIX": "chatKB/chunk_store",
     # Parser output root (controls native/dots_ocr/vlm_ocr/mineru subfolders).
     "PARSER_OUTPUT_DIR": "./data/parsed_files",
     # MultiPath fusion weights (RAG inference).
