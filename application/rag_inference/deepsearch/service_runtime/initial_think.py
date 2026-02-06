@@ -5,6 +5,9 @@ from core.deepsearch.trace import emit_trace
 from core.deepsearch.memory.plan_state import PlanState, update_plan_from_think_notes
 from core.graph_adapter.base import GraphAccessScope
 from encapsulation.data_model.deepsearch import GraphQueryContext
+from encapsulation.data_model.deepsearch import ThinkNote
+
+from application.rag_inference.deepsearch.runtime_cache import CachedInitialThink
 
 
 class DeepSearchServiceInitialThinkMixin:
@@ -49,6 +52,78 @@ class DeepSearchServiceInitialThinkMixin:
         steps = list(plan_steps or [])
         total_steps = len(steps)
         evidences = list(context_evidences or [])
+
+        # ------------------------------------------------------------------
+        # Initial-think cache (conservative): only cache "pure" initial think calls,
+        # i.e., no injected evidences/plan steps. This avoids accidental dependence on
+        # ephemeral context and keeps cache correctness high.
+        # ------------------------------------------------------------------
+        cache = getattr(self, "_initial_think_cache", None)
+        cache_key = None
+        if cache is not None and not steps and not evidences:
+            try:
+                owner_scope_id = str(getattr(scope, "scope_id", "") or "")
+                service_fp = str((getattr(self, "config", None) or {}).get("fingerprint") or "")
+                llm_fp = str(getattr(tool_manager, "llm_fingerprint", "") or "")
+                prompt_fp = str(getattr(self, "_think_prompt_fingerprint", "") or "")
+                if owner_scope_id and service_fp and prompt_fp:
+                    cache_key = cache.make_key(
+                        owner_scope_id=owner_scope_id,
+                        question=question,
+                        service_fingerprint=service_fp,
+                        llm_fingerprint=llm_fp,
+                        think_prompt_fingerprint=prompt_fp,
+                    )
+                    hit = cache.get(cache_key)
+                else:
+                    hit = None
+            except Exception:
+                hit = None
+
+            if hit is not None:
+                plan_state = PlanState()
+                plan_state.update(hit.plan_items)
+                note_objs: list[ThinkNote] = []
+                for payload in hit.think_notes_payloads:
+                    try:
+                        note_objs.append(ThinkNote.model_validate(payload))
+                    except Exception:
+                        continue
+
+                report_style = str(hit.report_style or "").strip().lower()
+                if report_style not in {"deepsearch", "research"}:
+                    report_style = "deepsearch"
+                if isinstance(reasoning_context.metadata, dict):
+                    reasoning_context.metadata["report_style"] = report_style
+                    reasoning_context.metadata["runtime_plan"] = list(plan_state.items)
+
+                await emit_trace(
+                    "write_outline",
+                    plan_state.markdown,
+                    meta={
+                        "stage": "think_init",
+                        "plan_step_id": "think_init",
+                        "plan_version": plan_state.version,
+                        "plan_items": list(plan_state.items),
+                        "cache": {"hit": True},
+                    },
+                )
+
+                await emit_trace(
+                    "think",
+                    "Initial think checkpoint (cache hit).",
+                    meta={"stage": "think_init", "plan_step": "think_init", "cache": {"hit": True}},
+                )
+                note_payloads = list(hit.think_notes_payloads)
+                return {
+                    "report_needed": bool(hit.report_needed),
+                    "report_style": report_style,
+                    "plan_state": plan_state,
+                    "think_notes": note_payloads,
+                    "think_notes_obj": note_objs,
+                    "raw": dict(hit.raw),
+                    "cache": {"hit": True},
+                }
 
         plan_state = PlanState()
         if isinstance(reasoning_context.metadata, dict):
@@ -137,6 +212,21 @@ class DeepSearchServiceInitialThinkMixin:
 
         await emit_trace("think", "\n".join(lines), meta={"stage": "think_init", "plan_step": "think_init"})
         note_payloads = [note.model_dump(exclude_none=True) for note in notes]
+        # Store cache entry after a successful run (same eligibility as above).
+        if cache is not None and cache_key is not None:
+            try:
+                cache.set(
+                    cache_key,
+                    CachedInitialThink(
+                        report_needed=bool(report_needed),
+                        report_style=report_style,
+                        raw=dict(raw),
+                        plan_items=list(plan_state.items),
+                        think_notes_payloads=list(note_payloads),
+                    ),
+                )
+            except Exception:
+                pass
         return {
             "report_needed": bool(report_needed),
             "report_style": report_style,
@@ -144,6 +234,7 @@ class DeepSearchServiceInitialThinkMixin:
             "think_notes": note_payloads,
             "think_notes_obj": list(notes),
             "raw": raw,
+            "cache": {"hit": False} if cache is not None and cache_key is not None else None,
         }
 
     async def _run_final_think(

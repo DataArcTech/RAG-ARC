@@ -11,6 +11,7 @@ from typing import Any, Dict, Literal, Optional, List
 from pydantic import BaseModel, Field
 
 from config.core.deepsearch.computable_gate_defaults import DEFAULT_COMPUTABLE_POLICY
+from config.core.deepsearch import runtime_cache_defaults
 from application.rag_inference.deepsearch.service import DeepSearchService
 from config.core.deepsearch.graph_adapter_config import GraphAdapterConfig
 from config.encapsulation.mcp.client_config import MCPClientConfig
@@ -27,6 +28,30 @@ logger = logging.getLogger(__name__)
 
 _ENV_PATTERN = re.compile(r"\$\{([^}]+)\}")
 _UNRESOLVED_ENV_PLACEHOLDER = object()
+
+
+class DeepSearchPlanCacheConfig(BaseModel):
+    """Process-local cache for initial think (plan/next actions).
+
+    Conservative policy:
+    - exact-match by normalized question hash (no semantic similarity)
+    - owner-scoped + fingerprint-scoped
+    """
+
+    enabled: bool = Field(
+        runtime_cache_defaults.DEFAULT_PLAN_CACHE_ENABLED,
+        description="Enable the DeepSearch initial think cache (process-local).",
+    )
+    max_entries: int = Field(
+        runtime_cache_defaults.DEFAULT_PLAN_CACHE_MAX_ENTRIES,
+        ge=1,
+        description="Maximum cached questions per process (LRU).",
+    )
+    ttl_seconds: float = Field(
+        float(runtime_cache_defaults.DEFAULT_PLAN_CACHE_TTL_SECONDS),
+        gt=0.0,
+        description="TTL for cached initial think results (seconds).",
+    )
 
 try:  # Keep substitution rules consistent with framework.Register
     from config.env_placeholder_policy import ENV_DEFAULTS as _ENV_DEFAULTS
@@ -499,6 +524,10 @@ class DeepSearchServiceConfig(AbstractConfig):
     reporter: ReporterConfig
     tool_manager: ToolManagerConfig
     tool_budget: ToolBudgetConfig
+    plan_cache: "DeepSearchPlanCacheConfig" = Field(
+        default_factory=lambda: DeepSearchPlanCacheConfig(),
+        description="Process-local cache knobs for initial think (plan template).",
+    )
     deterministic_routing: DeterministicRoutingConfig = Field(default_factory=DeterministicRoutingConfig)
     mcp_client: Optional[MCPClientConfig] = Field(
         default=None, description="Optional MCP client config used for remote tools."
@@ -573,6 +602,7 @@ class DeepSearchServiceConfig(AbstractConfig):
                 "disabled_tools": sorted(tool_hint_registry.get_disabled_tool_names()),
                 "think_tool": self.graph_reasoning.think.tool_name,
                 "coverage_expected_min_chunks": self.graph_reasoning.coverage_expected_min_chunks,
+                "plan_cache": self.plan_cache.model_dump(),
             },
         )
 

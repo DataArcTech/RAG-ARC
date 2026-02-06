@@ -1,5 +1,6 @@
 """Service façade wiring DeepSearch reasoning loop and reporting."""
 
+import hashlib
 import logging
 from typing import Any, Dict, Type
 
@@ -7,6 +8,7 @@ from core.deepsearch.reasoning import GraphReasoningLoop
 from core.deepsearch.report import DeepSearchReporter
 from core.deepsearch.state import DeepSearchState
 from core.deepsearch.tooling.protocols import ToolInvoker
+from core.prompts.deepsearch.tools import THINK_TOOL_SYSTEM_PROMPT_EN
 
 from .service_runtime import (
     DeepSearchServiceArtifactsMixin,
@@ -17,6 +19,7 @@ from .service_runtime import (
     DeepSearchServiceRunMixin,
     DeepSearchServiceStageMixin,
 )
+from .runtime_cache import DeepSearchInitialThinkCache
 
 logger = logging.getLogger(__name__)
 
@@ -49,3 +52,30 @@ class DeepSearchService(
         self.config = self._coerce_config(config)
         self.experiment_output_dir = self._resolve_experiment_dir()
         self.artifact_store = self._resolve_artifact_store()
+
+        self._initial_think_cache = self._build_initial_think_cache()
+        # Used as part of the initial think cache key so prompt changes auto-bust.
+        self._think_prompt_fingerprint = hashlib.sha256(THINK_TOOL_SYSTEM_PROMPT_EN.encode("utf-8")).hexdigest()
+
+    def _build_initial_think_cache(self) -> DeepSearchInitialThinkCache | None:
+        cfg = None
+        try:
+            cfg = (getattr(self, "config", None) or {}).get("plan_cache")
+        except Exception:
+            cfg = None
+        if not isinstance(cfg, dict):
+            return None
+        if cfg.get("enabled") is False:
+            return None
+        try:
+            max_entries = int(cfg.get("max_entries") or 0)
+        except Exception:
+            max_entries = 0
+        try:
+            ttl_seconds = float(cfg.get("ttl_seconds") or 0.0)
+        except Exception:
+            ttl_seconds = 0.0
+        if max_entries <= 0 or ttl_seconds <= 0:
+            # Treat invalid config as disabled; do not raise at runtime.
+            return None
+        return DeepSearchInitialThinkCache(max_entries=max_entries, ttl_seconds=ttl_seconds)

@@ -141,6 +141,11 @@
     "max_calls_total": 60,
     "expose_to_llm": true
   },
+  "plan_cache": {
+    "enabled": true,
+    "max_entries": 256,
+    "ttl_seconds": 1800
+  },
   "deterministic_routing": {
     "enabled": true,
     "classifier": "llm",
