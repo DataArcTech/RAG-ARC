@@ -1,11 +1,13 @@
 import asyncio
 import logging
-from typing import List, TYPE_CHECKING
+from typing import List, TYPE_CHECKING, Dict
 from collections import deque
 import threading
 
 from core.file_management.indexing.base import BaseIndexer
 from encapsulation.data_model.schema import Chunk
+from core.utils.owner_guard import normalize_owner_id
+from encapsulation.database.index_scoping import owner_scoped_dir
 
 if TYPE_CHECKING:
     from config.core.file_management.indexing.bm25_indexing_config import BM25IndexerConfig
@@ -24,7 +26,15 @@ class BM25Indexer(BaseIndexer):
         Initializes the BM25 indexer and its specific builder.
         """
         super().__init__(config)
-        self.bm25_builder = config.index_config.build()
+        self._template_cfg = config.index_config
+        self._owner_scoped_enabled = bool(getattr(self._template_cfg, "owner_scoped_enabled", False))
+        self._builder_by_owner: Dict[str | None, object] = {}
+        self._builder_lock = threading.Lock()
+
+        if not self._owner_scoped_enabled:
+            self.bm25_builder = config.index_config.build()
+        else:
+            self.bm25_builder = None
 
         # Batch processing configuration
         self.batch_size = config.batch_size
@@ -69,6 +79,60 @@ class BM25Indexer(BaseIndexer):
     def _build_or_update_index_sync(self, chunks_list: List[Chunk]) -> List[str]:
         """Synchronous method to build or update index (runs in thread pool)."""
         try:
+            if self._owner_scoped_enabled:
+                # Group by owner_id; update each owner's index independently.
+                by_owner: Dict[str, List[Chunk]] = {}
+                for c in chunks_list:
+                    owner_norm = normalize_owner_id(getattr(c, "owner_id", None) or getattr(getattr(c, "metadata", None) or {}, "get", lambda *_: None)("owner_id"))
+                    if owner_norm is None:
+                        continue
+                    by_owner.setdefault(owner_norm, []).append(c)
+
+                out_ids: List[str] = []
+                base_dir = str(getattr(self._template_cfg, "index_path", "") or "").strip()
+                owner_dirname = str(getattr(self._template_cfg, "owner_scoped_dirname", "owners") or "owners")
+                global_owner = str(getattr(self._template_cfg, "owner_scoped_global_owner_name", "__GLOBAL__") or "__GLOBAL__")
+
+                for owner_id, owner_chunks in by_owner.items():
+                    index_dir = owner_scoped_dir(
+                        base_dir,
+                        owner_id=owner_id,
+                        owner_dirname=owner_dirname,
+                        global_owner_name=global_owner,
+                    )
+                    with self._builder_lock:
+                        builder = self._builder_by_owner.get(owner_id)
+                        if builder is None:
+                            try:
+                                cfg2 = self._template_cfg.model_copy(update={"index_path": index_dir})
+                            except Exception:
+                                cfg2 = self._template_cfg
+                                try:
+                                    cfg2.index_path = index_dir
+                                except Exception:
+                                    pass
+                            builder = cfg2.build()
+                            self._builder_by_owner[owner_id] = builder
+
+                    # Build/update
+                    if getattr(builder, "_index", None) is not None:
+                        result = builder.update_index(owner_chunks)
+                        if result is not True:
+                            raise RuntimeError("BM25 builder update_index returned False")
+                        out_ids.extend([chunk.id for chunk in owner_chunks])
+                        continue
+                    try:
+                        builder.load_local()
+                        result = builder.update_index(owner_chunks)
+                        if result is not True:
+                            raise RuntimeError("BM25 builder update_index returned False")
+                        out_ids.extend([chunk.id for chunk in owner_chunks])
+                    except (FileNotFoundError, RuntimeError):
+                        builder.from_chunks(owner_chunks)
+                        out_ids.extend([chunk.id for chunk in owner_chunks])
+
+                return out_ids
+
             # Check if index is already loaded in memory
             if self.bm25_builder._index is not None:
                 # Index is loaded, use update_index to update existing chunks

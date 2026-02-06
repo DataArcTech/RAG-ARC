@@ -1,10 +1,12 @@
 from typing import Any, List, Dict, ClassVar, Collection, TYPE_CHECKING, Optional
 import logging
+import os
 
 from core.retrieval.base import BaseRetriever
 from encapsulation.data_model.schema import Chunk
 from core.utils.retrieval_helper import RetrievalHelper
 from core.utils.owner_guard import normalize_owner_id, is_admin_owner
+from encapsulation.database.index_scoping import owner_scoped_dir, iter_owner_dirs
 
 if TYPE_CHECKING:
     from config.core.retrieval.dense_config import DenseRetrieverConfig
@@ -37,12 +39,27 @@ class DenseRetriever(BaseRetriever):
                 self.embedding = config.index_config.embedding_config.build()
         logger.info("DenseRetriever: Embedding model initialized")
 
-        self._ensure_index_initialized()
+        self._owner_scoped_enabled = bool(getattr(getattr(config, "index_config", None), "owner_scoped_enabled", False))
+        self._owner_scoped_cache: dict[str | None, Any] = {}
+        self._owner_scoped_lock = None
+        try:
+            import threading
+
+            self._owner_scoped_lock = threading.Lock()
+        except Exception:
+            self._owner_scoped_lock = None
+
+        # For unified index mode, BaseRetriever already loaded the index.
+        if not self._owner_scoped_enabled:
+            self._ensure_index_initialized()
         logger.info("DenseRetriever: Initialization complete")
 
 
     def _ensure_index_initialized(self) -> None:
         """Ensure the index is initialized (built by IndexManager)"""
+        if getattr(self, "_owner_scoped_enabled", False):
+            # Owner-scoped indexes are loaded lazily per owner_id at query time.
+            return
         # Check if the index exists
         if not hasattr(self, '_index') or self._index is None:
             raise RuntimeError("Index not initialized. Please use IndexManager to build the index first.")
@@ -52,6 +69,68 @@ class DenseRetriever(BaseRetriever):
             raise RuntimeError("Index exists but contains no data. Please use IndexManager to build the index first.")
 
         logger.debug(f"Index initialized successfully for {self.get_name()}")
+
+    def _owner_scoped_faiss_db(self, *, owner_id: str | None):
+        """Lazy-load per-owner FAISS DB under index_path/owners/<owner_id>."""
+        idx_cfg = getattr(self.config, "index_config", None)
+        if idx_cfg is None:
+            return None
+        base_dir = str(getattr(idx_cfg, "index_path", "") or "").strip()
+        if not base_dir:
+            return None
+
+        owner_dirname = str(getattr(idx_cfg, "owner_scoped_dirname", "owners") or "owners")
+        global_owner = str(getattr(idx_cfg, "owner_scoped_global_owner_name", "__GLOBAL__") or "__GLOBAL__")
+        index_dir = owner_scoped_dir(
+            base_dir,
+            owner_id=owner_id,
+            owner_dirname=owner_dirname,
+            global_owner_name=global_owner,
+        )
+
+        key = None if owner_id is None else str(owner_id)
+        lock = getattr(self, "_owner_scoped_lock", None)
+        cache = getattr(self, "_owner_scoped_cache", None)
+        if cache is None:
+            self._owner_scoped_cache = {}
+            cache = self._owner_scoped_cache
+
+        if lock is not None:
+            with lock:
+                cached = cache.get(key)
+        else:
+            cached = cache.get(key)
+        if cached is not None:
+            db = cached
+        else:
+            try:
+                from encapsulation.database.vector_db.faiss import FaissVectorDB
+            except Exception:
+                return None
+            try:
+                cfg2 = idx_cfg.model_copy(update={"index_path": index_dir})
+            except Exception:
+                cfg2 = idx_cfg
+                try:
+                    cfg2.index_path = index_dir
+                except Exception:
+                    pass
+            db = FaissVectorDB(cfg2)
+            if lock is not None:
+                with lock:
+                    cache[key] = db
+            else:
+                cache[key] = db
+
+        # Attempt to load if artifacts exist and index isn't loaded yet.
+        try:
+            if getattr(db, "index", None) is None and os.path.isdir(index_dir):
+                # faiss.py load_index already checks for both .faiss and .pkl.
+                db.load_index(index_dir)
+        except Exception:
+            # Treat as empty until indexing writes artifacts.
+            pass
+        return db
 
     @staticmethod
     def _chunk_matches_owner(chunk: Chunk, owner_key: str) -> bool:
@@ -131,6 +210,77 @@ class DenseRetriever(BaseRetriever):
         Returns:
             list of chunks, if include_score=True, then score is stored in metadata["score"]
         """
+        # Owner-scoped routing: select per-owner FAISS index instead of scanning a unified index.
+        if getattr(self, "_owner_scoped_enabled", False):
+            owner_id = kwargs.pop('owner_id', None)
+            if owner_id is None:
+                logger.warning("Dense retrieval requires an owner_id; returning no results")
+                return []
+            owner_key = normalize_owner_id(owner_id)
+            if owner_key is None:
+                logger.warning("owner_id '%s' could not be normalized; returning no results", owner_id)
+                return []
+            global_scope = is_admin_owner(owner_id)
+            if global_scope:
+                # Best-effort admin scan: fuse across a bounded number of owner indexes.
+                idx_cfg = getattr(self.config, "index_config", None)
+                base_dir = str(getattr(idx_cfg, "index_path", "") or "").strip() if idx_cfg is not None else ""
+                owner_dirname = str(getattr(idx_cfg, "owner_scoped_dirname", "owners") or "owners") if idx_cfg is not None else "owners"
+                global_owner = str(getattr(idx_cfg, "owner_scoped_global_owner_name", "__GLOBAL__") or "__GLOBAL__") if idx_cfg is not None else "__GLOBAL__"
+                max_scan = int(getattr(idx_cfg, "owner_scoped_admin_max_owner_indexes", 0) or 0) if idx_cfg is not None else 0
+                if max_scan <= 0:
+                    return []
+                dirs = iter_owner_dirs(base_dir, owner_dirname=owner_dirname, global_owner_name=global_owner)[:max_scan]
+                merged: list[tuple[Chunk, float]] = []
+                # Keep k small per owner; final trim is original_k.
+                original_k = int(kwargs.get("k", self.config.search_kwargs.get("k", 5)) or 5)
+                per_owner_k = max(1, min(original_k, 10))
+                for owner, _dir in dirs:
+                    db = self._owner_scoped_faiss_db(owner_id=owner)
+                    if db is None or getattr(db, "index", None) is None or getattr(db.index, "ntotal", 0) <= 0:
+                        continue
+                    search_kwargs = {**self.config.search_kwargs, **kwargs}
+                    search_kwargs["metric"] = self.config.metric
+                    search_kwargs["k"] = min(per_owner_k, int(getattr(db.index, "ntotal", 0) or 0) or per_owner_k)
+                    merged.extend(RetrievalHelper.vector_search_with_faiss(db, embedding, search_kwargs))
+                merged.sort(key=lambda pair: pair[1], reverse=True)
+                merged = merged[:original_k]
+                if include_score:
+                    out = []
+                    for chunk, score in merged:
+                        out.append(
+                            Chunk(
+                                id=chunk.id,
+                                content=chunk.content,
+                                owner_id=chunk.owner_id,
+                                metadata={**(chunk.metadata or {}), "score": score},
+                            )
+                        )
+                    return out
+                return [chunk for chunk, _ in merged]
+
+            db = self._owner_scoped_faiss_db(owner_id=owner_key)
+            if db is None or getattr(db, "index", None) is None or getattr(db.index, "ntotal", 0) <= 0:
+                return []
+
+            search_kwargs = {**self.config.search_kwargs, **kwargs}
+            search_kwargs["metric"] = self.config.metric
+            # No need for owner over-fetch; index is owner-scoped.
+            chunks_and_scores = RetrievalHelper.vector_search_with_faiss(db, embedding, search_kwargs)
+            if include_score:
+                out = []
+                for chunk, score in chunks_and_scores:
+                    out.append(
+                        Chunk(
+                            id=chunk.id,
+                            content=chunk.content,
+                            owner_id=chunk.owner_id,
+                            metadata={**(chunk.metadata or {}), "score": score},
+                        )
+                    )
+                return out
+            return [chunk for chunk, _ in chunks_and_scores]
+
         if self._index is None:
             return []
 
