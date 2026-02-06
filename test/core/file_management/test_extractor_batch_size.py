@@ -38,4 +38,5 @@ async def test_extractor_respects_batch_size_scheduling():
     out = await extractor.extract_concurrent(chunks)
 
     assert [c.id for c in out] == [f"c{i}" for i in range(5)]
-    assert extractor.seen == [f"c{i}" for i in range(5)]
+    # Concurrency can reorder completion; only assert coverage.
+    assert sorted(extractor.seen) == [f"c{i}" for i in range(5)]

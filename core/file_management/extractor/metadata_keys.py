@@ -1,4 +1,5 @@
 EXTRACTION_ERROR_KEY = "extraction_error"
+EXTRACTION_SKIPPED_KEY = "extraction_skipped"
 MINDMAP_ERROR_KEY = "mindmap_error"
 TEMPORAL_ERROR_KEY = "temporal_error"
 BUSINESS_TIME_KEY = "business_time"
