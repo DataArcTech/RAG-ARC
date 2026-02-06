@@ -426,7 +426,32 @@ class FaissVectorDB(VectorDB):
 
         if texts_to_embed:
             self._ensure_embedding_model()
-            computed = self.embedding_model.embed(texts_to_embed)
+            try:
+                computed = self.embedding_model.embed(texts_to_embed)
+            except Exception as exc:  # noqa: BLE001
+                # Resilience: batch embedding can time out transiently (gateway/network).
+                # Fall back to progressive splitting to avoid failing the whole FAISS update when only
+                # a large batch request is flaky (and to avoid N per-item calls when smaller batches work).
+                logger.warning(
+                    "FAISS batch embedding failed (batch=%s). Retrying with progressive batch splitting. error=%s",
+                    len(texts_to_embed),
+                    str(exc),
+                )
+                def _embed_split(items: list[str]) -> list:
+                    if not items:
+                        return []
+                    try:
+                        return self.embedding_model.embed(items)
+                    except Exception:
+                        if len(items) <= 1:
+                            # Some OpenAI-compatible gateways reject list input; retry scalar.
+                            return [self.embedding_model.embed(items[0])]
+                        mid = max(1, len(items) // 2)
+                        left = _embed_split(items[:mid])
+                        right = _embed_split(items[mid:])
+                        return list(left or []) + list(right or [])
+
+                computed = _embed_split(list(texts_to_embed))
             if isinstance(computed, list) and computed and isinstance(computed[0], (int, float)):
                 computed = [computed]
             if len(computed) != len(texts_to_embed):

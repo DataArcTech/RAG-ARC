@@ -14,6 +14,7 @@ from config.core.embedding_retry_defaults import (
     EMBEDDING_TRANSIENT_BACKOFF_MAX_SECONDS,
     EMBEDDING_TRANSIENT_MAX_RETRIES,
 )
+from config.core.embedding_defaults import EMBEDDING_REQUEST_BATCH_SIZE_DEFAULT
 
 
 def _resolve_embedding_provider():
@@ -91,7 +92,7 @@ class OpenAIEmbeddingConfig(AbstractConfig):
 
     # Request shaping / compatibility
     request_batch_size: int = Field(
-        default_factory=lambda: int(os.getenv("EMBEDDING_REQUEST_BATCH_SIZE", "64")),
+        default_factory=lambda: int(os.getenv("EMBEDDING_REQUEST_BATCH_SIZE", str(EMBEDDING_REQUEST_BATCH_SIZE_DEFAULT))),
         description="Number of inputs per embeddings request when batching is enabled",
     )
     supports_batch_input: bool = Field(
