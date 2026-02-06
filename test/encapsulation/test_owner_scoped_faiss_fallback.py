@@ -27,7 +27,7 @@ class _Dummy(_PrunedHippoRAGNeo4jEmbeddingsMixin):
         return owner_id
 
 
-def test_owner_scoped_faiss_db_falls_back_to_legacy_layout(tmp_path: Path) -> None:
+def test_owner_scoped_faiss_db_falls_back_to_legacy_layout_for_global_owner(tmp_path: Path) -> None:
     storage = tmp_path / "graph_index"
     base_dir = storage / "fact_index"
     base_dir.mkdir(parents=True)
@@ -35,6 +35,5 @@ def test_owner_scoped_faiss_db_falls_back_to_legacy_layout(tmp_path: Path) -> No
     (base_dir / "index.pkl").write_bytes(b"")
 
     store = _Dummy(storage_path=storage)
-    db = store.get_fact_faiss_db("2a16b821-0e49-44c7-a5bb-96fd141f7772")
+    db = store.get_fact_faiss_db(None)
     assert db is store.fact_faiss_db
-

@@ -1,11 +1,43 @@
 import os
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal, Union, Optional, Dict, Any
 from pydantic import Field, model_validator
 
 from framework.config import AbstractConfig
 from config.encapsulation.llm.embedding.qwen import QwenEmbeddingConfig
 from config.encapsulation.llm.embedding.openai import OpenAIEmbeddingConfig
 from encapsulation.database.graph_db.pruned_hipporag_neo4j import PrunedHippoRAGNeo4jStore
+
+
+class GraphEmbeddingCacheConfig(AbstractConfig):
+    """
+    Owner-scoped embedding cache for graph indexing.
+
+    Goals
+    - Speed up repeated ingestion for the same tenant when content overlaps across files/versions/runs.
+    - Never share cached embeddings across owners (multi-tenant isolation).
+    - Keep IO low: batch reads/writes, single sqlite file per owner under storage_path.
+    """
+
+    type: Literal["graph_embedding_cache"] = "graph_embedding_cache"
+
+    enabled: bool = Field(
+        default=True,
+        description="Enable the owner-scoped sqlite embedding cache for graph indexing.",
+    )
+    dirname: str = Field(
+        default="embedding_cache",
+        description="Subdirectory under storage_path for embedding cache DB files.",
+    )
+    db_filename: str = Field(
+        default="embeddings.sqlite3",
+        description="Filename for each owner-scoped sqlite DB.",
+    )
+    max_in_keys_per_query: int = Field(
+        default=500,
+        ge=1,
+        le=5000,
+        description="Chunk sqlite IN (...) lookups to avoid oversized queries.",
+    )
 
 
 class PrunedHippoRAGNeo4jConfig(AbstractConfig):
@@ -54,6 +86,19 @@ class PrunedHippoRAGNeo4jConfig(AbstractConfig):
         description="Name prefix for index files"
     )
 
+    chunk_embeddings_owner_sharded: bool = Field(
+        default=True,
+        description=(
+            "When true (default), persist chunk embeddings as owner-scoped shards under "
+            "`storage_path/<chunk_embeddings_dirname>/` to avoid a single ever-growing pickle file. "
+            "This reduces write amplification and improves multi-owner isolation."
+        ),
+    )
+    chunk_embeddings_dirname: str = Field(
+        default="chunk_embeddings",
+        description="Subdirectory name under storage_path for persisted chunk embedding shards.",
+    )
+
     # KG schema governance (YAML)
     kg_schema_path: str = Field(
         default_factory=lambda: os.getenv("KG_SCHEMA_PATH", "./kg_schema.yml"),
@@ -65,6 +110,16 @@ class PrunedHippoRAGNeo4jConfig(AbstractConfig):
         ge=0,
         le=1000,
         description="Max chunk ids to retain per fact edge in Neo4j (`RELATES_TO.source_chunk_ids`). 0 disables storage.",
+    )
+
+    neo4j_ingest_chunk_batch_size: int = Field(
+        default=1000,
+        ge=1,
+        le=5000,
+        description=(
+            "Chunk batch size per Neo4j ingestion transaction during graph indexing. "
+            "Lower values reduce single-tx pressure under concurrency; higher values reduce overhead."
+        ),
     )
 
     chunk_upsert_policy: Literal["replace", "append"] = Field(
@@ -135,6 +190,11 @@ class PrunedHippoRAGNeo4jConfig(AbstractConfig):
         Union[QwenEmbeddingConfig, OpenAIEmbeddingConfig],
         Field(discriminator="type")
     ]
+
+    embedding_cache: GraphEmbeddingCacheConfig = Field(
+        default_factory=GraphEmbeddingCacheConfig,
+        description="Owner-scoped embedding cache settings for graph indexing.",
+    )
 
     # Synonymy edge configuration
     add_synonymy_edges: bool = Field(

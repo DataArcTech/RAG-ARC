@@ -24,28 +24,67 @@ class _PrunedHippoRAGNeo4jPersistenceMixin:
         """
         os.makedirs(path, exist_ok=True)
 
-        # 1. Save chunk embeddings
-        embeddings_path = os.path.join(path, f"{name}_chunk_embeddings.pkl")
-        with open(embeddings_path, 'wb') as f:
-            pickle.dump(self.chunk_embeddings, f)
-        logger.info(f"Saved chunk embeddings to {embeddings_path}")
+        # 1. Save chunk embeddings (owner-sharded when enabled).
+        save_chunks = getattr(self, "_save_chunk_embeddings", None)
+        if callable(save_chunks):
+            save_chunks(base_path=path, name=name)
+        else:
+            embeddings_path = os.path.join(path, f"{name}_chunk_embeddings.pkl")
+            with open(embeddings_path, "wb") as f:
+                pickle.dump(self.chunk_embeddings, f)
+            logger.info("Saved chunk embeddings to %s", embeddings_path)
 
         # 2. Save FAISS indices
+        # IMPORTANT (performance): do NOT scan and load all owner-scoped FAISS indexes on disk here.
+        # `iter_owner_scoped_faiss_dbs()` walks the filesystem and will eagerly load every owner index
+        # into memory, which can OOM on multi-owner deployments. Persist only what this process has
+        # actually touched (in-memory caches), plus the template/global indices.
+
+        # 2.1 Save template/global indices (legacy + still used by some graph ops).
+        try:
+            fact_db = getattr(self, "fact_faiss_db", None)
+            if fact_db is not None:
+                fact_index_path = os.path.join(path, "fact_index")
+                fact_db.save_index(fact_index_path, "index")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to save template fact index: %s", exc)
+
+        try:
+            entity_db = getattr(self, "entity_faiss_db", None)
+            if entity_db is not None:
+                entity_index_path = os.path.join(path, "entity_index")
+                entity_db.save_index(entity_index_path, "index")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to save template entity index: %s", exc)
+
+        # 2.2 Save loaded owner-scoped indices (only those instantiated in this process).
         saved = 0
-        for owner, db in self.iter_owner_scoped_faiss_dbs("fact"):
-            owner_leaf = safe_leaf_name(owner or "__GLOBAL__", default="__GLOBAL__")
-            fact_index_path = os.path.join(path, "fact_index", owner_leaf)
-            db.save_index(fact_index_path, "index")
-            saved += 1
-        logger.info("Saved %s owner-scoped fact indexes under %s", saved, os.path.join(path, "fact_index"))
+        fact_map = getattr(self, "_owner_scoped_fact_faiss", None)
+        if isinstance(fact_map, dict):
+            for owner_leaf, db in fact_map.items():
+                owner = None if owner_leaf == "__GLOBAL__" else owner_leaf
+                owner_leaf2 = safe_leaf_name(owner or "__GLOBAL__", default="__GLOBAL__")
+                fact_index_path = os.path.join(path, "fact_index", owner_leaf2)
+                try:
+                    db.save_index(fact_index_path, "index")
+                    saved += 1
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to save owner-scoped fact index (owner=%s): %s", owner, exc)
+        logger.info("Saved %s loaded owner-scoped fact indexes under %s", saved, os.path.join(path, "fact_index"))
 
         saved = 0
-        for owner, db in self.iter_owner_scoped_faiss_dbs("entity"):
-            owner_leaf = safe_leaf_name(owner or "__GLOBAL__", default="__GLOBAL__")
-            entity_index_path = os.path.join(path, "entity_index", owner_leaf)
-            db.save_index(entity_index_path, "index")
-            saved += 1
-        logger.info("Saved %s owner-scoped entity indexes under %s", saved, os.path.join(path, "entity_index"))
+        entity_map = getattr(self, "_owner_scoped_entity_faiss", None)
+        if isinstance(entity_map, dict):
+            for owner_leaf, db in entity_map.items():
+                owner = None if owner_leaf == "__GLOBAL__" else owner_leaf
+                owner_leaf2 = safe_leaf_name(owner or "__GLOBAL__", default="__GLOBAL__")
+                entity_index_path = os.path.join(path, "entity_index", owner_leaf2)
+                try:
+                    db.save_index(entity_index_path, "index")
+                    saved += 1
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to save owner-scoped entity index (owner=%s): %s", owner, exc)
+        logger.info("Saved %s loaded owner-scoped entity indexes under %s", saved, os.path.join(path, "entity_index"))
 
         logger.info(f"Index saved to {path}")
         logger.info("Note: Neo4j data is persisted automatically in the database")
@@ -64,17 +103,28 @@ class _PrunedHippoRAGNeo4jPersistenceMixin:
             path: Directory path to load the index from
             name: Base name for index files
         """
-        # 1. Load chunk embeddings
-        embeddings_path = os.path.join(path, f"{name}_chunk_embeddings.pkl")
-        if os.path.exists(embeddings_path):
-            with open(embeddings_path, 'rb') as f:
-                loaded = pickle.load(f)
-            with self.write_lock():
-                self.chunk_embeddings = loaded
-                self._chunk_embeddings_array = None  # Mark for rebuild
-            logger.info(f"Loaded chunk embeddings from {embeddings_path}")
+        # 1. Load chunk embeddings (owner-sharded when enabled).
+        load_chunks = getattr(self, "_load_chunk_embeddings", None)
+        if callable(load_chunks):
+            # `_load_chunk_embeddings` reads from self.storage_path, so temporarily point it at `path`.
+            original = getattr(self, "storage_path", None)
+            try:
+                setattr(self, "storage_path", str(path))
+                load_chunks()
+            finally:
+                if original is not None:
+                    setattr(self, "storage_path", original)
         else:
-            logger.warning(f"Chunk embeddings file not found: {embeddings_path}")
+            embeddings_path = os.path.join(path, f"{name}_chunk_embeddings.pkl")
+            if os.path.exists(embeddings_path):
+                with open(embeddings_path, "rb") as f:
+                    loaded = pickle.load(f)
+                with self.write_lock():
+                    self.chunk_embeddings = loaded
+                    self._chunk_embeddings_array = None  # Mark for rebuild
+                logger.info("Loaded chunk embeddings from %s", embeddings_path)
+            else:
+                logger.warning("Chunk embeddings file not found: %s", embeddings_path)
 
         # 2. Load FAISS indices (owner-scoped directories)
         def _load_owner_scoped(kind: str) -> int:

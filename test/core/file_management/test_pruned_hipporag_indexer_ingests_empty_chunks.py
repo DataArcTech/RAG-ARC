@@ -60,6 +60,8 @@ async def test_indexer_does_not_drop_empty_or_failed_graph_chunks():
     ]
 
     indexed_ids = await indexer.update_index(chunks)
+    if isinstance(indexed_ids, dict):
+        indexed_ids = indexed_ids.get("indexed_ids")
 
     assert indexed_ids == ["chunk_ok", "chunk_empty", "chunk_failed"]
     assert [c.id for c in store.seen] == ["chunk_ok", "chunk_empty", "chunk_failed"]

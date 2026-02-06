@@ -90,7 +90,7 @@ class _FakeStore(_PrunedHippoRAGNeo4jEmbeddingsMixin):
                 {"entity_id": "entity-a2", "entity_name": "Alpha2", "owner_id": "owner-a"},
                 {"entity_id": "entity-b1", "entity_name": "Beta", "owner_id": "owner-b"},
             ]
-        if "MATCH (h:Entity)-[r:RELATES_TO]->(t:Entity)" in query:
+        if "MATCH (h:Entity)-[r:RELATES_TO" in query and "RETURN r.fact_id AS fact_id" in query:
             return [
                 {
                     "fact_id": "fact-a1",
