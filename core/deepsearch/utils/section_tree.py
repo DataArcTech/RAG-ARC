@@ -107,6 +107,50 @@ async def fetch_section_nodes(
     return sections, diagnostics
 
 
+async def fetch_section_tree_fingerprint(
+    *,
+    adapter: Any,
+    access_scope: Any,
+    file_id: str,
+) -> tuple[str | None, Dict[str, Any]]:
+    """Return a cheap fingerprint for a file's Section tree (for cache busting).
+
+    We intentionally avoid reading all Section rows here; this query returns a single row.
+    """
+
+    diagnostics: Dict[str, Any] = {"file_id": file_id}
+    if not pageindex_cfg.pageindex_enabled():
+        diagnostics["reason"] = "pageindex_disabled"
+        return None, diagnostics
+    if adapter is None or not adapter_supports_cypher(adapter):
+        diagnostics["reason"] = "cypher_unavailable"
+        return None, diagnostics
+    if access_scope is None or not getattr(access_scope, "scope_id", None):
+        diagnostics["reason"] = "owner_scope_missing"
+        return None, diagnostics
+
+    cypher = (
+        "MATCH (s:Section)\n"
+        "WHERE s.source_file_id = $file_id AND COALESCE(s.owner_id, $global_owner) = $owner_id\n"
+        "RETURN count(s) AS section_count, max(s.updated_at) AS max_updated_at\n"
+    )
+    params = {"file_id": file_id}
+    async with adapter_locked(adapter):
+        rows = await adapter.acypher(cypher, params, access_scope=access_scope)
+    row = rows[0] if isinstance(rows, list) and rows else {}
+    if not isinstance(row, dict):
+        row = {}
+    try:
+        count = int(row.get("section_count") or 0)
+    except Exception:
+        count = 0
+    updated_at = row.get("max_updated_at")
+    updated_str = str(updated_at) if updated_at is not None else ""
+    fingerprint = f"sections:{count}|updated:{updated_str}"
+    diagnostics.update({"section_count": count, "max_updated_at": updated_str})
+    return fingerprint, diagnostics
+
+
 def _parse_metadata(raw: Any) -> Dict[str, Any]:
     if isinstance(raw, dict):
         return dict(raw)

@@ -6,10 +6,16 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from config import pageindex as pageindex_cfg
 from config.core.deepsearch import tool_defaults
+from config.core.deepsearch import runtime_cache_defaults
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.deepsearch.utils.evidence_ids import derived_chunk_id
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
-from core.deepsearch.utils.section_tree import build_section_tree, fetch_section_nodes, normalize_file_id
+from core.deepsearch.utils.section_tree import (
+    build_section_tree,
+    fetch_section_nodes,
+    fetch_section_tree_fingerprint,
+    normalize_file_id,
+)
 from core.deepsearch.utils.file_scope import FileScope
 from core.deepsearch.entity_resolution import build_default_entity_resolver
 from core.graph_adapter.concurrency import adapter_locked
@@ -22,6 +28,7 @@ from core.prompts.deepsearch.section_select import (
     SECTION_TREE_SEARCH_USER_PROMPT,
 )
 from core.retrieval.pageindex_retriever import PageIndexRetriever
+from framework.cache import TTLRUCache
 
 from .graph_ops.graph_ops_common import normalize_entity_name
 from ..base import (
@@ -183,6 +190,9 @@ class SectionSelectTool(_SearchToolBase, _FaissChannel, _Bm25Channel, GraphTool)
         temperature: float | None = None,
         dense_retriever=None,
         bm25_retriever=None,
+        section_nodes_cache_enabled: bool | None = None,
+        section_nodes_cache_max_entries: int | None = None,
+        section_nodes_cache_ttl_seconds: float | None = None,
     ) -> None:
         _SearchToolBase.__init__(self, llm_connector=llm_connector, dense_retriever=dense_retriever, bm25_retriever=bm25_retriever)
         self.llm_connector = llm_connector
@@ -190,6 +200,21 @@ class SectionSelectTool(_SearchToolBase, _FaissChannel, _Bm25Channel, GraphTool)
         if temperature is None:
             temperature = tool_defaults.SECTION_SELECT_TEMPERATURE
         self.temperature = float(temperature)
+        if section_nodes_cache_enabled is None:
+            section_nodes_cache_enabled = runtime_cache_defaults.DEFAULT_SECTION_NODES_CACHE_ENABLED
+        if section_nodes_cache_max_entries is None:
+            section_nodes_cache_max_entries = runtime_cache_defaults.DEFAULT_SECTION_NODES_CACHE_MAX_ENTRIES
+        if section_nodes_cache_ttl_seconds is None:
+            section_nodes_cache_ttl_seconds = float(runtime_cache_defaults.DEFAULT_SECTION_NODES_CACHE_TTL_SECONDS)
+        self._section_nodes_cache: TTLRUCache[tuple[str, str, str], Dict[str, Any]] | None = None
+        if section_nodes_cache_enabled and section_nodes_cache_max_entries and section_nodes_cache_ttl_seconds:
+            try:
+                self._section_nodes_cache = TTLRUCache(
+                    max_entries=int(section_nodes_cache_max_entries),
+                    ttl_seconds=float(section_nodes_cache_ttl_seconds),
+                )
+            except Exception:
+                self._section_nodes_cache = None
 
     async def run(self, request: ToolRunRequest) -> ToolResult:
         if self.llm_connector is None:
@@ -215,13 +240,60 @@ class SectionSelectTool(_SearchToolBase, _FaissChannel, _Bm25Channel, GraphTool)
         if not query:
             return ToolResult(summary="section.select skipped: empty query.", diagnostics={"reason": "empty_query", "file_id": file_id})
 
-        sections, fetch_diag = await fetch_section_nodes(
-            adapter=request.adapter,
-            access_scope=request.access_scope,
-            file_id=file_id,
-            file_id_raw=file_id_raw,
-            include_node_types=True,
-        )
+        sections: list[Any] = []
+        fetch_diag: Dict[str, Any] = {}
+        if self._section_nodes_cache is not None:
+            try:
+                owner_scope_id = str(getattr(request.access_scope, "scope_id", "") or "")
+            except Exception:
+                owner_scope_id = ""
+            if owner_scope_id:
+                fp, fp_diag = await fetch_section_tree_fingerprint(
+                    adapter=request.adapter,
+                    access_scope=request.access_scope,
+                    file_id=file_id,
+                )
+                if fp:
+                    key = (owner_scope_id, file_id, fp)
+                    cached = self._section_nodes_cache.get(key)
+                    if isinstance(cached, dict) and isinstance(cached.get("sections"), list):
+                        sections = cached.get("sections") or []
+                        fetch_diag = dict(cached.get("fetch_diag") or {})
+                        fetch_diag.setdefault("cache", {})
+                        fetch_diag["cache"] = {"hit": True, "fingerprint": fp, "fingerprint_diag": fp_diag}
+                    else:
+                        sections, fetch_diag = await fetch_section_nodes(
+                            adapter=request.adapter,
+                            access_scope=request.access_scope,
+                            file_id=file_id,
+                            file_id_raw=file_id_raw,
+                            include_node_types=True,
+                        )
+                        fetch_diag.setdefault("cache", {})
+                        fetch_diag["cache"] = {"hit": False, "fingerprint": fp, "fingerprint_diag": fp_diag}
+                        try:
+                            self._section_nodes_cache.set(
+                                key,
+                                {"sections": list(sections), "fetch_diag": dict(fetch_diag)},
+                            )
+                        except Exception:
+                            pass
+                else:
+                    sections, fetch_diag = await fetch_section_nodes(
+                        adapter=request.adapter,
+                        access_scope=request.access_scope,
+                        file_id=file_id,
+                        file_id_raw=file_id_raw,
+                        include_node_types=True,
+                    )
+        else:
+            sections, fetch_diag = await fetch_section_nodes(
+                adapter=request.adapter,
+                access_scope=request.access_scope,
+                file_id=file_id,
+                file_id_raw=file_id_raw,
+                include_node_types=True,
+            )
         if not sections:
             reason = fetch_diag.get("reason") or "no_sections_found"
             diagnostics = {**fetch_diag, "reason": reason}
