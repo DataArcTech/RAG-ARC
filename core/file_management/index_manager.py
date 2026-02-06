@@ -90,3 +90,25 @@ class IndexManager(_IndexManagerPipelineMixin, _IndexManagerStatusMixin, _IndexM
             }
 
         return await self.process_file(file_id, **kwargs)
+
+    async def index_file_from_parsed_markdown(
+        self,
+        *,
+        file_id: str,
+        parsed_markdown: str,
+        filename: str | None = None,
+        parser_type: str | None = None,
+        md_path: str | None = None,
+        output_dir: str | None = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Index a file starting from an already-parsed markdown string."""
+        return await self.process_file_from_parsed_markdown(
+            file_id=file_id,
+            parsed_markdown=parsed_markdown,
+            filename=filename,
+            parser_type=parser_type,
+            md_path=md_path,
+            output_dir=output_dir,
+            **kwargs,
+        )

@@ -2,6 +2,7 @@
 
 import json
 import logging
+import time
 from typing import Any, Dict, List, Optional, Sequence
 
 from encapsulation.data_model.schema import Chunk, GraphData
@@ -83,7 +84,7 @@ class _PrunedHippoRAGNeo4jIndexingOpsMixin:
         """
         logger.info(f"Building index from {len(chunks)} chunks...")
 
-        batch_size = 1000
+        batch_size = int(getattr(getattr(self, "config", None), "neo4j_ingest_chunk_batch_size", 1000) or 1000)
         total_chunks = len(chunks)
 
         from tqdm import tqdm
@@ -110,6 +111,106 @@ class _PrunedHippoRAGNeo4jIndexingOpsMixin:
 
         logger.info("Index building completed")
 
+    def _update_index_impl(self, chunks: List[Chunk], *, collect_stats: bool) -> tuple[bool, Dict[str, Any]]:
+        stats: Dict[str, Any] = {"timings_s": {}, "counts": {}} if collect_stats else {}
+        t_total0 = time.perf_counter()
+
+        logger.info(f"Updating index with {len(chunks)} chunks (incremental)...")
+
+        try:
+            # Track new chunk IDs and entity IDs for incremental updates
+            new_chunk_ids: List[str] = []
+            new_entity_ids: List[str] = []
+
+            # Step 1: Batch add chunks and graph data (OPTIMIZED)
+            logger.info("Step 1: Batch adding chunks and graph data...")
+            t0 = time.perf_counter()
+            ingest_batch_size = int(getattr(getattr(self, "config", None), "neo4j_ingest_chunk_batch_size", 1000) or 1000)
+            new_entity_ids = []
+            for i in range(0, len(chunks), ingest_batch_size):
+                batch = chunks[i : i + ingest_batch_size]
+                new_entity_ids.extend(self._batch_add_chunks_and_graph_data(batch) or [])
+            # Deduplicate while preserving stability for downstream embedding selection.
+            if new_entity_ids:
+                seen = set()
+                deduped: List[str] = []
+                for eid in new_entity_ids:
+                    s = str(eid or "").strip()
+                    if not s or s in seen:
+                        continue
+                    seen.add(s)
+                    deduped.append(s)
+                new_entity_ids = deduped
+            # Normalize IDs to strings: chunk.id can be UUID-like objects depending on upstream pipelines,
+            # but Neo4j stores `Chunk.chunk_id` as a string.
+            new_chunk_ids = [str(chunk.id).strip() for chunk in chunks if str(getattr(chunk, "id", "") or "").strip()]
+            if collect_stats:
+                stats["timings_s"]["step1_add_chunks_graph"] = time.perf_counter() - t0
+                stats["counts"]["input_chunks"] = int(len(chunks))
+                stats["counts"]["new_chunks"] = int(len(new_chunk_ids))
+                stats["counts"]["new_entities"] = int(len(new_entity_ids or []))
+            logger.info("Step 1 completed: All chunks and graph data added")
+
+            # Step 2: Batch generate embeddings (only for new items)
+            logger.info("Step 2: Batch generating embeddings for new items...")
+            t0 = time.perf_counter()
+            embed_summary = self.batch_generate_embeddings(chunk_ids=new_chunk_ids, entity_ids=new_entity_ids)
+            if collect_stats:
+                stats["timings_s"]["step2_embeddings"] = time.perf_counter() - t0
+                stats["embeddings"] = embed_summary
+            logger.info("Step 2 completed: Embeddings generated")
+
+            # Step 3: Incrementally compute synonymy edges (only for new entities)
+            t0 = time.perf_counter()
+            if self.add_synonymy_edges:
+                if new_entity_ids:
+                    logger.info(
+                        f"Step 3: Computing synonymy edges for {len(new_entity_ids)} new entities (incremental)..."
+                    )
+                    self._add_synonymy_edges(new_entity_ids=new_entity_ids)
+                    logger.info("Step 3 completed: Synonymy edges added incrementally")
+                else:
+                    logger.info("Step 3 skipped: No new entities to process")
+            else:
+                logger.info("Step 3 skipped: Synonymy edges disabled")
+            if collect_stats:
+                stats["timings_s"]["step3_synonymy_edges"] = time.perf_counter() - t0
+
+            # Step 4: Incrementally update graph cache
+            logger.info("Step 4: Incrementally updating graph cache...")
+            t0 = time.perf_counter()
+            self._update_graph_cache_incremental(new_chunk_ids, new_entity_ids)
+            if collect_stats:
+                stats["timings_s"]["step4_update_graph_cache"] = time.perf_counter() - t0
+            logger.info("Step 4 completed: Graph cache updated incrementally")
+
+            # Step 5: Incrementally append chunk embeddings (OPTIMIZED)
+            logger.info("Step 5: Incrementally appending chunk embeddings...")
+            t0 = time.perf_counter()
+            self._append_chunk_embeddings(new_chunk_ids)
+            if collect_stats:
+                stats["timings_s"]["step5_append_chunk_embeddings"] = time.perf_counter() - t0
+            logger.info("Step 5 completed: Chunk embeddings appended")
+
+            # Step 6: Increment cache version to notify retrievers
+            with self.write_lock():
+                self._cache_version += 1
+                cache_version = self._cache_version
+
+            if collect_stats:
+                stats["cache_version"] = int(cache_version)
+                stats["timings_s"]["total"] = time.perf_counter() - t_total0
+
+            logger.info(f"✅ Index update completed successfully (incremental, cache_version={cache_version})")
+            return True, stats
+
+        except Exception as e:
+            logger.error(f"❌ Failed to update index: {e}", exc_info=True)
+            if collect_stats:
+                stats["error"] = str(e)
+                stats["timings_s"]["total"] = time.perf_counter() - t_total0
+            return False, stats
+
     def update_index(self, chunks: List[Chunk]) -> Optional[bool]:
         """
         Update the graph index with new or modified chunks (incremental update).
@@ -127,60 +228,12 @@ class _PrunedHippoRAGNeo4jIndexingOpsMixin:
         Returns:
             True if successful, False otherwise
         """
-        logger.info(f"Updating index with {len(chunks)} chunks (incremental)...")
+        ok, _stats = self._update_index_impl(chunks, collect_stats=False)
+        return ok
 
-        try:
-            # Track new chunk IDs and entity IDs for incremental updates
-            new_chunk_ids = []
-            new_entity_ids = []
-
-            # Step 1: Batch add chunks and graph data (OPTIMIZED)
-            logger.info("Step 1: Batch adding chunks and graph data...")
-            new_entity_ids = self._batch_add_chunks_and_graph_data(chunks)
-            # Normalize IDs to strings: chunk.id can be UUID-like objects depending on upstream pipelines,
-            # but Neo4j stores `Chunk.chunk_id` as a string.
-            new_chunk_ids = [str(chunk.id).strip() for chunk in chunks if str(getattr(chunk, "id", "") or "").strip()]
-            logger.info("Step 1 completed: All chunks and graph data added")
-
-            # Step 2: Batch generate embeddings (only for new items)
-            logger.info("Step 2: Batch generating embeddings for new items...")
-            self.batch_generate_embeddings(chunk_ids=new_chunk_ids, entity_ids=new_entity_ids)
-            logger.info("Step 2 completed: Embeddings generated")
-
-            # Step 3: Incrementally compute synonymy edges (only for new entities)
-            if self.add_synonymy_edges:
-                if new_entity_ids:
-                    logger.info(
-                        f"Step 3: Computing synonymy edges for {len(new_entity_ids)} new entities (incremental)..."
-                    )
-                    self._add_synonymy_edges(new_entity_ids=new_entity_ids)
-                    logger.info("Step 3 completed: Synonymy edges added incrementally")
-                else:
-                    logger.info("Step 3 skipped: No new entities to process")
-            else:
-                logger.info("Step 3 skipped: Synonymy edges disabled")
-
-            # Step 4: Incrementally update graph cache
-            logger.info("Step 4: Incrementally updating graph cache...")
-            self._update_graph_cache_incremental(new_chunk_ids, new_entity_ids)
-            logger.info("Step 4 completed: Graph cache updated incrementally")
-
-            # Step 5: Incrementally append chunk embeddings (OPTIMIZED)
-            logger.info("Step 5: Incrementally appending chunk embeddings...")
-            self._append_chunk_embeddings(new_chunk_ids)
-            logger.info("Step 5 completed: Chunk embeddings appended")
-
-            # Step 6: Increment cache version to notify retrievers
-            with self.write_lock():
-                self._cache_version += 1
-                cache_version = self._cache_version
-
-            logger.info(f"✅ Index update completed successfully (incremental, cache_version={cache_version})")
-            return True
-
-        except Exception as e:
-            logger.error(f"❌ Failed to update index: {e}", exc_info=True)
-            return False
+    def update_index_with_stats(self, chunks: List[Chunk]) -> tuple[bool, Dict[str, Any]]:
+        """Like update_index(), but returns a JSON-serializable stats dict for profiling/benchmarking."""
+        return self._update_index_impl(chunks, collect_stats=True)
 
     def delete_index(self, ids: Optional[List[str]] = None) -> Optional[bool]:
         """
@@ -334,6 +387,13 @@ class _PrunedHippoRAGNeo4jIndexingOpsMixin:
                 for chunk_id in chunk_ids:
                     if chunk_id in self.chunk_embeddings:
                         del self.chunk_embeddings[chunk_id]
+                    try:
+                        owner = self._chunk_embedding_owner_by_chunk_id.pop(str(chunk_id), None)
+                        if owner in self._chunk_ids_by_owner:
+                            self._chunk_ids_by_owner.get(owner, set()).discard(str(chunk_id))
+                        self._chunk_embeddings_dirty_owners.add(owner)
+                    except Exception:
+                        pass
 
             # 5. Invalidate chunk embeddings array (mark for rebuild)
             with self.write_lock():

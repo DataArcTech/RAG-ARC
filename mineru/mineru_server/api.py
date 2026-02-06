@@ -287,13 +287,19 @@ def build_app(cfg: ServerConfig) -> FastAPI:
                 output_format=options.output_format,
             )
 
-            asset_manifest, images_meta = post.process(
-                task_id=task_id,
-                task_root=task_root,
-                doc_name=doc_name,
-                method_dir=method_dir,
-                markdown_path=md_path,
-                content_list_path=content_list_path,
+            # Post-processing (markdown rewrite, asset manifest, optional LLM captioning) is blocking.
+            # If we run it in the event-loop thread, it can make even /health hang while parsing.
+            loop = asyncio.get_running_loop()
+            asset_manifest, images_meta = await loop.run_in_executor(
+                None,
+                lambda: post.process(
+                    task_id=task_id,
+                    task_root=task_root,
+                    doc_name=doc_name,
+                    method_dir=method_dir,
+                    markdown_path=md_path,
+                    content_list_path=content_list_path,
+                ),
             )
 
             images_dir = method_dir / "images"

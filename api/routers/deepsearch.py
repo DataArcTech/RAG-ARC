@@ -141,16 +141,15 @@ async def _schedule_deepsearch(
     effective_owner: uuid.UUID,
 ) -> JSONResponse:
     run_id = new_run_id()
-    task_queue = _get_task_queue()
-    task_queue.create_task_run(
-        task_run_id=run_id,
-        task_type="deepsearch",
-        owner_id=effective_owner,
-        resource_id=run_id,
-        metadata={"include_evidence": request.include_evidence, "metadata": request.metadata or {}, "executor": "api"},
-    )
-
     if _use_celery():
+        task_queue = _get_task_queue()
+        task_queue.create_task_run(
+            task_run_id=run_id,
+            task_type="deepsearch",
+            owner_id=effective_owner,
+            resource_id=run_id,
+            metadata={"include_evidence": request.include_evidence, "metadata": request.metadata or {}, "executor": "api"},
+        )
         from application.deepsearch.celery_tasks import run_deepsearch as run_deepsearch_task
 
         queue = os.getenv("CELERY_QUEUE_DEEPSEARCH", "deepsearch")
@@ -202,7 +201,8 @@ async def _schedule_deepsearch(
             return
 
     async def _runner() -> None:
-        task_queue.update_task_run(run_id, state=TaskState.RUNNING, progress_percent=1)
+        # In in-process mode, never block the event loop on Redis IO.
+        # Redis mirroring (best-effort) is handled by DeepSearchTaskRegistry.publish().
         emitter = make_inprocess_trace_emitter(
             run_id=run_id,
             publish=lambda event_type, payload: TASKS.publish(run_id, event_type=event_type, payload=payload),
@@ -248,7 +248,6 @@ async def _schedule_deepsearch(
                 ),
             )
             await TASKS.mark_done(run_id, error=str(exc))
-            task_queue.update_task_run(run_id, state=TaskState.FAILURE, progress_percent=100, error_message=str(exc), finished=True)
             await emit_trace("terminate", f"DeepSearch failed.\nrun_id={run_id}\nerror={exc}", meta={"run_id": run_id, "ok": False})
             reset_trace_emitter(token)
             return
@@ -271,7 +270,6 @@ async def _schedule_deepsearch(
             ),
         )
         await TASKS.mark_done(run_id, result=trimmed)
-        task_queue.update_task_run(run_id, state=TaskState.SUCCESS, progress_percent=100, finished=True)
         await emit_trace("terminate", f"DeepSearch completed.\nrun_id={run_id}", meta={"run_id": run_id, "ok": True})
         reset_trace_emitter(token)
 

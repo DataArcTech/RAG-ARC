@@ -2,6 +2,7 @@ import base64
 import io
 import re
 import time
+import threading
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
@@ -233,6 +234,9 @@ class ChatCaptioner:
         self.timeout_s = int(timeout_s)
         self.fixed_context = str(fixed_context or "")
         self._session = requests.Session()
+        # `requests.Session` isn't guaranteed to be thread-safe. The server can run multiple
+        # parse jobs concurrently, and post-processing may run in a threadpool.
+        self._lock = threading.Lock()
         self._unavailable_until = 0.0
         self._cooldown_s = 300.0
 
@@ -299,12 +303,13 @@ class ChatCaptioner:
         headers = {"Authorization": f"Bearer {self.api_key}"}
         try:
             connect_timeout = min(8.0, float(self.timeout_s))
-            resp = self._session.post(
-                self._endpoint(),
-                json=payload,
-                headers=headers,
-                timeout=(connect_timeout, float(self.timeout_s)),
-            )
+            with self._lock:
+                resp = self._session.post(
+                    self._endpoint(),
+                    json=payload,
+                    headers=headers,
+                    timeout=(connect_timeout, float(self.timeout_s)),
+                )
             resp.raise_for_status()
             data = resp.json()
             text = data.get("choices", [{}])[0].get("message", {}).get("content", "")

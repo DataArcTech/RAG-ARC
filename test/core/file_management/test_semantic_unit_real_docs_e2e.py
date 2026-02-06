@@ -100,14 +100,14 @@ def test_semantic_unit_e2e_real_doc_bm25_anchor_backfill(tmp_path: Path):
 
     bm25_dir = tmp_path / "bm25_index"
     bm25_dir.mkdir(parents=True, exist_ok=True)
-    bm25_builder = BM25BuilderConfig(index_path=str(bm25_dir)).build()
+    bm25_builder = BM25BuilderConfig(index_path=str(bm25_dir), owner_scoped_enabled=False).build()
     ok = bm25_builder.update_index(chunk_objects)
     assert ok, "expected BM25 indexing to succeed"
 
     multipath = MultiPathRetrieverConfig(
         retrievers=[
             TantivyBM25RetrieverConfig(
-                index_config=BM25BuilderConfig(index_path=str(bm25_dir)),
+                index_config=BM25BuilderConfig(index_path=str(bm25_dir), owner_scoped_enabled=False),
                 search_kwargs={"k": 6, "with_score": True, "use_phrase_query": False},
             )
         ],

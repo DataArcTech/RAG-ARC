@@ -12,6 +12,33 @@ class FaissVectorDBConfig(AbstractConfig):
     index_path: str = Field(default_factory=lambda: os.getenv("FAISS_INDEX_PATH", "./data/unified_faiss_index"))
     index_name: str = "index"
 
+    owner_scoped_enabled: bool = Field(
+        default=True,
+        description=(
+            "When enabled, store/load FAISS index artifacts under an owner-scoped subdirectory "
+            "derived from `index_path` (see owner_scoped_dirname/global_owner_name). "
+            "This avoids mixing multiple owners into a single on-disk index."
+        ),
+    )
+    owner_scoped_dirname: str = Field(
+        default="owners",
+        description="Subdirectory name under `index_path` for owner-scoped FAISS indexes.",
+    )
+    owner_scoped_global_owner_name: str = Field(
+        default="__GLOBAL__",
+        description="Directory name used for admin/global scope when owner_id is None.",
+    )
+    owner_scoped_admin_max_owner_indexes: int = Field(
+        default=50,
+        ge=0,
+        le=10000,
+        description=(
+            "When owner_scoped is enabled and an admin/global query is executed, "
+            "cap the number of owner indexes scanned/fused to avoid expensive fan-out. "
+            "0 disables admin global scan."
+        ),
+    )
+
     metric: Literal["cosine", "l2", "ip"] = Field(default="cosine", description="Distance metric")
     index_type: Literal["flat", "ivf", "hnsw"] = Field(default="flat", description="Index type")
     nlist: int = 100

@@ -11,8 +11,13 @@ logger = logging.getLogger(__name__)
 class BaseRetriever(AbstractModule, ABC):
     def __init__(self, config):
         self.config = config
-        self._index = self.config.index_config.build()
-        self._load_existing_index()
+        # Owner-scoped indexes cannot be loaded at init time because owner_id is only known at query time.
+        # The concrete retriever must implement owner-scoped routing (build/load per-owner indexes lazily).
+        if bool(getattr(getattr(self.config, "index_config", None), "owner_scoped_enabled", False)):
+            self._index = None
+        else:
+            self._index = self.config.index_config.build()
+            self._load_existing_index()
 
     def _load_existing_index(self) -> None:
         """尝试加载已存在的索引"""

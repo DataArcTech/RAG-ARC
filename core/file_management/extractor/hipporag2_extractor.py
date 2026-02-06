@@ -10,6 +10,7 @@ import logging
 import json
 import os
 import re
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, TYPE_CHECKING
@@ -91,10 +92,12 @@ class HippoRAG2Extractor(ExtractorBase):
         self.logger = logging.getLogger(__name__)
         self.entity_types = getattr(config, 'entity_types', None)  # Optional entity types to extract
         self._prompt_cache: dict[str, str] = {}
+        self._cache_fingerprint: str | None = None
         self._kg_schema = None
         self._kg_domain = None
         self._kg_domain_schema = None
         self._load_kg_schema_for_prompting()
+        self._cache_fingerprint = self._build_cache_fingerprint()
 
     def _load_kg_schema_for_prompting(self) -> None:
         cfg_flag = getattr(self.config, "schema_aware_triple_extraction", None)
@@ -159,6 +162,59 @@ class HippoRAG2Extractor(ExtractorBase):
 
         template = HIPPORAG2_EDGE_SCHEMA_HINT_ZH if language == "zh" else HIPPORAG2_EDGE_SCHEMA_HINT_EN
         return template.format(allowed_relations=allowed_block, relation_aliases_json=alias_json).strip()
+
+    def cache_fingerprint(self) -> str:
+        """Stable fingerprint for Redis extraction cache keys.
+
+        Must change whenever the extractor's output could change for the same input chunk content.
+        This includes:
+        - model_name (provider routing / model upgrade)
+        - prompt templates / one-shots
+        - schema-aware prompting inputs (schema file, domain)
+        - key config toggles affecting extraction policy
+        """
+        return str(self._cache_fingerprint or "")
+
+    def _build_cache_fingerprint(self) -> str:
+        llm_cfg = getattr(self.config, "llm_config", None)
+        model_name = str(getattr(llm_cfg, "model_name", "") or "").strip()
+        schema_path = str(getattr(self.config, "kg_schema_path", "") or os.getenv("KG_SCHEMA_PATH", "") or "").strip()
+        schema_blob = ""
+        if schema_path:
+            try:
+                with open(schema_path, "rb") as f:
+                    schema_blob = f.read(256 * 1024).decode("utf-8", errors="ignore")
+            except Exception:
+                schema_blob = schema_path  # fallback: still differentiates different paths
+
+        parts = [
+            "HippoRAG2Extractor",
+            f"model={model_name}",
+            f"schema_aware={getattr(self.config, 'schema_aware_triple_extraction', None)}",
+            f"schema_domain={getattr(self.config, 'schema_prompt_domain', None) or ''}",
+            f"max_allowed_rel={getattr(self.config, 'schema_prompt_max_allowed_relations', None)}",
+            f"max_aliases={getattr(self.config, 'schema_prompt_max_relation_aliases', None)}",
+            f"entity_types={','.join(getattr(self.config, 'entity_types', None) or [])}",
+            f"edge_ref_time={getattr(self.config, 'edge_reference_time_override', None) or ''}",
+            # Prompts / one-shots (hash only; avoid storing large prompt text in the key)
+            HIPPORAG2_NER_JSON_SYSTEM_EN,
+            HIPPORAG2_NER_JSON_SYSTEM_ZH,
+            HIPPORAG2_NER_JSON_PROMPT_EN,
+            HIPPORAG2_NER_JSON_PROMPT_ZH,
+            HIPPORAG2_NER_JSON_ONE_SHOT_INPUT_EN,
+            HIPPORAG2_NER_JSON_ONE_SHOT_INPUT_ZH,
+            HIPPORAG2_NER_JSON_ONE_SHOT_OUTPUT_EN,
+            HIPPORAG2_NER_JSON_ONE_SHOT_OUTPUT_ZH,
+            HIPPORAG2_EDGE_JSON_SYSTEM_EN,
+            HIPPORAG2_EDGE_JSON_SYSTEM_ZH,
+            HIPPORAG2_EDGE_JSON_PROMPT_EN,
+            HIPPORAG2_EDGE_JSON_PROMPT_ZH,
+            HIPPORAG2_EDGE_SCHEMA_HINT_EN,
+            HIPPORAG2_EDGE_SCHEMA_HINT_ZH,
+            schema_blob,
+        ]
+        blob = "\n---\n".join([str(p or "") for p in parts])
+        return hashlib.sha256(blob.encode("utf-8", errors="ignore")).hexdigest()[:24]
 
     def detect_language(self, text: str) -> str:
         """

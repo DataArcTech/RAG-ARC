@@ -11,6 +11,34 @@ logger = logging.getLogger(__name__)
 
 
 class _PostgreSQLChunksMixin:
+    def store_chunk_metadata_batch(
+        self,
+        chunk_metadatas: List[ChunkMetadata],
+        **kwargs: Any,
+    ) -> List[str]:
+        """Store chunk metadata in bulk (single transaction).
+
+        Why:
+        - The indexing pipeline can generate hundreds/thousands of chunks per file.
+        - Committing per-row is extremely slow; a single transaction reduces overhead dramatically.
+        """
+        if not chunk_metadatas:
+            return []
+
+        try:
+            with self.SessionMaker() as session:
+                # Prefer SQLAlchemy bulk path to reduce ORM overhead.
+                session.bulk_save_objects(chunk_metadatas, return_defaults=False)
+                session.commit()
+                return [m.chunk_id for m in chunk_metadatas]
+        except IntegrityError as e:
+            if "already exists" in str(e) or "duplicate key" in str(e):
+                raise ValueError("One or more chunks already exist (duplicate chunk_id)") from e
+            raise
+        except SQLAlchemyError as e:
+            logger.error("Database error storing chunk metadata batch: %s", e)
+            raise
+
     def store_chunk_metadata(
         self,
         chunk_metadata: ChunkMetadata,
@@ -132,5 +160,4 @@ class _PostgreSQLChunksMixin:
             raise
 
     # ==================== USER MANAGEMENT ====================
-
 

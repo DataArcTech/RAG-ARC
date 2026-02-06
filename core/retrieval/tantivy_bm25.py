@@ -7,6 +7,7 @@ from tantivy import Query, Occur, Order
 from core.retrieval.base import BaseRetriever
 from encapsulation.data_model.schema import Chunk
 from core.utils.owner_guard import normalize_owner_id
+from encapsulation.database.index_scoping import owner_scoped_dir
 
 if TYPE_CHECKING:
     from config.core.retrieval.tantivy_bm25_config import TantivyBM25RetrieverConfig
@@ -58,11 +59,17 @@ class TantivyBM25Retriever(BaseRetriever):
         logger.info("TantivyBM25Retriever: Initializing...")
         self.config = config
         self._tls = threading.local()
+        self._owner_scoped_enabled = bool(getattr(getattr(config, "index_config", None), "owner_scoped_enabled", False))
+        self._builder_by_owner: Dict[str, Any] = {}
+        self._builder_lock = threading.Lock()
         logger.info("TantivyBM25Retriever: Building index...")
-        self._index = self.config.index_config.build()
-        logger.info("TantivyBM25Retriever: Index built, loading existing index...")
-        self._load_existing_index()
-        logger.info("TantivyBM25Retriever: Index loaded successfully")
+        if not self._owner_scoped_enabled:
+            self._index = self.config.index_config.build()
+            logger.info("TantivyBM25Retriever: Index built, loading existing index...")
+            self._load_existing_index()
+            logger.info("TantivyBM25Retriever: Index loaded successfully")
+        else:
+            self._index = None
 
         self.searcher = None
 
@@ -220,13 +227,49 @@ class TantivyBM25Retriever(BaseRetriever):
             return []
         owner_id_str = owner_id
 
+        # Owner-scoped routing: choose per-owner BM25 index on disk, reduce IO and avoid mixed-owner indexes.
+        if getattr(self, "_owner_scoped_enabled", False):
+            template = getattr(self.config, "index_config", None)
+            base_dir = str(getattr(template, "index_path", "") or "").strip() if template is not None else ""
+            owner_dirname = str(getattr(template, "owner_scoped_dirname", "owners") or "owners") if template is not None else "owners"
+            global_owner = str(getattr(template, "owner_scoped_global_owner_name", "__GLOBAL__") or "__GLOBAL__") if template is not None else "__GLOBAL__"
+            index_dir = owner_scoped_dir(
+                base_dir,
+                owner_id=owner_id_str,
+                owner_dirname=owner_dirname,
+                global_owner_name=global_owner,
+            )
+            with self._builder_lock:
+                builder = self._builder_by_owner.get(owner_id_str)
+                if builder is None:
+                    try:
+                        cfg2 = template.model_copy(update={"index_path": index_dir})
+                    except Exception:
+                        cfg2 = template
+                        try:
+                            cfg2.index_path = index_dir
+                        except Exception:
+                            pass
+                    builder = cfg2.build()
+                    self._builder_by_owner[owner_id_str] = builder
+            # Best-effort load (tantivy will error if index doesn't exist yet).
+            try:
+                if getattr(builder, "_index", None) is None:
+                    builder.load_local()
+            except Exception:
+                return []
+            index_instance = builder
+        else:
+            index_instance = self.index
+
         # Use config defaults if parameters not provided
         k = k if k is not None else self.config.search_kwargs.get("k", 5)
         filters = filters or {}
 
         # Add owner_id to filters
-        filters['owner_id'] = owner_id_str
-        logger.debug(f"Added owner_id filter: {owner_id_str}")
+        if not getattr(self, "_owner_scoped_enabled", False):
+            filters['owner_id'] = owner_id_str
+            logger.debug(f"Added owner_id filter: {owner_id_str}")
 
         with_score = with_score if with_score is not None else self.config.search_kwargs.get("with_score", False)
         use_phrase_query = use_phrase_query if use_phrase_query is not None else self.config.search_kwargs.get("use_phrase_query", False)
@@ -239,7 +282,6 @@ class TantivyBM25Retriever(BaseRetriever):
             logger.info("Empty query received, returning empty results.")
             return []
 
-        index_instance = self.index
         if index_instance.index is None:
             logger.warning("BM25 index is not loaded. Returning empty results.")
             return []

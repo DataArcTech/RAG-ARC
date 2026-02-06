@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from typing import List, TYPE_CHECKING
 
 from core.file_management.indexing.base import BaseIndexer
@@ -34,7 +35,7 @@ class PrunedHippoRAGIndexer(BaseIndexer):
 
         logger.info("Pruned HippoRAG Indexer initialized with extractor and graph store")
 
-    async def update_index(self, chunks: List[Chunk]) -> List[str]:
+    async def update_index(self, chunks: List[Chunk]):  # type: ignore[override]
         """
         Adds a batch of chunks to the Pruned HippoRAG graph index.
 
@@ -56,7 +57,9 @@ class PrunedHippoRAGIndexer(BaseIndexer):
         try:
             # Step 1: Extract graph data from chunks using HippoRAG2Extractor
             logger.info(f"Extracting graph data from {len(chunks)} chunks...")
+            t_extract0 = time.perf_counter()
             extracted_chunks = await self._extract_graph_data(chunks)
+            t_extract = time.perf_counter() - t_extract0
 
             if not extracted_chunks:
                 raise RuntimeError("Graph extraction failed for all chunks")
@@ -69,7 +72,15 @@ class PrunedHippoRAGIndexer(BaseIndexer):
             # - Computing synonymy edges (if enabled)
             # - Building graph structure
             # - Rebuilding chunk embeddings array
-            success = self.graph_store.update_index(extracted_chunks)
+            loop = asyncio.get_running_loop()
+            t_update0 = time.perf_counter()
+            store_stats = None
+            update_with_stats = getattr(self.graph_store, "update_index_with_stats", None)
+            if callable(update_with_stats):
+                success, store_stats = await loop.run_in_executor(None, update_with_stats, extracted_chunks)
+            else:
+                success = await loop.run_in_executor(None, self.graph_store.update_index, extracted_chunks)
+            t_update = time.perf_counter() - t_update0
 
             if not success:
                 raise RuntimeError("Failed to update graph store")
@@ -78,11 +89,30 @@ class PrunedHippoRAGIndexer(BaseIndexer):
             chunk_ids = [chunk.id for chunk in extracted_chunks]
 
             # Step 3: Save index if storage path is configured
+            t_save = 0.0
             if hasattr(self.graph_store, 'storage_path') and self.graph_store.storage_path:
-                self.graph_store.save_index(self.graph_store.storage_path, self.graph_store.index_name)
+                t_save0 = time.perf_counter()
+                await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    self.graph_store.save_index,
+                    self.graph_store.storage_path,
+                    self.graph_store.index_name,
+                )
+                t_save = time.perf_counter() - t_save0
                 logger.info(f"Saved graph index to {self.graph_store.storage_path}")
 
-            return chunk_ids
+            # Return a richer payload (handled by IndexManagerPipeline) so perf experiments can attribute costs.
+            return {
+                "indexed_ids": chunk_ids,
+                "metadata": {
+                    "timings_s": {
+                        "extract_graph": float(t_extract),
+                        "graph_store_update_index": float(t_update),
+                        "graph_store_save_index": float(t_save),
+                    },
+                    "graph_store": store_stats,
+                },
+            }
 
         except Exception as e:
             logger.error(f"Error during Pruned HippoRAG graph indexing: {e}", exc_info=True)

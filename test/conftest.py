@@ -22,7 +22,9 @@ def pytest_configure() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
-    os.environ.setdefault("TASK_QUEUE_MODE", "inprocess")
+    # IMPORTANT: unit tests must not depend on developer-local `.env` values.
+    # Force in-process task queue mode unless a test explicitly overrides it via monkeypatch.
+    os.environ["TASK_QUEUE_MODE"] = "inprocess"
     os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret")
     # Knowledge indexing preflight checks attempt to connect to Postgres/Redis/Neo4j.
     # Unit tests are hermetic by default and should not require external services.

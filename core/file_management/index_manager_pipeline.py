@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Dict, List
 
 from encapsulation.data_model.schema import Chunk
@@ -10,6 +11,346 @@ logger = logging.getLogger(__name__)
 
 
 class _IndexManagerPipelineMixin:
+    async def process_file_from_parsed_markdown(
+        self,
+        *,
+        file_id: str,
+        parsed_markdown: str,
+        filename: str | None = None,
+        parser_type: str | None = None,
+        md_path: str | None = None,
+        output_dir: str | None = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Index a file starting from an already-parsed markdown string.
+
+        This is meant for performance experiments and ingestion flows that
+        reuse a precomputed parser output (e.g., MinerU markdown) and want to
+        measure/optimize the "parsed -> askable" latency.
+
+        Notes:
+        - File metadata must already exist (we still need owner_id + filename).
+        - This intentionally skips Step 1 (read file bytes) and Step 2 (parse).
+        """
+        result = {
+            "success": False,
+            "file_id": file_id,
+            "parsed_content_id": None,
+            "chunk_ids": [],
+            "indexing_results": {},
+            "error_message": None,
+            "metadata": {
+                "parser_type": None,
+                "chunker_type": None,
+                "num_chunks": 0,
+                "indexers_used": [],
+                "timings_s": {},
+            },
+        }
+
+        progress_cb = kwargs.pop("progress", None)
+
+        def _emit(stage: str, percent: int | None = None, payload: Dict[str, Any] | None = None) -> None:
+            if progress_cb is None or not callable(progress_cb):
+                return
+            try:
+                progress_cb(str(stage), percent, payload or {})
+            except Exception:
+                return
+
+        if file_id is None or not isinstance(file_id, str) or not file_id.strip():
+            result["error_message"] = "file_id must be a non-empty string"
+            return result
+        if parsed_markdown is None or not isinstance(parsed_markdown, str) or not parsed_markdown.strip():
+            result["error_message"] = "parsed_markdown must be a non-empty string"
+            return result
+
+        started = time.perf_counter()
+        stage_t0 = started
+        try:
+            logger.info("Starting parsed-markdown indexing pipeline for file_id=%s", file_id)
+            _emit("start", 1, {"file_id": file_id, "mode": "parsed_markdown"})
+
+            # Load file metadata for owner_id + filename.
+            file_metadata = await get_thread_pool().run_blocking(
+                self.file_storage.get_file_metadata,
+                file_id,
+            )
+            if file_metadata is None:
+                raise ValueError(f"File metadata not found for file_id: {file_id}")
+
+            effective_filename = (filename or getattr(file_metadata, "filename", None) or "").strip()
+            if not effective_filename:
+                effective_filename = f"unknown_file_{file_id}"
+
+            result["metadata"]["timings_s"]["load_file_metadata"] = time.perf_counter() - stage_t0
+            stage_t0 = time.perf_counter()
+
+            from config.core.file_management.chunk_ingest_defaults import PARSED_MARKDOWN_PARSER_TYPE_DEFAULT
+
+            parser_type_name = (parser_type or PARSED_MARKDOWN_PARSER_TYPE_DEFAULT).strip() or PARSED_MARKDOWN_PARSER_TYPE_DEFAULT
+            result["metadata"]["parser_type"] = parser_type_name
+
+            parsed_text = parsed_markdown
+            _emit("parsed_ready", 15, {"file_id": file_id, "filename": effective_filename, "chars": len(parsed_text)})
+
+            # Optional: build PageIndex context + enrich chunks (keeps DeepSearch/tree tools available).
+            pageindex_context = None
+            pageindex_info: Dict[str, Any] = {}
+            if getattr(self, "pageindex_service", None) is not None:
+                try:
+                    from config import pageindex as pageindex_cfg
+
+                    if pageindex_cfg.pageindex_enabled():
+                        pageindex_context = self.pageindex_service.build_context(
+                            file_id=file_id,
+                            filename=effective_filename,
+                            markdown=parsed_text,
+                            md_path=str(md_path) if md_path else None,
+                            output_dir=str(output_dir) if output_dir else None,
+                        )
+                        pageindex_info = {
+                            "sections": len(pageindex_context.tree.nodes),
+                            "level_conflict_ratio": pageindex_context.tree.level_conflict_ratio,
+                            "uniform_level_flattened": pageindex_context.tree.uniform_level_flattened,
+                        }
+                except Exception as exc:
+                    logger.warning("PageIndex tree build failed for %s: %s", file_id, exc)
+                    pageindex_info = {"error": str(exc)}
+
+            result["metadata"]["timings_s"]["pageindex_tree"] = time.perf_counter() - stage_t0
+            stage_t0 = time.perf_counter()
+
+            # Persist parsed markdown (same as Step 3 in process_file).
+            parsed_data = parsed_text.encode("utf-8", errors="replace")
+            parsed_content_id = await get_thread_pool().run_blocking(
+                self.parsed_content_storage.store_parsed_content,
+                source_file_id=file_id,
+                parser_type=parser_type_name,
+                parsed_data=parsed_data,
+                content_type="text/markdown",
+                **kwargs,
+            )
+            if not parsed_content_id:
+                raise ValueError("Failed to store parsed content")
+            result["parsed_content_id"] = parsed_content_id
+
+            _emit("parsed_stored", 30, {"file_id": file_id, "parsed_content_id": parsed_content_id})
+
+            # Update file status to PARSED after successfully persisting parsed content.
+            await get_thread_pool().run_blocking(
+                self._update_file_status_to_parsed,
+                file_id,
+                **kwargs,
+            )
+
+            result["metadata"]["timings_s"]["store_parsed_content"] = time.perf_counter() - stage_t0
+            stage_t0 = time.perf_counter()
+
+            # Chunk (Step 4).
+            chunker_info = self.chunker.get_chunker_info()
+            chunker_strategy = chunker_info.get("strategy", type(self.chunker).__name__)
+            result["metadata"]["chunker_type"] = chunker_strategy
+
+            chunk_metadata = {
+                "source_file_id": file_id,
+                "parsed_content_id": parsed_content_id,
+                "filename": effective_filename,
+                "parser_type": parser_type_name,
+                "owner_id": str(getattr(file_metadata, "owner_id", "")),
+            }
+
+            chunks = self.chunker.chunk_text(text=parsed_text, metadata=chunk_metadata, **kwargs)
+            if not chunks:
+                raise ValueError("Chunker returned no chunks")
+
+            try:
+                from core.file_management.index_text_augmentation import augment_chunk_dict_index_text
+
+                for chunk in chunks:
+                    if isinstance(chunk, dict):
+                        augment_chunk_dict_index_text(chunk)
+            except Exception as exc:
+                logger.warning("Failed to augment chunk index_text from filename: %s", exc)
+
+            if pageindex_context is not None:
+                try:
+                    enrichment = self.pageindex_service.enrich_chunks(context=pageindex_context, chunks=chunks)
+                    pageindex_info["chunk_enrichment"] = enrichment
+                except Exception as exc:
+                    logger.warning("PageIndex chunk enrichment failed for %s: %s", file_id, exc)
+                    pageindex_info["chunk_enrichment_error"] = str(exc)
+            if pageindex_info:
+                result["metadata"]["pageindex"] = pageindex_info
+
+            result["metadata"]["num_chunks"] = len(chunks)
+            _emit("chunked", 50, {"file_id": file_id, "num_chunks": len(chunks)})
+
+            result["metadata"]["timings_s"]["chunk"] = time.perf_counter() - stage_t0
+            stage_t0 = time.perf_counter()
+
+            # Store chunks (Step 5) - prefer batch store.
+            chunk_ids: list[str] = []
+            stored_chunks: List[Dict[str, Any]] = []
+            store_batch = getattr(self.chunk_storage, "store_chunks_batch", None)
+            if callable(store_batch):
+                from config.core.file_management.chunk_ingest_defaults import (
+                    CHUNK_BATCH_VALIDATE_AFTER_STORE_DEFAULT,
+                )
+
+                stored_refs: list[tuple[int, str]] = await get_thread_pool().run_blocking(
+                    store_batch,
+                    source_parsed_content_id=parsed_content_id,
+                    chunker_type=chunker_strategy,
+                    chunks=chunks,
+                    owner_id=getattr(file_metadata, "owner_id", None),
+                    validate_after_store=CHUNK_BATCH_VALIDATE_AFTER_STORE_DEFAULT,
+                    **kwargs,
+                )
+                for chunk_index, chunk_id in stored_refs:
+                    if not chunk_id:
+                        continue
+                    chunk_ids.append(chunk_id)
+                    try:
+                        stored_chunks.append(chunks[int(chunk_index)])
+                    except Exception:
+                        continue
+            else:
+                for i, chunk in enumerate(chunks):
+                    if chunk is None:
+                        continue
+                    chunk_data = json.dumps(chunk, ensure_ascii=False).encode("utf-8", errors="replace")
+                    chunk_id = await get_thread_pool().run_blocking(
+                        self.chunk_storage.store_chunk,
+                        source_parsed_content_id=parsed_content_id,
+                        chunker_type=chunker_strategy,
+                        chunk_data=chunk_data,
+                        chunk_index=i,
+                        owner_id=getattr(file_metadata, "owner_id", None),
+                        validate_after_store=True,
+                        **kwargs,
+                    )
+                    if chunk_id:
+                        chunk_ids.append(chunk_id)
+                        stored_chunks.append(chunk)
+
+            if not chunk_ids:
+                raise ValueError("No chunks stored successfully")
+
+            # Backfill semantic_unit anchor_chunk_id for graph/dense retrieval.
+            try:
+                self._backfill_anchor_chunk_ids(stored_chunks, chunk_ids)
+                overwrite = getattr(self.chunk_storage, "overwrite_chunk_json", None)
+                if callable(overwrite):
+                    await get_thread_pool().run_blocking(
+                        self._overwrite_chunk_json_batch,
+                        self.chunk_storage,
+                        stored_chunks,
+                        chunk_ids,
+                    )
+            except Exception as exc:
+                logger.warning("Anchor chunk id backfill failed: %s", exc)
+
+            result["chunk_ids"] = chunk_ids
+            _emit("chunks_stored", 65, {"file_id": file_id, "num_chunks": len(chunk_ids)})
+
+            result["metadata"]["timings_s"]["store_chunks"] = time.perf_counter() - stage_t0
+            stage_t0 = time.perf_counter()
+
+            # Index (Step 6) + statuses (Steps 7-8).
+            indexing_results = await self._index_chunks(stored_chunks, chunk_ids)
+            result["indexing_results"] = indexing_results
+            result["metadata"]["indexers_used"] = list(indexing_results.keys())
+            # Surface per-indexer timing breakdown for performance experiments.
+            indexer_timings: Dict[str, Any] = {}
+            for name, payload in (indexing_results or {}).items():
+                if not isinstance(payload, dict):
+                    continue
+                meta = payload.get("metadata") or {}
+                if isinstance(meta, dict):
+                    elapsed = meta.get("elapsed_s")
+                    if elapsed is not None:
+                        indexer_timings[name] = float(elapsed)
+            if indexer_timings:
+                result["metadata"]["timings_s"]["indexers"] = indexer_timings
+
+            result["metadata"]["timings_s"]["index"] = time.perf_counter() - stage_t0
+            stage_t0 = time.perf_counter()
+
+            chunks_updated = await get_thread_pool().run_blocking(
+                self._update_indexed_chunks_status,
+                chunk_ids,
+                indexing_results,
+                **kwargs,
+            )
+            result["metadata"]["timings_s"]["update_chunk_status"] = time.perf_counter() - stage_t0
+            stage_t0 = time.perf_counter()
+
+            # File status decision mirrors process_file.
+            successful_indexers = [k for k, v in (indexing_results or {}).items() if v.get("success")]
+            if not self.indexers:
+                successful_indexers = []
+            if not self.indexers:
+                # If no indexers are configured, mark the file as indexed (askable) after chunk storage.
+                await get_thread_pool().run_blocking(self._update_file_status_to_indexed, file_id, **kwargs)
+                result["success"] = True
+                _emit("indexed", 95, {"file_id": file_id, "success": True, "status": "INDEXED", "chunks_updated": chunks_updated})
+            elif successful_indexers and len(successful_indexers) == len(self.indexers):
+                await get_thread_pool().run_blocking(self._update_file_status_to_indexed, file_id, **kwargs)
+                result["success"] = True
+                _emit("indexed", 95, {"file_id": file_id, "success": True, "status": "INDEXED", "chunks_updated": chunks_updated})
+            else:
+                # Partial or total failure.
+                result["success"] = False
+                result["error_message"] = "all indexers failed" if not successful_indexers else "partial indexing: not all indexers succeeded"
+                from encapsulation.data_model.orm_models import FileStatus
+
+                metadata = None
+                try:
+                    metadata = self.file_storage.get_file_metadata(file_id)
+                except Exception:
+                    metadata = None
+                if metadata is None or getattr(metadata, "status", None) != FileStatus.DELETED:
+                    target_status = FileStatus.PARTIAL_INDEXED if successful_indexers else FileStatus.FAILED
+                    await get_thread_pool().run_blocking(
+                        self.file_storage.metadata_store.update_file_status,
+                        file_id,
+                        target_status,
+                        **kwargs,
+                    )
+                _emit("index_failed", 100, {"file_id": file_id, "success": False, "indexers": indexing_results})
+                return result
+
+            result["metadata"]["timings_s"]["update_file_status"] = time.perf_counter() - stage_t0
+            result["metadata"]["timings_s"]["total"] = time.perf_counter() - started
+            _emit("done", 100, {"file_id": file_id, "success": True})
+            return result
+
+        except Exception as exc:  # noqa: BLE001
+            error_msg = f"Parsed-markdown indexing pipeline failed for file_id {file_id}: {exc}"
+            logger.error(error_msg, exc_info=True)
+            result["error_message"] = error_msg
+            result["metadata"]["timings_s"]["total"] = time.perf_counter() - started
+            _emit("failed", 100, {"file_id": file_id, "success": False, "error_message": str(exc)})
+            try:
+                from encapsulation.data_model.orm_models import FileStatus
+
+                metadata = None
+                try:
+                    metadata = self.file_storage.get_file_metadata(file_id)
+                except Exception:
+                    metadata = None
+                if metadata is None or getattr(metadata, "status", None) != FileStatus.DELETED:
+                    await get_thread_pool().run_blocking(
+                        self.file_storage.metadata_store.update_file_status,
+                        file_id,
+                        FileStatus.FAILED,
+                        **kwargs,
+                    )
+            except Exception:
+                pass
+            return result
+
     async def process_file(self, file_id: str, **kwargs: Any) -> Dict[str, Any]:
         """
         Process a file through the complete indexing pipeline.
@@ -275,33 +616,85 @@ class _IndexManagerPipelineMixin:
             chunk_ids = []
             stored_chunks: List[Dict[str, Any]] = []
 
-            for i, chunk in enumerate(chunks):
-                if chunk is None:
-                    logger.warning(f"Chunk {i+1}/{len(chunks)} is None, skipping")
-                    continue
-
-                # Convert chunk to JSON bytes for storage (use thread pool to avoid blocking)
+            store_batch = getattr(self.chunk_storage, "store_chunks_batch", None)
+            if callable(store_batch):
                 try:
-                    # Use errors='replace' to handle surrogate pairs and invalid Unicode characters
-                    chunk_data = json.dumps(chunk, ensure_ascii=False).encode("utf-8", errors="replace")
-                    chunk_id = await get_thread_pool().run_blocking(
-                        self.chunk_storage.store_chunk,
-                        source_parsed_content_id=parsed_content_id,
-                        chunker_type=chunker_strategy,
-                        chunk_data=chunk_data,
-                        chunk_index=i,  # Pass the chunk index
-                        **kwargs,
+                    from config.core.file_management.chunk_ingest_defaults import (
+                        CHUNK_BATCH_VALIDATE_AFTER_STORE_DEFAULT,
                     )
 
-                    if chunk_id:
+                    stored_refs: list[tuple[int, str]] = await get_thread_pool().run_blocking(
+                        store_batch,
+                        source_parsed_content_id=parsed_content_id,
+                        chunker_type=chunker_strategy,
+                        chunks=chunks,
+                        owner_id=getattr(file_metadata, "owner_id", None),
+                        validate_after_store=CHUNK_BATCH_VALIDATE_AFTER_STORE_DEFAULT,
+                        **kwargs,
+                    )
+                    for chunk_index, chunk_id in stored_refs:
+                        if not chunk_id:
+                            continue
                         chunk_ids.append(chunk_id)
-                        stored_chunks.append(chunk)
-                        logger.debug(f"Stored chunk {i+1}/{len(chunks)} with ID: {chunk_id}")
-                    else:
-                        logger.warning(f"Failed to store chunk {i+1}/{len(chunks)}")
+                        try:
+                            stored_chunks.append(chunks[int(chunk_index)])
+                        except Exception:
+                            continue
                 except Exception as e:
-                    logger.error(f"Failed to store chunk {i+1}/{len(chunks)}: {str(e)}")
-                    continue
+                    logger.error("Batch chunk storage failed; falling back to per-chunk store: %s", e)
+                    # Fall back to the safer per-chunk path (keeps behavior consistent even if batch is unsupported).
+                    for i, chunk in enumerate(chunks):
+                        if chunk is None:
+                            logger.warning(f"Chunk {i+1}/{len(chunks)} is None, skipping")
+                            continue
+                        try:
+                            chunk_data = json.dumps(chunk, ensure_ascii=False).encode("utf-8", errors="replace")
+                            chunk_id = await get_thread_pool().run_blocking(
+                                self.chunk_storage.store_chunk,
+                                source_parsed_content_id=parsed_content_id,
+                                chunker_type=chunker_strategy,
+                                chunk_data=chunk_data,
+                                chunk_index=i,
+                                owner_id=getattr(file_metadata, "owner_id", None),
+                                validate_after_store=True,
+                                **kwargs,
+                            )
+                            if chunk_id:
+                                chunk_ids.append(chunk_id)
+                                stored_chunks.append(chunk)
+                        except Exception as e2:
+                            logger.error("Failed to store chunk %s/%s: %s", i + 1, len(chunks), e2)
+                            continue
+            else:
+                for i, chunk in enumerate(chunks):
+                    if chunk is None:
+                        logger.warning(f"Chunk {i+1}/{len(chunks)} is None, skipping")
+                        continue
+
+                    # Convert chunk to JSON bytes for storage (use thread pool to avoid blocking)
+                    try:
+                        # Use errors='replace' to handle surrogate pairs and invalid Unicode characters
+                        chunk_data = json.dumps(chunk, ensure_ascii=False).encode("utf-8", errors="replace")
+                        chunk_id = await get_thread_pool().run_blocking(
+                            self.chunk_storage.store_chunk,
+                            source_parsed_content_id=parsed_content_id,
+                            chunker_type=chunker_strategy,
+                            chunk_data=chunk_data,
+                            chunk_index=i,  # Pass the chunk index
+                            owner_id=getattr(file_metadata, "owner_id", None),
+                            validate_after_store=True,
+                            **kwargs,
+                        )
+
+                        if chunk_id:
+                            chunk_ids.append(chunk_id)
+                            stored_chunks.append(chunk)
+                            logger.debug(f"Stored chunk {i+1}/{len(chunks)} with ID: {chunk_id}")
+                        else:
+                            logger.warning(f"Failed to store chunk {i+1}/{len(chunks)}")
+                    except Exception as e:
+                        logger.error(f"Failed to store chunk {i+1}/{len(chunks)}: {str(e)}")
+                        continue
 
             if not chunk_ids:
                 raise ValueError("Failed to store any chunks")
@@ -394,7 +787,7 @@ class _IndexManagerPipelineMixin:
                         except Exception:
                             metadata = None
                         if metadata is not None and getattr(metadata, "status", None) == FileStatus.DELETED:
-                            logger.info("Skip updating file %s to FAILED because status is DELETED", file_id)
+                            logger.info("Skip updating file %s to PARTIAL_INDEXED because status is DELETED", file_id)
                         else:
                             await get_thread_pool().run_blocking(
                                 self.file_storage.metadata_store.update_file_status,
@@ -423,7 +816,7 @@ class _IndexManagerPipelineMixin:
                         {"file_id": file_id, "success": True, "status": "INDEXED", "chunks_updated": chunks_updated},
                     )
                 else:
-                    # 部分 indexer 成功也视为索引失败，状态标为 FAILED
+                    # 部分 indexer 成功：标为 PARTIAL_INDEXED，保持可观测性，避免把可用的索引结果当作“全失败”。
                     from encapsulation.data_model.orm_models import FileStatus
 
                     result["success"] = False
@@ -440,11 +833,11 @@ class _IndexManagerPipelineMixin:
                             await get_thread_pool().run_blocking(
                                 self.file_storage.metadata_store.update_file_status,
                                 file_id,
-                                FileStatus.FAILED,
+                                FileStatus.PARTIAL_INDEXED,
                                 **kwargs,
                             )
                     except Exception as status_error:
-                        logger.error("Failed to update file status to FAILED for %s: %s", file_id, status_error)
+                        logger.error("Failed to update file status to PARTIAL_INDEXED for %s: %s", file_id, status_error)
                     _emit(
                         "index_failed",
                         100,
@@ -707,9 +1100,26 @@ class _IndexManagerPipelineMixin:
         """
         try:
             logger.info(f"Indexing {len(chunk_objects)} chunks with {indexer_name}")
-            indexed_ids = await indexer.update_index(chunk_objects)
+            t0 = time.perf_counter()
+            raw = await indexer.update_index(chunk_objects)
+            elapsed_s = time.perf_counter() - t0
 
-            indexed_ids = indexed_ids or []
+            indexed_ids: list[str] = []
+            extra_meta: dict[str, Any] = {}
+            if isinstance(raw, dict):
+                candidate = raw.get("indexed_ids")
+                if candidate is None:
+                    candidate = raw.get("chunk_ids")
+                if isinstance(candidate, list):
+                    indexed_ids = [str(x).strip() for x in candidate if str(x or "").strip()]
+                extra_meta = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+            elif isinstance(raw, list):
+                indexed_ids = [str(x).strip() for x in raw if str(x or "").strip()]
+            elif raw is None:
+                indexed_ids = []
+            else:
+                indexed_ids = [str(raw).strip()] if str(raw).strip() else []
+
             indexed_count = len(indexed_ids)
             if indexed_count <= 0:
                 return {
@@ -718,6 +1128,7 @@ class _IndexManagerPipelineMixin:
                     "indexed_count": 0,
                     "total_chunks": len(chunk_objects),
                     "indexed_ids": [],
+                    "metadata": {"elapsed_s": elapsed_s},
                 }
 
             return {
@@ -725,6 +1136,7 @@ class _IndexManagerPipelineMixin:
                 "indexed_count": indexed_count,
                 "total_chunks": len(chunk_objects),
                 "indexed_ids": indexed_ids,
+                "metadata": {"elapsed_s": elapsed_s, **extra_meta},
             }
         except Exception as e:
             logger.error(f"Indexing failed with {indexer_name}: {str(e)}")
@@ -733,4 +1145,5 @@ class _IndexManagerPipelineMixin:
                 "error_message": str(e),
                 "indexed_count": 0,
                 "total_chunks": len(chunk_objects),
+                "metadata": {"elapsed_s": 0.0},
             }

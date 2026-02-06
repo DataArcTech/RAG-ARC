@@ -116,6 +116,7 @@
                     "database": "${NEO4J_DATABASE}",
                     "storage_path": "${GRAPH_STORAGE_PATH}",
                     "index_name": "${GRAPH_INDEX_NAME}",
+                    "neo4j_ingest_chunk_batch_size": 250,
                     "embedding": {
                         "type": "qwen_embedding",
                         "model_name": "${EMBEDDING_MODEL_NAME}",
@@ -123,6 +124,13 @@
                         "use_china_mirror": true,
                         "cache_folder": "${EMBEDDING_CACHE_FOLDER}",
                         "embedding_dimensions": "${EMBEDDING_DIMENSIONS}"
+                    },
+                    "embedding_cache": {
+                        "type": "graph_embedding_cache",
+                        "enabled": true,
+                        "dirname": "embedding_cache",
+                        "db_filename": "embeddings.sqlite3",
+                        "max_in_keys_per_query": 500
                     },
                     "add_synonymy_edges": true,
                     "synonymy_edge_topk": 100,

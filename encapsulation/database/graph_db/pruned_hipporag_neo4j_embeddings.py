@@ -6,6 +6,7 @@ import random
 import threading
 import time
 import copy
+import hashlib
 from typing import List, Dict, Any, Optional, Sequence, Set, Tuple
 
 import numpy as np
@@ -105,7 +106,10 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
         template_db = self.fact_faiss_db if kind == "fact" else self.entity_faiss_db
         base_dir = os.path.join(str(self.storage_path), f"{kind}_index")
         owner_dir = self._faiss_owner_scoped_dir(kind, owner_id=owner_id)
-        if not self._faiss_index_artifacts_ready(owner_dir) and self._faiss_index_artifacts_ready(base_dir):
+        # IMPORTANT: for a concrete owner scope, never fall back to the legacy shared index.
+        # Returning the shared DB would mix owners and can cause us to accidentally persist a multi-owner
+        # index into a single-owner directory during incremental embedding/indexing.
+        if owner_id is None and (not self._faiss_index_artifacts_ready(owner_dir)) and self._faiss_index_artifacts_ready(base_dir):
             return template_db
 
         cache_attr = "_owner_scoped_fact_faiss" if kind == "fact" else "_owner_scoped_entity_faiss"
@@ -200,6 +204,71 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
             "sleep_between_batches": float(max(0.0, sleep_between_batches)),
         }
 
+    def _embedding_cache_model_fingerprint(self) -> str:
+        """
+        Stable fingerprint for embedding cache keys.
+
+        Must change when the effective embedding model changes (provider/model/dim).
+        """
+        payload: Dict[str, Any] = {}
+        cfg = getattr(getattr(self, "config", None), "embedding", None)
+        if cfg is not None:
+            try:
+                from config.encapsulation.database.vector_db.embedding_model_aliases import normalize_embedding_model_name
+
+                payload = {
+                    "type": getattr(cfg, "type", None) or cfg.__class__.__name__,
+                    "loading_method": getattr(cfg, "loading_method", None),
+                    "model_name": normalize_embedding_model_name(getattr(cfg, "model_name", None)),
+                    "embedding_dimensions": getattr(cfg, "embedding_dimensions", None),
+                }
+            except Exception:
+                payload = {
+                    "type": getattr(cfg, "type", None) or cfg.__class__.__name__,
+                    "loading_method": getattr(cfg, "loading_method", None),
+                    "model_name": getattr(cfg, "model_name", None),
+                    "embedding_dimensions": getattr(cfg, "embedding_dimensions", None),
+                }
+        return json.dumps(payload, sort_keys=True, ensure_ascii=False)
+
+    def _embedding_cache_for_owner(self, *, owner_id: Optional[str]):
+        cfg = getattr(self, "config", None)
+        cache_cfg = getattr(cfg, "embedding_cache", None)
+        if not bool(getattr(cache_cfg, "enabled", False)):
+            return None
+
+        dirname = str(getattr(cache_cfg, "dirname", "embedding_cache") or "embedding_cache")
+        db_filename = str(getattr(cache_cfg, "db_filename", "embeddings.sqlite3") or "embeddings.sqlite3")
+        max_in = int(getattr(cache_cfg, "max_in_keys_per_query", 500) or 500)
+
+        owner_leaf = safe_leaf_name(owner_id or "__GLOBAL__", default="__GLOBAL__")
+        db_path = os.path.join(str(self.storage_path), dirname, owner_leaf, db_filename)
+
+        cache_attr = "_embedding_cache_by_owner"
+        lock_attr = "_embedding_cache_lock_by_owner"
+        caches: Dict[str, Any] = getattr(self, cache_attr, None) or {}
+        locks: Dict[str, threading.Lock] = getattr(self, lock_attr, None) or {}
+        setattr(self, cache_attr, caches)
+        setattr(self, lock_attr, locks)
+
+        key = str(owner_id) if owner_id is not None else "__GLOBAL__"
+        if key not in locks:
+            locks[key] = threading.Lock()
+
+        if key not in caches:
+            from encapsulation.database.utils.sqlite_embedding_cache import SqliteEmbeddingCache
+
+            caches[key] = SqliteEmbeddingCache(db_path=db_path, max_in_keys_per_query=max_in)
+
+        return caches[key]
+
+    def _embedding_cache_key(self, *, model_fp: str, text: str) -> str:
+        h = hashlib.sha256()
+        h.update(model_fp.encode("utf-8", errors="ignore"))
+        h.update(b"\0")
+        h.update(text.encode("utf-8", errors="ignore"))
+        return h.hexdigest()
+
     @staticmethod
     def _looks_like_rate_limit(exc: Exception) -> bool:
         msg = str(exc).lower()
@@ -264,6 +333,124 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
         )
 
     def _embed_texts_resilient(self, texts: List[str], *, purpose: str) -> List[List[float]]:
+        return self._embed_texts_resilient_scoped(texts, purpose=purpose, owner_id=None)
+
+    def _embed_texts_resilient_scoped(
+        self, texts: List[str], *, purpose: str, owner_id: Optional[str]
+    ) -> List[List[float]]:
+        """
+        Resilient embedding wrapper for graph indexing (dedup + optional owner-scoped cache).
+
+        - Deduplicates within the request to avoid repeated remote calls.
+        - When enabled, uses an owner-scoped sqlite cache keyed by (model_fingerprint, normalized_text).
+        """
+        from config.graph_index_embedding import GRAPH_INDEX_EMBED_FAILURE_POLICY
+
+        if not texts:
+            return []
+
+        # Normalize + group duplicates (preserve original order).
+        normalized_by_idx: Dict[int, str] = {}
+        empty_indices: List[int] = []
+        for idx, raw in enumerate(texts):
+            if not isinstance(raw, str):
+                raise TypeError(f"{purpose} embedding input must be str (index={idx}, type={type(raw).__name__})")
+            stripped = raw.strip()
+            if not stripped:
+                empty_indices.append(idx)
+                continue
+            normalized_by_idx[idx] = stripped.replace("\n", " ")
+
+        # Unique texts in first-seen order.
+        text_to_indices: Dict[str, List[int]] = {}
+        unique_texts: List[str] = []
+        for idx in range(len(texts)):
+            t = normalized_by_idx.get(idx)
+            if not t:
+                continue
+            if t not in text_to_indices:
+                text_to_indices[t] = []
+                unique_texts.append(t)
+            text_to_indices[t].append(idx)
+
+        # If all inputs are empty, follow the same failure policy as uncached embed.
+        if not unique_texts:
+            if GRAPH_INDEX_EMBED_FAILURE_POLICY == "raise":
+                raise ValueError(f"Graph index embedding failed ({purpose}): all inputs were empty")
+            dim = self._embedding_dimension_for_placeholders()
+            zero = [0.0] * dim
+            return [zero for _ in texts]
+
+        # Cache lookup for unique texts (optional).
+        model_fp = self._embedding_cache_model_fingerprint()
+        cache = self._embedding_cache_for_owner(owner_id=owner_id)
+        cache_hits: Dict[str, List[float]] = {}
+        missing_texts: List[str] = unique_texts
+
+        if cache is not None:
+            keys = [self._embedding_cache_key(model_fp=model_fp, text=t) for t in unique_texts]
+            rows = cache.get_many(keys)
+            missing_texts = []
+            for t, k in zip(unique_texts, keys):
+                hit = rows.get(k)
+                if not hit:
+                    missing_texts.append(t)
+                    continue
+                blob, dim = hit
+                try:
+                    vec = np.frombuffer(blob, dtype=np.float32, count=int(dim)).tolist()
+                except Exception:
+                    missing_texts.append(t)
+                    continue
+                cache_hits[t] = vec
+
+        # Embed misses (and the full set if cache is disabled).
+        embedded_misses: Dict[str, List[float]] = {}
+        if missing_texts:
+            miss_vecs = self._embed_texts_resilient_uncached(missing_texts, purpose=purpose)
+            for t, v in zip(missing_texts, miss_vecs):
+                embedded_misses[t] = v
+
+            if cache is not None:
+                items = []
+                for t, v in embedded_misses.items():
+                    try:
+                        arr = np.asarray(v, dtype=np.float32)
+                        items.append((self._embedding_cache_key(model_fp=model_fp, text=t), arr.tobytes(), int(arr.size)))
+                    except Exception:
+                        continue
+                if items:
+                    cache.set_many(items)
+
+        # Reconstruct aligned results for original indices.
+        results: List[List[float]] = [None] * len(texts)  # type: ignore[list-item]
+        for t, indices in text_to_indices.items():
+            vec = cache_hits.get(t) or embedded_misses.get(t)
+            if vec is None:
+                continue
+            for i in indices:
+                results[i] = vec
+
+        # Fill empty inputs (policy: treat as failures).
+        if empty_indices:
+            if GRAPH_INDEX_EMBED_FAILURE_POLICY == "raise":
+                raise ValueError(f"Graph index embedding failed ({purpose}): empty inputs={len(empty_indices)}")
+            dim = self._embedding_dimension_for_placeholders(fallback_from=[r for r in results if r is not None])
+            zero = [0.0] * dim
+            for i in empty_indices:
+                results[i] = zero
+
+        # Defensive: if any still None, treat as failure according to policy (fill zeros for tolerant modes).
+        if any(r is None for r in results):
+            if GRAPH_INDEX_EMBED_FAILURE_POLICY == "raise":
+                raise RuntimeError(f"Graph index embedding failed ({purpose}): missing outputs")
+            dim = self._embedding_dimension_for_placeholders(fallback_from=[r for r in results if r is not None])
+            zero = [0.0] * dim
+            results = [r if r is not None else zero for r in results]  # type: ignore[list-item]
+
+        return results  # type: ignore[return-value]
+
+    def _embed_texts_resilient_uncached(self, texts: List[str], *, purpose: str) -> List[List[float]]:
         """
         Resilient embedding wrapper for graph indexing.
 
@@ -437,35 +624,44 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
 
         # Normalize identifiers defensively: some upstream pipelines may pass UUID objects.
         chunk_ids_norm: Optional[list[str]] = None
-        if chunk_ids is not None:
+        chunk_ids_provided = chunk_ids is not None
+        if chunk_ids_provided:
             chunk_ids_norm = [str(x).strip() for x in chunk_ids if str(x or "").strip()]
 
         entity_ids_norm: Optional[list[str]] = None
-        if entity_ids is not None:
+        entity_ids_provided = entity_ids is not None
+        if entity_ids_provided:
             entity_ids_norm = [str(x).strip() for x in entity_ids if str(x or "").strip()]
 
         # 1. Generate chunk embeddings
         chunk_params: Dict[str, Any] = {}
-        if chunk_ids_norm:
-            chunk_query = (
-                "MATCH (c:Chunk) WHERE c.chunk_id IN $chunk_ids "
-                "RETURN c.chunk_id AS chunk_id, c.content AS content, c.metadata AS metadata, c.source_file_id AS source_file_id"
-            )
-            chunk_params = {"chunk_ids": list(chunk_ids_norm)}
+        if chunk_ids_provided:
+            if not chunk_ids_norm:
+                chunks_data = []
+            else:
+                chunk_query = (
+                    "MATCH (c:Chunk) WHERE c.chunk_id IN $chunk_ids "
+                    "RETURN c.chunk_id AS chunk_id, c.content AS content, c.metadata AS metadata, c.source_file_id AS source_file_id, c.owner_id AS owner_id"
+                )
+                chunk_params = {"chunk_ids": list(chunk_ids_norm)}
+                chunks_data = self._execute_query(chunk_query, chunk_params or None)
         else:
             chunk_query = (
                 "MATCH (c:Chunk) "
-                "RETURN c.chunk_id AS chunk_id, c.content AS content, c.metadata AS metadata, c.source_file_id AS source_file_id"
+                "RETURN c.chunk_id AS chunk_id, c.content AS content, c.metadata AS metadata, c.source_file_id AS source_file_id, c.owner_id AS owner_id"
             )
-        chunks_data = self._execute_query(chunk_query, chunk_params or None)
+            chunks_data = self._execute_query(chunk_query, chunk_params or None)
 
         new_chunks = []
         new_chunk_ids = []
+        new_chunk_owner_by_id: Dict[str, Optional[str]] = {}
         for record in chunks_data:
             chunk_id = record['chunk_id']
             content = record.get('content')
             raw_meta = record.get("metadata")
             source_file_id = record.get("source_file_id")
+            owner_raw = record.get("owner_id")
+            owner = self._restore_owner_id(owner_raw)
             if chunk_id not in self.chunk_embeddings:
                 # Prefer index_text/prompt_text for embedding (same as retrieval),
                 # and optionally prefix file/path context for disambiguation.
@@ -498,18 +694,30 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
 
                 new_chunks.append(embed_text)
                 new_chunk_ids.append(chunk_id)
+                new_chunk_owner_by_id[str(chunk_id)] = owner
 
         if new_chunks:
             logger.info(f"Batch generating embeddings for {len(new_chunks)} chunks...")
-            chunk_embeddings = self._embed_texts_resilient(new_chunks, purpose="chunk")
 
-            # Store embeddings
-            for chunk_id, embedding in zip(new_chunk_ids, chunk_embeddings):
-                if isinstance(embedding, list):
-                    embedding = np.array(embedding)
-                # Normalize for cosine similarity
-                embedding = embedding / (np.linalg.norm(embedding) + 1e-10)
-                self.chunk_embeddings[chunk_id] = embedding
+            # Owner-scoped chunk embedding + cache use.
+            owner_to_items: Dict[Optional[str], List[Tuple[str, str]]] = {}
+            for cid, text in zip(new_chunk_ids, new_chunks):
+                owner = new_chunk_owner_by_id.get(str(cid))
+                owner_to_items.setdefault(owner, []).append((cid, text))
+
+            for owner, items in owner_to_items.items():
+                texts = [t for _cid, t in items]
+                embeddings = self._embed_texts_resilient_scoped(texts, purpose="chunk", owner_id=owner)
+                for (chunk_id, _), embedding in zip(items, embeddings):
+                    arr = np.asarray(embedding, dtype=np.float32)
+                    arr = arr / (np.linalg.norm(arr) + 1e-10)  # cosine
+                    self.chunk_embeddings[chunk_id] = arr
+                    try:
+                        self._chunk_embedding_owner_by_chunk_id[str(chunk_id)] = owner
+                        self._chunk_ids_by_owner.setdefault(owner, set()).add(str(chunk_id))
+                        self._chunk_embeddings_dirty_owners.add(owner)
+                    except Exception:
+                        pass
 
             # Mark array needs rebuild
             self._chunk_embeddings_array = None
@@ -520,15 +728,19 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
 
         # 2. Generate entity embeddings and add to FAISS HNSW
         entity_params: Dict[str, Any] = {}
-        if entity_ids_norm:
-            entity_query = (
-                "MATCH (e:Entity) WHERE e.entity_id IN $entity_ids "
-                "RETURN e.entity_id AS entity_id, e.entity_name AS entity_name, e.owner_id AS owner_id"
-            )
-            entity_params = {"entity_ids": list(entity_ids_norm)}
+        if entity_ids_provided:
+            if not entity_ids_norm:
+                entities = []
+            else:
+                entity_query = (
+                    "MATCH (e:Entity) WHERE e.entity_id IN $entity_ids "
+                    "RETURN e.entity_id AS entity_id, e.entity_name AS entity_name, e.owner_id AS owner_id"
+                )
+                entity_params = {"entity_ids": list(entity_ids_norm)}
+                entities = self._execute_query(entity_query, entity_params or None)
         else:
             entity_query = "MATCH (e:Entity) RETURN e.entity_id AS entity_id, e.entity_name AS entity_name, e.owner_id AS owner_id"
-        entities = self._execute_query(entity_query, entity_params or None)
+            entities = self._execute_query(entity_query, entity_params or None)
 
         owners_to_entities: Dict[Optional[str], List[Dict[str, Any]]] = {}
         for record in entities:
@@ -556,7 +768,7 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
 
             logger.info("Adding %s entities to FAISS HNSW (owner=%s)...", len(new_entities), owner)
             entity_texts = [chunk.content for chunk in new_entities]
-            entity_embeddings = self._embed_texts_resilient(entity_texts, purpose="entity")
+            entity_embeddings = self._embed_texts_resilient_scoped(entity_texts, purpose="entity", owner_id=owner)
 
             for chunk, embedding in zip(new_entities, entity_embeddings):
                 chunk.metadata["embedding"] = np.array(embedding, dtype=np.float32)
@@ -570,9 +782,30 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
         summary["entities"] = {"attempted": attempted_entities, "embedded": embedded_entities}
 
         # 3. Generate fact embeddings and add to FAISS Flat
-        # Facts are stored as RELATES_TO relationships between entities
-        fact_query = """
-        MATCH (h:Entity)-[r:RELATES_TO]->(t:Entity)
+        # Facts are stored as RELATES_TO relationships between entities.
+        #
+        # IMPORTANT (performance): in incremental mode (chunk_ids/entity_ids provided),
+        # do NOT scan all facts in the graph. Restrict to facts that are plausibly affected:
+        # - endpoint entity is among entity_ids, OR
+        # - provenance source_chunk_ids intersects chunk_ids.
+        #
+        # This prevents O(N_graph) rebuilds and avoids saving owner-scoped FAISS artifacts for unrelated owners.
+        fact_params: Dict[str, Any] = {}
+        fact_filters: list[str] = []
+        if entity_ids_norm:
+            fact_filters.append("(h.entity_id IN $entity_ids OR t.entity_id IN $entity_ids)")
+            fact_params["entity_ids"] = list(entity_ids_norm)
+        if chunk_ids_norm:
+            fact_filters.append("any(cid IN $chunk_ids WHERE cid IN coalesce(r.source_chunk_ids, []))")
+            fact_params["chunk_ids"] = list(chunk_ids_norm)
+
+        where_clause = ""
+        if fact_filters:
+            where_clause = "WHERE (" + " OR ".join(fact_filters) + ")"
+
+        fact_query = f"""
+        MATCH (h:Entity)-[r:RELATES_TO]-(t:Entity)
+        {where_clause}
         RETURN r.fact_id AS fact_id,
                r.text AS text,
                r.predicate AS predicate,
@@ -586,7 +819,7 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
                h.entity_type AS head_type,
                t.entity_type AS tail_type
         """
-        facts = self._execute_query(fact_query)
+        facts = self._execute_query(fact_query, fact_params or None)
 
         owners_to_facts: Dict[Optional[str], List[Dict[str, Any]]] = {}
         for record in facts:
@@ -650,7 +883,7 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
             if new_facts:
                 logger.info("Adding %s facts to FAISS Flat (owner=%s)...", len(new_facts), owner)
                 fact_texts = [chunk.content for chunk in new_facts]
-                fact_embeddings = self._embed_texts_resilient(fact_texts, purpose="fact")
+                fact_embeddings = self._embed_texts_resilient_scoped(fact_texts, purpose="fact", owner_id=owner)
                 for chunk, embedding in zip(new_facts, fact_embeddings):
                     chunk.metadata["embedding"] = np.array(embedding, dtype=np.float32)
                 fact_db.update_index(new_facts)
@@ -672,6 +905,26 @@ class _PrunedHippoRAGNeo4jEmbeddingsMixin:
             updated_fact_meta_total += updated_fact_meta
 
         summary["facts"] = {"attempted": attempted_facts, "embedded": embedded_facts, "updated_meta": updated_fact_meta_total}
+
+        try:
+            cache_cfg = getattr(getattr(self, "config", None), "embedding_cache", None)
+            if bool(getattr(cache_cfg, "enabled", False)):
+                caches: Dict[str, Any] = getattr(self, "_embedding_cache_by_owner", None) or {}
+                cache_stats: Dict[str, Any] = {}
+                for owner_key, cache in caches.items():
+                    try:
+                        st = cache.stats()  # type: ignore[attr-defined]
+                        cache_stats[str(owner_key)] = {
+                            "hits": int(getattr(st, "hits", 0)),
+                            "misses": int(getattr(st, "misses", 0)),
+                            "sets": int(getattr(st, "sets", 0)),
+                        }
+                    except Exception:
+                        continue
+                if cache_stats:
+                    summary["embedding_cache"] = cache_stats
+        except Exception:
+            pass
 
         logger.info("Batch embedding generation completed!")
         return summary

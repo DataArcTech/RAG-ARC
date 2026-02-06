@@ -3,7 +3,7 @@
 This directory provides a standalone FastAPI service that wraps the upstream MinerU parser.
 It can run on a GPU machine and be accessed remotely via `MINERU_SERVER_URL` or an SSH tunnel.
 
-
+---
 
 ## What It Does
 
@@ -17,7 +17,7 @@ It can run on a GPU machine and be accessed remotely via `MINERU_SERVER_URL` or 
 - `mineru_client.py`: simple HTTP client + CLI (parse, download artifacts, sync full task directory).
 - `mineru_server/client.py` + `mineru_server/cli.py client`: minimal sync helper.
 
-
+---
 
 ## Prerequisites (Upstream MinerU)
 
@@ -26,7 +26,7 @@ This service **does not install or configure upstream MinerU**. Please follow th
 - `mineru.cli.common.do_parse` / `aio_do_parse`
 - `mineru.utils.enum_class.MakeMode`
 
-
+---
 
 ## Quick Start
 
@@ -81,7 +81,8 @@ If you want to call the server from Python, you can either:
 
 Example:
 
-```python
+```bash
+PYTHONPATH=service python - <<'PY'
 from pathlib import Path
 from mineru_server.client import MinerUServerClient
 
@@ -99,8 +100,10 @@ result = client.parse(
     wait=True,
 )
 print(result["status"], result.get("processing_time"))
+PY
 ```
 
+---
 
 ## External vLLM Acceleration (Multi-GPU)
 
@@ -214,7 +217,7 @@ errors, it is temporarily put into cooldown and avoided.
 - `start_vllm.sh --gpus 4,6 --tp 2` starts *one* model sharded across two GPUs: a single request uses **both** GPUs.
 - `start_vllm_pool.sh --gpus 4,6` starts *two* models (tp=1 each): concurrent requests can be routed to **different** GPUs.
 
-
+---
 
 ## CLI Reference (All Options)
 
@@ -300,7 +303,7 @@ python mineru_main.py client --help
 - `--output-format` (default: `mm_md`, choices: `mm_md|md_only|content_list`)
 - `--timeout` (default: `900`)
 
-
+---
 
 ## HTTP API (Server)
 
@@ -321,26 +324,22 @@ Endpoints:
 - `start_page`, `end_page`, `output_format`
 - `wait` (if true, block until parse completes)
 
-
+---
 
 ## SSH Tunnel (Remote GPU)
 
 ```bash
-# default SSH port
 ssh -CNg -L 8899:127.0.0.1:8899 <user>@<gpu-host>
-# if SSH uses a non-default port
-ssh -CNg -L 8899:127.0.0.1:8899 <user>@<gpu-host> -p <port>
 export MINERU_SERVER_URL="http://127.0.0.1:8899"
 python mineru_main.py client --base-url "$MINERU_SERVER_URL" --file demo.pdf --output-dir ./mineru_client_outputs
 ```
 
-
+---
 
 ## RAG-ARC Integration
 
 - `PARSER_PARSE_MODE=mineru`
 - `MINERU_SERVER_URL=http://<server-ip>:8899` (optional `MINERU_TIMEOUT_S=900`)
-- Optional backend override: `MINERU_BACKEND=vlm-http-client`
 - Optional page range: `MINERU_START_PAGE=0`, `MINERU_END_PAGE=1`
 
 Parsed outputs are mirrored under `PARSER_OUTPUT_DIR` (default `./data/parsed_files/mineru/<file_id>/...`).

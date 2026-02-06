@@ -47,6 +47,14 @@ class HippoRAG2ExtractorConfig(AbstractConfig):
         ge=1,
     )
 
+    dedup_by_content: bool = Field(
+        default=True,
+        description=(
+            "Whether to de-duplicate identical chunk.content within a single extraction batch. "
+            "This can significantly reduce LLM calls for PDFs with repeated headers/footers."
+        ),
+    )
+
     retry_attempts: Optional[int] = Field(
         default=None,
         description="Optional override for LLM retry attempts (mapped to llm_config.max_retries).",
@@ -67,6 +75,16 @@ class HippoRAG2ExtractorConfig(AbstractConfig):
     enable_temporal_extraction: bool = Field(
         default=True,
         description="Whether to extract business-time (effective_date/valid_from/valid_to) via LLM for temporal tools (e.g. latest_truth).",
+    )
+
+    extract_chunk_roles: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Optional filter for which chunk roles should run LLM extraction. "
+            "When set, only chunks whose `chunk.metadata['chunk_role']` is in this list are extracted; "
+            "other chunks are still ingested but get an empty graph (with an observable skip marker). "
+            "This is useful for speed when semantic_unit chunking produces many table 'slice' chunks."
+        ),
     )
 
     enable_mindmap_extraction: bool = Field(
@@ -163,6 +181,77 @@ class HippoRAG2ExtractorConfig(AbstractConfig):
         ge=0,
         le=800,
         description="Max number of predicate alias entries to include in the schema hint prompt.",
+    )
+
+    # ==================== EXTRACTION CACHE (REDIS) ====================
+    extraction_cache_enabled: bool = Field(
+        default=True,
+        description=(
+            "Enable Redis-backed caching for HippoRAG2 extraction outputs (GraphData). "
+            "This reduces repeated LLM calls during re-indexing or when chunks repeat across documents. "
+            "Cache keys are tenant-scoped by default (share across users within a tenant; isolates across tenants)."
+        ),
+    )
+
+    extraction_cache_ttl_seconds: int = Field(
+        default=30 * 24 * 3600,
+        ge=60,
+        description="TTL for cached extraction outputs.",
+    )
+
+    extraction_cache_namespace: str = Field(
+        default="ragarc:extract:hipporag2",
+        description="Redis key namespace/prefix for extraction cache entries.",
+    )
+
+    extraction_cache_compress: bool = Field(
+        default=True,
+        description="Whether to compress cached values (zlib+base64) to reduce Redis memory/network usage.",
+    )
+
+    extraction_cache_mget_batch_size: int = Field(
+        default=256,
+        ge=1,
+        le=5000,
+        description="Max keys per Redis MGET batch when prefetching extraction cache.",
+    )
+
+    extraction_cache_mset_batch_size: int = Field(
+        default=128,
+        ge=1,
+        le=5000,
+        description="Max SETEX ops per pipeline execute when writing extraction cache.",
+    )
+
+    extraction_cache_key_scope: Literal["tenant", "owner"] = Field(
+        default="tenant",
+        description=(
+            "Cache key scoping strategy. "
+            "tenant=share extraction outputs across users within the same tenant (recommended); "
+            "owner=isolate per owner_id (stricter, less reuse). "
+            "In multi-tenant deployments, set tenant_id from JWT/middleware."
+        ),
+    )
+
+    extraction_cache_max_unique_keys_per_call: int = Field(
+        default=10000,
+        ge=1,
+        le=200000,
+        description=(
+            "Safety cap for Redis cache IO per extractor call. "
+            "If unique chunk contents exceed this value, Redis cache is skipped for that call "
+            "(dedup_by_content still applies). This prevents Redis overload on very large corpora."
+        ),
+    )
+
+    extraction_cache_max_value_bytes: int = Field(
+        default=96 * 1024,
+        ge=1024,
+        le=5 * 1024 * 1024,
+        description=(
+            "Max uncompressed JSON byte size for a single cached value. "
+            "Oversized entries are skipped to reduce Redis memory/IO pressure."
+        ),
     )
 
     @staticmethod

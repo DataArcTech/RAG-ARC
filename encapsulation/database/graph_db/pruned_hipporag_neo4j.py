@@ -166,6 +166,10 @@ class PrunedHippoRAGNeo4jStore(
         self.chunk_embeddings = {}
         self._chunk_embeddings_array = None
         self._chunk_ids_list = None
+        # Owner bookkeeping for chunk embedding persistence (IO sharding).
+        self._chunk_embedding_owner_by_chunk_id: Dict[str, Optional[str]] = {}
+        self._chunk_ids_by_owner: Dict[Optional[str], Set[str]] = {}
+        self._chunk_embeddings_dirty_owners: Set[Optional[str]] = set()
 
         # Chunk embeddings optimization settings
         self.use_float16_embeddings = config.use_float16_embeddings

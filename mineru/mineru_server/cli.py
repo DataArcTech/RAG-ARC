@@ -131,6 +131,16 @@ def parse_args(argv: Optional[List[str]]) -> argparse.Namespace:
 
 def run_server(args: argparse.Namespace) -> None:
     _ensure_pythonpath_for_workers()
+    # Help debugging "server is alive but endpoints hang" cases:
+    #   kill -USR1 <pid>  -> dumps Python stack traces of all threads to stderr.
+    try:
+        import faulthandler
+        import signal
+
+        faulthandler.enable(all_threads=True)
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
+    except Exception:
+        pass
     # Load `.env` early so CLI flags can override it, but defaults can come from it.
     from mineru_server.config import SERVER_DIR
 

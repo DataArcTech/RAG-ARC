@@ -1,7 +1,7 @@
 import logging
 import os
 import pickle
-from typing import List
+from typing import List, Optional, Dict, Any
 
 import numpy as np
 
@@ -9,6 +9,27 @@ logger = logging.getLogger(__name__)
 
 
 class _PrunedHippoRAGNeo4jChunkEmbeddingsMixin:
+    @staticmethod
+    def _chunk_owner_leaf(owner_id: Optional[str]) -> str:
+        token = str(owner_id or "").strip() or "__GLOBAL__"
+        return token.replace("/", "_").replace("\\", "_") or "__GLOBAL__"
+
+    def _chunk_embeddings_sharded_enabled(self) -> bool:
+        cfg = getattr(self, "config", None)
+        return bool(getattr(cfg, "chunk_embeddings_owner_sharded", False))
+
+    def _chunk_embeddings_dir(self, *, base_path: Optional[str] = None) -> str:
+        cfg = getattr(self, "config", None)
+        dirname = str(getattr(cfg, "chunk_embeddings_dirname", "chunk_embeddings") or "chunk_embeddings").strip()
+        root = str(base_path or getattr(self, "storage_path", "") or "").strip()
+        return os.path.join(root, dirname)
+
+    def _chunk_embeddings_shard_path(self, *, owner_id: Optional[str], base_path: Optional[str] = None) -> str:
+        base = self._chunk_embeddings_dir(base_path=base_path)
+        leaf = self._chunk_owner_leaf(owner_id)
+        name = str(getattr(self, "index_name", "index") or "index")
+        return os.path.join(base, f"{name}_chunk_embeddings__{leaf}.pkl")
+
     def _load_chunk_embeddings(self):
         """
         Load chunk embeddings from disk if available.
@@ -16,6 +37,44 @@ class _PrunedHippoRAGNeo4jChunkEmbeddingsMixin:
         This is called during initialization to restore chunk embeddings
         that were saved during previous sessions.
         """
+        # New layout: owner-scoped shards (when enabled).
+        if self._chunk_embeddings_sharded_enabled():
+            try:
+                base = self._chunk_embeddings_dir()
+                loaded_total: Dict[str, Any] = {}
+                owner_by_chunk_id: Dict[str, Optional[str]] = {}
+                chunk_ids_by_owner: Dict[Optional[str], set[str]] = {}
+                if os.path.isdir(base):
+                    prefix = f"{self.index_name}_chunk_embeddings__"
+                    for fname in sorted(os.listdir(base)):
+                        if not (fname.startswith(prefix) and fname.endswith(".pkl")):
+                            continue
+                        leaf = fname[len(prefix) : -len(".pkl")]
+                        owner = None if leaf == "__GLOBAL__" else leaf
+                        fpath = os.path.join(base, fname)
+                        with open(fpath, "rb") as f:
+                            shard = pickle.load(f)
+                        if not isinstance(shard, dict):
+                            continue
+                        for cid, emb in shard.items():
+                            cid_str = str(cid)
+                            loaded_total[cid_str] = emb
+                            owner_by_chunk_id[cid_str] = owner
+                            chunk_ids_by_owner.setdefault(owner, set()).add(cid_str)
+
+                if loaded_total:
+                    with self.write_lock():
+                        self.chunk_embeddings = loaded_total
+                        self._chunk_embeddings_array = None
+                        setattr(self, "_chunk_embedding_owner_by_chunk_id", owner_by_chunk_id)
+                        setattr(self, "_chunk_ids_by_owner", chunk_ids_by_owner)
+                        setattr(self, "_chunk_embeddings_dirty_owners", set())
+                    logger.info("Loaded %s chunk embeddings from sharded dir %s", len(loaded_total), base)
+                    return
+            except Exception as e:
+                logger.warning("Failed to load sharded chunk embeddings: %s", e)
+
+        # Legacy layout: single shared pickle.
         embeddings_path = os.path.join(self.storage_path, f"{self.index_name}_chunk_embeddings.pkl")
         if os.path.exists(embeddings_path):
             try:
@@ -73,6 +132,42 @@ class _PrunedHippoRAGNeo4jChunkEmbeddingsMixin:
                 logger.warning(f"Failed to load chunk embeddings: {e}")
         else:
             logger.info(f"No existing chunk embeddings found at {embeddings_path}")
+
+    def _save_chunk_embeddings(self, *, base_path: str, name: str = "index") -> None:
+        """Persist chunk embeddings (sharded by owner when enabled)."""
+        if not self._chunk_embeddings_sharded_enabled():
+            embeddings_path = os.path.join(base_path, f"{name}_chunk_embeddings.pkl")
+            with open(embeddings_path, "wb") as f:
+                pickle.dump(self.chunk_embeddings, f)
+            logger.info("Saved chunk embeddings to %s", embeddings_path)
+            return
+
+        base = self._chunk_embeddings_dir(base_path=base_path)
+        os.makedirs(base, exist_ok=True)
+
+        dirty: set[Optional[str]] = getattr(self, "_chunk_embeddings_dirty_owners", None) or set()
+        by_owner: Dict[Optional[str], set[str]] = getattr(self, "_chunk_ids_by_owner", None) or {}
+
+        owners = dirty or set(by_owner.keys())
+        if not owners:
+            return
+
+        for owner in owners:
+            shard_path = self._chunk_embeddings_shard_path(owner_id=owner, base_path=base_path)
+            ids = by_owner.get(owner) or set()
+            payload = {}
+            for cid in ids:
+                if cid in self.chunk_embeddings:
+                    payload[cid] = self.chunk_embeddings[cid]
+            tmp_path = f"{shard_path}.tmp"
+            with open(tmp_path, "wb") as f:
+                pickle.dump(payload, f)
+            os.replace(tmp_path, shard_path)
+
+        try:
+            dirty.clear()
+        except Exception:
+            pass
 
     def _append_chunk_embeddings(self, new_chunk_ids: List[str]):
         """

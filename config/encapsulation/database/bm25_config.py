@@ -13,6 +13,24 @@ class BM25BuilderConfig(AbstractConfig):
         default_factory=lambda: os.getenv("BM25_INDEX_PATH", "./data/unified_bm25_index"),
         description="index storage path",
     )
+
+    owner_scoped_enabled: bool = Field(
+        default=True,
+        description=(
+            "When enabled, store/load BM25 index artifacts under an owner-scoped subdirectory "
+            "derived from `index_path` (see owner_scoped_dirname/global_owner_name). "
+            "This avoids mixing multiple owners into a single on-disk index."
+        ),
+    )
+    owner_scoped_dirname: str = Field(
+        default="owners",
+        description="Subdirectory name under `index_path` for owner-scoped BM25 indexes.",
+    )
+    owner_scoped_global_owner_name: str = Field(
+        default="__GLOBAL__",
+        description="Directory name used for admin/global scope when owner_id is None.",
+    )
+
     bm25_k1: float = Field(default=1.2, description="bm25 k1 parameter")
     bm25_b: float = Field(default=0.75, description="bm25 b parameter")
 
