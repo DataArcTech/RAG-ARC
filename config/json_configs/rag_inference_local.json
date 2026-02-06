@@ -91,7 +91,8 @@
         "weights": ["${RAG_RETRIEVAL_WEIGHT_DENSE}", "${RAG_RETRIEVAL_WEIGHT_BM25}", "${RAG_RETRIEVAL_WEIGHT_GRAPH}"],
         "search_kwargs": {
             "k": 30,
-            "with_score": true
+            "with_score": true,
+            "must_prefix_tokens": 1
         }
     },
     "reranker_config": {

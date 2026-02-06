@@ -67,7 +67,7 @@ def test_tantivy_bm25_lowercases_query_tokens(monkeypatch):
 
     captured: dict[str, list[str]] = {}
 
-    def _capture(tokens, _use_phrase_query=False):  # noqa: ARG001
+    def _capture(_index_instance, tokens, _use_phrase_query=False, **_kwargs):  # noqa: ARG001
         captured["tokens"] = list(tokens)
         return object()
 
@@ -78,4 +78,3 @@ def test_tantivy_bm25_lowercases_query_tokens(monkeypatch):
     retriever.invoke("Enterprise Function", owner_id=owner_id, k=1)
 
     assert captured["tokens"] == ["enterprise", "function"]
-
