@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import json
 import uuid
+import concurrent.futures
 from encapsulation.data_model.orm_models import ChunkMetadata
 from encapsulation.data_model.orm_models import ChunkIndexStatus
 
@@ -254,6 +255,199 @@ class ChunkStorage(AbstractModule):
         except Exception as e:
             logger.error(f"Chunk storage error: {e}")
             raise StorageOperationError(f"Storage error: {str(e)}")
+
+    def store_chunks_batch(
+        self,
+        source_parsed_content_id: str,
+        chunker_type: str,
+        chunks: list[dict],
+        *,
+        owner_id: uuid.UUID | None = None,
+        validate_after_store: bool = False,
+        blob_write_max_workers: int | None = None,
+        blob_content_type: str = "application/json",
+        **kwargs: Any,
+    ) -> list[tuple[int, str]]:
+        """
+        Store multiple chunks in a batch.
+
+        Key optimizations vs. `store_chunk` in a loop:
+        - Resolve parsed-content/file owner once (no per-chunk DB lookups).
+        - Batch insert chunk metadata in a single transaction when supported by the metadata store.
+        - Avoid per-chunk threadpool transitions when called via a single run_blocking().
+
+        Returns:
+            List of (chunk_index, chunk_id) for successfully stored chunks.
+        """
+        if not chunks:
+            return []
+
+        # Verify source parsed content exists once.
+        source_metadata = self.metadata_store.get_parsed_content_metadata(source_parsed_content_id, **kwargs)
+        if not source_metadata:
+            raise ValueError(f"Source parsed content {source_parsed_content_id} not found")
+
+        # Resolve owner_id once.
+        if owner_id is None:
+            file_metadata = self.metadata_store.get_file_metadata(source_metadata.source_file_id, **kwargs)
+            if not file_metadata:
+                raise ValueError(f"Source file {source_metadata.source_file_id} not found")
+            owner_id = file_metadata.owner_id
+
+        now = datetime.now(tz=datetime.now().astimezone().tzinfo)
+
+        batch_items: list[dict[str, Any]] = []
+        for i, chunk in enumerate(chunks):
+            if chunk is None:
+                continue
+            try:
+                # Use errors='replace' to handle surrogate pairs and invalid Unicode characters.
+                chunk_data = json.dumps(chunk, ensure_ascii=False).encode("utf-8", errors="replace")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to serialize chunk %s for %s: %s", i, source_parsed_content_id, exc)
+                continue
+
+            chunk_id = self._generate_chunk_id()
+            blob_key = self._generate_chunk_blob_key(chunk_id, source_parsed_content_id, chunker_type)
+            chunk_metadata = ChunkMetadata(
+                chunk_id=chunk_id,
+                source_parsed_content_id=source_parsed_content_id,
+                owner_id=owner_id,
+                blob_key=blob_key,
+                chunker_type=chunker_type,
+                chunk_index=i,
+                index_status=ChunkIndexStatus.STORED,
+                created_at=now,
+            )
+            batch_items.append(
+                {
+                    "chunk_index": i,
+                    "chunk_id": chunk_id,
+                    "blob_key": blob_key,
+                    "metadata": chunk_metadata,
+                    "data": chunk_data,
+                }
+            )
+
+        if not batch_items:
+            return []
+
+        # Store metadata in bulk when supported (single transaction).
+        metas = [it["metadata"] for it in batch_items]
+        try:
+            store_batch = getattr(self.metadata_store, "store_chunk_metadata_batch", None)
+            if callable(store_batch):
+                store_batch(metas, **kwargs)
+            else:
+                for m in metas:
+                    self.metadata_store.store_chunk_metadata(m, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            raise StorageOperationError(f"Chunk metadata batch store failed: {exc}") from exc
+
+        stored: list[tuple[int, str]] = []
+        failures: list[tuple[int, str, str]] = []
+
+        # Parallelize blob writes (remote object stores benefit greatly). Keep DB updates/cleanup sequential.
+        try:
+            from config.core.file_management.chunk_ingest_defaults import (
+                CHUNK_BATCH_BLOB_WRITE_MAX_WORKERS_DEFAULT,
+            )
+
+            max_workers = int(
+                CHUNK_BATCH_BLOB_WRITE_MAX_WORKERS_DEFAULT
+                if blob_write_max_workers is None
+                else blob_write_max_workers
+            )
+        except Exception:
+            max_workers = 8
+        max_workers = max(1, max_workers)
+
+        def _blob_store_one(item: dict[str, Any]) -> tuple[str, str, str, bool, str | None]:
+            cid = str(item["chunk_id"])
+            blob_key = str(item["blob_key"])
+            try:
+                stored_blob_key, was_overwritten = self.blob_store.store(
+                    blob_key,
+                    item["data"],
+                    content_type=blob_content_type,
+                    **kwargs,
+                )
+                return cid, blob_key, str(stored_blob_key), bool(was_overwritten), None
+            except Exception as exc:  # noqa: BLE001
+                return cid, blob_key, "", False, str(exc)
+
+        blob_results: dict[str, tuple[str, str, bool, str | None]] = {}
+        if max_workers <= 1 or len(batch_items) <= 1:
+            for it in batch_items:
+                cid, blob_key, stored_blob_key, was_overwritten, err = _blob_store_one(it)
+                blob_results[cid] = (blob_key, stored_blob_key, was_overwritten, err)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futs = [ex.submit(_blob_store_one, it) for it in batch_items]
+                for fut in concurrent.futures.as_completed(futs):
+                    cid, blob_key, stored_blob_key, was_overwritten, err = fut.result()
+                    blob_results[cid] = (blob_key, stored_blob_key, was_overwritten, err)
+
+        for it in batch_items:
+            cid = str(it["chunk_id"])
+            cidx = int(it["chunk_index"])
+            blob_key, stored_blob_key, was_overwritten, err = blob_results.get(cid, ("", "", False, "missing_blob_result"))
+            if err:
+                failures.append((cidx, cid, str(err)))
+                try:
+                    self.metadata_store.delete_chunk_metadata(cid, **kwargs)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    if blob_key and self.blob_store.exists(blob_key, **kwargs):
+                        self.blob_store.delete(blob_key, **kwargs)
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
+
+            if was_overwritten:
+                logger.warning("Chunk blob was overwritten: %s", stored_blob_key)
+
+            # Update metadata only when the backing store rewrites the key.
+            if stored_blob_key and stored_blob_key != blob_key:
+                try:
+                    self.metadata_store.update_chunk_metadata(cid, {"blob_key": stored_blob_key}, **kwargs)
+                except Exception as update_exc:  # noqa: BLE001
+                    logger.warning("Failed to update chunk %s blob_key to %s: %s", cid, stored_blob_key, update_exc)
+
+            if validate_after_store:
+                try:
+                    if not self.blob_store.exists(stored_blob_key or blob_key, **kwargs):
+                        raise StorageOperationError(f"Chunk blob missing after store: {stored_blob_key or blob_key}")
+                except Exception as validate_exc:  # noqa: BLE001
+                    failures.append((cidx, cid, str(validate_exc)))
+                    try:
+                        self.metadata_store.delete_chunk_metadata(cid, **kwargs)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    try:
+                        key = stored_blob_key or blob_key
+                        if key and self.blob_store.exists(key, **kwargs):
+                            self.blob_store.delete(key, **kwargs)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    continue
+
+            stored.append((cidx, cid))
+
+        if failures:
+            logger.warning(
+                "Chunk batch store partial failures: %d failed / %d total (source_parsed_content_id=%s)",
+                len(failures),
+                len(batch_items),
+                source_parsed_content_id,
+            )
+            for cidx, cid, msg in failures[:10]:
+                logger.warning("Chunk batch failure chunk_index=%s chunk_id=%s err=%s", cidx, cid, msg)
+
+        if not stored:
+            raise StorageOperationError("Failed to store any chunks in batch")
+        return stored
 
     def get_chunk_metadata(self, chunk_id: str, **kwargs: Any) -> Optional['ChunkMetadata']:
         """Retrieve chunk metadata by ID"""
