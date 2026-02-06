@@ -137,12 +137,12 @@ These vars control when DeepSearch attempts a single query rewrite (via the retr
 | `PARSED_CONTENT_STORE_BASE_PATH` | `./data/parsed_content_store` | Parsed content store path (relative paths are resolved against the repo root). |
 | `CHUNK_STORE_BASE_PATH` | `./data/chunk_store` | Chunk store path (relative paths are resolved against the repo root). |
 | `LOCAL_BLOB_STORE_BASE_PATH` | `./data/files` | Legacy alias for `LOCAL_FILE_STORAGE_PATH` (only used when a JSON `base_path` is not provided). |
-| `FAISS_INDEX_PATH` | `./data/unified_faiss_index` | Unified FAISS index directory. |
+| `FAISS_INDEX_PATH` | `./data/unified_faiss_index` | Base FAISS index directory. When owner-scoped indexing is enabled (default), the actual artifacts live under `FAISS_INDEX_PATH/owners/<owner_id>/`. |
 | `FAISS_TWO_STAGE_ENABLED` | `false` | Enable two-stage retrieval for FAISS HNSW: ANN prefetch then exact rescoring on candidates. Applies only when the FAISS index uses `index_type=hnsw`. |
 | `FAISS_TWO_STAGE_PREFETCH_K` | `200` | Candidate pool size for two-stage HNSW prefetch. If smaller than `k`, `k` is used. |
 | `FAISS_MIN_TRAIN_SIZE` | `100` | IVF training guard (only relevant when `index_type=ivf`). Minimum number of vectors required to train IVF; also must be >= `nlist`. |
-| `BM25_INDEX_PATH` | `./data/unified_bm25_index` | Unified BM25 index directory. |
-| `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | Graph index / embedding cache directory (Neo4j HippoRAG). |
+| `BM25_INDEX_PATH` | `./data/unified_bm25_index` | Base BM25 index directory. When owner-scoped indexing is enabled (default), the actual artifacts live under `BM25_INDEX_PATH/owners/<owner_id>/`. |
+| `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | Graph index / embedding cache directory (Neo4j HippoRAG). Chunk-embedding persistence is owner-sharded by default under `GRAPH_STORAGE_PATH/chunk_embeddings/` (one shard per owner). Fact/entity FAISS artifacts are already owner-scoped under `GRAPH_STORAGE_PATH/{fact_index,entity_index}/<owner_id>/`. Graph-indexing embedding cache (sqlite, enabled by default) is stored under `GRAPH_STORAGE_PATH/embedding_cache/<owner_id>/embeddings.sqlite3`. |
 | `GRAPH_INDEX_NAME` | `index` | Graph index file name prefix. |
 | `KG_SCHEMA_PATH` | `./kg_schema.yml` | KG schema YAML path for Neo4j HippoRAG (predicate governance + direction-sensitive set). Optional: `./fin_kg_schema.yml` for finance/insurance deployments. |
 | `GRAPH_INDEX_EMBED_FAILURE_POLICY` | `zero` | Graph-index embedding failure policy: `zero` (fill a small number of failed items with zero vectors and log) / `raise` (fail the indexing task on any failure). |
@@ -153,7 +153,7 @@ These vars control when DeepSearch attempts a single query rewrite (via the retr
 
 Notes:
 - **FAISS fingerprint guard**: the FAISS `.pkl` metadata stores an `embedding_fingerprint` (provider/model/dim). If you switch embedding models/dimensions, set a new `FAISS_INDEX_PATH` (recommended) or rebuild the index; otherwise the system will fail-fast to avoid silent corruption.
-- **Path consistency (important)**: indexing and online retrieval must use the same `GRAPH_STORAGE_PATH` / `FAISS_INDEX_PATH` / `BM25_INDEX_PATH`. If you index into directory A but serve from directory B, you may see “the target file/chunks exist in Neo4j + chunk_store, but retrieval hits unrelated files”.
+- **Path consistency (important)**: indexing and online retrieval must use the same `GRAPH_STORAGE_PATH` / `FAISS_INDEX_PATH` / `BM25_INDEX_PATH`. In owner-scoped mode, this means you must keep the same *base* path (the system will resolve `.../owners/<owner_id>/` automatically). If you index into directory A but serve from directory B, you may see “the target file/chunks exist in Neo4j + chunk_store, but retrieval hits unrelated files”.
 - **E2E isolation**: for real-service tests, point the path knobs above to an isolated directory (for example under `./local/e2e_*`) to avoid polluting `./data/*`.
 - **KG domain fallback**: when chunks do not provide `chunk.domain` (or `chunk.metadata["domain"]`), Neo4j indexing falls back to the loaded schema's `default_domain` (for example `finance_insurance` when using `./fin_kg_schema.yml`).
 - **HippoRAG PPR directionality (important)**: for general-purpose retrieval stability, `pruned_hipporag_neo4j_retrieval.ppr_directed_mode` defaults to `off` (undirected PPR). `direction_sensitive_relations` in `KG_SCHEMA_PATH` is still used by DeepSearch / fast graph tools for directional constraints and validation; to enable directed PPR at retrieval time, explicitly set `ppr_directed_mode=auto/on` in `config/json_configs/rag_inference*.json` or `config/json_configs/deepsearch_service.json` under `retriever_config`.
@@ -441,6 +441,8 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | Variable | Default | Description |
 | --- | --- | --- |
 | `JWT_SECRET_KEY` | _(empty)_ | JWT signing secret. If empty, the API auto-generates one and persists it under `RAGARC_RUNTIME_DIR` (default: `./local/runtime/jwt_secret_key`). Set explicitly in production. |
+| `JWT_DEFAULT_TENANT_ID` | `default` | Default tenant_id for multi-tenant deployments (used when auth/JWT does not provide a tenant_id). Single-tenant deployments can keep the default. |
+| `RAGARC_DEFAULT_TENANT_ID` | `default` | Legacy alias for `JWT_DEFAULT_TENANT_ID` (lower precedence). |
 | `HF_TOKEN` | _(empty)_ | HuggingFace token for downloading gated models (optional). |
 | `HF_ENDPOINT` | _(empty)_ | Optional HuggingFace endpoint override (e.g. `https://hf-mirror.com`). |
 | `LOG_LEVEL` | `INFO` | Python logging level (`DEBUG`, `INFO`, etc.). |

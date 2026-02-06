@@ -137,12 +137,12 @@ Benchmark/实验模式：
 | `PARSED_CONTENT_STORE_BASE_PATH` | `./data/parsed_content_store` | 解析结果存储目录（相对路径按项目根目录解析）。 |
 | `CHUNK_STORE_BASE_PATH` | `./data/chunk_store` | Chunk 存储目录（相对路径按项目根目录解析）。 |
 | `LOCAL_BLOB_STORE_BASE_PATH` | `./data/files` | `LOCAL_FILE_STORAGE_PATH` 的历史别名（仅在 JSON 未提供 `base_path` 时才会使用）。 |
-| `FAISS_INDEX_PATH` | `./data/unified_faiss_index` | 统一 FAISS 索引目录。 |
+| `FAISS_INDEX_PATH` | `./data/unified_faiss_index` | FAISS 索引**基目录**。启用 owner-scoped（默认开启）后，真实索引文件位于 `FAISS_INDEX_PATH/owners/<owner_id>/`。 |
 | `FAISS_TWO_STAGE_ENABLED` | `false` | 启用 FAISS HNSW 的两阶段检索：先 ANN 预召回，再对候选做 exact 重打分（稳定排序）。仅在索引 `index_type=hnsw` 时生效。 |
 | `FAISS_TWO_STAGE_PREFETCH_K` | `200` | 两阶段 HNSW 预召回候选池大小；若小于 `k`，将自动使用 `k`。 |
 | `FAISS_MIN_TRAIN_SIZE` | `100` | IVF 训练保护（仅当 `index_type=ivf` 相关）。训练 IVF 至少需要这么多向量，同时也必须 >= `nlist`。 |
-| `BM25_INDEX_PATH` | `./data/unified_bm25_index` | 统一 BM25 索引目录。 |
-| `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | 图索引/向量缓存落盘目录（Neo4j HippoRAG）。 |
+| `BM25_INDEX_PATH` | `./data/unified_bm25_index` | BM25 索引**基目录**。启用 owner-scoped（默认开启）后，真实索引文件位于 `BM25_INDEX_PATH/owners/<owner_id>/`。 |
+| `GRAPH_STORAGE_PATH` | `./data/graph_index_neo4j` | 图索引/向量缓存落盘目录（Neo4j HippoRAG）。Chunk embedding 的落盘默认按 owner 分片保存在 `GRAPH_STORAGE_PATH/chunk_embeddings/`（每个 owner 一份），fact/entity 的 FAISS 目录本身已按 owner 分片在 `GRAPH_STORAGE_PATH/{fact_index,entity_index}/<owner_id>/`。Graph indexing 的 embedding cache（sqlite，默认开启）存放在 `GRAPH_STORAGE_PATH/embedding_cache/<owner_id>/embeddings.sqlite3`。 |
 | `GRAPH_INDEX_NAME` | `index` | 图索引文件前缀名。 |
 | `KG_SCHEMA_PATH` | `./kg_schema.yml` | Neo4j HippoRAG 的 KG schema YAML 路径（谓词治理 + 方向敏感集合）。可选：金融/保险部署可切换到 `./fin_kg_schema.yml`。 |
 | `GRAPH_INDEX_EMBED_FAILURE_POLICY` | `zero` | 图索引 embedding 失败处理策略：`zero`（少量失败用零向量占位并记录日志）/`raise`（任意失败直接失败任务）。 |
@@ -153,7 +153,7 @@ Benchmark/实验模式：
 
 补充说明：
 - **FAISS 指纹保护**：FAISS 的 `.pkl` 元数据会写入 `embedding_fingerprint`（provider/model/dim）。当切换 embedding 模型/维度时，建议设置新的 `FAISS_INDEX_PATH`（推荐）或清理重建索引；否则系统会 fail-fast，避免“静默索引污染”。
-- **路径一致性（重要）**：索引写入与在线检索必须使用同一套 `GRAPH_STORAGE_PATH` / `FAISS_INDEX_PATH` / `BM25_INDEX_PATH`。若索引写在 A 目录、检索读 B 目录，会出现“文件/Chunk 在 Neo4j 与 chunk_store 中存在，但召回命中的是错误文件”的现象。
+- **路径一致性（重要）**：索引写入与在线检索必须使用同一套 `GRAPH_STORAGE_PATH` / `FAISS_INDEX_PATH` / `BM25_INDEX_PATH`。在 owner-scoped 模式下，这意味着需要保持相同的**基目录**（系统会自动解析到 `.../owners/<owner_id>/`）。若索引写在 A 目录、检索读 B 目录，会出现“文件/Chunk 在 Neo4j 与 chunk_store 中存在，但召回命中的是错误文件”的现象。
 - **E2E 隔离**：真实服务测试建议把上述路径指向隔离目录（例如 `./local/e2e_*`），避免污染默认的 `./data/*`。
 - **KG domain 回退**：当 chunk 未提供 `chunk.domain`（或 `chunk.metadata["domain"]`）时，Neo4j 入库会回退到已加载 schema 的 `default_domain`（例如使用 `./fin_kg_schema.yml` 时为 `finance_insurance`）。
 - **HippoRAG PPR 方向性（重要）**：为了通用检索稳定性，`pruned_hipporag_neo4j_retrieval.ppr_directed_mode` 默认 `off`（无向 PPR）。`KG_SCHEMA_PATH` 中的 `direction_sensitive_relations` 仍会被 DeepSearch / fast graph tools 用于方向约束与校验；如需在“检索阶段”启用有向 PPR，请在 `config/json_configs/rag_inference*.json` 或 `config/json_configs/deepsearch_service.json` 的 `retriever_config` 中显式设置 `ppr_directed_mode=auto/on`。
@@ -439,6 +439,8 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `JWT_SECRET_KEY` | _(空)_ | JWT 签名秘钥。留空时 API 会自动生成并写入 `RAGARC_RUNTIME_DIR`（默认：`./local/runtime/jwt_secret_key`）；生产环境建议显式配置。 |
+| `JWT_DEFAULT_TENANT_ID` | `default` | 多租户部署时的默认 tenant_id（当登录态/JWT 未注入 tenant_id 时使用）。单租户部署可保持默认值。 |
+| `RAGARC_DEFAULT_TENANT_ID` | `default` | `JWT_DEFAULT_TENANT_ID` 的历史别名（优先级更低）。 |
 | `HF_TOKEN` | _(空)_ | HuggingFace Token（下载受限模型时使用）。 |
 | `HF_ENDPOINT` | _(空)_ | 可选：HuggingFace Endpoint 覆盖（例如 `https://hf-mirror.com`）。 |
 | `LOG_LEVEL` | `INFO` | 日志等级。 |
