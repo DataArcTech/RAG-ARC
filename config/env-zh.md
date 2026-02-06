@@ -216,9 +216,9 @@ Benchmark/实验模式：
 | `QUERY_VARIANTS_LANGS` | `zh-Hans,en,zh-Hant` | 变体目标列表（逗号分隔、按顺序执行）。由低成本模型生成 JSON `{lang: rewritten_query}`。若只填写 `zh-Hans` 可禁用其他变体。 |
 | `QUERY_VARIANTS_ZH_HANS_HANT_ENABLED` | `true` | 是否启用中文简繁体互转变体（需要 OpenCC）。 |
 | `QUERY_VARIANTS_MAX` | `3` | query variants 最大数量（包含原 query）。 |
-| `RAG_RETRIEVAL_WEIGHT_DENSE` | `1.0` | MultiPath 的 RRF 融合权重：dense 路径。 |
-| `RAG_RETRIEVAL_WEIGHT_BM25` | `1.0` | MultiPath 的 RRF 融合权重：BM25 路径。 |
-| `RAG_RETRIEVAL_WEIGHT_GRAPH` | `1.5` | MultiPath 的 RRF 融合权重：graph 路径（调低以避免在“稀有细节”问题上压制 dense/bm25）。 |
+| `RAG_RETRIEVAL_WEIGHT_DENSE` | `1.0` | MultiPath 的 RRF 融合权重：dense 路径。设为 `0` 表示在普通 RAG 中禁用该检索路径。 |
+| `RAG_RETRIEVAL_WEIGHT_BM25` | `1.0` | MultiPath 的 RRF 融合权重：BM25 路径。设为 `0` 表示在普通 RAG 中禁用该检索路径。 |
+| `RAG_RETRIEVAL_WEIGHT_GRAPH` | `0.0` | MultiPath 的 RRF 融合权重：graph 路径。设为 `0` 表示在**普通 RAG**中禁用图检索（可显著提速）；设为正值（如 `1.0`）可启用。注意这并不影响离线入库/索引阶段的图谱构建，DeepSearch 仍可在其专用流程中使用图信号。 |
 | `RAG_RETRIEVAL_DYNAMIC_QUOTA_ENABLED` | `true` | 是否启用 LLM 动态路由比例（按 query 决定 dense/bm25/graph 的候选配额保底）。关闭后回退为静态比例（由权重推导）。 |
 | `RAG_REWRITE_HISTORY_USER_ONLY` | `true` | rewrite 阶段只向模型提供 user 历史（不包含 assistant），降低错误回答污染后续 rewrite（assistant poisoning）。 |
 | `RAG_REWRITE_HISTORY_MOST_RECENT_FIRST` | `true` | rewrite 的 history context 按“最近在前”排序（与 rewrite prompt 保持一致）。 |
