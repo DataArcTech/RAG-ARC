@@ -27,7 +27,9 @@ ENV_DEFAULTS: dict[str, str] = {
     # Order aligns with `config/json_configs/rag_inference*.json` retrievers: [dense, bm25, graph].
     "RAG_RETRIEVAL_WEIGHT_DENSE": "1.0",
     "RAG_RETRIEVAL_WEIGHT_BM25": "1.0",
-    "RAG_RETRIEVAL_WEIGHT_GRAPH": "1.5",
+    # Default to disabling graph retrieval for normal RAG to reduce latency.
+    # This does not disable graph indexing/ingestion. DeepSearch still uses graph signals in its own pipeline.
+    "RAG_RETRIEVAL_WEIGHT_GRAPH": "0.0",
     # Intent router (semantic intent classification)
     "INTENT_OPENAI_EMBEDDING_MODEL": "text-embedding-3-small",
     "INTENT_QWEN_EMBEDDING_MODEL_NAME": "Qwen/Qwen3-Embedding-0.6B",

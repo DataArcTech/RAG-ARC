@@ -58,6 +58,7 @@ class MultiPathRetriever(BaseRetriever):
     def _get_relevant_chunks(self, query: str, **kwargs: Any) -> List[Chunk]:
         """Search relevant chunks and fuse results"""
         k = kwargs.get('k', self.config.search_kwargs.get('k', 5))
+        bm25_query = str(kwargs.get("bm25_query") or "").strip() or None
 
         if k <= 0:
             raise ValueError(f"Parameter 'k' must be greater than 0, got {k}")
@@ -66,18 +67,18 @@ class MultiPathRetriever(BaseRetriever):
             return []
 
         # Optional query variants (e.g. Hans<->Hant) to improve recall on mixed-script corpora.
-        try:
-            from core.utils.query_variants import generate_query_variants
+        def _variants(text: str) -> list[str]:
+            try:
+                from core.utils.query_variants import generate_query_variants
 
-            variant_queries = generate_query_variants(query)
-        except Exception:
-            variant_queries = [query]
-        if not variant_queries:
-            return []
+                return generate_query_variants(text)
+            except Exception:
+                return [text]
 
         all_results = []
         subgraph_info = None  # Store subgraph info from graph retriever
         routing_ratios = kwargs.get("retrieval_ratios")
+        ratio_by_key: dict[str, float] = {}
 
         # Determine per-retriever quotas (coverage floor) based on routing ratios.
         # - If routing_ratios is absent, fall back to the configured fusion weights.
@@ -90,7 +91,6 @@ class MultiPathRetriever(BaseRetriever):
             if len(weights) < len(self.config.retrievers):
                 weights = weights + [1.0] * (len(self.config.retrievers) - len(weights))
 
-            ratio_by_key: dict[str, float] = {}
             if isinstance(routing_ratios, dict):
                 for key in ("dense", "bm25", "graph"):
                     val = routing_ratios.get(key)
@@ -170,6 +170,24 @@ class MultiPathRetriever(BaseRetriever):
 
         for idx, retriever in enumerate(self.config.built_retrievers or []):
             try:
+                # Routing ratios can explicitly disable a backend by setting its ratio to 0.
+                # This is LLM-driven (from rewrite_query_with_routing), not hardcoded.
+                if isinstance(routing_ratios, dict):
+                    try:
+                        cfg_t = str(getattr(self.config.retrievers[idx], "type", "") or "").strip()
+                    except Exception:  # noqa: BLE001
+                        cfg_t = ""
+                    disabled = False
+                    if cfg_t == "dense" and float(ratio_by_key.get("dense", 1.0)) <= 0:
+                        disabled = True
+                    elif cfg_t == "tantivy_bm25" and float(ratio_by_key.get("bm25", 1.0)) <= 0:
+                        disabled = True
+                    elif cfg_t in {"pruned_hipporag_neo4j_retrieval", "pruned_hipporag_retrieval"} and float(ratio_by_key.get("graph", 1.0)) <= 0:
+                        disabled = True
+                    if disabled:
+                        all_results.append([])
+                        continue
+
                 # Allow disabling a retriever via weight=0 (skip invocation entirely).
                 if self.config.weights is not None and idx < len(self.config.weights):
                     try:
@@ -196,7 +214,9 @@ class MultiPathRetriever(BaseRetriever):
 
                 best_by_key: dict[str, tuple[int, int, Chunk]] = {}
                 seq = 0
-                for qv in variant_queries:
+                cfg_t = str(getattr(self.config.retrievers[idx], "type", "") or "").strip()
+                per_query = bm25_query if (cfg_t == "tantivy_bm25" and bm25_query) else query
+                for qv in _variants(per_query):
                     qv_chunks = retriever.invoke(qv, **kwargs) or []
                     for rank, chunk in enumerate(qv_chunks, 1):
                         seq += 1

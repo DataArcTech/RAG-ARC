@@ -54,6 +54,37 @@ class RAGInference(AbstractModule):
         logger.info("Building retriever...")
         self.retriever = self.config.retrieval_config.build()
         logger.info("Retriever built successfully")
+
+        # Startup visibility: if a MultiPath branch weight is 0, that branch is skipped in normal RAG.
+        # This affects online retrieval only; offline indexing/ingestion still builds indices as configured.
+        try:
+            mp_cfg = getattr(self.retriever, "config", None)
+            weights = getattr(mp_cfg, "weights", None)
+            retriever_cfgs = list(getattr(mp_cfg, "retrievers", None) or [])
+            if isinstance(weights, list) and retriever_cfgs:
+                enabled: list[str] = []
+                disabled: list[str] = []
+                for idx, rcfg in enumerate(retriever_cfgs):
+                    rtype = str(getattr(rcfg, "type", "") or type(rcfg).__name__)
+                    w = None
+                    if idx < len(weights):
+                        try:
+                            w = float(weights[idx])
+                        except Exception:  # noqa: BLE001
+                            w = None
+                    if w is not None and w <= 0:
+                        disabled.append(f"{idx}:{rtype}")
+                    else:
+                        enabled.append(f"{idx}:{rtype}")
+                if disabled:
+                    logger.info(
+                        "Normal RAG MultiPath: enabled=%s disabled=%s weights=%s",
+                        enabled,
+                        disabled,
+                        weights,
+                    )
+        except Exception:  # noqa: BLE001
+            pass
         self.graph_retriever = None
         graph_cls_name = "PrunedHippoRAGNeo4jRetriever"
         if hasattr(self.retriever, "retrievers"):
