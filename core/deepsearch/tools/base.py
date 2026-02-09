@@ -172,11 +172,19 @@ async def call_llm_async(llm, messages: List[Dict[str, Any]], **kwargs) -> str:
     warn_context = str(kwargs.pop("warn_context", "") or "").strip() or None
 
     from core.utils.llm_debug_dump import append_llm_event  # local import to avoid global side-effects
+    from framework.run_context import get_run_id  # debug-only context (no runtime behavior changes)
+
+    import time
+    import uuid
 
     model = kwargs.get("model")
     if model is None:
         cfg = getattr(llm, "config", None)
         model = getattr(cfg, "model_name", None) if cfg is not None else None
+
+    run_id = get_run_id()
+    llm_call_id = uuid.uuid4().hex
+    start = time.perf_counter()
 
     async_chat = getattr(llm, "achat", None)
     if callable(async_chat):
@@ -187,28 +195,38 @@ async def call_llm_async(llm, messages: List[Dict[str, Any]], **kwargs) -> str:
                     "transport": "async",
                     "warn_context": warn_context,
                     "model": model,
+                    "run_id": run_id,
+                    "llm_call_id": llm_call_id,
                     "kwargs": dict(kwargs),
                     "messages": messages,
                 }
             )
             response = await async_chat(messages, **kwargs)
+            elapsed_ms = int((time.perf_counter() - start) * 1000)
             append_llm_event(
                 {
                     "event": "llm.response",
                     "transport": "async",
                     "warn_context": warn_context,
                     "model": model,
+                    "run_id": run_id,
+                    "llm_call_id": llm_call_id,
+                    "elapsed_ms": elapsed_ms,
                     "text": response,
                 }
             )
             return response
         except Exception as exc:  # noqa: BLE001
+            elapsed_ms = int((time.perf_counter() - start) * 1000)
             append_llm_event(
                 {
                     "event": "llm.error",
                     "transport": "async",
                     "warn_context": warn_context,
                     "model": model,
+                    "run_id": run_id,
+                    "llm_call_id": llm_call_id,
+                    "elapsed_ms": elapsed_ms,
                     "error": str(exc),
                 }
             )
@@ -224,28 +242,38 @@ async def call_llm_async(llm, messages: List[Dict[str, Any]], **kwargs) -> str:
                 "transport": "sync",
                 "warn_context": warn_context,
                 "model": model,
+                "run_id": run_id,
+                "llm_call_id": llm_call_id,
                 "kwargs": dict(kwargs),
                 "messages": messages,
             }
         )
         response = chat(messages, **kwargs)
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
         append_llm_event(
             {
                 "event": "llm.response",
                 "transport": "sync",
                 "warn_context": warn_context,
                 "model": model,
+                "run_id": run_id,
+                "llm_call_id": llm_call_id,
+                "elapsed_ms": elapsed_ms,
                 "text": response,
             }
         )
         return response
     except Exception as exc:  # noqa: BLE001
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
         append_llm_event(
             {
                 "event": "llm.error",
                 "transport": "sync",
                 "warn_context": warn_context,
                 "model": model,
+                "run_id": run_id,
+                "llm_call_id": llm_call_id,
+                "elapsed_ms": elapsed_ms,
                 "error": str(exc),
             }
         )
