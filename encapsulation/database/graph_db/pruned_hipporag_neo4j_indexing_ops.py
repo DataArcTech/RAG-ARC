@@ -127,9 +127,98 @@ class _PrunedHippoRAGNeo4jIndexingOpsMixin:
             t0 = time.perf_counter()
             ingest_batch_size = int(getattr(getattr(self, "config", None), "neo4j_ingest_chunk_batch_size", 1000) or 1000)
             new_entity_ids = []
+
+            # L0 KG maintenance: materialize mention nodes (best-effort, budgeted).
+            cfg = getattr(self, "config", None)
+            l0_cfg = getattr(getattr(cfg, "kg_maintenance", None), "l0", None) if cfg is not None else None
+            l0_budget = getattr(l0_cfg, "budget", None) if l0_cfg is not None else None
+            l0_enabled = bool(getattr(l0_cfg, "enabled", False)) if l0_cfg is not None else False
+            l0_ratio = float(getattr(l0_budget, "ratio", 1.2) or 1.2) if l0_budget is not None else 1.2
+            l0_ratio = max(1.0, float(l0_ratio))
+            l0_min_seconds = float(getattr(l0_budget, "min_seconds", 0.0) or 0.0) if l0_budget is not None else 0.0
+            l0_max_seconds = float(getattr(l0_budget, "max_seconds", 0.0) or 0.0) if l0_budget is not None else 0.0
+            l0_alpha = float(getattr(l0_budget, "ema_alpha", 1.0) or 1.0) if l0_budget is not None else 1.0
+            l0_alpha = min(1.0, max(0.01, float(l0_alpha)))
+            l0_cap = int(getattr(l0_cfg, "max_mentions_to_write", 0) or 0) if l0_cfg is not None else 0
+            l0_cap = max(0, int(l0_cap))
+
+            l0_stats: Dict[str, Any] = {
+                "enabled": bool(l0_enabled),
+                "deferred": False,
+                "defer_reason": None,
+                "ratio": float(l0_ratio),
+                "budget_seconds": None,
+                "elapsed_seconds": 0.0,
+                "attempted": 0,
+                "written": 0,
+                "estimated_total_mentions": None,
+                "throughput_mentions_per_sec": None,
+                "throughput_ema_mentions_per_sec": None,
+                "source_file_ids": sorted(
+                    {
+                        str(getattr(c, "metadata", {}).get("source_file_id") or "").strip()
+                        for c in chunks
+                        if isinstance(getattr(c, "metadata", None), dict)
+                    }
+                    - {""}
+                ),
+            }
+            if l0_enabled:
+                l0_stats["throughput_ema_mentions_per_sec"] = getattr(self, "_kg_l0_mentions_per_sec_ema", None)
+
+            processed_chunks = 0
+            budget_seconds: float | None = None
             for i in range(0, len(chunks), ingest_batch_size):
                 batch = chunks[i : i + ingest_batch_size]
-                new_entity_ids.extend(self._batch_add_chunks_and_graph_data(batch) or [])
+                remaining = None
+                if l0_enabled and l0_cap > 0:
+                    remaining = max(0, int(l0_cap) - int(l0_stats["written"]))
+                enable_mentions = bool(l0_enabled and not l0_stats["deferred"])
+                batch_new_entities, batch_l0 = self._batch_add_chunks_and_graph_data(
+                    batch,
+                    enable_entity_mentions=enable_mentions,
+                    entity_mentions_remaining=remaining,
+                )
+                new_entity_ids.extend(batch_new_entities or [])
+
+                processed_chunks += len(batch)
+                try:
+                    em = (batch_l0 or {}).get("entity_mentions") or {}
+                    l0_stats["attempted"] = int(l0_stats["attempted"]) + int(em.get("attempted") or 0)
+                    l0_stats["written"] = int(l0_stats["written"]) + int(em.get("written") or 0)
+                    l0_stats["elapsed_seconds"] = float(l0_stats["elapsed_seconds"]) + float(em.get("elapsed_s") or 0.0)
+                except Exception:
+                    pass
+
+                if l0_enabled and not l0_stats["deferred"]:
+                    elapsed = float(l0_stats["elapsed_seconds"] or 0.0)
+                    written = int(l0_stats["written"] or 0)
+                    if budget_seconds is None and elapsed > 0 and written > 0 and processed_chunks > 0:
+                        throughput = written / elapsed
+                        l0_stats["throughput_mentions_per_sec"] = float(throughput)
+
+                        avg_mentions_per_chunk = written / float(processed_chunks)
+                        est_total = int(round(avg_mentions_per_chunk * float(len(chunks))))
+                        l0_stats["estimated_total_mentions"] = int(max(0, est_total))
+
+                        ema = getattr(self, "_kg_l0_mentions_per_sec_ema", None)
+                        try:
+                            ema_val = float(ema) if ema is not None else None
+                        except Exception:
+                            ema_val = None
+                        denom = ema_val if (ema_val is not None and ema_val > 0) else float(throughput)
+                        expected = (float(est_total) / float(denom)) if denom > 0 else 0.0
+                        budget_seconds = float(expected) * float(l0_ratio)
+                        if l0_min_seconds > 0:
+                            budget_seconds = max(float(budget_seconds), float(l0_min_seconds))
+                        if l0_max_seconds > 0:
+                            budget_seconds = min(float(budget_seconds), float(l0_max_seconds))
+                        l0_stats["budget_seconds"] = float(budget_seconds)
+
+                    # Hot-path protection: if L0 mention materialization is too slow, defer remainder.
+                    if budget_seconds is not None and elapsed > float(budget_seconds):
+                        l0_stats["deferred"] = True
+                        l0_stats["defer_reason"] = "budget_exceeded"
             # Deduplicate while preserving stability for downstream embedding selection.
             if new_entity_ids:
                 seen = set()
@@ -149,7 +238,28 @@ class _PrunedHippoRAGNeo4jIndexingOpsMixin:
                 stats["counts"]["input_chunks"] = int(len(chunks))
                 stats["counts"]["new_chunks"] = int(len(new_chunk_ids))
                 stats["counts"]["new_entities"] = int(len(new_entity_ids or []))
+                stats["kg_maintenance_l0"] = dict(l0_stats)
             logger.info("Step 1 completed: All chunks and graph data added")
+
+            # Update L0 throughput EMA (deployment-local). This stores only a numeric throughput signal.
+            if l0_enabled:
+                try:
+                    elapsed = float(l0_stats.get("elapsed_seconds") or 0.0)
+                    written = int(l0_stats.get("written") or 0)
+                    if elapsed > 0 and written > 0:
+                        throughput = float(written) / float(elapsed)
+                        prev = getattr(self, "_kg_l0_mentions_per_sec_ema", None)
+                        prev_val = float(prev) if prev is not None else None
+                        new_ema = (
+                            throughput
+                            if (prev_val is None or prev_val <= 0)
+                            else (prev_val * (1.0 - l0_alpha) + throughput * l0_alpha)
+                        )
+                        setattr(self, "_kg_l0_mentions_per_sec_ema", float(new_ema))
+                        if collect_stats and isinstance(stats.get("kg_maintenance_l0"), dict):
+                            stats["kg_maintenance_l0"]["throughput_ema_mentions_per_sec"] = float(new_ema)
+                except Exception:
+                    pass
 
             # Step 2: Batch generate embeddings (only for new items)
             logger.info("Step 2: Batch generating embeddings for new items...")
@@ -234,6 +344,117 @@ class _PrunedHippoRAGNeo4jIndexingOpsMixin:
     def update_index_with_stats(self, chunks: List[Chunk]) -> tuple[bool, Dict[str, Any]]:
         """Like update_index(), but returns a JSON-serializable stats dict for profiling/benchmarking."""
         return self._update_index_impl(chunks, collect_stats=True)
+
+    def materialize_entity_mentions_for_chunk_ids(
+        self,
+        *,
+        owner_id: object,
+        chunk_ids: List[str],
+    ) -> Dict[str, Any]:
+        """
+        Best-effort: materialize EntityMention nodes for already-ingested Chunk-[:MENTIONS]->Entity edges.
+
+        Why this exists
+        ---------------
+        L0 mention materialization is hot-path and budgeted. When it defers, we need a background
+        "fill missing mentions" pass that can run later without reindexing the file.
+
+        Notes
+        -----
+        - Idempotent: MERGE by mention_id.
+        - Owner-scoped: never crosses owners.
+        - Temporal/version fields come from Chunk.metadata JSON (business_time + optional version keys).
+        """
+        ids = [str(cid) for cid in (chunk_ids or []) if str(cid).strip()]
+        if not ids:
+            return {"success": True, "attempted": 0, "written": 0, "elapsed_s": 0.0, "reason": "no_chunk_ids"}
+
+        cfg = getattr(self, "config", None)
+        l0_cfg = getattr(getattr(cfg, "kg_maintenance", None), "l0", None) if cfg is not None else None
+        batch_size_cfg = int(getattr(l0_cfg, "batch_size", 0) or 0) if l0_cfg is not None else 0
+        ingest_batch_size = int(getattr(cfg, "neo4j_ingest_chunk_batch_size", 1000) or 1000) if cfg is not None else 1000
+        batch_size = batch_size_cfg if batch_size_cfg > 0 else max(1, ingest_batch_size)
+        version_keys = list(getattr(l0_cfg, "source_version_metadata_keys", []) or []) if l0_cfg is not None else []
+
+        owner_key = self._owner_key(str(owner_id))
+
+        # Fetch mention pairs + chunk metadata for time/version.
+        query = """
+        UNWIND $chunk_ids AS chunk_id
+        MATCH (c:Chunk {chunk_id: chunk_id, owner_id: $owner_id})-[:MENTIONS]->(e:Entity {owner_id: $owner_id})
+        RETURN c.chunk_id AS chunk_id,
+               c.source_file_id AS source_file_id,
+               c.metadata AS metadata,
+               e.entity_id AS surface_entity_id
+        """
+        rows = self._execute_query(query, {"chunk_ids": ids, "owner_id": owner_key}) or []
+
+        from core.file_management.extractor.metadata_keys import BUSINESS_TIME_KEY
+        from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id
+
+        payloads: List[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            chunk_id = str(row.get("chunk_id") or "").strip()
+            surface_entity_id = str(row.get("surface_entity_id") or "").strip()
+            if not chunk_id or not surface_entity_id:
+                continue
+
+            meta_raw = row.get("metadata")
+            meta: Dict[str, Any] = {}
+            if meta_raw:
+                try:
+                    meta = json.loads(meta_raw) if isinstance(meta_raw, str) else dict(meta_raw)
+                except Exception:
+                    meta = {}
+
+            bt: Dict[str, Any] = {}
+            raw_bt = meta.get(BUSINESS_TIME_KEY)
+            if isinstance(raw_bt, dict):
+                bt = dict(raw_bt)
+            valid_from = str(bt.get("valid_from") or bt.get("effective_date") or "").strip()
+            effective_date = str(bt.get("effective_date") or bt.get("valid_from") or "").strip()
+            valid_to = str(bt.get("valid_to") or "").strip()
+
+            source_version = ""
+            for key in version_keys:
+                val = str(meta.get(key) or "").strip()
+                if val:
+                    source_version = val
+                    break
+
+            mention_id = compute_mdhash_id(f"{chunk_id}|{surface_entity_id}", prefix="mention-", owner_id=owner_key)
+            payloads.append(
+                {
+                    "mention_id": mention_id,
+                    "chunk_id": chunk_id,
+                    "surface_entity_id": surface_entity_id,
+                    "owner_id": owner_key,
+                    "source_file_id": str(row.get("source_file_id") or "").strip(),
+                    "source_version": source_version,
+                    "valid_from": valid_from,
+                    "valid_to": valid_to,
+                    "effective_date": effective_date,
+                }
+            )
+
+        if not payloads:
+            return {"success": True, "attempted": 0, "written": 0, "elapsed_s": 0.0, "reason": "no_mentions"}
+
+        from encapsulation.database.graph_db.neo4j_entity_mention_cypher import UPSERT_ENTITY_MENTIONS_QUERY
+
+        t0 = time.perf_counter()
+        written = 0
+        with self._driver.session(database=self.database) as session:
+            for i in range(0, len(payloads), batch_size):
+                batch = payloads[i : i + batch_size]
+                with session.begin_transaction() as tx:
+                    tx.run(UPSERT_ENTITY_MENTIONS_QUERY, {"entity_mentions": batch})
+                    tx.commit()
+                written += len(batch)
+        elapsed_s = float(time.perf_counter() - t0)
+        return {"success": True, "attempted": int(len(payloads)), "written": int(written), "elapsed_s": float(elapsed_s)}
 
     def delete_index(self, ids: Optional[List[str]] = None) -> Optional[bool]:
         """
@@ -375,6 +596,15 @@ class _PrunedHippoRAGNeo4jIndexingOpsMixin:
             """
             self._execute_query(delete_chunks_query, {'chunk_ids': chunk_ids})
             logger.info(f"Deleted {len(chunk_ids)} chunks from Neo4j")
+
+            # 3.2 Delete EntityMention nodes created by L0 KG maintenance (keyed by chunk_id).
+            # These nodes are not deleted by Chunk DETACH DELETE unless explicitly matched.
+            delete_mentions_query = """
+            UNWIND $chunk_ids AS chunk_id
+            MATCH (m:EntityMention {chunk_id: chunk_id})
+            DETACH DELETE m
+            """
+            self._execute_query(delete_mentions_query, {"chunk_ids": chunk_ids})
 
             # 3.5 Cleanup dangling provenance in facts (RELATES_TO.source_chunk_ids).
             # This must run after deletions, otherwise deleted chunk_ids will remain referenced forever.

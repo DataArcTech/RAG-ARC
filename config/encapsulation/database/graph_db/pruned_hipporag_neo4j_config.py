@@ -1,5 +1,5 @@
 import os
-from typing import Annotated, Literal, Union, Optional, Dict, Any
+from typing import Annotated, Literal, Union, Optional, Dict, Any, List
 from pydantic import Field, model_validator
 
 from framework.config import AbstractConfig
@@ -37,6 +37,169 @@ class GraphEmbeddingCacheConfig(AbstractConfig):
         ge=1,
         le=5000,
         description="Chunk sqlite IN (...) lookups to avoid oversized queries.",
+    )
+
+
+class KGMaintenanceL0BudgetConfig(AbstractConfig):
+    """
+    L0 KG maintenance budget policy for the "new file arrived" hot path.
+
+    Goal
+    - Improve graph quality quickly without degrading user-perceived indexing readiness.
+    - Use a relative budget (ratio) so laptop/server deployments can share defaults.
+
+    Policy
+    - Estimate expected seconds from workload size / throughput_estimate.
+    - Allow up to expected * ratio, clamped to [min_seconds, max_seconds].
+    - If we hit the budget mid-run, we stop and defer the remainder to background L1/L2.
+    """
+
+    type: Literal["kg_maintenance_l0_budget"] = "kg_maintenance_l0_budget"
+
+    ratio: float = Field(
+        default=1.2,
+        ge=1.0,
+        le=10.0,
+        description="Defer L0 when actual runtime exceeds expected_seconds * ratio (after clamping).",
+    )
+    estimator: Literal["mentions_throughput_ema"] = Field(
+        default="mentions_throughput_ema",
+        description="How to estimate expected runtime for L0.",
+    )
+    min_seconds: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=60.0,
+        description="Lower bound for computed L0 budget seconds (stability against jitter).",
+    )
+    max_seconds: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=600.0,
+        description="Upper bound for computed L0 budget seconds (protects readiness latency).",
+    )
+    ema_alpha: float = Field(
+        default=1.0,
+        ge=0.01,
+        le=1.0,
+        description="EMA alpha for updating mentions/sec throughput estimate per deployment/process.",
+    )
+
+
+class KGMaintenanceL0Config(AbstractConfig):
+    """
+    L0 KG maintenance: create entity mentions (occurrences) for a new file quickly.
+
+    Notes
+    - This is hot-path and must be budgeted.
+    - L0 does NOT run disambiguation/identity alignment; it only materializes mention evidence and
+      produces a bounded "affected surface set" for later L1.
+    """
+
+    type: Literal["kg_maintenance_l0"] = "kg_maintenance_l0"
+
+    enabled: bool = Field(default=True, description="Enable L0 mention materialization after file indexing.")
+    budget: KGMaintenanceL0BudgetConfig = Field(default_factory=KGMaintenanceL0BudgetConfig)
+
+    batch_size: int = Field(
+        default=0,
+        ge=0,
+        le=5000,
+        description=(
+            "UNWIND batch size for L0 mention upserts into Neo4j. "
+            "0 means 'reuse neo4j_ingest_chunk_batch_size'."
+        ),
+    )
+    max_mentions_to_write: int = Field(
+        default=0,
+        ge=0,
+        le=5_000_000,
+        description="Hard cap on mention writes per L0 run. 0 disables the cap (use budget_ratio only).",
+    )
+
+    # Optional: generate a bounded "affected surfaces" set for later L1 (not used by L0 upserts directly).
+    max_surfaces: int = Field(
+        default=0,
+        ge=0,
+        le=200_000,
+        description="Cap the number of surface entities returned as the affected set for later maintenance. 0 disables.",
+    )
+    neighbor_hops: int = Field(
+        default=0,
+        ge=0,
+        le=2,
+        description="Optional neighbor expansion hops for the affected set (0 disables expansion).",
+    )
+    max_neighbors: int = Field(
+        default=0,
+        ge=0,
+        le=200_000,
+        description="Cap expanded neighbors when neighbor_hops > 0. 0 disables.",
+    )
+
+    # Metadata extraction policy (time/version).
+    source_version_metadata_keys: List[str] = Field(
+        default_factory=lambda: ["source_version", "version", "doc_version", "edition", "revision"],
+        description="Metadata keys (in order) used to extract a document/source version label for mentions.",
+    )
+
+
+class KGMaintenanceConfig(AbstractConfig):
+    type: Literal["kg_maintenance"] = "kg_maintenance"
+
+    l0: KGMaintenanceL0Config = Field(default_factory=KGMaintenanceL0Config)
+
+    # L1/L2 are background quality maintenance and are disabled by default until tuned.
+    # They can be executed via scripts or scheduled jobs.
+    l1_enabled: bool = Field(
+        default=True,
+        description="Enable L1 background entity disambiguation + identity alignment maintenance.",
+    )
+    l1_disambiguation_min_cluster_similarity: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum cosine similarity to assign a mention embedding to an existing identity cluster during "
+            "greedy disambiguation. When None, reuse synonymy_edge_sim_threshold."
+        ),
+    )
+    l1_min_mentions_to_split: int = Field(
+        default=0,
+        ge=0,
+        le=1_000_000,
+        description="Only attempt splitting a surface entity when it has at least this many mentions. 0 means no minimum.",
+    )
+    l1_alignment_nn_topk: int | None = Field(
+        default=None,
+        ge=0,
+        le=1000,
+        description=(
+            "Top-K nearest neighbor identities to consider for SAME_AS alignment. "
+            "When None, reuse synonymy_edge_topk. 0 disables alignment."
+        ),
+    )
+    l1_alignment_min_score: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Minimum cosine similarity score for creating SAME_AS edges. When None, reuse synonymy_edge_sim_threshold.",
+    )
+    l1_alignment_gradient_mink: int = Field(
+        default=0,
+        ge=0,
+        le=100,
+        description="Gradient truncation: mink. 0 means 'no gradient truncation' (use topk only).",
+    )
+    l1_alignment_gradient_g: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Gradient truncation: g. Only used when gradient_mink > 0.",
+    )
+    l1_require_time_overlap_for_merge: bool = Field(
+        default=True,
+        description="Guardrail: if time overlap is decisively false, avoid strong merge actions (we still allow SAME_AS).",
     )
 
 
@@ -194,6 +357,11 @@ class PrunedHippoRAGNeo4jConfig(AbstractConfig):
     embedding_cache: GraphEmbeddingCacheConfig = Field(
         default_factory=GraphEmbeddingCacheConfig,
         description="Owner-scoped embedding cache settings for graph indexing.",
+    )
+
+    kg_maintenance: KGMaintenanceConfig = Field(
+        default_factory=KGMaintenanceConfig,
+        description="Long-term KG maintenance settings (L0/L1/L2; L0 is hot-path).",
     )
 
     # Synonymy edge configuration
