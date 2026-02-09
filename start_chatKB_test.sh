@@ -131,7 +131,7 @@ else
         --name ${POSTGRES_CONTAINER_NAME} \
         --network ${NETWORK_NAME} \
         --restart always \
-        -p ${POSTGRES_HOST_PORT}:5432 \
+        -p 127.0.0.1:${POSTGRES_HOST_PORT}:5432 \
         -e POSTGRES_USER=${POSTGRES_USER} \
         -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD} \
         -e POSTGRES_DB=${POSTGRES_DB} \
@@ -172,8 +172,8 @@ else
         --name ${NEO4J_CONTAINER_NAME} \
         --network ${NETWORK_NAME} \
         --restart always \
-        -p ${NEO4J_WEB_HOST_PORT}:7474 \
-        -p ${NEO4J_BOLT_HOST_PORT}:7687 \
+        -p 127.0.0.1:${NEO4J_WEB_HOST_PORT}:7474 \
+        -p 127.0.0.1:${NEO4J_BOLT_HOST_PORT}:7687 \
         -e NEO4J_AUTH=${NEO4J_USERNAME}/${NEO4J_PASSWORD} \
         -e NEO4J_PLUGINS='["apoc"]' \
         -e NEO4J_dbms_security_procedures_unrestricted=apoc.* \

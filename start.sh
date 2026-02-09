@@ -256,7 +256,7 @@ start_postgres() {
     POSTGRES_HOST_PORT=${POSTGRES_HOST_PORT:-${POSTGRES_PORT:-5432}}
     POSTGRES_PORTS=""
     if [[ "$EXPOSE_POSTGRES" == "true" ]]; then
-        POSTGRES_PORTS="-p ${POSTGRES_HOST_PORT}:5432"
+        POSTGRES_PORTS="-p 127.0.0.1:${POSTGRES_HOST_PORT}:5432"
         print_message "$GREEN" "   Exposing PostgreSQL on localhost:${POSTGRES_HOST_PORT}"
     fi
 
@@ -312,7 +312,7 @@ start_neo4j() {
 
     NEO4J_PORTS=""
     if [[ "$EXPOSE_NEO4J" == "true" ]]; then
-        NEO4J_PORTS="-p ${NEO4J_HTTP_PORT}:7474 -p ${NEO4J_BOLT_PORT}:7687"
+        NEO4J_PORTS="-p 127.0.0.1:${NEO4J_HTTP_PORT}:7474 -p 127.0.0.1:${NEO4J_BOLT_PORT}:7687"
         print_message "$GREEN" "✅ Neo4j ports will be exposed:"
         print_message "$GREEN" "   - Browser: http://localhost:${NEO4J_HTTP_PORT}"
         print_message "$GREEN" "   - Bolt: bolt://localhost:${NEO4J_BOLT_PORT}"
