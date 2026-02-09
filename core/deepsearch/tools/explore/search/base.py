@@ -7,6 +7,7 @@ from encapsulation.data_model.deepsearch import EvidenceChunk
 from encapsulation.data_model.schema import Chunk
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 from core.deepsearch.utils.file_scope import FileScope, chunk_in_scope
+from core.deepsearch.tooling.file_scope_policy import strip_file_scope_from_graph_context
 from core.deepsearch.utils.ids import coerce_uuid_list
 from core.deepsearch.utils.owner_visibility import OwnerVisibilityResolution, resolve_owner_visibility
 from core.deepsearch.utils.query_clean import clean_query
@@ -120,11 +121,11 @@ class _SearchToolBase:
         focus = extra.get("focus_query") or extra.get("query") or request.question
         return clean_query(str(focus or ""), max_chars=max_chars) or str(focus or "").strip()
 
-    def _resolve_query_variants(self, query: str) -> List[str]:
+    def _resolve_query_variants(self, query: str, *, cache_scope: str | None = None) -> List[str]:
         try:
             from core.utils.query_variants import generate_query_variants
 
-            variants = generate_query_variants(query, llm_connector=self.llm_connector)
+            variants = generate_query_variants(query, llm_connector=self.llm_connector, cache_scope=cache_scope)
         except Exception:  # noqa: BLE001
             variants = [str(query or "").strip()]
 
@@ -362,22 +363,3 @@ class _SearchToolBase:
         token = getattr(cfg, "low_cost_model_name", None) if cfg is not None else None
         token = str(token or "").strip()
         return token or None
-
-
-def strip_file_scope_from_graph_context(graph_context: Any) -> Any:
-    """Return a best-effort copy of GraphQueryContext with metadata.file_scope removed.
-
-    Used by `search.global*` tools to ensure they do not inherit prior scoped decisions.
-    """
-
-    if graph_context is None:
-        return None
-    meta = getattr(graph_context, "metadata", None)
-    if not isinstance(meta, dict) or "file_scope" not in meta:
-        return graph_context
-    cleaned = dict(meta)
-    cleaned.pop("file_scope", None)
-    try:
-        return graph_context.model_copy(update={"metadata": cleaned})
-    except Exception:  # noqa: BLE001
-        return graph_context

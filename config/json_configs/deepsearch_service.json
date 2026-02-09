@@ -146,6 +146,13 @@
     "max_entries": 256,
     "ttl_seconds": 1800
   },
+  "initial_think_template": {
+    "enabled": true,
+    "model_name": "${LOW_COST_MODEL}",
+    "temperature": 0.0,
+    "max_tokens": 800,
+    "json_attempts": 2
+  },
   "deterministic_routing": {
     "enabled": true,
     "classifier": "llm",

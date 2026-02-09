@@ -15,14 +15,158 @@ from encapsulation.data_model.deepsearch import (
 from core.deepsearch.memory.plan_state import update_plan_from_think_notes
 from core.deepsearch.trace import emit_trace
 from core.deepsearch.utils.llm_envelope import try_parse_llm_envelope
+from core.deepsearch.tooling.run_tool_memo import MemoEntry
+from core.deepsearch.tooling.file_scope_policy import is_global_action_tool
+from core.deepsearch.utils.ids import coerce_uuid_list
 from config.core.deepsearch import tool_defaults
 
 from .graph_loop_state import _RUN_THINK_COUNT, _run_plan_state
+from .graph_loop_state import _RUN_TOOL_MEMO
 
 logger = logging.getLogger(__name__)
 
 
 class GraphLoopRuntimeMixin:
+    @staticmethod
+    def _extract_file_ids_from_tool_args(tool_name: str, tool_args: Any) -> list[str]:
+        """Best-effort extraction of explicit file_id/file_ids from tool args.
+
+        Priority: explicit tool args reflect the selected file(s) and should narrow file_scope.
+        """
+
+        if not isinstance(tool_args, dict):
+            return []
+
+        raw: list[Any] = []
+        for key in ("file_ids", "file_id", "source_file_ids", "source_file_id"):
+            val = tool_args.get(key)
+            if val is None:
+                continue
+            if isinstance(val, (list, tuple, set, frozenset)):
+                raw.extend(list(val))
+            else:
+                raw.append(val)
+
+        # explore(...) nests file ids inside action lists.
+        if str(tool_name or "").strip() == "explore":
+            actions = tool_args.get("actions")
+            if isinstance(actions, list):
+                for action in actions:
+                    if not isinstance(action, dict):
+                        continue
+                    action_tool = str(action.get("tool") or "").strip()
+                    if not action_tool or is_global_action_tool(action_tool):
+                        continue
+                    action_args = action.get("args") if isinstance(action.get("args"), dict) else {}
+                    for key in ("file_ids", "file_id", "source_file_ids", "source_file_id"):
+                        val = action_args.get(key)
+                        if val is None:
+                            continue
+                        if isinstance(val, (list, tuple, set, frozenset)):
+                            raw.extend(list(val))
+                        else:
+                            raw.append(val)
+
+        valid, _invalid = coerce_uuid_list(raw)
+        return list(valid)
+
+    @staticmethod
+    def _extract_file_ids_from_search_file_diagnostics(diagnostics: Any) -> list[str]:
+        if not isinstance(diagnostics, dict):
+            return []
+        results = diagnostics.get("results")
+        if not isinstance(results, list):
+            return []
+        raw: list[Any] = []
+        for row in results:
+            if not isinstance(row, dict):
+                continue
+            raw.append(row.get("file_id"))
+        valid, _invalid = coerce_uuid_list(raw)
+        return list(valid)
+
+    @classmethod
+    def _extract_file_ids_from_tool_result(cls, *, tool_name: str, result: Any) -> list[str]:
+        """Extract candidate file_ids from tool results (search.file inside explore)."""
+
+        name = str(tool_name or "").strip()
+        diag = getattr(result, "diagnostics", None)
+        if name == "search.file":
+            out = cls._extract_file_ids_from_search_file_diagnostics(diag)
+            if out:
+                return out
+            # Fallback to parsing the JSON envelope in summary.
+            summary = str(getattr(result, "summary", "") or "")
+            env = try_parse_llm_envelope(summary)
+            if isinstance(env, dict):
+                answer = env.get("answer")
+                valid, _invalid = coerce_uuid_list(answer if isinstance(answer, list) else [])
+                return list(valid)
+            return []
+
+        if name == "explore" and isinstance(diag, dict):
+            actions = diag.get("actions")
+            if not isinstance(actions, list):
+                return []
+            collected: list[Any] = []
+            for action in actions:
+                if not isinstance(action, dict):
+                    continue
+                if str(action.get("tool") or "").strip() != "search.file":
+                    continue
+                if str(action.get("status") or "").strip() != "ok":
+                    continue
+                action_diag = action.get("diagnostics")
+                collected.extend(cls._extract_file_ids_from_search_file_diagnostics(action_diag))
+            valid, _invalid = coerce_uuid_list(collected)
+            return list(valid)
+        return []
+
+    async def _maybe_lock_in_file_scope(
+        self,
+        *,
+        context: GraphQueryContext,
+        tool_name: str,
+        tool_args: Any,
+        result: Any,
+    ) -> None:
+        """Lock file_scope into graph_context.metadata when we have strong signals.
+
+        Rules:
+        - Prefer explicit tool args (file_id/file_ids) since they represent a deliberate selection.
+        - Otherwise, accept candidates from search.file outputs (routing stage).
+        """
+
+        explicit = self._extract_file_ids_from_tool_args(tool_name, tool_args)
+        candidates: list[str] = []
+        if not explicit:
+            candidates = self._extract_file_ids_from_tool_result(tool_name=tool_name, result=result)
+
+        file_ids = explicit or candidates
+        if not file_ids:
+            return
+
+        meta = dict(getattr(context, "metadata", None) or {})
+        current = meta.get("file_scope") if isinstance(meta, dict) else None
+        current_ids: list[str] = []
+        if isinstance(current, dict):
+            current_ids = list(current.get("file_ids") or [])
+
+        if list(current_ids) == list(file_ids):
+            return
+
+        meta["file_scope"] = {
+            "file_ids": list(file_ids),
+            "filename_contains": [],
+            "source": "tool_args" if explicit else "search_file",
+        }
+        context.metadata = meta
+        await emit_trace(
+            "think",
+            "Locked-in file_scope for subsequent tool calls.",
+            meta={"tool": str(tool_name or ""), "file_ids": list(file_ids), "source": meta["file_scope"]["source"]},
+        )
+
     async def _emit_plan_update(self, *, plan_state, stage: str, plan_step_id: str | None = None) -> None:
         markdown = str(getattr(plan_state, "markdown", "") or "").strip()
         if not markdown:
@@ -133,6 +277,78 @@ class GraphLoopRuntimeMixin:
                 channel="graph",
                 status="running",
             )
+
+            memoizer = _RUN_TOOL_MEMO.get()
+            memo_key = None
+            if memoizer is not None and memoizer.is_cacheable(tool_name):
+                owner_scope_id = ""
+                try:
+                    owner_scope_id = str(getattr(getattr(context, "access_scope", None), "scope_id", "") or "")
+                except Exception:
+                    owner_scope_id = ""
+                file_scope_hint = {}
+                try:
+                    meta = context.metadata if isinstance(getattr(context, "metadata", None), dict) else {}
+                    raw_scope = meta.get("file_scope")
+                    file_scope_hint = dict(raw_scope) if isinstance(raw_scope, dict) else {}
+                except Exception:
+                    file_scope_hint = {}
+                memo_key = memoizer.make_key(
+                    tool_name=tool_name,
+                    owner_scope_id=owner_scope_id,
+                    tool_args=dict(tool_args or {}),
+                    file_scope_hint=file_scope_hint,
+                )
+                cached = memoizer.get(memo_key)
+                if cached is not None:
+                    # Replay: do not re-emit evidences (they were already added to EvidenceBank on first call).
+                    record.status = "done"
+                    record.output_summary = cached.result.summary
+                    record.produced_evidence_ids = list(cached.produced_evidence_ids)
+                    record.diagnostics.setdefault("reason", "tool_memoization_replay")
+                    record.diagnostics.setdefault("latency_ms", 0)
+                    record.tool_logs.append(
+                        ToolExecutionLog(
+                            tool_name=cached.result.tool_name,
+                            server_name=None,
+                            arguments_snapshot=tool_args,
+                            response_excerpt=cached.result.summary if cached.result.summary else None,
+                            latency_ms=0,
+                            graph_context=context,
+                            extra={
+                                "channel": cached.result.channel,
+                                "profile": cached.result.profile,
+                                "determinism": cached.result.determinism,
+                                "trigger": "tool_memoization_replay",
+                                "parent_think_step_id": think_step_id,
+                                "memoization": {"hit": True},
+                            },
+                        )
+                    )
+                    diag = dict(cached.result.diagnostics or {})
+                    diag.setdefault("memoization", {})
+                    diag["memoization"] = {"hit": True}
+                    replay_payload = cached.result.model_copy(update={"diagnostics": diag, "evidences": []})
+                    tool_runs.append(
+                        {
+                            "plan_step_id": plan_step_id,
+                            "tool_name": replay_payload.tool_name,
+                            "channel": replay_payload.channel,
+                            "result": replay_payload.model_dump(),
+                        }
+                    )
+                    for note in replay_payload.think_notes:
+                        think_notes_out.append(note.model_dump(exclude_none=True))
+                    if replay_payload.think_notes:
+                        plan_state = _run_plan_state()
+                        if plan_state is not None and update_plan_from_think_notes(plan_state, think_notes=replay_payload.think_notes):
+                            await self._emit_plan_update(
+                                plan_state=plan_state,
+                                stage="tool_memoization_replay",
+                                plan_step_id=plan_step_id,
+                            )
+                    return record
+
             async with semaphore:
                 if tool_name == "logic.check":
                     plan_state = _run_plan_state()
@@ -159,6 +375,17 @@ class GraphLoopRuntimeMixin:
                 except Exception:  # noqa: BLE001
                     raise
                 latency_ms = int((time.perf_counter() - start) * 1000)
+
+            # Propagate/lock-in file scope between tool calls.
+            try:
+                await self._maybe_lock_in_file_scope(context=context, tool_name=tool_name, tool_args=tool_args, result=result)
+            except Exception:  # noqa: BLE001
+                # Never fail the run due to a scoping hint; keep it observable via trace only.
+                await emit_trace(
+                    "think",
+                    "file_scope lock-in failed (continuing).",
+                    meta={"tool": str(tool_name or ""), "stage": "file_scope_lockin"},
+                )
 
             await self._extend_shared_evidences(result.evidences)
             record.status = "done"
@@ -191,6 +418,21 @@ class GraphLoopRuntimeMixin:
                     "result": result.model_dump(),
                 }
             )
+
+            # Store into run-scoped memoization cache (after successful completion).
+            if memoizer is not None and memo_key and memoizer.is_cacheable(result.tool_name):
+                diag = dict(result.diagnostics or {})
+                diag.setdefault("memoization", {})
+                diag["memoization"] = {
+                    "stored": True,
+                    "original_evidence_count": len(result.evidences or []),
+                }
+                stored = result.model_copy(update={"diagnostics": diag, "evidences": []})
+                memoizer.put(
+                    memo_key,
+                    MemoEntry(result=stored, produced_evidence_ids=tuple(record.produced_evidence_ids or [])),
+                )
+
             for note in result.think_notes:
                 think_notes_out.append(note.model_dump(exclude_none=True))
             if result.think_notes:

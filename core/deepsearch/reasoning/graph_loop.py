@@ -36,8 +36,10 @@ from .graph_loop_state import (
     _RUN_THINK_COUNT,
     _RUN_TOTAL_STEPS,
     _RUN_PLAN_STATE,
+    _RUN_TOOL_MEMO,
     _run_evidence_state,
 )
+from core.deepsearch.tooling.run_tool_memo import RunToolMemoizer
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +94,8 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
         total_steps_token = _RUN_TOTAL_STEPS.set(0)
         think_count_token = _RUN_THINK_COUNT.set(0)
         reflect_count_token = _RUN_REFLECT_COUNT.set(0)
+        tool_memo = RunToolMemoizer()
+        tool_memo_token = _RUN_TOOL_MEMO.set(tool_memo if tool_memo.enabled() else None)
         plan_state = PlanState()
         if isinstance(context.metadata, dict):
             plan_state.update(context.metadata.get("runtime_plan"))
@@ -316,6 +320,7 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             _RUN_THINK_COUNT.reset(think_count_token)
             _RUN_REFLECT_COUNT.reset(reflect_count_token)
             _RUN_PLAN_STATE.reset(plan_token)
+            _RUN_TOOL_MEMO.reset(tool_memo_token)
 
         coverage_metrics = self._coverage_snapshot(
             evidences=evidences,
@@ -334,6 +339,7 @@ class GraphReasoningLoop(GraphLoopRuntimeMixin):
             "think_notes": think_notes,
             "runtime_plan": plan_state.to_payload(),
             "coverage_metrics": coverage_metrics,
+            "tool_memoization": tool_memo.stats(),
         }
 
     @staticmethod

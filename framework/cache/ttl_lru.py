@@ -7,9 +7,6 @@ Non-goals:
 - Cross-process persistence
 - Perfect clock guarantees (we use time.monotonic for TTL)
 """
-
-from __future__ import annotations
-
 import threading
 import time
 from collections import OrderedDict

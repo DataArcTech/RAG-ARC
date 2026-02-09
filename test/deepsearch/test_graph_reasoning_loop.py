@@ -65,6 +65,41 @@ class _StubToolManager:
         raise RuntimeError(f"Unexpected tool: {tool_name}")
 
 
+class _FileRoutingToolManager(_StubToolManager):
+    def __init__(self, think_payloads: list[dict], *, routed_file_ids: list[str]):
+        super().__init__(think_payloads)
+        self._routed_file_ids = list(routed_file_ids)
+
+    async def invoke(self, tool_name: str, *, payload: dict) -> ToolResultPayload:
+        if tool_name != "explore":
+            return await super().invoke(tool_name, payload=payload)
+
+        # Simulate explore(action=search.file) returning file candidates.
+        return ToolResultPayload(
+            tool_name="explore",
+            namespace="stub::explore",
+            channel="graph",
+            profile="X",
+            determinism="hybrid",
+            summary="explore ok",
+            evidences=[],
+            diagnostics={
+                "actions": [
+                    {
+                        "id": "auto_search_file",
+                        "tool": "search.file",
+                        "status": "ok",
+                        "summary": "search.file ok",
+                        "diagnostics": {
+                            "results": [{"file_id": fid} for fid in self._routed_file_ids],
+                        },
+                    }
+                ]
+            },
+            think_notes=[],
+        )
+
+
 def _strategy_config(*, think_overrides: dict | None = None) -> dict:
     base = {
         "strategy_name": "ppr_chain",
@@ -244,3 +279,50 @@ async def test_think_tool_call_concurrency_zero_is_sequential() -> None:
 
     await loop.run_think_loop("Q", graph_context=context)
     assert tool_manager.max_inflight == 1
+
+
+@pytest.mark.asyncio
+async def test_file_scope_is_locked_in_from_search_file_results() -> None:
+    fid = "00000000-0000-0000-0000-000000000123"
+    think_payloads = [
+        {
+            "reasoning": "Route to a file.",
+            "tool_calls": [
+                {"tool_name": "explore", "tool_args": {"actions": [{"tool": "search.file"}]}, "rationale": "route", "parallelizable": True}
+            ],
+            "plan": [],
+        },
+        {
+            "reasoning": "Now continue.",
+            "tool_calls": [],
+            "plan": [],
+        },
+    ]
+    tool_manager = _FileRoutingToolManager(think_payloads, routed_file_ids=[fid])
+    loop = GraphReasoningLoop(
+        adapter=_StubAdapter(),
+        llm_connector=None,
+        strategy_config=_strategy_config(
+            think_overrides={
+                "tool_catalog_allowlist": ["explore", "code.python"],
+                "tool_call_concurrency": 1,
+                "max_rounds_per_checkpoint": 2,
+            }
+        ),
+        tool_manager=tool_manager,
+    )
+    context = GraphQueryContext(
+        adapter_name="stub",
+        question="Q",
+        access_scope=GraphAccessScope(scope_id="owner"),
+    )
+
+    await loop.run_think_loop("Q", graph_context=context)
+
+    think_payloads_seen = [payload for name, payload in tool_manager.calls if name == "think"]
+    assert len(think_payloads_seen) >= 2
+    second = think_payloads_seen[1]
+    meta = (second.get("graph_context") or {}).get("metadata") or {}
+    scope = meta.get("file_scope")
+    assert isinstance(scope, dict)
+    assert scope.get("file_ids") == [fid]

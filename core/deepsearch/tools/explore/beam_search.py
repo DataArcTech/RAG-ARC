@@ -4,6 +4,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from encapsulation.data_model.deepsearch import EvidenceChunk, ThinkNote
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_DERIVED
+from core.deepsearch.utils.file_scope import resolve_file_scope
 
 from ..base import (
     GraphTool,
@@ -91,6 +92,16 @@ class BeamSearchTool(GraphTool):
         beam_size = int(request.extra.get("beam_size") or self.beam_size)
         max_depth = int(request.extra.get("max_depth") or self.max_depth)
         seeds = await self._seed_entities(request)
+        file_scope = resolve_file_scope(
+            extra=request.extra,
+            graph_context_metadata=(request.graph_context.metadata if request.graph_context else {}),
+            question=request.question,
+        )
+
+        query_options: Dict[str, Any] = {"export_subgraph": True}
+        if file_scope.enabled:
+            # File-scoped beam search: use the adapter's file_scope filtering to avoid drifting to unrelated files.
+            query_options["file_scope"] = file_scope.as_dict()
 
         async with adapter_locked(adapter):
             traversal = await adapter.chain_traverse(
@@ -100,6 +111,7 @@ class BeamSearchTool(GraphTool):
                     "beam_size": beam_size,
                     "max_depth": max_depth,
                     "seed_entities": seeds,
+                    "query_options": query_options,
                 },
                 access_scope=request.access_scope,
             )
@@ -110,6 +122,7 @@ class BeamSearchTool(GraphTool):
             diagnostics = {
                 "beam_size": beam_size,
                 "max_depth": max_depth,
+                "file_scope": file_scope.as_dict() if file_scope.enabled else None,
                 "path_count": 0,
                 "selected_paths": 0,
                 "used_llm_rerank": False,
@@ -127,6 +140,7 @@ class BeamSearchTool(GraphTool):
         diagnostics = {
             "beam_size": beam_size,
             "max_depth": max_depth,
+            "file_scope": file_scope.as_dict() if file_scope.enabled else None,
             "path_count": len(paths),
             "selected_paths": len(ranked_paths),
             "used_llm_rerank": True,

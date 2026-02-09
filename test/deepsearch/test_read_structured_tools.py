@@ -52,6 +52,28 @@ class _FakeAdapter:
         ]
 
 
+class _FakeListHeavyAdapter:
+    def cypher_capable(self) -> bool:
+        return True
+
+    async def acypher(self, cypher: str, params=None, *, access_scope=None):  # noqa: ANN001, ARG002
+        params = params or {}
+        file_id = params.get("file_id")
+        if file_id != "11111111-1111-1111-1111-111111111111":
+            return []
+        # Build a list-heavy single page (p1) so read.pages suggests expanding to contiguous pages.
+        rows = []
+        for i in range(6):
+            rows.append(
+                {
+                    "chunk_id": f"l{i}",
+                    "content": f"- item {i}\n",
+                    "metadata": {"chunk_index": i, "page_start": 1, "page_end": 1, "semantic_unit_type": "list"},
+                }
+            )
+        return rows
+
+
 @pytest.mark.asyncio
 async def test_read_pages_filters_by_page_range() -> None:
     tool = ReadPagesTool()
@@ -88,3 +110,32 @@ async def test_read_pages_filters_by_page_range() -> None:
     assert meta2.get("source_file_id") == "11111111-1111-1111-1111-111111111111"
     assert meta1.get("page_start") == 1
     assert meta2.get("page_start") == 2
+
+
+@pytest.mark.asyncio
+async def test_read_pages_suggests_contiguous_expansion_for_list_heavy_pages() -> None:
+    tool = ReadPagesTool()
+    req = ToolRunRequest(
+        question="read",
+        plan_step="plan_01",
+        context_evidences=[],
+        adapter=_FakeListHeavyAdapter(),
+        access_scope=GraphAccessScope(scope_id="owner-1"),
+        extra={"file_id": "11111111-1111-1111-1111-111111111111", "page_start": 1, "page_end": 1, "goal": "verify continuity hints"},
+        graph_context=None,
+        coverage_metrics=None,
+    )
+    result = await tool.run(req)
+    assert result.evidences
+    assert result.evidences[0].source == "read.pages"
+    diag = result.diagnostics or {}
+    steps = diag.get("suggested_next_steps")
+    assert isinstance(steps, list)
+    assert steps, "expected a continuity suggestion for list-heavy pages"
+    first = steps[0]
+    assert isinstance(first, dict)
+    assert first.get("tool") == "read.pages"
+    args = first.get("args") if isinstance(first.get("args"), dict) else {}
+    assert args.get("page_start") == 0
+    assert args.get("page_end") == 2
+    assert "list_detected" in str(first.get("reason") or "")

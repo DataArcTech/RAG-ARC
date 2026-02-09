@@ -118,6 +118,32 @@ ENTITY_RESOLUTION_ALIAS_SCORE_BONUS = 0.12
 THINK_JSON_REPAIR_DEFAULT_ATTEMPTS = 2
 THINK_JSON_REPAIR_DEFAULT_TEMPERATURE = 0.0
 THINK_JSON_REPAIR_DEFAULT_MAX_RAW_CHARS = 2000
+# Think responses are control/navigation JSON; keep them compact to reduce tail latency/timeouts.
+# 0/None means "connector default".
+THINK_DEFAULT_MAX_TOKENS = 1200
+# The think prompt payload already includes structured fields (available_tools, recent_tool_runs, etc).
+# Including the entire `extra` dict is redundant and can bloat prompts significantly.
+THINK_INCLUDE_EXTRA_IN_PROMPT = False
+
+# -----------------------------
+# file-scope propagation policy
+# -----------------------------
+# DeepSearch uses a "file_scope" hint (graph_context.metadata.file_scope) to keep non-global tools
+# from drifting across unrelated documents.
+#
+# "Global tools" are explicitly allowed to ignore file_scope so they can be used to *discover* the
+# right files (routing) or search the web.
+DEEPSEARCH_GLOBAL_ACTION_TOOL_NAMES = (
+    "search.file",
+    "search.global",
+    "search.global.faiss",
+    "search.global.bm25",
+    "search.global.graph",
+    "web.search",
+)
+DEEPSEARCH_GLOBAL_ACTION_TOOL_PREFIXES = (
+    "search.global.",
+)
 
 # -----------------------------
 # logic.check defaults
@@ -258,6 +284,12 @@ SECTION_NODE_TYPE_MAP = {
     "table": "table",
     "image": "image",
     "math": "equation",
+    # Other common semantic_unit_type values emitted by SemanticUnitChunker.
+    # These are used for navigation/diagnostics only (e.g. read.pages continuity hints).
+    "list": "list",
+    "code": "code",
+    "blockquote": "blockquote",
+    "text": "paragraph",
 }
 SECTION_NODE_TYPE_DEFAULT = "page"
 # Limit how many chunk metadata rows to scan when deriving node-type counts for sections.
@@ -332,6 +364,25 @@ NAV_BOOTSTRAP_SECTION_TOP_K = 6
 # -----------------------------
 TOC_TREE_DEFAULT_MAX_DEPTH = 2
 TOC_TREE_MAX_CHUNKS_SCANNED = 5000
+
+# -----------------------------
+# read.pages continuity signals (navigation hints only; no auto-fetch)
+# -----------------------------
+# These knobs control when `read.pages` suggests expanding to contiguous pages to
+# avoid cutting off long spans (tables, lists, dense pages). They are used for
+# *suggestions only* and must never trigger automatic extra reads.
+READ_PAGES_SIGNALS_ENABLED = True
+READ_PAGES_SIGNALS_EXPAND_DELTA_PAGES = 1  # suggest p-1..p+1
+
+# Absolute + relative gates. A page triggers a continuity hint if it exceeds
+# at least one absolute threshold OR is unusually large vs the median of pages
+# returned in the current read.pages call.
+READ_PAGES_SIGNALS_LONG_PAGE_MIN_CHARS = 9000
+READ_PAGES_SIGNALS_DENSE_PAGE_MIN_CHUNKS = 24
+READ_PAGES_SIGNALS_MEDIAN_MULTIPLIER = 1.8
+
+# List-heavy pages are likely to span multiple pages.
+READ_PAGES_SIGNALS_LIST_MIN_CHUNKS = 6
 TOC_TREE_MAX_NODES = 220
 
 # NOTE: `read.pages` returns full pages without truncation. Page selection (which pages to read)
