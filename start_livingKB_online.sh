@@ -212,7 +212,17 @@ done
 echo ""
 if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
     echo "  ⚠️  PostgreSQL启动超时，但将继续尝试启动应用（请检查容器日志）"
-fi 
+fi
+
+# 5.1 同步 PostgreSQL 密码（确保 .env 中的密码与数据库一致，每次重启都会执行）
+echo "🔐 同步 PostgreSQL 密码至数据库..."
+PG_PASS_ESC="${POSTGRES_PASSWORD//\'/\'\'}"  # 转义单引号
+if docker exec ${POSTGRES_CONTAINER_NAME} psql -U ${POSTGRES_USER} -h localhost -tAc "ALTER USER ${POSTGRES_USER} PASSWORD '${PG_PASS_ESC}';" 2>/dev/null; then
+    echo "  ✅ PostgreSQL 密码已同步（来自 .env）"
+else
+    echo "  ⚠️  密码同步失败，请检查容器状态或手动执行 ALTER USER"
+fi
+echo ""
 
 # ==============================================================================
 # 第六步：使用PM2启动/重启应用
