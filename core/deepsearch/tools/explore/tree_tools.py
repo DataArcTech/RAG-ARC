@@ -3,7 +3,12 @@ from typing import Any, Dict, List, Optional
 
 from config import pageindex as pageindex_cfg
 from config.core.deepsearch import tool_defaults
-from core.deepsearch.utils.section_tree import fetch_section_nodes, normalize_file_id
+from config.core.deepsearch import runtime_cache_defaults
+from core.deepsearch.utils.section_tree import (
+    fetch_section_nodes,
+    fetch_section_tree_fingerprint,
+    normalize_file_id,
+)
 from core.deepsearch.utils.tree_nodes import (
     TreeNode,
     fetch_section_tree_stats,
@@ -11,6 +16,7 @@ from core.deepsearch.utils.tree_nodes import (
     fetch_tree_node,
     fetch_tree_nodes_for_section,
 )
+from framework.cache import TTLRUCache
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from ..governance_tags import EVIDENCE_DERIVED, SCOPE_FILE, SCOPE_OWNER
@@ -46,6 +52,13 @@ def _format_node_line(node: TreeNode) -> str:
     return f"- {node.node_type}: {title} [node_id={node_id}]{page_hint}".rstrip()
 
 
+def _owner_scope_id(request: ToolRunRequest) -> str:
+    try:
+        return str(getattr(getattr(request, "access_scope", None), "scope_id", "") or "")
+    except Exception:
+        return ""
+
+
 class TreeRootTool(GraphTool):
     descriptor = ToolDescriptor(
         name="tree.root",
@@ -72,6 +85,26 @@ class TreeRootTool(GraphTool):
         },
     )
 
+    def __init__(
+        self,
+        *,
+        cache_enabled: bool | None = None,
+        cache_max_entries: int | None = None,
+        cache_ttl_seconds: float | None = None,
+    ) -> None:
+        if cache_enabled is None:
+            cache_enabled = runtime_cache_defaults.DEFAULT_TREE_ROOT_CACHE_ENABLED
+        if cache_max_entries is None:
+            cache_max_entries = runtime_cache_defaults.DEFAULT_TREE_ROOT_CACHE_MAX_ENTRIES
+        if cache_ttl_seconds is None:
+            cache_ttl_seconds = float(runtime_cache_defaults.DEFAULT_TREE_ROOT_CACHE_TTL_SECONDS)
+        self._cache: TTLRUCache[tuple[str, str, str, int], Dict[str, Any]] | None = None
+        if cache_enabled and cache_max_entries and cache_ttl_seconds:
+            try:
+                self._cache = TTLRUCache(max_entries=int(cache_max_entries), ttl_seconds=float(cache_ttl_seconds))
+            except Exception:
+                self._cache = None
+
     async def run(self, request: ToolRunRequest) -> ToolResult:
         extra = request.extra or {}
         file_id, file_id_raw = normalize_file_id(extra.get("file_id"))
@@ -84,6 +117,24 @@ class TreeRootTool(GraphTool):
 
         max_roots = _coerce_int(extra.get("max_roots")) or pageindex_cfg.toc_check_page_num()
         max_roots = max(1, max_roots)
+
+        if self._cache is not None:
+            owner_id = _owner_scope_id(request)
+            if owner_id:
+                fp, fp_diag = await fetch_section_tree_fingerprint(
+                    adapter=request.adapter,
+                    access_scope=request.access_scope,
+                    file_id=file_id,
+                )
+                if fp:
+                    key = (owner_id, file_id, fp, int(max_roots))
+                    cached = self._cache.get(key)
+                    if isinstance(cached, dict) and "summary" in cached and "diagnostics" in cached:
+                        diag = dict(cached.get("diagnostics") or {})
+                        diag.setdefault("cache", {})
+                        diag["cache"] = {"hit": True, "fingerprint": fp, "fingerprint_diag": fp_diag}
+                        return ToolResult(summary=str(cached.get("summary") or ""), diagnostics=diag)
+
         sections, fetch_diag = await fetch_section_nodes(
             adapter=request.adapter,
             access_scope=request.access_scope,
@@ -139,6 +190,22 @@ class TreeRootTool(GraphTool):
             reason = diagnostics.get("reason") or "no_sections_found"
             diagnostics["reason"] = reason
             return ToolResult(summary="tree.root returned no sections.", diagnostics=diagnostics)
+
+        if self._cache is not None:
+            owner_id = _owner_scope_id(request)
+            if owner_id:
+                fp, fp_diag = await fetch_section_tree_fingerprint(
+                    adapter=request.adapter,
+                    access_scope=request.access_scope,
+                    file_id=file_id,
+                )
+                if fp:
+                    diagnostics.setdefault("cache", {})
+                    diagnostics["cache"] = {"hit": False, "fingerprint": fp, "fingerprint_diag": fp_diag}
+                    try:
+                        self._cache.set((owner_id, file_id, fp, int(max_roots)), {"summary": summary, "diagnostics": dict(diagnostics)})
+                    except Exception:
+                        pass
         return ToolResult(summary=summary, diagnostics=diagnostics)
 
 
@@ -170,6 +237,26 @@ class TreeChildrenTool(GraphTool):
         },
     )
 
+    def __init__(
+        self,
+        *,
+        cache_enabled: bool | None = None,
+        cache_max_entries: int | None = None,
+        cache_ttl_seconds: float | None = None,
+    ) -> None:
+        if cache_enabled is None:
+            cache_enabled = runtime_cache_defaults.DEFAULT_TREE_CHILDREN_CACHE_ENABLED
+        if cache_max_entries is None:
+            cache_max_entries = runtime_cache_defaults.DEFAULT_TREE_CHILDREN_CACHE_MAX_ENTRIES
+        if cache_ttl_seconds is None:
+            cache_ttl_seconds = float(runtime_cache_defaults.DEFAULT_TREE_CHILDREN_CACHE_TTL_SECONDS)
+        self._cache: TTLRUCache[tuple[str, str, str, int], Dict[str, Any]] | None = None
+        if cache_enabled and cache_max_entries and cache_ttl_seconds:
+            try:
+                self._cache = TTLRUCache(max_entries=int(cache_max_entries), ttl_seconds=float(cache_ttl_seconds))
+            except Exception:
+                self._cache = None
+
     async def run(self, request: ToolRunRequest) -> ToolResult:
         extra = request.extra or {}
         node_id = str(extra.get("node_id") or "").strip()
@@ -177,6 +264,32 @@ class TreeChildrenTool(GraphTool):
         file_id, file_id_raw = normalize_file_id(extra.get("file_id"))
         max_nodes = _coerce_int(extra.get("max_nodes")) or int(tool_defaults.TOC_TREE_MAX_NODES)
         max_nodes = max(1, max_nodes)
+
+        if self._cache is not None:
+            owner_id = _owner_scope_id(request)
+            if owner_id:
+                scope_key = ""
+                fp = ""
+                fp_diag: Dict[str, Any] = {}
+                if node_id:
+                    scope_key = f"node:{node_id}"
+                    fp = "node"
+                else:
+                    scope_key = f"section:{file_id}:{section_id}"
+                    if file_id:
+                        fp, fp_diag = await fetch_section_tree_fingerprint(
+                            adapter=request.adapter,
+                            access_scope=request.access_scope,
+                            file_id=file_id,
+                        )
+                if scope_key and fp:
+                    key = (owner_id, scope_key, fp, int(max_nodes))
+                    cached = self._cache.get(key)
+                    if isinstance(cached, dict) and "summary" in cached and "diagnostics" in cached:
+                        diag = dict(cached.get("diagnostics") or {})
+                        diag.setdefault("cache", {})
+                        diag["cache"] = {"hit": True, "fingerprint": fp, "fingerprint_diag": fp_diag}
+                        return ToolResult(summary=str(cached.get("summary") or ""), diagnostics=diag)
 
         if node_id:
             nodes, diagnostics = await fetch_tree_children(
@@ -217,6 +330,27 @@ class TreeChildrenTool(GraphTool):
             for node in nodes
             if node.file_id and node.page_start is not None and node.page_end is not None
         ]
+        if self._cache is not None:
+            owner_id = _owner_scope_id(request)
+            if owner_id:
+                scope_key = f"node:{node_id}" if node_id else f"section:{file_id}:{section_id}"
+                fp = ""
+                fp_diag: Dict[str, Any] = {}
+                if node_id:
+                    fp = "node"
+                elif file_id:
+                    fp, fp_diag = await fetch_section_tree_fingerprint(
+                        adapter=request.adapter,
+                        access_scope=request.access_scope,
+                        file_id=file_id,
+                    )
+                if scope_key and fp:
+                    diagnostics.setdefault("cache", {})
+                    diagnostics["cache"] = {"hit": False, "fingerprint": fp, "fingerprint_diag": fp_diag}
+                    try:
+                        self._cache.set((owner_id, scope_key, fp, int(max_nodes)), {"summary": summary, "diagnostics": dict(diagnostics)})
+                    except Exception:
+                        pass
         return ToolResult(summary=summary, diagnostics=diagnostics)
 
 
@@ -245,9 +379,38 @@ class TreeNodeTool(GraphTool):
         },
     )
 
+    def __init__(
+        self,
+        *,
+        cache_enabled: bool | None = None,
+        cache_max_entries: int | None = None,
+        cache_ttl_seconds: float | None = None,
+    ) -> None:
+        if cache_enabled is None:
+            cache_enabled = runtime_cache_defaults.DEFAULT_TREE_NODE_CACHE_ENABLED
+        if cache_max_entries is None:
+            cache_max_entries = runtime_cache_defaults.DEFAULT_TREE_NODE_CACHE_MAX_ENTRIES
+        if cache_ttl_seconds is None:
+            cache_ttl_seconds = float(runtime_cache_defaults.DEFAULT_TREE_NODE_CACHE_TTL_SECONDS)
+        self._cache: TTLRUCache[tuple[str, str], Dict[str, Any]] | None = None
+        if cache_enabled and cache_max_entries and cache_ttl_seconds:
+            try:
+                self._cache = TTLRUCache(max_entries=int(cache_max_entries), ttl_seconds=float(cache_ttl_seconds))
+            except Exception:
+                self._cache = None
+
     async def run(self, request: ToolRunRequest) -> ToolResult:
         extra = request.extra or {}
         node_id = str(extra.get("node_id") or "").strip()
+        if self._cache is not None:
+            owner_id = _owner_scope_id(request)
+            if owner_id and node_id:
+                cached = self._cache.get((owner_id, node_id))
+                if isinstance(cached, dict) and "summary" in cached and "diagnostics" in cached:
+                    diag = dict(cached.get("diagnostics") or {})
+                    diag.setdefault("cache", {})
+                    diag["cache"] = {"hit": True}
+                    return ToolResult(summary=str(cached.get("summary") or ""), diagnostics=diag)
         node, diagnostics = await fetch_tree_node(
             adapter=request.adapter,
             access_scope=request.access_scope,
@@ -272,6 +435,15 @@ class TreeNodeTool(GraphTool):
             "page_end": node.page_end,
             "node_id": node.node_id,
         }
+        if self._cache is not None:
+            owner_id = _owner_scope_id(request)
+            if owner_id and node_id:
+                diagnostics.setdefault("cache", {})
+                diagnostics["cache"] = {"hit": False}
+                try:
+                    self._cache.set((owner_id, node_id), {"summary": summary, "diagnostics": dict(diagnostics)})
+                except Exception:
+                    pass
         return ToolResult(summary=summary, diagnostics=diagnostics)
 
 
@@ -302,12 +474,55 @@ class TreeOpenTool(GraphTool):
         },
     )
 
+    def __init__(
+        self,
+        *,
+        cache_enabled: bool | None = None,
+        cache_max_entries: int | None = None,
+        cache_ttl_seconds: float | None = None,
+    ) -> None:
+        if cache_enabled is None:
+            cache_enabled = runtime_cache_defaults.DEFAULT_TREE_NODE_CACHE_ENABLED
+        if cache_max_entries is None:
+            cache_max_entries = runtime_cache_defaults.DEFAULT_TREE_NODE_CACHE_MAX_ENTRIES
+        if cache_ttl_seconds is None:
+            cache_ttl_seconds = float(runtime_cache_defaults.DEFAULT_TREE_NODE_CACHE_TTL_SECONDS)
+        self._cache: TTLRUCache[tuple, Dict[str, Any]] | None = None
+        if cache_enabled and cache_max_entries and cache_ttl_seconds:
+            try:
+                self._cache = TTLRUCache(max_entries=int(cache_max_entries), ttl_seconds=float(cache_ttl_seconds))
+            except Exception:
+                self._cache = None
+
     async def run(self, request: ToolRunRequest) -> ToolResult:
         extra = request.extra or {}
         node_id = str(extra.get("node_id") or "").strip()
         section_id = str(extra.get("section_id") or "").strip()
         file_id, file_id_raw = normalize_file_id(extra.get("file_id")) if section_id else (None, None)
         diagnostics: Dict[str, Any] = {}
+
+        if self._cache is not None:
+            owner_id = _owner_scope_id(request)
+            if owner_id and node_id:
+                cached = self._cache.get((owner_id, "node", node_id))
+                if isinstance(cached, dict) and "summary" in cached and "diagnostics" in cached:
+                    diag = dict(cached.get("diagnostics") or {})
+                    diag.setdefault("cache", {})
+                    diag["cache"] = {"hit": True}
+                    return ToolResult(summary=str(cached.get("summary") or ""), diagnostics=diag)
+            if owner_id and section_id and file_id:
+                fp, fp_diag = await fetch_section_tree_fingerprint(
+                    adapter=request.adapter,
+                    access_scope=request.access_scope,
+                    file_id=file_id,
+                )
+                if fp:
+                    cached = self._cache.get((owner_id, "section", file_id, section_id, fp))
+                    if isinstance(cached, dict) and "summary" in cached and "diagnostics" in cached:
+                        diag = dict(cached.get("diagnostics") or {})
+                        diag.setdefault("cache", {})
+                        diag["cache"] = {"hit": True, "fingerprint": fp, "fingerprint_diag": fp_diag}
+                        return ToolResult(summary=str(cached.get("summary") or ""), diagnostics=diag)
 
         node = None
         if node_id:
@@ -363,6 +578,31 @@ class TreeOpenTool(GraphTool):
             "page_end": node.page_end,
             "node_id": node.node_id,
         }
+        if self._cache is not None:
+            owner_id = _owner_scope_id(request)
+            if owner_id and node_id:
+                diagnostics.setdefault("cache", {})
+                diagnostics["cache"] = {"hit": False}
+                try:
+                    self._cache.set((owner_id, "node", node_id), {"summary": summary, "diagnostics": dict(diagnostics)})
+                except Exception:
+                    pass
+            if owner_id and section_id and file_id:
+                fp, fp_diag = await fetch_section_tree_fingerprint(
+                    adapter=request.adapter,
+                    access_scope=request.access_scope,
+                    file_id=file_id,
+                )
+                if fp:
+                    diagnostics.setdefault("cache", {})
+                    diagnostics["cache"] = {"hit": False, "fingerprint": fp, "fingerprint_diag": fp_diag}
+                    try:
+                        self._cache.set(
+                            (owner_id, "section", file_id, section_id, fp),
+                            {"summary": summary, "diagnostics": dict(diagnostics)},
+                        )
+                    except Exception:
+                        pass
         return ToolResult(summary=summary, diagnostics=diagnostics)
 
 

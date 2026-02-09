@@ -10,6 +10,23 @@ from framework.config import AbstractConfig
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+class _DisabledBuiltRetriever:
+    """Placeholder retriever used when a MultiPath branch is disabled (e.g. weight=0).
+
+    Why:
+    - Avoid building heavy dependencies (e.g. Neo4j + embedding probes) when the backend is disabled by config.
+    - Preserve retriever index alignment with `weights` and fusion logic.
+    """
+
+    def __init__(self, name: str) -> None:
+        self._name = str(name or "disabled")
+
+    def invoke(self, input: str, **kwargs: Any):  # noqa: ANN001
+        return []
+
+    def get_name(self) -> str:
+        return f"disabled:{self._name}"
+
 
 class MultiPathRetrieverConfig(AbstractConfig):
     """Configuration for MultiPath Retriever"""
@@ -53,6 +70,16 @@ class MultiPathRetrieverConfig(AbstractConfig):
         built_retrievers = []
         for idx, retriever_config in enumerate(self.retrievers):
             logger.info(f"Building retriever {idx} of type {retriever_config.type}...")
+            # Allow disabling a branch via weight<=0 without building heavyweight retrievers.
+            # This is config-driven (no hardcoded backend rules).
+            try:
+                if self.weights is not None and idx < len(self.weights):
+                    if float(self.weights[idx]) <= 0:
+                        built_retrievers.append(_DisabledBuiltRetriever(str(retriever_config.type)))
+                        logger.info("Retriever %d disabled by weight<=0: type=%s", idx, retriever_config.type)
+                        continue
+            except Exception:  # noqa: BLE001
+                pass
             if not hasattr(retriever_config, 'build'):
                 raise TypeError(f"Retriever config at position {idx} does not provide a build() method")
             built_retrievers.append(retriever_config.build())

@@ -309,6 +309,19 @@ class SearchScopedTool(SearchTool):
     async def run(self, request: ToolRunRequest) -> ToolResult:
         query = self._resolve_query(request)
         file_ids_raw = _coerce_file_ids(request.extra)
+        scope_source = "tool_args"
+        if not file_ids_raw:
+            try:
+                meta = request.graph_context.metadata if request.graph_context and isinstance(request.graph_context.metadata, dict) else {}
+                scope = meta.get("file_scope") if isinstance(meta, dict) else None
+                if isinstance(scope, dict):
+                    inherited = scope.get("file_ids") or scope.get("source_file_ids") or []
+                    if isinstance(inherited, (list, tuple, set, frozenset)):
+                        file_ids_raw = [str(x) for x in inherited]
+                        if file_ids_raw:
+                            scope_source = "graph_context"
+            except Exception:
+                file_ids_raw = file_ids_raw
         file_ids, invalid = coerce_uuid_list(file_ids_raw)
         if invalid:
             return ToolResult(
@@ -340,7 +353,11 @@ class SearchScopedTool(SearchTool):
             graph_context=request.graph_context,
             coverage_metrics=request.coverage_metrics,
         )
-        return await super().run(patched)
+        result = await super().run(patched)
+        diag = dict(result.diagnostics or {})
+        diag.setdefault("file_scope_source", scope_source)
+        result.diagnostics = diag
+        return result
 
 
 class SearchGlobalTool(SearchTool):

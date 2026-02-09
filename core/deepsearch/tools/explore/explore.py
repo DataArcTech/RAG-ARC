@@ -26,6 +26,10 @@ from .web_search import WebSearchTool
 from .beam_search import BeamSearchTool
 from .llm_chain_explorer import LLMChainExplorerTool
 from .section_select import SectionSelectTool
+from core.deepsearch.tooling.file_scope_policy import (
+    is_global_action_tool,
+    strip_file_scope_from_graph_context,
+)
 
 
 _ALLOWED_TOOL_NAMES = {
@@ -163,7 +167,7 @@ class ExploreTool(GraphTool):
                 diagnostics={"actions": [], "errors": ["missing_actions"]},
             )
 
-        actions, routing_diag = self._enforce_file_routing(actions)
+        actions, routing_diag = self._enforce_file_routing(actions, graph_context=request.graph_context)
         if self.llm_connector is None and self._requires_llm(actions):
             raise RuntimeError("explore requires an LLM connector for requested actions.")
 
@@ -298,6 +302,10 @@ class ExploreTool(GraphTool):
                 error=f"{tool_name}: tool_unavailable",
             )
         merged_extra = self._merge_extra(request.extra, args)
+        graph_context = request.graph_context
+        if is_global_action_tool(tool_name):
+            # Global tools must not inherit prior scoping decisions.
+            graph_context = strip_file_scope_from_graph_context(graph_context)
         sub_request = ToolRunRequest(
             question=request.question,
             plan_step=request.plan_step,
@@ -305,7 +313,7 @@ class ExploreTool(GraphTool):
             adapter=request.adapter,
             access_scope=request.access_scope,
             extra=merged_extra,
-            graph_context=request.graph_context,
+            graph_context=graph_context,
             coverage_metrics=request.coverage_metrics,
         )
         try:
@@ -342,13 +350,37 @@ class ExploreTool(GraphTool):
             normalized.append(entry)
         return normalized
 
-    def _enforce_file_routing(self, actions: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    def _enforce_file_routing(
+        self,
+        actions: List[Dict[str, Any]],
+        *,
+        graph_context: Any,
+    ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
         if not actions:
             return actions, {}
         for action in actions:
             tool_name = str(action.get("tool") or "").strip()
             if tool_name and tool_name not in _ALLOWED_TOOL_NAMES:
                 return actions, {}
+
+        inherited_file_ids: List[str] = []
+        try:
+            meta = getattr(graph_context, "metadata", None)
+            if isinstance(meta, dict):
+                scope = meta.get("file_scope")
+                if isinstance(scope, dict):
+                    raw = scope.get("file_ids") or scope.get("source_file_ids") or []
+                    if isinstance(raw, (list, tuple, set, frozenset)):
+                        for item in raw:
+                            token = str(item or "").strip()
+                            if not token:
+                                continue
+                            try:
+                                inherited_file_ids.append(str(uuid.UUID(token)))
+                            except Exception:
+                                continue
+        except Exception:
+            inherited_file_ids = []
 
         def _requires_file_id(tool_name: str, args: Dict[str, Any]) -> bool:
             """Return True when the action semantically requires a file_id/file_ids.
@@ -357,12 +389,8 @@ class ExploreTool(GraphTool):
             node-id based tree lookups which are already fully pinned to a specific file tree.
             """
 
-            if tool_name == "search.file":
-                return False
             # Global tools do not require a file_id and are often used to *get* routing hints.
-            if tool_name == "search.global" or tool_name.startswith("search.global."):
-                return False
-            if tool_name == "web.search":
+            if is_global_action_tool(tool_name):
                 return False
             if tool_name == "tree.node":
                 return False
@@ -419,6 +447,9 @@ class ExploreTool(GraphTool):
                         else:
                             invalid_file_ids.append(token)
 
+        if inherited_file_ids:
+            has_valid_file_id = True
+
         # If the user/model only requested tools that do not require a file_id (currently: node-id tree inspection),
         # do not force search.file.
         if not file_required_actions:
@@ -426,9 +457,37 @@ class ExploreTool(GraphTool):
         if has_valid_file_id:
             return actions, {}
 
-        # When the model passes placeholders / non-UUID file identifiers, treat them as missing and force
-        # a search.file-only round. This prevents wasted tree/search actions that will be skipped later.
+        # When the model passes placeholders / non-UUID file identifiers:
+        # - If we already have an inherited file_scope, prefer that scope and strip the invalid ids.
+        # - Otherwise, treat as missing and enforce a search.file-only round.
         if invalid_file_ids:
+            if inherited_file_ids:
+                for action in actions:
+                    args = action.get("args") if isinstance(action.get("args"), dict) else {}
+                    if not args:
+                        continue
+                    file_id = str(args.get("file_id") or "").strip()
+                    if file_id and file_id in invalid_file_ids:
+                        args.pop("file_id", None)
+                    file_ids = args.get("file_ids")
+                    if isinstance(file_ids, list):
+                        kept = []
+                        for fid in file_ids:
+                            token = str(fid or "").strip()
+                            if token and token not in invalid_file_ids:
+                                kept.append(fid)
+                        if kept:
+                            args["file_ids"] = kept
+                        else:
+                            args.pop("file_ids", None)
+                    action["args"] = args
+                return actions, {
+                    "enforced": False,
+                    "reason": "invalid_file_id_sanitized",
+                    "invalid_file_ids": sorted(set(invalid_file_ids))[:8],
+                    "inherited_file_ids": sorted(set(inherited_file_ids))[:8],
+                }
+
             diag = {
                 "enforced": True,
                 "reason": "invalid_file_id",
@@ -612,6 +671,12 @@ class ExploreTool(GraphTool):
                     "The provided file_id was invalid (placeholder/non-UUID). "
                     "Next: use search.file results to pick a real file_id (UUID), then rerun explore with "
                     "toc.tree/tree.root and finally read.pages for citeable evidence."
+                )
+            elif reason == "invalid_file_id_sanitized":
+                next_steps = (
+                    "The action args included an invalid file_id, but an inherited file_scope exists. "
+                    "Next: rely on the locked file_scope or re-run search.file to obtain a real file_id (UUID), "
+                    "then proceed with toc.tree/tree.root/tree.open + read.pages."
                 )
             elif reason == "file_routing_first":
                 next_steps = (

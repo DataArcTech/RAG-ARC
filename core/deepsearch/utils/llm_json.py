@@ -6,7 +6,7 @@ markdown fences or get truncated. This module provides a centralized, configurab
 Note: This lives under `core/deepsearch/utils/` so it can be reused by tools and other
 DeepSearch components without creating circular imports.
 """
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping, Optional
 
 from config.core.deepsearch import tool_defaults
 from core.prompts.deepsearch import JSON_RETRY_INSTRUCTION_EN
@@ -43,6 +43,7 @@ async def call_llm_json_with_retry(
     temperature: float,
     max_tokens: int,
     attempts: int | None = None,
+    llm_kwargs: Optional[Mapping[str, Any]] = None,
 ) -> Any | None:
     """Call an LLM and parse JSON with centralized retries.
 
@@ -62,6 +63,7 @@ async def call_llm_json_with_retry(
     # Keep the original message list stable; append retry instruction on later attempts.
     base_messages = list(messages or [])
     last_raw: str | None = None
+    extra_kwargs: Dict[str, Any] = dict(llm_kwargs or {})
     for attempt in range(tries):
         call_messages: List[Dict[str, Any]] = list(base_messages)
         if attempt > 0:
@@ -75,6 +77,7 @@ async def call_llm_json_with_retry(
             call_messages,
             temperature=float(temperature),
             max_tokens=int(max_tokens),
+            **extra_kwargs,
         )
         last_raw = str(raw or "")
         extracted = extract_json_from_text(last_raw)

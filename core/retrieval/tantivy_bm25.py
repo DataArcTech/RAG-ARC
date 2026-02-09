@@ -14,8 +14,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-
-
 class TantivyBM25Retriever(BaseRetriever):
     """
     TantivyBM25Retriever is a high-performance chunk retriever based on the Tantivy search engine.
@@ -111,10 +109,15 @@ class TantivyBM25Retriever(BaseRetriever):
             logger.error(f"Error reloading searcher: {e}")
             raise
 
-    def _build_filter_query(self, filters: Dict[str, Union[str, List[str]]]) -> List[Tuple[Occur, Query]]:
+    def _build_filter_query(
+        self,
+        index_instance: Any,
+        filters: Dict[str, Union[str, List[str]]],
+    ) -> List[Tuple[Occur, Query]]:
         """Build dynamic filter query supporting arbitrary fields
         
         Args:
+            index_instance: BM25IndexBuilder instance (owner-scoped routing may use a per-owner builder)
             filters: Dictionary of field names and their values to filter by
             
         Returns:
@@ -127,17 +130,23 @@ class TantivyBM25Retriever(BaseRetriever):
             if not values:
                 continue
             try:
-                index_instance = self.index
                 q = Query.term_set_query(index_instance.index.schema, field_name, values)
                 filter_queries.append((Occur.Must, q))
             except Exception as e:
                 logger.warning(f"Skipping invalid filter field '{field_name}': {e}")
         return filter_queries
 
-    def _build_main_query(self, query_tokens: List[str], use_phrase_query: bool = False) -> Query:
+    def _build_main_query(
+        self,
+        index_instance: Any,
+        query_tokens: List[str],
+        use_phrase_query: bool = False,
+        must_prefix_tokens: int = 0,
+    ) -> Query:
         """Build main query supporting normal BM25 or phrase queries
         
         Args:
+            index_instance: BM25IndexBuilder instance (owner-scoped routing may use a per-owner builder)
             query_tokens: List of preprocessed query tokens
             
         Returns:
@@ -147,7 +156,6 @@ class TantivyBM25Retriever(BaseRetriever):
             return Query.all_query()
 
         # Remove stopwords and empty/whitespace-only tokens
-        index_instance = self.index
         stopwords = set(index_instance.tokenizer_manager.get_stopwords())
         filtered_tokens = [t for t in query_tokens if t not in stopwords and t.strip()]
         if not filtered_tokens:
@@ -163,7 +171,7 @@ class TantivyBM25Retriever(BaseRetriever):
             except Exception as e:
                 logger.warning(f"Falling back to term query due to phrase query error: {e}")
 
-        # Default: BM25 multi-term query with OR logic
+        # Default: BM25 multi-term query with OR logic (optionally with a small MUST-prefix to reduce drift).
         logger.info(f"Building query for tokens: {filtered_tokens}")
         
         # Use consistent term query approach for both single and multi-token queries
@@ -178,6 +186,19 @@ class TantivyBM25Retriever(BaseRetriever):
         
         if not term_queries:
             return Query.all_query()
+
+        # Optional: require the first N tokens (as they appear in bm25_query) to match.
+        # This is especially useful when bm25_query is constructed as "anchor_terms feature_terms ..."
+        # and we want to avoid a different file winning solely on generic feature tokens.
+        try:
+            must_n = int(must_prefix_tokens or 0)
+        except Exception:
+            must_n = 0
+        if must_n > 0 and len(term_queries) > 1:
+            must_n = max(0, min(must_n, len(term_queries)))
+            must_part = [(Occur.Must, q) for _, q in term_queries[:must_n]]
+            should_part = term_queries[must_n:]
+            return Query.boolean_query(must_part + should_part)
         
         if len(term_queries) == 1:
             # Single token query - extract the term query directly
@@ -296,8 +317,21 @@ class TantivyBM25Retriever(BaseRetriever):
             return []
 
         # 2. Build main query + filters
-        main_query = self._build_main_query(query_tokens, use_phrase_query)
-        filter_subqueries = self._build_filter_query(filters)
+        must_prefix_tokens = 0
+        try:
+            must_prefix_tokens = int(kwargs.pop("must_prefix_tokens", 0) or 0)
+        except Exception:
+            must_prefix_tokens = 0
+        if must_prefix_tokens < 0:
+            must_prefix_tokens = 0
+
+        main_query = self._build_main_query(
+            index_instance,
+            query_tokens,
+            use_phrase_query,
+            must_prefix_tokens=must_prefix_tokens,
+        )
+        filter_subqueries = self._build_filter_query(index_instance, filters)
 
         final_query = (
             Query.boolean_query([(Occur.Must, main_query)] + filter_subqueries)

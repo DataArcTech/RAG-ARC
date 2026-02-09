@@ -66,6 +66,8 @@ class ThinkTool(GraphTool):
         *,
         temperature: float = 0.1,
         system_prompt: str = THINK_TOOL_SYSTEM_PROMPT_EN,
+        max_tokens: int | None = tool_defaults.THINK_DEFAULT_MAX_TOKENS,
+        include_extra_in_prompt: bool = tool_defaults.THINK_INCLUDE_EXTRA_IN_PROMPT,
         json_repair_attempts: int = tool_defaults.THINK_JSON_REPAIR_DEFAULT_ATTEMPTS,
         json_repair_temperature: float = tool_defaults.THINK_JSON_REPAIR_DEFAULT_TEMPERATURE,
         json_repair_max_raw_chars: int = tool_defaults.THINK_JSON_REPAIR_DEFAULT_MAX_RAW_CHARS,
@@ -74,6 +76,8 @@ class ThinkTool(GraphTool):
         self.llm_connector = llm_connector
         self.temperature = temperature
         self.system_prompt = system_prompt
+        self.max_tokens = None if max_tokens is None else max(0, int(max_tokens))
+        self.include_extra_in_prompt = bool(include_extra_in_prompt)
         self.json_repair_attempts = max(0, int(json_repair_attempts))
         self.json_repair_temperature = float(json_repair_temperature)
         self.json_repair_model = str(json_repair_model).strip() if isinstance(json_repair_model, str) and json_repair_model.strip() else None
@@ -143,6 +147,10 @@ class ThinkTool(GraphTool):
         # The EvidencePool/EvidenceBank stores full content; the think tool consumes metadata-only cards.
         cards = evidence_cards(request.context_evidences or [])
         extra = request.extra or {}
+        available_tools = extra.get("available_tools")
+        previous_tool_call_results = extra.get("previous_tool_call_results")
+        recent_tool_runs = extra.get("recent_tool_runs")
+        current_plan = extra.get("current_plan")
         prompt_payload = {
             "question": request.question,
             "plan_step": request.plan_step,
@@ -150,17 +158,37 @@ class ThinkTool(GraphTool):
             "graph_context": context_snapshot,
             "tool_budget": (context_snapshot.get("metadata") or {}).get("tool_budget") if isinstance(context_snapshot, dict) else None,
             "coverage_metrics": coverage_snapshot,
-            "available_tools": extra.get("available_tools"),
-            "previous_tool_call_results": extra.get("previous_tool_call_results"),
-            "recent_tool_runs": extra.get("recent_tool_runs"),
-            "current_plan": extra.get("current_plan"),
-            "extra": extra,
+            "available_tools": available_tools,
+            "previous_tool_call_results": previous_tool_call_results,
+            "recent_tool_runs": recent_tool_runs,
+            "current_plan": current_plan,
+        }
+        if self.include_extra_in_prompt:
+            # Optional debug escape hatch (disabled by default) since `extra` can be large/redundant.
+            prompt_payload["extra"] = extra
+        else:
+            # Keep only minimal runtime markers (helps debugging without bloating prompts).
+            prompt_payload["runtime"] = {
+                "trigger": extra.get("trigger"),
+                "round": extra.get("round"),
+                "think_mode": extra.get("think_mode"),
+            }
+        prompt_json = self._serialize_payload(prompt_payload)
+        prompt_stats = {
+            "prompt_chars": len(prompt_json),
+            "evidence_cards": len(cards),
+            "available_tools_count": len(available_tools) if isinstance(available_tools, list) else None,
+            "previous_tool_call_results_count": len(previous_tool_call_results) if isinstance(previous_tool_call_results, list) else None,
+            "recent_tool_runs_count": len(recent_tool_runs) if isinstance(recent_tool_runs, list) else None,
+            "current_plan_count": len(current_plan) if isinstance(current_plan, list) else None,
+            "max_tokens": self.max_tokens,
+            "include_extra_in_prompt": self.include_extra_in_prompt,
         }
         messages = [
             {"role": "system", "content": self.system_prompt},
             {
                 "role": "user",
-                "content": self._serialize_payload(prompt_payload),
+                "content": prompt_json,
             },
         ]
         mode = str((request.extra or {}).get("think_mode") or normal_mode.MODE).strip().lower()
@@ -170,6 +198,7 @@ class ThinkTool(GraphTool):
                 self.llm_connector,
                 messages,
                 temperature=self.temperature,
+                max_tokens=self.max_tokens,
                 warn_context="deepsearch.think.init",
             )
             try:
@@ -269,6 +298,7 @@ class ThinkTool(GraphTool):
                     "raw": parsed,
                     "graph_context": context_snapshot,
                     "coverage_metrics": coverage_snapshot,
+                    "prompt_stats": prompt_stats,
                     "tool_calls": [call.model_dump() for call in payload.tool_calls],
                     "plan": [item.model_dump() for item in payload.plan],
                     "report_needed": payload.report_needed,

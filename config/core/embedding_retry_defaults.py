@@ -10,11 +10,14 @@ Rate-limit (429) backoff remains handled separately by the embedding client.
 """
 
 # How many times to retry on transient (non-429) failures.
-EMBEDDING_TRANSIENT_MAX_RETRIES = 2
+#
+# NOTE: OpenAI-compatible gateways (e.g., OpenRouter) may occasionally return an empty `data`
+# envelope or "No successful provider responses" despite an HTTP 200. Treating those as transient
+# and retrying a few more times improves robustness under provider routing blips.
+EMBEDDING_TRANSIENT_MAX_RETRIES = 6
 
 # Exponential backoff base (seconds). Sleep pattern:
 #   min(max, base * (2**attempt)) + uniform(0, jitter)
 EMBEDDING_TRANSIENT_BACKOFF_INITIAL_SECONDS = 1.0
 EMBEDDING_TRANSIENT_BACKOFF_MAX_SECONDS = 20.0
 EMBEDDING_TRANSIENT_BACKOFF_JITTER_SECONDS = 0.8
-

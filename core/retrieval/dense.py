@@ -13,9 +13,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-
-
-
 class DenseRetriever(BaseRetriever):
     """
     Based on vector database for dense retrieval.
@@ -192,6 +189,12 @@ class DenseRetriever(BaseRetriever):
         Returns:
             list of chunks, if include_score=True, then score is stored in metadata["score"]
         """
+        # Owner-scoped mode uses per-owner FAISS indexes loaded lazily (self._index is None by design).
+        # Do NOT short-circuit on self._index when owner-scoped is enabled; route via similarity_search_by_vector().
+        if getattr(self, "_owner_scoped_enabled", False):
+            query_embedding = self.embedding.embed(query)
+            return self.similarity_search_by_vector(query_embedding, include_score=include_score, **kwargs)
+
         if self._index is None or not hasattr(self._index, 'index') or self._index.index is None or self._index.index.ntotal == 0:
             return []
 
@@ -355,6 +358,36 @@ class DenseRetriever(BaseRetriever):
         **kwargs: Any,
     ) -> List[Chunk]:
         """Max marginal relevance search (diversity)"""
+        # Owner-scoped mode uses per-owner FAISS indexes loaded lazily.
+        if getattr(self, "_owner_scoped_enabled", False):
+            owner_id = kwargs.get("owner_id")
+            if owner_id is None:
+                logger.warning("Dense retrieval requires an owner_id; returning no results")
+                return []
+
+            owner_key = normalize_owner_id(owner_id)
+            if owner_key is None:
+                logger.warning("owner_id '%s' could not be normalized; returning no results", owner_id)
+                return []
+
+            db = self._owner_scoped_faiss_db(owner_id=owner_key)
+            if db is None or getattr(db, "index", None) is None or getattr(db.index, "ntotal", 0) <= 0:
+                return []
+
+            query_embedding = self.embedding.embed(query)
+            search_kwargs = {**self.config.search_kwargs, **kwargs}
+            fetch_k = search_kwargs.get("fetch_k", 20)
+            chunks_and_scores = RetrievalHelper.vector_search_with_faiss(
+                db, query_embedding, {**search_kwargs, "k": fetch_k, "metric": self.config.metric}
+            )
+            if not chunks_and_scores:
+                return []
+            search_kwargs["normalize_for_cosine"] = (
+                (hasattr(db.config, "normalize_L2") and bool(getattr(db.config, "normalize_L2")))  # type: ignore[attr-defined]
+                or (hasattr(db.config, "metric") and getattr(db.config, "metric") == "cosine")  # type: ignore[attr-defined]
+            )
+            return RetrievalHelper.mmr_search(query_embedding, chunks_and_scores, self.embedding, search_kwargs)
+
         if self._index is None:
             return []
 

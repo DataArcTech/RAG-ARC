@@ -89,7 +89,22 @@ class OpenAIEmbeddingLLM(EmbeddingLLMBase):
                 raise RuntimeError(f"Embedding failed: {str(e)}")
 
         def _extract_embeddings(response) -> list[list[float]]:
-            if hasattr(response, 'data') and response.data:
+            # OpenAI-compatible gateways (e.g., OpenRouter) may return an envelope with an `error`
+            # field instead of raising a non-2xx HTTP error. Surface that explicitly so retry/backoff
+            # can make an informed decision.
+            if hasattr(response, "error") and getattr(response, "error") is not None:
+                err = getattr(response, "error")
+                # err can be a dict or a pydantic-like object.
+                try:
+                    if isinstance(err, dict):
+                        msg = err.get("message") or err.get("error") or err
+                    else:
+                        msg = getattr(err, "message", None) or str(err)
+                except Exception:  # noqa: BLE001
+                    msg = str(err)
+                raise RuntimeError(f"Embeddings endpoint returned error: {msg}")
+
+            if hasattr(response, "data") and response.data:
                 return [item.embedding for item in response.data]
             if isinstance(response, dict) and 'data' in response:
                 return [item['embedding'] for item in response['data']]
@@ -217,6 +232,15 @@ class OpenAIEmbeddingLLM(EmbeddingLLMBase):
                         return True
                 # Gateway fallback (best-effort, kept minimal).
                 msg = str(exc).lower()
+                # OpenAI-compatible gateways occasionally return a 200 response with an empty `data` field
+                # (observed on OpenRouter / proxy providers). OpenAI SDK raises ValueError("No embedding data received").
+                # Treat this as transient so we can retry with backoff.
+                if "no embedding data received" in msg:
+                    return True
+                # OpenRouter-style envelope: {"error": {"message": "No successful provider responses.", ...}}
+                # surfaced as RuntimeError by `_extract_embeddings` above.
+                if "no successful provider responses" in msg:
+                    return True
                 return ("timed out" in msg) or ("timeout" in msg) or ("connection error" in msg)
 
             def _transient_sleep_seconds(attempt: int) -> float:

@@ -14,7 +14,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-
 class PrunedHippoRAGNeo4jRetriever(
     _PrunedHippoRAGNeo4jCacheMixin,
     _PrunedHippoRAGNeo4jGraphMixin,

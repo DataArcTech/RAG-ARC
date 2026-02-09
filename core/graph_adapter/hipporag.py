@@ -245,11 +245,22 @@ class HippoRAGGraphAdapter(GraphDeepSearchAdapter):
         if not query:
             return base
 
+        # Respect file_scope / query_options when provided by upstream tools.
+        # This keeps heavy traversal strategies (beam_search, bridge_lookup, ppr_prefetch)
+        # scoped to one or more candidate files when requested, avoiding global drift.
+        query_options: Dict[str, Any] = {}
+        raw_options = strategy.get("query_options")
+        if isinstance(raw_options, Mapping):
+            query_options.update(dict(raw_options))
+        if "file_scope" not in query_options and isinstance(strategy.get("file_scope"), Mapping):
+            query_options["file_scope"] = dict(strategy.get("file_scope"))  # type: ignore[arg-type]
+        query_options.setdefault("export_subgraph", True)
+
         payload = await self.aquery_subgraph(
             query,
             channel="graph",
             access_scope=access_scope,
-            query_options={"export_subgraph": True},
+            query_options=query_options,
         )
         edges = payload.get("edges") if isinstance(payload, dict) else None
         if not isinstance(edges, list) or not edges:

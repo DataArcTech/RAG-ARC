@@ -225,7 +225,7 @@ class _GraphChunkChannel:
             try:
                 from core.utils.query_variants import generate_query_variants
 
-                variant_queries = generate_query_variants(query, llm_connector=self.llm_connector)
+                variant_queries = generate_query_variants(query, llm_connector=self.llm_connector, cache_scope=str(normalized_owner or "").strip() or None)
             except Exception:  # noqa: BLE001
                 variant_queries = [str(query or "").strip()]
 

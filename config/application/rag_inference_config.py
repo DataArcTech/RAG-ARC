@@ -37,6 +37,26 @@ class RAGCandidateSelectionConfig(BaseModel):
     web_candidates_k: int = Field(5, ge=0, le=20, description="Number of web candidates to add.")
     rerank_keep_k: int = Field(5, ge=1, le=50, description="Number of chunks kept after LLM reranking.")
 
+    file_prune_enabled: bool = Field(
+        default=True,
+        description=(
+            "Whether to prune retrieved chunks by file coverage before reranking (file-first candidate selection). "
+            "This improves precision and reduces reranker context cost."
+        ),
+    )
+    file_prune_max_files: int = Field(
+        default=4,
+        ge=1,
+        le=50,
+        description="Max number of files to keep after file-level aggregation (before reranking).",
+    )
+    file_prune_max_chunks_per_file: int = Field(
+        default=6,
+        ge=1,
+        le=200,
+        description="Max number of chunks to keep per selected file (before reranking).",
+    )
+
 
 class RAGInferenceConfig(AbstractConfig):
     type: Literal["rag_inference"] = "rag_inference"

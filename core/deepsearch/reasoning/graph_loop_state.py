@@ -4,6 +4,7 @@ from typing import List
 
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.deepsearch.memory.plan_state import PlanState
+from core.deepsearch.tooling.run_tool_memo import RunToolMemoizer
 
 
 _RUN_EVIDENCES: contextvars.ContextVar[List[EvidenceChunk] | None] = contextvars.ContextVar(
@@ -19,6 +20,10 @@ _RUN_THINK_COUNT: contextvars.ContextVar[int] = contextvars.ContextVar("deepsear
 _RUN_REFLECT_COUNT: contextvars.ContextVar[int] = contextvars.ContextVar("deepsearch_run_reflect_count", default=0)
 _RUN_PLAN_STATE: contextvars.ContextVar[PlanState | None] = contextvars.ContextVar(
     "deepsearch_run_plan_state",
+    default=None,
+)
+_RUN_TOOL_MEMO: contextvars.ContextVar[RunToolMemoizer | None] = contextvars.ContextVar(
+    "deepsearch_run_tool_memo",
     default=None,
 )
 
@@ -45,6 +50,7 @@ __all__ = [
     "_RUN_THINK_COUNT",
     "_RUN_TOTAL_STEPS",
     "_RUN_PLAN_STATE",
+    "_RUN_TOOL_MEMO",
     "_run_evidence_state",
     "_run_plan_state",
 ]

@@ -6,7 +6,14 @@ a readable ToC tree for the LLM to pick a section before reading.
 from typing import Any, Dict, List
 
 from config.core.deepsearch import tool_defaults
-from core.deepsearch.utils.section_tree import build_section_tree, fetch_section_nodes, normalize_file_id
+from config.core.deepsearch import runtime_cache_defaults
+from core.deepsearch.utils.section_tree import (
+    build_section_tree,
+    fetch_section_nodes,
+    fetch_section_tree_fingerprint,
+    normalize_file_id,
+)
+from framework.cache import TTLRUCache
 
 from ..base import GraphTool, ToolDescriptor, ToolResult, ToolRunRequest, build_input_schema
 from ..governance_tags import EVIDENCE_DERIVED, SCOPE_FILE, SCOPE_OWNER
@@ -48,6 +55,26 @@ class TocTreeTool(GraphTool):
         },
     )
 
+    def __init__(
+        self,
+        *,
+        cache_enabled: bool | None = None,
+        cache_max_entries: int | None = None,
+        cache_ttl_seconds: float | None = None,
+    ) -> None:
+        if cache_enabled is None:
+            cache_enabled = runtime_cache_defaults.DEFAULT_TOC_TREE_CACHE_ENABLED
+        if cache_max_entries is None:
+            cache_max_entries = runtime_cache_defaults.DEFAULT_TOC_TREE_CACHE_MAX_ENTRIES
+        if cache_ttl_seconds is None:
+            cache_ttl_seconds = float(runtime_cache_defaults.DEFAULT_TOC_TREE_CACHE_TTL_SECONDS)
+        self._cache: TTLRUCache[tuple[str, str, str, int, int], Dict[str, Any]] | None = None
+        if cache_enabled and cache_max_entries and cache_ttl_seconds:
+            try:
+                self._cache = TTLRUCache(max_entries=int(cache_max_entries), ttl_seconds=float(cache_ttl_seconds))
+            except Exception:
+                self._cache = None
+
     async def run(self, request: ToolRunRequest) -> ToolResult:
         extra = request.extra or {}
         file_id, file_id_raw = normalize_file_id(extra.get("file_id"))
@@ -62,6 +89,31 @@ class TocTreeTool(GraphTool):
         max_nodes = _coerce_int(extra.get("max_nodes")) or int(tool_defaults.TOC_TREE_MAX_NODES)
         max_depth = max(1, max_depth)
         max_nodes = max(1, max_nodes)
+
+        # Cache ToC trees by owner+file+tree fingerprint; formatting params are part of the key.
+        if self._cache is not None and request.access_scope is not None:
+            try:
+                owner_scope_id = str(getattr(request.access_scope, "scope_id", "") or "")
+            except Exception:
+                owner_scope_id = ""
+            if owner_scope_id:
+                fp, fp_diag = await fetch_section_tree_fingerprint(
+                    adapter=request.adapter,
+                    access_scope=request.access_scope,
+                    file_id=file_id,
+                )
+                if fp:
+                    key = (owner_scope_id, file_id, fp, int(max_depth), int(max_nodes))
+                    cached = self._cache.get(key)
+                    if isinstance(cached, dict) and "summary" in cached and "diagnostics" in cached:
+                        diag = dict(cached.get("diagnostics") or {})
+                        diag.setdefault("cache", {})
+                        diag["cache"] = {
+                            "hit": True,
+                            "fingerprint": fp,
+                            "fingerprint_diag": fp_diag,
+                        }
+                        return ToolResult(summary=str(cached.get("summary") or ""), diagnostics=diag)
         sections, fetch_diag = await fetch_section_nodes(
             adapter=request.adapter,
             access_scope=request.access_scope,
@@ -95,6 +147,26 @@ class TocTreeTool(GraphTool):
             if reason == "owner_scope_missing":
                 return ToolResult(summary="toc.tree skipped: missing owner scope.", diagnostics=diagnostics)
             return ToolResult(summary="toc.tree returned no sections (PageIndex Section nodes missing).", diagnostics=diagnostics)
+
+        if self._cache is not None and request.access_scope is not None:
+            try:
+                owner_scope_id = str(getattr(request.access_scope, "scope_id", "") or "")
+            except Exception:
+                owner_scope_id = ""
+            if owner_scope_id:
+                fp, fp_diag = await fetch_section_tree_fingerprint(
+                    adapter=request.adapter,
+                    access_scope=request.access_scope,
+                    file_id=file_id,
+                )
+                if fp:
+                    key = (owner_scope_id, file_id, fp, int(max_depth), int(max_nodes))
+                    diagnostics.setdefault("cache", {})
+                    diagnostics["cache"] = {"hit": False, "fingerprint": fp, "fingerprint_diag": fp_diag}
+                    try:
+                        self._cache.set(key, {"summary": summary, "diagnostics": diagnostics})
+                    except Exception:
+                        pass
         return ToolResult(summary=summary, diagnostics=diagnostics)
 
     @staticmethod

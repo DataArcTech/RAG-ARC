@@ -54,6 +54,37 @@ class RAGInference(AbstractModule):
         logger.info("Building retriever...")
         self.retriever = self.config.retrieval_config.build()
         logger.info("Retriever built successfully")
+
+        # Startup visibility: if a MultiPath branch weight is 0, that branch is skipped in normal RAG.
+        # This affects online retrieval only; offline indexing/ingestion still builds indices as configured.
+        try:
+            mp_cfg = getattr(self.retriever, "config", None)
+            weights = getattr(mp_cfg, "weights", None)
+            retriever_cfgs = list(getattr(mp_cfg, "retrievers", None) or [])
+            if isinstance(weights, list) and retriever_cfgs:
+                enabled: list[str] = []
+                disabled: list[str] = []
+                for idx, rcfg in enumerate(retriever_cfgs):
+                    rtype = str(getattr(rcfg, "type", "") or type(rcfg).__name__)
+                    w = None
+                    if idx < len(weights):
+                        try:
+                            w = float(weights[idx])
+                        except Exception:  # noqa: BLE001
+                            w = None
+                    if w is not None and w <= 0:
+                        disabled.append(f"{idx}:{rtype}")
+                    else:
+                        enabled.append(f"{idx}:{rtype}")
+                if disabled:
+                    logger.info(
+                        "Normal RAG MultiPath: enabled=%s disabled=%s weights=%s",
+                        enabled,
+                        disabled,
+                        weights,
+                    )
+        except Exception:  # noqa: BLE001
+            pass
         self.graph_retriever = None
         graph_cls_name = "PrunedHippoRAGNeo4jRetriever"
         if hasattr(self.retriever, "retrievers"):
@@ -516,6 +547,7 @@ class RAGInference(AbstractModule):
         rewrite_kwargs: dict[str, Any] = {}
         rewritten_query: str
         retrieval_ratios: dict[str, float] | None = None
+        bm25_query: str | None = None
         # Legacy fields kept for backward compatibility with message building, now unused.
         rewrite_intent: str | None = None
         rewrite_anchors: list[str] = []
@@ -534,6 +566,7 @@ class RAGInference(AbstractModule):
         if skip_retrieval:
             rewritten_query = str(query or "").strip()
             retrieval_ratios = None
+            bm25_query = None
         elif rag_retrieval_dynamic_quota_enabled() and hasattr(self.query_rewriter, "rewrite_query_with_routing"):
             try:
                 fn = getattr(self.query_rewriter, "rewrite_query_with_routing")
@@ -542,13 +575,16 @@ class RAGInference(AbstractModule):
                 call_kwargs = dict(rewrite_kwargs)
                 if not accepts_var_kw and "history_text" not in sig.parameters:
                     call_kwargs.pop("history_text", None)
-                rewritten_query, retrieval_ratios = fn(query, **call_kwargs)  # type: ignore[misc]
+                rewritten_query, retrieval_ratios, bm25_query = fn(query, **call_kwargs)  # type: ignore[misc]
             except Exception as exc:  # noqa: BLE001
                 logger.warning("rewrite_query_with_routing failed; falling back to rewrite_query: %s", exc)
                 rewritten_query = self.query_rewriter.rewrite_query(query, **rewrite_kwargs)
                 retrieval_ratios = None
+                bm25_query = None
         else:
             rewritten_query = self.query_rewriter.rewrite_query(query, **rewrite_kwargs)
+            retrieval_ratios = None
+            bm25_query = None
         self._emit_progress(
             progress_callback,
             {
@@ -560,6 +596,7 @@ class RAGInference(AbstractModule):
                 **({"anchors": rewrite_anchors} if rewrite_anchors else {}),
                 **({"reason": rewrite_reason} if rewrite_reason else {}),
                 **({"retrieval_ratios": retrieval_ratios} if retrieval_ratios else {}),
+                **({"bm25_query": bm25_query} if bm25_query else {}),
             },
         )
 
@@ -691,6 +728,7 @@ class RAGInference(AbstractModule):
                     owner_id=owner_token,
                     return_subgraph_info=return_subgraph,
                     k=graph_candidates_k,
+                    **({"bm25_query": bm25_query} if bm25_query else {}),
                     **({"retrieval_ratios": retrieval_ratios} if retrieval_ratios else {}),
                 )
                 per_info = self._consume_subgraph_info(retrieved)
@@ -869,6 +907,49 @@ class RAGInference(AbstractModule):
         chunks = dedupe_chunks(chunks)
         if len(chunks) != before:
             logger.info("Deduped chunks after web merge: %d -> %d", before, len(chunks))
+
+        # File-level candidate pruning (file-first): keep top files then top chunks per file.
+        # Keep it close to rerank so it sees the final merged candidate pool.
+        try:
+            from core.retrieval.file_pruning import prune_chunks_by_file
+
+            enabled = bool(getattr(candidate_cfg, "file_prune_enabled", True))
+            max_files = int(getattr(candidate_cfg, "file_prune_max_files", 4))
+            max_chunks_per_file = int(getattr(candidate_cfg, "file_prune_max_chunks_per_file", 6))
+            self._emit_progress(
+                progress_callback,
+                {
+                    "stage": "candidate_prune",
+                    "status": "start",
+                    "enabled": enabled,
+                    "max_files": max_files,
+                    "max_chunks_per_file": max_chunks_per_file,
+                    "chunks_in": len(chunks),
+                },
+            )
+            pruned, info = prune_chunks_by_file(
+                chunks,
+                enabled=enabled,
+                max_files=max_files,
+                max_chunks_per_file=max_chunks_per_file,
+            )
+            chunks = pruned
+            self._emit_progress(
+                progress_callback,
+                {
+                    "stage": "candidate_prune",
+                    "status": "end",
+                    "enabled": bool(getattr(info, "enabled", False)),
+                    "chunks_in": int(getattr(info, "chunks_in", len(chunks))),
+                    "chunks_out": int(getattr(info, "chunks_out", len(chunks))),
+                    "files_in": int(getattr(info, "files_in", 0)),
+                    "files_kept": int(getattr(info, "files_kept", 0)),
+                    "top_files": getattr(info, "top_files", None),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Candidate prune failed (ignored): %s", exc)
+
         subgraph_info = None
         if subgraph_infos:
             if len(subgraph_infos) == 1:

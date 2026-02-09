@@ -226,14 +226,34 @@ class _PrunedHippoRAGNeo4jRetrieveMixin:
             variant_queries = [str(query or "").strip()]
 
         # Use a simple, general-domain aggregation: elementwise max over variant dense scores.
-        # This helps mixed-script corpora (e.g., Simplified vs Traditional Chinese) without any domain rules.
-        query_doc_scores = None
-        for qv in variant_queries:
-            if not str(qv or "").strip():
-                continue
-            scores_v = self._dense_passage_retrieval_scores(str(qv))
-            query_doc_scores = scores_v if query_doc_scores is None else np.maximum(query_doc_scores, scores_v)
-        if query_doc_scores is None:
+        # Compute variant embeddings in one batch to reduce remote embedding round-trips.
+        cleaned_variants = [str(qv or "").strip() for qv in (variant_queries or [])]
+        cleaned_variants = [qv for qv in cleaned_variants if qv]
+        if not cleaned_variants:
+            cleaned_variants = [str(query or "").strip()]
+
+        try:
+            query_embs = self._get_query_embeddings(cleaned_variants)
+            if query_embs.size == 0:
+                raise RuntimeError("Empty query embeddings")
+
+            # Normalize query embeddings if chunk embeddings are normalized.
+            if self.graph_store.normalize_chunk_embeddings:
+                norms = np.linalg.norm(query_embs, axis=1, keepdims=True)
+                norms = np.where(norms > 0, norms, 1.0)
+                query_embs = query_embs / norms
+
+            if self.passage_embeddings_array.size == 0:
+                query_doc_scores = np.zeros(len(self.passage_node_keys), dtype=np.float32)
+            else:
+                # dtype alignment (float16 acceleration paths)
+                if self.passage_embeddings_array.dtype == np.float16 and query_embs.dtype != np.float16:
+                    query_embs = query_embs.astype(np.float16)
+                scores_mat = np.dot(self.passage_embeddings_array, query_embs.T)
+                if scores_mat.dtype == np.float16:
+                    scores_mat = scores_mat.astype(np.float32)
+                query_doc_scores = np.max(scores_mat, axis=1)
+        except Exception:  # noqa: BLE001
             query_doc_scores = self._dense_passage_retrieval_scores(query)
 
         # Step 1: Retrieve relevant facts

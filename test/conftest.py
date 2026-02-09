@@ -31,3 +31,31 @@ def pytest_configure() -> None:
     os.environ.setdefault("RAGARC_INDEXING_DEPENDENCY_CHECK_MODE", "off")
     # Avoid filesystem/object-store probes in unit tests unless explicitly enabled.
     os.environ.setdefault("KNOWLEDGE_ACTIVE_CHECK_BLOB_EXISTS", "0")
+
+
+def pytest_runtest_setup(item) -> None:  # noqa: ANN001
+    # Clear in-process caches between tests to avoid cross-test coupling.
+    try:
+        from config.core.retrieval.dense_config import DenseRetrieverConfig
+
+        DenseRetrieverConfig.clear_process_cache()
+    except Exception:
+        pass
+    try:
+        from config.core.retrieval.tantivy_bm25_config import TantivyBM25RetrieverConfig
+
+        TantivyBM25RetrieverConfig.clear_process_cache()
+    except Exception:
+        pass
+    try:
+        from config.core.retrieval.pruned_hipporag_neo4j_config import PrunedHippoRAGNeo4jRetrievalConfig
+
+        PrunedHippoRAGNeo4jRetrievalConfig.clear_process_cache()
+    except Exception:
+        pass
+    try:
+        from encapsulation.llm.utils.openai_client import clear_openai_client_cache
+
+        clear_openai_client_cache()
+    except Exception:
+        pass

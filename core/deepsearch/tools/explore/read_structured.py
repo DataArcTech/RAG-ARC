@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from config import pageindex as pageindex_cfg
 from config.core.deepsearch.evidence_defaults import EVIDENCE_CLASS_SOURCE_TEXT
+from config.core.deepsearch import tool_defaults
 from encapsulation.data_model.deepsearch import EvidenceChunk
 from core.deepsearch.utils.evidence_ids import hashed_chunk_id
 from core.deepsearch.utils.evidence_kinds import EVIDENCE_KIND_PRIMARY
@@ -130,6 +131,15 @@ def _join_full_page(chunks: Sequence[_ChunkRow]) -> tuple[str, list[str]]:
     return "\n".join(parts).strip(), used_ids
 
 
+def _median(values: Sequence[int]) -> int:
+    nums = [int(v) for v in values if isinstance(v, (int, float))]
+    if not nums:
+        return 0
+    nums.sort()
+    mid = len(nums) // 2
+    return int(nums[mid]) if len(nums) % 2 == 1 else int((nums[mid - 1] + nums[mid]) / 2)
+
+
 class ReadPagesTool(GraphTool):
     descriptor = ToolDescriptor(
         name="read.pages",
@@ -198,6 +208,7 @@ class ReadPagesTool(GraphTool):
         page_summaries: list[str] = []
         filename = _extract_filename(all_rows)
         page_diag: dict[int, dict[str, Any]] = {}
+        page_char_counts: dict[int, int] = {}
         for page in range(page_start, page_end + 1):
             page_rows = [row for row in all_rows if _row_overlaps_page(row, page)]
             if not page_rows:
@@ -246,7 +257,14 @@ class ReadPagesTool(GraphTool):
                 )
             )
             page_summaries.append(f"p{page}: {len(used_ids)} chunks, {len(content)} chars")
-            page_diag[page] = {"used_chunk_count": len(used_ids), "node_types": node_type_counts, "image_url_count": len(image_urls)}
+            char_count = int(len(content))
+            page_char_counts[page] = char_count
+            page_diag[page] = {
+                "used_chunk_count": len(used_ids),
+                "char_count": char_count,
+                "node_types": node_type_counts,
+                "image_url_count": len(image_urls),
+            }
 
         if not evidences:
             return ToolResult(
@@ -255,12 +273,69 @@ class ReadPagesTool(GraphTool):
             )
 
         summary = "read.pages returned full page evidence: " + "; ".join(page_summaries)
+        # Navigation-only continuity hints:
+        # - Tables/equations often span adjacent pages.
+        # - List-heavy or unusually dense pages may continue to p±1.
+        # This tool MUST NOT auto-fetch; it only suggests the next read.pages call.
+        suggested_expansions: list[dict[str, Any]] = []
+        if bool(getattr(tool_defaults, "READ_PAGES_SIGNALS_ENABLED", True)):
+            delta = int(getattr(tool_defaults, "READ_PAGES_SIGNALS_EXPAND_DELTA_PAGES", 1) or 1)
+            delta = max(1, delta)
+            abs_min_chars = int(getattr(tool_defaults, "READ_PAGES_SIGNALS_LONG_PAGE_MIN_CHARS", 0) or 0)
+            abs_min_chunks = int(getattr(tool_defaults, "READ_PAGES_SIGNALS_DENSE_PAGE_MIN_CHUNKS", 0) or 0)
+            mult = float(getattr(tool_defaults, "READ_PAGES_SIGNALS_MEDIAN_MULTIPLIER", 1.0) or 1.0)
+            list_min_chunks = int(getattr(tool_defaults, "READ_PAGES_SIGNALS_LIST_MIN_CHUNKS", 0) or 0)
+
+            median_chars = _median(list(page_char_counts.values()))
+            median_chunks = _median([int(info.get("used_chunk_count") or 0) for info in page_diag.values() if isinstance(info, dict)])
+
+            reasons: set[str] = set()
+            for _p, info in page_diag.items():
+                if not isinstance(info, dict):
+                    continue
+                node_types = info.get("node_types") or {}
+                char_count = int(info.get("char_count") or 0)
+                used_chunk_count = int(info.get("used_chunk_count") or 0)
+
+                if int(node_types.get("table") or 0) > 0 or int(node_types.get("equation") or 0) > 0:
+                    reasons.add("table_or_equation_detected")
+                if list_min_chunks > 0 and int(node_types.get("list") or 0) >= list_min_chunks:
+                    reasons.add("list_detected")
+
+                # Dense/long-page heuristic: absolute or unusually large vs median within this call.
+                if abs_min_chars > 0 and char_count >= abs_min_chars:
+                    reasons.add("long_page_detected")
+                elif median_chars > 0 and mult > 1.0 and char_count >= int(median_chars * mult):
+                    reasons.add("long_page_detected")
+
+                if abs_min_chunks > 0 and used_chunk_count >= abs_min_chunks:
+                    reasons.add("dense_page_detected")
+                elif median_chunks > 0 and mult > 1.0 and used_chunk_count >= int(median_chunks * mult):
+                    reasons.add("dense_page_detected")
+
+            if reasons:
+                lo = max(0, int(page_start) - delta)
+                hi = int(page_end) + delta
+                if lo != page_start or hi != page_end:
+                    suggested_expansions.append(
+                        {
+                            "tool": "read.pages",
+                            "args": {"file_id": file_id, "page_start": lo, "page_end": hi, "goal": "expand contiguous pages for continuity (navigation hint)"},
+                            "reason": ",".join(sorted(reasons)),
+                        }
+                    )
+                    summary = summary.rstrip() + f" TIP: continuity hint ({','.join(sorted(reasons))}); consider expanding to p{lo}-p{hi}."
         diagnostics = {
             **fetch_diag,
             "page_start": page_start,
             "page_end": page_end,
             "pages_returned": len(evidences),
             "pages": page_diag,
+            "suggested_next_steps": suggested_expansions,
+            "signals": {
+                "median_page_chars": int(median_chars) if "median_chars" in locals() else None,
+                "median_page_chunks": int(median_chunks) if "median_chunks" in locals() else None,
+            },
         }
         return ToolResult(summary=summary, evidences=evidences, diagnostics=diagnostics)
 
