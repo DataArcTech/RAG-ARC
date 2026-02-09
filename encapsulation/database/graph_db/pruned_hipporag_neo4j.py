@@ -18,6 +18,7 @@ from encapsulation.database.graph_db.base import GraphStore
 from encapsulation.database.graph_db.pruned_hipporag_neo4j_cache import _PrunedHippoRAGNeo4jCacheMixin
 from encapsulation.database.graph_db.pruned_hipporag_neo4j_embeddings import _PrunedHippoRAGNeo4jEmbeddingsMixin
 from encapsulation.database.graph_db.pruned_hipporag_neo4j_indexing import _PrunedHippoRAGNeo4jIndexingMixin
+from encapsulation.database.graph_db.pruned_hipporag_neo4j_kg_maintenance import _PrunedHippoRAGNeo4jKGMaintenanceMixin
 from encapsulation.database.graph_db.pruned_hipporag_neo4j_persistence import _PrunedHippoRAGNeo4jPersistenceMixin
 from encapsulation.data_model.schema import Chunk, GraphData
 from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id, text_processing
@@ -43,6 +44,7 @@ class PrunedHippoRAGNeo4jStore(
     _PrunedHippoRAGNeo4jEmbeddingsMixin,
     _PrunedHippoRAGNeo4jCacheMixin,
     _PrunedHippoRAGNeo4jIndexingMixin,
+    _PrunedHippoRAGNeo4jKGMaintenanceMixin,
     _PrunedHippoRAGNeo4jPersistenceMixin,
     GraphStore,
 ):
@@ -280,6 +282,17 @@ class PrunedHippoRAGNeo4jStore(
             # Relationships: CANONICAL_OF / ALIAS_OF.
             "CREATE INDEX canonical_of_owner IF NOT EXISTS FOR ()-[r:CANONICAL_OF]-() ON (r.owner_id)",
             "CREATE INDEX alias_of_owner IF NOT EXISTS FOR ()-[r:ALIAS_OF]-() ON (r.owner_id)",
+            # Nodes: entity mentions (occurrence materialization, used by KG maintenance).
+            "CREATE CONSTRAINT entity_mention_id_unique IF NOT EXISTS FOR (m:EntityMention) REQUIRE m.mention_id IS UNIQUE",
+            "CREATE INDEX entity_mention_owner_chunk IF NOT EXISTS FOR (m:EntityMention) ON (m.owner_id, m.chunk_id)",
+            "CREATE INDEX entity_mention_owner_surface IF NOT EXISTS FOR (m:EntityMention) ON (m.owner_id, m.surface_entity_id)",
+            # Nodes: entity identities (disambiguation clusters / real-world entity centers).
+            "CREATE CONSTRAINT entity_identity_id_unique IF NOT EXISTS FOR (i:EntityIdentity) REQUIRE i.identity_id IS UNIQUE",
+            "CREATE INDEX entity_identity_owner_type IF NOT EXISTS FOR (i:EntityIdentity) ON (i.owner_id, i.entity_type_key)",
+            "CREATE INDEX entity_identity_owner_surface IF NOT EXISTS FOR (i:EntityIdentity) ON (i.owner_id, i.surface_entity_id)",
+            # Relationships: RESOLVED_TO / SAME_AS.
+            "CREATE INDEX resolved_to_owner IF NOT EXISTS FOR ()-[r:RESOLVED_TO]-() ON (r.owner_id)",
+            "CREATE INDEX same_as_owner IF NOT EXISTS FOR ()-[r:SAME_AS]-() ON (r.owner_id)",
         ]
         if not include_existence_constraints:
             return statements
@@ -301,6 +314,11 @@ class PrunedHippoRAGNeo4jStore(
             "CREATE CONSTRAINT entity_alias_text_required IF NOT EXISTS FOR (a:EntityAlias) REQUIRE a.alias_text_normalized IS NOT NULL",
             "CREATE CONSTRAINT canonical_of_owner_required IF NOT EXISTS FOR ()-[r:CANONICAL_OF]-() REQUIRE r.owner_id IS NOT NULL",
             "CREATE CONSTRAINT alias_of_owner_required IF NOT EXISTS FOR ()-[r:ALIAS_OF]-() REQUIRE r.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT entity_mention_owner_required IF NOT EXISTS FOR (m:EntityMention) REQUIRE m.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT entity_mention_chunk_required IF NOT EXISTS FOR (m:EntityMention) REQUIRE m.chunk_id IS NOT NULL",
+            "CREATE CONSTRAINT entity_mention_surface_required IF NOT EXISTS FOR (m:EntityMention) REQUIRE m.surface_entity_id IS NOT NULL",
+            "CREATE CONSTRAINT entity_identity_owner_required IF NOT EXISTS FOR (i:EntityIdentity) REQUIRE i.owner_id IS NOT NULL",
+            "CREATE CONSTRAINT entity_identity_type_required IF NOT EXISTS FOR (i:EntityIdentity) REQUIRE i.entity_type_key IS NOT NULL",
         ]
         return statements + existence
 

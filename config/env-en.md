@@ -52,6 +52,20 @@ Recommended places to tune parameters:
 - `config/output_limits.py`: response trimming / evidence caps.
 - `config/core/deepsearch/*_defaults.py`: DeepSearch loop/tool/report defaults used at runtime.
 
+Knowledge-graph (KG) long-term maintenance:
+
+- `config/json_configs/knowledge*.json`:
+  - `max_concurrent_kg_maintenance`: concurrency for background KG maintenance tasks (`0` means reuse `max_concurrent_indexing`).
+  - `index_manager_config.indexer_configs[].graph_store_config.kg_maintenance.l0.*`:
+    - L0 (hot-path) materializes `EntityMention` (occurrence evidence) during ingest for later disambiguation/alignment and delete-time repair.
+    - L0 is best-effort + budgeted: if it exceeds budget it is marked deferred and a background backfill completes the missing mentions (without blocking "askable" readiness).
+  - `index_manager_config.indexer_configs[].graph_store_config.kg_maintenance.l1_*` (enabled by default; can be turned off):
+    - L1 (background) disambiguates same-name same-type entities using mention context (chunk embeddings) and creates `EntityIdentity` cluster centers.
+    - Alignment is represented via `(:EntityMention)-[:RESOLVED_TO]->(:EntityIdentity)`; original surface `Entity` nodes are preserved.
+    - Optionally emits `(:EntityIdentity)-[:SAME_AS]->(:EntityIdentity)` as a weak alias/same-real-world-entity signal (no hard merge).
+    - When `l1_enabled=true`: after each successful file indexing, the service schedules an L1 run in the background (strict owner/file scope; does not block "askable" readiness).
+    - When `l1_enabled=false`: only L0 mention materialization runs; you can trigger maintenance manually via scripts/API during off-peak hours.
+
 How secrets flow into configs:
 - JSON supports `${ENV_VAR}` placeholders (e.g. `${OPENAI_API_KEY}`), so keep secrets in `.env` and reference them from `config/`.
 

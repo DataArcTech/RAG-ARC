@@ -52,6 +52,20 @@ Benchmark/实验模式：
 - `config/output_limits.py`：API 返回裁剪与证据上限（payload 限制）。
 - `config/core/deepsearch/*_defaults.py`：DeepSearch 的 loop/tool/report 默认参数（运行时读取）。
 
+与“知识图谱长期维护”相关的配置（重要）：
+
+- `config/json_configs/knowledge*.json`：
+  - `max_concurrent_kg_maintenance`：KG 维护后台任务并发（0 表示复用 `max_concurrent_indexing`）。
+  - `index_manager_config.indexer_configs[].graph_store_config.kg_maintenance.l0.*`：
+    - L0（热路径）会在入库时**物化 EntityMention（occurence evidence）**，用于后续实体消歧/对齐与删除修复。
+    - L0 是 best-effort + 预算化：超过预算会标记 deferred，并由后台任务补齐 mention（不阻塞“文件可问答”）。
+  - `index_manager_config.indexer_configs[].graph_store_config.kg_maintenance.l1_*`（默认开启，可按需关闭）：
+    - L1（后台）会基于 mention 的上下文（chunk embedding）对同名同类型实体做**消歧**，产出 `EntityIdentity`（聚类中心）。
+    - 通过 `(:EntityMention)-[:RESOLVED_TO]->(:EntityIdentity)` 保留**对齐/归一化**关系；不会删除原始 surface `Entity`。
+    - 可选输出 `(:EntityIdentity)-[:SAME_AS]->(:EntityIdentity)` 作为“别名/同一现实实体”的弱对齐信号（不会做强合并）。
+    - 当 `l1_enabled=true` 时：每次文件入库成功后会自动在后台触发一次 L1（严格 owner/file scoped，不阻塞“可问答”就绪）。
+    - 当 `l1_enabled=false` 时：仅保留 L0 mention 物化；可在低峰期用脚本/API 手动运行维护。
+
 密钥如何在配置里引用：
 - JSON 支持 `${ENV_VAR}` 占位符（例如 `${OPENAI_API_KEY}`），因此密钥放 `.env`，参数放 `config/`。
 

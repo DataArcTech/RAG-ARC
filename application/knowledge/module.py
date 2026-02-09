@@ -39,12 +39,17 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
         
         # Semaphore to control concurrent indexing operations
         self.indexing_semaphore = asyncio.Semaphore(config.max_concurrent_indexing)
+        max_kg = int(getattr(config, "max_concurrent_kg_maintenance", 0) or 0)
+        if max_kg <= 0:
+            max_kg = int(getattr(config, "max_concurrent_indexing", 5) or 5)
+        self.kg_maintenance_semaphore = asyncio.Semaphore(max_kg)
         self._active_index_tasks: Dict[str, asyncio.Task] = {}
         self._files_marked_for_deletion: set[str] = set()
         self._files_marked_for_deletion_by_owner: Dict[uuid.UUID, set[str]] = {}
         self._file_owner_cache: Dict[str, uuid.UUID] = {}
         self._active_deletion_tasks: Dict[str, asyncio.Task] = {}
         self._deletion_failures: Dict[str, str] = {}
+        self._active_kg_maintenance_tasks: Dict[str, asyncio.Task] = {}
 
     def _use_celery(self) -> bool:
         return os.getenv("TASK_QUEUE_MODE", "inprocess").lower() == "celery"
@@ -72,6 +77,90 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
                 )
 
         task.add_done_callback(_cleanup)
+
+    def _track_kg_maintenance_task(self, key: str, task: asyncio.Task) -> None:
+        """Register a background KG maintenance task so we don't schedule duplicates."""
+        self._active_kg_maintenance_tasks[key] = task
+
+        def _cleanup(fut: asyncio.Task, k: str = key) -> None:
+            self._active_kg_maintenance_tasks.pop(k, None)
+            if fut.cancelled():
+                logger.info("Background KG maintenance task cancelled: %s", k)
+            elif fut.exception():
+                logger.error("Background KG maintenance task failed (%s): %s", k, fut.exception(), exc_info=True)
+
+        task.add_done_callback(_cleanup)
+
+    def _get_graph_stores_with_l0_mentions(self):  # noqa: ANN001
+        stores = []
+        try:
+            indexers = getattr(self.file_index, "indexers", None) or []
+            for indexer in indexers:
+                store = getattr(indexer, "graph_store", None)
+                if store is None:
+                    continue
+                if callable(getattr(store, "materialize_entity_mentions_for_chunk_ids", None)):
+                    stores.append(store)
+        except Exception:
+            return []
+        return stores
+
+    async def _run_kg_maintenance_l0_backfill(self, *, file_id: str, owner_id: uuid.UUID, chunk_ids: list[str]) -> None:
+        """Background continuation: materialize mention nodes for the file's chunks."""
+        async with self.kg_maintenance_semaphore:
+            stores = self._get_graph_stores_with_l0_mentions()
+            if not stores:
+                logger.warning("No graph store available for L0 mention backfill (file_id=%s)", file_id)
+                return
+            store = stores[0]
+            logger.info("Starting L0 mention backfill (file_id=%s owner_id=%s chunks=%s)", file_id, owner_id, len(chunk_ids))
+            await self._run_blocking(
+                store.materialize_entity_mentions_for_chunk_ids,
+                owner_id=str(owner_id),
+                chunk_ids=chunk_ids,
+            )
+            logger.info("Completed L0 mention backfill (file_id=%s owner_id=%s)", file_id, owner_id)
+
+    def _get_graph_stores_with_l1_maintenance(self):  # noqa: ANN001
+        stores = []
+        try:
+            indexers = getattr(self.file_index, "indexers", None) or []
+            for indexer in indexers:
+                store = getattr(indexer, "graph_store", None)
+                if store is None:
+                    continue
+                if callable(getattr(store, "run_kg_maintenance_l1_for_file_ids", None)):
+                    stores.append(store)
+        except Exception:
+            return []
+        return stores
+
+    def _is_l1_enabled_anywhere(self) -> bool:
+        for store in self._get_graph_stores_with_l1_maintenance():
+            cfg = getattr(store, "config", None)
+            kg_cfg = getattr(cfg, "kg_maintenance", None) if cfg is not None else None
+            if bool(getattr(kg_cfg, "l1_enabled", False)):
+                return True
+        return False
+
+    async def _run_kg_maintenance_l1_for_file_id(self, *, file_id: str, owner_id: uuid.UUID) -> None:
+        """Background L1: entity disambiguation + identity alignment (owner/file scoped).
+
+        L1 is store-config controlled; when disabled it will fast-return with 'skipped'.
+        """
+        async with self.kg_maintenance_semaphore:
+            stores = self._get_graph_stores_with_l1_maintenance()
+            if not stores:
+                logger.warning("No graph store available for L1 KG maintenance (file_id=%s)", file_id)
+                return
+            store = stores[0]
+            logger.info("Starting L1 KG maintenance (file_id=%s owner_id=%s)", file_id, owner_id)
+            stats = await self._run_blocking(
+                store.run_kg_maintenance_l1_for_file_ids,
+                owner_id=str(owner_id),
+                file_ids=[str(file_id)],
+            )
+            logger.info("Completed L1 KG maintenance (file_id=%s owner_id=%s stats=%s)", file_id, owner_id, stats)
 
     async def _cancel_deletion_task(self, doc_id: str) -> None:
         task = self._active_deletion_tasks.get(doc_id)
@@ -298,6 +387,64 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
                             resource_id=doc_id,
                             payload={"file_id": doc_id, "success": True},
                         )
+
+                    # If L0 mention materialization was deferred (budget exceeded), schedule a background backfill.
+                    try:
+                        indexing_results = result.get("indexing_results") if isinstance(result, dict) else None
+                        deferred = False
+                        if isinstance(indexing_results, dict):
+                            for payload in indexing_results.values():
+                                if not isinstance(payload, dict):
+                                    continue
+                                meta = payload.get("metadata") or {}
+                                if not isinstance(meta, dict):
+                                    continue
+                                gs = meta.get("graph_store") or {}
+                                if not isinstance(gs, dict):
+                                    continue
+                                l0 = gs.get("kg_maintenance_l0") or {}
+                                if isinstance(l0, dict) and bool(l0.get("deferred")):
+                                    deferred = True
+                                    break
+                        if deferred:
+                            file_meta = await self._run_blocking(self.file_storage.get_file_metadata, doc_id)
+                            owner_id = getattr(file_meta, "owner_id", None) if file_meta is not None else None
+                            chunk_ids = result.get("chunk_ids") if isinstance(result.get("chunk_ids"), list) else []
+                            chunk_ids = [str(x).strip() for x in chunk_ids if str(x or "").strip()]
+                            if owner_id and chunk_ids:
+                                task_key = f"l0_mentions:{str(owner_id)}:{str(doc_id)}"
+                                if task_key not in self._active_kg_maintenance_tasks:
+                                    task = asyncio.create_task(
+                                        self._run_kg_maintenance_l0_backfill(
+                                            file_id=doc_id,
+                                            owner_id=owner_id,
+                                            chunk_ids=chunk_ids,
+                                        )
+                                    )
+                                    self._track_kg_maintenance_task(task_key, task)
+                                    logger.info("Scheduled L0 mention backfill: %s", task_key)
+                    except Exception as exc:
+                        logger.warning("Failed to schedule L0 mention backfill for %s: %s", doc_id, exc)
+
+                    # L1: entity disambiguation + identity alignment (background; file-scoped).
+                    # This is scheduled only when enabled in store config, and never blocks indexing readiness.
+                    try:
+                        if self._is_l1_enabled_anywhere():
+                            file_meta = await self._run_blocking(self.file_storage.get_file_metadata, doc_id)
+                            owner_id = getattr(file_meta, "owner_id", None) if file_meta is not None else None
+                            if owner_id:
+                                task_key = f"l1_kg:{str(owner_id)}:{str(doc_id)}"
+                                if task_key not in self._active_kg_maintenance_tasks:
+                                    task = asyncio.create_task(
+                                        self._run_kg_maintenance_l1_for_file_id(
+                                            file_id=doc_id,
+                                            owner_id=owner_id,
+                                        )
+                                    )
+                                    self._track_kg_maintenance_task(task_key, task)
+                                    logger.info("Scheduled L1 KG maintenance: %s", task_key)
+                    except Exception as exc:
+                        logger.warning("Failed to schedule L1 KG maintenance for %s: %s", doc_id, exc)
                 else:
                     logger.error(f"Background indexing failed for file_id: {doc_id}, error: {result.get('error_message')}")
                     if task_run_id:
