@@ -6,12 +6,13 @@ logger = logging.getLogger(__name__)
 
 
 class _IndexManagerDeletionMixin:
-    def _delete_chunks_from_indexers(self, chunk_ids: List[str]) -> Dict[str, Any]:
+    def _delete_chunks_from_indexers(self, chunk_ids: List[str], **kwargs: Any) -> Dict[str, Any]:
         """
         Delete chunks from all configured indexers using ThreadPoolExecutor.
 
         Args:
             chunk_ids: List of chunk IDs to delete
+            **kwargs: Optional deletion context propagated to indexers (e.g., `owner_id`).
 
         Returns:
             Dictionary with deletion results for each indexer
@@ -24,7 +25,7 @@ class _IndexManagerDeletionMixin:
 
             for i, indexer in enumerate(self.indexers):
                 indexer_name = f"{type(indexer).__name__}_{i}"
-                future = executor.submit(self._delete_with_single_indexer_sync, indexer, indexer_name, chunk_ids)
+                future = executor.submit(self._delete_with_single_indexer_sync, indexer, indexer_name, chunk_ids, **kwargs)
                 future_to_indexer[future] = (indexer, indexer_name)
 
             # Collect results
@@ -47,7 +48,7 @@ class _IndexManagerDeletionMixin:
 
         return deletion_results
 
-    def _delete_with_single_indexer_sync(self, indexer, indexer_name: str, chunk_ids: List[str]) -> Dict[str, Any]:
+    def _delete_with_single_indexer_sync(self, indexer, indexer_name: str, chunk_ids: List[str], **kwargs: Any) -> Dict[str, Any]:
         """
         Delete chunks with a single indexer (synchronous).
 
@@ -63,7 +64,7 @@ class _IndexManagerDeletionMixin:
         """
         try:
             logger.info(f"Deleting {len(chunk_ids)} chunks from {indexer_name}")
-            success = indexer.delete_chunks(chunk_ids)
+            success = indexer.delete_chunks(chunk_ids, **kwargs)
 
             if success:
                 logger.info(f"Successfully deleted {len(chunk_ids)} chunks from {indexer_name}")
@@ -151,6 +152,21 @@ class _IndexManagerDeletionMixin:
 
             logger.info(f"Found {len(parsed_content_list)} parsed content entries")
 
+            # Resolve owner_id for owner-scoped indices (FAISS/BM25). Prefer explicit kwargs, then metadata.
+            owner_id = kwargs.get("owner_id")
+            if not owner_id:
+                try:
+                    # ParsedContentMetadata usually carries owner_id.
+                    owner_id = getattr(parsed_content_list[0], "owner_id", None)
+                except Exception:
+                    owner_id = None
+            if not owner_id:
+                try:
+                    file_meta = self.file_storage.get_file_metadata(file_id, **kwargs)  # type: ignore[attr-defined]
+                    owner_id = getattr(file_meta, "owner_id", None) if file_meta is not None else None
+                except Exception:
+                    owner_id = None
+
             # Step 2: For each parsed content, find all chunks
             all_chunk_ids = []
             for parsed_content in parsed_content_list:
@@ -183,7 +199,10 @@ class _IndexManagerDeletionMixin:
             # REQUIRED: Indexer data (FAISS, BM25) is NOT managed by database CASCADE
             if all_chunk_ids and self.indexers:
                 logger.info(f"Step 3: Deleting {len(all_chunk_ids)} chunks from {len(self.indexers)} indexers")
-                deletion_results = self._delete_chunks_from_indexers(all_chunk_ids)
+                delete_ctx = dict(kwargs)
+                if owner_id and not delete_ctx.get("owner_id"):
+                    delete_ctx["owner_id"] = owner_id
+                deletion_results = self._delete_chunks_from_indexers(all_chunk_ids, **delete_ctx)
                 result["indexer_deletion_results"] = deletion_results
 
                 # Check if indexer deletion was successful
@@ -268,4 +287,3 @@ class _IndexManagerDeletionMixin:
             result["error_message"] = error_msg
 
         return result
-

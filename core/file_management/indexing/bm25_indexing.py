@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import List, TYPE_CHECKING, Dict
+from typing import Any, List, TYPE_CHECKING, Dict
 from collections import deque
 import threading
 
@@ -212,16 +212,60 @@ class BM25Indexer(BaseIndexer):
         if removed > 0:
             logger.info(f"Removed {removed} pending chunks due to delete request")
 
-    def delete_chunks(self, chunk_ids: List[str]) -> bool:
+    def delete_chunks(self, chunk_ids: List[str], **kwargs: Any) -> bool:
         """
         Deletes a batch of chunks from the BM25 index (synchronous).
         """
         try:
+            if not chunk_ids:
+                return True
+
             self._remove_pending_chunks(chunk_ids)
-            # Delete chunks from BM25 index
-            result = self.bm25_builder.delete_index(chunk_ids)
+
+            if not self._owner_scoped_enabled:
+                # Delete chunks from BM25 index
+                result = self.bm25_builder.delete_index(chunk_ids)
+                logger.info(f"Deletion result: {result}")
+                return result if result is not None else False
+
+            owner_norm = normalize_owner_id(kwargs.get("owner_id"))
+            if owner_norm is None:
+                logger.error("Owner-scoped BM25 deletion requires owner_id; got None")
+                return False
+
+            base_dir = str(getattr(self._template_cfg, "index_path", "") or "").strip()
+            owner_dirname = str(getattr(self._template_cfg, "owner_scoped_dirname", "owners") or "owners")
+            global_owner = str(getattr(self._template_cfg, "owner_scoped_global_owner_name", "__GLOBAL__") or "__GLOBAL__")
+            index_dir = owner_scoped_dir(
+                base_dir,
+                owner_id=owner_norm,
+                owner_dirname=owner_dirname,
+                global_owner_name=global_owner,
+            )
+
+            with self._builder_lock:
+                builder = self._builder_by_owner.get(owner_norm)
+                if builder is None:
+                    try:
+                        cfg2 = self._template_cfg.model_copy(update={"index_path": index_dir})
+                    except Exception:
+                        cfg2 = self._template_cfg
+                        try:
+                            cfg2.index_path = index_dir
+                        except Exception:
+                            pass
+                    builder = cfg2.build()
+                    self._builder_by_owner[owner_norm] = builder
+
+            # Best-effort load local before deletion (delete_index is idempotent).
+            try:
+                builder.load_local()
+            except Exception:
+                pass
+
+            result = builder.delete_index(chunk_ids)
             logger.info(f"Deletion result: {result}")
-            return result if result is not None else False
+            return bool(True if result is None else result)
         except Exception as e:
             logger.error(f"Failed to delete chunks from BM25 index: {e}")
             return False
