@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from encapsulation.data_model.deepsearch import EvidenceChunk, GraphQueryContext, ThinkNote
@@ -18,11 +19,33 @@ from config.core.deepsearch.reasoning_defaults import (
 from .artifact_dedupe_v2 import build_evidence_pool_v2, dedupe_reasoning_v2, dedupe_report_v2
 from .artifact_views_v2 import build_v2_artifact_documents
 from .trace_capture import attach_trace_capture
+from .llm_dump_metrics import summarize_llm_dump_metrics
 
 logger = logging.getLogger(__name__)
 
 
 class DeepSearchServiceRunMixin:
+    @staticmethod
+    def _maybe_record_llm_dump_metrics(state: DeepSearchState) -> None:
+        """Best-effort: attach aggregated LLM dump metrics to the state snapshot.
+
+        This reads DEEPSEARCH_LLM_DUMP_PATH JSONL only when the env var is set.
+        It must never raise or affect the main pipeline.
+        """
+
+        try:
+            dump_path = str(os.getenv("DEEPSEARCH_LLM_DUMP_PATH", "") or "").strip()
+        except Exception:
+            dump_path = ""
+        if not dump_path:
+            return
+        try:
+            run_id = str(getattr(state, "run_id", "") or "").strip()
+            metrics = summarize_llm_dump_metrics(path=dump_path, run_id=run_id)
+            state.record_cost("llm_dump_metrics", json_safe(metrics))
+        except Exception:
+            return
+
     @staticmethod
     def _coerce_evidence_chunks(raw: Sequence[Dict[str, Any]] | None) -> List[EvidenceChunk]:
         items = raw or []
@@ -550,6 +573,9 @@ class DeepSearchServiceRunMixin:
             logger.debug("Failed to attach trace capture: %s", exc, exc_info=True)
             trace_capture_token = None
 
+        from framework.run_context import reset_run_id, set_run_id
+
+        run_token = set_run_id(state.run_id)
         try:
             bootstrap_context = graph_context or self._bootstrap_graph_context(
                 question=normalized_question,
@@ -668,6 +694,7 @@ class DeepSearchServiceRunMixin:
                     )
                 except Exception:
                     pass
+                self._maybe_record_llm_dump_metrics(state)
                 snapshot = state.snapshot()
                 return self._finalize_and_persist_run(
                     owner_id=owner_id,
@@ -792,6 +819,14 @@ class DeepSearchServiceRunMixin:
                     plan_items=list(getattr(plan_state, "items", []) or []),
                 )
                 state.record_reasoning(round_trace)
+                try:
+                    from application.rag_inference.deepsearch.service_runtime.reasoning_metrics import (
+                        summarize_reasoning_trace,
+                    )
+
+                    state.record_cost("reasoning_metrics", summarize_reasoning_trace(round_trace or {}))
+                except Exception as exc:  # noqa: BLE001
+                    state.append_error(f"reasoning_metrics failed: {exc}", stage="graph_reasoning")
                 self._surface_worker_failures(state, round_trace)
                 try:
                     evidence_count = len(round_trace.get("evidences") or [])
@@ -891,6 +926,7 @@ class DeepSearchServiceRunMixin:
                     state.transition_stage("done", metadata={"rounds": 1, "report_blocked": True})
                 except Exception:
                     pass
+                self._maybe_record_llm_dump_metrics(state)
                 snapshot = state.snapshot()
                 return self._finalize_and_persist_run(
                     owner_id=owner_id,
@@ -950,6 +986,7 @@ class DeepSearchServiceRunMixin:
             except Exception:
                 pass
 
+            self._maybe_record_llm_dump_metrics(state)
             snapshot = state.snapshot()
             return self._finalize_and_persist_run(
                 owner_id=owner_id,
@@ -964,6 +1001,10 @@ class DeepSearchServiceRunMixin:
                 stage_timings_written=stage_timings_written,
             )
         finally:
+            try:
+                reset_run_id(run_token)
+            except Exception:
+                pass
             if trace_capture_token is not None:
                 try:
                     reset_trace_emitter(trace_capture_token)

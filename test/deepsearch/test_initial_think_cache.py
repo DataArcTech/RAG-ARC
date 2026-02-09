@@ -83,3 +83,47 @@ async def test_initial_think_cache_hits_for_same_question():
     assert out2["report_needed"] is True
     assert out2.get("cache", {}).get("hit") is True
 
+
+@pytest.mark.asyncio
+async def test_initial_think_cache_normalization_strips_trailing_punctuation_only():
+    svc = _DummyService()
+    scope = GraphAccessScope(scope_id="owner-1")
+    ctx = GraphQueryContext(adapter_name="test", owner_id="owner-1", question="Q", seed_entities=[], metadata={}, access_scope=scope)
+
+    # Trailing punctuation should be normalized away for cache keys.
+    out1 = await svc._run_initial_think(
+        question="What is X?",
+        scope=scope,
+        reasoning_context=ctx,
+        context_evidences=[],
+        plan_steps=[],
+    )
+    out2 = await svc._run_initial_think(
+        question="What is X",
+        scope=scope,
+        reasoning_context=ctx,
+        context_evidences=[],
+        plan_steps=[],
+    )
+    assert out1["report_needed"] is True
+    assert out2.get("cache", {}).get("hit") is True
+    assert svc.tool_manager.calls == 1
+
+    # Interior punctuation should remain significant (avoid collisions).
+    out3 = await svc._run_initial_think(
+        question="A-B",
+        scope=scope,
+        reasoning_context=ctx,
+        context_evidences=[],
+        plan_steps=[],
+    )
+    out4 = await svc._run_initial_think(
+        question="AB",
+        scope=scope,
+        reasoning_context=ctx,
+        context_evidences=[],
+        plan_steps=[],
+    )
+    assert out3["report_needed"] is True
+    assert out4.get("cache", {}).get("hit") is not True
+    assert svc.tool_manager.calls == 3

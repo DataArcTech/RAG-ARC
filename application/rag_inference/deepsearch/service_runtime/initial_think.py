@@ -3,14 +3,41 @@ from typing import Any, Dict, List, Sequence
 
 from core.deepsearch.trace import emit_trace
 from core.deepsearch.memory.plan_state import PlanState, update_plan_from_think_notes
+from core.deepsearch.planning import (
+    build_template_fingerprint,
+    coerce_templates,
+    instantiate_template_plan,
+    select_plan_template,
+)
 from core.graph_adapter.base import GraphAccessScope
 from encapsulation.data_model.deepsearch import GraphQueryContext
 from encapsulation.data_model.deepsearch import ThinkNote
 
 from application.rag_inference.deepsearch.runtime_cache import CachedInitialThink
+from config.core.deepsearch import plan_template_defaults
 
 
 class DeepSearchServiceInitialThinkMixin:
+    def _initial_think_template_cfg(self) -> Dict[str, Any]:
+        cfg = None
+        try:
+            cfg = (getattr(self, "config", None) or {}).get("initial_think_template")
+        except Exception:
+            cfg = None
+        return cfg if isinstance(cfg, dict) else {}
+
+    def _resolve_llm_connector(self) -> Any | None:
+        tool_manager = getattr(self, "tool_manager", None)
+        if tool_manager is None:
+            return None
+        try:
+            tool_cfgs = getattr(tool_manager, "tool_configs", None)
+            if isinstance(tool_cfgs, dict):
+                return tool_cfgs.get("llm_connector")
+        except Exception:
+            return None
+        return None
+
     def _resolve_tool_timeout_seconds(self) -> float | None:
         cfg = None
         try:
@@ -124,6 +151,148 @@ class DeepSearchServiceInitialThinkMixin:
                     "raw": dict(hit.raw),
                     "cache": {"hit": True},
                 }
+
+        # ------------------------------------------------------------------
+        # Initial-think plan templates (fast path): use a light LLM to pick a
+        # template + fill slots, then seed the think loop with a synthetic note.
+        # This avoids paying the heavy think model just to create an initial plan.
+        # ------------------------------------------------------------------
+        template_cfg = self._initial_think_template_cfg()
+        template_enabled = template_cfg.get("enabled")
+        if template_enabled is None:
+            template_enabled = plan_template_defaults.DEFAULT_INITIAL_THINK_TEMPLATE_ENABLED
+        if (
+            bool(template_enabled)
+            and not steps
+            and not evidences
+            and getattr(self, "_think_prompt_fingerprint", None) is not None
+        ):
+            llm = self._resolve_llm_connector()
+            templates = coerce_templates()
+            model_name = template_cfg.get("model_name")
+            if isinstance(model_name, str) and model_name.strip():
+                model_name = model_name.strip()
+            else:
+                model_name = None
+            # If caller did not specify a model, prefer the connector's low_cost_model_name when present.
+            if model_name is None and llm is not None:
+                cfg_obj = getattr(llm, "config", None)
+                low_cost = getattr(cfg_obj, "low_cost_model_name", None) if cfg_obj is not None else None
+                low_cost = str(low_cost or "").strip()
+                if low_cost:
+                    model_name = low_cost
+
+            try:
+                selection = await select_plan_template(
+                    llm_connector=llm,
+                    question=question,
+                    templates=templates,
+                    model_name=model_name,
+                    temperature=template_cfg.get("temperature"),
+                    max_tokens=template_cfg.get("max_tokens"),
+                    attempts=template_cfg.get("json_attempts"),
+                )
+            except Exception:
+                selection = None
+
+            if selection is not None and selection.use_template and selection.template_id:
+                try:
+                    plan_items, tool_calls, signature = instantiate_template_plan(
+                        templates=templates,
+                        template_id=selection.template_id,
+                        question=question,
+                        slots=selection.slots,
+                    )
+                except Exception:
+                    plan_items, tool_calls, signature = [], [], ""
+
+                if plan_items or tool_calls:
+                    plan_state = PlanState()
+                    plan_state.update(plan_items)
+                    report_style = str(selection.report_style or "deepsearch").strip().lower()
+                    if report_style not in {"deepsearch", "research"}:
+                        report_style = "deepsearch"
+                    if isinstance(reasoning_context.metadata, dict):
+                        reasoning_context.metadata["report_style"] = report_style
+                        reasoning_context.metadata["runtime_plan"] = list(plan_state.items)
+                        reasoning_context.metadata["plan_template"] = {
+                            "template_id": selection.template_id,
+                            "signature": signature or None,
+                            "slots": dict(selection.slots),
+                        }
+
+                    raw = {
+                        "reasoning": selection.reasoning or f"Using plan template: {selection.template_id}",
+                        "tool_calls": list(tool_calls),
+                        "plan": list(plan_state.items),
+                        "report_needed": bool(selection.report_needed),
+                        "report_style": report_style,
+                        "template": {
+                            "template_id": selection.template_id,
+                            "signature": signature or None,
+                            "slots": dict(selection.slots),
+                            "fingerprint": build_template_fingerprint(),
+                        },
+                    }
+                    note = ThinkNote(
+                        plan_step_id="think_init",
+                        reasoning=str(raw["reasoning"]).strip() or "Template planning checkpoint.",
+                        next_actions=[
+                            f"Execute initial tool call: {tool_calls[0]['tool_name']}" if tool_calls else "Continue with tool-driven retrieval.",
+                        ],
+                        metadata={"raw": raw},
+                    )
+
+                    await emit_trace(
+                        "write_outline",
+                        plan_state.markdown,
+                        meta={
+                            "stage": "think_init",
+                            "plan_step_id": "think_init",
+                            "plan_version": plan_state.version,
+                            "plan_items": list(plan_state.items),
+                            "template": raw.get("template"),
+                        },
+                    )
+                    await emit_trace(
+                        "think",
+                        "Initial think checkpoint (template mode).\n"
+                        f"template_id={selection.template_id}\n"
+                        f"reasoning={note.reasoning}\n"
+                        f"initial_tool_calls={[c.get('tool_name') for c in tool_calls]}",
+                        meta={
+                            "stage": "think_init",
+                            "plan_step": "think_init",
+                            "template": raw.get("template"),
+                        },
+                    )
+
+                    note_payloads = [note.model_dump(exclude_none=True)]
+                    # Cache template result as an initial-think output (same eligibility as cache path).
+                    if cache is not None and cache_key is not None:
+                        try:
+                            cache.set(
+                                cache_key,
+                                CachedInitialThink(
+                                    report_needed=bool(selection.report_needed),
+                                    report_style=report_style,
+                                    raw=dict(raw),
+                                    plan_items=list(plan_state.items),
+                                    think_notes_payloads=list(note_payloads),
+                                ),
+                            )
+                        except Exception:
+                            pass
+
+                    return {
+                        "report_needed": bool(selection.report_needed),
+                        "report_style": report_style,
+                        "plan_state": plan_state,
+                        "think_notes": note_payloads,
+                        "think_notes_obj": [note],
+                        "raw": raw,
+                        "cache": {"hit": False, "template": True} if cache is not None and cache_key is not None else {"template": True},
+                    }
 
         plan_state = PlanState()
         if isinstance(reasoning_context.metadata, dict):

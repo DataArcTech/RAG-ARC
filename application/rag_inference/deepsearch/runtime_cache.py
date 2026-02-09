@@ -5,10 +5,8 @@ These caches are process-local and intentionally conservative:
 - Fingerprint-scoped (config/prompt/model changes auto-bust)
 - Exact-match keys by default (avoid "similarity" mistakes)
 """
-
-from __future__ import annotations
-
 import hashlib
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -20,8 +18,31 @@ def _stable_hash(text: str) -> str:
 
 
 def normalize_question(question: str) -> str:
-    # Keep normalization simple and deterministic; do not "rewrite" semantics.
-    return " ".join(str(question or "").strip().split())
+    """Normalize question for cache keys (deterministic, non-semantic).
+
+    Goal: increase cache hits for trivially equivalent user inputs (e.g., trailing punctuation)
+    without attempting semantic rewrites (which can be unsafe).
+    """
+    text = str(question or "")
+    # 1) Unicode normalize so full-width punctuation and compatibility forms become stable.
+    text = unicodedata.normalize("NFKC", text)
+    # 2) Collapse internal whitespace.
+    text = " ".join(text.strip().split())
+
+    # 3) Strip leading/trailing punctuation (keeps interior punctuation to avoid collisions like "A-B" vs "AB").
+    def _is_punct(ch: str) -> bool:
+        if not ch:
+            return False
+        try:
+            return unicodedata.category(ch).startswith("P")
+        except Exception:
+            return False
+
+    while text and _is_punct(text[0]):
+        text = text[1:].lstrip()
+    while text and _is_punct(text[-1]):
+        text = text[:-1].rstrip()
+    return text
 
 
 @dataclass(frozen=True)
@@ -72,4 +93,3 @@ class DeepSearchInitialThinkCache:
 
     def set(self, key: str, value: CachedInitialThink) -> None:
         self._cache.set(key, value)
-

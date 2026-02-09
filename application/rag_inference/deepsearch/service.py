@@ -9,6 +9,11 @@ from core.deepsearch.report import DeepSearchReporter
 from core.deepsearch.state import DeepSearchState
 from core.deepsearch.tooling.protocols import ToolInvoker
 from core.prompts.deepsearch.tools import THINK_TOOL_SYSTEM_PROMPT_EN
+from core.prompts.deepsearch.plan_templates import (
+    PLAN_TEMPLATE_SELECTOR_SYSTEM_PROMPT_EN,
+    PLAN_TEMPLATE_SELECTOR_USER_PROMPT_TEMPLATE_EN,
+)
+from core.deepsearch.planning import build_template_fingerprint
 
 from .service_runtime import (
     DeepSearchServiceArtifactsMixin,
@@ -54,8 +59,16 @@ class DeepSearchService(
         self.artifact_store = self._resolve_artifact_store()
 
         self._initial_think_cache = self._build_initial_think_cache()
-        # Used as part of the initial think cache key so prompt changes auto-bust.
-        self._think_prompt_fingerprint = hashlib.sha256(THINK_TOOL_SYSTEM_PROMPT_EN.encode("utf-8")).hexdigest()
+        # Used as part of the initial think cache key so prompt/template changes auto-bust.
+        prompt_blob = "\n".join(
+            [
+                THINK_TOOL_SYSTEM_PROMPT_EN,
+                PLAN_TEMPLATE_SELECTOR_SYSTEM_PROMPT_EN,
+                PLAN_TEMPLATE_SELECTOR_USER_PROMPT_TEMPLATE_EN,
+                build_template_fingerprint(),
+            ]
+        )
+        self._think_prompt_fingerprint = hashlib.sha256(prompt_blob.encode("utf-8")).hexdigest()
 
     def _build_initial_think_cache(self) -> DeepSearchInitialThinkCache | None:
         cfg = None
