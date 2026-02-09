@@ -54,7 +54,8 @@ class _FaissChannel:
             )
 
         owner_ids = list(visibility.owner_ids_used)
-        query_variants = self._resolve_query_variants(query)
+        cache_scope = self._resolve_owner_id(request)
+        query_variants = self._resolve_query_variants(query, cache_scope=cache_scope)
         parts = await asyncio.gather(
             *[_call_one(owner_id, qv) for qv in query_variants for owner_id in owner_ids],
             return_exceptions=True,

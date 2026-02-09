@@ -34,6 +34,16 @@ class PrunedHippoRAGNeo4jRetrievalConfig(AbstractConfig):
         ),
     )
 
+    node_mappings_cache_max_entries: int = Field(
+        default=2,
+        ge=0,
+        description=(
+            "Max number of (owner_id, graph_store_cache_version) node-mapping entries to keep in the in-process cache. "
+            "These mappings contain the chunk-id list and a dense passage embedding matrix used by graph retrieval. "
+            "0 disables the shared cache (will rebuild per thread/request)."
+        ),
+    )
+
     # Neo4j graph store configuration
     graph_config: PrunedHippoRAGNeo4jConfig
 

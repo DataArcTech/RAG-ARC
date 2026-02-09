@@ -9,11 +9,17 @@ Design note:
 import logging
 import json
 import functools
+import hashlib
 from typing import Optional
 
 from config.query_variants import (
     QUERY_VARIANTS_ENABLED,
     QUERY_VARIANTS_LANGS,
+    QUERY_VARIANTS_LLM_CACHE_ENABLED,
+    QUERY_VARIANTS_LLM_CACHE_MAX_ENTRIES,
+    QUERY_VARIANTS_LLM_CACHE_TTL_SECONDS,
+    QUERY_VARIANTS_LLM_MAX_TOKENS,
+    QUERY_VARIANTS_LLM_TEMPERATURE,
     QUERY_VARIANTS_MAX,
     QUERY_VARIANTS_ZH_HANS_HANT_ENABLED,
 )
@@ -25,6 +31,34 @@ from core.prompts.query_variants import (
 logger = logging.getLogger(__name__)
 
 _OPENCC_AVAILABLE: bool | None = None
+_LLM_REWRITE_CACHE = None
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _prompt_fingerprint() -> str:
+    return _sha(QUERY_VARIANTS_SYSTEM_PROMPT + "\n" + QUERY_VARIANTS_USER_PROMPT_TEMPLATE)
+
+
+def _get_llm_rewrite_cache():
+    global _LLM_REWRITE_CACHE
+    if _LLM_REWRITE_CACHE is not None:
+        return _LLM_REWRITE_CACHE
+    if not QUERY_VARIANTS_LLM_CACHE_ENABLED or int(QUERY_VARIANTS_LLM_CACHE_MAX_ENTRIES) <= 0:
+        _LLM_REWRITE_CACHE = False
+        return _LLM_REWRITE_CACHE
+    try:
+        from framework.cache import TTLRUCache
+
+        _LLM_REWRITE_CACHE = TTLRUCache(
+            max_entries=int(QUERY_VARIANTS_LLM_CACHE_MAX_ENTRIES),
+            ttl_seconds=float(QUERY_VARIANTS_LLM_CACHE_TTL_SECONDS),
+        )
+    except Exception:  # noqa: BLE001
+        _LLM_REWRITE_CACHE = False
+    return _LLM_REWRITE_CACHE
 
 
 def _dedupe_preserve_order(items: list[str]) -> list[str]:
@@ -61,17 +95,33 @@ def _extract_json_object(text: str) -> Optional[dict]:
     return payload if isinstance(payload, dict) else None
 
 
-def _llm_rewrite_variants(llm_connector, query: str, langs: list[str]) -> dict[str, str]:
+def _llm_rewrite_variants(llm_connector, query: str, langs: list[str], *, cache_scope: str | None = None) -> dict[str, str]:
     if llm_connector is None:
         return {}
+
+    normalized = str(query or "").strip()
+    langs_key = ",".join([str(x).strip() for x in langs if str(x).strip()])
+    cfg = getattr(llm_connector, "config", None)
+    default_model = str(getattr(cfg, "model_name", "") or "").strip()
+    low_cost = _low_cost_model_name(llm_connector)
+    used_model = low_cost or default_model
+    scope_key = str(cache_scope or "").strip()
+    cache = _get_llm_rewrite_cache()
+    cache_key = None
+    # Cache is only safe when the caller provides an explicit scope (owner/tenant).
+    # Without a scope, caching would risk cross-tenant query leakage.
+    if cache not in (None, False) and scope_key:
+        cache_key = _sha("|".join(["qv_llm", scope_key, used_model, _prompt_fingerprint(), langs_key, normalized]))
+        cached = cache.get(cache_key)
+        if isinstance(cached, dict):
+            return {str(k): str(v) for k, v in cached.items()}
 
     payload = {"query": query, "target_langs": list(langs)}
     messages = [
         {"role": "system", "content": QUERY_VARIANTS_SYSTEM_PROMPT},
         {"role": "user", "content": QUERY_VARIANTS_USER_PROMPT_TEMPLATE.format(payload=json.dumps(payload, ensure_ascii=False))},
     ]
-    kwargs = {"temperature": 0.0, "max_tokens": 512}
-    low_cost = _low_cost_model_name(llm_connector)
+    kwargs = {"temperature": float(QUERY_VARIANTS_LLM_TEMPERATURE), "max_tokens": int(QUERY_VARIANTS_LLM_MAX_TOKENS)}
     if low_cost:
         kwargs["model"] = low_cost
     try:
@@ -92,6 +142,11 @@ def _llm_rewrite_variants(llm_connector, query: str, langs: list[str]) -> dict[s
         token = str(parsed.get(key) or "").strip()
         if token:
             out[key] = token
+    if cache_key and cache not in (None, False) and out:
+        try:
+            cache.set(cache_key, dict(out))
+        except Exception:  # noqa: BLE001
+            pass
     return out
 
 
@@ -180,7 +235,7 @@ def _extract_ascii_keyword_query(text: str) -> str | None:
     return query or None
 
 
-def generate_query_variants(query: str, *, llm_connector=None) -> list[str]:
+def generate_query_variants(query: str, *, llm_connector=None, cache_scope: str | None = None) -> list[str]:
     """
     Generate a small set of deterministic query variants.
 
@@ -223,7 +278,7 @@ def generate_query_variants(query: str, *, llm_connector=None) -> list[str]:
 
     # Optional LLM enrichment (if provided).
     if langs and llm_connector is not None:
-        rewritten = _llm_rewrite_variants(llm_connector, base, langs)
+        rewritten = _llm_rewrite_variants(llm_connector, base, langs, cache_scope=cache_scope)
         for lang in langs:
             candidate = str(rewritten.get(lang) or "").strip()
             if candidate:

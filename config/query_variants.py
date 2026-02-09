@@ -85,3 +85,18 @@ QUERY_VARIANTS_LANGS = _normalized_langs
 
 # Hard cap for number of unique variants (including the original query).
 QUERY_VARIANTS_MAX = max(1, _env_int("QUERY_VARIANTS_MAX", 3))
+
+# -----------------------------
+# LLM rewrite caching (optional)
+# -----------------------------
+# The LLM rewrite is used for mixed-language corpora (zh-Hans/zh-Hant/en) and can be slow/unstable
+# due to remote chat endpoints. We keep a small in-process cache to:
+# - reduce repeated rewrites for identical queries within a warm service
+# - improve robustness under transient timeouts
+QUERY_VARIANTS_LLM_CACHE_ENABLED = _env_bool("QUERY_VARIANTS_LLM_CACHE_ENABLED", True)
+QUERY_VARIANTS_LLM_CACHE_MAX_ENTRIES = max(0, _env_int("QUERY_VARIANTS_LLM_CACHE_MAX_ENTRIES", 2048))
+QUERY_VARIANTS_LLM_CACHE_TTL_SECONDS = max(1, _env_int("QUERY_VARIANTS_LLM_CACHE_TTL_SECONDS", 30 * 60))
+
+# LLM rewrite call parameters (centralized; avoid scattered "magic numbers")
+QUERY_VARIANTS_LLM_TEMPERATURE = float(os.getenv("QUERY_VARIANTS_LLM_TEMPERATURE", "0.0") or 0.0)
+QUERY_VARIANTS_LLM_MAX_TOKENS = max(16, _env_int("QUERY_VARIANTS_LLM_MAX_TOKENS", 256))

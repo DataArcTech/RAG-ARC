@@ -153,6 +153,28 @@ class _PrunedHippoRAGFactsMixin:
             embedding = np.array(embedding)
         return embedding
 
+    def _get_query_embeddings(self, queries: list[str]) -> np.ndarray:
+        """
+        Generate embeddings for multiple query strings in one batch.
+
+        This reduces remote embedding round-trips when query variants are enabled.
+        """
+        cleaned = [str(q or "").strip() for q in (queries or [])]
+        cleaned = [q for q in cleaned if q]
+        if not cleaned:
+            return np.zeros((0, 0), dtype=np.float32)
+
+        embeddings = self.embedding_model.embed(cleaned)
+        # `embed(list[str])` should return `list[list[float]]` for OpenAI-compatible providers.
+        if isinstance(embeddings, list):
+            arr = np.array(embeddings, dtype=np.float32)
+        else:
+            # Defensive fallback: treat as single vector.
+            arr = np.array([embeddings], dtype=np.float32)
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        return arr
+
     def _min_max_normalize(self, scores: np.ndarray) -> np.ndarray:
         """Normalize scores to [0, 1] range using min-max normalization."""
         if len(scores) == 0:
