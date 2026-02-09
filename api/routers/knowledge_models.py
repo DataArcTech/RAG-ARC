@@ -59,6 +59,20 @@ class IndexTriggerResponse(BaseModel):
     message: str
 
 
+class KGMaintenanceL2Request(BaseModel):
+    file_ids: List[str] = Field(default_factory=list, description="Optional file_ids to scope the repair (owner-scoped).")
+    rebuild_same_as: bool = Field(default=False, description="Rebuild SAME_AS edges from scratch (supersedes existing).")
+    backfill_missing_mentions: bool = Field(
+        default=False,
+        description="Backfill missing EntityMention nodes before repair (can be expensive; still owner/file scoped).",
+    )
+
+
+class KGMaintenanceL2Response(BaseModel):
+    owner_id: str
+    stats: Dict[str, Any]
+
+
 class GraphExportRequest(BaseModel):
     """Request model for graph export."""
 

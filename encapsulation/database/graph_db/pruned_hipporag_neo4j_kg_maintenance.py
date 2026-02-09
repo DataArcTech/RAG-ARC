@@ -434,6 +434,345 @@ class _PrunedHippoRAGNeo4jKGMaintenanceMixin:
         stats["timings_s"]["total"] = float(time.perf_counter() - started)
         return stats
 
+    def run_kg_maintenance_l2_for_owner(
+        self,
+        *,
+        owner_id: object,
+        file_ids: Sequence[str] | None = None,
+        run_id: str | None = None,
+        rebuild_same_as: bool = False,
+        backfill_missing_mentions: bool = False,
+    ) -> Dict[str, Any]:
+        """Run L2 repair for an owner (optionally scoped to file_ids).
+
+        L2 goals
+        - Repair drift after incremental uploads and deletions (stale identity aggregates, orphan nodes/edges).
+        - Keep history (supersede edges instead of deleting).
+        - Never cross owner boundaries (multi-tenant isolation).
+        """
+
+        started = time.perf_counter()
+        owner_key = self._kg_owner_key(owner_id)
+        rid = str(run_id or f"kg-l2-{uuid.uuid4().hex}")
+        scope_file_ids = [str(x).strip() for x in (file_ids or []) if str(x or "").strip()]
+
+        stats: Dict[str, Any] = {
+            "success": False,
+            "owner_id": owner_key,
+            "file_ids": scope_file_ids,
+            "run_id": rid,
+            "counts": {},
+            "timings_s": {},
+        }
+
+        # Optional: fill missing mention nodes for this scope before repair.
+        if backfill_missing_mentions:
+            t0 = time.perf_counter()
+            chunk_query = """
+            MATCH (c:Chunk {owner_id: $owner_id})
+            WHERE $file_ids_is_empty OR c.source_file_id IN $file_ids
+            RETURN c.chunk_id AS chunk_id
+            """
+            rows = self._execute_query(  # type: ignore[attr-defined]
+                chunk_query,
+                {"owner_id": owner_key, "file_ids": scope_file_ids, "file_ids_is_empty": bool(not scope_file_ids)},
+            )
+            chunk_ids = [str(r.get("chunk_id") or "").strip() for r in (rows or []) if isinstance(r, dict)]
+            chunk_ids = [x for x in chunk_ids if x]
+            stats["counts"]["backfill_chunk_ids"] = int(len(chunk_ids))
+            if chunk_ids:
+                self.materialize_entity_mentions_for_chunk_ids(owner_id=owner_key, chunk_ids=chunk_ids)  # type: ignore[attr-defined]
+            stats["timings_s"]["backfill_missing_mentions"] = float(time.perf_counter() - t0)
+
+        # Fetch active RESOLVED_TO edges in scope.
+        t0 = time.perf_counter()
+        query = """
+        MATCH (m:EntityMention {owner_id: $owner_id})-[r:RESOLVED_TO]->(i:EntityIdentity {owner_id: $owner_id})
+        WHERE r.valid_to IS NULL
+          AND ($file_ids_is_empty OR m.source_file_id IN $file_ids)
+        RETURN m.mention_id AS mention_id,
+               m.chunk_id AS chunk_id,
+               m.surface_entity_id AS surface_entity_id,
+               coalesce(m.valid_from, '') AS valid_from,
+               coalesce(m.valid_to, '') AS valid_to,
+               coalesce(m.effective_date, '') AS effective_date,
+               i.identity_id AS identity_id,
+               coalesce(r.confidence, 0.0) AS confidence,
+               r.valid_from AS edge_valid_from
+        """
+        rows = self._execute_query(  # type: ignore[attr-defined]
+            query,
+            {"owner_id": owner_key, "file_ids": scope_file_ids, "file_ids_is_empty": bool(not scope_file_ids)},
+        )
+        stats["timings_s"]["fetch_active_resolved_to"] = float(time.perf_counter() - t0)
+
+        if not rows:
+            # Still do orphan identity cleanup for global runs.
+            from encapsulation.database.graph_db.neo4j_entity_identity_cypher import (
+                MARK_ORPHAN_IDENTITIES_INACTIVE_QUERY,
+                ZERO_ORPHAN_IDENTITIES_MEMBER_COUNT_QUERY,
+                SUPERSEDE_SAME_AS_FOR_INACTIVE_IDENTITIES_QUERY,
+            )
+
+            t0 = time.perf_counter()
+            marked = 0
+            zeroed = 0
+            superseded = 0
+            with self._driver.session(database=self.database) as session:  # type: ignore[attr-defined]
+                with session.begin_transaction() as tx:
+                    rec = list(tx.run(MARK_ORPHAN_IDENTITIES_INACTIVE_QUERY, {"owner_id": owner_key}))
+                    if rec:
+                        try:
+                            marked = int(rec[0].get("marked") or 0)
+                        except Exception:
+                            marked = 0
+                    rec0 = list(tx.run(ZERO_ORPHAN_IDENTITIES_MEMBER_COUNT_QUERY, {"owner_id": owner_key}))
+                    if rec0:
+                        try:
+                            zeroed = int(rec0[0].get("zeroed") or 0)
+                        except Exception:
+                            zeroed = 0
+                    rec2 = list(tx.run(SUPERSEDE_SAME_AS_FOR_INACTIVE_IDENTITIES_QUERY, {"owner_id": owner_key, "run_id": rid}))
+                    if rec2:
+                        try:
+                            superseded = int(rec2[0].get("superseded") or 0)
+                        except Exception:
+                            superseded = 0
+                    tx.commit()
+            stats["timings_s"]["cleanup_orphans_only"] = float(time.perf_counter() - t0)
+            stats["counts"]["identities_marked_inactive"] = int(marked)
+            stats["counts"]["identities_orphans_zeroed"] = int(zeroed)
+            stats["counts"]["same_as_superseded_inactive"] = int(superseded)
+            stats["success"] = True
+            stats["timings_s"]["total"] = float(time.perf_counter() - started)
+            return stats
+
+        # Group by mention_id to detect multiple active assignments.
+        by_mention: Dict[str, List[Dict[str, Any]]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            mid = str(row.get("mention_id") or "").strip()
+            if not mid:
+                continue
+            by_mention.setdefault(mid, []).append(row)
+        stats["counts"]["mentions_with_active_assignments"] = int(len(by_mention))
+
+        # Supersede duplicate assignments (keep the best per mention).
+        supersede_payload: List[Dict[str, Any]] = []
+        kept_rows: List[Dict[str, Any]] = []
+        for mid, items in by_mention.items():
+            if len(items) == 1:
+                kept_rows.append(items[0])
+                continue
+            # Prefer higher confidence; tie-break by more recent edge_valid_from when available; else stable by identity_id.
+            def _key(it: Dict[str, Any]) -> Tuple[float, float, str]:
+                conf = _safe_float(it.get("confidence"), 0.0) or 0.0
+                evf = it.get("edge_valid_from")
+                ts = 0.0
+                try:
+                    if evf is not None:
+                        # Neo4j datetime -> string-ish; compare lexicographically is unsafe; keep 0.
+                        ts = 0.0
+                except Exception:
+                    ts = 0.0
+                return (float(conf), float(ts), str(it.get("identity_id") or ""))
+
+            items_sorted = sorted(items, key=_key, reverse=True)
+            kept = items_sorted[0]
+            kept_rows.append(kept)
+            for drop in items_sorted[1:]:
+                supersede_payload.append(
+                    {
+                        "mention_id": str(drop.get("mention_id") or "").strip(),
+                        "identity_id": str(drop.get("identity_id") or "").strip(),
+                        "owner_id": owner_key,
+                    }
+                )
+
+        if supersede_payload:
+            from encapsulation.database.graph_db.neo4j_entity_identity_cypher import SUPERSEDE_RESOLVED_TO_FOR_ASSIGNMENTS_QUERY
+
+            t0 = time.perf_counter()
+            with self._driver.session(database=self.database) as session:  # type: ignore[attr-defined]
+                with session.begin_transaction() as tx:
+                    tx.run(SUPERSEDE_RESOLVED_TO_FOR_ASSIGNMENTS_QUERY, {"assignments": supersede_payload, "run_id": rid})
+                    tx.commit()
+            stats["timings_s"]["supersede_duplicate_assignments"] = float(time.perf_counter() - t0)
+        stats["counts"]["resolved_to_superseded"] = int(len(supersede_payload))
+
+        # Recompute identity aggregates from kept active assignments.
+        by_identity: Dict[str, List[Dict[str, Any]]] = {}
+        for row in kept_rows:
+            iid = str(row.get("identity_id") or "").strip()
+            if not iid:
+                continue
+            by_identity.setdefault(iid, []).append(row)
+        stats["counts"]["identities_touched"] = int(len(by_identity))
+
+        updates: List[Dict[str, Any]] = []
+        missing_embeddings = 0
+        for identity_id, items in by_identity.items():
+            embs: List[np.ndarray] = []
+            # time window summary
+            parsed_from: list[Tuple[str, Any]] = []
+            parsed_to: list[Tuple[str, Any]] = []
+            for it in items:
+                chunk_id = str(it.get("chunk_id") or "").strip()
+                vec = self._kg_chunk_embedding(chunk_id)
+                if vec is None:
+                    missing_embeddings += 1
+                else:
+                    embs.append(vec)
+
+                vf = str(it.get("valid_from") or "").strip() or str(it.get("effective_date") or "").strip()
+                vt = str(it.get("valid_to") or "").strip()
+                tw = TimeWindow.from_strings(valid_from=vf or "", valid_to=vt or "")
+                if tw.valid_from is not None:
+                    parsed_from.append((vf or "", tw.valid_from))
+                if tw.valid_to is not None:
+                    parsed_to.append((vt or "", tw.valid_to))
+
+            member_count = int(len(items))
+            valid_from_min = min(parsed_from, key=lambda t: t[1])[0] if parsed_from else ""
+            valid_to_max = max(parsed_to, key=lambda t: t[1])[0] if parsed_to else ""
+
+            if embs:
+                mat = normalize_rows(np.stack(embs, axis=0))
+                centroid_sum = np.asarray(mat.sum(axis=0), dtype=np.float32)
+                centroid = normalize_rows(centroid_sum)[0]
+                updates.append(
+                    {
+                        "identity_id": identity_id,
+                        "owner_id": owner_key,
+                        "centroid_dim": int(centroid.shape[0]),
+                        "centroid_b64": _b64_f32(centroid),
+                        "centroid_sum_b64": _b64_f32(centroid_sum),
+                        "member_count": member_count,
+                        "valid_from_min": valid_from_min,
+                        "valid_to_max": valid_to_max,
+                    }
+                )
+            else:
+                # No embeddings available: still repair counts/time; keep centroid untouched.
+                updates.append(
+                    {
+                        "identity_id": identity_id,
+                        "owner_id": owner_key,
+                        "centroid_dim": None,
+                        "centroid_b64": None,
+                        "centroid_sum_b64": None,
+                        "member_count": member_count,
+                        "valid_from_min": valid_from_min,
+                        "valid_to_max": valid_to_max,
+                    }
+                )
+
+        stats["counts"]["missing_chunk_embeddings"] = int(missing_embeddings)
+
+        if updates:
+            from encapsulation.database.graph_db.neo4j_entity_identity_cypher import UPDATE_ENTITY_IDENTITIES_AGGREGATES_QUERY
+
+            # Split into two batches: with centroid and without (Cypher SET cannot set null dim to int reliably).
+            with_centroid = [u for u in updates if u.get("centroid_dim") is not None]
+            without_centroid = [u for u in updates if u.get("centroid_dim") is None]
+
+            t0 = time.perf_counter()
+            with self._driver.session(database=self.database) as session:  # type: ignore[attr-defined]
+                with session.begin_transaction() as tx:
+                    if with_centroid:
+                        tx.run(UPDATE_ENTITY_IDENTITIES_AGGREGATES_QUERY, {"updates": with_centroid})
+                    if without_centroid:
+                        # Update only counts/time.
+                        q2 = """
+                        UNWIND $updates AS u
+                        MATCH (i:EntityIdentity {identity_id: u.identity_id, owner_id: u.owner_id})
+                        SET i.member_count = u.member_count,
+                            i.valid_from_min = u.valid_from_min,
+                            i.valid_to_max = u.valid_to_max,
+                            i.updated_at = datetime()
+                        """
+                        tx.run(q2, {"updates": without_centroid})
+                    tx.commit()
+            stats["timings_s"]["update_identity_aggregates"] = float(time.perf_counter() - t0)
+        stats["counts"]["identities_updated"] = int(len(updates))
+
+        # Mark orphan identities inactive + supersede SAME_AS edges to inactive identities.
+        from encapsulation.database.graph_db.neo4j_entity_identity_cypher import (
+            MARK_ORPHAN_IDENTITIES_INACTIVE_QUERY,
+            ZERO_ORPHAN_IDENTITIES_MEMBER_COUNT_QUERY,
+            SUPERSEDE_SAME_AS_FOR_INACTIVE_IDENTITIES_QUERY,
+            SUPERSEDE_ALL_SAME_AS_FOR_OWNER_QUERY,
+        )
+
+        t0 = time.perf_counter()
+        marked = 0
+        zeroed = 0
+        superseded_inactive = 0
+        superseded_all = 0
+        with self._driver.session(database=self.database) as session:  # type: ignore[attr-defined]
+            with session.begin_transaction() as tx:
+                rec = list(tx.run(MARK_ORPHAN_IDENTITIES_INACTIVE_QUERY, {"owner_id": owner_key}))
+                if rec:
+                    try:
+                        marked = int(rec[0].get("marked") or 0)
+                    except Exception:
+                        marked = 0
+                rec0 = list(tx.run(ZERO_ORPHAN_IDENTITIES_MEMBER_COUNT_QUERY, {"owner_id": owner_key}))
+                if rec0:
+                    try:
+                        zeroed = int(rec0[0].get("zeroed") or 0)
+                    except Exception:
+                        zeroed = 0
+                rec2 = list(tx.run(SUPERSEDE_SAME_AS_FOR_INACTIVE_IDENTITIES_QUERY, {"owner_id": owner_key, "run_id": rid}))
+                if rec2:
+                    try:
+                        superseded_inactive = int(rec2[0].get("superseded") or 0)
+                    except Exception:
+                        superseded_inactive = 0
+                if rebuild_same_as:
+                    rec3 = list(tx.run(SUPERSEDE_ALL_SAME_AS_FOR_OWNER_QUERY, {"owner_id": owner_key, "run_id": rid}))
+                    if rec3:
+                        try:
+                            superseded_all = int(rec3[0].get("superseded") or 0)
+                        except Exception:
+                            superseded_all = 0
+                tx.commit()
+        stats["timings_s"]["cleanup_orphans_and_same_as"] = float(time.perf_counter() - t0)
+        stats["counts"]["identities_marked_inactive"] = int(marked)
+        stats["counts"]["identities_orphans_zeroed"] = int(zeroed)
+        stats["counts"]["same_as_superseded_inactive"] = int(superseded_inactive)
+        stats["counts"]["same_as_superseded_all"] = int(superseded_all)
+
+        # Rebuild SAME_AS edges (optional).
+        if rebuild_same_as:
+            t0 = time.perf_counter()
+            align_params = self._kg_l1_alignment_params()
+            topk = int(align_params["topk"])
+            if topk > 0:
+                # Focus all active identities for this owner.
+                active_ids_rows = self._execute_query(  # type: ignore[attr-defined]
+                    "MATCH (i:EntityIdentity {owner_id: $owner_id}) WHERE coalesce(i.status,'active')='active' RETURN i.identity_id AS identity_id",
+                    {"owner_id": owner_key},
+                )
+                active_ids = [str(r.get("identity_id") or "").strip() for r in (active_ids_rows or []) if isinstance(r, dict)]
+                active_ids = [x for x in active_ids if x]
+                align_stats = self._kg_align_identities_same_as(
+                    owner_key=owner_key,
+                    run_id=rid,
+                    focus_identity_ids=sorted(set(active_ids)),
+                    topk=topk,
+                    min_score=float(align_params["min_score"]),
+                    gradient=align_params["gradient"],
+                    use_gradient=bool(align_params["use_gradient"]),
+                )
+                stats["alignment"] = align_stats
+            stats["timings_s"]["rebuild_same_as"] = float(time.perf_counter() - t0)
+
+        stats["success"] = True
+        stats["timings_s"]["total"] = float(time.perf_counter() - started)
+        return stats
+
     def _kg_align_identities_same_as(
         self,
         *,

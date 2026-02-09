@@ -54,6 +54,8 @@ from api.routers.knowledge_models import (
     MindmapExportRequest,
     MindmapExportResponse,
     MindmapNode,
+    KGMaintenanceL2Request,
+    KGMaintenanceL2Response,
     PermissionInfo,
     PermissionListResponse,
     RevokePermissionRequest,
@@ -219,9 +221,40 @@ async def get_task_result(
     if state not in {TaskState.SUCCESS.value, TaskState.FAILURE.value, TaskState.CANCELED.value}:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run not finished")
     if state != TaskState.SUCCESS.value:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(task_run.get("error_message") or "task failed"))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(task_run.get("error_message") or "task failed"),
+        )
     result = await asyncio.to_thread(task_queue.get_task_result, run_id)
     return result or {"run_id": run_id, "done": True, "result": None}
+
+
+@router.post("/kg/maintenance/l2", response_model=KGMaintenanceL2Response, status_code=status.HTTP_200_OK)
+async def kg_maintenance_l2(
+    req: KGMaintenanceL2Request = Body(...),
+    user: Annotated[User | None, Depends(get_current_user)] = None,
+):
+    """Run L2 KG maintenance (repair) for the current owner scope.
+
+    This endpoint is intended for debugging/admin maintenance and is owner-scoped by default.
+    """
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+
+    # For now, only allow users to run maintenance on their own scope (admin can impersonate by calling with admin token).
+    owner_id = user.id
+    try:
+        stats = await get_knowledge_handler().run_kg_maintenance_l2(
+            owner_id=owner_id,
+            file_ids=req.file_ids,
+            rebuild_same_as=req.rebuild_same_as,
+            backfill_missing_mentions=req.backfill_missing_mentions,
+        )
+        return KGMaintenanceL2Response(owner_id=str(owner_id), stats=stats)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
 
 
 @router.get("/stream/{run_id}")

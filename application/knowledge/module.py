@@ -162,6 +162,47 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
             )
             logger.info("Completed L1 KG maintenance (file_id=%s owner_id=%s stats=%s)", file_id, owner_id, stats)
 
+    def _get_graph_stores_with_l2_maintenance(self):  # noqa: ANN001
+        stores = []
+        try:
+            indexers = getattr(self.file_index, "indexers", None) or []
+            for indexer in indexers:
+                store = getattr(indexer, "graph_store", None)
+                if store is None:
+                    continue
+                if callable(getattr(store, "run_kg_maintenance_l2_for_owner", None)):
+                    stores.append(store)
+        except Exception:
+            return []
+        return stores
+
+    async def run_kg_maintenance_l2(
+        self,
+        *,
+        owner_id: uuid.UUID,
+        file_ids: list[str] | None = None,
+        rebuild_same_as: bool = False,
+        backfill_missing_mentions: bool = False,
+    ) -> Dict[str, Any]:
+        """Run L2 KG maintenance (repair) in a background thread.
+
+        This is intended for manual or admin-triggered maintenance. It is owner-scoped and
+        can optionally be limited to specific file_ids (still within owner scope).
+        """
+
+        stores = self._get_graph_stores_with_l2_maintenance()
+        if not stores:
+            raise RuntimeError("No graph store available for L2 KG maintenance")
+        store = stores[0]
+        file_ids_norm = [str(x).strip() for x in (file_ids or []) if str(x or "").strip()]
+        return await self._run_blocking(
+            store.run_kg_maintenance_l2_for_owner,
+            owner_id=str(owner_id),
+            file_ids=file_ids_norm,
+            rebuild_same_as=bool(rebuild_same_as),
+            backfill_missing_mentions=bool(backfill_missing_mentions),
+        )
+
     async def _cancel_deletion_task(self, doc_id: str) -> None:
         task = self._active_deletion_tasks.get(doc_id)
         if not task:

@@ -782,6 +782,46 @@ def export_graph(
         )
 
 
+@app.command("kg-maintenance-l2")
+def kg_maintenance_l2(
+    owner_id: str = typer.Option(None, help="Optional owner UUID overriding default."),
+    file_ids: Optional[List[str]] = typer.Option(
+        None,
+        "--file-id",
+        help="Optional file_id scope (repeatable). When omitted, runs owner-global repair.",
+    ),
+    rebuild_same_as: bool = typer.Option(
+        False,
+        "--rebuild-same-as",
+        help="Supersede and rebuild SAME_AS edges for the owner (expensive).",
+    ),
+    backfill_missing_mentions: bool = typer.Option(
+        False,
+        "--backfill-missing-mentions",
+        help="Backfill missing EntityMention nodes before running repair (can be expensive).",
+    ),
+    output_json: bool = typer.Option(True, "--json/--no-json", help="Print JSON result to stdout."),
+) -> None:
+    """Run L2 KG maintenance (repair) for an owner scope."""
+    ctx = initialize(owner_id=owner_id)
+    runner = _get_rag_runner()
+    graph_store = runner.get_graph_store()
+    if not graph_store or not callable(getattr(graph_store, "run_kg_maintenance_l2_for_owner", None)):
+        typer.secho("Current retriever does not expose a graph store with L2 maintenance.", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    stats = graph_store.run_kg_maintenance_l2_for_owner(
+        owner_id=str(ctx.owner_id),
+        file_ids=[str(x).strip() for x in (file_ids or []) if str(x or "").strip()],
+        rebuild_same_as=bool(rebuild_same_as),
+        backfill_missing_mentions=bool(backfill_missing_mentions),
+    )
+    if output_json:
+        typer.echo(json.dumps(stats, ensure_ascii=False, indent=2, default=str))
+        return
+    typer.echo(f"L2 KG maintenance done: success={stats.get('success')} run_id={stats.get('run_id')}")
+
+
 @app.command("semantic-unit-eval")
 def semantic_unit_eval(
     path: Path = typer.Argument(
