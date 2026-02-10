@@ -475,6 +475,9 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINERU_HEALTHCHECK_TIMEOUT_S` | `2` | 当 `PARSER_PARSE_MODE=mineru` 时，启动/索引会对 `GET $MINERU_SERVER_URL/health` 做健康检查；该变量控制超时秒数。 |
 | `MINERU_FALLBACK_TO_NATIVE_ON_FAILURE` | `false` | 当 `PARSER_PARSE_MODE=mineru` 时，如果 MinerU 解析失败（例如服务未启动）则回退到 native 的 PDF 文本抽取；回退信息会写入解析结果元数据（`metadata.parser_fallback`）。 |
 | `MINERU_REUSE_CACHE` | `1` | 重新入库时，如果 `PARSER_OUTPUT_DIR/mineru/<file_id>/` 下已有 MinerU markdown，则复用缓存（跳过远程 MinerU 调用）。 |
+| `MINERU_SHARED_CACHE_ENABLED` | `1` | 启用 MinerU 的全局（跨 owner/tenant）解析缓存复用：当文件 bytes 完全一致（sha256 匹配）时跳过远程 MinerU 调用。 |
+| `MINERU_SHARED_CACHE_DIR` | _(空)_ | 可选：共享 MinerU 缓存根目录；默认 `${PARSER_OUTPUT_DIR}/mineru/_shared`。 |
+| `MINERU_SHARED_CACHE_MODE` | `symlink` | 共享缓存物化到每个 file 输出目录的方式：`symlink`（优先）或 `copy`。 |
 | `MINERU_TIMEOUT_S` | `900` | 可选：远程 MinerU 解析/下载的 HTTP 超时（秒）。 |
 | `MINERU_POLL_INTERVAL_S` | `5` | 可选：MinerU 异步解析状态的轮询间隔（秒）。 |
 | `MINERU_POLL_TIMEOUT_S` | `0` | 可选：等待 MinerU 解析完成的最大秒数；`0` 或负数表示不限制。 |

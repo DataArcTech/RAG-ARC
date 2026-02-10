@@ -8,6 +8,15 @@ from core.utils.path_guard import require_writable_dir, safe_leaf_name
 from framework.thread_pool import get_thread_pool
 
 from encapsulation.remote_services.mineru_service_client import MinerUServiceClient
+from core.file_management.parser.mineru_shared_cache import (
+    MinerUSharedCacheKey,
+    build_parser_fingerprint,
+    materialize_shared_cache,
+    publish_to_shared_cache,
+    resolve_shared_cache_dir,
+    sha256_hex,
+    shared_cache_hit,
+)
 
 if TYPE_CHECKING:
     from config.core.file_management.parser.mineru import MinerUParserConfig
@@ -111,6 +120,55 @@ class MinerUParser(AbstractParser):
         end_page = int(end_page) if end_page is not None else None
         output_format = str(kwargs.get("output_format") or getattr(self.config, "output_format", "mm_md"))
 
+        # Shared-cache reuse (cross-owner/tenant): if file bytes are identical and parse params match,
+        # materialize shared artifacts under this file_id dir and skip MinerU remote calls.
+        shared_enabled = bool(getattr(self.config, "shared_cache_enabled", False))
+        shared_root = resolve_shared_cache_dir(base_dir=getattr(self.config, "shared_cache_dir", None)) if shared_enabled else None
+        shared_mode = str(getattr(self.config, "shared_cache_mode", "symlink") or "symlink")
+        shared_key: MinerUSharedCacheKey | None = None
+        if shared_root is not None:
+            try:
+                bytes_sha = sha256_hex(file_data)
+                fp = build_parser_fingerprint(
+                    params={
+                        "backend": backend,
+                        "parse_method": parse_method,
+                        "lang": lang,
+                        "formula_enable": bool(formula_enable),
+                        "table_enable": bool(table_enable),
+                        "start_page": int(start_page),
+                        "end_page": None if end_page is None else int(end_page),
+                        "output_format": output_format,
+                    }
+                )
+                shared_key = MinerUSharedCacheKey(bytes_sha256=bytes_sha, parser_fingerprint=fp)
+                shared_dir = shared_cache_hit(shared_root, shared_key)
+                if shared_dir is not None:
+                    mat = materialize_shared_cache(shared_dir=shared_dir, dest_dir=doc_dir, mode=shared_mode)
+                    if mat.get("ok"):
+                        md_candidates = sorted(doc_dir.glob("*.md"))
+                        if md_candidates:
+                            md_text = md_candidates[0].read_text(encoding="utf-8", errors="ignore")
+                            if md_text.strip():
+                                logger.info("Reusing shared MinerU artifacts: %s -> %s", shared_dir, doc_dir)
+                                return [
+                                    {
+                                        "md_content_path": str(md_candidates[0]),
+                                        "text": md_text,
+                                        "metadata": {
+                                            "source_file_name": filename,
+                                            "mineru_shared_cache_reused": True,
+                                            "mineru_shared_cache_sha256": bytes_sha,
+                                            "mineru_shared_cache_fingerprint": fp,
+                                            "mineru_shared_cache_mode": mat.get("mode"),
+                                            "output_dir": str(doc_dir),
+                                        },
+                                    }
+                                ]
+            except Exception as exc:
+                logger.warning("MinerU shared-cache reuse failed; will fall back: %s", exc)
+                shared_key = None
+
         parse_result = await get_thread_pool().run_blocking(
             self.client.parse_bytes,
             file_bytes=file_data,
@@ -178,6 +236,11 @@ class MinerUParser(AbstractParser):
             raise RuntimeError(f"MinerU markdown download missing: {md_local_path}")
 
         md_text = md_local_path.read_text(encoding="utf-8", errors="ignore")
+        if shared_root is not None and shared_key is not None:
+            try:
+                publish_to_shared_cache(shared_root=shared_root, key=shared_key, src_dir=doc_dir)
+            except Exception:
+                pass
         return [
             {
                 "md_content_path": str(md_local_path),

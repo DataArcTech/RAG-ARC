@@ -477,6 +477,9 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINERU_HEALTHCHECK_TIMEOUT_S` | `2` | Startup/indexing healthcheck timeout seconds for `GET $MINERU_SERVER_URL/health` when `PARSER_PARSE_MODE=mineru`. |
 | `MINERU_FALLBACK_TO_NATIVE_ON_FAILURE` | `false` | When `PARSER_PARSE_MODE=mineru`, fallback to native PDF text extraction if MinerU parsing fails (e.g. service not running). Fallback is recorded in parse result metadata (`metadata.parser_fallback`). |
 | `MINERU_REUSE_CACHE` | `1` | When re-indexing, reuse existing MinerU markdown artifacts under `PARSER_OUTPUT_DIR/mineru/<file_id>/` if present (skip remote MinerU call). |
+| `MINERU_SHARED_CACHE_ENABLED` | `1` | Enable global (cross-owner/tenant) MinerU parse cache reuse when file bytes are identical (sha256 match). |
+| `MINERU_SHARED_CACHE_DIR` | _(empty)_ | Optional shared MinerU cache root. Defaults to `${PARSER_OUTPUT_DIR}/mineru/_shared`. |
+| `MINERU_SHARED_CACHE_MODE` | `symlink` | How to materialize shared cache into per-file output dirs: `symlink` (preferred) or `copy`. |
 | `MINERU_TIMEOUT_S` | `900` | Optional: HTTP timeout seconds for remote MinerU parsing/downloads. |
 | `MINERU_POLL_INTERVAL_S` | `5` | Optional: polling interval seconds for MinerU async parse status. |
 | `MINERU_POLL_TIMEOUT_S` | `0` | Optional: max seconds to wait for MinerU parse completion; `0` or negative means no limit. |
