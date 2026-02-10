@@ -780,7 +780,7 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
             response["previous_failure"] = failure_reason
         return response
 
-    async def delete_file(self, doc_id: str, user_id: uuid.UUID) -> Dict[str, Any]:
+    async def delete_file(self, doc_id: str, user_id: uuid.UUID, *, purge: bool = False) -> Dict[str, Any]:
         # Check if the file exists before attempting deletion
         metadata = await self._run_blocking(self.file_storage.get_file_metadata, doc_id)
         if not metadata:
@@ -820,18 +820,18 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
                 task_type="delete_file",
                 owner_id=user_id,
                 resource_id=doc_id,
-                metadata={"trigger": "api_delete"},
+                metadata={"trigger": "api_delete", "purge": bool(purge)},
             )
             queue = os.getenv("CELERY_QUEUE_INDEXING", "indexing")
             delete_file_task.apply_async(
-                kwargs={"file_id": doc_id, "owner_id": str(user_id), "delete_file_metadata": True},
+                kwargs={"file_id": doc_id, "owner_id": str(user_id), "purge": bool(purge)},
                 task_id=task_run_id,
                 queue=queue,
             )
             logger.info("Deletion enqueued for file_id=%s (task_run_id=%s)", doc_id, task_run_id)
         else:
             # Schedule deletion in background
-            delete_task = asyncio.create_task(self._delete_file_background(doc_id))
+            delete_task = asyncio.create_task(self._delete_file_background(doc_id, purge=purge))
             self._track_deletion_task(doc_id, delete_task)
             logger.info(f"Deletion scheduled for file_id: {doc_id}")
 
@@ -847,6 +847,7 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
         actor_id: uuid.UUID,
         owner_id: uuid.UUID,
         allow_non_owner: bool = False,
+        purge: bool = False,
     ) -> Dict[str, Any]:
         """
         Delete a file in an explicit owner scope.
@@ -891,17 +892,17 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
                 task_type="delete_file",
                 owner_id=metadata.owner_id,
                 resource_id=doc_id,
-                metadata={"trigger": "scoped_delete", "actor_id": str(actor_id)},
+                metadata={"trigger": "scoped_delete", "actor_id": str(actor_id), "purge": bool(purge)},
             )
             queue = os.getenv("CELERY_QUEUE_INDEXING", "indexing")
             delete_file_task.apply_async(
-                kwargs={"file_id": doc_id, "owner_id": str(metadata.owner_id), "delete_file_metadata": True},
+                kwargs={"file_id": doc_id, "owner_id": str(metadata.owner_id), "purge": bool(purge)},
                 task_id=task_run_id,
                 queue=queue,
             )
             logger.info("Deletion enqueued for file_id=%s (task_run_id=%s owner_id=%s)", doc_id, task_run_id, owner_id)
         else:
-            delete_task = asyncio.create_task(self._delete_file_background(doc_id))
+            delete_task = asyncio.create_task(self._delete_file_background(doc_id, purge=purge))
             self._track_deletion_task(doc_id, delete_task)
             logger.info("Deletion scheduled for file_id: %s (owner_id=%s)", doc_id, owner_id)
 
@@ -921,15 +922,21 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
     def _is_share_library_admin(actor_id: uuid.UUID) -> bool:
         return bool(is_admin_owner(actor_id) or is_org_admin_owner(actor_id))
 
-    async def _delete_file_background(self, doc_id: str) -> None:
-        """Execute the deletion pipeline asynchronously."""
-        logger.info(f"Background deletion started for file_id: {doc_id}")
+    async def _delete_file_background(self, doc_id: str, *, purge: bool = False) -> None:
+        """Execute the deletion pipeline asynchronously.
+
+        Default behavior (purge=0) removes only derived artifacts (chunks/indexes) and keeps parsed content and file bytes
+        so future indexing can skip parsing and identical uploads can reuse parser artifacts.
+
+        When purge=1, it also deletes file bytes + metadata (and thus parsed content, which is file-scoped in SQL).
+        """
+        logger.info("Background deletion started for file_id=%s purge=%s", doc_id, int(bool(purge)))
         success = False
         try:
             deletion_result = await self._run_blocking(
                 self.file_index.delete_file_data,
                 doc_id,
-                delete_file_metadata=True
+                preserve_parsed_content=not bool(purge),
             )
 
             if not deletion_result.get("success", False):
@@ -939,11 +946,12 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
                     raise RuntimeError(error_msg)
                 logger.info(f"No indexed content found for file {doc_id}, continuing deletion workflow")
 
-            storage_deleted = await self._run_blocking(self.file_storage.delete_file, doc_id)
-            if not storage_deleted:
-                raise RuntimeError("File storage deletion returned False")
+            if bool(purge):
+                storage_deleted = await self._run_blocking(self.file_storage.delete_file, doc_id)
+                if not storage_deleted:
+                    raise RuntimeError("File storage deletion returned False")
 
-            logger.info(f"Background deletion completed for file_id: {doc_id}")
+            logger.info("Background deletion completed for file_id=%s purge=%s", doc_id, int(bool(purge)))
             success = True
         except Exception as e:
             logger.error(f"Background deletion failed for {doc_id}: {e}")

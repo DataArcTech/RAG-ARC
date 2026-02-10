@@ -418,14 +418,24 @@ async def get_mineru_asset(
 
 
 @router.delete("/{file_id}", status_code=status.HTTP_200_OK)
-async def delete_file(file_id: str, user: Annotated[User | None, Depends(get_current_user)]):
+async def delete_file(
+    file_id: str,
+    user: Annotated[User | None, Depends(get_current_user)],
+    purge: bool = Query(
+        default=False,
+        description=(
+            "When true, purge underlying file bytes + parsed content. "
+            "Default (false) only removes derived artifacts (chunks/indexes) in the owner scope and keeps parsed artifacts for reuse."
+        ),
+    ),
+):
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required"
         )
     try:
-        result = await get_knowledge_handler().delete_file(file_id, user.id)
+        result = await get_knowledge_handler().delete_file(file_id, user.id, purge=purge)
         return result
     except HTTPException:
         # surface 404s and 403s if thrown by storage layer

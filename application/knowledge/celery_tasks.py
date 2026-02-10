@@ -560,7 +560,14 @@ def parse_file(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
 
 
 @celery_app.task(bind=True, name="rag_arc.knowledge.delete_file")
-def delete_file(self, *, file_id: str, owner_id: str, delete_file_metadata: bool = True) -> Dict[str, Any]:
+def delete_file(
+    self,
+    *,
+    file_id: str,
+    owner_id: str,
+    purge: bool = False,
+    delete_file_metadata: bool | None = None,
+) -> Dict[str, Any]:
     ensure_initialized()
 
     run_id = str(getattr(self.request, "id", "") or uuid.uuid4().hex)
@@ -643,17 +650,25 @@ def delete_file(self, *, file_id: str, owner_id: str, delete_file_metadata: bool
             payload={"file_id": file_id},
         )
 
-        deletion_result = knowledge.file_index.delete_file_data(file_id, delete_file_metadata=delete_file_metadata)
+        # Back-compat: historical call sites used `delete_file_metadata` to mean "purge".
+        if delete_file_metadata is not None:
+            purge = bool(delete_file_metadata)
+
+        deletion_result = knowledge.file_index.delete_file_data(
+            file_id,
+            preserve_parsed_content=not bool(purge),
+        )
         if not deletion_result.get("success", False):
             error_msg = str(deletion_result.get("error_message") or "delete_file_data failed")
             if error_msg and "file_id must be a non-empty string" not in error_msg:
                 raise RuntimeError(error_msg)
 
-        storage_deleted = knowledge.file_storage.delete_file(file_id)
-        if not storage_deleted:
-            raise RuntimeError("file storage deletion returned False")
+        if bool(purge):
+            storage_deleted = knowledge.file_storage.delete_file(file_id)
+            if not storage_deleted:
+                raise RuntimeError("file storage deletion returned False")
 
-        result_payload = {"success": True, "file_id": file_id, "deleted": True}
+        result_payload = {"success": True, "file_id": file_id, "deleted": True, "purged": bool(purge)}
         task_queue.set_task_result_and_finalize_run(
             run_id,
             result=result_payload,
