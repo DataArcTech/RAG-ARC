@@ -15,9 +15,11 @@ CLI 提供从“文档接入 → 索引/建图 → 检索问答”的完整算�
 | --- | --- | --- |
 | 文档导入 | `uv run rag-arc ingest-file ./doc.pdf --owner-id <UUID>` | 上传并完成切分、索引、建图（单文件，推荐始终指定 `--owner-id`）。 |
 | 文档导入 | `uv run rag-arc ingest-folder ./docs --pattern '*.pdf' --owner-id <UUID>` | 按文件夹批量导入，默认递归子目录。 |
+| 文档导入 | `uv run rag-arc parse-file ./doc.pdf --owner-id <UUID>` | 上传并仅解析（持久化解析产物），不分块/不索引。 |
+| 文档导入 | `uv run rag-arc parse-folder ./docs --pattern '*.pdf' --owner-id <UUID>` | 按文件夹批量仅解析（不分块/不索引）。 |
 | 知识管理 | `uv run rag-arc list-files --json --owner-id <UUID>` | 列出当前 Owner 下的文件，可按状态/分页过滤。 |
 | 知识管理 | `uv run rag-arc delete-file FILE_ID --owner-id <UUID>` | 仅标记删除（元数据操作，不会清理索引/存储）。 |
-| 知识管理 | `uv run rag-arc trigger-index FILE_ID [FILE_ID ...] --owner-id <UUID>` | 对既有文件重新触发索引/建图。 |
+| 知识管理 | `uv run rag-arc trigger-index FILE_ID [FILE_ID ...] --owner-id <UUID>` | 对既有文件重新触发索引/建图（若已有解析产物会跳过解析阶段）。 |
 | 图工具 | `uv run rag-arc export-graph --output graph.json --owner-id <UUID>` | 导出完整图谱（Neo4j/igraph）到终端或 JSON 文件。 |
 | 检索问答 | `uv run rag-arc chat "什么是RAG-ARC？" --owner-id <UUID>` | 多路径检索 + 重排 + LLM 的完整对话。 |
 | 检索问答 | `uv run rag-arc pipeline "什么是RAG-ARC？" --skip-llm --subgraph --owner-id <UUID>` | 仅查看改写/检索/重排（可导出子图）。 |
@@ -35,6 +37,7 @@ CLI 提供从“文档接入 → 索引/建图 → 检索问答”的完整算�
 ## 使用提示
 - `--json` 适用于 list/chat/pipeline/graph-qa/export-graph，方便获得结构化输出。
 - `ingest-folder` 支持 `--limit`、`--pattern`、`--no-recursive` 控制导入范围，每个文件失败会即时打印原因。
+- 如果解析开销较大或希望跨用户复用解析结果，可优先走两段式：先用 `parse-*` 持久化解析产物，再用 `trigger-index` 在需要时入库；索引会自动跳过已完成的解析阶段。
 - `trigger-index` 与 `export-graph` 直接操作配置文件中声明的图存储（默认 Neo4j）。运行前请确认相关服务处于可访问状态。
 - 默认的 owner ID 会缓存到 `~/.rag_arc_owner_id`，若需多人共享或固定某个租户，可使用 `--owner-id ...`，或在环境变量中设置 `CLI_OWNER_ID` / `RAG_ARC_OWNER_ID` / `DEFAULT_OWNER_ID`。
 - 终端中展示的 chunk 预览默认截取前 50 个字符；如需查看完整内容请使用 `--json` 输出。

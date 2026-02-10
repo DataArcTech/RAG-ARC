@@ -7,6 +7,7 @@ import numpy as np
 from encapsulation.data_model.schema import Chunk, GraphData
 from encapsulation.database.graph_db.pruned_hipporag_neo4j import PrunedHippoRAGNeo4jStore
 from encapsulation.database.utils.pruned_hipporag_utils import compute_mdhash_id
+from core.file_management.extractor.metadata_keys import BUSINESS_TIME_KEY
 from core.retrieval.graph_retrieveal.pruned_hipporag import PrunedHippoRAGRetriever
 from core.retrieval.graph_retrieveal.pruned_hipporag_neo4j import PrunedHippoRAGNeo4jRetriever
 from core.utils.owner_guard import is_admin_owner
@@ -154,6 +155,56 @@ def test_batch_add_chunks_and_graph_data_scopes_owner_metadata():
         owner_id=sample_fact['owner_id'],
     )
     assert sample_fact['fact_id'] == expected_fact_id
+
+
+def test_batch_add_chunks_and_graph_data_materializes_entity_mentions_when_enabled():
+    """L0 mention materialization writes EntityMention payloads owner-scoped + time/version-aware."""
+    store = _make_store()
+    owner_a = str(uuid.uuid4())
+
+    # Enable L0 mention materialization in this unit test.
+    store.config = SimpleNamespace(
+        kg_maintenance=SimpleNamespace(
+            l0=SimpleNamespace(
+                enabled=True,
+                source_version_metadata_keys=["source_version"],
+            )
+        )
+    )
+
+    graph = _build_graph("Alpha Corp", "Beta Corp")
+    graph.metadata = {BUSINESS_TIME_KEY: {"valid_from": "2020-01-01", "valid_to": "2021-01-01"}}
+    chunk_a = Chunk(
+        id="chunk-a",
+        content="Alpha content",
+        owner_id=owner_a,
+        metadata={"owner_id": owner_a, "source_file_id": "file-a", "source_version": "v2"},
+        graph=graph,
+    )
+
+    store._batch_add_chunks_and_graph_data([chunk_a])
+    run_calls = store._driver.transactions[-1].run_calls
+
+    # Ensure mention materialization query was issued.
+    params = next(params for query, params in run_calls if "UNWIND $entity_mentions AS m" in query)
+    mentions = params["entity_mentions"]
+    assert isinstance(mentions, list)
+    assert len(mentions) >= 1
+
+    sample = mentions[0]
+    assert sample["owner_id"] == store._owner_key(owner_a)
+    assert sample["chunk_id"] == "chunk-a"
+    assert sample["source_file_id"] == "file-a"
+    assert sample["source_version"] == "v2"
+    assert sample["valid_from"] == "2020-01-01"
+    assert sample["valid_to"] == "2021-01-01"
+
+    expected_mention_id = compute_mdhash_id(
+        f"{sample['chunk_id']}|{sample['surface_entity_id']}",
+        prefix="mention-",
+        owner_id=store._owner_key(owner_a),
+    )
+    assert sample["mention_id"] == expected_mention_id
 
 
 def test_graph_cache_filters_neighbors_by_owner():

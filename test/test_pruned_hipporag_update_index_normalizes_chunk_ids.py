@@ -13,9 +13,9 @@ class _DummyStore(_PrunedHippoRAGNeo4jIndexingOpsMixin):
         self.captured_chunk_ids: List[str] | None = None
         self.captured_entity_ids: List[str] | None = None
 
-    def _batch_add_chunks_and_graph_data(self, chunks: List[Chunk]):  # noqa: ANN001
+    def _batch_add_chunks_and_graph_data(self, chunks: List[Chunk], **kwargs):  # noqa: ANN001
         # Simulate successful ingest.
-        return []
+        return [], {"entity_mentions": {"enabled": False, "attempted": 0, "written": 0, "elapsed_s": 0.0}}
 
     def batch_generate_embeddings(self, *, chunk_ids=None, entity_ids=None):  # noqa: ANN001
         # The bug: chunk_ids could be UUID objects and would not match Neo4j string ids.

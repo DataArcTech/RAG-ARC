@@ -39,12 +39,17 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
         
         # Semaphore to control concurrent indexing operations
         self.indexing_semaphore = asyncio.Semaphore(config.max_concurrent_indexing)
+        max_kg = int(getattr(config, "max_concurrent_kg_maintenance", 0) or 0)
+        if max_kg <= 0:
+            max_kg = int(getattr(config, "max_concurrent_indexing", 5) or 5)
+        self.kg_maintenance_semaphore = asyncio.Semaphore(max_kg)
         self._active_index_tasks: Dict[str, asyncio.Task] = {}
         self._files_marked_for_deletion: set[str] = set()
         self._files_marked_for_deletion_by_owner: Dict[uuid.UUID, set[str]] = {}
         self._file_owner_cache: Dict[str, uuid.UUID] = {}
         self._active_deletion_tasks: Dict[str, asyncio.Task] = {}
         self._deletion_failures: Dict[str, str] = {}
+        self._active_kg_maintenance_tasks: Dict[str, asyncio.Task] = {}
 
     def _use_celery(self) -> bool:
         return os.getenv("TASK_QUEUE_MODE", "inprocess").lower() == "celery"
@@ -73,6 +78,131 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
 
         task.add_done_callback(_cleanup)
 
+    def _track_kg_maintenance_task(self, key: str, task: asyncio.Task) -> None:
+        """Register a background KG maintenance task so we don't schedule duplicates."""
+        self._active_kg_maintenance_tasks[key] = task
+
+        def _cleanup(fut: asyncio.Task, k: str = key) -> None:
+            self._active_kg_maintenance_tasks.pop(k, None)
+            if fut.cancelled():
+                logger.info("Background KG maintenance task cancelled: %s", k)
+            elif fut.exception():
+                logger.error("Background KG maintenance task failed (%s): %s", k, fut.exception(), exc_info=True)
+
+        task.add_done_callback(_cleanup)
+
+    def _get_graph_stores_with_l0_mentions(self):  # noqa: ANN001
+        stores = []
+        try:
+            indexers = getattr(self.file_index, "indexers", None) or []
+            for indexer in indexers:
+                store = getattr(indexer, "graph_store", None)
+                if store is None:
+                    continue
+                if callable(getattr(store, "materialize_entity_mentions_for_chunk_ids", None)):
+                    stores.append(store)
+        except Exception:
+            return []
+        return stores
+
+    async def _run_kg_maintenance_l0_backfill(self, *, file_id: str, owner_id: uuid.UUID, chunk_ids: list[str]) -> None:
+        """Background continuation: materialize mention nodes for the file's chunks."""
+        async with self.kg_maintenance_semaphore:
+            stores = self._get_graph_stores_with_l0_mentions()
+            if not stores:
+                logger.warning("No graph store available for L0 mention backfill (file_id=%s)", file_id)
+                return
+            store = stores[0]
+            logger.info("Starting L0 mention backfill (file_id=%s owner_id=%s chunks=%s)", file_id, owner_id, len(chunk_ids))
+            await self._run_blocking(
+                store.materialize_entity_mentions_for_chunk_ids,
+                owner_id=str(owner_id),
+                chunk_ids=chunk_ids,
+            )
+            logger.info("Completed L0 mention backfill (file_id=%s owner_id=%s)", file_id, owner_id)
+
+    def _get_graph_stores_with_l1_maintenance(self):  # noqa: ANN001
+        stores = []
+        try:
+            indexers = getattr(self.file_index, "indexers", None) or []
+            for indexer in indexers:
+                store = getattr(indexer, "graph_store", None)
+                if store is None:
+                    continue
+                if callable(getattr(store, "run_kg_maintenance_l1_for_file_ids", None)):
+                    stores.append(store)
+        except Exception:
+            return []
+        return stores
+
+    def _is_l1_enabled_anywhere(self) -> bool:
+        for store in self._get_graph_stores_with_l1_maintenance():
+            cfg = getattr(store, "config", None)
+            kg_cfg = getattr(cfg, "kg_maintenance", None) if cfg is not None else None
+            if bool(getattr(kg_cfg, "l1_enabled", False)):
+                return True
+        return False
+
+    async def _run_kg_maintenance_l1_for_file_id(self, *, file_id: str, owner_id: uuid.UUID) -> None:
+        """Background L1: entity disambiguation + identity alignment (owner/file scoped).
+
+        L1 is store-config controlled; when disabled it will fast-return with 'skipped'.
+        """
+        async with self.kg_maintenance_semaphore:
+            stores = self._get_graph_stores_with_l1_maintenance()
+            if not stores:
+                logger.warning("No graph store available for L1 KG maintenance (file_id=%s)", file_id)
+                return
+            store = stores[0]
+            logger.info("Starting L1 KG maintenance (file_id=%s owner_id=%s)", file_id, owner_id)
+            stats = await self._run_blocking(
+                store.run_kg_maintenance_l1_for_file_ids,
+                owner_id=str(owner_id),
+                file_ids=[str(file_id)],
+            )
+            logger.info("Completed L1 KG maintenance (file_id=%s owner_id=%s stats=%s)", file_id, owner_id, stats)
+
+    def _get_graph_stores_with_l2_maintenance(self):  # noqa: ANN001
+        stores = []
+        try:
+            indexers = getattr(self.file_index, "indexers", None) or []
+            for indexer in indexers:
+                store = getattr(indexer, "graph_store", None)
+                if store is None:
+                    continue
+                if callable(getattr(store, "run_kg_maintenance_l2_for_owner", None)):
+                    stores.append(store)
+        except Exception:
+            return []
+        return stores
+
+    async def run_kg_maintenance_l2(
+        self,
+        *,
+        owner_id: uuid.UUID,
+        file_ids: list[str] | None = None,
+        rebuild_same_as: bool = False,
+        backfill_missing_mentions: bool = False,
+    ) -> Dict[str, Any]:
+        """Run L2 KG maintenance (repair) in a background thread.
+
+        This is intended for manual or admin-triggered maintenance. It is owner-scoped and
+        can optionally be limited to specific file_ids (still within owner scope).
+        """
+
+        stores = self._get_graph_stores_with_l2_maintenance()
+        if not stores:
+            raise RuntimeError("No graph store available for L2 KG maintenance")
+        store = stores[0]
+        file_ids_norm = [str(x).strip() for x in (file_ids or []) if str(x or "").strip()]
+        return await self._run_blocking(
+            store.run_kg_maintenance_l2_for_owner,
+            owner_id=str(owner_id),
+            file_ids=file_ids_norm,
+            rebuild_same_as=bool(rebuild_same_as),
+            backfill_missing_mentions=bool(backfill_missing_mentions),
+        )
+
     async def _cancel_deletion_task(self, doc_id: str) -> None:
         task = self._active_deletion_tasks.get(doc_id)
         if not task:
@@ -83,13 +213,21 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
         except asyncio.CancelledError:
             logger.info(f"Cancelled deletion task awaited for file_id: {doc_id}")
     
-    async def upload_file(self, file: UploadFile, user_id: uuid.UUID, *, relative_path: str | None = None) -> str:
+    async def upload_file(
+        self,
+        file: UploadFile,
+        user_id: uuid.UUID,
+        *,
+        relative_path: str | None = None,
+        ingest_mode: str = "index",
+    ) -> str:
         return await self.upload_file_scoped(
             file=file,
             actor_id=user_id,
             owner_id=user_id,
             allow_non_owner=True,
             relative_path=relative_path,
+            ingest_mode=ingest_mode,
         )
 
     async def upload_file_scoped(
@@ -100,6 +238,7 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
         owner_id: uuid.UUID,
         allow_non_owner: bool = False,
         relative_path: str | None = None,
+        ingest_mode: str = "index",
     ) -> str:
         """
         Upload a file into an explicit owner scope.
@@ -123,42 +262,218 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
                 content_type=file.content_type,
             )
 
+            mode = str(ingest_mode or "index").strip().lower()
+            if mode not in {"index", "parse", "store"}:
+                raise ValueError("ingest_mode must be one of: index, parse, store")
+
+            if mode == "store":
+                logger.info("File %s uploaded with ID %s (store-only; no background job)", file.filename, doc_id)
+                return doc_id
+
+            task_type = "parse_file" if mode == "parse" else "index_file"
             task_run_id = self.task_queue.create_task_run(
-                task_type="index_file",
+                task_type=task_type,
                 owner_id=owner_id,
                 resource_id=doc_id,
-                metadata={"filename": relative_path or file.filename, "content_type": file.content_type, "actor_id": str(actor_id)},
+                metadata={"filename": relative_path or file.filename, "content_type": file.content_type, "actor_id": str(actor_id), "mode": mode},
             )
-            if self._use_celery():
-                from application.knowledge.celery_tasks import index_file as index_file_task
 
+            if self._use_celery():
                 queue = os.getenv("CELERY_QUEUE_INDEXING", "indexing")
-                index_file_task.apply_async(
-                    kwargs={"file_id": doc_id, "owner_id": str(owner_id)},
-                    task_id=task_run_id,
-                    queue=queue,
-                )
-                logger.info(
-                    "File %s uploaded with ID %s, indexing enqueued (task_run_id=%s owner_id=%s)",
-                    file.filename,
-                    doc_id,
-                    task_run_id,
-                    owner_id,
-                )
+                if mode == "parse":
+                    from application.knowledge.celery_tasks import parse_file as parse_file_task
+
+                    parse_file_task.apply_async(
+                        kwargs={"file_id": doc_id, "owner_id": str(owner_id)},
+                        task_id=task_run_id,
+                        queue=queue,
+                    )
+                    logger.info(
+                        "File %s uploaded with ID %s, parsing enqueued (task_run_id=%s owner_id=%s)",
+                        file.filename,
+                        doc_id,
+                        task_run_id,
+                        owner_id,
+                    )
+                else:
+                    from application.knowledge.celery_tasks import index_file as index_file_task
+
+                    index_file_task.apply_async(
+                        kwargs={"file_id": doc_id, "owner_id": str(owner_id)},
+                        task_id=task_run_id,
+                        queue=queue,
+                    )
+                    logger.info(
+                        "File %s uploaded with ID %s, indexing enqueued (task_run_id=%s owner_id=%s)",
+                        file.filename,
+                        doc_id,
+                        task_run_id,
+                        owner_id,
+                    )
             else:
-                task = asyncio.create_task(self._index_file_background(doc_id, task_run_id=task_run_id))
-                self._track_background_task(doc_id, task)
-                logger.info(
-                    "File %s uploaded with ID %s, indexing started in background (owner_id=%s)",
-                    file.filename,
-                    doc_id,
-                    owner_id,
-                )
+                if mode == "parse":
+                    task = asyncio.create_task(self._parse_file_background(doc_id, task_run_id=task_run_id))
+                    self._track_background_task(doc_id, task)
+                    logger.info(
+                        "File %s uploaded with ID %s, parsing started in background (owner_id=%s)",
+                        file.filename,
+                        doc_id,
+                        owner_id,
+                    )
+                else:
+                    task = asyncio.create_task(self._index_file_background(doc_id, task_run_id=task_run_id))
+                    self._track_background_task(doc_id, task)
+                    logger.info(
+                        "File %s uploaded with ID %s, indexing started in background (owner_id=%s)",
+                        file.filename,
+                        doc_id,
+                        owner_id,
+                    )
             return doc_id
 
         except Exception as e:
             logger.error(e)
             raise
+
+    async def _parse_file_background(
+        self,
+        doc_id: str,
+        *,
+        task_run_id: str | None = None,
+        force_reparse: bool = False,
+    ) -> Dict[str, Any]:
+        """Background task for parse-only flows (no chunk/index)."""
+        if self._is_file_marked_for_deletion(doc_id):
+            logger.info("Skipping parsing for file_id %s because it is marked for deletion", doc_id)
+            if task_run_id:
+                self.task_queue.update_task_run(
+                    task_run_id,
+                    state=TaskState.CANCELED,
+                    error_message="file scheduled for deletion",
+                    finished=True,
+                )
+            return {"success": False, "file_id": doc_id, "error_message": "file scheduled for deletion"}
+
+        async with self.indexing_semaphore:
+            try:
+                if task_run_id:
+                    self.task_queue.update_task_run(task_run_id, state=TaskState.RUNNING, progress_percent=1)
+                    self.task_queue.append_progress_event(
+                        flow="parsing",
+                        task_run_id=task_run_id,
+                        stage="parse",
+                        status="start",
+                        percent=1,
+                        resource_id=doc_id,
+                        payload={"file_id": doc_id},
+                    )
+
+                # Dependency preflight for parsing (skip Neo4j; include MinerU when parse_mode=mineru).
+                try:
+                    from core.utils.dependency_health import check_dependencies, format_dependency_failures
+
+                    health = check_dependencies(
+                        include_postgres=True,
+                        include_redis=True,
+                        include_neo4j=False,
+                        mode_env="RAGARC_INDEXING_DEPENDENCY_CHECK_MODE",
+                        default_mode="strict",
+                    )
+                    failure = format_dependency_failures(health)
+                    if failure and health.get("mode") == "strict":
+                        raise RuntimeError(failure)
+                except Exception as exc:
+                    err = f"dependency health check failed: {exc}"
+                    logger.error(err)
+                    if task_run_id:
+                        try:
+                            self.task_queue.update_task_run(
+                                task_run_id,
+                                state=TaskState.FAILURE,
+                                progress_percent=100,
+                                error_message=err,
+                                finished=True,
+                            )
+                            self.task_queue.append_progress_event(
+                                flow="parsing",
+                                task_run_id=task_run_id,
+                                stage="dependency_check",
+                                status="error",
+                                percent=100,
+                                resource_id=doc_id,
+                                payload={"file_id": doc_id, "success": False, "error_message": err},
+                            )
+                        except Exception:
+                            pass
+                    return {"success": False, "file_id": doc_id, "error_message": err}
+
+                def _progress(stage: str, percent: int | None, payload: dict[str, Any] | None = None) -> None:
+                    if not task_run_id:
+                        return
+                    try:
+                        merged = {"file_id": doc_id}
+                        if payload and isinstance(payload, dict):
+                            merged.update(payload)
+                        self.task_queue.append_progress_event(
+                            flow="parsing",
+                            task_run_id=task_run_id,
+                            stage=str(stage),
+                            status="progress",
+                            percent=percent,
+                            resource_id=doc_id,
+                            payload=merged,
+                        )
+                    except Exception:
+                        return
+
+                result = await self.file_index.parse_file(doc_id, progress=_progress, force_reparse=bool(force_reparse))
+                if result.get("success", False):
+                    if task_run_id:
+                        self.task_queue.update_task_run(task_run_id, state=TaskState.SUCCESS, progress_percent=100, finished=True)
+                        self.task_queue.append_progress_event(
+                            flow="parsing",
+                            task_run_id=task_run_id,
+                            stage="parse",
+                            status="end",
+                            percent=100,
+                            resource_id=doc_id,
+                            payload={"file_id": doc_id, "success": True, "parsed_content_id": result.get("parsed_content_id")},
+                        )
+                else:
+                    err = str(result.get("error_message") or "parsing failed")
+                    if task_run_id:
+                        self.task_queue.update_task_run(
+                            task_run_id,
+                            state=TaskState.FAILURE,
+                            progress_percent=100,
+                            error_message=err,
+                            finished=True,
+                        )
+                        self.task_queue.append_progress_event(
+                            flow="parsing",
+                            task_run_id=task_run_id,
+                            stage="parse",
+                            status="error",
+                            percent=100,
+                            resource_id=doc_id,
+                            payload={"file_id": doc_id, "success": False, "error_message": err},
+                        )
+                return result
+            except Exception as exc:  # noqa: BLE001
+                err = str(exc)
+                logger.error("Background parsing failed for file_id=%s: %s", doc_id, err, exc_info=True)
+                if task_run_id:
+                    try:
+                        self.task_queue.update_task_run(
+                            task_run_id,
+                            state=TaskState.FAILURE,
+                            progress_percent=100,
+                            error_message=err,
+                            finished=True,
+                        )
+                    except Exception:
+                        pass
+                return {"success": False, "file_id": doc_id, "error_message": err}
 
     async def _index_file_background(self, doc_id: str, *, task_run_id: str | None = None) -> Dict[str, Any]:
         """Background task for indexing files with semaphore control
@@ -240,7 +555,11 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
                     return {"success": False, "file_id": doc_id, "error_message": err}
 
                 # Idempotency under at-least-once semantics: remove old derived artifacts/index entries first.
-                cleanup = await self._run_blocking(self.file_index.delete_file_data, doc_id)
+                cleanup = await self._run_blocking(
+                    self.file_index.delete_file_data,
+                    doc_id,
+                    preserve_parsed_content=True,
+                )
                 if not cleanup.get("success", False):
                     err = str(cleanup.get("error_message") or "pre-index cleanup failed")
                     logger.error("Pre-index cleanup failed for file_id=%s: %s", doc_id, err)
@@ -298,6 +617,64 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
                             resource_id=doc_id,
                             payload={"file_id": doc_id, "success": True},
                         )
+
+                    # If L0 mention materialization was deferred (budget exceeded), schedule a background backfill.
+                    try:
+                        indexing_results = result.get("indexing_results") if isinstance(result, dict) else None
+                        deferred = False
+                        if isinstance(indexing_results, dict):
+                            for payload in indexing_results.values():
+                                if not isinstance(payload, dict):
+                                    continue
+                                meta = payload.get("metadata") or {}
+                                if not isinstance(meta, dict):
+                                    continue
+                                gs = meta.get("graph_store") or {}
+                                if not isinstance(gs, dict):
+                                    continue
+                                l0 = gs.get("kg_maintenance_l0") or {}
+                                if isinstance(l0, dict) and bool(l0.get("deferred")):
+                                    deferred = True
+                                    break
+                        if deferred:
+                            file_meta = await self._run_blocking(self.file_storage.get_file_metadata, doc_id)
+                            owner_id = getattr(file_meta, "owner_id", None) if file_meta is not None else None
+                            chunk_ids = result.get("chunk_ids") if isinstance(result.get("chunk_ids"), list) else []
+                            chunk_ids = [str(x).strip() for x in chunk_ids if str(x or "").strip()]
+                            if owner_id and chunk_ids:
+                                task_key = f"l0_mentions:{str(owner_id)}:{str(doc_id)}"
+                                if task_key not in self._active_kg_maintenance_tasks:
+                                    task = asyncio.create_task(
+                                        self._run_kg_maintenance_l0_backfill(
+                                            file_id=doc_id,
+                                            owner_id=owner_id,
+                                            chunk_ids=chunk_ids,
+                                        )
+                                    )
+                                    self._track_kg_maintenance_task(task_key, task)
+                                    logger.info("Scheduled L0 mention backfill: %s", task_key)
+                    except Exception as exc:
+                        logger.warning("Failed to schedule L0 mention backfill for %s: %s", doc_id, exc)
+
+                    # L1: entity disambiguation + identity alignment (background; file-scoped).
+                    # This is scheduled only when enabled in store config, and never blocks indexing readiness.
+                    try:
+                        if self._is_l1_enabled_anywhere():
+                            file_meta = await self._run_blocking(self.file_storage.get_file_metadata, doc_id)
+                            owner_id = getattr(file_meta, "owner_id", None) if file_meta is not None else None
+                            if owner_id:
+                                task_key = f"l1_kg:{str(owner_id)}:{str(doc_id)}"
+                                if task_key not in self._active_kg_maintenance_tasks:
+                                    task = asyncio.create_task(
+                                        self._run_kg_maintenance_l1_for_file_id(
+                                            file_id=doc_id,
+                                            owner_id=owner_id,
+                                        )
+                                    )
+                                    self._track_kg_maintenance_task(task_key, task)
+                                    logger.info("Scheduled L1 KG maintenance: %s", task_key)
+                    except Exception as exc:
+                        logger.warning("Failed to schedule L1 KG maintenance for %s: %s", doc_id, exc)
                 else:
                     logger.error(f"Background indexing failed for file_id: {doc_id}, error: {result.get('error_message')}")
                     if task_run_id:
@@ -409,7 +786,7 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
             response["previous_failure"] = failure_reason
         return response
 
-    async def delete_file(self, doc_id: str, user_id: uuid.UUID) -> Dict[str, Any]:
+    async def delete_file(self, doc_id: str, user_id: uuid.UUID, *, purge: bool = False) -> Dict[str, Any]:
         # Check if the file exists before attempting deletion
         metadata = await self._run_blocking(self.file_storage.get_file_metadata, doc_id)
         if not metadata:
@@ -449,18 +826,18 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
                 task_type="delete_file",
                 owner_id=user_id,
                 resource_id=doc_id,
-                metadata={"trigger": "api_delete"},
+                metadata={"trigger": "api_delete", "purge": bool(purge)},
             )
             queue = os.getenv("CELERY_QUEUE_INDEXING", "indexing")
             delete_file_task.apply_async(
-                kwargs={"file_id": doc_id, "owner_id": str(user_id), "delete_file_metadata": True},
+                kwargs={"file_id": doc_id, "owner_id": str(user_id), "purge": bool(purge)},
                 task_id=task_run_id,
                 queue=queue,
             )
             logger.info("Deletion enqueued for file_id=%s (task_run_id=%s)", doc_id, task_run_id)
         else:
             # Schedule deletion in background
-            delete_task = asyncio.create_task(self._delete_file_background(doc_id))
+            delete_task = asyncio.create_task(self._delete_file_background(doc_id, purge=purge))
             self._track_deletion_task(doc_id, delete_task)
             logger.info(f"Deletion scheduled for file_id: {doc_id}")
 
@@ -476,6 +853,7 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
         actor_id: uuid.UUID,
         owner_id: uuid.UUID,
         allow_non_owner: bool = False,
+        purge: bool = False,
     ) -> Dict[str, Any]:
         """
         Delete a file in an explicit owner scope.
@@ -520,17 +898,17 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
                 task_type="delete_file",
                 owner_id=metadata.owner_id,
                 resource_id=doc_id,
-                metadata={"trigger": "scoped_delete", "actor_id": str(actor_id)},
+                metadata={"trigger": "scoped_delete", "actor_id": str(actor_id), "purge": bool(purge)},
             )
             queue = os.getenv("CELERY_QUEUE_INDEXING", "indexing")
             delete_file_task.apply_async(
-                kwargs={"file_id": doc_id, "owner_id": str(metadata.owner_id), "delete_file_metadata": True},
+                kwargs={"file_id": doc_id, "owner_id": str(metadata.owner_id), "purge": bool(purge)},
                 task_id=task_run_id,
                 queue=queue,
             )
             logger.info("Deletion enqueued for file_id=%s (task_run_id=%s owner_id=%s)", doc_id, task_run_id, owner_id)
         else:
-            delete_task = asyncio.create_task(self._delete_file_background(doc_id))
+            delete_task = asyncio.create_task(self._delete_file_background(doc_id, purge=purge))
             self._track_deletion_task(doc_id, delete_task)
             logger.info("Deletion scheduled for file_id: %s (owner_id=%s)", doc_id, owner_id)
 
@@ -550,15 +928,21 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
     def _is_share_library_admin(actor_id: uuid.UUID) -> bool:
         return bool(is_admin_owner(actor_id) or is_org_admin_owner(actor_id))
 
-    async def _delete_file_background(self, doc_id: str) -> None:
-        """Execute the deletion pipeline asynchronously."""
-        logger.info(f"Background deletion started for file_id: {doc_id}")
+    async def _delete_file_background(self, doc_id: str, *, purge: bool = False) -> None:
+        """Execute the deletion pipeline asynchronously.
+
+        Default behavior (purge=0) removes only derived artifacts (chunks/indexes) and keeps parsed content and file bytes
+        so future indexing can skip parsing and identical uploads can reuse parser artifacts.
+
+        When purge=1, it also deletes file bytes + metadata (and thus parsed content, which is file-scoped in SQL).
+        """
+        logger.info("Background deletion started for file_id=%s purge=%s", doc_id, int(bool(purge)))
         success = False
         try:
             deletion_result = await self._run_blocking(
                 self.file_index.delete_file_data,
                 doc_id,
-                delete_file_metadata=True
+                preserve_parsed_content=not bool(purge),
             )
 
             if not deletion_result.get("success", False):
@@ -568,11 +952,12 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
                     raise RuntimeError(error_msg)
                 logger.info(f"No indexed content found for file {doc_id}, continuing deletion workflow")
 
-            storage_deleted = await self._run_blocking(self.file_storage.delete_file, doc_id)
-            if not storage_deleted:
-                raise RuntimeError("File storage deletion returned False")
+            if bool(purge):
+                storage_deleted = await self._run_blocking(self.file_storage.delete_file, doc_id)
+                if not storage_deleted:
+                    raise RuntimeError("File storage deletion returned False")
 
-            logger.info(f"Background deletion completed for file_id: {doc_id}")
+            logger.info("Background deletion completed for file_id=%s purge=%s", doc_id, int(bool(purge)))
             success = True
         except Exception as e:
             logger.error(f"Background deletion failed for {doc_id}: {e}")
@@ -961,9 +1346,8 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
         Returns:
             String containing basic info about the triggered indexing or error message
         """
-        # Validate files and collect those eligible for indexing
-        # Only allow indexing of STORED or FAILED files
-        # Skip files that are INDEXED, or in intermediate states (PARSED, CHUNKED) indicating processing is in progress
+        # Validate files and collect those eligible for indexing.
+        # NOTE: PARSED is eligible (parse-only mode). CHUNKED indicates indexing in progress (we usually skip it).
         valid_files = []
         invalid_files = []
         skipped_files = []
@@ -1010,10 +1394,10 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
                     invalid_files.append(f"File is deleted: {file_id}")
                     continue
 
-                # Only allow indexing for STORED, FAILED, or PARTIAL_INDEXED files, unless force is enabled.
+                # Only allow indexing for STORED/FAILED/PARTIAL_INDEXED/PARSED files, unless force is enabled.
                 # PARTIAL_INDEXED is treated as retriable (same as FAILED from user perspective).
-                # Skip files that are in intermediate processing states (PARSED, CHUNKED) or already INDEXED.
-                if metadata.status in {FileStatus.STORED, FileStatus.FAILED, FileStatus.PARTIAL_INDEXED} or force:
+                # Skip files that are in intermediate processing states (CHUNKED) or already INDEXED.
+                if metadata.status in {FileStatus.STORED, FileStatus.FAILED, FileStatus.PARTIAL_INDEXED, FileStatus.PARSED} or force:
                     valid_files.append(file_id)
                 else:
                     skipped_files.append(file_id)
@@ -1105,6 +1489,136 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
 
         return "\n".join(message_parts)
 
+    async def trigger_parsing(
+        self,
+        file_ids: List[str],
+        user_id: uuid.UUID,
+        *,
+        force: bool = False,
+        force_reparse: bool = False,
+        wait: bool = False,
+    ) -> str:
+        """Trigger parse-only for multiple files asynchronously (no chunk/index)."""
+        effective_force = bool(force or force_reparse)
+        valid_files: list[str] = []
+        invalid_files: list[str] = []
+        skipped_files: list[str] = []
+
+        for file_id in file_ids:
+            try:
+                metadata = self.file_storage.get_file_metadata(file_id)
+                if not metadata:
+                    invalid_files.append(f"File not found or invalid: {file_id}")
+                    continue
+                if metadata.owner_id != user_id:
+                    invalid_files.append(f"You are not authorized to operate on this file: {file_id}")
+                    continue
+
+                if self._use_celery():
+                    latest_run_id = self.task_queue.get_latest_task_run_id_for_resource(
+                        task_type="parse_file",
+                        resource_id=file_id,
+                    )
+                    if latest_run_id:
+                        latest_run = self.task_queue.get_task_run(latest_run_id) or {}
+                        latest_state = str(latest_run.get("state") or "")
+                        if latest_state in {TaskState.PENDING.value, TaskState.RUNNING.value} and not effective_force:
+                            skipped_files.append(file_id)
+                            continue
+                else:
+                    active_task = self._active_index_tasks.get(file_id)
+                    if active_task is not None and not active_task.done() and not effective_force:
+                        skipped_files.append(file_id)
+                        continue
+
+                if metadata.status == FileStatus.DELETED:
+                    invalid_files.append(f"File is deleted: {file_id}")
+                    continue
+
+                if metadata.status in {FileStatus.STORED, FileStatus.FAILED, FileStatus.PARTIAL_INDEXED} or effective_force:
+                    valid_files.append(file_id)
+                else:
+                    skipped_files.append(file_id)
+            except Exception:
+                invalid_files.append(file_id)
+                logger.exception("Error accessing file %s for parsing", file_id)
+                continue
+
+        if not valid_files:
+            message_parts: list[str] = []
+            if invalid_files:
+                message_parts.append(f"Invalid files: {'; '.join(invalid_files)}")
+            if skipped_files:
+                message_parts.append(f"Skipped files (already parsed or in progress): {'; '.join(skipped_files)}")
+            message_parts.append("No files scheduled for parsing.")
+            return "\n".join(message_parts)
+
+        results: list[Dict[str, Any] | Exception] = []
+        if self._use_celery():
+            queue = os.getenv("CELERY_QUEUE_INDEXING", "indexing")
+            from application.knowledge.celery_tasks import parse_file as parse_file_task
+
+            for file_id in valid_files:
+                task_run_id = self.task_queue.create_task_run(
+                    task_type="parse_file",
+                    owner_id=user_id,
+                    resource_id=file_id,
+                    metadata={"trigger": "manual", "force_reparse": bool(force_reparse)},
+                )
+                parse_file_task.apply_async(
+                    kwargs={"file_id": file_id, "owner_id": str(user_id), "force_reparse": bool(force_reparse)},
+                    task_id=task_run_id,
+                    queue=queue,
+                )
+        else:
+            task_specs: list[tuple[str, str]] = []
+            for file_id in valid_files:
+                task_run_id = self.task_queue.create_task_run(
+                    task_type="parse_file",
+                    owner_id=user_id,
+                    resource_id=file_id,
+                    metadata={"trigger": "manual", "force_reparse": bool(force_reparse)},
+                )
+                task_specs.append((file_id, task_run_id))
+
+            if wait:
+                tasks = [
+                    self._parse_file_background(file_id, task_run_id=task_run_id, force_reparse=bool(force_reparse))
+                    for file_id, task_run_id in task_specs
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+            else:
+                for file_id, task_run_id in task_specs:
+                    task = asyncio.create_task(
+                        self._parse_file_background(file_id, task_run_id=task_run_id, force_reparse=bool(force_reparse))
+                    )
+                    self._track_background_task(file_id, task)
+
+        message_parts: list[str] = []
+        if wait and not self._use_celery():
+            succeeded: list[str] = []
+            failed: list[str] = []
+            for file_id, outcome in zip(valid_files, results):
+                if isinstance(outcome, Exception):
+                    failed.append(file_id)
+                    continue
+                if isinstance(outcome, dict) and outcome.get("success", False):
+                    succeeded.append(file_id)
+                else:
+                    failed.append(file_id)
+            message_parts.append(f"Parsing completed for files: {'; '.join(valid_files)}")
+            message_parts.append(f"succeeded={len(succeeded)}, failed={len(failed)}")
+            if failed:
+                message_parts.append(f"failed_files: {'; '.join(failed)}")
+        else:
+            message_parts.append(f"Parsing started for files: {'; '.join(valid_files)}")
+        if skipped_files:
+            message_parts.append(f"Skipped files (already parsed or in progress): {'; '.join(skipped_files)}")
+        if invalid_files:
+            message_parts.append(f"Invalid files: {'; '.join(invalid_files)}")
+
+        return "\n".join(message_parts)
+
     async def get_file_task_status(self, file_id: str, user_id: uuid.UUID) -> Dict[str, Any]:
         metadata = await self._run_blocking(self.file_storage.get_file_metadata, file_id)
         if not metadata:
@@ -1116,14 +1630,40 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
         if permission_type is None:
             raise HTTPException(status_code=403, detail="You are not allowed to access this file")
 
-        task_run_id = await self._run_blocking(
+        # Surface the most recent task among {parse_file, index_file} so clients can poll uniformly.
+        index_run_id = await self._run_blocking(
             self.task_queue.get_latest_task_run_id_for_resource,
             task_type="index_file",
             resource_id=file_id,
         )
-        task_run = None
-        if task_run_id:
-            task_run = await self._run_blocking(self.task_queue.get_task_run, task_run_id)
+        parse_run_id = await self._run_blocking(
+            self.task_queue.get_latest_task_run_id_for_resource,
+            task_type="parse_file",
+            resource_id=file_id,
+        )
+
+        def _load(run_id: str | None) -> dict[str, Any] | None:
+            if not run_id:
+                return None
+            try:
+                return self.task_queue.get_task_run(run_id) or None
+            except Exception:
+                return None
+
+        index_run = await self._run_blocking(_load, index_run_id) if index_run_id else None
+        parse_run = await self._run_blocking(_load, parse_run_id) if parse_run_id else None
+
+        task_run_id = index_run_id or parse_run_id
+        task_run = index_run or parse_run
+        if index_run and parse_run:
+            try:
+                idx_ts = int(index_run.get("updated_at_ms") or 0)
+                parse_ts = int(parse_run.get("updated_at_ms") or 0)
+                if parse_ts > idx_ts:
+                    task_run_id = parse_run_id
+                    task_run = parse_run
+            except Exception:
+                pass
 
         return {
             "file_id": file_id,

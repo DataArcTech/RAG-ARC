@@ -5,7 +5,7 @@ import uuid
 from typing import Annotated, Any, Dict, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from api.deepsearch.tasks import TASKS, new_run_id
 from api.routers.auth import get_current_user
@@ -24,6 +24,7 @@ from core.deepsearch.tooling.all_tools import render_all_tools_block
 from core.deepsearch.trace import emit_trace, reset_trace_emitter, set_trace_emitter, with_trace_protocol
 from core.deepsearch.utils.progress import compute_deepsearch_progress
 from core.presentation.deepsearch_payload import trim_deepsearch_payload
+from core.presentation.deepsearch_trace_report import DeepSearchTraceEvent, build_debug_report_text
 from core.utils.owner_guard import is_admin_owner
 from encapsulation.data_model.orm_models import User
 from encapsulation.message_queue.redis_task_queue import RedisTaskQueue, TaskState
@@ -104,6 +105,22 @@ def _get_graph_store() -> Any | None:
 
 def _stage_progress(stage: str) -> Dict[str, Any]:
     return compute_deepsearch_progress(stage)
+
+
+async def _read_all_progress_events(task_queue: RedisTaskQueue, run_id: str) -> list[Dict[str, Any]]:
+    """Read all progress events for a run from RedisTaskQueue (best-effort)."""
+    cursor = -1
+    out: list[Dict[str, Any]] = []
+    while True:
+        batch = await asyncio.to_thread(task_queue.read_progress_events, run_id, last_seq=cursor, count=200, block_ms=0)
+        if not batch:
+            break
+        out.extend(batch)
+        try:
+            cursor = int(batch[-1].get("seq", cursor))
+        except Exception:
+            cursor = cursor + len(batch)
+    return out
 
 
 @router.post("/run", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
@@ -387,6 +404,93 @@ async def get_result(
     if info.error:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=info.error)
     return info.result or {"run_id": run_id, "done": True, "result": None}
+
+
+@router.get("/{run_id}/debug_report", response_class=PlainTextResponse, status_code=status.HTTP_200_OK)
+async def get_debug_report(
+    run_id: str,
+    current_user: Annotated[User | None, Depends(get_current_user)],
+):
+    """Return a human-readable DeepSearch trace report (weaver/XML blocks)."""
+
+    if current_user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+
+    owner_id: str | None = None
+    question: str | None = None
+    answer: str | None = None
+    trace_events: list[DeepSearchTraceEvent] = []
+
+    if _use_celery():
+        task_queue = _get_task_queue()
+        task_run = task_queue.get_task_run(run_id)
+        if not task_run:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run_id not found")
+        _assert_task_owner(task_run, user_id=current_user.id)
+        owner_id = str(task_run.get("owner_id") or "")
+        state = str(task_run.get("state") or "")
+        if state not in {TaskState.SUCCESS.value, TaskState.FAILURE.value, TaskState.CANCELED.value}:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run not finished")
+        if state != TaskState.SUCCESS.value:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=str(task_run.get("error_message") or "task failed"),
+            )
+
+        result = task_queue.get_task_result(run_id) or {}
+        if isinstance(result, dict):
+            question = str(result.get("question") or "")
+            report = result.get("report") if isinstance(result.get("report"), dict) else {}
+            answer = report.get("answer") if isinstance(report.get("answer"), str) else None
+
+        events = await _read_all_progress_events(task_queue, run_id)
+        for ev in events:
+            if str(ev.get("status") or "").strip().lower() != "trace":
+                continue
+            payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+            trace_events.append(
+                DeepSearchTraceEvent(
+                    tag=str(payload.get("trace_tag") or "think"),
+                    content=str(payload.get("content") or ""),
+                    meta=(payload.get("meta") if isinstance(payload.get("meta"), dict) else {}),
+                )
+            )
+    else:
+        info = await TASKS.get(run_id)
+        if not info:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run_id not found")
+        _assert_inprocess_task_owner(info, user_id=current_user.id)
+        owner_id = str(info.owner_id or "")
+        if not info.done:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run not finished")
+        if info.error:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(info.error))
+
+        result = info.result or {}
+        if isinstance(result, dict):
+            question = str(result.get("question") or "")
+            report = result.get("report") if isinstance(result.get("report"), dict) else {}
+            answer = report.get("answer") if isinstance(report.get("answer"), str) else None
+        for item in info.events:
+            if str(item.get("type") or "").strip().lower() != "trace":
+                continue
+            payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            trace_events.append(
+                DeepSearchTraceEvent(
+                    tag=str(payload.get("trace_tag") or "think"),
+                    content=str(payload.get("content") or ""),
+                    meta=(payload.get("meta") if isinstance(payload.get("meta"), dict) else {}),
+                )
+            )
+
+    text = build_debug_report_text(
+        run_id=str(run_id),
+        owner_id=owner_id,
+        question=question if question and question.strip() else None,
+        answer=answer,
+        trace_events=trace_events,
+    )
+    return PlainTextResponse(text, media_type="text/plain; charset=utf-8")
 
 
 @router.get("/stream/{run_id}")

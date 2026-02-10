@@ -168,7 +168,13 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
 
         logger.info("FAISS indices initialized (fact: Flat, entity: HNSW)")
 
-    def _batch_add_chunks_and_graph_data(self, chunks: List[Chunk]) -> List[str]:
+    def _batch_add_chunks_and_graph_data(
+        self,
+        chunks: List[Chunk],
+        *,
+        enable_entity_mentions: bool | None = None,
+        entity_mentions_remaining: int | None = None,
+    ) -> tuple[List[str], Dict[str, Any]]:
         """
         Batch add chunks and their graph data to Neo4j (OPTIMIZED).
 
@@ -179,7 +185,7 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
             chunks: List of Chunk objects to add
 
         Returns:
-            List of newly created entity IDs
+            (new_entity_ids, stats) where stats includes optional L0 mention materialization metrics.
         """
         import time
         start_time = time.time()
@@ -197,6 +203,7 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
         tree_node_parent_link_keys: set[tuple[str, str, str]] = set()
         entity_data: Dict[str, Dict[str, Any]] = {}  # entity_id -> entity payload
         mention_data = []
+        entity_mention_data: List[Dict[str, Any]] = []
         fact_data_by_id: Dict[str, Dict[str, Any]] = {}
         schema_nodes_by_id: Dict[str, Dict[str, Any]] = {}
         schema_links: List[Dict[str, Any]] = []
@@ -204,7 +211,17 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
         sdf_has_subevent_edges: List[Dict[str, Any]] = []
         sdf_before_edges: List[Dict[str, Any]] = []
         sdf_chunk_event_links: List[Dict[str, Any]] = []
-        new_entity_ids = []
+        new_entity_ids: List[str] = []
+
+        l0_stats: Dict[str, Any] = {
+            "entity_mentions": {
+                "enabled": False,
+                "attempted": 0,
+                "written": 0,
+                "skipped_reason": None,
+                "elapsed_s": 0.0,
+            }
+        }
 
         # HippoRAG chunk-triples contract: keep only triples whose endpoints are extracted named entities.
         # (Precision-first; endpoints outside extracted entities are dropped.)
@@ -218,6 +235,41 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
         )
         enable_schema_layers = bool(getattr(cfg, "enable_schema_layer_nodes", False))
         raw_schema_max_nodes = getattr(cfg, "schema_layer_max_nodes_per_chunk", None)
+
+        # L0 mention materialization config (hot-path, must be optional and budgeted by caller).
+        l0_cfg = getattr(getattr(cfg, "kg_maintenance", None), "l0", None) if cfg is not None else None
+        l0_enabled_cfg = bool(getattr(l0_cfg, "enabled", False)) if l0_cfg is not None else False
+        if enable_entity_mentions is None:
+            enable_entity_mentions = l0_enabled_cfg
+        enable_entity_mentions = bool(enable_entity_mentions)
+        l0_stats["entity_mentions"]["enabled"] = bool(enable_entity_mentions)
+        if enable_entity_mentions and entity_mentions_remaining is not None and int(entity_mentions_remaining) <= 0:
+            enable_entity_mentions = False
+            l0_stats["entity_mentions"]["enabled"] = False
+            l0_stats["entity_mentions"]["skipped_reason"] = "quota_exhausted"
+
+        # Source-version extraction keys for mention evidence.
+        version_keys = list(getattr(l0_cfg, "source_version_metadata_keys", []) or []) if l0_cfg is not None else []
+
+        def _extract_source_version(meta: Dict[str, Any]) -> str:
+            for key in version_keys:
+                val = str((meta or {}).get(key) or "").strip()
+                if val:
+                    return val
+            return ""
+
+        def _extract_business_time(meta: Dict[str, Any], *, chunk_obj: Chunk) -> Dict[str, Any]:
+            business_time: Dict[str, Any] = {}
+            try:
+                if chunk_obj.graph and isinstance(getattr(chunk_obj.graph, "metadata", None), dict):
+                    raw = chunk_obj.graph.metadata.get(BUSINESS_TIME_KEY)
+                    if isinstance(raw, dict):
+                        business_time = dict(raw)
+            except Exception:
+                business_time = {}
+            if not business_time and isinstance((meta or {}).get(BUSINESS_TIME_KEY), dict):
+                business_time = dict((meta or {}).get(BUSINESS_TIME_KEY) or {})
+            return business_time
         schema_layer_max_nodes = int(raw_schema_max_nodes) if raw_schema_max_nodes is not None else 0
         enable_sdf_schema = bool(getattr(cfg, "enable_sdf_schema", False))
         sdf_max_events = int(getattr(cfg, "sdf_max_events_per_chunk", 0) or 0)
@@ -264,6 +316,16 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
 
             # Extract source_file_id from metadata for independent storage
             source_file_id = metadata.get("source_file_id")
+
+            # Persist business_time into Chunk.metadata so background maintenance can recover temporal fields
+            # even when extractor-only fields are not available.
+            try:
+                if chunk.graph and isinstance(getattr(chunk.graph, "metadata", None), dict):
+                    raw_bt = chunk.graph.metadata.get(BUSINESS_TIME_KEY)
+                    if isinstance(raw_bt, dict) and BUSINESS_TIME_KEY not in metadata:
+                        metadata[BUSINESS_TIME_KEY] = dict(raw_bt)
+            except Exception:
+                pass
             
             chunk_id = str(chunk.id or "").strip()
             if not chunk_id:
@@ -495,6 +557,11 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
                 # Collect entity nodes + chunk mentions from NER outputs (not only triple endpoints).
                 # This keeps the entity layer usable even when relation extraction is sparse or schema-rejected.
                 mention_keys: set[tuple[str, str]] = set()
+                business_time = _extract_business_time(metadata, chunk_obj=chunk)
+                chunk_valid_from = business_time.get("valid_from") or business_time.get("effective_date")
+                chunk_effective_date = business_time.get("effective_date") or business_time.get("valid_from")
+                chunk_valid_to = business_time.get("valid_to")
+                source_version = _extract_source_version(metadata)
                 for (normalized_name, entity_type_key), entity_type_display in entity_key_to_type_display.items():
                     entity_id = compute_mdhash_id(
                         f"{normalized_name}|{entity_type_key}",
@@ -518,7 +585,27 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
                         mention_key = (chunk_id, entity_id)
                     if mention_key not in mention_keys:
                         mention_keys.add(mention_key)
-                        mention_data.append({"chunk_id": chunk_id, "entity_id": entity_id, "owner_id": db_owner_id})
+                        mention_record = {"chunk_id": chunk_id, "entity_id": entity_id, "owner_id": db_owner_id}
+                        mention_data.append(mention_record)
+                        if enable_entity_mentions:
+                            # Mention evidence is keyed per (chunk, surface_entity). Keep mention_id stable and owner-scoped.
+                            mention_id = compute_mdhash_id(
+                                f"{chunk_id}|{entity_id}",
+                                prefix="mention-",
+                                owner_id=db_owner_id,
+                            )
+                            payload = {
+                                "mention_id": mention_id,
+                                "chunk_id": chunk_id,
+                                "surface_entity_id": entity_id,
+                                "owner_id": db_owner_id,
+                                "source_file_id": str(source_file_id or "").strip(),
+                                "source_version": source_version,
+                                "valid_from": str(chunk_valid_from or "").strip(),
+                                "valid_to": str(chunk_valid_to or "").strip(),
+                                "effective_date": str(chunk_effective_date or "").strip(),
+                            }
+                            entity_mention_data.append(payload)
 
                 # Process and normalize relation triples (schema-governed predicate normalization)
                 canonical_to_entity_keys: dict[str, set[tuple[str, str]]] = {}
@@ -994,7 +1081,11 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
                 if canonical_nodes:
                     canonical_query = """
                     UNWIND $canonicals AS c
-                    MERGE (n:EntityCanonical:Concept {canonical_id: c.canonical_id})
+                    // NOTE: Do NOT include extra labels (e.g. `:Concept`) in the MERGE pattern.
+                    // Older DBs may already contain (:EntityCanonical {canonical_id}) nodes without the extra label.
+                    // `MERGE (n:EntityCanonical:Concept {canonical_id})` would then attempt to create a new node and
+                    // violate the unique constraint on :EntityCanonical(canonical_id).
+                    MERGE (n:EntityCanonical {canonical_id: c.canonical_id})
                     ON CREATE SET n.owner_id = c.owner_id,
                                   n.canonical_key = c.canonical_key,
                                   n.canonical_name = c.canonical_name,
@@ -1006,6 +1097,7 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
                                   n.canonical_name = c.canonical_name,
                                   n.entity_type_key = c.entity_type_key,
                                   n.updated_at = datetime()
+                    SET n:Concept
                     """
                     tx.run(canonical_query, {"canonicals": canonical_nodes})
                     logger.info("  Upserted %s EntityCanonical nodes", len(canonical_nodes))
@@ -1211,6 +1303,33 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
                     tx.run(mention_query, {'mentions': mention_data})
                     logger.info(f"  Batch created {len(mention_data)} MENTIONS relationships")
 
+                # 3.5 L0: materialize entity mentions (occurrence evidence) for KG maintenance.
+                if entity_mention_data:
+                    # Optional cap: only materialize up to remaining quota (if provided by caller).
+                    capped = entity_mention_data
+                    if entity_mentions_remaining is not None:
+                        try:
+                            remaining_int = int(entity_mentions_remaining)
+                        except Exception:
+                            remaining_int = None
+                        if remaining_int is not None and remaining_int >= 0:
+                            capped = entity_mention_data[:remaining_int]
+
+                    from encapsulation.database.graph_db.neo4j_entity_mention_cypher import UPSERT_ENTITY_MENTIONS_QUERY
+
+                    t0 = time.perf_counter()
+                    tx.run(UPSERT_ENTITY_MENTIONS_QUERY, {"entity_mentions": capped})
+                    elapsed = float(time.perf_counter() - t0)
+                    l0_stats["entity_mentions"]["attempted"] = int(len(entity_mention_data))
+                    l0_stats["entity_mentions"]["written"] = int(len(capped))
+                    l0_stats["entity_mentions"]["elapsed_s"] = float(elapsed)
+                    logger.info("  L0: materialized %s EntityMention nodes (attempted=%s, elapsed=%.3fs)", len(capped), len(entity_mention_data), elapsed)
+                elif enable_entity_mentions:
+                    l0_stats["entity_mentions"]["attempted"] = 0
+                    l0_stats["entity_mentions"]["written"] = 0
+                    if l0_stats["entity_mentions"]["skipped_reason"] is None:
+                        l0_stats["entity_mentions"]["skipped_reason"] = "no_mentions"
+
                 # 4. Batch create fact relationships
                 if fact_data:
                     fact_query = """
@@ -1279,4 +1398,4 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
         elapsed = time.time() - start_time
         logger.info(f"Batch insertion completed in {elapsed:.2f}s")
 
-        return new_entity_ids
+        return new_entity_ids, l0_stats

@@ -332,6 +332,9 @@ You can run the retrieval/rerank/LLM pipeline from the command line without laun
 # Bulk ingest (upload + indexing + graph build) from a local folder
 uv run rag-arc ingest-folder ./example/docs --owner-id YOUR_UUID
 
+# Parse only (upload + parse + persist parsed markdown), no chunk/index
+uv run rag-arc parse-folder ./example/docs --owner-id YOUR_UUID
+
 # Inspect stored files and statuses (JSON output)
 uv run rag-arc list-files --owner-id YOUR_UUID --json
 
@@ -353,6 +356,8 @@ uv run rag-arc export-graph --output graph.json
 
 The CLI still connects to the same PostgreSQL/Redis/Neo4j/MinIO services defined in `.env`, so ensure those dependencies are reachable even though the `rag-arc-app` container is not started.
 
+> ℹ️ Two-step ingest: if a file is already `PARSED`, `trigger-index` / re-indexing will reuse the latest parsed content and **skip the parse stage** (this is also where MinerU byte-level shared-cache reuse kicks in).
+
 > ⚠️ Deletion note: `uv run rag-arc delete-file FILE_ID` **only marks the file status as `DELETED`** to support quick UI/retrieval isolation tests. It does not trigger any chunk/index/blob cleanup. For the full asynchronous deletion pipeline (indexes, vector stores, graph, blobs), call the HTTP API `DELETE /knowledge/{file_id}`; the CLI no longer schedules full cleanup jobs.
 
 #### DeepSearch MCP tool server
@@ -371,7 +376,7 @@ The CLI still connects to the same PostgreSQL/Redis/Neo4j/MinIO services defined
 - SSE/HTTP transports listen on `127.0.0.1:8785` with the default path `mcp/chat`, so they won't collide with the tool MCP server (`8765`).
 - Use this endpoint if you want an external agent to drive RAG-ARC's chat stack through MCP instead of the HTTP API.
 
-> 📚 See `cli/README.md` for the full command reference (ingest-file/folder, list/delete, trigger-index, export-graph, chat/pipeline/graph-qa).
+> 📚 See `cli/README.md` for the full command reference (ingest-file/folder, parse-file/folder, list/delete, trigger-index, export-graph, chat/pipeline/graph-qa).
 
 ### 🧪 Example Usage
 
@@ -380,6 +385,12 @@ The CLI still connects to the same PostgreSQL/Redis/Neo4j/MinIO services defined
 curl -X POST "http://localhost:8000/knowledge" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -F "file=@/path/to/your/document.pdf"
+
+# Upload + parse only (no chunk/index). You can index later via POST /knowledge/trigger_indexing.
+curl -X POST "http://localhost:8000/knowledge" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -F "file=@/path/to/your/document.pdf" \
+  -F "ingest_mode=parse"
 
 # Chat with the RAG system
 curl -X POST "http://localhost:8000/rag_inference/chat" \
@@ -517,6 +528,7 @@ The document processing pipeline consists of several stages:
 2. **Parsing**: Multiple parsers support different document types:
    - Native parsers for standard formats (PDF, DOCX, PPTX, etc.)
    - OCR parsers for scanned documents (using DOTS-OCR or VLM-based approaches)
+   - Parse/index decoupling: parsing can be run as a standalone step (`PARSED` status) and indexing can reuse the stored parsed output later (skip re-parse).
 3. **Chunking**: Text is split into chunks using configurable strategies:
    - Token-based chunking
    - Semantic chunking
@@ -532,9 +544,13 @@ The document processing pipeline consists of several stages:
 RAG-ARC provides a comprehensive REST API with the following key endpoints:
 
 ### Knowledge Management
-- `POST /knowledge`: Upload documents
+- `POST /knowledge`: Upload documents (supports `ingest_mode=index|parse|store`)
 - `GET /knowledge/list_files`: List user documents
 - `GET /knowledge/{doc_id}/download`: Download documents
+- `GET /knowledge/{doc_id}/task`: Poll parse/index background task status
+- `POST /knowledge/trigger_indexing`: Trigger indexing for existing files (supports `PARSED` → index without re-parse)
+- `POST /knowledge/trigger_parsing`: Trigger parse-only for existing files (no chunk/index)
+- `POST /knowledge/{doc_id}/parse`: Convenience endpoint (parse-only for a single file)
 - `DELETE /knowledge/{doc_id}`: Delete documents
 
 ### RAG Inference

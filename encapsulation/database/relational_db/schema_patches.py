@@ -81,6 +81,9 @@ def apply_postgres_schema_patches(engine: Engine) -> None:
         "ALTER TABLE public.chat_session ADD COLUMN IF NOT EXISTS current_task_status varchar(50);",
         "ALTER TABLE public.chat_session ADD COLUMN IF NOT EXISTS current_task_started_at timestamp;",
         "CREATE INDEX IF NOT EXISTS ix_chat_session_current_task_id ON public.chat_session (current_task_id);",
+        # Parsed content metadata: store optional parser artifact paths for parse/index decoupling.
+        "ALTER TABLE public.parsed_content_metadata ADD COLUMN IF NOT EXISTS md_path varchar(1000);",
+        "ALTER TABLE public.parsed_content_metadata ADD COLUMN IF NOT EXISTS output_dir varchar(1000);",
     ]
 
     for stmt in statements:

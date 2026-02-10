@@ -89,7 +89,44 @@ class IndexManager(_IndexManagerPipelineMixin, _IndexManagerStatusMixin, _IndexM
                 "error_message": error_msg,
             }
 
+        # Parse-index decoupling: when a file has already been parsed (status=PARSED),
+        # try to reuse the most recent parsed_content_id to skip the parse stage.
+        reuse_parsed = bool(kwargs.pop("reuse_parsed", True))
+        explicit_parsed_content_id = str(kwargs.pop("parsed_content_id", "") or "").strip() or None
+        if explicit_parsed_content_id:
+            return await self.process_file_from_parsed_content_id(
+                file_id=file_id,
+                parsed_content_id=explicit_parsed_content_id,
+                **kwargs,
+            )
+
+        if reuse_parsed:
+            try:
+                parsed_list = self.parsed_content_storage.metadata_store.list_parsed_content_metadata(
+                    source_file_id=file_id,
+                    limit=1,
+                )
+                if parsed_list:
+                    candidate_id = str(getattr(parsed_list[0], "parsed_content_id", "") or "").strip()
+                    if candidate_id:
+                        return await self.process_file_from_parsed_content_id(
+                            file_id=file_id,
+                            parsed_content_id=candidate_id,
+                            **kwargs,
+                        )
+            except Exception:
+                # Best-effort; fall back to normal parse+index.
+                pass
+
         return await self.process_file(file_id, **kwargs)
+
+    async def parse_file(self, file_id: str, **kwargs: Any) -> Dict[str, Any]:
+        """Parse + persist parsed content only (no chunking/indexing)."""
+        if file_id is None or not isinstance(file_id, str) or not file_id.strip():
+            error_msg = "file_id must be a non-empty string"
+            logger.error(error_msg)
+            return {"success": False, "file_id": file_id, "error_message": error_msg}
+        return await self.parse_file_only(file_id, **kwargs)
 
     async def index_file_from_parsed_markdown(
         self,

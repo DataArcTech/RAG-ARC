@@ -11,6 +11,7 @@ class KnowledgeConfig(AbstractConfig):
     index_manager_config: IndexManagerConfig
     file_storage_config: FileStorageConfig
     max_concurrent_indexing: int = 5  # Maximum number of concurrent indexing operations
+    max_concurrent_kg_maintenance: int = 0  # 0 means "reuse max_concurrent_indexing"
 
     def build(self):
         return Knowledge(self)

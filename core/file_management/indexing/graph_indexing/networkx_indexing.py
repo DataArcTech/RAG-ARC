@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import List, TYPE_CHECKING
+from typing import Any, List, TYPE_CHECKING
 
 from core.file_management.indexing.base import BaseIndexer
 from encapsulation.data_model.schema import Chunk
@@ -146,12 +146,13 @@ class NetworkXGraphIndexer(BaseIndexer):
         logger.info(f"Successfully added {len(added_chunk_ids)} chunks to NetworkX graph store")
         return added_chunk_ids
 
-    def delete_chunks(self, chunk_ids: List[str]) -> bool:
+    def delete_chunks(self, chunk_ids: List[str], **kwargs: Any) -> bool:
         """
         Deletes a batch of chunks from the NetworkX graph index (synchronous).
 
         Args:
             chunk_ids: A list of chunk IDs to be deleted
+            **kwargs: Optional deletion context (ignored by NetworkX indexer).
 
         Returns:
             True if deletion was successful, False otherwise

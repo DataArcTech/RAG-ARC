@@ -138,6 +138,8 @@ class ParsedContentStorage(AbstractModule):
         parser_type: str,
         parsed_data: bytes,
         content_type: str = "text/markdown",
+        md_path: str | None = None,
+        output_dir: str | None = None,
         validate_after_store: bool = True,
         **kwargs: Any,
     ) -> str:
@@ -183,7 +185,9 @@ class ParsedContentStorage(AbstractModule):
                 status=ParsedContentStatus.STORED,
                 created_at=now,
                 updated_at=now,
-                content_type=content_type
+                content_type=content_type,
+                md_path=str(md_path) if md_path else None,
+                output_dir=str(output_dir) if output_dir else None,
             )
 
             # Store parsed metadata first

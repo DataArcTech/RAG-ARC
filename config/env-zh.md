@@ -52,6 +52,20 @@ Benchmark/实验模式：
 - `config/output_limits.py`：API 返回裁剪与证据上限（payload 限制）。
 - `config/core/deepsearch/*_defaults.py`：DeepSearch 的 loop/tool/report 默认参数（运行时读取）。
 
+与“知识图谱长期维护”相关的配置（重要）：
+
+- `config/json_configs/knowledge*.json`：
+  - `max_concurrent_kg_maintenance`：KG 维护后台任务并发（0 表示复用 `max_concurrent_indexing`）。
+  - `index_manager_config.indexer_configs[].graph_store_config.kg_maintenance.l0.*`：
+    - L0（热路径）会在入库时**物化 EntityMention（occurence evidence）**，用于后续实体消歧/对齐与删除修复。
+    - L0 是 best-effort + 预算化：超过预算会标记 deferred，并由后台任务补齐 mention（不阻塞“文件可问答”）。
+  - `index_manager_config.indexer_configs[].graph_store_config.kg_maintenance.l1_*`（默认开启，可按需关闭）：
+    - L1（后台）会基于 mention 的上下文（chunk embedding）对同名同类型实体做**消歧**，产出 `EntityIdentity`（聚类中心）。
+    - 通过 `(:EntityMention)-[:RESOLVED_TO]->(:EntityIdentity)` 保留**对齐/归一化**关系；不会删除原始 surface `Entity`。
+    - 可选输出 `(:EntityIdentity)-[:SAME_AS]->(:EntityIdentity)` 作为“别名/同一现实实体”的弱对齐信号（不会做强合并）。
+    - 当 `l1_enabled=true` 时：每次文件入库成功后会自动在后台触发一次 L1（严格 owner/file scoped，不阻塞“可问答”就绪）。
+    - 当 `l1_enabled=false` 时：仅保留 L0 mention 物化；可在低峰期用脚本/API 手动运行维护。
+
 密钥如何在配置里引用：
 - JSON 支持 `${ENV_VAR}` 占位符（例如 `${OPENAI_API_KEY}`），因此密钥放 `.env`，参数放 `config/`。
 
@@ -461,6 +475,9 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINERU_HEALTHCHECK_TIMEOUT_S` | `2` | 当 `PARSER_PARSE_MODE=mineru` 时，启动/索引会对 `GET $MINERU_SERVER_URL/health` 做健康检查；该变量控制超时秒数。 |
 | `MINERU_FALLBACK_TO_NATIVE_ON_FAILURE` | `false` | 当 `PARSER_PARSE_MODE=mineru` 时，如果 MinerU 解析失败（例如服务未启动）则回退到 native 的 PDF 文本抽取；回退信息会写入解析结果元数据（`metadata.parser_fallback`）。 |
 | `MINERU_REUSE_CACHE` | `1` | 重新入库时，如果 `PARSER_OUTPUT_DIR/mineru/<file_id>/` 下已有 MinerU markdown，则复用缓存（跳过远程 MinerU 调用）。 |
+| `MINERU_SHARED_CACHE_ENABLED` | `1` | 启用 MinerU 的全局（跨 owner/tenant）解析缓存复用：当文件 bytes 完全一致（sha256 匹配）时跳过远程 MinerU 调用。 |
+| `MINERU_SHARED_CACHE_DIR` | _(空)_ | 可选：共享 MinerU 缓存根目录；默认 `${PARSER_OUTPUT_DIR}/mineru/_shared`。 |
+| `MINERU_SHARED_CACHE_MODE` | `symlink` | 共享缓存物化到每个 file 输出目录的方式：`symlink`（优先）或 `copy`。 |
 | `MINERU_TIMEOUT_S` | `900` | 可选：远程 MinerU 解析/下载的 HTTP 超时（秒）。 |
 | `MINERU_POLL_INTERVAL_S` | `5` | 可选：MinerU 异步解析状态的轮询间隔（秒）。 |
 | `MINERU_POLL_TIMEOUT_S` | `0` | 可选：等待 MinerU 解析完成的最大秒数；`0` 或负数表示不限制。 |

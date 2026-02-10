@@ -49,11 +49,15 @@ from api.routers.knowledge_models import (
     GraphExportRequest,
     IndexTriggerRequest,
     IndexTriggerResponse,
+    ParseTriggerRequest,
+    ParseTriggerResponse,
     KnowledgeChunkResponse,
     MindmapEdge,
     MindmapExportRequest,
     MindmapExportResponse,
     MindmapNode,
+    KGMaintenanceL2Request,
+    KGMaintenanceL2Response,
     PermissionInfo,
     PermissionListResponse,
     RevokePermissionRequest,
@@ -93,6 +97,10 @@ async def upload_file(
     relative_path: Optional[str] = Form(
         default=None,
         description="Optional repo-relative path (e.g. RAG-ARC/docs/a.pdf).",
+    ),
+    ingest_mode: Optional[str] = Form(
+        default="index",
+        description="Upload mode: index (default), parse (parse-only), store (store-only).",
     ),
 ):
     """
@@ -135,7 +143,12 @@ async def upload_file(
     
     try:
         # Convert string UUID to UUID object
-        doc_id = await get_knowledge_handler().upload_file(file, user.id, relative_path=relative_path)
+        doc_id = await get_knowledge_handler().upload_file(
+            file,
+            user.id,
+            relative_path=relative_path,
+            ingest_mode=str(ingest_mode or "index"),
+        )
         return doc_id
     except ValueError as e:
         raise HTTPException(
@@ -219,9 +232,40 @@ async def get_task_result(
     if state not in {TaskState.SUCCESS.value, TaskState.FAILURE.value, TaskState.CANCELED.value}:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run not finished")
     if state != TaskState.SUCCESS.value:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(task_run.get("error_message") or "task failed"))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(task_run.get("error_message") or "task failed"),
+        )
     result = await asyncio.to_thread(task_queue.get_task_result, run_id)
     return result or {"run_id": run_id, "done": True, "result": None}
+
+
+@router.post("/kg/maintenance/l2", response_model=KGMaintenanceL2Response, status_code=status.HTTP_200_OK)
+async def kg_maintenance_l2(
+    req: KGMaintenanceL2Request = Body(...),
+    user: Annotated[User | None, Depends(get_current_user)] = None,
+):
+    """Run L2 KG maintenance (repair) for the current owner scope.
+
+    This endpoint is intended for debugging/admin maintenance and is owner-scoped by default.
+    """
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+
+    # For now, only allow users to run maintenance on their own scope (admin can impersonate by calling with admin token).
+    owner_id = user.id
+    try:
+        stats = await get_knowledge_handler().run_kg_maintenance_l2(
+            owner_id=owner_id,
+            file_ids=req.file_ids,
+            rebuild_same_as=req.rebuild_same_as,
+            backfill_missing_mentions=req.backfill_missing_mentions,
+        )
+        return KGMaintenanceL2Response(owner_id=str(owner_id), stats=stats)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
 
 
 @router.get("/stream/{run_id}")
@@ -374,14 +418,24 @@ async def get_mineru_asset(
 
 
 @router.delete("/{file_id}", status_code=status.HTTP_200_OK)
-async def delete_file(file_id: str, user: Annotated[User | None, Depends(get_current_user)]):
+async def delete_file(
+    file_id: str,
+    user: Annotated[User | None, Depends(get_current_user)],
+    purge: bool = Query(
+        default=False,
+        description=(
+            "When true, purge underlying file bytes + parsed content. "
+            "Default (false) only removes derived artifacts (chunks/indexes) in the owner scope and keeps parsed artifacts for reuse."
+        ),
+    ),
+):
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required"
         )
     try:
-        result = await get_knowledge_handler().delete_file(file_id, user.id)
+        result = await get_knowledge_handler().delete_file(file_id, user.id, purge=purge)
         return result
     except HTTPException:
         # surface 404s and 403s if thrown by storage layer
@@ -568,6 +622,55 @@ async def trigger_indexing(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to trigger indexing: {str(e)}",
         )
+
+
+@router.post(
+    "/trigger_parsing",
+    response_model=ParseTriggerResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def trigger_parsing(
+    request: ParseTriggerRequest,
+    user: Annotated[User | None, Depends(get_current_user)],
+):
+    """Trigger parse-only for multiple files (no chunk/index)."""
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    if not request.file_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="file_ids list cannot be empty")
+    try:
+        result = await get_knowledge_handler().trigger_parsing(
+            request.file_ids,
+            user.id,
+            force_reparse=bool(getattr(request, "force_reparse", False)),
+        )
+        return ParseTriggerResponse(message=result)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to trigger parsing: {e}")
+
+
+@router.post(
+    "/{file_id}/parse",
+    response_model=ParseTriggerResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def parse_single_file(
+    file_id: str,
+    user: Annotated[User | None, Depends(get_current_user)],
+    force_reparse: bool = False,
+):
+    """Trigger parse-only for a single file."""
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    try:
+        result = await get_knowledge_handler().trigger_parsing([file_id], user.id, force_reparse=bool(force_reparse))
+        return ParseTriggerResponse(message=result)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to trigger parsing: {e}")
 
 
 @router.post(

@@ -806,7 +806,18 @@ class DeepSearchServiceRunMixin:
             round_trace: Dict[str, Any] | None = None
             report_evidences: List[Dict[str, Any]] = []
             page_evidence_count = 0
-            for attempt_idx in range(max_gate_retries + 1):
+            attempt_idx = 0
+            gate_note_added = 0
+            while True:
+                # If we have no remaining tool budget, we cannot keep the loop alive to satisfy the gate.
+                # In that case we will stop gracefully after the loop with an actionable (but rare) message.
+                try:
+                    if required_pages > 0 and budget_obj is not None:
+                        remaining = int(budget_obj.snapshot().get("remaining_calls") or 0)
+                        if remaining <= 0:
+                            break
+                except Exception:
+                    pass
                 round_trace = await self._execute_stage(
                     "graph_reasoning",
                     self._think_loop_stage,
@@ -838,7 +849,7 @@ class DeepSearchServiceRunMixin:
                         [
                             "Completed graph reasoning.",
                             f"evidence_count={evidence_count}",
-                            f"attempt={attempt_idx + 1}/{max_gate_retries + 1}",
+                            f"attempt={attempt_idx + 1}",
                         ]
                     ),
                     meta={"stage": "graph_reasoning", "evidence_count": evidence_count, "attempt": attempt_idx + 1},
@@ -856,7 +867,7 @@ class DeepSearchServiceRunMixin:
                         "report_evidence_count": len(report_evidences),
                         "total_evidence_count": len(all_evidences) if isinstance(all_evidences, list) else 0,
                         "attempt": attempt_idx + 1,
-                        "max_attempts": max_gate_retries + 1,
+                        "soft_max_attempts": max_gate_retries + 1,
                     }
 
                 # If no hard gate is required, proceed immediately.
@@ -864,38 +875,54 @@ class DeepSearchServiceRunMixin:
                     break
 
                 # Give the LLM a clear, LLM-visible failure note and retry.
+                #
+                # IMPORTANT: do NOT stop the run just because the gate is unmet after a small number
+                # of retries. In practice, models may need multiple rounds to route → select section
+                # → read.pages, especially under flaky networks / JSON repair churn.
+                #
+                # We treat `max_gate_retries` as a *soft* cap on how many times we append the same
+                # gate note (to avoid bloating think_notes), not as a reason to finalize a user-visible
+                # "missing evidence" report.
                 carried_seed_evidences = self._coerce_evidence_chunks(all_evidences if isinstance(all_evidences, list) else [])
-                carried_initial_notes.append(
-                    ThinkNote(
-                        plan_step_id=None,
-                        reasoning=(
-                            "Report hard gate not satisfied: no citeable page evidence was collected yet. "
-                            "Search snippets are navigation-only. You must call read.pages at least once on relevant pages "
-                            "before stopping the reasoning loop."
-                        ),
-                        confidence_delta=None,
-                        coverage_delta=None,
-                        next_actions=[
-                            "Use explore + search.file to pick a real file_id (UUID) if not already known.",
-                            "Use toc.tree / tree.root / section.select to locate likely sections and page ranges.",
-                            "Call read.pages on those pages (full-page evidence), then continue reasoning.",
-                        ],
-                        metadata={
-                            "gate": "missing_primary_page_evidence",
-                            "required_primary_source": "read.pages",
-                            "attempt": attempt_idx + 1,
-                            "max_attempts": max_gate_retries + 1,
-                        },
+                if gate_note_added < max_gate_retries + 1:
+                    carried_initial_notes.append(
+                        ThinkNote(
+                            plan_step_id=None,
+                            reasoning=(
+                                "Report hard gate not satisfied: no citeable page evidence was collected yet. "
+                                "Search snippets are navigation-only. You must call read.pages at least once on relevant pages "
+                                "before stopping the reasoning loop."
+                            ),
+                            confidence_delta=None,
+                            coverage_delta=None,
+                            next_actions=[
+                                "Use explore + search.file to pick a real file_id (UUID) if not already known.",
+                                "Use toc.tree / tree.root / section.select to locate likely sections and page ranges.",
+                                "Call read.pages on those pages (full-page evidence), then continue reasoning.",
+                            ],
+                            metadata={
+                                "gate": "missing_primary_page_evidence",
+                                "required_primary_source": "read.pages",
+                                "attempt": attempt_idx + 1,
+                                "soft_max_attempts": max_gate_retries + 1,
+                            },
+                        )
                     )
-                )
+                    gate_note_added += 1
                 await emit_trace(
                     "think",
                     "Evidence gate unmet (missing read.pages). Retrying reasoning with an explicit gate note.",
-                    meta={"stage": "report_gate_retry", "attempt": attempt_idx + 1, "max_attempts": max_gate_retries + 1},
+                    meta={"stage": "report_gate_retry", "attempt": attempt_idx + 1, "soft_max_attempts": max_gate_retries + 1},
                 )
+                attempt_idx += 1
 
-            # If we still cannot collect citeable page evidence after retries, stop gracefully with an
-            # actionable message (rather than fabricating an evidence-grounded report).
+            # If we still cannot collect citeable page evidence, stop gracefully with an actionable message
+            # (rather than fabricating an evidence-grounded report).
+            #
+            # This should be rare in normal operation because the loop above keeps retrying until the tool budget
+            # is exhausted. When it happens, it's usually due to:
+            # - tool budget exhaustion
+            # - persistent tool failures (invalid_file_id, repeated JSON parsing failures, network issues, etc.)
             if required_pages > 0 and page_evidence_count < required_pages:
                 report = {
                     "question": normalized_question,
@@ -907,8 +934,8 @@ class DeepSearchServiceRunMixin:
                         "required_primary_source": "read.pages",
                         "min_primary_page_evidence_required": required_pages,
                         "primary_page_evidence_count": page_evidence_count,
-                        "max_reasoning_retries": max_gate_retries,
-                        "total_attempts": max_gate_retries + 1,
+                        "soft_max_reasoning_retries": max_gate_retries,
+                        "total_attempts": attempt_idx + 1,
                     },
                 }
                 state.record_report(report)
@@ -918,7 +945,7 @@ class DeepSearchServiceRunMixin:
                     meta={
                         "stage": "report_gate",
                         "reason": "missing_primary_page_evidence",
-                        "attempts": max_gate_retries + 1,
+                        "attempts": attempt_idx + 1,
                     },
                 )
                 state.reasoning_trace = round_trace or {}

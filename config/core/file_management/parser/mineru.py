@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from typing import Literal, Optional
 
 from pydantic import Field
@@ -96,6 +97,20 @@ def _default_http_retry_max_backoff_s() -> float:
     except Exception:
         return 8.0
 
+def _default_shared_cache_enabled() -> bool:
+    return str(os.getenv("MINERU_SHARED_CACHE_ENABLED", "1") or "1").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+def _default_shared_cache_dir() -> str:
+    raw = str(os.getenv("MINERU_SHARED_CACHE_DIR", "") or "").strip()
+    if raw:
+        return raw
+    base = str(os.getenv("PARSER_OUTPUT_DIR", "./data/parsed_files") or "./data/parsed_files").strip()
+    return str((Path(base).expanduser() / "mineru" / "_shared").resolve())
+
+def _default_shared_cache_mode() -> str:
+    raw = str(os.getenv("MINERU_SHARED_CACHE_MODE", "") or "").strip().lower()
+    return raw or "symlink"
+
 
 class MinerUParserConfig(AbstractConfig):
     type: Literal["mineru_parser"] = "mineru_parser"
@@ -133,6 +148,24 @@ class MinerUParserConfig(AbstractConfig):
             "When true, reuse existing MinerU markdown artifacts under output_dir/<source_file_id>/ when present, "
             "skipping remote MinerU calls. Controlled by MINERU_REUSE_CACHE=1/0."
         ),
+    )
+    shared_cache_enabled: bool = Field(
+        default_factory=_default_shared_cache_enabled,
+        description=(
+            "When true, reuse MinerU artifacts across uploads if the file bytes are identical (sha256 match), "
+            "even across different owners/tenants. Controlled by MINERU_SHARED_CACHE_ENABLED=1/0."
+        ),
+    )
+    shared_cache_dir: str = Field(
+        default_factory=_default_shared_cache_dir,
+        description=(
+            "Directory for shared MinerU artifacts cache. Defaults to `${PARSER_OUTPUT_DIR}/mineru/_shared`. "
+            "Controlled by MINERU_SHARED_CACHE_DIR."
+        ),
+    )
+    shared_cache_mode: str = Field(
+        default_factory=_default_shared_cache_mode,
+        description="How to materialize shared cache into per-file dirs: `symlink` (preferred) or `copy`.",
     )
 
     # MinerU parse defaults (can be overridden per-call via kwargs)

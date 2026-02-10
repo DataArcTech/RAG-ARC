@@ -52,6 +52,20 @@ Recommended places to tune parameters:
 - `config/output_limits.py`: response trimming / evidence caps.
 - `config/core/deepsearch/*_defaults.py`: DeepSearch loop/tool/report defaults used at runtime.
 
+Knowledge-graph (KG) long-term maintenance:
+
+- `config/json_configs/knowledge*.json`:
+  - `max_concurrent_kg_maintenance`: concurrency for background KG maintenance tasks (`0` means reuse `max_concurrent_indexing`).
+  - `index_manager_config.indexer_configs[].graph_store_config.kg_maintenance.l0.*`:
+    - L0 (hot-path) materializes `EntityMention` (occurrence evidence) during ingest for later disambiguation/alignment and delete-time repair.
+    - L0 is best-effort + budgeted: if it exceeds budget it is marked deferred and a background backfill completes the missing mentions (without blocking "askable" readiness).
+  - `index_manager_config.indexer_configs[].graph_store_config.kg_maintenance.l1_*` (enabled by default; can be turned off):
+    - L1 (background) disambiguates same-name same-type entities using mention context (chunk embeddings) and creates `EntityIdentity` cluster centers.
+    - Alignment is represented via `(:EntityMention)-[:RESOLVED_TO]->(:EntityIdentity)`; original surface `Entity` nodes are preserved.
+    - Optionally emits `(:EntityIdentity)-[:SAME_AS]->(:EntityIdentity)` as a weak alias/same-real-world-entity signal (no hard merge).
+    - When `l1_enabled=true`: after each successful file indexing, the service schedules an L1 run in the background (strict owner/file scope; does not block "askable" readiness).
+    - When `l1_enabled=false`: only L0 mention materialization runs; you can trigger maintenance manually via scripts/API during off-peak hours.
+
 How secrets flow into configs:
 - JSON supports `${ENV_VAR}` placeholders (e.g. `${OPENAI_API_KEY}`), so keep secrets in `.env` and reference them from `config/`.
 
@@ -463,6 +477,9 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINERU_HEALTHCHECK_TIMEOUT_S` | `2` | Startup/indexing healthcheck timeout seconds for `GET $MINERU_SERVER_URL/health` when `PARSER_PARSE_MODE=mineru`. |
 | `MINERU_FALLBACK_TO_NATIVE_ON_FAILURE` | `false` | When `PARSER_PARSE_MODE=mineru`, fallback to native PDF text extraction if MinerU parsing fails (e.g. service not running). Fallback is recorded in parse result metadata (`metadata.parser_fallback`). |
 | `MINERU_REUSE_CACHE` | `1` | When re-indexing, reuse existing MinerU markdown artifacts under `PARSER_OUTPUT_DIR/mineru/<file_id>/` if present (skip remote MinerU call). |
+| `MINERU_SHARED_CACHE_ENABLED` | `1` | Enable global (cross-owner/tenant) MinerU parse cache reuse when file bytes are identical (sha256 match). |
+| `MINERU_SHARED_CACHE_DIR` | _(empty)_ | Optional shared MinerU cache root. Defaults to `${PARSER_OUTPUT_DIR}/mineru/_shared`. |
+| `MINERU_SHARED_CACHE_MODE` | `symlink` | How to materialize shared cache into per-file output dirs: `symlink` (preferred) or `copy`. |
 | `MINERU_TIMEOUT_S` | `900` | Optional: HTTP timeout seconds for remote MinerU parsing/downloads. |
 | `MINERU_POLL_INTERVAL_S` | `5` | Optional: polling interval seconds for MinerU async parse status. |
 | `MINERU_POLL_TIMEOUT_S` | `0` | Optional: max seconds to wait for MinerU parse completion; `0` or negative means no limit. |

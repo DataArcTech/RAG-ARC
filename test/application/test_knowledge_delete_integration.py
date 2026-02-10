@@ -61,8 +61,8 @@ class _StubIndexManager:
     def __init__(self):
         self.deleted_files: list[tuple[str, bool]] = []
 
-    def delete_file_data(self, file_id: str, delete_file_metadata: bool = True):
-        self.deleted_files.append((file_id, delete_file_metadata))
+    def delete_file_data(self, file_id: str, preserve_parsed_content: bool = False, **_kwargs):  # noqa: ANN001
+        self.deleted_files.append((file_id, preserve_parsed_content))
         return {
             "success": True,
             "file_id": file_id,
@@ -142,8 +142,9 @@ async def test_delete_file_marks_metadata_and_finishes_background_cleanup():
     assert task is not None, "background deletion task was not registered"
     await asyncio.wait_for(task, timeout=1)
 
+    # Default delete: remove derived artifacts only; keep parsed/file bytes.
     assert index_manager.deleted_files == [(metadata.file_id, True)]
-    assert storage.deleted_files == [metadata.file_id]
+    assert storage.deleted_files == []
     assert knowledge._is_file_marked_for_deletion(metadata.file_id) is False
     assert metadata.status == FileStatus.DELETED
 

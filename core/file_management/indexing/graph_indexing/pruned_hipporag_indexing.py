@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import time
-from typing import List, TYPE_CHECKING
+from typing import Any, List, TYPE_CHECKING
 
 from core.file_management.indexing.base import BaseIndexer
 from encapsulation.data_model.schema import Chunk
@@ -141,12 +141,13 @@ class PrunedHippoRAGIndexer(BaseIndexer):
             logger.error("Error during graph extraction", exc_info=True)
             raise exc
 
-    def delete_chunks(self, chunk_ids: List[str]) -> bool:
+    def delete_chunks(self, chunk_ids: List[str], **kwargs: Any) -> bool:
         """
         Deletes a batch of chunks from the Pruned HippoRAG graph index (synchronous).
 
         Args:
             chunk_ids: A list of chunk IDs to be deleted
+            **kwargs: Optional deletion context (ignored by graph indexer).
 
         Returns:
             True if deletion was successful, False otherwise

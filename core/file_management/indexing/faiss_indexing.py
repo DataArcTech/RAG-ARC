@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import threading
-from typing import List, TYPE_CHECKING, Dict, Optional
+from typing import Any, List, TYPE_CHECKING, Dict, Optional
 
 from core.file_management.indexing.base import BaseIndexer
 from encapsulation.data_model.schema import Chunk
@@ -116,17 +116,69 @@ class FaissIndexer(BaseIndexer):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _sync_update_and_save)
 
-    def delete_chunks(self, chunk_ids: List[str]) -> bool:
+    def delete_chunks(self, chunk_ids: List[str], **kwargs: Any) -> bool:
         """
         Deletes a batch of chunks from the FAISS index using soft-delete (synchronous).
         """
         try:
-            # Delete chunks from index (soft-delete)
-            result = self.faiss_db.delete_index(chunk_ids)
-            # Save the index to disk
-            if hasattr(self.faiss_db.config, 'index_path'):
-                self.faiss_db.save_index(self.faiss_db.config.index_path)
-            return result if result is not None else False
+            if not chunk_ids:
+                return True
+
+            if not self._owner_scoped_enabled:
+                # Delete chunks from index (soft-delete)
+                result = self.faiss_db.delete_index(chunk_ids)
+                # Save the index to disk
+                if hasattr(self.faiss_db.config, "index_path"):
+                    self.faiss_db.save_index(self.faiss_db.config.index_path)
+                return result if result is not None else False
+
+            # Owner-scoped deletion requires owner_id context.
+            from core.utils.owner_guard import normalize_owner_id
+            from encapsulation.database.index_scoping import owner_scoped_dir
+            from encapsulation.database.vector_db.faiss import FaissVectorDB
+
+            owner_norm = normalize_owner_id(kwargs.get("owner_id"))
+            if owner_norm is None:
+                logger.error("Owner-scoped FAISS deletion requires owner_id; got None")
+                return False
+
+            base_dir = str(getattr(self._template_cfg, "index_path", "") or "").strip()
+            owner_dirname = str(getattr(self._template_cfg, "owner_scoped_dirname", "owners") or "owners")
+            global_owner = str(getattr(self._template_cfg, "owner_scoped_global_owner_name", "__GLOBAL__") or "__GLOBAL__")
+            index_dir = owner_scoped_dir(
+                base_dir,
+                owner_id=owner_norm,
+                owner_dirname=owner_dirname,
+                global_owner_name=global_owner,
+            )
+
+            with self._db_lock:
+                db = self._db_by_owner.get(owner_norm)
+                if db is None:
+                    try:
+                        cfg2 = self._template_cfg.model_copy(update={"index_path": index_dir})
+                    except Exception:
+                        cfg2 = self._template_cfg
+                        try:
+                            cfg2.index_path = index_dir
+                        except Exception:
+                            pass
+                    db = FaissVectorDB(cfg2)
+                    self._db_by_owner[owner_norm] = db
+
+            # Load existing artifacts if present and index not loaded.
+            try:
+                if getattr(db, "index", None) is None and os.path.isdir(index_dir):
+                    db.load_index(index_dir)
+            except Exception:
+                pass
+
+            result = db.delete_index(chunk_ids)
+            try:
+                db.save_index(index_dir)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to save owner-scoped FAISS index for owner=%s: %s", owner_norm, exc)
+            return bool(True if result is None else result)
         except Exception as e:
             logger.error(f"Failed to delete chunks from FAISS index: {e}")
             return False
