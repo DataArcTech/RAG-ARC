@@ -1081,7 +1081,11 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
                 if canonical_nodes:
                     canonical_query = """
                     UNWIND $canonicals AS c
-                    MERGE (n:EntityCanonical:Concept {canonical_id: c.canonical_id})
+                    // NOTE: Do NOT include extra labels (e.g. `:Concept`) in the MERGE pattern.
+                    // Older DBs may already contain (:EntityCanonical {canonical_id}) nodes without the extra label.
+                    // `MERGE (n:EntityCanonical:Concept {canonical_id})` would then attempt to create a new node and
+                    // violate the unique constraint on :EntityCanonical(canonical_id).
+                    MERGE (n:EntityCanonical {canonical_id: c.canonical_id})
                     ON CREATE SET n.owner_id = c.owner_id,
                                   n.canonical_key = c.canonical_key,
                                   n.canonical_name = c.canonical_name,
@@ -1093,6 +1097,7 @@ class _PrunedHippoRAGNeo4jIndexingIngestMixin(_PrunedHippoRAGNeo4jChunkEmbedding
                                   n.canonical_name = c.canonical_name,
                                   n.entity_type_key = c.entity_type_key,
                                   n.updated_at = datetime()
+                    SET n:Concept
                     """
                     tx.run(canonical_query, {"canonicals": canonical_nodes})
                     logger.info("  Upserted %s EntityCanonical nodes", len(canonical_nodes))
