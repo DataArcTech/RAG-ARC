@@ -255,7 +255,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_TOOL_SERVER_CONFIG = REPO_ROOT / "config/json_configs/deepsearch_tool_mcp_server.json"
 
 
-def _ingest_single_file(path: Path, knowledge: Knowledge, owner_id, *, logical_filename: Optional[str] = None) -> bool:
+def _ingest_single_file(
+    path: Path,
+    knowledge: Knowledge,
+    owner_id,
+    *,
+    logical_filename: Optional[str] = None,
+    force_reparse: bool = False,
+) -> bool:
     typer.echo(f"\n→ Ingesting {path}")
     try:
         file_bytes = path.read_bytes()
@@ -277,7 +284,7 @@ def _ingest_single_file(path: Path, knowledge: Knowledge, owner_id, *, logical_f
         return False
 
     try:
-        index_result = asyncio.run(knowledge.file_index.index_file(file_id))
+        index_result = asyncio.run(knowledge.file_index.index_file(file_id, force_reparse=bool(force_reparse)))
     except Exception as exc:  # noqa: BLE001
         typer.secho(f"  ! Indexing failed: {exc}", fg=typer.colors.RED)
         return False
@@ -291,7 +298,14 @@ def _ingest_single_file(path: Path, knowledge: Knowledge, owner_id, *, logical_f
     return True
 
 
-def _parse_single_file(path: Path, knowledge: Knowledge, owner_id, *, logical_filename: Optional[str] = None) -> bool:
+def _parse_single_file(
+    path: Path,
+    knowledge: Knowledge,
+    owner_id,
+    *,
+    logical_filename: Optional[str] = None,
+    force_reparse: bool = False,
+) -> bool:
     """Upload + parse only (no chunk/index)."""
     typer.echo(f"\n→ Parsing {path}")
     try:
@@ -314,7 +328,7 @@ def _parse_single_file(path: Path, knowledge: Knowledge, owner_id, *, logical_fi
         return False
 
     try:
-        parse_result = asyncio.run(knowledge.file_index.parse_file(file_id))
+        parse_result = asyncio.run(knowledge.file_index.parse_file(file_id, force_reparse=bool(force_reparse)))
     except Exception as exc:  # noqa: BLE001
         typer.secho(f"  ! Parsing failed: {exc}", fg=typer.colors.RED)
         return False
@@ -622,11 +636,22 @@ def ingest_file(
         help="Single document to ingest.",
     ),
     owner_id: str = typer.Option(None, help="Optional owner UUID; defaults to a random UUID."),
+    force_reparse: bool = typer.Option(
+        False,
+        "--force-reparse",
+        help="Bypass MinerU caches (local/shared) and refresh shared-cache artifacts after parsing.",
+    ),
 ) -> None:
     """Upload and index a single file."""
     ctx = initialize(owner_id=owner_id)
     knowledge = _get_knowledge_module()
-    success = _ingest_single_file(path, knowledge, ctx.owner_id, logical_filename=_project_relative_filename(path))
+    success = _ingest_single_file(
+        path,
+        knowledge,
+        ctx.owner_id,
+        logical_filename=_project_relative_filename(path),
+        force_reparse=bool(force_reparse),
+    )
     if not success:
         raise typer.Exit(code=1)
 
@@ -643,11 +668,22 @@ def parse_file(
         help="Single document to parse (no chunk/index).",
     ),
     owner_id: str = typer.Option(None, help="Optional owner UUID; defaults to a random UUID."),
+    force_reparse: bool = typer.Option(
+        False,
+        "--force-reparse",
+        help="Bypass MinerU caches (local/shared) and refresh shared-cache artifacts after parsing.",
+    ),
 ) -> None:
     """Upload and parse a single file (no chunking/indexing)."""
     ctx = initialize(owner_id=owner_id)
     knowledge = _get_knowledge_module()
-    success = _parse_single_file(path, knowledge, ctx.owner_id, logical_filename=_project_relative_filename(path))
+    success = _parse_single_file(
+        path,
+        knowledge,
+        ctx.owner_id,
+        logical_filename=_project_relative_filename(path),
+        force_reparse=bool(force_reparse),
+    )
     if not success:
         raise typer.Exit(code=1)
 
@@ -667,6 +703,11 @@ def ingest_folder(
     pattern: str = typer.Option("*", help="Glob pattern for files inside the folder."),
     recursive: bool = typer.Option(True, "--recursive/--no-recursive", help="Recursively search subdirectories."),
     limit: Optional[int] = typer.Option(None, help="Limit the number of files to ingest."),
+    force_reparse: bool = typer.Option(
+        False,
+        "--force-reparse",
+        help="Bypass MinerU caches (local/shared) and refresh shared-cache artifacts after parsing.",
+    ),
 ) -> None:
     """Upload, index, and build graph data for all files inside a folder."""
     ctx = initialize(owner_id=owner_id)
@@ -683,7 +724,13 @@ def ingest_folder(
     typer.echo(f"Found {len(files)} file(s) in {folder}")
     succeeded = 0
     for path in files:
-        if _ingest_single_file(path, knowledge, ctx.owner_id, logical_filename=_project_relative_filename(path)):
+        if _ingest_single_file(
+            path,
+            knowledge,
+            ctx.owner_id,
+            logical_filename=_project_relative_filename(path),
+            force_reparse=bool(force_reparse),
+        ):
             succeeded += 1
 
     typer.echo(f"\nCompleted ingestion: {succeeded}/{len(files)} file(s) indexed successfully.")
@@ -704,6 +751,11 @@ def parse_folder(
     pattern: str = typer.Option("*", help="Glob pattern for files inside the folder."),
     recursive: bool = typer.Option(True, "--recursive/--no-recursive", help="Recursively search subdirectories."),
     limit: Optional[int] = typer.Option(None, help="Limit the number of files to parse."),
+    force_reparse: bool = typer.Option(
+        False,
+        "--force-reparse",
+        help="Bypass MinerU caches (local/shared) and refresh shared-cache artifacts after parsing.",
+    ),
 ) -> None:
     """Upload, parse, and store parsed artifacts for all files inside a folder (no indexing)."""
     ctx = initialize(owner_id=owner_id)
@@ -720,7 +772,13 @@ def parse_folder(
     typer.echo(f"Found {len(files)} file(s) in {folder}")
     succeeded = 0
     for path in files:
-        if _parse_single_file(path, knowledge, ctx.owner_id, logical_filename=_project_relative_filename(path)):
+        if _parse_single_file(
+            path,
+            knowledge,
+            ctx.owner_id,
+            logical_filename=_project_relative_filename(path),
+            force_reparse=bool(force_reparse),
+        ):
             succeeded += 1
 
     typer.echo(f"\nCompleted parsing: {succeeded}/{len(files)} file(s) parsed successfully.")

@@ -639,7 +639,11 @@ async def trigger_parsing(
     if not request.file_ids:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="file_ids list cannot be empty")
     try:
-        result = await get_knowledge_handler().trigger_parsing(request.file_ids, user.id)
+        result = await get_knowledge_handler().trigger_parsing(
+            request.file_ids,
+            user.id,
+            force_reparse=bool(getattr(request, "force_reparse", False)),
+        )
         return ParseTriggerResponse(message=result)
     except HTTPException:
         raise
@@ -655,12 +659,13 @@ async def trigger_parsing(
 async def parse_single_file(
     file_id: str,
     user: Annotated[User | None, Depends(get_current_user)],
+    force_reparse: bool = False,
 ):
     """Trigger parse-only for a single file."""
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
     try:
-        result = await get_knowledge_handler().trigger_parsing([file_id], user.id)
+        result = await get_knowledge_handler().trigger_parsing([file_id], user.id, force_reparse=bool(force_reparse))
         return ParseTriggerResponse(message=result)
     except HTTPException:
         raise

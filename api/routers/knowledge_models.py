@@ -63,6 +63,10 @@ class ParseTriggerRequest(BaseModel):
     """Request model for triggering parse-only."""
 
     file_ids: List[str]
+    force_reparse: bool = Field(
+        default=False,
+        description="When true, bypass MinerU caches (local/shared) and refresh shared-cache artifacts after parsing.",
+    )
 
 
 class ParseTriggerResponse(BaseModel):

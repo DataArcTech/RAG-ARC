@@ -135,6 +135,7 @@ def publish_to_shared_cache(
     shared_root: Path,
     key: MinerUSharedCacheKey,
     src_dir: Path,
+    overwrite: bool = False,
 ) -> Dict[str, Any]:
     """Best-effort publish MinerU artifacts into shared cache.
 
@@ -143,7 +144,7 @@ def publish_to_shared_cache(
     dest = (shared_root / key.rel_dir()).resolve()
     result: Dict[str, Any] = {"ok": False, "dest": str(dest)}
     try:
-        if (dest / ".complete").exists():
+        if not overwrite and (dest / ".complete").exists():
             result["ok"] = True
             result["skipped"] = "already_complete"
             return result
@@ -154,7 +155,31 @@ def publish_to_shared_cache(
         shutil.copytree(src_dir, tmp, dirs_exist_ok=True)
         (tmp / ".complete").write_text("ok\n", encoding="utf-8")
         try:
-            os.rename(str(tmp), str(dest))
+            if overwrite and dest.exists():
+                backup = dest.with_name(dest.name + f".bak-{os.getpid()}")
+                try:
+                    if backup.exists():
+                        shutil.rmtree(backup, ignore_errors=True)
+                    os.rename(str(dest), str(backup))
+                except Exception:
+                    # If we can't move away the existing dir, do not risk clobbering it.
+                    shutil.rmtree(tmp, ignore_errors=True)
+                    raise
+                try:
+                    os.rename(str(tmp), str(dest))
+                    shutil.rmtree(backup, ignore_errors=True)
+                    result["overwritten"] = True
+                except Exception:
+                    # Best-effort rollback.
+                    try:
+                        if dest.exists():
+                            shutil.rmtree(dest, ignore_errors=True)
+                        os.rename(str(backup), str(dest))
+                    except Exception:
+                        pass
+                    raise
+            else:
+                os.rename(str(tmp), str(dest))
         except FileExistsError:
             shutil.rmtree(tmp, ignore_errors=True)
         result["ok"] = True
@@ -163,4 +188,3 @@ def publish_to_shared_cache(
         logger.debug("Failed to publish MinerU artifacts to shared cache: %s", exc, exc_info=True)
         result["error"] = str(exc)
         return result
-

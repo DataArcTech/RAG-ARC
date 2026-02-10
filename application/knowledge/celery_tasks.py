@@ -360,7 +360,7 @@ def index_file(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
 
 
 @celery_app.task(bind=True, name="rag_arc.knowledge.parse_file")
-def parse_file(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
+def parse_file(self, *, file_id: str, owner_id: str, force_reparse: bool = False) -> Dict[str, Any]:
     """Celery task: parse only (no chunk/index)."""
     ensure_initialized()
 
@@ -476,7 +476,7 @@ def parse_file(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
             except Exception:
                 return
 
-        result = _run_coroutine(knowledge.file_index.parse_file(file_id, progress=_progress))
+        result = _run_coroutine(knowledge.file_index.parse_file(file_id, progress=_progress, force_reparse=bool(force_reparse)))
         if result.get("success"):
             task_queue.set_task_result_and_finalize_run(
                 run_id,

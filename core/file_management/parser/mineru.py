@@ -55,6 +55,12 @@ class MinerUParser(AbstractParser):
         return [".pdf", ".jpg", ".jpeg", ".png"]
 
     async def parse_file(self, file_data: bytes, filename: str, **kwargs: Any) -> List[Dict[str, Any]]:
+        # `force_reparse` bypasses all cache reuse (local + shared) and refreshes the shared-cache
+        # entry for the same (bytes_sha256, parser_fingerprint) key after a successful parse.
+        #
+        # Use this when the operator explicitly wants to regenerate artifacts for identical bytes
+        # (e.g., MinerU upgraded or parse parameters changed outside the cache fingerprint).
+        force_reparse = bool(kwargs.get("force_reparse", False))
         base_filename = Path(filename).stem or "document"
         file_ext = Path(filename).suffix.lower()
         if file_ext not in set(self.get_supported_extensions()):
@@ -68,11 +74,17 @@ class MinerUParser(AbstractParser):
         source_file_id = kwargs.get("source_file_id") or kwargs.get("file_id")
         doc_key = safe_leaf_name(str(source_file_id or ""), default=base_filename)
         doc_dir = Path(output_dir) / doc_key
+        # If a previous run materialized shared cache via symlink, `force_reparse` needs a real folder.
+        if force_reparse and doc_dir.exists() and doc_dir.is_symlink():
+            try:
+                doc_dir.unlink()
+            except Exception:
+                pass
         doc_dir.mkdir(parents=True, exist_ok=True)
 
         # Cache reuse: if a previous MinerU run already produced local markdown for this file_id,
         # allow re-indexing to reuse it without calling the remote MinerU service again.
-        reuse_cache = bool(kwargs.get("reuse_cache", getattr(self.config, "reuse_cache", False)))
+        reuse_cache = False if force_reparse else bool(kwargs.get("reuse_cache", getattr(self.config, "reuse_cache", False)))
         md_local_path = doc_dir / f"{base_filename}.md"
         if reuse_cache and md_local_path.exists():
             md_text = md_local_path.read_text(encoding="utf-8", errors="ignore")
@@ -122,7 +134,7 @@ class MinerUParser(AbstractParser):
 
         # Shared-cache reuse (cross-owner/tenant): if file bytes are identical and parse params match,
         # materialize shared artifacts under this file_id dir and skip MinerU remote calls.
-        shared_enabled = bool(getattr(self.config, "shared_cache_enabled", False))
+        shared_enabled = bool(getattr(self.config, "shared_cache_enabled", False)) and not force_reparse
         shared_root = resolve_shared_cache_dir(base_dir=getattr(self.config, "shared_cache_dir", None)) if shared_enabled else None
         shared_mode = str(getattr(self.config, "shared_cache_mode", "symlink") or "symlink")
         shared_key: MinerUSharedCacheKey | None = None
@@ -236,7 +248,35 @@ class MinerUParser(AbstractParser):
             raise RuntimeError(f"MinerU markdown download missing: {md_local_path}")
 
         md_text = md_local_path.read_text(encoding="utf-8", errors="ignore")
-        if shared_root is not None and shared_key is not None:
+        # Publish to shared cache:
+        # - normal: publish on miss (no overwrite)
+        # - force_reparse: overwrite to refresh the shared entry for the same bytes+fingerprint key
+        if force_reparse and bool(getattr(self.config, "shared_cache_enabled", False)):
+            try:
+                shared_root_force = resolve_shared_cache_dir(base_dir=getattr(self.config, "shared_cache_dir", None))
+                if shared_root_force is not None:
+                    bytes_sha = sha256_hex(file_data)
+                    fp = build_parser_fingerprint(
+                        params={
+                            "backend": backend,
+                            "parse_method": parse_method,
+                            "lang": lang,
+                            "formula_enable": bool(formula_enable),
+                            "table_enable": bool(table_enable),
+                            "start_page": int(start_page),
+                            "end_page": None if end_page is None else int(end_page),
+                            "output_format": output_format,
+                        }
+                    )
+                    publish_to_shared_cache(
+                        shared_root=shared_root_force,
+                        key=MinerUSharedCacheKey(bytes_sha256=bytes_sha, parser_fingerprint=fp),
+                        src_dir=doc_dir,
+                        overwrite=True,
+                    )
+            except Exception:
+                pass
+        elif shared_root is not None and shared_key is not None:
             try:
                 publish_to_shared_cache(shared_root=shared_root, key=shared_key, src_dir=doc_dir)
             except Exception:

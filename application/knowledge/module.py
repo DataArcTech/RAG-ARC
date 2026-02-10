@@ -335,7 +335,13 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
             logger.error(e)
             raise
 
-    async def _parse_file_background(self, doc_id: str, *, task_run_id: str | None = None) -> Dict[str, Any]:
+    async def _parse_file_background(
+        self,
+        doc_id: str,
+        *,
+        task_run_id: str | None = None,
+        force_reparse: bool = False,
+    ) -> Dict[str, Any]:
         """Background task for parse-only flows (no chunk/index)."""
         if self._is_file_marked_for_deletion(doc_id):
             logger.info("Skipping parsing for file_id %s because it is marked for deletion", doc_id)
@@ -420,7 +426,7 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
                     except Exception:
                         return
 
-                result = await self.file_index.parse_file(doc_id, progress=_progress)
+                result = await self.file_index.parse_file(doc_id, progress=_progress, force_reparse=bool(force_reparse))
                 if result.get("success", False):
                     if task_run_id:
                         self.task_queue.update_task_run(task_run_id, state=TaskState.SUCCESS, progress_percent=100, finished=True)
@@ -1489,9 +1495,11 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
         user_id: uuid.UUID,
         *,
         force: bool = False,
+        force_reparse: bool = False,
         wait: bool = False,
     ) -> str:
         """Trigger parse-only for multiple files asynchronously (no chunk/index)."""
+        effective_force = bool(force or force_reparse)
         valid_files: list[str] = []
         invalid_files: list[str] = []
         skipped_files: list[str] = []
@@ -1514,12 +1522,12 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
                     if latest_run_id:
                         latest_run = self.task_queue.get_task_run(latest_run_id) or {}
                         latest_state = str(latest_run.get("state") or "")
-                        if latest_state in {TaskState.PENDING.value, TaskState.RUNNING.value} and not force:
+                        if latest_state in {TaskState.PENDING.value, TaskState.RUNNING.value} and not effective_force:
                             skipped_files.append(file_id)
                             continue
                 else:
                     active_task = self._active_index_tasks.get(file_id)
-                    if active_task is not None and not active_task.done() and not force:
+                    if active_task is not None and not active_task.done() and not effective_force:
                         skipped_files.append(file_id)
                         continue
 
@@ -1527,7 +1535,7 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
                     invalid_files.append(f"File is deleted: {file_id}")
                     continue
 
-                if metadata.status in {FileStatus.STORED, FileStatus.FAILED, FileStatus.PARTIAL_INDEXED} or force:
+                if metadata.status in {FileStatus.STORED, FileStatus.FAILED, FileStatus.PARTIAL_INDEXED} or effective_force:
                     valid_files.append(file_id)
                 else:
                     skipped_files.append(file_id)
@@ -1555,10 +1563,10 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
                     task_type="parse_file",
                     owner_id=user_id,
                     resource_id=file_id,
-                    metadata={"trigger": "manual"},
+                    metadata={"trigger": "manual", "force_reparse": bool(force_reparse)},
                 )
                 parse_file_task.apply_async(
-                    kwargs={"file_id": file_id, "owner_id": str(user_id)},
+                    kwargs={"file_id": file_id, "owner_id": str(user_id), "force_reparse": bool(force_reparse)},
                     task_id=task_run_id,
                     queue=queue,
                 )
@@ -1569,16 +1577,21 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
                     task_type="parse_file",
                     owner_id=user_id,
                     resource_id=file_id,
-                    metadata={"trigger": "manual"},
+                    metadata={"trigger": "manual", "force_reparse": bool(force_reparse)},
                 )
                 task_specs.append((file_id, task_run_id))
 
             if wait:
-                tasks = [self._parse_file_background(file_id, task_run_id=task_run_id) for file_id, task_run_id in task_specs]
+                tasks = [
+                    self._parse_file_background(file_id, task_run_id=task_run_id, force_reparse=bool(force_reparse))
+                    for file_id, task_run_id in task_specs
+                ]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
             else:
                 for file_id, task_run_id in task_specs:
-                    task = asyncio.create_task(self._parse_file_background(file_id, task_run_id=task_run_id))
+                    task = asyncio.create_task(
+                        self._parse_file_background(file_id, task_run_id=task_run_id, force_reparse=bool(force_reparse))
+                    )
                     self._track_background_task(file_id, task)
 
         message_parts: list[str] = []
