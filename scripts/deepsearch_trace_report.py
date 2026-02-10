@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from api.routers.deepsearch_weaver_render import render_trace_payload, weaver_block
+from core.presentation.deepsearch_trace_report import DeepSearchTraceEvent, build_debug_report_text
 
 
 @dataclass(frozen=True)
@@ -124,12 +124,19 @@ def extract_trace(path: Path, *, message_index: int | None) -> ExtractedTrace:
     return _extract_from_session_messages(payload, message_index=message_index)
 
 
-def _render_blocks(trace: ExtractedTrace) -> Iterable[str]:
+def _to_events(trace: ExtractedTrace) -> list[DeepSearchTraceEvent]:
+    events: list[DeepSearchTraceEvent] = []
     for item in trace.trace_events:
-        tag = item.get("tag") or "progress"
-        content = item.get("content") or ""
-        rendered_tag, rendered = render_trace_payload(trace_tag=str(tag), content=str(content), run_id=trace.run_id)
-        yield weaver_block(rendered_tag, rendered)
+        if not isinstance(item, dict):
+            continue
+        events.append(
+            DeepSearchTraceEvent(
+                tag=str(item.get("tag") or "think"),
+                content=str(item.get("content") or ""),
+                meta=item.get("meta") if isinstance(item.get("meta"), dict) else {},
+            )
+        )
+    return events
 
 
 def write_report(
@@ -144,30 +151,14 @@ def write_report(
     question = question_override or trace.question
     answer = answer_override or trace.answer
 
-    lines: list[str] = []
-    lines.append("DeepSearch Trace Report (human-readable)")
-    lines.append("")
-    if trace.owner_id or trace.owner_id == "":
-        lines.append(f"owner_id: {trace.owner_id}")
-    if trace.run_id:
-        lines.append(f"run_id: {trace.run_id}")
-    if question:
-        lines.append("")
-        lines.append("q:")
-        lines.append(question)
-    lines.append("")
-    lines.append("---")
-    lines.append("trace:")
-    lines.append("")
-    lines.extend(_render_blocks(trace))
-    if answer:
-        lines.append("")
-        lines.append("---")
-        lines.append("report:")
-        lines.append("")
-        lines.append(answer.rstrip())
-
-    output_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    text = build_debug_report_text(
+        run_id=trace.run_id,
+        owner_id=trace.owner_id,
+        question=question,
+        answer=answer,
+        trace_events=_to_events(trace),
+    )
+    output_path.write_text(text, encoding="utf-8")
 
 
 def main() -> int:
@@ -207,4 +198,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
