@@ -59,6 +59,18 @@ class IndexTriggerResponse(BaseModel):
     message: str
 
 
+class ParseTriggerRequest(BaseModel):
+    """Request model for triggering parse-only."""
+
+    file_ids: List[str]
+
+
+class ParseTriggerResponse(BaseModel):
+    """Response model for parse triggering results."""
+
+    message: str
+
+
 class KGMaintenanceL2Request(BaseModel):
     file_ids: List[str] = Field(default_factory=list, description="Optional file_ids to scope the repair (owner-scoped).")
     rebuild_same_as: bool = Field(default=False, description="Rebuild SAME_AS edges from scratch (supersedes existing).")

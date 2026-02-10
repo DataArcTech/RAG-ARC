@@ -291,6 +291,42 @@ def _ingest_single_file(path: Path, knowledge: Knowledge, owner_id, *, logical_f
     return True
 
 
+def _parse_single_file(path: Path, knowledge: Knowledge, owner_id, *, logical_filename: Optional[str] = None) -> bool:
+    """Upload + parse only (no chunk/index)."""
+    typer.echo(f"\n→ Parsing {path}")
+    try:
+        file_bytes = path.read_bytes()
+    except OSError as exc:
+        typer.secho(f"  ! Failed to read file: {exc}", fg=typer.colors.RED)
+        return False
+
+    content_type = _guess_content_type(path)
+    try:
+        file_id = knowledge.file_storage.upload_file(
+            filename=(str(logical_filename or "").strip() or path.name),
+            file_data=file_bytes,
+            owner_id=owner_id,
+            content_type=content_type,
+        )
+        typer.echo(f"  • Stored as file_id={file_id} ({len(file_bytes)} bytes)")
+    except Exception as exc:  # noqa: BLE001
+        typer.secho(f"  ! Upload failed: {exc}", fg=typer.colors.RED)
+        return False
+
+    try:
+        parse_result = asyncio.run(knowledge.file_index.parse_file(file_id))
+    except Exception as exc:  # noqa: BLE001
+        typer.secho(f"  ! Parsing failed: {exc}", fg=typer.colors.RED)
+        return False
+
+    if not parse_result.get("success"):
+        typer.secho(f"  ! Parsing failed: {parse_result.get('error_message')}", fg=typer.colors.RED)
+        return False
+
+    typer.echo(f"  • Parsed successfully parsed_content_id={parse_result.get('parsed_content_id')}")
+    return True
+
+
 def _resolve_tool_server_config_path() -> Path:
     raw_path = os.getenv("DEEPSEARCH_TOOL_MCP_CONFIG_PATH")
     if raw_path:
@@ -595,6 +631,27 @@ def ingest_file(
         raise typer.Exit(code=1)
 
 
+@app.command("parse-file")
+def parse_file(
+    path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+        help="Single document to parse (no chunk/index).",
+    ),
+    owner_id: str = typer.Option(None, help="Optional owner UUID; defaults to a random UUID."),
+) -> None:
+    """Upload and parse a single file (no chunking/indexing)."""
+    ctx = initialize(owner_id=owner_id)
+    knowledge = _get_knowledge_module()
+    success = _parse_single_file(path, knowledge, ctx.owner_id, logical_filename=_project_relative_filename(path))
+    if not success:
+        raise typer.Exit(code=1)
+
+
 @app.command("ingest-folder")
 def ingest_folder(
     folder: Path = typer.Argument(
@@ -630,6 +687,43 @@ def ingest_folder(
             succeeded += 1
 
     typer.echo(f"\nCompleted ingestion: {succeeded}/{len(files)} file(s) indexed successfully.")
+
+
+@app.command("parse-folder")
+def parse_folder(
+    folder: Path = typer.Argument(
+        ...,
+        exists=True,
+        readable=True,
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+        help="Folder containing documents to parse (no chunk/index).",
+    ),
+    owner_id: str = typer.Option(None, help="Optional owner UUID; defaults to a random UUID."),
+    pattern: str = typer.Option("*", help="Glob pattern for files inside the folder."),
+    recursive: bool = typer.Option(True, "--recursive/--no-recursive", help="Recursively search subdirectories."),
+    limit: Optional[int] = typer.Option(None, help="Limit the number of files to parse."),
+) -> None:
+    """Upload, parse, and store parsed artifacts for all files inside a folder (no indexing)."""
+    ctx = initialize(owner_id=owner_id)
+    knowledge = _get_knowledge_module()
+    _project_relative_filename(folder)
+    files = _gather_files(folder, pattern, recursive)
+    if limit is not None and limit > 0:
+        files = files[:limit]
+
+    if not files:
+        typer.secho("No files matched the given pattern.", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    typer.echo(f"Found {len(files)} file(s) in {folder}")
+    succeeded = 0
+    for path in files:
+        if _parse_single_file(path, knowledge, ctx.owner_id, logical_filename=_project_relative_filename(path)):
+            succeeded += 1
+
+    typer.echo(f"\nCompleted parsing: {succeeded}/{len(files)} file(s) parsed successfully.")
 
 
 @app.command("list-files")

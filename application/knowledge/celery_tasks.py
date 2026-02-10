@@ -359,6 +359,206 @@ def index_file(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
         _release_lock(redis_client, lock_key, run_id)
 
 
+@celery_app.task(bind=True, name="rag_arc.knowledge.parse_file")
+def parse_file(self, *, file_id: str, owner_id: str) -> Dict[str, Any]:
+    """Celery task: parse only (no chunk/index)."""
+    ensure_initialized()
+
+    run_id = str(getattr(self.request, "id", "") or uuid.uuid4().hex)
+    task_queue = RedisTaskQueue.from_env()
+    owner_uuid = _parse_uuid(owner_id)
+
+    if not task_queue.get_task_run(run_id):
+        task_queue.create_task_run(
+            task_run_id=run_id,
+            task_type="parse_file",
+            owner_id=owner_uuid,
+            resource_id=file_id,
+            metadata={"executor": "celery"},
+        )
+
+    lock_ttl = int(os.getenv("FILE_OP_LOCK_TTL_SECONDS", str(6 * 3600)))
+    lock_key = _file_lock_key(namespace=task_queue.settings.namespace, file_id=file_id)
+    redis_client = RedisDB(RedisConfig()).client
+    if not _acquire_lock(redis_client, lock_key, run_id, lock_ttl):
+        max_retries = int(os.getenv("CELERY_TASK_LOCK_MAX_RETRIES", "30"))
+        countdown = int(os.getenv("CELERY_TASK_LOCK_RETRY_COUNTDOWN_SECONDS", "2"))
+        try:
+            task_queue.update_task_run(
+                run_id,
+                state=TaskState.PENDING,
+                progress_percent=0,
+                error_message="waiting for file lock",
+                metadata_patch={"retries": int(getattr(self.request, "retries", 0) or 0)},
+            )
+        except Exception:
+            pass
+        try:
+            raise self.retry(exc=RuntimeError("file op lock busy"), countdown=countdown, max_retries=max_retries)
+        except MaxRetriesExceededError as exc:
+            result_payload = {"success": False, "file_id": file_id, "error_message": "failed to acquire file lock"}
+            task_queue.set_task_result_and_finalize_run(
+                run_id,
+                result=result_payload,
+                state=TaskState.FAILURE,
+                progress_percent=100,
+                error_message=f"failed to acquire file lock: {exc}",
+                finished=True,
+            )
+            return result_payload
+
+    try:
+        knowledge = _get_knowledge()
+        metadata = knowledge.file_storage.get_file_metadata(file_id)
+        if not metadata:
+            result_payload = {"success": False, "file_id": file_id, "error_message": "file not found"}
+            task_queue.set_task_result_and_finalize_run(
+                run_id,
+                result=result_payload,
+                state=TaskState.FAILURE,
+                progress_percent=100,
+                error_message="file not found",
+                finished=True,
+            )
+            return result_payload
+
+        if getattr(metadata, "status", None) == FileStatus.DELETED:
+            result_payload = {"success": False, "file_id": file_id, "error_message": "file deleted", "canceled": True}
+            task_queue.set_task_result_and_finalize_run(
+                run_id,
+                result=result_payload,
+                state=TaskState.CANCELED,
+                progress_percent=100,
+                error_message="file deleted",
+                finished=True,
+            )
+            return result_payload
+
+        if getattr(metadata, "owner_id", None) != owner_uuid:
+            result_payload = {"success": False, "file_id": file_id, "error_message": "owner mismatch"}
+            task_queue.set_task_result_and_finalize_run(
+                run_id,
+                result=result_payload,
+                state=TaskState.FAILURE,
+                progress_percent=100,
+                error_message="owner mismatch",
+                finished=True,
+            )
+            return result_payload
+
+        task_queue.update_task_run(run_id, state=TaskState.RUNNING, progress_percent=1)
+        task_queue.append_progress_event(
+            flow="parsing",
+            task_run_id=run_id,
+            stage="parse",
+            status="start",
+            percent=1,
+            resource_id=file_id,
+            payload={"file_id": file_id},
+        )
+
+        def _progress(stage: str, percent: int | None, payload: dict[str, Any] | None = None) -> None:
+            try:
+                merged = {"file_id": file_id}
+                if payload and isinstance(payload, dict):
+                    merged.update(payload)
+                task_queue.append_progress_event(
+                    flow="parsing",
+                    task_run_id=run_id,
+                    stage=str(stage),
+                    status="progress",
+                    percent=percent,
+                    resource_id=file_id,
+                    payload=merged,
+                )
+                if percent is not None:
+                    task_queue.update_task_run(run_id, state=TaskState.RUNNING, progress_percent=int(percent))
+            except Exception:
+                return
+
+        result = _run_coroutine(knowledge.file_index.parse_file(file_id, progress=_progress))
+        if result.get("success"):
+            task_queue.set_task_result_and_finalize_run(
+                run_id,
+                result=result if isinstance(result, dict) else {"result": result},
+                state=TaskState.SUCCESS,
+                progress_percent=100,
+                finished=True,
+            )
+            task_queue.append_progress_event(
+                flow="parsing",
+                task_run_id=run_id,
+                stage="parse",
+                status="end",
+                percent=100,
+                resource_id=file_id,
+                payload={"file_id": file_id, "success": True},
+            )
+            return result
+
+        err = str(result.get("error_message") or "parsing failed")
+        result_payload = {"success": False, "file_id": file_id, "error_message": err}
+        task_queue.set_task_result_and_finalize_run(
+            run_id,
+            result=result_payload,
+            state=TaskState.FAILURE,
+            progress_percent=100,
+            error_message=err,
+            finished=True,
+        )
+        task_queue.append_progress_event(
+            flow="parsing",
+            task_run_id=run_id,
+            stage="parse",
+            status="error",
+            percent=100,
+            resource_id=file_id,
+            payload={"file_id": file_id, "success": False, "error_message": err},
+        )
+        return result_payload
+    except Retry:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        err = str(exc)
+        max_retries = int(os.getenv("CELERY_TASK_MAX_RETRIES", "3"))
+        countdown = int(os.getenv("CELERY_TASK_RETRY_COUNTDOWN_SECONDS", "5"))
+        if int(getattr(self.request, "retries", 0) or 0) < max_retries:
+            try:
+                task_queue.update_task_run(
+                    run_id,
+                    state=TaskState.PENDING,
+                    progress_percent=0,
+                    error_message=err,
+                    metadata_patch={"retries": int(getattr(self.request, "retries", 0) or 0)},
+                )
+            except Exception:
+                pass
+            raise self.retry(exc=exc, countdown=countdown, max_retries=max_retries)
+
+        logger.exception("Parsing failed (file_id=%s run_id=%s): %s", file_id, run_id, err)
+        result_payload = {"success": False, "file_id": file_id, "error_message": err}
+        task_queue.set_task_result_and_finalize_run(
+            run_id,
+            result=result_payload,
+            state=TaskState.FAILURE,
+            progress_percent=100,
+            error_message=err,
+            finished=True,
+        )
+        task_queue.append_progress_event(
+            flow="parsing",
+            task_run_id=run_id,
+            stage="parse",
+            status="error",
+            percent=100,
+            resource_id=file_id,
+            payload={"file_id": file_id, "success": False, "error_message": err},
+        )
+        return result_payload
+    finally:
+        _release_lock(redis_client, lock_key, run_id)
+
+
 @celery_app.task(bind=True, name="rag_arc.knowledge.delete_file")
 def delete_file(self, *, file_id: str, owner_id: str, delete_file_metadata: bool = True) -> Dict[str, Any]:
     ensure_initialized()

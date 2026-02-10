@@ -468,6 +468,12 @@ class ParsedContentMetadata(Base):
     # Content metadata
     content_type: Mapped[str] = mapped_column(String(100), default="text/markdown", nullable=False)
 
+    # Optional parser artifact paths (for incremental ingest / parse-index decoupling).
+    # Stored as either absolute paths or paths relative to a configured parser output root
+    # (e.g., PARSER_OUTPUT_DIR). Downstream code must resolve them safely.
+    md_path: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True, default=None)
+    output_dir: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True, default=None)
+
     # Relationships
     source_file: Mapped["FileMetadata"] = relationship(back_populates="parsed_contents")
     chunks: Mapped[List["ChunkMetadata"]] = relationship(

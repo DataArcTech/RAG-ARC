@@ -6,6 +6,11 @@ from typing import Any, Dict, List
 
 from encapsulation.data_model.schema import Chunk
 from framework.thread_pool import get_thread_pool
+from core.file_management.parser_artifact_paths import (
+    extract_md_path_and_output_dir,
+    relativize_under_base,
+    resolve_under_base,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +96,10 @@ class _IndexManagerPipelineMixin:
             parser_type_name = (parser_type or PARSED_MARKDOWN_PARSER_TYPE_DEFAULT).strip() or PARSED_MARKDOWN_PARSER_TYPE_DEFAULT
             result["metadata"]["parser_type"] = parser_type_name
 
+            base_output_dir = getattr(getattr(self, "parser", None), "base_output_dir", None)
+            md_path_rel = relativize_under_base(md_path, base_dir=str(base_output_dir) if base_output_dir else None)
+            output_dir_rel = relativize_under_base(output_dir, base_dir=str(base_output_dir) if base_output_dir else None)
+
             parsed_text = parsed_markdown
             _emit("parsed_ready", 15, {"file_id": file_id, "filename": effective_filename, "chars": len(parsed_text)})
 
@@ -106,8 +115,8 @@ class _IndexManagerPipelineMixin:
                             file_id=file_id,
                             filename=effective_filename,
                             markdown=parsed_text,
-                            md_path=str(md_path) if md_path else None,
-                            output_dir=str(output_dir) if output_dir else None,
+                            md_path=resolve_under_base(md_path_rel, base_dir=str(base_output_dir) if base_output_dir else None),
+                            output_dir=resolve_under_base(output_dir_rel, base_dir=str(base_output_dir) if base_output_dir else None),
                         )
                         pageindex_info = {
                             "sections": len(pageindex_context.tree.nodes),
@@ -129,6 +138,8 @@ class _IndexManagerPipelineMixin:
                 parser_type=parser_type_name,
                 parsed_data=parsed_data,
                 content_type="text/markdown",
+                md_path=md_path_rel,
+                output_dir=output_dir_rel,
                 **kwargs,
             )
             if not parsed_content_id:
@@ -351,6 +362,481 @@ class _IndexManagerPipelineMixin:
                 pass
             return result
 
+    async def parse_file_only(self, file_id: str, **kwargs: Any) -> Dict[str, Any]:
+        """Parse + persist parsed content, but do NOT chunk/index.
+
+        This enables a two-step workflow:
+        1) parse-only (status -> PARSED, parsed_content_metadata stored)
+        2) ingest/index later (reuse the parsed output; skip parse stage)
+        """
+        result: Dict[str, Any] = {
+            "success": False,
+            "file_id": file_id,
+            "parsed_content_id": None,
+            "error_message": None,
+            "metadata": {
+                "parser_type": None,
+                "md_path": None,
+                "output_dir": None,
+            },
+        }
+
+        progress_cb = kwargs.pop("progress", None)
+
+        def _emit(stage: str, percent: int | None = None, payload: Dict[str, Any] | None = None) -> None:
+            if progress_cb is None or not callable(progress_cb):
+                return
+            try:
+                progress_cb(str(stage), percent, payload or {})
+            except Exception:
+                return
+
+        try:
+            if file_id is None or not isinstance(file_id, str) or not file_id.strip():
+                result["error_message"] = "file_id must be a non-empty string"
+                return result
+
+            _emit("start", 1, {"file_id": file_id, "mode": "parse_only"})
+
+            file_content = await get_thread_pool().run_blocking(self.file_storage.get_file_content, file_id)
+            if file_content is None:
+                raise ValueError(f"File content not found for file_id: {file_id}")
+
+            file_metadata = await get_thread_pool().run_blocking(self.file_storage.get_file_metadata, file_id)
+            if file_metadata is None:
+                raise ValueError(f"File metadata not found for file_id: {file_id}")
+
+            filename = str(getattr(file_metadata, "filename", "") or "").strip() or f"unknown_file_{file_id}"
+            _emit("retrieved", 5, {"file_id": file_id, "filename": filename, "bytes": len(file_content)})
+
+            parser_kwargs = dict(kwargs)
+            parser_kwargs.setdefault("source_file_id", file_id)
+            parse_results = await self.parser.parse_file(file_data=file_content, filename=filename, **parser_kwargs)
+            if not parse_results:
+                raise ValueError(f"Parser returned no results for file: {filename}")
+            if not isinstance(parse_results, list):
+                parse_results = [parse_results]
+
+            if len(parse_results) == 1:
+                parse_result = parse_results[0]
+                parsed_text = self._extract_text_from_parse_result(parse_result)
+            else:
+                concatenated: list[str] = []
+                for parse_result in parse_results:
+                    if parse_result is None:
+                        continue
+                    text_content = self._extract_text_from_parse_result(parse_result)
+                    if text_content:
+                        concatenated.append(text_content)
+                if not concatenated:
+                    raise ValueError("No valid text content extracted from any parse results")
+                parsed_text = "\n\n".join(concatenated)
+                parse_result = parse_results[0]
+
+            if not isinstance(parsed_text, str) or not parsed_text.strip():
+                raise ValueError("No text content extracted from parsed result")
+            _emit("parsed", 25, {"file_id": file_id, "chars": len(parsed_text)})
+
+            base_output_dir = getattr(getattr(self, "parser", None), "base_output_dir", None)
+            md_path_abs, output_dir_abs = extract_md_path_and_output_dir(parse_result)
+            md_path_rel = relativize_under_base(md_path_abs, base_dir=str(base_output_dir) if base_output_dir else None)
+            output_dir_rel = relativize_under_base(output_dir_abs, base_dir=str(base_output_dir) if base_output_dir else None)
+
+            parser_type_name = "auto_selected"
+            if isinstance(parse_result, dict):
+                meta = parse_result.get("metadata")
+                if isinstance(meta, dict):
+                    token = str(
+                        meta.get("parser_label")
+                        or meta.get("parser_type")
+                        or meta.get("parser_name")
+                        or ""
+                    ).strip()
+                    if token:
+                        parser_type_name = token
+
+            parsed_data = parsed_text.encode("utf-8", errors="replace")
+            parsed_content_id = await get_thread_pool().run_blocking(
+                self.parsed_content_storage.store_parsed_content,
+                source_file_id=file_id,
+                parser_type=parser_type_name,
+                parsed_data=parsed_data,
+                content_type="text/markdown",
+                md_path=md_path_rel,
+                output_dir=output_dir_rel,
+                **kwargs,
+            )
+            if not parsed_content_id:
+                raise ValueError("Failed to store parsed content")
+
+            result["parsed_content_id"] = parsed_content_id
+            result["metadata"]["parser_type"] = parser_type_name
+            result["metadata"]["md_path"] = md_path_rel
+            result["metadata"]["output_dir"] = output_dir_rel
+
+            _emit("parsed_stored", 60, {"file_id": file_id, "parsed_content_id": parsed_content_id})
+            await get_thread_pool().run_blocking(self._update_file_status_to_parsed, file_id, **kwargs)
+            _emit("done", 100, {"file_id": file_id, "success": True, "status": "PARSED"})
+
+            result["success"] = True
+            return result
+
+        except Exception as exc:  # noqa: BLE001
+            err = f"parse-only pipeline failed for file_id {file_id}: {exc}"
+            logger.error(err, exc_info=True)
+            result["error_message"] = err
+            _emit("failed", 100, {"file_id": file_id, "success": False, "error_message": str(exc)})
+            try:
+                from encapsulation.data_model.orm_models import FileStatus
+
+                metadata = None
+                try:
+                    metadata = self.file_storage.get_file_metadata(file_id)
+                except Exception:
+                    metadata = None
+                if metadata is None or getattr(metadata, "status", None) != FileStatus.DELETED:
+                    await get_thread_pool().run_blocking(
+                        self.file_storage.metadata_store.update_file_status,
+                        file_id,
+                        FileStatus.FAILED,
+                        **kwargs,
+                    )
+            except Exception:
+                pass
+            return result
+
+    async def process_file_from_parsed_content_id(
+        self,
+        *,
+        file_id: str,
+        parsed_content_id: str,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Index a file starting from an existing parsed_content_id (skip parse + skip re-storing parsed content)."""
+        result: Dict[str, Any] = {
+            "success": False,
+            "file_id": file_id,
+            "parsed_content_id": parsed_content_id,
+            "chunk_ids": [],
+            "indexing_results": {},
+            "error_message": None,
+            "metadata": {
+                "parser_type": None,
+                "chunker_type": None,
+                "num_chunks": 0,
+                "indexers_used": [],
+                "timings_s": {},
+            },
+        }
+
+        progress_cb = kwargs.pop("progress", None)
+
+        def _emit(stage: str, percent: int | None = None, payload: Dict[str, Any] | None = None) -> None:
+            if progress_cb is None or not callable(progress_cb):
+                return
+            try:
+                progress_cb(str(stage), percent, payload or {})
+            except Exception:
+                return
+
+        started = time.perf_counter()
+        stage_t0 = started
+        try:
+            if file_id is None or not isinstance(file_id, str) or not file_id.strip():
+                result["error_message"] = "file_id must be a non-empty string"
+                return result
+            if parsed_content_id is None or not isinstance(parsed_content_id, str) or not parsed_content_id.strip():
+                result["error_message"] = "parsed_content_id must be a non-empty string"
+                return result
+
+            _emit("start", 1, {"file_id": file_id, "mode": "parsed_content_id", "parsed_content_id": parsed_content_id})
+
+            file_metadata = await get_thread_pool().run_blocking(self.file_storage.get_file_metadata, file_id)
+            if file_metadata is None:
+                raise ValueError(f"File metadata not found for file_id: {file_id}")
+            filename = str(getattr(file_metadata, "filename", "") or "").strip() or f"unknown_file_{file_id}"
+            result["metadata"]["timings_s"]["load_file_metadata"] = time.perf_counter() - stage_t0
+            stage_t0 = time.perf_counter()
+
+            parsed_meta = await get_thread_pool().run_blocking(
+                self.parsed_content_storage.metadata_store.get_parsed_content_metadata,
+                parsed_content_id,
+                **kwargs,
+            )
+            if parsed_meta is None:
+                raise ValueError(f"parsed_content_id not found: {parsed_content_id}")
+            if str(getattr(parsed_meta, "source_file_id", "") or "") != str(file_id):
+                raise ValueError("parsed_content_id does not belong to file_id")
+
+            blob_key = str(getattr(parsed_meta, "blob_key", "") or "").strip()
+            if not blob_key:
+                raise ValueError("parsed content blob_key missing")
+
+            parsed_bytes = await get_thread_pool().run_blocking(
+                self.parsed_content_storage.blob_store.retrieve,
+                blob_key,
+                **kwargs,
+            )
+            parsed_text = parsed_bytes.decode("utf-8", errors="replace") if isinstance(parsed_bytes, (bytes, bytearray)) else str(parsed_bytes or "")
+            if not parsed_text.strip():
+                raise ValueError("parsed content is empty")
+
+            parser_type_name = str(getattr(parsed_meta, "parser_type", "") or "").strip() or "parsed_content"
+            result["metadata"]["parser_type"] = parser_type_name
+            _emit("parsed_ready", 15, {"file_id": file_id, "filename": filename, "chars": len(parsed_text)})
+
+            base_output_dir = getattr(getattr(self, "parser", None), "base_output_dir", None)
+            md_path_rel = str(getattr(parsed_meta, "md_path", "") or "").strip() or None
+            output_dir_rel = str(getattr(parsed_meta, "output_dir", "") or "").strip() or None
+
+            pageindex_context = None
+            pageindex_info: Dict[str, Any] = {}
+            if getattr(self, "pageindex_service", None) is not None:
+                try:
+                    from config import pageindex as pageindex_cfg
+
+                    if pageindex_cfg.pageindex_enabled():
+                        pageindex_context = self.pageindex_service.build_context(
+                            file_id=file_id,
+                            filename=filename,
+                            markdown=parsed_text,
+                            md_path=resolve_under_base(md_path_rel, base_dir=str(base_output_dir) if base_output_dir else None),
+                            output_dir=resolve_under_base(output_dir_rel, base_dir=str(base_output_dir) if base_output_dir else None),
+                        )
+                        pageindex_info = {
+                            "sections": len(pageindex_context.tree.nodes),
+                            "level_conflict_ratio": pageindex_context.tree.level_conflict_ratio,
+                            "uniform_level_flattened": pageindex_context.tree.uniform_level_flattened,
+                        }
+                except Exception as exc:
+                    logger.warning("PageIndex tree build failed for %s: %s", file_id, exc)
+                    pageindex_info = {"error": str(exc)}
+
+            result["metadata"]["timings_s"]["pageindex_tree"] = time.perf_counter() - stage_t0
+            stage_t0 = time.perf_counter()
+
+            # Chunk (Step 4).
+            chunker_info = self.chunker.get_chunker_info()
+            chunker_strategy = chunker_info.get("strategy", type(self.chunker).__name__)
+            result["metadata"]["chunker_type"] = chunker_strategy
+
+            chunk_metadata = {
+                "source_file_id": file_id,
+                "parsed_content_id": parsed_content_id,
+                "filename": filename,
+                "parser_type": parser_type_name,
+                "owner_id": str(getattr(file_metadata, "owner_id", "")),
+            }
+
+            chunks = self.chunker.chunk_text(text=parsed_text, metadata=chunk_metadata, **kwargs)
+            if not chunks:
+                raise ValueError("Chunker returned no chunks")
+
+            try:
+                from core.file_management.index_text_augmentation import augment_chunk_dict_index_text
+
+                for chunk in chunks:
+                    if isinstance(chunk, dict):
+                        augment_chunk_dict_index_text(chunk)
+            except Exception as exc:
+                logger.warning("Failed to augment chunk index_text from filename: %s", exc)
+
+            if pageindex_context is not None:
+                try:
+                    enrichment = self.pageindex_service.enrich_chunks(context=pageindex_context, chunks=chunks)
+                    pageindex_info["chunk_enrichment"] = enrichment
+                except Exception as exc:
+                    logger.warning("PageIndex chunk enrichment failed for %s: %s", file_id, exc)
+                    pageindex_info["chunk_enrichment_error"] = str(exc)
+            if pageindex_info:
+                result["metadata"]["pageindex"] = pageindex_info
+
+            result["metadata"]["num_chunks"] = len(chunks)
+            _emit("chunked", 50, {"file_id": file_id, "num_chunks": len(chunks)})
+
+            result["metadata"]["timings_s"]["chunk"] = time.perf_counter() - stage_t0
+            stage_t0 = time.perf_counter()
+
+            # Store chunks (Step 5) - prefer batch store.
+            chunk_ids: list[str] = []
+            stored_chunks: List[Dict[str, Any]] = []
+            store_batch = getattr(self.chunk_storage, "store_chunks_batch", None)
+            if callable(store_batch):
+                from config.core.file_management.chunk_ingest_defaults import (
+                    CHUNK_BATCH_VALIDATE_AFTER_STORE_DEFAULT,
+                )
+
+                stored_refs: list[tuple[int, str]] = await get_thread_pool().run_blocking(
+                    store_batch,
+                    source_parsed_content_id=parsed_content_id,
+                    chunker_type=chunker_strategy,
+                    chunks=chunks,
+                    owner_id=getattr(file_metadata, "owner_id", None),
+                    validate_after_store=CHUNK_BATCH_VALIDATE_AFTER_STORE_DEFAULT,
+                    **kwargs,
+                )
+                for chunk_index, chunk_id in stored_refs:
+                    if not chunk_id:
+                        continue
+                    chunk_ids.append(chunk_id)
+                    try:
+                        stored_chunks.append(chunks[int(chunk_index)])
+                    except Exception:
+                        continue
+            else:
+                for i, chunk in enumerate(chunks):
+                    if chunk is None:
+                        continue
+                    chunk_data = json.dumps(chunk, ensure_ascii=False).encode("utf-8", errors="replace")
+                    chunk_id = await get_thread_pool().run_blocking(
+                        self.chunk_storage.store_chunk,
+                        source_parsed_content_id=parsed_content_id,
+                        chunker_type=chunker_strategy,
+                        chunk_data=chunk_data,
+                        chunk_index=i,
+                        owner_id=getattr(file_metadata, "owner_id", None),
+                        validate_after_store=True,
+                        **kwargs,
+                    )
+                    if chunk_id:
+                        chunk_ids.append(chunk_id)
+                        stored_chunks.append(chunk)
+
+            if not chunk_ids:
+                raise ValueError("No chunks stored successfully")
+
+            # Backfill semantic_unit anchor_chunk_id for graph/dense retrieval.
+            try:
+                self._backfill_anchor_chunk_ids(stored_chunks, chunk_ids)
+                overwrite = getattr(self.chunk_storage, "overwrite_chunk_json", None)
+                if callable(overwrite):
+                    await get_thread_pool().run_blocking(
+                        self._overwrite_chunk_json_batch,
+                        self.chunk_storage,
+                        stored_chunks,
+                        chunk_ids,
+                    )
+            except Exception as exc:
+                logger.warning("Anchor chunk id backfill failed: %s", exc)
+
+            result["chunk_ids"] = chunk_ids
+            _emit("chunks_stored", 65, {"file_id": file_id, "num_chunks": len(chunk_ids)})
+
+            result["metadata"]["timings_s"]["store_chunks"] = time.perf_counter() - stage_t0
+            stage_t0 = time.perf_counter()
+
+            await get_thread_pool().run_blocking(self._update_parsed_content_status_to_chunked, parsed_content_id, **kwargs)
+            await get_thread_pool().run_blocking(self._update_file_status_to_chunked, file_id, **kwargs)
+
+            if pageindex_context is not None:
+                try:
+                    summary_info = await self.pageindex_service.summarize_sections(context=pageindex_context, chunks=stored_chunks)
+                    pageindex_info["summaries"] = summary_info
+                except Exception as exc:
+                    logger.warning("PageIndex summaries failed for %s: %s", file_id, exc)
+                    pageindex_info["summary_error"] = str(exc)
+
+                try:
+                    pageindex_indexing = await self.pageindex_service.build_indexes(
+                        context=pageindex_context,
+                        owner_id=str(getattr(file_metadata, "owner_id", "")) if file_metadata else None,
+                        base_indexers=self.indexers,
+                    )
+                    if pageindex_indexing:
+                        pageindex_info["indexing"] = pageindex_indexing
+                except Exception as exc:
+                    logger.warning("PageIndex indexing failed for %s: %s", file_id, exc)
+                    pageindex_info["indexing_error"] = str(exc)
+                if pageindex_info:
+                    result["metadata"]["pageindex"] = pageindex_info
+
+            # Index (Step 6) + statuses (Steps 7-8).
+            if self.indexers:
+                _emit("indexing", 75, {"file_id": file_id, "indexers": len(self.indexers)})
+                indexing_results = await self._index_chunks(stored_chunks, chunk_ids)
+                result["indexing_results"] = indexing_results
+                result["metadata"]["indexers_used"] = list(indexing_results.keys())
+            else:
+                indexing_results = {}
+                result["indexing_results"] = {}
+                result["metadata"]["indexers_used"] = []
+
+            result["metadata"]["timings_s"]["index"] = time.perf_counter() - stage_t0
+            stage_t0 = time.perf_counter()
+
+            # Update chunk status for indexed chunks
+            chunks_updated = False
+            if indexing_results:
+                chunks_updated = await get_thread_pool().run_blocking(
+                    self._update_indexed_chunks_status,
+                    chunk_ids,
+                    indexing_results,
+                    **kwargs,
+                )
+
+            # File status decision mirrors process_file_from_parsed_markdown/process_file.
+            successful_indexers = [k for k, v in (indexing_results or {}).items() if v.get("success")]
+            if not self.indexers:
+                successful_indexers = []
+            if not self.indexers:
+                await get_thread_pool().run_blocking(self._update_file_status_to_indexed, file_id, **kwargs)
+                result["success"] = True
+                _emit("indexed", 95, {"file_id": file_id, "success": True, "status": "INDEXED", "chunks_updated": chunks_updated})
+            elif successful_indexers and len(successful_indexers) == len(self.indexers):
+                await get_thread_pool().run_blocking(self._update_file_status_to_indexed, file_id, **kwargs)
+                result["success"] = True
+                _emit("indexed", 95, {"file_id": file_id, "success": True, "status": "INDEXED", "chunks_updated": chunks_updated})
+            else:
+                result["success"] = False
+                result["error_message"] = "all indexers failed" if not successful_indexers else "partial indexing: not all indexers succeeded"
+                from encapsulation.data_model.orm_models import FileStatus
+
+                metadata = None
+                try:
+                    metadata = self.file_storage.get_file_metadata(file_id)
+                except Exception:
+                    metadata = None
+                if metadata is None or getattr(metadata, "status", None) != FileStatus.DELETED:
+                    target_status = FileStatus.PARTIAL_INDEXED if successful_indexers else FileStatus.FAILED
+                    await get_thread_pool().run_blocking(
+                        self.file_storage.metadata_store.update_file_status,
+                        file_id,
+                        target_status,
+                        **kwargs,
+                    )
+                _emit("index_failed", 100, {"file_id": file_id, "success": False, "indexers": indexing_results})
+                return result
+
+            result["metadata"]["timings_s"]["update_file_status"] = time.perf_counter() - stage_t0
+            result["metadata"]["timings_s"]["total"] = time.perf_counter() - started
+            _emit("done", 100, {"file_id": file_id, "success": True})
+            return result
+
+        except Exception as exc:  # noqa: BLE001
+            error_msg = f"Parsed-content indexing pipeline failed for file_id {file_id}: {exc}"
+            logger.error(error_msg, exc_info=True)
+            result["error_message"] = error_msg
+            result["metadata"]["timings_s"]["total"] = time.perf_counter() - started
+            _emit("failed", 100, {"file_id": file_id, "success": False, "error_message": str(exc)})
+            try:
+                from encapsulation.data_model.orm_models import FileStatus
+
+                metadata = None
+                try:
+                    metadata = self.file_storage.get_file_metadata(file_id)
+                except Exception:
+                    metadata = None
+                if metadata is None or getattr(metadata, "status", None) != FileStatus.DELETED:
+                    await get_thread_pool().run_blocking(
+                        self.file_storage.metadata_store.update_file_status,
+                        file_id,
+                        FileStatus.FAILED,
+                        **kwargs,
+                    )
+            except Exception:
+                pass
+            return result
+
     async def process_file(self, file_id: str, **kwargs: Any) -> Dict[str, Any]:
         """
         Process a file through the complete indexing pipeline.
@@ -482,6 +968,12 @@ class _IndexManagerPipelineMixin:
             logger.info(f"Extracted {len(parsed_text)} characters of text content")
             _emit("parsed", 25, {"file_id": file_id, "filename": filename, "chars": len(parsed_text)})
 
+            # Best-effort capture of local parser artifact paths (e.g., MinerU markdown + asset folder).
+            base_output_dir = getattr(getattr(self, "parser", None), "base_output_dir", None)
+            md_path_abs, output_dir_abs = extract_md_path_and_output_dir(parse_result)
+            md_path_rel = relativize_under_base(md_path_abs, base_dir=str(base_output_dir) if base_output_dir else None)
+            output_dir_rel = relativize_under_base(output_dir_abs, base_dir=str(base_output_dir) if base_output_dir else None)
+
             pageindex_context = None
             pageindex_info: Dict[str, Any] = {}
             if getattr(self, "pageindex_service", None) is not None:
@@ -489,23 +981,12 @@ class _IndexManagerPipelineMixin:
                     from config import pageindex as pageindex_cfg
 
                     if pageindex_cfg.pageindex_enabled():
-                        md_path = None
-                        output_dir = None
-                        if isinstance(parse_result, dict):
-                            md_path = parse_result.get("md_content_path")
-                            output_paths = parse_result.get("output_paths")
-                            if isinstance(output_paths, dict):
-                                md_path = md_path or output_paths.get("markdown")
-                            meta = parse_result.get("metadata")
-                            if isinstance(meta, dict):
-                                output_dir = meta.get("output_dir")
-
                         pageindex_context = self.pageindex_service.build_context(
                             file_id=file_id,
                             filename=filename,
                             markdown=parsed_text,
-                            md_path=str(md_path) if md_path else None,
-                            output_dir=str(output_dir) if output_dir else None,
+                            md_path=resolve_under_base(md_path_rel, base_dir=str(base_output_dir) if base_output_dir else None),
+                            output_dir=resolve_under_base(output_dir_rel, base_dir=str(base_output_dir) if base_output_dir else None),
                         )
                         pageindex_info = {
                             "sections": len(pageindex_context.tree.nodes),
@@ -543,6 +1024,8 @@ class _IndexManagerPipelineMixin:
                 parser_type=parser_type_name,
                 parsed_data=parsed_data,
                 content_type="text/markdown",
+                md_path=md_path_rel,
+                output_dir=output_dir_rel,
                 **kwargs,
             )
 

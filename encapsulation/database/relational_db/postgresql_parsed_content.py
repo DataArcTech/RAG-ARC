@@ -127,7 +127,8 @@ class _PostgreSQLParsedContentMixin:
                 if source_file_id:
                     query = query.filter(ParsedContentMetadata.source_file_id == source_file_id)
                 if status:
-                    query = query.filter(ParsedContentMetadata.status == status.value)
+                    # ParsedContentMetadata.status is a SQLAlchemy Enum; compare against the enum value itself.
+                    query = query.filter(ParsedContentMetadata.status == status)
                 if parser_type:
                     query = query.filter(ParsedContentMetadata.parser_type == parser_type)
 
@@ -150,5 +151,4 @@ class _PostgreSQLParsedContentMixin:
             raise
 
     # ==================== CHUNK METADATA METHODS ====================
-
 

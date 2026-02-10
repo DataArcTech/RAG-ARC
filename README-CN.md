@@ -348,6 +348,9 @@ uv run uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 # 在本地文件夹中批量导入/索引/建图
 uv run rag-arc ingest-folder ./example/docs --owner-id 00000000-0000-0000-0000-000000000000
 
+# 仅解析（上传 + 解析 + 持久化解析产物），不进行分块/索引
+uv run rag-arc parse-folder ./example/docs --owner-id 00000000-0000-0000-0000-000000000000
+
 # 查看已导入文件及状态（JSON 输出）
 uv run rag-arc list-files --owner-id 00000000-0000-0000-0000-000000000000 --json
 
@@ -368,6 +371,8 @@ uv run rag-arc export-graph --output graph.json
 ```
 
 CLI 仍会连接 `.env` 中配置的 PostgreSQL / Redis / Neo4j / MinIO 等基础服务，因此虽然不用启动 `rag-arc-app` 容器，但这些依赖必须保持可用。
+
+> ℹ️ 两段式入库：如果文件已处于 `PARSED` 状态，后续 `trigger-index` / 重新索引会复用最新的解析结果并 **跳过 parse 阶段**（这也会自然复用 MinerU 的按文件内容 sha256 共享缓存）。
 
 > ⚠️ 删除提示：`uv run rag-arc delete-file FILE_ID` **仅会把文件状态标记为 `DELETED`**，方便本地快速验证检索隔离，不会执行索引、向量库、图谱或 Blob 的真正清理。若需完整的后台删除流程，请调用 HTTP API `DELETE /knowledge/{file_id}`；CLI 不再支持触发全量清理。
 
@@ -396,6 +401,12 @@ CLI 仍会连接 `.env` 中配置的 PostgreSQL / Redis / Neo4j / MinIO 等基�
 curl -X POST "http://localhost:8000/knowledge" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -F "file=@/path/to/your/document.pdf"
+
+# 上传后仅解析（不分块/不索引）。后续可通过 POST /knowledge/trigger_indexing 再入库。
+curl -X POST "http://localhost:8000/knowledge" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -F "file=@/path/to/your/document.pdf" \
+  -F "ingest_mode=parse"
 
 # 与RAG系统对话
 curl -X POST "http://localhost:8000/rag_inference/chat" \
@@ -532,6 +543,7 @@ RAG-ARC 实现了基于 HippoRAG2 的增强 GraphRAG 方法，具有以下关键
 2. **解析**：多个解析器支持不同类型的文档：
    - 标准格式的原生解析器（PDF、DOCX、PPTX等）
    - 扫描文档的OCR解析器（使用DOTS-OCR或基于VLM的方法）
+   - 解析/入库解耦：解析可单独运行并落库（状态为 `PARSED`），后续入库会复用解析产物并跳过重复解析。
 3. **分块**：文本使用可配置的策略分割成块：
    - 基于Token的分块
    - 语义分块
@@ -547,9 +559,13 @@ RAG-ARC 实现了基于 HippoRAG2 的增强 GraphRAG 方法，具有以下关键
 RAG-ARC 提供了全面的 REST API，包含以下关键端点：
 
 ### 知识管理
-- `POST /knowledge`：上传文档
+- `POST /knowledge`：上传文档（支持 `ingest_mode=index|parse|store`）
 - `GET /knowledge/list_files`：列出用户文档
 - `GET /knowledge/{doc_id}/download`：下载文档
+- `GET /knowledge/{doc_id}/task`：查询解析/索引后台任务状态
+- `POST /knowledge/trigger_indexing`：对已有文件触发索引（支持 `PARSED` → 直接入库，不重复解析）
+- `POST /knowledge/trigger_parsing`：对已有文件触发仅解析（不分块/不索引）
+- `POST /knowledge/{doc_id}/parse`：便捷接口（单文件仅解析）
 - `DELETE /knowledge/{doc_id}`：删除文档
 
 ### RAG 推理

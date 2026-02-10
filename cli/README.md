@@ -15,9 +15,11 @@ The CLI lets you exercise the full RAG pipeline (ingestion → indexing/graph bu
 | --- | --- | --- |
 | Ingestion | `uv run rag-arc ingest-file ./doc.pdf --owner-id <UUID>` | Upload + chunk + index + build graph for a single file (always pass a stable `--owner-id`). |
 | Ingestion | `uv run rag-arc ingest-folder ./docs --pattern '*.pdf' --owner-id <UUID>` | Bulk ingest every file in a folder, recursive by default. |
+| Ingestion | `uv run rag-arc parse-file ./doc.pdf --owner-id <UUID>` | Upload + parse + persist parsed markdown (no chunk/index). |
+| Ingestion | `uv run rag-arc parse-folder ./docs --pattern '*.pdf' --owner-id <UUID>` | Bulk parse-only for every file in a folder (no chunk/index). |
 | Knowledge mgmt | `uv run rag-arc list-files --json --owner-id <UUID>` | List files accessible to the owner (filter by status/limit/offset). |
 | Knowledge mgmt | `uv run rag-arc delete-file FILE_ID --owner-id <UUID>` | Mark a file as deleted (metadata only, no cleanup). |
-| Knowledge mgmt | `uv run rag-arc trigger-index FILE_ID [FILE_ID ...] --owner-id <UUID>` | Re-run indexing for one or more files. |
+| Knowledge mgmt | `uv run rag-arc trigger-index FILE_ID [FILE_ID ...] --owner-id <UUID>` | Re-run indexing for one or more files (reuses latest parsed output when available). |
 | Graph tooling | `uv run rag-arc export-graph --output graph.json --owner-id <UUID>` | Export the entire graph (Neo4j or igraph) to stdout or a JSON file. |
 | Retrieval | `uv run rag-arc chat "What is RAG-ARC?" --owner-id <UUID>` | Full pipeline (multi-path retrieval + rerank + LLM). |
 | Retrieval | `uv run rag-arc pipeline "What is RAG-ARC?" --skip-llm --subgraph --owner-id <UUID>` | Inspect rewrite/retrieval/rerank without calling the LLM. |
@@ -33,6 +35,7 @@ Always pass `--owner-id <UUID>` when you want to reuse the same tenant/user data
 ## Tips
 - `--json` is supported on list/chat/pipeline/graph-qa/export-graph to emit structured output.
 - `ingest-folder` respects `--limit`, `--pattern`, and `--no-recursive` to control scope, and fails fast per file.
+- Prefer two-step ingest when parsing is expensive or shared: `parse-*` first, then `trigger-index` to index later; indexing will skip parsing when a parsed output is already stored.
 - `trigger-index` and `export-graph` run against the same graph store configured in `config/json_configs/*` (Neo4j for API profile by default). Ensure those services are accessible before running the commands.
 - The CLI caches a default owner ID in `~/.rag_arc_owner_id`. Override it via `--owner-id ...` or by setting `CLI_OWNER_ID`/`RAG_ARC_OWNER_ID` in the environment when you want to share the same tenant across machines.
 - Chunk previews shown in the terminal are trimmed to the first 50 characters for readability; use `--json` when you need the full content.

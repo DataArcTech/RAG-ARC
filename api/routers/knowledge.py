@@ -49,6 +49,8 @@ from api.routers.knowledge_models import (
     GraphExportRequest,
     IndexTriggerRequest,
     IndexTriggerResponse,
+    ParseTriggerRequest,
+    ParseTriggerResponse,
     KnowledgeChunkResponse,
     MindmapEdge,
     MindmapExportRequest,
@@ -96,6 +98,10 @@ async def upload_file(
         default=None,
         description="Optional repo-relative path (e.g. RAG-ARC/docs/a.pdf).",
     ),
+    ingest_mode: Optional[str] = Form(
+        default="index",
+        description="Upload mode: index (default), parse (parse-only), store (store-only).",
+    ),
 ):
     """
     Upload a file to the knowledge base
@@ -137,7 +143,12 @@ async def upload_file(
     
     try:
         # Convert string UUID to UUID object
-        doc_id = await get_knowledge_handler().upload_file(file, user.id, relative_path=relative_path)
+        doc_id = await get_knowledge_handler().upload_file(
+            file,
+            user.id,
+            relative_path=relative_path,
+            ingest_mode=str(ingest_mode or "index"),
+        )
         return doc_id
     except ValueError as e:
         raise HTTPException(
@@ -601,6 +612,50 @@ async def trigger_indexing(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to trigger indexing: {str(e)}",
         )
+
+
+@router.post(
+    "/trigger_parsing",
+    response_model=ParseTriggerResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def trigger_parsing(
+    request: ParseTriggerRequest,
+    user: Annotated[User | None, Depends(get_current_user)],
+):
+    """Trigger parse-only for multiple files (no chunk/index)."""
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    if not request.file_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="file_ids list cannot be empty")
+    try:
+        result = await get_knowledge_handler().trigger_parsing(request.file_ids, user.id)
+        return ParseTriggerResponse(message=result)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to trigger parsing: {e}")
+
+
+@router.post(
+    "/{file_id}/parse",
+    response_model=ParseTriggerResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def parse_single_file(
+    file_id: str,
+    user: Annotated[User | None, Depends(get_current_user)],
+):
+    """Trigger parse-only for a single file."""
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    try:
+        result = await get_knowledge_handler().trigger_parsing([file_id], user.id)
+        return ParseTriggerResponse(message=result)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to trigger parsing: {e}")
 
 
 @router.post(

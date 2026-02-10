@@ -26,8 +26,8 @@ def client(monkeypatch):
     calls: dict[str, object] = {}
 
     class _StubKnowledge:
-        async def upload_file(self, file, user_id, *, relative_path=None):  # noqa: ANN001
-            calls["upload"] = (file.filename, user_id, relative_path)
+        async def upload_file(self, file, user_id, *, relative_path=None, ingest_mode="index"):  # noqa: ANN001
+            calls["upload"] = (file.filename, user_id, relative_path, ingest_mode)
             return "doc-1"
 
         async def list_user_files_async(self, user_id, status=None, limit=None, offset=None, search=None):  # noqa: ANN001
@@ -60,10 +60,11 @@ def test_knowledge_upload_passes_relative_path(client, tmp_path):
         )
     assert resp.status_code == 200
     assert resp.json() == "doc-1"
-    filename, user_id, rel = client._calls["upload"]  # type: ignore[attr-defined]
+    filename, user_id, rel, ingest_mode = client._calls["upload"]  # type: ignore[attr-defined]
     assert filename == "a.txt"
     assert user_id == client._user.id  # type: ignore[attr-defined]
     assert rel == "docs/a.txt"
+    assert ingest_mode == "index"
 
 
 def test_knowledge_list_uses_async_wrappers(client):
@@ -135,7 +136,7 @@ def test_knowledge_upload_file_validation(monkeypatch):
     user = SimpleNamespace(id=uuid.uuid4())
     
     class _StubKnowledge:
-        async def upload_file(self, file, user_id, *, relative_path=None):  # noqa: ANN001
+        async def upload_file(self, file, user_id, *, relative_path=None, ingest_mode="index"):  # noqa: ANN001
             return "doc-1"
     
     monkeypatch.setattr(knowledge_router, "get_knowledge_handler", lambda: _StubKnowledge())

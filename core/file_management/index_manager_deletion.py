@@ -96,7 +96,7 @@ class _IndexManagerDeletionMixin:
 
         return self.delete_file_data(file_id, **kwargs)
 
-    def delete_file_data(self, file_id: str, **kwargs: Any) -> Dict[str, Any]:
+    def delete_file_data(self, file_id: str, *, preserve_parsed_content: bool = False, **kwargs: Any) -> Dict[str, Any]:
         """
         Delete a file and all its associated data (parsed content, chunks and index entries).
 
@@ -115,6 +115,8 @@ class _IndexManagerDeletionMixin:
 
         Args:
             file_id: ID of the file to delete
+            preserve_parsed_content: When true, delete only derived artifacts (chunks + index entries) and keep parsed
+                content blobs/metadata intact so subsequent indexing can reuse them and skip parsing.
             **kwargs: Additional arguments
 
         Returns:
@@ -249,13 +251,19 @@ class _IndexManagerDeletionMixin:
             # Step 5: Delete parsed content blobs (THIRD, after chunks are deleted)
             # REQUIRED: Blob files are NOT managed by database CASCADE
             # NOTE: Parsed content metadata will be automatically deleted via CASCADE when file_metadata is deleted
-            logger.info(f"Step 5: Deleting {len(parsed_content_list)} parsed content blobs")
+            if preserve_parsed_content:
+                logger.info("Step 5: Skipping parsed content deletion (preserve_parsed_content=1)")
+            else:
+                logger.info(f"Step 5: Deleting {len(parsed_content_list)} parsed content blobs")
             for parsed_content in parsed_content_list:
                 if not parsed_content or not hasattr(parsed_content, "parsed_content_id"):
                     continue
 
                 parsed_content_id = parsed_content.parsed_content_id
                 if not parsed_content_id:
+                    continue
+
+                if preserve_parsed_content:
                     continue
 
                 try:
@@ -271,9 +279,10 @@ class _IndexManagerDeletionMixin:
                 except Exception as e:
                     logger.error(f"Failed to delete parsed content {parsed_content_id}: {e}")
 
-            logger.info(
-                f"Successfully deleted {len(result['deleted_parsed_content_ids'])}/{len(parsed_content_list)} parsed content blobs"
-            )
+            if not preserve_parsed_content:
+                logger.info(
+                    f"Successfully deleted {len(result['deleted_parsed_content_ids'])}/{len(parsed_content_list)} parsed content blobs"
+                )
 
             if result["error_message"]:
                 logger.warning(f"Deletion pipeline for file_id {file_id} completed with errors: {result['error_message']}")
