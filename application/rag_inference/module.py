@@ -25,7 +25,7 @@ from config.output_limits import CHAT_MAX_IMAGE_INPUTS, RAG_RETRIEVAL_OBSERVABIL
 from core.utils.multimodal_images import collect_image_paths_from_chunk_payloads
 from core.utils.multimodal_llm import build_multimodal_user_message
 from core.utils.chunk_dedupe import dedupe_chunks
-from encapsulation.web_search import TavilySearchClient
+from encapsulation.web_search import TavilySearchClient, aggregate_tavily_results
 from config.retrieval_routing import rag_retrieval_dynamic_quota_enabled
 from config.rag_intent_routing import (
     rag_evidence_consistency_enabled,
@@ -798,14 +798,34 @@ class RAGInference(AbstractModule):
                 {"stage": "web_search", "status": "start", "provider": "tavily", "max_results": web_candidates_k},
             )
 
-            def _run_web_search() -> list[dict]:
+            def _run_web_search() -> dict[str, Any]:
                 try:
                     logger.info(f"Executing Tavily search for query: {rewritten_query}")
                     results = self._tavily_client.search(query=rewritten_query, max_results=web_candidates_k)
                     logger.info(f"Tavily search returned {len(results)} results")
+                    agg_stats = None
+                    web_agg_enabled = bool(getattr(web_cfg, 'aggregate_enabled', True))
+                    if web_agg_enabled:
+                        group_by = str(getattr(web_cfg, 'aggregate_group_by', 'domain') or 'domain')
+                        max_groups = int(getattr(web_cfg, 'aggregate_max_groups', 3))
+                        max_per_group = int(getattr(web_cfg, 'aggregate_max_results_per_group', 2))
+                        agg_results, agg_stats = aggregate_tavily_results(
+                            results,
+                            group_by=group_by,
+                            max_groups=max_groups,
+                            max_items_per_group=max_per_group,
+                        )
+                        logger.info(
+                            'Web search aggregation applied: group_by=%s in=%d out=%d groups=%d',
+                            agg_stats.group_by,
+                            agg_stats.total_in,
+                            agg_stats.total_out,
+                            len(agg_stats.groups),
+                        )
+                        results = agg_results
                     evidence_chunks = self._tavily_client.to_evidence_chunks(results=results, step_id=web_step_id, query=rewritten_query)
                     logger.info(f"Converted to {len(evidence_chunks)} evidence chunks")
-                    return evidence_chunks
+                    return {"evidences": evidence_chunks, "aggregation": (agg_stats.__dict__ if agg_stats is not None else None)}
                 except Exception as e:
                     logger.error(f"Error in web search: {e}", exc_info=True)
                     raise
@@ -1039,6 +1059,7 @@ class RAGInference(AbstractModule):
                 logger.warning("Evidence consistency filter failed (ignored): %s", exc)
 
         web_chunks: list[Chunk] = []
+        web_aggregation: dict[str, Any] | None = None
         if web_future is not None:
             logger.info("Waiting for web search results...")
             web_start = time.perf_counter()
@@ -1049,12 +1070,22 @@ class RAGInference(AbstractModule):
                 logger.info(f"Web search timeout: {total_timeout}s")
                 # Use done() to check if completed, avoid blocking indefinitely
                 if web_future.done():
-                    evidences = web_future.result()
+                    web_payload = web_future.result()
+                    if isinstance(web_payload, dict):
+                        evidences = web_payload.get("evidences") if isinstance(web_payload.get("evidences"), list) else []
+                        web_aggregation = web_payload.get("aggregation") if isinstance(web_payload.get("aggregation"), dict) else None
+                    else:
+                        evidences = web_payload if isinstance(web_payload, list) else []
                     logger.info(f"Web search already completed, got {len(evidences) if evidences else 0} evidences")
                 else:
                     # Wait with timeout, but don't block forever
                     try:
-                        evidences = web_future.result(timeout=total_timeout)
+                        web_payload = web_future.result(timeout=total_timeout)
+                        if isinstance(web_payload, dict):
+                            evidences = web_payload.get("evidences") if isinstance(web_payload.get("evidences"), list) else []
+                            web_aggregation = web_payload.get("aggregation") if isinstance(web_payload.get("aggregation"), dict) else None
+                        else:
+                            evidences = web_payload if isinstance(web_payload, list) else []
                         logger.info(f"Web search completed within timeout, got {len(evidences) if evidences else 0} evidences")
                     except TimeoutError:
                         logger.warning(f"Web search timed out after {total_timeout}s, continuing without web results")
@@ -1093,6 +1124,7 @@ class RAGInference(AbstractModule):
                         "status": "end",
                         "duration_ms": int((time.perf_counter() - web_start) * 1000),
                         "results": len(web_chunks),
+                        "aggregation": web_aggregation,
                     },
                 )
                 web_stage = _debug_stage("web_search")
@@ -1103,6 +1135,7 @@ class RAGInference(AbstractModule):
                             "duration_ms": int((time.perf_counter() - web_start) * 1000),
                             "results": len(web_chunks),
                             "chunks": _chunks_debug_list(web_chunks),
+                            "aggregation": web_aggregation,
                         }
                     )
             except Exception as exc:  # noqa: BLE001

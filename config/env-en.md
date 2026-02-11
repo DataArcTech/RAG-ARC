@@ -620,6 +620,15 @@ Entry points:
 
 DeepSearch web search policy (in `config/json_configs/deepsearch_service.json`):
 
+- `tool_manager.enabled_tools["web.search"].params` sets Tavily overrides for DeepSearch.
+- `aggregate_enabled` toggles source aggregation; `aggregate_group_by` accepts `domain`, `url`, or `provider`.
+- `aggregate_max_groups` and `aggregate_max_results_per_group` cap per-source diversity (score = sum(score)/sqrt(n+1)).
+
+HippoRAG Q&A web search policy (in `config/json_configs/rag_inference.json`):
+
+- `web_search.aggregate_*` controls the same source-level aggregation for Tavily results.
+- `candidate_selection.web_candidates_k` sets the requested web result count before aggregation.
+
 
 DeepSearch tool budget (in `config/json_configs/deepsearch_service.json`):
 

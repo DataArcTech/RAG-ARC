@@ -618,6 +618,15 @@ RAG-ARC 采用单一可信配置流：
 
 DeepSearch Web 搜索策略（位于 `config/json_configs/deepsearch_service.json`）：
 
+- `tool_manager.enabled_tools["web.search"].params` 用于覆盖 DeepSearch 的 Tavily 参数。
+- `aggregate_enabled` 控制是否做来源聚合；`aggregate_group_by` 支持 `domain`/`url`/`provider`。
+- `aggregate_max_groups` 与 `aggregate_max_results_per_group` 用于限制来源数量（打分公式 sum(score)/sqrt(n+1)）。
+
+HippoRAG Q&A Web 搜索策略（位于 `config/json_configs/rag_inference.json`）：
+
+- `web_search.aggregate_*` 控制 Tavily 结果的来源聚合。
+- `candidate_selection.web_candidates_k` 设置聚合前请求的 web 结果数。
+
 
 DeepSearch 工具调用预算（位于 `config/json_configs/deepsearch_service.json`）：
 
