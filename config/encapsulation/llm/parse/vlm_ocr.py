@@ -15,11 +15,13 @@ def _default_ocr_model_name() -> str:
 
 
 def _default_ocr_api_key() -> str:
-    return os.getenv("OCR_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+    # Treat empty component-specific env vars as unset so OPENAI_* can act as a shared default.
+    return os.getenv("OCR_API_KEY") or os.getenv("OPENAI_API_KEY", "")
 
 
 def _default_ocr_base_url() -> str:
-    return os.getenv("OCR_API_BASE_URL", os.getenv("OPENAI_BASE_URL", ""))
+    # Treat empty component-specific env vars as unset so OPENAI_* can act as a shared default.
+    return os.getenv("OCR_API_BASE_URL") or os.getenv("OPENAI_BASE_URL", "")
 
 
 class VLMOcrConfig(AbstractConfig):
@@ -40,7 +42,11 @@ class VLMOcrConfig(AbstractConfig):
     max_retries: int = 3
 
     # VLLM configuration (when loading_method="vllm")
-    base_url: str = Field(default_factory=lambda: os.getenv("OCR_API_BASE_URL", os.getenv("OPENAI_BASE_URL", "http://localhost:8000/v1")))
+    base_url: str = Field(
+        default_factory=lambda: os.getenv("OCR_API_BASE_URL")
+        or os.getenv("OPENAI_BASE_URL")
+        or "http://localhost:8000/v1"
+    )
     api_key: str = Field(default_factory=_default_ocr_api_key)
 
     # Inference parameters
