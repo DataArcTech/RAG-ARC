@@ -212,6 +212,51 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
             await task
         except asyncio.CancelledError:
             logger.info(f"Cancelled deletion task awaited for file_id: {doc_id}")
+
+    def _revoke_celery_parsing_indexing_task(self, doc_id: str) -> None:
+        """
+        撤销该文件对应的 Celery 解析/索引任务，以节省资源。
+
+        当用户在前端删除「索引中」或「索引完成」的文件时，需主动同步到后端，
+        取消正在执行或排队中的解析/索引任务。
+        """
+        if not self._use_celery():
+            return
+        for task_type in ("index_file", "parse_file"):
+            task_run_id = self.task_queue.get_latest_task_run_id_for_resource(
+                task_type=task_type, resource_id=doc_id
+            )
+            if not task_run_id:
+                continue
+            record = self.task_queue.get_task_run(task_run_id)
+            if not record:
+                continue
+            state = str(record.get("state") or "").strip()
+            if state not in (TaskState.PENDING.value, TaskState.RUNNING.value):
+                continue
+            try:
+                from encapsulation.message_queue.celery_app import app as celery_app
+
+                celery_app.control.revoke(task_run_id, terminate=True)
+                self.task_queue.update_task_run(
+                    task_run_id,
+                    state=TaskState.CANCELED,
+                    error_message="file deleted by user",
+                    finished=True,
+                )
+                logger.info(
+                    "Revoked celery task for deleted file: file_id=%s task_type=%s task_run_id=%s",
+                    doc_id,
+                    task_type,
+                    task_run_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to revoke celery task for file_id=%s task_run_id=%s: %s",
+                    doc_id,
+                    task_run_id,
+                    exc,
+                )
     
     async def upload_file(
         self,
@@ -769,6 +814,8 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
 
         await self._cancel_indexing_task(doc_id)
         await self._cancel_deletion_task(doc_id)
+        # 撤销 Celery 解析/索引任务，以节省资源
+        await self._run_blocking(self._revoke_celery_parsing_indexing_task, doc_id)
 
         if not self._is_file_marked_for_deletion(doc_id):
             self._mark_file_for_deletion(doc_id, metadata.owner_id)
@@ -809,6 +856,8 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
         # Ensure background indexing/deletion is not running for this file
         await self._cancel_indexing_task(doc_id)
         await self._cancel_deletion_task(doc_id)
+        # 撤销 Celery 解析/索引任务，以节省资源
+        await self._run_blocking(self._revoke_celery_parsing_indexing_task, doc_id)
 
         self._mark_file_for_deletion(doc_id, metadata.owner_id)
 
@@ -887,6 +936,8 @@ class Knowledge(KnowledgePermissionMixin, KnowledgeRuntimeStateMixin, AbstractMo
 
         await self._cancel_indexing_task(doc_id)
         await self._cancel_deletion_task(doc_id)
+        # 撤销 Celery 解析/索引任务，以节省资源
+        await self._run_blocking(self._revoke_celery_parsing_indexing_task, doc_id)
 
         self._mark_file_for_deletion(doc_id, metadata.owner_id)
         await self._run_blocking(self.file_storage.metadata_store.update_file_status, doc_id, FileStatus.DELETED)
