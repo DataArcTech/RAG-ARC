@@ -15,90 +15,235 @@ from api.sse import (
     sse_json_wrapped,
 )
 from core.deepsearch.trace import TraceEmitter, TraceEvent, set_trace_emitter, reset_trace_emitter
+from core.deepsearch.utils.llm_envelope import try_parse_llm_envelope
 from api.routers.deepsearch_weaver_render import render_trace_payload, weaver_block
 
 logger = logging.getLogger(__name__)
 
 
-def _generate_trace_message(trace_event: TraceEvent) -> str:
-    """Generate a human-readable message from trace event."""
-    tag = trace_event.tag
-    meta = trace_event.meta or {}
-    
-    if tag == "think":
-        stage = meta.get("stage", "")
-        if stage == "plan":
-            return "正在生成搜索计划..."
-        elif stage == "question_classification":
-            return "正在分析问题类型..."
-        elif stage == "think_init":
-            return "正在初始化思考..."
-        elif stage == "reflection":
-            step_id = meta.get("step_id", "")
-            return f"正在反思步骤 {step_id} 的结果..."
-        else:
-            return "正在思考..."
-    
-    elif tag == "write_outline":
-        return "已生成搜索计划大纲"
-    
-    elif tag == "tool_call":
-        tool_name = meta.get("tool_name", "")
-        plan_step = meta.get("plan_step", "")
-        
-        # 简化工具名称显示
-        if tool_name == "think":
-            return "正在思考..."
-        if tool_name == "explore":
-            return "正在探索知识库..."
-        if tool_name == "code.python":
-            return "正在进行计算验证..."
-        if tool_name == "read.pages":
-            return "正在读取证据..."
-        if tool_name.startswith("graph."):
-            return "正在执行图谱操作..."
-        if tool_name.startswith("search"):
-            return "正在检索知识库..."
-        if tool_name.startswith("web"):
-            return "正在进行网络搜索..."
-        if plan_step:
-            return f"正在执行步骤 {plan_step}..."
-        return f"正在调用工具 {tool_name}..."
-    
-    elif tag == "tool_response":
-        tool_name = meta.get("tool_name", "")
-        ok = meta.get("ok", True)
-        
-        if not ok:
-            return f"工具 {tool_name} 调用失败"
-        
-        if tool_name == "think":
-            return "思考完成"
-        if tool_name == "explore":
-            return "探索完成"
-        if tool_name == "code.python":
-            return "计算完成"
-        if tool_name == "read.pages":
-            return "读取完成"
-        if tool_name.startswith("graph."):
-            return "图谱操作完成"
-        if tool_name.startswith("search"):
-            return "检索完成"
-        if tool_name.startswith("web"):
-            return "网络搜索完成"
-        return f"工具 {tool_name} 调用完成"
-    
-    elif tag == "write":
-        return "正在写入内容..."
-    
-    elif tag == "progress":
-        return "处理中..."
-    
-    elif tag == "terminate":
-        return "处理终止"
-    
-    else:
-        return f"DeepSearch 执行中 ({tag})..."
+def _try_parse_json(value: Any) -> Any | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def _extract_envelope_thinking(raw: str) -> str | None:
+    payload = try_parse_llm_envelope(raw)
+    if not isinstance(payload, dict):
+        return None
+    thinking = str(payload.get("thinking") or "").strip()
+    return thinking or None
+
+
+def _extract_reasoning_lines(raw: str) -> str | None:
+    parsed = _try_parse_json(raw)
+    if isinstance(parsed, dict):
+        reasoning = parsed.get("reasoning")
+        if isinstance(reasoning, str) and reasoning.strip():
+            return reasoning.strip()
+    lines = []
+    for line in str(raw or "").splitlines():
+        if "reasoning=" in line:
+            lines.append(line.split("reasoning=", 1)[1].strip())
+    if lines:
+        return " / ".join([line for line in lines if line])
+    text = str(raw or "").strip()
+    return text or None
+
+
+def _extract_tool_response_thinking(payload: dict[str, Any]) -> str | None:
+    result = payload.get("result") if isinstance(payload, dict) else None
+    if isinstance(result, dict):
+        summary = result.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            return _extract_envelope_thinking(summary) or _extract_reasoning_lines(summary)
+        think_notes = result.get("think_notes")
+        if isinstance(think_notes, list):
+            for note in reversed(think_notes):
+                if not isinstance(note, dict):
+                    continue
+                reasoning = note.get("reasoning")
+                if isinstance(reasoning, str) and reasoning.strip():
+                    return reasoning.strip()
+    return None
+
+
+def _extract_tool_call_hint(payload: dict[str, Any]) -> str | None:
+    extra = payload.get("extra") if isinstance(payload, dict) else None
+    if isinstance(extra, dict):
+        for key in ("rationale", "purpose", "query", "focus_query", "question"):
+            value = extra.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    tool_name = payload.get("tool_name") if isinstance(payload, dict) else None
+    if isinstance(tool_name, str) and tool_name.strip():
+        return tool_name.strip()
+    return None
+
+
+def _first_nonempty_line(text: str | None) -> str | None:
+    for line in str(text or "").splitlines():
+        token = line.strip()
+        if token:
+            return token
+    return None
+
+
+def _build_trace_message(trace_event: TraceEvent, rendered_content: str | None = None) -> str | None:
+    content = str(getattr(trace_event, "content", "") or "").strip()
+    if trace_event.tag == "think" and content:
+        return _extract_envelope_thinking(content) or _extract_reasoning_lines(content)
+
+    parsed = _try_parse_json(content)
+    if trace_event.tag == "tool_response" and isinstance(parsed, dict):
+        message = _extract_tool_response_thinking(parsed)
+        if message:
+            return message
+    if trace_event.tag == "tool_call" and isinstance(parsed, dict):
+        message = _extract_tool_call_hint(parsed)
+        if message:
+            return message
+
+    if content:
+        message = _extract_envelope_thinking(content)
+        if message:
+            return message
+
+    return _first_nonempty_line(rendered_content) or _first_nonempty_line(content)
+
+def _collect_plan_step_texts(plan_steps: Any) -> list[str]:
+    texts: list[str] = []
+    if not isinstance(plan_steps, list):
+        return texts
+    for step in plan_steps:
+        if not isinstance(step, dict):
+            continue
+        for key in ("description", "text", "title"):
+            value = step.get(key)
+            if isinstance(value, str) and value.strip():
+                texts.append(value.strip())
+                break
+    return texts
+
+
+def _extract_latest_think_note(state: Any) -> str | None:
+    trace = getattr(state, "reasoning_trace", None)
+    trace = trace if isinstance(trace, dict) else {}
+    notes = trace.get("think_notes") if isinstance(trace, dict) else None
+    if not isinstance(notes, list):
+        return None
+    for note in reversed(notes):
+        if not isinstance(note, dict):
+            continue
+        reasoning = note.get("reasoning")
+        if isinstance(reasoning, str) and reasoning.strip():
+            return reasoning.strip()
+    return None
+
+
+def _extract_latest_reasoning_step(state: Any) -> str | None:
+    trace = getattr(state, "reasoning_trace", None)
+    trace = trace if isinstance(trace, dict) else {}
+    steps = trace.get("reasoning_steps") if isinstance(trace, dict) else None
+    if not isinstance(steps, list):
+        return None
+    for step in reversed(steps):
+        if not isinstance(step, dict):
+            continue
+        candidate = step.get("output_summary") or step.get("description")
+        if isinstance(candidate, str) and candidate.strip():
+            return _extract_envelope_thinking(candidate) or _extract_reasoning_lines(candidate)
+    return None
+
+
+def _extract_tool_result_thinking(state: Any) -> str | None:
+    trace = getattr(state, "reasoning_trace", None)
+    trace = trace if isinstance(trace, dict) else {}
+    tool_results = trace.get("tool_results") if isinstance(trace, dict) else None
+    if not isinstance(tool_results, list):
+        return None
+    for entry in reversed(tool_results):
+        if not isinstance(entry, dict):
+            continue
+        result = entry.get("result")
+        if not isinstance(result, dict):
+            continue
+        summary = result.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            return _extract_envelope_thinking(summary) or _extract_reasoning_lines(summary)
+        think_notes = result.get("think_notes")
+        if isinstance(think_notes, list):
+            for note in reversed(think_notes):
+                if not isinstance(note, dict):
+                    continue
+                reasoning = note.get("reasoning")
+                if isinstance(reasoning, str) and reasoning.strip():
+                    return reasoning.strip()
+    return None
+
+
+def _extract_report_summary(state: Any) -> str | None:
+    report = getattr(state, "report_payload", None)
+    if not isinstance(report, dict):
+        return None
+    answer = report.get("answer")
+    if isinstance(answer, str) and answer.strip():
+        return _first_nonempty_line(answer)
+    return None
+
+
+def _extract_error_summary(state: Any) -> str | None:
+    errors = getattr(state, "errors", None)
+    if not isinstance(errors, list):
+        return None
+    for entry in reversed(errors):
+        if not isinstance(entry, dict):
+            continue
+        for key in ("reason", "message"):
+            value = entry.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _build_progress_message(stage: str, metadata: dict, state: Any) -> str | None:
+    for candidate in (
+        _extract_latest_think_note(state),
+        _extract_tool_result_thinking(state),
+        _extract_latest_reasoning_step(state),
+    ):
+        if candidate:
+            return candidate
+
+    if stage == "planned":
+        plan_texts = _collect_plan_step_texts(getattr(state, "plan_steps", None))
+        if plan_texts:
+            return " / ".join(plan_texts[:2])
+
+    if stage in {"reported", "done"}:
+        report_summary = _extract_report_summary(state)
+        if report_summary:
+            return report_summary
+
+    if stage == "failed":
+        error_summary = _extract_error_summary(state)
+        if error_summary:
+            return error_summary
+
+    if isinstance(metadata, dict):
+        for key in ("plan_id", "step_id", "stage"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    return None
+
 
 
 def _save_trace_events_to_file(
@@ -109,7 +254,7 @@ def _save_trace_events_to_file(
     deepsearch_result: dict[str, Any] | None
 ) -> str | None:
     """Save trace events to a JSON file.
-    
+
     Returns:
         Path to the saved file, or None if saving failed.
     """
@@ -120,13 +265,13 @@ def _save_trace_events_to_file(
         base_dir = os.getenv("DEEPSEARCH_TRACE_STORAGE_PATH", "./local/deepsearch_traces")
         storage_dir = Path(base_dir).expanduser()
         storage_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # 生成文件名：使用 run_id 或 request_id，加上时间戳
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         file_id = run_id or request_id
         filename = f"trace_{file_id}_{timestamp}.json"
         file_path = storage_dir / filename
-        
+
         rendered_result = deepsearch_result
         try:
             if isinstance(deepsearch_result, dict):
@@ -205,7 +350,7 @@ def _save_trace_events_to_file(
                 for event in trace_events
             ]
         }
-        
+
         # 保存为 JSON 文件
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(
@@ -215,7 +360,7 @@ def _save_trace_events_to_file(
                 indent=2,
                 default=str,
             )
-        
+
         logger.info(
             "Saved %d trace events to %s (request_id=%s, run_id=%s)",
             len(trace_events),
@@ -231,10 +376,10 @@ def _save_trace_events_to_file(
 
 def load_trace_events_from_file(trace_file_path: str) -> dict[str, Any] | None:
     """Load trace events from a JSON file.
-    
+
     Args:
         trace_file_path: Path to the trace events JSON file
-        
+
     Returns:
         Dictionary containing trace data, or None if loading failed.
     """
@@ -243,10 +388,10 @@ def load_trace_events_from_file(trace_file_path: str) -> dict[str, Any] | None:
         if not file_path.exists():
             logger.warning("Trace file not found: %s", trace_file_path)
             return None
-        
+
         with open(file_path, "r", encoding="utf-8") as f:
             trace_data = json.load(f)
-        
+
         logger.debug("Loaded trace events from %s", trace_file_path)
         return trace_data
     except Exception as e:
@@ -256,11 +401,11 @@ def load_trace_events_from_file(trace_file_path: str) -> dict[str, Any] | None:
 
 class InMemoryTraceEmitter:
     """In-memory trace emitter that collects events in a queue for real-time processing and storage."""
-    
+
     def __init__(self, trace_queue: asyncio.Queue[TraceEvent | None]):
         self.trace_queue = trace_queue
         self.collected_events: List[TraceEvent] = []  # 收集所有 trace events 用于存储
-    
+
     async def emit(self, event: TraceEvent) -> None:
         """Emit a trace event to the queue and collect it for storage."""
         try:
@@ -269,11 +414,10 @@ class InMemoryTraceEmitter:
             self.collected_events.append(event)
         except Exception as e:
             logger.error("Error emitting trace event: %s", e, exc_info=True)
-    
+
     def get_all_events(self) -> List[TraceEvent]:
         """Get all collected trace events."""
         return self.collected_events.copy()
-
 
 def _build_progress_info(stage: str, metadata: dict, state: Any, request_id: str) -> dict[str, Any]:
     """Build progress info based on DeepSearch stage."""
@@ -282,9 +426,8 @@ def _build_progress_info(stage: str, metadata: dict, state: Any, request_id: str
         "deepsearch_stage": stage,
         "status": "running",
     }
-    
+
     if stage == "planned":
-        progress_info["message"] = "正在生成搜索计划..."
         if "step_count" in metadata:
             progress_info["plan_steps_count"] = metadata.get("step_count")
         if hasattr(state, "plan_steps") and state.plan_steps:
@@ -292,7 +435,6 @@ def _build_progress_info(stage: str, metadata: dict, state: Any, request_id: str
         if hasattr(state, "plan_metadata") and state.plan_metadata:
             progress_info["plan_metadata"] = state.plan_metadata
     elif stage == "reasoned":
-        progress_info["message"] = "正在进行图谱推理..."
         if hasattr(state, "reasoning_trace") and state.reasoning_trace:
             progress_info["reasoning_trace"] = state.reasoning_trace
             reasoning_steps = state.reasoning_trace.get("reasoning_steps", [])
@@ -304,29 +446,26 @@ def _build_progress_info(stage: str, metadata: dict, state: Any, request_id: str
                 progress_info["tool_results"] = tool_results
                 progress_info["tool_calls_count"] = len(tool_results)
     elif stage == "reported":
-        progress_info["message"] = "正在生成报告..."
         if hasattr(state, "report_payload") and state.report_payload:
             progress_info["report_payload"] = state.report_payload
     elif stage == "done":
         progress_info["status"] = "completed"
-        progress_info["message"] = "DeepSearch 完成"
         if hasattr(state, "run_id"):
             progress_info["run_id"] = state.run_id
     elif stage == "failed":
         progress_info["status"] = "failed"
-        progress_info["message"] = "DeepSearch 执行失败"
         if hasattr(state, "errors") and state.errors:
             progress_info["errors"] = state.errors
     elif stage == "created":
-        progress_info["message"] = "DeepSearch 初始化..."
         if hasattr(state, "run_id"):
             progress_info["run_id"] = state.run_id
-    else:
-        progress_info["message"] = f"DeepSearch 执行中（阶段: {stage}）..."
-    
+
+    message = _build_progress_message(stage, metadata, state)
+    progress_info["message"] = message or str(stage or "deepsearch")
+
     if "plan_id" in metadata:
         progress_info["plan_id"] = metadata.get("plan_id")
-    
+
     return progress_info
 
 
@@ -404,8 +543,8 @@ async def _yield_trace_event(
     # 包装成 weaver block
     weaver_content = weaver_block(rendered_tag, rendered_content)
     
-    # 生成人类可读的 message
-    message = _generate_trace_message(trace_event)
+    # 生成人类可读的 message（优先使用动态推理内容）
+    message = _build_trace_message(trace_event, rendered_content=rendered_content) or str(rendered_tag or trace_event.tag or "trace")
     
     # 作为 tool_call 发送
     tool_calls = [{

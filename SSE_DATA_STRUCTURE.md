@@ -61,6 +61,11 @@
 
 ### 2. DeepSearch 进度事件（DeepSearch Progress Events）
 
+**message 字段说明：**
+- 优先使用 LLM 输出的动态内容（think_notes.reasoning、think tool summary 的 thinking、plan 步骤文本等）。
+- 若无可用推理内容，则回退为当前 stage 名称（例如 `created`/`planned`）。
+
+
 **事件类型：** `tool_calls` with `rag_arc_progress`
 
 #### 2.1 created（初始化）
@@ -85,7 +90,7 @@
               "type": "function",
               "function": {
                 "name": "rag_arc_progress",
-                "arguments": "{\"stage\":\"deepsearch\",\"deepsearch_stage\":\"created\",\"status\":\"running\",\"message\":\"DeepSearch 初始化...\",\"run_id\":\"xxx\",\"config_fingerprint\":\"xxx\",\"v\":1,\"type\":\"progress\",\"ts_ms\":1234567890,\"request_id\":\"xxx\",\"seq\":1}"
+                "arguments": "{\"stage\":\"deepsearch\",\"deepsearch_stage\":\"created\",\"status\":\"running\",\"message\":\"<dynamic>\",\"run_id\":\"xxx\",\"config_fingerprint\":\"xxx\",\"v\":1,\"type\":\"progress\",\"ts_ms\":1234567890,\"request_id\":\"xxx\",\"seq\":1}"
               }
             }
           ]
@@ -105,7 +110,7 @@
   "stage": "deepsearch",
   "deepsearch_stage": "created",
   "status": "running",
-  "message": "DeepSearch 初始化...",
+  "message": "<dynamic>",
   "run_id": "xxx",
   "config_fingerprint": "xxx",
   "v": 1,
@@ -123,7 +128,7 @@
   "stage": "deepsearch",
   "deepsearch_stage": "planned",
   "status": "running",
-  "message": "正在生成搜索计划...",
+  "message": "<dynamic>",
   "plan_steps_count": 4,
   "plan_steps": [
     {
@@ -155,7 +160,7 @@
   "stage": "deepsearch",
   "deepsearch_stage": "reasoned",
   "status": "running",
-  "message": "正在进行图谱推理...",
+  "message": "<dynamic>",
   "reasoning_trace": {
     "reasoning_steps": [...],
     "tool_results": [...],
@@ -203,7 +208,7 @@
   "stage": "deepsearch",
   "deepsearch_stage": "reported",
   "status": "running",
-  "message": "正在生成报告...",
+  "message": "<dynamic>",
   "report_payload": {
     "answer": "完整的报告答案...",
     "structured_report": {...},
@@ -243,7 +248,7 @@
   "stage": "deepsearch",
   "deepsearch_stage": "done",
   "status": "completed",
-  "message": "DeepSearch 完成",
+  "message": "<dynamic>",
   "run_id": "xxx",
   "cost_telemetry": {
     "plan": 3000,
@@ -266,7 +271,7 @@
   "stage": "deepsearch",
   "deepsearch_stage": "failed",
   "status": "failed",
-  "message": "DeepSearch 执行失败",
+  "message": "<dynamic>",
   "errors": [
     {
       "error": "错误信息",
@@ -570,11 +575,11 @@ data: [DONE]
 ## 完整事件序列示例
 
 1. **初始消息** - 设置 assistant role
-2. **DeepSearch created** - DeepSearch 初始化
+2. **DeepSearch created** - 进入 DeepSearch（message 为动态思考文本）
 3. **DeepSearch planned** - 计划生成
 4. **DeepSearch reasoned** - 图谱推理（可能多次）
 5. **DeepSearch reported** - 报告生成
-6. **DeepSearch done** - DeepSearch 完成
+6. **DeepSearch done** - DeepSearch 完成（message 为动态思考文本）
 7. **RAG prepare** - RAG 准备阶段
 8. **RAG web_search** - 联网搜索（如果启用）
 9. **RAG generate** - 生成阶段
