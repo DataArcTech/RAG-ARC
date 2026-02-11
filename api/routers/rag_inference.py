@@ -15,7 +15,7 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from api.routers.auth import get_current_user
+from api.routers.auth import get_current_user, get_current_user_optional
 from asgi_correlation_id import correlation_id
 from api.sse import (
     delta_envelope,
@@ -39,6 +39,7 @@ from framework.register import Register
 import uuid
 import logging
 from core.utils.owner_guard import is_admin_owner
+from core.utils.json_safe import json_safe
 from api.routers.rag_inference_handlers import (
     generate_title_via_llm,
     get_account_handler,
@@ -48,6 +49,7 @@ from api.routers.rag_inference_handlers import (
 )
 from api.routers.rag_inference_models import (
     GraphOverviewResponse,
+    RAGDebugRequest,
     StreamChatRequest,
 )
 
@@ -103,6 +105,64 @@ async def graph_overview(
         include_node_types=include_node_types,
     )
     return GraphOverviewResponse(**overview)
+
+
+@router.post("/debug")
+async def rag_debug(
+    request: RAGDebugRequest,
+    current_user: Annotated[User | None, Depends(get_current_user_optional)] = None,
+):
+    """Debug endpoint for inspecting RAG internals (no auth enforced for now)."""
+    # NOTE: Auth is intentionally disabled for online inspection.
+    # Uncomment when ready to enforce:
+    # if current_user is None:
+    #     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    # if not is_admin_owner(current_user.id):
+    #     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin only")
+
+    debug_state: dict[str, Any] = {}
+    progress_events: list[dict[str, Any]] = []
+
+    def _collect_progress(payload: dict[str, Any]) -> None:
+        progress_events.append(payload)
+
+    rag = get_rag_inference_handler()
+    messages, chunks, subgraph_data, subgraph_info = await get_thread_pool().run_blocking(
+        rag._build_messages_and_context,
+        query=request.query,
+        owner_id=request.owner_id,
+        return_subgraph=bool(request.return_subgraph),
+        progress_callback=_collect_progress,
+        history_text=request.history_text,
+        enable_web_search=bool(request.enable_web_search),
+        session_id=request.session_id,
+        user_type=request.user_type,
+        include_share=bool(request.include_share),
+        share_owner_id=request.share_owner_id,
+        debug_state=debug_state,
+        disable_intent_routing=bool(request.disable_intent_routing),
+    )
+
+    response: dict[str, Any] = {
+        "debug": json_safe(debug_state),
+        "progress_events": json_safe(progress_events),
+        "messages": json_safe(messages),
+        "chunks": json_safe(chunks),
+        "subgraph_data": json_safe(subgraph_data),
+        "subgraph_info": json_safe(subgraph_info),
+    }
+
+    if request.include_answer:
+        try:
+            def _run_chat():
+                return rag.llm.chat(messages)
+
+            answer = await get_thread_pool().run_blocking(_run_chat)
+            response["answer"] = answer
+        except Exception as exc:  # noqa: BLE001
+            response["answer_error"] = str(exc)
+
+    return response
 
 
 @router.post("/stream_chat/{session_id}")

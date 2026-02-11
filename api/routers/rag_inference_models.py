@@ -29,6 +29,22 @@ class StreamChatRequest(BaseModel):
     enable_deepsearch: bool = False
 
 
+class RAGDebugRequest(BaseModel):
+    """Request model for RAG debug endpoint."""
+
+    query: str
+    owner_id: uuid.UUID
+    history_text: Optional[str] = None
+    return_subgraph: bool = False
+    enable_web_search: bool = False
+    include_share: bool = False
+    share_owner_id: Optional[uuid.UUID] = None
+    session_id: Optional[uuid.UUID] = None
+    user_type: Optional[int] = None
+    disable_intent_routing: bool = False
+    include_answer: bool = False
+
+
 class ChatResponse(BaseModel):
     """Response model for chat endpoint."""
 
