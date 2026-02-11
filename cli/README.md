@@ -36,6 +36,7 @@ Always pass `--owner-id <UUID>` when you want to reuse the same tenant/user data
 - `--json` is supported on list/chat/pipeline/graph-qa/export-graph to emit structured output.
 - `ingest-folder` respects `--limit`, `--pattern`, and `--no-recursive` to control scope, and fails fast per file.
 - Prefer two-step ingest when parsing is expensive or shared: `parse-*` first, then `trigger-index` to index later; indexing will skip parsing when a parsed output is already stored.
+- When `ingest-*`/`parse-*` hits duplicate uploads (same filename/content), CLI now reuses the existing file record and continues index/parse, so parse/index decoupling works smoothly.
 - When using `parse-*`/`ingest-*` with `--force-reparse`, duplicate uploads (same filename or content) are automatically marked deleted and re-uploaded before parsing/indexing.
 - `trigger-index` and `export-graph` run against the same graph store configured in `config/json_configs/*` (Neo4j for API profile by default). Ensure those services are accessible before running the commands.
 - The CLI caches a default owner ID in `~/.rag_arc_owner_id`. Override it via `--owner-id ...` or by setting `CLI_OWNER_ID`/`RAG_ARC_OWNER_ID` in the environment when you want to share the same tenant across machines.

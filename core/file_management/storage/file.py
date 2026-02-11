@@ -140,6 +140,7 @@ class FileStorage(AbstractModule):
                 session.query(FileMetadata)
                 .filter_by(filename=filename, owner_id=owner_id)
                 .filter(FileMetadata.status != FileStatus.DELETED)
+                .order_by(FileMetadata.updated_at.desc())
                 .all()
             )
 
@@ -147,6 +148,7 @@ class FileStorage(AbstractModule):
                 session.query(FileMetadata)
                 .filter_by(content_hash=content_hash, owner_id=owner_id)
                 .filter(FileMetadata.status != FileStatus.DELETED)
+                .order_by(FileMetadata.updated_at.desc())
                 .all()
             )
 

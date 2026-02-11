@@ -256,6 +256,27 @@ def _is_duplicate_upload_error(exc: Exception) -> bool:
     return "already exists" in str(exc).lower()
 
 
+def _resolve_existing_file_for_duplicate_upload(
+    *,
+    knowledge: Knowledge,
+    owner_id: UUID | str,
+    filename: str,
+    file_bytes: bytes,
+) -> str | None:
+    duplicate_ids: list[str] = []
+    try:
+        duplicate_ids = knowledge.file_storage.find_duplicate_file_ids(
+            filename=filename,
+            file_data=file_bytes,
+            owner_id=UUID(str(owner_id)),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Duplicate lookup failed: %s", exc)
+        return None
+
+    return duplicate_ids[0] if duplicate_ids else None
+
+
 def _delete_duplicate_files_for_reparse(
     *,
     knowledge: Knowledge,
@@ -314,24 +335,37 @@ def _ingest_single_file(
                 content_type=content_type,
             )
         except FileValidationError as exc:
-            if force_reparse and _is_duplicate_upload_error(exc):
+            if _is_duplicate_upload_error(exc):
                 typer.secho(f"  ! Upload blocked by duplicate: {exc}", fg=typer.colors.YELLOW)
-                deleted = _delete_duplicate_files_for_reparse(
-                    knowledge=knowledge,
-                    owner_id=owner_id,
-                    filename=filename,
-                    file_bytes=file_bytes,
-                )
-                if deleted:
-                    typer.echo(f"  • Deleted {len(deleted)} duplicate file(s), retrying upload...")
-                    file_id = knowledge.file_storage.upload_file(
-                        filename=filename,
-                        file_data=file_bytes,
+                if force_reparse:
+                    deleted = _delete_duplicate_files_for_reparse(
+                        knowledge=knowledge,
                         owner_id=owner_id,
-                        content_type=content_type,
+                        filename=filename,
+                        file_bytes=file_bytes,
                     )
+                    if deleted:
+                        typer.echo(f"  • Deleted {len(deleted)} duplicate file(s), retrying upload...")
+                        file_id = knowledge.file_storage.upload_file(
+                            filename=filename,
+                            file_data=file_bytes,
+                            owner_id=owner_id,
+                            content_type=content_type,
+                        )
+                    else:
+                        raise
                 else:
-                    raise
+                    existing_file_id = _resolve_existing_file_for_duplicate_upload(
+                        knowledge=knowledge,
+                        owner_id=owner_id,
+                        filename=filename,
+                        file_bytes=file_bytes,
+                    )
+                    if existing_file_id:
+                        file_id = existing_file_id
+                        typer.echo(f"  • Reusing existing file_id={file_id} for indexing")
+                    else:
+                        raise
             else:
                 raise
         typer.echo(f"  • Stored as file_id={file_id} ({len(file_bytes)} bytes)")
@@ -381,24 +415,37 @@ def _parse_single_file(
                 content_type=content_type,
             )
         except FileValidationError as exc:
-            if force_reparse and _is_duplicate_upload_error(exc):
+            if _is_duplicate_upload_error(exc):
                 typer.secho(f"  ! Upload blocked by duplicate: {exc}", fg=typer.colors.YELLOW)
-                deleted = _delete_duplicate_files_for_reparse(
-                    knowledge=knowledge,
-                    owner_id=owner_id,
-                    filename=filename,
-                    file_bytes=file_bytes,
-                )
-                if deleted:
-                    typer.echo(f"  • Deleted {len(deleted)} duplicate file(s), retrying upload...")
-                    file_id = knowledge.file_storage.upload_file(
-                        filename=filename,
-                        file_data=file_bytes,
+                if force_reparse:
+                    deleted = _delete_duplicate_files_for_reparse(
+                        knowledge=knowledge,
                         owner_id=owner_id,
-                        content_type=content_type,
+                        filename=filename,
+                        file_bytes=file_bytes,
                     )
+                    if deleted:
+                        typer.echo(f"  • Deleted {len(deleted)} duplicate file(s), retrying upload...")
+                        file_id = knowledge.file_storage.upload_file(
+                            filename=filename,
+                            file_data=file_bytes,
+                            owner_id=owner_id,
+                            content_type=content_type,
+                        )
+                    else:
+                        raise
                 else:
-                    raise
+                    existing_file_id = _resolve_existing_file_for_duplicate_upload(
+                        knowledge=knowledge,
+                        owner_id=owner_id,
+                        filename=filename,
+                        file_bytes=file_bytes,
+                    )
+                    if existing_file_id:
+                        file_id = existing_file_id
+                        typer.echo(f"  • Reusing existing file_id={file_id} for parsing")
+                    else:
+                        raise
             else:
                 raise
         typer.echo(f"  • Stored as file_id={file_id} ({len(file_bytes)} bytes)")
