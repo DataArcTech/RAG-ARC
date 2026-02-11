@@ -485,7 +485,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINERU_POLL_TIMEOUT_S` | `0` | Optional: max seconds to wait for MinerU parse completion; `0` or negative means no limit. |
 | `MINERU_START_PAGE` | `0` | Optional: start page (0-based) for MinerU parsing. |
 | `MINERU_END_PAGE` | _(empty)_ | Optional: end page (0-based, inclusive). If empty, parse to the end. |
-| `MINERU_HTTP_MAX_RETRIES` | `3` | Optional: retry transient MinerU HTTP errors (0 disables retries). |
+| `MINERU_HTTP_MAX_RETRIES` | `3` | Optional: retry transient MinerU HTTP errors (0 disables retries), including startup OpenAPI validation and parse/status/download requests. |
 | `MINERU_HTTP_RETRY_BACKOFF_S` | `1.0` | Optional: base backoff seconds for MinerU HTTP retries. |
 | `MINERU_HTTP_RETRY_MAX_BACKOFF_S` | `8.0` | Optional: max backoff seconds for MinerU HTTP retries. |
 | `TOKEN_CHUNK_SIZE` | `1000` | Token chunk size for `token_chunker` (also used as `semantic_unit_chunker.fallback_chunker_config`). |

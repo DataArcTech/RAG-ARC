@@ -32,6 +32,7 @@ from application.rag_inference.module import RAGInference
 from config.application.deepsearch_tool_server_config import load_tool_server_config
 from core.presentation.summary import PipelineSummary, DeepSearchReport
 from core.presentation.deepsearch_payload import trim_deepsearch_payload
+from core.file_management.storage.file import FileValidationError
 from cli.bootstrap import CLIContext, initialize
 from encapsulation.data_model.orm_models import FileStatus
 from framework.register import Register
@@ -251,6 +252,38 @@ def _project_relative_filename(path: Path) -> str:
     return f"{PROJECT_ROOT.name}/{rel_str}" if rel_str else f"{PROJECT_ROOT.name}/"
 
 
+def _is_duplicate_upload_error(exc: Exception) -> bool:
+    return "already exists" in str(exc).lower()
+
+
+def _delete_duplicate_files_for_reparse(
+    *,
+    knowledge: Knowledge,
+    owner_id: UUID | str,
+    filename: str,
+    file_bytes: bytes,
+) -> list[str]:
+    duplicate_ids: list[str] = []
+    try:
+        duplicate_ids = knowledge.file_storage.find_duplicate_file_ids(
+            filename=filename,
+            file_data=file_bytes,
+            owner_id=UUID(str(owner_id)),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Force-reparse duplicate lookup failed: %s", exc)
+        return []
+
+    deleted: list[str] = []
+    for file_id in duplicate_ids:
+        try:
+            asyncio.run(knowledge.mark_file_deleted_cli(file_id, UUID(str(owner_id))))
+            deleted.append(file_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Force-reparse delete failed for %s: %s", file_id, exc)
+    return deleted
+
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_TOOL_SERVER_CONFIG = REPO_ROOT / "config/json_configs/deepsearch_tool_mcp_server.json"
 
@@ -272,12 +305,35 @@ def _ingest_single_file(
 
     content_type = _guess_content_type(path)
     try:
-        file_id = knowledge.file_storage.upload_file(
-            filename=(str(logical_filename or "").strip() or path.name),
-            file_data=file_bytes,
-            owner_id=owner_id,
-            content_type=content_type,
-        )
+        filename = (str(logical_filename or "").strip() or path.name)
+        try:
+            file_id = knowledge.file_storage.upload_file(
+                filename=filename,
+                file_data=file_bytes,
+                owner_id=owner_id,
+                content_type=content_type,
+            )
+        except FileValidationError as exc:
+            if force_reparse and _is_duplicate_upload_error(exc):
+                typer.secho(f"  ! Upload blocked by duplicate: {exc}", fg=typer.colors.YELLOW)
+                deleted = _delete_duplicate_files_for_reparse(
+                    knowledge=knowledge,
+                    owner_id=owner_id,
+                    filename=filename,
+                    file_bytes=file_bytes,
+                )
+                if deleted:
+                    typer.echo(f"  • Deleted {len(deleted)} duplicate file(s), retrying upload...")
+                    file_id = knowledge.file_storage.upload_file(
+                        filename=filename,
+                        file_data=file_bytes,
+                        owner_id=owner_id,
+                        content_type=content_type,
+                    )
+                else:
+                    raise
+            else:
+                raise
         typer.echo(f"  • Stored as file_id={file_id} ({len(file_bytes)} bytes)")
     except Exception as exc:  # noqa: BLE001
         typer.secho(f"  ! Upload failed: {exc}", fg=typer.colors.RED)
@@ -316,12 +372,35 @@ def _parse_single_file(
 
     content_type = _guess_content_type(path)
     try:
-        file_id = knowledge.file_storage.upload_file(
-            filename=(str(logical_filename or "").strip() or path.name),
-            file_data=file_bytes,
-            owner_id=owner_id,
-            content_type=content_type,
-        )
+        filename = (str(logical_filename or "").strip() or path.name)
+        try:
+            file_id = knowledge.file_storage.upload_file(
+                filename=filename,
+                file_data=file_bytes,
+                owner_id=owner_id,
+                content_type=content_type,
+            )
+        except FileValidationError as exc:
+            if force_reparse and _is_duplicate_upload_error(exc):
+                typer.secho(f"  ! Upload blocked by duplicate: {exc}", fg=typer.colors.YELLOW)
+                deleted = _delete_duplicate_files_for_reparse(
+                    knowledge=knowledge,
+                    owner_id=owner_id,
+                    filename=filename,
+                    file_bytes=file_bytes,
+                )
+                if deleted:
+                    typer.echo(f"  • Deleted {len(deleted)} duplicate file(s), retrying upload...")
+                    file_id = knowledge.file_storage.upload_file(
+                        filename=filename,
+                        file_data=file_bytes,
+                        owner_id=owner_id,
+                        content_type=content_type,
+                    )
+                else:
+                    raise
+            else:
+                raise
         typer.echo(f"  • Stored as file_id={file_id} ({len(file_bytes)} bytes)")
     except Exception as exc:  # noqa: BLE001
         typer.secho(f"  ! Upload failed: {exc}", fg=typer.colors.RED)

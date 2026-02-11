@@ -483,7 +483,7 @@ DEEPSEARCH_TOOL_MCP_SCOPE_LABELS='["demo", "shared"]'
 | `MINERU_POLL_TIMEOUT_S` | `0` | 可选：等待 MinerU 解析完成的最大秒数；`0` 或负数表示不限制。 |
 | `MINERU_START_PAGE` | `0` | 可选：MinerU 解析起始页（0-based）。 |
 | `MINERU_END_PAGE` | _(空)_ | 可选：MinerU 解析结束页（0-based，包含该页）。为空表示解析到末尾。 |
-| `MINERU_HTTP_MAX_RETRIES` | `3` | 可选：MinerU HTTP 短暂错误重试次数（设为 `0` 表示不重试）。 |
+| `MINERU_HTTP_MAX_RETRIES` | `3` | 可选：MinerU HTTP 短暂错误重试次数（设为 `0` 表示不重试），覆盖启动时 OpenAPI 校验与 parse/status/download 请求。 |
 | `MINERU_HTTP_RETRY_BACKOFF_S` | `1.0` | 可选：MinerU HTTP 重试的基础退避秒数。 |
 | `MINERU_HTTP_RETRY_MAX_BACKOFF_S` | `8.0` | 可选：MinerU HTTP 重试的最大退避秒数。 |
 | `TOKEN_CHUNK_SIZE` | `1000` | `token_chunker` 的 chunk size（同时用于 `semantic_unit_chunker.fallback_chunker_config`）。 |

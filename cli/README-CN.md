@@ -38,6 +38,7 @@ CLI 提供从“文档接入 → 索引/建图 → 检索问答”的完整算�
 - `--json` 适用于 list/chat/pipeline/graph-qa/export-graph，方便获得结构化输出。
 - `ingest-folder` 支持 `--limit`、`--pattern`、`--no-recursive` 控制导入范围，每个文件失败会即时打印原因。
 - 如果解析开销较大或希望跨用户复用解析结果，可优先走两段式：先用 `parse-*` 持久化解析产物，再用 `trigger-index` 在需要时入库；索引会自动跳过已完成的解析阶段。
+- 对 `parse-*` / `ingest-*` 使用 `--force-reparse` 时，若遇到重复上传（同名或同内容），CLI 会先将重复记录标记删除，再自动重传并继续解析/索引。
 - `trigger-index` 与 `export-graph` 直接操作配置文件中声明的图存储（默认 Neo4j）。运行前请确认相关服务处于可访问状态。
 - 默认的 owner ID 会缓存到 `~/.rag_arc_owner_id`，若需多人共享或固定某个租户，可使用 `--owner-id ...`，或在环境变量中设置 `CLI_OWNER_ID` / `RAG_ARC_OWNER_ID` / `DEFAULT_OWNER_ID`。
 - 终端中展示的 chunk 预览默认截取前 50 个字符；如需查看完整内容请使用 `--json` 输出。
